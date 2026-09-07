@@ -6,7 +6,7 @@ use std::process::Command;
 
 use xtask::manifest::Manifest;
 use xtask::reading::{Number, Status, Store};
-use xtask::{budget, generated};
+use xtask::{budget, generated, lock};
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -57,7 +57,7 @@ fn the_tracked_workspace_passes_with_the_manifests_numbers() {
     }
     assert_eq!(
         ws.numbers["lock_packages"],
-        i64::try_from(generated::Lock::load(workspace()).unwrap().packages())
+        i64::try_from(lock::CargoLock::load(workspace()).unwrap().packages())
             .unwrap()
             .into()
     );

@@ -8,6 +8,7 @@ pub mod cli;
 pub mod generated;
 pub mod git;
 pub mod lines;
+pub mod lock;
 pub mod manifest;
 pub mod reading;
 pub mod sources;

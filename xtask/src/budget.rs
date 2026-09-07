@@ -9,78 +9,86 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::generated::{self, Lock};
+use crate::generated;
 use crate::git::{self, Stamp};
 use crate::lines;
-use crate::manifest::{Crate, Manifest};
+use crate::lock::CargoLock;
+use crate::manifest::{Budget, Crate, Manifest};
 use crate::reading::{Reading, Status};
 use crate::sources;
 
-/// Where the design's sentence on ceilings is, for the failure text.
+/// Where the design's sentence on ceilings is, for the failure text; the
+/// `[[crate]]` row carries no text of its own.
 const CEILING_TEXT: &str = "a line ceiling is design §4.1, principle 7: size is a gate; lines are non-blank, non-comment, tests excluded";
 
 /// Measure the workspace; every reading, stamped.
 pub fn run(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
     let mut readings = Vec::new();
-    let mut total: u64 = 0;
-    let mut bindings: u64 = 0;
-    let mut failures = Vec::new();
-
+    let mut total = Count::default();
     for krate in &manifest.crates {
-        let mut reading = Reading::new("budget", &krate.name);
-        reading
-            .numbers
-            .insert("ceiling".into(), i64::try_from(krate.budget)?.into());
-        if sources::exists(root, krate) {
-            let count = count(root, krate)?;
-            total += count.lines;
-            bindings += count.bindings;
-            reading
-                .numbers
-                .insert("lines".into(), i64::try_from(count.lines)?.into());
-            if count.bindings > 0 {
-                reading
-                    .numbers
-                    .insert("bindings".into(), i64::try_from(count.bindings)?.into());
-            }
-            if count.lines > krate.budget {
-                reading.status = Status::Fail;
-                reading.message = format!(
-                    "{}: {} lines over the ceiling of {} ({CEILING_TEXT})",
-                    krate.name, count.lines, krate.budget
-                );
-            } else {
-                reading.status = Status::Pass;
-                reading.message = format!(
-                    "{}: {} lines under the ceiling of {}",
-                    krate.name, count.lines, krate.budget
-                );
-            }
-            reading.stamp(&Stamp::take(root, &krate.path())?);
-        } else {
-            reading.message = format!("{}: not yet created", krate.name);
-        }
+        let (reading, count) = crate_reading(root, krate)?;
+        total.lines += count.lines;
+        total.bindings += count.bindings;
         readings.push(reading);
     }
+    readings.push(workspace_reading(root, manifest, total)?);
+    readings.extend(generated_readings(root, manifest)?);
+    Ok(readings)
+}
 
-    let mut workspace = Reading::new("budget", "workspace");
-    let budget = &manifest.budget;
+/// One crate against its ceiling, and what it counted.
+fn crate_reading(root: &Path, krate: &Crate) -> Result<(Reading, Count)> {
+    let mut reading = Reading::new("budget", &krate.name);
+    reading.count("ceiling", krate.budget)?;
+    if !sources::exists(root, krate) {
+        reading.message = format!("{}: not yet created", krate.name);
+        return Ok((reading, Count::default()));
+    }
+    let count = count(root, krate)?;
+    reading.count("lines", count.lines)?;
+    if count.bindings > 0 {
+        reading.count("bindings", count.bindings)?;
+    }
+    if count.lines > krate.budget {
+        reading.status = Status::Fail;
+        reading.message = format!(
+            "{}: {} lines over the ceiling of {} ({CEILING_TEXT})",
+            krate.name, count.lines, krate.budget
+        );
+    } else {
+        reading.status = Status::Pass;
+        reading.message = format!(
+            "{}: {} lines under the ceiling of {}",
+            krate.name, count.lines, krate.budget
+        );
+    }
+    reading.stamp(&Stamp::take(root, &krate.path())?);
+    Ok((reading, count))
+}
+
+/// The workspace against `[budget]`: the pooled counts, every crate
+/// declared, no committed generated code outside the exceptions.
+fn workspace_reading(root: &Path, manifest: &Manifest, total: Count) -> Result<Reading> {
+    let mut reading = Reading::new("budget", "workspace");
+    let budget: &Budget = &manifest.budget;
+    let mut failures = Vec::new();
     let mut ceiling = |name: &str, value: u64, limit: u64, what: &str| -> Result<()> {
-        workspace
-            .numbers
-            .insert(name.to_owned(), i64::try_from(value)?.into());
-        workspace
-            .numbers
-            .insert(format!("{name}_ceiling"), i64::try_from(limit)?.into());
+        reading.count(name, value)?;
+        reading.count(&format!("{name}_ceiling"), limit)?;
         if value > limit {
             failures.push(format!("{what}: {value} over the ceiling of {limit}"));
         }
         Ok(())
     };
-    ceiling("total", total, budget.total, "workspace lines")?;
+    ceiling(
+        "total",
+        total.lines + total.bindings,
+        budget.total,
+        "workspace lines",
+    )?;
     ceiling(
         "bindings",
-        bindings,
+        total.bindings,
         budget.bindings,
         "ext/*/src/ffi/** lines",
     )?;
@@ -98,13 +106,11 @@ pub fn run(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
     )?;
     ceiling(
         "lock_packages",
-        u64::try_from(Lock::load(root)?.packages())?,
+        u64::try_from(CargoLock::load(root)?.packages())?,
         budget.lock_packages,
         "Cargo.lock packages",
     )?;
-    workspace
-        .numbers
-        .insert("new_ceiling".into(), i64::try_from(budget.new)?.into());
+    reading.count("new_ceiling", budget.new)?;
 
     for name in sources::undeclared(root, manifest) {
         failures.push(format!(
@@ -123,43 +129,65 @@ pub fn run(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
         ));
     }
     if failures.is_empty() {
-        workspace.status = Status::Pass;
-        workspace.message = format!(
-            "workspace: {total} lines under the ceiling of {}; the new-code ceiling of {} is not measured until the manifest says which crates are inherited",
-            budget.total, budget.new
+        reading.status = Status::Pass;
+        reading.message = format!(
+            "workspace: {} lines under the ceiling of {}; the new-code ceiling of {} is not measured until the manifest says which crates are inherited",
+            total.lines + total.bindings,
+            budget.total,
+            budget.new
         );
     } else {
-        workspace.status = Status::Fail;
-        workspace.message = failures.join("; ");
+        reading.status = Status::Fail;
+        reading.message = failures.join("; ");
     }
-    workspace.stamp(&Stamp::take(root, Path::new("."))?);
-    readings.push(workspace);
+    reading.stamp(&Stamp::take(root, Path::new("."))?);
+    Ok(reading)
+}
 
+/// Each generated, committed file against its rendering
+/// (`generated.committed`). The reading's ADR is the source rule's, which
+/// decided the list the file carries, beside the generated rule's own.
+fn generated_readings(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
+    let mut readings = Vec::new();
     for rule in &manifest.rules {
         for (file, from) in rule.predicate.generated.iter().flatten() {
             let mut reading = Reading::new("budget", file);
             reading.rule.clone_from(&rule.id);
-            reading.adr = rule.adr.iter().collect::<Vec<_>>().join(", ");
+            let source = manifest.rule(from);
+            let adrs: Vec<&str> = source
+                .into_iter()
+                .flat_map(|r| r.adr.iter())
+                .chain(rule.adr.iter())
+                .collect();
+            reading.adr = adrs.join(", ");
+            let cited = if adrs.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " ({})",
+                    adrs.iter()
+                        .map(|n| format!("ADR-{n}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
             let want = generated::render(root, manifest, file, from)?;
             let have = std::fs::read_to_string(root.join(file)).ok();
-            match have {
-                Some(have) if have == want => {
+            let stale = match have {
+                Some(have) if have == want => None,
+                Some(_) => Some(format!(
+                    "{file} differs from its rendering from rule {from}"
+                )),
+                None => Some(format!("{file} is not committed")),
+            };
+            match stale {
+                None => {
                     reading.status = Status::Pass;
                     reading.message = format!("{file} matches its rendering from rule {from}");
                 }
-                Some(_) => {
+                Some(what) => {
                     reading.status = Status::Fail;
-                    reading.message = format!(
-                        "{file} differs from its rendering from rule {from}; run `xtask generate`. {}",
-                        rule.text
-                    );
-                }
-                None => {
-                    reading.status = Status::Fail;
-                    reading.message = format!(
-                        "{file} is not committed; run `xtask generate`. {}",
-                        rule.text
-                    );
+                    reading.message = format!("{what}; run `xtask generate`. {}{cited}", rule.text);
                 }
             }
             reading.stamp(&Stamp::take(root, Path::new(file))?);
@@ -224,13 +252,13 @@ fn sum(root: &Path, paths: &[String]) -> Result<u64> {
 
 /// Committed generated files under the crate trees: a `generated` path
 /// component, or an `@generated` marker in the first lines, outside the
-/// files the manifest declares as generated and committed.
+/// files the manifest declares as generated and committed. The harness's
+/// own negative controls hold generated code on purpose and are left out.
 pub fn committed_generated(root: &Path, exceptions: &[&str]) -> Result<Vec<String>> {
     let mut out = Vec::new();
-    for dir in ["crates", "ext", "xtask"] {
+    for dir in sources::CRATE_DIRS {
         for path in git::files(root, Path::new(dir))? {
-            if exceptions.contains(&path.as_str()) || path.split('/').any(|part| part == "fixtures")
-            {
+            if exceptions.contains(&path.as_str()) || path.starts_with("xtask/fixtures/") {
                 continue;
             }
             let by_path = path.split('/').any(|part| part == "generated");

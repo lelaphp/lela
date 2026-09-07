@@ -1,5 +1,5 @@
 //! What a line budget counts (design §4.1): non-blank, non-comment lines,
-//! tests excluded. One counter for Rust, one for everything else.
+//! tests excluded. One count for Rust, one for everything else.
 
 /// The counted lines of one file, by its extension: Rust through
 /// `rust`, TOML without its `#` comments, and every other text as its
@@ -87,6 +87,17 @@ impl Counter {
             }
             let line_comment = rest.find("//");
             let block_open = rest.find("/*");
+            // A `//` or `/*` inside a string literal is text, not a comment:
+            // copy the literal through its closing quote first.
+            if let Some(quote) = rest.find('"')
+                && line_comment.is_none_or(|l| quote < l)
+                && block_open.is_none_or(|b| quote < b)
+            {
+                let end = string_end(&rest[quote + 1..]).map_or(rest.len(), |e| quote + 1 + e);
+                code.push_str(&rest[..end]);
+                rest = &rest[end..];
+                continue;
+            }
             match (line_comment, block_open) {
                 (Some(l), Some(b)) if l < b => {
                     code.push_str(&rest[..l]);
@@ -110,6 +121,21 @@ impl Counter {
         }
         Some(code)
     }
+}
+
+/// The index just past the closing quote of a string literal whose opening
+/// quote precedes `s`, escapes honoured; `None` when it runs past the line.
+fn string_end(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'"' => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 /// Advance through one line of a test item; `None` when the item ended on it.
@@ -157,6 +183,14 @@ mod tests {
         assert_eq!(rust(text), 2);
         let text = "#[cfg(test)] fn t() { let x = 1; }\nfn b() {}\n";
         assert_eq!(rust(text), 1);
+    }
+
+    #[test]
+    fn a_comment_marker_inside_a_string_is_text() {
+        let text = "let url = \"https://x\"; // real\nlet s = \"/* not\";\nfn a() {}\n";
+        assert_eq!(rust(text), 3);
+        let code = super::code(text, true);
+        assert_eq!(code[0].1, "let url = \"https://x\"; ");
     }
 
     #[test]

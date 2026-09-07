@@ -228,6 +228,22 @@ pub enum OneOrMany {
 }
 
 impl OneOrMany {
+    /// The ADR numbers as a reading's `adr` field: `"0004, 0005"`.
+    pub fn adr_field(&self) -> String {
+        self.iter().collect::<Vec<_>>().join(", ")
+    }
+
+    /// The ADR numbers as a failure text cites them: `"(ADR-0004, ADR-0005)"`,
+    /// empty when there are none (harness-design.md §10 rule 2).
+    pub fn adr_cited(&self) -> String {
+        let cited: Vec<String> = self.iter().map(|n| format!("ADR-{n}")).collect();
+        if cited.is_empty() {
+            String::new()
+        } else {
+            format!("({})", cited.join(", "))
+        }
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &str> {
         match self {
             OneOrMany::None => [].iter(),

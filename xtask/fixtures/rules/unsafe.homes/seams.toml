@@ -18,9 +18,12 @@ budget = 1000
 [[crate]]
 name = "php_unit"
 budget = 1000
+[[crate]]
+name = "ext/pcre"
+budget = 1000
 
 [[rule]]
 id = "unsafe.homes"
-allow = ["php_heap"]
+allow = ["php_heap", "ext/*/src/ffi/"]
 adr = "0006"
 text = "unsafe is permitted in the homes alone (fixture)."

@@ -9,6 +9,9 @@ use anyhow::Result;
 use crate::git;
 use crate::manifest::{Crate, Manifest};
 
+/// Where crates live under the root (design §4.2): `crates/*`, `ext/*`, `xtask`.
+pub const CRATE_DIRS: [&str; 3] = ["crates", "ext", "xtask"];
+
 /// Directories under a crate whose files are not its code.
 const NOT_CODE: [&str; 4] = ["tests", "benches", "examples", "fixtures"];
 
@@ -19,11 +22,16 @@ pub fn rust(root: &Path, krate: &Crate) -> Result<Vec<String>> {
         .into_iter()
         .filter(|p| Path::new(p).extension().is_some_and(|e| e == "rs"))
         .filter(|p| {
-            Path::new(p)
-                .strip_prefix(&base)
-                .ok()
-                .and_then(|rel| rel.components().next())
-                .is_none_or(|first| !NOT_CODE.iter().any(|d| first.as_os_str() == *d))
+            let rel = Path::new(p).strip_prefix(&base).unwrap_or(Path::new(p));
+            let top_level_not_code = rel
+                .components()
+                .next()
+                .is_some_and(|first| NOT_CODE.iter().any(|d| first.as_os_str() == *d));
+            // A `#[cfg(test)] mod tests;` lives in `tests.rs` or `tests/`.
+            let test_module = rel
+                .components()
+                .any(|c| c.as_os_str() == "tests" || c.as_os_str() == "tests.rs");
+            !top_level_not_code && !test_module
         })
         .collect())
 }
@@ -49,7 +57,8 @@ pub fn exists(root: &Path, krate: &Crate) -> bool {
 /// manifest name (`ext/<name>` or `<name>`).
 pub fn undeclared(root: &Path, manifest: &Manifest) -> Vec<String> {
     let mut out = Vec::new();
-    for (dir, prefix) in [("crates", ""), ("ext", "ext/")] {
+    for dir in CRATE_DIRS.iter().filter(|d| **d != "xtask") {
+        let prefix = if *dir == "ext" { "ext/" } else { "" };
         let Ok(entries) = std::fs::read_dir(root.join(dir)) else {
             continue;
         };

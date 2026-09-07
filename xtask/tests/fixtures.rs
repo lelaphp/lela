@@ -114,6 +114,13 @@ fn an_unsafe_block_outside_the_homes_fails_naming_the_file_and_the_rule() {
     let heap = readings.iter().find(|r| r.scope == "php_heap").unwrap();
     assert_eq!(heap.status, Status::Pass, "a home passes: {heap:#?}");
     assert_eq!(heap.numbers["sites"], 1.into());
+    let pcre = readings.iter().find(|r| r.scope == "ext/pcre").unwrap();
+    assert_eq!(
+        pcre.status,
+        Status::Pass,
+        "an extension with bindings is deny with the allowance on ffi: {pcre:#?}"
+    );
+    assert_eq!(pcre.numbers["sites"], 1.into());
     let unit = readings.iter().find(|r| r.scope == "php_unit").unwrap();
     assert_eq!(unit.status, Status::Fail, "{unit:#?}");
     assert_eq!(unit.rule, "unsafe.homes");

@@ -29,21 +29,16 @@ pub fn run(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
         .flatten()
         .map(|h| Home::parse(h))
         .collect::<Result<_>>()?;
-    let adr = rule.adr.iter().collect::<Vec<_>>().join(", ");
     let mut readings = Vec::new();
     for krate in &manifest.crates {
         let mut reading = Reading::new("unsafe-audit", &krate.name);
         RULE.clone_into(&mut reading.rule);
-        reading.adr.clone_from(&adr);
+        reading.adr = rule.adr.adr_field();
         if sources::exists(root, krate) {
             let audit = audit(root, krate, &homes)?;
-            reading
-                .numbers
-                .insert("sites".into(), i64::try_from(audit.sites)?.into());
-            reading
-                .numbers
-                .insert("outside".into(), i64::try_from(audit.outside.len())?.into());
-            if audit.outside.is_empty() && audit.root.is_none() {
+            reading.count("sites", u64::try_from(audit.sites)?)?;
+            reading.count("outside", u64::try_from(audit.outside.len())?)?;
+            if audit.outside.is_empty() && audit.attribute.is_none() {
                 reading.status = Status::Pass;
                 reading.message = format!(
                     "{}: {} unsafe sites, all in the homes {RULE} allows",
@@ -52,16 +47,12 @@ pub fn run(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
             } else {
                 reading.status = Status::Fail;
                 let mut lines = audit.outside;
-                lines.extend(audit.root);
+                lines.extend(audit.attribute);
                 reading.message = format!(
-                    "{}. {} ({})",
+                    "{}. {} {}",
                     lines.join("; "),
                     rule.text,
-                    rule.adr
-                        .iter()
-                        .map(|n| format!("ADR-{n}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    rule.adr.adr_cited()
                 );
             }
             reading.stamp(&Stamp::take(root, &krate.path())?);
@@ -80,17 +71,26 @@ pub struct Audit {
     pub sites: usize,
     /// The sites outside the homes, as `path:line`.
     pub outside: Vec<String>,
-    /// What is wrong with the crate root's attribute, if anything.
-    pub root: Option<String>,
+    /// What is wrong with the crate root's `unsafe_code` attribute, if anything.
+    pub attribute: Option<String>,
 }
 
 /// Audit one crate's sources against the homes.
 pub fn audit(root: &Path, krate: &Crate, homes: &[Home]) -> Result<Audit> {
     let mut found = Audit::default();
     let whole = homes.iter().any(|h| h.covers_whole(krate));
-    let modules = homes.iter().any(|h| h.is_module_of(krate));
     let allowed = |path: &str| homes.iter().any(|h| h.covers(krate, path));
-    for path in sources::rust(root, krate)? {
+    let sources = sources::rust(root, krate)?;
+    // A crate with a module home (`php_jit::enter`), or with sources under
+    // a path home (an extension with bindings), is `deny` with the
+    // allowance on that module; every other crate is `forbid`.
+    let modules = homes.iter().any(|h| h.is_module_of(krate))
+        || sources.iter().any(|p| {
+            homes
+                .iter()
+                .any(|h| matches!(h, Home::Path(_)) && h.covers(krate, p))
+        });
+    for path in sources {
         let text =
             std::fs::read_to_string(root.join(&path)).with_context(|| format!("reading {path}"))?;
         for (line, code) in lines::code(&text, false) {
@@ -114,7 +114,7 @@ pub fn audit(root: &Path, krate: &Crate, homes: &[Home]) -> Result<Audit> {
                 .iter()
                 .any(|(_, code)| code.contains(&format!("#![{want}(unsafe_code)]")));
             if !has {
-                found.root = Some(format!(
+                found.attribute = Some(format!(
                     "{}: the crate root lacks #![{want}(unsafe_code)]",
                     path.display()
                 ));
