@@ -238,7 +238,8 @@ deny = true # design §4.2: keeps a later main/-style split possible
 
 # ---------------------------------------------------------------- rules
 # Each rule: an `id`, a `scope` or a `tool`, one predicate, an optional `adr`,
-# and the `text` a failure prints. One fixture per rule under
+# and the `text` a failure prints (or, for an `on` rule, the note an allow
+# carries). One fixture per rule under
 # `xtask/fixtures/rules/<id>/` must fail, or `cargo test -p xtask` fails.
 
 [[rule]]
@@ -285,13 +286,13 @@ text = "php_heap::hot is for the handlers; api never re-exports it (design §4.4
 id = "api.lock-line"
 scope = "crates/php_engine/src/api/**"
 on = "pub"
-note = "A new pub item in api needs its api.lock line in the same commit; api ≤ 400 items."
+text = "A new pub item in api needs its api.lock line in the same commit; api ≤ 400 items."
 
 [[rule]]
 id = "ext.pub-beyond-extension"
 scope = "ext/*"
 on = "pub"
-note = "api-check prints each ext crate's pub items beyond extension(); anything beyond the pdo driver trait and the random handle needs a line in the design (§12)."
+text = "api-check prints each ext crate's pub items beyond extension(); anything beyond the pdo driver trait and the random handle needs a line in the design (§12)."
 
 [[rule]]
 id = "witness.exit-authored"

@@ -105,7 +105,7 @@ fn rules(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
                         "predicate",
                         json!(rule.predicate.named().first().copied().unwrap_or("")),
                     ),
-                    ("text", json!(rule.text())),
+                    ("text", json!(rule.text)),
                 ],
                 latest(readings, |r| r.rule == rule.id),
             )

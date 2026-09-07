@@ -125,10 +125,10 @@ pub struct Edge {
 }
 
 /// `[[rule]]`: an `id`, a scope or a tool, one predicate, an optional `adr`,
-/// and the `text` a failure prints (or the `note` an allow carries). Two
-/// rules of the tracked manifest (`unsafe.homes`, `generated.committed`)
-/// carry neither scope nor tool, so their absence is not refused; `exempt`
-/// and `note` are keys the manifest uses beyond the design's excerpt.
+/// and the `text` a failure prints; for an `on` rule, which never denies,
+/// it is the note an allow carries. Two rules of the tracked manifest
+/// (`unsafe.homes`, `generated.committed`) carry neither scope nor tool, so
+/// their absence is not refused.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
@@ -141,17 +141,9 @@ pub struct Rule {
     pub exempt: Vec<String>,
     #[serde(default)]
     pub adr: OneOrMany,
-    pub text: Option<String>,
-    pub note: Option<String>,
+    pub text: String,
     #[serde(flatten)]
     pub predicate: Predicates,
-}
-
-impl Rule {
-    /// The text a failure prints, or the note an allow carries.
-    pub fn text(&self) -> &str {
-        self.text.as_deref().or(self.note.as_deref()).unwrap_or("")
-    }
 }
 
 /// The ten predicates of harness-design.md §4.1, each optional in the
