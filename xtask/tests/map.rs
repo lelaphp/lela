@@ -148,9 +148,15 @@ fn the_session_start_hook_runs_computed_then_status_on_the_four_matchers() {
     }
     let command = start["hooks"][0]["command"].as_str().unwrap();
     assert_eq!(start["hooks"][0]["type"], "command");
+    // The clone's hooks path is pointed at scripts/hooks once, so pre-push
+    // is wired without a person's step; a clone that set its own is kept.
+    let hooks_path = command
+        .find("git config core.hooksPath scripts/hooks")
+        .expect(command);
     let computed = command
         .find("computed run .claude/harness.local.md")
         .expect(command);
+    assert!(hooks_path < computed, "hooksPath is set first: {command}");
     let status = command.rfind("status --session").expect(command);
     assert!(
         computed < status,

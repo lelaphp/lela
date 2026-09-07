@@ -1,5 +1,5 @@
 {
-  "description": "PreToolUse on Edit, Write and Bash is xtask permit over the hook's stdin (harness-design.md \u00a74.4); the built binary is a process start, cargo run the fallback when none is built, about 200 ms more. Stop is xtask done --hook over the hook's stdin (\u00a74.5): the turn is held with the unmet list as the reason, and the second Stop, stop_hook_active true, passes; it goes through cargo run, since what a turn changes is often xtask itself, and a cargo that fails is a block naming the build, never a silent pass, except on the second Stop. SessionStart on startup, resume, clear and compact renders the local file and prints the map plus the local facts (\u00a75); once a session, so it goes through cargo run, which rebuilds a stale binary rather than trusting it.",
+  "description": "PreToolUse on Edit, Write and Bash is xtask permit over the hook's stdin (harness-design.md \u00a74.4); the built binary is a process start, cargo run the fallback when none is built, about 200 ms more. Stop is xtask done --hook over the hook's stdin (\u00a74.5): the turn is held with the unmet list as the reason, and the second Stop, stop_hook_active true, passes; it goes through cargo run, since what a turn changes is often xtask itself, and a cargo that fails is a block naming the build, never a silent pass, except on the second Stop. SessionStart on startup, resume, clear and compact points core.hooksPath at scripts/hooks when the clone has none, so pre-push is wired, then renders the local file and prints the map plus the local facts (\u00a75); once a session, so it goes through cargo run, which rebuilds a stale binary rather than trusting it.",
   "hooks": {
     "PreToolUse": [
       {
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$CLAUDE_PROJECT_DIR\" && X='cargo run -q -p xtask --'; [ -f .claude/harness.local.md ] || $X status --session >/dev/null; computed run .claude/harness.local.md >/dev/null 2>&1; case $? in 0|1) ;; 2) echo 'harness: a marker in .claude/harness.local.md is broken; see `computed check .claude/harness.local.md`';; *) echo 'harness: computed did not run; the local facts are stale (cargo install computed)';; esac; exec $X status --session",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && [ -n \"$(git config core.hooksPath)\" ] || git config core.hooksPath scripts/hooks; X='cargo run -q -p xtask --'; [ -f .claude/harness.local.md ] || $X status --session >/dev/null; computed run .claude/harness.local.md >/dev/null 2>&1; case $? in 0|1) ;; 2) echo 'harness: a marker in .claude/harness.local.md is broken; see `computed check .claude/harness.local.md`';; *) echo 'harness: computed did not run; the local facts are stale (cargo install computed)';; esac; exec $X status --session",
             "timeout": 60
           }
         ]
