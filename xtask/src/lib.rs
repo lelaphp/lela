@@ -1,23 +1,28 @@
 //! The harness for the third engine (`harness-design.md` §4): the seam
 //! manifest and the oracle pin loaded by one reader, the reading and its
-//! store, and `status`, the one renderer.
+//! store, the instruments, and `status`, the one renderer.
 #![forbid(unsafe_code)]
 
+pub mod budget;
 pub mod cli;
+pub mod generated;
 pub mod git;
+pub mod lines;
 pub mod manifest;
 pub mod reading;
+pub mod sources;
 pub mod status;
+pub mod unsafe_audit;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Parser;
 
 use cli::{Cli, Command};
 use manifest::Manifest;
-use reading::Store;
+use reading::{Reading, Status, Store};
 
 /// The workspace this binary was built in: the parent of `xtask/`.
 pub fn built_root() -> PathBuf {
@@ -30,13 +35,44 @@ pub fn built_root() -> PathBuf {
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let root = cli.root.unwrap_or_else(built_root);
+    let manifest = Manifest::load(&root)?;
+    let store = Store::of_workspace(&root);
     match cli.command {
         Command::Status { section, format } => {
-            let manifest = Manifest::load(&root)?;
-            let store = Store::of_workspace(&root);
             let text = status::render(&manifest, &store, section, format)?;
             std::io::stdout().write_all(text.as_bytes())?;
             Ok(())
         }
+        Command::Budget => record(&store, &budget::run(&root, &manifest)?),
+        Command::UnsafeAudit => record(&store, &unsafe_audit::run(&root, &manifest)?),
+        Command::Generate => {
+            for path in generated::write_all(&root, &manifest)? {
+                println!("wrote {}", path.display());
+            }
+            Ok(())
+        }
     }
+}
+
+/// What every instrument ends with: each reading written to the store and
+/// printed as one line; an error when any failed, so the exit status says so.
+pub fn record(store: &Store, readings: &[Reading]) -> Result<()> {
+    let mut failed = 0;
+    for reading in readings {
+        store.write(reading)?;
+        println!(
+            "{} {} {}: {}",
+            reading.status.as_str(),
+            reading.instrument,
+            reading.scope,
+            reading.message
+        );
+        if reading.status == Status::Fail {
+            failed += 1;
+        }
+    }
+    if failed > 0 {
+        bail!("{failed} of {} readings failed", readings.len());
+    }
+    Ok(())
 }

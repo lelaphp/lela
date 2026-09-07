@@ -28,6 +28,13 @@ pub enum Command {
         #[arg(long, default_value = "md")]
         format: Format,
     },
+    /// Hold every crate to its line ceiling and the workspace to [budget];
+    /// refuse committed generated code and a stale generated file.
+    Budget,
+    /// Allow `unsafe` only in the homes the manifest's unsafe.homes rule names.
+    UnsafeAudit,
+    /// Write the files the manifest's `generated` rules render (ext/clippy.toml).
+    Generate,
 }
 
 /// The sections of harness-design.md §4.6 that have a renderer.

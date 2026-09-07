@@ -1,0 +1,4 @@
+# A hand edit: the reason below is not the rule text, so this copy is stale.
+disallowed-types = [
+    { path = "std::sync::Mutex", reason = "edited by hand" },
+]

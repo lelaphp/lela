@@ -32,9 +32,10 @@ impl Stamp {
     }
 }
 
-/// One object id over every file under `scope` that git does not ignore,
-/// tracked or not, with its content as it is on disk.
-pub fn tree_hash(root: &Path, scope: &Path) -> Result<String> {
+/// Every file under `scope` (relative to `root`) that git does not ignore,
+/// tracked or not, as paths relative to `root`, sorted. What an instrument
+/// means by "the sources" of a scope; `tree_hash` is one hash over them.
+pub fn files(root: &Path, scope: &Path) -> Result<Vec<String>> {
     let scope = scope.to_str().context("the scope path is not UTF-8")?;
     let listing = git(
         root,
@@ -49,13 +50,27 @@ pub fn tree_hash(root: &Path, scope: &Path) -> Result<String> {
         ],
         None,
     )?;
-    let mut paths: Vec<&str> = listing
+    let mut paths: Vec<String> = listing
         .split('\0')
         .filter(|p| !p.is_empty() && root.join(p).is_file())
+        .map(str::to_owned)
         .collect();
     paths.sort_unstable();
     paths.dedup();
-    let stdin = paths.join("\n");
+    Ok(paths)
+}
+
+/// One object id over every file under `scope` that git does not ignore,
+/// tracked or not, with its content as it is on disk.
+pub fn tree_hash(root: &Path, scope: &Path) -> Result<String> {
+    let paths = files(root, scope)?;
+    // Absolute, since `hash-object` reads a relative path from the
+    // repository's top level, not from `-C`'s directory.
+    let stdin = paths
+        .iter()
+        .map(|p| root.join(p).display().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
     let hashes = git(root, &["hash-object", "--stdin-paths"], Some(&stdin))?;
     let mut manifest = String::new();
     for (path, hash) in paths.iter().zip(hashes.lines()) {
