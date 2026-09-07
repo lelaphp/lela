@@ -39,9 +39,7 @@ fn a_test_instrument_writes_one_reading_end_to_end() {
     let scope = manifest.scope_path("xtask").unwrap();
     let mut reading = Reading::new("test", "xtask");
     reading.status = Status::Pass;
-    Stamp::take(workspace(), &scope)
-        .unwrap()
-        .apply(&mut reading);
+    reading.stamp(&Stamp::take(workspace(), &scope).unwrap());
     let store = Store::at(&root);
     let path = store.write(&reading).unwrap();
     assert_eq!(path, root.join("test/xtask.toml"));

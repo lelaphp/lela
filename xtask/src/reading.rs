@@ -13,6 +13,8 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use toml::value::Datetime;
 
+use crate::git::Stamp;
+
 /// Where the store lives, relative to the workspace root.
 pub const DIR: &str = "target/harness";
 /// The append-only log, inside the store.
@@ -58,6 +60,23 @@ impl Reading {
                 .parse()
                 .unwrap_or_else(|_| unreachable!("{EPOCH} is a datetime")),
         }
+    }
+}
+
+impl Reading {
+    /// Put the stamp's tree, commit and time on the reading.
+    pub fn stamp(&mut self, stamp: &Stamp) {
+        self.tree.clone_from(&stamp.tree);
+        self.commit.clone_from(&stamp.commit);
+        self.at = stamp.at;
+    }
+
+    /// The reading as JSON, `at` as an RFC 3339 string: the log line, and
+    /// what `status --format json` carries.
+    pub fn to_json(&self) -> Result<serde_json::Value> {
+        let mut value = serde_json::to_value(self).context("rendering the reading as JSON")?;
+        value["at"] = serde_json::Value::String(self.at.to_string());
+        Ok(value)
     }
 }
 
@@ -155,8 +174,7 @@ impl Store {
         let text = toml::to_string(reading).context("rendering the reading")?;
         fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
 
-        let mut line = serde_json::to_value(reading).context("rendering the log line")?;
-        line["at"] = serde_json::Value::String(reading.at.to_string());
+        let line = reading.to_json()?;
         let log = self.root.join(LOG);
         let mut file = OpenOptions::new()
             .create(true)

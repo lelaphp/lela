@@ -7,6 +7,9 @@ rust-version.workspace = true
 publish = false
 description = "The harness: instruments, readings and the one renderer (harness-design.md §4)"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true

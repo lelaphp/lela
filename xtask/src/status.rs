@@ -5,8 +5,7 @@
 use std::fmt::Write;
 
 use anyhow::Result;
-use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::cli::{Format, Section};
 use crate::manifest::Manifest;
@@ -30,35 +29,51 @@ pub fn render(
     };
     Ok(match format {
         Format::Json => {
-            serde_json::to_string_pretty(&rows.iter().map(|r| r.json()).collect::<Vec<_>>())?
+            serde_json::to_string_pretty(&rows.iter().map(Row::json).collect::<Result<Vec<_>>>()?)?
         }
         Format::Md => table(section, &rows),
     })
 }
 
-/// One rendered row: the manifest's facts and the reading, if any.
-#[derive(Debug, Serialize)]
+/// One rendered row: the manifest's facts by name, and the reading, if any.
+#[derive(Debug)]
 struct Row {
-    facts: Vec<(&'static str, Value)>,
+    facts: Map<String, Value>,
     reading: Option<Reading>,
 }
 
 impl Row {
-    fn json(&self) -> Value {
-        let mut object = serde_json::Map::new();
-        for (key, value) in &self.facts {
-            object.insert((*key).to_owned(), value.clone());
-        }
+    fn new(facts: &[(&str, Value)], reading: Option<Reading>) -> Row {
+        let facts = facts
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), v.clone()))
+            .collect();
+        Row { facts, reading }
+    }
+
+    fn json(&self) -> Result<Value> {
+        let mut object = self.facts.clone();
         let reading = match &self.reading {
-            Some(r) => {
-                let mut v = serde_json::to_value(r).unwrap_or(Value::Null);
-                v["at"] = Value::String(r.at.to_string());
-                v
-            }
+            Some(r) => r.to_json()?,
             None => Value::Null,
         };
         object.insert("reading".to_owned(), reading);
-        Value::Object(object)
+        Ok(Value::Object(object))
+    }
+
+    /// One fact as a Markdown cell: a list renders as ADR numbers.
+    fn fact(&self, key: &str) -> String {
+        match self.facts.get(key) {
+            None | Some(Value::Null) => String::new(),
+            Some(Value::String(s)) => s.replace('|', "\\|").replace('\n', " "),
+            Some(Value::Array(a)) => a
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|n| format!("ADR-{n}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            Some(other) => other.to_string(),
+        }
     }
 
     fn status(&self) -> String {
@@ -72,7 +87,7 @@ impl Row {
         self.reading
             .as_ref()
             .and_then(|r| r.numbers.get(key))
-            .map(|n| n.to_string())
+            .map(ToString::to_string)
             .unwrap_or_default()
     }
 }
@@ -81,17 +96,19 @@ fn rules(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
     manifest
         .rules
         .iter()
-        .map(|rule| Row {
-            facts: vec![
-                ("id", json!(rule.id)),
-                ("adr", json!(rule.adr.iter().collect::<Vec<_>>())),
-                (
-                    "predicate",
-                    json!(rule.predicate.named().first().copied().unwrap_or("")),
-                ),
-                ("text", json!(rule.text())),
-            ],
-            reading: latest(readings, |r| r.rule == rule.id),
+        .map(|rule| {
+            Row::new(
+                &[
+                    ("id", json!(rule.id)),
+                    ("adr", json!(rule.adr.iter().collect::<Vec<_>>())),
+                    (
+                        "predicate",
+                        json!(rule.predicate.named().first().copied().unwrap_or("")),
+                    ),
+                    ("text", json!(rule.text())),
+                ],
+                latest(readings, |r| r.rule == rule.id),
+            )
         })
         .collect()
 }
@@ -100,22 +117,23 @@ fn locks(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
     manifest
         .seams
         .iter()
-        .map(|seam| Row {
-            facts: vec![
-                ("seam", json!(seam.name)),
-                ("lock", json!(seam.lock)),
-                (
-                    "ceiling",
-                    if seam.lock == "api.lock" {
-                        json!(manifest.budget.api_items)
-                    } else {
-                        Value::Null
-                    },
-                ),
-            ],
-            reading: latest(readings, |r| {
-                r.instrument == "api-check" && r.scope == seam.name
-            }),
+        .map(|seam| {
+            // `api_items` is the manifest's ceiling on the api seam's lock (design §4.4).
+            let ceiling = if seam.name == "api" {
+                json!(manifest.budget.api_items)
+            } else {
+                Value::Null
+            };
+            Row::new(
+                &[
+                    ("seam", json!(seam.name)),
+                    ("lock", json!(seam.lock)),
+                    ("ceiling", ceiling),
+                ],
+                latest(readings, |r| {
+                    r.instrument == "api-check" && r.scope == seam.name
+                }),
+            )
         })
         .collect()
 }
@@ -124,19 +142,24 @@ fn budget(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
     manifest
         .crates
         .iter()
-        .map(|krate| Row {
-            facts: vec![
-                ("crate", json!(krate.name)),
-                ("ceiling", json!(krate.budget)),
-            ],
-            reading: latest(readings, |r| {
-                r.instrument == "budget" && r.scope == krate.name
-            }),
+        .map(|krate| {
+            Row::new(
+                &[
+                    ("crate", json!(krate.name)),
+                    ("ceiling", json!(krate.budget)),
+                ],
+                latest(readings, |r| {
+                    r.instrument == "budget" && r.scope == krate.name
+                }),
+            )
         })
         .collect()
 }
 
-/// The newest reading that matches, by its `at`.
+/// The newest reading that matches, by its `at`. The store holds one file
+/// per instrument and scope, so a rule measured by two instruments has two
+/// readings; the newer is shown. `at` is always UTC to the second in one
+/// format (`git::now`), so its text orders as its instant does.
 fn latest(readings: &[Reading], pick: impl Fn(&Reading) -> bool) -> Option<Reading> {
     readings
         .iter()
@@ -153,27 +176,27 @@ fn table(section: Section, rows: &[Row]) -> String {
     let (head, line): (&[&str], Line) = match section {
         Section::Rules => (&["rule", "adr", "predicate", "reading", "text"], |r| {
             vec![
-                cell(&r.facts[0].1),
-                adrs(&r.facts[1].1),
-                cell(&r.facts[2].1),
+                r.fact("id"),
+                r.fact("adr"),
+                r.fact("predicate"),
                 r.status(),
-                cell(&r.facts[3].1),
+                r.fact("text"),
             ]
         }),
         Section::Locks => (&["seam", "lock", "items", "ceiling", "reading"], |r| {
             vec![
-                cell(&r.facts[0].1),
-                cell(&r.facts[1].1),
+                r.fact("seam"),
+                r.fact("lock"),
                 r.number("items"),
-                cell(&r.facts[2].1),
+                r.fact("ceiling"),
                 r.status(),
             ]
         }),
         Section::Budget => (&["crate", "lines", "ceiling", "reading", "message"], |r| {
             vec![
-                cell(&r.facts[0].1),
+                r.fact("crate"),
                 r.number("lines"),
-                cell(&r.facts[1].1),
+                r.fact("ceiling"),
                 r.status(),
                 r.reading
                     .as_ref()
@@ -188,24 +211,4 @@ fn table(section: Section, rows: &[Row]) -> String {
         let _ = writeln!(out, "| {} |", line(row).join(" | "));
     }
     out
-}
-
-fn cell(v: &Value) -> String {
-    match v {
-        Value::Null => String::new(),
-        Value::String(s) => s.replace('|', "\\|").replace('\n', " "),
-        other => other.to_string(),
-    }
-}
-
-fn adrs(v: &Value) -> String {
-    v.as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(Value::as_str)
-                .map(|n| format!("ADR-{n}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_default()
 }

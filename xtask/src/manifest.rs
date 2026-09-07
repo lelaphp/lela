@@ -21,7 +21,7 @@ pub const FILE: &str = "seams.toml";
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
-    pub oracle: OracleRow,
+    pub oracle: PinRow,
     pub budget: Budget,
     #[serde(rename = "crate", default)]
     pub crates: Vec<Crate>,
@@ -39,7 +39,7 @@ pub struct Manifest {
 /// `[oracle]`: the only place the manifest says where the pin is.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OracleRow {
+pub struct PinRow {
     pub pin: String,
 }
 
@@ -125,7 +125,10 @@ pub struct Edge {
 }
 
 /// `[[rule]]`: an `id`, a scope or a tool, one predicate, an optional `adr`,
-/// and the `text` a failure prints (or the `note` an allow carries).
+/// and the `text` a failure prints (or the `note` an allow carries). Two
+/// rules of the tracked manifest (`unsafe.homes`, `generated.committed`)
+/// carry neither scope nor tool, so their absence is not refused; `exempt`
+/// and `note` are keys the manifest uses beyond the design's excerpt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
@@ -152,8 +155,9 @@ impl Rule {
 }
 
 /// The ten predicates of harness-design.md §4.1, each optional in the
-/// grammar so the file parses; `Manifest::load` then holds every rule to
-/// exactly one. `unless` and `with` qualify `deny_pattern` and `deny_argv`.
+/// grammar so the file parses; `Manifest::parse` then holds every rule to
+/// exactly one. `unless` and `with` qualify `deny_pattern` and `deny_argv`
+/// and are refused beside any other predicate.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Predicates {
@@ -172,25 +176,52 @@ pub struct Predicates {
 }
 
 impl Predicates {
+    /// The ten predicate names, in the design's order.
+    pub const NAMES: [&'static str; 10] = [
+        "deny_types",
+        "allow",
+        "deny_pattern",
+        "deny_argv",
+        "on",
+        "deny",
+        "deny_lints",
+        "check",
+        "avoid_from",
+        "generated",
+    ];
+
     /// The names of the predicates this rule carries.
     pub fn named(&self) -> Vec<&'static str> {
-        let mut out = Vec::new();
-        let mut take = |set: bool, name: &'static str| {
-            if set {
-                out.push(name);
-            }
-        };
-        take(self.deny_types.is_some(), "deny_types");
-        take(self.allow.is_some(), "allow");
-        take(self.deny_pattern.is_some(), "deny_pattern");
-        take(self.deny_argv.is_some(), "deny_argv");
-        take(self.on.is_some(), "on");
-        take(self.deny.is_some(), "deny");
-        take(self.deny_lints.is_some(), "deny_lints");
-        take(self.check.is_some(), "check");
-        take(self.avoid_from.is_some(), "avoid_from");
-        take(self.generated.is_some(), "generated");
-        out
+        let set = [
+            self.deny_types.is_some(),
+            self.allow.is_some(),
+            self.deny_pattern.is_some(),
+            self.deny_argv.is_some(),
+            self.on.is_some(),
+            self.deny.is_some(),
+            self.deny_lints.is_some(),
+            self.check.is_some(),
+            self.avoid_from.is_some(),
+            self.generated.is_some(),
+        ];
+        Self::NAMES
+            .iter()
+            .zip(set)
+            .filter(|(_, on)| *on)
+            .map(|(name, _)| *name)
+            .collect()
+    }
+
+    /// A qualifier that has no predicate to qualify: `unless` without
+    /// `deny_pattern`, `with` without `deny_argv`.
+    pub fn orphaned_qualifier(&self) -> Option<&'static str> {
+        if self.unless.is_some() && self.deny_pattern.is_none() {
+            Some("unless")
+        } else if self.with.is_some() && self.deny_argv.is_none() {
+            Some("with")
+        } else {
+            None
+        }
     }
 }
 
@@ -227,27 +258,26 @@ impl<const N: usize> PartialEq<[&str; N]> for OneOrMany {
 
 /// `oracle.toml`: the pinned oracle and its invocation recipe. Read through
 /// the manifest's `[oracle]` row and nowhere else; the version is a value of
-/// this file, not of any code.
+/// this file, not of any code. Its grammar is the oracle module's to hold
+/// (harness-design.md §4.3), so an unknown key here is not refused.
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Oracle {
-    pub oracle: Pin,
+    pub oracle: Binary,
     pub source: Source,
     pub recipe: Recipe,
     #[serde(default)]
     pub regime: BTreeMap<String, Regime>,
 }
 
+/// The `php` binary: version, where it is on this machine, and its digest.
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Pin {
+pub struct Binary {
     pub version: String,
     pub path: PathBuf,
     pub md5: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Source {
     pub tag: String,
     pub commit: String,
@@ -256,7 +286,6 @@ pub struct Source {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Recipe {
     pub script_name: String,
     pub preamble: String,
@@ -270,13 +299,11 @@ pub struct Recipe {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Limits {
     pub timeout_s: u64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Normalise {
     pub crlf_to_lf: bool,
     pub trim: String,
@@ -284,7 +311,6 @@ pub struct Normalise {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Regime {
     pub ini: Vec<String>,
 }
@@ -312,10 +338,18 @@ impl Manifest {
             let named = rule.predicate.named();
             if named.len() != 1 {
                 bail!(
-                    "rule \"{}\" carries {} predicates ({}); each rule carries exactly one of deny_types, allow, deny_pattern, deny_argv, on, deny, deny_lints, check, avoid_from, generated",
+                    "rule \"{}\" carries {} predicates ({}); each rule carries exactly one of {}",
                     rule.id,
                     named.len(),
-                    named.join(", ")
+                    named.join(", "),
+                    Predicates::NAMES.join(", ")
+                );
+            }
+            if let Some(qualifier) = rule.predicate.orphaned_qualifier() {
+                bail!(
+                    "rule \"{}\" has `{qualifier}` beside `{}`; `unless` qualifies deny_pattern and `with` qualifies deny_argv",
+                    rule.id,
+                    named[0]
                 );
             }
         }

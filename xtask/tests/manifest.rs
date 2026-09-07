@@ -80,6 +80,15 @@ fn a_rule_with_two_predicates_is_refused() {
 }
 
 #[test]
+fn a_qualifier_without_its_predicate_is_refused() {
+    let text = format!(
+        "{MINIMAL}\n[[rule]]\nid = \"x.orphan\"\ntool = \"Bash\"\ncheck = \"c\"\nunless = \"u\"\ntext = \"t\"\n"
+    );
+    let err = Manifest::parse(&text).unwrap_err().to_string();
+    assert!(err.contains("x.orphan") && err.contains("unless"), "{err}");
+}
+
+#[test]
 fn the_oracle_version_comes_from_the_pin_and_is_written_in_no_source_file() {
     let manifest = Manifest::load(workspace()).unwrap();
     let version = &manifest.pin.oracle.version;

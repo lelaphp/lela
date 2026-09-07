@@ -11,6 +11,14 @@ edition = "2024"
 license = "MIT"
 rust-version = "1.95"
 
+# Design §10: pedantic on with a short, reasoned allow list; the no-panic
+# lints are per-crate (`seams.toml` rule `lints.no-panic`, xtask exempt).
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"   # `manifest::Manifest`, `reading::Reading` are the names the design uses
+missing_errors_doc = "allow"        # every Result here is anyhow with context; the doc would say "on failure"
+must_use_candidate = "allow"        # the harness's constructors are not misused by discarding
+
 [workspace.dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
