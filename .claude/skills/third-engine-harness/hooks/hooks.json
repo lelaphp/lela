@@ -1,5 +1,5 @@
 {
-  "description": "PreToolUse on Edit, Write and Bash is xtask permit over the hook's stdin (harness-design.md \u00a74.4); the built binary is a process start, cargo run the fallback when none is built, about 200 ms more. SessionStart on startup, resume, clear and compact renders the local file and prints the map plus the local facts (\u00a75); once a session, so it goes through cargo run, which rebuilds a stale binary rather than trusting it.",
+  "description": "PreToolUse on Edit, Write and Bash is xtask permit over the hook's stdin (harness-design.md \u00a74.4); the built binary is a process start, cargo run the fallback when none is built, about 200 ms more. Stop is xtask done --hook over the hook's stdin (\u00a74.5): the turn is held with the unmet list as the reason, and the second Stop, stop_hook_active true, passes; it goes through cargo run, since what a turn changes is often xtask itself, and a cargo that fails is a block naming the build, never a silent pass, except on the second Stop. SessionStart on startup, resume, clear and compact renders the local file and prints the map plus the local facts (\u00a75); once a session, so it goes through cargo run, which rebuilds a stale binary rather than trusting it.",
   "hooks": {
     "PreToolUse": [
       {
@@ -9,6 +9,17 @@
             "type": "command",
             "command": "cd \"$CLAUDE_PROJECT_DIR\" && for x in target/release/xtask target/debug/xtask; do [ -x \"$x\" ] && exec \"$x\" permit; done; exec cargo run -q -p xtask -- permit",
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && in=$(cat) && { printf '%s' \"$in\" | cargo run -q -p xtask -- done --hook || case $in in *'\"stop_hook_active\":true'*) ;; *) echo '{\"decision\":\"block\",\"reason\":\"xtask done did not run: cargo run -q -p xtask -- done --hook failed; fix the build of xtask\"}';; esac; }",
+            "timeout": 120
           }
         ]
       }

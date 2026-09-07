@@ -1,0 +1,18 @@
+# A fixture registry for `xtask done` (harness-design.md §4.5, condition 4):
+# one accepted row a person reasoned, and one open row on ext/pcre's phpt
+# subset, so `done` fails while ext/pcre is in the diff and passes while
+# only another crate is.
+
+[[divergence]]
+id = "trace:root-table-full"
+kind = "trace"
+reason = "When the root table fills, this engine blacklists the one root that hit Full (fixture)."
+status = "accepted"
+since = "2026-09-06"
+
+[[divergence]]
+id = "phpt:php-src/ext/pcre/tests/preg_match_basic.phpt"
+kind = "phpt"
+reason = ""
+status = "open"
+since = "2026-09-08"

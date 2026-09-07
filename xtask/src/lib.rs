@@ -1,14 +1,16 @@
 //! The harness for the third engine (`harness-design.md` §4): the seam
 //! manifest and the oracle pin loaded by one reader, the oracle module that
 //! owns every comparison and the divergence registry, the reading and its
-//! store, the instruments, `permit`, the judge at the tool call, `vocab`,
-//! the glossary as a sensor, and `status`, the one renderer.
+//! store, the instruments, `permit`, the judge at the tool call, `done`,
+//! the definition of done, `vocab`, the glossary as a sensor, and
+//! `status`, the one renderer.
 #![forbid(unsafe_code)]
 
 pub mod api_check;
 pub mod budget;
 pub mod cli;
 pub mod divergence;
+pub mod done;
 pub mod generated;
 pub mod git;
 pub mod glossary;
@@ -69,6 +71,15 @@ pub fn run() -> Result<()> {
             } else {
                 permit::run(&root, json.as_deref());
                 Ok(())
+            }
+        }
+        Command::Done { base, hook } => {
+            let registry = Registry::load(&root)?;
+            if hook {
+                done::run_hook(&root, &manifest, &registry, &store);
+                Ok(())
+            } else {
+                done::run(&root, &manifest, &registry, &store, base.as_deref())
             }
         }
         Command::Budget => record(&store, &budget::run(&root, &manifest)?),

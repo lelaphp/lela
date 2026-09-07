@@ -53,6 +53,18 @@ pub enum Command {
         #[arg(long, default_value_t = 100, requires = "bench")]
         runs: usize,
     },
+    /// The definition of done: print the conditions unmet for the changes
+    /// since the base and exit 1 while any is; the Stop hook, pre-push and
+    /// CI read the same list.
+    Done {
+        /// Measure the changes since the merge base with this ref; default `main`.
+        #[arg(long, value_name = "REF", conflicts_with = "hook")]
+        base: Option<String>,
+        /// Read the Stop hook's stdin: exit 0 when `stop_hook_active`,
+        /// otherwise print the block JSON with the list while anything is unmet.
+        #[arg(long)]
+        hook: bool,
+    },
     /// Hold every crate to its line ceiling and the workspace to [budget];
     /// refuse committed generated code and a stale generated file.
     Budget,

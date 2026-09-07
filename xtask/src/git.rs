@@ -199,6 +199,76 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     (y, m, d)
 }
 
+/// The merge base of `HEAD` and `other`: what `done` measures the changes
+/// since when no `--base` is given (harness-design.md §4.5). `main` first,
+/// then `origin/main` for a checkout that has only the remote's branch.
+pub fn merge_base(root: &Path, other: &str) -> Result<String> {
+    let remote = format!("origin/{other}");
+    let mut last = None;
+    for name in [other, remote.as_str()] {
+        match git(root, &["merge-base", "HEAD", name], None) {
+            Ok(id) => return Ok(id.trim().to_owned()),
+            Err(err) => last = Some(err),
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("no merge base with {other}")))
+}
+
+/// One file the working tree differs in from a base commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Change {
+    /// Relative to the root.
+    pub path: String,
+    /// The file is gone from the working tree.
+    pub deleted: bool,
+}
+
+/// Every file that differs between `base` and the working tree, committed
+/// since the base or not, plus every untracked file git does not ignore;
+/// sorted by path. A rename is its deletion and its addition.
+pub fn changed_since(root: &Path, base: &str) -> Result<Vec<Change>> {
+    let listing = git(
+        root,
+        &["diff", "--name-status", "-z", "--no-renames", base, "--"],
+        None,
+    )?;
+    let mut fields = listing.split('\0').filter(|f| !f.is_empty());
+    let mut out = Vec::new();
+    while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
+        out.push(Change {
+            path: path.to_owned(),
+            deleted: status.starts_with('D'),
+        });
+    }
+    let untracked = git(
+        root,
+        &["ls-files", "-z", "--others", "--exclude-standard"],
+        None,
+    )?;
+    out.extend(
+        untracked
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .map(|p| Change {
+                path: p.to_owned(),
+                deleted: false,
+            }),
+    );
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out.dedup();
+    Ok(out)
+}
+
+/// The content of `path` at `rev`, or `None` when the commit has no such
+/// file.
+pub fn show(root: &Path, rev: &str, path: &str) -> Result<Option<String>> {
+    match git(root, &["show", &format!("{rev}:{path}")], None) {
+        Ok(text) => Ok(Some(text)),
+        Err(err) if err.to_string().contains("does not exist") => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::civil_from_days;
