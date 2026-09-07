@@ -1,14 +1,18 @@
 //! The glossary, `CONTEXT.md`, read for its `_Avoid_` lists (harness-design.md
-//! §5). A term is a `**Name**:` line; its avoided phrases are the
-//! comma-separated entries of the `_Avoid_:` line that follows. An entry may
-//! carry an explanation the sensor does not match on: a parenthetical, a
-//! qualifier (`param as nouns for the value`, `` `Ret` for a return ``,
-//! `class table alone`), backticks or quotes. What remains is the phrase.
+//! §5). A term is a `**Name**:` line; its avoided phrases are the entries,
+//! separated by commas or semicolons, of the `_Avoid_:` line that follows.
+//! An entry may carry an explanation the sensor does not match on: a
+//! parenthetical, a qualifier (`param as nouns for the value`, `` `Ret` for
+//! a return ``, `class table alone`), backticks or quotes. What remains is
+//! the phrase.
 //!
-//! Matching is case-sensitive and by whole word: the glossary avoids
-//! `result` and `Ret` as written, so `Result` the type is not `result` the
-//! word. Words are runs of letters and digits; a hyphen or an underscore
-//! separates two words, and a possessive `'s` is dropped.
+//! Matching is by whole word and ignores case, so `Registry` the type is
+//! `registry` the word. The one scoping the design asks for, `Result` is not
+//! `result`, is read from the glossary itself: an identifier the entry's
+//! parenthetical writes in backticks (`result (which means `Result` in
+//! Rust)`) is a spelling that is code, and that spelling, written exactly,
+//! is not a hit. Words are runs of letters and digits; a hyphen or an
+//! underscore separates two words, and a possessive `'s` is dropped.
 
 use std::fs;
 use std::path::Path;
@@ -29,22 +33,39 @@ pub struct Term {
 }
 
 /// One avoided phrase: its text as the glossary wrote it, less the
-/// explanation, and its words.
+/// explanation; its words, lowercased; and the spellings its explanation
+/// marks as code, which are not the word.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Phrase {
     pub text: String,
     pub words: Vec<String>,
+    pub code: Vec<String>,
+}
+
+impl Phrase {
+    /// Whether `words` (as written, any case) carry this phrase, starting
+    /// at some position: the lowercased words match, and a one-word phrase
+    /// is not met by a spelling its glossary entry marks as code.
+    pub fn occurs_in(&self, words: &[String]) -> bool {
+        words.windows(self.words.len()).any(|window| {
+            window
+                .iter()
+                .zip(&self.words)
+                .all(|(w, p)| w.to_lowercase() == *p)
+                && !(self.words.len() == 1 && self.code.contains(&window[0]))
+        })
+    }
 }
 
 /// One avoided phrase with every term that avoids it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Avoided {
-    pub text: String,
-    pub words: Vec<String>,
+    pub phrase: Phrase,
     pub terms: Vec<String>,
 }
 
 impl Glossary {
+    /// Read the glossary file.
     pub fn load(path: &Path) -> Result<Glossary> {
         let text =
             fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -85,6 +106,7 @@ impl Glossary {
         Ok(Glossary { terms })
     }
 
+    /// The term named `name`, if the glossary has it.
     pub fn term(&self, name: &str) -> Option<&Term> {
         self.terms.iter().find(|t| t.name == name)
     }
@@ -95,25 +117,16 @@ impl Glossary {
         let mut out: Vec<Avoided> = Vec::new();
         for term in &self.terms {
             for phrase in &term.avoid {
-                match out.iter_mut().find(|a| a.words == phrase.words) {
+                match out.iter_mut().find(|a| a.phrase.words == phrase.words) {
                     Some(seen) => seen.terms.push(term.name.clone()),
                     None => out.push(Avoided {
-                        text: phrase.text.clone(),
-                        words: phrase.words.clone(),
+                        phrase: phrase.clone(),
                         terms: vec![term.name.clone()],
                     }),
                 }
             }
         }
         out
-    }
-
-    /// The avoided phrase written as `text`, if the glossary avoids it.
-    pub fn avoided(&self, text: &str) -> Option<Avoided> {
-        let words = words(text);
-        self.avoided_phrases()
-            .into_iter()
-            .find(|a| a.words == words)
     }
 }
 
@@ -148,17 +161,30 @@ fn split_entries(list: &str) -> Vec<String> {
 const QUALIFIERS: [&str; 4] = [" as ", " for ", " alone", " which "];
 
 /// The phrase of one entry: parentheticals, backticks and quotes removed,
-/// cut at the first qualifier. `None` for an entry that leaves no words.
+/// cut at the first qualifier; the identifiers the parentheticals write in
+/// backticks kept as its code spellings. `None` for an entry that leaves
+/// no words.
 fn phrase(entry: &str) -> Option<Phrase> {
     let mut text = String::new();
+    let mut code = Vec::new();
     let mut depth = 0u32;
+    let mut span: Option<String> = None;
     for c in entry.chars() {
         match c {
+            '`' if depth > 0 => match span.take() {
+                Some(s) if is_identifier(&s) => code.push(s),
+                Some(_) => {}
+                None => span = Some(String::new()),
+            },
             '(' => depth += 1,
             ')' => depth = depth.saturating_sub(1),
             '`' | '"' | '\u{201c}' | '\u{201d}' => {}
             _ if depth == 0 => text.push(c),
-            _ => {}
+            _ => {
+                if let Some(s) = span.as_mut() {
+                    s.push(c);
+                }
+            }
         }
     }
     let cut = QUALIFIERS
@@ -167,12 +193,19 @@ fn phrase(entry: &str) -> Option<Phrase> {
         .min()
         .unwrap_or(text.len());
     let text = text[..cut].trim().to_owned();
-    let words = words(&text);
-    (!words.is_empty()).then_some(Phrase { text, words })
+    let words = words(&text)
+        .iter()
+        .map(|w| w.to_lowercase())
+        .collect::<Vec<_>>();
+    (!words.is_empty()).then_some(Phrase { text, words, code })
 }
 
-/// The words of a run of prose or of a glossary entry: runs of letters and
-/// digits, a possessive `'s` dropped.
+fn is_identifier(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// The words of a run of prose or of a glossary entry, as written: runs of
+/// letters and digits, a possessive `'s` dropped.
 pub fn words(text: &str) -> Vec<String> {
     let text = text.replace("'s", "").replace("\u{2019}s", "");
     text.split(|c: char| !c.is_alphanumeric())
@@ -202,6 +235,31 @@ mod tests {
         );
         assert_eq!(p("`api-check`'s tables"), Some("api-check's tables".into()));
         assert_eq!(p("(nothing)"), None);
+    }
+
+    #[test]
+    fn a_backticked_identifier_in_the_explanation_is_a_code_spelling() {
+        let p = phrase("result (which means `Result` in Rust)").unwrap();
+        assert_eq!(p.words, ["result"]);
+        assert_eq!(p.code, ["Result"]);
+        assert!(p.occurs_in(&["the".into(), "result".into()]));
+        assert!(p.occurs_in(&["RESULT".into()]));
+        assert!(!p.occurs_in(&["Result".into()]));
+        assert!(!p.occurs_in(&["results".into()]));
+
+        // A code span that is not an identifier marks nothing.
+        let p = phrase("feedback (the `MapPtr<[Feedback]>` of §5.14)").unwrap();
+        assert!(p.code.is_empty());
+        assert!(p.occurs_in(&["Feedback".into()]));
+    }
+
+    #[test]
+    fn phrases_match_any_case_and_several_words() {
+        let p = phrase("plugin list").unwrap();
+        assert!(p.occurs_in(&["Plugin".into(), "List".into()]));
+        assert!(!p.occurs_in(&["plugin".into(), "lists".into()]));
+        let p = phrase("AST as a distinct thing").unwrap();
+        assert!(p.occurs_in(&["ast".into()]));
     }
 
     #[test]

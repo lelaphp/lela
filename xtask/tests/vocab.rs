@@ -24,6 +24,12 @@ fn glossary() -> Glossary {
     Glossary::load(&workspace().join("CONTEXT.md")).unwrap()
 }
 
+fn fixture_findings() -> Vec<Finding> {
+    vocab::scan_crate(&fixture("vocab.avoid"), &glossary())
+        .unwrap()
+        .findings
+}
+
 #[test]
 fn the_glossary_reads_each_term_with_its_avoided_phrases() {
     let glossary = glossary();
@@ -40,13 +46,21 @@ fn the_glossary_reads_each_term_with_its_avoided_phrases() {
     assert_eq!(avoided, ["arg", "param", "Ret"]);
 
     // A phrase avoided under two terms names both.
-    let registry = glossary.avoided("registry").unwrap();
+    let phrases = glossary.avoided_phrases();
+    let registry = phrases
+        .iter()
+        .find(|a| a.phrase.text == "registry")
+        .unwrap();
     assert_eq!(registry.terms, ["Linked table", "Bundle"]);
+
+    // The glossary's own carve-out: `result (which means `Result` in Rust)`.
+    let result = phrases.iter().find(|a| a.phrase.text == "result").unwrap();
+    assert_eq!(result.phrase.code, ["Result"]);
 }
 
 #[test]
 fn a_public_item_named_by_an_avoided_word_fails_naming_the_word_and_the_term() {
-    let findings = vocab::scan_crate(&fixture("vocab.avoid"), &glossary()).unwrap();
+    let findings = fixture_findings();
     let hit = findings
         .iter()
         .find(|f| f.site == Where::Item && f.word == "run")
@@ -56,11 +70,25 @@ fn a_public_item_named_by_an_avoided_word_fails_naming_the_word_and_the_term() {
     assert_eq!(hit.line, 6);
     let text = hit.to_string();
     assert!(text.contains("run") && text.contains("Serve"), "{text}");
+
+    // Case does not hide a name: a type, a field and a variant.
+    let items: Vec<(&str, usize)> = findings
+        .iter()
+        .filter(|f| f.site == Where::Item)
+        .map(|f| (f.word.as_str(), f.line))
+        .collect();
+    assert!(items.contains(&("registry", 16)), "{items:?}");
+    assert!(items.contains(&("globals", 18)), "{items:?}");
+    assert!(items.contains(&("handle", 24)), "{items:?}");
+    assert!(
+        !items.iter().any(|(_, line)| *line == 23),
+        "a variant named by a glossary term passes: {items:?}"
+    );
 }
 
 #[test]
 fn prose_using_an_avoided_word_fails_and_the_same_word_as_a_type_name_passes() {
-    let findings = vocab::scan_crate(&fixture("vocab.avoid"), &glossary()).unwrap();
+    let findings = fixture_findings();
     let prose: Vec<(&str, usize)> = findings
         .iter()
         .filter(|f| f.site == Where::Prose)
@@ -70,12 +98,12 @@ fn prose_using_an_avoided_word_fails_and_the_same_word_as_a_type_name_passes() {
     assert!(prose.contains(&("run", 5)), "{prose:?}");
     assert!(
         !prose.iter().any(|(_, line)| *line == 8),
-        "`Result` in prose is the type, not the word: {prose:?}"
+        "`Result` in a code span and Result bare are the type, not the word: {prose:?}"
     );
     assert!(
         !findings
             .iter()
-            .any(|f| f.site == Where::Item && (f.line == 9 || f.line == 12)),
+            .any(|f| f.site == Where::Item && (f.line == 10 || f.line == 13)),
         "a type named Result or Return is not the avoided word: {findings:#?}"
     );
 }
@@ -159,7 +187,7 @@ fn the_instrument_writes_a_reading_per_crate_with_instrument_vocab() {
     let hits = reading.numbers["hits"].to_string().parse::<i64>().unwrap();
     assert!(hits >= 4, "items, prose and the lock: {reading:#?}");
 
-    // The lock is checked under the crate that holds it and nowhere else.
+    // The lock is read under the crate that holds it and nowhere else.
     let other = scratch("nolock", "crates/php_heap");
     let (ok, _, _) = xtask(&other, &["vocab", "--crate", "php_heap"]);
     assert!(!ok);
@@ -206,7 +234,11 @@ fn every_rule_vocab_evaluates_has_a_fixture_that_fails() {
         let glossary =
             Glossary::load(&workspace().join(rule.predicate.avoid_from.as_deref().unwrap()))
                 .unwrap();
-        let findings = vocab::scan_crate(&dir, &glossary).unwrap();
-        assert!(!findings.is_empty(), "the fixture for {} passes", rule.id);
+        let scan = vocab::scan_crate(&dir, &glossary).unwrap();
+        assert!(
+            !scan.findings.is_empty(),
+            "the fixture for {} passes",
+            rule.id
+        );
     }
 }

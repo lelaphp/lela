@@ -1,17 +1,20 @@
-//! `xtask vocab`, the glossary as a sensor (harness-design.md §5). For every
-//! manifest rule with `avoid_from`, the glossary it names is read for its
+//! `xtask vocab`, the glossary as a sensor (harness-design.md §5). The
+//! manifest's `avoid_from` rule names the glossary, which is read for its
 //! `_Avoid_` lists, and every crate the rule's scope covers is scanned: the
 //! names of its public items, the prose of its rustdoc, and any lock file
 //! the scope names under the crate's path. One reading per crate, of
 //! instrument `vocab`; a crate whose sources do not exist yet gets none.
 //!
-//! The scan is textual, not a parse: a public item is a line beginning `pub`
-//! followed by an item keyword and a name; rustdoc prose is the text of
-//! `///` and `//!` lines outside fenced code blocks and inline code spans.
-//! A name is split into its words (`get_or_build`, `ExtensionBuilder`) and
-//! also taken whole, so `ReturnTypeWillChange` is found as written.
-//! Matching is case-sensitive (`glossary`): `Result` the type, in a name or
-//! in prose, is not `result` the avoided word.
+//! The scan is textual, not a parse. A public item is a line beginning
+//! `pub` followed by an item keyword and a name, a `pub` field, a variant of
+//! a `pub enum`, or a `macro_rules!` under `#[macro_export]`; `pub(crate)`
+//! and narrower are not public. Rustdoc prose is the text of `///` and `//!`
+//! lines outside fenced code blocks and inline code spans; `/** */` and
+//! `#[doc]` are not read. A name is split into its words (`get_or_build`,
+//! `ExtensionBuilder`) and also taken whole, so `ReturnTypeWillChange` is
+//! found as written. Case is ignored except for the spellings the glossary
+//! marks as code (`glossary`): `Registry` is `registry`, `Result` is not
+//! `result`.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -23,7 +26,7 @@ use anyhow::{Context, Result, bail};
 use crate::git::Stamp;
 use crate::glossary::{self, Avoided, Glossary};
 use crate::manifest::{Crate, Manifest, Rule};
-use crate::reading::{Reading, Status, Store};
+use crate::reading::{self, Reading, Status, Store};
 
 /// The instrument's name, the reading's `instrument` field.
 pub const INSTRUMENT: &str = "vocab";
@@ -54,6 +57,19 @@ pub struct Finding {
     pub terms: Vec<String>,
 }
 
+impl Finding {
+    fn at(file: &Path, line: usize, site: Where, subject: &str, hit: &Avoided) -> Finding {
+        Finding {
+            file: file.to_path_buf(),
+            line,
+            site,
+            word: hit.phrase.text.clone(),
+            subject: subject.to_owned(),
+            terms: hit.terms.clone(),
+        }
+    }
+}
+
 impl fmt::Display for Finding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -80,6 +96,18 @@ fn quoted(terms: &[String]) -> String {
         .join(" or ")
 }
 
+/// What one scan counted and found.
+#[derive(Debug, Default)]
+pub struct Scan {
+    /// Public items whose names were read.
+    pub items: i64,
+    /// Rustdoc prose lines read.
+    pub prose: i64,
+    /// Lock lines read.
+    pub lock: i64,
+    pub findings: Vec<Finding>,
+}
+
 /// Run the instrument over the manifest's crates, or over `only` when it
 /// names some, and write a reading per crate that exists. `Ok(true)` when
 /// every reading passed.
@@ -89,144 +117,127 @@ pub fn run(root: &Path, manifest: &Manifest, store: &Store, only: &[String]) -> 
         .iter()
         .filter(|r| r.predicate.avoid_from.is_some())
         .collect();
-    if rules.is_empty() {
-        bail!("the manifest has no rule with `avoid_from`; nothing for vocab to read");
-    }
+    let rule = match rules.as_slice() {
+        [] => bail!("the manifest has no rule with `avoid_from`; nothing for vocab to read"),
+        [rule] => *rule,
+        many => bail!(
+            "the manifest has {} rules with `avoid_from` ({}); the store holds one vocab reading per crate, so vocab evaluates one",
+            many.len(),
+            many.iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
     for name in only {
         if manifest.crate_named(name).is_none() {
             bail!("the manifest has no crate named {name:?}");
         }
     }
+    let glossary_file = rule.predicate.avoid_from.as_deref().unwrap_or_default();
+    let glossary = Glossary::load(&root.join(glossary_file))?;
     let mut all_pass = true;
-    for rule in rules {
-        let glossary_file = rule.predicate.avoid_from.as_deref().unwrap_or_default();
-        let glossary = Glossary::load(&root.join(glossary_file))?;
-        for krate in &manifest.crates {
-            if !only.is_empty() && !only.iter().any(|n| n == &krate.name) {
-                continue;
-            }
-            let Some(scan) = Scan::of(root, rule, krate, &glossary)? else {
-                continue;
-            };
-            let reading = scan.reading(root, rule, krate)?;
-            for finding in &scan.findings {
-                println!("{}/{finding}", krate.path().display());
-            }
-            all_pass &= reading.status == Status::Pass;
-            store.write(&reading)?;
+    for krate in &manifest.crates {
+        if !only.is_empty() && !only.iter().any(|n| n == &krate.name) {
+            continue;
         }
+        let Some(scan) = scan_in_scope(root, rule, krate, &glossary)? else {
+            continue;
+        };
+        let reading = reading_of(&scan, root, rule, krate)?;
+        for finding in &scan.findings {
+            println!("{}/{finding}", krate.path().display());
+        }
+        all_pass &= reading.status == Status::Pass;
+        store.write(&reading)?;
     }
     Ok(all_pass)
 }
 
-/// What one crate's scan counted and found.
-struct Scan {
-    items: i64,
-    prose: i64,
-    lock: i64,
-    findings: Vec<Finding>,
-}
-
-impl Scan {
-    /// Scan `krate` under `rule`'s scope; `None` when the scope does not
-    /// cover it or its directory does not exist.
-    fn of(root: &Path, rule: &Rule, krate: &Crate, glossary: &Glossary) -> Result<Option<Scan>> {
-        let path = krate.path();
-        let dir = root.join(&path);
-        let covered = rule.scope.iter().any(|pattern| matches(pattern, &path));
-        if !covered || !dir.is_dir() {
-            return Ok(None);
-        }
-        let mut scan = Scan {
-            items: 0,
-            prose: 0,
-            lock: 0,
-            findings: Vec::new(),
-        };
-        let avoided = glossary.avoided_phrases();
-        for file in rust_files(&dir)? {
-            let text =
-                fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-            let relative = file.strip_prefix(&dir).unwrap_or(&file).to_path_buf();
-            let counts = scan_source(&relative, &text, &avoided, &mut scan.findings);
-            scan.items += counts.0;
-            scan.prose += counts.1;
-        }
-        for lock in rule.scope.iter().filter(|s| !s.contains('*')) {
-            let lock_path = Path::new(lock);
-            if !lock_path.starts_with(&path) {
-                continue;
-            }
-            let file = root.join(lock_path);
-            if !file.is_file() {
-                continue;
-            }
-            let text =
-                fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-            let relative = lock_path.strip_prefix(&path).unwrap_or(lock_path);
-            scan.lock += scan_lock_text(relative, &text, &avoided, &mut scan.findings);
-        }
-        Ok(Some(scan))
+/// Scan `krate` under `rule`'s scope: its sources, and each lock the scope
+/// names under its path. `None` when the scope does not cover it or its
+/// directory does not exist.
+fn scan_in_scope(
+    root: &Path,
+    rule: &Rule,
+    krate: &Crate,
+    glossary: &Glossary,
+) -> Result<Option<Scan>> {
+    let path = krate.path();
+    let dir = root.join(&path);
+    let covered = rule.scope.iter().any(|pattern| matches(pattern, &path));
+    if !covered || !dir.is_dir() {
+        return Ok(None);
     }
-
-    fn reading(&self, root: &Path, rule: &Rule, krate: &Crate) -> Result<Reading> {
-        let mut reading = Reading::new(INSTRUMENT, &krate.name);
-        reading.rule.clone_from(&rule.id);
-        rule.adr
-            .iter()
-            .next()
-            .unwrap_or_default()
-            .clone_into(&mut reading.adr);
-        reading.numbers = BTreeMap::from([
-            ("items".to_owned(), self.items.into()),
-            ("prose".to_owned(), self.prose.into()),
-            ("lock".to_owned(), self.lock.into()),
-            (
-                "hits".to_owned(),
-                i64::try_from(self.findings.len())
-                    .unwrap_or(i64::MAX)
-                    .into(),
-            ),
-        ]);
-        reading.status = if self.findings.is_empty() {
-            Status::Pass
-        } else {
-            Status::Fail
-        };
-        reading.message = if self.findings.is_empty() {
-            format!("{}: no avoided word", krate.name)
-        } else {
-            let list = self
-                .findings
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("\n");
-            format!("{}: {}\n{list}", krate.name, rule.text)
-        };
-        reading.stamp(&Stamp::take(root, &krate.path())?);
-        Ok(reading)
-    }
-}
-
-/// Scan one crate directory as the instrument would: every `.rs` file under
-/// it. The findings' files are relative to `dir`.
-pub fn scan_crate(dir: &Path, glossary: &Glossary) -> Result<Vec<Finding>> {
+    let mut scan = scan_crate(&dir, glossary)?;
     let avoided = glossary.avoided_phrases();
-    let mut findings = Vec::new();
-    for file in rust_files(dir)? {
-        let text =
-            fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-        let relative = file.strip_prefix(dir).unwrap_or(&file).to_path_buf();
-        scan_source(&relative, &text, &avoided, &mut findings);
+    for lock in rule.scope.iter().filter(|s| !s.contains('*')) {
+        let lock_path = Path::new(lock);
+        let file = root.join(lock_path);
+        if !lock_path.starts_with(&path) || !file.is_file() {
+            continue;
+        }
+        let text = read(&file)?;
+        let relative = lock_path.strip_prefix(&path).unwrap_or(lock_path);
+        scan.lock += scan_lock_text(relative, &text, &avoided, &mut scan.findings);
     }
-    Ok(findings)
+    Ok(Some(scan))
+}
+
+/// The reading of one crate's scan: `numbers` are the counts and the hits,
+/// `message` lists every finding under the rule's text.
+fn reading_of(scan: &Scan, root: &Path, rule: &Rule, krate: &Crate) -> Result<Reading> {
+    let mut reading = Reading::new(INSTRUMENT, &krate.name);
+    reading.rule.clone_from(&rule.id);
+    reading.adr = rule.adr.iter().collect::<Vec<_>>().join(", ");
+    reading.numbers = BTreeMap::from([
+        ("items".to_owned(), scan.items.into()),
+        ("prose".to_owned(), scan.prose.into()),
+        ("lock".to_owned(), scan.lock.into()),
+        (
+            "hits".to_owned(),
+            i64::try_from(scan.findings.len())
+                .unwrap_or(i64::MAX)
+                .into(),
+        ),
+    ]);
+    reading.status = if scan.findings.is_empty() {
+        Status::Pass
+    } else {
+        Status::Fail
+    };
+    reading.message = if scan.findings.is_empty() {
+        format!("{}: no avoided word", krate.name)
+    } else {
+        let list = scan
+            .findings
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("{}: {}\n{list}", krate.name, rule.text)
+    };
+    reading.stamp(&Stamp::take(root, &krate.path())?);
+    Ok(reading)
+}
+
+/// Scan one crate directory: every `.rs` file under it, `target/` aside.
+/// The findings' files are relative to `dir`.
+pub fn scan_crate(dir: &Path, glossary: &Glossary) -> Result<Scan> {
+    let avoided = glossary.avoided_phrases();
+    let mut scan = Scan::default();
+    for file in rust_files(dir)? {
+        let text = read(&file)?;
+        let relative = file.strip_prefix(dir).unwrap_or(&file);
+        scan_source(relative, &text, &avoided, &mut scan);
+    }
+    Ok(scan)
 }
 
 /// Scan one lock file: each item line's path, split into words. Comment
 /// lines are the lock's own prose and not asserted on.
 pub fn scan_lock(file: &Path, glossary: &Glossary) -> Result<Vec<Finding>> {
-    let text = fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let text = read(file)?;
     let mut findings = Vec::new();
     let name = file
         .file_name()
@@ -235,6 +246,11 @@ pub fn scan_lock(file: &Path, glossary: &Glossary) -> Result<Vec<Finding>> {
     Ok(findings)
 }
 
+fn read(file: &Path) -> Result<String> {
+    fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))
+}
+
+/// Scan lock text; the item lines counted.
 fn scan_lock_text(file: &Path, text: &str, avoided: &[Avoided], out: &mut Vec<Finding>) -> i64 {
     let mut lines = 0;
     for (index, line) in text.lines().enumerate() {
@@ -249,24 +265,18 @@ fn scan_lock_text(file: &Path, text: &str, avoided: &[Avoided], out: &mut Vec<Fi
             words.push(segment.to_owned());
         }
         for hit in hits(&words, avoided) {
-            out.push(Finding {
-                file: file.to_path_buf(),
-                line: index + 1,
-                site: Where::Lock,
-                word: hit.text.clone(),
-                subject: line.to_owned(),
-                terms: hit.terms.clone(),
-            });
+            out.push(Finding::at(file, index + 1, Where::Lock, line, hit));
         }
     }
     lines
 }
 
-/// Scan one source file; `(public items, prose lines)` counted.
-fn scan_source(file: &Path, text: &str, avoided: &[Avoided], out: &mut Vec<Finding>) -> (i64, i64) {
-    let (mut items, mut prose) = (0, 0);
+/// Scan one source file into `scan`.
+fn scan_source(file: &Path, text: &str, avoided: &[Avoided], scan: &mut Scan) {
     let mut in_fence = false;
+    let mut items = Items::default();
     for (index, line) in text.lines().enumerate() {
+        let indent = line.len() - line.trim_start().len();
         let line = line.trim_start();
         if let Some(doc) = line
             .strip_prefix("///")
@@ -280,35 +290,22 @@ fn scan_source(file: &Path, text: &str, avoided: &[Avoided], out: &mut Vec<Findi
             if in_fence {
                 continue;
             }
-            prose += 1;
+            scan.prose += 1;
             let words = glossary::words(&without_code_spans(doc));
             for hit in hits(&words, avoided) {
-                out.push(Finding {
-                    file: file.to_path_buf(),
-                    line: index + 1,
-                    site: Where::Prose,
-                    word: hit.text.clone(),
-                    subject: String::new(),
-                    terms: hit.terms.clone(),
-                });
+                scan.findings
+                    .push(Finding::at(file, index + 1, Where::Prose, "", hit));
             }
-        } else if let Some((subject, name)) = public_item(line) {
-            items += 1;
+        } else if let Some((subject, name)) = items.public_item(line, indent) {
+            scan.items += 1;
             let mut words = identifier_words(&name);
             words.push(name);
             for hit in hits(&words, avoided) {
-                out.push(Finding {
-                    file: file.to_path_buf(),
-                    line: index + 1,
-                    site: Where::Item,
-                    word: hit.text.clone(),
-                    subject: subject.clone(),
-                    terms: hit.terms.clone(),
-                });
+                scan.findings
+                    .push(Finding::at(file, index + 1, Where::Item, &subject, hit));
             }
         }
     }
-    (items, prose)
 }
 
 /// The avoided phrases that occur in `words`, each once, in the order the
@@ -316,11 +313,7 @@ fn scan_source(file: &Path, text: &str, avoided: &[Avoided], out: &mut Vec<Findi
 fn hits<'a>(words: &[String], avoided: &'a [Avoided]) -> Vec<&'a Avoided> {
     avoided
         .iter()
-        .filter(|a| {
-            words
-                .windows(a.words.len())
-                .any(|w| w == a.words.as_slice())
-        })
+        .filter(|a| a.phrase.occurs_in(words))
         .collect()
 }
 
@@ -329,34 +322,82 @@ const ITEM_KEYWORDS: [&str; 11] = [
     "fn", "struct", "enum", "union", "trait", "type", "mod", "const", "static", "macro", "use",
 ];
 
-/// A public item on this line: its declaration head (`pub fn run`) and
-/// its name. `pub(crate)` and narrower are not public.
-fn public_item(line: &str) -> Option<(String, String)> {
-    let rest = line.strip_prefix("pub ")?;
-    let mut tokens = rest.split_whitespace().peekable();
-    let mut keyword = None;
-    while let Some(token) = tokens.next() {
-        match token {
-            "unsafe" | "async" | "extern" => {}
-            t if t.starts_with('"') => {} // the ABI of `extern "C"`
-            "const" if tokens.peek() == Some(&"fn") => {}
-            t if ITEM_KEYWORDS.contains(&t) => {
-                keyword = Some(t);
-                break;
+/// The line-to-line state of the public-item scan: the `pub enum` whose
+/// variants are being read, by the indentation its `}` will have, and
+/// whether the last attribute line was `#[macro_export]`.
+#[derive(Default)]
+struct Items {
+    enum_indent: Option<usize>,
+    exported: bool,
+}
+
+impl Items {
+    /// The public item this line declares: its head (`pub fn run`) and its
+    /// name.
+    fn public_item(&mut self, line: &str, indent: usize) -> Option<(String, String)> {
+        if let Some(enum_indent) = self.enum_indent {
+            if line.starts_with('}') && indent <= enum_indent {
+                self.enum_indent = None;
+            } else if let Some(name) = variant(line) {
+                return Some((format!("variant {name}"), name.to_owned()));
             }
-            _ => return None,
         }
+        let exported = std::mem::replace(&mut self.exported, line.starts_with("#[macro_export]"));
+        if exported && let Some(rest) = line.strip_prefix("macro_rules!") {
+            let name = identifier(rest)?;
+            return Some((format!("macro_rules! {name}"), name.to_owned()));
+        }
+        let rest = line.strip_prefix("pub ")?;
+        let mut tokens = rest.split_whitespace().peekable();
+        let mut keyword = None;
+        while let Some(token) = tokens.next() {
+            match token {
+                "unsafe" | "async" | "extern" => {}
+                t if t.starts_with('"') => {} // the ABI of `extern "C"`
+                "const" if tokens.peek() == Some(&"fn") => {}
+                t if ITEM_KEYWORDS.contains(&t) => {
+                    keyword = Some(t);
+                    break;
+                }
+                t => {
+                    // A `pub` field: `pub name: Type,`.
+                    let name = identifier(t)?;
+                    return (t[name.len()..].starts_with(':'))
+                        .then(|| (format!("pub field {name}"), name.to_owned()));
+                }
+            }
+        }
+        let keyword = keyword?;
+        let tail = tokens.collect::<Vec<_>>().join(" ");
+        let name = if keyword == "use" {
+            use_name(&tail)?
+        } else {
+            identifier(&tail)?
+        };
+        if keyword == "enum" && tail.contains('{') && !tail.contains('}') {
+            self.enum_indent = Some(indent);
+        }
+        Some((format!("pub {keyword} {name}"), name.to_owned()))
     }
-    let keyword = keyword?;
-    let tail = tokens.collect::<Vec<_>>().join(" ");
-    let name = if keyword == "use" {
-        use_name(&tail)?
-    } else {
-        tail.split(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .next()
-            .filter(|n| !n.is_empty())?
-    };
-    Some((format!("pub {keyword} {name}"), name.to_owned()))
+}
+
+/// A variant line of an enum body: a capitalised identifier followed by
+/// `,`, `(`, `{`, `=` or nothing.
+fn variant(line: &str) -> Option<&str> {
+    let name = identifier(line)?;
+    let next = line[name.len()..].trim_start().chars().next();
+    (name.starts_with(|c: char| c.is_uppercase())
+        && matches!(next, None | Some(',' | '(' | '{' | '=')))
+    .then_some(name)
+}
+
+/// The identifier at the start of `text`, if there is one.
+fn identifier(text: &str) -> Option<&str> {
+    let text = text.trim_start();
+    let end = text
+        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .unwrap_or(text.len());
+    (end > 0).then(|| &text[..end])
 }
 
 /// The name a `pub use` brings in: the `as` alias, else the last path
@@ -433,32 +474,25 @@ fn matches(pattern: &str, path: &Path) -> bool {
 
 /// Every `.rs` file under `dir`, in path order; `target/` is skipped.
 fn rust_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    walk(dir, &mut out)?;
-    out.sort();
-    Ok(out)
-}
-
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))? {
-        let path = entry?.path();
-        if path.is_dir() {
-            if path.file_name().is_some_and(|n| n == "target") {
-                continue;
-            }
-            walk(&path, out)?;
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            out.push(path);
-        }
-    }
-    Ok(())
+    let mut files = Vec::new();
+    reading::walk(dir, &mut files)?;
+    files.retain(|p| {
+        p.extension().is_some_and(|e| e == "rs")
+            && !p
+                .strip_prefix(dir)
+                .unwrap_or(p)
+                .iter()
+                .any(|part| part == "target")
+    });
+    files.sort();
+    Ok(files)
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
-    use super::{identifier_words, matches, public_item, use_name};
+    use super::{Items, identifier_words, matches, use_name};
 
     #[test]
     fn identifiers_split_into_their_words() {
@@ -474,7 +508,7 @@ mod tests {
 
     #[test]
     fn public_items_are_named_and_narrower_visibility_is_not() {
-        let head = |l: &str| public_item(l).map(|(h, _)| h);
+        let head = |l: &str| Items::default().public_item(l, 0).map(|(h, _)| h);
         assert_eq!(head("pub fn run() {}"), Some("pub fn run".into()));
         assert_eq!(head("pub const fn run() {}"), Some("pub fn run".into()));
         assert_eq!(
@@ -489,10 +523,42 @@ mod tests {
         assert_eq!(head("pub struct Return;"), Some("pub struct Return".into()));
         assert_eq!(head("pub use a::b::run;"), Some("pub use run".into()));
         assert_eq!(head("pub use a::b as serve;"), Some("pub use serve".into()));
+        assert_eq!(head("pub run: u32,"), Some("pub field run".into()));
         assert_eq!(head("pub use a::*;"), None);
         assert_eq!(head("pub(crate) fn run() {}"), None);
         assert_eq!(head("fn run() {}"), None);
+        assert_eq!(head("pub if x {}"), None);
         assert_eq!(use_name("a::{b, c};"), None);
+    }
+
+    #[test]
+    fn enum_variants_and_exported_macros_are_public_items() {
+        let mut items = Items::default();
+        let mut heads = Vec::new();
+        for (line, indent) in [
+            ("pub enum Kind {", 0),
+            ("/// A run.", 4),
+            ("Run,", 4),
+            ("Handle(u8),", 4),
+            ("}", 0),
+            ("Other,", 0),
+            ("#[macro_export]", 0),
+            ("macro_rules! script {", 0),
+            ("macro_rules! private {", 0),
+        ] {
+            if let Some((head, _)) = items.public_item(line, indent) {
+                heads.push(head);
+            }
+        }
+        assert_eq!(
+            heads,
+            [
+                "pub enum Kind",
+                "variant Run",
+                "variant Handle",
+                "macro_rules! script"
+            ]
+        );
     }
 
     #[test]
