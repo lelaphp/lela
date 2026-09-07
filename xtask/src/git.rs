@@ -69,7 +69,9 @@ pub fn tree_hash(root: &Path, scope: &Path) -> Result<String> {
         .to_owned())
 }
 
-fn git(root: &Path, args: &[&str], stdin: Option<&str>) -> Result<String> {
+/// Run git in `root` and return its stdout; a non-zero exit is an error
+/// carrying git's stderr.
+pub(crate) fn git(root: &Path, args: &[&str], stdin: Option<&str>) -> Result<String> {
     let mut child = Command::new("git")
         .arg("-C")
         .arg(root)

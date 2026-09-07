@@ -1,0 +1,7 @@
+{
+ "tool_name": "Write",
+ "tool_input": {
+  "file_path": "xtask/fixtures/regions/map.md",
+  "content": "# A map with regions\n\nProse a person wrote. Change it freely.\n\n<!-- computed exec cmd=\"xtask status --section rules --format md\" inputs=seams.toml name=rules -->\n| rule | adr |\n|---|---|\n| ext.no-locks | ADR-0005 |\n<!-- /computed in=4b0267a37bd1187b38918aa56d344242263571578d5b300fb415b2fb4260d898 out=45ca178e8d4046c3d6663949c214424beef2e9912da4931b45621e1e5ecbf559 -->\n\n<!-- computed tree src=crates depth=2 name=layout -->\n<!-- /computed -->\n\nAn example of a marker, which is prose:\n\n```markdown\n<!-- computed tree src=. depth=2 name=example -->\na line inside the example\n<!-- /computed -->\n```\n\nMore prose after the fence.\n"
+ }
+}

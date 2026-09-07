@@ -26,15 +26,16 @@ use regex_lite::Regex;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::git::Stamp;
+use crate::git::{Stamp, git};
 use crate::manifest::{Manifest, Rule};
 use crate::reading::{Reading, Status, Store};
 
+/// The instrument name every reading of permit carries.
 pub const INSTRUMENT: &str = "permit";
 /// The hook event the shipped adapter wires (§6).
-pub const HOOK_EVENT: &str = "PreToolUse";
+const HOOK_EVENT: &str = "PreToolUse";
 /// The bar of §4.4: p99 latency at the tool call, in milliseconds.
-pub const BAR_MS: f64 = 100.0;
+const BAR_MS: f64 = 100.0;
 /// The region-body check is computed's ADR 0005, not a manifest rule; this
 /// is the id its readings and denials carry.
 pub const REGION_RULE: &str = "computed.region-body";
@@ -43,7 +44,7 @@ const REGION_TEXT: &str = "The body of a computed region is rendered by `compute
 /// One intended tool call, as the hook receives it on stdin. The other keys
 /// of the recorded shape (`session_id`, `cwd`, `permission_mode`, …) are
 /// carried by the JSON and not read.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Call {
     pub tool_name: String,
     #[serde(default)]
@@ -64,6 +65,7 @@ pub struct ToolInput {
 }
 
 impl Call {
+    /// The call from the hook's JSON.
     pub fn parse(text: &str) -> Result<Call> {
         serde_json::from_str(text).context("reading the tool call")
     }
@@ -137,6 +139,18 @@ pub enum Kind {
     Note,
 }
 
+impl Kind {
+    /// What a rule does when it fires: an `on` rule notes, every other
+    /// predicate permit judges denies.
+    pub fn of(rule: &Rule) -> Kind {
+        if rule.predicate.on.is_some() {
+            Kind::Note
+        } else {
+            Kind::Deny
+        }
+    }
+}
+
 /// One thing permit found: the rule, its text and its ADR numbers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
@@ -169,7 +183,7 @@ impl Finding {
 }
 
 /// Every finding over one call, in evaluation order.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Judgement {
     pub findings: Vec<Finding>,
 }
@@ -180,6 +194,7 @@ impl Judgement {
         self.findings.iter().find(|f| f.kind == Kind::Deny)
     }
 
+    /// The notes, which ride on the allow.
     pub fn notes(&self) -> impl Iterator<Item = &Finding> {
         self.findings.iter().filter(|f| f.kind == Kind::Note)
     }
@@ -216,13 +231,7 @@ fn deny_output(reason: &str) -> Value {
 /// Whether a rule describes a write or a command, so permit can judge it
 /// before the tool runs.
 pub fn judged_at_the_tool_call(rule: &Rule) -> bool {
-    let p = &rule.predicate;
-    p.deny.is_some()
-        || p.deny_argv.is_some()
-        || p.deny_pattern.is_some()
-        || p.deny_types.is_some()
-        || p.allow.is_some()
-        || p.on.is_some()
+    rule.predicate.describes_a_call()
 }
 
 /// Judge one call: the region-body check, then the manifest's rules in
@@ -234,13 +243,14 @@ pub fn judge(manifest: &Manifest, root: &Path, call: &Call) -> Result<Judgement>
         findings.extend(region_body(root, path, call));
     }
     for rule in &manifest.rules {
-        findings.extend(evaluate(manifest, rule, call, path.as_deref())?);
+        findings.extend(evaluate(manifest, root, rule, call, path.as_deref())?);
     }
     Ok(Judgement { findings })
 }
 
 fn evaluate(
     manifest: &Manifest,
+    root: &Path,
     rule: &Rule,
     call: &Call,
     path: Option<&Path>,
@@ -257,7 +267,9 @@ fn evaluate(
     }
     let p = &rule.predicate;
     let source = path.is_some_and(is_rust_source);
-    let fired = if let Some(argv) = &p.deny_argv {
+    let fired = if !p.describes_a_call() {
+        return Ok(None);
+    } else if let Some(argv) = &p.deny_argv {
         call.command()
             .is_some_and(|c| argv_denied(c, argv, p.with.as_deref()))
     } else if let Some(pattern) = &p.deny_pattern {
@@ -274,16 +286,11 @@ fn evaluate(
             && call.written().is_some_and(has_unsafe)
             && !path.is_some_and(|path| homes.iter().any(|h| in_home(manifest, h, path)))
     } else if let Some(on) = &p.on {
-        on == "pub" && source && adds_a_pub_item(call, path)
+        on == "pub" && source && adds_a_pub_item(root, call, path)
     } else {
         return Ok(None);
     };
-    let kind = if p.on.is_some() {
-        Kind::Note
-    } else {
-        Kind::Deny
-    };
-    Ok(fired.then(|| Finding::of(kind, rule)))
+    Ok(fired.then(|| Finding::of(Kind::of(rule), rule)))
 }
 
 fn is_rust_source(path: &Path) -> bool {
@@ -293,7 +300,7 @@ fn is_rust_source(path: &Path) -> bool {
 /// Whether `path` is at or under the scope pattern: `*` is one segment or
 /// part of one, `**` any number of segments, and a pattern that ends before
 /// the path does names a directory the path is under.
-pub fn scope_matches(pattern: &str, path: &Path) -> bool {
+fn scope_matches(pattern: &str, path: &Path) -> bool {
     let pattern: Vec<&str> = pattern
         .trim_end_matches('/')
         .split('/')
@@ -338,7 +345,7 @@ fn segment_matches(pattern: &str, segment: &str) -> bool {
 /// The tokens of each simple command in a shell line, split on unquoted
 /// whitespace and on `;`, `&&`, `||`, `|`, `&` and newlines, with quotes
 /// stripped. Conservative: what a shell can hide is pre-commit's to find.
-pub fn commands(line: &str) -> Vec<Vec<String>> {
+fn commands(line: &str) -> Vec<Vec<String>> {
     let mut commands = vec![Vec::new()];
     let mut token = String::new();
     let mut quoted = false;
@@ -423,17 +430,24 @@ fn mentions_a_type(text: &str, types: &[String]) -> bool {
             None => (ty.as_str(), r"\b"),
         };
         let last = whole.rsplit("::").next().unwrap_or(whole);
-        let regex = format!(
+        let pattern = format!(
             r"\b{}\b|\b{}{tail}",
             regex_lite::escape(whole),
             regex_lite::escape(last)
         );
-        Regex::new(&regex).is_ok_and(|r| r.is_match(text))
+        regex(&pattern).is_match(text)
     })
 }
 
+/// A pattern permit writes itself; one that does not compile is a bug
+/// here, not a call to let through.
+fn regex(pattern: &str) -> Regex {
+    Regex::new(pattern)
+        .unwrap_or_else(|err| unreachable!("permit's own pattern {pattern:?}: {err}"))
+}
+
 fn has_unsafe(text: &str) -> bool {
-    Regex::new(r"\bunsafe\s*(\{|fn\b|impl\b|trait\b|extern\b)").is_ok_and(|r| r.is_match(text))
+    regex(r"\bunsafe\s*(\{|fn\b|impl\b|trait\b|extern\b)").is_match(text)
 }
 
 /// An `unsafe.homes` entry against a path: a crate name, a path pattern, or
@@ -464,14 +478,12 @@ fn in_home(manifest: &Manifest, home: &str, path: &Path) -> bool {
 }
 
 /// Whether the call leaves more `pub` items in the file than it found.
-fn adds_a_pub_item(call: &Call, path: Option<&Path>) -> bool {
-    let Ok(pub_item) = Regex::new(r"(?m)^\s*pub\s") else {
-        return false;
-    };
+fn adds_a_pub_item(root: &Path, call: &Call, path: Option<&Path>) -> bool {
+    let pub_item = regex(r"(?m)^\s*pub\s");
     let count = |text: &str| pub_item.find_iter(text).count();
     let before = match (&call.tool_input.old_string, path) {
         (Some(old), _) => count(old),
-        (None, Some(path)) => fs::read_to_string(path).map_or(0, |t| count(&t)),
+        (None, Some(path)) => fs::read_to_string(root.join(path)).map_or(0, |t| count(&t)),
         (None, None) => 0,
     };
     call.written().is_some_and(|text| count(text) > before)
@@ -516,7 +528,10 @@ fn regions(text: &str) -> Vec<Region<'_>> {
 }
 
 /// The region-body check: an `Edit` whose `old_string` lies in a body, or a
-/// `Write` that leaves a body other than it found, is denied.
+/// `Write` that leaves a body other than it found, is denied. A `Write`'s
+/// regions pair with the file's by opener, or by position when an opener
+/// changed; a region the `Write` removes is a template change, not a body
+/// edit.
 fn region_body(root: &Path, path: &Path, call: &Call) -> Option<Finding> {
     let existing = fs::read_to_string(root.join(path)).ok()?;
     let bodies = regions(&existing);
@@ -541,11 +556,12 @@ fn region_body(root: &Path, path: &Path, call: &Call) -> Option<Finding> {
         "Write" => {
             let content = call.tool_input.content.as_deref().unwrap_or_default();
             let after = regions(content);
-            bodies.iter().any(|before| {
+            bodies.iter().enumerate().any(|(i, before)| {
                 after
                     .iter()
                     .find(|r| r.opener == before.opener)
-                    .is_none_or(|r| content[r.body.clone()] != existing[before.body.clone()])
+                    .or_else(|| after.get(i))
+                    .is_some_and(|r| content[r.body.clone()] != existing[before.body.clone()])
             })
         }
         _ => false,
@@ -560,7 +576,7 @@ fn region_body(root: &Path, path: &Path, call: &Call) -> Option<Finding> {
 
 /// Write one reading per finding: scope and rule are the rule id, a denial
 /// fails and a note passes, the stamp is over the file the call touches.
-pub fn record(root: &Path, call: &Call, judgement: &Judgement) -> Result<()> {
+fn record(root: &Path, call: &Call, judgement: &Judgement) -> Result<()> {
     if judgement.findings.is_empty() {
         return Ok(());
     }
@@ -589,17 +605,20 @@ pub fn record(root: &Path, call: &Call, judgement: &Judgement) -> Result<()> {
 
 /// The command: judge the call on stdin (or in `--json`), print the hook's
 /// JSON, record the findings. Whatever goes wrong before a decision is a
-/// deny that says so, since a hook that exits non-zero fails open.
-pub fn run(root: &Path, json: Option<&str>) -> Result<()> {
-    let mut text = String::new();
-    if let Some(json) = json {
-        text.push_str(json);
-    } else {
-        std::io::stdin()
-            .read_to_string(&mut text)
-            .context("reading the tool call from stdin")?;
-    }
-    let judged = Call::parse(&text).and_then(|call| {
+/// deny that says so, and nothing here returns an error, since a hook
+/// that exits non-zero fails open.
+pub fn run(root: &Path, json: Option<&str>) {
+    let text = json.map_or_else(
+        || {
+            let mut bytes = Vec::new();
+            std::io::stdin()
+                .read_to_end(&mut bytes)
+                .context("reading the tool call from stdin")
+                .map(|_| String::from_utf8_lossy(&bytes).into_owned())
+        },
+        |json| Ok(json.to_owned()),
+    );
+    let judged = text.and_then(|text| Call::parse(&text)).and_then(|call| {
         let manifest = Manifest::load(root)?;
         let judgement = judge(&manifest, root, &call)?;
         Ok((call, judgement))
@@ -620,40 +639,40 @@ pub fn run(root: &Path, json: Option<&str>) -> Result<()> {
             );
         }
     }
-    Ok(())
 }
 
 /// What `--bench` measured: the quantiles over every call, and over each
 /// shape, since a denial pays for its reading and an allow does not.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Bench {
-    pub runs: usize,
-    pub all: Quantiles,
-    pub shapes: Vec<(String, Quantiles)>,
+struct Bench {
+    runs: usize,
+    all: Quantiles,
+    shapes: Vec<(String, Quantiles)>,
 }
 
+/// Three points of one distribution of call times, in milliseconds.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Quantiles {
-    pub p50_ms: f64,
-    pub p99_ms: f64,
-    pub max_ms: f64,
+struct Quantiles {
+    p50: f64,
+    p99: f64,
+    max: f64,
 }
 
 impl Quantiles {
     fn of(times: &mut [f64]) -> Quantiles {
         times.sort_by(f64::total_cmp);
         Quantiles {
-            p50_ms: quantile(times, 50),
-            p99_ms: quantile(times, 99),
-            max_ms: quantile(times, 100),
+            p50: quantile(times, 50),
+            p99: quantile(times, 99),
+            max: quantile(times, 100),
         }
     }
 }
 
 impl Bench {
     /// The bar is on every call the hook makes, denials included.
-    pub fn meets_the_bar(&self) -> bool {
-        self.all.p99_ms <= BAR_MS
+    fn meets_the_bar(&self) -> bool {
+        self.all.p99 <= BAR_MS
     }
 }
 
@@ -687,11 +706,12 @@ fn bench_shapes() -> [(&'static str, Value); 3] {
 /// Time `runs` calls of this binary as the hook would make them, over a
 /// scratch copy of the workspace's manifest under `target/`, so the denials
 /// the bench provokes are stamped and stored there and not here.
-pub fn bench(root: &Path, runs: usize) -> Result<Bench> {
+fn bench(root: &Path, runs: usize) -> Result<Bench> {
     if runs == 0 {
         bail!("--runs must be at least 1");
     }
-    let scratch = scratch_workspace(root)?;
+    let scratch = root.join("target").join("harness-bench");
+    scratch_workspace(root, &scratch)?;
     let exe = std::env::current_exe().context("locating this binary")?;
     let shapes = bench_shapes();
     let mut times: Vec<Vec<f64>> = vec![Vec::new(); shapes.len()];
@@ -736,49 +756,41 @@ pub fn bench(root: &Path, runs: usize) -> Result<Bench> {
     })
 }
 
-/// A git repository under `target/harness-bench/` with the manifest, the
-/// pin and a README; rebuilt on every bench.
-fn scratch_workspace(root: &Path) -> Result<PathBuf> {
-    let dir = root.join("target").join("harness-bench");
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+/// A git repository at `dir`, rebuilt from scratch, holding the
+/// workspace's manifest, its pin, the divergence registry and a README:
+/// where `--bench` and the tests provoke denials, so the readings land in
+/// its store and not the workspace's.
+pub fn scratch_workspace(root: &Path, dir: &Path) -> Result<()> {
+    let _ = fs::remove_dir_all(dir);
+    fs::create_dir_all(dir.join("docs")).with_context(|| format!("creating {}", dir.display()))?;
     let manifest = Manifest::load(root)?;
     for file in [
         crate::manifest::FILE,
         manifest.oracle.pin.as_str(),
+        "docs/divergence.toml",
         "README.md",
     ] {
         fs::copy(root.join(file), dir.join(file)).with_context(|| format!("copying {file}"))?;
     }
-    for args in [
-        &["init", "-q"][..],
-        &["add", "."],
+    git(dir, &["init", "-q"], None)?;
+    git(dir, &["add", "."], None)?;
+    git(
+        dir,
         &[
             "-c",
-            "user.name=bench",
+            "user.name=xtask",
             "-c",
-            "user.email=bench@xtask",
+            "user.email=xtask@scratch",
             "-c",
             "commit.gpgsign=false",
             "commit",
             "-q",
             "-m",
-            "bench",
+            "scratch",
         ],
-    ] {
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(&dir)
-            .args(args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .context("running git")?;
-        if !status.success() {
-            bail!("git {} failed in {}", args.join(" "), dir.display());
-        }
-    }
-    Ok(dir)
+        None,
+    )?;
+    Ok(())
 }
 
 /// `permit --bench`: measure, print one line per shape and the verdict,
@@ -793,7 +805,7 @@ pub fn run_bench(root: &Path, runs: usize) -> Result<()> {
     let line = |name: &str, q: &Quantiles| {
         format!(
             "{name}: p50 {:.1} ms, p99 {:.1} ms, max {:.1} ms",
-            q.p50_ms, q.p99_ms, q.max_ms
+            q.p50, q.p99, q.max
         )
     };
     println!(
@@ -816,25 +828,25 @@ pub fn run_bench(root: &Path, runs: usize) -> Result<()> {
     reading.numbers.insert("bar_ms".into(), BAR_MS.into());
     reading
         .numbers
-        .insert("p50_ms".into(), measured.all.p50_ms.into());
+        .insert("p50_ms".into(), measured.all.p50.into());
     reading
         .numbers
-        .insert("p99_ms".into(), measured.all.p99_ms.into());
+        .insert("p99_ms".into(), measured.all.p99.into());
     reading
         .numbers
-        .insert("max_ms".into(), measured.all.max_ms.into());
+        .insert("max_ms".into(), measured.all.max.into());
     for (name, q) in &measured.shapes {
         let key = name.replace('-', "_");
         reading
             .numbers
-            .insert(format!("{key}_p50_ms"), q.p50_ms.into());
+            .insert(format!("{key}_p50_ms"), q.p50.into());
         reading
             .numbers
-            .insert(format!("{key}_p99_ms"), q.p99_ms.into());
+            .insert(format!("{key}_p99_ms"), q.p99.into());
     }
     reading.message = format!(
         "permit at the tool call: p99 {:.1} ms against the bar of {BAR_MS:.0} ms (harness-design.md §4.4)",
-        measured.all.p99_ms
+        measured.all.p99
     );
     reading.stamp(&Stamp::take(root, Path::new("xtask"))?);
     Store::of_workspace(root).write(&reading)?;

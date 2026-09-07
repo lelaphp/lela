@@ -204,6 +204,19 @@ impl Predicates {
             .collect()
     }
 
+    /// Whether the predicate describes one write or one command, so `permit`
+    /// can judge it before the tool runs: `deny`, `deny_argv`, `deny_pattern`,
+    /// `deny_types`, `allow`, `on`. The other four read the tree after the
+    /// write (harness-design.md §4.4).
+    pub fn describes_a_call(&self) -> bool {
+        self.deny.is_some()
+            || self.deny_argv.is_some()
+            || self.deny_pattern.is_some()
+            || self.deny_types.is_some()
+            || self.allow.is_some()
+            || self.on.is_some()
+    }
+
     /// A qualifier that has no predicate to qualify: `unless` without
     /// `deny_pattern`, `with` without `deny_argv`.
     pub fn orphaned_qualifier(&self) -> Option<&'static str> {

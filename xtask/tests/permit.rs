@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use xtask::manifest::Manifest;
-use xtask::permit::{Call, Kind, judge, judged_at_the_tool_call};
+use xtask::permit::{Call, Kind, judge, judged_at_the_tool_call, scratch_workspace};
 use xtask::reading::{Status, Store};
 
 fn workspace() -> &'static Path {
@@ -37,11 +37,7 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
     );
     for rule in judged {
         let dir = fixtures().join("rules").join(&rule.id);
-        let kind = if rule.predicate.on.is_some() {
-            Kind::Note
-        } else {
-            Kind::Deny
-        };
+        let kind = Kind::of(rule);
         let fires = dir.join(match kind {
             Kind::Deny => "deny.json",
             Kind::Note => "note.json",
@@ -77,6 +73,32 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
             judgement.findings.iter().all(|f| f.rule != rule.id),
             "{}: the neighbour fired: {judgement:?}",
             rule.id
+        );
+    }
+}
+
+/// Every rule with a tool or a scope is either judged here, with its
+/// fixture, or carries one of the four predicates that read the tree after
+/// the write; a fifth kind cannot fall between the two.
+#[test]
+fn every_rule_with_a_tool_or_a_scope_is_judged_or_is_an_after_the_write_sensor() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    for rule in manifest
+        .rules
+        .iter()
+        .filter(|r| !r.tool.is_empty() || !r.scope.is_empty())
+    {
+        let p = &rule.predicate;
+        let after_the_write = p.check.is_some()
+            || p.deny_lints.is_some()
+            || p.avoid_from.is_some()
+            || p.generated.is_some();
+        assert!(
+            judged_at_the_tool_call(rule) != after_the_write,
+            "{}: judged {}, after the write {}",
+            rule.id,
+            judged_at_the_tool_call(rule),
+            after_the_write
         );
     }
 }
@@ -157,6 +179,16 @@ fn an_edit_inside_a_computed_region_body_is_denied_and_one_beside_it_allowed() {
     );
     let same = judge(&manifest, workspace(), &call(&dir.join("write-same.json"))).unwrap();
     assert!(same.denial().is_none(), "{same:?}");
+    let opener = judge(
+        &manifest,
+        workspace(),
+        &call(&dir.join("write-opener.json")),
+    )
+    .unwrap();
+    assert!(
+        opener.denial().is_none(),
+        "a changed opener is a template change: {opener:?}"
+    );
 }
 
 fn permit(root: &Path, stdin: &str, args: &[&str]) -> (i32, String, String) {
@@ -180,43 +212,11 @@ fn permit(root: &Path, stdin: &str, args: &[&str]) -> (i32, String, String) {
 }
 
 /// A scratch workspace that is a git repository with the tracked manifest
-/// and pin, so a denial there can be stamped and stored without touching
-/// this workspace's store.
+/// and pin, so a denial there is stamped and stored without touching this
+/// workspace's store.
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("xtask-permit-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("docs")).unwrap();
-    for file in [
-        "seams.toml",
-        "oracle.toml",
-        "docs/divergence.toml",
-        "README.md",
-    ] {
-        std::fs::copy(workspace().join(file), dir.join(file)).unwrap();
-    }
-    let git = |args: &[&str]| {
-        let ok = Command::new("git")
-            .arg("-C")
-            .arg(&dir)
-            .args([
-                "-c",
-                "user.name=x",
-                "-c",
-                "user.email=x@x",
-                "-c",
-                "commit.gpgsign=false",
-            ])
-            .args(args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .unwrap()
-            .success();
-        assert!(ok, "git {args:?}");
-    };
-    git(&["init", "-q"]);
-    git(&["add", "."]);
-    git(&["commit", "-q", "-m", "scratch"]);
+    scratch_workspace(workspace(), &dir).unwrap();
     dir
 }
 
@@ -316,7 +316,7 @@ fn a_call_that_cannot_be_read_is_denied_not_dropped() {
 }
 
 #[test]
-fn bench_reports_p99_against_the_bar_and_writes_a_reading() {
+fn bench_measures_p99_against_the_bar_and_writes_a_reading() {
     let root = scratch("bench");
     let (code, out, err) = permit(&root, "", &["--bench", "--runs", "6"]);
     assert_eq!(code, 0, "{err}");

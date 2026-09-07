@@ -44,7 +44,8 @@ pub fn run() -> Result<()> {
             if bench {
                 permit::run_bench(&root, runs)
             } else {
-                permit::run(&root, json.as_deref())
+                permit::run(&root, json.as_deref());
+                Ok(())
             }
         }
     }
