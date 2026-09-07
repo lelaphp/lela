@@ -1,0 +1,5 @@
+# The negative control's lock: one line names an avoided word.
+abi::Extension
+abi::ExtensionBuilder::build
+request::Request::run
+values::Value::to_return

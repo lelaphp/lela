@@ -28,6 +28,13 @@ pub enum Command {
         #[arg(long, default_value = "md")]
         format: Format,
     },
+    /// The glossary as a sensor: `_Avoid_` words in public item names,
+    /// rustdoc prose and the lock; one reading per crate.
+    Vocab {
+        /// Only these crates, by manifest name; default every crate that exists.
+        #[arg(long = "crate", value_name = "NAME")]
+        crates: Vec<String>,
+    },
 }
 
 /// The sections of harness-design.md §4.6 that have a renderer.
