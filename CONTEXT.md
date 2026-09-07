@@ -116,7 +116,7 @@ _Avoid_: hook, probe, counter handler (php's mechanism)
 
 **Word**:
 The opaque two-atomic slot the engine allocates per safepoint of a function, and the compiled tier allocates per exit, whose bits only the tier interprets: heat in one half while cold; recording, compiled with a trace index, or blacklisted in the other. The trace index is one number in one space whichever word holds it. A sealed word, all ones, is one the tier never acts on; a request-scoped op array (`eval`, an uncached include) has only sealed words.
-_Avoid_: feedback (the per-request `MapPtr<[Feedback]>` of `third-engine-design.r2.md` §5.14, which the next engine revision deletes), counter, flag
+_Avoid_: feedback (the per-request `MapPtr<[Feedback]>` of `research/third-engine-design.r2.md` §5.14, which the next engine revision deletes), counter, flag
 
 **Interrupt**:
 The one flag on a request that the execution timer and signal delivery set and nothing else touches. The loop tests it at a back-edge, at a frame's activation and after every `Resume`; compiled code tests it once per loop iteration and exits when it is set; the interrupt helper that runs at the check raises the timeout fatal or dispatches the pending signals.

@@ -11,4 +11,4 @@ Data files the harness reads, each stated once:
 - `ops.toml`: the instruction set, extracted from `Zend/zend_vm_def.h` at the pinned tag by `scripts/extract_ops.py`.
 - `crates/php_ext/api.lock`: the extension-facing interface; v0 is drafted from the Mahout census by `scripts/census.sh`.
 
-The research behind the design, the earlier revisions (`*.rN.md`) and the predecessor data live in `~/Projects/mahout_php_vs_dax` and are cited by path.
+The research behind the design, the earlier revisions (`*.rN.md`) and the predecessor data are in `research/`, kept unedited as records and cited by path from there.

@@ -3,7 +3,7 @@
 Drafted 2026-09-07 from Mahout at `1b3104a8` (19 `mahout_ext_*` crates, 105k lines, test modules excluded) by
 `scripts/census.sh`; joined to the lock in `data/port-map.v0.toml` (651 rows: 165 same, 336 renamed, 150 gone).
 
-## Counts per source: script vs the r2 census (`data/r2-mahout-ext-seam-census.txt`, HEAD d6460ef0)
+## Counts per source: script vs the r2 census (`research/data/r2-mahout-ext-seam-census.txt`, HEAD d6460ef0)
 
 | Source | r2 census | census.sh at 1b3104a8 | Why they differ |
 |---|---|---|---|
