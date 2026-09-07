@@ -37,6 +37,8 @@ Check: the six are wrong if the manifest cannot express a rule the design has (�
 
 **5. Revision 5 (2026-09-07).** `seams.toml` and `oracle.toml` were written before day 1 (design ledger 9, `data/pre-day-1.md`), which is the acceptance test §12 item 13 named, and it failed twice. The example in §4.1 was not TOML: `name = "x"; budget = 1` on one line does not parse, since TOML has no statement separator, so a row is one key per line and the example is now an excerpt of the file itself. And design §10 states four rules the example had no predicate for: the denied clippy lints (`deny_lints`), a named `xtask` lint such as the re-entry signature rule (`check`), the glossary as a sensor (`avoid_from`), and the generated, committed `ext/clippy.toml` (`generated`). The grammar sentence lists every predicate. D.3 and D.16 are answered by measurement: the `expect` fence's `=` trips `rustdoc::invalid_codeblock_attributes` and the crates that carry witnesses allow it; the PreToolUse and Stop hook shapes, the deny output and the Stop block were exercised end to end on Claude Code 2.1.263 and are recorded in §13. Check: `tomllib` parses the manifest; every `[[rule]]` carries exactly one of the predicates the grammar sentence lists; `permit` on the recorded stdin shapes produces the recorded stdout shapes.
 
+**6. Revision 6 (2026-09-07).** The context layer was built (#7) and three sentences of §5 did not survive contact with the tools. The local file's regions are `volatile`, not `inputs=../target/harness/**`, because `computed` refuses a glob that matches nothing and a fresh clone has no store; `ext/AGENTS.md` lists its extensions with the `tree` loader, because `ls -d */` fails while `ext/` is empty; the `design-of-record` region's inputs are the three design globs, because `*.md` takes in the map itself and its closer sums. Two things §5 left unsaid are now said: `status --session` lays the local file down from its template when the clone has none, and the session hook goes through `cargo run`. The tracked map is rendered against an empty store, every row "no reading", since the readings are one machine's and a rendering of them would churn on every clone; the live numbers are the local file's. Check: `cargo test -p xtask --test map` holds the map under 100 lines with the regions this section names; a second `computed run` after the first writes nothing.
+
 ---
 
 ## 2. Vocabulary
@@ -293,16 +295,16 @@ Its regions, all tracked, each one command:
 
 | Region | Command | `inputs=` |
 |---|---|---|
-| `design-of-record` | `ls third-engine-design*.md jit-design*.md harness-design.md \| sort -V` | `*.md` |
+| `design-of-record` | `ls third-engine-design*.md jit-design*.md harness-design.md \| sort -V` | the same three globs; `*.md` would take in the map itself, whose closer sums change on every render |
 | `adrs` | `scripts/adr-index.sh` | `docs/adr/*.md,scripts/adr-index.sh` |
 | `seams` | `xtask status --section locks --format md` | `seams.toml,crates/**/*.lock` |
 | `rules` | `xtask status --section rules --format md` | `seams.toml` |
 | `instruments` | `xtask --help` | `xtask/src/cli.rs` |
-| `layout` | `tree src=crates depth=1`, `tree src=ext depth=1` | (implied) |
+| `layout`, `layout-ext` | `tree src=crates depth=1`, `tree src=ext depth=1` | (implied) |
 
-**The local file.** `.claude/harness.local.md`, gitignored, rendered only by name (CM discovery skips dot-directories and ignored files; revision 2 A2.1). Every region is `xtask status --section <name>` with `inputs=../target/harness/**` or `volatile`: `budget`, `phpt`, `witness`, `mutants`, `divergence`, `permits`, `git`. The `computed trust` grant is the person's (§11). The session hook runs `computed run .claude/harness.local.md` before `status --session`, treating exit 1 as "written" and exit 2 as a broken marker to log.
+**The local file.** `.claude/harness.local.md`, gitignored, rendered only by name (CM discovery skips dot-directories and ignored files; revision 2 A2.1). Every region is `xtask status --section <name>`, `volatile`: `budget`, `phpt`, `witness`, `mutants`, `divergence`, `permits`, `git`. Not `inputs=../target/harness/**`: `computed` answers exit 2 to a glob that matches nothing, and a fresh clone has no store. `xtask status --session` lays the file down from its template when the clone has none; the template is a constant, so the renderer computes nothing by writing it. The `computed trust` grant is the person's (§11). The session hook runs `computed run .claude/harness.local.md` before `status --session`, treating exit 1 as "written", exit 2 as a broken marker and any other failure as "computed did not run", each said in one line of the hook's output; it goes through `cargo run`, since once a session the rebuild is cheap and a stale built binary once answered without `--session`.
 
-**Per-directory guidance.** `ext/AGENTS.md` with the extension template rules (one dependency, `extension()`, state on the value, no locks, tests through `Capture`, witnesses in rustdoc, phpt from `php-src/ext/<name>/tests`) and two regions, `extensions` (`ls -d */`) and `bundle-order` (`xtask status --section bundle`). `xtask new-ext <name>` lays the topology down.
+**Per-directory guidance.** `ext/AGENTS.md` with the extension template rules (one dependency, `extension()`, state on the value, no locks, tests through `Capture`, witnesses in rustdoc, phpt from `php-src/ext/<name>/tests`) and two regions, `extensions` (`tree src=. depth=1 dirs`; `ls -d */` fails on an empty `ext/`) and `bundle-order` (`xtask status --section bundle`). `xtask new-ext <name>` lays the topology down.
 
 **The glossary as a sensor.** `xtask vocab` checks public item names and rustdoc prose in `crates/*` and `ext/*` against the `_Avoid_` lists, scoped so that `Result` is not `result`; and asserts every `_Avoid_` word appears nowhere in `api.lock`. It writes a reading like any instrument.
 
