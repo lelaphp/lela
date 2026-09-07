@@ -58,6 +58,13 @@ pub enum Command {
     /// Hold the divergence registry to the manifest rule whose `check` names
     /// this instrument: an accepted row has a reason a person wrote.
     DivergenceReason,
+    /// The glossary as a sensor: `_Avoid_` words in public item names,
+    /// rustdoc prose and the lock; one reading per crate.
+    Vocab {
+        /// Only these crates, by manifest name; default every crate that exists.
+        #[arg(long = "crate", value_name = "NAME")]
+        crates: Vec<String>,
+    },
 }
 
 /// The sections of harness-design.md §4.6 that have a renderer.

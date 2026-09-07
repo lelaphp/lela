@@ -1,8 +1,8 @@
 //! The harness for the third engine (`harness-design.md` §4): the seam
 //! manifest and the oracle pin loaded by one reader, the oracle module that
 //! owns every comparison and the divergence registry, the reading and its
-//! store, the instruments, `permit`, the judge at the tool call, and
-//! `status`, the one renderer.
+//! store, the instruments, `permit`, the judge at the tool call, `vocab`,
+//! the glossary as a sensor, and `status`, the one renderer.
 #![forbid(unsafe_code)]
 
 pub mod api_check;
@@ -11,6 +11,7 @@ pub mod cli;
 pub mod divergence;
 pub mod generated;
 pub mod git;
+pub mod glossary;
 pub mod lines;
 pub mod lock;
 pub mod manifest;
@@ -20,6 +21,7 @@ pub mod reading;
 pub mod sources;
 pub mod status;
 pub mod unsafe_audit;
+pub mod vocab;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -80,6 +82,13 @@ pub fn run() -> Result<()> {
             }
             println!("{}", reading.message);
             Ok(())
+        }
+        Command::Vocab { crates } => {
+            if vocab::run(&root, &manifest, &store, &crates)? {
+                Ok(())
+            } else {
+                bail!("vocab: an avoided word is in use; the findings are above")
+            }
         }
     }
 }

@@ -231,7 +231,8 @@ impl Store {
     }
 }
 
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+/// Every file under `dir`, recursively, in directory order.
+pub(crate) fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))? {
         let path = entry?.path();
         if path.is_dir() {
