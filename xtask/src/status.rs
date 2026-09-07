@@ -13,6 +13,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
+use crate::api_check;
 use crate::cli::{Format, Section};
 use crate::divergence::{Kind, Registry, Status};
 use crate::git::git;
@@ -233,9 +234,7 @@ fn locks(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
                     ("lock", json!(seam.lock)),
                     ("ceiling", ceiling),
                 ],
-                latest(readings, |r| {
-                    r.instrument == "api-check" && r.scope == seam.name
-                }),
+                latest_of(readings, api_check::INSTRUMENT, &seam.name),
             )
         })
         .collect()
@@ -251,9 +250,7 @@ fn budget(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
                     ("crate", json!(krate.name)),
                     ("ceiling", json!(krate.budget)),
                 ],
-                latest(readings, |r| {
-                    r.instrument == "budget" && r.scope == krate.name
-                }),
+                latest_of(readings, "budget", &krate.name),
             )
         })
         .collect()
@@ -356,12 +353,7 @@ fn instrument(readings: &[Reading], name: &str) -> Vec<Row> {
     scopes.dedup();
     scopes
         .into_iter()
-        .map(|scope| {
-            Row::new(
-                &[("scope", json!(scope))],
-                latest(readings, |r| r.instrument == name && r.scope == scope),
-            )
-        })
+        .map(|scope| Row::new(&[("scope", json!(scope))], latest_of(readings, name, scope)))
         .collect()
 }
 
@@ -406,9 +398,7 @@ fn bundle(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
         .map(|(edge, order)| {
             Row::new(
                 &[("crate", json!(edge.from)), ("order", json!(order))],
-                latest(readings, |r| {
-                    r.instrument == "api-check" && r.scope == edge.from
-                }),
+                latest_of(readings, api_check::INSTRUMENT, &edge.from),
             )
         })
         .collect()
@@ -447,6 +437,11 @@ fn latest(readings: &[Reading], pick: impl Fn(&Reading) -> bool) -> Option<Readi
         .cloned()
 }
 
+/// The newest reading of one instrument over one scope.
+fn latest_of(readings: &[Reading], instrument: &str, scope: &str) -> Option<Reading> {
+    latest(readings, |r| r.instrument == instrument && r.scope == scope)
+}
+
 /// A Markdown table's columns: the header, and the cells of one row.
 type Columns = (&'static [&'static str], fn(&Row) -> Vec<String>);
 
@@ -476,10 +471,7 @@ const BUDGET: Columns = (&["crate", "lines", "ceiling", "reading", "message"], |
         r.number("lines"),
         r.fact("ceiling"),
         r.status(),
-        r.reading
-            .as_ref()
-            .map(|x| x.message.clone())
-            .unwrap_or_default(),
+        r.message(),
     ]
 });
 

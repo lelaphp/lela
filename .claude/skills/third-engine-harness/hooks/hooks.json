@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$CLAUDE_PROJECT_DIR\" && X='cargo run -q -p xtask --'; [ -f .claude/harness.local.md ] || $X status --session >/dev/null; computed run .claude/harness.local.md >/dev/null 2>&1; [ $? -eq 2 ] && echo 'harness: a marker in .claude/harness.local.md is broken; see `computed check .claude/harness.local.md`'; exec $X status --session",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && X='cargo run -q -p xtask --'; [ -f .claude/harness.local.md ] || $X status --session >/dev/null; computed run .claude/harness.local.md >/dev/null 2>&1; case $? in 0|1) ;; 2) echo 'harness: a marker in .claude/harness.local.md is broken; see `computed check .claude/harness.local.md`';; *) echo 'harness: computed did not run; the local facts are stale (cargo install computed)';; esac; exec $X status --session",
             "timeout": 60
           }
         ]

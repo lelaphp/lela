@@ -52,13 +52,12 @@ pub fn run() -> Result<()> {
         Command::Status {
             section,
             format,
-            session,
+            session: _,
         } => {
             let text = if let Some(section) = section {
                 let registry = Registry::load(&root)?;
                 status::render(&manifest, &registry, &store, &root, section, format)?
             } else {
-                debug_assert!(session);
                 status::session(&root)?
             };
             std::io::stdout().write_all(text.as_bytes())?;

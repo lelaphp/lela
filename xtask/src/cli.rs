@@ -89,7 +89,8 @@ pub enum Section {
     Witness,
     /// The mutants readings, one row per crate.
     Mutants,
-    /// Each rule permit judges: its last denial and how many the log holds.
+    /// Each rule permit judges: its last finding, denial or note, and how
+    /// many denials the log holds.
     Permits,
     /// The log and the status of the working tree; volatile.
     Git,

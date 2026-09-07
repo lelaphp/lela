@@ -22,9 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          components: clippy, rustfmt
+      - uses: dtolnay/rust-toolchain@stable # reads rust-toolchain.toml; the number is stated there
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy -p xtask --all-targets -- -D warnings
