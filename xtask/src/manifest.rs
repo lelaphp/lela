@@ -34,6 +34,9 @@ pub struct Manifest {
     /// The pin the `[oracle]` row names, loaded from that file.
     #[serde(skip)]
     pub pin: Oracle,
+    /// The workspace the manifest was loaded from; empty for `parse`.
+    #[serde(skip)]
+    pub root: PathBuf,
 }
 
 /// `[oracle]`: the only place the manifest says where the pin is.
@@ -319,6 +322,7 @@ impl Manifest {
             .with_context(|| format!("reading the oracle pin {}", pin_path.display()))?;
         manifest.pin =
             toml::from_str(&pin_text).with_context(|| format!("{}", pin_path.display()))?;
+        manifest.root = root.to_path_buf();
         Ok(manifest)
     }
 
@@ -350,6 +354,28 @@ impl Manifest {
 
     pub fn rule(&self, id: &str) -> Option<&Rule> {
         self.rules.iter().find(|r| r.id == id)
+    }
+
+    /// The ceiling on a seam's lock width: `[budget] api_items` for the api
+    /// seam (design §4.4, §4.5); no other lock has one.
+    pub fn lock_ceiling(&self, seam: &Seam) -> Option<u64> {
+        (seam.name == "api").then_some(self.budget.api_items)
+    }
+
+    /// The title of `docs/adr/<number>-*.md`, when the workspace has it.
+    pub fn adr_title(&self, number: &str) -> Option<String> {
+        let entry = fs::read_dir(self.root.join("docs/adr"))
+            .ok()?
+            .flatten()
+            .find(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|f| f.starts_with(&format!("{number}-")))
+            })?;
+        let text = fs::read_to_string(entry.path()).ok()?;
+        text.lines()
+            .find_map(|l| l.strip_prefix("# "))
+            .map(|t| t.trim().to_owned())
     }
 
     pub fn crate_named(&self, name: &str) -> Option<&Crate> {

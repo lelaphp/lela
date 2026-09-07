@@ -53,6 +53,12 @@ fn the_clean_fixture_passes_every_rule() {
     assert_eq!(api.status, Status::Pass, "{}", api.message);
     assert_eq!(api.numbers["items"], 8.into(), "re-exports are followed");
     assert_eq!(api.adr, "0002, 0004, 0005");
+    assert_eq!(api.rule, "api.lock-line");
+    assert_eq!(of(&readings, "ext/random").rule, "ext.pub-beyond-extension");
+    assert!(
+        of(&readings, "ext/random").message.contains("Handle"),
+        "the pub surface beyond extension() is printed"
+    );
     assert_eq!(of(&readings, "sapi").status, Status::Pass);
     assert_eq!(
         of(&readings, "unit").status,
@@ -98,7 +104,12 @@ fn a_crate_depending_outside_its_edges_fails_with_the_adr() {
     let json = of(&readings, "ext/json");
     assert_eq!(json.status, Status::Fail);
     assert!(json.message.contains("php_engine"), "{}", json.message);
-    assert!(json.message.contains("ADR-0004"), "{}", json.message);
+    assert!(
+        json.message
+            .contains("ADR-0004: Extensions are one crate each under `ext/`"),
+        "the ADR's text is printed: {}",
+        json.message
+    );
     assert_eq!(json.adr, "0004");
 }
 

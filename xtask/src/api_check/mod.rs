@@ -11,8 +11,9 @@
 //!   what the consumers `use` from the producer. `api.lock` is held under
 //!   `[budget] api_items`.
 //! - A crate's workspace dependencies are held to the `[[edge]]` rows whose
-//!   `from` matches it; a `use` path across a `deny = true` module edge
-//!   fails; a `reexports_only` crate may define nothing.
+//!   `from` matches it: every row is exclusive, so `only = true` restates
+//!   what the check does for each crate. A `use` path across a `deny = true`
+//!   module edge fails; a `reexports_only` crate may define nothing.
 //! - `php_bundle`'s registration order, read as the order of
 //!   `php_ext_<name>::extension()` in its sources, is held topological over
 //!   the `ext/*` dependency graph (`order = "topological"`).
@@ -32,9 +33,9 @@ use anyhow::{Context, Result, bail};
 
 use crate::git::Stamp;
 use crate::manifest::{Edge, Manifest, Seam};
-use crate::reading::{Reading, Status, Store};
+use crate::reading::{Number, Reading, Status, Store};
 
-use inventory::{Inventory, Leaf, uses};
+use inventory::{Inventory, Leaf, extension_calls, uses};
 use lock::{Diff, Lock, list};
 use workspace::{Crates, Present};
 
@@ -131,6 +132,10 @@ fn seam_reading(
 ) -> Result<Reading> {
     let mut reading = Reading::new(INSTRUMENT, &seam.name);
     reading.adr = adrs(&seam.adr);
+    // The manifest's `on = "pub"` note for the facade's lock.
+    if seam.lock == "api.lock" {
+        reading.rule = String::from("api.lock-line");
+    }
     let home = lock_home(manifest, &seam.lock);
     let scope = home
         .as_deref()
@@ -171,8 +176,9 @@ fn seam_reading(
         LockKind::Items => inventory.public_items(krate)?,
         LockKind::Imports => imports(crates, seam)?,
     };
-    let count = i64::try_from(generated.len()).unwrap_or(i64::MAX);
-    reading.numbers.insert("items".to_owned(), count.into());
+    reading
+        .numbers
+        .insert("items".to_owned(), count(generated.len()));
     let path = krate.dir.join(&seam.lock);
     let shown = crates.relative(&path).display().to_string();
     let subject = match kind {
@@ -184,12 +190,12 @@ fn seam_reading(
     if write {
         reading.stamp(&Stamp::take(crates.root(), &scope)?);
     }
-    // `api_items` is the ceiling on the api seam's lock (design §4.4).
-    if seam.name == "api" && generated.len() as u64 > manifest.budget.api_items {
+    if let Some(ceiling) = manifest.lock_ceiling(seam)
+        && generated.len() as u64 > ceiling
+    {
         problems.push(format!(
-            "{shown} has {} items; the ceiling is {} (api_items)",
-            generated.len(),
-            manifest.budget.api_items
+            "{shown} has {} items; the ceiling is {ceiling} (api_items)",
+            generated.len()
         ));
     }
     if problems.is_empty() {
@@ -307,10 +313,9 @@ fn crate_reading(
     let mut adr: Vec<&str> = rows.iter().flat_map(|e| e.adr.iter()).collect();
     adr.dedup();
     reading.adr = adr.join(", ");
-    reading.numbers.insert(
-        "edges".to_owned(),
-        i64::try_from(krate.deps.len()).unwrap_or(i64::MAX).into(),
-    );
+    reading
+        .numbers
+        .insert("edges".to_owned(), count(krate.deps.len()));
 
     let mut problems = Vec::new();
     let mut notes = Vec::new();
@@ -321,7 +326,7 @@ fn crate_reading(
         if permitted.iter().any(|p| matches(p, &dep.name)) {
             continue;
         }
-        let cite = adr_cite(crates.root(), &adr);
+        let cite = adr_cite(manifest, &adr);
         problems.push(if rows.is_empty() {
             format!(
                 "{} depends on {}; no [[edge]] row gives {} a dependency (design §4.2)",
@@ -355,12 +360,10 @@ fn crate_reading(
     // The bundle's order over the ext/* graph.
     if let Some(order) = rows.iter().find_map(|e| e.order.as_deref()) {
         if order == "topological" {
-            let (listed, found) = bundle_order(krate)?;
-            reading.numbers.insert(
-                "extensions".to_owned(),
-                i64::try_from(listed.len()).unwrap_or(0).into(),
-            );
-            problems.extend(found);
+            let listed = bundle_order(krate)?;
+            reading
+                .numbers
+                .insert("extensions".to_owned(), count(listed.len()));
             problems.extend(not_topological(crates, &listed));
         } else {
             problems.push(format!(
@@ -369,8 +372,10 @@ fn crate_reading(
         }
     }
 
-    // What an extension exports beyond `extension()` (design §4.10).
+    // What an extension exports beyond `extension()` (design §4.10), the
+    // manifest's `ext.pub-beyond-extension` note.
     if krate.name.starts_with("ext/") {
+        reading.rule = String::from("ext.pub-beyond-extension");
         let beyond: Vec<String> = inventory
             .public_items(krate)?
             .into_iter()
@@ -491,31 +496,21 @@ fn module_of(krate: &Present, file: &Path) -> Option<Vec<String>> {
     Some(parts)
 }
 
-/// The extensions `php_bundle` registers, in the order its sources name
-/// `php_ext_<name>::extension()`, and any problem reading them.
-fn bundle_order(krate: &Present) -> Result<(Vec<String>, Vec<String>)> {
-    const CALL: &str = "::extension()";
+/// The extensions `php_bundle` registers: every `php_ext_<name>::extension`
+/// path in its `src/` files, in the order written, files in path order.
+fn bundle_order(krate: &Present) -> Result<Vec<String>> {
     let mut listed: Vec<String> = Vec::new();
     for file in krate.sources()? {
         if module_of(krate, &file).is_none() {
             continue;
         }
-        let text =
-            fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-        for (end, _) in text.match_indices(CALL) {
-            let head = &text[..end];
-            let start = head
-                .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
-                .map_or(0, |i| i + 1);
-            if let Some(name) = head[start..].strip_prefix("php_ext_") {
-                let name = format!("ext/{name}");
-                if !listed.contains(&name) {
-                    listed.push(name);
-                }
+        for name in extension_calls(&file)? {
+            if !listed.contains(&name) {
+                listed.push(name);
             }
         }
     }
-    Ok((listed, Vec::new()))
+    Ok(listed)
 }
 
 /// Why `listed` is not a topological order of the `ext/*` graph: an
@@ -558,37 +553,29 @@ fn matches(pattern: &str, name: &str) -> bool {
     }
 }
 
+/// A count as a reading's number.
+fn count(n: usize) -> Number {
+    Number::Int(i64::try_from(n).unwrap_or(i64::MAX))
+}
+
 fn adrs(adr: &crate::manifest::OneOrMany) -> String {
     adr.iter().collect::<Vec<_>>().join(", ")
 }
 
-/// ` (ADR-0004: <title>)` for the row's ADRs, the title read from
-/// `docs/adr/` when the workspace has it.
-fn adr_cite(root: &Path, adr: &[&str]) -> String {
+/// ` (ADR-0004: <title>)` for the row's ADRs, the title read from the
+/// tracked workspace's `docs/adr/`.
+fn adr_cite(manifest: &Manifest, adr: &[&str]) -> String {
     if adr.is_empty() {
         return String::new();
     }
     let cites: Vec<String> = adr
         .iter()
-        .map(|n| match adr_title(root, n) {
+        .map(|n| match manifest.adr_title(n) {
             Some(title) => format!("ADR-{n}: {title}"),
             None => format!("ADR-{n}"),
         })
         .collect();
     format!(" ({})", cites.join("; "))
-}
-
-fn adr_title(root: &Path, number: &str) -> Option<String> {
-    let dir = root.join("docs/adr");
-    let entry = fs::read_dir(dir).ok()?.flatten().find(|e| {
-        e.file_name()
-            .to_str()
-            .is_some_and(|f| f.starts_with(&format!("{number}-")))
-    })?;
-    let text = fs::read_to_string(entry.path()).ok()?;
-    text.lines()
-        .find_map(|l| l.strip_prefix("# "))
-        .map(|t| t.trim().to_owned())
 }
 
 fn manifest_path(manifest: &Manifest, crate_name: &str) -> PathBuf {

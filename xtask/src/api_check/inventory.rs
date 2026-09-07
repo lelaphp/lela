@@ -572,6 +572,32 @@ pub fn uses(file: &Path) -> Result<Vec<UsePath>> {
     Ok(collector.0)
 }
 
+/// The `<name>` of every `php_ext_<name>::extension` path in a file, in
+/// the order written, as manifest crate names: the bundle's registration
+/// order (design §4.10).
+pub fn extension_calls(file: &Path) -> Result<Vec<String>> {
+    let text = fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let parsed = syn::parse_file(&text).with_context(|| format!("parsing {}", file.display()))?;
+    let mut calls = Calls(Vec::new());
+    calls.visit_file(&parsed);
+    Ok(calls.0)
+}
+
+struct Calls(Vec<String>);
+
+impl<'ast> Visit<'ast> for Calls {
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        if let [krate, item] = segments.as_slice()
+            && item == "extension"
+            && let Some(name) = krate.strip_prefix("php_ext_")
+        {
+            self.0.push(format!("ext/{name}"));
+        }
+        syn::visit::visit_path(self, path);
+    }
+}
+
 struct Collector(Vec<UsePath>);
 
 impl<'ast> Visit<'ast> for Collector {
