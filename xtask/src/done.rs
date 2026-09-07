@@ -64,6 +64,19 @@ pub const FRESH: [&str; 6] = [
     "phpt",
 ];
 
+/// The harness crate; it has no kernel, no native and no phpt subset.
+pub const HARNESS: &str = "xtask";
+
+/// The instruments condition 1 asks of one crate: all of [`FRESH`] for an
+/// engine or extension crate; for the harness, the ones that measure it,
+/// since `witness` and `phpt` have nothing to read there.
+pub fn instruments_of(krate: &Crate) -> impl Iterator<Item = &'static str> {
+    let harness = krate.name == HARNESS;
+    FRESH
+        .into_iter()
+        .filter(move |i| !harness || !matches!(*i, "witness" | "phpt"))
+}
+
 /// What `done` found over one diff.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verdict {
@@ -214,7 +227,7 @@ fn fresh_readings(
 ) -> Result<()> {
     let tree = git::tree_hash(root, &krate.path())?;
     let name = &krate.name;
-    for instrument in FRESH {
+    for instrument in instruments_of(krate) {
         let Some(reading) = store.read(instrument, name)? else {
             unmet.push(format!("{instrument}: no reading for {name}"));
             continue;

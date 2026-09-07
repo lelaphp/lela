@@ -68,6 +68,13 @@ pub enum Command {
     /// Hold every crate to its line ceiling and the workspace to [budget];
     /// refuse committed generated code and a stale generated file.
     Budget,
+    /// `cargo clippy` with every warning denied, on every target of each
+    /// crate, as the reading `done` reads; one reading per crate.
+    Clippy {
+        /// Only these crates, by manifest name; default every crate that exists.
+        #[arg(long = "crate", value_name = "NAME")]
+        crates: Vec<String>,
+    },
     /// Allow `unsafe` only in the homes the manifest's unsafe.homes rule names.
     UnsafeAudit,
     /// Write the files the manifest's `generated` rules render (ext/clippy.toml).

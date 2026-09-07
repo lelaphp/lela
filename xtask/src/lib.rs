@@ -9,6 +9,7 @@
 pub mod api_check;
 pub mod budget;
 pub mod cli;
+pub mod clippy;
 pub mod divergence;
 pub mod done;
 pub mod generated;
@@ -84,6 +85,7 @@ pub fn run() -> Result<()> {
             }
         }
         Command::Budget => record(&store, &budget::run(&root, &manifest)?),
+        Command::Clippy { crates } => record(&store, &clippy::run(&root, &manifest, &crates)?),
         Command::UnsafeAudit => record(&store, &unsafe_audit::run(&root, &manifest)?),
         Command::Generate => {
             for path in generated::write_all(&root, &manifest)? {

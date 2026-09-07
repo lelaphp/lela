@@ -52,8 +52,7 @@ I want Zend's design with better tooling, and nothing beside it. No second execu
 
 ## Taste
 
-- Types over comments: newtypes for indices and handles, enums for state machines, `&mut Request` on anything that can run PHP code. No panic reaches a request; `unwrap` and `expect` are denied in engine crates. `unsafe` lives in four homes, one operation per block, each with a `SAFETY` comment.
-- `pub` crosses a crate boundary only through a locked module. Generated code is generated in `build.rs` and never committed; the one exception, `ext/clippy.toml`, is regenerated and diffed.
+- Types over comments: newtypes for indices and handles, enums for state machines, `&mut Request` on anything that can run PHP code. No panic reaches a request; `unwrap` and `expect` are denied in engine crates. `unsafe` lives in four homes, one operation per block, each with a `SAFETY` comment. `pub` crosses a crate boundary only through a locked module. Generated code is generated in `build.rs` and never committed; the one exception, `ext/clippy.toml`, is regenerated and diffed.
 - Copy php's algorithm where the behaviour is observable; drop the cleverness where it is not. The floor is php's interpreter by construction; the ceiling comes from threads and whole-program LTO, not a smarter IR. If a rule here fights the task in front of you, say so loudly and get a person's sign-off before breaking it.
 
 ## The facts, computed
@@ -124,6 +123,7 @@ Commands:
   permit             Judge one intended tool call from the `PreToolUse` hook's stdin; the decision is the JSON on stdout and the exit is 0 always
   done               The definition of done: print the conditions unmet for the changes since the base and exit 1 while any is; the Stop hook, pre-push and CI read the same list
   budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code and a stale generated file
+  clippy             `cargo clippy` with every warning denied, on every target of each crate, as the reading `done` reads; one reading per crate
   unsafe-audit       Allow `unsafe` only in the homes the manifest's unsafe.homes rule names
   generate           Write the files the manifest's `generated` rules render (ext/clippy.toml)
   divergence-reason  Hold the divergence registry to the manifest rule whose `check` names this instrument: an accepted row has a reason a person wrote
@@ -134,7 +134,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=1118ffb8b737a30e2d75503815e4b9940d029e83032c5c84691fa085f8ac0750 out=989558432343e5ff8a473e9ffb8cd67ed9d67b9487ae1ad4992070697f4c6779 -->
+<!-- /computed in=250403912f137f1cf0d80a04e992401ae01edb8776b0211f99ca81ef98485b90 out=ad666c01bd104716127bbec640a8f89208c14c28d831af96fc3c976fc4c4c491 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

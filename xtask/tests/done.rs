@@ -142,6 +142,42 @@ fn xtask(root: &Path, args: &[&str], stdin: Option<&str>) -> (i32, String, Strin
 // ---------------------------------------------------------------- 1, 2
 
 #[test]
+fn the_harness_crate_is_asked_for_clippy_api_check_budget_and_unsafe_audit_only() {
+    let asked: Vec<&str> = done::instruments_of(&krate("xtask")).collect();
+    assert_eq!(asked, ["clippy", "api-check", "budget", "unsafe-audit"]);
+    let asked: Vec<&str> = done::instruments_of(&krate("ext/pcre")).collect();
+    assert_eq!(asked, FRESH);
+
+    // Over a diff in xtask, the harness's own sources, witness and phpt are
+    // not on the list, and the four that are pass when fresh.
+    let root = scratch("harness");
+    write(
+        &root,
+        "xtask/Cargo.toml",
+        "[package]\nname = \"xtask\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+    );
+    write(&root, "xtask/src/lib.rs", "pub fn measure() {}\n");
+    let verdict = judge(&root);
+    assert!(
+        verdict
+            .unmet
+            .iter()
+            .all(|u| !u.starts_with("witness") && !u.starts_with("phpt")),
+        "{verdict:#?}"
+    );
+    assert_eq!(verdict.unmet.len(), 4, "{verdict:#?}");
+    let store = Store::of_workspace(&root);
+    for instrument in done::instruments_of(&krate("xtask")) {
+        store.write(&fresh(&root, instrument, "xtask")).unwrap();
+    }
+    assert!(judge(&root).unmet.is_empty(), "{:#?}", judge(&root));
+}
+
+fn krate(name: &str) -> xtask::manifest::Crate {
+    toml::from_str(&format!("name = \"{name}\"\nbudget = 1")).unwrap()
+}
+
+#[test]
 fn with_no_readings_every_instrument_of_the_touched_crate_is_unmet_and_the_exit_is_1() {
     let root = scratch("none");
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
