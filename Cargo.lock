@@ -336,6 +336,7 @@ dependencies = [
  "regex-lite",
  "serde",
  "serde_json",
+ "syn",
  "toml",
 ]
 

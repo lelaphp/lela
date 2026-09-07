@@ -118,12 +118,9 @@ fn locks(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
         .seams
         .iter()
         .map(|seam| {
-            // `api_items` is the manifest's ceiling on the api seam's lock (design §4.4).
-            let ceiling = if seam.name == "api" {
-                json!(manifest.budget.api_items)
-            } else {
-                Value::Null
-            };
+            let ceiling = manifest
+                .lock_ceiling(seam)
+                .map_or(Value::Null, |n| json!(n));
             Row::new(
                 &[
                     ("seam", json!(seam.name)),

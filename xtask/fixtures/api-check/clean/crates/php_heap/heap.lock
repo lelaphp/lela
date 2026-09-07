@@ -1,0 +1,10 @@
+# heap.lock: the public surface of php_heap (design §4.5).
+Arena
+Arena::new
+Slot
+Slot::EMPTY
+stack::Entry
+stack::Frame
+stack::Frame::DEPTH
+stack::Frame::current
+stack::push

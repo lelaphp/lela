@@ -4,6 +4,7 @@
 //! `status`, the one renderer.
 #![forbid(unsafe_code)]
 
+pub mod api_check;
 pub mod budget;
 pub mod cli;
 pub mod generated;
@@ -62,6 +63,7 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
+        Command::ApiCheck { write } => api_check::run(&manifest, &root, &store, write),
     }
 }
 

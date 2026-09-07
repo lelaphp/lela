@@ -1,0 +1,9 @@
+# api.lock: php_ext's public items, measured by xtask api-check.
+Severity
+abi::Cache
+abi::Cache::get_or_build
+abi::Cache::new
+abi::Extension
+abi::Extension::name
+raising::Level
+raising::warning
