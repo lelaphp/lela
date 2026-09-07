@@ -6,6 +6,8 @@ This is the design of record for the harness. It is one living document: every s
 
 **Sources.** The full citation lists are in `research/harness-research.r1.md` ("Sources") and `research/harness-research.r2.md` ("Sources"); this file cites them by the same short names (**HE**, **CE**, **Sensors**, **OpenAI**, **Stripe**, **Anthropic**, **Approved**, **CM** for `computed`, **FH-dts**, **FH-issue**, **Hooks-ref**, **Plugins-ref**). Revision 3 adds one input: the architecture review of 2026-09-07 over both earlier revisions and the design of record, with a citation inventory of every harness prescription in `research/third-engine-design.r1.md` to `.r7.md`, `research/jit-design.r3.md`, `research/llvm-research.r1.md` and the ADRs.
 
+**7. Revision 7 (2026-09-08).** Two readings of §5 changed after `done` (#6) and `new-ext` (#9) landed. The map's ceiling is 150 lines, not 100: the rewritten map (`974a41f`) carries the four commitments and the six regions, and at 100 lines the regions alone left no room for the prose the map test names. And `vocab` no longer reads a lock: the lines of `api.lock` mirror php's own names (`sapi_name`, `set_exception_handler`, `unregister_tick_function`), which the engine copies on purpose, so the assertion could only fail on the names php chose. Public item names and rustdoc prose are still read. Check: `cargo test -p xtask --test map` holds the map at 150; `cargo xtask vocab` passes on a `php_ext` whose lock names php's API.
+
 ---
 
 ## 0. The one-paragraph design
@@ -283,7 +285,7 @@ It reads the manifest, the registry and the store and computes nothing else. A s
 
 ## 5. Context layer: what an agent reads first
 
-**The map.** `AGENTS.md` at the workspace root, at most 100 lines (OpenAI), fed to the model by a `SessionStart` command hook whose command is `xtask status --session` (matchers `startup`, `resume`, `clear`, `compact`, so re-injection after compaction is the hook's own behaviour, Hooks-ref), and, when the function hook is enabled, by `prompt.context` instead. Whether the map is named `CLAUDE.md` or `AGENTS.md` is settled by the hook: it is read by the harness, not by the engine's automatic load, so it is `AGENTS.md`. Its prose items are decisions and stay prose:
+**The map.** `AGENTS.md` at the workspace root, at most 150 lines (revision 7; OpenAI's figure was 100), fed to the model by a `SessionStart` command hook whose command is `xtask status --session` (matchers `startup`, `resume`, `clear`, `compact`, so re-injection after compaction is the hook's own behaviour, Hooks-ref), and, when the function hook is enabled, by `prompt.context` instead. Whether the map is named `CLAUDE.md` or `AGENTS.md` is settled by the hook: it is read by the harness, not by the engine's automatic load, so it is `AGENTS.md`. Its prose items are decisions and stay prose:
 
 1. Read `CONTEXT.md` first; the `_Avoid_` lists are binding in code, rustdoc and commit messages.
 2. The design of record is `third-engine-design.md`, and `jit-design.md` for the compiled tier; the `rN` files are records and are not read for anything current.
@@ -306,7 +308,7 @@ Its regions, all tracked, each one command:
 
 **Per-directory guidance.** `ext/AGENTS.md` with the extension template rules (one dependency, `extension()`, state on the value, no locks, tests through `Capture`, witnesses in rustdoc, phpt from `php-src/ext/<name>/tests`) and two regions, `extensions` (`tree src=. depth=1 dirs`; `ls -d */` fails on an empty `ext/`) and `bundle-order` (`xtask status --section bundle`). `xtask new-ext <name>` lays the topology down.
 
-**The glossary as a sensor.** `xtask vocab` checks public item names and rustdoc prose in `crates/*` and `ext/*` against the `_Avoid_` lists, scoped so that `Result` is not `result`; and asserts every `_Avoid_` word appears nowhere in `api.lock`. It writes a reading like any instrument.
+**The glossary as a sensor.** `xtask vocab` checks public item names and rustdoc prose in `crates/*` and `ext/*` against the `_Avoid_` lists, scoped so that `Result` is not `result`. A lock is not read: its lines mirror php's own names (`sapi_name`, `set_exception_handler`), which the engine copies on purpose. It writes a reading like any instrument.
 
 **What else is computed.** `data/INDEX.md` gains a `files` region. Design documents get no regions and no numbers: they cite `seams.toml` and `oracle.toml` (§14).
 

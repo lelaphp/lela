@@ -24,12 +24,12 @@ fn opener<'a>(text: &'a str, name: &str) -> Option<&'a str> {
 }
 
 #[test]
-fn the_map_is_under_100_lines_with_the_six_regions_of_the_design() {
+fn the_map_is_under_150_lines_with_the_six_regions_of_the_design() {
     let map = read("AGENTS.md");
     let lines = map.lines().count();
     assert!(
-        lines <= 100,
-        "AGENTS.md is {lines} lines; the map is at most 100 (harness §5)"
+        lines <= 150,
+        "AGENTS.md is {lines} lines; the map is at most 150 (harness §5)"
     );
     let regions = [
         ("design-of-record", "ls "),
