@@ -1,0 +1,120 @@
+# The pinned oracle. The only statement of the oracle's version, digest and
+# invocation recipe (design §8, harness §4.3). Every design document cites this
+# file and states no version. Bumping it is a person's act with its own review,
+# never a side effect of a green run; the nightly `oracle drift` lane re-runs the
+# witnesses against this binary and fails when php's own bytes move.
+#
+# Read by `xtask`'s oracle module and nothing else. The module asserts the digest
+# before every run and refuses the whole run on a mismatch.
+
+[oracle]
+version = "8.5.9"
+# The keg path, not `/opt/homebrew/bin/php`: the bare name is a symlink the
+# package manager re-points on upgrade (Dax's oracle.toml records it moving
+# 8.5.9 → 8.5.10 mid-run on 2026-09-01). The digest is the identity; the path is
+# where to find it on this machine.
+path = "/opt/homebrew/Cellar/php/8.5.9/bin/php"
+md5 = "315162bd4382e9b7a0aa6668edf4c097"
+# opcache is compiled into this build (`php -n -m` lists it; no `zend_extension`
+# line is needed or accepted). The tier regimes below rely on that.
+
+[source]
+# The php-src tree at the same tag: the stubs `xtask crosscheck` reads, the phpt
+# corpus, `Zend/zend_vm_def.h` for `ops.toml`, and every `Z/path:line` citation
+# from this revision on. Design revisions before 8 cite 8.5.7 line numbers.
+tag = "php-8.5.9"
+commit = "dd6e76cc"
+path = "~/Projects/php-src-8.5.9"
+phpt_files = 21655    # `find . -name '*.phpt' | wc -l` at the tag; 8.5.7 had 21548
+
+[recipe]
+# The witness regime (design §8): the snippet runs as `witness.php` with `<?php`
+# on line 1 and the code on line 2, so php's own error text matches.
+script_name = "witness.php"
+preamble = "<?php\n"
+# php's own `run-tests.php` regime: `-n` and upstream's `$ini_overwrites`
+# (run-tests.php:269-308 at the tag, 38 entries) passed as `-d`, exactly as
+# `settings2params` renders them. `xtask phpt` adds a test's `--INI--` section
+# after these; `xtask witness` passes these and nothing else.
+args = ["-n"]
+ini = [
+    "output_handler=",
+    "open_basedir=",
+    "disable_functions=",
+    "output_buffering=Off",
+    "error_reporting=32767",
+    "fatal_error_backtraces=Off",
+    "display_errors=1",
+    "display_startup_errors=1",
+    "log_errors=0",
+    "html_errors=0",
+    "track_errors=0",
+    "report_zend_debug=0",
+    "docref_root=",
+    "docref_ext=.html",
+    "error_prepend_string=",
+    "error_append_string=",
+    "auto_prepend_file=",
+    "auto_append_file=",
+    "ignore_repeated_errors=0",
+    "precision=14",
+    "serialize_precision=-1",
+    "memory_limit=128M",
+    "opcache.fast_shutdown=0",
+    "opcache.file_update_protection=0",
+    "opcache.revalidate_freq=0",
+    "opcache.jit_hot_loop=1",
+    "opcache.jit_hot_func=1",
+    "opcache.jit_hot_return=1",
+    "opcache.jit_hot_side_exit=1",
+    "opcache.jit_max_root_traces=100000",
+    "opcache.jit_max_side_traces=100000",
+    "opcache.jit_max_exit_counters=100000",
+    "opcache.protect_memory=1",
+    "zend.assertions=1",
+    "zend.exception_ignore_args=0",
+    "zend.exception_string_param_max_len=15",
+    "short_open_tag=0",
+    "date.timezone=UTC",
+]
+# The process environment is cleared and rebuilt from this table, so nothing on
+# the developer's shell (`SSH_*`, a `PHPRC`, a locale) reaches the oracle.
+# `run-tests.php` deletes the `SSH_*` variables and exports the executable's
+# path; the CGI-only variables it sets are the CGI adapter's, not the recipe's.
+env_clear = true
+[recipe.env]
+TEST_PHP_EXECUTABLE = "/opt/homebrew/Cellar/php/8.5.9/bin/php"
+TZ = "UTC"
+LANG = "C"
+LC_ALL = "C"
+
+[recipe.limits]
+# `run-tests.php:1187`: 60 s per test, 300 under valgrind. A witness's `wall=`
+# is disclosure, not a limit.
+timeout_s = 60
+
+[recipe.normalise]
+# `run-tests.php:2528`: `preg_replace("/\r\n/", "\n", trim($out))`. The trim set
+# is PHP's `trim()` default. The scratch directory the snippet ran in is
+# replaced by the token below in both streams before comparison, so a witness
+# that prints a path is stable across machines; `%s` and the other EXPECTF
+# wildcards are the phpt runner's and are translated by the code it owns.
+crlf_to_lf = true
+trim = " \t\n\r\u0000\u000B"
+scratch_token = "%SCRATCH%"
+
+# The compiled tier's regimes (design §8, jit-design §7). The oracle under
+# `tracing` is the reference for `TRACE start/stop` dumps and for `force` and
+# `exit-fuzz`; under `off` it is the same binary with the tier disabled, the
+# control for the A/A drift bound. Both are `-d` overrides added after `ini`.
+[regime.jit-tracing]
+ini = ["opcache.enable_cli=1", "opcache.jit=tracing", "opcache.jit_buffer_size=64M"]
+[regime.jit-off]
+ini = ["opcache.enable_cli=1", "opcache.jit=off"]
+[regime.jit-inline]
+# The trace-dump diff (jit-design §4.1): `TRACE start` (1<<12), `TRACE stop`
+# (1<<13), compiled (1<<14), exit (1<<15), abort (1<<16), blacklist (1<<17)
+# from `ext/opcache/jit/zend_jit.h:67-72` at the tag; 0x3F000 = 258048. The
+# engine's `inline` mode is the synchronous compile so the dump is
+# deterministic; php compiles synchronously always.
+ini = ["opcache.enable_cli=1", "opcache.jit=tracing", "opcache.jit_buffer_size=64M", "opcache.jit_debug=258048"]

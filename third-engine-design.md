@@ -1,0 +1,819 @@
+# The third engine: design
+
+This is the design of record for the engine. It is one living document: every section is at its current value, and the ledger below records each revision with what changed, why, and the check that would show it wrong. Git holds the dated versions. `third-engine-design.r1.md` to `third-engine-design.r7.md` are the seven earlier revisions, kept unedited as records; they are not read for anything this file marks current, and the "highest `N` wins" naming rule of revision 3 no longer applies. The compiled tier's design of record is `jit-design.md`, in the same shape. The harness's is `harness-design.md`. Vocabulary is in `CONTEXT.md`. Decisions reversed or otherwise likely to be "fixed" by a later reader are in `docs/adr/0001` to `0006`. Research: `research.md` and `data/` for the two predecessors (Mahout `M/`, Dax `D/`), `jit-research.r1.md` and `llvm-research.r1.md` for the tier; php-src paths are cited `Z/path:line` at the tag the research read, which is 8.5.7. Numbers that the harness enforces, budgets, edges, lock names and `unsafe` homes, are stated here once and carried by `seams.toml` when it exists; the oracle's version, digest and recipe are stated in `oracle.toml` and nowhere else.
+
+Goals as given, non-negotiable: insane performance, full parity with PHP 8.5.x, modern and future-proof architecture, the best modern Rust, memory efficient, smallest possible codebase, done in one month.
+
+---
+
+## Ledger: what changed, and why
+
+Each entry is numbered as the revision that made it and names the check that would show it wrong.
+
+**1. Revision 1 (2026-09-05).** Zend's execution model in Rust, once, with nothing beside it: Zend's layouts and algorithms, one executor, the library rule, witnesses and phpt per commit, nine crates, 260k lines. Check: the day-30 bars of §9.
+
+**2. Revision 2 (2026-09-05).** Named every module's interface, measured it and locked it: `php_engine::api` sized from a census of what Mahout's extensions call, op-array identity against php's own dump, interface locks, `HeapHooks`, map pointers, the 25-slot object-handler table, frames in `php_heap`, handler bodies monomorphised over operand kinds. Check: `compile-identity` byte-identical on the per-commit corpus; `port-map` unresolved rows reaching zero.
+
+**3. Revision 3 (2026-09-05).** Walked the inherited crates: one declaration model in a leaf crate `php_unit` (ADR-0001), validate dissolved into the compiler, the `Sapi` trait replaced by a request description and an output sink, the typed arena tree (ADR-0003), native entries taking the concrete request (ADR-0002), `php_proto`. Check: the manifest corrections of §13 name files that exist.
+
+**4. Revision 4 (2026-09-05).** One crate per extension under `ext/` with `php_ext` below and `php_bundle` above (ADR-0004); the witness fence carries the exit status, captured and never authored; the phpt runner gains upstream's `run-tests.php` as its nightly control. Check: the bundle's order is a topological order of the crate graph; `exit=` written only by `--accept`; the two runners agree.
+
+**5. Revision 5 (2026-09-05).** Extension state is request-scoped or immutable engine-scoped, and the engine owns the only cross-request cache (ADR-0005). Check: `Cache` hit cost on the pcre workload under thread-per-request.
+
+**6. Revision 6 (2026-09-06).** The tentative return type as one bit on the declared return type, set only by natives, read by the linker and Reflection. Check: the 31 phpts of the `tentative` subset.
+
+**7. Revision 7 (2026-09-06).** The compiled tier as the eighth seam, designed in from day one: `execute` generic over `Tier` with one hook, `step` reporting the edge it took, one opaque `Word` per safepoint in `Published`, `OpArray.safepoints` and the `safepoint` column, the `VmStack` entry slot, `php_jit` behind a feature, one compile worker per engine. Revision 1's `Func.code` slot, per-cache-slot feedback word and "baseline method JIT" go. Check: G1 within the A/A drift bound from the day `php_engine::tier` exists.
+
+**8. Revision 8 (2026-09-07).** A review of every design, the seams, the month-one to month-two transition and the harness. Six changes, and the shape of this file:
+
+1. **Three mechanisms the interpreter owes the tier, stated as mechanisms** (§5.6, §5.8). The request's interrupt flag is a named item, tested at back-edges, at frame activation and after every `Flow::Resume`, so that a compiled loop can be stopped; php's JIT tests `vm_interrupt` in every compiled loop and revision 7 had removed the back-edge check from compiled code and put nothing in its place, so the §8 witness `set_time_limit(1); for (;;) {}` would have hung under `jit.mode=force`. `Site::Entry` is raised by the activation of a user frame after its `RECV*` prologue, not "inside the first body opline's handler", which can be any opcode. A request-scoped op array (`eval`, an uncached include) carries sealed words, all ones, so the tier never claims on a `Func` that has no `Published`.
+2. **Two invariants made assertions** (§5.7, §6.1). `JMPZ` joins the `safepoint` column, since `zend_compile.c` inverts a `BOOL_NOT` condition's branch, and the compiler asserts on every op array that every backward jump has a column and a numbered header; a fused compare-and-branch is one handler over two oplines for `step` and for `Site::Loop`, stated once.
+3. **The threading model stated once** (§5.14). Revision 1 said a thread pool, ADR-0005 argued from "threads are not pooled". A host runs each request to completion on one thread; whether it pools threads is the host's and is invisible to the engine, because no engine or extension state is thread-local. ADR-0005's argument holds for that reason and is amended to say so.
+4. **Names and sizes corrected.** `opcache.jit_buffer_size` is the one name; `tier.lock` is a face of a few dozen items plus a generated kernels section of about three hundred; `php_bundle` depends on `php_ext` as well as `ext/*`, and on `php_jit` only on the four targets the feature names; the harness manifest's example budgets are this file's.
+5. **ADR-0006** records the eighth seam, the engine-level word and the deletion of revision 1 §9.3, which the design's own rule in §10 required and revision 7 did not write; ADR-0004's two-home `unsafe` sentence is amended to point at it.
+6. **One living document** (§10). Seven files, each saying which sections of which predecessor still stood, cost every reader seven files and let stale sentences survive (`xtask opgen --check`, deleted in revision 2 and standing in revision 1's text; two `unsafe` lists in force at once). This file is the design at its current value with this ledger on top; the `rN` files are records; `jit-design.md` and `harness-design.md` have the same shape. This is harness `§14` item 5, taken.
+
+Check: `Probe` sees `(Entry, 0)` once per call and never when a `RECV` throws; the time-limit and signal witnesses pass under `force`; an `eval` op array's words read as sealed; `php_compile`'s assertion holds over the compile-identity corpus; `xtask budget` against `seams.toml` passes with the numbers of §4.1 and no others.
+
+---
+
+## 0. The one-paragraph design
+
+Build **Zend's execution model in Rust, once, with nothing beside it, behind eight named seams.** One value representation with Zend's layouts (16-byte zval, 8-byte refcounted header, packed/hash arrays, objects with inline property slots), one Zend-shaped allocator, one single-pass compiler from the inherited syntax tree to op arrays that are **identical to php's own**, one operand-specialised interpreter whose handler bodies are written once and monomorphised over operand kinds, synchronous destructors, Bacon–Rajan GC with Zend's root-buffer placement, generators as heap frames, fibers as real coroutines. **No second executor, no MIR, no DSL; no JIT in month one, and the tier's seam, word and safepoints designed in from day one.** Correctness comes from the real `php` binary at every interface that has one: op arrays diffed against php's dump, witnesses embedded in rustdoc, php-src's `.phpt` corpus per commit, grammar fuzzing nightly. Extensions follow one rule, **write what PHP writes, link what PHP links**, and see the engine through one locked module, `php_engine::api`, whose first version is generated from what Mahout's 19 extension crates already call. Every class, function, constant and attribute, whether written in PHP or as a native, is described once in the unit format. Immutable compiled units are shared across threads through map pointers, so one process serves many requests without a fork and without recompiling. **Twelve crates in `crates/` plus `php_jit` behind a feature, one crate per extension in `ext/`, eight seams, one declaration model.** The interpreter runs op arrays through `execute::<Nop>`; the same op arrays, the same frames and the same kernels serve `execute::<Jit>` when the feature is on, and the compiled tier reaches the engine through one lock file. Budget: **≤ 272.5k lines total, ≤ 127.5k of them new.**
+
+Why this and not a smarter architecture: the two predecessors already ran the experiments. Mahout built three IRs and three tiers and measured its interpreter 17.5× behind php's interpreter, with the JIT tiers refused by its own gates. Dax built a semantics language that generates four hosts and measured 20× behind php with no optimizer and 118 builtins. Both spent their budgets beside the engine rather than on it. Zend's design is the one PHP VM that is known to reach the target numbers, its algorithms are fully specified by `php-src`, and its observable behaviours (GC status, memory usage, hash order, dtor timing) are only reproducible by using the same algorithms. A Rust engine that copies those algorithms with better tooling has a floor near php's interpreter by construction, and a genuine ceiling above it (threads, shared immutable units, PGO'd whole-program LTO).
+
+---
+
+## 1. What the month can and cannot mean
+
+The goals are contradictory on their face. Mahout reached 99.74% of `Zend/tests` in 85 days at 3,621 commits and is at 67% of the runnable full corpus (`data/mahout-conformance/docs_conformance_phpt_burndown.md`). Dax's own roadmap puts practical use at "2027 with wide error bars". Nobody has done this in 30 days.
+
+What makes 30 days defensible here, and only here:
+
+1. **The front end is done.** Mahout's lexer, syntax tree, parser and validator (about 33k lines) parse every 8.5 construct and agreed with php on 172,118 of 172,212 verdicts over the top-1000 Packagist corpus at M0. Dax vendored them byte-identically for the same reason.
+2. **The extension bodies are largely done.** Mahout's 19 `ext_*` crates are 90k lines of pure Rust behind a typed ABI that derives arginfo from Rust signatures. They port, and where they are weak (`date` 29%, `mbstring` 26%, `pcre` 62%) the weakness is a policy (pure Rust) that this design reverses.
+3. **The test instruments are done.** A byte-faithful `run-tests.php` port, a grammar-driven differential fuzzer, 21,548 pinned `.phpt`, and a measurement protocol with negative controls all exist in Mahout's tree.
+4. **The design is done.** `php-src/Zend` is the specification. There is no research phase.
+
+What is written new is the core: value model, allocator, GC, compiler, interpreter, class linker, request lifecycle, SAPI. That is the part both predecessors got wrong for performance and it is about 90–110k lines.
+
+Demonstrated velocity is the hard limit. Mahout produced ~7.6k lines/day and Dax ~6.5k lines/day of hand-written code in the same single-author, agent-driven modality (`data/*-git-weekly.txt`, `data/*-loc-*`). Thirty days at that rate is ~200k lines of new code. The budget asks for 110k new plus adaptation of 130k inherited, which fits with roughly zero slack. The schedule in §11 therefore has a published cut order, and §12 states what "parity" will and will not mean on day 30.
+
+**Parity, defined.** Day-30 parity means: `Zend/tests` ≥ 99.7%, `tests/` 100%, `sapi/cli` ≥ 95%, and every extension in a default `./configure` of php 8.5 present and ≥ 90% on its `.phpt`. Extensions php itself does not build by default (intl, gd, mysqli, soap, ldap, imap, ffi, sodium, zip, bcmath, gmp, curl, openssl, mbstring, pdo_mysql) are scheduled in §11 by value; the ones that do not land by day 30 are named there rather than discovered later.
+
+**The port is the schedule.** Of the 130k inherited lines, 90k are extension bodies that cross an interface which does not exist yet. The census says the bodies call 89 distinct `mahout_value` methods, 83 distinct `RequestCtx` methods, 135 distinct `semantics::` functions and 38 ABI items, and 12 of the 19 crates import the linker's `ClassDescriptor` family directly (`data/r2-mahout-ext-seam-census.txt`). That is a 345-item interface, and every item is either provided under the same name with the same meaning, or has a line in a porting table. §4.4 makes that table an instrument (`xtask port-map`) rather than a hope.
+
+**The tier's month is month two.** What month one carries is its seam, its word, its unit and heap sentences, its safepoints, the interrupt flag, and G1.
+
+---
+
+## 2. Learnings ledger
+
+Each row is a decision for the third engine, with the evidence that forced it.
+
+### 2.1 From Mahout
+
+| Keep | Why |
+|---|---|
+| Lexer, lossless token stream, parser (`M/crates/mahout_{lexer,syntax,parser,source}`) | M0 token differential 193,377/193,377 vs php; validator verdicts 99.95% on 172k files. Dax reached the same conclusion and vendored them. The tree's representation and the validate pass are not kept (§4.9, §6.1). |
+| Native ABI shape: `#[php_function]`/`#[php_class]`, marshalling traits, arginfo derived from the Rust signature (`M/crates/mahout_native_abi`, `mahout_native_macros`) | Signature written once; the 495 `#[php_function]` sites port. |
+| `run-tests.php` port (`M/crates/mahout_phpt`), grammar fuzzer (`mahout_fuzz_gen`), 14 libfuzzer targets, corpus lock file | Instruments first; both projects' own rule ("a new instrument ships with its negative control"). |
+| Line-for-line `zend_sort` port, `php_gcvt` port, `serialize_precision=-1` path, the 85 php-exact message wordings, the ~800 lines of probed coercion ladders | Byte-identical on 12,343 sort calls; probes 25–28 matched. These are the parts of Mahout that copied Zend's algorithms and they are the parts that are byte-correct. See §13 for where they actually are. |
+| Effect atoms on the op schema driving may-throw check placement; one `has_pending()` site | Correct and cheap. The 2026-07-28 effect audit that found 16 under-declared rows is the gate to keep. |
+| Measurement protocol: status labels on artifacts, paired reps, A/A negative controls, load average recorded (`docs/perf/measurement-protocol.md`) | Every perf claim in this design is made under it. |
+| `unsafe` hygiene: `SAFETY` per block, one op per block, `unsafe_op_in_unsafe_fn = deny`, Miri job, `unsafe-audit` gate | 249 unsafe sites in `mahout_value` with 206 SAFETY comments and no known soundness bug. |
+| Release profile `lto="thin"`, `codegen-units=1`, measured at −33%; PGO lane | Free performance, already measured on this toolchain. |
+| Interned atom table: frozen global layer + per-request overflow | Correct model for a multi-threaded worker. |
+| The census itself as an instrument: the set of engine items the extension bodies call | It is the extension interface, measured. 345 items, top of the list `as_bytes` (828 sites), `len`, `get`, `set`, `throw_internal` (128), `raise_text_warning` (115). |
+| `Reentrant` as a marker on the runtime context | The idea that "may run user code" should be visible to the compiler is right; it is a parameter type here (§5.10). |
+| The lexer's heredoc dedent into trivia tokens and its structured interpolation runs | A deep decision: string cooking downstream never sees indentation. The tokenizer extension reconstitutes php's undedented tokens from it. |
+| The phpt runner's `ScriptExec` seam (two adapters) and its byte-faithful section parser and `--EXPECTF--` translation | The seam is real; the pooled-worker adapter is replaced by the in-process one (§8). |
+| The FastCGI record codec and the dev server's HTTP framing, mime and status tables | Engine-free, tested, and they port as is into `php_proto`. |
+| Per-extension request state: **the shape**, one type-keyed method on the request, the state type private to its crate | A native reaches its state through the request it already holds, and no extension can name another's. The contract around it is replaced (ADR-0005). |
+| Mahout's fix that keyed the tentative-return deprecation on the parent return's tentativeness and not on "the parent is a builtin" (`4802a1d5`) | Internal methods with real return types exist, `getMicrosecond(): int` among them, and override of those is a fatal as it is for user code. |
+
+| Reject | Evidence |
+|---|---|
+| Two executors sharing one semantics | 83.6% co-fix rate before inversion; R168 (single-homing onto the wrong answer) after it. A second in-house executor is a second place to be wrong that agrees with the first. The oracle is the second opinion. |
+| Three IRs (HIR 7.6k → MIR 58k with 12 passes → bytecode 19.6k) | Per-request compile 64.4 ms vs php's 2.4 ms; 99k lines that never produced a measured runtime win. |
+| Three JIT tiers (jit1/stencil/codemem/jit2/tier2_host, 43k lines) | Tier 1 entered a compiled body on 0.28% of corpus rows forced and 0% shipped; Tier 2's default flip refused at 2.2× slower; stencils never executed on the dev machine. A JIT before an at-parity interpreter is negative value; nothing of the five crates is taken (`jit-research.r1.md §B.9`). |
+| 16-byte `Value` with `word` tag but object properties in a `PhpArray`, `Vec<Option<(Key,Value)>>` arrays with tombstones never compacted, separate hash index | Heap charges ~2.7× php's bytes (R118), 40 MB RSS on `binary_trees` vs php's 24 MB; property access is a hash lookup where Zend does an offset load through a run-time cache. |
+| Per-op summary work-word check, always-on profiling cells, generic IC keys, kernels returning `*Step` sums that the executor re-dispatches | These are the per-op terms behind "Tier 0 running 17.5× behind upstream's interpreter". Two callers of one kernel with a protocol between them is a shallow module. |
+| Destructor queue drained at op boundaries | Deviates from Zend (dtors run synchronously at rc→0) and produced R84 (quadratic drain), R127 (temporaries live to frame end), R24/R31/R35. |
+| `!Send` request context, process pool, panics that abort the pooled worker; `Value` with `Drop` that may run destructors (R46) | Not adoptable under a process manager. A zval is `Copy` and has no `Drop` (§5.1). |
+| Allocation accounting as a caller obligation: `note_alloc` | 327 call sites in the extension crates alone. Every forgotten site is an R120-class bug. The allocator is the only accountant (§5.13). |
+| A partial object-handler table (`NativeState`: 7 methods) | Zend's has 25. Every missing slot is a place an internal class cannot behave like php's: R23, the `count`/`compare`/`cast` holes. |
+| Extension crates depending on `mahout_linker` and `mahout_code_meta` (12 of 19 each) | The ABI leaked into the linker's data structures. Extensions see one module (§4.3). |
+| Pre-reading all of stdin when not a terminal (`sapi_cli/src/lib.rs:838-856`) | Hangs under any supervisor that leaves stdin open; added so two executors would see identical bytes. |
+| Pure-Rust policy for `pcre`, `date`, `mbstring` | Caps parity at 62% / 29% / 26% and R121 (regex recompiled per call, 250× slower). PHP's behaviour in these areas *is* the C library's behaviour. |
+| 60 crates, 333 lock packages, 829 markdown files, 385 plans, 62k-line xtask | Process and structure that a second engineer cannot carry; README stale by three milestones. |
+| Committed generated code (`generated/` dirs, 51k lines) | Diff noise; drift between generator and output. |
+| A validate pass separate from the compiler | 9,284 lines; 49 `ancestors()` and 42 `parent()` climbs to rebuild scope the compiler has; three code-number tables that deliberately disagree; `scope_import_events` quadratic in declarations. |
+| Two message voices joined by a code number (`MHT` codes) | 1,124 lines of `codes.rs` whose only engine use is two columns; the join exists for a language-server voice the engine does not have. |
+| Lexer-to-parser glue as a caller obligation | `parse_file` is documented and does not exist; the same four steps appear at 70 sites in 36 files. |
+| A native ABI whose declared seam is 8 methods while bodies cross ~400 items | `NativeCtx` versus 130 `RequestCtx` methods, 135 `semantics::` functions, 53 field paths; one adapter. |
+| Native declarations as PHP source text re-parsed at engine start; registration order as call position; class ids as a fixed table in the heap crate | ~1,000 signature strings parsed on every build; 19 hand-ordered `register()` calls; 131 extension class ids in `mahout_value`. |
+| A GC contract in safe extension code (`NativeState::sever` must equal `trace_children`) | A mismatch is a double decrement. Memory safety belongs in `php_heap` (§5.4). |
+| Five copies of the request transaction and three copies of header commit; a `Sapi` trait whose call order is the contract | `RunPolicy::new` at five sites; nine getters consulted in a fixed sequence at `M/crates/mahout_driver/src/run.rs:2259-2573`. |
+| An oracle module that owns the path but not the recipe | The `-n -d …` recipe is spelled five ways across lanes. |
+| One crate for every extension | `mahout_runtime` is a dependency of all 19 extension crates and grew to 4,649 lines of coercion alone because it was the only shared place. |
+| Two extension registries that must agree | `mahout_driver`'s feature list and its 19 hand-ordered `register()` calls. |
+| Lazy, first-touch extension state torn down in first-touch order; a state trait with a downcast hook; two request-end channels; contract as doc comment; no scope for cross-request state | `M/crates/mahout_runtime/src/lib.rs:7198-7210, 7337, 2818, 2781-2810`; pcre, unit and tier state in process globals under their own locks. |
+| Encoding a tentative return as "no return type" and probing the oracle to recover it; modelling a tentative interface method as an abstract user method; discovering the tentative set by failing phpts | `mahout_ext_date/src/php.rs:1901-2168`; `ba3d31b0`; six commits from `188ed320` to `26cf50d5`. |
+
+### 2.2 From Dax
+
+| Keep | Why |
+|---|---|
+| **Witnesses beside the meaning**: a PHP snippet pinned to the oracle's bytes, next to the rule it tests, executed on every test run (4,446 witnesses, 4,446 pass) | The one instrument that detects convergence on a wrong answer. Kept as rustdoc blocks on kernel functions, not as a DSL. |
+| Oracle pinned by digest and keg path with the exact `-n -d …` recipe (`D/oracle.toml`) | Homebrew re-pointed `php` from one patch release to the next mid-campaign (ticket 239). |
+| A locked effects artifact checked by a gate (`D/engine/effects.lock`) | Generalised: every cross-crate interface has a lock file (§4.5); the effects column itself lives in `ops.lock`. |
+| Dependency footprint as a tracked number (43 lock packages) | Ours will be larger because of C bindings; it is still a number in CI. |
+| Refuse to specialise before measuring (D5 NO-GO honoured) | Good discipline; applies to the tier's default flip (§9.3). |
+| 0 TODO/FIXME, 8 `unsafe` sites in hand-written code | The standard for every crate outside the heap core. |
+| Two witness marker rules: a status is captured, never authored, and a duration discloses and never gates | Both are about capture, not syntax; they survive the move from marker lines to fence attributes (§8). |
+| `tools/phpt-run.sh`: upstream's `run-tests.php` with `-p <binary>` under the oracle php, the oracle's own verdicts frozen as the control | The one arrangement in which a disagreement is never the runner's fault (§8). |
+| ADR-0007's form for a gate decision: thresholds frozen before any gated number is seen | The form of the tier's backend ADR (§9.3). |
+
+| Reject | Evidence |
+|---|---|
+| A semantics language that generates hosts | 433k generated lines committed, 94k–140k-line single files, 968 `unreachable!`, 74 MB RSS on a small script, no JIT emitter after D6 was declined; `mir` slower than `tier0` on every measurement. |
+| A pattern-binder roster that refuses unbound productions | 322 forms cover the PHP 5-era subset after 22 days; 33 of 50 probes refused. |
+| No cycle collector | Probe 24: a two-object cycle leaks to shutdown. |
+| Process weight: 345 tickets (61.8k lines), 18 maps, a 12,750-line draft SPEC | Two-to-one process over product. |
+| `LowerHost` with 101 methods; `Core` with 83 fields and 236 methods | Interfaces that grew until the implementation showed through. Budgets apply to interfaces, not only to lines. |
+| Witness status as an output line (`exit>` inside the pin) | Needs an ordering rule so an output line beginning `exit> ` is not read as a claim. An attribute on the fence has no such line. |
+
+### 2.3 From php-src
+
+| Keep | Why |
+|---|---|
+| php-src's `ext/<name>/` layout, and `ZEND_MOD_REQUIRED` as the statement of one extension's dependency on another | The directory joins directly to `php-src/ext/<name>/tests` and to its `*.stub.php`. The dependency statement becomes a Cargo edge. |
+| php-src's split of pcre state at `RSHUTDOWN` (`Z/ext/pcre/php_pcre.c:474`) | The compiled pattern persists, the per-request match scratch is freed: request state versus cached immutable value, exactly. |
+| `ZEND_MAP_PTR` as the one mechanism for "a shared structure holds an offset, the request owns the value" | Statics, run-time caches and request state are one table, not three (§5.14). |
+| The tentative return type as one bit on the return type (`Z/Zend/zend_compile.h:1120-1128`); `gen_stub.php`'s two rules (methods only, never `final`); the optimizer's rule that a tentative type is trusted only through an exactly resolved callee | The type is the same type; only its force on overrides differs (§4.7, §6.2). The tracing tier infers nothing from a declared return type, so the third rule has no counterpart yet (§9). |
+| php's trace JIT over unmodified op arrays, with deoptimisation as a jump to an opline of the identical frame (`Z/ext/opcache/jit/zend_jit_trace.c`) | It is why the tier can be a seam on `execute` and not a second executor. |
+| php's counter handlers at loop headers and after `RECV` as the only places the interpreter consults the tier (`Z/ext/opcache/jit/zend_jit.c:3219-3244`) | Three safepoints, one hook. Anything else the tier wants it learns by stepping. |
+| php's `vm_interrupt` test in every compiled loop and at every exit (`data/jit-research/rfc-jit.md:118`, `php-src-jit-exit-points.txt:298`); php's per-process `tracing` flag that bumps and does not trace while a trace is being recorded (`php-src-jit-hot-root.txt:30-33`) | The two rules revision 7 lacked; both are one load on a cold path (§5.8, `jit-design.md` §4.9). |
+| php's `opcache.jit_debug` outputs as the tier's oracle; php's thresholds, stop list, guard set and trace bounds as numbers in one policy | The recorder, the type pass and the table each have a line of php's to diff against; behaviour php users see, under php's names and defaults. |
+
+| Reject | Evidence |
+|---|---|
+| Per-thread module globals as the answer for cross-request state | The engine serves a request per thread; per-thread would rebuild pcre's pattern cache on every request against a bar of at least php-fpm's throughput (ADR-0005). |
+| Compiling on the request thread inside the safepoint | php's shape because php has one thread; here the engine is `Sync` and the table publishes under one lock from any thread (`jit-design.md` §4.8). |
+| One code mapping flipped RW around each publish | Sound on macOS with `MAP_JIT`, unsound on Linux where `mprotect` is per mapping (`jit-design.md` §4.4). |
+
+### 2.4 From both, and from this engine
+
+Both predecessors are single-author, agent-driven, and both spent most of their effort on machinery around the engine. The third engine's process rule is in §10: one design document per subject, an ADR only on reversal, an op spec that is its own documentation, and no ticket corpus in the repository.
+
+**From this engine.** Rows are added here, Keep/Reject shape, when a sensor catches the same class of mistake twice, with a `log.jsonl` query as the evidence (harness rule 1). None yet.
+
+---
+
+## 3. Principles
+
+1. **Zend's algorithms, Rust's compiler.** Where php's behaviour is observable (hash order, `nNextFreeElement`, `gc_status()`, `memory_get_usage()`, dtor timing, float printing, sort order, error message text), implement php's algorithm, not an equivalent one. Where php's behaviour is not observable, be free.
+2. **One executor. The oracle is the second opinion.** Every semantic lives in exactly one function, called from exactly one dispatch loop. Disagreement is measured against `php`, never against another in-house executor. The compiled tier is not a second executor: it runs the same kernels on the same frames and returns to the same loop.
+3. **Write what PHP writes, link what PHP links.** Zend and `ext/standard` are hand-written C in php-src; they are written in Rust here. `pcre2`, `timelib`, `libxml2`, `zlib`, `openssl`, `sqlite3`, `ICU`, `libsodium`, `libcurl`, `lexbor`, `uriparser` are libraries php links; they are linked here through `-sys` crates.
+4. **Immutable after publication, shared across threads.** Compiled units, linked classes, interned strings, constant arrays and published traces are immutable and `Sync`; request state is `Send` and single-threaded. This is opcache's memory model applied to threads instead of processes; the mechanism that makes it true for classes with mutable statics is §5.14.
+5. **No panic reaches a request boundary.** A PHP fatal is a value. `unwrap`/`expect` are lint-denied in engine crates; `catch_unwind` at the request boundary exists as a last line and every trip of it is a bug.
+6. **The instrument ships first.** Witness runner, phpt runner, fuzzer and budget gate are in CI before the first opcode executes.
+7. **Size is a gate.** Line budgets per crate and a total, checked in CI. Generated code is generated in `build.rs` and never committed.
+8. **Interfaces are measured, then locked.** Every cross-crate interface is a listed set of items in a lock file. The first list is derived from the callers that already exist; growth is a diff in the same commit. Nothing is `pub` across a crate boundary that is not in a lock.
+9. **Re-entry is a parameter.** Any function that can run PHP code takes `&mut Request` (or the `HeapHooks` port in `php_heap`). A function without that parameter cannot re-enter. Zend carries this fact in comments; here the types carry it.
+10. **Declarations are data, linked once.** One declaration model describes every class, function, constant and attribute. The compiler produces it for PHP; the native macros produce it for Rust. The linker consumes it at module startup for natives and at publication for units. No parser runs at engine start; no registration depends on call order; nothing panics. The safepoints of an op array are a fact about the op array and belong in the same model.
+11. **An extension crosses one name.** An extension crate depends on `php_ext` and on the extensions it declares; it cannot name `php_engine`, `php_compile` or `php_syntax` because they are not in its manifest. Enforced by crate visibility, not by a lint over the bodies.
+12. **An extension holds no lock.** Request state is `&mut` and owned by the request; engine state is immutable after construction and shared by reference; the one thing that mutates across requests is the engine's cache of immutable values. `Mutex`, `RwLock`, `Cell`, `RefCell` and the atomics are denied in `ext/*`. The engine's own three cross-request structures with a lock inside, the unit cache, the trace table and the compiler's queue, are the exceptions, and no extension can reach one (§4.4).
+
+---
+
+## 4. Modules, interfaces, seams
+
+Vocabulary. A **module** is anything with an interface and an implementation, at any scale. Its **interface** is everything a caller must know: signatures, invariants, ordering, error modes, cost. A module is **deep** when a lot of behaviour sits behind a small interface. A **seam** is a place where behaviour can be swapped without editing there; an **adapter** is a concrete thing that fills a seam. One adapter is a hypothetical seam; two is a real one. **The interface is the test surface.** `CONTEXT.md` carries the domain terms.
+
+### 4.1 Crate map and budgets
+
+Twelve crates in `crates/`, one behind a feature, nineteen in `ext/`, and `xtask`. Budgets are ceilings enforced by `xtask budget` (non-blank, non-comment lines, tests excluded); `seams.toml` carries these numbers and no other file restates them.
+
+| Crate | Role | Interface (what callers learn) | Budget | Origin |
+|---|---|---|---|---|
+| `php_syntax` | Lexer, lossless token stream, typed tree in a safe arena (§4.9), parser, parse-error text. Typed nodes from `php.ungram` in `build.rs`. | `parse(&[u8], Options) -> Parsed { source, tokens, lines, tree, diagnostics }` and the typed nodes. Tokens are `(kind, offset, len)` over the retained source; the line table is built while lexing; diagnostics arrive merged in php's phase order. | 26k | Inherited: four Mahout crates merged; the green/red layer, `NodeCache`, validate, reparse, checkpoints, `codes.rs`, `root.rs`, `level.rs` and ~1,060 unused generated lines removed. |
+| `php_heap` | **The memory model, and the only `unsafe` in the engine.** Allocator, refcounted header, zval, string, array, object and handle table, reference, resource, weak refs, GC, VM stack and frame layout with the entry slot, run-time cache storage, map-pointer table. | The value API (≈ 90 census items + the hot accessors), `Heap`, `VmStack`/`Frame`, `MapTable`, and one port: `HeapHooks`. Locked in `heap.lock`. | 20k | New; ports `zend_alloc`, `zend_hash`, `zend_string`, `zend_gc`, `zend_vm_stack` layouts; Mahout's SAFETY discipline and Miri lanes. |
+| `php_unit` | **The unit format.** Declaration model for classes, functions, constants, attributes; op arrays with their tables, safepoints, literal tables, line tables, try/catch and live ranges; the constant-expression tree; the `ops.toml`-generated opcode enum with operand kinds, effects, `may_throw`, the `safepoint` column and the disassembler in php's dump format. Types and their invariants only. | The unit value types; `Unit::dump()`. Locked in `unit.lock`. | 6k | New. |
+| `php_compile` | Single pass typed tree → `php_unit::Unit`; constant expressions; early binding; compile-time fatals at the site that owns each construct; safepoint numbering with its invariant asserted. | `compile(&Parsed, &Options) -> Result<Unit, CompileError>`. | 18k | New, after `zend_compile.c`; the 136 probed edge cases of Mahout's validate move in as guards. |
+| `php_engine` | Kernels, generic handlers plus generated dispatch over `php_unit::Opcode`, `execute::<T: Tier>`, `step`, the `tier` module with `Nop`, exceptions, generators, fibers, linker and linked tables, object handlers, errors, ini, output, streams, `serve`, unit cache and `Published`, native ABI traits, `api`. | Host-facing: `Engine::builder`, `Engine::serve(RequestDescription, &mut dyn OutputSink) -> Observables`, `Engine::unit`. Extension-facing: `php_engine::api` (≤ 400 items, `api.lock`). Tier-facing: `tier.lock`. | 48k | New; tables ported from Mahout; ~3,500 lines of Zend builtins from `mahout_ext_standard`. |
+| `php_macros` | `#[php_function]`, `#[php_class]`, `#[php_const]` expanding to `api` calls that build `php_unit` declarations; `#[tentative]` as an argument the class macro reads. | Three attributes. | 3k | Inherited (`mahout_native_macros`). |
+| `php_ext` | **The facade.** Re-exports `php_engine::api`, `php_engine::tier::Nop` for the bundle's alias, and the three attributes, under one prelude. Nothing is defined here. The macros expand to paths in this crate's private module. | The `api` items and the attributes. `api.lock` is this crate's public surface. | 0.2k | New. |
+| `php_bundle` | **The enabled set, and the tier's name.** One cargo feature per non-default extension and the `jit` feature; `enabled()` returns the extensions in module-startup order, a topological order of the `ext/*` graph; `Tier` is one alias. php-src's `internal_functions.c`. | `enabled() -> &'static [ExtensionBuilder]`; `type Tier`; the feature list. | 0.5k | New. |
+| `php_jit` | **The compiled tier.** As `jit-design.md` designs it: recorder over `step`, trace SSA with php's guard set, lowering behind a backend value with the interrupt test at the loop header, one table in a dual-mapped arena, one dispatch with recording exclusive per request, the crossing, php's thresholds as a pure state machine, one compile worker per engine. `#![deny(unsafe_code)]` with the allowance on `table::code` and `enter`, about 300 lines. Behind the `jit` feature on Linux and macOS for x86-64 and aarch64 and nowhere else until a second `Pages` adapter exists. | `Jit: Tier`; nothing else is `pub`. Reads `php_engine` through `tier.lock`. | 17.5k | New. Shape after `zend_jit_trace.c`; nothing from Mahout's five JIT crates. |
+| `ext/<name>` | One extension each; the table below. `src/ffi/` only where a `-sys` crate is bound. | `extension() -> Extension`, plus what the crate deliberately exports to dependent extensions. | below | Ported (`M/crates/mahout_ext_<name>`) + bindings. |
+| `php_proto` | FastCGI record codec; HTTP/1.x framing, static file serving, mime and status tables for `-S`; CGI environment parsing into plain fields. Names no engine type. | Codecs. | 4k | Ported (`M/crates/mahout_sapi_fcgi/src/fcgi.rs`, `mahout_sapi_cli/src/server.rs` minus its engine coupling). |
+| `php_sapi` | CLI (lazy stdin), CGI, FastCGI worker, dev server, embed: each builds a request description from `php_proto`'s output and supplies a sink. | Hosts. | 5k | Ported; pool rewritten. |
+| `php` | The binary. Argument parsing, ini discovery, `-r -f -l -i -a -S -m -v --ini --ri`. | argv. | 1k | New. |
+| `xtask` | `witness`, `phpt`, `compile-identity`, `port-map`, `api-check`, `fuzz`, `bench`, `budget`, `unsafe-audit`, `crosscheck`, `vocab`, `permit`, `done`, `status`, `new-ext`, with `oracle` as the one module every lane calls. `mahout_phpt` and `mahout_fuzz_gen` live here as modules. | Subcommands; readings (harness §4.2). | 14k | Inherited pieces, 62k → 14k. |
+
+Per-extension budgets, from Mahout's line counts, `standard` less the 3,500 lines of Zend builtins that §13 moves to the engine:
+
+| Extension | Budget | Extension | Budget |
+|---|---|---|---|
+| `standard` | 30k | `random` | 2k |
+| `spl` | 10k | `pdo_mysql` | 2k |
+| `date` | 10k | `filter` | 2k |
+| `reflection` | 9k | `tokenizer` | 1.5k |
+| `pcre` | 6k | `json` | 1.5k |
+| `mbstring` | 4k | `openssl` | 1k |
+| `session` | 4k | `curl` | 1k |
+| `pdo` | 2.5k | `iconv`, `pdo_sqlite`, `ctype` | 0.5k each |
+| `dom` | 2k | bindings across all | 15k |
+
+Total ceiling **272.5k**, of which the tier's 17.5k is month two; new code **≤ 127.5k** on the same split. `docs/` ≤ 5k lines. Third-party dependencies, default feature set: `corosensei`, `memchr`, `hashbrown` (raw table for the compiler's symbol maps only; PHP arrays are `php_heap`'s own), `pcre2-sys`, `libz-sys`, `libsqlite3-sys`, `libxml` bindings, `timelib-sys` (vendored), RustCrypto hash crates, `libc`, `arc-swap`; under `jit`, Cranelift's crates and `rustix` or `memmap2`. Target: ≤ 120 lock packages for the default build, counted on day 31 with the Cranelift set.
+
+**`unsafe`** is permitted in four places: `php_heap`; `ext/*/src/ffi/`; `php_jit::table::code`; `php_jit::enter`. Every other crate is `#![forbid(unsafe_code)]`; an extension with bindings and `php_jit` are `#![deny(unsafe_code)]` with the allowance on the named module alone; `xtask unsafe-audit` names the four and fails on a fifth (ADR-0004 as amended, ADR-0006).
+
+### 4.2 Dependency graph
+
+```
+php_heap ◄── php_unit ◄── php_compile ◄── php_engine ◄── php_macros
+   ▲            ▲                             ▲   ▲
+   │            │                             │   └── php_ext ◄── ext/* ◄── php_bundle ──► (feature jit, four targets) php_jit
+   └────────────┴──────── php_jit ────────────┘         ▲
+                                                        └── php_bundle (for ExtensionBuilder and the Nop alias)
+    ext/random ◄── ext/standard    ext/pdo ◄── ext/pdo_sqlite, ext/pdo_mysql    each: php_ext + its declared extension edges
+    php ──► php_bundle ──► php_sapi ──► php_proto          xtask (crosscheck, phpt, witness, bench) ──► php_bundle
+```
+
+`php_heap` depends on nothing in the workspace. `php_unit` depends on `php_heap` only (names interned, literals as heap values). `php_compile` depends on `php_syntax`, `php_unit`, `php_heap`. `php_engine` depends on `php_compile`, `php_unit`, `php_heap`. `php_macros` depends on `php_engine` (ADR-0002). `php_ext` depends on `php_engine` and `php_macros` and re-exports `api`, `tier::Nop` and the attributes only. An `ext/*` crate depends on `php_ext` and on `ext/*` crates it declares, never on `php_engine`, `php_compile`, `php_syntax` or `php_bundle`. `php_bundle` depends on `ext/*`, on `php_ext`, and under `jit` on the four named targets on `php_jit`, from which it names `php_jit::Jit` and nothing else. `php_jit` depends on `php_engine`, `php_unit`, `php_heap` and on nothing under `ext/`; nothing depends on `php_jit` but the bundle. `php_sapi` never sees `api`; `php_proto` sees nothing. Workspace members are `crates/*`, `ext/*`, `xtask`; an extension's package is `php_ext_<name>` at path `ext/<name>`.
+
+`xtask api-check` fails the build on a manifest edge outside this list, on a `use` path that crosses a seam, on a bundle order that is not a topological order of the `ext/*` graph, and, inside `php_engine`, on any `use` from the executor and kernel modules into the serve, headers, GPC or output-buffering modules, which keeps a later `main/`-style crate split possible without making it now. `php_jit` may import from `php_engine` only what `tier.lock` names.
+
+### 4.3 The eight seams
+
+Each has at least two adapters, so each is real. Zend's equivalents are from `data/r2-zend-seam-sizes.txt`.
+
+| # | Seam | Lives in | Interface | Adapters | Zend equivalent |
+|---|---|---|---|---|---|
+| 1 | `HeapHooks` (port, upward) | `php_heap` | 5 methods: `destruct(obj)`, `free_native(obj)`, `gc_children(obj, visit)`, `free_resource(res)`, `out_of_memory(bytes) -> Bailout` | `Request` (production); `Recorder` (heap tests under Miri, records what would have run) | `zend_objects_store_del`, `get_gc`, `zend_mm` limit callback |
+| 2 | `ObjectHandlers` | `php_engine` | Zend's 25 slots (`read_property` … `get_gc`, `do_operation`, `compare`, `get_properties_for`) with `Std` as the default impl of every slot | `Std`; `Closure`, `Generator`, `Fiber`, `WeakMap`, `WeakReference`, enums, `ArrayObject` family, `SplFixedArray`, `SplObjectStorage`, `DateTime` family, `Reflection*`, DOM nodes, lazy proxies | `zend_object_handlers` (25) |
+| 3 | `Extension` | `php_engine::api`, named to extensions as `php_ext` | The `Extension` value of §7.1: declarations paired with entries, constants, ini entries, lifecycle functions, `request_state::<T>()` and `engine_state(ctor)`; one `extension()` per crate; `Engine::builder().extensions(..)` takes the slice | One crate per extension under `ext/`; `TestExt` in engine tests; the empty slice, which must serve a Zend-only script; the tier's own state through `Tier::extension()` | `zend_module_entry`, including `globals_size`, `globals_ctor` and `globals_dtor`; the bundle is `internal_functions.c` |
+| 4 | **Request description** (input) and **`OutputSink`** (output) | `php_engine` | Input: one plain `Send` value built before the request starts: argv, env, cwd, server vars, request headers, body stream, sapi name, `is_web`. Output: `write`, `flush`, `send_headers(block)`, `log`. The engine owns the header list, status, default content type, output buffering and the commit moment. | Inputs built by `cli`, `cgi`, `fcgi`, dev server, embed, xtask in-process; sinks: stdout, CGI, FastCGI, dev-server response buffer, **`Capture`** (in-process tests) | `sapi_module_struct` split into `sapi_request_info` and the four output callbacks |
+| 5 | `StreamWrapper` / `Stream` | `php_engine` | Zend's wrapper ops (open, opendir, stat, unlink, rename, mkdir, rmdir, metadata) and stream ops (read, write, seek, flush, close, stat, cast, set_option) | `file`, `php`, `data`, `glob`, user wrappers; `phar`, `http` (month two) | `php_stream_wrapper_ops`, `php_stream_ops` |
+| 6 | `Operand` (compile-time) | `php_engine` | `read(frame, opline) -> Zval`, `read_ptr`, `free` for one operand position | `Const`, `Tmp`, `Var`, `Cv`, `Unused` marker types; handler bodies are generic over two of them | `OP1_TYPE`/`OP2_TYPE` in `zend_vm_def.h`, expanded by `zend_vm_gen.php` |
+| 7 | `ops.toml` → opcode enum and dispatch | enum, operand kinds, effects, `may_throw`, `safepoint` column, disassembler generated in `php_unit`'s `build.rs`; dispatch `match` generated in `php_engine`'s `build.rs` over `php_unit::Opcode` | One spec, two build scripts, one enum | `php_compile` (emits), `php_engine` (dispatches), `php_unit::dump` (prints), xtask (disassembles) | `zend_vm_opcodes.h` generation |
+| 8 | `Tier` | `php_engine::tier`; `execute` is generic over it; bound per `Engine` as an `ExecuteFn` by `EngineBuilder::tier::<T>()`, which also registers the tier's state; named once in `php_bundle` | One method, `safepoint(req, frame, Site) -> Flow`, where `Site` is `Loop(n)`, `Entry` or `Return(n)` and carries the safepoint's number, and `Flow` is `Continue`, `Resume(frame)` or `Bail`; one provided method, `extension()`, through which the tier declares its engine state, request state and ini under seam 3 without being an extension. Beside it, `step(req, frame) -> Result<Stepped, Bailout>`, which runs exactly one handler with `Nop` at the safepoints and reports `Same`, `Pushed`, `Popped`, `Moved`, `Threw` or `Done`; and one opaque `Word` per safepoint on `Func`, zero at publication, sealed for a request-scoped op array, whose bits only the tier interprets | `Nop` (month one, in `php_engine`); `php_jit::Jit`; `Probe` (engine tests, asserting `(site, number)` sequences) | `zend_execute_ex` as the bound entry; the counter handlers at loop headers and after `RECV` (`Z/ext/opcache/jit/zend_jit.c:3219-3244`); `zend_jit_trace_execute` has no equivalent, because `step` is what it exists to be |
+
+What a caller of seam 8 must know. `safepoint` runs inside two handlers and one activation: a backward `JMP*` after operand reads and before the jump; `RETURN*` after operand reads and before the pop; and the activation of a user frame, by the call handlers and by `execute` for its own entry frame, after the `RECV*` prologue has run without raising (§5.6). `Site::Return` is never raised for the entry frame of an `execute`: the handler compares the frame with the stack's entry slot before calling the tier. `Site::Entry` is raised for the entry frame, as php's counter fires whatever the caller is. After a `Resume` the loop performs the interrupt check it performs at a back-edge and the pending-exception check it performs after a `throw`-effect op, then dispatches from the given frame. `step` never runs `HANDLE_EXCEPTION`, so one call is one handler and never an unwind; a fused compare-and-branch is one handler over two oplines (§5.8); `Threw` wins over a push or pop the same handler did, and `Done` may carry a pending exception, as php's leave helper returns to a native caller with `EG(exception)` set. `Nop` is one inlined function returning a constant and the branch on `Flow` folds; `Stepped` is a discriminant the loop already holds. The deletion test: month one has `Nop` and `Probe`, two adapters, so the seam is real before `php_jit` exists. Full interface, invariants and the tier's modules: `jit-design.md` §2.
+
+**Deliberately not seams.** The executor (one). The value representation (one). The allocator (one; the system allocator used for compiler temporaries is a different domain, not an adapter). The syntax tree. The backend behind the tier's lowering, which is a value inside `php_jit` and not a seam of the engine. Anything with one adapter is an indirection, and this design has none.
+
+### 4.4 The extension-facing interface: `php_engine::api`
+
+This is the widest interface in the system and the one on which 41% of the budget sits. It is a module interface, not a seam: it has one implementation and many callers. It is designed as a deep module in the sense that matters for the port: a large amount of behaviour (the whole engine) behind a list of items that is smaller than what Mahout's extensions already use.
+
+Sizing. Zend's extension-facing headers declare 832 `ZEND_API`/`PHPAPI` functions. Mahout's extensions use 345 distinct engine items. The budget is **≤ 400 items**, listed in `api.lock`, measured on `php_ext`, where a public-items dump is the whole crate.
+
+Shape. Five groups, mirroring the census rather than Zend's file layout:
+
+| Group | What | Census origin |
+|---|---|---|
+| Values | zval constructors and accessors, strings, arrays, objects, references, resources, `Key` normalisation | 89 `mahout_value` items; the 20 most-called are kept by name (`as_bytes`, `len`, `get`, `set`, `is_empty`, `as_object`, `contains`, `append`, `as_array`, `class`, `tag`, `as_int`, `instance_of`, `lookup`, …) |
+| Raising | `throw(class, msg)`, `warning`, `notice`, `deprecated`, `fatal`, `arg_type_error`, `arg_count_error`, `too_few_arguments`, with `Thrown` as the error type every native returns. The engine knows the active native's qualified name and parameter names before the body runs, so the raising items take the argument position and the tail of the message, and the engine renders `fn(): Argument #N ($name) must …` itself; a native body never hand-types its own name (Mahout's did at 203 sites). | `throw_internal` (128), `raise_text_warning` (115), and the 135 `semantics::` functions collapse to ≈ 40 |
+| Coercion and conversion | `to_long`, `to_double`, `to_string`, `truthy`, `coerce_param` honouring the caller's `strict_types`, `loose_eq`, `compare` | the `coerce_*`/`cast_*` family (12 items) |
+| Calling back | `call(callable, args)`, `instantiate`, `new_object(class)`, `lookup_function`, `lookup_class`, autoload | `Reentrant`, `native_call_by_name`, `instantiate_no_ctor`, `lookup_func` |
+| Request environment | output, headers, ini get/set, streams and resources, `cwd`, `temp_dir`, superglobals, error/exception handler stack, `current_line`, `gc_enable`; **`req.state::<T>() -> &mut T`**, **`req.engine::<E>() -> &E`**, **`api::Cache<K, V>`** | 83 `RequestCtx` items less `note_alloc` (gone) and less what was linker leakage; the state accessor's shape |
+
+The declaration types in `api` (`FunctionDecl`, `ClassDecl`, `ConstDecl`, `IniDecl`, parameter and attribute descriptors, the constant-expression tree) are re-exports of `php_unit`; there is no second model. The marshalling traits are `FromArgument` and `IntoReturn`. Native classes declare properties, methods, constants and, where needed, an `ObjectHandlers` impl, and never see the linker's descriptors.
+
+**State** (ADR-0005). An extension declares its state on its `Extension` value and reaches it through the request:
+
+| Item | Scope | Declared on `Extension` as | Built | Dropped |
+|---|---|---|---|---|
+| `req.state::<T>() -> &mut T` | one request | `request_state::<T: Default>()` | at request start, in bundle order | after the `rshutdown` hooks, in reverse bundle order |
+| `req.engine::<E>() -> &E` | one `Engine` | `engine_state(fn(&StartupIni) -> E)`, `E: Send + Sync + 'static` | in `Engine::new`, in bundle order; this is `minit` | at engine drop, in reverse order; this is `mshutdown` |
+| `api::Cache<K, V>` | one `Engine` | a field of `E`, given a capacity | with `E` | with `E` |
+
+The state type is private to its crate; a request for a type no bundled extension declared is a bug and panics with the type name. The slot is a `MapPtr<T>` assigned when `Engine::new` publishes the extension, so access is an index read into the request's map table. `E` is built once per `Engine` from the startup ini view, which is what makes it per engine rather than a crate `static`: tests build a fresh `Engine` per phpt in-process, and engine state can depend on system ini such as `pcre.jit`. **`E` may not contain a lock** (principle 12). What it may contain is tables, handles to immutable library objects, and `Cache`. The exceptions, none of which an extension can hold: the engine owns three cross-request structures with a lock inside, the unit cache (an `api::Cache` under another name), the trace table and the compiler's queue, the latter two as fields of the tier's engine state, declared through `Tier::extension()` and living in `php_jit`, where `api-check`'s `ext/*` lint does not reach and `unsafe-audit` does. `Cache<K, V>` has one method, get-or-build by key, returning a shared handle to an immutable `V: Send + Sync`; bounding, eviction, sharding and the lock are the engine's. php's pcre bound (4,096 entries, then a partial clean, `Z/ext/pcre/php_pcre.c:817`) becomes the capacity pcre passes. A zval held in request state is released in `rshutdown`, because the state drops before the request leak gate runs; the gate catches what is not and names the state type.
+
+**`xtask port-map`.** Regenerates the census against Mahout's tree and joins it to `api.lock`: every Mahout item is `same`, `renamed` (with the new name), or `gone` (with the replacement rule, e.g. `note_alloc → nothing; the allocator accounts`; `ext_state_mut::<T>() → state::<T>()` at 35 sites in 6 crates; `ExtState::ext_teardown → rshutdown` where it reads the request, `Drop` where it only releases; `sig_tentative → #[tentative]`). The join is the porting checklist and its unmatched rows are a CI failure from day 3; it writes a reading like any instrument.
+
+**Design it twice.** Two shapes were considered for the value half. (A) Zend's own vocabulary (`zend_hash_find`, `zend_string_init`, `ZVAL_LONG`) as safe Rust: honest to the port, and unfamiliar to every line that has to cross it. (B) Mahout's vocabulary over Zend's layouts: 90k lines of callers already know it, and layout knowledge stays inside `php_heap`. (B) is chosen for `api`; (A)-shaped accessors exist as `php_heap::hot` for the handlers only and are not re-exported by `api`.
+
+### 4.5 Interface locks
+
+`heap.lock` (the `php_heap` public surface, including `VmStack::entry`, `push_entry`, `current`, `MapTable::base`), `unit.lock` (the `php_unit` surface, including `OpArray.safepoints`), `ops.lock` (the instruction set with effects and the `safepoint` column, generated from `ops.toml`), `api.lock` (`php_ext`'s public items, ≤ 400), `sapi.lock` (the host face), `tier.lock` (the widening of `php_engine` toward the tier, in two sections: the face, a few dozen items reviewed one by one, and the kernels named by `php_jit`'s `kernels!` list, about three hundred, generated from the list and diffed as one section). Six locks; the set is declared once in `seams.toml`. Dax's `effects.lock` is retired, its content being `ops.lock`'s effects column. `xtask api-check` regenerates each from the compiled crate's public items and fails on any difference; adding an item means committing the new lock line with the code. This is how "smallest possible codebase" is measured at the interface, where callers pay, not only in lines.
+
+### 4.6 The deletion test, applied
+
+Delete `php_compile`: every caller would need to know how to turn a tree into an op array. Delete `php_heap`: layout and refcount knowledge would spread through every kernel and every native, which is Mahout's `note_alloc` at 327 sites. Delete `api`: the 19 extension crates depend on nine engine crates again. Delete `php_unit`: the unit format reappears in the compiler's output type, `api`'s declaration types and the disassembler's input, with the opcode enum generated twice from one file. Delete `php_proto`: nothing reappears elsewhere; it exists so that protocol tests run without building the engine, and it is the one crate a second engineer may fold back into `php_sapi` without an ADR. Delete `php_ext`: every extension depends on `php_engine` and `php_macros` directly and the "api only" rule returns as a `use`-path scan over 105k lines. Delete `php_bundle`: the enabled list and the tier's name reappear in the binary, in `xtask crosscheck`, in `xtask phpt` and in the embed host. Delete `state`: every extension keeps a `thread_local!`. Delete `engine`: ini-dependent tables become crate statics wrong for the second `Engine` in a process. Delete `Cache`: pcre writes its own `RwLock<HashMap>` and principle 12 cannot be a lint. Delete `Tier`: either `php_engine` checks a `cfg(feature = "jit")` word in three places and depends on `php_jit`, or the check is a `dyn` call per back-edge. Delete `php_jit`: the engine builds, runs every phpt and passes G1's denominator; that is the month-one state. Delete `opgen --check` from revision 1: nothing reappears, because handler bodies are ordinary generic Rust that fail to compile if the spec disagrees (§5.8), so it is gone.
+
+### 4.7 `php_unit`: one declaration model
+
+What it holds: the declaration model (names as interned strings; declared types, of which a return type carries a `tentative` bit; parameters with by-ref, variadic and default flags; doc comment; declaration site; attributes with unevaluated arguments), op arrays and their tables, the constant-expression tree, the opcode enum, and `dump()`. The dependency rules leave the format no other home (ADR-0001).
+
+How declarations are produced. **User code:** `php_compile` emits them as part of a `Unit`. **Natives:** `#[php_function]` and `#[php_class]` emit a builder function, not a `static`, because names are interned and a Rust `static` cannot call the interner. The builder runs once at module startup against the engine's interner and the result is frozen. Defaults that reference named constants are resolved once there, not per call. The native entry function itself is not part of the declaration; the `Extension` value pairs each declaration with its entry (§7.1).
+
+How declarations are consumed: the linker in `php_engine` orders classes by their `extends` and `implements` references, allocates identities into the linked tables, and returns an error for a cycle or a missing parent. `php_heap` knows only the handful of intrinsic identities it needs for destruction and GC (stdClass, Closure, Generator, the Throwable family).
+
+**The tentative bit.** A field of the return type in the declaration model, beside nullability, as in `zend_arg_info`. The engine verifies the native's own return against the type as it does any return type; the linker treats an override that drops the type or narrows it incompatibly as a deprecation rather than an error (§6.2); Reflection reports the type through `getTentativeReturnType()` and not `getReturnType()`. Only natives set it: `php_compile` never emits it, PHP has no syntax for it, and `gen_stub.php` reads a doc-comment tag. The bit is invalid on a function, on a `final` method, and on a method with no return type; the declaration builder rejects all three when it runs, and `xtask crosscheck` runs every builder, so an invalid declaration cannot reach a release. The macro spells it as `#[tentative]` on the method inside a `#[php_class]` impl block, an argument the class macro reads, not a fourth attribute: a Rust `-> bool` cannot say "bool, and overriding without it is a deprecation", and a wrapper type for it would put a linker fact into the marshalling vocabulary. `dump()` prints it in php's Reflection wording, "Tentative return" against "Return".
+
+**The safepoints.** `OpArray.safepoints: Box<[OplineIdx]>`, the entry, the loop headers and the returns of the op array, immutable, produced by the compiler at the same time as the line tables: the entry is the opline after the `RECV*` prologue and is number zero, a loop header is a backward jump target, a return is a `RETURN*`. The compiler numbers headers, not back-edges, so a `foreach` with a `continue` has two backward jumps carrying one header's number and php's one counter per header is kept. For the opcodes that are sites, a field php leaves unused for that opcode carries the safepoint's number: `result` on the backward jumps and the `RETURN*` family, per `ops.toml` (§5.7). `Unit::dump` prints operands by the opcode's kinds and an unused field is not printed, so `compile-identity` (§6.1) compares the field as zero and identity is unchanged. This is ADR-0001's rule applied: the fact belongs below both the compiler that produces it and the engine that allocates a word for it.
+
+The constant-expression tree is Zend's `zend_ast` for constant expressions: literals, named constants, class constants, enum cases, operators, array literals, `new`, and, for 8.5, closures and first-class callables by an index into the owning unit's function table. `php_engine` evaluates it with the same kernels the interpreter uses; Reflection reads the unevaluated form.
+
+### 4.8 `php_proto`
+
+The FastCGI record codec (`M/crates/mahout_sapi_fcgi/src/fcgi.rs`, 335 lines, verbatim), the dev server's HTTP/1.x framing with its caps, chunked scan, percent-decoding, path normalisation, mime and status tables and RFC-1123 dates (≈ 2.9k lines of `server.rs`, verbatim), and CGI environment parsing into plain fields. It produces bytes and plain structs; `php_sapi` turns those into a request description. The dev server's accept loop blocks on `accept`, since the worker runs a request per thread.
+
+### 4.9 `php_syntax`: the tree
+
+**Typed nodes, built once** (ADR-0003). The generator emits one struct per node kind in `php.ungram` with named child fields, and the tree builder resolves those fields from the parser's event stream at build time. An accessor is a field read. Required markers (`!` only where construction anchors on the child) become non-`Option` fields; everything else is `Option`. This is `zend_ast`'s positional-children shape, which is what a compiler after `zend_compile.c` walks. Nodes live in one arena owned by `Parsed`, addressed by index, in safe Rust; the crate stays `#![forbid(unsafe_code)]`.
+
+**No parent links.** The compiler passes scope downward. Mahout's 93 upward walks were validate's (91), and validate is gone (§6.1). A construct that seems to need its parent is a construct whose compiler scope is missing a fact, and that is where it is fixed.
+
+**Trivia stays in the token stream.** The tree references significant tokens only. The token stream is lossless (whitespace, comments, `HEREDOC_INDENT`, `HALT_DATA`), and it is the interface `token_get_all`, `highlight_string` and `__COMPILER_HALT_OFFSET__` consume; the builder records which comment block is a declaration's doc comment as a token index on the declaration node.
+
+**No interning.** Mahout's `NodeCache` served reparse and salsa; neither consumer exists. Mahout's parse-throughput figure (≥ 25 MB/s) is a regression bar in `xtask bench` so the change is measured rather than assumed.
+
+**What survives unchanged.** The lexer's mode machine, heredoc dedent into trivia, structured interpolation runs, and `__halt_compiler` handling; the event-driven parser and its ≈ 30-method driver; the grammar; the 80 hand-pinned `expecting` clauses and `php_token_name`; the dump format (`KIND@start..end "text"`), so the 549 inherited snapshot tests survive with their trivia lines removed in one regeneration; the parser's own recursion cap.
+
+### 4.10 Extension crates
+
+**Layout.** `ext/<name>/Cargo.toml`, `src/lib.rs` exporting `extension()`, `src/ffi/` only where a `-sys` crate is bound, `tests/` for `Capture`-driven integration tests. Witnesses are in rustdoc as everywhere else. Stubs are not copied: `xtask crosscheck` reads `php-src/ext/<name>/*.stub.php` at the oracle's pinned tag.
+
+**Cross-extension edges.** An extension may depend on another when its php-src counterpart includes that extension's headers: the pdo drivers on `pdo`, `standard` on `random` for `shuffle`, `array_rand`, `str_shuffle` and `uniqid`. What an extension exports to dependents is a deliberate `pub` surface, kept to the driver trait for `pdo` and the RNG handle for `random`; `api-check` prints anything beyond `extension()`.
+
+**No shared helper crate under `ext/`.** A function two extensions need is engine policy, and enters `api` (the `open_basedir` check, path absolutisation, the filesystem-access guard Mahout's `check_fs_access` performed at 27 sites), or belongs to the extension that owns it in php-src, which exports it. A `php_ext_common` is the grab-bag this rule exists to prevent.
+
+**State.** An extension declares its state on its `Extension` value and reaches it through the request (§4.4). Request state is one type per extension, built at request start and dropped at request end, in bundle order and its reverse. Engine state is one type per extension, built in `Engine::new` and immutable thereafter. Anything an extension wants to keep between requests and change is a `Cache` inside its engine state, and the engine bounds it. Both state types are private to their crate. No `thread_local!`, no `static` holding a lock, no `Mutex` anywhere under `ext/`; the generated `ext/clippy.toml` and `api-check` deny them. **Persistent resources are not state.** A pdo or mysqli persistent connection lives in php's `EG(persistent_list)`, which under ZTS is per thread and therefore never shared; a `Sync` engine needs a checkout pool for them, a separate decision for whenever persistent connections are scheduled.
+
+**Order.** The bundle lists extensions in module-startup order; the linker orders classes from their declarations, so the list order matters for lifecycle hooks only. `api-check` verifies the list is a topological order of the manifest edges.
+
+**Features.** Enable and disable live on `php_bundle` only, one feature per non-default extension, default features matching php-src's default `./configure` set as far as ported. An extension crate has no enable feature of its own; it may have a feature for a library choice (`libmbfl` behind a feature on `mbstring`).
+
+**Tests.** An extension's tests build `Engine::builder().extensions(&[php_ext_<name>::extension(), ...its dependencies])` with the `Capture` sink (ADR-0002) and never dev-depend on `php_bundle`. An engine with no extensions serves a script that uses Zend alone; this is a witness in `php_engine`. Witnesses in one extension that call another's functions make that crate a dev-dependency.
+
+---
+
+## 5. Execution model
+
+This section is the design of `php_heap` and `php_engine`. Where a structure is named after its Zend counterpart the intent is a faithful port of the algorithm, with Rust's types enforcing the invariants Zend documents in comments.
+
+### 5.1 Values
+
+```
+Zval          16 bytes   #[repr(C)]
+  value       u64        i64 | f64 | *Refcounted | (u32 lval, u32 extra)
+  type        u8         IS_UNDEF=0 NULL TRUE FALSE LONG DOUBLE STRING ARRAY OBJECT RESOURCE REFERENCE
+  type_flags  u8         IS_TYPE_REFCOUNTED | IS_TYPE_COLLECTABLE
+  _pad        u16
+  u2          u32        opline-specific: next opline, cache slot, fe pos, constant flags
+```
+
+Zend's type numbering is kept so `IS_UNDEF` is the all-zero value, `IS_TRUE`/`IS_FALSE` are separate tags, and refcounted-ness is a flag test rather than a type-range check. NaN-boxing is not attempted: PHP integers are 64-bit, a 51-bit payload spills every large integer, which is what Mahout measured (ADR-0019/0022: dense 0.904, spill 1.594, +77% wall). Zend's zval is 16 bytes and reaches the target numbers.
+
+```
+Refcounted    8 bytes    { rc: Cell<u32>, info: Cell<u32> }
+  info        type u8 | flags (NOT_COLLECTABLE, PROTECTED, IMMUTABLE, PERSISTENT) | gc colour + root-buffer index
+```
+
+`IMMUTABLE` values skip refcount traffic entirely. Interned strings, constant arrays in op arrays and immutable linked classes carry it. This is what makes sharing across threads sound: no shared value is ever refcounted.
+
+**Ownership, decided.** `Zval` is `Copy` and has no `Drop`. Copying a zval is a bitwise copy of 16 bytes and does not touch a refcount, exactly as `ZVAL_COPY_VALUE` does; `heap.addref(z)` and `heap.release(z, hooks)` are explicit. Consequences: no drop glue can run a destructor (R46 cannot occur); a function that never receives `&mut dyn HeapHooks` provably never runs user code; frame slots are plain cells and handlers never hold two `&mut` into one frame. The cost is discipline against leaks, and it is paid by the instrument, not by callers: the native ABI owns arguments and return values, so a native releases only what it creates and drops; a debug-build leak gate runs at the end of every request in tests; the allocator frees everything at request end regardless.
+
+### 5.2 Strings
+
+`{ Refcounted, hash: Cell<u64>, len: usize, bytes: [u8] }` in one allocation. Bytes, not UTF-8. Hash cached lazily (`hash == 0` means unset, Zend's convention with the top bit forced). `IS_STR_INTERNED`, `IS_STR_PERSISTENT`, `IS_STR_VALID_UTF8` flags. Interning: a process-wide frozen table of known strings (every builtin function, class, method, property, constant and ini name, plus Zend's `known_strings`) built once at startup; compile-time literals interned into the persistent table when a unit enters the shared cache; a per-request table otherwise. Numeric-string classification (`is_numeric_string_ex`) ported exactly, including the leading/trailing whitespace rules of 8.0+.
+
+### 5.3 Arrays
+
+A port of `zend_hash`, because everything about it is observable: insertion order, `nNextFreeElement` (with the 8.3 negative-key rule), internal pointer semantics under `current`/`next`/`reset`, packed-to-hash conversion points, the rehash that compacts tombstones and moves the internal pointer, and `count()` after `unset`.
+
+```
+HashTable  56 bytes      { Refcounted, flags: u32, table_mask: u32, data: *ArData,
+                           num_used: u32, num_elements: u32, table_size: u32,
+                           internal_pointer: u32, next_free_element: i64, dtor }
+Packed:    data = [Zval; table_size]                                  16 B / element
+Hash:      data = [u32 hash slots; -table_mask] ++ [Bucket; table_size]   Bucket = { Zval, h: u64, key: *Str } = 32 B
+```
+
+Sizes follow Zend (min 8, doubling, `HT_MAX_SIZE`), so `memory_get_usage()` deltas match to the byte for array-heavy tests. Copy-on-write and separation follow `SEPARATE_ARRAY`; `RC` of 1 means unique. References inside arrays are supported exactly as Zend does, including the `IS_ARRAY_IMMUTABLE` duplication rules.
+
+### 5.4 Objects and properties
+
+```
+Object     { Refcounted, handle: u32, ce: &Class, handlers: &'static dyn ObjectHandlers,
+             properties: *HashTable (lazy), native: NativeSlot,
+             properties_table: [Zval; ce.default_properties_count] }
+```
+
+Declared properties live in inline slots at class-determined offsets. Dynamic properties, `get_object_vars`, `foreach` over an object and `(array)` casts materialise the `properties` table with `IS_INDIRECT` entries pointing at the slots. Typed properties, readonly, asymmetric visibility, hooks, lazy objects (ghost and proxy with the 8.4 initialisation triggers), `__get`/`__set` recursion guards, and `WeakMap` keys all attach to this one representation.
+
+**Behaviour is a seam.** Every object carries Zend's 25-slot handler table in 8.5 order (`free_obj`, `dtor_obj`, `clone_obj`, `clone_obj_with`, `read_property`, `write_property`, `read_dimension`, `write_dimension`, `get_property_ptr_ptr`, `has_property`, `unset_property`, `has_dimension`, `unset_dimension`, `get_properties`, `get_method`, `get_constructor`, `get_class_name`, `cast_object`, `count_elements`, `get_debug_info`, `get_closure`, `get_gc`, `do_operation`, `compare`, `get_properties_for`). `Std` implements all of them with the user-class semantics; an internal class overrides the slots it needs and inherits the rest. The kernels call the table; the handlers call the kernels; nothing else knows how an `ArrayObject` indexes.
+
+**An internal class's native payload is one typed slot on the object header, and its tracing is derived, not written.** `php_heap` owns the slot, derives the GC visit and the release from the payload's field types, and exposes the payload to the class's methods as `&Self`/`&mut Self` through the receiver. `get_gc` and `free_obj` are the derived implementations unless a class overrides them, and an override is audited like `unsafe`-adjacent code. No extension body downcasts through `Any` to reach its own state.
+
+Property and method resolution at a call site goes through a **per-opline run-time cache** (a pair of machine words per cache slot, indexed by the opline's `u2`): monomorphic `(class ptr, slot offset)` for fetches, `(class ptr, method ptr)` for calls, `(class ptr, const ptr)` for class constants. On miss, the kernel does the full lookup and refills. The cache is per request through a map pointer (§5.14), so units stay immutable. The object store is a handle table with a free list, which gives `spl_object_id`, weak references, `WeakMap`, and GC enumeration.
+
+### 5.5 References, resources, closures
+
+`Reference { Refcounted, val: Zval, sources: Option<Box<PropSources>> }` with Zend's typed-property reference sources so `$r = &$obj->typedProp; $r = "x";` throws exactly where php throws. Resources are `{ Refcounted, handle: u32, type: ResourceType, ptr }` with a per-type destructor. Closures are objects of the internal `Closure` class with `{ func, this, called_scope, static vars }`; first-class callables, `Closure::fromCallable`, `bind`/`bindTo`/`call`, `getCurrent()` (8.5) and the six 8.5 binding deprecations are properties of that one struct.
+
+### 5.6 Frames and the VM stack
+
+A contiguous stack of 16-byte slots in 256 KiB pages, grown by page and never moved while a frame lives on it. A call frame is a header followed immediately by its slots, laid out `[CVs][TMP/VAR][extra args]`:
+
+```
+Frame header  { func: FuncRef, opline: *const Opline, this: Zval, prev: *Frame,
+                return_value: *Zval, num_args: u32, call_info: u32,
+                symbol_table: Option<*HashTable>, run_time_cache: MapPtr<[Cache]> }
+```
+
+Arguments are written by the caller directly into the callee's CV slots (`INIT_FCALL` reserves the frame, `SEND_*` fill it, `DO_FCALL` activates it), so no argument vector is allocated for any call. PHP→PHP calls do not recurse on the Rust stack: the loop switches `frame` and continues. Native→PHP re-entry (`__toString`, `usort` callbacks, destructors, autoloaders) recurses via `execute(frame)` on the Rust stack; a stack-limit check (`zend.max_allowed_stack_size` semantics from 8.3) turns a deep recursion into the php-identical `Error` rather than a Rust stack overflow. `$GLOBALS`, `compact`/`extract`, `get_defined_vars`, `include` inside functions and `eval` attach a symbol table to the frame on demand, with CVs exposed through `IS_INDIRECT`.
+
+**In `php_heap`.** A frame is raw memory with an invariant ("never moves while live"), which is `unsafe` territory. `php_heap::VmStack` owns the pages and exposes `Frame` with typed, bounds-checked slot cells: `frame.slot(Slot) -> Zval`, `frame.set(Slot, Zval)`, `frame.slot_ptr(Slot) -> ZvalRef` for `VAR`/`IS_INDIRECT` cases, plus `push_frame(func, num_args)`, `pop_frame`, `move_to_heap` (generators). The run-time cache and the map-pointer table are also `php_heap` storage. `php_engine` stays `#![forbid(unsafe_code)]`.
+
+**The entry slot.** `VmStack` has three `heap.lock` items for the tier: `entry() -> FrameRef`, the entry frame of the innermost `execute` on this stack; `push_entry(f) -> EntryGuard`, pushed by `execute` on entry, popped by the guard's drop so that an `Err(Bailout)` pops too, because shutdown functions and destructors run `execute` again after a bailout; and `current() -> FrameRef`, the frame the loop is executing. The frame header gains no bit: "this is the entry frame of an `execute`" is a fact about the stack and not about the frame. A generator resumed by a nested `execute` is a heap frame; the slot holds its `FrameRef`, which the running resume keeps alive. The slot is per fiber because the stack is (§5.11).
+
+**Activation.** The `DO_UCALL` and `DO_FCALL*` handlers activate a user frame and so does `execute` for its own entry frame: push, position `frame.opline` as php's `i_init_func_execute_data` does, skipping the `RECV` oplines of passed arguments when the function has no typed parameters (the rule is copied; unverified here), run the remaining `RECV*` handlers in a loop bounded by `OpArray.safepoints[0]`, then, if none raised, perform the interrupt check (§5.8) and call `T::safepoint(req, callee, Site::Entry)`, and continue at the first body opline. If a `RECV*` raised, the exception is pending and `Entry` is not raised, as php's counter on the first body opline never runs when `RECV` throws. A generator frame is activated the same way before `GENERATOR_CREATE` moves it and is not activated again on resume. The comparison per prologue opline is paid once per call and never per body opline; a function with no parameters has an empty prologue and one compare.
+
+### 5.7 Op arrays and the op spec
+
+```
+Opline   24 bytes   { opcode: u16, op1_type: u8, op2_type: u8, op1: u32, op2: u32, result: u32, extended_value: u32, lineno: u32 }
+Operand kinds        CONST (literal index) | TMP | VAR | CV (slot index) | UNUSED
+OpArray             { oplines: Box<[Opline]>, literals: Box<[Zval]> (immutable), vars: Box<[&Str]>,
+                      num_cvs, num_tmps, try_catch: Box<[TryCatch]>, live_ranges: Box<[LiveRange]>,
+                      safepoints: Box<[OplineIdx]>,
+                      static_vars, arg_info, attributes, doc_comment, filename, line_start/end, cache_size }
+```
+
+**The instruction set is php's, exactly, as `zend_compile.c` emits it.** Before the optimizer there are no JIT-only opcodes: `Z/Zend/zend_vm_def.h` has 207 handlers and 25 helpers, and every opcode the compiler emits is in the pre-optimiser dump (§6.1). Opcodes only the optimizer introduces are also implemented so that a month-two optimizer needs no new handlers. The set is written once in `ops.toml`: name, operand kinds accepted, result kind, **effects** (`throw`, `alloc`, `call`, `write_globals`), specialisation list, **`safepoint`**, and a doc block. The `safepoint` column names per opcode the field that carries the safepoint number: the backward jumps `zend_compile.c` emits, `JMP`, `JMPNZ` and `JMPZ` (`zend_emit_cond_jump` inverts the branch when the condition is a `BOOL_NOT`, so `do { } while (!$x)` jumps back on `JMPZ`; unverified against `zend_compile.c`), and `RETURN`, `RETURN_BY_REF`, `GENERATOR_RETURN`, all of which declare no result (unverified against `zend_vm_def.h`; `RETURN_BY_REF` uses `extended_value`, which is why `result` is the field). `JMPZ_EX`, `JMPNZ_EX`, `JMP_NULL`, `FE_FETCH_*`, `SWITCH_*` and `MATCH` jump forward and are not sites. The generated dispatch passes the field's value on `Site` from the handler that has it. That a site opcode leaves `result` unused is a build error, not a runtime one, if wrong; that every backward jump has a column and a numbered header is the compiler's assertion (§6.1).
+
+`ops.toml` is consumed four times (the opcode enum, operand kinds, effects, `may_throw`, `safepoint` and the disassembler generated in `php_unit`'s `build.rs`; the dispatch `match` generated in `php_engine`'s `build.rs` over `php_unit::Opcode`; the compiler's emission; xtask's disassembly) and is therefore locked as `ops.lock`. One enum, so the compiler, the dump and the dispatch cannot disagree on a number.
+
+### 5.8 Dispatch
+
+A `loop { match opcode }` over the dense `u16` with handlers as `#[inline(always)]` functions. Per-op overhead is limited to: fetch opline, switch. There is **no** per-op pending check (only after ops whose spec says `throw`, generated), **no** per-op safepoint, **no** profiling counter, **no** destructor-queue check.
+
+**Bodies written once, monomorphised over operand kinds.** For the hot opcodes (`ASSIGN`, `ADD`, `SUB`, `MUL`, `IS_SMALLER`, `IS_EQUAL`, `IS_IDENTICAL`, `JMPZ`, `JMPNZ`, `FETCH_DIM_R/W`, `ASSIGN_DIM`, `FETCH_OBJ_R/W`, `ASSIGN_OBJ`, `SEND_VAR`, `SEND_VAL`, `INIT_FCALL`, `DO_UCALL`, `DO_ICALL`, `RETURN`, `PRE_INC`, `CONCAT`, `FAST_CONCAT`, `ROPE_*`, `FE_FETCH_R`, `COUNT`, `ISSET_ISEMPTY_DIM_OBJ`) `build.rs` reads the specialisation list and emits `match` arms `ADD_CV_CONST => add::<Cv, Const>(..)`, and so on:
+
+```rust
+#[inline(always)]
+fn add<A: Operand, B: Operand>(cx: &mut Request, f: &Frame, op: &Opline) -> Next {
+    let a = A::read(f, op.op1);            // static offset for CV/TMP/VAR, literal for CONST
+    let b = B::read(f, op.op2);
+    if let (Some(x), Some(y)) = (a.as_long(), b.as_long()) { /* inline fast path */ }
+    else if let (Some(x), Some(y)) = (a.as_double(), b.as_double()) { /* inline */ }
+    else { return ops::add_slow(cx, f, op, a, b) }  // cold kernel, may throw
+    ...
+}
+```
+
+A body that disagrees with the spec is a compile error. This is `zend_vm_gen.php` done by the Rust compiler; ≈ 30 hot opcodes × ≤ 16 operand pairs plus ≈ 180 unspecialised handlers is ≈ 650 arms. Whether `#[inline(always)]` and the dense `match` reach a jump table is measured under the protocol, not assumed.
+
+**The handler contains no semantics.** A handler does operand addressing, the inline `(LONG, LONG)`/`(DOUBLE, DOUBLE)` fast path that Zend's `fast_add_function` also inlines, and a call to a kernel in `php_engine::ops`. The kernel is the unit that carries a witness (§8). Because the same kernel is what `api` exposes to natives and what the tier's `kernels!` list wraps, one semantic lives in one function and every caller gets it; no `*Step` protocol exists between them.
+
+**`SMART_BRANCH` is a handler property, not a compiler one.** php's pre-optimiser dump for `if ($v < 2) continue;` is `IS_SMALLER` followed by a separate `JMPZ` (`data/r2-php-oparray-dump.txt`, oplines 0014–0015); the fusion happens inside the comparison handler, which peeks at the next opline. Putting it in the compiler would break op-array identity. **A fused handler is one handler over two oplines**, and that is the rule everywhere the loop is observed: `step` runs it as one step and reports `Same` at the opline after both; a backward fused branch raises `Site::Loop` from the fused handler, which reads the number from the branch opline's field; the tier's recorder records one event with the direction taken; and the tier's exit for a mispredicted fused branch lands on the branch opline with the comparison's result written as a constant (`jit-design.md` §4.1, §4.2).
+
+**`execute` is `execute::<T: Tier>`**, instantiated twice in a `jit` build and once without, and its loop body returns the edge it took so that `step` can hand it out. The interpreter's own adapter, `Nop`, makes the safepoint a folded branch. The safepoints are in the backward `JMP*` handlers after operand reads and before the jump, in `RETURN*` after operand reads and before the pop, and in the activation of a frame (§5.6). `Site::Return` is never raised for the entry frame of an `execute`, which the handler knows from the stack's entry slot.
+
+**The interrupt.** `Request::interrupt` is one `AtomicBool`, set by the engine's execution timer when `max_execution_time` elapses and by `pcntl`'s asynchronous signal delivery, and by nothing else; setting it is all either does. The loop tests it at a back-edge `JMP*`, at frame activation, and after every `Flow::Resume`, which is `ZEND_VM_INTERRUPT_CHECK` at `ZEND_VM_ENTER_EX`; when set, the interrupt helper clears it and either raises the timeout fatal as a `Bailout` with php's text or dispatches the pending signals to their PHP handlers, which is `zend_interrupt_function`. Compiled code tests the same flag once per loop iteration through the tier's `ExitCtx` and exits when it is set (`jit-design.md` §4.3), so a compiled loop is stopped one iteration after an interpreted one would have been. The flag is a `tier.lock` item.
+
+Tail-call dispatch: Rust's explicit tail calls (`become`) are nightly-only and not accepted as an RFC. The `match` loop is the shipped form; a `cfg(dispatch = "tailcall")` variant may be measured on nightly under the protocol, and nothing here assumes it is faster.
+
+### 5.9 Errors, exceptions, fatals, exit
+
+Three distinct mechanisms, as in Zend. **Exceptions** are pending state (`EG(exception)`). An op with the `throw` effect is followed by a generated check that jumps to the `HANDLE_EXCEPTION` handler, which walks the op array's try/catch table, runs `finally` blocks through `FAST_CALL`/`FAST_RET`, unwinds frames, and re-raises across native re-entry boundaries by returning to the nested `execute` caller. **Fatals and `exit`** are `Bailout`, an `Err` carried by `execute() -> Result<(), Bailout>` and propagated with `?` only through the nested-execute recursion; `zend_bailout` without `longjmp`. Uncaught exceptions convert to a fatal at the request boundary with php's exact `Fatal error: Uncaught …` / `Stack trace:` rendering, including 8.5's `fatal_error_backtraces`. **Warnings, notices, deprecations** go through one `php_error_docref`-shaped function: level, message id, formatted text, file, line, then `error_reporting`, `@` scopes, `display_errors`, `log_errors`, `html_errors`, and user handlers. Message text is a table indexed by id, the 85 php-exact wordings from Mahout as data and the rest from php-src. Two witnesses per message, minimum.
+
+### 5.10 Destructors, shutdown
+
+`zval_ptr_dtor` semantics: when a refcount reaches zero the destructor runs **synchronously**, on the spot, by nested `execute`. Object destruction during GC follows `zend_gc`'s ordering. Shutdown order is `php_request_shutdown`'s: shutdown functions, `__destruct` on globals in symbol-table order then objects-store order, output flushed, output handlers finalised, `ob` stack, extensions' `rshutdown` in reverse bundle order. Mahout's twenty registered dtor/GC-order divergences are the argument for doing this the way Zend does rather than with a queue.
+
+**How the heap runs a destructor without knowing the VM.** `php_heap` depends on nothing, yet a refcount reaching zero inside a hash-table clear must run `__destruct`. Every heap operation that can free an object or resource takes `hooks: &mut dyn HeapHooks` (seam 1); `Request` implements it by calling `execute` for `destruct`, dispatching `free_obj`/`get_gc` to the object's handler table, and returning a `Bailout` for `out_of_memory`. Heap operations that cannot free anything do not take the parameter, so the signature says which operations may re-enter. Under Miri the heap's tests pass a `Recorder` adapter that logs `(handle, event)` instead of running anything, which is how the ordering rules of `zend_gc` are tested without a VM.
+
+### 5.11 Generators and fibers
+
+Generators are heap frames: on first `yield`, the frame's header and slots move from the VM stack into a `Box<[Zval]>` owned by the `Generator` object through `VmStack::move_to_heap`; resumption pushes a delegating frame. `yield from`, keys, `send`, `throw`, `getReturn`, `finally` on destruction, and generator-in-generator delegation trees follow `zend_generators.c`.
+
+Fibers are coroutines: each `Fiber` owns a `corosensei` stack sized by `fiber.stack_size` and its own VM stack pages; `Fiber::start`/`resume`/`suspend` switch both. The whole nested execution (including native frames) lives on the fiber's stack, which is the model Zend uses. Because fibers own their VM stack pages, the entry slot of §5.6 switches with the stack on a fiber switch, and no save-and-restore of "the entry frame" is written anywhere: two fibers are two `execute` nestings and two slots. The same holds for compiled code: a trace's machine frame that is suspended inside a kernel waits on its fiber's stack, and the crossing's invariant is stated per fiber stack (`jit-design.md` §4.6). Unwinding a fiber on destruction throws `FiberError`/`GracefulExit` through its frames exactly as php does. GC walks suspended fibers' and generators' frames as roots.
+
+### 5.12 Cycle collection
+
+A port of `zend_gc.c`: purple root buffer, `gc_possible_root` called at precisely the sites Zend calls it, threshold 10,000 with Zend's adaptive growth and shrink rules, mark-grey/scan/scan-black/collect-white, destructor phase with resurrection detection, `gc_status()` fields including `runs`, `collected`, `threshold`, `buffer_size`, `application_time`/`collector_time`, and the 8.5 change to `gc_collect_cycles()`'s return value. `gc_children` and the destructor phase go through `HeapHooks`. Mahout's R169–R174 and R191–R195 were root-buffer population differences; they are avoided only by placing the calls where Zend places them.
+
+### 5.13 Allocator and memory accounting
+
+`php_heap::mm` is a `zend_alloc` port: 2 MiB chunks, 4 KiB pages, the 30 small-size bins, large runs, huge allocations via `mmap`, per-request ownership, mass release at request end. All PHP-visible heap objects allocate through it. `memory_get_usage(false)` is the bin accounting; `memory_get_usage(true)` is chunk count × 2 MiB; `memory_limit` is enforced on chunk growth with php's exact message. **The allocator is the only accountant**: a string, array, object or frame cannot exist without passing through `mm`, and no `api` item lets a native tell the engine about memory. The compiler's temporaries and the syntax tree on the system allocator remain the one recorded approximation; the tier's compile allocations, on the compile worker, do not count against the recording request's `memory_limit`, as php's JIT buffer does not (unverified).
+
+### 5.14 Request lifecycle, threads, and map pointers
+
+`Engine` (process-wide, `Sync`): interned string table, unit cache of `Published` values, linked immutable classes, ini defaults, every extension's engine state, the tier's engine state. `Request` (`Send`, not `Sync`): allocator, object store, globals, constants, ini overrides, output buffers, error state, the interrupt flag, per-request caches, every extension's request state, `rinit`/`rshutdown`.
+
+**Threads.** A host runs each request to completion on one thread over one `Engine`. Whether the host spawns a thread per request or keeps a bounded pool is the host's choice and is invisible to the engine, because no engine or extension state is thread-local: state that outlives a request lives in the engine (§4.4), state that does not lives in the request, and the request leak gate is what a pooled thread would otherwise have leaked into. This is opcache's memory model applied to threads instead of processes; ADR-0005's argument stands on the absence of thread-local state, not on the absence of a pool. `catch_unwind` at the request boundary converts any panic into a request failure with a logged internal error and a clean `Request` drop; the thread and process survive. **One engine-owned thread that is not a request:** under `jit.compile=thread`, the default, the tier's engine state owns one compile worker per `Engine` that runs the pipeline from a trace record to a published trace; recording stays on the request thread that holds the frame, and everything after the record is pure over owned values. `jit.compile=inline` runs the pipeline on the request that won the claim, which `jit.mode=force` and `exit-fuzz` imply, so every per-commit test is deterministic. The worker touches no request, no frame and no map pointer.
+
+**Serve.** The lifecycle is one function: take a request description and a sink, compile or fetch the unit, seed superglobals and GPC from the description, run, commit headers at the first body byte or at shutdown, run shutdown functions and destructors in `php_request_shutdown` order, finalise output handlers, report observables (exit code, whether headers were sent, the rendered fatal if any). No host contains any of these steps. Stdin is a stream on the description and is read only when the script reads it. The embed API is `Engine::serve` and nothing else.
+
+**Map pointers.** An immutable, shared class still has per-request mutable state: static properties, class constants and property defaults with constant expressions evaluated lazily, each op array's run-time cache and `static` variables, and each extension's request state. Zend solves all of them with one mechanism, `ZEND_MAP_PTR`. Here `MapPtr<T>` is a newtype over an offset assigned by `Engine` when a unit, class or extension is published; `Request` owns a `MapTable` (in `php_heap`) and `req.map(ptr) -> &mut T` allocates on first touch. A shared structure holds `MapPtr<T>` and never `T`, which is what makes it `Sync` by construction rather than by review. Compiled code reaches per-request state as `map_base + const` after the tier's crossing has touched every map pointer the trace names, in safe Rust, on first entry per request.
+
+**Published, and the word.** The unit cache stores `Published`: the immutable `Arc<Unit>` beside the engine's `Func` for each of its op arrays, their safepoint words, and the map-pointer offsets assigned at publication. `Func`, and so the words, live in `Published` and not in the unit (ADR-0001). A `Word` is one opaque value per safepoint, two `AtomicU32` halves behind one accessor, all zero at publication; `php_engine` knows this much and no more, and `Nop` never reads one. A request-scoped op array, from `eval`, an uncached include or a closure declared in one, has a `Func` in request memory whose `published()` is `None` and whose words are **sealed**, all ones, the one bit pattern `php_engine` knows: the tier reads a sealed word as never compilable and never claims on it, so no path on the tier's side reaches for a `Published` that does not exist. There is no per-request feedback word; heat, compiled state and blacklist are the engine-level word, and type feedback is the trace record (ADR-0006). The per-request alternative is written down in `jit-design.md` §3.3 with F.3 as its criterion.
+
+---
+
+## 6. Compilation and the unit cache
+
+### 6.1 Compiler, and its oracle
+
+One pass over the typed tree, structured after `zend_compile.c`: the same evaluation-order decisions, the same temporaries, the same `ROPE` compilation of interpolated strings, the same `FAST_CALL`/`FAST_RET` layout for `finally`, the same delayed early binding. Constant expression evaluation handles 8.5's closures, first-class callables and casts in constant expressions.
+
+**Op-array identity is a measured claim.** php prints its own op arrays before the optimizer runs:
+
+```
+php -n -d opcache.enable_cli=1 -d opcache.file_cache_only=1 -d opcache.file_cache=<dir> \
+    -d opcache.opt_debug_level=0x10000 file.php
+```
+
+The output (`data/r2-php-oparray-dump.txt`) is one block per op array: opline number, result operand, opcode, operands with kinds and literal values, jump targets, and the live-range table. `Unit::dump()` prints the same format, and `xtask compile-identity` diffs the two over a corpus through `oracle::compare`. **Gate: byte-identical on every file of `Zend/tests`, `tests/` and `sapi/cli` per commit (≈ 6.5k files), and on the top-1000 Packagist corpus nightly (172k files).** Any deliberate difference is a row of kind `compile` in the divergence registry; the target is zero. What this buys: evaluation-order and temporary-lifetime bugs of the R127 kind are visible in the live-range table before a single opline executes; the `SMART_BRANCH` question of §5.8 was settled by the dump; and the compiler lane can reach green independently of the VM lane, on day 3, against an oracle.
+
+**Compile-time errors live in the compiler.** Each of Mahout's validate checks is a guard at the compiler function that owns the construct (`compile_class_decl`, `compile_func_decl`, `compile_params`, `compile_break_continue`, and so on), fed by the compiler's scope instead of ancestor climbs. Each guard emits what `zend_error_noreturn` takes: an error kind, php's exact text, a byte offset. php reports the first fatal it *reaches* in compile order, which is not always source order; a compiler that checks at the site reproduces that by construction. The seven lexical fatals (`(real)` and `(unset)` casts, `$s{0}`, `(void)` placement, nested `const`, octal overflow, and peers) belong to the parser and are emitted there with `E_PARSE`. Mahout's 10,228-line validation fixture file is re-homed as compile-output fixtures. There is no code number on a diagnostic; the engine has one voice.
+
+**Safepoints.** The compiler emits `OpArray.safepoints` and writes each site's number into the field `ops.toml` names (§4.7, §5.7). Identity against php's dump is unchanged, because the dump prints no unused field. **The compiler asserts, on every op array it emits, that every backward jump's opcode has a `safepoint` column and that its target is a numbered header**; the assertion fails `php_compile`'s own tests and the `compile-identity` corpus sweep, so a loop that would silently never compile cannot exist. The gate that the numbers are right is `php_engine`'s: every backward jump and return in a witness carries the number of a word, two back-edges to one header carry one number, and the entry is zero.
+
+Compile speed target: within 2× of php's for the top-1000 corpus, measured; it matters only on cache miss.
+
+### 6.2 Class linking
+
+Per-unit class declarations are extracted at compile time. A class whose parent, interfaces and traits are resolvable within the unit or already linked is bound early into an **immutable linked class** (`Sync`, shared across requests). Otherwise `DECLARE_CLASS_DELAYED` links at run time into request-owned classes. The linker is `zend_inheritance.c` over `php_unit` declarations for user and native classes alike: property and constant inheritance, method compatibility (variance with the 8.5 relaxation of `static` to `self` in final classes and `Closure` as a subtype of `callable`), trait binding **before** parent (8.5 order change), abstract/interface checks, enum backing, hook inheritance, `#[\Override]`, `#[\Deprecated]` and `#[\ReturnTypeWillChange]` validation, delayed variance obligations.
+
+**Method compatibility has php's third outcome.** The check returns error, success or *warning*; warning is what an incompatible or missing child return against a tentative parent return produces (`Z/Zend/zend_inheritance.c:872-891`). A warning is rendered as `E_DEPRECATED` at the child's declaration site with php's text, "Return type of %s should either be compatible with %s, or the #[\ReturnTypeWillChange] attribute should be used to temporarily suppress the notice", unless the child carries `#[\ReturnTypeWillChange]`, in which case nothing is raised. A parameter mismatch against a tentative parent is still an error, because the bit is on the return. Delayed variance keeps the three-way outcome, so `Zend/tests/tentative_type_early_binding.phpt` reproduces without a special case. `#[\ReturnTypeWillChange]` targets methods only and has no other effect.
+
+**The linked tables are the only metadata readers see.** Reflection, `var_dump`/`print_r`/`var_export`, `serialize`, attribute instantiation and the stub cross-check read the linked tables and nothing else: no declaration model after link, no fields on the object header, no re-evaluation of defaults from source text. Reflection reads the tentative bit from the linked table: `hasReturnType()` and `getReturnType()` answer for a real return type only; `hasTentativeReturnType()` and `getTentativeReturnType()` for a tentative one; `__toString()` prints "Tentative return" in the return row. Closure and generator introspection is a small accessor set on the engine, read through `api`. Defaults are constant-expression trees evaluated by the engine on request and reported unevaluated to Reflection.
+
+### 6.3 Unit cache and `opcache_*`
+
+The unit cache is an `api::Cache` under another name, keyed by realpath plus `(mtime, size)` with an optional content-hash mode, and the two share their implementation (§4.4). Its value is `Published` (§5.14): op arrays, literals (interned), functions with their words, classes (early-bound where possible), source map, run-time cache size and the map-pointer offsets assigned at publication. Cache hit means zero compile work per request, which is where Mahout lost 64 ms per request against php's 2.4 ms. `opcache_get_status`, `opcache_get_configuration`, `opcache_reset`, `opcache_invalidate`, `opcache_compile_file`, `opcache_is_script_cached`, `opcache.preload` answer from this cache, since 8.5 makes opcache always present. A published trace holds an `Arc<Published>` for every unit it inlined, so an evicted unit lives while a trace or a request holds it and dies with the last (`jit-design.md` §4.5). An on-disk serialised form (`opcache.file_cache` equivalent) is month two.
+
+---
+
+## 7. Extensions
+
+### 7.1 The ABI
+
+A native function is a Rust `fn` with `FromArgument` parameters and an `IntoReturn` return; arity, by-reference markers, defaults, nullability and the reflected parameter types are derived from the signature; coercion runs through the engine's own kernels and honours the caller file's `strict_types`. The macro emits a builder for the native's `php_unit` declaration (§4.7) and an entry function that takes `php_engine`'s concrete `Request` (ADR-0002), not a trait object; there is no Plain/Reentrant channel, because re-entry is a parameter (principle 9). The macros expand to `::php_ext::__private::` paths, so `php_macros` is the one crate that could be replaced without touching an extension body, and `php_ext` is the one crate every body names.
+
+An `Extension` is a value: its declarations paired with entries, its constants, its ini entries with defaults and on-modify hooks, its lifecycle functions, and its two state declarations, `request_state::<T: Default>()` and `engine_state(fn(&StartupIni) -> E)`, neither required. Each `ext/<name>` crate exports one `extension()`; `php_bundle::enabled()` collects them behind its features in module-startup order; `Engine::builder().extensions(..)` takes the slice. Nothing in the bundle links, orders classes, or runs a hook. Lifecycle order is the bundle's and its reverse, for construction, `rinit`, `rshutdown` and drop alike; an extension's `rshutdown` runs with every extension's request state still live; `Drop` runs after all `rshutdown` hooks and may touch no engine.
+
+The type vocabulary is wide enough that overrides and raw bodies go toward zero: typed receivers, class-typed parameters, n-ary unions, `object`, `iterable`, defaults of any constant expression, and `#[tentative]` on a method's return. Mahout's 218 signature overrides, 88 bare-`Value` parameters and 142 hand-marshaled natives are the measure of what a narrow vocabulary costs.
+
+**The stub cross-check is new work.** `xtask crosscheck` links `php_bundle` with every feature on, runs each extension's declaration builders against a throwaway interner, and diffs per crate against `php-src/ext/<name>/*.stub.php` at the oracle's pinned tag: arity, by-ref, variadic, defaults, nullability, the types, and the tentative bit in both directions, since the stubs carry `@tentative-return-type` on 1,372 methods in 49 files. A native whose return type is real where the stub says tentative would make the engine fatal where php deprecates; the reverse would make it deprecate where php fatals. Either is a red build. `--ext <name>` runs one.
+
+There is no `dl()` and no C `zend_module_entry` ABI; both predecessors ruled this out and the ruling stands because it would require Zend's internal ABI, not just its behaviour. `ext/ffi` (`libffi`) is month two.
+
+**The tier is not an extension.** It declares its state and ini through `Tier::extension()` so that seam 3 and §4.4 carry them, but `php_bundle` lists it as the tier alias, not in `enabled()`, and `get_loaded_extensions()` does not report it, as php does not report its JIT.
+
+### 7.2 The library rule, applied
+
+| Extension | Month-1 source | Reason |
+|---|---|---|
+| Core, standard, spl, reflection, json, ctype, tokenizer, filter, session, random, hash | Rust: port Mahout's bodies, complete against `*.stub.php`; `random` engines ported from C exactly (seeded sequences are observable); `hash` via RustCrypto | php writes these; so do we |
+| pcre | `pcre2-sys` (libpcre2-8, JIT on), php's compiled-pattern cache as a `Cache` in engine state (4,096 entries) | Behaviour *is* PCRE2's; Mahout's `regex`+`fancy-regex` reached 62% and R121 |
+| date | vendored `timelib` (`php-src/ext/date/lib`, MIT) as `timelib-sys`, bundled tz database | `strtotime`/`DateTime::modify` parsing is only reproducible by timelib; Mahout's `tz-rs` reached 29% |
+| mbstring | vendored `libmbfl` as `libmbfl-sys` behind the `mbstring` feature (LGPL-2.1: the licence is flagged in §12; the alternative is `encoding_rs` with a shorter encoding list) | 79 encodings vs Mahout's 4 (R66) |
+| libxml, dom, xml, simplexml, xmlreader, xmlwriter | `libxml2` bindings | php's DOM is libxml's DOM |
+| `Dom\HTMLDocument` (8.4), `Uri\WhatWg\Url` (8.5) | vendored `lexbor` (Apache-2.0) | php bundles lexbor for exactly these |
+| uri (8.5, `Uri\Rfc3986`) | `uriparser` (BSD) | php bundles uriparser |
+| zlib | `libz-sys` | byte-identical deflate output per level; `miniz_oxide` differs in bytes |
+| sqlite3, pdo_sqlite | `libsqlite3-sys` bundled | Mahout already does this |
+| openssl | `openssl-sys` | TLS and cipher parity |
+| curl | `curl-sys` | |
+| sodium | `libsodium-sys` | |
+| intl | ICU4C bindings, system ICU | `icu4x` is not API-identical to what `ext/intl` exposes |
+| gmp | `gmp-mpfr-sys` | |
+| bcmath | Rust port of php's own C | php writes it |
+| posix, pcntl, sockets, iconv | `libc` | thin |
+| fileinfo, exif, zip, phar, mysqli, pdo_mysql, pdo_pgsql, gd, soap, ldap, imap, ffi | month two (§11) | ordered by Packagist `ext-*` requirement frequency |
+
+A `-sys`-backed extension implements the same `Extension` seam as a pure-Rust one; its `ObjectHandlers` impls (DOM nodes, `DateTime`) are where the C object lifetimes are tied to the handle table. The `-sys` glue lives in `ext/<name>/src/ffi/`, one of the four `unsafe` homes, with the same SAFETY discipline as `php_heap`.
+
+---
+
+## 8. Correctness instrument
+
+There is one executor, so the instrument stands outside it. Each module's interface is its test surface, and where the interface has an oracle in the php binary, the oracle is used. The instruments are `xtask` subcommands that write readings; the harness (`harness-design.md`) says how they are wired.
+
+| Module | Interface | Test adapter | Oracle | Cadence |
+|---|---|---|---|---|
+| `php_syntax` | `parse` | none needed | php token differential and verdict agreement (M0, inherited); parse throughput ≥ 25 MB/s in `bench` | per commit |
+| `php_heap` | value API + `HeapHooks` + `VmStack` | `Recorder` hooks; Miri; libfuzzer on allocator, array, string; nested `execute` from a native, a bailout inside it, a fiber switch between two nestings for the entry slot | `memory_get_usage()` deltas vs php through the engine | per commit |
+| `php_compile` | `compile`, `dump` | text diff; the safepoint invariant asserted on every op array | **php's pre-optimiser op-array dump** | per commit on 6.5k files, nightly on 172k |
+| `php_engine::ops` | kernel functions | **witnesses in rustdoc**: a kernel or native without one fails CI | php's bytes | per commit |
+| `php_engine` linker | linked tables | `xtask phpt --subset tentative`: the 31 phpts that exercise the tentative bit | phpt | per commit |
+| `Tier` in `php_engine` | `execute::<T>`, `EngineBuilder::tier` | `Probe` asserting `(site, number)` sequences on witness scripts: `(Entry, 0)` once per call and never when a `RECV` throws, one `n` for two back-edges to one header, no `Return` for the entry frame | none needed | per commit |
+| `step` in `php_engine` | `step` | a witness single-stepped to completion produces the output of `execute::<Nop>`; one witness per `Stepped` arm; a fused compare-and-branch as one step; `Done` with and without a pending exception | `Capture` output | per commit |
+| the word and the interrupt in `php_engine` | `Func::word`, `Func::published`, `OpArray.safepoints`, `Request::interrupt` | every backward jump and return in a witness carries the number of a word; the entry is zero; an `eval` op array's words are sealed; `set_time_limit(1); for (;;) {}` and a `pcntl` signal delivered into a loop | `compile-identity` unchanged; php's fatal text | per commit |
+| `php_engine` (host face) | `Engine::builder`/`serve` | **`Capture` sink, in-process**: a fresh `Engine` per test gives the isolation a process gave; a panic is caught at the boundary and reported as a failure | phpt expectations | `Zend/tests` + `tests/` + `sapi/cli` per commit (4-minute budget); full 21.5k nightly |
+| `api::Cache` | one method | the unit cache and pcre; two requests on two threads against one `Engine` asserting one build per key; Miri's data-race detection on a `std::thread` test | none | per commit |
+| `ext/<name>` | `extension()`, `ObjectHandlers` | `Capture` with that crate and its dependencies linked plus `php-src/ext/<name>/tests` through the in-process adapter; `crosscheck` against stubs, tentative bit included | phpt, stubs | per commit for default extensions, nightly for the rest |
+| `php_bundle` | the feature list and the order | `api-check` on the order against the crate graph | none | per commit |
+| `php_sapi` | hosts, worker | proxy lanes (nginx and Caddy → FastCGI), process-mode phpt for `sapi/cli` | php-fpm behaviour | nightly |
+| the phpt runner itself | verdicts | upstream `run-tests.php -p <binary>` under the oracle php over the same corpus; a disagreement is a runner bug | the oracle's verdict table | nightly |
+| all seams | lock files | `xtask api-check` | the committed lock | per commit |
+| the compiled tier | `Jit` | `jit-design.md` §7: `force` and `exit-fuzz` on every witness per commit and on `Zend/tests` and `tests/` nightly; G1 per commit from the day `php_engine::tier` exists | the oracle with `opcache.jit=tracing` and `off` | per commit; run of record for the flip |
+
+**Witnesses in rustdoc.** Every kernel function and every native carries at least one block: a `php` fence followed by an `expect` fence, with two attributes on the `expect` fence and one optional third fence:
+
+```rust
+/// ```php
+/// set_time_limit(1); for (;;) {} ?>never reached
+/// ```
+/// ```expect exit=255 wall=1s
+/// Fatal error: Maximum execution time of 1 second exceeded in witness.php on line 2
+/// ```
+```
+
+`xtask witness` extracts them, runs the pinned oracle and the engine, and compares stdout, stderr and exit code byte for byte through `oracle::compare`. `exit=N` is a pin; absent means zero is asserted; bare `exit` is the opt-in that fails the run until `--accept` rewrites the fence line with the oracle's number, so the status is a function of snippet and oracle, captured and never authored. `wall=D` is disclosure and gates nothing; `xtask witness` sums the declared durations into a budget line. A `stderr` fence, when present, is the pinned second stream; absent means empty is asserted. Output lines are bytes; `%s`, `%d`, `%f` and `%a` are the EXPECTF wildcards, translated by the code the phpt runner owns. A witness id is a content hash of the snippet. The snippet runs as `witness.php` with `<?php` on line 1 and the code on line 2, so php's own error text matches; the oracle module owns that recipe. A nightly job re-runs the oracle to detect php patch drift. Coverage rule: a kernel or native without a witness fails CI. This is Dax's instrument kept, without Dax's language, and it is the thing that sees convergence on a wrong answer because the arbiter is not in the tree.
+
+**Oracle.** One module in `xtask`, pinned by `oracle.toml` (version, digest, invocation recipe; the only statement of the pin), exposes "run this program / this SKIPIF / this `-r` snippet under the harness regime" and returns normalised output, and `compare(id, expected, actual) -> Verdict`, which consults the divergence registry. It owns `-n`, the `BASELINE_INI` list (upstream's 39 `$ini_overwrites`), the env, the timeout, the scratch-prefix stripping and the trim set. Witness extraction, phpt skip detection, compile identity, the trace-dump diff, battery capture and differential fuzzing all call it. The stubs the cross-check reads are at the same pinned tag.
+
+**phpt.** The `ScriptExec` seam stays with two adapters: the fresh-process adapter (crash isolation) and the in-process adapter, which is the `Capture` sink under `Engine::serve` on a thread. Outcomes are run-tests.php's set; `--EXTENSIONS--` missing means `Skip` with upstream's reason. The scheduler honours `--CONFLICTS--` (98 corpus files). `--EXPECTREGEX--` is matched by an RE2-semantics engine; one corpus body uses PCRE-only syntax and is a registry row. Both predecessors kept phpt out of CI; with a fast engine it fits in four minutes per commit.
+
+**Differential fuzzing.** The inherited grammar generator produces programs, both engines run them under the oracle recipe, any byte difference is a minimised failing case proposed as an `open` registry row. Nightly, plus libfuzzer targets for lexer, parser, string ops, array ops, allocator, `unserialize`, `sprintf`, `preg` on every push. The battery generators (covering arrays over semantic axes: references and copy-on-write, destructor timing, evaluation order, error ladder) are engine-independent and are taken.
+
+**Unsafe core.** Miri on `php_heap`'s test suite per commit; `cargo careful` on the full test suite nightly; `unsafe-audit` asserts the four homes.
+
+**Divergence registry.** One file, `docs/divergence.toml`, owned by the oracle module, each row a witness hash, a phpt path, a compile-identity path or a trace site, with a kind (`witness`, `phpt`, `runner`, `compile`, `trace`), a reason a person wrote, a status and a date. Mahout's has 197 entries; the target on day 30 is under 20 rows across every kind, all extension-shaped. The runner control's known disagreements, the compiler's deliberate differences and the tier's two recorded differences are rows in it, not tables of their own.
+
+---
+
+## 9. Performance and memory
+
+### 9.1 Where the predecessors' time went
+
+Mahout's own decomposition of its 49.88× kernel deficit is `17.5 × 2.10 × 1.355`: Tier 0 versus php's interpreter, php's JIT, and a residual. The 17.5× is the term month one removes, and it is not one thing:
+
+| Cost in Mahout's Tier 0 | This design |
+|---|---|
+| Kernels shared with a second executor return `*Step` sums; the executor re-dispatches on them | Kernels are called by one loop and act directly |
+| 8-byte instruction word, `u16 opcode + three u16 slots`, decoded per op | 24-byte opline with typed operands; no decode |
+| Operand type branch per op | Operand-kind specialised handlers |
+| Summary work-word check per op | Checks only after `throw`-effect ops, at back-edges and at activation |
+| Always-on profiling cells and entry/back-edge counters | None in the interpreter; the tier's word is read only in the `Jit` instantiation |
+| Property access is a hash lookup in a `PhpArray` | Inline slot through a run-time cache: one compare, one load |
+| IC keyed generically | Per-opline cache slot, monomorphic fast path |
+| Destructor queue checked and drained at op boundaries | Synchronous at rc→0 |
+| Per-request compile: 64.4 ms | Unit cache: 0 ms on hit; single-pass compile on miss |
+| Arrays as `Vec<Option<(Key,Value)>>` + `HashMap` index | `zend_hash` layout; packed arrays are 16 bytes per element |
+
+The 2.10× is the tier's term and is month two (§9.3).
+
+### 9.2 Targets on day 30
+
+Measured under Mahout's protocol (paired reps, A/A control, load recorded), against the oracle with opcache enabled and JIT off, on the seven kernels plus `binary_trees`, `fannkuch`, `nbody`, `mandelbrot`, `spectralnorm`, `fib`:
+
+| Metric | Bar |
+|---|---|
+| Compute geomean, engine ÷ php interpreter | ≤ 1.5× (stretch 1.0×) |
+| Process start to first byte, `-r 'echo 1;'` | ≤ php |
+| Per-request compile on cache hit, Laravel skeleton | 0 |
+| Peak RSS on `binary_trees` / `fannkuch` | ≤ 1.2× php |
+| `memory_get_usage()` delta on array and string micro-tests | within 5% of php |
+| Worker throughput, FastCGI, 8 threads, one process, hello-world and Laravel skeleton | ≥ php-fpm with 8 workers |
+| Parse throughput, top-1000 corpus | ≥ 25 MB/s |
+| `Cache` hit cost under thread-per-request, pcre workload | less than the compile it saves, per commit from the day pcre lands |
+| **G1, door cost**: an engine built with the `jit` feature, the tier bound and `opcache.jit_buffer_size=0`, against one built without the feature, seven kernels and the Laravel skeleton | within the A/A drift bound (Mahout used 1.813%); above 2% the seam costs too much and `jit-design.md` §3 is revisited. Per commit from the day `php_engine::tier` exists, on the kernels from day 2 and on the Laravel skeleton from the day the engine runs it |
+
+Why 1.5× is credible and 1.0× is possible: the interpreter executes the same algorithms as Zend under the same optimising compiler infrastructure, with PGO and whole-program thin LTO already measured at −33% on this toolchain, and without any of the per-op terms above. The `HeapHooks` parameter and the `Copy` zval add no per-op cost; the `MapPtr` indirection is one load through a per-request table, which is Zend's cost too; the tentative bit and the word have no run-time reader in the interpreter. "Insane" on day 30 means: php's interpreter speed on compute, faster start, zero recompilation, and one process with N threads where php needs N processes. Against php with its JIT the gap on pure compute is php's remaining 2.1×, which is month two.
+
+### 9.3 The compiled tier, and what month one builds for it
+
+Month one builds: the `Tier` seam with `Nop` and `Probe`, `step` and `Stepped`, activation raising `Site::Entry`, one zero `Word` per safepoint in `Published` and sealed words for request-scoped op arrays, `OpArray.safepoints` and the `safepoint` column with the compiler's assertion, the `VmStack` entry slot, the interrupt flag on `Request` with its three interpreter checks, `tier.lock`, and G1 per commit.
+
+Month two builds `php_jit` as `jit-design.md` designs it: a tracing tier after `zend_jit_trace.c`, recording by stepping the interpreter with recording exclusive per request, php's guard set and thresholds, Cranelift behind a backend value with Stogov's IR as the named fallback, the interrupt test at every compiled loop header, compensation code at exits for register-resident scalars only and no on-stack replacement entry, deoptimisation as a jump to an opline of the identical frame, traces as engine-owned immutable values in a dual-mapped arena, published under one lock and visible by a release store, holding every unit they inlined, and one compile worker per engine. What it must clear is `jit-research.r1.md` §E.11's G2 to G7: compute geomean ≥ 2.0× over the interpreter and ≤ 1.1× of php's JIT on the same programs; RSS ≤ +10% and code ≤ 2× php's; zero divergence under `force` and `exit-fuzz`; FastCGI throughput ≥ php's JIT; recording overhead reported. G6 and G7 run with `jit.compile` in both settings and the run of record names which. Memory per engine for the words: 8 bytes per safepoint in `Published` plus 4 bytes per safepoint in the unit's table, shared by every request; G4 sees both in RSS. The tier infers nothing from a declared return type, so php's rule that a tentative type is trusted only through an exactly resolved callee has no counterpart yet; a later revision that adds signature-based return inference copies the rule or is wrong on every polymorphic call through a tentative parent.
+
+The backend decision is recorded as an ADR on the day the default flips or is refused, with the G1 to G7 readings of the run of record, in the form Mahout's stage 307 and Dax's ADR-0007 used. Month three's list, in order and each behind its own gate: profile-guided region growth, PHP-to-PHP inlining beyond the recorded depth, refcount inference on the trace, and the IR fallback only if G3 fails on codegen rather than lowering. An LLVM tier is not on it: `llvm-research.r1.md` finds every dynamic-language JIT that put LLVM on the hot-compile path measured it and left, and recommends at most a bounded spike over hot regions, gated by its G8 against the Cranelift tier as the baseline, after G3 has a reading, and no crate, thread, word bit or budget line before that. A region is a table entry with the same entry ABI, so the word's layout needs no tier bit (`jit-design.md` §4.5).
+
+### 9.4 Memory
+
+Parity layouts (§5.1–5.4) are the memory plan. Additionally: interned literals and names are shared process-wide once; immutable linked classes are shared; op arrays are shared; run-time caches are per request and sized exactly; tombstones compact on rehash; strings are one allocation; packed arrays hold bare zvals; the allocator releases whole chunks at request end and caches a small number for reuse, as php does. The budget is the RSS bar in §9.2. Under `jit`, the arena is bounded by `opcache.jit_buffer_size` under php's name.
+
+---
+
+## 10. Rust standards and process
+
+- **Toolchain**: latest stable, pinned in `rust-toolchain.toml`, edition 2024, resolver 3. MSRV is the pinned stable.
+- **Lints**: `clippy::pedantic` warn with a short, reasoned allow list; `-D warnings` in CI; `unwrap_used`, `expect_used`, `panic`, `unreachable`, `todo`, `unimplemented` **denied** in `php_heap`, `php_unit`, `php_compile`, `php_engine`, `php_jit`, `ext/*`, `php_sapi` (tests and `xtask` exempt). Internal invariant failures are `InternalError` fatals with a message, not panics. `disallowed-types` for `ext/*` lives in the generated `ext/clippy.toml`, which clippy finds by nearest-file search; the list is derived from `seams.toml`.
+- **`unsafe`**: four homes (§4.1); every block one operation with a `SAFETY` comment (`undocumented_unsafe_blocks`, `multiple_unsafe_ops_per_block` deny); Miri per commit; documented invariants at the top of each unsafe module.
+- **Types over comments**: newtypes for `Slot`, `LiteralIdx`, `CacheSlot`, `Handle`, `ClassId`, `MapPtr<T>`, `SafepointIdx`, `OplineIdx`; `Zval` never exposes its union outside `php_heap`; kernels take `&mut Request` and typed handles, never raw pointers; state machines (`Generator`, `Fiber`, `LazyObject`) are enums. No `Drop` on engine value types; RAII for Rust-side resources only.
+- **Visibility discipline**: `pub` across a crate boundary only through a locked module; `php_heap::hot` is `pub` but excluded from `api` and audited. Inside a crate, modules are internal seams and may be as fine-grained as the tests need.
+- **Re-entry in signatures** (principle 9): a lint in `xtask` flags any function in `php_engine` that calls `execute` or `release` and does not take `&mut Request`.
+- **Generated code**: only in `build.rs` (`ops.toml` → enum and dispatch; `php.ungram` → typed nodes); never committed, except the generated `ext/clippy.toml`, which is regenerated and diffed.
+- **Profiles**: dev `opt-level = 1`; release `opt-level = 3`, `lto = "thin"`, `codegen-units = 1`, `panic = "unwind"` (required by `catch_unwind` and fibers); PGO lane in `xtask bench`.
+- **Budgets**: per-crate and total line ceilings (§4.1), interface item counts (§4.5), lock-package count, binary size, clean-build time (≤ 90 s release on the dev machine), `docs/` ≤ 5k lines, `.claude/**` hand-written ≤ 300 lines; all CI gates fed from `seams.toml`.
+- **Witness accept**: `xtask witness --accept` is the only writer of `exit=` values.
+- **Documentation**: this file; `jit-design.md`; `harness-design.md`; `ops.toml` as the instruction-set reference; rustdoc with witnesses. No tickets, plans or maps in the repository; the phpt burndown and the divergence registry are the status.
+- **Living documents.** Each design of record is one file at its current state with a ledger on top; a revision edits the sections it changes and adds one ledger entry with what changed, why, and the check that would show it wrong; git is the dated record; the `rN` files are records and are not edited. A revision that alters a rule the harness enforces changes `seams.toml` in the same commit, and §14 lists what the manifest, the registry, the instruments or the locks gain or lose.
+- **ADRs** live in `docs/adr/`, numbered from 0001, written only when a decision in this file is reversed or when a choice would otherwise be "fixed" by a future reader; each ends with the sentence that reader needs. Six exist at this revision. Manifest rules that an ADR decided carry its number, so it prints at the failure. The tier owes one more, the backend's, due at the flip (§9.3).
+- **CI on every commit**: fmt, clippy, unit tests, Miri (`php_heap`), witnesses, `Zend/tests` + `tests/` + `sapi/cli`, compile identity on the per-commit corpus, crosscheck for default extensions, fuzz smoke, budgets, unsafe audit, api-check, vocab, G1. Nightly: full corpus, 172k compile identity, `run-tests.php` verdict control, differential fuzz, `cargo careful`, oracle drift, bench under protocol, `force` and `exit-fuzz` over `Zend/tests` and `tests/`.
+
+---
+
+## 11. Thirty days
+
+The same modality as the predecessors is assumed: one lead, agents working in parallel along crate seams from day 3, lanes as modules with locked interfaces. Each week has an exit bar measured by the instruments, not by feel. If a bar is missed, the cut order in §12 applies before the next week begins.
+
+| Days | Work | Exit bar |
+|---|---|---|
+| **1–2** | Repository, crate skeletons, budgets gate, CI, `seams.toml` and the harness's `permit`, `done`, `status`. Inherit `php_syntax` (generator rewritten to emit typed nodes), `php_macros`, phpt runner, fuzz generator, corpus lock. `oracle.toml` and the oracle module with its recipe. **All eight seams compile as traits and types**: `heap.lock`, `unit.lock`, `api.lock` v0 (from `xtask port-map` over the Mahout census), `sapi.lock`, `ops.lock` (full instruction set with effects and the `safepoint` column), `tier.lock`. `php_engine::tier` with `Tier`, `Nop`, `Site`, `Flow`, `execute::<T>`; the `jit` feature as a name on `php_bundle` that enables nothing yet. `php_unit` types; `php_proto` skeleton with the FastCGI codec's tests green; `php_ext` and `php_bundle` skeletons with the `ext/*` directories and empty `extension()` bodies, so the graph and `api-check`'s manifest rules exist before any body is ported. `Cache` with the unit cache. `build.rs` produces the dispatch table over empty bodies. `compile-identity` running against the oracle with a compiler that emits nothing (all red). Witness runner working against the oracle alone. `Capture` sink. The `run-tests.php` lane wired against the oracle binary itself, so its verdict table is the control from day 1. | CI green on an engine that runs nothing; every instrument writes a reading; `port-map` shows 345 rows, all unresolved; G1 has its denominator from the first engine that runs a witness. |
+| **3–7** | Lane A `php_heap` complete: allocator, header, string, array (packed + hash), object, reference, resource, handle table, VM stack with the entry slot and its guard, `Recorder`-hooked Miri suite. Lane B `php_compile` to green on `tests/basic` and `tests/lang` **by op-array identity, before execution**, the dissolved validate's guard list ordered by the corpus, `OpArray.safepoints` and the `safepoint` column with the assertion; `php_engine` spine for procedural PHP: literals, variables, operators with php coercion, strings and interpolation, arrays and `foreach`, functions with activation raising `Site::Entry`, closures with `use`, references, `include`/`require`, `echo`/`print`, output buffering core, `var_dump`/`print_r`/`var_export`, warnings and `error_reporting`; `step` and `Stepped`; the interrupt flag with its three checks; `Word` per safepoint in `Published` and sealed words for request-scoped op arrays; the `Probe` adapter with the first loop witness. Lane C kernels: `zend_sort`, `php_gcvt`, numeric strings, comparison, with witnesses. Lane D extension port begins against `api.lock` with `Capture`, in bundle order, `random` (the first `request_state` user) and `standard` first, one crate at a time. Lane E hosts against the request description and sink. | `compile-identity` ≥ 95% on `tests/`; `tests/lang` ≥ 90%, `tests/basic` 100%, `Zend/tests` ≥ 60%; `port-map` unresolved ≤ 150; G1 within the drift bound on the kernels. |
+| **8–14** | Classes: inheritance linker with the three-way compatibility outcome and `#[\ReturnTypeWillChange]`, interfaces, abstract, traits (8.5 binding order), static, constants (typed, `final`), enums, readonly, property hooks, asymmetric visibility (instance and static), promoted ctor props incl. `final`, magic methods, `__destruct` synchronous, `instanceof`, `new` without parens, `clone` and `clone()` with properties, lazy objects; `ObjectHandlers` with `Std` complete. Exceptions with `finally`, multi-catch, `throw` expression. Generators. Types: scalar/union/intersection/DNF, `strict_types`, return types, `never`, coercion tables. `match`, named args, spread, first-class callables, pipe, `(void)`, `#[\NoDiscard]`, attributes with reflection core, `#[\Override]`, `#[\Deprecated]`, `#[\DelayedTargetValidation]`, `goto`, heredoc/nowdoc, `list` in all forms, namespaces and `use`, `declare`, `eval`, `$GLOBALS`/`global`/`static`, `__halt_compiler`. Deprecations table for 8.5. | `compile-identity` ≥ 99% on `Zend/tests`; `Zend/tests` ≥ 95%, `tests/classes` 100%; the `tentative` subset green; the 50-script probe battery ≥ 45/50; `port-map` unresolved ≤ 50. |
+| **15–21** | GC port through `HeapHooks` with `gc_status`; fibers, with the two-fibers-two-entry-slots test; `WeakMap`/`WeakReference` as handler adapters; shutdown ordering; error and exception handlers incl. `get_*_handler`; ini system (all Core directives, php.ini discovery, `-d`); streams seam with `file`/`php`/`data`/`glob`/user adapters; CLI SAPI with lazy stdin and all flags; unit cache, map pointers, `opcache_*`; `Engine`/`Request` split and `catch_unwind` boundary; `max_execution_time` and the timer. Extensions ported: standard, spl (the first `#[tentative]` user), reflection with the two tentative accessors, json, ctype, tokenizer, random, hash, filter, session; bindings: pcre2 (the first `engine_state` and `Cache` user), timelib, libmbfl, sqlite. | `compile-identity` 100% on the per-commit corpus; `Zend/tests` ≥ 99.5%, `tests/` 100%, `sapi/cli` ≥ 90%, `ext/standard` ≥ 85%, `ext/pcre` ≥ 95%, `ext/date` ≥ 80%; compute geomean ≤ 2.5×; RSS ≤ 1.5×; `port-map` unresolved 0. |
+| **22–30** | Bindings: libxml family, lexbor, uriparser, zlib, openssl, curl, sodium, gmp, bcmath port, posix/pcntl/sockets/iconv, intl. FastCGI SAPI and the worker; `memory_limit`; `-S` dev server. Perf pass: operand-specialisation list from an executed-op census on the corpus, PGO, hot-kernel review under the protocol; G1 on the Laravel skeleton from the day it runs. Full-corpus burndown and divergence registry. This file updated to as-built. | Day-30 parity as defined in §1; compute geomean ≤ 1.5×; RSS ≤ 1.2×; worker throughput ≥ php-fpm; all locks and budgets green. |
+| **31** | The tier's prototypes, before any trace is recorded: the per-call cost of `catch_unwind` in the kernel wrappers on the non-unwinding path; the per-opline cost of `step` under recording on the seven kernels; the dual-mapped `mov eax, 7; ret` through two views on the aarch64 box with the cache maintenance and the reused-chunk `isb` question answered; the concurrent publish test on both targets; the interrupt test's cost on the kernels; the Cranelift crate set counted against the lock-package target. Month two's schedule is `jit-design.md`'s phased plan (`jit-research.r1.md` §E.12). | |
+
+Lane D starts on day 3 against a locked `api`, not on day 15 against a finished engine; that is the single largest schedule decision, and it is possible only because the interface is fixed before the implementation exists. Lane B owns the compile-time fatals from day 3; Lane E writes against the request description and sink from day 3 and never touches engine policy.
+
+---
+
+## 12. Risks, cut order, and what parity will not include
+
+**Cut order** (applied top-down when a weekly bar is missed): 1. intl; 2. curl, sodium, gmp; 3. `-S` dev server; 4. FastCGI (keep CLI + embed); 5. lexbor/uriparser (8.5 `Uri` and `Dom\HTMLDocument` then report absent, as both predecessors do today); 6. libxml family. Nothing in `php_heap`, `php_engine`, `php_compile`, GC, fibers, the tier's month-one seam work, or the `Zend/tests` bar is cuttable. If month two slips, the tier ships behind the feature at `opcache.jit=off` and nothing a user sees changes.
+
+**Not in month one, by decision**: the compiled tier itself; on-disk unit cache; mysqli, pdo_mysql, pdo_pgsql; gd; soap, ldap, imap; ffi; phar, zip, exif, fileinfo; Windows; persistent connections; ZTS-style per-thread ini isolation beyond what `Request` gives. These are month two in the order listed in §7.2.
+
+| Risk | Likelihood | Mitigation |
+|---|---|---|
+| Schedule has zero slack | High | Inheritance list is fixed on day 1; cut order is published; weekly bars are measured, not negotiated. |
+| A soundness bug in `php_heap` | Medium | Miri per commit, fuzz targets on allocator/array/string, ported invariants, one-op-per-unsafe-block. |
+| `libmbfl` is LGPL-2.1; static linking has licence consequences for a non-GPL engine | Certain | Feature-gated; default build documents it; `encoding_rs` fallback covers the web encodings. Decision is the owner's. |
+| Synchronous destructors and native re-entry recurse on the Rust stack | Medium | Stack-limit checks with php's own `Error` message and threshold; fibers get their own stacks; main thread stack sized at startup. |
+| `become` never stabilises | Irrelevant | The shipped dispatch is a `match` loop; tail calls are a measured option, not a dependency. |
+| Vendored C (timelib, libmbfl, lexbor, uriparser) complicates the build | Medium | `cc`-built `-sys` crates with pinned php-src tags; no system-library discovery for vendored ones. |
+| Agent-driven development regrows process weight | High | No tickets in the repo; ADRs only on reversal; budgets gate documentation and harness lines too. |
+| Full-corpus parity slips because `ext/` is 15k of the 21.5k tests | Certain for some extensions | Parity is defined as the default-build set in §1; the rest is named and scheduled, not implied. |
+| `api.lock` v0 is wrong in shape and the port stalls on renames | Medium | `port-map` is the measure; the first 20 census items by call count are kept by name; renames are mechanical. |
+| Op-array identity is too strict: php emits something we do not want to emit | Low | Every deliberate difference is a registry row of kind `compile`; the gate found one design error (§5.8) before any code existed. |
+| Explicit `release` leaks values in native bodies | Medium | The ABI owns args and returns; the leak gate runs per request in every test; the allocator's request-end release bounds the damage to accounting. |
+| `HeapHooks` threading makes some heap signatures awkward | Low | It is one parameter on the operations that can free; Zend has the same set of "may run user code" sites, in comments. |
+| Locks become friction and get rubber-stamped | Medium | A lock diff is small and local; review is of the interface, which is the review that matters. |
+| Dissolving validate loses probed edge cases in the move | Medium | The 136 annotations and the fixture file are the inventory; each guard lands with its fixture re-homed as compile output. |
+| `php_unit`'s constant-expression tree grows into a second compiler | Low | It is `zend_ast`'s constant-expression subset by enumeration; evaluation is one kernel in `php_engine`. |
+| Two build scripts reading one `ops.toml` drift | Low | One enum, generated once; a wrong arm is a compile error; `ops.lock` diffs the spec. |
+| Typed-node construction under error recovery: a partial node whose required child is missing | Low | Mahout's `check_required_children` soak runs on the new builder before the marker set is trusted. |
+| Cross-extension `pub` surfaces grow into a second api | Medium | `api-check` prints each `ext/*` crate's public items beyond `extension()`; anything beyond the pdo driver trait and the random handle needs a line in this document. |
+| The two phpt runners disagree on many tests early and the lane is muted | Medium | The lane compares verdicts, not pass counts; known disagreements are registry rows of kind `runner`, target zero on day 30. |
+| `Cache` hit cost under contention exceeds the compile it saves on a many-core worker | Low | §9.2's measurement per commit from the day pcre lands; the escape is sharding inside `Cache`, which no caller sees. |
+| An extension needs mutable cross-request state that is not a cache of immutable values | Low in month one | The known case is persistent connections, out of scope by decision (§4.10). |
+| A stub marks a method tentative where the C implementation and phpts treat the type as real, or the reverse | Low | `gen_stub.php` is the one source for both its arginfo and the tag, so the stub is the truth; the phpt is reported against the oracle, which wins. |
+| The word at the safepoint, or the mode load under `Off`, costs more than the A/A drift bound | Low | G1 per commit from day 2; the escape is copying the mode and thresholds into request state, and reading the word only in the `Jit` instantiation, which `Nop` already does by folding the branch. |
+| A site opcode does not leave `result` unused, so the number has no field; a backward jump opcode is missing from the column | Low | `ops.toml` says which field per opcode and the generated dispatch reads it, so a wrong column is a build error; the compiler's assertion catches a missing opcode on the first op array that has one. |
+| Raising `Entry` at activation diverges from where php's counter fires, so trace roots differ from php's | Low | The `TRACE start` diff against php under `inline` on the seven kernels shows it; the `RECV`-skipping rule is copied and marked unverified. |
+| An owned `UnitView` cannot hold engine-immutable classes by `Arc` | Low | The compile thread stays and `types::build` alone moves back to the recording thread; no interface here changes. |
+| Linux `memfd_create` sealing and the two mappings do not behave as the JIT note says; aarch64 needs a per-thread `isb` on chunk reuse | Low to medium | Both are day-31 prototypes on both targets before the arena carries a trace. |
+| The compile worker makes `jit_debug` output non-deterministic | Certain under `thread` | The oracle diff of `TRACE` lines runs under `inline`, which `force` implies. |
+| A host pools threads and something leaks across requests on the thread | Low | Nothing may be thread-local (§5.14); the request leak gate runs after every request-state drop in tests and names the state type. |
+
+---
+
+## 13. Inheritance manifest
+
+Exact paths to take, at Mahout `1b3104a8` (walked at `d6460ef0`; the research read `8f119938` for the LLVM note) and Dax `aff0fc5` unless noted. Everything else in both trees is left behind.
+
+| Take | From | Into |
+|---|---|---|
+| `crates/mahout_lexer`, `mahout_parser` (grammar, driver, events, tree builder, tests), `mahout_source/{line_index,magic_method,builtin_attr}.rs`, `docs/specs/php.ungram`, and the generator `M/xtask/src/{codegen_ast,ungram}.rs` (2,372 lines, rewritten to emit typed nodes per §4.9) | Mahout | `php_syntax` |
+| `mahout_native_macros` | Mahout | `php_macros`, expanding to `::php_ext::__private::` |
+| The ABI traits of `mahout_native_abi` | Mahout | `php_engine::api`, as `FromArgument`/`IntoReturn` |
+| `mahout_phpt`'s section parser and `--EXPECTF--` translation; ~600 of the 2,447 lines of `M/crates/mahout_driver/src/bin/phpt_burndown.rs` (corpus walk, category map, `-j` fan-out, oracle-skip logic); `mahout_fuzz_gen` and its battery generators with the thirteen Mahout divergence ids stripped; `fuzz/fuzz_targets/*`; `conformance/php-src-tests.lock.json`; the `corpus/phpt` manifest | Mahout | `xtask`, `fuzz/` |
+| The generic half of the `zend_sort` port (`M/crates/mahout_runtime/src/semantics/compare.rs:954-1363`: `php_stable_sort_by`, `zend_sort`, `zend_insert_sort` over a comparator, ~250 lines, verbatim; the live-array half rewritten against `php_heap`) | Mahout | `php_engine` kernels |
+| The cast and coercion ladders of `semantics/coerce.rs` (`to_long`, `cast_int`/`cast_float`, `coerce_float_to_int`, `coerce_scalar`, `aggregate_number`, ~800 lines) and the 300-line `ty2_pins` test module, as re-derivations with witnesses | Mahout | `php_engine` kernels |
+| The 85 php-exact message wordings of `messages.rs` and `ids.rs`, as data; `MsgId` not taken | Mahout | `php_engine` raise sites |
+| `mahout_value/src/convert.rs:121-183`, the `php_gcvt` shape | Mahout | `php_engine` kernels |
+| `crates/mahout_ext_*` bodies (19 crates), adapted through `port-map`; ~3,500 lines of Zend builtins in `mahout_ext_standard` (`class_exists`, `get_object_vars`, `debug_backtrace`, `set_error_handler`, `define`, `gc_*`, `spl_autoload`, `func_get_args`) go to the engine; `base_promotion_pin.rs` is not taken | Mahout | `ext/<name>`, one crate each; `php_engine` for the builtins |
+| `mahout_driver`'s feature list and its 19 `register()` calls | Mahout | `php_bundle`: the features and the ordered list |
+| `M/crates/mahout_sapi_fcgi/src/fcgi.rs` (335 lines, verbatim) and the engine-free parts of `mahout_sapi_cli/src/server.rs` (≈ 2.9k lines) | Mahout | `php_proto` |
+| `docs/perf/measurement-protocol.md`, the ~700-line measurement protocol of `xtask/src/bench.rs` (paired reps, A/A, status labels), `benchmarks/` corpus | Mahout | `xtask bench`, `docs/` |
+| `.github/workflows/nightly.yml` dashboard job shape | Mahout | CI |
+| `mahout_value/src/*` SAFETY comments and invariant list | Mahout | `php_heap` documentation only; the layouts are Zend's, the 131 extension class ids and the float-printing family do not come along |
+| The extension-seam census (`data/r2-mahout-ext-seam-census.txt`: the commands, not the numbers) | this investigation | `xtask port-map`, run against `M/crates/mahout_ext_*` on day 2 to produce `api.lock` v0 |
+| `oracle.toml` | Dax | root |
+| The witness idea, its coverage rule, and `SPEC.md` ticket 095's two marker rules | Dax | `xtask witness`, §8; no code is taken |
+| `D/tools/phpt-run.sh` | Dax | §8's nightly lane, as a rule; no code is taken |
+| ADR-0007's form | Dax | the tier's backend ADR |
+
+Not taken: `mahout_runtime` as a unit; any IR; any JIT crate (`jit1`, `jit2`, `stencil`, `codemem`, `tier2_host`); `mahout_driver`, `mahout_gauge`; `mahout_gc` (re-ported from `zend_gc.c` for root-buffer placement); `mahout_alloc` (re-ported from `zend_alloc.c`); `mahout_syntax/src/{green,red,builder}.rs` (the green/red layer and `NodeCache`); `mahout_parser/src/{validate/,reparse.rs}` (validate's guards move as knowledge into `php_compile`); lexer checkpoints; `mahout_source/{codes,root,level}.rs`; `removed.rs` except its three parse errors; the generated `Visitor` and `check_required_children`; `parser.rs`'s thread-stack policy; `mahout_phpt/src/{wire,worker}.rs` and the adjudication arm; `mahout_sapi_cli/src/worker.rs`; `mahout_fuzz_gen/src/{isolation_stream.rs,generated/isolation_dial.rs}`; `xtask/src/bench.rs`'s vintage ledger and JSON codec; `messages_check`; `xtask/src/native_crosscheck.rs` (it never reads php-src stubs; `xtask crosscheck` is re-authored, ~400 lines); `mahout_native_abi`'s crate boundary; `NativeState`; `RequestCtx::ext_state_mut`'s trait and contract; all of Dax's `lang/`, `engine/joined`, `engine/host/substrate`, `emitters`, `battery`.
+
+What earlier revisions said that is no longer true, so a reader of the records is not misled: `Func` with a `code: Option<NonNull>` slot and a reserved type-feedback word per cache slot (revision 1 §9.3, revision 2 §5.14) are gone, the word's trace id is the entry and feedback is the trace record (ADR-0006); month two builds a tracing tier, not a baseline method JIT; `xtask opgen --check` does not exist; `SMART_BRANCH` fusion is the handler's, not the compiler's; the instruction set has no "minus JIT-only opcodes"; `php_ext::enabled()` is `php_bundle::enabled()`; `heap.lock` never gained `FrameRef::is_entry`; `E` may not contain a lock has its three engine-owned exceptions; `unsafe` has four homes, not two.
+
+---
+
+## 14. Harness changes in this revision
+
+Rule 3 of `harness-design.md`: each revision of the design of record lists what the manifest, the registry, the instruments or the locks gain or lose, and the commit that lands it is the commit that changes them.
+
+- **`seams.toml`** (as the example in `harness-design.md` §4.1 until the file exists): `[[crate]]` budgets are §4.1's, `php_heap` 20000, `php_unit` 6000, `php_engine` 48000; the `unsafe` field leaves the `[[crate]]` rows, since the `unsafe.homes` rule already declares the four homes once; the `php_bundle` edge is `["ext/*", "php_ext", "php_jit"]`; the `tier` seam's lock has two sections, `face` and `kernels`.
+- **`oracle.toml`**: unchanged in shape; this file cites it and states no version.
+- **`docs/divergence.toml`**: the two `trace` rows of `jit-design.md` §4.1 are its first rows of that kind.
+- **Instruments**: `port-map` writes a reading like the others; `bench` gains the G1 reading with the tier bound and `opcache.jit_buffer_size=0` as its definition; `phpt` gains the `force` and `exit-fuzz` lanes on the witnesses per commit and on `Zend/tests` and `tests/` nightly; the trace-dump diff runs under `inline` per commit on the seven kernels.
+- **Locks**: `tier.lock` gains `Word::sealed`, `Func::published` as an option, `Request::interrupt`; `ops.lock`'s `safepoint` column gains `JMPZ`.
+- **`CONTEXT.md`**: gains **Interrupt**; **Word** gains the sealed sentence; **Safepoint** names activation; **Instrument** gains `mutants`; the pointers name the living documents.
+- **ADRs**: ADR-0006 added; ADR-0004 and ADR-0005 each gain a one-line amendment.

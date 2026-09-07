@@ -1,0 +1,29 @@
+---
+status: accepted
+date: 2026-09-05
+supersedes: third-engine-design.r3.md §2 (the "keep" row for `ext_state_mut::<T>()`), third-engine-design.r4.md §4.10 ("State")
+---
+
+# Extension state is request-scoped or immutable engine-scoped, and the engine owns the only cross-request cache
+
+Revision 3 kept Mahout's `RequestCtx::ext_state_mut::<T>()` as the one deep small module in the extension area. Its signature is one method; its interface is not. A state type implements `ExtState`, whose `as_any_mut` is "the same one line" in every implementor (`mahout_runtime/src/lib.rs:2818`); the state is created lazily on first touch by a `TypeId` scan (`:7198`) and torn down in first-touch order (`:7337`), so the order in which session and pdo release their handles depends on which function the script called first, where php-src runs `RSHUTDOWN` in reverse module-startup order; three rules about what the state may hold live in doc comments; and `ExtState::ext_teardown` is a second request-end channel beside the `rshutdown` the `Extension` value already has, which `mahout_ext_session` calls a "no-executor backstop". There is no scope for state that outlives a request, so Mahout's pcre cache, unit cache and tier state carry a "Worker-persistent" census tag and live in process globals under their own locks. The third engine is `Sync` with thread-per-request over one `Engine` (revision 3 §5.14), so php-src's answer for cross-request state, per-thread module globals under ZTS, does not transfer, and per-request rebuild fails the throughput bar: php-src keeps compiled patterns in persistent module globals across requests and frees only the match scratch at `RSHUTDOWN` (`ext/pcre/php_pcre.c:285`, `:474`).
+
+The decision: an extension declares its state on its `Extension` value and reaches it through the request. Request state, `request_state::<T: Default>()`, is built at request start in bundle order and dropped after the `rshutdown` hooks in reverse bundle order; its slot is a `MapPtr<T>` assigned when `Engine::new` publishes the extension, the mechanism revision 2 §5.14 already uses for class statics, so access is an index read. Engine state, `engine_state(fn(&StartupIni) -> E)` with `E: Send + Sync`, is built in `Engine::new` and immutable thereafter, reached as `&E`. The only thing that mutates across requests is `api::Cache<K, V>`, an engine-owned, bounded, get-or-build cache of immutable values that an extension holds as a field of `E`; the unit cache is the second user of its implementation. `Mutex`, `RwLock`, `Cell`, `RefCell` and the atomics are denied under `ext/*` by `api-check`, which turns Mahout's doc-comment rule X2 into a lint. Both state types are private to their crate.
+
+## Considered options
+
+- **Keep Mahout's accessor as is.** Rejected for the reasons above; the shape survives, the contract does not.
+- **php-src's shape: one mutable globals struct per extension, reset by `rinit`, per thread.** Rejected: the engine serves a request per thread and threads are not pooled, so per-thread is per-request and the pcre cache would be rebuilt on every request, hundreds of compiles on a framework request against a bar of at least php-fpm's throughput.
+- **A worker pool so that thread scope survives across requests.** Rejected: it reintroduces `thread_local!`, the ambient state Mahout's inversion exists to remove, and gains nothing once a bounded shared cache exists.
+- **Mutable engine state with extension-supplied interior mutability.** Rejected: every extension writes its own lock, the pcre bound and eviction policy become pcre's rather than the engine's, and principle 12 cannot be a lint.
+- **Crate `static`s for engine-scoped tables.** Rejected: tests build a fresh `Engine` per phpt in-process, and engine state can depend on system ini such as `pcre.jit`, so a process-wide value is wrong for the second engine.
+- **Lazy request-state creation, declared slot.** Rejected as the default: nineteen small `Default` values per request cost less than a presence check on every access, and a state that is expensive to build gets a lazy field, not a lazy slot.
+
+## Consequences
+
+- The request-environment group of `api` gains `state`, `engine` and `Cache` and no trait. `port-map` maps 35 `ext_state_mut` sites in 6 crates to `state`; `ext_teardown` bodies go to `rshutdown` where they read the request and to `Drop` where they only release; `as_any_mut` is gone.
+- `rshutdown` runs with every extension's request state live, in reverse bundle order; `Drop` on a state type runs afterwards and may touch no engine. A zval held in request state is released in `rshutdown`, and the request leak gate names the state type that did not.
+- `Cache` must be measured, not assumed: the perf pass records hit cost under thread-per-request on the pcre workload from the day pcre lands, and sharding inside `Cache` is the escape no caller sees.
+- Persistent connections (`pdo`, `mysqli` pconnect) are not extension state here or in php, where `EG(persistent_list)` is per thread under ZTS. A `Sync` engine needs a checkout pool for them, a separate decision when they are scheduled; nothing here blocks it.
+- A future reader will want to let one extension "just hold a `Mutex`" for a small cross-request counter or table. Do not; make it a `Cache` value or engine policy in `api`. This file is the answer.
+- *Amended 2026-09-07 (design ledger 8):* the argument above says "threads are not pooled, so per-thread is per-request". Whether a host pools threads is the host's choice and invisible to the engine; the argument holds because no engine or extension state may be thread-local, which is what this decision enforces, and not because of how a host schedules threads.

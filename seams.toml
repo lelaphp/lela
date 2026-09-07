@@ -1,0 +1,347 @@
+# The seam manifest (harness-design.md §4.1). One tracked file that declares
+# each seam once: producer, consumers, lock file, permitted edges, `unsafe`
+# homes, forbidden types, line ceilings, the ADR that decided it, and the text
+# a failure prints. Every rule sensor is derived from it: `api-check`,
+# `unsafe-audit`, `budget`, `permit`, `status`, the generated `ext/clippy.toml`
+# and the one negative-control fixture per rule. A rule stated anywhere else is
+# a copy. Edited by a person, in the same commit as the design change.
+#
+# Numbers are design §4.1 (crates), §4.5 (locks), §10 (lints, profiles) and the
+# harness's §12 item 6; the design cites this file and restates none of them.
+# `xtask` refuses a manifest with a key outside this grammar:
+#   [oracle] [budget] [[crate]] [[seam]] [[edge]] [[rule]]
+# Keys beyond the harness's §4.1 example, added here because §10 states a rule
+# the example had no predicate for, are marked `# grammar:` where they first
+# appear. Each is one predicate, as the grammar requires.
+
+[oracle]
+pin = "oracle.toml"                        # the only statement of version, digest, recipe
+
+[budget]
+total = 272500                             # design §4.1: the sum of every [[crate]] row plus `bindings`; docs is separate (253.2k + 15k = 268.2k at this revision)
+new = 127500                               # design §0, §4.1: lines not on the inheritance manifest (§13)
+docs = 5000                                # design §10; `docs/**` plus the three living documents
+harness = 300                              # harness §12 item 6: `.claude/**` hand-written, generated types excluded
+lock_packages = 120                        # design §4.1: `Cargo.lock` packages, default features, counted on day 31 with the Cranelift set
+clean_build_release_s = 90                 # design §10: `cargo build --release` from clean on the dev machine
+api_items = 400                            # design §4.4, §4.5: public items of php_ext, measured on api.lock
+bindings = 15000                           # design §4.1: `ext/*/src/ffi/**` pooled across every extension
+# Lines are non-blank, non-comment, tests excluded (`xtask budget`).
+
+# ---------------------------------------------------------------- crates/
+[[crate]]
+name = "php_syntax"
+budget = 26000
+[[crate]]
+name = "php_heap"
+budget = 20000
+lock = "heap.lock"
+[[crate]]
+name = "php_unit"
+budget = 6000
+lock = "unit.lock"
+[[crate]]
+name = "php_compile"
+budget = 18000
+[[crate]]
+name = "php_engine"
+budget = 48000
+lock = ["api.lock", "sapi.lock", "tier.lock"]
+lock_from = { "api.lock" = "php_ext" }
+[[crate]]
+name = "php_macros"
+budget = 3000
+[[crate]]
+name = "php_ext"
+budget = 200
+[[crate]]
+name = "php_bundle"
+budget = 500
+[[crate]]
+name = "php_jit"
+budget = 17500
+feature = "jit"
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin"]
+[[crate]]
+name = "php_proto"
+budget = 4000
+[[crate]]
+name = "php_sapi"
+budget = 5000
+[[crate]]
+name = "php"
+budget = 1000
+[[crate]]
+name = "xtask"
+budget = 14000
+
+# ---------------------------------------------------------------- ext/
+# One crate per extension, package `php_ext_<name>` at `ext/<name>` (ADR-0004).
+# Budgets are design §4.1's table; `standard` is less the 3,500 lines of Zend
+# builtins that §13 moves into php_engine.
+[[crate]]
+name = "ext/standard"
+budget = 30000
+[[crate]]
+name = "ext/spl"
+budget = 10000
+[[crate]]
+name = "ext/date"
+budget = 10000
+[[crate]]
+name = "ext/reflection"
+budget = 9000
+[[crate]]
+name = "ext/pcre"
+budget = 6000
+[[crate]]
+name = "ext/mbstring"
+budget = 4000
+feature = "mbstring"
+[[crate]]
+name = "ext/session"
+budget = 4000
+[[crate]]
+name = "ext/pdo"
+budget = 2500
+[[crate]]
+name = "ext/dom"
+budget = 2000
+[[crate]]
+name = "ext/random"
+budget = 2000
+[[crate]]
+name = "ext/pdo_mysql"
+budget = 2000
+feature = "pdo_mysql"
+[[crate]]
+name = "ext/filter"
+budget = 2000
+[[crate]]
+name = "ext/tokenizer"
+budget = 1500
+[[crate]]
+name = "ext/json"
+budget = 1500
+[[crate]]
+name = "ext/openssl"
+budget = 1000
+feature = "openssl"
+[[crate]]
+name = "ext/curl"
+budget = 1000
+feature = "curl"
+[[crate]]
+name = "ext/iconv"
+budget = 500
+[[crate]]
+name = "ext/pdo_sqlite"
+budget = 500
+[[crate]]
+name = "ext/ctype"
+budget = 500
+
+# ---------------------------------------------------------------- seams
+# The six locked seams (design §4.5). `effects.lock` is retired; its content is
+# `ops.lock`'s effects column. A lock with `sections` is diffed per section.
+[[seam]]
+name = "heap"
+producer = "php_heap"
+consumers = ["php_unit", "php_compile", "php_engine", "php_jit"]
+lock = "heap.lock"
+adr = "0003"
+[[seam]]
+name = "unit"
+producer = "php_unit"
+consumers = ["php_compile", "php_engine", "php_macros", "php_jit"]
+lock = "unit.lock"
+adr = "0001"
+[[seam]]
+name = "ops"
+producer = "ops.toml"
+consumers = ["php_unit", "php_engine", "php_compile", "xtask"]
+lock = "ops.lock"
+generated = true
+[[seam]]
+name = "api"
+producer = "php_engine"
+facade = "php_ext"
+consumers = ["ext/*"]
+lock = "api.lock"
+adr = ["0002", "0004", "0005"]
+[[seam]]
+name = "sapi"
+producer = "php_engine"
+consumers = ["php_sapi", "xtask"]
+lock = "sapi.lock"
+[[seam]]
+name = "tier"
+producer = "php_engine"
+consumers = ["php_jit"]
+lock = "tier.lock"
+allowlist = true
+sections = ["face", "kernels"]
+adr = "0006"
+
+# ---------------------------------------------------------------- edges
+# Design §4.2. A manifest edge outside this list fails `api-check`; so does a
+# `use` path that crosses a seam without going through its lock.
+[[edge]]
+from = "php_unit"
+to = ["php_heap"]
+[[edge]]
+from = "php_compile"
+to = ["php_syntax", "php_unit", "php_heap"]
+[[edge]]
+from = "php_engine"
+to = ["php_compile", "php_unit", "php_heap"]
+[[edge]]
+from = "php_macros"
+to = ["php_engine"]
+adr = "0002"
+[[edge]]
+from = "php_ext"
+to = ["php_engine", "php_macros"]
+reexports_only = true
+[[edge]]
+from = "ext/*"
+to = ["php_ext", "ext/*"]
+only = true
+adr = "0004" # ext/* edges are the ones each crate declares; never php_engine, php_compile, php_syntax, php_bundle
+[[edge]]
+from = "php_bundle"
+to = ["ext/*", "php_ext", "php_jit"]
+order = "topological"
+adr = ["0004", "0006"]
+[[edge]]
+from = "php_jit"
+to = ["php_engine", "php_unit", "php_heap"]
+allowlist = "tier.lock"
+adr = "0006"
+[[edge]]
+from = "php_sapi"
+to = ["php_proto", "php_engine"]
+lock = "sapi.lock" # the host face only; php_sapi never sees api
+[[edge]]
+from = "php"
+to = ["php_bundle", "php_sapi"]
+[[edge]]
+from = "xtask"
+to = ["php_bundle", "php_sapi"]
+[[edge]]
+from = "php_engine::{executor,kernels}"
+to = "php_engine::{serve,headers,gpc,output}"
+deny = true # design §4.2: keeps a later main/-style split possible
+
+# ---------------------------------------------------------------- rules
+# Each rule: an `id`, a `scope` or a `tool`, one predicate, an optional `adr`,
+# and the `text` a failure prints. One fixture per rule under
+# `xtask/fixtures/rules/<id>/` must fail, or `cargo test -p xtask` fails.
+
+[[rule]]
+id = "ext.no-locks"
+scope = "ext/*"
+deny_types = ["std::sync::Mutex", "std::sync::RwLock", "std::cell::Cell", "std::cell::RefCell", "std::sync::atomic::*", "parking_lot::*"]
+adr = "0005"
+text = "Extension state is request-scoped or immutable; no lock or cell in ext/*. Cross-request caching is api::Cache."
+# Renders to the generated, committed `ext/clippy.toml` (`disallowed-types`);
+# a stale copy is a `budget` failure. The wildcard is expanded from Cargo.lock.
+
+[[rule]]
+id = "unsafe.homes"
+allow = ["php_heap", "ext/*/src/ffi/", "php_jit::table::code", "php_jit::enter"]
+adr = "0006"
+text = "unsafe is permitted in four places; see design §4.1. Every other crate is #![forbid(unsafe_code)]; php_jit and an extension with bindings are #![deny(unsafe_code)] with the allowance on the named module alone."
+
+[[rule]]
+id = "unsafe.one-op"
+scope = ["crates/php_heap/**", "ext/*/src/ffi/**", "crates/php_jit/src/table/code.rs", "crates/php_jit/src/enter.rs"]
+deny_lints = ["clippy::undocumented_unsafe_blocks", "clippy::multiple_unsafe_ops_per_block"]   # grammar: deny_lints, design §10
+text = "Every unsafe block is one operation with a SAFETY comment."
+
+[[rule]]
+id = "lints.no-panic"
+scope = ["crates/php_heap", "crates/php_unit", "crates/php_compile", "crates/php_engine", "crates/php_jit", "crates/php_sapi", "ext/*"]
+exempt = ["tests", "xtask"]
+deny_lints = ["clippy::unwrap_used", "clippy::expect_used", "clippy::panic", "clippy::unreachable", "clippy::todo", "clippy::unimplemented"]
+text = "Internal invariant failures are InternalError fatals with a message, not panics (design §10)."
+
+[[rule]]
+id = "engine.reentry-signature"
+scope = "crates/php_engine/**"
+check = "reentry-signature" # grammar: check, a named xtask lint (design §10, principle 9)
+text = "A function in php_engine that calls execute or release takes &mut Request."
+
+[[rule]]
+id = "api.no-hot"
+scope = "crates/php_ext/**"
+deny_pattern = 'php_heap::hot'
+text = "php_heap::hot is for the handlers; api never re-exports it (design §4.4, §10)."
+
+[[rule]]
+id = "api.lock-line"
+scope = "crates/php_engine/src/api/**"
+on = "pub"
+note = "A new pub item in api needs its api.lock line in the same commit; api ≤ 400 items."
+
+[[rule]]
+id = "ext.pub-beyond-extension"
+scope = "ext/*"
+on = "pub"
+note = "api-check prints each ext crate's pub items beyond extension(); anything beyond the pdo driver trait and the random handle needs a line in the design (§12)."
+
+[[rule]]
+id = "witness.exit-authored"
+scope = "**/*.rs"
+deny_pattern = '```expect[^\n]*\bexit=\d+'
+unless = "xtask witness --accept"
+text = "exit= in a witness is captured by `xtask witness --accept`, never authored."
+
+[[rule]]
+id = "witness.coverage"
+scope = ["crates/php_engine/src/ops/**", "ext/*/src/**"]
+check = "witness-coverage"
+text = "A kernel or a native without a witness fails CI (design §8)."
+
+[[rule]]
+id = "vocab.avoid"
+scope = ["crates/*", "ext/*", "crates/php_ext/api.lock"]
+avoid_from = "CONTEXT.md" # grammar: avoid_from, harness §5
+text = "The glossary's _Avoid_ words appear in no public item name, rustdoc prose or api.lock line."
+
+[[rule]]
+id = "generated.committed"
+generated = { "ext/clippy.toml" = "ext.no-locks" } # grammar: generated, design §10
+text = "ext/clippy.toml is generated from the manifest and committed; a stale copy fails budget."
+
+[[rule]]
+id = "git.no-verify"
+tool = "Bash"
+deny_argv = ["--no-verify", "-n"]
+with = "commit"
+text = "Commits run the pre-commit hook; --no-verify is not available to agents."
+
+[[rule]]
+id = "lanes.nightly"
+tool = "Bash"
+deny_pattern = 'xtask (phpt|bench) --full|run-tests\.php|compile-identity --corpus'
+text = "Nightly lanes run in CI only; run the per-crate subset."
+
+[[rule]]
+id = "computed.force"
+tool = "Bash"
+deny_pattern = 'computed\s+run\b.*--force'
+text = "`computed run --force` discards a hand edit; a person decides that."
+
+[[rule]]
+id = "harness.self"
+tool = ["Edit", "Write"]
+scope = [".claude/**", "seams.toml", "oracle.toml", "docs/divergence.toml"]
+deny = true
+text = "Harness configuration, the oracle pin and the divergence registry are edited by a person."
+
+[[rule]]
+id = "divergence.reason"
+scope = "docs/divergence.toml"
+check = "divergence-reason"
+text = "A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3)."

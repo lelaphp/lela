@@ -1,0 +1,4575 @@
+# port-map.v0.toml — every Mahout item the 19 mahout_ext_* crates call at 1b3104a8, joined to api.lock v0.
+# Generated from scripts/census.sh output on 2026-09-07; the seed of `xtask port-map`.
+# status: same (kept by name) | renamed (api names the replacement) | gone (rule says what replaces the need).
+# sites: call sites in the ext crates (excluding test modules); crates: how many ext crates use the item.
+# mahout: the qualified Mahout item; `{A,B}::m` marks a method name defined on several value types (matched by name).
+# RequestCtx::<field>.<member> is a public field of RequestCtx reached as ctx.<field>.<member>(..).
+
+# ---- mahout_value methods called from ext crates
+[[item]]
+mahout = "mahout_value::{PhpArray,PhpString}::len"
+sites = 748
+crates = 18
+status = "same"
+api = "values::PhpArray::len"
+
+[[item]]
+mahout = "mahout_value::PhpString::as_bytes"
+sites = 700
+crates = 19
+status = "same"
+api = "values::PhpString::as_bytes"
+
+[[item]]
+mahout = "mahout_value::PhpArray::get"
+sites = 527
+crates = 16
+status = "same"
+api = "values::PhpArray::get"
+
+[[item]]
+mahout = "mahout_value::PhpArray::set"
+sites = 359
+crates = 16
+status = "same"
+api = "values::PhpArray::set"
+
+[[item]]
+mahout = "mahout_value::{PhpArray,PhpString}::is_empty"
+sites = 220
+crates = 15
+status = "same"
+api = "values::PhpArray::is_empty"
+
+[[item]]
+mahout = "mahout_value::Value::as_object"
+sites = 190
+crates = 12
+status = "same"
+api = "values::Value::as_object"
+
+[[item]]
+mahout = "mahout_value::PhpArray::contains"
+sites = 154
+crates = 15
+status = "same"
+api = "values::PhpArray::contains"
+
+[[item]]
+mahout = "mahout_value::{PhpArray,PhpString}::append"
+sites = 151
+crates = 12
+status = "same"
+api = "values::PhpArray::append"
+
+[[item]]
+mahout = "mahout_value::PhpArray::snapshot"
+sites = 145
+crates = 12
+status = "same"
+api = "values::PhpArray::snapshot"
+
+[[item]]
+mahout = "mahout_value::Value::as_array"
+sites = 141
+crates = 14
+status = "same"
+api = "values::Value::as_array"
+
+[[item]]
+mahout = "mahout_value::Value::as_ref"
+sites = 140
+crates = 13
+status = "same"
+api = "values::Value::as_ref"
+
+[[item]]
+mahout = "mahout_value::PhpObject::class"
+sites = 121
+crates = 9
+status = "same"
+api = "values::PhpObject::class"
+
+[[item]]
+mahout = "mahout_value::Value::tag"
+sites = 117
+crates = 11
+status = "same"
+api = "values::Value::tag"
+
+[[item]]
+mahout = "mahout_value::Value::as_str_bytes"
+sites = 114
+crates = 10
+status = "same"
+api = "values::Value::as_str_bytes"
+
+[[item]]
+mahout = "mahout_value::Value::as_int"
+sites = 65
+crates = 12
+status = "same"
+api = "values::Value::as_int"
+
+[[item]]
+mahout = "mahout_value::PhpObject::as_value"
+sites = 53
+crates = 6
+status = "same"
+api = "values::PhpObject::as_value"
+
+[[item]]
+mahout = "mahout_value::Value::as_php_ref"
+sites = 44
+crates = 6
+status = "same"
+api = "values::Value::as_php_ref"
+
+[[item]]
+mahout = "mahout_value::PhpObject::index"
+sites = 37
+crates = 3
+status = "same"
+api = "values::PhpObject::index"
+
+[[item]]
+mahout = "mahout_value::PhpObject::props"
+sites = 34
+crates = 8
+status = "same"
+api = "values::PhpObject::props"
+
+[[item]]
+mahout = "mahout_value::PhpObject::trace"
+sites = 33
+crates = 4
+status = "renamed"
+api = "values::PhpObject::prop"
+
+[[item]]
+mahout = "mahout_value::PhpObject::addr"
+sites = 28
+crates = 4
+status = "gone"
+rule = "object identity is the handle (PhpObject::index); heap addresses are php_heap's"
+
+[[item]]
+mahout = "mahout_value::Value::as_float"
+sites = 27
+crates = 7
+status = "same"
+api = "values::Value::as_float"
+
+[[item]]
+mahout = "mahout_value::PhpObject::set_trace"
+sites = 27
+crates = 4
+status = "renamed"
+api = "values::PhpObject::set_prop"
+
+[[item]]
+mahout = "mahout_value::PhpObject::line"
+sites = 22
+crates = 3
+status = "renamed"
+api = "values::PhpObject::prop"
+
+[[item]]
+mahout = "mahout_value::PhpObject::set_line"
+sites = 22
+crates = 3
+status = "renamed"
+api = "values::PhpObject::set_prop"
+
+[[item]]
+mahout = "mahout_value::PhpArray::to_value"
+sites = 22
+crates = 2
+status = "same"
+api = "values::PhpArray::to_value"
+
+[[item]]
+mahout = "mahout_value::PhpObject::set_code"
+sites = 21
+crates = 3
+status = "renamed"
+api = "values::PhpObject::set_prop"
+
+[[item]]
+mahout = "mahout_value::PhpObject::code"
+sites = 20
+crates = 2
+status = "renamed"
+api = "values::PhpObject::prop"
+
+[[item]]
+mahout = "mahout_value::PhpObject::previous"
+sites = 19
+crates = 2
+status = "renamed"
+api = "values::PhpObject::prop"
+
+[[item]]
+mahout = "mahout_value::PhpArray::unset"
+sites = 18
+crates = 1
+status = "same"
+api = "values::PhpArray::unset"
+
+[[item]]
+mahout = "mahout_value::Value::as_bool"
+sites = 17
+crates = 7
+status = "same"
+api = "values::Value::as_bool"
+
+[[item]]
+mahout = "mahout_value::PhpObject::set_native"
+sites = 14
+crates = 5
+status = "renamed"
+api = "values::PhpObject::native_mut"
+
+[[item]]
+mahout = "mahout_value::PhpRef::take"
+sites = 12
+crates = 3
+status = "renamed"
+api = "values::PhpRef::get"
+
+[[item]]
+mahout = "mahout_value::PhpObject::with_native"
+sites = 12
+crates = 4
+status = "renamed"
+api = "values::PhpObject::native"
+
+[[item]]
+mahout = "mahout_value::PhpObject::set_previous"
+sites = 11
+crates = 2
+status = "renamed"
+api = "values::PhpObject::set_prop"
+
+[[item]]
+mahout = "mahout_value::Value::as_resource_id"
+sites = 9
+crates = 2
+status = "renamed"
+api = "values::Value::as_resource"
+
+[[item]]
+mahout = "mahout_value::PhpObject::closure_unit"
+sites = 9
+crates = 2
+status = "renamed"
+api = "values::PhpObject::closure"
+
+[[item]]
+mahout = "mahout_value::Value::as_php_string"
+sites = 8
+crates = 3
+status = "same"
+api = "values::Value::as_php_string"
+
+[[item]]
+mahout = "mahout_value::PhpObject::closure_func"
+sites = 8
+crates = 2
+status = "renamed"
+api = "values::PhpObject::closure"
+
+[[item]]
+mahout = "mahout_value::Value::truthy"
+sites = 8
+crates = 2
+status = "renamed"
+api = "coerce::truthy"
+
+[[item]]
+mahout = "mahout_value::PhpObject::closure_bound_this"
+sites = 7
+crates = 2
+status = "renamed"
+api = "values::PhpObject::closure"
+
+[[item]]
+mahout = "mahout_value::PhpObject::closure_scope"
+sites = 7
+crates = 2
+status = "renamed"
+api = "values::PhpObject::closure"
+
+[[item]]
+mahout = "mahout_value::PhpObject::closure_native_name"
+sites = 5
+crates = 2
+status = "renamed"
+api = "values::PhpObject::closure"
+
+[[item]]
+mahout = "mahout_value::PhpString::concat"
+sites = 5
+crates = 2
+status = "same"
+api = "values::PhpString::concat"
+
+[[item]]
+mahout = "mahout_value::PhpObject::set_message"
+sites = 5
+crates = 2
+status = "renamed"
+api = "values::PhpObject::set_prop"
+
+[[item]]
+mahout = "mahout_value::PhpArray::snapshot_ref_flags"
+sites = 5
+crates = 1
+status = "renamed"
+api = "values::PhpArray::snapshot_refs"
+
+[[item]]
+mahout = "mahout_value::PhpObject::closure_deferred_method_name"
+sites = 4
+crates = 2
+status = "renamed"
+api = "values::PhpObject::closure"
+
+[[item]]
+mahout = "mahout_value::PhpObject::message"
+sites = 4
+crates = 2
+status = "renamed"
+api = "values::PhpObject::prop"
+
+[[item]]
+mahout = "mahout_value::PhpObject::throwable_props"
+sites = 4
+crates = 3
+status = "renamed"
+api = "values::PhpObject::props"
+
+[[item]]
+mahout = "mahout_value::ArrayIter::value"
+sites = 4
+crates = 2
+status = "same"
+api = "values::ArrayIter::value"
+
+[[item]]
+mahout = "mahout_value::PhpObject::with_native_mut"
+sites = 4
+crates = 2
+status = "renamed"
+api = "values::PhpObject::native_mut"
+
+[[item]]
+mahout = "mahout_value::PhpArray::adopt_iters_from"
+sites = 3
+crates = 1
+status = "gone"
+rule = "foreach-iterator fixup on edit is php_heap's; the array's edit methods do it"
+
+[[item]]
+mahout = "mahout_value::Value::heap_refcount"
+sites = 3
+crates = 1
+status = "renamed"
+api = "values::Value::refcount"
+
+[[item]]
+mahout = "mahout_value::ArrayIter::advance"
+sites = 2
+crates = 1
+status = "same"
+api = "values::ArrayIter::advance"
+
+[[item]]
+mahout = "mahout_value::Value::as_raw"
+sites = 2
+crates = 1
+status = "gone"
+rule = "RawValue is php_heap's layout; api has no raw view"
+
+[[item]]
+mahout = "mahout_value::PhpObject::closure_captures"
+sites = 2
+crates = 2
+status = "renamed"
+api = "values::PhpObject::closure"
+
+[[item]]
+mahout = "mahout_value::PhpArray::cursor_current"
+sites = 2
+crates = 1
+status = "same"
+api = "values::PhpArray::cursor_current"
+
+[[item]]
+mahout = "mahout_value::PhpArray::cursor_key"
+sites = 2
+crates = 1
+status = "same"
+api = "values::PhpArray::cursor_key"
+
+[[item]]
+mahout = "mahout_value::ScratchValue::into_value"
+sites = 2
+crates = 1
+status = "gone"
+rule = "ScratchValue is php_heap's; a native builds a Value directly"
+
+[[item]]
+mahout = "mahout_value::PhpArray::separate"
+sites = 2
+crates = 1
+status = "same"
+api = "values::PhpArray::separate"
+
+[[item]]
+mahout = "mahout_value::Value::string"
+sites = 2
+crates = 1
+status = "same"
+api = "values::Value::string"
+
+[[item]]
+mahout = "mahout_value::PhpArray::try_append"
+sites = 2
+crates = 1
+status = "same"
+api = "values::PhpArray::try_append"
+
+[[item]]
+mahout = "mahout_value::PhpObject::closure_callable_name"
+sites = 1
+crates = 1
+status = "renamed"
+api = "values::PhpObject::closure"
+
+[[item]]
+mahout = "mahout_value::PhpArray::content_tag"
+sites = 1
+crates = 1
+status = "gone"
+rule = "the packed/hash shape is php_heap's; api exposes is_list only"
+
+[[item]]
+mahout = "mahout_value::PhpArray::cursor_end"
+sites = 1
+crates = 1
+status = "same"
+api = "values::PhpArray::cursor_end"
+
+[[item]]
+mahout = "mahout_value::PhpArray::cursor_next"
+sites = 1
+crates = 1
+status = "same"
+api = "values::PhpArray::cursor_next"
+
+[[item]]
+mahout = "mahout_value::PhpArray::cursor_prev"
+sites = 1
+crates = 1
+status = "same"
+api = "values::PhpArray::cursor_prev"
+
+[[item]]
+mahout = "mahout_value::PhpArray::cursor_reset"
+sites = 1
+crates = 1
+status = "same"
+api = "values::PhpArray::cursor_reset"
+
+[[item]]
+mahout = "mahout_value::PhpArray::fixup_iters"
+sites = 1
+crates = 1
+status = "gone"
+rule = "foreach-iterator fixup on edit is php_heap's; the array's edit methods do it"
+
+[[item]]
+mahout = "mahout_value::ScratchValue::into_inner"
+sites = 1
+crates = 1
+status = "gone"
+rule = "ScratchValue is php_heap's; a native builds a Value directly"
+
+[[item]]
+mahout = "mahout_value::HeapHeader::is_interned"
+sites = 1
+crates = 1
+status = "gone"
+rule = "interning is the heap's; no native asks"
+
+[[item]]
+mahout = "mahout_value::PhpArray::is_packed_list"
+sites = 1
+crates = 1
+status = "renamed"
+api = "values::PhpArray::is_list"
+
+[[item]]
+mahout = "mahout_value::PhpArray::is_shared"
+sites = 1
+crates = 1
+status = "gone"
+rule = "separate() is unconditional; the refcount test is php_heap's"
+
+[[item]]
+mahout = "mahout_value::PhpArray::iter_free_slot"
+sites = 1
+crates = 1
+status = "gone"
+rule = "foreach-iterator slots are php_heap's"
+
+[[item]]
+mahout = "mahout_value::ArrayIter::key"
+sites = 1
+crates = 1
+status = "same"
+api = "values::ArrayIter::key"
+
+[[item]]
+mahout = "mahout_value::PhpObject::native_dump_entries"
+sites = 1
+crates = 1
+status = "renamed"
+api = "abi::ObjectHandlers"
+
+[[item]]
+mahout = "mahout_value::PhpArray::nmemb"
+sites = 1
+crates = 1
+status = "renamed"
+api = "values::PhpArray::len"
+
+[[item]]
+mahout = "mahout_value::PhpObject::refcount"
+sites = 1
+crates = 1
+status = "renamed"
+api = "values::Value::refcount"
+
+[[item]]
+mahout = "mahout_value::PhpArray::replace"
+sites = 1
+crates = 1
+status = "same"
+api = "values::PhpArray::replace"
+
+[[item]]
+mahout = "mahout_value::PhpArray::sort_begin"
+sites = 1
+crates = 1
+status = "renamed"
+api = "values::PhpArray::sort_by"
+
+[[item]]
+mahout = "mahout_value::PhpArray::sort_end"
+sites = 1
+crates = 1
+status = "renamed"
+api = "values::PhpArray::sort_by"
+
+[[item]]
+mahout = "mahout_value::Key::to_prop_name"
+sites = 1
+crates = 1
+status = "same"
+api = "values::Key::to_prop_name"
+
+# ---- mahout_value free functions called from ext crates
+[[item]]
+mahout = "mahout_value::normalize_str_key"
+sites = 28
+crates = 4
+status = "renamed"
+api = "values::Key::from_bytes"
+
+[[item]]
+mahout = "mahout_value::normalize_key"
+sites = 6
+crates = 1
+status = "renamed"
+api = "coerce::key_of"
+
+[[item]]
+mahout = "mahout_value::convert::float_to_repr"
+sites = 3
+crates = 2
+status = "renamed"
+api = "coerce::float_to_string"
+
+[[item]]
+mahout = "mahout_value::convert::debug_type_name"
+sites = 2
+crates = 1
+status = "renamed"
+api = "values::Value::type_name"
+
+[[item]]
+mahout = "mahout_value::convert::float_to_e"
+sites = 1
+crates = 1
+status = "renamed"
+api = "coerce::float_format"
+
+[[item]]
+mahout = "mahout_value::convert::float_to_g"
+sites = 1
+crates = 1
+status = "renamed"
+api = "coerce::float_format"
+
+[[item]]
+mahout = "mahout_value::convert::int_to_string"
+sites = 1
+crates = 1
+status = "same"
+api = "coerce::int_to_string"
+
+[[item]]
+mahout = "mahout_value::internal_class_count"
+sites = 1
+crates = 1
+status = "gone"
+rule = "a Mahout debug counter; nothing to count"
+
+[[item]]
+mahout = "mahout_value::convert::to_long_lossy"
+sites = 1
+crates = 1
+status = "renamed"
+api = "coerce::float_to_long"
+
+# ---- mahout_value associated functions and variants named from ext crates
+[[item]]
+mahout = "mahout_value::Value::null"
+sites = 372
+crates = 11
+status = "same"
+api = "values::Value::null"
+
+[[item]]
+mahout = "mahout_value::Value::bool"
+sites = 288
+crates = 11
+status = "same"
+api = "values::Value::bool"
+
+[[item]]
+mahout = "mahout_value::PhpArray::new"
+sites = 266
+crates = 16
+status = "same"
+api = "values::PhpArray::new"
+
+[[item]]
+mahout = "mahout_value::PhpString::from_bytes"
+sites = 265
+crates = 16
+status = "same"
+api = "values::PhpString::from_bytes"
+
+[[item]]
+mahout = "mahout_value::Value::array"
+sites = 209
+crates = 15
+status = "same"
+api = "values::Value::array"
+
+[[item]]
+mahout = "mahout_value::Value::int"
+sites = 205
+crates = 14
+status = "same"
+api = "values::Value::int"
+
+[[item]]
+mahout = "mahout_value::Key::Int"
+sites = 186
+crates = 10
+status = "same"
+api = "values::Key"
+
+[[item]]
+mahout = "mahout_value::Key::Str"
+sites = 171
+crates = 13
+status = "same"
+api = "values::Key"
+
+[[item]]
+mahout = "mahout_value::Value::string"
+sites = 153
+crates = 16
+status = "same"
+api = "values::Value::string"
+
+[[item]]
+mahout = "mahout_value::TypeTag::Null"
+sites = 53
+crates = 7
+status = "same"
+api = "values::TypeTag"
+
+[[item]]
+mahout = "mahout_value::Value::as_object"
+sites = 40
+crates = 3
+status = "same"
+api = "values::Value::as_object"
+
+[[item]]
+mahout = "mahout_value::TypeTag::Str"
+sites = 35
+crates = 9
+status = "same"
+api = "values::TypeTag"
+
+[[item]]
+mahout = "mahout_value::TypeTag::Array"
+sites = 33
+crates = 6
+status = "same"
+api = "values::TypeTag"
+
+[[item]]
+mahout = "mahout_value::Value::as_array"
+sites = 30
+crates = 6
+status = "same"
+api = "values::Value::as_array"
+
+[[item]]
+mahout = "mahout_value::TypeTag::Int"
+sites = 29
+crates = 9
+status = "same"
+api = "values::TypeTag"
+
+[[item]]
+mahout = "mahout_value::PhpObject::new_user"
+sites = 27
+crates = 5
+status = "renamed"
+api = "call::new_object"
+
+[[item]]
+mahout = "mahout_value::TypeTag::Object"
+sites = 26
+crates = 4
+status = "same"
+api = "values::TypeTag"
+
+[[item]]
+mahout = "mahout_value::Value::resource"
+sites = 21
+crates = 1
+status = "same"
+api = "values::Value::resource"
+
+[[item]]
+mahout = "mahout_value::TypeTag::Float"
+sites = 20
+crates = 6
+status = "same"
+api = "values::TypeTag"
+
+[[item]]
+mahout = "mahout_value::TypeTag::Bool"
+sites = 18
+crates = 6
+status = "same"
+api = "values::TypeTag"
+
+[[item]]
+mahout = "mahout_value::Value::as_str_bytes"
+sites = 17
+crates = 5
+status = "same"
+api = "values::Value::as_str_bytes"
+
+[[item]]
+mahout = "mahout_value::Value::as_int"
+sites = 13
+crates = 3
+status = "same"
+api = "values::Value::as_int"
+
+[[item]]
+mahout = "mahout_value::Value::float"
+sites = 13
+crates = 5
+status = "same"
+api = "values::Value::float"
+
+[[item]]
+mahout = "mahout_value::Value::as_php_ref"
+sites = 10
+crates = 2
+status = "same"
+api = "values::Value::as_php_ref"
+
+[[item]]
+mahout = "mahout_value::Value::truthy"
+sites = 7
+crates = 3
+status = "renamed"
+api = "coerce::truthy"
+
+[[item]]
+mahout = "mahout_value::PhpRef::new"
+sites = 5
+crates = 1
+status = "same"
+api = "values::PhpRef::new"
+
+[[item]]
+mahout = "mahout_value::TypeTag::Closure"
+sites = 4
+crates = 1
+status = "gone"
+rule = "a closure is an object whose class is Closure; TypeTag has no closure arm"
+
+[[item]]
+mahout = "mahout_value::TypeTag::Resource"
+sites = 4
+crates = 1
+status = "same"
+api = "values::TypeTag"
+
+[[item]]
+mahout = "mahout_value::PhpRef::get"
+sites = 3
+crates = 1
+status = "same"
+api = "values::PhpRef::get"
+
+[[item]]
+mahout = "mahout_value::Value::as_bool"
+sites = 3
+crates = 1
+status = "same"
+api = "values::Value::as_bool"
+
+[[item]]
+mahout = "mahout_value::Value::as_resource_id"
+sites = 2
+crates = 1
+status = "renamed"
+api = "values::Value::as_resource"
+
+[[item]]
+mahout = "mahout_value::PhpArray::cursor_end"
+sites = 1
+crates = 1
+status = "same"
+api = "values::PhpArray::cursor_end"
+
+[[item]]
+mahout = "mahout_value::PhpArray::cursor_next"
+sites = 1
+crates = 1
+status = "same"
+api = "values::PhpArray::cursor_next"
+
+[[item]]
+mahout = "mahout_value::PhpArray::cursor_prev"
+sites = 1
+crates = 1
+status = "same"
+api = "values::PhpArray::cursor_prev"
+
+[[item]]
+mahout = "mahout_value::PhpArray::cursor_reset"
+sites = 1
+crates = 1
+status = "same"
+api = "values::PhpArray::cursor_reset"
+
+[[item]]
+mahout = "mahout_value::TypeTag::Ref"
+sites = 1
+crates = 1
+status = "same"
+api = "values::TypeTag"
+
+[[item]]
+mahout = "mahout_value::Value::as_php_string"
+sites = 1
+crates = 1
+status = "same"
+api = "values::Value::as_php_string"
+
+[[item]]
+mahout = "mahout_value::Value::object"
+sites = 1
+crates = 1
+status = "same"
+api = "values::Value::object"
+
+[[item]]
+mahout = "mahout_value::ValueRef::Blob"
+sites = 1
+crates = 1
+status = "same"
+api = "values::ValueRef"
+
+[[item]]
+mahout = "mahout_value::ValueRef::Integer"
+sites = 1
+crates = 1
+status = "same"
+api = "values::ValueRef"
+
+[[item]]
+mahout = "mahout_value::ValueRef::Null"
+sites = 1
+crates = 1
+status = "same"
+api = "values::ValueRef"
+
+[[item]]
+mahout = "mahout_value::ValueRef::Real"
+sites = 1
+crates = 1
+status = "same"
+api = "values::ValueRef"
+
+[[item]]
+mahout = "mahout_value::ValueRef::Text"
+sites = 1
+crates = 1
+status = "same"
+api = "values::ValueRef"
+
+# ---- RequestCtx methods called from ext crates
+[[item]]
+mahout = "RequestCtx::note_alloc"
+sites = 327
+crates = 15
+status = "gone"
+rule = "nothing; the allocator accounts"
+
+[[item]]
+mahout = "RequestCtx::resources_mut"
+sites = 63
+crates = 1
+status = "renamed"
+api = "request::Request::resources"
+
+[[item]]
+mahout = "RequestCtx::resources"
+sites = 56
+crates = 1
+status = "same"
+api = "request::Request::resources"
+
+[[item]]
+mahout = "RequestCtx::current_line"
+sites = 20
+crates = 7
+status = "same"
+api = "request::Request::current_line"
+
+[[item]]
+mahout = "RequestCtx::type_mode"
+sites = 18
+crates = 3
+status = "gone"
+rule = "coerce_param reads the caller's strict_types itself"
+
+[[item]]
+mahout = "RequestCtx::cwd"
+sites = 16
+crates = 2
+status = "same"
+api = "request::Request::cwd"
+
+[[item]]
+mahout = "RequestCtx::write_output"
+sites = 16
+crates = 2
+status = "renamed"
+api = "request::Request::write"
+
+[[item]]
+mahout = "RequestCtx::lookup_func"
+sites = 9
+crates = 2
+status = "renamed"
+api = "call::lookup_function"
+
+[[item]]
+mahout = "RequestCtx::scope_for_native"
+sites = 9
+crates = 1
+status = "renamed"
+api = "request::Request::scope"
+
+[[item]]
+mahout = "RequestCtx::closure_info"
+sites = 8
+crates = 2
+status = "renamed"
+api = "values::PhpObject::closure"
+
+[[item]]
+mahout = "RequestCtx::create_mode"
+sites = 8
+crates = 1
+status = "renamed"
+api = "request::Request::umask"
+
+[[item]]
+mahout = "RequestCtx::superglobal"
+sites = 8
+crates = 2
+status = "same"
+api = "request::Request::superglobal"
+
+[[item]]
+mahout = "RequestCtx::stream_wrappers"
+sites = 6
+crates = 1
+status = "same"
+api = "request::Request::stream_wrappers"
+
+[[item]]
+mahout = "RequestCtx::headers_sent"
+sites = 5
+crates = 2
+status = "same"
+api = "request::Request::headers_sent"
+
+[[item]]
+mahout = "RequestCtx::lazy_objects_is_empty"
+sites = 5
+crates = 1
+status = "gone"
+rule = "the lazy-object table is the engine's; nothing polls it"
+
+[[item]]
+mahout = "RequestCtx::set_superglobal"
+sites = 5
+crates = 1
+status = "same"
+api = "request::Request::set_superglobal"
+
+[[item]]
+mahout = "RequestCtx::frame_vars_for_native_mut"
+sites = 4
+crates = 1
+status = "renamed"
+api = "request::Request::frame_vars"
+
+[[item]]
+mahout = "RequestCtx::umask"
+sites = 4
+crates = 1
+status = "same"
+api = "request::Request::umask"
+
+[[item]]
+mahout = "RequestCtx::loaded_extensions"
+sites = 3
+crates = 2
+status = "same"
+api = "request::Request::loaded_extensions"
+
+[[item]]
+mahout = "RequestCtx::native_call_by_name"
+sites = 3
+crates = 1
+status = "gone"
+rule = "the ABI knows the call shape; a native does not ask how it was called"
+
+[[item]]
+mahout = "RequestCtx::output_started_at"
+sites = 3
+crates = 2
+status = "same"
+api = "request::Request::output_started_at"
+
+[[item]]
+mahout = "RequestCtx::set_gc_enabled"
+sites = 3
+crates = 1
+status = "renamed"
+api = "request::Request::gc_enable"
+
+[[item]]
+mahout = "RequestCtx::set_in_tick_dispatch"
+sites = 3
+crates = 1
+status = "gone"
+rule = "declare(ticks) dispatch is the engine's"
+
+[[item]]
+mahout = "RequestCtx::set_response_code"
+sites = 3
+crates = 1
+status = "same"
+api = "request::Request::set_response_code"
+
+[[item]]
+mahout = "RequestCtx::temp_dir"
+sites = 3
+crates = 1
+status = "same"
+api = "request::Request::temp_dir"
+
+[[item]]
+mahout = "RequestCtx::arm_time_limit"
+sites = 2
+crates = 1
+status = "renamed"
+api = "request::Request::set_time_limit"
+
+[[item]]
+mahout = "RequestCtx::assert_callback"
+sites = 2
+crates = 1
+status = "same"
+api = "request::Request::assert_callback"
+
+[[item]]
+mahout = "RequestCtx::current_file"
+sites = 2
+crates = 2
+status = "same"
+api = "request::Request::current_file"
+
+[[item]]
+mahout = "RequestCtx::engine_handle"
+sites = 2
+crates = 1
+status = "gone"
+rule = "req.engine::<E>() reaches the extension's own engine state; the Engine itself is not in api"
+
+[[item]]
+mahout = "RequestCtx::extension_is_loaded"
+sites = 2
+crates = 1
+status = "renamed"
+api = "request::Request::loaded_extensions"
+
+[[item]]
+mahout = "RequestCtx::header_remove"
+sites = 2
+crates = 1
+status = "same"
+api = "request::Request::header_remove"
+
+[[item]]
+mahout = "RequestCtx::headers_list"
+sites = 2
+crates = 1
+status = "same"
+api = "request::Request::headers_list"
+
+[[item]]
+mahout = "RequestCtx::is_uploaded_file"
+sites = 2
+crates = 1
+status = "same"
+api = "request::Request::is_uploaded_file"
+
+[[item]]
+mahout = "RequestCtx::lsb_for_native"
+sites = 2
+crates = 1
+status = "renamed"
+api = "request::Request::called_scope"
+
+[[item]]
+mahout = "RequestCtx::native_discard"
+sites = 2
+crates = 1
+status = "gone"
+rule = "#[\\NoDiscard] is a declaration fact; the engine warns on a discarded return"
+
+[[item]]
+mahout = "RequestCtx::native_early_bound"
+sites = 2
+crates = 1
+status = "gone"
+rule = "the ABI knows the call shape; a native does not ask how it was bound"
+
+[[item]]
+mahout = "RequestCtx::new"
+sites = 2
+crates = 2
+status = "gone"
+rule = "a native never builds a request; the host does"
+
+[[item]]
+mahout = "RequestCtx::push_exception_handler"
+sites = 2
+crates = 1
+status = "renamed"
+api = "request::Request::set_exception_handler"
+
+[[item]]
+mahout = "RequestCtx::restore_error_handler"
+sites = 2
+crates = 1
+status = "same"
+api = "request::Request::restore_error_handler"
+
+[[item]]
+mahout = "RequestCtx::restore_exception_handler"
+sites = 2
+crates = 1
+status = "same"
+api = "request::Request::restore_exception_handler"
+
+[[item]]
+mahout = "RequestCtx::script_name"
+sites = 2
+crates = 1
+status = "same"
+api = "request::Request::script_name"
+
+[[item]]
+mahout = "RequestCtx::set_assert_callback"
+sites = 2
+crates = 1
+status = "same"
+api = "request::Request::set_assert_callback"
+
+[[item]]
+mahout = "RequestCtx::set_error_handler"
+sites = 2
+crates = 1
+status = "same"
+api = "request::Request::set_error_handler"
+
+[[item]]
+mahout = "RequestCtx::static_side_cell_peek"
+sites = 2
+crates = 1
+status = "renamed"
+api = "request::Request::function_decl"
+
+[[item]]
+mahout = "RequestCtx::stream_wrappers_mut"
+sites = 2
+crates = 1
+status = "renamed"
+api = "request::Request::register_wrapper"
+
+[[item]]
+mahout = "RequestCtx::suppress_pop"
+sites = 2
+crates = 1
+status = "gone"
+rule = "the @ operator is the engine's; a native's raise is silenced by the engine"
+
+[[item]]
+mahout = "RequestCtx::suppress_push"
+sites = 2
+crates = 1
+status = "gone"
+rule = "the @ operator is the engine's; a native's raise is silenced by the engine"
+
+[[item]]
+mahout = "RequestCtx::take_frame_vars_for_native"
+sites = 2
+crates = 1
+status = "renamed"
+api = "request::Request::frame_vars"
+
+[[item]]
+mahout = "RequestCtx::take_native_named_args"
+sites = 2
+crates = 2
+status = "gone"
+rule = "the ABI matches named arguments; a variadic collects the extras with their names"
+
+[[item]]
+mahout = "RequestCtx::user_filters"
+sites = 2
+crates = 1
+status = "renamed"
+api = "request::Request::register_filter"
+
+[[item]]
+mahout = "RequestCtx::write_output_stderr"
+sites = 2
+crates = 1
+status = "same"
+api = "request::Request::write_stderr"
+
+[[item]]
+mahout = "RequestCtx::autoload_functions"
+sites = 1
+crates = 1
+status = "same"
+api = "request::Request::autoload_functions"
+
+[[item]]
+mahout = "RequestCtx::autoload_register"
+sites = 1
+crates = 1
+status = "same"
+api = "request::Request::autoload_register"
+
+[[item]]
+mahout = "RequestCtx::autoload_unregister"
+sites = 1
+crates = 1
+status = "same"
+api = "request::Request::autoload_unregister"
+
+[[item]]
+mahout = "RequestCtx::called_class_for_native"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::called_scope"
+
+[[item]]
+mahout = "RequestCtx::class_alias_bind"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::class_alias"
+
+[[item]]
+mahout = "RequestCtx::clear_last_error"
+sites = 1
+crates = 1
+status = "same"
+api = "request::Request::clear_last_error"
+
+[[item]]
+mahout = "RequestCtx::closure_static_key_prefix"
+sites = 1
+crates = 1
+status = "gone"
+rule = "static variables are read through the function's declaration view"
+
+[[item]]
+mahout = "RequestCtx::commit_headers"
+sites = 1
+crates = 1
+status = "gone"
+rule = "the host commits headers on first output"
+
+[[item]]
+mahout = "RequestCtx::debug_backtrace"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::backtrace"
+
+[[item]]
+mahout = "RequestCtx::debug_print_backtrace"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::backtrace"
+
+[[item]]
+mahout = "RequestCtx::define_runtime_const"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::define_constant"
+
+[[item]]
+mahout = "RequestCtx::env_lookup"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::env"
+
+[[item]]
+mahout = "RequestCtx::env_pairs"
+sites = 1
+crates = 1
+status = "same"
+api = "request::Request::env_pairs"
+
+[[item]]
+mahout = "RequestCtx::flush_output"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::flush"
+
+[[item]]
+mahout = "RequestCtx::frame_args"
+sites = 1
+crates = 1
+status = "same"
+api = "request::Request::frame_args"
+
+[[item]]
+mahout = "RequestCtx::gc_active"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::gc_status"
+
+[[item]]
+mahout = "RequestCtx::gc_buffer_size"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::gc_status"
+
+[[item]]
+mahout = "RequestCtx::gc_collected"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::gc_status"
+
+[[item]]
+mahout = "RequestCtx::gc_enabled"
+sites = 1
+crates = 1
+status = "same"
+api = "request::Request::gc_enabled"
+
+[[item]]
+mahout = "RequestCtx::gc_roots"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::gc_status"
+
+[[item]]
+mahout = "RequestCtx::gc_runs"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::gc_status"
+
+[[item]]
+mahout = "RequestCtx::gc_threshold"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::gc_status"
+
+[[item]]
+mahout = "RequestCtx::gen_func_name"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::function_decl"
+
+[[item]]
+mahout = "RequestCtx::globals_view_with"
+sites = 1
+crates = 1
+status = "gone"
+rule = "$GLOBALS is the engine's view; get_defined_vars reads frame_vars"
+
+[[item]]
+mahout = "RequestCtx::handler_routes"
+sites = 1
+crates = 1
+status = "gone"
+rule = "the engine runs the error handler at the raise; a native never asks whether one is set"
+
+[[item]]
+mahout = "RequestCtx::has_tick_functions"
+sites = 1
+crates = 1
+status = "gone"
+rule = "declare(ticks) dispatch is the engine's"
+
+[[item]]
+mahout = "RequestCtx::header_add"
+sites = 1
+crates = 1
+status = "same"
+api = "request::Request::header_add"
+
+[[item]]
+mahout = "RequestCtx::in_tick_dispatch"
+sites = 1
+crates = 1
+status = "gone"
+rule = "declare(ticks) dispatch is the engine's"
+
+[[item]]
+mahout = "RequestCtx::included_files"
+sites = 1
+crates = 1
+status = "same"
+api = "request::Request::included_files"
+
+[[item]]
+mahout = "RequestCtx::iter_funcs"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::defined_functions"
+
+[[item]]
+mahout = "RequestCtx::last_error"
+sites = 1
+crates = 1
+status = "same"
+api = "request::Request::last_error"
+
+[[item]]
+mahout = "RequestCtx::lazy_pinned"
+sites = 1
+crates = 1
+status = "gone"
+rule = "lazy-object bookkeeping is the engine's"
+
+[[item]]
+mahout = "RequestCtx::memory_peak_usage_bytes"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::memory_peak"
+
+[[item]]
+mahout = "RequestCtx::memory_usage_bytes"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::memory_usage"
+
+[[item]]
+mahout = "RequestCtx::note_props_materialized"
+sites = 1
+crates = 1
+status = "gone"
+rule = "lazy-object bookkeeping is the engine's"
+
+[[item]]
+mahout = "RequestCtx::queue_handler_call"
+sites = 1
+crates = 1
+status = "gone"
+rule = "the engine runs the error handler at the raise; natives never queue handler calls"
+
+[[item]]
+mahout = "RequestCtx::register_shutdown_function"
+sites = 1
+crates = 1
+status = "same"
+api = "request::Request::register_shutdown_function"
+
+[[item]]
+mahout = "RequestCtx::register_tick_function"
+sites = 1
+crates = 1
+status = "same"
+api = "request::Request::register_tick_function"
+
+[[item]]
+mahout = "RequestCtx::request_headers"
+sites = 1
+crates = 1
+status = "same"
+api = "request::Request::request_headers"
+
+[[item]]
+mahout = "RequestCtx::reset_memory_peak"
+sites = 1
+crates = 1
+status = "same"
+api = "request::Request::reset_memory_peak"
+
+[[item]]
+mahout = "RequestCtx::response_code"
+sites = 1
+crates = 1
+status = "same"
+api = "request::Request::response_code"
+
+[[item]]
+mahout = "RequestCtx::sapi_name"
+sites = 1
+crates = 1
+status = "same"
+api = "request::Request::sapi_name"
+
+[[item]]
+mahout = "RequestCtx::set_callable_dep_pre_emitted"
+sites = 1
+crates = 1
+status = "gone"
+rule = "to_callable emits the deprecation once itself"
+
+[[item]]
+mahout = "RequestCtx::set_current_line"
+sites = 1
+crates = 1
+status = "gone"
+rule = "the engine tracks the line"
+
+[[item]]
+mahout = "RequestCtx::set_cwd"
+sites = 1
+crates = 1
+status = "same"
+api = "request::Request::set_cwd"
+
+[[item]]
+mahout = "RequestCtx::set_env_override"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::set_env"
+
+[[item]]
+mahout = "RequestCtx::set_header_callback"
+sites = 1
+crates = 1
+status = "same"
+api = "request::Request::set_header_callback"
+
+[[item]]
+mahout = "RequestCtx::set_status_line"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::set_response_code"
+
+[[item]]
+mahout = "RequestCtx::set_umask"
+sites = 1
+crates = 1
+status = "same"
+api = "request::Request::set_umask"
+
+[[item]]
+mahout = "RequestCtx::silence_cancel"
+sites = 1
+crates = 1
+status = "gone"
+rule = "the @ operator is the engine's; a native's raise is silenced by the engine"
+
+[[item]]
+mahout = "RequestCtx::status_line_fixed"
+sites = 1
+crates = 1
+status = "gone"
+rule = "the host owns the status line once headers are committed"
+
+[[item]]
+mahout = "RequestCtx::stdin_shared"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::stdin"
+
+[[item]]
+mahout = "RequestCtx::strtok_next"
+sites = 1
+crates = 1
+status = "gone"
+rule = "strtok's state is ext/standard's request state (BG(strtok_*) in php)"
+
+[[item]]
+mahout = "RequestCtx::strtok_seed"
+sites = 1
+crates = 1
+status = "gone"
+rule = "strtok's state is ext/standard's request state (BG(strtok_*) in php)"
+
+[[item]]
+mahout = "RequestCtx::strtok_seeded"
+sites = 1
+crates = 1
+status = "gone"
+rule = "strtok's state is ext/standard's request state (BG(strtok_*) in php)"
+
+[[item]]
+mahout = "RequestCtx::suppressed"
+sites = 1
+crates = 1
+status = "gone"
+rule = "the @ operator is the engine's; a native's raise is silenced by the engine"
+
+[[item]]
+mahout = "RequestCtx::take_uploaded_file"
+sites = 1
+crates = 1
+status = "same"
+api = "request::Request::take_uploaded_file"
+
+[[item]]
+mahout = "RequestCtx::tick_due"
+sites = 1
+crates = 1
+status = "gone"
+rule = "declare(ticks) dispatch is the engine's"
+
+[[item]]
+mahout = "RequestCtx::tick_functions_snapshot"
+sites = 1
+crates = 1
+status = "gone"
+rule = "declare(ticks) dispatch is the engine's"
+
+[[item]]
+mahout = "RequestCtx::unit_file"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::function_decl"
+
+[[item]]
+mahout = "RequestCtx::unregister_tick_function"
+sites = 1
+crates = 1
+status = "same"
+api = "request::Request::unregister_tick_function"
+
+[[item]]
+mahout = "RequestCtx::unset_dying_count"
+sites = 1
+crates = 1
+status = "gone"
+rule = "lazy-object bookkeeping is the engine's"
+
+[[item]]
+mahout = "RequestCtx::user_filters_mut"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::register_filter"
+
+[[item]]
+mahout = "RequestCtx::write_output_console"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::write_stderr"
+
+# ---- RequestCtx public-field members reached from ext crates
+[[item]]
+mahout = "RequestCtx::classes.descriptor"
+sites = 119
+crates = 6
+status = "renamed"
+api = "request::Request::class_decl"
+
+[[item]]
+mahout = "RequestCtx::classes.instance_of"
+sites = 47
+crates = 5
+status = "same"
+api = "values::PhpObject::instance_of"
+
+[[item]]
+mahout = "RequestCtx::classes.lookup"
+sites = 42
+crates = 5
+status = "renamed"
+api = "call::lookup_class"
+
+[[item]]
+mahout = "RequestCtx::classes.descriptor_arc"
+sites = 23
+crates = 3
+status = "renamed"
+api = "request::Request::class_decl"
+
+[[item]]
+mahout = "RequestCtx::ini.get"
+sites = 20
+crates = 4
+status = "renamed"
+api = "request::Request::ini_get"
+
+[[item]]
+mahout = "RequestCtx::ini.set_string"
+sites = 11
+crates = 2
+status = "renamed"
+api = "request::Request::ini_set"
+
+[[item]]
+mahout = "RequestCtx::classes.unit_of"
+sites = 7
+crates = 1
+status = "gone"
+rule = "units are not addressed by natives; class_decl carries the declaration site"
+
+[[item]]
+mahout = "RequestCtx::errors.has_pending"
+sites = 6
+crates = 2
+status = "gone"
+rule = "a Thrown in hand is the pending exception; there is no slot to poll"
+
+[[item]]
+mahout = "RequestCtx::output.ob_peek_meta"
+sites = 6
+crates = 1
+status = "renamed"
+api = "request::Request::output_buffer_op"
+
+[[item]]
+mahout = "RequestCtx::errors.take_pending"
+sites = 5
+crates = 2
+status = "renamed"
+api = "raising::Thrown::exception"
+
+[[item]]
+mahout = "RequestCtx::output.ob_contents"
+sites = 4
+crates = 1
+status = "renamed"
+api = "request::Request::output_buffer_op"
+
+[[item]]
+mahout = "RequestCtx::settings.enable_gc"
+sites = 4
+crates = 1
+status = "renamed"
+api = "request::Request::gc_enable"
+
+[[item]]
+mahout = "RequestCtx::settings.error_reporting"
+sites = 4
+crates = 1
+status = "renamed"
+api = "request::Request::error_reporting"
+
+[[item]]
+mahout = "RequestCtx::settings.include_path"
+sites = 4
+crates = 1
+status = "renamed"
+api = "request::Request::ini_get"
+
+[[item]]
+mahout = "RequestCtx::classes.enum_case"
+sites = 3
+crates = 2
+status = "renamed"
+api = "call::class_constant"
+
+[[item]]
+mahout = "RequestCtx::classes.static_get"
+sites = 3
+crates = 1
+status = "renamed"
+api = "call::read_static_prop"
+
+[[item]]
+mahout = "RequestCtx::consts.define"
+sites = 3
+crates = 1
+status = "renamed"
+api = "request::Request::define_constant"
+
+[[item]]
+mahout = "RequestCtx::errors.restore_pending"
+sites = 3
+crates = 1
+status = "renamed"
+api = "raising::throw_value"
+
+[[item]]
+mahout = "RequestCtx::output.ob_status_snapshot"
+sites = 3
+crates = 1
+status = "renamed"
+api = "request::Request::output_buffer_op"
+
+[[item]]
+mahout = "RequestCtx::settings.apply_override"
+sites = 3
+crates = 1
+status = "renamed"
+api = "request::Request::ini_set"
+
+[[item]]
+mahout = "RequestCtx::settings.serialize_ndigit"
+sites = 3
+crates = 3
+status = "renamed"
+api = "coerce::float_to_string"
+
+[[item]]
+mahout = "RequestCtx::classes.prop_slot"
+sites = 2
+crates = 2
+status = "renamed"
+api = "values::PhpObject::prop"
+
+[[item]]
+mahout = "RequestCtx::classes.static_set"
+sites = 2
+crates = 1
+status = "renamed"
+api = "call::write_static_prop"
+
+[[item]]
+mahout = "RequestCtx::consts.lookup"
+sites = 2
+crates = 2
+status = "renamed"
+api = "call::constant"
+
+[[item]]
+mahout = "RequestCtx::output.is_deactivated"
+sites = 2
+crates = 1
+status = "gone"
+rule = "output deactivation at shutdown is the engine's"
+
+[[item]]
+mahout = "RequestCtx::settings.admin_frozen"
+sites = 2
+crates = 1
+status = "gone"
+rule = "ini_set reports the verdict; a native does not inspect the freeze"
+
+[[item]]
+mahout = "RequestCtx::settings.display_errors"
+sites = 2
+crates = 1
+status = "renamed"
+api = "request::Request::ini_get"
+
+[[item]]
+mahout = "RequestCtx::settings.fiber_stack_size"
+sites = 2
+crates = 1
+status = "renamed"
+api = "request::Request::ini_get"
+
+[[item]]
+mahout = "RequestCtx::settings.html_errors"
+sites = 2
+crates = 1
+status = "renamed"
+api = "request::Request::ini_get"
+
+[[item]]
+mahout = "RequestCtx::settings.max_execution_time"
+sites = 2
+crates = 1
+status = "renamed"
+api = "request::Request::ini_get"
+
+[[item]]
+mahout = "RequestCtx::settings.memory_limit"
+sites = 2
+crates = 1
+status = "renamed"
+api = "request::Request::ini_get"
+
+[[item]]
+mahout = "RequestCtx::settings.serialize_ndigit_h"
+sites = 2
+crates = 1
+status = "renamed"
+api = "coerce::float_to_string"
+
+[[item]]
+mahout = "RequestCtx::settings.sys_temp_dir"
+sites = 2
+crates = 1
+status = "renamed"
+api = "request::Request::temp_dir"
+
+[[item]]
+mahout = "RequestCtx::settings.zend_assertions"
+sites = 2
+crates = 1
+status = "renamed"
+api = "request::Request::ini_get"
+
+[[item]]
+mahout = "RequestCtx::classes.decl_site_of"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::class_decl"
+
+[[item]]
+mahout = "RequestCtx::classes.names_of_kinds"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::declared_classes"
+
+[[item]]
+mahout = "RequestCtx::consts.contains"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::constant"
+
+[[item]]
+mahout = "RequestCtx::consts.iter"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::constants"
+
+[[item]]
+mahout = "RequestCtx::consts.lookup_attributes"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::constants"
+
+[[item]]
+mahout = "RequestCtx::errors.pending_is_exception"
+sites = 1
+crates = 1
+status = "gone"
+rule = "a Thrown in hand is the pending exception; there is no slot to poll"
+
+[[item]]
+mahout = "RequestCtx::errors.raise_exception"
+sites = 1
+crates = 1
+status = "renamed"
+api = "raising::throw_value"
+
+[[item]]
+mahout = "RequestCtx::ini.iter_detailed"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::ini_entries"
+
+[[item]]
+mahout = "RequestCtx::output.deactivate"
+sites = 1
+crates = 1
+status = "gone"
+rule = "output deactivation at shutdown is the engine's"
+
+[[item]]
+mahout = "RequestCtx::output.in_handler"
+sites = 1
+crates = 1
+status = "gone"
+rule = "re-entry into an output handler is refused by the engine"
+
+[[item]]
+mahout = "RequestCtx::output.ob_level"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::output_buffer_op"
+
+[[item]]
+mahout = "RequestCtx::output.ob_pop_take"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::output_buffer_op"
+
+[[item]]
+mahout = "RequestCtx::output.ob_start_with"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::output_buffer_op"
+
+[[item]]
+mahout = "RequestCtx::security.open_basedir"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::ini_get"
+
+[[item]]
+mahout = "RequestCtx::security.tighten_open_basedir"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::ini_set"
+
+[[item]]
+mahout = "RequestCtx::settings.display_errors_ini"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::ini_get"
+
+[[item]]
+mahout = "RequestCtx::settings.exception_ignore_args"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::ini_get"
+
+[[item]]
+mahout = "RequestCtx::settings.exception_string_param_max_len"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::ini_get"
+
+[[item]]
+mahout = "RequestCtx::settings.fatal_error_backtraces"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::ini_get"
+
+[[item]]
+mahout = "RequestCtx::settings.ignore_repeated_errors"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::ini_get"
+
+[[item]]
+mahout = "RequestCtx::settings.ignore_repeated_source"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::ini_get"
+
+[[item]]
+mahout = "RequestCtx::settings.max_input_nesting_level"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::ini_get"
+
+[[item]]
+mahout = "RequestCtx::settings.max_memory_limit"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::ini_get"
+
+[[item]]
+mahout = "RequestCtx::settings.precision"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::ini_get"
+
+[[item]]
+mahout = "RequestCtx::settings.serialize_precision"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::ini_get"
+
+# ---- semantics:: items used from ext crates
+[[item]]
+mahout = "semantics::Raised"
+sites = 1614
+crates = 17
+status = "renamed"
+api = "raising::Thrown"
+
+[[item]]
+mahout = "semantics::throw_internal"
+sites = 181
+crates = 12
+status = "renamed"
+api = "raising::throw"
+
+[[item]]
+mahout = "semantics::raise_text_warning"
+sites = 116
+crates = 10
+status = "renamed"
+api = "raising::warning"
+
+[[item]]
+mahout = "semantics::to_long"
+sites = 38
+crates = 5
+status = "same"
+api = "coerce::to_long"
+
+[[item]]
+mahout = "semantics::arg_type_error"
+sites = 35
+crates = 7
+status = "same"
+api = "raising::arg_type_error"
+
+[[item]]
+mahout = "semantics::truthy"
+sites = 35
+crates = 4
+status = "same"
+api = "coerce::truthy"
+
+[[item]]
+mahout = "semantics::PathIntent"
+sites = 33
+crates = 3
+status = "same"
+api = "request::PathIntent"
+
+[[item]]
+mahout = "semantics::deref_value"
+sites = 30
+crates = 3
+status = "renamed"
+api = "values::Value::deref"
+
+[[item]]
+mahout = "semantics::check_fs_access"
+sites = 27
+crates = 3
+status = "renamed"
+api = "request::Request::fs_guard"
+
+[[item]]
+mahout = "semantics::ArrayOrString"
+sites = 25
+crates = 1
+status = "gone"
+rule = "an `array|string` parameter is an abi::Union enum the native declares"
+
+[[item]]
+mahout = "semantics::raise_text_deprecated"
+sites = 25
+crates = 4
+status = "renamed"
+api = "raising::deprecated"
+
+[[item]]
+mahout = "semantics::coerce_string_ctx"
+sites = 24
+crates = 9
+status = "renamed"
+api = "coerce::to_string"
+
+[[item]]
+mahout = "semantics::instantiate_no_ctor"
+sites = 24
+crates = 8
+status = "renamed"
+api = "call::new_object"
+
+[[item]]
+mahout = "semantics::coerce_string_rt"
+sites = 23
+crates = 2
+status = "renamed"
+api = "coerce::to_string"
+
+[[item]]
+mahout = "semantics::arg_count_error"
+sites = 16
+crates = 4
+status = "same"
+api = "raising::arg_count_error"
+
+[[item]]
+mahout = "semantics::engine_limitation"
+sites = 15
+crates = 7
+status = "gone"
+rule = "gone, decided 2026-09-07. php has no engine-limitation error, so no witness can pin one. The 15 sites: 10 (curl 4, iconv 3, mbstring 2, dom 1) disappear with the C bindings the design chooses over pure Rust; 2 (SplPriorityQueue::compare override, PhpToken __get override) exist only because Mahout could not re-enter user code from those positions, which call::call and the object handlers provide; 3 (RegexIterator GET_MATCH/ALL_MATCHES/SPLIT, unpack non-integer codes, htmlspecialchars non-UTF-8 charsets) are unported behaviour, and a native without it fails its own witness against the oracle, which proposes an open divergence row that fails done until the behaviour is ported or a person accepts the row. No api item, no interim raise."
+
+[[item]]
+mahout = "semantics::guard_alloc"
+sites = 14
+crates = 2
+status = "gone"
+rule = "the allocator accounts and raises the memory-limit fatal itself"
+
+[[item]]
+mahout = "semantics::absolutize"
+sites = 12
+crates = 2
+status = "same"
+api = "request::Request::absolutize"
+
+[[item]]
+mahout = "semantics::cast_float"
+sites = 10
+crates = 1
+status = "renamed"
+api = "coerce::to_double"
+
+[[item]]
+mahout = "semantics::cast_int"
+sites = 10
+crates = 1
+status = "renamed"
+api = "coerce::to_long"
+
+[[item]]
+mahout = "semantics::too_few_arguments"
+sites = 9
+crates = 2
+status = "same"
+api = "raising::too_few_arguments"
+
+[[item]]
+mahout = "semantics::LazyDumpView"
+sites = 8
+crates = 1
+status = "gone"
+rule = "var_dump of a lazy object is the engine's ObjectHandlers::debug_info"
+
+[[item]]
+mahout = "semantics::coerce_param"
+sites = 8
+crates = 3
+status = "same"
+api = "coerce::coerce_param"
+
+[[item]]
+mahout = "semantics::raise"
+sites = 8
+crates = 4
+status = "same"
+api = "raising::raise"
+
+[[item]]
+mahout = "semantics::coerce_string_typed"
+sites = 7
+crates = 2
+status = "renamed"
+api = "coerce::to_string"
+
+[[item]]
+mahout = "semantics::drain_handler_calls_sync"
+sites = 7
+crates = 2
+status = "gone"
+rule = "the engine runs the error handler at the raise; natives never drain the handler queue"
+
+[[item]]
+mahout = "semantics::CallableCx"
+sites = 6
+crates = 1
+status = "renamed"
+api = "coerce::to_callable"
+
+[[item]]
+mahout = "semantics::IterOpened"
+sites = 6
+crates = 1
+status = "renamed"
+api = "call::Iter"
+
+[[item]]
+mahout = "semantics::given_display"
+sites = 6
+crates = 3
+status = "renamed"
+api = "values::Value::type_name"
+
+[[item]]
+mahout = "semantics::guard_value_recursion"
+sites = 6
+crates = 2
+status = "renamed"
+api = "raising::fatal"
+
+[[item]]
+mahout = "semantics::raise_text_fatal"
+sites = 6
+crates = 1
+status = "renamed"
+api = "raising::fatal"
+
+[[item]]
+mahout = "semantics::resolve_path_realpath"
+sites = 6
+crates = 1
+status = "renamed"
+api = "request::Request::realpath"
+
+[[item]]
+mahout = "semantics::ConstScope"
+sites = 5
+crates = 1
+status = "renamed"
+api = "call::eval_const_expr"
+
+[[item]]
+mahout = "semantics::LazyOp"
+sites = 5
+crates = 2
+status = "gone"
+rule = "lazy initialisation on access is the engine's property handlers'"
+
+[[item]]
+mahout = "semantics::arg_count_error_range"
+sites = 5
+crates = 3
+status = "renamed"
+api = "raising::arg_count_error"
+
+[[item]]
+mahout = "semantics::check_fs_access_display"
+sites = 5
+crates = 1
+status = "renamed"
+api = "request::Request::fs_guard"
+
+[[item]]
+mahout = "semantics::class_lookup"
+sites = 5
+crates = 1
+status = "renamed"
+api = "call::lookup_class"
+
+[[item]]
+mahout = "semantics::is_spl_array_family"
+sites = 5
+crates = 1
+status = "gone"
+rule = "ArrayObject's storage is ext/spl's own NativeClass payload; the engine reaches it through ObjectHandlers"
+
+[[item]]
+mahout = "semantics::null_param_deprecated"
+sites = 5
+crates = 3
+status = "renamed"
+api = "raising::arg_null_deprecated"
+
+[[item]]
+mahout = "semantics::observe"
+sites = 5
+crates = 2
+status = "gone"
+rule = "lazy initialisation on access is the engine's property handlers'"
+
+[[item]]
+mahout = "semantics::spl_array_view"
+sites = 5
+crates = 2
+status = "gone"
+rule = "ArrayObject's storage is ext/spl's own NativeClass payload; the engine reaches it through ObjectHandlers"
+
+[[item]]
+mahout = "semantics::ARRAY_ELEM_BYTES"
+sites = 4
+crates = 1
+status = "gone"
+rule = "the allocator accounts and raises the memory-limit fatal itself"
+
+[[item]]
+mahout = "semantics::SplArrayState"
+sites = 4
+crates = 3
+status = "gone"
+rule = "ArrayObject's storage is ext/spl's own NativeClass payload; the engine reaches it through ObjectHandlers"
+
+[[item]]
+mahout = "semantics::check_callable_cx"
+sites = 4
+crates = 1
+status = "renamed"
+api = "coerce::is_callable"
+
+[[item]]
+mahout = "semantics::dump_prop_entries"
+sites = 4
+crates = 1
+status = "renamed"
+api = "values::PhpObject::entries"
+
+[[item]]
+mahout = "semantics::dump_view"
+sites = 4
+crates = 1
+status = "gone"
+rule = "var_dump of a lazy object is the engine's ObjectHandlers::debug_info"
+
+[[item]]
+mahout = "semantics::key_of"
+sites = 4
+crates = 1
+status = "same"
+api = "coerce::key_of"
+
+[[item]]
+mahout = "semantics::loose_eq_rt"
+sites = 4
+crates = 1
+status = "renamed"
+api = "coerce::loose_eq"
+
+[[item]]
+mahout = "semantics::php_stable_sort_by"
+sites = 4
+crates = 2
+status = "gone"
+rule = "std's sort_by is stable; a Vec sorts itself"
+
+[[item]]
+mahout = "semantics::raise_text_notice"
+sites = 4
+crates = 4
+status = "renamed"
+api = "raising::notice"
+
+[[item]]
+mahout = "semantics::reserve_or_raise"
+sites = 4
+crates = 3
+status = "gone"
+rule = "the allocator accounts and raises the memory-limit fatal itself"
+
+[[item]]
+mahout = "semantics::spl_array_flags"
+sites = 4
+crates = 1
+status = "gone"
+rule = "ArrayObject's storage is ext/spl's own NativeClass payload; the engine reaches it through ObjectHandlers"
+
+[[item]]
+mahout = "semantics::typed_ref_store"
+sites = 4
+crates = 1
+status = "renamed"
+api = "values::PhpRef::set"
+
+[[item]]
+mahout = "semantics::AggregateNumber"
+sites = 3
+crates = 1
+status = "renamed"
+api = "coerce::to_number"
+
+[[item]]
+mahout = "semantics::HookedTablePolicy"
+sites = 3
+crates = 2
+status = "renamed"
+api = "values::PhpObject::entries"
+
+[[item]]
+mahout = "semantics::class_const_reflect"
+sites = 3
+crates = 1
+status = "renamed"
+api = "call::class_constant"
+
+[[item]]
+mahout = "semantics::class_has_hooked_props"
+sites = 3
+crates = 2
+status = "renamed"
+api = "request::Request::class_decl"
+
+[[item]]
+mahout = "semantics::default_value"
+sites = 3
+crates = 1
+status = "renamed"
+api = "call::eval_const_expr"
+
+[[item]]
+mahout = "semantics::ensure_enum_cases"
+sites = 3
+crates = 2
+status = "gone"
+rule = "enum cases are linked at declaration; class_constant materialises a case on read"
+
+[[item]]
+mahout = "semantics::ensure_spl_array_storage"
+sites = 3
+crates = 2
+status = "gone"
+rule = "ArrayObject's storage is ext/spl's own NativeClass payload; the engine reaches it through ObjectHandlers"
+
+[[item]]
+mahout = "semantics::hooked_object_prop_table"
+sites = 3
+crates = 2
+status = "renamed"
+api = "values::PhpObject::entries"
+
+[[item]]
+mahout = "semantics::identical"
+sites = 3
+crates = 1
+status = "same"
+api = "coerce::identical"
+
+[[item]]
+mahout = "semantics::is_callable_form"
+sites = 3
+crates = 2
+status = "renamed"
+api = "coerce::is_callable"
+
+[[item]]
+mahout = "semantics::loose_cmp"
+sites = 3
+crates = 2
+status = "renamed"
+api = "coerce::compare"
+
+[[item]]
+mahout = "semantics::normalize_callable_cx"
+sites = 3
+crates = 1
+status = "renamed"
+api = "coerce::to_callable"
+
+[[item]]
+mahout = "semantics::set_spl_array_flags"
+sites = 3
+crates = 1
+status = "gone"
+rule = "ArrayObject's storage is ext/spl's own NativeClass payload; the engine reaches it through ObjectHandlers"
+
+[[item]]
+mahout = "semantics::throw_value"
+sites = 3
+crates = 3
+status = "same"
+api = "raising::throw_value"
+
+[[item]]
+mahout = "semantics::validate_native_callback"
+sites = 3
+crates = 1
+status = "renamed"
+api = "abi::Callable"
+
+[[item]]
+mahout = "semantics::HostPath"
+sites = 2
+crates = 1
+status = "same"
+api = "request::HostPath"
+
+[[item]]
+mahout = "semantics::OffsetOp"
+sites = 2
+crates = 1
+status = "gone"
+rule = "key_of renders the offset message for the container it is given"
+
+[[item]]
+mahout = "semantics::cast_to_array"
+sites = 2
+crates = 1
+status = "renamed"
+api = "coerce::to_array"
+
+[[item]]
+mahout = "semantics::ensure_static_defaults"
+sites = 2
+crates = 1
+status = "gone"
+rule = "static property defaults are evaluated by the engine on first access"
+
+[[item]]
+mahout = "semantics::eval_const_expr_text"
+sites = 2
+crates = 1
+status = "renamed"
+api = "call::eval_const_expr"
+
+[[item]]
+mahout = "semantics::is_numeric_string"
+sites = 2
+crates = 2
+status = "renamed"
+api = "coerce::numeric_string"
+
+[[item]]
+mahout = "semantics::is_uninitialized"
+sites = 2
+crates = 2
+status = "renamed"
+api = "values::PhpObject::is_lazy"
+
+[[item]]
+mahout = "semantics::loose_cmp_rt"
+sites = 2
+crates = 1
+status = "renamed"
+api = "coerce::compare"
+
+[[item]]
+mahout = "semantics::object_prop_entries"
+sites = 2
+crates = 2
+status = "renamed"
+api = "values::PhpObject::entries"
+
+[[item]]
+mahout = "semantics::proxy_real"
+sites = 2
+crates = 2
+status = "renamed"
+api = "values::PhpObject::lazy_real"
+
+[[item]]
+mahout = "semantics::rethrow"
+sites = 2
+crates = 1
+status = "renamed"
+api = "raising::throw_value"
+
+[[item]]
+mahout = "semantics::seed_throwable_prop"
+sites = 2
+crates = 1
+status = "renamed"
+api = "values::PhpObject::set_prop"
+
+[[item]]
+mahout = "semantics::set_raw_prop"
+sites = 2
+crates = 1
+status = "renamed"
+api = "values::PhpObject::set_prop"
+
+[[item]]
+mahout = "semantics::stamp_dtor_less"
+sites = 2
+crates = 2
+status = "gone"
+rule = "whether a class has a destructor is a linked fact; the heap reads it"
+
+[[item]]
+mahout = "semantics::teardown_warning"
+sites = 2
+crates = 1
+status = "renamed"
+api = "raising::warning"
+
+[[item]]
+mahout = "semantics::throw_internal_chained"
+sites = 2
+crates = 1
+status = "renamed"
+api = "raising::throw_value"
+
+[[item]]
+mahout = "semantics::throwable_at"
+sites = 2
+crates = 2
+status = "renamed"
+api = "raising::new_throwable"
+
+[[item]]
+mahout = "semantics::truthy_warn"
+sites = 2
+crates = 1
+status = "renamed"
+api = "coerce::truthy"
+
+[[item]]
+mahout = "semantics::GenMethod"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::Iter"
+
+[[item]]
+mahout = "semantics::PropRead"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::read_prop"
+
+[[item]]
+mahout = "semantics::aggregate_number"
+sites = 1
+crates = 1
+status = "renamed"
+api = "coerce::to_number"
+
+[[item]]
+mahout = "semantics::assert_gate"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::ini_get"
+
+[[item]]
+mahout = "semantics::attribute_to_string"
+sites = 1
+crates = 1
+status = "gone"
+rule = "Reflection*::__toString is ext/reflection's own rendering over class_decl"
+
+[[item]]
+mahout = "semantics::callable_deprecation_shape"
+sites = 1
+crates = 1
+status = "renamed"
+api = "coerce::to_callable"
+
+[[item]]
+mahout = "semantics::callback_class_autoload"
+sites = 1
+crates = 1
+status = "renamed"
+api = "coerce::to_callable"
+
+[[item]]
+mahout = "semantics::cast_to_object"
+sites = 1
+crates = 1
+status = "renamed"
+api = "coerce::to_object"
+
+[[item]]
+mahout = "semantics::check_unserialize_throwable_field"
+sites = 1
+crates = 1
+status = "renamed"
+api = "values::PhpObject::set_prop"
+
+[[item]]
+mahout = "semantics::class_const_fetch"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::class_constant"
+
+[[item]]
+mahout = "semantics::class_constant_to_string"
+sites = 1
+crates = 1
+status = "gone"
+rule = "Reflection*::__toString is ext/reflection's own rendering over class_decl"
+
+[[item]]
+mahout = "semantics::class_method_names"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::class_decl"
+
+[[item]]
+mahout = "semantics::class_to_string"
+sites = 1
+crates = 1
+status = "gone"
+rule = "Reflection*::__toString is ext/reflection's own rendering over class_decl"
+
+[[item]]
+mahout = "semantics::class_var_defaults"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::class_decl"
+
+[[item]]
+mahout = "semantics::clone_call"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::clone"
+
+[[item]]
+mahout = "semantics::closure_from_callable"
+sites = 1
+crates = 1
+status = "same"
+api = "call::closure_from_callable"
+
+[[item]]
+mahout = "semantics::closure_from_callable_in_scope"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::closure_from_callable"
+
+[[item]]
+mahout = "semantics::const_fetch"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::constant"
+
+[[item]]
+mahout = "semantics::count_value"
+sites = 1
+crates = 1
+status = "renamed"
+api = "coerce::count"
+
+[[item]]
+mahout = "semantics::cow_make_mut"
+sites = 1
+crates = 1
+status = "renamed"
+api = "values::PhpArray::separate"
+
+[[item]]
+mahout = "semantics::declare_class"
+sites = 1
+crates = 1
+status = "gone"
+rule = "natives declare classes through #[php_class]; runtime declaration is not in api"
+
+[[item]]
+mahout = "semantics::declared_prop_order"
+sites = 1
+crates = 1
+status = "renamed"
+api = "values::PhpObject::entries"
+
+[[item]]
+mahout = "semantics::default_error_display"
+sites = 1
+crates = 1
+status = "gone"
+rule = "the engine displays errors; a native raises"
+
+[[item]]
+mahout = "semantics::deprecate_dynamic_creation_unserialize"
+sites = 1
+crates = 1
+status = "renamed"
+api = "values::PhpObject::set_prop"
+
+[[item]]
+mahout = "semantics::effective_error_reporting"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::error_reporting"
+
+[[item]]
+mahout = "semantics::find_double_colon"
+sites = 1
+crates = 1
+status = "gone"
+rule = "a byte search; the native does it"
+
+[[item]]
+mahout = "semantics::float_dim_key_under_handler"
+sites = 1
+crates = 1
+status = "renamed"
+api = "coerce::key_of"
+
+[[item]]
+mahout = "semantics::fs_path_allowed"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::fs_guard"
+
+[[item]]
+mahout = "semantics::function_to_string"
+sites = 1
+crates = 1
+status = "gone"
+rule = "Reflection*::__toString is ext/reflection's own rendering over class_decl"
+
+[[item]]
+mahout = "semantics::get_initializer"
+sites = 1
+crates = 1
+status = "renamed"
+api = "values::PhpObject::lazy_initializer"
+
+[[item]]
+mahout = "semantics::instantiate_user_filter"
+sites = 1
+crates = 1
+status = "gone"
+rule = "a user filter is instantiated through call::instantiate and driven by call::call_method"
+
+[[item]]
+mahout = "semantics::is_lazy_prop"
+sites = 1
+crates = 1
+status = "same"
+api = "values::PhpObject::is_lazy_prop"
+
+[[item]]
+mahout = "semantics::iter_live_object_advance"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::Iter::next"
+
+[[item]]
+mahout = "semantics::iter_object_key"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::Iter::key"
+
+[[item]]
+mahout = "semantics::iter_object_next"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::Iter::next"
+
+[[item]]
+mahout = "semantics::iter_object_value"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::Iter::value"
+
+[[item]]
+mahout = "semantics::iter_open"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::iterate"
+
+[[item]]
+mahout = "semantics::key_of_op_on"
+sites = 1
+crates = 1
+status = "renamed"
+api = "coerce::key_of"
+
+[[item]]
+mahout = "semantics::lazy_skips_init_on_serialize"
+sites = 1
+crates = 1
+status = "renamed"
+api = "values::PhpObject::is_lazy"
+
+[[item]]
+mahout = "semantics::make_ghost"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::new_lazy_ghost"
+
+[[item]]
+mahout = "semantics::make_proxy"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::new_lazy_proxy"
+
+[[item]]
+mahout = "semantics::mark_ghost_debug_viewed"
+sites = 1
+crates = 1
+status = "gone"
+rule = "var_dump of a lazy object is the engine's ObjectHandlers::debug_info"
+
+[[item]]
+mahout = "semantics::mark_initialized"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::initialize_lazy"
+
+[[item]]
+mahout = "semantics::materialize"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::initialize_lazy"
+
+[[item]]
+mahout = "semantics::method_to_string"
+sites = 1
+crates = 1
+status = "gone"
+rule = "Reflection*::__toString is ext/reflection's own rendering over class_decl"
+
+[[item]]
+mahout = "semantics::nan_wrap_post_handler"
+sites = 1
+crates = 1
+status = "renamed"
+api = "coerce::to_long"
+
+[[item]]
+mahout = "semantics::numeric_string_value"
+sites = 1
+crates = 1
+status = "renamed"
+api = "coerce::numeric_string"
+
+[[item]]
+mahout = "semantics::object_prop_entries_flagged"
+sites = 1
+crates = 1
+status = "renamed"
+api = "values::PhpObject::entries"
+
+[[item]]
+mahout = "semantics::operand_type_name"
+sites = 1
+crates = 1
+status = "renamed"
+api = "values::Value::type_name"
+
+[[item]]
+mahout = "semantics::parameter_to_string"
+sites = 1
+crates = 1
+status = "gone"
+rule = "Reflection*::__toString is ext/reflection's own rendering over class_decl"
+
+[[item]]
+mahout = "semantics::php_add"
+sites = 1
+crates = 1
+status = "renamed"
+api = "coerce::binary_op"
+
+[[item]]
+mahout = "semantics::php_mul"
+sites = 1
+crates = 1
+status = "renamed"
+api = "coerce::binary_op"
+
+[[item]]
+mahout = "semantics::php_pow"
+sites = 1
+crates = 1
+status = "renamed"
+api = "coerce::binary_op"
+
+[[item]]
+mahout = "semantics::prop_load"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::read_prop"
+
+[[item]]
+mahout = "semantics::prop_store"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::write_prop"
+
+[[item]]
+mahout = "semantics::raise_exit_now"
+sites = 1
+crates = 1
+status = "renamed"
+api = "raising::exit"
+
+[[item]]
+mahout = "semantics::raise_text_warning_with_exception_pending"
+sites = 1
+crates = 1
+status = "renamed"
+api = "raising::warning"
+
+[[item]]
+mahout = "semantics::realize_if_fully_covered"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::skip_lazy_initialization"
+
+[[item]]
+mahout = "semantics::ref_store_null_out_param"
+sites = 1
+crates = 1
+status = "renamed"
+api = "values::PhpRef::set"
+
+[[item]]
+mahout = "semantics::refl_property_to_string"
+sites = 1
+crates = 1
+status = "gone"
+rule = "Reflection*::__toString is ext/reflection's own rendering over class_decl"
+
+[[item]]
+mahout = "semantics::reflection_constant_to_string"
+sites = 1
+crates = 1
+status = "gone"
+rule = "Reflection*::__toString is ext/reflection's own rendering over class_decl"
+
+[[item]]
+mahout = "semantics::reset_as_ghost"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::reset_as_lazy_ghost"
+
+[[item]]
+mahout = "semantics::reset_as_proxy"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::reset_as_lazy_proxy"
+
+[[item]]
+mahout = "semantics::resource_offset_key"
+sites = 1
+crates = 1
+status = "renamed"
+api = "coerce::key_of"
+
+[[item]]
+mahout = "semantics::set_lazy_options"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::new_lazy_ghost"
+
+[[item]]
+mahout = "semantics::skip_prop"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::skip_lazy_initialization"
+
+[[item]]
+mahout = "semantics::spl_array_as_props"
+sites = 1
+crates = 1
+status = "gone"
+rule = "ArrayObject's storage is ext/spl's own NativeClass payload; the engine reaches it through ObjectHandlers"
+
+[[item]]
+mahout = "semantics::spl_array_serialize_payload"
+sites = 1
+crates = 1
+status = "gone"
+rule = "ArrayObject's storage is ext/spl's own NativeClass payload; the engine reaches it through ObjectHandlers"
+
+[[item]]
+mahout = "semantics::spl_array_unserialize_payload"
+sites = 1
+crates = 1
+status = "gone"
+rule = "ArrayObject's storage is ext/spl's own NativeClass payload; the engine reaches it through ObjectHandlers"
+
+[[item]]
+mahout = "semantics::spl_dual_it_receiver"
+sites = 1
+crates = 1
+status = "gone"
+rule = "spl's dual iterators are ext/spl's own NativeClass payload"
+
+[[item]]
+mahout = "semantics::stamp_typed_slot_ref"
+sites = 1
+crates = 1
+status = "gone"
+rule = "typed-property references are bound by the engine's property write"
+
+[[item]]
+mahout = "semantics::static_prop_load"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::read_static_prop"
+
+[[item]]
+mahout = "semantics::static_prop_store"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::write_static_prop"
+
+[[item]]
+mahout = "semantics::throwable"
+sites = 1
+crates = 1
+status = "renamed"
+api = "raising::new_throwable"
+
+[[item]]
+mahout = "semantics::throwable_fixed_key"
+sites = 1
+crates = 1
+status = "gone"
+rule = "which exception properties are fixed is the engine's; set_prop refuses"
+
+[[item]]
+mahout = "semantics::trigger_user_error"
+sites = 1
+crates = 1
+status = "renamed"
+api = "raising::raise"
+
+[[item]]
+mahout = "semantics::valid_callback_error"
+sites = 1
+crates = 1
+status = "renamed"
+api = "raising::arg_value_error"
+
+[[item]]
+mahout = "semantics::weakmap_entries"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::iterate"
+
+[[item]]
+mahout = "semantics::weakmap_iter_value"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::iterate"
+
+[[item]]
+mahout = "semantics::weakref_referent"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::call_method"
+
+[[item]]
+mahout = "semantics::wind_read_chain"
+sites = 1
+crates = 1
+status = "gone"
+rule = "stream filter chains are inside request::Stream; a native reads and writes the stream"
+
+[[item]]
+mahout = "semantics::wind_write_chain"
+sites = 1
+crates = 1
+status = "gone"
+rule = "stream filter chains are inside request::Stream; a native reads and writes the stream"
+
+[[item]]
+mahout = "semantics::write_error_display"
+sites = 1
+crates = 1
+status = "gone"
+rule = "the engine displays errors; a native raises"
+
+[[item]]
+mahout = "semantics::write_error_log"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::error_log"
+
+[[item]]
+mahout = "semantics::zend_sort_in_place"
+sites = 1
+crates = 1
+status = "renamed"
+api = "values::PhpArray::sort_by"
+
+# ---- mahout_native_abi items used from ext crates
+[[item]]
+mahout = "mahout_native_abi::Str"
+sites = 722
+crates = 15
+status = "renamed"
+api = "values::PhpString"
+
+[[item]]
+mahout = "mahout_native_abi::This"
+sites = 520
+crates = 9
+status = "same"
+api = "abi::This"
+
+[[item]]
+mahout = "mahout_native_abi::OrFalse"
+sites = 347
+crates = 10
+status = "same"
+api = "abi::OrFalse"
+
+[[item]]
+mahout = "mahout_native_abi::Arr"
+sites = 275
+crates = 10
+status = "renamed"
+api = "values::PhpArray"
+
+[[item]]
+mahout = "mahout_native_abi::Union2"
+sites = 153
+crates = 6
+status = "renamed"
+api = "abi::Union"
+
+[[item]]
+mahout = "mahout_native_abi::False"
+sites = 142
+crates = 6
+status = "renamed"
+api = "abi::OrFalse"
+
+[[item]]
+mahout = "mahout_native_abi::Mixed"
+sites = 82
+crates = 4
+status = "renamed"
+api = "values::Value"
+
+[[item]]
+mahout = "mahout_native_abi::Res"
+sites = 56
+crates = 1
+status = "renamed"
+api = "values::Resource"
+
+[[item]]
+mahout = "mahout_native_abi::Variadic"
+sites = 45
+crates = 3
+status = "same"
+api = "abi::Variadic"
+
+[[item]]
+mahout = "mahout_native_abi::True"
+sites = 26
+crates = 1
+status = "gone"
+rule = "a `true` return type is `bool` on the Rust side; the declaration builder takes the literal type from the stub cross-check"
+
+[[item]]
+mahout = "mahout_native_abi::Callback"
+sites = 17
+crates = 2
+status = "renamed"
+api = "abi::Callable"
+
+[[item]]
+mahout = "mahout_native_abi::InOut"
+sites = 14
+crates = 1
+status = "same"
+api = "abi::InOut"
+
+[[item]]
+mahout = "mahout_native_abi::Out"
+sites = 14
+crates = 3
+status = "same"
+api = "abi::Out"
+
+[[item]]
+mahout = "mahout_native_abi::InOut::into_parts"
+sites = 14
+crates = 1
+status = "renamed"
+api = "abi::Out::set"
+
+[[item]]
+mahout = "mahout_native_abi::NativeError"
+sites = 4
+crates = 1
+status = "renamed"
+api = "raising::Thrown"
+
+[[item]]
+mahout = "mahout_native_abi::Nullable"
+sites = 4
+crates = 3
+status = "gone"
+rule = "a nullable parameter is Option<T>"
+
+[[item]]
+mahout = "mahout_native_abi::Out::cell"
+sites = 4
+crates = 2
+status = "renamed"
+api = "abi::Out::set"
+
+[[item]]
+mahout = "mahout_native_abi::NativeError::new"
+sites = 1
+crates = 1
+status = "renamed"
+api = "raising::throw"
+
+# ---- mahout_native_macros attributes and their arguments
+[[item]]
+mahout = "mahout_native_macros::php_method"
+sites = 528
+crates = 9
+status = "renamed"
+api = "attr::php_class"
+
+[[item]]
+mahout = "mahout_native_macros::php_function"
+sites = 495
+crates = 13
+status = "same"
+api = "attr::php_function"
+
+[[item]]
+mahout = "mahout_native_macros::php_method(sig)"
+sites = 428
+crates = 7
+status = "gone"
+rule = "the signature is derived from the Rust fn; the stub cross-check verifies it"
+
+[[item]]
+mahout = "mahout_native_macros::php_method(name)"
+sites = 348
+crates = 8
+status = "renamed"
+api = "attr::php_class"
+
+[[item]]
+mahout = "mahout_native_macros::php_method(tentative)"
+sites = 133
+crates = 2
+status = "renamed"
+api = "attr::tentative"
+
+[[item]]
+mahout = "mahout_native_macros::php_const"
+sites = 91
+crates = 4
+status = "same"
+api = "attr::php_const"
+
+[[item]]
+mahout = "mahout_native_macros::php_class(registered)"
+sites = 83
+crates = 7
+status = "gone"
+rule = "extension() pairs declarations with entries; there is no registration argument"
+
+[[item]]
+mahout = "mahout_native_macros::php_class(id)"
+sites = 80
+crates = 10
+status = "gone"
+rule = "class identities are allocated by the linker; a native never names one"
+
+[[item]]
+mahout = "mahout_native_macros::php_class(name)"
+sites = 80
+crates = 10
+status = "same"
+api = "attr::php_class"
+
+[[item]]
+mahout = "mahout_native_macros::php_class"
+sites = 80
+crates = 10
+status = "same"
+api = "attr::php_class"
+
+[[item]]
+mahout = "mahout_native_macros::php_class(implements)"
+sites = 38
+crates = 8
+status = "same"
+api = "attr::php_class"
+
+[[item]]
+mahout = "mahout_native_macros::php_class(extends)"
+sites = 27
+crates = 4
+status = "same"
+api = "attr::php_class"
+
+[[item]]
+mahout = "mahout_native_macros::php_class(flags)"
+sites = 13
+crates = 5
+status = "renamed"
+api = "attr::php_class"
+
+[[item]]
+mahout = "mahout_native_macros::php_function(raw)"
+sites = 11
+crates = 1
+status = "gone"
+rule = "typed parameters and unions make raw bodies unnecessary; the Variadic<Value> form covers the rest"
+
+[[item]]
+mahout = "mahout_native_macros::php_function(sig)"
+sites = 10
+crates = 1
+status = "gone"
+rule = "the signature is derived from the Rust fn; the stub cross-check verifies it"
+
+[[item]]
+mahout = "mahout_native_macros::php_method(raw)"
+sites = 10
+crates = 1
+status = "gone"
+rule = "typed parameters and unions make raw bodies unnecessary; the Variadic<Value> form covers the rest"
+
+[[item]]
+mahout = "mahout_native_macros::php_class(fields)"
+sites = 9
+crates = 5
+status = "renamed"
+api = "abi::NativeClass"
+
+[[item]]
+mahout = "mahout_native_macros::php_class(props)"
+sites = 9
+crates = 5
+status = "renamed"
+api = "attr::php_class"
+
+[[item]]
+mahout = "mahout_native_macros::php_props"
+sites = 9
+crates = 5
+status = "renamed"
+api = "attr::php_class"
+
+[[item]]
+mahout = "mahout_native_macros::php_class(interface)"
+sites = 8
+crates = 5
+status = "renamed"
+api = "attr::php_class"
+
+[[item]]
+mahout = "mahout_native_macros::php_class(kind)"
+sites = 8
+crates = 5
+status = "renamed"
+api = "attr::php_class"
+
+[[item]]
+mahout = "mahout_native_macros::php_class(prototypes)"
+sites = 8
+crates = 5
+status = "gone"
+rule = "abstract and interface methods are declared in the class attribute like any other; no separate prototype list"
+
+[[item]]
+mahout = "mahout_native_macros::php_method(no_discard)"
+sites = 7
+crates = 1
+status = "renamed"
+api = "attr::php_class"
+
+[[item]]
+mahout = "mahout_native_macros::php_function(name)"
+sites = 6
+crates = 1
+status = "same"
+api = "attr::php_function"
+
+[[item]]
+mahout = "mahout_native_macros::php_class(final)"
+sites = 2
+crates = 1
+status = "same"
+api = "attr::php_class"
+
+[[item]]
+mahout = "mahout_native_macros::php_class(uncloneable)"
+sites = 1
+crates = 1
+status = "renamed"
+api = "abi::ObjectHandlers"
+
+[[item]]
+mahout = "mahout_native_macros::php_prop(protected)"
+sites = 1
+crates = 1
+status = "renamed"
+api = "attr::php_class"
+
+[[item]]
+mahout = "mahout_native_macros::php_prop"
+sites = 1
+crates = 1
+status = "renamed"
+api = "attr::php_class"
+
+# ---- mahout_linker items imported or path-qualified by ext crates
+[[item]]
+mahout = "mahout_linker::ClassKind"
+sites = 55
+crates = 7
+status = "same"
+api = "decl::ClassKind"
+
+[[item]]
+mahout = "mahout_linker::Visibility"
+sites = 27
+crates = 6
+status = "same"
+api = "decl::Visibility"
+
+[[item]]
+mahout = "mahout_linker::ClassDescriptor"
+sites = 18
+crates = 6
+status = "renamed"
+api = "decl::ClassDecl"
+
+[[item]]
+mahout = "mahout_linker::ConstRow"
+sites = 15
+crates = 3
+status = "renamed"
+api = "decl::ClassConstDecl"
+
+[[item]]
+mahout = "mahout_linker::ClassFlags"
+sites = 13
+crates = 6
+status = "same"
+api = "decl::ClassFlags"
+
+[[item]]
+mahout = "mahout_linker::PropDefault"
+sites = 11
+crates = 3
+status = "renamed"
+api = "decl::ConstExpr"
+
+[[item]]
+mahout = "mahout_linker::PropDesc"
+sites = 8
+crates = 3
+status = "renamed"
+api = "decl::PropertyDecl"
+
+[[item]]
+mahout = "mahout_linker::EnumBacking"
+sites = 6
+crates = 2
+status = "same"
+api = "decl::EnumBacking"
+
+[[item]]
+mahout = "mahout_linker::MethodDesc"
+sites = 5
+crates = 3
+status = "renamed"
+api = "decl::MethodDecl"
+
+[[item]]
+mahout = "mahout_linker::MethodSig"
+sites = 5
+crates = 4
+status = "renamed"
+api = "decl::MethodDecl"
+
+[[item]]
+mahout = "mahout_linker::ClassInput"
+sites = 1
+crates = 1
+status = "gone"
+rule = "not needed once natives declare classes through the macros"
+
+[[item]]
+mahout = "mahout_linker::PropHooks"
+sites = 1
+crates = 1
+status = "renamed"
+api = "decl::PropertyDecl"
+
+[[item]]
+mahout = "mahout_linker::TraitAdaptations"
+sites = 1
+crates = 1
+status = "gone"
+rule = "not needed once natives declare classes through the macros"
+
+# ---- mahout_code_meta items imported or path-qualified by ext crates
+[[item]]
+mahout = "mahout_code_meta::ClassId"
+sites = 37
+crates = 2
+status = "same"
+api = "values::ClassId"
+
+[[item]]
+mahout = "mahout_code_meta::UnitId"
+sites = 14
+crates = 5
+status = "gone"
+rule = "units are not addressed by natives; current_file and the declaration views carry the file"
+
+[[item]]
+mahout = "mahout_code_meta::AttrSpec"
+sites = 8
+crates = 2
+status = "renamed"
+api = "decl::Attribute"
+
+[[item]]
+mahout = "mahout_code_meta::ErrorLevel"
+sites = 8
+crates = 4
+status = "renamed"
+api = "raising::Level"
+
+[[item]]
+mahout = "mahout_code_meta::NameScope"
+sites = 8
+crates = 5
+status = "gone"
+rule = "not needed once natives declare classes through the macros; the macros fold names"
+
+[[item]]
+mahout = "mahout_code_meta::ParamTy"
+sites = 6
+crates = 3
+status = "renamed"
+api = "decl::Type"
+
+[[item]]
+mahout = "mahout_code_meta::ScalarType"
+sites = 6
+crates = 3
+status = "renamed"
+api = "decl::Type"
+
+[[item]]
+mahout = "mahout_code_meta::TypeMode"
+sites = 6
+crates = 3
+status = "gone"
+rule = "coerce_param reads the caller's strict_types itself"
+
+[[item]]
+mahout = "mahout_code_meta::render"
+sites = 6
+crates = 2
+status = "gone"
+rule = "messages are rendered at the raising site; there is no message table"
+
+[[item]]
+mahout = "mahout_code_meta::StaticVarLit"
+sites = 4
+crates = 1
+status = "renamed"
+api = "decl::ConstExpr"
+
+[[item]]
+mahout = "mahout_code_meta::msgs::ENGINE_LIMITATION"
+sites = 3
+crates = 3
+status = "gone"
+rule = "no engine-limitation raise; unported behaviour is a divergence in the oracle registry"
+
+[[item]]
+mahout = "mahout_code_meta::msgs::NEXT_ELEMENT_OCCUPIED"
+sites = 3
+crates = 1
+status = "renamed"
+api = "values::PhpArray::try_append"
+
+[[item]]
+mahout = "mahout_code_meta::Deprecation"
+sites = 2
+crates = 1
+status = "gone"
+rule = "the linker emits inheritance deprecations; a native never builds one"
+
+[[item]]
+mahout = "mahout_code_meta::NoDiscardNote"
+sites = 2
+crates = 1
+status = "gone"
+rule = "#[\\NoDiscard] is a declaration fact; the engine warns on a discarded return"
+
+[[item]]
+mahout = "mahout_code_meta::ScopeWord"
+sites = 2
+crates = 1
+status = "gone"
+rule = "self/parent/static are resolved by lookup_class against the scope"
+
+[[item]]
+mahout = "mahout_code_meta::msgs::CONST_ALREADY_DEFINED"
+sites = 2
+crates = 1
+status = "renamed"
+api = "request::Request::define_constant"
+
+[[item]]
+mahout = "mahout_code_meta::msgs::NAN_COERCED"
+sites = 2
+crates = 1
+status = "renamed"
+api = "coerce::to_long"
+
+[[item]]
+mahout = "mahout_code_meta::reserved_scope_word"
+sites = 2
+crates = 1
+status = "gone"
+rule = "self/parent/static are resolved by lookup_class against the scope"
+
+[[item]]
+mahout = "mahout_code_meta::AttrArg"
+sites = 1
+crates = 1
+status = "renamed"
+api = "decl::AttributeArgument"
+
+[[item]]
+mahout = "mahout_code_meta::NativeMethodId"
+sites = 1
+crates = 1
+status = "gone"
+rule = "native identities are the linker's; a native never names one"
+
+[[item]]
+mahout = "mahout_code_meta::PhpErrorKind"
+sites = 1
+crates = 1
+status = "renamed"
+api = "raising::Level"
+
+[[item]]
+mahout = "mahout_code_meta::Visibility"
+sites = 1
+crates = 1
+status = "same"
+api = "decl::Visibility"
+
+[[item]]
+mahout = "mahout_code_meta::byref_table_index"
+sites = 1
+crates = 1
+status = "gone"
+rule = "by-reference markers come from the signature; the ABI owns the byref table"
+
+[[item]]
+mahout = "mahout_code_meta::msgs"
+sites = 1
+crates = 1
+status = "gone"
+rule = "messages are rendered at the raising site; there is no message table"
+
+[[item]]
+mahout = "mahout_code_meta::native_byref_mask"
+sites = 1
+crates = 1
+status = "gone"
+rule = "by-reference markers come from the signature; the ABI owns the byref table"
+
+[[item]]
+mahout = "mahout_code_meta::native_byref_variadic_at"
+sites = 1
+crates = 1
+status = "gone"
+rule = "by-reference markers come from the signature; the ABI owns the byref table"
+
+[[item]]
+mahout = "mahout_code_meta::native_prefer_ref"
+sites = 1
+crates = 1
+status = "gone"
+rule = "by-reference markers come from the signature; the ABI owns the byref table"
+
+# ---- mahout_native items imported or path-qualified by ext crates
+[[item]]
+mahout = "mahout_native::parse::build_linked_descriptor"
+sites = 49
+crates = 4
+status = "gone"
+rule = "not needed once natives declare classes through the macros"
+
+[[item]]
+mahout = "mahout_native::check::strip_native_ids"
+sites = 6
+crates = 2
+status = "gone"
+rule = "class identities are allocated by the linker; nothing to strip"
+
+[[item]]
+mahout = "mahout_native::check::assert_sig"
+sites = 4
+crates = 2
+status = "gone"
+rule = "xtask crosscheck diffs the declaration builders against the stubs"
+
+[[item]]
+mahout = "mahout_native::parse::parse_function_sig"
+sites = 2
+crates = 2
+status = "gone"
+rule = "the signature is derived from the Rust fn; no PHP signature text is parsed"
+
+# ---- other mahout_runtime items imported or called from ext crates
+[[item]]
+mahout = "mahout_runtime::Reentrant::ctx"
+sites = 1209
+crates = 15
+status = "gone"
+rule = "re-entry is a parameter (principle 9): every native receives &mut Request"
+
+[[item]]
+mahout = "mahout_runtime::Reentrant"
+sites = 164
+crates = 15
+status = "gone"
+rule = "re-entry is a parameter (principle 9): every native receives &mut Request; no Plain/Reentrant split"
+
+[[item]]
+mahout = "mahout_runtime::EngineBuilder"
+sites = 81
+crates = 19
+status = "renamed"
+api = "abi::ExtensionBuilder"
+
+[[item]]
+mahout = "mahout_runtime::Reentrant::call_method"
+sites = 74
+crates = 6
+status = "same"
+api = "call::call_method"
+
+[[item]]
+mahout = "mahout_runtime::symbols::FoldedName"
+sites = 54
+crates = 5
+status = "gone"
+rule = "lookup_function and lookup_class fold the name themselves"
+
+[[item]]
+mahout = "mahout_runtime::native_marshal::NativeFnDecl"
+sites = 51
+crates = 14
+status = "gone"
+rule = "the macro emits the declaration builder; extension() pairs it with the entry"
+
+[[item]]
+mahout = "RequestCtx::ext_state_mut"
+sites = 33
+crates = 7
+status = "renamed"
+api = "request::Request::state"
+
+[[item]]
+mahout = "mahout_runtime::CoreConst"
+sites = 29
+crates = 13
+status = "renamed"
+api = "decl::ConstDecl"
+
+[[item]]
+mahout = "mahout_runtime::Reentrant::call_value"
+sites = 26
+crates = 6
+status = "renamed"
+api = "call::call"
+
+[[item]]
+mahout = "mahout_runtime::native_marshal::ClassManifestRow"
+sites = 23
+crates = 10
+status = "renamed"
+api = "abi::ExtensionBuilder::classes"
+
+[[item]]
+mahout = "mahout_runtime::Reentrant::ensure_class"
+sites = 16
+crates = 3
+status = "renamed"
+api = "call::lookup_class"
+
+[[item]]
+mahout = "mahout_runtime::native_marshal::FnManifestRow"
+sites = 16
+crates = 14
+status = "renamed"
+api = "abi::ExtensionBuilder::functions"
+
+[[item]]
+mahout = "mahout_runtime::native_marshal::manifest_of"
+sites = 14
+crates = 14
+status = "renamed"
+api = "abi::ExtensionBuilder::functions"
+
+[[item]]
+mahout = "mahout_runtime::resources::Stream"
+sites = 12
+crates = 1
+status = "same"
+api = "request::Stream"
+
+[[item]]
+mahout = "mahout_runtime::ExtState"
+sites = 11
+crates = 7
+status = "renamed"
+api = "abi::ExtensionBuilder::request_state"
+
+[[item]]
+mahout = "mahout_runtime::native_marshal::OutWrite"
+sites = 11
+crates = 3
+status = "renamed"
+api = "abi::Out::set"
+
+[[item]]
+mahout = "mahout_runtime::resources::io_error_text"
+sites = 10
+crates = 3
+status = "renamed"
+api = "request::Request::os_error_text"
+
+[[item]]
+mahout = "mahout_runtime::Reentrant::call_value_named"
+sites = 8
+crates = 2
+status = "renamed"
+api = "call::call_named"
+
+[[item]]
+mahout = "mahout_runtime::symbols::ExactName"
+sites = 7
+crates = 2
+status = "gone"
+rule = "define_constant takes the name's bytes"
+
+[[item]]
+mahout = "mahout_runtime::IniVerdict"
+sites = 5
+crates = 2
+status = "same"
+api = "abi::IniVerdict"
+
+[[item]]
+mahout = "mahout_runtime::Reentrant::drive_generator"
+sites = 5
+crates = 1
+status = "renamed"
+api = "call::Iter::next"
+
+[[item]]
+mahout = "mahout_runtime::output::run_handler_op"
+sites = 5
+crates = 1
+status = "renamed"
+api = "request::Request::output_buffer_op"
+
+[[item]]
+mahout = "mahout_runtime::resources"
+sites = 4
+crates = 1
+status = "renamed"
+api = "request::Resources"
+
+[[item]]
+mahout = "mahout_runtime::resources::scheme_of"
+sites = 4
+crates = 1
+status = "gone"
+rule = "open_stream resolves the wrapper from the scheme itself"
+
+[[item]]
+mahout = "mahout_runtime::settings::ini_access"
+sites = 4
+crates = 2
+status = "renamed"
+api = "request::Request::ini_entries"
+
+[[item]]
+mahout = "mahout_runtime::symbols::FuncBinding"
+sites = 4
+crates = 2
+status = "renamed"
+api = "call::Function"
+
+[[item]]
+mahout = "mahout_runtime::codecs::hex_val"
+sites = 3
+crates = 1
+status = "gone"
+rule = "hex and base64 codecs are ext/standard's own"
+
+[[item]]
+mahout = "mahout_runtime::errors::Pending"
+sites = 3
+crates = 1
+status = "renamed"
+api = "raising::Thrown"
+
+[[item]]
+mahout = "mahout_runtime::messages::render"
+sites = 3
+crates = 1
+status = "gone"
+rule = "messages are rendered at the raising site; there is no message table"
+
+[[item]]
+mahout = "mahout_runtime::output::OB_OP_FINAL"
+sites = 3
+crates = 1
+status = "renamed"
+api = "request::OutputOp"
+
+[[item]]
+mahout = "mahout_runtime::resources::Backend"
+sites = 3
+crates = 1
+status = "gone"
+rule = "a stream's backing is inside request::Stream"
+
+[[item]]
+mahout = "mahout_runtime::settings::INI_USER"
+sites = 3
+crates = 2
+status = "renamed"
+api = "decl::IniDecl"
+
+[[item]]
+mahout = "mahout_runtime::settings::ini_parse_bool"
+sites = 3
+crates = 2
+status = "same"
+api = "request::Request::ini_parse_bool"
+
+[[item]]
+mahout = "mahout_runtime::ExtState::ext_teardown"
+sites = 2
+crates = 2
+status = "renamed"
+api = "abi::ExtensionBuilder::rshutdown"
+
+[[item]]
+mahout = "mahout_runtime::Reentrant::call_value_discarded"
+sites = 2
+crates = 1
+status = "renamed"
+api = "call::call"
+
+[[item]]
+mahout = "mahout_runtime::Reentrant::call_value_propagating"
+sites = 2
+crates = 1
+status = "renamed"
+api = "call::call"
+
+[[item]]
+mahout = "mahout_runtime::engine::PHP_VERSION"
+sites = 2
+crates = 2
+status = "same"
+api = "request::PHP_VERSION"
+
+[[item]]
+mahout = "mahout_runtime::host_note::note"
+sites = 2
+crates = 1
+status = "gone"
+rule = "Mahout's host-note instrument; the harness reads the engine, not the reverse"
+
+[[item]]
+mahout = "mahout_runtime::native_marshal"
+sites = 2
+crates = 2
+status = "gone"
+rule = "marshalling is the ABI's: FromArgument and IntoReturn"
+
+[[item]]
+mahout = "mahout_runtime::native_marshal::invoke_callback"
+sites = 2
+crates = 1
+status = "renamed"
+api = "call::call"
+
+[[item]]
+mahout = "mahout_runtime::output::CaptureBackend"
+sites = 2
+crates = 2
+status = "gone"
+rule = "tests build Engine::builder with the Capture sink (ADR-0002); not an api item"
+
+[[item]]
+mahout = "mahout_runtime::output::OB_OP_CLEAN"
+sites = 2
+crates = 1
+status = "renamed"
+api = "request::OutputOp"
+
+[[item]]
+mahout = "mahout_runtime::resources::WrapperKind"
+sites = 2
+crates = 1
+status = "renamed"
+api = "request::StreamWrapper"
+
+[[item]]
+mahout = "mahout_runtime::settings::CoupledDirective"
+sites = 2
+crates = 1
+status = "gone"
+rule = "coupled ini directives are the engine's ini table's"
+
+[[item]]
+mahout = "mahout_runtime::settings::IniStore"
+sites = 2
+crates = 1
+status = "renamed"
+api = "request::Request::ini_entries"
+
+[[item]]
+mahout = "mahout_runtime::settings::Settings"
+sites = 2
+crates = 2
+status = "renamed"
+api = "request::Request::ini_get"
+
+[[item]]
+mahout = "mahout_runtime::settings::parse_byte_shorthand"
+sites = 2
+crates = 1
+status = "renamed"
+api = "request::Request::ini_parse_bytes"
+
+[[item]]
+mahout = "mahout_runtime::ClosureParam"
+sites = 1
+crates = 1
+status = "renamed"
+api = "decl::Parameter"
+
+[[item]]
+mahout = "mahout_runtime::FrameVarsForNative"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::frame_vars"
+
+[[item]]
+mahout = "mahout_runtime::Reentrant::drain_dtors_inline"
+sites = 1
+crates = 1
+status = "gone"
+rule = "destructors run when the last handle drops; the heap schedules them"
+
+[[item]]
+mahout = "mahout_runtime::Reentrant::generator_is_closed"
+sites = 1
+crates = 1
+status = "renamed"
+api = "call::Iter::next"
+
+[[item]]
+mahout = "mahout_runtime::codecs"
+sites = 1
+crates = 1
+status = "gone"
+rule = "hex and base64 codecs are ext/standard's own"
+
+[[item]]
+mahout = "mahout_runtime::codecs::b64_val"
+sites = 1
+crates = 1
+status = "gone"
+rule = "hex and base64 codecs are ext/standard's own"
+
+[[item]]
+mahout = "mahout_runtime::codecs::decode_sextet"
+sites = 1
+crates = 1
+status = "gone"
+rule = "hex and base64 codecs are ext/standard's own"
+
+[[item]]
+mahout = "mahout_runtime::errors::render_uncaught_block_as"
+sites = 1
+crates = 1
+status = "gone"
+rule = "the engine renders an uncaught exception"
+
+[[item]]
+mahout = "mahout_runtime::errors::set_exception_previous"
+sites = 1
+crates = 1
+status = "renamed"
+api = "values::PhpObject::set_prop"
+
+[[item]]
+mahout = "mahout_runtime::gc_collect_cycles_protocol"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::gc_collect"
+
+[[item]]
+mahout = "mahout_runtime::gpc::GpcOptions"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::parse_query"
+
+[[item]]
+mahout = "mahout_runtime::gpc::build_tree"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::parse_query"
+
+[[item]]
+mahout = "mahout_runtime::gpc::materialize"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::parse_query"
+
+[[item]]
+mahout = "mahout_runtime::gpc::parse_urlencoded"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::parse_query"
+
+[[item]]
+mahout = "mahout_runtime::native_marshal::MarshalCtx"
+sites = 1
+crates = 1
+status = "gone"
+rule = "marshalling is the ABI's: FromArgument and IntoReturn"
+
+[[item]]
+mahout = "mahout_runtime::native_marshal::run_native"
+sites = 1
+crates = 1
+status = "gone"
+rule = "marshalling is the ABI's: FromArgument and IntoReturn"
+
+[[item]]
+mahout = "mahout_runtime::output::OB_OP_FLUSH"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::OutputOp"
+
+[[item]]
+mahout = "mahout_runtime::resources::DirHandle"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::open_dir"
+
+[[item]]
+mahout = "mahout_runtime::resources::FilterLink"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::StreamFilter"
+
+[[item]]
+mahout = "mahout_runtime::resources::FilterRegister"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::register_filter"
+
+[[item]]
+mahout = "mahout_runtime::resources::Link"
+sites = 1
+crates = 1
+status = "gone"
+rule = "a stream's backing is inside request::Stream"
+
+[[item]]
+mahout = "mahout_runtime::resources::OpenError"
+sites = 1
+crates = 1
+status = "renamed"
+api = "raising::Thrown"
+
+[[item]]
+mahout = "mahout_runtime::resources::ProcPipe"
+sites = 1
+crates = 1
+status = "gone"
+rule = "proc_open's pipes are ext/standard's own resource payload"
+
+[[item]]
+mahout = "mahout_runtime::resources::SelectKind"
+sites = 1
+crates = 1
+status = "gone"
+rule = "a stream's backing is inside request::Stream"
+
+[[item]]
+mahout = "mahout_runtime::resources::StdinLocal"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::stdin"
+
+[[item]]
+mahout = "mahout_runtime::resources::StreamFilter"
+sites = 1
+crates = 1
+status = "same"
+api = "request::StreamFilter"
+
+[[item]]
+mahout = "mahout_runtime::resources::StreamMode"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::open_stream"
+
+[[item]]
+mahout = "mahout_runtime::resources::WriteOutcome"
+sites = 1
+crates = 1
+status = "gone"
+rule = "a stream's backing is inside request::Stream"
+
+[[item]]
+mahout = "mahout_runtime::resources::open_stream"
+sites = 1
+crates = 1
+status = "same"
+api = "request::Request::open_stream"
+
+[[item]]
+mahout = "mahout_runtime::resources::parse_php_filter"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::open_stream"
+
+[[item]]
+mahout = "mahout_runtime::settings"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::ini_get"
+
+[[item]]
+mahout = "mahout_runtime::settings::DisplayErrors"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::ini_get"
+
+[[item]]
+mahout = "mahout_runtime::settings::INI_ACCESS_TABLE"
+sites = 1
+crates = 1
+status = "renamed"
+api = "request::Request::ini_entries"
+
+[[item]]
+mahout = "mahout_runtime::settings::memory_limit_clamp_body"
+sites = 1
+crates = 1
+status = "gone"
+rule = "the allocator accounts; the memory_limit on-modify hook is the engine's"
+
+[[item]]
+mahout = "mahout_runtime::symbols::throwable_slots"
+sites = 1
+crates = 1
+status = "gone"
+rule = "which exception properties are fixed is the engine's; set_prop refuses"

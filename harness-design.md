@@ -1,0 +1,441 @@
+# The harness for the third engine: design
+
+This is the design of record for the harness. It is one living document: every section is at its current value, and the ledger in §1 records each revision with what changed, why, and the check that would show it wrong. Git holds the dated versions. `harness-research.r1.md` and `harness-research.r2.md` are the two earlier revisions, kept unedited as records; they are not read for anything this file marks current, and the "highest `N` wins" naming rule no longer applies to this note. Design of record for the engine: `third-engine-design.md`, one living document with a ledger on top, with `jit-design.md` for the compiled tier in the same shape; the `rN` files are records and are not read for anything current. Vocabulary: `CONTEXT.md`. Decisions: `docs/adr/0001` to `0006`. Architecture terms (module, interface, seam, adapter, depth, leverage, locality) are the `codebase-design` vocabulary.
+
+**Question.** What should a harness, in Böckeler's sense, look like for the development and maintenance of the third engine, and how much of it does the design already prescribe? And, from revision 3 on: what shape does the harness itself have to be so that it does not drift the way the design revisions have already begun to?
+
+**Sources.** The full citation lists are in `harness-research.r1.md` ("Sources") and `harness-research.r2.md` ("Sources"); this file cites them by the same short names (**HE**, **CE**, **Sensors**, **OpenAI**, **Stripe**, **Anthropic**, **Approved**, **CM** for `computed`, **FH-dts**, **FH-issue**, **Hooks-ref**, **Plugins-ref**). Revision 3 adds one input: the architecture review of 2026-09-07 over both earlier revisions and the design of record, with a citation inventory of every harness prescription in `third-engine-design.r1.md` to `.r7.md`, `jit-design.r3.md`, `llvm-research.r1.md` and the ADRs.
+
+---
+
+## 0. The one-paragraph design
+
+**One manifest, one reading, one comparison, one judge, one status.** The rules of the harness live in one tracked data file, `seams.toml`, and every rule sensor is derived from it. Every instrument ends by writing one reading of one shape to `target/harness/`, and everything an agent or a person reads about the state of the engine is a rendering of those readings by `xtask status`. Every comparison against the oracle crosses one seam in the oracle module, which owns the one table of accepted differences. The edit-time gate is one instrument, `xtask permit`, and both kinds of Claude Code hook are thin adapters over it; the definition of done is one instrument, `xtask done`, called by the Stop hook, by pre-push and by CI. The harness note is one living document, and it asks the design of record to become one too.
+
+---
+
+## 1. Ledger: what changed, and why
+
+Each entry is numbered as the revision that made it and names the check that would show it wrong.
+
+**1. Revision 1 (2026-09-05).** Read HE and its neighbours; found that the design never says "harness" but that nineteen of its mechanisms are guides or sensors, almost all computational, the guides structural (types, crate visibility, locks); found no agent map, no local wiring of sensors into the edit loop, and no rule for repeated agent failures. Proposed a four-layer harness (context, constraint, feedback, maintenance) in the crate map, with every check an `xtask` subcommand and hooks as thin wires. Check: §3's table maps to the design's own sections; a mechanism it lists that the design does not have is a mistake in the table.
+
+**2. Revision 2 (2026-09-05).** Read `computed` and Function Hooks from primary sources. Made the map's facts computed regions, added a gitignored local region file, moved the session ritual into a `prompt.context` function hook, folded the two shell hooks into one `tool.call` function hook with the rules in TypeScript, added steering-loop capture, and listed the fail-open hazard as the largest new gap. Check: a gitignored region file renders when named (verified by a scratch run recorded in `harness-research.r2.md` A2.1); the installed binary exposes the events used (verified against the declaration file it writes).
+
+**3. Revision 3 (2026-09-07).** An architecture review found the sensors deep and everything around them shallow. The rules the sensors enforce were prose in five design revisions and re-typed by hand into `xtask`, a clippy configuration, TypeScript regexes and the agent map; the inventory found the lock set enumerated four incompatible ways, two `unsafe` allowance lists in force at once, and the oracle pin stated as 8.5.9 in one file and 8.5.7 in another, before any code exists. Sensor results reached the agent through nine separately wired channels. "We differ from the oracle on purpose" was three tables of three shapes. "Done" was six conditions of prose and a one-condition file protocol. And the harness note itself needed both revisions read in full, the disease it diagnosed in the design. Six changes:
+
+1. **The seam manifest** (§4.1). One tracked data file declares each seam once: producer, consumers, lock file, permitted edges, `unsafe` homes, forbidden types with reasons, line ceilings, the ADR that decided it, the sentence a failure prints. `api-check`, `unsafe-audit`, `budget`, the generated `ext/clippy.toml`, `permit`, the map's region and one negative-control fixture per rule are all derived from it. The design revision cites the manifest instead of restating numbers.
+2. **The reading** (§4.2). Every instrument writes one value of one shape; regions, the done gate, the steering ledger, the weekly bar table and CI telemetry are renderers over the store, not stores of their own.
+3. **`xtask permit`** (§4.4). The edit-time rules move out of TypeScript into one instrument that judges an intended tool call. The shipped command hook and the optional function hook are both adapters over it, so the seam has two real adapters and fail-open is covered. `rules.ts`, `tsconfig.json` and the generated declaration file leave the harness unless the function hook is enabled.
+4. **One table of divergences** (§4.3). The oracle module gains the comparison and owns the one table of accepted differences; witnesses, phpt verdicts, the runner control, compile identity and trace dumps all consult it by a stable id. The JIT note's "recorded differences table" and revision 4's "named list of known disagreements" are rows in it.
+5. **`xtask done`** (§4.5). The definition of done is one instrument computed from git and the readings, called by the Stop hook, pre-push and CI. The per-turn file protocol between a function hook and a shell script is gone.
+6. **A living document** (§10 rule 7, §14). This note is one file at its current state with this ledger on top. It asks the design of record to take the same shape.
+
+Check: the six are wrong if the manifest cannot express a rule the design has (§4.1 lists every rule it must carry; one that does not fit is the counterexample), if a reading of one shape cannot carry what a region needs (§5's regions are each one `status` call; a region that needs a second command is the counterexample), or if `permit` is too slow at the tool call (§4.4 gives the bar and the fallback).
+
+**4. Revision 4 (2026-09-07).** The review that produced design ledger 8 and JIT ledger 4 found the manifest's example disagreeing with the design it exists to carry: three crate budgets that were not the design's, the `unsafe` homes declared twice (once per `[[crate]]` row and once as a rule), and a `php_bundle` edge that omitted `php_ext`, on which the bundle depends for `ExtensionBuilder` and the `Nop` alias. It also found no lane for the tier's own sensors. Four changes: the example manifest carries the design's numbers and declares `unsafe` once (§4.1); the `php_bundle` edge names `php_ext`; §7 gains the tier's lanes, `force` and `exit-fuzz` per commit on the witnesses and nightly on `Zend/tests` and `tests/`, the trace-dump diff under `inline`, and `port-map` as an instrument with a reading; §14 records which of its asks the design of record took in its ledger 8 (items 1 in part, 2, 3, 5 and 6) and what remains. Check: `xtask budget` against the manifest passes with the design's §4.1 numbers and no others; a second statement of the `unsafe` homes anywhere in the manifest is the counterexample.
+
+---
+
+## 2. Vocabulary
+
+From HE: a **harness** is everything in an agent except the model, narrowed here to the part a team adds around a product it did not build; a **guide** is a feedforward control that steers before the agent acts; a **sensor** is a feedback control that observes after; **computational** controls are deterministic and fast, **inferential** ones are model-run and slower; **keep quality left** distributes checks by cost, speed and criticality; the **steering loop** is the human iterating on the harness whenever an issue repeats. The full reading of the article, its principles and the claims it attributes to others is `harness-research.r1.md` Part A and is not repeated.
+
+From this design: an **instrument** is one `xtask` subcommand that measures or judges something and writes a reading; the **seam manifest** is `seams.toml`; a **reading** is the one-shaped result an instrument writes; a **divergence** is one accepted difference from the oracle, a row in the registry the oracle module owns; a **rendering** is what `xtask status` produces from readings and the manifest. Cadences: **at the tool call** (milliseconds, `permit`), **on save** (seconds), **pre-commit** (under a minute), **per commit** (CI, the 4-minute phpt budget sets the scale), **nightly**, **per revision**.
+
+---
+
+## 3. What the design of record already prescribes
+
+The design never uses the word harness, but most of it is one. Each mechanism, its kind in HE's vocabulary, and where it is specified. Where revision 3 moves the fact's home into the manifest or the registry, the last column says so.
+
+| Mechanism | Kind | Specified in | What it does | Home from revision 3 |
+|---|---|---|---|---|
+| **Oracle** | sensor | `CONTEXT.md`; r1 §8.6; r3 §8 | The pinned `php` binary and recipe in `oracle.toml`; one `xtask` module every lane calls, owning `-n`, the 39-entry baseline ini, env, timeout, normalisation; nightly drift re-run. | `oracle.toml` is the only statement of the pin; revisions cite it (§14). The module gains `compare` (§4.3). |
+| **Witnesses** | sensor and guide | `CONTEXT.md`; r1 §8.1; r4 §8 | PHP snippet plus pinned `expect` in rustdoc on every kernel and native; `exit=` written only by `--accept`; id is a content hash; coverage rule fails CI. | Unchanged; the id is the divergence key (§4.3). |
+| **phpt** | sensor | r1 §8.2; r2 §8; r3 §8; r4 §8 | ~6.5k files per commit through `Capture`, 21.5k nightly, per-extension subsets, `--subset <name>`; nightly `run-tests.php -p` verdict control. | Runner disagreements become divergences of kind `runner` (§4.3). |
+| **Compile identity** | sensor | r2 §6.1; r7 §5.7 | `Unit::dump()` byte-identical to php's pre-optimiser dump on 6.5k files per commit, 172k nightly. | A deliberate difference is a divergence of kind `compile`. |
+| **Trace dump diff** | sensor | jit r3 §4.2, §7 | Recorded `TRACE start/stop` lines diffed against php's `jit_debug` under `jit.compile=inline`, "within the recorded differences table". | The table's rows become divergences of kind `trace`. |
+| **Stub cross-check** | sensor | r3 §7.1; r4 §7.1; r6 §7.1 | Declarations diffed against `php-src/ext/<name>/*.stub.php` at the oracle's tag, tentative bit included. | Unchanged. |
+| **Interface locks** | guide and sensor | r2 §4.5; r3 §4.5; r4 §4.5; r7 §9.3 | Generated inventories of public items, diffed by `api-check`; `api.lock` ≤ 400 items; `tier.lock` doubles as `php_jit`'s import allowlist. | The lock set is declared once in the manifest (§4.1). |
+| **Dependency direction** | guide and sensor | r3 §4.2; r4 §4.2; ADR-0004 | Crate visibility first; `api-check` fails manifest edges outside the list, `use` paths across lines, non-topological bundle order. | Edges declared in the manifest. |
+| **Lock-free extensions** | guide and sensor | r5 §10; ADR-0005 | `Mutex`, `RwLock`, `Cell`, `RefCell`, atomics denied under `ext/*` via `clippy::disallowed-types` with reasons. | The list is generated from the manifest into `ext/clippy.toml`. |
+| **Budgets** | sensor | r1 §3, §4.1; r4 §4.1; r7 §4.1 | Line ceilings per crate, total 272.5k, new ≤ 127.5k, `docs/` ≤ 5k, ≤ 120 lock packages, clean release build ≤ 90 s. | Ceilings declared in the manifest. |
+| **`unsafe` audit** | sensor | r1 §10; r4 §10; r7 §4.1 | Four homes: `php_heap`, `ext/*/src/ffi/`, `php_jit::table::code`, `php_jit::enter`; a fifth fails. | Homes declared in the manifest; ADR-0004's two-home sentence is superseded (§14). |
+| **Lints** | sensor | r1 §10 | `clippy::pedantic`, `-D warnings`, panic family denied in engine crates. | Unchanged. |
+| **Re-entry lint** | sensor | r2 §10 | Any `php_engine` function calling `execute` or `release` must take `&mut Request`. | Unchanged. |
+| **Request leak gate** | sensor | r2 §5.14; r5 §8; ADR-0005 | Asserted after every request-state drop in tests; names the state type. | Unchanged. |
+| **Bundle features** | guide | r4 §4.10; ADR-0004 | One feature per non-default extension on `php_bundle`; `enabled()` in module-startup order, checked against the crate graph. | Unchanged. |
+| **Gates G1 to G8** | sensor | r7 §9; jit-research §E.11; llvm-research §G8 | Numbered bars under the measurement protocol (paired reps, A/A control); G1 per commit from the day `php_engine::tier` exists. | Readings of instrument `bench` (§4.2). |
+| **Perf bars** | sensor, nightly | r1 §9.2; r3 §8; r5 §9 | Geomean ≤ 1.5× php's interpreter, start ≤ php, compile-on-hit 0, RSS ≤ 1.2×, FastCGI ≥ php-fpm, parse ≥ 25 MB/s, `Cache` hit cost. | Readings of `bench`. |
+| **Divergence registry** | sensor and record | r1 §8.5 | One table, each row a phpt name or witness id with a reason and a status; < 20 rows on day 30. | Becomes `docs/divergence.toml`, owned by the oracle module (§4.3). |
+| **Schedule gates** | sensor, weekly | r1 §11; r2 §11 | Weekly exit bars measured by the instruments; a missed bar applies the cut order. | Rendered by `xtask status --week` (§9). |
+| **Learnings ledger** | guide | r1 to r7 §2 | Keep/Reject rows with file:line evidence. | Gains a "From this engine" table (§10 rule 1). |
+| **ADRs** | guide and record | r3 §10; `docs/adr/*` | Written only on reversal or where a future reader would "fix" a choice; each ends with the sentence that reader needs. | Unchanged; their numbers are carried by manifest rules so they print at the failure (§4.1). |
+| **`CONTEXT.md`** | guide | header | Glossary of the seams with an `_Avoid_` list per term. | Gains the harness terms (§4). |
+| **Revisions** | maintenance rule | r3 §10 | Files `rN`, highest wins, each opening with "what changed and why" and the check that would show it wrong. | Reopened by §14; this note no longer follows it. |
+| **Process rule** | guide, anti-weight | r1 §2.3, §10, §12 | One design document, ADRs on reversal only, no ticket corpus; `docs/` budgeted. | Unchanged; the harness's own files are budgeted (§12 item 6). |
+
+Two observations stand from revision 1. The design is unusually harnessable: strongly typed, eight seams, one executor, one declaration model, one oracle, and its ledger rejects exactly the variety a regulator could not model. And almost every mechanism is a sensor whose guide half is structural; the textual guides (map, ritual, division of labour) are what the harness adds.
+
+---
+
+## 4. The harness's own modules
+
+Five modules, each deep: a small interface, most of the harness's behaviour behind it. All live in `xtask` (budget 14k, r3 §4.1) except the manifest and the registry, which are data at the workspace root and under `docs/`.
+
+### 4.1 The seam manifest: `seams.toml`
+
+**Interface.** One tracked file. Readers: `api-check`, `unsafe-audit`, `budget`, `permit`, `status`, the generator of `ext/clippy.toml`, and the test that runs one negative-control fixture per rule. Writers: people, in the same commit as the design change that alters a rule; the commit that lands a revision of the design of record is the commit that changes the manifest.
+
+**What it declares, once.** Every rule the design of record states as a sentence today. The list is the acceptance test for the format: a rule below that the format cannot carry is a design error in this section.
+
+```toml
+[oracle]
+pin = "oracle.toml"                        # the only statement of version, digest, recipe
+
+[budget]
+total = 272500                             # r7 §4.1
+new = 127500
+docs = 5000                                # r1 §12
+lock_packages = 120                        # r7 §4.1
+clean_build_release_s = 90                 # r1 §10
+api_items = 400                            # r2 §4.5
+
+[[crate]]
+name = "php_heap";   budget = 20000
+[[crate]]
+name = "php_unit";   budget = 6000;  lock = "unit.lock"
+[[crate]]
+name = "php_engine"; budget = 48000; lock = "api.lock"; lock_from = "php_ext"
+[[crate]]
+name = "php_jit";    budget = 17500; feature = "jit"
+[[crate]]
+name = "xtask";      budget = 14000
+# ... one row per crate of design §4.1; ext/* rows carry their own ceilings; the unsafe homes are declared once, below
+
+[[seam]]
+name = "unit"; producer = "php_unit"; consumers = ["php_compile", "php_engine", "php_macros"]; lock = "unit.lock"; adr = "0001"
+[[seam]]
+name = "api";  producer = "php_engine"; facade = "php_ext"; consumers = ["ext/*"]; lock = "api.lock"; adr = ["0002", "0004"]
+[[seam]]
+name = "tier"; producer = "php_engine"; consumers = ["php_jit"]; lock = "tier.lock"; allowlist = true; sections = ["face", "kernels"]
+# ... heap, ops, sapi; effects.lock is retired (§14)
+
+[[edge]]
+from = "php_macros"; to = "php_engine"; adr = "0002"
+[[edge]]
+from = "ext/*"; to = ["php_ext"]; only = true; adr = "0004"
+[[edge]]
+from = "php_bundle"; to = ["ext/*", "php_ext", "php_jit"]; order = "topological"; adr = ["0004", "0006"]
+[[edge]]
+from = "php_engine::{executor,kernels}"; to = "php_engine::{serve,headers,gpc,output}"; deny = true   # r3 §4.2
+
+[[rule]]
+id = "ext.no-locks"; scope = "ext/*"; deny_types = ["std::sync::Mutex", "std::sync::RwLock", "std::cell::Cell", "std::cell::RefCell", "std::sync::atomic::*", "parking_lot::*"]
+adr = "0005"; text = "Extension state is request-scoped or immutable; no lock or cell in ext/*."
+[[rule]]
+id = "unsafe.homes"; allow = ["php_heap", "ext/*/src/ffi/", "php_jit::table::code", "php_jit::enter"]; adr = "0006"
+text = "unsafe is permitted in four places; see design §4.1."
+[[rule]]
+id = "witness.exit-authored"; scope = "**/*.rs"; deny_pattern = '```expect[^\n]*\bexit=\d+'; unless = "xtask witness --accept"
+text = "exit= in a witness is captured by `xtask witness --accept`, never authored."
+[[rule]]
+id = "api.lock-line"; scope = "crates/php_engine/src/api/**"; on = "pub"; note = "A new pub item in api needs its api.lock line in the same commit; api ≤ 400 items."
+[[rule]]
+id = "git.no-verify"; tool = "Bash"; deny_argv = ["--no-verify", "-n"]; with = "commit"; text = "Commits run the pre-commit hook; --no-verify is not available to agents."
+[[rule]]
+id = "lanes.nightly"; tool = "Bash"; deny_pattern = 'xtask (phpt|bench) --full|run-tests\.php|compile-identity --corpus'
+text = "Nightly lanes run in CI only; run the per-crate subset."
+[[rule]]
+id = "computed.force"; tool = "Bash"; deny_pattern = 'computed\s+run\b.*--force'; text = "`computed run --force` discards a hand edit; a person decides that."
+[[rule]]
+id = "harness.self"; tool = ["Edit", "Write"]; scope = [".claude/**", "seams.toml", "oracle.toml", "docs/divergence.toml"]; deny = true
+text = "Harness configuration, the oracle pin and the divergence registry are edited by a person."
+```
+
+Each `[[rule]]` has an `id`, a scope or a tool, one predicate, an optional `adr`, and the `text` a failure prints. Each `[[seam]]` names its lock, and a lock with `sections` is diffed per section; each `[[crate]]` names its ceiling and nothing about `unsafe`; the `unsafe` homes are one rule and appear nowhere else in the file. That is the whole grammar, and `xtask` refuses a manifest with an unknown key.
+
+**What is derived.**
+
+- `api-check` reads `[[seam]]` and `[[edge]]`: it regenerates each lock from the compiled crate's public items (`lock_from` says which crate for `api.lock`, r4 §4.5), fails on a diff, fails a manifest edge not in `[[edge]]`, fails a `use` path crossing a seam, checks the bundle order is topological, prints each extension's `pub` beyond `extension()`, and treats `allowlist = true` as "the consumer may import only what the lock names" (r7 §4.2).
+- `unsafe-audit` reads `unsafe.homes`. `budget` reads `[budget]` and every `[[crate]]`.
+- `ext/clippy.toml` is generated from `ext.no-locks`, `reason` strings included, and committed; a stale copy is a `budget` failure (the same rule as generated code, r1 §3 principle 7, applied to a config file). Clippy finds it by nearest-file search, so it covers every `ext/<name>` and nothing under `crates/` (revision 1 D.2).
+- `permit` reads every `[[rule]]` with a `tool` or a `scope` (§4.4).
+- `status --section rules` renders the rule list with its ADR numbers; that rendering is the map's item 7 (§5).
+- One fixture per `[[rule]]` under `xtask/fixtures/rules/<id>/` that must fail, run by `cargo test -p xtask`; a rule without a fixture fails the test. This is Mahout's "a new instrument ships with its negative control" (r1 §2.1) as a structural fact.
+
+**The deletion test.** Delete the manifest and every number and edge reappears in six places: `api-check`'s source, `unsafe-audit`'s source, `budget`'s source, `ext/clippy.toml`, the hook's rules, and the map. That is what the inventory found had already happened in the design revisions.
+
+**What is not in it.** The oracle pin (`oracle.toml`, a human decision with its own nightly sensor, §10 rule 5). Divergences (`docs/divergence.toml`, §4.3). Anything decided in prose: the deletion-test arguments, the ledger, the principles.
+
+### 4.2 The reading and its store
+
+**Interface.** Every instrument ends by writing one reading; every rendering reads them; nothing else touches the store. One shape:
+
+```toml
+instrument = "witness"                     # witness | phpt | compile-identity | crosscheck | port-map | api-check | budget | unsafe-audit | bench | fuzz | mutants | permit | done | vocab
+scope = "ext/pcre"                         # a crate, a corpus subset, a gate id, or "workspace"
+rule = "witness.coverage"                  # a manifest rule id when one applies
+status = "fail"                            # pass | fail | skip
+numbers = { run = 212, failed = 3, missing = 1 }
+message = "ext/pcre: 3 witnesses differ from the oracle; preg_replace_callback lacks a witness"
+adr = ""                                   # from the manifest when the rule names one
+tree = "9f3c…"                             # git tree hash of the scope's sources at the time
+commit = "0b62ae0"
+at = 2026-09-07T01:05:49Z
+```
+
+**Store.** `target/harness/<instrument>/<scope>.toml`, one file per key, overwritten on each run; and `target/harness/log.jsonl`, append-only, one line per reading. CI uploads the directory as the run's artefact and nothing else. The `tree` field is what makes a reading fresh or stale without a turn counter: a reading is fresh for a scope when the scope's tree hash still matches.
+
+**Readers.** `status` (§4.6), `done` (§4.5), the steering ledger (§10 rule 6), the CI summary that answers HE's "which sensor never fails" (§7). `permit` writes a reading per denial, which is the steering-loop capture of revision 2 without `$.store` or a second file.
+
+**The deletion test.** Delete the store and nine channels reappear: `jq .summary phpt-last.json`, `jq` over the mutants outcomes, `wc -l` over the locks, `grep -c` over the divergence table, the `context` note, `harness-turn.json`, the `$.store` counters, `harness-steering.jsonl`, and a per-gate CI line. Revision 2 had all nine.
+
+### 4.3 The oracle module owns the comparison and the divergence registry
+
+**Interface.** Two functions. `oracle::run` is revision 1's: run this program, SKIPIF or `-r` snippet under the harness regime and return normalised output (r3 §8). New: `oracle::compare(id, expected, actual) -> Verdict`, where `id` is a divergence key and `Verdict` is `Same`, `Diverged(Divergence)` when the registry has an accepted row for the id, or `Differs(diff)`. Every instrument that holds the engine to the oracle calls `compare` and never diffs on its own: witnesses (id `witness:<hash>`), phpt verdicts and the nightly runner control (id `phpt:<path>`, kinds `phpt` and `runner`), compile identity (id `compile:<path>`), the trace dump diff (id `trace:<site>`), and the differential fuzzer, whose minimised failure is proposed as a row with status `open`.
+
+**The registry.** `docs/divergence.toml`, one row shape:
+
+```toml
+[[divergence]]
+id = "trace:nested-entry-return"
+kind = "trace"                             # witness | phpt | runner | compile | trace
+reason = "A trace rooted at the entry frame of a nested execute stops with Return one opline earlier than php's (jit-design.r3 §4.2)."
+status = "accepted"                        # open | accepted | fixed
+since = "2026-09-06"
+```
+
+The two rows the JIT note carries in prose and the runner disagreements revision 4 §12 allows in the first weeks are rows here, so the day-30 target (< 20 rows, r1 §8.5) counts every kind, and the "target zero" of the runner control is the count of kind `runner`. A Markdown rendering for people is a computed region in `docs/divergence.md` whose command is `xtask status --section divergence`; the region is the view, the TOML is the truth (CM-spec:3).
+
+**Who writes a row.** A person, with a reason (§11). The fuzzer and `compare` may add a row with status `open` and an empty reason; `done` fails while an `open` row touches the scope.
+
+**The deletion test.** Delete `compare` and four instruments each decide alone whether a difference is accepted and against which list; three lists existed.
+
+### 4.4 `xtask permit`: the judge at the tool call
+
+**Interface.** Input: one intended tool call, as the JSON the shipped hook receives on stdin (`tool_name`, `tool_input` with `file_path`, `old_string`, `new_string`, `content` or `command`). Output: the hook's JSON, either `{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"<text> (ADR-0005)"}}` or allow with `additionalContext` carrying the notes; exit 0 always, since the decision is in the JSON (Hooks-ref, PreToolUse decision control). Every denial and every note is a reading with `instrument = "permit"` and the rule id.
+
+**Implementation.** The `[[rule]]` rows of the manifest with a `tool` or a `scope`, evaluated in order: the region-body check of revision 2 (an `Edit` whose `old_string` lies in a computed region body, CM ADR 0005), `witness.exit-authored`, `unsafe.homes`, `ext.no-locks`, `api.lock-line` as a note, `git.no-verify`, `lanes.nightly`, `computed.force`, `harness.self`. Argument parsing for `Bash` is conservative, splitting on unquoted whitespace and `;`, `&&`, `|`; pre-commit remains the sensor of record for what a shell can hide. Path to crate is one function over the manifest's `[[crate]]` rows.
+
+**Adapters, two.** The shipped command hook, always on: `PreToolUse` with matcher `Edit|Write|Bash`, command `xtask permit` reading stdin, in `.claude/skills/third-engine-harness/hooks/hooks.json`. The function hook, optional, behind `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`: a `tool.call` handler of about fifteen lines that serialises `e`, calls `$.process.run(["xtask", "permit", "--json", …])`, returns `{ deny }` or `{ ...result, context }`, and calls `$.ui.invalidate("prompt.context")` after a `Bash` call that ran an instrument. It adds nothing the command hook does not do except the invalidation and in-process latency; it fails open, and the command hook beneath it does not, which is why it may exist at all (revision 2 C.8 item 8). A third caller is pre-commit, which runs `permit` over the staged diff as a whole.
+
+**Cost.** `cargo run -q -p xtask -- permit` after a warm build is a process start and a manifest parse, tens of milliseconds; an `xtask` binary installed by `cargo install --path xtask` is the same without cargo. The bar: p99 under 100 ms at the tool call on the developer machine, measured by `permit --bench` on day 1. If it is missed, the manifest's rules are compiled into the binary at build time and the parse goes away; the interface does not move.
+
+**What leaves the harness.** `rules.ts`, its tests, `tsconfig.json`, the `types-version` region, and the `tsc --noEmit` CI step, unless the function hook is enabled, in which case they are the fifteen-line adapter, a `tsconfig.json` and the regenerated declaration file, and the `types-version` region returns with them.
+
+**The deletion test.** Delete `permit` and the rules are evaluated twice, in Rust after the write and in TypeScript before it, on a surface whose events "may change between releases without notice" (FH-dts:1-6).
+
+### 4.5 `xtask done`: the definition of done
+
+**Interface.** `xtask done [--base <ref>] [--hook]` prints the conditions of done that are unmet for the changes since `--base` (default: the merge base with `main`), exits 1 if any, 0 if none; with `--hook` it reads the Stop hook's stdin, exits 0 when `stop_hook_active` is true, and otherwise prints `{"decision":"block","reason":"<the list>"}` (Hooks-ref, Stop).
+
+**The conditions**, from revision 1's map item 6, now checked rather than stated:
+
+1. For every crate with a changed file, a fresh passing reading exists for `clippy`, `witness`, `api-check`, `budget` and `unsafe-audit`, and for `phpt` on that crate's subset. Fresh means the reading's `tree` matches the crate's tree hash now.
+2. Every kernel or native added in the diff has a witness (the `witness` reading's `missing` is zero for the crate).
+3. If a `.lock` differs from its regenerated form, the lock file is in the diff (the `api-check` reading, plus `git diff --name-only`).
+4. No `open` divergence touches a changed scope.
+5. `permit` over the diff denies nothing.
+6. `seams.toml` and `docs/divergence.toml` are unchanged in the diff, or the diff is by a person (the hook cannot tell, so the Stop hook reports it as a note, and pre-push, run by the person, passes).
+
+**Callers, three.** The Stop command hook, pre-push, and CI per commit. One instrument, one list; an agent and a person are told the same thing.
+
+**The deletion test.** Delete `done` and the definition is six sentences in the map plus a file protocol between `turn.step` and `stop-gate.sh` that checked one of them and only inside Claude Code.
+
+### 4.6 `xtask status`: the one renderer
+
+**Interface.** `xtask status --section <name> [--format md|json] [--week N] [--session]`. Sections: `locks` (each lock's width against `api_items`), `budget` (each crate against its ceiling), `rules` (the manifest's rules with ADR numbers), `phpt`, `witness`, `mutants`, `divergence` (the registry, with counts by kind and status), `gates` (G1 to G8 readings), `bars` (the perf bars), `week` (the weekly exit bar table with pass/fail per row from the readings, r1 §11), `git` (log and status, volatile), `permits` (denials by rule this session and across sessions from the log). `--session` prints the map file and the local facts in one block for the session-start hook.
+
+It reads the manifest, the registry and the store and computes nothing else. A section that needs a command of its own is a missing instrument, not a shell one-liner in a region.
+
+---
+
+## 5. Context layer: what an agent reads first
+
+**The map.** `AGENTS.md` at the workspace root, at most 100 lines (OpenAI), fed to the model by a `SessionStart` command hook whose command is `xtask status --session` (matchers `startup`, `resume`, `clear`, `compact`, so re-injection after compaction is the hook's own behaviour, Hooks-ref), and, when the function hook is enabled, by `prompt.context` instead. Whether the map is named `CLAUDE.md` or `AGENTS.md` is settled by the hook: it is read by the harness, not by the engine's automatic load, so it is `AGENTS.md`. Its prose items are decisions and stay prose:
+
+1. Read `CONTEXT.md` first; the `_Avoid_` lists are binding in code, rustdoc and commit messages.
+2. The design of record is `third-engine-design.md`, and `jit-design.md` for the compiled tier; the `rN` files are records and are not read for anything current.
+3. `docs/adr/` is the list of reversals; read the ADR before touching what it names.
+4. Definition of done: what `xtask done` checks, in one sentence each (§4.5).
+5. What an agent must not do alone (§11).
+
+Its regions, all tracked, each one command:
+
+| Region | Command | `inputs=` |
+|---|---|---|
+| `design-of-record` | `ls third-engine-design*.md jit-design*.md harness-design.md \| sort -V` | `*.md` |
+| `adrs` | `scripts/adr-index.sh` | `docs/adr/*.md,scripts/adr-index.sh` |
+| `seams` | `xtask status --section locks --format md` | `seams.toml,crates/**/*.lock` |
+| `rules` | `xtask status --section rules --format md` | `seams.toml` |
+| `instruments` | `xtask --help` | `xtask/src/cli.rs` |
+| `layout` | `tree src=crates depth=1`, `tree src=ext depth=1` | (implied) |
+
+**The local file.** `.claude/harness.local.md`, gitignored, rendered only by name (CM discovery skips dot-directories and ignored files; revision 2 A2.1). Every region is `xtask status --section <name>` with `inputs=../target/harness/**` or `volatile`: `budget`, `phpt`, `witness`, `mutants`, `divergence`, `permits`, `git`. The `computed trust` grant is the person's (§11). The session hook runs `computed run .claude/harness.local.md` before `status --session`, treating exit 1 as "written" and exit 2 as a broken marker to log.
+
+**Per-directory guidance.** `ext/AGENTS.md` with the extension template rules (one dependency, `extension()`, state on the value, no locks, tests through `Capture`, witnesses in rustdoc, phpt from `php-src/ext/<name>/tests`) and two regions, `extensions` (`ls -d */`) and `bundle-order` (`xtask status --section bundle`). `xtask new-ext <name>` lays the topology down.
+
+**The glossary as a sensor.** `xtask vocab` checks public item names and rustdoc prose in `crates/*` and `ext/*` against the `_Avoid_` lists, scoped so that `Result` is not `result`; and asserts every `_Avoid_` word appears nowhere in `api.lock`. It writes a reading like any instrument.
+
+**What else is computed.** `data/INDEX.md` gains a `files` region. Design documents get no regions and no numbers: they cite `seams.toml` and `oracle.toml` (§14).
+
+---
+
+## 6. Constraint layer: what is mechanically forbidden
+
+The constraint table of revision 1 stands, with its column of where each rule now lives:
+
+| Constraint | Mechanism | Cadence | Declared in |
+|---|---|---|---|
+| An extension cannot reach the engine | crate visibility (`ext/*` depends on `php_ext` only) | compile | `[[edge]]` `ext/* → php_ext only`, ADR-0004 |
+| A native cannot re-enter without saying so | `&mut Request` plus the re-entry lint | compile, per commit | `xtask` lint (unchanged) |
+| Shared structures cannot hold per-request values | `MapPtr<T>` newtype | compile | design r2 §5.14 |
+| An extension cannot hold a lock | generated `ext/clippy.toml`; `permit` at the edit | at the tool call, on save, per commit | `ext.no-locks`, ADR-0005 |
+| No `unsafe` outside four places | `forbid(unsafe_code)` at crate roots; `unsafe-audit`; `permit` | at the tool call, compile, per commit | `unsafe.homes` |
+| No panic reaches a request | panic family denied; `catch_unwind` at the boundary | on save, per commit | lints (unchanged) |
+| No interface growth without a lock line | `api-check`; `permit` note | at the tool call, per commit | `[[seam]]`, `api.lock-line` |
+| No hand-authored exit status in a witness | `witness --accept` the only writer; `permit` | at the tool call, pre-commit | `witness.exit-authored` |
+| No second registry | bundle order checked against the crate graph | per commit | `[[edge]]` `php_bundle`, `order = "topological"` |
+| No committed generated code, except the generated config | `budget` path check; `ext/clippy.toml` regenerated and diffed | per commit | `[[crate]]` |
+| No process weight | `docs/` ≤ 5k; `.claude/**` hand-written ≤ 300 lines | per commit | `[budget]` |
+| An agent does not touch the harness's own configuration | `permit` | at the tool call | `harness.self` |
+
+The strongest rows are still the ones with no path to take. Every row below them has a twin: a rule `permit` evaluates before the write has a lint or an `xtask` check after it, so no function hook is ever the only sensor for a constraint (revision 2 C.8 item 8), and the column says which.
+
+**Wiring.** Pre-commit: `cargo fmt --check`, `cargo clippy -p <touched> -- -D warnings`, `xtask api-check`, `xtask budget`, `xtask unsafe-audit`, `xtask witness --crate <touched>`, `xtask permit --diff`, and `computed run` with `always_run` (CM-spec:226-240) plus `computed run .claude/harness.local.md` by name. Pre-push: `xtask done`. The plugin:
+
+```
+.claude/
+  harness.local.md                    gitignored; §5's local regions
+  skills/third-engine-harness/
+    .claude-plugin/plugin.json        name, version, hooks
+    hooks/hooks.json                  PreToolUse → xtask permit; Stop → xtask done --hook; SessionStart → xtask status --session
+    hooks/harness.ts                  optional; the fifteen-line function-hook adapter; present only with the flag
+```
+
+No `rules.ts`, no `scripts/`, no generated types unless `harness.ts` is enabled. `plugin.json` keeps one `userConfig` key, `functionHook` (boolean, default false), which is what decides whether `hooks.json` lists a `modules` entry; on a build that predates the key the command hooks stand alone (revision 2 D.10).
+
+---
+
+## 7. Feedback layer: the sensors and when they run
+
+| Sensor | at the tool call | on save | pre-commit | per commit | nightly | Reading's scope |
+|---|---|---|---|---|---|---|
+| `permit` | yes | | over the diff | over the diff | | rule id |
+| type check, clippy | | crate | touched crates | workspace | | crate |
+| witnesses | | crate, on request | touched crates | all crates | oracle drift | crate |
+| phpt | | `--subset` on request | | `Zend/tests` + `tests/` + `sapi/cli` + default extensions' subsets, 4 min | 21.5k; `run-tests.php -p` control | subset |
+| compile identity | | file, on request | | 6.5k files | 172k | corpus |
+| crosscheck | | `--ext` on request | | default extensions | all features | extension |
+| `api-check` | | | yes | yes | | seam |
+| `budget`, `unsafe-audit` | | | yes | yes | | crate |
+| Miri (`php_heap`), `cargo careful` | | | | Miri | careful | crate |
+| fuzz | | | | libfuzzer smoke | differential | target |
+| `bench` | | | | G1 from the day `tier` exists, the tier bound and `opcache.jit_buffer_size=0`; `Cache` hit cost; parse throughput | full protocol | gate or bar |
+| `phpt --jit force`, `--jit exit-fuzz` | | | | every witness (G5) | `Zend/tests` + `tests/` | subset |
+| trace-dump diff (`jit-design.md` §4.1) | | | | seven kernels under `jit.compile=inline` | | trace site |
+| `port-map` | | | | unresolved rows | | crate |
+| mutants | | | | `--in-diff`, reported not gated | `php_heap` full | crate |
+| leak gate | | | | in tests | | state type |
+| `vocab` | | | yes | yes | | crate |
+| `done` | | | | yes | | workspace |
+
+**What the agent sees.** The tool result, as before; and beside it the rendering. `permit`'s note or denial arrives as the hook's `additionalContext` or `permissionDecisionReason`, with the ADR number from the manifest. The map's numbers are `status` renderings, refreshed by the session hook, by the function hook's invalidation when enabled, and by the next `computed run` on the local file otherwise. `done`'s list is the Stop hook's `reason`. A person sees the same renderings in the terminal and, per CI run, the uploaded `target/harness/`.
+
+**Sensor telemetry.** The CI summary is `xtask status --section permits` and a query over `log.jsonl`: readings per instrument, failures per instrument, and the instruments with no failure in fourteen days, which are the candidates for "silent" (HE, open questions; Sensors, appendix). The negative-control fixtures of §4.1 are what separates silent from respected for the rule sensors; for the phpt runner it is the nightly control; for `permit` it is a fixture tool call per rule.
+
+**Mutation testing and concurrency** stand as revision 1 had them: `cargo mutants --in-diff` per commit on `php_engine` kernels and `php_compile`, reported; full nightly on `php_heap`; `Cache` under Miri's data-race detection on a `std::thread` test, with loom priced as revision 1 D.4 says.
+
+---
+
+## 8. The behaviour harness
+
+Unchanged in substance from revision 1. The behaviour specification is the oracle, the test bodies are php-src's, and a witness is an approved scenario (Approved) whose approval is the oracle's bytes, "captured and never authored" (r4 §8). What the harness protects is the choice of snippet: the `port-map` join says the minimum each native's witness must cover, mutation on the diff says whether it pins the branches touched, and human review of witness diffs is the inferential sensor. Revision 3 adds one thing: the registry. A witness that differs from the oracle is a `Differs` verdict until a person writes the row, and `done` will not pass while the row is `open`.
+
+---
+
+## 9. Architecture fitness
+
+The fitness functions are the manifest's numbers and edges: `api_items`, the lock set, the edges, the ceilings, the `unsafe` homes, plus the perf bars and the gates. The deletion test per crate stays inferential and per revision. The weekly exit bar (r1 §11, r2 §11) is `xtask status --section week`, a table with pass or fail per row from the readings; "measured, not negotiated" (r1 §12) is a rendering rather than a judgement, which is what makes it true when an agent reads it.
+
+---
+
+## 10. Maintenance layer: keeping the harness honest
+
+**Rule 1: a ledger row for every repeated failure.** The design's ledger gains a "From this engine" table, Keep/Reject shape, one row when a sensor catches the same class of agent mistake twice; the evidence column is a `log.jsonl` query. The consequence is a change to a guide or a sensor, in HE's order: a type or visibility change first, then a manifest rule with a `reason`, then a hook, and last a sentence in the map.
+
+**Rule 2: ADRs stay reversals**, and reach the agent at the moment they matter: every manifest rule that an ADR decided carries the number, and every failure text prints it.
+
+**Rule 3: the revision is a harness change.** Each revision of the design of record lists what the manifest, the registry, the instruments or the locks gain or lose, and the commit that lands it. From revision 3 that section is checkable: the manifest diff in the same commit is the list.
+
+**Rule 4: the map is regenerated, not edited.** `computed check` in CI over `AGENTS.md`, `ext/AGENTS.md`, `data/INDEX.md`, `docs/divergence.md`; a hand edit into a region body is refused at pre-commit (CM ADR 0005) and denied at the tool call by `permit`'s region check.
+
+**Rule 5: the oracle pin is a human decision with a nightly sensor.** `oracle.toml` is the only statement of the pin; the drift job re-runs witnesses against the installed php; an agent reports drift and never moves the pin. Design documents cite the file and never the number (§14).
+
+**Rule 6: a denial that repeats is a ledger row.** `status --section permits` at the weekly bar; a rule that fired repeatedly across sessions gets a row under rule 1; a rule that never fired in two weeks is either respected or silent, and its fixture says which.
+
+**Rule 7: one living document per subject.** This note is one file at its current state with a ledger on top; a revision edits the sections it changes and adds one ledger entry with what changed, why, and the check. Git is the dated record. The `harness-research.rN.md` files are the record of the two revisions before the rule and are not edited. §14 asks the design of record to take the same shape.
+
+---
+
+## 11. Division of labour
+
+**Human-only.** The oracle pin and recipe (`oracle.toml`). Every write to `seams.toml` and `docs/divergence.toml`, including the reason on a divergence and the flip of a row to `accepted`; `permit` denies the agent both files. ADRs and revisions of the design of record; the deletion-test arguments. Reviewing witness diffs after `--accept`. Sign-off on a perf claim, with the A/A control read by a person. Licence decisions. Applying the cut order when a weekly bar is missed. `computed trust` once per clone, and `computed run --force`. Enabling the function hook (`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` in `.claude/settings.json`, the `functionHook` option, the workspace trust dialog). Reading `status --section permits` and writing the ledger row. Choosing which prose becomes a region.
+
+**Agent-default.** Porting bodies against `port-map` rows. Writing kernels and natives with witnesses; running `--accept`; adding the lock line in the same commit. Running `xtask done` before proposing a change and the per-crate subsets it names. Regenerating the extension template with `new-ext`. Running `computed run` on a stale region and re-staging. Proposing a manifest rule or a divergence row in a commit message or a PR description, never in the file. Proposing a rule's fixture with the rule.
+
+**Shared, with the sensor as arbiter.** Interface growth: the agent adds the lock line, the person reviews the lock diff. The manifest: the agent proposes, the person commits, `cargo test -p xtask` and the fixtures arbitrate.
+
+---
+
+## 12. Gaps
+
+Items of revisions 1 and 2 with their outcome, then what revision 3 opens.
+
+1. **No agent map file.** Closed on paper by §5; still to build.
+2. **No local wiring of sensors.** Closed by §4.4 and §6 on the shipped command hook, which is certain; the function hook is an addition that costs nothing when it does not load.
+3. **No rule for repeated agent failures.** Rules 1 and 6, evidence from the reading log.
+4. **No negative controls for the instruments.** Closed for every manifest rule by the fixture-per-rule test (§4.1); the phpt runner keeps its nightly control; `bench` has the A/A control; `crosscheck`, `compile-identity` and `witness` still need one fixture each that must fail.
+5. **No concurrency exploration for `Cache`.** Unchanged; revision 1 D.4.
+6. **No harness for the harness's own size.** Closed: `.claude/**` hand-written ≤ 300 lines in `[budget]`, generated types excluded; `xtask` keeps its 14k.
+7. **No statement of what an agent may run.** Closed by `lanes.nightly` and §11.
+8. **Every function hook fails open.** Closed by construction: the command hook beneath it does not, and every rule has a twin (§6).
+9. **A function hook cannot hold a turn.** Moot: `done --hook` is the command Stop hook.
+10. **No test harness for `($, e, next)`.** Moot for the rules, which are Rust; the fifteen-line adapter is exercised by `--plugin-dir` only, as revision 2 said.
+11. **`computed` discovery skips dot-directories.** Unchanged; the pre-commit and session commands name the local file.
+12. **The one-hook-per-event constraint.** Moot: one adapter, one event.
+13. **The manifest's grammar is new** (revision 3). §4.1's rule list is the acceptance test; a rule that does not fit is found on day 1 when the manifest is written before any crate exists.
+14. **`permit`'s latency at the tool call** (revision 3). The bar and the fallback are in §4.4; measured on day 1.
+15. **The design of record is still seven files** (revision 3). Closed by design ledger 8: `third-engine-design.md` and `jit-design.md` are living documents; the map's item 2 names them.
+16. **Two schedules for divergences** (revision 3). The registry counts every kind against one target; whether the trace and runner kinds should have their own targets is a question for the JIT note's next revision.
+
+---
+
+## 13. Open questions and things not verified
+
+**D.1 to D.6, D.8 to D.15** of the earlier revisions stand as written there; the ones that matter for this revision are D.2 (where the clippy list lives; now generated, so the answer is the manifest's), D.3 (rustdoc and the `expect` fence, a day-1 check), D.5 (the engine binary under `run-tests.php`, a lane control until the CLI flags exist), and D.10 (what in Function Hooks is stable; now only the fifteen-line adapter depends on it).
+
+**D.7, settled.** Every check is an `xtask` subcommand. The shipped command hooks and pre-commit are the whole local harness in month one. The function hook is one optional adapter.
+
+**D.16 The hook JSON shapes.** `permit` reads and writes the shipped hook's stdin and stdout JSON (Hooks-ref, PreToolUse and Stop). The field names were read from the reference in revision 2 and not exercised; day 1 runs `permit` under `claude --debug-file` on one fixture call per rule.
+
+**D.17 `$.process.run` and stdin.** Whether the function-hook noun can pass stdin to a process was not checked; the adapter passes the event as an argument (`--json`), which is bounded by the argument-length limit and is fine for an `Edit` and marginal for a large `Write`. If it is a problem the adapter writes a temp file under the working directory, which `$.fs.writeFile` allows.
+
+**D.18 The tree hash as freshness.** `git rev-parse HEAD:<path>` gives a tree hash of committed content only; for the working tree `done` must hash the crate's files itself. A content hash over the crate's sources in byte-order sorted path order, the `computed` snapshot shape (CM-spec:100), is what `tree` holds. Cost: the same as `computed check` over the same inputs, seconds.
+
+**D.19 `parking_lot::*` in `deny_types`.** `clippy::disallowed-types` matches fully qualified paths, so a wildcard is not a clippy feature; the generator expands the manifest's wildcard into the paths the lock packages actually contain, read from `Cargo.lock`. Unverified that the expansion is complete for a crate that re-exports a lock under another name; the `permit` regex and the review of `api.lock` are the twins.
+
+---
+
+## 14. What this design asks of the design of record
+
+Design ledger 8 (2026-09-07) took items 2, 3, 5 and 6 below in full and item 1 in part: the design states its numbers once in its §4.1 and §4.5 and says the manifest carries them; the manifest itself does not exist until day 1, so until then the example in §4.1 of this note is the statement the design cites, and this revision made it agree. Item 4 is the harness's own and is unchanged. The list is kept as the record of what was asked.
+
+1. **The numbers move to `seams.toml`.** §4.1's crate map, §4.2's dependency graph, §4.5's lock set, §10's `unsafe` homes and lint list, and §12's budgets are stated once in the manifest, and the revision cites it. The inventory found the lock set enumerated four ways (`heap`, `api`, `sapi`, `ops`, `effects` in r2; plus `unit` in r3; `tier`, `heap`, `unit`, `ops`, `api` in r7): the manifest's set is `heap`, `unit`, `ops`, `api`, `sapi`, `tier`; `effects.lock` is retired, its content being `ops.lock`'s effects column. ADR-0004's consequence "`unsafe` is permitted in `php_heap` and `ext/*/src/ffi/` only" is superseded by r7's four homes and should say so in a one-line amendment.
+2. **The oracle pin is cited, never stated.** r1 §8.6 and §9.2 say 8.5.9; r6, r7 and the JIT notes cite php-src 8.5.7; r6 §7.1 says the oracle and the stubs are pinned to one tag. `oracle.toml` is that statement and the documents point at it.
+3. **One divergence registry.** r1 §8.5's table, r4 §12's runner list and JIT revision 3's recorded differences table are one file, `docs/divergence.toml`, with kinds; the day-30 target counts all kinds.
+4. **`xtask` gains `permit`, `done`, `status`, `vocab`, `new-ext`**, and the oracle module gains `compare`. The 14k budget stands; revision 3's estimate for the five is under 3k.
+5. **The revision rule of r3 §10 is reopened.** "Revisions are files; the highest `N` is the source of record" costs every reader seven files and lets stale sentences survive (`xtask opgen --check`, deleted in r2 and still standing in r1's text; the two `unsafe` lists). The ask: `third-engine-design.md` and `jit-design.md` as living documents with the numbered "what changed and why" ledger each revision already writes, git as the dated record, ADRs unchanged. The `rN` files stay as records. This is not an ADR reversal, since no ADR made the rule; it is a decision of the design and its owner's to make.
+6. **A "Harness changes" section per revision** (rule 3), which from now on is the manifest and registry diff in the landing commit.
