@@ -23,6 +23,7 @@ must_use_candidate = "allow"        # the harness's constructors are not misused
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 regex-lite = "0.1"                  # permit's deny_pattern; one package, no dependencies
+sha1_smol = "1"                     # git blob ids for the stamp's tree hash, in process; one package, no dependencies
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"

@@ -4,6 +4,7 @@
 //! §4.2): it covers the working tree, tracked and untracked files alike, so
 //! an unstaged edit changes it.
 
+use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -24,12 +25,62 @@ impl Stamp {
     pub fn take(root: &Path, scope: &Path) -> Result<Stamp> {
         Ok(Stamp {
             tree: tree_hash(root, scope)?,
-            commit: git(root, &["rev-parse", "--short", "HEAD"], None)?
-                .trim()
-                .to_owned(),
+            commit: head_commit(root)?,
             at: now()?,
         })
     }
+}
+
+/// The short id of `HEAD`, read from the repository's files; `git
+/// rev-parse` when the layout is one this reader does not know. A stamp is
+/// taken at every denial, so it spawns git once (`ls-files`) and not four
+/// times.
+pub fn head_commit(root: &Path) -> Result<String> {
+    match read_head(root) {
+        Some(id) => Ok(id),
+        None => Ok(git(root, &["rev-parse", "--short", "HEAD"], None)?
+            .trim()
+            .to_owned()),
+    }
+}
+
+/// `HEAD` through `.git` (a directory, or a worktree's file naming one),
+/// a symbolic ref through `refs/` and then `packed-refs`, shortened to the
+/// seven characters `rev-parse --short` prints on a small repository.
+fn read_head(root: &Path) -> Option<String> {
+    let dot_git = root.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let line = fs::read_to_string(&dot_git).ok()?;
+        let target = line.strip_prefix("gitdir:")?.trim();
+        let target = Path::new(target);
+        if target.is_absolute() {
+            target.to_path_buf()
+        } else {
+            root.join(target)
+        }
+    };
+    let common = match fs::read_to_string(git_dir.join("commondir")) {
+        Ok(rel) => git_dir.join(rel.trim()),
+        Err(_) => git_dir.clone(),
+    };
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    let full = match head.strip_prefix("ref:") {
+        None => head.to_owned(),
+        Some(name) => {
+            let name = name.trim();
+            match fs::read_to_string(common.join(name)) {
+                Ok(id) => id.trim().to_owned(),
+                Err(_) => fs::read_to_string(common.join("packed-refs"))
+                    .ok()?
+                    .lines()
+                    .find_map(|l| l.strip_suffix(name).map(|id| id.trim().to_owned()))?,
+            }
+        }
+    };
+    (full.len() == 40 && full.chars().all(|c| c.is_ascii_hexdigit())).then(|| full[..7].to_owned())
 }
 
 /// Every file under `scope` (relative to `root`) that git does not ignore,
@@ -61,27 +112,28 @@ pub fn files(root: &Path, scope: &Path) -> Result<Vec<String>> {
 }
 
 /// One object id over every file under `scope` that git does not ignore,
-/// tracked or not, with its content as it is on disk.
+/// tracked or not, with its content as it is on disk: the blob id of each
+/// file, then the blob id of the sorted `<id> <path>` listing, which is
+/// what `git hash-object` would print for the same bytes.
 pub fn tree_hash(root: &Path, scope: &Path) -> Result<String> {
-    let paths = files(root, scope)?;
-    // Absolute, since `hash-object` reads a relative path from the
-    // repository's top level, not from `-C`'s directory.
-    let stdin = paths
-        .iter()
-        .map(|p| root.join(p).display().to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let hashes = git(root, &["hash-object", "--stdin-paths"], Some(&stdin))?;
     let mut manifest = String::new();
-    for (path, hash) in paths.iter().zip(hashes.lines()) {
-        manifest.push_str(hash);
+    for path in files(root, scope)? {
+        let file = root.join(&path);
+        let bytes = fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
+        manifest.push_str(&blob_id(&bytes));
         manifest.push(' ');
-        manifest.push_str(path);
+        manifest.push_str(&path);
         manifest.push('\n');
     }
-    Ok(git(root, &["hash-object", "--stdin"], Some(&manifest))?
-        .trim()
-        .to_owned())
+    Ok(blob_id(manifest.as_bytes()))
+}
+
+/// The id git gives a blob: SHA-1 over `blob <len>\0<content>`.
+pub fn blob_id(content: &[u8]) -> String {
+    let mut hash = sha1_smol::Sha1::new();
+    hash.update(format!("blob {}\0", content.len()).as_bytes());
+    hash.update(content);
+    hash.digest().to_string()
 }
 
 /// Run git in `root` and return its stdout; a non-zero exit is an error
@@ -150,6 +202,18 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::civil_from_days;
+
+    #[test]
+    fn blob_ids_are_git_object_ids() {
+        assert_eq!(
+            super::blob_id(b""),
+            "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+        );
+        assert_eq!(
+            super::blob_id(b"hello\n"),
+            "ce013625030ba8dba906f756967f9e9ca394464a"
+        );
+    }
 
     #[test]
     fn civil_dates() {
