@@ -55,6 +55,9 @@ pub enum Command {
     UnsafeAudit,
     /// Write the files the manifest's `generated` rules render (ext/clippy.toml).
     Generate,
+    /// Hold the divergence registry to the manifest rule whose `check` names
+    /// this instrument: an accepted row has a reason a person wrote.
+    DivergenceReason,
 }
 
 /// The sections of harness-design.md §4.6 that have a renderer.
@@ -66,6 +69,8 @@ pub enum Section {
     Locks,
     /// Each crate against its ceiling.
     Budget,
+    /// The divergence registry, with counts by kind and status.
+    Divergence,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

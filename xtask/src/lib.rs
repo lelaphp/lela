@@ -1,5 +1,6 @@
 //! The harness for the third engine (`harness-design.md` §4): the seam
-//! manifest and the oracle pin loaded by one reader, the reading and its
+//! manifest and the oracle pin loaded by one reader, the oracle module that
+//! owns every comparison and the divergence registry, the reading and its
 //! store, the instruments, `permit`, the judge at the tool call, and
 //! `status`, the one renderer.
 #![forbid(unsafe_code)]
@@ -7,11 +8,13 @@
 pub mod api_check;
 pub mod budget;
 pub mod cli;
+pub mod divergence;
 pub mod generated;
 pub mod git;
 pub mod lines;
 pub mod lock;
 pub mod manifest;
+pub mod oracle;
 pub mod permit;
 pub mod reading;
 pub mod sources;
@@ -25,6 +28,8 @@ use anyhow::{Result, bail};
 use clap::Parser;
 
 use cli::{Cli, Command};
+use divergence::Registry;
+use git::Stamp;
 use manifest::Manifest;
 use reading::{Reading, Status, Store};
 
@@ -43,7 +48,8 @@ pub fn run() -> Result<()> {
     let store = Store::of_workspace(&root);
     match cli.command {
         Command::Status { section, format } => {
-            let text = status::render(&manifest, &store, section, format)?;
+            let registry = Registry::load(&root)?;
+            let text = status::render(&manifest, &registry, &store, section, format)?;
             std::io::stdout().write_all(text.as_bytes())?;
             Ok(())
         }
@@ -64,6 +70,17 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         Command::ApiCheck { write } => api_check::run(&manifest, &root, &store, write),
+        Command::DivergenceReason => {
+            let registry = Registry::load(&root)?;
+            let mut reading = divergence::reason(&registry, &manifest);
+            reading.stamp(&Stamp::take(&root, Path::new(divergence::FILE))?);
+            store.write(&reading)?;
+            if reading.status == Status::Fail {
+                bail!("{}", reading.message);
+            }
+            println!("{}", reading.message);
+            Ok(())
+        }
     }
 }
 

@@ -10,12 +10,12 @@ fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
 }
 
-/// A scratch workspace: the tracked manifest and pin, and no store.
+/// A scratch workspace: the tracked manifest, pin and registry, and no store.
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("xtask-status-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    for file in ["seams.toml", "oracle.toml"] {
+    std::fs::create_dir_all(dir.join("docs")).unwrap();
+    for file in ["seams.toml", "oracle.toml", "docs/divergence.toml"] {
         std::fs::copy(workspace().join(file), dir.join(file)).unwrap();
     }
     dir

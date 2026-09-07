@@ -1,6 +1,6 @@
 //! `xtask status`, the one renderer (harness-design.md §4.6). It reads the
-//! manifest and the store and computes nothing else; a section that needs a
-//! command of its own is a missing instrument.
+//! manifest, the divergence registry and the store and computes nothing
+//! else; a section that needs a command of its own is a missing instrument.
 
 use std::fmt::Write;
 
@@ -8,6 +8,7 @@ use anyhow::Result;
 use serde_json::{Map, Value, json};
 
 use crate::cli::{Format, Section};
+use crate::divergence::{Kind, Registry, Status};
 use crate::manifest::Manifest;
 use crate::reading::{Reading, Store};
 
@@ -17,21 +18,23 @@ pub const NO_READING: &str = "no reading";
 /// Render one section to a string in the asked format.
 pub fn render(
     manifest: &Manifest,
+    registry: &Registry,
     store: &Store,
     section: Section,
     format: Format,
 ) -> Result<String> {
     let readings = store.readings()?;
-    let rows: Vec<Row> = match section {
-        Section::Rules => rules(manifest, &readings),
-        Section::Locks => locks(manifest, &readings),
-        Section::Budget => budget(manifest, &readings),
+    let (rows, columns): (Vec<Row>, Columns) = match section {
+        Section::Rules => (rules(manifest, &readings), RULES),
+        Section::Locks => (locks(manifest, &readings), LOCKS),
+        Section::Budget => (budget(manifest, &readings), BUDGET),
+        Section::Divergence => return divergence(registry, format),
     };
     Ok(match format {
         Format::Json => {
             serde_json::to_string_pretty(&rows.iter().map(Row::json).collect::<Result<Vec<_>>>()?)?
         }
-        Format::Md => table(section, &rows),
+        Format::Md => table(columns, &rows),
     })
 }
 
@@ -65,7 +68,7 @@ impl Row {
     fn fact(&self, key: &str) -> String {
         match self.facts.get(key) {
             None | Some(Value::Null) => String::new(),
-            Some(Value::String(s)) => s.replace('|', "\\|").replace('\n', " "),
+            Some(Value::String(s)) => cell(s),
             Some(Value::Array(a)) => a
                 .iter()
                 .filter_map(Value::as_str)
@@ -153,6 +156,95 @@ fn budget(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
         .collect()
 }
 
+/// The divergence section: the registry's rows, then counts by kind (rows)
+/// and status (columns) with a total. It reads no reading; the registry is
+/// the truth and this is its view (harness-design.md §4.3).
+fn divergence(registry: &Registry, format: Format) -> Result<String> {
+    let counts = registry.counts();
+    let kinds = Kind::ALL
+        .into_iter()
+        .filter(|k| counts.by_kind.contains_key(k));
+    let of = |status: Status| counts.by_status.get(&status).copied().unwrap_or(0);
+    match format {
+        Format::Json => {
+            let rows: Vec<Value> = registry
+                .rows
+                .iter()
+                .map(|r| {
+                    json!({
+                        "id": r.id,
+                        "kind": r.kind.as_str(),
+                        "status": r.status.as_str(),
+                        "since": r.since,
+                        "reason": r.reason,
+                    })
+                })
+                .collect();
+            let mut by_kind = Map::new();
+            for kind in kinds {
+                let cells: Map<String, Value> = Status::ALL
+                    .into_iter()
+                    .map(|s| (s.as_str().to_owned(), json!(counts.cell(kind, s))))
+                    .collect();
+                by_kind.insert(kind.as_str().to_owned(), Value::Object(cells));
+            }
+            let total: Map<String, Value> = Status::ALL
+                .into_iter()
+                .map(|s| (s.as_str().to_owned(), json!(of(s))))
+                .collect();
+            by_kind.insert("total".to_owned(), Value::Object(total));
+            Ok(serde_json::to_string_pretty(&json!({
+                "rows": rows,
+                "counts": by_kind,
+            }))?)
+        }
+        Format::Md => {
+            let mut out = String::new();
+            let _ = writeln!(out, "| id | kind | status | since | reason |");
+            let _ = writeln!(out, "|---|---|---|---|---|");
+            for row in &registry.rows {
+                let _ = writeln!(
+                    out,
+                    "| {} | {} | {} | {} | {} |",
+                    cell(&row.id),
+                    row.kind.as_str(),
+                    row.status.as_str(),
+                    row.since,
+                    cell(&row.reason)
+                );
+            }
+            let _ = writeln!(out);
+            let _ = writeln!(out, "| kind | open | accepted | fixed | rows |");
+            let _ = writeln!(out, "|---|---|---|---|---|");
+            for kind in kinds {
+                let _ = writeln!(
+                    out,
+                    "| {} | {} | {} | {} | {} |",
+                    kind.as_str(),
+                    counts.cell(kind, Status::Open),
+                    counts.cell(kind, Status::Accepted),
+                    counts.cell(kind, Status::Fixed),
+                    counts.by_kind[&kind]
+                );
+            }
+            let _ = writeln!(
+                out,
+                "| total | {} | {} | {} | {} |",
+                of(Status::Open),
+                of(Status::Accepted),
+                of(Status::Fixed),
+                registry.rows.len()
+            );
+            Ok(out)
+        }
+    }
+}
+
+/// One string as a Markdown cell: pipes escaped, one line.
+fn cell(text: &str) -> String {
+    text.replace('|', "\\|").replace('\n', " ")
+}
+
 /// The newest reading that matches, by its `at`. The store holds one file
 /// per instrument and scope, so a rule measured by two instruments has two
 /// readings; the newer is shown. `at` is always UTC to the second in one
@@ -165,43 +257,44 @@ fn latest(readings: &[Reading], pick: impl Fn(&Reading) -> bool) -> Option<Readi
         .cloned()
 }
 
-/// The cells of one Markdown row.
-type Line = fn(&Row) -> Vec<String>;
+/// A Markdown table's columns: the header, and the cells of one row.
+type Columns = (&'static [&'static str], fn(&Row) -> Vec<String>);
 
-fn table(section: Section, rows: &[Row]) -> String {
+const RULES: Columns = (&["rule", "adr", "predicate", "reading", "text"], |r| {
+    vec![
+        r.fact("id"),
+        r.fact("adr"),
+        r.fact("predicate"),
+        r.status(),
+        r.fact("text"),
+    ]
+});
+
+const LOCKS: Columns = (&["seam", "lock", "items", "ceiling", "reading"], |r| {
+    vec![
+        r.fact("seam"),
+        r.fact("lock"),
+        r.number("items"),
+        r.fact("ceiling"),
+        r.status(),
+    ]
+});
+
+const BUDGET: Columns = (&["crate", "lines", "ceiling", "reading", "message"], |r| {
+    vec![
+        r.fact("crate"),
+        r.number("lines"),
+        r.fact("ceiling"),
+        r.status(),
+        r.reading
+            .as_ref()
+            .map(|x| x.message.clone())
+            .unwrap_or_default(),
+    ]
+});
+
+fn table((head, line): Columns, rows: &[Row]) -> String {
     let mut out = String::new();
-    let (head, line): (&[&str], Line) = match section {
-        Section::Rules => (&["rule", "adr", "predicate", "reading", "text"], |r| {
-            vec![
-                r.fact("id"),
-                r.fact("adr"),
-                r.fact("predicate"),
-                r.status(),
-                r.fact("text"),
-            ]
-        }),
-        Section::Locks => (&["seam", "lock", "items", "ceiling", "reading"], |r| {
-            vec![
-                r.fact("seam"),
-                r.fact("lock"),
-                r.number("items"),
-                r.fact("ceiling"),
-                r.status(),
-            ]
-        }),
-        Section::Budget => (&["crate", "lines", "ceiling", "reading", "message"], |r| {
-            vec![
-                r.fact("crate"),
-                r.number("lines"),
-                r.fact("ceiling"),
-                r.status(),
-                r.reading
-                    .as_ref()
-                    .map(|x| x.message.clone())
-                    .unwrap_or_default(),
-            ]
-        }),
-    };
     let _ = writeln!(out, "| {} |", head.join(" | "));
     let _ = writeln!(out, "|{}", "---|".repeat(head.len()));
     for row in rows {

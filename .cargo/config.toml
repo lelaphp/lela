@@ -1,0 +1,4 @@
+# `cargo xtask <instrument>`: the harness by name from any directory of the
+# workspace. The computed regions (harness-design.md §5, §4.3) run it this way.
+[alias]
+xtask = "run --quiet --package xtask --"
