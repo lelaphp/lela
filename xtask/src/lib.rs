@@ -1,11 +1,14 @@
 //! The harness for the third engine (`harness-design.md` §4): the seam
-//! manifest and the oracle pin loaded by one reader, the reading and its
+//! manifest and the oracle pin loaded by one reader, the oracle module that
+//! owns every comparison and the divergence registry, the reading and its
 //! store, and `status`, the one renderer.
 #![forbid(unsafe_code)]
 
 pub mod cli;
+pub mod divergence;
 pub mod git;
 pub mod manifest;
+pub mod oracle;
 pub mod reading;
 pub mod status;
 
@@ -16,8 +19,10 @@ use anyhow::Result;
 use clap::Parser;
 
 use cli::{Cli, Command};
+use divergence::Registry;
+use git::Stamp;
 use manifest::Manifest;
-use reading::Store;
+use reading::{Status, Store};
 
 /// The workspace this binary was built in: the parent of `xtask/`.
 pub fn built_root() -> PathBuf {
@@ -33,9 +38,22 @@ pub fn run() -> Result<()> {
     match cli.command {
         Command::Status { section, format } => {
             let manifest = Manifest::load(&root)?;
+            let registry = Registry::load(&root)?;
             let store = Store::of_workspace(&root);
-            let text = status::render(&manifest, &store, section, format)?;
+            let text = status::render(&manifest, &registry, &store, section, format)?;
             std::io::stdout().write_all(text.as_bytes())?;
+            Ok(())
+        }
+        Command::DivergenceReason => {
+            let manifest = Manifest::load(&root)?;
+            let registry = Registry::load(&root)?;
+            let mut reading = divergence::reason_check(&registry, &manifest);
+            reading.stamp(&Stamp::take(&root, Path::new(divergence::FILE))?);
+            Store::of_workspace(&root).write(&reading)?;
+            if reading.status == Status::Fail {
+                anyhow::bail!("{}", reading.message);
+            }
+            println!("{}", reading.message);
             Ok(())
         }
     }

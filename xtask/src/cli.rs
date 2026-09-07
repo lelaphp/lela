@@ -28,6 +28,9 @@ pub enum Command {
         #[arg(long, default_value = "md")]
         format: Format,
     },
+    /// Hold the divergence registry to manifest rule `divergence.reason`:
+    /// an accepted row has a reason a person wrote. Writes one reading.
+    DivergenceReason,
 }
 
 /// The sections of harness-design.md §4.6 that have a renderer.
@@ -39,6 +42,8 @@ pub enum Section {
     Locks,
     /// Each crate against its ceiling.
     Budget,
+    /// The divergence registry, with counts by kind and status.
+    Divergence,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

@@ -1,5 +1,6 @@
 //! The seam manifest, `seams.toml`, and the oracle pin it points at,
-//! `oracle.toml`, loaded by one reader (harness-design.md §4.1, §4.3).
+//! `oracle.toml`, loaded by one reader (harness-design.md §4.1, §4.3); the
+//! pin's grammar is the oracle module's.
 //!
 //! The grammar is `[oracle] [budget] [[crate]] [[seam]] [[edge]] [[rule]]`,
 //! each rule carrying exactly one predicate. A manifest with a key outside
@@ -13,6 +14,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+
+use crate::oracle::Pin;
 
 /// The file name of the manifest at the workspace root.
 pub const FILE: &str = "seams.toml";
@@ -31,9 +34,10 @@ pub struct Manifest {
     pub edges: Vec<Edge>,
     #[serde(rename = "rule", default)]
     pub rules: Vec<Rule>,
-    /// The pin the `[oracle]` row names, loaded from that file.
+    /// The pin the `[oracle]` row names, loaded from that file by the
+    /// oracle module, whose grammar it is.
     #[serde(skip)]
-    pub pin: Oracle,
+    pub pin: Pin,
 }
 
 /// `[oracle]`: the only place the manifest says where the pin is.
@@ -248,65 +252,6 @@ impl<const N: usize> PartialEq<[&str; N]> for OneOrMany {
     }
 }
 
-/// `oracle.toml`: the pinned oracle and its invocation recipe. Read through
-/// the manifest's `[oracle]` row and nowhere else; the version is a value of
-/// this file, not of any code. Its grammar is the oracle module's to hold
-/// (harness-design.md §4.3), so an unknown key here is not refused.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct Oracle {
-    pub oracle: Binary,
-    pub source: Source,
-    pub recipe: Recipe,
-    #[serde(default)]
-    pub regime: BTreeMap<String, Regime>,
-}
-
-/// The `php` binary: version, where it is on this machine, and its digest.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct Binary {
-    pub version: String,
-    pub path: PathBuf,
-    pub md5: String,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct Source {
-    pub tag: String,
-    pub commit: String,
-    pub path: PathBuf,
-    pub phpt_files: u64,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct Recipe {
-    pub script_name: String,
-    pub preamble: String,
-    pub args: Vec<String>,
-    pub ini: Vec<String>,
-    pub env_clear: bool,
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
-    pub limits: Limits,
-    pub normalise: Normalise,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct Limits {
-    pub timeout_s: u64,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct Normalise {
-    pub crlf_to_lf: bool,
-    pub trim: String,
-    pub scratch_token: String,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct Regime {
-    pub ini: Vec<String>,
-}
-
 impl Manifest {
     /// Load `seams.toml` from the workspace root, then the pin it names.
     pub fn load(root: &Path) -> Result<Manifest> {
@@ -314,11 +259,7 @@ impl Manifest {
         let text =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         let mut manifest = Manifest::parse(&text).with_context(|| format!("{}", path.display()))?;
-        let pin_path = root.join(&manifest.oracle.pin);
-        let pin_text = fs::read_to_string(&pin_path)
-            .with_context(|| format!("reading the oracle pin {}", pin_path.display()))?;
-        manifest.pin =
-            toml::from_str(&pin_text).with_context(|| format!("{}", pin_path.display()))?;
+        manifest.pin = Pin::load(&root.join(&manifest.oracle.pin))?;
         Ok(manifest)
     }
 

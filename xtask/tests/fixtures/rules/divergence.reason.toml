@@ -1,0 +1,17 @@
+# The negative control for the manifest rule `divergence.reason`
+# (harness-design.md §4.1: one fixture per rule that must fail): an accepted
+# row whose reason nobody wrote, beside one that is in order.
+
+[[divergence]]
+id = "witness:0000000000000000"
+kind = "witness"
+reason = ""
+status = "accepted"
+since = "2026-09-07"
+
+[[divergence]]
+id = "phpt:Zend/tests/fixture.phpt"
+kind = "phpt"
+reason = "Written, so this row is not the one that fails."
+status = "accepted"
+since = "2026-09-07"
