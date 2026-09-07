@@ -1,0 +1,31 @@
+# The harness in CI (harness-design.md §7, §10 rule 4): the region files are
+# held by `computed check`, which runs no loader and needs no trust grant,
+# and the harness's own tests hold the map, the hook wiring and the rules'
+# negative controls.
+name: harness
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  regions:
+    name: computed check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install computed --locked
+      - run: computed check AGENTS.md ext/AGENTS.md data/INDEX.md docs/divergence.md
+  xtask:
+    name: cargo test -p xtask
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy -p xtask --all-targets -- -D warnings
+      - run: cargo test -p xtask

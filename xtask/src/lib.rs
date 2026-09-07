@@ -49,9 +49,18 @@ pub fn run() -> Result<()> {
     let manifest = Manifest::load(&root)?;
     let store = Store::of_workspace(&root);
     match cli.command {
-        Command::Status { section, format } => {
-            let registry = Registry::load(&root)?;
-            let text = status::render(&manifest, &registry, &store, section, format)?;
+        Command::Status {
+            section,
+            format,
+            session,
+        } => {
+            let text = if let Some(section) = section {
+                let registry = Registry::load(&root)?;
+                status::render(&manifest, &registry, &store, &root, section, format)?
+            } else {
+                debug_assert!(session);
+                status::session(&root)?
+            };
             std::io::stdout().write_all(text.as_bytes())?;
             Ok(())
         }

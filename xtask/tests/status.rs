@@ -134,7 +134,169 @@ fn locks_and_budget_render_the_readings_the_instruments_wrote() {
 #[test]
 fn a_section_that_has_no_renderer_yet_is_refused() {
     let root = scratch("unknown");
-    let (ok, _, err) = status(&root, &["--section", "phpt"]);
+    let (ok, _, err) = status(&root, &["--section", "week"]);
     assert!(!ok);
-    assert!(err.contains("phpt"), "{err}");
+    assert!(err.contains("week"), "{err}");
+}
+
+/// The volatile sections of the local file (harness-design.md §5) render
+/// the readings of an instrument that does not exist yet as "no reading",
+/// and one that was written as its row.
+#[test]
+fn the_local_sections_render_from_the_store_alone() {
+    let root = scratch("local");
+    for section in ["phpt", "witness", "mutants", "permits", "bundle"] {
+        let (ok, md, err) = status(&root, &["--section", section]);
+        assert!(ok, "{section}: {err}");
+        assert!(md.contains("no reading"), "{section}: {md}");
+    }
+
+    let store = Store::of_workspace(&root);
+    let mut phpt = Reading::new("phpt", "Zend/tests");
+    phpt.status = Status::Fail;
+    phpt.numbers.insert("passed".into(), 9.into());
+    phpt.numbers.insert("failed".into(), 1.into());
+    phpt.message = "Zend/tests: 1 of 10 failed".into();
+    store.write(&phpt).unwrap();
+    let (ok, md, _) = status(&root, &["--section", "phpt"]);
+    assert!(ok);
+    assert!(
+        md.contains("Zend/tests") && md.contains("failed=1") && md.contains("fail"),
+        "{md}"
+    );
+    assert!(!md.contains("no reading"), "{md}");
+
+    let mut denial = Reading::new("permit", "harness.self");
+    denial.rule = "harness.self".into();
+    denial.status = Status::Fail;
+    denial.adr = String::new();
+    denial.message = "Edit seams.toml: Harness configuration ... by a person.".into();
+    store.write(&denial).unwrap();
+    store.write(&denial).unwrap();
+    let (ok, md, _) = status(&root, &["--section", "permits"]);
+    assert!(ok, "{md}");
+    let row = md.lines().find(|l| l.contains("harness.self")).unwrap();
+    assert!(row.contains("| 2 |"), "two denials in the log: {row}");
+    assert!(
+        md.contains("ext.no-locks") && md.contains("| 0 |"),
+        "a rule that never fired says so: {md}"
+    );
+
+    let (ok, json, _) = status(&root, &["--section", "permits", "--format", "json"]);
+    assert!(ok);
+    let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["rule"] == "harness.self")
+        .unwrap();
+    assert_eq!(row["denials"], 2);
+    assert_eq!(row["reading"]["status"], "fail");
+}
+
+/// `git` is volatile: the log and the status of the working tree.
+#[test]
+fn git_prints_the_log_and_the_status() {
+    let root = scratch("git");
+    let run = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    run(&["init", "-q", "-b", "main"]);
+    run(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "the first commit",
+    ]);
+    std::fs::write(root.join("untracked.txt"), "x").unwrap();
+    let (ok, md, err) = status(&root, &["--section", "git"]);
+    assert!(ok, "{err}");
+    assert!(md.contains("the first commit"), "{md}");
+    assert!(md.contains("?? untracked.txt"), "{md}");
+}
+
+/// `--session` is the map plus the local facts in one block, for the
+/// session-start hook; the local file is laid down from its template when
+/// the clone has none, and an unrendered region is said to be one.
+#[test]
+fn session_prints_the_map_and_the_local_facts_in_one_block() {
+    let root = scratch("session");
+    std::fs::write(
+        root.join("AGENTS.md"),
+        "# The map
+
+Read CONTEXT.md first.
+",
+    )
+    .unwrap();
+    let local = root.join(".claude/harness.local.md");
+    assert!(!local.exists());
+
+    let (ok, text, err) = status(&root, &["--session"]);
+    assert!(ok, "{err}");
+    assert!(
+        text.starts_with(
+            "# The map
+"
+        ),
+        "{text}"
+    );
+    assert!(
+        local.exists(),
+        "the local file is laid down from its template"
+    );
+    let template = std::fs::read_to_string(&local).unwrap();
+    for name in [
+        "budget",
+        "phpt",
+        "witness",
+        "mutants",
+        "divergence",
+        "permits",
+        "git",
+    ] {
+        assert!(
+            template.contains(&format!("--section {name}\" volatile name={name}")),
+            "{name} is a volatile region of the local file: {template}"
+        );
+    }
+    assert!(text.contains("unrendered"), "{text}");
+    assert!(text.contains("computed trust"), "{text}");
+
+    std::fs::write(
+        &local,
+        "# Local\n\n<!-- computed exec cmd=\"x\" volatile name=budget -->\n| crate |\n<!-- /computed in=a out=b -->\n",
+    )
+    .unwrap();
+    let (ok, text, _) = status(&root, &["--session"]);
+    assert!(ok);
+    assert!(
+        text.contains(
+            "# The map
+"
+        ) && text.contains("| crate |"),
+        "{text}"
+    );
+    assert!(!text.contains("unrendered"), "{text}");
+
+    let (ok, _, err) = status(&root, &["--session", "--section", "rules"]);
+    assert!(!ok, "one of --section and --session: {err}");
+    let (ok, _, _) = status(&root, &[]);
+    assert!(!ok, "one of --section and --session is required");
 }

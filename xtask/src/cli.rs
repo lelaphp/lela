@@ -28,12 +28,17 @@ pub enum Command {
         #[arg(long)]
         write: bool,
     },
-    /// Render one section from the manifest and the store; computes nothing else.
+    /// Render one section from the manifest and the store, or with
+    /// `--session` the map plus the local facts; computes nothing else.
     Status {
-        #[arg(long)]
-        section: Section,
+        #[arg(long, required_unless_present = "session", conflicts_with = "session")]
+        section: Option<Section>,
         #[arg(long, default_value = "md")]
         format: Format,
+        /// Print AGENTS.md and .claude/harness.local.md in one block, for
+        /// the `SessionStart` hook; the local file is laid down when missing.
+        #[arg(long)]
+        session: bool,
     },
     /// Judge one intended tool call from the `PreToolUse` hook's stdin; the
     /// decision is the JSON on stdout and the exit is 0 always.
@@ -78,6 +83,18 @@ pub enum Section {
     Budget,
     /// The divergence registry, with counts by kind and status.
     Divergence,
+    /// The phpt readings, one row per subset.
+    Phpt,
+    /// The witness readings, one row per crate.
+    Witness,
+    /// The mutants readings, one row per crate.
+    Mutants,
+    /// Each rule permit judges: its last denial and how many the log holds.
+    Permits,
+    /// The log and the status of the working tree; volatile.
+    Git,
+    /// The bundle's registration order against the crate graph.
+    Bundle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

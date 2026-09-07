@@ -1,5 +1,5 @@
 {
-  "description": "PreToolUse on Edit, Write and Bash is xtask permit over the hook's stdin (harness-design.md §4.4). The built binary is a process start; cargo run is the fallback when none is built and costs about 200 ms more.",
+  "description": "PreToolUse on Edit, Write and Bash is xtask permit over the hook's stdin (harness-design.md \u00a74.4); the built binary is a process start, cargo run the fallback when none is built, about 200 ms more. SessionStart on startup, resume, clear and compact renders the local file and prints the map plus the local facts (\u00a75); once a session, so it goes through cargo run, which rebuilds a stale binary rather than trusting it.",
   "hooks": {
     "PreToolUse": [
       {
@@ -9,6 +9,18 @@
             "type": "command",
             "command": "cd \"$CLAUDE_PROJECT_DIR\" && for x in target/release/xtask target/debug/xtask; do [ -x \"$x\" ] && exec \"$x\" permit; done; exec cargo run -q -p xtask -- permit",
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && X='cargo run -q -p xtask --'; [ -f .claude/harness.local.md ] || $X status --session >/dev/null; computed run .claude/harness.local.md >/dev/null 2>&1; [ $? -eq 2 ] && echo 'harness: a marker in .claude/harness.local.md is broken; see `computed check .claude/harness.local.md`'; exec $X status --session",
+            "timeout": 60
           }
         ]
       }

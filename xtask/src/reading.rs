@@ -88,6 +88,21 @@ impl Reading {
     }
 }
 
+impl Reading {
+    /// One line of the log back into a reading; the inverse of `to_json`.
+    pub fn from_json(line: &str) -> Result<Reading> {
+        let mut value: serde_json::Value =
+            serde_json::from_str(line).context("parsing a log line")?;
+        let at = value["at"]
+            .as_str()
+            .context("a log line without `at`")?
+            .parse::<Datetime>()
+            .context("a log line whose `at` is not a datetime")?;
+        value["at"] = serde_json::to_value(at).context("the datetime as toml's value")?;
+        serde_json::from_value(value).context("a log line that is not a reading")
+    }
+}
+
 const EPOCH: &str = "1970-01-01T00:00:00Z";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,6 +223,21 @@ impl Store {
             return Ok(None);
         }
         Self::read_file(&path).map(Some)
+    }
+
+    /// Every line of the append-only log, oldest first: what the store held
+    /// across every run and every session. A missing log is empty.
+    pub fn log(&self) -> Result<Vec<Reading>> {
+        let path = self.root.join(LOG);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let text =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|line| Reading::from_json(line).with_context(|| format!("{}", path.display())))
+            .collect()
     }
 
     /// Every reading in the store, in path order. A missing store is empty.
