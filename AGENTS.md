@@ -190,13 +190,14 @@ Commands:
   unsafe-audit       Allow `unsafe` only in the homes the manifest's unsafe.homes rule names
   generate           Write the files the manifest's `generated` rules render (ext/clippy.toml)
   divergence-reason  Hold the divergence registry to the manifest rule whose `check` names this instrument: an accepted row has a reason a person wrote
+  new-ext            Lay one extension crate down at ext/<name> in the template topology: the facade as its one dependency, `extension()`, state on the value, a test through the capture sink, a witness, ext/clippy.toml rewritten and the row in ext/AGENTS.md; refuses an existing one
   vocab              The glossary as a sensor: `_Avoid_` words in public item names, rustdoc prose and the lock; one reading per crate
 
 Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=0bb66e835c40467641b3346e97cd37ed4492fcd46329fda8f4a4d81ecb9b5c7a out=3ee58c7d343ddf77c4b57c8237d9b40bfac398271f0a9e44eeb8eedc738eb34d -->
+<!-- /computed in=c18dd33a86e4df899c6a41fd93b17cefac8ca5fcea44f5dbc78020a17cebc7fb out=9dc8b11cf2d8260c8cc190af7a77d37d52693d25145d1d8029a89806c27c9b05 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

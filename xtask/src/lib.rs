@@ -15,6 +15,7 @@ pub mod glossary;
 pub mod lines;
 pub mod lock;
 pub mod manifest;
+pub mod new_ext;
 pub mod oracle;
 pub mod permit;
 pub mod reading;
@@ -89,6 +90,16 @@ pub fn run() -> Result<()> {
                 bail!("{}", reading.message);
             }
             println!("{}", reading.message);
+            Ok(())
+        }
+        Command::NewExt { name } => {
+            let laid = new_ext::run(&root, &manifest, &name)?;
+            for path in &laid.written {
+                println!("wrote {path}");
+            }
+            for note in &laid.notes {
+                println!("{note}");
+            }
             Ok(())
         }
         Command::Vocab { crates } => {
