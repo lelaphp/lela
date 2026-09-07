@@ -35,6 +35,8 @@ Check: the six are wrong if the manifest cannot express a rule the design has (�
 
 **4. Revision 4 (2026-09-07).** The review that produced design ledger 8 and JIT ledger 4 found the manifest's example disagreeing with the design it exists to carry: three crate budgets that were not the design's, the `unsafe` homes declared twice (once per `[[crate]]` row and once as a rule), and a `php_bundle` edge that omitted `php_ext`, on which the bundle depends for `ExtensionBuilder` and the `Nop` alias. It also found no lane for the tier's own sensors. Four changes: the example manifest carries the design's numbers and declares `unsafe` once (§4.1); the `php_bundle` edge names `php_ext`; §7 gains the tier's lanes, `force` and `exit-fuzz` per commit on the witnesses and nightly on `Zend/tests` and `tests/`, the trace-dump diff under `inline`, and `port-map` as an instrument with a reading; §14 records which of its asks the design of record took in its ledger 8 (items 1 in part, 2, 3, 5 and 6) and what remains. Check: `xtask budget` against the manifest passes with the design's §4.1 numbers and no others; a second statement of the `unsafe` homes anywhere in the manifest is the counterexample.
 
+**5. Revision 5 (2026-09-07).** `seams.toml` and `oracle.toml` were written before day 1 (design ledger 9, `data/pre-day-1.md`), which is the acceptance test §12 item 13 named, and it failed twice. The example in §4.1 was not TOML: `name = "x"; budget = 1` on one line does not parse, since TOML has no statement separator, so a row is one key per line and the example is now an excerpt of the file itself. And design §10 states four rules the example had no predicate for: the denied clippy lints (`deny_lints`), a named `xtask` lint such as the re-entry signature rule (`check`), the glossary as a sensor (`avoid_from`), and the generated, committed `ext/clippy.toml` (`generated`). The grammar sentence lists every predicate. D.3 and D.16 are answered by measurement: the `expect` fence's `=` trips `rustdoc::invalid_codeblock_attributes` and the crates that carry witnesses allow it; the PreToolUse and Stop hook shapes, the deny output and the Stop block were exercised end to end on Claude Code 2.1.263 and are recorded in §13. Check: `tomllib` parses the manifest; every `[[rule]]` carries exactly one of the predicates the grammar sentence lists; `permit` on the recorded stdin shapes produces the recorded stdout shapes.
+
 ---
 
 ## 2. Vocabulary
@@ -91,70 +93,95 @@ Five modules, each deep: a small interface, most of the harness's behaviour behi
 **What it declares, once.** Every rule the design of record states as a sentence today. The list is the acceptance test for the format: a rule below that the format cannot carry is a design error in this section.
 
 ```toml
+# An excerpt of seams.toml; the file is the statement. One key per line: TOML
+# has no statement separator, so `name = "x"; budget = 1` does not parse.
 [oracle]
 pin = "oracle.toml"                        # the only statement of version, digest, recipe
 
 [budget]
-total = 272500                             # r7 §4.1
+total = 272500                             # design §4.1: the [[crate]] rows plus bindings
 new = 127500
-docs = 5000                                # r1 §12
-lock_packages = 120                        # r7 §4.1
-clean_build_release_s = 90                 # r1 §10
-api_items = 400                            # r2 §4.5
+docs = 5000
+harness = 300                              # .claude/** hand-written
+lock_packages = 120
+clean_build_release_s = 90
+api_items = 400
+bindings = 15000                           # ext/*/src/ffi/** pooled
 
 [[crate]]
-name = "php_heap";   budget = 20000
+name = "php_engine"
+budget = 48000
+lock = ["api.lock", "sapi.lock", "tier.lock"]
+lock_from = { "api.lock" = "php_ext" }
 [[crate]]
-name = "php_unit";   budget = 6000;  lock = "unit.lock"
-[[crate]]
-name = "php_engine"; budget = 48000; lock = "api.lock"; lock_from = "php_ext"
-[[crate]]
-name = "php_jit";    budget = 17500; feature = "jit"
-[[crate]]
-name = "xtask";      budget = 14000
-# ... one row per crate of design §4.1; ext/* rows carry their own ceilings; the unsafe homes are declared once, below
+name = "php_jit"
+budget = 17500
+feature = "jit"
+# ... one row per crate of design §4.1, ext/* rows with their own ceilings
 
 [[seam]]
-name = "unit"; producer = "php_unit"; consumers = ["php_compile", "php_engine", "php_macros"]; lock = "unit.lock"; adr = "0001"
-[[seam]]
-name = "api";  producer = "php_engine"; facade = "php_ext"; consumers = ["ext/*"]; lock = "api.lock"; adr = ["0002", "0004"]
-[[seam]]
-name = "tier"; producer = "php_engine"; consumers = ["php_jit"]; lock = "tier.lock"; allowlist = true; sections = ["face", "kernels"]
-# ... heap, ops, sapi; effects.lock is retired (§14)
+name = "tier"
+producer = "php_engine"
+consumers = ["php_jit"]
+lock = "tier.lock"
+allowlist = true
+sections = ["face", "kernels"]
+adr = "0006"
+# ... heap, unit, ops, api, sapi; effects.lock is retired (§14)
 
 [[edge]]
-from = "php_macros"; to = "php_engine"; adr = "0002"
+from = "php_bundle"
+to = ["ext/*", "php_ext", "php_jit"]
+order = "topological"
+adr = ["0004", "0006"]
 [[edge]]
-from = "ext/*"; to = ["php_ext"]; only = true; adr = "0004"
-[[edge]]
-from = "php_bundle"; to = ["ext/*", "php_ext", "php_jit"]; order = "topological"; adr = ["0004", "0006"]
-[[edge]]
-from = "php_engine::{executor,kernels}"; to = "php_engine::{serve,headers,gpc,output}"; deny = true   # r3 §4.2
+from = "php_engine::{executor,kernels}"
+to = "php_engine::{serve,headers,gpc,output}"
+deny = true
 
 [[rule]]
-id = "ext.no-locks"; scope = "ext/*"; deny_types = ["std::sync::Mutex", "std::sync::RwLock", "std::cell::Cell", "std::cell::RefCell", "std::sync::atomic::*", "parking_lot::*"]
-adr = "0005"; text = "Extension state is request-scoped or immutable; no lock or cell in ext/*."
+id = "ext.no-locks"
+scope = "ext/*"
+deny_types = ["std::sync::Mutex", "std::sync::RwLock", "std::cell::Cell", "std::cell::RefCell", "std::sync::atomic::*", "parking_lot::*"]
+adr = "0005"
+text = "Extension state is request-scoped or immutable; no lock or cell in ext/*."
 [[rule]]
-id = "unsafe.homes"; allow = ["php_heap", "ext/*/src/ffi/", "php_jit::table::code", "php_jit::enter"]; adr = "0006"
+id = "unsafe.homes"
+allow = ["php_heap", "ext/*/src/ffi/", "php_jit::table::code", "php_jit::enter"]
+adr = "0006"
 text = "unsafe is permitted in four places; see design §4.1."
 [[rule]]
-id = "witness.exit-authored"; scope = "**/*.rs"; deny_pattern = '```expect[^\n]*\bexit=\d+'; unless = "xtask witness --accept"
+id = "lints.no-panic"
+scope = ["crates/php_heap", "crates/php_unit", "crates/php_compile", "crates/php_engine", "crates/php_jit", "crates/php_sapi", "ext/*"]
+exempt = ["tests", "xtask"]
+deny_lints = ["clippy::unwrap_used", "clippy::expect_used", "clippy::panic", "clippy::unreachable", "clippy::todo", "clippy::unimplemented"]
+text = "Internal invariant failures are InternalError fatals with a message, not panics (design §10)."
+[[rule]]
+id = "engine.reentry-signature"
+scope = "crates/php_engine/**"
+check = "reentry-signature"
+text = "A function in php_engine that calls execute or release takes &mut Request."
+[[rule]]
+id = "witness.exit-authored"
+scope = "**/*.rs"
+deny_pattern = '```expect[^\n]*\bexit=\d+'
+unless = "xtask witness --accept"
 text = "exit= in a witness is captured by `xtask witness --accept`, never authored."
 [[rule]]
-id = "api.lock-line"; scope = "crates/php_engine/src/api/**"; on = "pub"; note = "A new pub item in api needs its api.lock line in the same commit; api ≤ 400 items."
+id = "git.no-verify"
+tool = "Bash"
+deny_argv = ["--no-verify", "-n"]
+with = "commit"
+text = "Commits run the pre-commit hook; --no-verify is not available to agents."
 [[rule]]
-id = "git.no-verify"; tool = "Bash"; deny_argv = ["--no-verify", "-n"]; with = "commit"; text = "Commits run the pre-commit hook; --no-verify is not available to agents."
-[[rule]]
-id = "lanes.nightly"; tool = "Bash"; deny_pattern = 'xtask (phpt|bench) --full|run-tests\.php|compile-identity --corpus'
-text = "Nightly lanes run in CI only; run the per-crate subset."
-[[rule]]
-id = "computed.force"; tool = "Bash"; deny_pattern = 'computed\s+run\b.*--force'; text = "`computed run --force` discards a hand edit; a person decides that."
-[[rule]]
-id = "harness.self"; tool = ["Edit", "Write"]; scope = [".claude/**", "seams.toml", "oracle.toml", "docs/divergence.toml"]; deny = true
+id = "harness.self"
+tool = ["Edit", "Write"]
+scope = [".claude/**", "seams.toml", "oracle.toml", "docs/divergence.toml"]
+deny = true
 text = "Harness configuration, the oracle pin and the divergence registry are edited by a person."
 ```
 
-Each `[[rule]]` has an `id`, a scope or a tool, one predicate, an optional `adr`, and the `text` a failure prints. Each `[[seam]]` names its lock, and a lock with `sections` is diffed per section; each `[[crate]]` names its ceiling and nothing about `unsafe`; the `unsafe` homes are one rule and appear nowhere else in the file. That is the whole grammar, and `xtask` refuses a manifest with an unknown key.
+Each `[[rule]]` has an `id`, a scope or a tool, one predicate, an optional `adr`, and the `text` a failure prints. The predicates are ten: `deny_types`, `allow`, `deny_pattern` (with an optional `unless`), `deny_argv` (with `with`), `on`, `deny`, `deny_lints`, `check` (a named `xtask` lint), `avoid_from` (a glossary file), and `generated` (a file and the rule it is rendered from). Each `[[seam]]` names its lock, and a lock with `sections` is diffed per section; each `[[crate]]` names its ceiling and nothing about `unsafe`; the `unsafe` homes are one rule and appear nowhere else in the file. That is the whole grammar, and `xtask` refuses a manifest with an unknown key.
 
 **What is derived.**
 
@@ -406,8 +433,8 @@ Items of revisions 1 and 2 with their outcome, then what revision 3 opens.
 10. **No test harness for `($, e, next)`.** Moot for the rules, which are Rust; the fifteen-line adapter is exercised by `--plugin-dir` only, as revision 2 said.
 11. **`computed` discovery skips dot-directories.** Unchanged; the pre-commit and session commands name the local file.
 12. **The one-hook-per-event constraint.** Moot: one adapter, one event.
-13. **The manifest's grammar is new** (revision 3). §4.1's rule list is the acceptance test; a rule that does not fit is found on day 1 when the manifest is written before any crate exists.
-14. **`permit`'s latency at the tool call** (revision 3). The bar and the fallback are in §4.4; measured on day 1.
+13. **The manifest's grammar is new** (revision 3). Closed by revision 5: the manifest was written before day 1, the example was not TOML, and four predicates were missing; both are fixed in §4.1.
+14. **`permit`'s latency at the tool call** (revision 3). The bar and the fallback are in §4.4; measured on day 1, when `permit` exists. The hook shapes it reads and writes are recorded (D.16).
 15. **The design of record is still seven files** (revision 3). Closed by design ledger 8: `third-engine-design.md` and `jit-design.md` are living documents; the map's item 2 names them.
 16. **Two schedules for divergences** (revision 3). The registry counts every kind against one target; whether the trace and runner kinds should have their own targets is a question for the JIT note's next revision.
 
@@ -415,11 +442,11 @@ Items of revisions 1 and 2 with their outcome, then what revision 3 opens.
 
 ## 13. Open questions and things not verified
 
-**D.1 to D.6, D.8 to D.15** of the earlier revisions stand as written there; the ones that matter for this revision are D.2 (where the clippy list lives; now generated, so the answer is the manifest's), D.3 (rustdoc and the `expect` fence, a day-1 check), D.5 (the engine binary under `run-tests.php`, a lane control until the CLI flags exist), and D.10 (what in Function Hooks is stable; now only the fifteen-line adapter depends on it).
+**D.1 to D.6, D.8 to D.15** of the earlier revisions stand as written there; the ones that matter for this revision are D.2 (where the clippy list lives; now generated, so the answer is the manifest's), D.3 (rustdoc and the `expect` fence: answered by measurement, the `=` on the fence line trips `rustdoc::invalid_codeblock_attributes` under `-D warnings` while the doctests still run, so the crates that carry witnesses allow that lint at their root, design §8), D.5 (the engine binary under `run-tests.php`, a lane control until the CLI flags exist), and D.10 (what in Function Hooks is stable; now only the fifteen-line adapter depends on it).
 
 **D.7, settled.** Every check is an `xtask` subcommand. The shipped command hooks and pre-commit are the whole local harness in month one. The function hook is one optional adapter.
 
-**D.16 The hook JSON shapes.** `permit` reads and writes the shipped hook's stdin and stdout JSON (Hooks-ref, PreToolUse and Stop). The field names were read from the reference in revision 2 and not exercised; day 1 runs `permit` under `claude --debug-file` on one fixture call per rule.
+**D.16 The hook JSON shapes, answered.** Exercised on Claude Code 2.1.263 with a headless run (`data/pre-day-1.md` §4). PreToolUse stdin carries `session_id`, `transcript_path`, `cwd`, `prompt_id`, `permission_mode`, `hook_event_name`, `tool_name`, `tool_input` and `tool_use_id`; Stop stdin carries the same head plus `stop_hook_active` and `last_assistant_message`. A deny is `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"<text>"}}` on stdout with exit 0: the tool never ran and the model saw the text. A hold at Stop is `{"decision":"block","reason":"<text>"}`: the model continued on the reason and the hook fired again with `stop_hook_active` true, on which `done --hook` must pass. Day 1 runs `permit` against these recorded shapes as fixtures.
 
 **D.17 `$.process.run` and stdin.** Whether the function-hook noun can pass stdin to a process was not checked; the adapter passes the event as an argument (`--json`), which is bounded by the argument-length limit and is fine for an `Edit` and marginal for a large `Write`. If it is a problem the adapter writes a temp file under the working directory, which `$.fs.writeFile` allows.
 
@@ -431,7 +458,7 @@ Items of revisions 1 and 2 with their outcome, then what revision 3 opens.
 
 ## 14. What this design asks of the design of record
 
-Design ledger 8 (2026-09-07) took items 2, 3, 5 and 6 below in full and item 1 in part: the design states its numbers once in its §4.1 and §4.5 and says the manifest carries them; the manifest itself does not exist until day 1, so until then the example in §4.1 of this note is the statement the design cites, and this revision made it agree. Item 4 is the harness's own and is unchanged. The list is kept as the record of what was asked.
+Design ledger 8 (2026-09-07) took items 2, 3, 5 and 6 below in full and item 1 in part; design ledger 9 took item 1 in full, since `seams.toml` and `oracle.toml` now exist and the design cites them. Item 4 is the harness's own and is unchanged. The list is kept as the record of what was asked.
 
 1. **The numbers move to `seams.toml`.** §4.1's crate map, §4.2's dependency graph, §4.5's lock set, §10's `unsafe` homes and lint list, and §12's budgets are stated once in the manifest, and the revision cites it. The inventory found the lock set enumerated four ways (`heap`, `api`, `sapi`, `ops`, `effects` in r2; plus `unit` in r3; `tier`, `heap`, `unit`, `ops`, `api` in r7): the manifest's set is `heap`, `unit`, `ops`, `api`, `sapi`, `tier`; `effects.lock` is retired, its content being `ops.lock`'s effects column. ADR-0004's consequence "`unsafe` is permitted in `php_heap` and `ext/*/src/ffi/` only" is superseded by r7's four homes and should say so in a one-line amendment.
 2. **The oracle pin is cited, never stated.** r1 §8.6 and §9.2 say 8.5.9; r6, r7 and the JIT notes cite php-src 8.5.7; r6 §7.1 says the oracle and the stubs are pinned to one tag. `oracle.toml` is that statement and the documents point at it.

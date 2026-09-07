@@ -140,6 +140,9 @@ budget = 500
 [[crate]]
 name = "ext/ctype"
 budget = 500
+[[crate]]
+name = "ext/hash"
+budget = 3000    # design ledger 9: no Mahout crate; a thin port over the RustCrypto hash crates
 
 # ---------------------------------------------------------------- seams
 # The six locked seams (design §4.5). `effects.lock` is retired; its content is
