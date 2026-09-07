@@ -3,6 +3,7 @@
 //! store, and `status`, the one renderer.
 #![forbid(unsafe_code)]
 
+pub mod api_check;
 pub mod cli;
 pub mod git;
 pub mod manifest;
@@ -37,6 +38,11 @@ pub fn run() -> Result<()> {
             let text = status::render(&manifest, &store, section, format)?;
             std::io::stdout().write_all(text.as_bytes())?;
             Ok(())
+        }
+        Command::ApiCheck { write } => {
+            let manifest = Manifest::load(&root)?;
+            let store = Store::of_workspace(&root);
+            api_check::run(&manifest, &root, &store, write)
         }
     }
 }

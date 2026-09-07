@@ -36,11 +36,17 @@ impl Stamp {
 /// tracked or not, with its content as it is on disk.
 pub fn tree_hash(root: &Path, scope: &Path) -> Result<String> {
     let scope = scope.to_str().context("the scope path is not UTF-8")?;
+    // `hash-object --stdin-paths` reads paths from the repository's top
+    // level whatever the working directory, so the listing is asked for in
+    // that form; a root below the top level (a fixture workspace) then works.
+    let top = git(root, &["rev-parse", "--show-toplevel"], None)?;
+    let top = Path::new(top.trim());
     let listing = git(
         root,
         &[
             "ls-files",
             "-z",
+            "--full-name",
             "--cached",
             "--others",
             "--exclude-standard",
@@ -51,7 +57,7 @@ pub fn tree_hash(root: &Path, scope: &Path) -> Result<String> {
     )?;
     let mut paths: Vec<&str> = listing
         .split('\0')
-        .filter(|p| !p.is_empty() && root.join(p).is_file())
+        .filter(|p| !p.is_empty() && top.join(p).is_file())
         .collect();
     paths.sort_unstable();
     paths.dedup();

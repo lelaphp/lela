@@ -21,6 +21,13 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Hold the seams: regenerate and diff each lock, check crate edges,
+    /// `use` paths and the bundle order; one reading per seam and per crate.
+    ApiCheck {
+        /// Rewrite each lock file from the sources instead of failing on a diff.
+        #[arg(long)]
+        write: bool,
+    },
     /// Render one section from the manifest and the store; computes nothing else.
     Status {
         #[arg(long)]

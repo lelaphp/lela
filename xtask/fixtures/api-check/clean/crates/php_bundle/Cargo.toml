@@ -1,0 +1,8 @@
+[package]
+name = "php_bundle"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+php_ext_random = { path = "../../ext/random" }
+php_ext_standard = { path = "../../ext/standard" }
