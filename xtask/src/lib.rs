@@ -15,7 +15,7 @@ pub mod status;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Parser;
 
 use cli::{Cli, Command};
@@ -47,11 +47,11 @@ pub fn run() -> Result<()> {
         Command::DivergenceReason => {
             let manifest = Manifest::load(&root)?;
             let registry = Registry::load(&root)?;
-            let mut reading = divergence::reason_check(&registry, &manifest);
+            let mut reading = divergence::reason(&registry, &manifest);
             reading.stamp(&Stamp::take(&root, Path::new(divergence::FILE))?);
             Store::of_workspace(&root).write(&reading)?;
             if reading.status == Status::Fail {
-                anyhow::bail!("{}", reading.message);
+                bail!("{}", reading.message);
             }
             println!("{}", reading.message);
             Ok(())

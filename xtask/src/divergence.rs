@@ -2,9 +2,9 @@
 //! one row per accepted difference from the oracle, keyed by a witness hash,
 //! a phpt path, a compile-identity path or a trace site. A person writes a
 //! row and its reason; `compare`'s caller or the fuzzer may propose one with
-//! status `open` and an empty reason; the `divergence-reason` check fails an
-//! accepted row without a reason. The TOML is the truth; `status --section
-//! divergence` is the rendering.
+//! status `open` and an empty reason; the `divergence-reason` instrument
+//! fails an accepted row without a reason. The TOML is the truth; `status
+//! --section divergence` is the rendering.
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -15,19 +15,20 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::manifest::Manifest;
-use crate::reading::{self, Reading};
+use crate::reading::{self, Number, Reading};
 
 /// The registry's path, relative to the workspace root.
 pub const FILE: &str = "docs/divergence.toml";
-/// The name of the check the manifest's `check` predicate cites, and the
-/// instrument of its reading.
-pub const CHECK: &str = "divergence-reason";
+/// The instrument that holds the registry to its rule: the subcommand, the
+/// reading's `instrument`, and what the manifest's `check` predicate names.
+pub const INSTRUMENT: &str = "divergence-reason";
 
 /// One row of the registry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Divergence {
-    /// `witness:<hash> | phpt:<path> | compile:<path> | trace:<site>`.
+    /// `witness:<hash> | phpt:<path> | compile:<path> | trace:<site>`; the
+    /// prefix is the kind's, and `runner` shares `phpt:`.
     pub id: String,
     pub kind: Kind,
     /// Written by a person; empty on a proposed row.
@@ -65,6 +66,16 @@ impl Kind {
             Kind::Runner => "runner",
             Kind::Compile => "compile",
             Kind::Trace => "trace",
+        }
+    }
+
+    /// The prefix an id of this kind carries, colon included.
+    pub fn prefix(self) -> &'static str {
+        match self {
+            Kind::Witness => "witness:",
+            Kind::Phpt | Kind::Runner => "phpt:",
+            Kind::Compile => "compile:",
+            Kind::Trace => "trace:",
         }
     }
 }
@@ -120,13 +131,21 @@ impl Registry {
     }
 
     /// Parse the registry's text and hold it to the row shape; a duplicate
-    /// id is refused.
+    /// id, or an id whose prefix is not its kind's, is refused.
     pub fn parse(text: &str) -> Result<Registry> {
         let shape: FileShape = toml::from_str(text)?;
         let mut seen = std::collections::BTreeSet::new();
         for row in &shape.divergence {
             if !seen.insert(&row.id) {
                 bail!("the id {:?} has two rows", row.id);
+            }
+            if !row.id.starts_with(row.kind.prefix()) {
+                bail!(
+                    "the id {:?} is of kind {}, whose ids start with {:?}",
+                    row.id,
+                    row.kind.as_str(),
+                    row.kind.prefix()
+                );
             }
         }
         Ok(Registry {
@@ -145,12 +164,23 @@ impl Registry {
     }
 
     /// Propose a row: status `open`, empty reason, dated today, appended to
-    /// the file after its prose. The id must be new.
+    /// the file after its prose. The id must be new and carry the kind's
+    /// prefix, and the registry must have been loaded from its file.
     pub fn propose(&mut self, id: &str, kind: Kind) -> Result<&Divergence> {
+        let Some(path) = &self.path else {
+            bail!("the registry was parsed from text, not loaded from {FILE}; nothing to append to")
+        };
         if let Some(row) = self.row(id) {
             bail!(
                 "the id {id:?} already has a row with status {}",
                 row.status.as_str()
+            );
+        }
+        if !id.starts_with(kind.prefix()) {
+            bail!(
+                "the id {id:?} is not of kind {}, whose ids start with {:?}",
+                kind.as_str(),
+                kind.prefix()
             );
         }
         let since = crate::git::now()?
@@ -164,17 +194,15 @@ impl Registry {
             status: Status::Open,
             since,
         };
-        if let Some(path) = &self.path {
-            let text = toml::to_string(&Rows {
-                divergence: std::slice::from_ref(&row),
-            })
-            .context("rendering the row")?;
-            let mut file = OpenOptions::new()
-                .append(true)
-                .open(path)
-                .with_context(|| format!("opening {}", path.display()))?;
-            write!(file, "\n{text}").with_context(|| format!("appending to {}", path.display()))?;
-        }
+        let text = toml::to_string(&Rows {
+            divergence: std::slice::from_ref(&row),
+        })
+        .context("rendering the row")?;
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        write!(file, "\n{text}").with_context(|| format!("appending to {}", path.display()))?;
         self.rows.push(row);
         Ok(self
             .rows
@@ -221,39 +249,34 @@ impl Counts {
     }
 }
 
-/// The `divergence-reason` check as a reading over the workspace: fail when
-/// an accepted row has no reason, naming each such row and printing the
-/// manifest rule's text; the counts are the numbers. The stamp is the
-/// caller's.
-pub fn reason_check(registry: &Registry, manifest: &Manifest) -> Reading {
+/// The `divergence-reason` instrument's reading over the workspace: fail
+/// when an accepted row has no reason, naming each such row and printing
+/// the text of the manifest rule whose `check` predicate names this
+/// instrument; the counts are the numbers. The stamp is the caller's.
+pub fn reason(registry: &Registry, manifest: &Manifest) -> Reading {
     let rule = manifest
         .rules
         .iter()
-        .find(|r| r.predicate.check.as_deref() == Some(CHECK));
-    let mut reading = Reading::new(CHECK, "workspace");
+        .find(|r| r.predicate.check.as_deref() == Some(INSTRUMENT));
+    let mut reading = Reading::new(INSTRUMENT, "workspace");
     if let Some(rule) = rule {
         reading.rule.clone_from(&rule.id);
         reading.adr = rule.adr.iter().collect::<Vec<_>>().join(", ");
     }
     let counts = registry.counts();
     let unreasoned = registry.unreasoned();
-    reading.numbers.insert(
-        "rows".into(),
-        i64::try_from(registry.rows.len())
-            .unwrap_or(i64::MAX)
-            .into(),
-    );
+    reading
+        .numbers
+        .insert("rows".into(), Number::count(registry.rows.len()));
     for status in Status::ALL {
         let n = counts.by_status.get(&status).copied().unwrap_or(0);
-        reading.numbers.insert(
-            status.as_str().into(),
-            i64::try_from(n).unwrap_or(i64::MAX).into(),
-        );
+        reading
+            .numbers
+            .insert(status.as_str().into(), Number::count(n));
     }
-    reading.numbers.insert(
-        "unreasoned".into(),
-        i64::try_from(unreasoned.len()).unwrap_or(i64::MAX).into(),
-    );
+    reading
+        .numbers
+        .insert("unreasoned".into(), Number::count(unreasoned.len()));
     if unreasoned.is_empty() {
         reading.status = reading::Status::Pass;
         reading.message = format!(

@@ -77,9 +77,10 @@ fn a_snippet_gives_the_bytes_php_gives_by_hand_under_the_recipe() {
         .envs(&pin.recipe.env);
     let by_hand = cmd.output().unwrap();
     let by_hand = String::from_utf8(by_hand.stdout).unwrap();
+    let trim = |c: char| pin.recipe.normalise.trim.contains(c);
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        by_hand.trim(),
+        by_hand.replace("\r\n", "\n").trim_matches(trim),
         "the module adds nothing the recipe does not say"
     );
     assert!(
@@ -234,7 +235,7 @@ since = "2026-09-07"
 /// beside an engine's that differ, with no row for the id.
 #[test]
 fn the_fixture_comparison_fails() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/compare");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/compare");
     let expected = std::fs::read(dir.join("expected.txt")).unwrap();
     let actual = std::fs::read(dir.join("actual.txt")).unwrap();
     let verdict = oracle::compare(&registry(), "witness:fixture", &expected, &actual);

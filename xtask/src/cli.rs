@@ -28,8 +28,8 @@ pub enum Command {
         #[arg(long, default_value = "md")]
         format: Format,
     },
-    /// Hold the divergence registry to manifest rule `divergence.reason`:
-    /// an accepted row has a reason a person wrote. Writes one reading.
+    /// Hold the divergence registry to the manifest rule whose `check` names
+    /// this instrument: an accepted row has a reason a person wrote.
     DivergenceReason,
 }
 

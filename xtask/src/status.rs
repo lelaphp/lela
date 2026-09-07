@@ -23,20 +23,18 @@ pub fn render(
     section: Section,
     format: Format,
 ) -> Result<String> {
-    if section == Section::Divergence {
-        return divergence(registry, format);
-    }
     let readings = store.readings()?;
-    let rows: Vec<Row> = match section {
-        Section::Rules => rules(manifest, &readings),
-        Section::Locks => locks(manifest, &readings),
-        Section::Budget | Section::Divergence => budget(manifest, &readings),
+    let (rows, columns): (Vec<Row>, Columns) = match section {
+        Section::Rules => (rules(manifest, &readings), RULES),
+        Section::Locks => (locks(manifest, &readings), LOCKS),
+        Section::Budget => (budget(manifest, &readings), BUDGET),
+        Section::Divergence => return divergence(registry, format),
     };
     Ok(match format {
         Format::Json => {
             serde_json::to_string_pretty(&rows.iter().map(Row::json).collect::<Result<Vec<_>>>()?)?
         }
-        Format::Md => table(section, &rows),
+        Format::Md => table(columns, &rows),
     })
 }
 
@@ -262,45 +260,44 @@ fn latest(readings: &[Reading], pick: impl Fn(&Reading) -> bool) -> Option<Readi
         .cloned()
 }
 
-/// The cells of one Markdown row.
-type Line = fn(&Row) -> Vec<String>;
+/// A Markdown table's columns: the header, and the cells of one row.
+type Columns = (&'static [&'static str], fn(&Row) -> Vec<String>);
 
-fn table(section: Section, rows: &[Row]) -> String {
+const RULES: Columns = (&["rule", "adr", "predicate", "reading", "text"], |r| {
+    vec![
+        r.fact("id"),
+        r.fact("adr"),
+        r.fact("predicate"),
+        r.status(),
+        r.fact("text"),
+    ]
+});
+
+const LOCKS: Columns = (&["seam", "lock", "items", "ceiling", "reading"], |r| {
+    vec![
+        r.fact("seam"),
+        r.fact("lock"),
+        r.number("items"),
+        r.fact("ceiling"),
+        r.status(),
+    ]
+});
+
+const BUDGET: Columns = (&["crate", "lines", "ceiling", "reading", "message"], |r| {
+    vec![
+        r.fact("crate"),
+        r.number("lines"),
+        r.fact("ceiling"),
+        r.status(),
+        r.reading
+            .as_ref()
+            .map(|x| x.message.clone())
+            .unwrap_or_default(),
+    ]
+});
+
+fn table((head, line): Columns, rows: &[Row]) -> String {
     let mut out = String::new();
-    let (head, line): (&[&str], Line) = match section {
-        Section::Rules => (&["rule", "adr", "predicate", "reading", "text"], |r| {
-            vec![
-                r.fact("id"),
-                r.fact("adr"),
-                r.fact("predicate"),
-                r.status(),
-                r.fact("text"),
-            ]
-        }),
-        Section::Locks => (&["seam", "lock", "items", "ceiling", "reading"], |r| {
-            vec![
-                r.fact("seam"),
-                r.fact("lock"),
-                r.number("items"),
-                r.fact("ceiling"),
-                r.status(),
-            ]
-        }),
-        Section::Budget | Section::Divergence => {
-            (&["crate", "lines", "ceiling", "reading", "message"], |r| {
-                vec![
-                    r.fact("crate"),
-                    r.number("lines"),
-                    r.fact("ceiling"),
-                    r.status(),
-                    r.reading
-                        .as_ref()
-                        .map(|x| x.message.clone())
-                        .unwrap_or_default(),
-                ]
-            })
-        }
-    };
     let _ = writeln!(out, "| {} |", head.join(" | "));
     let _ = writeln!(out, "|{}", "---|".repeat(head.len()));
     for row in rows {

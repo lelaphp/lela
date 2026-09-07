@@ -25,7 +25,8 @@ pub const LOG: &str = "log.jsonl";
 #[serde(deny_unknown_fields)]
 pub struct Reading {
     /// `witness | phpt | compile-identity | crosscheck | port-map | api-check
-    /// | budget | unsafe-audit | bench | fuzz | mutants | permit | done | vocab`.
+    /// | budget | unsafe-audit | bench | fuzz | mutants | permit | done | vocab
+    /// | divergence-reason`.
     pub instrument: String,
     /// A crate, a corpus subset, a gate id, or `"workspace"`.
     pub scope: String,
@@ -111,6 +112,14 @@ pub enum Number {
 impl From<i64> for Number {
     fn from(n: i64) -> Number {
         Number::Int(n)
+    }
+}
+
+impl Number {
+    /// A count as a number; one past `i64::MAX` is not a count this store
+    /// will see, and saturates.
+    pub fn count(n: impl TryInto<i64>) -> Number {
+        Number::Int(n.try_into().unwrap_or(i64::MAX))
     }
 }
 
