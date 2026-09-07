@@ -83,8 +83,8 @@ pub enum Command {
         /// The extension's name as php-src spells it, with a `[[crate]]` row.
         name: String,
     },
-    /// The glossary as a sensor: `_Avoid_` words in public item names,
-    /// rustdoc prose and the lock; one reading per crate.
+    /// The glossary as a sensor: `_Avoid_` words in public item names and
+    /// rustdoc prose, never in a lock; one reading per crate.
     Vocab {
         /// Only these crates, by manifest name; default every crate that exists.
         #[arg(long = "crate", value_name = "NAME")]

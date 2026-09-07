@@ -1,9 +1,10 @@
 //! `xtask vocab`, the glossary as a sensor (harness-design.md §5). The
 //! manifest's `avoid_from` rule names the glossary, which is read for its
 //! `_Avoid_` lists, and every crate the rule's scope covers is scanned: the
-//! names of its public items, the prose of its rustdoc, and any lock file
-//! the scope names under the crate's path. One reading per crate, of
-//! instrument `vocab`; a crate whose sources do not exist yet gets none.
+//! names of its public items and the prose of its rustdoc. A lock file is
+//! not read: its lines mirror php's own names, which the engine copies on
+//! purpose. One reading per crate, of instrument `vocab`; a crate whose
+//! sources do not exist yet gets none.
 //!
 //! The scan is textual, not a parse. A public item is a line beginning
 //! `pub` followed by an item keyword and a name, a `pub` field, a variant of
@@ -38,21 +39,19 @@ pub enum Where {
     Item,
     /// Rustdoc prose.
     Prose,
-    /// A line of a lock file.
-    Lock,
 }
 
 /// One avoided word found: where, in what, and the terms the glossary
 /// offers instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
-    /// Relative to the crate's directory (or the lock's own name).
+    /// Relative to the crate's directory.
     pub file: PathBuf,
     pub line: usize,
     pub site: Where,
     /// The avoided phrase as the glossary wrote it.
     pub word: String,
-    /// The public item or lock line that carries it; empty for prose.
+    /// The public item that carries it; empty for prose.
     pub subject: String,
     pub terms: Vec<String>,
 }
@@ -82,7 +81,6 @@ impl fmt::Display for Finding {
         match self.site {
             Where::Item => write!(f, "names `{}`", self.subject)?,
             Where::Prose => write!(f, "in rustdoc prose")?,
-            Where::Lock => write!(f, "in the lock line `{}`", self.subject)?,
         }
         write!(f, "; the glossary says {}", quoted(&self.terms))
     }
@@ -103,8 +101,6 @@ pub struct Scan {
     pub items: i64,
     /// Rustdoc prose lines read.
     pub prose: i64,
-    /// Lock lines read.
-    pub lock: i64,
     pub findings: Vec<Finding>,
 }
 
@@ -154,9 +150,8 @@ pub fn run(root: &Path, manifest: &Manifest, store: &Store, only: &[String]) -> 
     Ok(all_pass)
 }
 
-/// Scan `krate` under `rule`'s scope: its sources, and each lock the scope
-/// names under its path. `None` when the scope does not cover it or its
-/// directory does not exist.
+/// Scan `krate` under `rule`'s scope: its sources. `None` when the scope
+/// does not cover it or its directory does not exist.
 fn scan_in_scope(
     root: &Path,
     rule: &Rule,
@@ -169,19 +164,7 @@ fn scan_in_scope(
     if !covered || !dir.is_dir() {
         return Ok(None);
     }
-    let mut scan = scan_crate(&dir, glossary)?;
-    let avoided = glossary.avoided_phrases();
-    for lock in rule.scope.iter().filter(|s| !s.contains('*')) {
-        let lock_path = Path::new(lock);
-        let file = root.join(lock_path);
-        if !lock_path.starts_with(&path) || !file.is_file() {
-            continue;
-        }
-        let text = read(&file)?;
-        let relative = lock_path.strip_prefix(&path).unwrap_or(lock_path);
-        scan.lock += scan_lock_text(relative, &text, &avoided, &mut scan.findings);
-    }
-    Ok(Some(scan))
+    Ok(Some(scan_crate(&dir, glossary)?))
 }
 
 /// The reading of one crate's scan: `numbers` are the counts and the hits,
@@ -193,7 +176,6 @@ fn reading_of(scan: &Scan, root: &Path, rule: &Rule, krate: &Crate) -> Result<Re
     reading.numbers = BTreeMap::from([
         ("items".to_owned(), scan.items.into()),
         ("prose".to_owned(), scan.prose.into()),
-        ("lock".to_owned(), scan.lock.into()),
         (
             "hits".to_owned(),
             i64::try_from(scan.findings.len())
@@ -234,41 +216,8 @@ pub fn scan_crate(dir: &Path, glossary: &Glossary) -> Result<Scan> {
     Ok(scan)
 }
 
-/// Scan one lock file: each item line's path, split into words. Comment
-/// lines are the lock's own prose and not asserted on.
-pub fn scan_lock(file: &Path, glossary: &Glossary) -> Result<Vec<Finding>> {
-    let text = read(file)?;
-    let mut findings = Vec::new();
-    let name = file
-        .file_name()
-        .map_or_else(|| file.to_path_buf(), PathBuf::from);
-    scan_lock_text(&name, &text, &glossary.avoided_phrases(), &mut findings);
-    Ok(findings)
-}
-
 fn read(file: &Path) -> Result<String> {
     fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))
-}
-
-/// Scan lock text; the item lines counted.
-fn scan_lock_text(file: &Path, text: &str, avoided: &[Avoided], out: &mut Vec<Finding>) -> i64 {
-    let mut lines = 0;
-    for (index, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        lines += 1;
-        let mut words = Vec::new();
-        for segment in line.split("::") {
-            words.extend(identifier_words(segment));
-            words.push(segment.to_owned());
-        }
-        for hit in hits(&words, avoided) {
-            out.push(Finding::at(file, index + 1, Where::Lock, line, hit));
-        }
-    }
-    lines
 }
 
 /// Scan one source file into `scan`.

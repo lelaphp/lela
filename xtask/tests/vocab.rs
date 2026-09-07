@@ -1,6 +1,6 @@
 //! `xtask vocab`, the glossary as a sensor (harness-design.md §5): the
 //! `_Avoid_` lists of `CONTEXT.md` against public item names, rustdoc prose
-//! and the lock, scoped so that `Result` is not `result`.
+//! scoped so that `Result` is not `result`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -108,14 +108,6 @@ fn prose_using_an_avoided_word_fails_and_the_same_word_as_a_type_name_passes() {
     );
 }
 
-#[test]
-fn an_avoided_word_in_the_lock_fails() {
-    let findings = vocab::scan_lock(&fixture("vocab.avoid").join("api.lock"), &glossary()).unwrap();
-    let words: Vec<(&str, usize)> = findings.iter().map(|f| (f.word.as_str(), f.line)).collect();
-    assert_eq!(words, [("run", 4)], "{findings:#?}");
-    assert!(findings.iter().all(|f: &Finding| f.site == Where::Lock));
-}
-
 /// A scratch workspace: the tracked manifest, pin and glossary, the fixture
 /// as one of the manifest's crates, and one commit so a reading can be stamped.
 fn scratch(name: &str, krate: &str) -> PathBuf {
@@ -129,7 +121,6 @@ fn scratch(name: &str, krate: &str) -> PathBuf {
     std::fs::create_dir_all(target.join("src")).unwrap();
     let from = fixture("vocab.avoid");
     std::fs::copy(from.join("src/lib.rs"), target.join("src/lib.rs")).unwrap();
-    std::fs::copy(from.join("api.lock"), target.join("api.lock")).unwrap();
     for args in [
         vec!["init", "-q"],
         vec!["add", "."],
@@ -185,17 +176,23 @@ fn the_instrument_writes_a_reading_per_crate_with_instrument_vocab() {
     assert!(reading.message.contains("run"), "{}", reading.message);
     assert!(!reading.tree.is_empty() && !reading.commit.is_empty());
     let hits = reading.numbers["hits"].to_string().parse::<i64>().unwrap();
-    assert!(hits >= 4, "items, prose and the lock: {reading:#?}");
+    assert!(hits >= 3, "items and prose: {reading:#?}");
 
-    // The lock is read under the crate that holds it and nowhere else.
+    // A lock under the crate is not read.
     let other = scratch("nolock", "crates/php_heap");
+    std::fs::write(other.join("crates/php_heap/heap.lock"), "heap::run\n").unwrap();
     let (ok, _, _) = xtask(&other, &["vocab", "--crate", "php_heap"]);
     assert!(!ok);
     let reading = Store::of_workspace(&other)
         .read("vocab", "php_heap")
         .unwrap()
         .unwrap();
-    assert_eq!(reading.numbers["lock"].to_string(), "0");
+    assert!(!reading.numbers.contains_key("lock"), "{reading:#?}");
+    assert!(
+        !reading.message.contains("heap::run"),
+        "{}",
+        reading.message
+    );
 }
 
 #[test]

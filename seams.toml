@@ -309,9 +309,9 @@ text = "A kernel or a native without a witness fails CI (design §8)."
 
 [[rule]]
 id = "vocab.avoid"
-scope = ["crates/*", "ext/*", "crates/php_ext/api.lock"]
+scope = ["crates/*", "ext/*"]
 avoid_from = "CONTEXT.md" # grammar: avoid_from, harness §5
-text = "The glossary's _Avoid_ words appear in no public item name, rustdoc prose or api.lock line."
+text = "The glossary's _Avoid_ words appear in no public item name or rustdoc prose; a lock line mirrors php's names and is not read."
 
 [[rule]]
 id = "generated.committed"
