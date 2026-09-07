@@ -150,6 +150,73 @@ fn the_harness_files_are_denied_by_their_absolute_path() {
 }
 
 #[test]
+fn a_file_in_an_agent_worktree_is_judged_against_that_checkout() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    // A worktree is a checkout: it has a `.git`. This one is gitignored.
+    let worktree = workspace().join(format!(
+        ".claude/worktrees/agent-permit-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::write(worktree.join(".git"), "gitdir: nowhere\n").unwrap();
+    let text = serde_json::json!({
+        "tool_name": "Write",
+        "cwd": worktree.to_str().unwrap(),
+        "tool_input": {
+            "file_path": worktree.join("crates/php_ext/src/lib.rs").to_str().unwrap(),
+            "content": "pub struct Facade;\n"
+        }
+    })
+    .to_string();
+    let call = Call::parse(&text).unwrap();
+    let root = call.workspace(workspace());
+    assert_eq!(root, worktree.canonicalize().unwrap_or(worktree.clone()));
+    assert_eq!(
+        call.path(&root).unwrap(),
+        Path::new("crates/php_ext/src/lib.rs")
+    );
+    let judgement = judge(&manifest, &root, &call).unwrap();
+    assert!(
+        judgement.denial().is_none(),
+        "a worktree is a checkout, not .claude/** of the main one: {judgement:#?}"
+    );
+
+    // A Bash call carries no file; its cwd places it.
+    let shell = Call::parse(
+        &serde_json::json!({"tool_name": "Bash", "cwd": worktree.to_str().unwrap(),
+            "tool_input": {"command": "cargo test -p xtask"}})
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(shell.workspace(workspace()), root);
+    // Outside any worktree, the root stands.
+    let plain = Call::parse(
+        &serde_json::json!({"tool_name": "Bash", "cwd": workspace().to_str().unwrap(),
+            "tool_input": {"command": "ls"}})
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        plain.workspace(workspace()),
+        workspace().canonicalize().unwrap()
+    );
+    // A directory under .claude/worktrees without a `.git` is not a
+    // checkout; its files are the main one's `.claude/**`.
+    let stray = workspace().join(".claude/worktrees/notes/todo.md");
+    let dir = Call::parse(
+        &serde_json::json!({"tool_name": "Write",
+            "tool_input": {"file_path": stray.to_str().unwrap(), "content": "x"}})
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        dir.workspace(workspace()),
+        workspace().canonicalize().unwrap()
+    );
+    std::fs::remove_dir_all(&worktree).unwrap();
+}
+
+#[test]
 fn an_edit_inside_a_computed_region_body_is_denied_and_one_beside_it_allowed() {
     let manifest = Manifest::load(workspace()).unwrap();
     let dir = fixtures().join("regions");

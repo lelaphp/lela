@@ -41,15 +41,21 @@ const BAR_MS: f64 = 100.0;
 pub const REGION_RULE: &str = "computed.region-body";
 const REGION_TEXT: &str = "The body of a computed region is rendered by `computed run`, not edited; change the command or its inputs, or the prose around the region (computed ADR 0005).";
 
-/// One intended tool call, as the hook receives it on stdin. The other keys
-/// of the recorded shape (`session_id`, `cwd`, `permission_mode`, …) are
-/// carried by the JSON and not read.
+/// One intended tool call, as the hook receives it on stdin. `cwd` places
+/// a call without a file in a worktree; the other keys of the recorded
+/// shape (`session_id`, `permission_mode`, …) are carried by the JSON and
+/// not read.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Call {
     pub tool_name: String,
     #[serde(default)]
     pub tool_input: ToolInput,
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
+
+/// Where the harness keeps an agent's worktrees, under the main checkout.
+const WORKTREES: &str = ".claude/worktrees";
 
 /// The fields of `tool_input` a rule can read: an `Edit`'s, a `Write`'s or
 /// a `Bash` call's.
@@ -99,6 +105,27 @@ impl Call {
             .filter(|c| !matches!(c, Component::CurDir))
             .collect();
         Some(clean)
+    }
+
+    /// The checkout the call belongs to: a worktree under
+    /// `.claude/worktrees/<name>` when the file, or failing that the
+    /// call's `cwd`, lies in one, else `root`. An agent's worktree is a
+    /// checkout of its own (it has a `.git`), and a path in it is judged
+    /// against that checkout, not as `.claude/**` of the main one.
+    pub fn workspace(&self, root: &Path) -> PathBuf {
+        let root = canonical(root);
+        let worktrees = root.join(WORKTREES);
+        let places = [self.tool_input.file_path.as_deref(), self.cwd.as_deref()];
+        places
+            .into_iter()
+            .flatten()
+            .map(|p| canonical(Path::new(p)))
+            .find_map(|p| {
+                let rest = p.strip_prefix(&worktrees).ok()?;
+                let checkout = worktrees.join(rest.components().next()?);
+                checkout.join(".git").exists().then_some(checkout)
+            })
+            .unwrap_or(root)
     }
 
     /// What a reading names: the path, or the command's first line.
@@ -619,16 +646,17 @@ pub fn run(root: &Path, json: Option<&str>) {
         |json| Ok(json.to_owned()),
     );
     let judged = text.and_then(|text| Call::parse(&text)).and_then(|call| {
-        let manifest = Manifest::load(root)?;
-        let judgement = judge(&manifest, root, &call)?;
-        Ok((call, judgement))
+        let root = call.workspace(root);
+        let manifest = Manifest::load(&root)?;
+        let judgement = judge(&manifest, &root, &call)?;
+        Ok((root, call, judgement))
     });
     match judged {
-        Ok((call, judgement)) => {
+        Ok((root, call, judgement)) => {
             if let Some(output) = judgement.hook_output() {
                 println!("{output}");
             }
-            if let Err(err) = record(root, &call, &judgement) {
+            if let Err(err) = record(&root, &call, &judgement) {
                 eprintln!("xtask permit: the decision stands but was not recorded: {err:#}");
             }
         }

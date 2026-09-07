@@ -374,6 +374,7 @@ fn over_the_diff(
                 content: Some(String::from_utf8_lossy(&bytes).into_owned()),
                 ..ToolInput::default()
             },
+            cwd: None,
         };
         let judgement = permit::judge(manifest, root, &call)?;
         for finding in judgement.findings.iter().filter(|f| f.kind == Kind::Deny) {
