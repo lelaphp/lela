@@ -1,0 +1,4 @@
+/target/
+# The reading store lives under target/harness/ (harness-design.md §4.2).
+# The local region file, rendered only by name (harness-design.md §5).
+/.claude/harness.local.md
