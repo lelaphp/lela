@@ -186,6 +186,7 @@ Commands:
   api-check          Hold the seams: regenerate and diff each lock, check crate edges, `use` paths and the bundle order; one reading per seam and per crate
   status             Render one section from the manifest and the store, or with `--session` the map plus the local facts; computes nothing else
   permit             Judge one intended tool call from the `PreToolUse` hook's stdin; the decision is the JSON on stdout and the exit is 0 always
+  done               The definition of done: print the conditions unmet for the changes since the base and exit 1 while any is; the Stop hook, pre-push and CI read the same list
   budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code and a stale generated file
   unsafe-audit       Allow `unsafe` only in the homes the manifest's unsafe.homes rule names
   generate           Write the files the manifest's `generated` rules render (ext/clippy.toml)
@@ -197,7 +198,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=c18dd33a86e4df899c6a41fd93b17cefac8ca5fcea44f5dbc78020a17cebc7fb out=9dc8b11cf2d8260c8cc190af7a77d37d52693d25145d1d8029a89806c27c9b05 -->
+<!-- /computed in=cb363c0bbcf30f72b6e3a2b717aa2226a408a272bba80008f1a09854df17199e out=5ee497166780977a8c785b5b33fd8e725f2105f093aeddbae66e8b5394d7c39a -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
