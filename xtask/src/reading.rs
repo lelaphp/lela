@@ -64,6 +64,13 @@ impl Reading {
 }
 
 impl Reading {
+    /// Record one count under `key`.
+    pub fn count(&mut self, key: &str, n: u64) -> Result<()> {
+        let n = i64::try_from(n).with_context(|| format!("{key} = {n} overflows a reading"))?;
+        self.numbers.insert(key.to_owned(), n.into());
+        Ok(())
+    }
+
     /// Put the stamp's tree, commit and time on the reading.
     pub fn stamp(&mut self, stamp: &Stamp) {
         self.tree.clone_from(&stamp.tree);

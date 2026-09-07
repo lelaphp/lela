@@ -4,7 +4,7 @@ The third engine: a PHP 8.5 engine in Rust that copies Zend's execution model on
 
 Read `CONTEXT.md` first. The design of record is `third-engine-design.md`; `jit-design.md` for the compiled tier; `harness-design.md` for the harness. Each is one living document with a ledger on top. Reversed decisions are in `docs/adr/`.
 
-The harness is the `xtask` crate: `cargo run -p xtask -- status --section rules|locks|budget` renders the manifest and the readings under `target/harness/` (harness §4.6).
+The harness is the `xtask` crate: `cargo run -p xtask -- status --section rules|locks|budget` renders the manifest and the readings under `target/harness/` (harness §4.6). `xtask budget` holds each crate to its ceiling and the workspace to `[budget]`; `xtask unsafe-audit` allows `unsafe` in the manifest's homes alone; `xtask generate` writes `ext/clippy.toml` from the manifest, and a committed copy that differs fails `budget`. Each instrument's negative controls are under `xtask/fixtures/`.
 
 Data files the harness reads, each stated once:
 

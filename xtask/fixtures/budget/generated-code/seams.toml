@@ -1,0 +1,17 @@
+# A negative-control fixture (harness-design.md §4.1): a workspace that must
+# fail the instrument named by its directory. The pin is the real one, by path.
+[oracle]
+pin = "../../../../oracle.toml"
+[budget]
+total = 1000
+new = 1000
+docs = 1000
+harness = 1000
+lock_packages = 1000
+clean_build_release_s = 1000
+api_items = 1000
+bindings = 1000
+
+[[crate]]
+name = "php_unit"
+budget = 1000
