@@ -1,0 +1,12 @@
+# The fixture workspace: the facade is a member; `new-ext` adds the crate it lays down.
+[workspace]
+resolver = "3"
+members = ["crates/php_ext"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+rust-version = "1.95"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }

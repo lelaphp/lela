@@ -1,0 +1,54 @@
+# The positive control of `xtask new-ext` (harness-design.md §5, ticket #9):
+# a workspace with the facade present, one `[[crate]]` row for `ext/demo`
+# and the rules the generated crate must pass untouched. The pin is the
+# real one, by path. The test copies this tree to a scratch directory and
+# lays the crate down there; nothing is generated in place.
+[oracle]
+pin = "../../../oracle.toml"
+[budget]
+total = 1000
+new = 1000
+docs = 1000
+harness = 1000
+lock_packages = 1000
+clean_build_release_s = 1000
+api_items = 1000
+bindings = 1000
+
+[[crate]]
+name = "php_ext"
+budget = 200
+[[crate]]
+name = "ext/demo"
+budget = 500
+
+[[edge]]
+from = "ext/*"
+to = ["php_ext", "ext/*"]
+only = true
+adr = "0004"
+
+[[rule]]
+id = "ext.no-locks"
+scope = "ext/*"
+deny_types = ["std::sync::Mutex", "std::sync::RwLock", "std::cell::Cell", "std::cell::RefCell", "std::sync::atomic::*", "parking_lot::*"]
+adr = "0005"
+text = "Extension state is request-scoped or immutable; no lock or cell in ext/*. Cross-request caching is api::Cache."
+
+[[rule]]
+id = "unsafe.homes"
+allow = ["php_heap", "ext/*/src/ffi/", "php_jit::table::code", "php_jit::enter"]
+adr = "0006"
+text = "unsafe is permitted in four places; see design §4.1."
+
+[[rule]]
+id = "lints.no-panic"
+scope = ["crates/php_engine", "ext/*"]
+exempt = ["tests", "xtask"]
+deny_lints = ["clippy::unwrap_used", "clippy::expect_used", "clippy::panic", "clippy::unreachable", "clippy::todo", "clippy::unimplemented"]
+text = "Internal invariant failures are InternalError fatals with a message, not panics (design §10)."
+
+[[rule]]
+id = "generated.committed"
+generated = { "ext/clippy.toml" = "ext.no-locks" }
+text = "ext/clippy.toml is generated from the manifest and committed; a stale copy fails budget."

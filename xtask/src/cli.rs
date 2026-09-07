@@ -75,6 +75,14 @@ pub enum Command {
     /// Hold the divergence registry to the manifest rule whose `check` names
     /// this instrument: an accepted row has a reason a person wrote.
     DivergenceReason,
+    /// Lay one extension crate down at ext/<name> in the template topology:
+    /// the facade as its one dependency, `extension()`, state on the value,
+    /// a test through the capture sink, a witness, ext/clippy.toml
+    /// rewritten and the row in ext/AGENTS.md; refuses an existing one.
+    NewExt {
+        /// The extension's name as php-src spells it, with a `[[crate]]` row.
+        name: String,
+    },
     /// The glossary as a sensor: `_Avoid_` words in public item names,
     /// rustdoc prose and the lock; one reading per crate.
     Vocab {
