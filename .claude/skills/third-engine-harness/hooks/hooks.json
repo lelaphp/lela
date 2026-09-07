@@ -1,0 +1,17 @@
+{
+  "description": "PreToolUse on Edit, Write and Bash is xtask permit over the hook's stdin (harness-design.md §4.4). The built binary is a process start; cargo run is the fallback when none is built and costs about 200 ms more.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && for x in target/release/xtask target/debug/xtask; do [ -x \"$x\" ] && exec \"$x\" permit; done; exec cargo run -q -p xtask -- permit",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

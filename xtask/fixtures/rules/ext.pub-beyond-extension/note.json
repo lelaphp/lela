@@ -1,0 +1,1 @@
+{"tool_name":"Write","tool_input":{"file_path":"ext/random/src/lib.rs","content":"pub fn extension() -> Extension {\n    Extension::new(\"random\")\n}\n\npub struct Handle;\n"}}

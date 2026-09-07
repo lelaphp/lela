@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"xtask phpt --full","description":"Run the whole corpus"}}

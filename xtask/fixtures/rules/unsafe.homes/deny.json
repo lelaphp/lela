@@ -1,0 +1,1 @@
+{"tool_name":"Edit","tool_input":{"file_path":"crates/php_engine/src/executor.rs","old_string":"let x = 1;","new_string":"let x = unsafe { *p };"}}

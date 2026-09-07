@@ -1,0 +1,1 @@
+{"tool_name":"Edit","tool_input":{"file_path":"crates/php_engine/src/api/values.rs","old_string":"    pub fn is_null(&self) -> bool {\n        false\n    }\n","new_string":"    pub fn is_null(&self) -> bool {\n        matches!(self, Value::Null)\n    }\n"}}

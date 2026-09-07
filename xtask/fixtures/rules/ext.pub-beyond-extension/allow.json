@@ -1,0 +1,1 @@
+{"tool_name":"Write","tool_input":{"file_path":"ext/random/src/engine.rs","content":"pub(crate) struct Engine;\n\nfn seed() -> u64 {\n    7\n}\n"}}

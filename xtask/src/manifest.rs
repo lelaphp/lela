@@ -356,6 +356,12 @@ impl Manifest {
         self.crates.iter().find(|c| c.name == name)
     }
 
+    /// The crate whose sources a path lies under: one function over the
+    /// `[[crate]]` rows (harness-design.md §4.4).
+    pub fn crate_of(&self, path: &Path) -> Option<&Crate> {
+        self.crates.iter().find(|c| path.starts_with(c.path()))
+    }
+
     /// The path of a reading's scope, relative to the root: a crate's
     /// sources, or the whole workspace for `"workspace"`.
     pub fn scope_path(&self, scope: &str) -> Option<PathBuf> {

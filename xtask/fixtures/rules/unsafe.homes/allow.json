@@ -1,0 +1,1 @@
+{"tool_name":"Edit","tool_input":{"file_path":"crates/php_jit/src/table/code.rs","old_string":"let x = 1;","new_string":"// SAFETY: the page is mapped.\nlet x = unsafe { *p };"}}

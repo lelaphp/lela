@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"xtask phpt --subset ext/pcre","description":"Run the pcre subset"}}

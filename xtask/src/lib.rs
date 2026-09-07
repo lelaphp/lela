@@ -1,11 +1,13 @@
 //! The harness for the third engine (`harness-design.md` §4): the seam
 //! manifest and the oracle pin loaded by one reader, the reading and its
-//! store, and `status`, the one renderer.
+//! store, `permit`, the judge at the tool call, and `status`, the one
+//! renderer.
 #![forbid(unsafe_code)]
 
 pub mod cli;
 pub mod git;
 pub mod manifest;
+pub mod permit;
 pub mod reading;
 pub mod status;
 
@@ -37,6 +39,13 @@ pub fn run() -> Result<()> {
             let text = status::render(&manifest, &store, section, format)?;
             std::io::stdout().write_all(text.as_bytes())?;
             Ok(())
+        }
+        Command::Permit { json, bench, runs } => {
+            if bench {
+                permit::run_bench(&root, runs)
+            } else {
+                permit::run(&root, json.as_deref())
+            }
         }
     }
 }

@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git log -n 5 --oneline; git commit -m \"a -n in the message is prose\"","description":"Log and commit"}}

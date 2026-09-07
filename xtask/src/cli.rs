@@ -28,6 +28,19 @@ pub enum Command {
         #[arg(long, default_value = "md")]
         format: Format,
     },
+    /// Judge one intended tool call from the `PreToolUse` hook's stdin; the
+    /// decision is the JSON on stdout and the exit is 0 always.
+    Permit {
+        /// The call as a JSON argument instead of stdin (the function-hook adapter).
+        #[arg(long, value_name = "JSON", conflicts_with = "bench")]
+        json: Option<String>,
+        /// Measure p99 latency at the tool call against the 100 ms bar.
+        #[arg(long)]
+        bench: bool,
+        /// How many calls `--bench` times.
+        #[arg(long, default_value_t = 100, requires = "bench")]
+        runs: usize,
+    },
 }
 
 /// The sections of harness-design.md §4.6 that have a renderer.
