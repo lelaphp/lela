@@ -542,6 +542,14 @@ fn the_stop_hook_runs_done_with_hook_and_pre_push_runs_done() {
     let text = std::fs::read_to_string(&pre_push).unwrap();
     assert!(text.starts_with("#!/"), "{text}");
     assert!(text.contains("cargo xtask done"), "{text}");
+    // The push is judged against what the remote has: the remote sha git
+    // hands the hook on stdin is the base, and a ref the remote lacks
+    // (all zeros) falls back to done's own default.
+    assert!(text.contains("--base \"$remote_sha\""), "{text}");
+    assert!(
+        text.contains("0000000000000000000000000000000000000000"),
+        "{text}"
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
