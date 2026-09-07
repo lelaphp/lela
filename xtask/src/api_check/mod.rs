@@ -123,6 +123,17 @@ fn lock_home(manifest: &Manifest, lock: &str) -> Option<String> {
         })
 }
 
+/// Where a seam's lock lives, relative to the root: the directory of the
+/// crate the lock lives with, and the lock file in it. `None` for a lock no
+/// `[[crate]]` row names. What `done` reads to say whether a lock that
+/// differs is in the diff (harness-design.md §4.5).
+pub fn lock_place(manifest: &Manifest, seam: &Seam) -> Option<(PathBuf, PathBuf)> {
+    let home = lock_home(manifest, &seam.lock)?;
+    let dir = manifest_path(manifest, &home);
+    let file = dir.join(&seam.lock);
+    Some((dir, file))
+}
+
 fn seam_reading(
     manifest: &Manifest,
     crates: &Crates,

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# pre-push: the definition of done, run by the person before the push
+# (harness-design.md §4.5, §6). `xtask done` prints what is unmet since the
+# merge base with main and exits 1 while anything is, which refuses the
+# push. Installed once per clone: `git config core.hooksPath scripts/hooks`.
+# It goes through cargo run, which rebuilds a stale binary rather than
+# trusting it; a person pushes once, so the build cost is nothing.
+set -eu
+cd "$(git rev-parse --show-toplevel)"
+exec cargo xtask done
