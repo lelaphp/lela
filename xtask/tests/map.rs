@@ -133,7 +133,7 @@ fn the_adr_index_lists_every_adr_with_its_title_status_and_date() {
 }
 
 #[test]
-fn the_session_start_hook_runs_computed_then_status_on_the_four_matchers() {
+fn the_session_start_hook_wires_the_clone_and_renders_the_local_file_on_the_four_matchers() {
     let hooks: serde_json::Value = serde_json::from_str(&read(
         ".claude/skills/third-engine-harness/hooks/hooks.json",
     ))
@@ -157,10 +157,17 @@ fn the_session_start_hook_runs_computed_then_status_on_the_four_matchers() {
         .find("computed run .claude/harness.local.md")
         .expect(command);
     assert!(hooks_path < computed, "hooksPath is set first: {command}");
-    let status = command.rfind("status --session").expect(command);
+    // The local file is laid down when missing, before it is rendered; the
+    // map itself reaches the model through the plugin's prompt.context
+    // (harness-plugins/), so the hook ends with the render and prints no map.
+    let laid = command.find("status --session >/dev/null").expect(command);
     assert!(
-        computed < status,
-        "computed run before status --session: {command}"
+        laid < computed,
+        "laid down before it is rendered: {command}"
+    );
+    assert!(
+        !command.trim_end().ends_with("status --session"),
+        "the map is the plugin's block, not the hook's stdout: {command}"
     );
     assert!(
         hooks["hooks"]["PreToolUse"].is_array(),

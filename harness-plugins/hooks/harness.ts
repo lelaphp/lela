@@ -4,9 +4,9 @@
 // the refresh. `prompt.context` renders the local facts and appends the
 // map plus the local facts as one block, `xtask status --session`, with
 // the session's id so the permits section can say "this session"
-// (§4.6); it stands in for the SessionStart command hook when this plugin
-// is loaded, and a person turns that hook off in hooks.json to avoid the
-// map twice. `tool.call` on Bash lets the call through and, when the
+// (§4.6). The SessionStart command hook wires pre-push and renders the
+// local file, and prints nothing: this block is how the map reaches the
+// model, so a session without the plugin has none (§5). `tool.call` on Bash lets the call through and, when the
 // command ran an instrument, invalidates `prompt.context` so the next
 // read of the facts is fresh (§7, "what the agent sees").
 //

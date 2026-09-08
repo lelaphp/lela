@@ -363,8 +363,17 @@ fn permits_counts_denials_per_session_and_in_total() {
 fn permits_lists_the_instruments_and_the_candidates_for_silent() {
     let root = scratch("silent");
     let store = Store::of_workspace(&root);
+    // The tracked manifest carries the window; the first rendering is
+    // without it, so strip the table and its one key.
     let manifest_path = root.join("seams.toml");
-    let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+    let mut manifest = String::new();
+    for line in std::fs::read_to_string(&manifest_path).unwrap().lines() {
+        if !line.starts_with("[telemetry]") && !line.starts_with("silent_days") {
+            manifest.push_str(line);
+            manifest.push('\n');
+        }
+    }
+    std::fs::write(&manifest_path, &manifest).unwrap();
 
     let mut budget = Reading::new("budget", "php_heap");
     budget.status = Status::Pass;

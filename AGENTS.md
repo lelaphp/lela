@@ -65,7 +65,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=9063bf0752adfad7f53d56838c430bebe7ae4e2ec4f1a2e45d88067d144de439 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=23af9315234042ed2c2a5d09d16461b975ee108a26c23e6ee3ca2508bd5ecdc4 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -87,12 +87,12 @@ third-engine-design.md
 | sapi | sapi.lock |  |  | skip |
 | tier | tier.lock |  |  | skip |
 
-<!-- /computed in=b9e9a69b30b9b9b134fc81e2b4f6e032b7465d8fe671da203ad8f84de0d449ce out=e2521776fafb15658d498ed026b1ee34916cdebfd1efe51daf451437d6292967 -->
+<!-- /computed in=82fce3fb98c96d428704ecf145324f5c1d228d2a41f27eafaa8a8d48c5b9b2b9 out=e2521776fafb15658d498ed026b1ee34916cdebfd1efe51daf451437d6292967 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
 |---|---|---|---|---|
-| ext.no-locks | ADR-0005 | deny_types | no reading | Extension state is request-scoped or immutable; no lock or cell in ext/*. Cross-request caching is api::Cache. |
+| ext.no-locks | ADR-0005 | deny_types | fail | Extension state is request-scoped or immutable; no lock or cell in ext/*. Cross-request caching is api::Cache. |
 | unsafe.homes | ADR-0006 | allow | pass | unsafe is permitted in four places; see design §4.1. Every other crate is #![forbid(unsafe_code)]; php_jit and an extension with bindings are #![deny(unsafe_code)] with the allowance on the named module alone. |
 | unsafe.one-op |  | deny_lints | no reading | Every unsafe block is one operation with a SAFETY comment. |
 | lints.no-panic |  | deny_lints | no reading | Internal invariant failures are InternalError fatals with a message, not panics (design §10). |
@@ -105,12 +105,12 @@ third-engine-design.md
 | vocab.avoid |  | avoid_from | pass | The glossary's _Avoid_ words appear in no public item name or rustdoc prose; a lock line mirrors php's names and is not read. |
 | generated.committed |  | generated | pass | ext/clippy.toml is generated from the manifest and committed; a stale copy fails budget. |
 | git.no-verify |  | deny_argv | no reading | Commits run the pre-commit hook; --no-verify is not available to agents. |
-| lanes.nightly |  | deny_pattern | no reading | Nightly lanes run in CI only; run the per-crate subset. |
+| lanes.nightly |  | deny_pattern | fail | Nightly lanes run in CI only; run the per-crate subset. |
 | computed.force |  | deny_pattern | fail | `computed run --force` discards a hand edit; a person decides that. |
 | harness.self |  | deny | fail | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
 | divergence.reason |  | check | pass | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
 
-<!-- /computed in=b024c7244980a2848486c6fca7974f3e767452c84073b4e792b38744901bfc3e out=5c83c518dc96eb4726cff3fc49f544d2ae4b964e5e4bc2e89a71a486a3a47b1c -->
+<!-- /computed in=bbb4e51b371fa81516d018b7e1d3e7774474d81df5eb6a7d7e15d8c52952b434 out=da02cf02b585feb1cf5fe3a23ecde3f42a343b29ec38a97d6c747ab11ef4545f -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

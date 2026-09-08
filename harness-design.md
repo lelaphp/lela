@@ -41,6 +41,8 @@ Check: the six are wrong if the manifest cannot express a rule the design has (�
 
 **6. Revision 6 (2026-09-07).** The context layer was built (#7) and three sentences of §5 did not survive contact with the tools. The local file's regions are `volatile`, not `inputs=../target/harness/**`, because `computed` refuses a glob that matches nothing and a fresh clone has no store; `ext/AGENTS.md` lists its extensions with the `tree` loader, because `ls -d */` fails while `ext/` is empty; the `design-of-record` region's inputs are the three design globs, because `*.md` takes in the map itself and its closer sums. Two things §5 left unsaid are now said: `status --session` lays the local file down from its template when the clone has none, and the session hook goes through `cargo run`. The tracked map is rendered against an empty store, every row "no reading", since the readings are one machine's and a rendering of them would churn on every clone; the live numbers are the local file's. Check: `cargo test -p xtask --test map` holds the map under 100 lines with the regions this section names; a second `computed run` after the first writes nothing.
 
+**8. Revision 8 (2026-09-08).** The sensor telemetry was built (#11) and two facts moved into the manifest: `[telemetry] silent_days`, so the fourteen-day window of §7 is the file's and not a constant's, and `[[week]]`, whose reads must name an instrument `xtask` has, so a bar row arrives with its instrument and never before. The reading gained `session`, the hook's `session_id`, and §4.6's "this session" is a rendering of it. The function hook of §4.4 exists as `harness-plugins/`, loaded with `--plugin-dir`; it carries the map through `prompt.context`, and the SessionStart command hook now renders the local file and prints nothing, so a session without the plugin has no map (§5). The check: `cargo test -p xtask` holds the grammar and the renderings; `claude plugin validate harness-plugins --strict` and `tsc -p harness-plugins` hold the adapter.
+
 ---
 
 ## 2. Vocabulary
@@ -187,6 +189,8 @@ text = "Harness configuration, the oracle pin and the divergence registry are ed
 
 Each `[[rule]]` has an `id`, a scope or a tool, one predicate, an optional `adr`, and the `text` a failure prints. The predicates are ten: `deny_types`, `allow`, `deny_pattern` (with an optional `unless`), `deny_argv` (with `with`), `on`, `deny`, `deny_lints`, `check` (a named `xtask` lint), `avoid_from` (a glossary file), and `generated` (a file and the rule it is rendered from). Each `[[seam]]` names its lock, and a lock with `sections` is diffed per section; each `[[crate]]` names its ceiling and nothing about `unsafe`; the `unsafe` homes are one rule and appear nowhere else in the file. That is the whole grammar, and `xtask` refuses a manifest with an unknown key.
 
+Two tables beside the rules. `[telemetry]` carries the sensor telemetry's one number, `silent_days` (§7); it is optional, and while it is absent `status` renders no silent column and says which key is unset, since a default in code would be a copy. Each `[[week]]` is one exit bar of the thirty days (design §11): `days` as the table writes them, `text` in the design's words, and `reads`, the readings the bar is measured by, each the latest of an `instrument` over a `scope`, held on status pass or, with `number`, within `min` and `max`. A read names an instrument `xtask` has, so a row cannot arrive before the instrument whose reading it reads: the instrument ships its row, in the commit that fixes the number's name, and until then `status --section week` says "no reading" for the bar.
+
 **What is derived.**
 
 - `api-check` reads `[[seam]]` and `[[edge]]`: it regenerates each lock from the compiled crate's public items (`lock_from` says which crate for `api.lock`, r4 §4.5), fails on a diff, fails a manifest edge not in `[[edge]]`, fails a `use` path crossing a seam, checks the bundle order is topological, prints each extension's `pub` beyond `extension()`, and treats `allowlist = true` as "the consumer may import only what the lock names" (r7 §4.2).
@@ -215,11 +219,14 @@ adr = ""                                   # from the manifest when the rule nam
 tree = "9f3c…"                             # git tree hash of the scope's sources at the time
 commit = "0b62ae0"
 at = 2026-09-07T01:05:49Z
+session = ""                               # the hook's session_id on a permit reading; empty elsewhere
 ```
 
 **Store.** `target/harness/<instrument>/<scope>.toml`, one file per key, overwritten on each run; and `target/harness/log.jsonl`, append-only, one line per reading. CI uploads the directory as the run's artefact and nothing else. The `tree` field is what makes a reading fresh or stale without a turn counter: a reading is fresh for a scope when the scope's tree hash still matches.
 
 **Readers.** `status` (§4.6), `done` (§4.5), the steering ledger (§10 rule 6), the CI summary that answers HE's "which sensor never fails" (§7). `permit` writes a reading per denial, which is the steering-loop capture of revision 2 without `$.store` or a second file.
+
+`session` is what makes "this session" of §4.6 a rendering rather than a guess: `permit` copies the hook's `session_id` onto every reading it writes, and `status` counts denials per session from the log.
 
 **The deletion test.** Delete the store and nine channels reappear: `jq .summary phpt-last.json`, `jq` over the mutants outcomes, `wc -l` over the locks, `grep -c` over the divergence table, the `context` note, `harness-turn.json`, the `$.store` counters, `harness-steering.jsonl`, and a per-gate CI line. Revision 2 had all nine.
 
@@ -277,7 +284,7 @@ The two rows the JIT note carries in prose and the runner disagreements revision
 
 ### 4.6 `xtask status`: the one renderer
 
-**Interface.** `xtask status --section <name> [--format md|json] [--week N] [--session]`. Sections: `locks` (each lock's width against `api_items`), `budget` (each crate against its ceiling), `rules` (the manifest's rules with ADR numbers), `phpt`, `witness`, `mutants`, `divergence` (the registry, with counts by kind and status), `gates` (G1 to G8 readings), `bars` (the perf bars), `week` (the weekly exit bar table with pass/fail per row from the readings, r1 §11), `git` (log and status, volatile), `permits` (denials by rule this session and across sessions from the log). `--session` prints the map file and the local facts in one block for the session-start hook.
+**Interface.** `xtask status --section <name> [--format md|json] [--week N] [--session]`. Sections: `locks` (each lock's width against `api_items`), `budget` (each crate against its ceiling), `rules` (the manifest's rules with ADR numbers), `phpt`, `witness`, `mutants`, `divergence` (the registry, with counts by kind and status), `gates` (G1 to G8 readings), `bars` (the perf bars), `week` (the weekly exit bar table with pass/fail per row from the readings, r1 §11), `git` (log and status, volatile), `permits` (denials by rule across sessions from the log, per session and in total, with `--session-id` naming this session; then the log per instrument with the candidates for silent, §7). `--session` prints the map file and the local facts in one block for the function hook's `prompt.context`, takes the session's id from `--session-id` or the hook's stdin head, and appends this session's denials after the local facts, nothing when it has none; the local file's `permits` region stays without it, since `computed run` has no session to hand `status`.
 
 It reads the manifest, the registry and the store and computes nothing else. A section that needs a command of its own is a missing instrument, not a shell one-liner in a region.
 
@@ -285,7 +292,7 @@ It reads the manifest, the registry and the store and computes nothing else. A s
 
 ## 5. Context layer: what an agent reads first
 
-**The map.** `AGENTS.md` at the workspace root, at most 150 lines (revision 7; OpenAI's figure was 100), fed to the model by a `SessionStart` command hook whose command is `xtask status --session` (matchers `startup`, `resume`, `clear`, `compact`, so re-injection after compaction is the hook's own behaviour, Hooks-ref), and, when the function hook is enabled, by `prompt.context` instead. Whether the map is named `CLAUDE.md` or `AGENTS.md` is settled by the hook: it is read by the harness, not by the engine's automatic load, so it is `AGENTS.md`. Its prose items are decisions and stay prose:
+**The map.** `AGENTS.md` at the workspace root, at most 150 lines (revision 7; OpenAI's figure was 100), fed to the model by the function hook's `prompt.context` (`harness-plugins/`, loaded with `--plugin-dir`), whose block is `xtask status --session` with the session's id; the `SessionStart` command hook (matchers `startup`, `resume`, `clear`, `compact`) wires the clone and renders the local file and prints no map, so a session without the plugin has none (revision 8). Whether the map is named `CLAUDE.md` or `AGENTS.md` is settled by the hook: it is read by the harness, not by the engine's automatic load, so it is `AGENTS.md`. Its prose items are decisions and stay prose:
 
 1. Read `CONTEXT.md` first; the `_Avoid_` lists are binding in code, rustdoc and commit messages.
 2. The design of record is `third-engine-design.md`, and `jit-design.md` for the compiled tier; the `rN` files are records and are not read for anything current.

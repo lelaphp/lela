@@ -9,7 +9,7 @@
 # Numbers are design §4.1 (crates), §4.5 (locks), §10 (lints, profiles) and the
 # harness's §12 item 6; the design cites this file and restates none of them.
 # `xtask` refuses a manifest with a key outside this grammar:
-#   [oracle] [budget] [[crate]] [[seam]] [[edge]] [[rule]]
+#   [oracle] [budget] [telemetry] [[crate]] [[seam]] [[edge]] [[rule]] [[week]]
 # Keys beyond the harness's §4.1 example, added here because §10 states a rule
 # the example had no predicate for, are marked `# grammar:` where they first
 # appear. Each is one predicate, as the grammar requires.
@@ -27,6 +27,9 @@ clean_build_release_s = 90                 # design §10: `cargo build --release
 api_items = 400                            # design §4.4, §4.5: public items of php_ext, measured on api.lock
 bindings = 15000                           # design §4.1: `ext/*/src/ffi/**` pooled across every extension
 # Lines are non-blank, non-comment, tests excluded (`xtask budget`).
+
+[telemetry]
+silent_days = 14                           # harness §7: readings and no failure this long is a candidate for silent; `status --section permits`
 
 # ---------------------------------------------------------------- crates/
 [[crate]]
