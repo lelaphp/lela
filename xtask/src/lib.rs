@@ -72,7 +72,12 @@ pub fn run() -> Result<()> {
             } else if diff {
                 permit::run_diff(&root, &manifest)
             } else {
-                permit::run(&root, json.as_deref(), above_the_command_hook);
+                let adapter = if above_the_command_hook {
+                    permit::Adapter::AboveTheCommandHook
+                } else {
+                    permit::Adapter::CommandHook
+                };
+                permit::run(&root, json.as_deref(), adapter);
                 Ok(())
             }
         }

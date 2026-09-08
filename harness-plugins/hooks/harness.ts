@@ -63,7 +63,9 @@ function stdinOf(e: ToolCallInput, session_id: string, cwd: string): string {
 }
 
 /// What permit printed: the deny's reason, the allow's notes, or nothing.
-function decisionOf(stdout: string): { deny?: string; notes?: string } {
+type Decision = { deny?: string; notes?: string };
+
+function decisionOf(stdout: string): Decision {
   if (stdout.trim() === '') return {};
   const head = (JSON.parse(stdout) as { hookSpecificOutput?: Record<string, string> })
     .hookSpecificOutput;
@@ -77,7 +79,7 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: JUDGED }, async ($, e, next) => {
     // permit before the call, as the command hook beneath is; whatever
     // keeps permit from judging leaves the call to that hook.
-    let decision: { deny?: string; notes?: string } = {};
+    let decision: Decision = {};
     try {
       const [cwd, id] = await Promise.all([$.session.cwd(), $.session.id()]);
       const run = await $.process.run([...XTASK, 'permit', '--above-the-command-hook'], {
@@ -87,7 +89,7 @@ export const register: Register = (on, options) => {
       });
       if (run.exitCode === 0) decision = decisionOf(run.stdout);
     } catch {
-      decision = {};
+      // fails open: the command hook beneath judges the call
     }
     if (decision.deny !== undefined) return { deny: decision.deny };
 

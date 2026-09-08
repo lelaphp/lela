@@ -663,12 +663,7 @@ fn record(root: &Path, call: &Call, judgement: &Judgement, adapter: Adapter) -> 
 /// JSON, record the findings the adapter records. Whatever goes wrong
 /// before a decision is a deny that says so, and nothing here returns an
 /// error, since a hook that exits non-zero fails open.
-pub fn run(root: &Path, json: Option<&str>, above_the_command_hook: bool) {
-    let adapter = if above_the_command_hook {
-        Adapter::AboveTheCommandHook
-    } else {
-        Adapter::CommandHook
-    };
+pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) {
     let text = json.map_or_else(
         || {
             let mut bytes = Vec::new();
