@@ -3,10 +3,10 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use xtask::built;
 use xtask::manifest::Manifest;
 use xtask::permit::{self, Call, Kind, judge, judged_at_the_tool_call, scratch_workspace};
 use xtask::reading::{Status, Store};
+use xtask::{built, inputs};
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -926,19 +926,46 @@ fn the_stale_fixture_parses_and_lets_through_what_the_manifest_on_disk_denies() 
     );
 }
 
-/// This build carries the digest of the manifest beside it, taken by
-/// `build.rs` and by `built::digest` the same way, so a build standing over
-/// its own workspace judges.
+/// This build carries the digest of what it judges by, the manifest beside
+/// it and its own sources, each taken by `build.rs` and by `inputs` the
+/// same way, so a build standing over its own workspace judges.
 #[test]
-fn this_build_carries_the_digest_of_the_manifest_it_was_compiled_against() {
-    let file = workspace().join("seams.toml");
-    let bytes = std::fs::read(&file).unwrap();
+fn this_build_carries_the_digest_of_what_it_was_compiled_against() {
     assert_eq!(
         built::MANIFEST,
-        built::digest(&bytes),
-        "build.rs and built::digest take one digest"
+        inputs::manifest_digest(workspace()).unwrap(),
+        "build.rs and inputs take one digest of the manifest"
     );
-    built::judges_by(&file).unwrap();
+    assert_eq!(
+        built::SOURCES,
+        inputs::sources_digest(workspace()).unwrap(),
+        "and one of the harness's own sources"
+    );
+    built::judges(workspace(), workspace()).unwrap();
+}
+
+/// A build stale in its own code judges by a matcher that has since been
+/// fixed, with no rule moved at all: the residue of #16 item 1, and the
+/// half an exit code and a manifest digest both miss.
+#[test]
+fn a_build_the_harnesss_own_sources_moved_under_refuses_too() {
+    let root = scratch("stale-sources");
+    let src = root.join("xtask/src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("permit.rs"),
+        "// a matcher of an earlier revision\n",
+    )
+    .unwrap();
+    let err = built::judges(workspace(), &root).unwrap_err().to_string();
+    assert!(err.contains("xtask/src"), "{err}");
+    assert!(
+        err.contains(built::SOURCES),
+        "the digest compiled in: {err}"
+    );
+    assert!(err.contains("cargo build -p xtask"), "the repair: {err}");
+    // The manifest is the workspace's, and it is not what moved.
+    built::judges(workspace(), workspace()).unwrap();
 }
 
 /// permit's exit is 0 whatever it decides, so the refusal is the one thing

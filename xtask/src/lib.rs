@@ -16,6 +16,10 @@ pub mod done;
 pub mod generated;
 pub mod git;
 pub mod glossary;
+/// What a build of the harness judges by, digested: the seam manifest and
+/// `xtask`'s own sources (harness-design.md §4.4, #16). Shared with
+/// `build.rs`, which includes the file rather than importing it.
+pub mod inputs;
 pub mod lines;
 pub mod lock;
 pub mod manifest;

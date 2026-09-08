@@ -695,11 +695,11 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
             return Ok(());
         }
     };
-    // The manifest in front of this build: the one it was compiled against,
-    // and readable as rules. Either failing is a refusal to decide, and a
-    // refusal decides nothing whichever way the decision would have fallen.
-    let manifest =
-        built::judges_by(&root.join(manifest::FILE)).and_then(|()| Manifest::load(&root));
+    // What this build judges by: the manifest in front of it, the sources
+    // it was built from, and the manifest readable as rules. Any of the
+    // three failing is a refusal to decide, and a refusal decides nothing
+    // whichever way the decision would have fallen.
+    let manifest = built::judges(&root, &crate::built_root()).and_then(|()| Manifest::load(&root));
     let manifest = match manifest {
         Ok(manifest) => manifest,
         Err(err) => {
