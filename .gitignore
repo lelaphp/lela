@@ -4,3 +4,6 @@ target/
 /.claude/harness.local.md
 # Claude Code's own worktrees, not the harness's.
 /.claude/worktrees/
+
+# The function-hook declarations /plugin-types writes for this build; regenerated, never edited.
+.claude/types/
