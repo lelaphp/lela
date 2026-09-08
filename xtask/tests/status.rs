@@ -355,6 +355,35 @@ fn permits_counts_denials_per_session_and_in_total() {
     );
 }
 
+/// permit judges by two rules of its own beside the manifest's, the
+/// region body and its own build, and the section carries a row for each:
+/// through the outage of #16 nothing under `permits` said the judge was
+/// down, and a rule with no row is a rule nothing renders.
+#[test]
+fn permits_carries_a_row_for_the_rules_permit_judges_by_that_are_its_own() {
+    let root = scratch("permit-own-rules");
+    let store = Store::of_workspace(&root);
+    let mut refusal = Reading::new("permit", "permit.stale-build");
+    refusal.rule = "permit.stale-build".into();
+    refusal.status = Status::Fail;
+    refusal.message = "Edit seams.toml: this call was not judged.".into();
+    refusal.session = "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11".into();
+    store.write(&refusal).unwrap();
+
+    let (ok, md, err) = status(&root, &["--section", "permits"]);
+    assert!(ok, "{err}");
+    let row = md
+        .lines()
+        .find(|l| l.contains("permit.stale-build"))
+        .unwrap_or_else(|| panic!("no row for the refusal:\n{md}"));
+    assert!(row.contains("| 1 |"), "the refusal is counted: {row}");
+    assert!(row.contains("not judged"), "and says so: {row}");
+    assert!(
+        md.contains("computed.region-body"),
+        "permit's other rule of its own has a row too:\n{md}"
+    );
+}
+
 /// The query behind the CI summary (harness-design.md §7): readings and
 /// failures per instrument from the log, and an instrument with readings
 /// but no failure in fourteen days is a candidate for silent; one whose

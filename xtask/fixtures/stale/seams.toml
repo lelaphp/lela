@@ -1,0 +1,35 @@
+# A manifest an earlier build was compiled against: the `lanes.nightly`
+# pattern as it stood before f7c1f54, beside the two tables the grammar
+# requires. It parses under today's grammar and judges the same call
+# differently — `phpt --subset Zend/tests --full` passes here and is denied
+# by the manifest on disk — which is the quiet staleness of #16: a build
+# older than the manifest exits 0 and is wrong, where the one that gained
+# `[telemetry]` exited 1 and was loud. `permit` refuses to judge by a
+# manifest it was not compiled against, so this fixture is refused rather
+# than believed.
+
+[oracle]
+pin = "oracle.toml"
+
+[budget]
+total = 272500
+new = 127500
+docs = 5000
+harness = 300
+lock_packages = 120
+clean_build_release_s = 90
+api_items = 400
+bindings = 15000
+
+[[rule]]
+id = "lanes.nightly"
+tool = "Bash"
+deny_pattern = 'xtask (-- )?(phpt|bench) --full|run-tests\.php|compile-identity --corpus'
+text = "Nightly lanes run in CI only; run the per-crate subset."
+
+[[rule]]
+id = "harness.self"
+tool = ["Edit", "Write"]
+scope = ["seams.toml", "oracle.toml", "docs/divergence.toml"]
+deny = true
+text = "Harness configuration, the oracle pin and the divergence registry are edited by a person."

@@ -3,8 +3,9 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use xtask::built;
 use xtask::manifest::Manifest;
-use xtask::permit::{Call, Kind, judge, judged_at_the_tool_call, scratch_workspace};
+use xtask::permit::{self, Call, Kind, judge, judged_at_the_tool_call, scratch_workspace};
 use xtask::reading::{Status, Store};
 
 fn workspace() -> &'static Path {
@@ -799,4 +800,162 @@ fn the_nightly_lane_is_denied_by_the_flag_and_not_by_a_citation() {
             "the subset and a citation are not the lane: {command}"
         );
     }
+}
+
+// ------------------------------ the build against the manifest it judges by
+
+/// The manifest an earlier build was compiled against (#16): it parses
+/// under today's grammar and judges the same call differently, which an
+/// exit code cannot see.
+fn stale_manifest() -> String {
+    std::fs::read_to_string(fixtures().join("stale/seams.toml")).unwrap()
+}
+
+/// A scratch workspace holding that manifest: a build meeting rules it was
+/// not compiled against.
+fn scratch_with_a_stale_manifest(name: &str) -> PathBuf {
+    let root = scratch(name);
+    std::fs::write(root.join("seams.toml"), stale_manifest()).unwrap();
+    root
+}
+
+fn bash_call(command: &str) -> Call {
+    Call::parse(
+        &serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": command, "description": "one call" }
+        })
+        .to_string(),
+    )
+    .unwrap()
+}
+
+/// The fixture is the quiet kind of stale and not the loud kind: it parses,
+/// and the lane it lets through is the one the manifest on disk denies
+/// (#15, #16). Nothing in the exit says so.
+#[test]
+fn the_stale_fixture_parses_and_lets_through_what_the_manifest_on_disk_denies() {
+    let stale = Manifest::parse(&stale_manifest()).unwrap();
+    let now = Manifest::load(workspace()).unwrap();
+    let call = bash_call("cargo run -p xtask -- phpt --subset Zend/tests --full");
+    assert_eq!(
+        judge(&now, workspace(), &call)
+            .unwrap()
+            .denial()
+            .map(|f| f.rule.clone())
+            .as_deref(),
+        Some("lanes.nightly"),
+        "the manifest on disk denies the lane"
+    );
+    assert!(
+        judge(&stale, workspace(), &call)
+            .unwrap()
+            .denial()
+            .is_none(),
+        "and the stale one lets it through, exiting 0 as it does"
+    );
+}
+
+/// This build carries the digest of the manifest beside it, taken by
+/// `build.rs` and by `built::digest` the same way, so a build standing over
+/// its own workspace judges.
+#[test]
+fn this_build_carries_the_digest_of_the_manifest_it_was_compiled_against() {
+    let file = workspace().join("seams.toml");
+    let bytes = std::fs::read(&file).unwrap();
+    assert_eq!(
+        built::MANIFEST,
+        built::digest(&bytes),
+        "build.rs and built::digest take one digest"
+    );
+    built::judges_by(&file).unwrap();
+}
+
+/// permit's exit is 0 whatever it decides, so the refusal is the one thing
+/// it says with an exit: a build that would judge by rules it was not
+/// compiled against decides nothing, names both digests, and leaves the
+/// call to the next candidate (#16, harness-design.md §4.4). The call this
+/// one reads is denied by both manifests, and the refusal still stands: a
+/// decision that happens to agree is not a decision this build may make.
+#[test]
+fn a_build_the_manifest_moved_under_refuses_to_judge_rather_than_judging_stale() {
+    let root = scratch_with_a_stale_manifest("stale");
+    let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
+    let (code, out, err) = permit(&root, &stdin, &[]);
+    assert_ne!(code, 0, "the build that cannot judge exits non-zero: {out}");
+    assert!(out.trim().is_empty(), "and decides nothing: {out}");
+    assert!(err.contains("seams.toml"), "{err}");
+    assert!(
+        err.contains(built::MANIFEST),
+        "the digest compiled in: {err}"
+    );
+}
+
+/// The refusal is a reading, so the store says the judge was down where the
+/// facts already are; through the outage of #16 nothing said it.
+#[test]
+fn the_refusal_is_a_reading_with_the_session_of_the_call_it_did_not_judge() {
+    let root = scratch_with_a_stale_manifest("stale-reading");
+    let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
+    let (code, _, err) = permit(&root, &stdin, &[]);
+    assert_ne!(code, 0, "{err}");
+    let reading = Store::of_workspace(&root)
+        .read("permit", permit::STALE_RULE)
+        .unwrap()
+        .expect("the refusal was recorded");
+    assert_eq!(reading.instrument, "permit");
+    assert_eq!(reading.rule, permit::STALE_RULE);
+    assert_eq!(reading.status, Status::Fail);
+    assert_eq!(reading.session, "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11");
+    assert!(
+        reading.message.contains("seams.toml"),
+        "{}",
+        reading.message
+    );
+    assert_eq!(reading.tree.len(), 40);
+}
+
+/// The outage of #16 was the loud staleness: a build that could not read
+/// the manifest in front of it at all. It exited without judging, which the
+/// fallback walks, and recorded nothing, so `status --section permits` said
+/// the judge was up for the hour it was down. The judge reads the manifest
+/// itself, so a manifest it cannot read is a refusal it records like any
+/// other.
+#[test]
+fn a_manifest_the_build_cannot_read_is_a_refusal_it_records() {
+    let root = scratch("unreadable");
+    std::fs::write(
+        root.join("seams.toml"),
+        "[oracle]\npin = \"oracle.toml\"\n\n[a_table_of_a_later_revision]\ndays = 14\n",
+    )
+    .unwrap();
+    let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
+    let (code, out, err) = permit(&root, &stdin, &[]);
+    assert_ne!(code, 0, "the build that cannot judge exits non-zero: {out}");
+    assert!(out.trim().is_empty(), "and decides nothing: {out}");
+    assert!(err.contains("seams.toml"), "{err}");
+    let reading = Store::of_workspace(&root)
+        .read("permit", permit::STALE_RULE)
+        .unwrap()
+        .expect("the refusal was recorded");
+    assert_eq!(reading.status, Status::Fail);
+    assert_eq!(reading.session, "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11");
+}
+
+/// A build standing over the manifest it was compiled against judges as it
+/// did: the sensor fires on staleness and on nothing else.
+#[test]
+fn a_build_over_the_manifest_it_was_compiled_against_judges_as_it_did() {
+    let root = scratch("stale-control");
+    let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
+    let (code, out, err) = permit(&root, &stdin, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("harness.self"), "{out}");
+    assert!(
+        Store::of_workspace(&root)
+            .read("permit", permit::STALE_RULE)
+            .unwrap()
+            .is_none(),
+        "nothing was refused"
+    );
 }

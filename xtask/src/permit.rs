@@ -3,8 +3,11 @@
 //! the region-body check and then every manifest rule that describes a write
 //! or a command, in the manifest's order, and prints the hook's JSON: a deny
 //! with the rule's text and ADR, an allow whose `additionalContext` carries
-//! the notes, or nothing. Exit 0 always; the decision is in the JSON. Every
-//! denial and every note is a reading with `instrument = "permit"`.
+//! the notes, or nothing. Exit 0 whatever it decides, since the decision is
+//! in the JSON; the one non-zero exit is the refusal to decide at all, a
+//! build meeting a manifest it was not compiled against (`built`, #16),
+//! which is what each adapter walks its next candidate on. Every denial,
+//! every note and every refusal is a reading with `instrument = "permit"`.
 //!
 //! What permit judges: `deny`, `deny_argv`, `deny_pattern`, `deny_types`,
 //! `allow` and `on`. The other four predicates (`check`, `deny_lints`,
@@ -26,8 +29,9 @@ use regex_lite::Regex;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::built;
 use crate::git::{self, Stamp, git};
-use crate::manifest::{Manifest, Rule};
+use crate::manifest::{self, Manifest, Rule};
 use crate::reading::{Reading, Status, Store};
 
 /// The instrument name every reading of permit carries.
@@ -39,6 +43,10 @@ const BAR_MS: f64 = 100.0;
 /// The region-body check is computed's ADR 0005, not a manifest rule; this
 /// is the id its readings and denials carry.
 pub const REGION_RULE: &str = "computed.region-body";
+/// A build refusing to judge by a manifest it was not compiled against is
+/// permit's own, not a manifest rule either; this is the id its readings
+/// carry (#16).
+pub const STALE_RULE: &str = "permit.stale-build";
 const REGION_TEXT: &str = "The body of a computed region is rendered by `computed run`, not edited; change the command or its inputs, or the prose around the region (computed ADR 0005).";
 
 /// One intended tool call, as the hook receives it on stdin. `cwd` places
@@ -660,10 +668,13 @@ fn record(root: &Path, call: &Call, judgement: &Judgement, adapter: Adapter) -> 
 }
 
 /// The command: judge the call on stdin (or in `--json`), print the hook's
-/// JSON, record the findings the adapter records. Whatever goes wrong
-/// before a decision is a deny that says so, and nothing here returns an
-/// error, since a hook that exits non-zero fails open.
-pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) {
+/// JSON, record the findings the adapter records. A call this cannot read
+/// is a deny that says so; a manifest it cannot judge by is the refusal,
+/// the one error returned, since that is the signal each adapter walks its
+/// next candidate on (§4.4, #16). The manifest is read here and not by the
+/// caller for that reason: a build that cannot read it must record the
+/// refusal before it exits.
+pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
     let text = json.map_or_else(
         || {
             let mut bytes = Vec::new();
@@ -674,14 +685,30 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) {
         },
         |json| Ok(json.to_owned()),
     );
-    let judged = text.and_then(|text| Call::parse(&text)).and_then(|call| {
-        let root = call.workspace(root);
-        let manifest = Manifest::load(&root)?;
-        let judgement = judge(&manifest, &root, &call)?;
-        Ok((root, call, judgement))
-    });
-    match judged {
-        Ok((root, call, judgement)) => {
+    let (root, call) = match text.and_then(|text| Call::parse(&text)) {
+        Ok(call) => (call.workspace(root), call),
+        Err(err) => {
+            println!(
+                "{}",
+                deny_output(&format!("permit could not judge this call: {err:#}"))
+            );
+            return Ok(());
+        }
+    };
+    // The manifest in front of this build: the one it was compiled against,
+    // and readable as rules. Either failing is a refusal to decide, and a
+    // refusal decides nothing whichever way the decision would have fallen.
+    let manifest =
+        built::judges_by(&root.join(manifest::FILE)).and_then(|()| Manifest::load(&root));
+    let manifest = match manifest {
+        Ok(manifest) => manifest,
+        Err(err) => {
+            record_the_refusal(&root, &call, &err);
+            return Err(err);
+        }
+    };
+    match judge(&manifest, &root, &call) {
+        Ok(judgement) => {
             if let Some(output) = judgement.hook_output() {
                 println!("{output}");
             }
@@ -695,6 +722,30 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) {
                 deny_output(&format!("permit could not judge this call: {err:#}"))
             );
         }
+    }
+    Ok(())
+}
+
+/// The refusal as a reading, so the store says the judge was down for this
+/// call and this session: through the outage of #16 a build that could not
+/// start recorded nothing, and `status --section permits` said the judge
+/// was up. Best effort, since the refusal stands whether or not the store
+/// takes it.
+fn record_the_refusal(root: &Path, call: &Call, err: &anyhow::Error) {
+    let mut reading = Reading::new(INSTRUMENT, STALE_RULE);
+    STALE_RULE.clone_into(&mut reading.rule);
+    reading.status = Status::Fail;
+    reading.message = format!(
+        "{} {}: this call was not judged. {err:#}",
+        call.tool_name,
+        call.subject(root)
+    );
+    reading.session.clone_from(&call.session_id);
+    let recorded = Stamp::take(root, Path::new(manifest::FILE))
+        .map(|stamp| reading.stamp(&stamp))
+        .and_then(|()| Store::of_workspace(root).write(&reading));
+    if let Err(err) = recorded {
+        eprintln!("xtask permit: the refusal to judge was not recorded: {err:#}");
     }
 }
 

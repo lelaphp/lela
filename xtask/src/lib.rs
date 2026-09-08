@@ -8,6 +8,7 @@
 
 pub mod api_check;
 pub mod budget;
+pub mod built;
 pub mod cli;
 pub mod clippy;
 pub mod divergence;
@@ -51,6 +52,25 @@ pub fn built_root() -> PathBuf {
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let root = cli.root.unwrap_or_else(built_root);
+    // The judge at the tool call reads the manifest itself: a manifest it
+    // cannot read is a refusal it records before it exits, and a manifest
+    // loaded out here would take that exit before permit saw the call
+    // (#16, harness-design.md §4.4).
+    if let Command::Permit {
+        json,
+        above_the_command_hook,
+        bench: false,
+        diff: false,
+        ..
+    } = &cli.command
+    {
+        let adapter = if *above_the_command_hook {
+            permit::Adapter::AboveTheCommandHook
+        } else {
+            permit::Adapter::CommandHook
+        };
+        return permit::run(&root, json.as_deref(), adapter);
+    }
     let manifest = Manifest::load(&root)?;
     let store = Store::of_workspace(&root);
     match cli.command {
@@ -61,25 +81,17 @@ pub fn run() -> Result<()> {
             session_id,
             session: _,
         } => status_command(&manifest, &store, &root, section, format, week, session_id),
+        // The judge itself returned above; what is left of `permit` are the
+        // two callers that read the manifest as a whole.
         Command::Permit {
-            json,
-            above_the_command_hook,
-            bench,
-            runs,
-            diff,
+            bench, runs, diff, ..
         } => {
             if bench {
                 permit::run_bench(&root, runs)
             } else if diff {
                 permit::run_diff(&root, &manifest)
             } else {
-                let adapter = if above_the_command_hook {
-                    permit::Adapter::AboveTheCommandHook
-                } else {
-                    permit::Adapter::CommandHook
-                };
-                permit::run(&root, json.as_deref(), adapter);
-                Ok(())
+                bail!("permit: the judge at the tool call is run above")
             }
         }
         Command::Done { base, hook } => {

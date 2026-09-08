@@ -498,33 +498,42 @@ fn permits(
     })
 }
 
-/// One row per rule `permit` judges: its last finding, the denials per
-/// session and in total, and, when `this` names a session, its count.
+/// One row per rule `permit` judges by: its last finding, the denials per
+/// session and in total, and, when `this` names a session, its count. The
+/// manifest's rules, then permit's own two, which no manifest row names
+/// and which a section that read the manifest alone would leave unsaid
+/// (#16).
 fn permit_rows(
     manifest: &Manifest,
     readings: &[Reading],
     log: &[Reading],
     this: Option<&str>,
 ) -> Vec<Row> {
-    manifest
+    let manifests = manifest
         .rules
         .iter()
         .filter(|rule| permit::judged_at_the_tool_call(rule))
-        .map(|rule| {
-            let sessions = denials_per_session(log, &rule.id);
+        .map(|rule| (rule.id.clone(), rule.adr.iter().collect::<Vec<_>>()));
+    let permits = [permit::REGION_RULE, permit::STALE_RULE]
+        .into_iter()
+        .map(|id| (id.to_owned(), Vec::new()));
+    manifests
+        .chain(permits)
+        .map(|(id, adr)| {
+            let sessions = denials_per_session(log, &id);
             let denials: usize = sessions.iter().map(|(_, n)| n).sum();
-            let this_session = this.map_or(Value::Null, |id| {
+            let this_session = this.map_or(Value::Null, |session| {
                 json!(
                     sessions
                         .iter()
-                        .find(|(s, _)| s == id)
+                        .find(|(s, _)| s == session)
                         .map_or(0, |(_, n)| *n)
                 )
             });
             Row::new(
                 &[
-                    ("rule", json!(rule.id)),
-                    ("adr", json!(rule.adr.iter().collect::<Vec<_>>())),
+                    ("rule", json!(id)),
+                    ("adr", json!(adr)),
                     ("denials", json!(denials)),
                     ("this_session", this_session),
                     (
@@ -538,7 +547,7 @@ fn permit_rows(
                     ),
                 ],
                 latest(readings, |r| {
-                    r.instrument == permit::INSTRUMENT && r.rule == rule.id
+                    r.instrument == permit::INSTRUMENT && r.rule == id
                 }),
             )
         })

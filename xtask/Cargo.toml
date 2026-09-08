@@ -10,6 +10,9 @@ description = "The harness: instruments, readings and the one renderer (harness-
 [lints]
 workspace = true
 
+[build-dependencies]
+sha1_smol.workspace = true          # the digest of seams.toml this build is compiled against (src/built.rs)
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
