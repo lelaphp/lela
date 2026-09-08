@@ -22,13 +22,23 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 fn status(root: &Path, args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    status_with_stdin(root, args, "")
+}
+
+/// `status` with the hook's stdin, the JSON head every hook event carries.
+fn status_with_stdin(root: &Path, args: &[&str], stdin: &str) -> (bool, String, String) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_xtask"))
         .arg("--root")
         .arg(root)
         .arg("status")
         .args(args)
-        .output()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), stdin.as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
     (
         out.status.success(),
         String::from_utf8(out.stdout).unwrap(),
@@ -503,4 +513,85 @@ reads = [{ instrument = "port-map", scope = "workspace", number = "unresolved", 
     assert_eq!(rows[1]["reads"][1]["value"], 42.5);
     assert_eq!(rows[2]["verdict"], "fail", "the crashed port-map run");
     assert_eq!(rows[2]["reads"][0]["status"], "fail");
+}
+
+/// "This session" (harness-design.md §4.6): `--session-id` names it, and
+/// the rule's row shows its count apart; `--session` takes the id from
+/// the hook's stdin head and appends this session's denials after the
+/// local facts, nothing when the session has none.
+#[test]
+fn permits_marks_this_session_and_the_session_block_carries_it() {
+    let root = scratch("this-session");
+    std::fs::write(root.join("AGENTS.md"), "# The map\n").unwrap();
+    let store = Store::of_workspace(&root);
+    let mut denial = Reading::new("permit", "harness.self");
+    denial.rule = "harness.self".into();
+    denial.status = Status::Fail;
+    denial.message = "Edit seams.toml: edited by a person.".into();
+    denial.session = "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11".into();
+    store.write(&denial).unwrap();
+    denial.session = "9a8b7c6d-0000-4000-8000-000000000000".into();
+    store.write(&denial).unwrap();
+    store.write(&denial).unwrap();
+
+    let this = "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11";
+    let (ok, md, err) = status(&root, &["--section", "permits", "--session-id", this]);
+    assert!(ok, "{err}");
+    let row = md.lines().find(|l| l.contains("harness.self")).unwrap();
+    assert!(row.contains("| 3 | 1 |"), "total, then this session: {row}");
+    let row = md.lines().find(|l| l.contains("ext.no-locks")).unwrap();
+    assert!(row.contains("| 0 | 0 |"), "{row}");
+    let (_, md, _) = status(&root, &["--section", "permits"]);
+    let row = md.lines().find(|l| l.contains("harness.self")).unwrap();
+    assert!(
+        row.contains("| 3 |  |"),
+        "no session named, no count: {row}"
+    );
+
+    let (ok, json, _) = status(
+        &root,
+        &[
+            "--section",
+            "permits",
+            "--session-id",
+            this,
+            "--format",
+            "json",
+        ],
+    );
+    assert!(ok);
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let row = value["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["rule"] == "harness.self")
+        .unwrap();
+    assert_eq!(row["this_session"], 1);
+    assert_eq!(value["session"], this);
+
+    let head = format!(
+        r#"{{"session_id":"{this}","transcript_path":"x","cwd":"x","hook_event_name":"SessionStart","source":"resume"}}"#
+    );
+    let (ok, text, err) = status_with_stdin(&root, &["--session"], &head);
+    assert!(ok, "{err}");
+    assert!(text.starts_with("# The map\n"), "{text}");
+    assert!(text.contains("## permits this session"), "{text}");
+    let row = text.lines().find(|l| l.contains("harness.self")).unwrap();
+    assert!(row.contains("| 3 | 1 |"), "{row}");
+    assert!(
+        !text.lines().any(|l| l.contains("ext.no-locks")),
+        "only the rules this session fired: {text}"
+    );
+
+    let quiet = r#"{"session_id":"00000000-0000-4000-8000-000000000000","hook_event_name":"SessionStart","source":"startup"}"#;
+    let (ok, text, _) = status_with_stdin(&root, &["--session"], quiet);
+    assert!(ok);
+    assert!(
+        !text.contains("this session"),
+        "a session with no denial adds nothing: {text}"
+    );
+    let (ok, text, _) = status_with_stdin(&root, &["--session"], "not json");
+    assert!(ok, "a head that is not JSON is no session, not an error");
+    assert!(!text.contains("this session"), "{text}");
 }

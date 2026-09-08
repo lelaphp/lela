@@ -39,6 +39,11 @@ pub enum Command {
         /// `[[week]]` table, counted from 1.
         #[arg(long, value_name = "N", requires = "section")]
         week: Option<usize>,
+        /// "This session" of the `permits` section: the session whose
+        /// denials are counted apart. `--session` takes it from the hook's
+        /// stdin head instead.
+        #[arg(long = "session-id", value_name = "ID")]
+        session_id: Option<String>,
         /// Print AGENTS.md and .claude/harness.local.md in one block, for
         /// the `SessionStart` hook; the local file is laid down when missing.
         #[arg(long)]

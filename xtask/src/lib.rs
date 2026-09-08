@@ -57,17 +57,9 @@ pub fn run() -> Result<()> {
             section,
             format,
             week,
+            session_id,
             session: _,
-        } => {
-            let text = if let Some(section) = section {
-                let registry = Registry::load(&root)?;
-                status::render(&manifest, &registry, &store, &root, section, format, week)?
-            } else {
-                status::session(&root)?
-            };
-            std::io::stdout().write_all(text.as_bytes())?;
-            Ok(())
-        }
+        } => status_command(&manifest, &store, &root, section, format, week, session_id),
         Command::Permit {
             json,
             bench,
@@ -160,5 +152,36 @@ pub fn record(store: &Store, readings: &[Reading]) -> Result<()> {
     if failed > 0 {
         bail!("{failed} of {} readings failed", readings.len());
     }
+    Ok(())
+}
+
+/// `xtask status`: one section, or with no section the map and the local
+/// facts for the session-start hook, whose stdin head names the session.
+fn status_command(
+    manifest: &Manifest,
+    store: &Store,
+    root: &Path,
+    section: Option<cli::Section>,
+    format: cli::Format,
+    week: Option<usize>,
+    session_id: Option<String>,
+) -> Result<()> {
+    let text = if let Some(section) = section {
+        let registry = Registry::load(root)?;
+        status::render(
+            manifest,
+            &registry,
+            store,
+            root,
+            section,
+            format,
+            week,
+            session_id.as_deref(),
+        )?
+    } else {
+        let id = session_id.or_else(status::session_of_stdin);
+        status::session(manifest, store, root, id.as_deref())?
+    };
+    std::io::stdout().write_all(text.as_bytes())?;
     Ok(())
 }

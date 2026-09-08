@@ -46,7 +46,9 @@ const UNRENDERED: &str = "The local facts above are unrendered: `computed run .c
 fills them once a person has run `computed trust` for this clone (harness-design.md §11).";
 
 /// Render one section to a string in the asked format; `week` picks one
-/// row of the `week` section and belongs to no other.
+/// row of the `week` section and `session_id` names "this session" of the
+/// `permits` section, each belonging to no other.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     manifest: &Manifest,
     registry: &Registry,
@@ -55,9 +57,13 @@ pub fn render(
     section: Section,
     format: Format,
     week: Option<usize>,
+    session_id: Option<&str>,
 ) -> Result<String> {
     if week.is_some() && section != Section::Week {
         bail!("--week picks a row of the week section; use --section week");
+    }
+    if session_id.is_some() && section != Section::Permits {
+        bail!("--session-id names this session of the permits section; use --section permits");
     }
     let readings = store.readings()?;
     let (rows, columns): (Vec<Row>, Columns) = match section {
@@ -68,7 +74,9 @@ pub fn render(
         Section::Phpt => (instrument(&readings, "phpt"), INSTRUMENT),
         Section::Witness => (instrument(&readings, "witness"), INSTRUMENT),
         Section::Mutants => (instrument(&readings, "mutants"), INSTRUMENT),
-        Section::Permits => return permits(manifest, &readings, &store.log()?, format),
+        Section::Permits => {
+            return permits(manifest, &readings, &store.log()?, format, session_id);
+        }
         Section::Week => return week_section(manifest, &readings, week, format),
         Section::Bundle => (bundle(manifest, &readings), BUNDLE),
         Section::Git => return git_section(root, format),
@@ -82,10 +90,37 @@ pub fn render(
     })
 }
 
-/// The map and the local facts in one block. The map is tracked and must
-/// exist; the local file is written from `local_template` when the clone
-/// has none, so the hook's `computed run` has a file to render next time.
-pub fn session(root: &Path) -> Result<String> {
+/// The `session_id` of the hook's stdin head, the JSON every hook event
+/// carries (harness-design.md D.16); none at a terminal, on an empty
+/// stdin, or on a head that is not JSON, since a session is a fact and not
+/// a condition.
+pub fn session_of_stdin() -> Option<String> {
+    use std::io::{IsTerminal, Read};
+    let mut stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return None;
+    }
+    let mut text = String::new();
+    stdin.read_to_string(&mut text).ok()?;
+    let head: Value = serde_json::from_str(&text).ok()?;
+    head["session_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+}
+
+/// The map and the local facts in one block, then, when `session_id` is
+/// known and the log holds a denial of its own, the rules this session
+/// fired with their counts (§4.6, "this session"). The map is tracked and
+/// must exist; the local file is written from `local_template` when the
+/// clone has none, so the hook's `computed run` has a file to render next
+/// time.
+pub fn session(
+    manifest: &Manifest,
+    store: &Store,
+    root: &Path,
+    session_id: Option<&str>,
+) -> Result<String> {
     let map = fs::read_to_string(root.join(MAP)).with_context(|| format!("reading {MAP}"))?;
     let local_path = root.join(LOCAL);
     if !local_path.exists() {
@@ -108,6 +143,19 @@ pub fn session(root: &Path) -> Result<String> {
         out.push('\n');
         out.push_str(UNRENDERED);
         out.push('\n');
+    }
+    if let Some(id) = session_id {
+        let rows: Vec<Row> = permit_rows(manifest, &store.readings()?, &store.log()?, Some(id))
+            .into_iter()
+            .filter(|r| r.facts.get("this_session").and_then(Value::as_u64) > Some(0))
+            .collect();
+        if !rows.is_empty() {
+            let _ = write!(
+                out,
+                "\n## permits this session\n\n{}",
+                table(PERMITS, &rows)
+            );
+        }
     }
     Ok(out)
 }
@@ -401,38 +449,13 @@ fn permits(
     readings: &[Reading],
     log: &[Reading],
     format: Format,
+    this: Option<&str>,
 ) -> Result<String> {
-    let rules: Vec<Row> = manifest
-        .rules
-        .iter()
-        .filter(|rule| permit::judged_at_the_tool_call(rule))
-        .map(|rule| {
-            let sessions = denials_per_session(log, &rule.id);
-            let denials: usize = sessions.iter().map(|(_, n)| n).sum();
-            Row::new(
-                &[
-                    ("rule", json!(rule.id)),
-                    ("adr", json!(rule.adr.iter().collect::<Vec<_>>())),
-                    ("denials", json!(denials)),
-                    (
-                        "sessions",
-                        json!(
-                            sessions
-                                .iter()
-                                .map(|(s, n)| json!({ "session": s, "denials": n }))
-                                .collect::<Vec<_>>()
-                        ),
-                    ),
-                ],
-                latest(readings, |r| {
-                    r.instrument == permit::INSTRUMENT && r.rule == rule.id
-                }),
-            )
-        })
-        .collect();
+    let rules = permit_rows(manifest, readings, log, this);
     let instruments = instruments(log)?;
     Ok(match format {
         Format::Json => serde_json::to_string_pretty(&json!({
+            "session": this,
             "rules": rules.iter().map(Row::json).collect::<Result<Vec<_>>>()?,
             "instruments": instruments.iter().map(InstrumentLine::json).collect::<Vec<_>>(),
         }))?,
@@ -459,6 +482,53 @@ fn permits(
             out
         }
     })
+}
+
+/// One row per rule `permit` judges: its last finding, the denials per
+/// session and in total, and, when `this` names a session, its count.
+fn permit_rows(
+    manifest: &Manifest,
+    readings: &[Reading],
+    log: &[Reading],
+    this: Option<&str>,
+) -> Vec<Row> {
+    manifest
+        .rules
+        .iter()
+        .filter(|rule| permit::judged_at_the_tool_call(rule))
+        .map(|rule| {
+            let sessions = denials_per_session(log, &rule.id);
+            let denials: usize = sessions.iter().map(|(_, n)| n).sum();
+            let this_session = this.map_or(Value::Null, |id| {
+                json!(
+                    sessions
+                        .iter()
+                        .find(|(s, _)| s == id)
+                        .map_or(0, |(_, n)| *n)
+                )
+            });
+            Row::new(
+                &[
+                    ("rule", json!(rule.id)),
+                    ("adr", json!(rule.adr.iter().collect::<Vec<_>>())),
+                    ("denials", json!(denials)),
+                    ("this_session", this_session),
+                    (
+                        "sessions",
+                        json!(
+                            sessions
+                                .iter()
+                                .map(|(s, n)| json!({ "session": s, "denials": n }))
+                                .collect::<Vec<_>>()
+                        ),
+                    ),
+                ],
+                latest(readings, |r| {
+                    r.instrument == permit::INSTRUMENT && r.rule == rule.id
+                }),
+            )
+        })
+        .collect()
 }
 
 /// The denials of one rule in the log, counted per session and ordered by
@@ -815,7 +885,14 @@ const INSTRUMENT: Columns = (&["scope", "reading", "numbers", "message"], |r| {
 
 const PERMITS: Columns = (
     &[
-        "rule", "adr", "reading", "at", "denials", "sessions", "message",
+        "rule",
+        "adr",
+        "reading",
+        "at",
+        "denials",
+        "this session",
+        "sessions",
+        "message",
     ],
     |r| {
         vec![
@@ -827,6 +904,7 @@ const PERMITS: Columns = (
                 .map(|x| x.at.to_string())
                 .unwrap_or_default(),
             r.fact("denials"),
+            r.fact("this_session"),
             r.sessions(),
             r.message(),
         ]
