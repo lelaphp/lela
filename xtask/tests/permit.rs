@@ -407,3 +407,84 @@ fn bench_measures_p99_against_the_bar_and_writes_a_reading() {
         "the bench's own denials do not land in the store it reports to"
     );
 }
+
+fn sh(root: &Path, args: &[&str]) {
+    let out = Command::new(args[0])
+        .args(&args[1..])
+        .current_dir(root)
+        .env("GIT_AUTHOR_NAME", "x")
+        .env("GIT_AUTHOR_EMAIL", "x@x")
+        .env("GIT_COMMITTER_NAME", "x")
+        .env("GIT_COMMITTER_EMAIL", "x@x")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn write(root: &Path, path: &str, text: &str) {
+    let file = root.join(path);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, text).unwrap();
+}
+
+/// `permit --diff`, pre-commit's caller (harness-design.md §4.4, §6): the
+/// staged files are judged as the `Write` of their staged content, a
+/// denial refuses the commit with the rule id, and the harness's own
+/// files, which a person commits, are a note and not a refusal.
+#[test]
+fn diff_judges_the_staged_files_and_refuses_a_denied_one_with_the_rule_id() {
+    let root = scratch("diff");
+    let (code, out, err) = permit(&root, "", &["--diff"]);
+    assert_eq!(code, 0, "nothing staged is nothing denied: {out}{err}");
+
+    let locked = "use std::sync::Mutex;\n\npub struct Cache(Mutex<Vec<u8>>);\n";
+    write(&root, "ext/pcre/src/cache.rs", locked);
+    sh(&root, &["git", "add", "ext/pcre/src/cache.rs"]);
+    let (code, out, _) = permit(&root, "", &["--diff"]);
+    assert_eq!(code, 1, "a denied staged file refuses the commit: {out}");
+    assert!(
+        out.contains("ext.no-locks"),
+        "the rule id is printed: {out}"
+    );
+    assert!(out.contains("ext/pcre/src/cache.rs"), "{out}");
+    let reading = Store::of_workspace(&root)
+        .read("permit", "ext.no-locks")
+        .unwrap()
+        .expect("the denial was recorded");
+    assert_eq!(reading.status, Status::Fail);
+    assert!(
+        reading.message.starts_with("Write ext/pcre/src/cache.rs"),
+        "{}",
+        reading.message
+    );
+
+    // What is judged is the index, not the working tree.
+    write(
+        &root,
+        "ext/pcre/src/cache.rs",
+        "pub struct Cache(Vec<u8>);\n",
+    );
+    let (code, out, _) = permit(&root, "", &["--diff"]);
+    assert_eq!(code, 1, "the staged content still holds the lock: {out}");
+    sh(&root, &["git", "add", "ext/pcre/src/cache.rs"]);
+    let (code, out, err) = permit(&root, "", &["--diff"]);
+    assert_eq!(code, 0, "{out}{err}");
+
+    // The harness's own file: a note, since the hook cannot tell a person
+    // from an agent, and the commit goes through.
+    let manifest = std::fs::read_to_string(root.join("seams.toml")).unwrap();
+    write(
+        &root,
+        "seams.toml",
+        &format!("{manifest}\n# a person's note\n"),
+    );
+    sh(&root, &["git", "add", "seams.toml"]);
+    let (code, out, err) = permit(&root, "", &["--diff"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("note seams.toml"), "{out}");
+    assert!(out.contains("harness.self"), "{out}");
+}

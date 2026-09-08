@@ -1,10 +1,10 @@
 //! `xtask done`, the definition of done (harness-design.md §4.5): the
 //! conditions unmet for the changes since a base commit, computed from git
 //! and the store and nothing else, so its three callers (§4.5: the Stop
-//! command hook, pre-push, and CI per commit once §7's wiring lands) read
-//! one list. The base is the merge base of `HEAD` with `main`, or with
-//! `--base`; the changes are every file the working tree differs in from
-//! it, committed since or not, plus the untracked files.
+//! command hook, pre-push, and CI per commit) read one list. The base is
+//! the merge base of `HEAD` with `main`, or with `--base`; the changes are
+//! every file the working tree differs in from it, committed since or not,
+//! plus the untracked files.
 //!
 //! The six conditions, one sentence each:
 //!
@@ -33,7 +33,6 @@
 //! with the list while anything is unmet. Every verdict is one reading,
 //! `done` over `workspace`.
 
-use std::fs;
 use std::io::Read;
 use std::path::Path;
 
@@ -45,7 +44,7 @@ use crate::api_check;
 use crate::divergence::{self, Registry};
 use crate::git::{self, Change, Stamp};
 use crate::manifest::{Crate, Manifest};
-use crate::permit::{self, Call, Kind, ToolInput};
+use crate::permit;
 use crate::reading::{Number, Reading, Status, Store};
 
 /// The instrument name the reading carries.
@@ -190,15 +189,8 @@ pub fn judge(
 ) -> Result<Verdict> {
     let base = git::merge_base(root, base.unwrap_or(MAIN))?;
     let changed = git::changed_since(root, &base)?;
-    let crates: Vec<&Crate> = manifest
-        .crates
-        .iter()
-        .filter(|c| {
-            changed
-                .iter()
-                .any(|ch| Path::new(&ch.path).starts_with(c.path()))
-        })
-        .collect();
+    let paths: Vec<&str> = changed.iter().map(|c| c.path.as_str()).collect();
+    let crates: Vec<&Crate> = manifest.crates_of(&paths);
     let mut unmet = Vec::new();
     let mut notes = Vec::new();
 
@@ -359,8 +351,9 @@ fn open_rows(
 }
 
 /// Conditions 5 and 6: every changed file judged as the `Write` of its
-/// content. A denial under a rule the manifest marks `deny = true` (the
-/// harness's own files) is the note of condition 6; any other is unmet.
+/// content, by the one judge pre-commit's `permit --diff` calls. A denial
+/// under a rule the manifest marks `deny = true` (the harness's own
+/// files) is the note of condition 6; any other is unmet.
 fn over_the_diff(
     root: &Path,
     manifest: &Manifest,
@@ -368,42 +361,16 @@ fn over_the_diff(
     unmet: &mut Vec<String>,
     notes: &mut Vec<String>,
 ) -> Result<()> {
-    let a_persons_rules: Vec<&str> = manifest
-        .rules
-        .iter()
-        .filter(|r| r.predicate.deny == Some(true))
-        .map(|r| r.id.as_str())
-        .collect();
-    for change in changed.iter().filter(|c| !c.deleted) {
-        let file = root.join(&change.path);
-        if !file.is_file() {
-            continue;
-        }
-        let bytes = fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
-        let call = Call {
-            tool_name: "Write".to_owned(),
-            tool_input: ToolInput {
-                file_path: Some(change.path.clone()),
-                content: Some(String::from_utf8_lossy(&bytes).into_owned()),
-                ..ToolInput::default()
-            },
-            cwd: None,
-        };
-        let judgement = permit::judge(manifest, root, &call)?;
-        for finding in judgement.findings.iter().filter(|f| f.kind == Kind::Deny) {
-            if a_persons_rules.contains(&finding.rule.as_str()) {
-                notes.push(format!(
-                    "{} is in the diff: changed by a person, or not; the hook cannot tell ({})",
-                    change.path, finding.rule
-                ));
-            } else {
-                unmet.push(format!(
-                    "permit denies {}: {}",
-                    change.path,
-                    finding.reason()
-                ));
-            }
-        }
+    let files = permit::working_files(root, changed)?;
+    let diff = permit::judge_files(manifest, root, &files)?;
+    for (path, finding) in diff.denials() {
+        unmet.push(format!("permit denies {path}: {}", finding.reason()));
+    }
+    for (path, finding) in diff.a_persons() {
+        notes.push(format!(
+            "{path} is in the diff: changed by a person, or not; the hook cannot tell ({})",
+            finding.rule
+        ));
     }
     Ok(())
 }

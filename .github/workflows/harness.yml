@@ -1,7 +1,10 @@
 # The harness in CI (harness-design.md §7, §10 rule 4): the region files are
-# held by `computed check`, which runs no loader and needs no trust grant,
-# and the harness's own tests hold the map, the hook wiring and the rules'
-# negative controls.
+# held by `computed check`, which runs no loader and needs no trust grant;
+# the harness's own tests hold the map, the hook wiring and the rules'
+# negative controls; and per commit the instruments run over the whole
+# workspace, then `done` judges the changes since the merge base with main,
+# the reading store is the only thing the run uploads, and the permits
+# section is the summary.
 name: harness
 on:
   push:
@@ -27,3 +30,34 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy -p xtask --all-targets -- -D warnings
       - run: cargo test -p xtask
+  per-commit:
+    name: the instruments, then done
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # done measures since the merge base with main
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Each instrument exits 1 on a failing reading, which fails the job;
+      # the readings it wrote are uploaded either way.
+      - run: cargo fmt --check
+      - run: cargo xtask clippy
+      - run: cargo xtask api-check
+      - run: cargo xtask budget
+      - run: cargo xtask unsafe-audit
+      - run: cargo xtask vocab
+      - run: cargo xtask done
+      - name: the summary
+        if: always()
+        run: |
+          cargo xtask status --section permits > permits.md
+          cat permits.md
+          cat permits.md >> "$GITHUB_STEP_SUMMARY"
+      - name: the reading store, the only upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness
+          path: target/harness
+          if-no-files-found: warn

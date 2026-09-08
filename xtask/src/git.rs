@@ -259,6 +259,40 @@ pub fn changed_since(root: &Path, base: &str) -> Result<Vec<Change>> {
     Ok(out)
 }
 
+/// Every file the index differs in from `HEAD`: what a commit would take,
+/// and what pre-commit judges (harness-design.md §6). Sorted by path; a
+/// rename is its deletion and its addition.
+pub fn staged(root: &Path) -> Result<Vec<Change>> {
+    let listing = git(
+        root,
+        &[
+            "diff",
+            "--cached",
+            "--name-status",
+            "-z",
+            "--no-renames",
+            "--",
+        ],
+        None,
+    )?;
+    let mut fields = listing.split('\0').filter(|f| !f.is_empty());
+    let mut out = Vec::new();
+    while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
+        out.push(Change {
+            path: path.to_owned(),
+            deleted: status.starts_with('D'),
+        });
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(out)
+}
+
+/// The content of `path` in the index: `show(root, "", path)`, since git
+/// spells the index as an empty revision.
+pub fn staged_content(root: &Path, path: &str) -> Result<Option<String>> {
+    show(root, "", path)
+}
+
 /// The content of `path` at `rev`, or `None` when the commit has no such
 /// file.
 pub fn show(root: &Path, rev: &str, path: &str) -> Result<Option<String>> {

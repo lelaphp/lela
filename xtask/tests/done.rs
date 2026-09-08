@@ -593,3 +593,105 @@ fn the_stop_hook_runs_done_with_hook_and_pre_push_runs_done() {
         assert!(mode & 0o111 != 0, "pre-push is executable: {mode:o}");
     }
 }
+
+/// Pre-commit (harness-design.md §6 wiring): the instruments that exist,
+/// in the order the design lists them, `permit --diff` over the staged
+/// diff, and `computed run` on the region files plus the local one by
+/// name, with what it wrote re-staged and a hand edit refused.
+#[test]
+fn pre_commit_runs_the_instruments_permit_over_the_diff_and_computed_run() {
+    let pre_commit = workspace().join("scripts/hooks/pre-commit");
+    let whole = std::fs::read_to_string(&pre_commit).unwrap();
+    assert!(whole.starts_with("#!/"), "{whole}");
+    // The commands, not the comment that describes them.
+    let text: String = whole
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut last = 0;
+    for step in [
+        "cargo fmt --check",
+        "clippy --staged",
+        "api-check",
+        "budget",
+        "unsafe-audit",
+        "vocab",
+        "permit --diff",
+        "computed run",
+    ] {
+        let at = text
+            .find(step)
+            .unwrap_or_else(|| panic!("pre-commit lacks {step}: {text}"));
+        assert!(at > last, "{step} is out of order: {text}");
+        last = at;
+    }
+    for file in [
+        "AGENTS.md",
+        "ext/AGENTS.md",
+        "data/INDEX.md",
+        "docs/divergence.md",
+        ".claude/harness.local.md",
+    ] {
+        assert!(text.contains(file), "computed run names {file}: {text}");
+    }
+    assert!(
+        text.contains("git add"),
+        "what computed wrote is re-staged: {text}"
+    );
+    assert!(
+        text.contains("computed check"),
+        "a hand edit is refused: {text}"
+    );
+    assert!(
+        !text.contains("--force"),
+        "a person decides --force: {text}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&pre_commit).unwrap().permissions().mode();
+        assert!(mode & 0o111 != 0, "pre-commit is executable: {mode:o}");
+    }
+}
+
+/// CI per commit (harness-design.md §7): the same instruments over the
+/// workspace, then `done`; the reading store is the only thing the run
+/// uploads; the summary is the permits section.
+#[test]
+fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
+    let text = read(".github/workflows/harness.yml");
+    let mut last = 0;
+    for step in [
+        "cargo fmt --check",
+        "xtask clippy",
+        "xtask api-check",
+        "xtask budget",
+        "xtask unsafe-audit",
+        "xtask vocab",
+        "xtask done",
+        "status --section permits",
+    ] {
+        let at = text
+            .find(step)
+            .unwrap_or_else(|| panic!("CI lacks {step}: {text}"));
+        assert!(at > last, "{step} is out of order: {text}");
+        last = at;
+    }
+    assert_eq!(
+        text.matches("upload-artifact").count(),
+        1,
+        "one upload, the store: {text}"
+    );
+    let upload = text.find("upload-artifact").unwrap();
+    let step = &text[upload..];
+    let step = &step[..step.find("\n      - ").unwrap_or(step.len())];
+    assert!(
+        step.contains("path: target/harness"),
+        "the upload is the store: {step}"
+    );
+    assert!(
+        text.contains("fetch-depth: 0"),
+        "done needs the merge base with main: {text}"
+    );
+}

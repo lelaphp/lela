@@ -67,9 +67,16 @@ pub fn run() -> Result<()> {
             std::io::stdout().write_all(text.as_bytes())?;
             Ok(())
         }
-        Command::Permit { json, bench, runs } => {
+        Command::Permit {
+            json,
+            bench,
+            runs,
+            diff,
+        } => {
             if bench {
                 permit::run_bench(&root, runs)
+            } else if diff {
+                permit::run_diff(&root, &manifest)
             } else {
                 permit::run(&root, json.as_deref());
                 Ok(())
@@ -85,7 +92,14 @@ pub fn run() -> Result<()> {
             }
         }
         Command::Budget => record(&store, &budget::run(&root, &manifest)?),
-        Command::Clippy { crates } => record(&store, &clippy::run(&root, &manifest, &crates)?),
+        Command::Clippy { crates, staged } => {
+            let readings = if staged {
+                clippy::run_staged(&root, &manifest)?
+            } else {
+                clippy::run(&root, &manifest, &crates)?
+            };
+            record(&store, &readings)
+        }
         Command::UnsafeAudit => record(&store, &unsafe_audit::run(&root, &manifest)?),
         Command::Generate => {
             for path in generated::write_all(&root, &manifest)? {

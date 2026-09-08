@@ -358,6 +358,16 @@ impl Manifest {
         self.crates.iter().find(|c| path.starts_with(c.path()))
     }
 
+    /// The crates any of `paths` lies under, in manifest order, each once:
+    /// the touched crates of a diff (harness-design.md §4.5 condition 1,
+    /// §6 "touched crates").
+    pub fn crates_of<P: AsRef<Path>>(&self, paths: &[P]) -> Vec<&Crate> {
+        self.crates
+            .iter()
+            .filter(|c| paths.iter().any(|p| p.as_ref().starts_with(c.path())))
+            .collect()
+    }
+
     /// The path of a reading's scope, relative to the root: a crate's
     /// sources, or the whole workspace for `"workspace"`.
     pub fn scope_path(&self, scope: &str) -> Option<PathBuf> {

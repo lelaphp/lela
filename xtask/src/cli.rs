@@ -44,8 +44,12 @@ pub enum Command {
     /// decision is the JSON on stdout and the exit is 0 always.
     Permit {
         /// The call as a JSON argument instead of stdin (the function-hook adapter).
-        #[arg(long, value_name = "JSON", conflicts_with = "bench")]
+        #[arg(long, value_name = "JSON", conflicts_with_all = ["bench", "diff"])]
         json: Option<String>,
+        /// Judge the staged diff, each file as the `Write` of its staged
+        /// content (pre-commit); exit 1 while any is denied.
+        #[arg(long, conflicts_with = "bench")]
+        diff: bool,
         /// Measure p99 latency at the tool call against the 100 ms bar.
         #[arg(long)]
         bench: bool,
@@ -72,8 +76,11 @@ pub enum Command {
     /// crate, as the reading `done` reads; one reading per crate.
     Clippy {
         /// Only these crates, by manifest name; default every crate that exists.
-        #[arg(long = "crate", value_name = "NAME")]
+        #[arg(long = "crate", value_name = "NAME", conflicts_with = "staged")]
         crates: Vec<String>,
+        /// Only the crates with a staged change (pre-commit's touched crates).
+        #[arg(long)]
+        staged: bool,
     },
     /// Allow `unsafe` only in the homes the manifest's unsafe.homes rule names.
     UnsafeAudit,
