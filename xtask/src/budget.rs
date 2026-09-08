@@ -208,8 +208,9 @@ pub struct Count {
 pub fn count(root: &Path, krate: &Crate) -> Result<Count> {
     let mut out = Count::default();
     for path in sources::rust(root, krate)? {
-        let text =
-            std::fs::read_to_string(root.join(&path)).with_context(|| format!("reading {path}"))?;
+        let Some(text) = text_of(root, &path)? else {
+            continue;
+        };
         let n = u64::try_from(lines::rust(&text))?;
         if sources::is_binding(&path) {
             out.bindings += n;
@@ -243,11 +244,21 @@ fn harness(root: &Path) -> Result<u64> {
 fn sum(root: &Path, paths: &[String]) -> Result<u64> {
     let mut n = 0;
     for path in paths {
-        let text =
-            std::fs::read_to_string(root.join(path)).with_context(|| format!("reading {path}"))?;
-        n += u64::try_from(lines::count(path, &text))?;
+        if let Some(text) = text_of(root, path)? {
+            n += u64::try_from(lines::count(path, &text))?;
+        }
     }
     Ok(n)
+}
+
+/// The text of one file to count, or `None` when the file is not text: a
+/// file that is not text has no lines. A `.DS_Store` Finder left under
+/// `docs/` took the whole instrument down with a UTF-8 error, and an
+/// instrument that falls over measures nothing, which is the shape of the
+/// bug #16 names.
+fn text_of(root: &Path, path: &str) -> Result<Option<String>> {
+    let bytes = std::fs::read(root.join(path)).with_context(|| format!("reading {path}"))?;
+    Ok(String::from_utf8(bytes).ok())
 }
 
 /// Committed generated files under the crate trees: a `generated` path

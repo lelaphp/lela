@@ -26,6 +26,34 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
+/// A file that is not text has no lines. A `.DS_Store` Finder left under
+/// `docs/` took the whole instrument down with "stream did not contain
+/// valid UTF-8", and an instrument that falls over measures nothing, which
+/// is the shape of the bug #16 names: the loud failure of a sensor is still
+/// a sensor that is not sensing.
+#[test]
+fn a_file_that_is_not_text_is_counted_as_no_lines_and_not_as_a_failure() {
+    let root = scratch("not-text");
+    xtask::permit::scratch_workspace(workspace(), &root).unwrap();
+    std::fs::copy(workspace().join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
+    let manifest = Manifest::load(&root).unwrap();
+    let before = budget::run(&root, &manifest).unwrap();
+    let docs_before = int(&workspace_reading(&before).numbers["docs"]);
+
+    std::fs::write(root.join("docs/.DS_Store"), [0x00, 0xff, 0xfe, b'x']).unwrap();
+    let after = budget::run(&root, &manifest)
+        .expect("a file that is not text does not take the instrument down");
+    assert_eq!(
+        int(&workspace_reading(&after).numbers["docs"]),
+        docs_before,
+        "and counts as no lines"
+    );
+}
+
+fn workspace_reading(readings: &[xtask::reading::Reading]) -> &xtask::reading::Reading {
+    readings.iter().find(|r| r.scope == "workspace").unwrap()
+}
+
 #[test]
 fn the_tracked_workspace_passes_with_the_manifests_numbers() {
     let manifest = Manifest::load(workspace()).unwrap();
