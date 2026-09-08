@@ -1,7 +1,7 @@
 {
   "name": "harness",
   "version": "0.1.0",
-  "description": "The function-hook adapter of the third engine's harness (harness-design.md §4.4, §5): the map and the local facts as a context block that names this session, refreshed after a Bash call that ran an instrument. Loaded with `claude --plugin-dir harness-plugins`; the shipped command hooks in .claude/skills/third-engine-harness stay the sensor of record.",
+  "description": "The function-hook adapter of the third engine's harness (harness-design.md §4.4, §5): the map and the local facts as a context block that names this session, refreshed after a Bash call that ran an instrument. Enabled by .claude/settings.json from the repository's own marketplace, harness@dax-php; the shipped command hooks in .claude/skills/third-engine-harness stay the sensor of record.",
   "author": {
     "name": "Mitchell van Wijngaarden"
   }

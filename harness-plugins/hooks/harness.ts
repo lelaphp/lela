@@ -1,4 +1,6 @@
-// The function-hook adapter of the harness (harness-design.md §4.4, §5).
+// The function-hook adapter of the harness (harness-design.md §4.4, §5),
+// enabled by .claude/settings.json as harness@dax-php from the repository's
+// own marketplace (.claude-plugin/marketplace.json).
 //
 // Two hooks, and nothing the shipped command hooks do not also do except
 // the refresh. `prompt.context` renders the local facts and appends the
