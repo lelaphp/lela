@@ -31,20 +31,25 @@
 
 import type { EngineInterface, Register, ToolCallInput } from 'claude-code';
 
-/// `cargo run` when no binary is built: it rebuilds a stale xtask rather
-/// than trusting it (hooks.json says why), at about 200 ms more per call.
+/// `cargo run` when no binary is built, and when no built one judged: it
+/// rebuilds a stale xtask rather than trusting it (hooks.json says why),
+/// at about 200 ms more per call.
 const CARGO_XTASK = ['cargo', 'run', '-q', '-p', 'xtask', '--'] as const;
 
 /// Where a built xtask stands, in the command hook's order (hooks.json).
 const BUILT = ['target/release/xtask', 'target/debug/xtask'] as const;
 
-/// The built binary when one exists, else cargo: the command hook's
-/// choice, so the two adapters cost the same at the tool call (§4.4).
-async function xtask($: EngineInterface): Promise<readonly string[]> {
-  for (const path of BUILT) {
-    if (await $.fs.exists(path).catch(() => false)) return [path];
-  }
-  return CARGO_XTASK;
+/// The built binaries that stand, then cargo: the command hook's choice,
+/// so the two adapters cost the same at the tool call (§4.4). A binary
+/// built before the manifest it reads exits without judging, so cargo
+/// closes the list rather than the last build standing for it.
+async function xtask($: EngineInterface): Promise<readonly (readonly string[])[]> {
+  const built = await Promise.all(
+    BUILT.map(async (path) =>
+      (await $.fs.exists(path).catch(() => false)) ? ([path] as readonly string[]) : undefined,
+    ),
+  );
+  return [...built.filter((bin): bin is readonly string[] => bin !== undefined), CARGO_XTASK];
 }
 
 /// The name of the block the map and the local facts render under.
@@ -93,13 +98,23 @@ export const register: Register = (on, options) => {
     // keeps permit from judging leaves the call to that hook.
     let decision: Decision = {};
     try {
-      const [cwd, id, bin] = await Promise.all([$.session.cwd(), $.session.id(), xtask($)]);
-      const run = await $.process.run([...bin, 'permit', '--above-the-command-hook'], {
-        cwd,
-        stdin: stdinOf(e, id, cwd),
-        timeoutMs: 30_000,
-      });
-      if (run.exitCode === 0) decision = decisionOf(run.stdout);
+      const [cwd, id, bins] = await Promise.all([$.session.cwd(), $.session.id(), xtask($)]);
+      const stdin = stdinOf(e, id, cwd);
+      // permit's exit is 0 whatever it decides, so a non-zero one is a
+      // permit that never judged: the build is older than the manifest it
+      // reads. The next candidate judges, rather than the call passing on
+      // a build's silence.
+      for (const bin of bins) {
+        const run = await $.process.run([...bin, 'permit', '--above-the-command-hook'], {
+          cwd,
+          stdin,
+          timeoutMs: 30_000,
+        });
+        if (run.exitCode === 0) {
+          decision = decisionOf(run.stdout);
+          break;
+        }
+      }
     } catch {
       // fails open: the command hook beneath judges the call
     }
