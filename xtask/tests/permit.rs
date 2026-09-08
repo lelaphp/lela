@@ -622,6 +622,26 @@ fn pre_tool_use_judges_the_three_tools_through_permit() {
     assert!(command.contains("permit"), "{command}");
 }
 
+/// The candidate that closes the list rebuilds rather than trusting a stale
+/// build, so the hook's budget has to cover a build and not only a judging:
+/// a warm recompile of xtask measured 4.88s when the fallback was written.
+/// A budget too small for it times the hook out, and a call that times out
+/// is a call that passed unjudged, which is the window the fallback closed
+/// (harness-design.md §4.4).
+#[test]
+fn the_hook_leaves_room_for_the_rebuild_its_last_candidate_may_do() {
+    let text =
+        std::fs::read_to_string(workspace().join("harness-plugins/hooks/hooks.json")).unwrap();
+    let hooks: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let timeout = hooks["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"]
+        .as_i64()
+        .expect("the hook declares its timeout");
+    assert!(
+        timeout >= 60,
+        "the cargo candidate needs room to rebuild: {timeout}"
+    );
+}
+
 /// What a build does when the command runs it: one that stands judges, and
 /// one older than the manifest or the flag it is handed exits without
 /// judging, the way a build from before `[telemetry]` landed did.
