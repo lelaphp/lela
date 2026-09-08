@@ -586,61 +586,87 @@ fn a_denial_carries_the_session_of_the_call() {
 
 // ----------------------------------------------- the wiring at the tool call
 
-/// The one command hooks.json declares for `PreToolUse`: the line the hook
-/// runs before every Edit, Write and Bash.
-fn pre_tool_use_command() -> String {
+/// The `PreToolUse` entries hooks.json declares, each with the tools its
+/// matcher names.
+fn pre_tool_use_entries() -> Vec<(Vec<String>, serde_json::Value)> {
     let text =
         std::fs::read_to_string(workspace().join("harness-plugins/hooks/hooks.json")).unwrap();
     let hooks: serde_json::Value = serde_json::from_str(&text).unwrap();
     let entries = hooks["hooks"]["PreToolUse"]
         .as_array()
-        .unwrap_or_else(|| panic!("no PreToolUse entry: {hooks}"));
-    let commands: Vec<String> = entries
-        .iter()
-        .flat_map(|entry| entry["hooks"].as_array().cloned().unwrap_or_default())
+        .unwrap_or_else(|| panic!("no PreToolUse entry: {hooks}"))
+        .clone();
+    entries
+        .into_iter()
+        .map(|entry| {
+            let tools = entry["matcher"]
+                .as_str()
+                .unwrap_or_else(|| panic!("an entry without a matcher: {entry}"))
+                .split('|')
+                .map(str::to_owned)
+                .collect();
+            (tools, entry)
+        })
+        .collect()
+}
+
+/// The one command hooks.json declares for one tool at `PreToolUse`: the
+/// line the hook runs before every call of it. Two entries walk the same
+/// candidates and differ in what they do when none judges, so the tool
+/// picks the line (#16 items 2 and 5).
+fn pre_tool_use_command(tool: &str) -> String {
+    let commands: Vec<String> = pre_tool_use_entries()
+        .into_iter()
+        .filter(|(tools, _)| tools.iter().any(|t| t == tool))
+        .flat_map(|(_, entry)| entry["hooks"].as_array().cloned().unwrap_or_default())
         .map(|hook| hook["command"].as_str().unwrap().to_string())
         .collect();
     assert_eq!(
         commands.len(),
         1,
-        "one command judges the call: {commands:?}"
+        "one command judges a {tool} call: {commands:?}"
     );
     commands.into_iter().next().unwrap()
 }
 
 /// `PreToolUse` hands the call to permit, over the three tools the design
-/// names, from the workspace root (harness-design.md §4.4).
+/// names, from the workspace root (harness-design.md §4.4). Each tool is
+/// named by exactly one entry, so no call is judged twice by the command
+/// hook and none is left to no entry at all.
 #[test]
 fn pre_tool_use_judges_the_three_tools_through_permit() {
-    let text =
-        std::fs::read_to_string(workspace().join("harness-plugins/hooks/hooks.json")).unwrap();
-    let hooks: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let entries = hooks["hooks"]["PreToolUse"].as_array().unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0]["matcher"], "Edit|Write|Bash");
-    let command = pre_tool_use_command();
-    assert!(command.contains("cd \"$CLAUDE_PROJECT_DIR\""), "{command}");
-    assert!(command.contains("permit"), "{command}");
+    for tool in JUDGED {
+        let named: Vec<_> = pre_tool_use_entries()
+            .into_iter()
+            .filter(|(tools, _)| tools.iter().any(|t| t == tool))
+            .collect();
+        assert_eq!(named.len(), 1, "{tool} is named by one entry: {named:?}");
+        let command = pre_tool_use_command(tool);
+        assert!(command.contains("cd \"$CLAUDE_PROJECT_DIR\""), "{command}");
+        assert!(command.contains("permit"), "{command}");
+    }
 }
+
+/// The tools permit judges, the matchers' union (harness-design.md §4.4).
+const JUDGED: [&str; 3] = ["Edit", "Write", "Bash"];
 
 /// The candidate that closes the list rebuilds rather than trusting a stale
 /// build, so the hook's budget has to cover a build and not only a judging:
 /// a warm recompile of xtask measured 4.88s when the fallback was written.
 /// A budget too small for it times the hook out, and a call that times out
 /// is a call that passed unjudged, which is the window the fallback closed
-/// (harness-design.md §4.4).
+/// (harness-design.md §4.4). Every entry, since each walks that candidate.
 #[test]
 fn the_hook_leaves_room_for_the_rebuild_its_last_candidate_may_do() {
-    let text =
-        std::fs::read_to_string(workspace().join("harness-plugins/hooks/hooks.json")).unwrap();
-    let hooks: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let timeout = hooks["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"]
-        .as_i64()
-        .expect("the hook declares its timeout");
-    assert!(
-        timeout >= 60,
-        "the cargo candidate needs room to rebuild: {timeout}"
-    );
+    for (tools, entry) in pre_tool_use_entries() {
+        let timeout = entry["hooks"][0]["timeout"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("{tools:?} declares no timeout"));
+        assert!(
+            timeout >= 60,
+            "the cargo candidate needs room to rebuild: {tools:?} {timeout}"
+        );
+    }
 }
 
 /// What a build does when the command runs it: one that stands judges, and
@@ -673,7 +699,7 @@ fn build(root: &Path, path: &str, who: &str, how: Build) {
 /// workspace in `CLAUDE_PROJECT_DIR`, and the scratch `bin` ahead of PATH so
 /// the cargo the command closes with is the one laid down here.
 #[cfg(unix)]
-fn pre_tool_use(root: &Path, stdin: &str) -> (i32, String, String) {
+fn pre_tool_use(root: &Path, tool: &str, stdin: &str) -> (i32, String, String) {
     let path = format!(
         "{}:{}",
         root.join("bin").display(),
@@ -681,7 +707,7 @@ fn pre_tool_use(root: &Path, stdin: &str) -> (i32, String, String) {
     );
     let mut child = Command::new("sh")
         .arg("-c")
-        .arg(pre_tool_use_command())
+        .arg(pre_tool_use_command(tool))
         .current_dir(root)
         .env("CLAUDE_PROJECT_DIR", root)
         .env("PATH", path)
@@ -704,19 +730,26 @@ fn pre_tool_use(root: &Path, stdin: &str) -> (i32, String, String) {
 /// cargo closes the list, rather than the call passing on a stale build's
 /// silence (harness-design.md §4.4). The two adapters resolve the binary in
 /// the same order, so a build that stood for both left the call unjudged
-/// beneath a hook that had already failed open above it.
+/// beneath a hook that had already failed open above it. The walk is one
+/// walk, whichever entry declares it, so both are held to it.
 #[cfg(unix)]
 #[test]
 fn a_build_that_did_not_judge_hands_the_call_to_the_next_candidate() {
     let call = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
     let call = call.trim();
+    for tool in JUDGED {
+        the_walk_is_the_same_for(tool, call);
+    }
+}
 
+#[cfg(unix)]
+fn the_walk_is_the_same_for(tool: &str, call: &str) {
     // The release build stands: it judges, and no other candidate runs.
-    let root = scratch("wiring-stands");
+    let root = scratch(&format!("wiring-stands-{tool}"));
     build(&root, "target/release/xtask", "release", Build::Judges);
     build(&root, "target/debug/xtask", "debug", Build::Judges);
     build(&root, "bin/cargo", "cargo", Build::Judges);
-    let (code, out, err) = pre_tool_use(&root, call);
+    let (code, out, err) = pre_tool_use(&root, tool, call);
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("JUDGED=release"), "{out}");
     assert!(!out.contains("JUDGED=debug"), "one build judges: {out}");
@@ -724,11 +757,11 @@ fn a_build_that_did_not_judge_hands_the_call_to_the_next_candidate() {
     assert!(out.contains(call), "the call reaches the build that judges");
 
     // The release build is older than the manifest: the next one judges.
-    let root = scratch("wiring-stale");
+    let root = scratch(&format!("wiring-stale-{tool}"));
     build(&root, "target/release/xtask", "release", Build::DidNotJudge);
     build(&root, "target/debug/xtask", "debug", Build::Judges);
     build(&root, "bin/cargo", "cargo", Build::Judges);
-    let (code, out, err) = pre_tool_use(&root, call);
+    let (code, out, err) = pre_tool_use(&root, tool, call);
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("JUDGED=debug"), "{out} / {err}");
     assert!(!out.contains("JUDGED=cargo"), "{out}");
@@ -738,14 +771,51 @@ fn a_build_that_did_not_judge_hands_the_call_to_the_next_candidate() {
     );
 
     // No build stands: cargo, which rebuilds rather than trusting one.
-    let root = scratch("wiring-cargo");
+    let root = scratch(&format!("wiring-cargo-{tool}"));
     build(&root, "target/release/xtask", "release", Build::DidNotJudge);
     build(&root, "target/debug/xtask", "debug", Build::DidNotJudge);
     build(&root, "bin/cargo", "cargo", Build::Judges);
-    let (code, out, err) = pre_tool_use(&root, call);
+    let (code, out, err) = pre_tool_use(&root, tool, call);
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("JUDGED=cargo"), "{out} / {err}");
     assert!(out.contains(call), "the call reaches cargo");
+}
+
+/// Where the two entries part (#16 items 2 and 5): with every candidate
+/// refusing, an Edit or a Write is denied, since a write no judge saw does
+/// not proceed, and a Bash call is handed on, since an agent repairs a
+/// broken harness with Bash and denying all three deadlocks the repair. A
+/// deny is exit 0 with the JSON (D.16); the hand-on is the non-zero exit
+/// the host reports as a non-blocking error, and the call proceeds.
+#[cfg(unix)]
+#[test]
+fn with_no_candidate_judging_a_write_is_denied_and_a_bash_call_is_handed_on() {
+    let call = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
+    let call = call.trim();
+    for tool in JUDGED {
+        let root = scratch(&format!("wiring-none-{tool}"));
+        build(&root, "target/release/xtask", "release", Build::DidNotJudge);
+        build(&root, "target/debug/xtask", "debug", Build::DidNotJudge);
+        build(&root, "bin/cargo", "cargo", Build::DidNotJudge);
+        let (code, out, err) = pre_tool_use(&root, tool, call);
+        if tool == "Bash" {
+            assert_ne!(code, 0, "a Bash call is handed on: {out}");
+            assert!(out.trim().is_empty(), "with no decision of its own: {out}");
+            continue;
+        }
+        assert_eq!(code, 0, "a deny is exit 0 with the JSON: {err}");
+        let got: serde_json::Value = serde_json::from_str(out.trim())
+            .unwrap_or_else(|e| panic!("{tool}: {e}: {out} / {err}"));
+        let head = &got["hookSpecificOutput"];
+        assert_eq!(head["hookEventName"], "PreToolUse");
+        assert_eq!(head["permissionDecision"], "deny");
+        let reason = head["permissionDecisionReason"].as_str().expect(&out);
+        assert!(reason.contains("did not judge"), "{reason}");
+        assert!(
+            reason.contains("cargo build -p xtask"),
+            "the repair: {reason}"
+        );
+    }
 }
 
 /// The two halves of `lanes.nightly` the phpt runner asked for (#15): the
