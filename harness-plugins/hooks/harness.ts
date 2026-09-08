@@ -19,8 +19,10 @@
 // allow goes on to the command hook, which records the notes, which is
 // what `--above-the-command-hook` tells permit. Every hook here fails
 // open by construction (§13 item 8): a permit that does not run lets the
-// call through to the command hook, which does not fail open. hooks.json
-// is a person's file under harness.self; this module is not.
+// call through to the command hook, which on an Edit or a Write denies
+// when no candidate of its own judged, and on Bash hands the call on so a
+// broken harness can be repaired (#16 items 2 and 5). hooks.json is a
+// person's file under harness.self; this module is not.
 //
 // `functionHook`: when the manifest declares it under `userConfig` and a
 // person sets it false, the module registers nothing and the command
@@ -36,13 +38,21 @@ import type { EngineInterface, Register, ToolCallInput } from 'claude-code';
 /// at about 200 ms more per call.
 const CARGO_XTASK = ['cargo', 'run', '-q', '-p', 'xtask', '--'] as const;
 
-/// Where a built xtask stands, in the command hook's order (hooks.json).
-const BUILT = ['target/release/xtask', 'target/debug/xtask'] as const;
+/// Where a built xtask stands, debug first: the command hook takes the
+/// release build first, and one stale build that both adapters resolved
+/// the same way took both layers out at once (#16 item 4). The debug build
+/// is the one every `cargo run` and `cargo test` refreshes, so this layer
+/// prefers the build that is freshest in practice while the layer beneath
+/// prefers the release one, and a single stale build no longer silences
+/// them together.
+const BUILT = ['target/debug/xtask', 'target/release/xtask'] as const;
 
-/// The built binaries that stand, then cargo: the command hook's choice,
-/// so the two adapters cost the same at the tool call (§4.4). A binary
-/// built before the manifest it reads exits without judging, so cargo
-/// closes the list rather than the last build standing for it.
+/// The built binaries that stand, then cargo. A binary built before the
+/// manifest it reads, or before the harness's own sources moved, exits
+/// without judging, so cargo closes the list rather than the last build
+/// standing for it (§4.4). The order of the built two is this adapter's
+/// own; the candidate that closes the list is shared, so when every build
+/// is stale both adapters still end at the same rebuild.
 async function xtask($: EngineInterface): Promise<readonly (readonly string[])[]> {
   const built = await Promise.all(
     BUILT.map(async (path) =>
@@ -102,8 +112,8 @@ export const register: Register = (on, options) => {
       const stdin = stdinOf(e, id, cwd);
       // permit's exit is 0 whatever it decides, so a non-zero one is a
       // permit that never judged: the build is older than the manifest it
-      // reads. The next candidate judges, rather than the call passing on
-      // a build's silence.
+      // reads, or than the harness's own sources. The next candidate
+      // judges, rather than the call passing on a build's silence.
       for (const bin of bins) {
         const run = await $.process.run([...bin, 'permit', '--above-the-command-hook'], {
           cwd,

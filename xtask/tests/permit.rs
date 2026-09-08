@@ -669,6 +669,47 @@ fn the_hook_leaves_room_for_the_rebuild_its_last_candidate_may_do() {
     }
 }
 
+/// The two adapters do not resolve the built binaries in one order (#16
+/// item 4): the command hook takes the release build first and the module
+/// beside it the debug one, so one stale build no longer silences both
+/// layers at once, which is how an hour of calls went unjudged. The
+/// candidate that closes each list is the same rebuild, so a tree in which
+/// every build is stale still ends in one place.
+#[test]
+fn the_two_adapters_do_not_walk_the_built_binaries_in_one_order() {
+    let command = pre_tool_use_command("Edit");
+    let walk: Vec<&str> = command
+        .split_once("for x in ")
+        .unwrap_or_else(|| panic!("no walk in {command}"))
+        .1
+        .split_once("; do")
+        .unwrap_or_else(|| panic!("no walk in {command}"))
+        .0
+        .split_whitespace()
+        .collect();
+    let module =
+        std::fs::read_to_string(workspace().join("harness-plugins/hooks/harness.ts")).unwrap();
+    let listed = module
+        .split_once("const BUILT = [")
+        .expect("the module lists the builds it walks")
+        .1
+        .split_once(']')
+        .expect("a list that closes")
+        .0;
+    let order: Vec<&str> = listed
+        .split(',')
+        .map(|path| path.trim().trim_matches('\''))
+        .filter(|path| !path.is_empty())
+        .collect();
+    assert_eq!(walk.len(), 2, "the command hook walks two builds: {walk:?}");
+    assert_eq!(order.len(), 2, "and the module the same two: {order:?}");
+    let mut by_name = (walk.clone(), order.clone());
+    by_name.0.sort_unstable();
+    by_name.1.sort_unstable();
+    assert_eq!(by_name.0, by_name.1, "the same builds");
+    assert_ne!(walk, order, "in orders that do not fall together");
+}
+
 /// What a build does when the command runs it: one that stands judges, and
 /// one older than the manifest or the flag it is handed exits without
 /// judging, the way a build from before `[telemetry]` landed did.
