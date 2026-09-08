@@ -29,11 +29,23 @@
 // Types: `/plugin-types` writes .claude/types/claude-code.d.ts, which the
 // tsconfig beside this folder includes; the import is empty at run time.
 
-import type { Register, ToolCallInput } from 'claude-code';
+import type { EngineInterface, Register, ToolCallInput } from 'claude-code';
 
-/// `cargo run` rather than a built binary: it rebuilds a stale xtask
-/// rather than trusting it (hooks.json says why).
-const XTASK = ['cargo', 'run', '-q', '-p', 'xtask', '--'] as const;
+/// `cargo run` when no binary is built: it rebuilds a stale xtask rather
+/// than trusting it (hooks.json says why), at about 200 ms more per call.
+const CARGO_XTASK = ['cargo', 'run', '-q', '-p', 'xtask', '--'] as const;
+
+/// Where a built xtask stands, in the command hook's order (hooks.json).
+const BUILT = ['target/release/xtask', 'target/debug/xtask'] as const;
+
+/// The built binary when one exists, else cargo: the command hook's
+/// choice, so the two adapters cost the same at the tool call (§4.4).
+async function xtask($: EngineInterface): Promise<readonly string[]> {
+  for (const path of BUILT) {
+    if (await $.fs.exists(path).catch(() => false)) return [path];
+  }
+  return CARGO_XTASK;
+}
 
 /// The name of the block the map and the local facts render under.
 const BLOCK = 'harness';
@@ -81,8 +93,8 @@ export const register: Register = (on, options) => {
     // keeps permit from judging leaves the call to that hook.
     let decision: Decision = {};
     try {
-      const [cwd, id] = await Promise.all([$.session.cwd(), $.session.id()]);
-      const run = await $.process.run([...XTASK, 'permit', '--above-the-command-hook'], {
+      const [cwd, id, bin] = await Promise.all([$.session.cwd(), $.session.id(), xtask($)]);
+      const run = await $.process.run([...bin, 'permit', '--above-the-command-hook'], {
         cwd,
         stdin: stdinOf(e, id, cwd),
         timeoutMs: 30_000,
@@ -112,7 +124,7 @@ export const register: Register = (on, options) => {
       .run(['computed', 'run', '.claude/harness.local.md'], { cwd, timeoutMs: 60_000 })
       .catch(() => undefined);
     const run = await $.process
-      .run([...XTASK, 'status', '--session', '--session-id', id], { cwd, timeoutMs: 120_000 })
+      .run([...CARGO_XTASK, 'status', '--session', '--session-id', id], { cwd, timeoutMs: 120_000 })
       .catch((err: unknown) => ({ exitCode: -1, stdout: '', stderr: String(err) }));
     const text =
       run.exitCode === 0
