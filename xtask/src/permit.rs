@@ -604,16 +604,41 @@ fn region_body(root: &Path, path: &Path, call: &Call) -> Option<Finding> {
     })
 }
 
-/// Write one reading per finding: scope and rule are the rule id, a denial
-/// fails and a note passes, the stamp is over the file the call touches.
-fn record(root: &Path, call: &Call, judgement: &Judgement) -> Result<()> {
-    if judgement.findings.is_empty() {
+/// Which adapter judges the call: the command hook records every
+/// finding; the function hook above it records a denial, which ends the
+/// call there, and leaves a note to the command hook beneath, which sees
+/// the same call and records it once (harness-design.md §4.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Adapter {
+    CommandHook,
+    AboveTheCommandHook,
+}
+
+impl Adapter {
+    fn records(self, kind: Kind) -> bool {
+        match self {
+            Adapter::CommandHook => true,
+            Adapter::AboveTheCommandHook => kind == Kind::Deny,
+        }
+    }
+}
+
+/// Write one reading per finding the adapter records: scope and rule are
+/// the rule id, a denial fails and a note passes, the stamp is over the
+/// file the call touches.
+fn record(root: &Path, call: &Call, judgement: &Judgement, adapter: Adapter) -> Result<()> {
+    let findings: Vec<&Finding> = judgement
+        .findings
+        .iter()
+        .filter(|f| adapter.records(f.kind))
+        .collect();
+    if findings.is_empty() {
         return Ok(());
     }
     let store = Store::of_workspace(root);
     let scope = call.path(root).unwrap_or_else(|| PathBuf::from("."));
     let stamp = Stamp::take(root, &scope)?;
-    for finding in &judgement.findings {
+    for finding in findings {
         let mut reading = Reading::new(INSTRUMENT, &finding.rule);
         reading.rule.clone_from(&finding.rule);
         reading.status = match finding.kind {
@@ -635,10 +660,15 @@ fn record(root: &Path, call: &Call, judgement: &Judgement) -> Result<()> {
 }
 
 /// The command: judge the call on stdin (or in `--json`), print the hook's
-/// JSON, record the findings. Whatever goes wrong before a decision is a
-/// deny that says so, and nothing here returns an error, since a hook
-/// that exits non-zero fails open.
-pub fn run(root: &Path, json: Option<&str>) {
+/// JSON, record the findings the adapter records. Whatever goes wrong
+/// before a decision is a deny that says so, and nothing here returns an
+/// error, since a hook that exits non-zero fails open.
+pub fn run(root: &Path, json: Option<&str>, above_the_command_hook: bool) {
+    let adapter = if above_the_command_hook {
+        Adapter::AboveTheCommandHook
+    } else {
+        Adapter::CommandHook
+    };
     let text = json.map_or_else(
         || {
             let mut bytes = Vec::new();
@@ -660,7 +690,7 @@ pub fn run(root: &Path, json: Option<&str>) {
             if let Some(output) = judgement.hook_output() {
                 println!("{output}");
             }
-            if let Err(err) = record(&root, &call, &judgement) {
+            if let Err(err) = record(&root, &call, &judgement, adapter) {
                 eprintln!("xtask permit: the decision stands but was not recorded: {err:#}");
             }
         }
@@ -739,7 +769,7 @@ impl Judged {
     /// Every finding as a reading, as the hook records one call's.
     pub fn record(&self, root: &Path) -> Result<()> {
         for (path, judgement) in &self.files {
-            record(root, &write_of(path, None), judgement)?;
+            record(root, &write_of(path, None), judgement, Adapter::CommandHook)?;
         }
         Ok(())
     }

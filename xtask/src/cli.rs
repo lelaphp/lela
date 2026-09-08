@@ -52,9 +52,14 @@ pub enum Command {
     /// Judge one intended tool call from the `PreToolUse` hook's stdin; the
     /// decision is the JSON on stdout and the exit is 0 always.
     Permit {
-        /// The call as a JSON argument instead of stdin (the function-hook adapter).
+        /// The call as a JSON argument instead of stdin.
         #[arg(long, value_name = "JSON", conflicts_with_all = ["bench", "diff"])]
         json: Option<String>,
+        /// The function-hook adapter's call: a denial ends the call here and
+        /// is recorded; an allow goes on to the command hook beneath, which
+        /// records the notes, so a note is one reading and not two.
+        #[arg(long, conflicts_with_all = ["bench", "diff"])]
+        above_the_command_hook: bool,
         /// Judge the staged diff, each file as the `Write` of its staged
         /// content (pre-commit); exit 1 while any is denied.
         #[arg(long, conflicts_with = "bench")]

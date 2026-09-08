@@ -373,6 +373,68 @@ fn a_note_rides_on_an_allow_as_additional_context_and_is_a_reading() {
     assert_eq!(reading.status, Status::Pass);
 }
 
+/// The function-hook adapter judges a call before the command hook does
+/// (harness-design.md §4.4): its denial ends the call and is recorded
+/// here, while an allow goes on to the command hook, which records the
+/// notes, so a note is one line of the log and not two.
+#[test]
+fn above_the_command_hook_a_denial_is_recorded_and_a_note_is_left_to_it() {
+    let root = scratch("above");
+    let dir = fixtures();
+    let stdin = std::fs::read_to_string(dir.join("rules/api.lock-line/note.json")).unwrap();
+    let (code, out, err) = permit(&root, &stdin, &["--above-the-command-hook"]);
+    assert_eq!(code, 0, "{err}");
+    let got: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let context = got["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(context.contains("api.lock-line"), "{context}");
+    let store = Store::of_workspace(&root);
+    assert!(
+        store.read("permit", "api.lock-line").unwrap().is_none(),
+        "the note is the command hook's to record"
+    );
+
+    let stdin = std::fs::read_to_string(dir.join("hooks/pretooluse-deny.json")).unwrap();
+    let (code, out, err) = permit(&root, &stdin, &["--above-the-command-hook"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\"deny\""), "{out}");
+    let reading = store
+        .read("permit", "harness.self")
+        .unwrap()
+        .expect("the denial ends the call here and is recorded here");
+    assert_eq!(reading.status, Status::Fail);
+}
+
+/// The adapter hands the call to permit on stdin, which no argument-length
+/// limit bounds (harness-design.md §13 D.17): a Write of several megabytes
+/// is judged whole.
+#[test]
+fn a_large_write_on_stdin_is_judged_whole() {
+    let root = scratch("large");
+    let content = format!(
+        "{}\nstatic X: std::sync::Mutex<u8> = todo!();\n",
+        "// ".repeat(1 << 20)
+    );
+    assert!(content.len() > 3_000_000);
+    let call = serde_json::json!({
+        "session_id": "s", "cwd": root, "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {"file_path": "ext/pcre/src/cache.rs", "content": content},
+    });
+    let (code, out, err) = permit(&root, &call.to_string(), &[]);
+    assert_eq!(code, 0, "{err}");
+    let reason = serde_json::from_str::<serde_json::Value>(&out).unwrap()["hookSpecificOutput"]
+        ["permissionDecisionReason"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        reason.contains("ext.no-locks"),
+        "the lock at the end of the file was read: {reason}"
+    );
+}
+
 #[test]
 fn a_call_that_cannot_be_read_is_denied_not_dropped() {
     let root = scratch("garbage");

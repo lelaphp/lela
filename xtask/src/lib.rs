@@ -62,6 +62,7 @@ pub fn run() -> Result<()> {
         } => status_command(&manifest, &store, &root, section, format, week, session_id),
         Command::Permit {
             json,
+            above_the_command_hook,
             bench,
             runs,
             diff,
@@ -71,7 +72,7 @@ pub fn run() -> Result<()> {
             } else if diff {
                 permit::run_diff(&root, &manifest)
             } else {
-                permit::run(&root, json.as_deref());
+                permit::run(&root, json.as_deref(), above_the_command_hook);
                 Ok(())
             }
         }

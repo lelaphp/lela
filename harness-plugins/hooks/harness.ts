@@ -3,39 +3,102 @@
 // own marketplace (.claude-plugin/marketplace.json).
 //
 // Two hooks, and nothing the shipped command hooks do not also do except
-// the refresh. `prompt.context` renders the local facts and appends the
+// the refresh and in-process latency. `tool.call` on Edit, Write and Bash
+// hands the call to `xtask permit` on stdin, the shape the command hook
+// reads, and returns its deny, or the tool's result with the notes as
+// context; after a Bash call that ran an instrument it invalidates
+// `prompt.context`, so the next read of the facts is fresh (§7, "what the
+// agent sees"). `prompt.context` renders the local facts and appends the
 // map plus the local facts as one block, `xtask status --session`, with
-// the session's id so the permits section can say "this session"
-// (§4.6). The SessionStart command hook wires pre-push and renders the
-// local file, and prints nothing: this block is how the map reaches the
-// model, so a session without the plugin has none (§5). `tool.call` on Bash lets the call through and, when the
-// command ran an instrument, invalidates `prompt.context` so the next
-// read of the facts is fresh (§7, "what the agent sees").
+// the session's id so the permits section can say "this session" (§4.6);
+// the SessionStart command hook prints no map, so a session without this
+// module has none (§5).
 //
-// `permit` is not called here: the PreToolUse command hook in hooks.json
-// beside this file runs first on every Edit, Write and Bash and its deny
-// ends the call, so a second judge would record every note twice in the
-// reading log. Every hook here fails open by construction (§13 item 8);
-// the command hooks beneath do not, and hooks.json is a person's file
-// under harness.self while this module is not.
+// The command hook in hooks.json beside this file judges the same call
+// beneath this one. A denial here ends the call and is recorded here; an
+// allow goes on to the command hook, which records the notes, which is
+// what `--above-the-command-hook` tells permit. Every hook here fails
+// open by construction (§13 item 8): a permit that does not run lets the
+// call through to the command hook, which does not fail open. hooks.json
+// is a person's file under harness.self; this module is not.
+//
+// `functionHook`: when the manifest declares it under `userConfig` and a
+// person sets it false, the module registers nothing and the command
+// hooks alone are exercised; undeclared, the module is on.
 //
 // Types: `/plugin-types` writes .claude/types/claude-code.d.ts, which the
 // tsconfig beside this folder includes; the import is empty at run time.
 
-import type { Register } from 'claude-code';
+import type { Register, ToolCallInput } from 'claude-code';
 
-/// `cargo run` rather than a built binary: once per session, and it
-/// rebuilds a stale xtask rather than trusting it (hooks.json says why).
+/// `cargo run` rather than a built binary: it rebuilds a stale xtask
+/// rather than trusting it (hooks.json says why).
 const XTASK = ['cargo', 'run', '-q', '-p', 'xtask', '--'] as const;
 
 /// The name of the block the map and the local facts render under.
 const BLOCK = 'harness';
 
+/// The tools permit judges: the command hook's matcher (§4.4).
+const JUDGED = ['Edit', 'Write', 'Bash'] as const;
+
 /// A Bash command that ran an instrument: `cargo xtask …`, `xtask …`, or
 /// a built binary by path. The facts it may have changed are re-read.
 const RAN_AN_INSTRUMENT = /(^|[\s;&|])(cargo\s+xtask|xtask|\S*\/xtask)\b/;
 
-export const register: Register = (on) => {
+/// The hook's stdin for one call (§13 D.16): the head permit reads and
+/// the tool's own arguments as `tool_input`, the event's reserved keys
+/// left out.
+function stdinOf(e: ToolCallInput, session_id: string, cwd: string): string {
+  const { tool, tool_use_id, consent: _consent, ...tool_input } = e as ToolCallInput & {
+    consent?: string;
+  };
+  return JSON.stringify({
+    session_id,
+    cwd,
+    hook_event_name: 'PreToolUse',
+    tool_name: tool,
+    tool_input,
+    tool_use_id,
+  });
+}
+
+/// What permit printed: the deny's reason, the allow's notes, or nothing.
+function decisionOf(stdout: string): { deny?: string; notes?: string } {
+  if (stdout.trim() === '') return {};
+  const head = (JSON.parse(stdout) as { hookSpecificOutput?: Record<string, string> })
+    .hookSpecificOutput;
+  if (head?.permissionDecision === 'deny') return { deny: head.permissionDecisionReason };
+  return { notes: head?.additionalContext };
+}
+
+export const register: Register = (on, options) => {
+  if (options.functionHook === false) return;
+
+  on('tool.call', { tool: JUDGED }, async ($, e, next) => {
+    // permit before the call, as the command hook beneath is; whatever
+    // keeps permit from judging leaves the call to that hook.
+    let decision: { deny?: string; notes?: string } = {};
+    try {
+      const [cwd, id] = await Promise.all([$.session.cwd(), $.session.id()]);
+      const run = await $.process.run([...XTASK, 'permit', '--above-the-command-hook'], {
+        cwd,
+        stdin: stdinOf(e, id, cwd),
+        timeoutMs: 30_000,
+      });
+      if (run.exitCode === 0) decision = decisionOf(run.stdout);
+    } catch {
+      decision = {};
+    }
+    if (decision.deny !== undefined) return { deny: decision.deny };
+
+    const result = await next(e);
+    if (e.tool === 'Bash' && RAN_AN_INSTRUMENT.test(e.command)) {
+      $.ui.invalidate('prompt.context');
+    }
+    if (decision.notes === undefined || result.deny !== undefined) return result;
+    return { ...result, context: [...(result.context ?? []), decision.notes] };
+  });
+
   on('prompt.context', async ($, e, next) => {
     const out = await next(e);
     const cwd = await $.session.cwd();
@@ -54,13 +117,5 @@ export const register: Register = (on) => {
         ? run.stdout
         : `harness: \`xtask status --session\` did not run (exit ${run.exitCode}); the map and the local facts are missing from this block. Fix the build of xtask.\n${run.stderr}`;
     return { blocks: [...out.blocks.filter((b) => b.name !== BLOCK), { name: BLOCK, text }] };
-  });
-
-  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    const result = await next(e);
-    if (RAN_AN_INSTRUMENT.test(e.command)) {
-      $.ui.invalidate('prompt.context');
-    }
-    return result;
   });
 };
