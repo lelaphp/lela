@@ -152,40 +152,107 @@ pub struct Output {
     pub wall: Duration,
 }
 
+/// One invocation under the pin's recipe: which binary runs, which program,
+/// which regime, and the four things a `.phpt` section adds to a run. Every
+/// field past the program is empty for a witness, which is why `run` takes
+/// none of them.
+#[derive(Debug, Clone)]
+pub struct Invocation<'a> {
+    /// The pinned php for the oracle; the engine's own binary for a phpt
+    /// lane, so that both run under one recipe.
+    pub binary: &'a Path,
+    pub program: Program<'a>,
+    /// A `[regime.<name>]` of the pin, its ini after the recipe's.
+    pub regime: Option<&'a str>,
+    /// Ini after the recipe's and the regime's: a test's `--INI--`.
+    pub ini: &'a [String],
+    /// Arguments after the script: a test's `--ARGS--`.
+    pub args: &'a [String],
+    /// Environment entries added to the recipe's: a test's `--ENV--`.
+    pub env: &'a [(String, String)],
+    /// What the program reads on stdin: a test's `--STDIN--`, and nothing
+    /// otherwise, which is what the recipe's own runs read.
+    pub stdin: Option<&'a [u8]>,
+    /// Whether the second stream is the first: upstream's `2>&1`, which is
+    /// how a phpt run is captured unless `--CAPTURE_STDIO--` says
+    /// otherwise (run-tests.php:1885-1889). A witness pins the two apart.
+    pub merge_streams: bool,
+}
+
+impl<'a> Invocation<'a> {
+    /// `binary` running `program` under the recipe and nothing more.
+    pub fn new(binary: &'a Path, program: Program<'a>) -> Invocation<'a> {
+        Invocation {
+            binary,
+            program,
+            regime: None,
+            ini: &[],
+            args: &[],
+            env: &[],
+            stdin: None,
+            merge_streams: false,
+        }
+    }
+}
+
 /// Run `program` under the pin's recipe, with `regime`'s ini after it when
 /// one is named, and return the normalised output. The digest is asserted
 /// first; the process runs with the recipe's environment alone, in the
 /// program's directory, under the recipe's timeout.
 pub fn run(pin: &Pin, program: Program<'_>, regime: Option<&str>) -> Result<Output> {
     pin.assert_digest()?;
-    let regime = regime.map(|name| pin.regime(name)).transpose()?;
+    run_under(
+        pin,
+        &Invocation {
+            regime,
+            ..Invocation::new(&pin.oracle.path, program)
+        },
+    )
+}
+
+/// Run one invocation under the recipe and return the normalised output.
+/// The digest is the pinned binary's alone and `run` asserts it; a phpt
+/// lane runs the engine's binary here, under the same recipe, which is
+/// what makes the two comparable (harness-design.md §4.3, design §8).
+pub fn run_under(pin: &Pin, call: &Invocation<'_>) -> Result<Output> {
+    let regime = call.regime.map(|name| pin.regime(name)).transpose()?;
     let recipe = &pin.recipe;
 
-    let scratch = Scratch::for_program(recipe, program)?;
-    let mut cmd = Command::new(&pin.oracle.path);
+    let scratch = Scratch::for_program(recipe, call.program)?;
+    let mut cmd = Command::new(call.binary);
     cmd.args(&recipe.args);
     for ini in recipe
         .ini
         .iter()
         .chain(regime.into_iter().flat_map(|r| &r.ini))
+        .chain(call.ini)
     {
         cmd.arg("-d").arg(ini);
     }
-    cmd.arg(&scratch.script).current_dir(&scratch.dir);
+    cmd.arg(&scratch.script)
+        .args(call.args)
+        .current_dir(&scratch.dir);
     if recipe.env_clear {
         cmd.env_clear();
     }
     cmd.envs(&recipe.env);
+    cmd.envs(call.env.iter().map(|(name, value)| (name, value)));
     let out_path = scratch.own.join("stdout");
     let err_path = scratch.own.join("stderr");
-    cmd.stdin(Stdio::null())
-        .stdout(File::create(&out_path).context("creating the stdout file")?)
-        .stderr(File::create(&err_path).context("creating the stderr file")?);
+    let out_file = File::create(&out_path).context("creating the stdout file")?;
+    let err_file = if call.merge_streams {
+        out_file.try_clone().context("sharing the stdout file")?
+    } else {
+        File::create(&err_path).context("creating the stderr file")?
+    };
+    cmd.stdin(stdin_of(&scratch, call.stdin)?)
+        .stdout(out_file)
+        .stderr(err_file);
 
     let started = Instant::now();
     let mut child = cmd
         .spawn()
-        .with_context(|| format!("running {}", pin.oracle.path.display()))?;
+        .with_context(|| format!("running {}", call.binary.display()))?;
     let limit = Duration::from_secs(recipe.limits.timeout_s);
     let status = loop {
         if let Some(status) = child.try_wait().context("waiting for php")? {
@@ -195,7 +262,8 @@ pub fn run(pin: &Pin, program: Program<'_>, regime: Option<&str>) -> Result<Outp
             let _ = child.kill();
             let _ = child.wait();
             bail!(
-                "php ran past the recipe's limit of {} s on {}",
+                "{} ran past the recipe's limit of {} s on {}",
+                call.binary.display(),
                 recipe.limits.timeout_s,
                 scratch.script.display()
             );
@@ -205,13 +273,54 @@ pub fn run(pin: &Pin, program: Program<'_>, regime: Option<&str>) -> Result<Outp
     let wall = started.elapsed();
 
     let stdout = fs::read(&out_path).context("reading php's stdout")?;
-    let stderr = fs::read(&err_path).context("reading php's stderr")?;
+    let stderr = if call.merge_streams {
+        Vec::new()
+    } else {
+        fs::read(&err_path).context("reading php's stderr")?
+    };
     Ok(Output {
         stdout: scratch.normalise(&recipe.normalise, stdout),
         stderr: scratch.normalise(&recipe.normalise, stderr),
         exit: status.code(),
         wall,
     })
+}
+
+/// The program's stdin: a file holding what a test's `--STDIN--` gives,
+/// and nothing at all otherwise.
+fn stdin_of(scratch: &Scratch, bytes: Option<&[u8]>) -> Result<Stdio> {
+    let Some(bytes) = bytes else {
+        return Ok(Stdio::null());
+    };
+    let path = scratch.own.join("stdin");
+    fs::write(&path, bytes).context("writing the program's stdin")?;
+    Ok(Stdio::from(
+        File::open(&path).context("opening the program's stdin")?,
+    ))
+}
+
+/// The recipe's normalisation of bytes that are not a stream of one run:
+/// CRLF to LF and php's trim set off both ends. What a run's streams go
+/// through is [`Scratch::normalise`], which is this and the scratch prefix;
+/// what a `.phpt` expectation goes through is this alone, since an
+/// expectation ran in no directory. The trim set is the recipe's and is
+/// read nowhere else (design §8).
+pub fn normalise(rules: &Normalise, bytes: Vec<u8>) -> Vec<u8> {
+    let bytes = if rules.crlf_to_lf {
+        replace(&bytes, b"\r\n", b"\n")
+    } else {
+        bytes
+    };
+    let trim: &[u8] = rules.trim.as_bytes();
+    let start = bytes
+        .iter()
+        .position(|b| !trim.contains(b))
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|b| !trim.contains(b))
+        .map_or(start, |i| i + 1);
+    bytes[start..end].to_vec()
 }
 
 /// Where a program runs: its directory and script, and a directory of this
@@ -249,23 +358,11 @@ impl Scratch {
         Ok(Scratch { dir, script, own })
     }
 
-    /// The recipe's normalisation: CRLF to LF, the trim set off both ends,
-    /// and the scratch directory, as given and as the kernel resolves it,
-    /// replaced by the token.
-    fn normalise(&self, rules: &Normalise, mut bytes: Vec<u8>) -> Vec<u8> {
-        if rules.crlf_to_lf {
-            bytes = replace(&bytes, b"\r\n", b"\n");
-        }
-        let trim: &[u8] = rules.trim.as_bytes();
-        let start = bytes
-            .iter()
-            .position(|b| !trim.contains(b))
-            .unwrap_or(bytes.len());
-        let end = bytes
-            .iter()
-            .rposition(|b| !trim.contains(b))
-            .map_or(start, |i| i + 1);
-        bytes = bytes[start..end].to_vec();
+    /// The recipe's normalisation of a stream: [`normalise`], and then the
+    /// scratch directory, as given and as the kernel resolves it, replaced
+    /// by the token.
+    fn normalise(&self, rules: &Normalise, bytes: Vec<u8>) -> Vec<u8> {
+        let mut bytes = normalise(rules, bytes);
         let mut forms = vec![self.dir.clone()];
         if let Ok(real) = self.dir.canonicalize() {
             forms.push(real);
@@ -325,7 +422,22 @@ pub enum Verdict {
 /// `open` or `fixed` row accepts nothing. Proposing a row for a `Differs`
 /// is the caller's, through `Registry::propose`.
 pub fn compare(registry: &Registry, id: &str, expected: &[u8], actual: &[u8]) -> Verdict {
-    if expected == actual {
+    verdict(registry, id, expected == actual, expected, actual)
+}
+
+/// The verdict when what stands for equality is a match the caller made
+/// rather than the bytes themselves: the phpt runner's `--EXPECTF--` and
+/// `--EXPECTREGEX--`, whose expectation is a pattern. `met` stands where
+/// `expected == actual` stands in `compare`, so one place decides what the
+/// registry means and no instrument diffs on its own.
+pub fn verdict(
+    registry: &Registry,
+    id: &str,
+    met: bool,
+    expected: &[u8],
+    actual: &[u8],
+) -> Verdict {
+    if met {
         return Verdict::Same;
     }
     match registry.accepted(id) {

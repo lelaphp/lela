@@ -22,8 +22,7 @@ I want Zend's design with better tooling, and nothing beside it. No second execu
 - **you** means the agent reading this file; **we** and **a person** mean Mitchell and the reviewers. Harness §11 lists what only a person does.
 - **oracle** means the real `php` binary pinned in `oracle.toml`; **witness** means a PHP snippet in rustdoc beside the code it exercises, with the oracle's output pinned next to it.
 - **seam** means a place where behaviour can be swapped without editing there; **lock** means the listed items that cross one; **manifest** means `seams.toml`, the file every rule sensor is derived from.
-- **instrument** means one `xtask` subcommand that measures or judges something and writes a **reading**; **divergence** means one accepted difference from the oracle, a row in `docs/divergence.toml` with a reason a person wrote.
-- **region** means a block of a Markdown file that `computed` renders from a command. Its body is never typed by hand.
+- **instrument** means one `xtask` subcommand that measures or judges something and writes a **reading**; **divergence** means one accepted difference from the oracle, a row in `docs/divergence.toml` with a reason a person wrote; **region** means a block of a Markdown file that `computed` renders from a command. Its body is never typed by hand.
 
 ## The five ways to hurt yourself
 
@@ -124,6 +123,7 @@ Commands:
   done               The definition of done: print the conditions unmet for the changes since the base and exit 1 while any is; the Stop hook, pre-push and CI read the same list
   budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code and a stale generated file
   clippy             `cargo clippy` with every warning denied, on every target of each crate, as the reading `done` reads; one reading per crate
+  phpt               Run a subset of the pinned `.phpt` corpus through the engine and hold each test to its `--EXPECT*--` section; one reading per subset, scoped to the crate whose subset it is
   unsafe-audit       Allow `unsafe` only in the homes the manifest's unsafe.homes rule names
   generate           Write the files the manifest's `generated` rules render (ext/clippy.toml)
   divergence-reason  Hold the divergence registry to the manifest rule whose `check` names this instrument: an accepted row has a reason a person wrote
@@ -134,7 +134,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=15e288ad91dd5153afeac0eb70d300028c6e32736fbc9d3e4c9375e4ab6425fc out=ad666c01bd104716127bbec640a8f89208c14c28d831af96fc3c976fc4c4c491 -->
+<!-- /computed in=f0d4e0f008cfca3f787714065cbf3b0ee80a55de8e0a0b8a0209ea597e00a573 out=7b2b15ef01f6793f6f53e2ed6f2d9e23be34a7d22ab29cb1133e1b979e555d12 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

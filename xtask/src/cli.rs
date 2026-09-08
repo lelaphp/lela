@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
+use crate::phpt::Lane;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "xtask",
@@ -95,6 +97,27 @@ pub enum Command {
         /// Only the crates with a staged change (pre-commit's touched crates).
         #[arg(long)]
         staged: bool,
+    },
+    /// Run a subset of the pinned `.phpt` corpus through the engine and
+    /// hold each test to its `--EXPECT*--` section; one reading per subset,
+    /// scoped to the crate whose subset it is.
+    Phpt {
+        /// The subset: an extension by name (`pcre`, `ext/pcre`) or a
+        /// directory of the pinned php-src tree (`Zend/tests`). One of
+        /// this and `--full` is named; which subsets a lane runs is the
+        /// design's sentence and belongs in the manifest.
+        #[arg(long, value_name = "NAME", conflicts_with = "full")]
+        subset: Option<String>,
+        /// Every subset of the corpus: the nightly lane, which CI runs.
+        #[arg(long)]
+        full: bool,
+        /// The compiled tier's lane: the engine runs under `jit.mode`.
+        #[arg(long, value_name = "MODE")]
+        jit: Option<Lane>,
+        /// The binary the process adapter runs; without it, the engine's
+        /// own where cargo puts it.
+        #[arg(long, value_name = "PATH")]
+        engine: Option<PathBuf>,
     },
     /// Allow `unsafe` only in the homes the manifest's unsafe.homes rule names.
     UnsafeAudit,

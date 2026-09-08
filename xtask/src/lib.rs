@@ -2,8 +2,8 @@
 //! manifest and the oracle pin loaded by one reader, the oracle module that
 //! owns every comparison and the divergence registry, the reading and its
 //! store, the instruments, `permit`, the judge at the tool call, `done`,
-//! the definition of done, `vocab`, the glossary as a sensor, and
-//! `status`, the one renderer.
+//! the definition of done, `vocab`, the glossary as a sensor, `phpt`, the
+//! subset runner, and `status`, the one renderer.
 #![forbid(unsafe_code)]
 
 pub mod api_check;
@@ -21,6 +21,7 @@ pub mod manifest;
 pub mod new_ext;
 pub mod oracle;
 pub mod permit;
+pub mod phpt;
 pub mod reading;
 pub mod sources;
 pub mod status;
@@ -99,6 +100,12 @@ pub fn run() -> Result<()> {
             };
             record(&store, &readings)
         }
+        Command::Phpt {
+            subset,
+            full,
+            jit,
+            engine,
+        } => phpt_command(&root, &manifest, &store, subset, full, jit, engine),
         Command::UnsafeAudit => record(&store, &unsafe_audit::run(&root, &manifest)?),
         Command::Generate => {
             for path in generated::write_all(&root, &manifest)? {
@@ -159,6 +166,26 @@ pub fn record(store: &Store, readings: &[Reading]) -> Result<()> {
         bail!("{failed} of {} readings failed", readings.len());
     }
     Ok(())
+}
+
+/// `xtask phpt`: the subsets asked for, each run and each written.
+fn phpt_command(
+    root: &Path,
+    manifest: &Manifest,
+    store: &Store,
+    subset: Option<String>,
+    full: bool,
+    jit: Option<phpt::Lane>,
+    engine: Option<PathBuf>,
+) -> Result<()> {
+    let registry = Registry::load(root)?;
+    let ask = phpt::Ask {
+        subset,
+        full,
+        lane: jit,
+        engine,
+    };
+    record(store, &phpt::run(root, manifest, &registry, &ask)?)
 }
 
 /// `xtask status`: one section, or with no section the map and the local

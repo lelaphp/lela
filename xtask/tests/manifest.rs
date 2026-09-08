@@ -154,13 +154,19 @@ fn a_week_row_names_the_readings_that_measure_its_bar() {
 #[test]
 fn a_week_read_names_an_instrument_xtask_has() {
     let text = format!(
-        "{MINIMAL}\n[[week]]\ndays = \"3-7\"\ntext = \"t\"\nreads = [{{ instrument = \"phpt\", scope = \"tests/basic\" }}]\n"
+        "{MINIMAL}\n[[week]]\ndays = \"3-7\"\ntext = \"t\"\nreads = [{{ instrument = \"phpt-nightly\", scope = \"tests/basic\" }}]\n"
     );
     let err = Manifest::parse(&text).unwrap_err().to_string();
     assert!(
-        err.contains("3-7") && err.contains("phpt") && err.contains("instrument"),
+        err.contains("3-7") && err.contains("phpt-nightly") && err.contains("instrument"),
         "{err}"
     );
+
+    // The same row naming the instrument that now exists parses.
+    let text = format!(
+        "{MINIMAL}\n[[week]]\ndays = \"3-7\"\ntext = \"t\"\nreads = [{{ instrument = \"phpt\", scope = \"ext/pcre\" }}]\n"
+    );
+    assert!(Manifest::parse(&text).is_ok());
 }
 
 /// `[telemetry] silent_days` is the window of the silent query (harness
