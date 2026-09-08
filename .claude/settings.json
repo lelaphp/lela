@@ -2,6 +2,9 @@
   "env": {
     "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"
   },
+  "enabledPlugins": {
+    "harness@dax-php": true
+  },
   "extraKnownMarketplaces": {
     "dax-php": {
       "source": {
@@ -9,8 +12,5 @@
         "path": "."
       }
     }
-  },
-  "enabledPlugins": {
-    "harness@dax-php": true
   }
 }
