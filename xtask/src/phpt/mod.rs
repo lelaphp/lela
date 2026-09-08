@@ -28,10 +28,11 @@
 //! rule; `--subset` is the form an agent runs. A CGI-shaped test, a
 //! `--PHPDBG--` one and a `--REDIRECTTEST--` are skipped with their reason:
 //! this runner hosts the command line. Beyond those, the process adapter
-//! gives a test one stdin and two streams captured as one; a test that
+//! gives a test one stdin and two streams captured as one, so a test that
 //! wants a terminal on a stream it did not capture, an interactive shell
-//! or a listening server is where the runner and upstream still part, and
-//! the control on `sapi/cli/tests` names them.
+//! or a listening server is where the runner and upstream still part; the
+//! four of `sapi/cli/tests` that do are named in harness-design.md §12
+//! item 17.
 
 pub mod expect;
 pub mod file;

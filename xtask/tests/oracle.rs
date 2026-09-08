@@ -245,3 +245,48 @@ fn the_fixture_comparison_fails() {
     assert!(diff.contains("-float(0.1)"), "{diff}");
     assert!(diff.contains("+float(0.10000000000000001)"), "{diff}");
 }
+
+/// `verdict` is `compare` with the caller's match standing where byte
+/// equality stands, so an expectation that is a pattern still asks the
+/// registry and nothing decides a difference twice (§4.3, ledger 12).
+#[test]
+fn verdict_is_compare_with_the_callers_match_in_place_of_equal_bytes() {
+    let registry = registry();
+    for (expected, actual) in [(&b"a"[..], &b"a"[..]), (b"a", b"b")] {
+        let met = expected == actual;
+        assert_eq!(
+            oracle::verdict(&registry, "witness:x", met, expected, actual),
+            oracle::compare(&registry, "witness:x", expected, actual)
+        );
+    }
+    // A pattern that matched bytes that are not its own is `Same`, which
+    // byte equality alone would have called a difference.
+    assert!(matches!(
+        oracle::verdict(
+            &registry,
+            "phpt:php-src/x.phpt",
+            true,
+            b"%s on line %d",
+            b"one on line 3"
+        ),
+        Verdict::Same
+    ));
+    // One that did not match asks the registry, and an accepted row
+    // answers a pattern as it answers bytes.
+    let missed = oracle::verdict(
+        &registry,
+        "trace:nested-entry-return",
+        false,
+        b"TRACE stop at %d",
+        b"TRACE stop at 3",
+    );
+    match missed {
+        Verdict::Diverged(row) => assert_eq!(row.id, "trace:nested-entry-return"),
+        other => panic!("{other:?}"),
+    }
+    let unaccepted = oracle::verdict(&registry, "phpt:php-src/no-row.phpt", false, b"%d", b"x");
+    match unaccepted {
+        Verdict::Differs(diff) => assert!(diff.contains("-%d") && diff.contains("+x"), "{diff}"),
+        other => panic!("{other:?}"),
+    }
+}

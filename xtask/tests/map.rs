@@ -23,13 +23,33 @@ fn opener<'a>(text: &'a str, name: &str) -> Option<&'a str> {
         .find(|l| l.starts_with("<!-- computed ") && l.contains(&format!(" name={name}")))
 }
 
+/// The ceiling of harness §5 holds what a person wrote, not what a region
+/// rendered: `instruments` grows one line per instrument and `layout` one
+/// per crate, and neither is the map being verbose.
+fn prose(map: &str) -> usize {
+    let mut inside = false;
+    map.lines()
+        .filter(|line| {
+            if line.starts_with("<!-- computed ") {
+                inside = true;
+                return false;
+            }
+            if line.starts_with("<!-- /computed") {
+                inside = false;
+                return false;
+            }
+            !inside
+        })
+        .count()
+}
+
 #[test]
-fn the_map_is_under_150_lines_with_the_six_regions_of_the_design() {
+fn the_map_is_under_100_written_lines_with_the_six_regions_of_the_design() {
     let map = read("AGENTS.md");
-    let lines = map.lines().count();
+    let lines = prose(&map);
     assert!(
-        lines <= 150,
-        "AGENTS.md is {lines} lines; the map is at most 150 (harness §5)"
+        lines <= 100,
+        "AGENTS.md is {lines} lines outside its computed regions; the map is at most 100 (harness §5)"
     );
     let regions = [
         ("design-of-record", "ls "),
@@ -64,6 +84,26 @@ fn the_map_is_under_150_lines_with_the_six_regions_of_the_design() {
         map.lines().all(|l| l != "<!-- /computed -->"),
         "every region of the map is rendered"
     );
+}
+
+/// The ceiling reads the map's own lines and not a region's: a region that
+/// grows by fifty lines is the harness growing, and only a hand-written
+/// line past the ceiling fails (harness §5, ledger 12).
+#[test]
+fn the_ceiling_counts_what_a_person_wrote_and_not_what_a_region_rendered() {
+    let map = read("AGENTS.md");
+    let written = prose(&map);
+    assert!(written < map.lines().count(), "the map has regions");
+
+    let instruments = opener(&map, "instruments").expect("the map has the instruments region");
+    let grown = map.replace(
+        instruments,
+        &format!("{instruments}\n{}", "one more instrument\n".repeat(50)),
+    );
+    assert_eq!(prose(&grown), written, "a region's growth is not the map's");
+
+    let padded = format!("a line a person wrote\n{map}");
+    assert_eq!(prose(&padded), written + 1);
 }
 
 #[test]
