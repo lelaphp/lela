@@ -1,0 +1,11 @@
+{
+  "name": "dax-php",
+  "owner": { "name": "Mitchell van Wijngaarden" },
+  "plugins": [
+    {
+      "name": "harness",
+      "source": "./harness-plugins",
+      "description": "The function-hook adapter of the harness (harness-design.md §4.4, §5)."
+    }
+  ]
+}
