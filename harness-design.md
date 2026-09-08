@@ -43,6 +43,8 @@ Check: the six are wrong if the manifest cannot express a rule the design has (�
 
 **8. Revision 8 (2026-09-08).** The sensor telemetry was built (#11) and two facts moved into the manifest: `[telemetry] silent_days`, so the fourteen-day window of §7 is the file's and not a constant's, and `[[week]]`, whose reads must name an instrument `xtask` has, so a bar row arrives with its instrument and never before. The reading gained `session`, the hook's `session_id`, and §4.6's "this session" is a rendering of it. The function hook of §4.4 exists as `harness-plugins/`, loaded with `--plugin-dir`; it carries the map through `prompt.context`, and the SessionStart command hook now renders the local file and prints nothing, so a session without the plugin has no map (§5). The check: `cargo test -p xtask` holds the grammar and the renderings; `claude plugin validate harness-plugins --strict` and `tsc -p harness-plugins` hold the adapter.
 
+**9. Revision 9 (2026-09-08).** Two plugins carried one harness: the command hooks in `.claude/skills/third-engine-harness/`, loaded by the skills-directory scan, and the function-hook module in `harness-plugins/`, loaded from the marketplace. They are one plugin now, `harness-plugins/`, whose `hooks.json` carries the three command hooks and names the module. What kept the command hooks a person's was `harness.self` on `.claude/**`; the rule now names `harness-plugins/hooks/hooks.json` and `plugin.json` too, and the `harness` budget counts both trees. Check: `cargo test -p xtask --test map --test done` reads the hooks at the new path; `xtask permit` denies a Write to the plugin's `hooks.json`.
+
 ---
 
 ## 2. Vocabulary
@@ -257,7 +259,7 @@ The two rows the JIT note carries in prose and the runner disagreements revision
 
 **Implementation.** The `[[rule]]` rows of the manifest with a `tool` or a `scope`, evaluated in order: the region-body check of revision 2 (an `Edit` whose `old_string` lies in a computed region body, CM ADR 0005), `witness.exit-authored`, `unsafe.homes`, `ext.no-locks`, `api.lock-line` as a note, `git.no-verify`, `lanes.nightly`, `computed.force`, `harness.self`. Argument parsing for `Bash` is conservative, splitting on unquoted whitespace and `;`, `&&`, `|`; pre-commit remains the sensor of record for what a shell can hide. Path to crate is one function over the manifest's `[[crate]]` rows.
 
-**Adapters, two.** The shipped command hook, always on: `PreToolUse` with matcher `Edit|Write|Bash`, command `xtask permit` reading stdin, in `.claude/skills/third-engine-harness/hooks/hooks.json`. The function hook, optional, behind `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`: a `tool.call` handler of about fifteen lines that serialises `e`, calls `$.process.run(["xtask", "permit", "--json", …])`, returns `{ deny }` or `{ ...result, context }`, and calls `$.ui.invalidate("prompt.context")` after a `Bash` call that ran an instrument. It adds nothing the command hook does not do except the invalidation and in-process latency; it fails open, and the command hook beneath it does not, which is why it may exist at all (revision 2 C.8 item 8). A third caller is pre-commit, which runs `permit` over the staged diff as a whole.
+**Adapters, two.** The shipped command hook, always on: `PreToolUse` with matcher `Edit|Write|Bash`, command `xtask permit` reading stdin, in `harness-plugins/hooks/hooks.json`, a person's file under `harness.self`. The function hook, optional, behind `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`: a `tool.call` handler of about fifteen lines that serialises `e`, calls `$.process.run(["xtask", "permit", "--json", …])`, returns `{ deny }` or `{ ...result, context }`, and calls `$.ui.invalidate("prompt.context")` after a `Bash` call that ran an instrument. It adds nothing the command hook does not do except the invalidation and in-process latency; it fails open, and the command hook beneath it does not, which is why it may exist at all (revision 2 C.8 item 8). A third caller is pre-commit, which runs `permit` over the staged diff as a whole.
 
 **Cost.** `cargo run -q -p xtask -- permit` after a warm build is a process start and a manifest parse, tens of milliseconds; an `xtask` binary installed by `cargo install --path xtask` is the same without cargo. The bar: p99 under 100 ms at the tool call on the developer machine, measured by `permit --bench` on day 1. If it is missed, the manifest's rules are compiled into the binary at build time and the parse goes away; the interface does not move.
 
@@ -347,13 +349,16 @@ The strongest rows are still the ones with no path to take. Every row below them
 ```
 .claude/
   harness.local.md                    gitignored; §5's local regions
-  skills/third-engine-harness/
-    .claude-plugin/plugin.json        name, version, hooks
-    hooks/hooks.json                  PreToolUse → xtask permit; Stop → xtask done --hook; SessionStart → xtask status --session
-    hooks/harness.ts                  optional; the fifteen-line function-hook adapter; present only with the flag
+  settings.json                       enables harness@dax-php from the repository's marketplace; the function-hook flag
+.claude-plugin/marketplace.json       the repository as a marketplace of one plugin
+harness-plugins/
+  .claude-plugin/plugin.json          name, version, hooks; a person's file
+  hooks/hooks.json                    PreToolUse → xtask permit; Stop → xtask done --hook; SessionStart wires the clone and renders the local file; `modules` names the function-hook module; a person's file
+  hooks/harness.ts                    the function-hook module: the map through prompt.context, the refresh after an instrument ran
+  tsconfig.json                       against the declarations /plugin-types writes, gitignored
 ```
 
-No `rules.ts`, no `scripts/`, no generated types unless `harness.ts` is enabled. `plugin.json` keeps one `userConfig` key, `functionHook` (boolean, default false), which is what decides whether `hooks.json` lists a `modules` entry; on a build that predates the key the command hooks stand alone (revision 2 D.10).
+No `rules.ts`, no `scripts/`. The command hooks and the function-hook module are one plugin, `harness@dax-php`, loaded from the repository's own marketplace by `.claude/settings.json`; `hooks.json` and `plugin.json` are a person's files under `harness.self`, the module is not, since a function hook fails open and is never the only sensor (revision 9). The generated declarations are gitignored and written by `/plugin-types`.
 
 ---
 

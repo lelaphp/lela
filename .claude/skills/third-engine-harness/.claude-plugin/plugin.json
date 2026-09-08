@@ -1,6 +1,0 @@
-{
-  "name": "third-engine-harness",
-  "version": "0.0.0",
-  "description": "The shipped command hooks of the harness (harness-design.md §6): PreToolUse is xtask permit.",
-  "hooks": "./hooks/hooks.json"
-}

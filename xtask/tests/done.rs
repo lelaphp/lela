@@ -554,10 +554,8 @@ fn every_verdict_is_one_reading_of_done_over_the_workspace() {
 
 #[test]
 fn the_stop_hook_runs_done_with_hook_and_pre_push_runs_done() {
-    let hooks: serde_json::Value = serde_json::from_str(&read(
-        ".claude/skills/third-engine-harness/hooks/hooks.json",
-    ))
-    .unwrap();
+    let hooks: serde_json::Value =
+        serde_json::from_str(&read("harness-plugins/hooks/hooks.json")).unwrap();
     let stop = &hooks["hooks"]["Stop"];
     let entries = stop
         .as_array()

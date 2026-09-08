@@ -102,7 +102,7 @@ fn workspace_reading(root: &Path, manifest: &Manifest, total: Count) -> Result<R
         "harness",
         harness(root)?,
         budget.harness,
-        ".claude/** hand-written lines",
+        ".claude/** and harness-plugins/** hand-written lines",
     )?;
     ceiling(
         "lock_packages",
@@ -231,12 +231,12 @@ fn docs(root: &Path) -> Result<u64> {
     sum(root, &paths)
 }
 
-/// `.claude/**` hand-written: generated types (`*.d.ts`) excluded.
+/// `.claude/**` and `harness-plugins/**` hand-written: generated types
+/// (`*.d.ts`) excluded.
 fn harness(root: &Path) -> Result<u64> {
-    let paths: Vec<String> = git::files(root, Path::new(".claude"))?
-        .into_iter()
-        .filter(|p| !p.ends_with(".d.ts"))
-        .collect();
+    let mut paths: Vec<String> = git::files(root, Path::new(".claude"))?;
+    paths.extend(git::files(root, Path::new("harness-plugins"))?);
+    paths.retain(|p| !p.ends_with(".d.ts"));
     sum(root, &paths)
 }
 

@@ -134,10 +134,8 @@ fn the_adr_index_lists_every_adr_with_its_title_status_and_date() {
 
 #[test]
 fn the_session_start_hook_wires_the_clone_and_renders_the_local_file_on_the_four_matchers() {
-    let hooks: serde_json::Value = serde_json::from_str(&read(
-        ".claude/skills/third-engine-harness/hooks/hooks.json",
-    ))
-    .unwrap();
+    let hooks: serde_json::Value =
+        serde_json::from_str(&read("harness-plugins/hooks/hooks.json")).unwrap();
     let start = &hooks["hooks"]["SessionStart"][0];
     let matcher = start["matcher"].as_str().unwrap();
     for source in ["startup", "resume", "clear", "compact"] {

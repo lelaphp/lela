@@ -12,11 +12,12 @@
 // command ran an instrument, invalidates `prompt.context` so the next
 // read of the facts is fresh (§7, "what the agent sees").
 //
-// `permit` is not called here: the PreToolUse command hook runs first on
-// every Edit, Write and Bash and its deny ends the call, so a second
-// judge would record every note twice in the reading log. Every hook
-// fails open by construction (§13 item 8); the command hook beneath does
-// not.
+// `permit` is not called here: the PreToolUse command hook in hooks.json
+// beside this file runs first on every Edit, Write and Bash and its deny
+// ends the call, so a second judge would record every note twice in the
+// reading log. Every hook here fails open by construction (§13 item 8);
+// the command hooks beneath do not, and hooks.json is a person's file
+// under harness.self while this module is not.
 //
 // Types: `/plugin-types` writes .claude/types/claude-code.d.ts, which the
 // tsconfig beside this folder includes; the import is empty at run time.

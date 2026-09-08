@@ -21,7 +21,7 @@ pin = "oracle.toml"                        # the only statement of version, dige
 total = 272500                             # design §4.1: the sum of every [[crate]] row plus `bindings`; docs is separate (253.2k + 15k = 268.2k at this revision)
 new = 127500                               # design §0, §4.1: lines not on the inheritance manifest (§13)
 docs = 5000                                # design §10; `docs/**` plus the three living documents
-harness = 300                              # harness §12 item 6: `.claude/**` hand-written, generated types excluded
+harness = 300                              # harness §12 item 6: `.claude/**` and `harness-plugins/**` hand-written, generated types excluded
 lock_packages = 120                        # design §4.1: `Cargo.lock` packages, default features, counted on day 31 with the Cranelift set
 clean_build_release_s = 90                 # design §10: `cargo build --release` from clean on the dev machine
 api_items = 400                            # design §4.4, §4.5: public items of php_ext, measured on api.lock
@@ -343,7 +343,7 @@ text = "`computed run --force` discards a hand edit; a person decides that."
 [[rule]]
 id = "harness.self"
 tool = ["Edit", "Write"]
-scope = [".claude/**", "seams.toml", "oracle.toml", "docs/divergence.toml"]
+scope = [".claude/**", "harness-plugins/hooks/hooks.json", "harness-plugins/.claude-plugin/plugin.json", "seams.toml", "oracle.toml", "docs/divergence.toml"]
 deny = true
 text = "Harness configuration, the oracle pin and the divergence registry are edited by a person."
 

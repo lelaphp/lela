@@ -65,7 +65,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=23af9315234042ed2c2a5d09d16461b975ee108a26c23e6ee3ca2508bd5ecdc4 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=46042eb80cdd97eb805e98c5c80eac532858b6ff659811094427d2383cb86122 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -87,7 +87,7 @@ third-engine-design.md
 | sapi | sapi.lock |  |  | skip |
 | tier | tier.lock |  |  | skip |
 
-<!-- /computed in=82fce3fb98c96d428704ecf145324f5c1d228d2a41f27eafaa8a8d48c5b9b2b9 out=e2521776fafb15658d498ed026b1ee34916cdebfd1efe51daf451437d6292967 -->
+<!-- /computed in=872baa26d867d169dbddbabc9d4946d2bde70a53594593ce83fc6953475b29e0 out=e2521776fafb15658d498ed026b1ee34916cdebfd1efe51daf451437d6292967 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -110,7 +110,7 @@ third-engine-design.md
 | harness.self |  | deny | fail | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
 | divergence.reason |  | check | pass | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
 
-<!-- /computed in=bbb4e51b371fa81516d018b7e1d3e7774474d81df5eb6a7d7e15d8c52952b434 out=da02cf02b585feb1cf5fe3a23ecde3f42a343b29ec38a97d6c747ab11ef4545f -->
+<!-- /computed in=0d3212222cb1bf000632877dcb2fcc0b0d3a22e1c0d2276d24a5910f957b097e out=da02cf02b585feb1cf5fe3a23ecde3f42a343b29ec38a97d6c747ab11ef4545f -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
