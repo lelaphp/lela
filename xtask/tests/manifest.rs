@@ -129,21 +129,50 @@ fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
 #[test]
 fn a_week_row_names_the_readings_that_measure_its_bar() {
     let text = format!(
-        "{MINIMAL}\n[[week]]\ndays = \"3-7\"\ntext = \"t\"\nreads = [{{ instrument = \"phpt\", scope = \"tests/basic\", number = \"percent\", min = 100 }}, {{ instrument = \"budget\", scope = \"xtask\" }}]\n"
+        "{MINIMAL}\n[[week]]\ndays = \"3-7\"\ntext = \"t\"\nreads = [{{ instrument = \"budget\", scope = \"xtask\", number = \"lines\", max = 14000 }}, {{ instrument = \"clippy\", scope = \"xtask\" }}]\n"
     );
     let manifest = Manifest::parse(&text).unwrap();
     assert_eq!(manifest.weeks.len(), 1);
     assert_eq!(manifest.weeks[0].reads.len(), 2);
 
     let text = format!(
-        "{MINIMAL}\n[[week]]\ndays = \"3-7\"\ntext = \"t\"\nreads = [{{ instrument = \"phpt\", scope = \"tests/basic\", min = 100 }}]\n"
+        "{MINIMAL}\n[[week]]\ndays = \"3-7\"\ntext = \"t\"\nreads = [{{ instrument = \"budget\", scope = \"xtask\", min = 100 }}]\n"
     );
     let err = Manifest::parse(&text).unwrap_err().to_string();
     assert!(err.contains("3-7") && err.contains("number"), "{err}");
 
     let text = format!(
-        "{MINIMAL}\n[[week]]\ndays = \"3-7\"\ntext = \"t\"\nreads = [{{ instrument = \"phpt\", scope = \"tests/basic\", number = \"percent\" }}]\n"
+        "{MINIMAL}\n[[week]]\ndays = \"3-7\"\ntext = \"t\"\nreads = [{{ instrument = \"budget\", scope = \"xtask\", number = \"lines\" }}]\n"
     );
     let err = Manifest::parse(&text).unwrap_err().to_string();
     assert!(err.contains("3-7") && err.contains("min"), "{err}");
+}
+
+/// A bar's read names an instrument `xtask` has, so a row cannot arrive
+/// before the instrument whose reading it reads; the instrument ships its
+/// row (AGENTS.md, "the instrument ships before the code it measures").
+#[test]
+fn a_week_read_names_an_instrument_xtask_has() {
+    let text = format!(
+        "{MINIMAL}\n[[week]]\ndays = \"3-7\"\ntext = \"t\"\nreads = [{{ instrument = \"phpt\", scope = \"tests/basic\" }}]\n"
+    );
+    let err = Manifest::parse(&text).unwrap_err().to_string();
+    assert!(
+        err.contains("3-7") && err.contains("phpt") && err.contains("instrument"),
+        "{err}"
+    );
+}
+
+/// `[telemetry] silent_days` is the window of the silent query (harness
+/// §7); optional, and nothing in code stands in for it when it is absent.
+#[test]
+fn telemetry_carries_the_silent_window_and_is_optional() {
+    let manifest = Manifest::parse(MINIMAL).unwrap();
+    assert!(manifest.telemetry.is_none());
+    let text = format!("{MINIMAL}\n[telemetry]\nsilent_days = 14\n");
+    let manifest = Manifest::parse(&text).unwrap();
+    assert_eq!(manifest.telemetry.unwrap().silent_days, 14);
+    let text = format!("{MINIMAL}\n[telemetry]\nsilent = 14\n");
+    let err = Manifest::parse(&text).unwrap_err().to_string();
+    assert!(err.contains("silent"), "the offending key is named: {err}");
 }

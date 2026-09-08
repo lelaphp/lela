@@ -2,12 +2,13 @@
 //! `oracle.toml`, loaded by one reader (harness-design.md §4.1, §4.3); the
 //! pin's grammar is the oracle module's.
 //!
-//! The grammar is `[oracle] [budget] [[crate]] [[seam]] [[edge]] [[rule]]
-//! [[week]]`, each rule carrying exactly one predicate and each week's
-//! read a status or a number against a bound. A manifest with a key
-//! outside the grammar is refused with the offending key named; so is a
-//! rule with zero or two predicates. The numbers live in the file; nothing
-//! here restates one.
+//! The grammar is `[oracle] [budget] [telemetry] [[crate]] [[seam]]
+//! [[edge]] [[rule]] [[week]]`, each rule carrying exactly one predicate
+//! and each week's read naming an instrument `xtask` has, as a status or
+//! a number against a bound. A manifest with a key outside the grammar is
+//! refused with the offending key named; so is a rule with zero or two
+//! predicates. The numbers live in the file; nothing here restates one,
+//! and an optional table that is absent is absent, never defaulted.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -27,6 +28,8 @@ pub const FILE: &str = "seams.toml";
 pub struct Manifest {
     pub oracle: PinRow,
     pub budget: Budget,
+    #[serde(default)]
+    pub telemetry: Option<Telemetry>,
     #[serde(rename = "crate", default)]
     pub crates: Vec<Crate>,
     #[serde(rename = "seam", default)]
@@ -44,6 +47,16 @@ pub struct Manifest {
     /// The workspace the manifest was loaded from; empty for `parse`.
     #[serde(skip)]
     pub root: PathBuf,
+}
+
+/// `[telemetry]`: the sensor telemetry's one number (harness-design.md
+/// §7), optional; without it `status` renders no silent column and says so.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Telemetry {
+    /// An instrument with readings and no failure this many days is a
+    /// candidate for silent.
+    pub silent_days: u64,
 }
 
 /// `[oracle]`: the only place the manifest says where the pin is.
@@ -331,8 +344,18 @@ impl Manifest {
     /// left empty; `load` fills it.
     pub fn parse(text: &str) -> Result<Manifest> {
         let manifest: Manifest = toml::from_str(text)?;
+        let instruments = crate::cli::instruments();
         for week in &manifest.weeks {
             for read in &week.reads {
+                if !instruments.contains(&read.instrument) {
+                    bail!(
+                        "week \"{}\" reads {} {}, and {} is not an instrument xtask has; the instrument ships its row",
+                        week.days,
+                        read.instrument,
+                        read.scope,
+                        read.instrument
+                    );
+                }
                 let bounded = read.min.is_some() || read.max.is_some();
                 if read.number.is_some() && !bounded {
                     bail!(

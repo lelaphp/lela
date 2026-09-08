@@ -24,9 +24,6 @@ use crate::reading::{self, Reading, Store};
 
 /// What a section says when no instrument has measured a row.
 pub const NO_READING: &str = "no reading";
-/// The window of the silent query (harness-design.md §7): an instrument
-/// with readings and no failure this long is a candidate for silent.
-const SILENT_DAYS: i64 = 14;
 /// The map: what an agent reads first (harness-design.md §5).
 pub const MAP: &str = "AGENTS.md";
 /// The local region file, gitignored, rendered only by name (§5).
@@ -452,10 +449,12 @@ fn permits(
     this: Option<&str>,
 ) -> Result<String> {
     let rules = permit_rows(manifest, readings, log, this);
-    let instruments = instruments(log)?;
+    let window = manifest.telemetry.as_ref().map(|t| t.silent_days);
+    let instruments = instruments(log, window)?;
     Ok(match format {
         Format::Json => serde_json::to_string_pretty(&json!({
             "session": this,
+            "silent_days": window,
             "rules": rules.iter().map(Row::json).collect::<Result<Vec<_>>>()?,
             "instruments": instruments.iter().map(InstrumentLine::json).collect::<Vec<_>>(),
         }))?,
@@ -463,20 +462,35 @@ fn permits(
         Format::Md => {
             let mut out = table(PERMITS, &rules);
             let _ = writeln!(out);
+            let (head, rule) = if window.is_some() {
+                (" silent |", "---|")
+            } else {
+                ("", "")
+            };
             let _ = writeln!(
                 out,
-                "| instrument | readings | failures | last failure | silent |"
+                "| instrument | readings | failures | last failure |{head}"
             );
-            let _ = writeln!(out, "|---|---|---|---|---|");
+            let _ = writeln!(out, "|---|---|---|---|{rule}");
             for i in &instruments {
+                let candidate = match i.silent {
+                    Some(true) => " candidate |",
+                    Some(false) => "  |",
+                    None => "",
+                };
                 let _ = writeln!(
                     out,
-                    "| {} | {} | {} | {} | {} |",
+                    "| {} | {} | {} | {} |{candidate}",
                     cell(&i.name),
                     i.readings,
                     i.failures,
-                    i.last_failure.as_deref().unwrap_or(""),
-                    if i.silent { "candidate" } else { "" }
+                    i.last_failure.as_deref().unwrap_or("")
+                );
+            }
+            if window.is_none() {
+                let _ = writeln!(
+                    out,
+                    "\nThe candidates for silent are not rendered: `[telemetry] silent_days` is unset in seams.toml (harness-design.md §7)."
                 );
             }
             out
@@ -558,7 +572,8 @@ struct InstrumentLine {
     readings: usize,
     failures: usize,
     last_failure: Option<String>,
-    silent: bool,
+    /// No failure within the manifest's window; none when it has no window.
+    silent: Option<bool>,
 }
 
 impl InstrumentLine {
@@ -574,9 +589,16 @@ impl InstrumentLine {
 }
 
 /// The log per instrument, in name order: readings, failures, the last
-/// failure's time, and whether no failure lies within `SILENT_DAYS` of now.
-fn instruments(log: &[Reading]) -> Result<Vec<InstrumentLine>> {
-    let since = git::epoch_seconds(&git::now()?)? - SILENT_DAYS * 86_400;
+/// failure's time, and, when the manifest has a window, whether no failure
+/// lies within it of now.
+fn instruments(log: &[Reading], window_days: Option<u64>) -> Result<Vec<InstrumentLine>> {
+    let since = match window_days {
+        Some(days) => {
+            let days = i64::try_from(days).context("silent_days is past the calendar")?;
+            Some(git::epoch_seconds(&git::now()?)? - days * 86_400)
+        }
+        None => None,
+    };
     let mut names: Vec<&str> = log.iter().map(|r| r.instrument.as_str()).collect();
     names.sort_unstable();
     names.dedup();
@@ -589,16 +611,22 @@ fn instruments(log: &[Reading]) -> Result<Vec<InstrumentLine>> {
                 .copied()
                 .filter(|r| r.status == reading::Status::Fail)
                 .collect();
-            let mut recent = false;
-            for r in &failed {
-                recent |= git::epoch_seconds(&r.at)? >= since;
-            }
+            let silent = match since {
+                Some(since) => {
+                    let mut recent = false;
+                    for r in &failed {
+                        recent |= git::epoch_seconds(&r.at)? >= since;
+                    }
+                    Some(!recent)
+                }
+                None => None,
+            };
             Ok(InstrumentLine {
                 name: name.to_owned(),
                 readings: of.len(),
                 failures: failed.len(),
                 last_failure: failed.iter().map(|r| r.at.to_string()).max(),
-                silent: !recent,
+                silent,
             })
         })
         .collect()

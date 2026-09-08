@@ -363,6 +363,8 @@ fn permits_counts_denials_per_session_and_in_total() {
 fn permits_lists_the_instruments_and_the_candidates_for_silent() {
     let root = scratch("silent");
     let store = Store::of_workspace(&root);
+    let manifest_path = root.join("seams.toml");
+    let manifest = std::fs::read_to_string(&manifest_path).unwrap();
 
     let mut budget = Reading::new("budget", "php_heap");
     budget.status = Status::Pass;
@@ -381,6 +383,22 @@ fn permits_lists_the_instruments_and_the_candidates_for_silent() {
     old.status = Status::Fail;
     store.write(&old).unwrap();
 
+    let (ok, md, err) = status(&root, &["--section", "permits"]);
+    assert!(ok, "{err}");
+    assert!(
+        !md.contains(" silent |") && md.contains("silent_days"),
+        "no window in the manifest: no silent column, and the key is named: {md}"
+    );
+    let (ok, json, _) = status(&root, &["--section", "permits", "--format", "json"]);
+    assert!(ok);
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["instruments"][0]["silent"], serde_json::Value::Null);
+
+    std::fs::write(
+        &manifest_path,
+        format!("{manifest}\n[telemetry]\nsilent_days = 14\n"),
+    )
+    .unwrap();
     let (ok, md, err) = status(&root, &["--section", "permits"]);
     assert!(ok, "{err}");
     let row = |name: &str| {
@@ -432,15 +450,15 @@ text = "every instrument writes a reading"
 reads = [{ instrument = "budget", scope = "xtask" }]
 [[week]]
 days = "3-7"
-text = "tests/basic 100%, Zend/tests >= 60%"
+text = "xtask under 7000 lines, api within 400 items"
 reads = [
-  { instrument = "phpt", scope = "tests/basic", number = "percent", min = 100 },
-  { instrument = "phpt", scope = "Zend/tests", number = "percent", min = 60 },
+  { instrument = "budget", scope = "xtask", number = "lines", max = 7000 },
+  { instrument = "api-check", scope = "api", number = "items", max = 400 },
 ]
 [[week]]
 days = "8-14"
-text = "port-map unresolved <= 50"
-reads = [{ instrument = "port-map", scope = "workspace", number = "unresolved", max = 50 }]
+text = "vocab clean on xtask"
+reads = [{ instrument = "vocab", scope = "xtask", number = "avoided", max = 0 }]
 "#,
     );
     std::fs::write(root.join("seams.toml"), manifest).unwrap();
@@ -449,17 +467,17 @@ reads = [{ instrument = "port-map", scope = "workspace", number = "unresolved", 
     let mut budget = Reading::new("budget", "xtask");
     budget.status = Status::Pass;
     store.write(&budget).unwrap();
-    let mut basic = Reading::new("phpt", "tests/basic");
-    basic.status = Status::Pass;
-    basic.numbers.insert("percent".into(), 100.into());
-    store.write(&basic).unwrap();
-    let mut zend = Reading::new("phpt", "Zend/tests");
-    zend.status = Status::Fail;
-    zend.numbers.insert("percent".into(), 42.5.into());
-    store.write(&zend).unwrap();
-    let mut crashed = Reading::new("port-map", "workspace");
+    let mut lines = Reading::new("budget", "xtask");
+    lines.status = Status::Pass;
+    lines.numbers.insert("lines".into(), 6508.into());
+    store.write(&lines).unwrap();
+    let mut items = Reading::new("api-check", "api");
+    items.status = Status::Fail;
+    items.numbers.insert("items".into(), 412.5.into());
+    store.write(&items).unwrap();
+    let mut crashed = Reading::new("vocab", "xtask");
     crashed.status = Status::Fail;
-    crashed.numbers.insert("unresolved".into(), 0.into());
+    crashed.numbers.insert("avoided".into(), 0.into());
 
     let (ok, md, err) = status(&root, &["--section", "week"]);
     assert!(ok, "{err}");
@@ -476,7 +494,7 @@ reads = [{ instrument = "port-map", scope = "workspace", number = "unresolved", 
         rows[1]
     );
     assert!(
-        rows[1].contains("Zend/tests percent=42.5 < 60"),
+        rows[1].contains("api items=412.5 > 400"),
         "the reading that missed the bar is named: {}",
         rows[1]
     );
@@ -510,8 +528,8 @@ reads = [{ instrument = "port-map", scope = "workspace", number = "unresolved", 
     assert_eq!(rows[0]["verdict"], "pass");
     assert_eq!(rows[1]["verdict"], "fail");
     assert_eq!(rows[1]["reads"][1]["verdict"], "fail");
-    assert_eq!(rows[1]["reads"][1]["value"], 42.5);
-    assert_eq!(rows[2]["verdict"], "fail", "the crashed port-map run");
+    assert_eq!(rows[1]["reads"][1]["value"], 412.5);
+    assert_eq!(rows[2]["verdict"], "fail", "the crashed vocab run");
     assert_eq!(rows[2]["reads"][0]["status"], "fail");
 }
 

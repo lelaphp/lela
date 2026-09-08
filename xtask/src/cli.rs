@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -149,4 +149,13 @@ pub enum Section {
 pub enum Format {
     Md,
     Json,
+}
+
+/// The subcommands `xtask` has, by name: what a reading's `instrument`
+/// and a `[[week]]` read may name. `xtask --help` is the same list.
+pub fn instruments() -> Vec<String> {
+    Cli::command()
+        .get_subcommands()
+        .map(|c| c.get_name().to_owned())
+        .collect()
 }
