@@ -331,7 +331,7 @@ text = "Commits run the pre-commit hook; --no-verify is not available to agents.
 [[rule]]
 id = "lanes.nightly"
 tool = "Bash"
-deny_pattern = 'xtask (-- )?(phpt|bench) --full|run-tests\.php|compile-identity --corpus'   # `xtask phpt --full` and `cargo run -p xtask -- phpt --full` alike
+deny_pattern = '(?m)xtask (-- )?(phpt|bench)\b[^|;&]*--(full|jit)|(^|[|;&]\s*|\bphp[0-9.]*\s+)\S*run-tests\.php|compile-identity --corpus'   # the flag wherever it stands in the call, and upstream's runner where it is run, never where it is cited
 text = "Nightly lanes run in CI only; run the per-crate subset."
 
 [[rule]]

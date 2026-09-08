@@ -20,4 +20,4 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 |---|---|---|---|---|
 | php_bundle | topological |  | no reading |  |
 
-<!-- /computed in=6c232f609d8424b0b5761eec99900175f03114cfa9faafc4aae42e2db354b46c out=9be00bd3300b30f705ac8fad16c6163c166f9774c8a9b49261578740230debb7 -->
+<!-- /computed in=93cc1b9558153c6277bc803178f87a27dd1264f4327a1249531ee485b3380800 out=9be00bd3300b30f705ac8fad16c6163c166f9774c8a9b49261578740230debb7 -->

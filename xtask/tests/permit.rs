@@ -746,3 +746,57 @@ fn a_build_that_did_not_judge_hands_the_call_to_the_next_candidate() {
     assert!(out.contains("JUDGED=cargo"), "{out} / {err}");
     assert!(out.contains(call), "the call reaches cargo");
 }
+
+/// The two halves of `lanes.nightly` the phpt runner asked for (#15): the
+/// flag is denied wherever it stands in the call, not only beside the
+/// subcommand, and upstream's runner is denied where it is run and not
+/// where it is cited. The rule denied `--subset x --full` on neither
+/// count before, and denied reading the file on the second.
+#[test]
+fn the_nightly_lane_is_denied_by_the_flag_and_not_by_a_citation() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let bash = |command: &str| {
+        Call::parse(
+            &serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": { "command": command, "description": "one call" }
+            })
+            .to_string(),
+        )
+        .unwrap()
+    };
+    let denied = |command: &str| {
+        judge(&manifest, workspace(), &bash(command))
+            .unwrap()
+            .denial()
+            .map(|f| f.rule.clone())
+    };
+
+    for command in [
+        "cargo run -q -p xtask -- phpt --full",
+        "cargo run -p xtask -- phpt --subset Zend/tests --full",
+        "xtask phpt --subset Zend/tests --jit force",
+        "cargo run -q -p xtask -- phpt --jit exit-fuzz --subset tests",
+        "php run-tests.php -p target/release/php",
+        "cd php-src && ./run-tests.php ext/pcre",
+    ] {
+        assert_eq!(
+            denied(command).as_deref(),
+            Some("lanes.nightly"),
+            "the lane must be denied: {command}"
+        );
+    }
+
+    for command in [
+        "cargo run -q -p xtask -- phpt --subset pcre",
+        "cargo test -p xtask --test phpt",
+        "grep -n 'EXPECTF' /Users/x/php-src-8.5.9/run-tests.php",
+        "echo 'upstream (run-tests.php:1885-1889) merges the streams'",
+    ] {
+        assert_eq!(
+            denied(command),
+            None,
+            "the subset and a citation are not the lane: {command}"
+        );
+    }
+}
