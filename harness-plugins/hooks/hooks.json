@@ -10,8 +10,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$CLAUDE_PROJECT_DIR\" && for x in target/release/xtask target/debug/xtask; do [ -x \"$x\" ] && exec \"$x\" permit; done; exec cargo run -q -p xtask -- permit",
-            "timeout": 10
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && in=$(cat) && { for x in target/release/xtask target/debug/xtask; do [ -x \"$x\" ] && printf '%s' \"$in\" | \"$x\" permit && exit 0; done; printf '%s' \"$in\" | cargo run -q -p xtask -- permit; }",
+            "timeout": 60
           }
         ]
       }
