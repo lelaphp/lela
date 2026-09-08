@@ -582,3 +582,147 @@ fn a_denial_carries_the_session_of_the_call() {
         "a call without a session is recorded without one"
     );
 }
+
+// ----------------------------------------------- the wiring at the tool call
+
+/// The one command hooks.json declares for `PreToolUse`: the line the hook
+/// runs before every Edit, Write and Bash.
+fn pre_tool_use_command() -> String {
+    let text =
+        std::fs::read_to_string(workspace().join("harness-plugins/hooks/hooks.json")).unwrap();
+    let hooks: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let entries = hooks["hooks"]["PreToolUse"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no PreToolUse entry: {hooks}"));
+    let commands: Vec<String> = entries
+        .iter()
+        .flat_map(|entry| entry["hooks"].as_array().cloned().unwrap_or_default())
+        .map(|hook| hook["command"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        commands.len(),
+        1,
+        "one command judges the call: {commands:?}"
+    );
+    commands.into_iter().next().unwrap()
+}
+
+/// `PreToolUse` hands the call to permit, over the three tools the design
+/// names, from the workspace root (harness-design.md §4.4).
+#[test]
+fn pre_tool_use_judges_the_three_tools_through_permit() {
+    let text =
+        std::fs::read_to_string(workspace().join("harness-plugins/hooks/hooks.json")).unwrap();
+    let hooks: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let entries = hooks["hooks"]["PreToolUse"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["matcher"], "Edit|Write|Bash");
+    let command = pre_tool_use_command();
+    assert!(command.contains("cd \"$CLAUDE_PROJECT_DIR\""), "{command}");
+    assert!(command.contains("permit"), "{command}");
+}
+
+/// What a build does when the command runs it: one that stands judges, and
+/// one older than the manifest or the flag it is handed exits without
+/// judging, the way a build from before `[telemetry]` landed did.
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum Build {
+    Judges,
+    DidNotJudge,
+}
+
+/// Lay a build down under the scratch workspace. One that judges prints its
+/// name and the call it read, so what the command hands each candidate is
+/// measured beside which candidate ran.
+#[cfg(unix)]
+fn build(root: &Path, path: &str, who: &str, how: Build) {
+    use std::os::unix::fs::PermissionsExt;
+    let text = match how {
+        Build::Judges => format!("#!/bin/sh\nin=$(cat)\nprintf 'JUDGED={who} SAW=%s' \"$in\"\n"),
+        Build::DidNotJudge => {
+            format!("#!/bin/sh\ncat >/dev/null\necho '{who}: unknown field' >&2\nexit 1\n")
+        }
+    };
+    write(root, path, &text);
+    std::fs::set_permissions(root.join(path), std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Run the declared command as the hook does: the call on stdin, the
+/// workspace in `CLAUDE_PROJECT_DIR`, and the scratch `bin` ahead of PATH so
+/// the cargo the command closes with is the one laid down here.
+#[cfg(unix)]
+fn pre_tool_use(root: &Path, stdin: &str) -> (i32, String, String) {
+    let path = format!(
+        "{}:{}",
+        root.join("bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(pre_tool_use_command())
+        .current_dir(root)
+        .env("CLAUDE_PROJECT_DIR", root)
+        .env("PATH", path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), stdin.as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    (
+        out.status.code().unwrap(),
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+    )
+}
+
+/// permit's exit is 0 whatever it decides, so a non-zero exit is a build
+/// that never judged: the command walks its candidates until one does, and
+/// cargo closes the list, rather than the call passing on a stale build's
+/// silence (harness-design.md §4.4). The two adapters resolve the binary in
+/// the same order, so a build that stood for both left the call unjudged
+/// beneath a hook that had already failed open above it.
+#[cfg(unix)]
+#[test]
+fn a_build_that_did_not_judge_hands_the_call_to_the_next_candidate() {
+    let call = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
+    let call = call.trim();
+
+    // The release build stands: it judges, and no other candidate runs.
+    let root = scratch("wiring-stands");
+    build(&root, "target/release/xtask", "release", Build::Judges);
+    build(&root, "target/debug/xtask", "debug", Build::Judges);
+    build(&root, "bin/cargo", "cargo", Build::Judges);
+    let (code, out, err) = pre_tool_use(&root, call);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("JUDGED=release"), "{out}");
+    assert!(!out.contains("JUDGED=debug"), "one build judges: {out}");
+    assert!(!out.contains("JUDGED=cargo"), "one build judges: {out}");
+    assert!(out.contains(call), "the call reaches the build that judges");
+
+    // The release build is older than the manifest: the next one judges.
+    let root = scratch("wiring-stale");
+    build(&root, "target/release/xtask", "release", Build::DidNotJudge);
+    build(&root, "target/debug/xtask", "debug", Build::Judges);
+    build(&root, "bin/cargo", "cargo", Build::Judges);
+    let (code, out, err) = pre_tool_use(&root, call);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("JUDGED=debug"), "{out} / {err}");
+    assert!(!out.contains("JUDGED=cargo"), "{out}");
+    assert!(
+        out.contains(call),
+        "the call the first build read reaches the second"
+    );
+
+    // No build stands: cargo, which rebuilds rather than trusting one.
+    let root = scratch("wiring-cargo");
+    build(&root, "target/release/xtask", "release", Build::DidNotJudge);
+    build(&root, "target/debug/xtask", "debug", Build::DidNotJudge);
+    build(&root, "bin/cargo", "cargo", Build::Judges);
+    let (code, out, err) = pre_tool_use(&root, call);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("JUDGED=cargo"), "{out} / {err}");
+    assert!(out.contains(call), "the call reaches cargo");
+}
