@@ -41,6 +41,11 @@ pub struct Reading {
     pub tree: String,
     pub commit: String,
     pub at: Datetime,
+    /// The session of the tool call a `permit` reading judged, from the
+    /// hook's `session_id`; empty for every other instrument, and for a
+    /// call that carried none.
+    #[serde(default)]
+    pub session: String,
 }
 
 impl Reading {
@@ -60,6 +65,7 @@ impl Reading {
             at: EPOCH
                 .parse()
                 .unwrap_or_else(|_| unreachable!("{EPOCH} is a datetime")),
+            session: String::new(),
         }
     }
 }
@@ -142,6 +148,18 @@ impl Number {
     /// will see, and saturates.
     pub fn count(n: impl TryInto<i64>) -> Number {
         Number::Int(n.try_into().unwrap_or(i64::MAX))
+    }
+}
+
+impl Number {
+    /// The number as a float, for a comparison against a bound. A count
+    /// past 2^53 is not one this store will see; the cast is exact below it.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn as_f64(self) -> f64 {
+        match self {
+            Number::Int(n) => n as f64,
+            Number::Float(n) => n,
+        }
     }
 }
 

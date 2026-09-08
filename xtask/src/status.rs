@@ -6,23 +6,27 @@
 //! (§5), laying the local file down from its template when the clone has
 //! none.
 
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 
 use crate::api_check;
 use crate::cli::{Format, Section};
 use crate::divergence::{Kind, Registry, Status};
-use crate::git::git;
-use crate::manifest::Manifest;
+use crate::git::{self, git};
+use crate::manifest::{Manifest, Measure, Week};
 use crate::permit;
 use crate::reading::{self, Reading, Store};
 
 /// What a section says when no instrument has measured a row.
 pub const NO_READING: &str = "no reading";
+/// The window of the silent query (harness-design.md §7): an instrument
+/// with readings and no failure this long is a candidate for silent.
+const SILENT_DAYS: i64 = 14;
 /// The map: what an agent reads first (harness-design.md §5).
 pub const MAP: &str = "AGENTS.md";
 /// The local region file, gitignored, rendered only by name (§5).
@@ -41,7 +45,8 @@ pub const LOCAL_SECTIONS: [&str; 7] = [
 const UNRENDERED: &str = "The local facts above are unrendered: `computed run .claude/harness.local.md` \
 fills them once a person has run `computed trust` for this clone (harness-design.md §11).";
 
-/// Render one section to a string in the asked format.
+/// Render one section to a string in the asked format; `week` picks one
+/// row of the `week` section and belongs to no other.
 pub fn render(
     manifest: &Manifest,
     registry: &Registry,
@@ -49,7 +54,11 @@ pub fn render(
     root: &Path,
     section: Section,
     format: Format,
+    week: Option<usize>,
 ) -> Result<String> {
+    if week.is_some() && section != Section::Week {
+        bail!("--week picks a row of the week section; use --section week");
+    }
     let readings = store.readings()?;
     let (rows, columns): (Vec<Row>, Columns) = match section {
         Section::Rules => (rules(manifest, &readings), RULES),
@@ -59,7 +68,8 @@ pub fn render(
         Section::Phpt => (instrument(&readings, "phpt"), INSTRUMENT),
         Section::Witness => (instrument(&readings, "witness"), INSTRUMENT),
         Section::Mutants => (instrument(&readings, "mutants"), INSTRUMENT),
-        Section::Permits => (permits(manifest, &readings, &store.log()?), PERMITS),
+        Section::Permits => return permits(manifest, &readings, &store.log()?, format),
+        Section::Week => return week_section(manifest, &readings, week, format),
         Section::Bundle => (bundle(manifest, &readings), BUNDLE),
         Section::Git => return git_section(root, format),
     };
@@ -184,6 +194,29 @@ impl Row {
                 x.numbers
                     .iter()
                     .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default()
+    }
+
+    /// The `sessions` fact as `id=count` pairs, the session by its first
+    /// eight characters, a call without one as `-`.
+    fn sessions(&self) -> String {
+        self.facts
+            .get("sessions")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .map(|s| {
+                        let id = s["session"].as_str().unwrap_or("");
+                        let id = if id.is_empty() {
+                            "-"
+                        } else {
+                            id.get(..8).unwrap_or(id)
+                        };
+                        format!("{id}={}", s["denials"])
+                    })
                     .collect::<Vec<_>>()
                     .join(" ")
             })
@@ -357,35 +390,336 @@ fn instrument(readings: &[Reading], name: &str) -> Vec<Row> {
         .collect()
 }
 
-/// Each rule `permit` judges (harness-design.md §4.4): its last finding in
-/// the store, and how many denials the append-only log holds across
-/// sessions (§10 rule 6).
-fn permits(manifest: &Manifest, readings: &[Reading], log: &[Reading]) -> Vec<Row> {
-    manifest
+/// The `permits` section (harness-design.md §4.6, §10 rule 6): each rule
+/// `permit` judges, its last finding in the store, and the denials the
+/// append-only log holds per session, newest session first, and in total;
+/// then the query behind the CI summary (§7): the log per instrument, its
+/// readings and failures, and whether none failed in the last fourteen
+/// days, which makes it a candidate for silent.
+fn permits(
+    manifest: &Manifest,
+    readings: &[Reading],
+    log: &[Reading],
+    format: Format,
+) -> Result<String> {
+    let rules: Vec<Row> = manifest
         .rules
         .iter()
         .filter(|rule| permit::judged_at_the_tool_call(rule))
         .map(|rule| {
-            let denials = log
-                .iter()
-                .filter(|r| {
-                    r.instrument == permit::INSTRUMENT
-                        && r.rule == rule.id
-                        && r.status == reading::Status::Fail
-                })
-                .count();
+            let sessions = denials_per_session(log, &rule.id);
+            let denials: usize = sessions.iter().map(|(_, n)| n).sum();
             Row::new(
                 &[
                     ("rule", json!(rule.id)),
                     ("adr", json!(rule.adr.iter().collect::<Vec<_>>())),
                     ("denials", json!(denials)),
+                    (
+                        "sessions",
+                        json!(
+                            sessions
+                                .iter()
+                                .map(|(s, n)| json!({ "session": s, "denials": n }))
+                                .collect::<Vec<_>>()
+                        ),
+                    ),
                 ],
                 latest(readings, |r| {
                     r.instrument == permit::INSTRUMENT && r.rule == rule.id
                 }),
             )
         })
+        .collect();
+    let instruments = instruments(log)?;
+    Ok(match format {
+        Format::Json => serde_json::to_string_pretty(&json!({
+            "rules": rules.iter().map(Row::json).collect::<Result<Vec<_>>>()?,
+            "instruments": instruments.iter().map(InstrumentLine::json).collect::<Vec<_>>(),
+        }))?,
+        Format::Md if rules.is_empty() && instruments.is_empty() => format!("{NO_READING}\n"),
+        Format::Md => {
+            let mut out = table(PERMITS, &rules);
+            let _ = writeln!(out);
+            let _ = writeln!(
+                out,
+                "| instrument | readings | failures | last failure | silent |"
+            );
+            let _ = writeln!(out, "|---|---|---|---|---|");
+            for i in &instruments {
+                let _ = writeln!(
+                    out,
+                    "| {} | {} | {} | {} | {} |",
+                    cell(&i.name),
+                    i.readings,
+                    i.failures,
+                    i.last_failure.as_deref().unwrap_or(""),
+                    if i.silent { "candidate" } else { "" }
+                );
+            }
+            out
+        }
+    })
+}
+
+/// The denials of one rule in the log, counted per session and ordered by
+/// each session's last denial, newest first; the log is append-only, so
+/// its order is time's.
+fn denials_per_session(log: &[Reading], rule: &str) -> Vec<(String, usize)> {
+    let mut seen: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    for (i, r) in log.iter().enumerate() {
+        if r.instrument == permit::INSTRUMENT && r.rule == rule && r.status == reading::Status::Fail
+        {
+            let entry = seen.entry(&r.session).or_insert((i, 0));
+            entry.0 = i;
+            entry.1 += 1;
+        }
+    }
+    let mut sessions: Vec<_> = seen.into_iter().collect();
+    sessions.sort_by_key(|(_, (last, _))| std::cmp::Reverse(*last));
+    sessions
+        .into_iter()
+        .map(|(s, (_, n))| (s.to_owned(), n))
         .collect()
+}
+
+/// One instrument's line of the CI summary (harness-design.md §7).
+struct InstrumentLine {
+    name: String,
+    readings: usize,
+    failures: usize,
+    last_failure: Option<String>,
+    silent: bool,
+}
+
+impl InstrumentLine {
+    fn json(&self) -> Value {
+        json!({
+            "instrument": self.name,
+            "readings": self.readings,
+            "failures": self.failures,
+            "last_failure": self.last_failure,
+            "silent": self.silent,
+        })
+    }
+}
+
+/// The log per instrument, in name order: readings, failures, the last
+/// failure's time, and whether no failure lies within `SILENT_DAYS` of now.
+fn instruments(log: &[Reading]) -> Result<Vec<InstrumentLine>> {
+    let since = git::epoch_seconds(&git::now()?)? - SILENT_DAYS * 86_400;
+    let mut names: Vec<&str> = log.iter().map(|r| r.instrument.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+        .into_iter()
+        .map(|name| {
+            let of: Vec<&Reading> = log.iter().filter(|r| r.instrument == name).collect();
+            let failed: Vec<&Reading> = of
+                .iter()
+                .copied()
+                .filter(|r| r.status == reading::Status::Fail)
+                .collect();
+            let mut recent = false;
+            for r in &failed {
+                recent |= git::epoch_seconds(&r.at)? >= since;
+            }
+            Ok(InstrumentLine {
+                name: name.to_owned(),
+                readings: of.len(),
+                failures: failed.len(),
+                last_failure: failed.iter().map(|r| r.at.to_string()).max(),
+                silent: !recent,
+            })
+        })
+        .collect()
+}
+
+/// The weekly exit bar table (harness-design.md §9): one row per `[[week]]`
+/// of the manifest, or the one `--week` names, each read the bar names
+/// judged against the latest reading of its instrument over its scope.
+fn week_section(
+    manifest: &Manifest,
+    readings: &[Reading],
+    week: Option<usize>,
+    format: Format,
+) -> Result<String> {
+    let weeks: Vec<(usize, &Week)> = match week {
+        Some(n) => {
+            let row = n
+                .checked_sub(1)
+                .and_then(|i| manifest.weeks.get(i))
+                .with_context(|| {
+                    format!(
+                        "--week {n}: the manifest's [[week]] table has {} rows",
+                        manifest.weeks.len()
+                    )
+                })?;
+            vec![(n, row)]
+        }
+        None => manifest
+            .weeks
+            .iter()
+            .enumerate()
+            .map(|(i, w)| (i + 1, w))
+            .collect(),
+    };
+    let rows: Vec<(usize, &Week, Vec<Judged>)> = weeks
+        .into_iter()
+        .map(|(n, w)| (n, w, w.reads.iter().map(|r| judge(r, readings)).collect()))
+        .collect();
+    Ok(match format {
+        Format::Json => serde_json::to_string_pretty(
+            &rows
+                .iter()
+                .map(|(n, w, reads)| {
+                    json!({
+                        "week": n,
+                        "days": w.days,
+                        "text": w.text,
+                        "verdict": verdict_of(reads).as_str(),
+                        "reads": reads.iter().map(Judged::json).collect::<Vec<_>>(),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )?,
+        Format::Md if rows.is_empty() => format!("{NO_READING}\n"),
+        Format::Md => {
+            let mut out = String::new();
+            let _ = writeln!(out, "| week | days | reading | bar | readings |");
+            let _ = writeln!(out, "|---|---|---|---|---|");
+            for (n, w, reads) in &rows {
+                let _ = writeln!(
+                    out,
+                    "| {n} | {} | {} | {} | {} |",
+                    cell(&w.days),
+                    verdict_of(reads).as_str(),
+                    cell(&w.text),
+                    reads
+                        .iter()
+                        .map(Judged::text)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                );
+            }
+            out
+        }
+    })
+}
+
+/// What a bar's row says: pass when every read holds, fail when one
+/// contradicts, "no reading" while one is unmeasured and none contradicts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Pass,
+    Fail,
+    NoReading,
+}
+
+impl Verdict {
+    fn as_str(self) -> &'static str {
+        match self {
+            Verdict::Pass => "pass",
+            Verdict::Fail => "fail",
+            Verdict::NoReading => NO_READING,
+        }
+    }
+}
+
+fn verdict_of(reads: &[Judged]) -> Verdict {
+    if reads.iter().any(|r| r.verdict == Verdict::Fail) {
+        Verdict::Fail
+    } else if reads.iter().any(|r| r.verdict == Verdict::NoReading) {
+        Verdict::NoReading
+    } else {
+        Verdict::Pass
+    }
+}
+
+/// One read of a bar against the store: the reading it found, if any, and
+/// the verdict, with the number and the bound it missed when it failed one.
+struct Judged<'a> {
+    read: &'a Measure,
+    reading: Option<Reading>,
+    verdict: Verdict,
+    /// The number read, when the read names one and the reading has it.
+    value: Option<reading::Number>,
+    /// `< min` or `> max`, when the number missed a bound.
+    missed: Option<String>,
+}
+
+impl Judged<'_> {
+    fn json(&self) -> Value {
+        json!({
+            "instrument": self.read.instrument,
+            "scope": self.read.scope,
+            "number": self.read.number,
+            "verdict": self.verdict.as_str(),
+            "status": self.reading.as_ref().map(|r| r.status.as_str()),
+            "value": self.value,
+            "missed": self.missed,
+        })
+    }
+
+    /// The read as one cell: `phpt Zend/tests percent=42.5 < 60`.
+    fn text(&self) -> String {
+        let head = format!("{} {}", self.read.instrument, self.read.scope);
+        match (&self.read.number, self.value) {
+            (Some(number), Some(value)) => format!(
+                "{head} {number}={value}{}",
+                self.missed
+                    .as_deref()
+                    .map(|m| format!(" {m}"))
+                    .unwrap_or_default()
+            ),
+            _ => format!("{head} {}", self.verdict.as_str()),
+        }
+    }
+}
+
+/// Judge one read: a status read holds on pass and fails on fail; a number
+/// read holds within its bounds, and never on a reading that failed, since
+/// a partial run's number is not a bar's. A skip, or a reading without the
+/// number, is no reading.
+fn judge<'a>(read: &'a Measure, readings: &[Reading]) -> Judged<'a> {
+    let reading = latest_of(readings, &read.instrument, &read.scope);
+    let mut judged = Judged {
+        read,
+        reading: None,
+        verdict: Verdict::NoReading,
+        value: None,
+        missed: None,
+    };
+    let Some(reading) = reading else {
+        return judged;
+    };
+    match &read.number {
+        None => {
+            judged.verdict = match reading.status {
+                reading::Status::Pass => Verdict::Pass,
+                reading::Status::Fail => Verdict::Fail,
+                reading::Status::Skip => Verdict::NoReading,
+            };
+        }
+        Some(number) => {
+            if let Some(value) = reading.numbers.get(number).copied() {
+                let n = value.as_f64();
+                judged.value = Some(value);
+                judged.missed = match (read.min, read.max) {
+                    (Some(min), _) if n < min => Some(format!("< {min}")),
+                    (_, Some(max)) if n > max => Some(format!("> {max}")),
+                    _ => None,
+                };
+                judged.verdict =
+                    if judged.missed.is_some() || reading.status == reading::Status::Fail {
+                        Verdict::Fail
+                    } else {
+                        Verdict::Pass
+                    };
+            }
+        }
+    }
+    judged.reading = Some(reading);
+    judged
 }
 
 /// The bundle's order: each crate whose edge carries an `order`, against
@@ -480,7 +814,9 @@ const INSTRUMENT: Columns = (&["scope", "reading", "numbers", "message"], |r| {
 });
 
 const PERMITS: Columns = (
-    &["rule", "adr", "reading", "at", "denials", "message"],
+    &[
+        "rule", "adr", "reading", "at", "denials", "sessions", "message",
+    ],
     |r| {
         vec![
             r.fact("rule"),
@@ -491,6 +827,7 @@ const PERMITS: Columns = (
                 .map(|x| x.at.to_string())
                 .unwrap_or_default(),
             r.fact("denials"),
+            r.sessions(),
             r.message(),
         ]
     },

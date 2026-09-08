@@ -2,11 +2,12 @@
 //! `oracle.toml`, loaded by one reader (harness-design.md §4.1, §4.3); the
 //! pin's grammar is the oracle module's.
 //!
-//! The grammar is `[oracle] [budget] [[crate]] [[seam]] [[edge]] [[rule]]`,
-//! each rule carrying exactly one predicate. A manifest with a key outside
-//! the grammar is refused with the offending key named; so is a rule with
-//! zero or two predicates. The numbers live in the file; nothing here
-//! restates one.
+//! The grammar is `[oracle] [budget] [[crate]] [[seam]] [[edge]] [[rule]]
+//! [[week]]`, each rule carrying exactly one predicate and each week's
+//! read a status or a number against a bound. A manifest with a key
+//! outside the grammar is refused with the offending key named; so is a
+//! rule with zero or two predicates. The numbers live in the file; nothing
+//! here restates one.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -34,6 +35,8 @@ pub struct Manifest {
     pub edges: Vec<Edge>,
     #[serde(rename = "rule", default)]
     pub rules: Vec<Rule>,
+    #[serde(rename = "week", default)]
+    pub weeks: Vec<Week>,
     /// The pin the `[oracle]` row names, loaded from that file by the
     /// oracle module, whose grammar it is.
     #[serde(skip)]
@@ -284,6 +287,34 @@ impl<const N: usize> PartialEq<[&str; N]> for OneOrMany {
     }
 }
 
+/// `[[week]]`: one exit bar of the thirty days (design §11), measured by
+/// the readings it names and rendered by `status --section week` (§9).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Week {
+    /// The days of the bar as the design's table writes them, `"3-7"`.
+    pub days: String,
+    /// The bar in the design's words.
+    pub text: String,
+    /// The readings the bar is measured by; the bar passes when every one
+    /// holds.
+    #[serde(default)]
+    pub reads: Vec<Measure>,
+}
+
+/// One reading a bar names: the latest of `instrument` over `scope`, which
+/// holds when its status is pass, or, with `number`, when that number lies
+/// within `min` and `max`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Measure {
+    pub instrument: String,
+    pub scope: String,
+    pub number: Option<String>,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+}
+
 impl Manifest {
     /// Load `seams.toml` from the workspace root, then the pin it names.
     pub fn load(root: &Path) -> Result<Manifest> {
@@ -300,6 +331,27 @@ impl Manifest {
     /// left empty; `load` fills it.
     pub fn parse(text: &str) -> Result<Manifest> {
         let manifest: Manifest = toml::from_str(text)?;
+        for week in &manifest.weeks {
+            for read in &week.reads {
+                let bounded = read.min.is_some() || read.max.is_some();
+                if read.number.is_some() && !bounded {
+                    bail!(
+                        "week \"{}\" reads {} {} by a number without a min or a max",
+                        week.days,
+                        read.instrument,
+                        read.scope
+                    );
+                }
+                if read.number.is_none() && bounded {
+                    bail!(
+                        "week \"{}\" bounds {} {} without naming the number",
+                        week.days,
+                        read.instrument,
+                        read.scope
+                    );
+                }
+            }
+        }
         for rule in &manifest.rules {
             let named = rule.predicate.named();
             if named.len() != 1 {

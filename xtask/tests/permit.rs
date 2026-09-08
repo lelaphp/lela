@@ -488,3 +488,35 @@ fn diff_judges_the_staged_files_and_refuses_a_denied_one_with_the_rule_id() {
     assert!(out.contains("note seams.toml"), "{out}");
     assert!(out.contains("harness.self"), "{out}");
 }
+
+/// The hook's stdin carries `session_id`; a reading carries it, so the
+/// `permits` section can count denials per session (harness-design.md
+/// §4.6, §10 rule 6).
+#[test]
+fn a_denial_carries_the_session_of_the_call() {
+    let root = scratch("session");
+    let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
+    let (code, _, err) = permit(&root, &stdin, &[]);
+    assert_eq!(code, 0, "{err}");
+    let reading = Store::of_workspace(&root)
+        .read("permit", "harness.self")
+        .unwrap()
+        .expect("the denial was recorded");
+    assert_eq!(reading.session, "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11");
+
+    let (code, _, err) = permit(
+        &root,
+        "",
+        &[
+            "--json",
+            r#"{"tool_name":"Edit","tool_input":{"file_path":"seams.toml","old_string":"a","new_string":"b"}}"#,
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let log = Store::of_workspace(&root).log().unwrap();
+    assert_eq!(
+        log.last().unwrap().session,
+        "",
+        "a call without a session is recorded without one"
+    );
+}

@@ -121,3 +121,29 @@ fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
     }
     out
 }
+
+/// `[[week]]` is a bar of the thirty days (design §11): the days, the text,
+/// and the readings it is measured by, each a status or a number against
+/// a bound. A bound without a number, or a number without a bound, is
+/// refused by name.
+#[test]
+fn a_week_row_names_the_readings_that_measure_its_bar() {
+    let text = format!(
+        "{MINIMAL}\n[[week]]\ndays = \"3-7\"\ntext = \"t\"\nreads = [{{ instrument = \"phpt\", scope = \"tests/basic\", number = \"percent\", min = 100 }}, {{ instrument = \"budget\", scope = \"xtask\" }}]\n"
+    );
+    let manifest = Manifest::parse(&text).unwrap();
+    assert_eq!(manifest.weeks.len(), 1);
+    assert_eq!(manifest.weeks[0].reads.len(), 2);
+
+    let text = format!(
+        "{MINIMAL}\n[[week]]\ndays = \"3-7\"\ntext = \"t\"\nreads = [{{ instrument = \"phpt\", scope = \"tests/basic\", min = 100 }}]\n"
+    );
+    let err = Manifest::parse(&text).unwrap_err().to_string();
+    assert!(err.contains("3-7") && err.contains("number"), "{err}");
+
+    let text = format!(
+        "{MINIMAL}\n[[week]]\ndays = \"3-7\"\ntext = \"t\"\nreads = [{{ instrument = \"phpt\", scope = \"tests/basic\", number = \"percent\" }}]\n"
+    );
+    let err = Manifest::parse(&text).unwrap_err().to_string();
+    assert!(err.contains("3-7") && err.contains("min"), "{err}");
+}

@@ -35,6 +35,10 @@ pub enum Command {
         section: Option<Section>,
         #[arg(long, default_value = "md")]
         format: Format,
+        /// One row of the `week` section: the Nth bar of the manifest's
+        /// `[[week]]` table, counted from 1.
+        #[arg(long, value_name = "N", requires = "section")]
+        week: Option<usize>,
         /// Print AGENTS.md and .claude/harness.local.md in one block, for
         /// the `SessionStart` hook; the local file is laid down when missing.
         #[arg(long)]
@@ -123,9 +127,13 @@ pub enum Section {
     Witness,
     /// The mutants readings, one row per crate.
     Mutants,
-    /// Each rule permit judges: its last finding, denial or note, and how
-    /// many denials the log holds.
+    /// Each rule permit judges: its last finding, denial or note, and the
+    /// denials the log holds per session and in total; then the log per
+    /// instrument, with the candidates for silent (the CI summary).
     Permits,
+    /// The weekly exit bar table: each `[[week]]` of the manifest with
+    /// pass, fail or "no reading" from the readings it names.
+    Week,
     /// The log and the status of the working tree; volatile.
     Git,
     /// The bundle's registration order against the crate graph.

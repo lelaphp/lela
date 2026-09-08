@@ -56,11 +56,12 @@ pub fn run() -> Result<()> {
         Command::Status {
             section,
             format,
+            week,
             session: _,
         } => {
             let text = if let Some(section) = section {
                 let registry = Registry::load(&root)?;
-                status::render(&manifest, &registry, &store, &root, section, format)?
+                status::render(&manifest, &registry, &store, &root, section, format, week)?
             } else {
                 status::session(&root)?
             };

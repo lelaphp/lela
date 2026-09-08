@@ -42,8 +42,9 @@ pub const REGION_RULE: &str = "computed.region-body";
 const REGION_TEXT: &str = "The body of a computed region is rendered by `computed run`, not edited; change the command or its inputs, or the prose around the region (computed ADR 0005).";
 
 /// One intended tool call, as the hook receives it on stdin. `cwd` places
-/// a call without a file in a worktree; the other keys of the recorded
-/// shape (`session_id`, `permission_mode`, …) are carried by the JSON and
+/// a call without a file in a worktree; `session_id` is what a reading
+/// carries so denials count per session (§10 rule 6); the other keys of
+/// the recorded shape (`permission_mode`, …) are carried by the JSON and
 /// not read.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Call {
@@ -52,6 +53,8 @@ pub struct Call {
     pub tool_input: ToolInput,
     #[serde(default)]
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub session_id: String,
 }
 
 /// Where the harness keeps an agent's worktrees, under the main checkout.
@@ -624,6 +627,7 @@ fn record(root: &Path, call: &Call, judgement: &Judgement) -> Result<()> {
             finding.text
         );
         reading.adr = finding.adr.first().cloned().unwrap_or_default();
+        reading.session.clone_from(&call.session_id);
         reading.stamp(&stamp);
         store.write(&reading)?;
     }
@@ -751,6 +755,7 @@ fn write_of(path: &str, content: Option<&str>) -> Call {
             ..ToolInput::default()
         },
         cwd: None,
+        session_id: String::new(),
     }
 }
 

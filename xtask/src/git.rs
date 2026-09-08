@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use toml::value::Datetime;
+use toml::value::{Datetime, Offset, Time};
 
 #[derive(Debug, Clone)]
 pub struct Stamp {
@@ -182,6 +182,43 @@ pub fn now() -> Result<Datetime> {
     );
     text.parse()
         .with_context(|| format!("{text} is not a datetime"))
+}
+
+/// Seconds since 1970-01-01 of a reading's `at`, which `now` writes in UTC
+/// to the second; what a window such as the fourteen days of the silent
+/// query (harness-design.md §7) is measured in.
+pub fn epoch_seconds(at: &Datetime) -> Result<i64> {
+    let date = at.date.with_context(|| format!("{at} has no date"))?;
+    let time = at.time.unwrap_or(Time {
+        hour: 0,
+        minute: 0,
+        second: 0,
+        nanosecond: 0,
+    });
+    let days = days_from_civil(
+        i64::from(date.year),
+        i64::from(date.month),
+        i64::from(date.day),
+    );
+    let seconds =
+        i64::from(time.hour) * 3600 + i64::from(time.minute) * 60 + i64::from(time.second);
+    let offset = at.offset.map_or(0, |o| match o {
+        Offset::Z => 0,
+        Offset::Custom { minutes } => i64::from(minutes) * 60,
+    });
+    Ok(days * 86_400 + seconds - offset)
+}
+
+/// A proleptic Gregorian date to days since 1970-01-01 (Howard Hinnant's
+/// `days_from_civil`), the inverse of `civil_from_days`.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = y - i64::from(m <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 /// Days since 1970-01-01 to a proleptic Gregorian date (Howard Hinnant's

@@ -134,9 +134,9 @@ fn locks_and_budget_render_the_readings_the_instruments_wrote() {
 #[test]
 fn a_section_that_has_no_renderer_yet_is_refused() {
     let root = scratch("unknown");
-    let (ok, _, err) = status(&root, &["--section", "week"]);
+    let (ok, _, err) = status(&root, &["--section", "gates"]);
     assert!(!ok);
-    assert!(err.contains("week"), "{err}");
+    assert!(err.contains("gates"), "{err}");
 }
 
 /// The volatile sections of the local file (harness-design.md §5) render
@@ -185,7 +185,7 @@ fn the_local_sections_render_from_the_store_alone() {
     let (ok, json, _) = status(&root, &["--section", "permits", "--format", "json"]);
     assert!(ok);
     let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
-    let row = rows
+    let row = rows["rules"]
         .as_array()
         .unwrap()
         .iter()
@@ -299,4 +299,208 @@ Read CONTEXT.md first.
     assert!(!ok, "one of --section and --session: {err}");
     let (ok, _, _) = status(&root, &[]);
     assert!(!ok, "one of --section and --session is required");
+}
+
+/// Three denials of one rule across two sessions: the rule's row counts
+/// them per session, newest session first, and in total (§10 rule 6).
+#[test]
+fn permits_counts_denials_per_session_and_in_total() {
+    let root = scratch("sessions");
+    let store = Store::of_workspace(&root);
+    let mut denial = Reading::new("permit", "harness.self");
+    denial.rule = "harness.self".into();
+    denial.status = Status::Fail;
+    denial.message = "Edit seams.toml: edited by a person.".into();
+    denial.session = "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11".into();
+    store.write(&denial).unwrap();
+    store.write(&denial).unwrap();
+    denial.session = "9a8b7c6d-0000-4000-8000-000000000000".into();
+    store.write(&denial).unwrap();
+
+    let (ok, md, err) = status(&root, &["--section", "permits"]);
+    assert!(ok, "{err}");
+    let row = md.lines().find(|l| l.contains("harness.self")).unwrap();
+    assert!(row.contains("| 3 |"), "three denials in total: {row}");
+    assert!(
+        row.contains("9a8b7c6d=1 3f1c0d2a=2"),
+        "per session, the newest first: {row}"
+    );
+
+    let (ok, json, _) = status(&root, &["--section", "permits", "--format", "json"]);
+    assert!(ok);
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let row = value["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["rule"] == "harness.self")
+        .unwrap();
+    assert_eq!(row["denials"], 3);
+    assert_eq!(
+        row["sessions"],
+        serde_json::json!([
+            {"session": "9a8b7c6d-0000-4000-8000-000000000000", "denials": 1},
+            {"session": "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11", "denials": 2},
+        ])
+    );
+}
+
+/// The query behind the CI summary (harness-design.md §7): readings and
+/// failures per instrument from the log, and an instrument with readings
+/// but no failure in fourteen days is a candidate for silent; one whose
+/// fixture failed within the window is not.
+#[test]
+fn permits_lists_the_instruments_and_the_candidates_for_silent() {
+    let root = scratch("silent");
+    let store = Store::of_workspace(&root);
+
+    let mut budget = Reading::new("budget", "php_heap");
+    budget.status = Status::Pass;
+    store.write(&budget).unwrap();
+    store.write(&budget).unwrap();
+
+    let mut vocab = Reading::new("vocab", "php_heap");
+    vocab.status = Status::Pass;
+    store.write(&vocab).unwrap();
+    vocab.scope = "fixture".into();
+    vocab.status = Status::Fail;
+    vocab.at = xtask::git::now().unwrap();
+    store.write(&vocab).unwrap();
+
+    let mut old = Reading::new("clippy", "php_heap");
+    old.status = Status::Fail;
+    store.write(&old).unwrap();
+
+    let (ok, md, err) = status(&root, &["--section", "permits"]);
+    assert!(ok, "{err}");
+    let row = |name: &str| {
+        md.lines()
+            .find(|l| l.starts_with(&format!("| {name} |")))
+            .unwrap_or_else(|| panic!("{name}: {md}"))
+            .to_owned()
+    };
+    assert!(row("budget").contains("| 2 | 0 |"), "{}", row("budget"));
+    assert!(row("budget").contains("candidate"), "{}", row("budget"));
+    assert!(row("vocab").contains("| 2 | 1 |"), "{}", row("vocab"));
+    assert!(!row("vocab").contains("candidate"), "{}", row("vocab"));
+    assert!(
+        row("clippy").contains("candidate"),
+        "a failure at the epoch is not one in the window: {}",
+        row("clippy")
+    );
+
+    let (ok, json, _) = status(&root, &["--section", "permits", "--format", "json"]);
+    assert!(ok);
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let instruments = value["instruments"].as_array().unwrap();
+    let of = |name: &str| {
+        instruments
+            .iter()
+            .find(|r| r["instrument"] == name)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(of("budget")["readings"], 2);
+    assert_eq!(of("budget")["failures"], 0);
+    assert_eq!(of("budget")["silent"], true);
+    assert_eq!(of("vocab")["failures"], 1);
+    assert_eq!(of("vocab")["silent"], false);
+}
+
+/// The weekly exit bar table (harness-design.md §9): one row per `[[week]]`
+/// of the manifest, pass when every reading it names holds, fail when one
+/// contradicts, "no reading" while one is missing; `--week N` is one row.
+#[test]
+fn week_renders_one_row_per_bar_from_the_readings() {
+    let root = scratch("week");
+    let mut manifest = std::fs::read_to_string(root.join("seams.toml")).unwrap();
+    manifest.push_str(
+        r#"
+[[week]]
+days = "1-2"
+text = "every instrument writes a reading"
+reads = [{ instrument = "budget", scope = "xtask" }]
+[[week]]
+days = "3-7"
+text = "tests/basic 100%, Zend/tests >= 60%"
+reads = [
+  { instrument = "phpt", scope = "tests/basic", number = "percent", min = 100 },
+  { instrument = "phpt", scope = "Zend/tests", number = "percent", min = 60 },
+]
+[[week]]
+days = "8-14"
+text = "port-map unresolved <= 50"
+reads = [{ instrument = "port-map", scope = "workspace", number = "unresolved", max = 50 }]
+"#,
+    );
+    std::fs::write(root.join("seams.toml"), manifest).unwrap();
+
+    let store = Store::of_workspace(&root);
+    let mut budget = Reading::new("budget", "xtask");
+    budget.status = Status::Pass;
+    store.write(&budget).unwrap();
+    let mut basic = Reading::new("phpt", "tests/basic");
+    basic.status = Status::Pass;
+    basic.numbers.insert("percent".into(), 100.into());
+    store.write(&basic).unwrap();
+    let mut zend = Reading::new("phpt", "Zend/tests");
+    zend.status = Status::Fail;
+    zend.numbers.insert("percent".into(), 42.5.into());
+    store.write(&zend).unwrap();
+    let mut crashed = Reading::new("port-map", "workspace");
+    crashed.status = Status::Fail;
+    crashed.numbers.insert("unresolved".into(), 0.into());
+
+    let (ok, md, err) = status(&root, &["--section", "week"]);
+    assert!(ok, "{err}");
+    let rows: Vec<&str> = md.lines().skip(2).collect();
+    assert_eq!(rows.len(), 3, "{md}");
+    assert!(
+        rows[0].contains("| 1-2 |") && rows[0].contains("| pass |"),
+        "{}",
+        rows[0]
+    );
+    assert!(
+        rows[1].contains("| 3-7 |") && rows[1].contains("| fail |"),
+        "{}",
+        rows[1]
+    );
+    assert!(
+        rows[1].contains("Zend/tests percent=42.5 < 60"),
+        "the reading that missed the bar is named: {}",
+        rows[1]
+    );
+    assert!(
+        rows[2].contains("| 8-14 |") && rows[2].contains("| no reading |"),
+        "{}",
+        rows[2]
+    );
+    store.write(&crashed).unwrap();
+    let (ok, md, _) = status(&root, &["--section", "week", "--week", "3"]);
+    assert!(ok);
+    assert!(
+        md.contains("| fail |"),
+        "a number inside the bound on a reading that failed is no pass: {md}"
+    );
+
+    let (ok, md, err) = status(&root, &["--section", "week", "--week", "2"]);
+    assert!(ok, "{err}");
+    assert_eq!(md.lines().skip(2).count(), 1, "{md}");
+    assert!(md.contains("| 3-7 |"), "{md}");
+    let (ok, _, err) = status(&root, &["--section", "week", "--week", "4"]);
+    assert!(!ok, "a week the manifest has no row for: {err}");
+    let (ok, _, err) = status(&root, &["--section", "rules", "--week", "1"]);
+    assert!(!ok, "--week belongs to the week section: {err}");
+
+    let (ok, json, _) = status(&root, &["--section", "week", "--format", "json"]);
+    assert!(ok);
+    let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows[0]["days"], "1-2");
+    assert_eq!(rows[0]["verdict"], "pass");
+    assert_eq!(rows[1]["verdict"], "fail");
+    assert_eq!(rows[1]["reads"][1]["verdict"], "fail");
+    assert_eq!(rows[1]["reads"][1]["value"], 42.5);
+    assert_eq!(rows[2]["verdict"], "fail", "the crashed port-map run");
+    assert_eq!(rows[2]["reads"][0]["status"], "fail");
 }
