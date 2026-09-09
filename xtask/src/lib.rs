@@ -37,6 +37,7 @@ pub mod track;
 pub mod unsafe_audit;
 pub mod vocab;
 pub mod witness;
+pub mod worktree;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -44,7 +45,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use clap::Parser;
 
-use cli::{Cli, Command};
+use cli::{Cli, Command, WorktreeCommand};
 use divergence::Registry;
 use git::Stamp;
 use manifest::Manifest;
@@ -80,10 +81,8 @@ pub fn run() -> Result<()> {
         };
         return permit::run(&root, json.as_deref(), adapter);
     }
-    // The track measures nothing and reads no manifest, so a worktree
-    // whose manifest is unreadable can still say which track it is on.
-    if let Command::Track { branch, json } = &cli.command {
-        return track_command(&root, branch.as_deref(), *json);
+    if let Some(answered) = before_the_manifest(&root, &cli.command) {
+        return answered;
     }
     let manifest = Manifest::load(&root)?;
     let store = Store::of_workspace(&root);
@@ -162,6 +161,7 @@ pub fn run() -> Result<()> {
             }
         }
         Command::Track { .. } => bail!("track: answered above"),
+        Command::Worktree { .. } => bail!("worktree: answered above"),
     }
 }
 
@@ -222,6 +222,20 @@ fn divergence_command(root: &Path, manifest: &Manifest, store: &Store) -> Result
     }
     println!("{}", reading.message);
     Ok(())
+}
+
+/// The commands that measure nothing and read no manifest, answered
+/// before `Manifest::load`: the track, so a worktree whose manifest is
+/// unreadable can still say which track it is on, and the add half of a
+/// worktree, whose manifest is the worktree's, once built there.
+fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
+    match command {
+        Command::Track { branch, json } => Some(track_command(root, branch.as_deref(), *json)),
+        Command::Worktree {
+            command: WorktreeCommand::Add { branch },
+        } => Some(worktree::add(root, branch).map(|_| ())),
+        _ => None,
+    }
 }
 
 /// `xtask track`: the facts as text, or as one object; no reading.

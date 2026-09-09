@@ -1,10 +1,9 @@
-//! The track worktree (harness-design.md §4.2, §5, §11): `scripts/worktree-add.sh`
-//! lays one down ready to be worked in and `scripts/worktree-retire.sh`
-//! retires it into the track's store. Both halves run against a fixture
-//! repository whose `xtask` is the fixture's stand-in
-//! (`xtask/fixtures/worktree`), so what is measured here is the command and
-//! not the harness it builds; the track it takes the branch off is asked
-//! of this crate's own `xtask track`, placed where the command looks.
+//! The track worktree (harness-design.md §4.2, §5, §11): `xtask worktree
+//! add` lays one down ready to be worked in and `scripts/worktree-retire.sh`
+//! retires it into the track's store. Both run against a scratch repository
+//! holding this working tree's tracked files, so the harness the add builds
+//! in the worktree and asks for the local file is this one, and the store
+//! the retire appends to is the real store.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,15 +12,13 @@ use std::process::Command;
 use xtask::cli::{Format, Section};
 use xtask::divergence::Registry;
 use xtask::manifest::Manifest;
+use xtask::permit::{Call, judge};
 use xtask::reading::{Reading, Status, Store};
 use xtask::status;
+use xtask::worktree::WORKTREES;
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
-}
-
-fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures")
 }
 
 fn write(root: &Path, path: &str, text: &str) {
@@ -48,9 +45,38 @@ fn sh(root: &Path, args: &[&str]) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
-/// One of the two commands, run from the fixture repository: its exit code
-/// and its two streams joined, which is what a person reads.
-fn run(root: &Path, name: &str, args: &[&str]) -> (i32, String) {
+/// A command's exit code and its two streams joined, which is what a
+/// person reads.
+fn joined(out: &std::process::Output) -> (i32, String) {
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.code().unwrap_or(-1), text)
+}
+
+/// The instrument, this crate's own binary, run against the scratch root.
+fn add(root: &Path, args: &[&str]) -> (i32, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("--root")
+        .arg(root)
+        .args(["worktree", "add"])
+        .args(args)
+        .current_dir(root)
+        .env_remove("CARGO")
+        .env_remove("CARGO_MANIFEST_DIR")
+        .env("GIT_AUTHOR_NAME", "x")
+        .env("GIT_AUTHOR_EMAIL", "x@x")
+        .env("GIT_COMMITTER_NAME", "x")
+        .env("GIT_COMMITTER_EMAIL", "x@x")
+        .output()
+        .unwrap();
+    joined(&out)
+}
+
+/// One of the two commands, run from the scratch repository.
+fn command(root: &Path, name: &str, args: &[&str]) -> (i32, String) {
     let out = Command::new("bash")
         .arg(workspace().join("scripts").join(name))
         .args(args)
@@ -63,71 +89,55 @@ fn run(root: &Path, name: &str, args: &[&str]) -> (i32, String) {
         .env("GIT_COMMITTER_EMAIL", "x@x")
         .output()
         .unwrap_or_else(|e| panic!("{name}: {e}"));
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    (out.status.code().unwrap_or(-1), text)
+    joined(&out)
 }
 
-/// Where the add command lays a worktree by default: a sibling tree named
-/// after the repository, one directory per branch.
-fn worktrees_of(root: &Path) -> PathBuf {
-    let name = root.file_name().unwrap().to_string_lossy().to_string();
-    root.parent().unwrap().join(format!("{name}-wt"))
+/// Where a worktree of `root` lives: under the main checkout, one
+/// directory per branch, where `permit` resolves a workspace.
+fn worktree_of(root: &Path, branch: &str) -> PathBuf {
+    root.join(WORKTREES).join(branch)
 }
 
-/// A fixture repository: the manifest, the pin and the registry the
-/// renderers read, the tracked settings the worktree inherits, the
-/// fixture's `xtask` crate, one commit on `main`, and `origin/t-x` as the
-/// track a worktree is taken off, which is where a track's branch lives in
-/// a repository that has worktrees on it (harness-design.md ledger 14).
+/// A scratch repository: this working tree's files, tracked or not yet, so the
+/// `xtask` a worktree of it builds is this one and the manifest, the pin,
+/// the registry, the map, the tracked settings and the hooks are the
+/// real ones; one commit on `main`; and `origin/t-x` as the track a
+/// worktree is taken off, which is where a track's branch lives in a
+/// repository that has worktrees on it (harness-design.md ledger 14).
 fn repository(name: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!("xtask-worktree-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
-    let _ = fs::remove_dir_all(worktrees_of(&root));
-    fs::create_dir_all(root.join("docs")).unwrap();
-    for file in ["seams.toml", "oracle.toml", "docs/divergence.toml"] {
-        fs::copy(workspace().join(file), root.join(file)).unwrap();
-    }
-    for file in ["Cargo.toml", "xtask/Cargo.toml", "xtask/src/main.rs"] {
-        let text = fs::read_to_string(fixtures().join("worktree").join(file)).unwrap();
-        write(&root, file, &text);
-    }
-    // `Cargo.lock` is tracked in the repository this fixture stands in for
-    // and generated here, where a build would leave the worktree dirty and
-    // `git worktree remove` would refuse it for a reason of the fixture's.
-    write(
-        &root,
-        ".gitignore",
-        "target/\n/Cargo.lock\n/.claude/harness.local.md\n",
+    fs::create_dir_all(&root).unwrap();
+    let listed = sh(
+        workspace(),
+        &[
+            "git",
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
     );
-    write(
-        &root,
-        ".claude/settings.json",
-        "{ \"enabledPlugins\": {} }\n",
-    );
-    write(&root, "scripts/hooks/pre-commit", "#!/bin/sh\nexit 0\n");
-    // The harness under test, where the add command looks for the clone's
-    // built one, so the track is resolved by `xtask track` itself while
-    // the worktree's own build stays the stand-in.
-    let built = root.join("target/debug/xtask");
-    fs::create_dir_all(built.parent().unwrap()).unwrap();
-    fs::copy(env!("CARGO_BIN_EXE_xtask"), &built).unwrap();
+    for file in listed.split('\0').filter(|f| !f.is_empty()) {
+        let to = root.join(file);
+        fs::create_dir_all(to.parent().unwrap()).unwrap();
+        fs::copy(workspace().join(file), &to).unwrap_or_else(|e| panic!("{file}: {e}"));
+    }
     sh(&root, &["git", "init", "-q", "-b", "main"]);
     sh(&root, &["git", "config", "core.hooksPath", "scripts/hooks"]);
     sh(&root, &["git", "add", "-A"]);
-    commit(&root, "fixture");
+    commit(&root, "scratch");
     sh(
         &root,
         &["git", "update-ref", "refs/remotes/origin/t-x", "HEAD"],
     );
-    root
+    fs::canonicalize(root).unwrap()
 }
 
-/// One commit of what is staged, unsigned: a person's `commit.gpgsign` is
-/// not the fixture's.
+/// One commit of what is staged, unsigned and unhooked: a person's
+/// `commit.gpgsign` is not the scratch repository's, and the real
+/// pre-commit measuring the scratch's own files is not the test.
 fn commit(root: &Path, message: &str) {
     sh(
         root,
@@ -135,6 +145,8 @@ fn commit(root: &Path, message: &str) {
             "git",
             "-c",
             "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/var/empty",
             "commit",
             "-q",
             "--allow-empty",
@@ -151,32 +163,43 @@ fn worktrees(root: &Path) -> Vec<String> {
         .collect()
 }
 
-/// The add command: one call creates the branch off its track, adds the
+/// The add instrument: one call creates the branch off its track, adds the
 /// worktree, builds `xtask` so the first `Edit` is judged by a built
 /// binary rather than a cold `cargo run` (§12 item 8), lays the local file
 /// down and prints the `computed trust` line as a person's to run (§11).
 #[test]
 fn an_add_lays_a_worktree_down_ready_to_be_worked_in() {
     let root = repository("add");
-    let (code, out) = run(&root, "worktree-add.sh", &["t-x/witness"]);
+    let (code, out) = add(&root, &["t-x/witness"]);
     assert_eq!(code, 0, "{out}");
-    let dir = worktrees_of(&root).join("t-x/witness");
+    let dir = worktree_of(&root, "t-x/witness");
     assert!(dir.is_dir(), "{}: {out}", dir.display());
-    // What git prints of the path, which the temporary root is a symlink to.
-    let dir = fs::canonicalize(&dir).unwrap();
 
     // The branch is the track's tip, not `main`'s: `origin/t-x` is what a
     // track's branch is in a repository with worktrees on it.
     let head = sh(&root, &["git", "rev-parse", "t-x/witness"]);
     assert_eq!(head, sh(&root, &["git", "rev-parse", "origin/t-x"]));
-    assert!(out.contains("t-x"), "the track is named: {out}");
+    assert!(
+        out.contains("off the track t-x"),
+        "the track is named: {out}"
+    );
 
-    // Judged by a built binary from the first tool call.
+    // Judged by a built binary from the first tool call: this crate,
+    // built at the worktree's own HEAD, which is what it says it is.
     let built = dir.join("target/debug/xtask");
     assert!(built.is_file(), "no built xtask: {out}");
+    let track = Command::new(&built)
+        .args(["track", "--json"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let facts: serde_json::Value =
+        serde_json::from_slice(&track.stdout).unwrap_or_else(|e| panic!("{e}: {out}"));
+    assert_eq!(facts["branch"], "t-x/witness", "{facts}");
+    assert_eq!(facts["store"], root.to_str().unwrap(), "{facts}");
 
-    // The local file is laid down and rendered, and the grant that would
-    // render it is printed rather than run.
+    // The local file is laid down by that build and rendered, and the
+    // grant that would render it is printed rather than run.
     assert!(dir.join(".claude/harness.local.md").is_file(), "{out}");
     assert!(
         out.contains(&format!("computed trust {}", dir.display())),
@@ -199,11 +222,15 @@ fn an_add_lays_a_worktree_down_ready_to_be_worked_in() {
         "scripts/hooks",
         "the hooks path is asserted, not set again"
     );
+    assert!(
+        out.contains(&format!("ready: cd {}", dir.display())),
+        "{out}"
+    );
 
     // A second add refuses and changes nothing.
     let before = fs::read_to_string(dir.join(".claude/harness.local.md")).unwrap();
     let listed = worktrees(&root);
-    let (code, again) = run(&root, "worktree-add.sh", &["t-x/witness"]);
+    let (code, again) = add(&root, &["t-x/witness"]);
     assert_eq!(code, 1, "{again}");
     assert_eq!(worktrees(&root), listed, "{again}");
     assert_eq!(
@@ -213,11 +240,11 @@ fn an_add_lays_a_worktree_down_ready_to_be_worked_in() {
 
     // A branch that exists with no worktree of its own refuses too.
     sh(&root, &["git", "branch", "t-x/other"]);
-    let (code, other) = run(&root, "worktree-add.sh", &["t-x/other"]);
+    let (code, other) = add(&root, &["t-x/other"]);
     assert_eq!(code, 1, "{other}");
     assert!(other.contains("t-x/other"), "{other}");
     assert_eq!(worktrees(&root), listed, "{other}");
-    assert!(!worktrees_of(&root).join("t-x/other").exists(), "{other}");
+    assert!(!worktree_of(&root, "t-x/other").exists(), "{other}");
 
     // A branch `origin` has is one an agent is already on, so it is refused
     // rather than taken off the track a second time.
@@ -225,27 +252,78 @@ fn an_add_lays_a_worktree_down_ready_to_be_worked_in() {
         &root,
         &["git", "update-ref", "refs/remotes/origin/pushed", "HEAD"],
     );
-    let (code, pushed) = run(&root, "worktree-add.sh", &["pushed"]);
+    let (code, pushed) = add(&root, &["pushed"]);
     assert_eq!(code, 1, "{pushed}");
     assert_eq!(worktrees(&root), listed, "{pushed}");
-    assert!(!worktrees_of(&root).join("pushed").exists(), "{pushed}");
+    assert!(!worktree_of(&root, "pushed").exists(), "{pushed}");
+
+    // A directory that exists refuses before the branch is made.
+    fs::create_dir_all(worktree_of(&root, "t-x/taken")).unwrap();
+    let (code, taken) = add(&root, &["t-x/taken"]);
+    assert_eq!(code, 1, "{taken}");
+    assert_eq!(worktrees(&root), listed, "{taken}");
+    assert!(
+        !sh(&root, &["git", "branch", "--list", "t-x/taken"]).contains("t-x/taken"),
+        "{taken}"
+    );
 
     // No branch is a usage error, not a refusal of something.
-    let (code, usage) = run(&root, "worktree-add.sh", &[]);
+    let (code, usage) = add(&root, &[]);
     assert_eq!(code, 2, "{usage}");
     assert_eq!(worktrees(&root), listed, "{usage}");
 
-    let _ = fs::remove_dir_all(worktrees_of(&root));
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// A worktree the instrument lays down is one `permit` resolves as a
+/// workspace of its own: an `Edit` in it is judged by that worktree's
+/// manifest, not as `.claude/**` of the main checkout and not by the main
+/// checkout's rules (harness-design.md §4.4, #41).
+#[test]
+fn an_edit_in_a_laid_worktree_is_judged_by_that_worktrees_manifest() {
+    let root = repository("permit");
+    let (code, out) = add(&root, &["t-x/judged"]);
+    assert_eq!(code, 0, "{out}");
+    let dir = worktree_of(&root, "t-x/judged");
+
+    // The worktree's manifest differs from the main checkout's in what
+    // the rule says, so the denial says which manifest judged.
+    let manifest = fs::read_to_string(dir.join("seams.toml")).unwrap();
+    let marker = "edited by a person, says the worktree's manifest";
+    let manifest = manifest.replacen("are edited by a person.", &format!("are {marker}."), 1);
+    assert!(
+        manifest.contains(marker),
+        "the harness.self text is rewritten"
+    );
+    fs::write(dir.join("seams.toml"), manifest).unwrap();
+
+    let call = Call::parse(
+        &serde_json::json!({"tool_name": "Edit", "cwd": dir.to_str().unwrap(),
+            "tool_input": {"file_path": dir.join("oracle.toml").to_str().unwrap(),
+                "old_string": "a", "new_string": "b"}})
+        .to_string(),
+    )
+    .unwrap();
+    let workspace = call.workspace(&root);
+    assert_eq!(workspace, dir, "the worktree is the workspace: {out}");
+    let judged = judge(&Manifest::load(&workspace).unwrap(), &workspace, &call).unwrap();
+    let denial = judged
+        .denial()
+        .expect("the pin is a person's in the worktree too");
+    assert_eq!(denial.rule, "harness.self");
+    assert!(denial.reason().contains(marker), "{}", denial.reason());
+
     let _ = fs::remove_dir_all(&root);
 }
 
 /// A branch whose prefixes name no branch is on no track, so it is taken
-/// off `main`, which is what `done` judges it against (harness §4.5).
+/// off `main`, which is what `done` judges it against (harness §4.5); and
+/// `scripts/worktree-add.sh` is one `exec` of the instrument, so this one runs through it.
 #[test]
-fn a_branch_on_no_track_is_taken_off_main() {
+fn a_branch_on_no_track_is_taken_off_main_through_the_add_command() {
     let root = repository("solo");
     commit(&root, "ahead");
-    let (code, out) = run(&root, "worktree-add.sh", &["solo"]);
+    let (code, out) = command(&root, "worktree-add.sh", &["solo"]);
     assert_eq!(code, 0, "{out}");
     assert_eq!(
         sh(&root, &["git", "rev-parse", "solo"]),
@@ -253,7 +331,12 @@ fn a_branch_on_no_track_is_taken_off_main() {
         "{out}"
     );
     assert!(out.contains("off the track main"), "{out}");
-    let _ = fs::remove_dir_all(worktrees_of(&root));
+    assert!(
+        worktree_of(&root, "solo")
+            .join("target/debug/xtask")
+            .is_file(),
+        "{out}"
+    );
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -264,9 +347,9 @@ fn a_branch_on_no_track_is_taken_off_main() {
 #[test]
 fn retiring_appends_the_readings_to_the_tracks_store_and_removes_the_worktree() {
     let root = repository("retire");
-    let (code, out) = run(&root, "worktree-add.sh", &["t-x/witness"]);
+    let (code, out) = add(&root, &["t-x/witness"]);
     assert_eq!(code, 0, "{out}");
-    let dir = worktrees_of(&root).join("t-x/witness");
+    let dir = worktree_of(&root, "t-x/witness");
 
     let mut denial = Reading::new("permit", "workspace");
     denial.rule = "harness.self".to_owned();
@@ -279,12 +362,12 @@ fn retiring_appends_the_readings_to_the_tracks_store_and_removes_the_worktree() 
     // A removal that refuses has appended the readings already, so the
     // call that follows it must not count them a second time.
     write(&dir, "uncommitted.rs", "fn left_behind() {}\n");
-    let (code, dirty) = run(&root, "worktree-retire.sh", &["t-x/witness"]);
+    let (code, dirty) = command(&root, "worktree-retire.sh", &["t-x/witness"]);
     assert_eq!(code, 1, "{dirty}");
     assert!(dir.is_dir(), "{dirty}");
     fs::remove_file(dir.join("uncommitted.rs")).unwrap();
 
-    let (code, out) = run(&root, "worktree-retire.sh", &["t-x/witness"]);
+    let (code, out) = command(&root, "worktree-retire.sh", &["t-x/witness"]);
     assert_eq!(code, 0, "{out}");
     assert_eq!(
         fs::read_to_string(root.join("target/harness/log.jsonl"))
@@ -332,10 +415,9 @@ fn retiring_appends_the_readings_to_the_tracks_store_and_removes_the_worktree() 
     assert!(out.contains("git branch -D t-x/witness"), "{out}");
 
     // The main worktree is not a thing this command retires.
-    let (code, main) = run(&root, "worktree-retire.sh", &["main"]);
+    let (code, main) = command(&root, "worktree-retire.sh", &["main"]);
     assert_eq!(code, 1, "{main}");
     assert_eq!(worktrees(&root).len(), 1, "{main}");
 
-    let _ = fs::remove_dir_all(worktrees_of(&root));
     let _ = fs::remove_dir_all(&root);
 }

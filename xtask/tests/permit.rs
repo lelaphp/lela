@@ -217,6 +217,29 @@ fn a_file_in_an_agent_worktree_is_judged_against_that_checkout() {
     std::fs::remove_dir_all(&worktree).unwrap();
 }
 
+/// A track's worktree is named by its branch, and a branch's name is a
+/// path (`t-x/witness`), so the checkout is the first directory under
+/// `.claude/worktrees` on the way down that has a `.git`, not the first
+/// component alone (harness-design.md §5, #41).
+#[test]
+fn a_worktree_named_by_a_branch_with_a_slash_is_a_checkout_of_its_own() {
+    let track = workspace().join(format!(".claude/worktrees/t-permit-{}", std::process::id()));
+    let worktree = track.join("witness");
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::write(worktree.join(".git"), "gitdir: nowhere\n").unwrap();
+    let call = Call::parse(
+        &serde_json::json!({"tool_name": "Edit", "cwd": worktree.to_str().unwrap(),
+            "tool_input": {"file_path": worktree.join("seams.toml").to_str().unwrap(),
+                "old_string": "a", "new_string": "b"}})
+        .to_string(),
+    )
+    .unwrap();
+    let root = call.workspace(workspace());
+    assert_eq!(root, worktree.canonicalize().unwrap());
+    assert_eq!(call.path(&root).unwrap(), Path::new("seams.toml"));
+    std::fs::remove_dir_all(&track).unwrap();
+}
+
 #[test]
 fn an_edit_inside_a_computed_region_body_is_denied_and_one_beside_it_allowed() {
     let manifest = Manifest::load(workspace()).unwrap();

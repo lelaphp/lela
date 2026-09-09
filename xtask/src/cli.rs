@@ -99,6 +99,15 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// A track's worktrees: `add` lays one down under .claude/worktrees/<branch>
+    /// ready to be worked in, the branch off its track, `xtask` built there,
+    /// the local file laid and rendered, the `computed trust` line printed
+    /// as a person's; refuses a branch that exists and a directory that
+    /// does. Writes no reading.
+    Worktree {
+        #[command(subcommand)]
+        command: WorktreeCommand,
+    },
     /// Hold every crate to its line ceiling and the workspace to [budget];
     /// refuse committed generated code and a stale generated file.
     Budget,
@@ -168,6 +177,17 @@ pub enum Command {
         /// Only these crates, by manifest name; default every crate that exists.
         #[arg(long = "crate", value_name = "NAME")]
         crates: Vec<String>,
+    },
+}
+
+/// The halves of a track's worktree `xtask` has; the retire half is
+/// `scripts/worktree-retire.sh` still.
+#[derive(Debug, Subcommand)]
+pub enum WorktreeCommand {
+    /// Lay the worktree for a branch down, ready to be worked in.
+    Add {
+        /// The branch, not yet made; it names its own track.
+        branch: String,
     },
 }
 

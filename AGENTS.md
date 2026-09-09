@@ -123,6 +123,7 @@ Commands:
   permit             Judge one intended tool call from the `PreToolUse` hook's stdin; the decision is the JSON on stdout and the exit is 0 always
   done               The definition of done: print the conditions unmet for the changes since the base and exit 1 while any is; the Stop hook, pre-push and CI read the same list
   track              Say which track this worktree's branch is on (the longest existing branch that is a proper path prefix of its name, `main` for a branch on none), the commit `done` measures since, and the root that holds the track's store; as text, or as one object. Writes no reading
+  worktree           A track's worktrees: `add` lays one down under .claude/worktrees/<branch> ready to be worked in, the branch off its track, `xtask` built there, the local file laid and rendered, the `computed trust` line printed as a person's; refuses a branch that exists and a directory that does. Writes no reading
   budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code and a stale generated file
   clippy             `cargo clippy` with every warning denied, on every target of each crate, as the reading `done` reads; one reading per crate
   phpt               Run the pinned `.phpt` corpus through the engine and hold each test to its `--EXPECT*--` section: the per-commit lane the manifest composes, or the subset named; one reading per subset, scoped to the crate whose subset it is
@@ -137,7 +138,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=b34c00c776a68cb2e87a50cfa931064ae14e690ea73b161d2d13da982a73e902 out=19b217017f87cf999097f8a49bfb7eb6445946772ccded51c31e15ff98625797 -->
+<!-- /computed in=dfecff8f3309e4627bddd2ed682bbcb8d4cc03e82a359b0db24c3f78ce506b32 out=0aea22627cbbfe51107b5593a947b2d4ddea19465d276491485c06d4595596f8 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

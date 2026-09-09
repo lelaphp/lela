@@ -34,6 +34,7 @@ use crate::git::{self, Stamp, git};
 use crate::manifest::{self, Manifest, Rule, scope_matches};
 use crate::reading::{Reading, Status, Store};
 use crate::rust;
+use crate::worktree::WORKTREES;
 
 /// The instrument name every reading of permit carries.
 pub const INSTRUMENT: &str = "permit";
@@ -65,9 +66,6 @@ pub struct Call {
     #[serde(default)]
     pub session_id: String,
 }
-
-/// Where the harness keeps an agent's worktrees, under the main checkout.
-const WORKTREES: &str = ".claude/worktrees";
 
 /// The fields of `tool_input` a rule can read: an `Edit`'s, a `Write`'s or
 /// a `Bash` call's.
@@ -120,10 +118,12 @@ impl Call {
     }
 
     /// The checkout the call belongs to: a worktree under
-    /// `.claude/worktrees/<name>` when the file, or failing that the
-    /// call's `cwd`, lies in one, else `root`. An agent's worktree is a
-    /// checkout of its own (it has a `.git`), and a path in it is judged
-    /// against that checkout, not as `.claude/**` of the main one.
+    /// [`WORKTREES`] when the file, or failing that the call's `cwd`, lies
+    /// in one, else `root`. An agent's worktree is a checkout of its own
+    /// (it has a `.git`), and a path in it is judged against that checkout,
+    /// not as `.claude/**` of the main one. A track's worktree is named by
+    /// its branch, whose name is a path, so the checkout is the first
+    /// directory on the way down that has a `.git`.
     pub fn workspace(&self, root: &Path) -> PathBuf {
         let root = canonical(root);
         let worktrees = root.join(WORKTREES);
@@ -134,8 +134,11 @@ impl Call {
             .map(|p| canonical(Path::new(p)))
             .find_map(|p| {
                 let rest = p.strip_prefix(&worktrees).ok()?;
-                let checkout = worktrees.join(rest.components().next()?);
-                checkout.join(".git").exists().then_some(checkout)
+                let mut checkout = worktrees.clone();
+                rest.components().find_map(|component| {
+                    checkout.push(component);
+                    checkout.join(".git").exists().then(|| checkout.clone())
+                })
             })
             .unwrap_or(root)
     }
