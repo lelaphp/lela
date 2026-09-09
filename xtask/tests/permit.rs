@@ -1164,3 +1164,27 @@ fn an_unsafe_inside_a_string_or_a_comment_is_not_a_site() {
         "the audit's own negative controls are strings, not sites"
     );
 }
+
+/// An unsafe attribute, `#[unsafe(no_mangle)]`, asserts an unsafe contract
+/// as a block does, and is a site for both sensors of `unsafe.homes`: the
+/// rule's fixture carries it outside a home and inside one (#46).
+#[test]
+fn an_unsafe_attribute_is_a_site_outside_a_home_and_not_a_finding_inside_one() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let dir = fixtures().join("rules/unsafe.homes");
+    let fired = |name: &str| {
+        judge(&manifest, workspace(), &call(&dir.join(name)))
+            .unwrap()
+            .findings
+            .iter()
+            .any(|f| f.rule == "unsafe.homes")
+    };
+    assert!(
+        fired("deny-attribute.json"),
+        "the attribute outside a home is denied at the edit"
+    );
+    assert!(
+        !fired("allow-attribute.json"),
+        "the attribute inside a home is allowed at the edit"
+    );
+}

@@ -443,9 +443,10 @@ fn regex(pattern: &str) -> Regex {
         .unwrap_or_else(|err| unreachable!("permit's own pattern {pattern:?}: {err}"))
 }
 
+/// Whether the written text carries an unsafe site: what `rust::unsafe_sites`
+/// finds, so the judge at the edit and the audit after it read one matcher.
 fn has_unsafe(text: &str) -> bool {
-    regex(r"\bunsafe\s*(\{|fn\b|impl\b|trait\b|extern\b)")
-        .is_match(&rust::without_comments_or_literals(text))
+    !rust::unsafe_sites(text).is_empty()
 }
 
 /// An `unsafe.homes` entry against a path: a crate name, a path pattern, or

@@ -1,16 +1,66 @@
-//! Reading Rust source as code: one function that blanks what is not
-//! code, so a sensor's pattern never fires on a word inside a string or a
-//! comment.
+//! Reading Rust source as code: one function that returns the unsafe
+//! sites of a text, over one blanker of what is not code, so a sensor
+//! never fires on a word inside a string or a comment and the two sensors
+//! of one rule agree on what a site is.
 //!
-//! Two sensors of one rule read it. `permit` judges the whole written file
-//! at the tool call and `unsafe-audit` counts the sites of one line after
-//! `lines::code` has taken the comments away; before this module each
+//! Two sensors of `unsafe.homes` read it. `permit` judges the whole written
+//! file at the tool call and `unsafe-audit` counts the sites of one line
+//! after `lines::code` has taken the comments away; before this module each
 //! carried a blanker of its own, and the harness's own negative controls
 //! are strings (`unsafe_sites("unsafe { a(); }")`), so the fidelity of the
-//! blanker decided whether a sensor could be edited at all (#18). A rule
-//! read two ways is two rules, which is what harness-design.md §4.1 says
-//! of a rule stated anywhere but the manifest, and what the two hook
-//! adapters were taught on 2026-09-08.
+//! blanker decided whether a sensor could be edited at all (#18). The
+//! matcher then stayed split, `permit` on the keyword before a block or an
+//! item and the audit on every word-bounded keyword, so an unsafe attribute
+//! was a site for one and not the other (#46). A rule read two ways is two
+//! rules, which is what harness-design.md §4.1 says of a rule stated
+//! anywhere but the manifest, and what the two hook adapters were taught on
+//! 2026-09-08.
+
+/// The character offsets in `text` where an unsafe contract is asserted,
+/// so a sensor of `unsafe.homes` counts them, names their lines or asks
+/// whether there is one; the text is read whole, since the token that makes
+/// the keyword a site may stand on the next line. A
+/// site is the keyword before a block, `fn`, `impl`, `trait` or `extern`,
+/// or the unsafe attribute, `#[unsafe(no_mangle)]` and its kin: the
+/// attribute asserts a contract the item's caller cannot uphold, as a block
+/// does, which is why Rust 2024 spells it with the keyword and why a
+/// binding outside `ext/*/src/ffi/` may not carry one. `unsafe_code` in a
+/// lint attribute is not a site, nor is `is_unsafe` or the word inside a
+/// string or a comment; the text is read through
+/// [`without_comments_or_literals`] first.
+pub fn unsafe_sites(text: &str) -> Vec<usize> {
+    let code = without_comments_or_literals(text);
+    let bytes = code.as_bytes();
+    let word = |i: usize| {
+        bytes
+            .get(i)
+            .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+    };
+    let mut sites = Vec::new();
+    let mut from = 0;
+    while let Some(at) = code[from..].find("unsafe") {
+        let start = from + at;
+        let end = start + "unsafe".len();
+        from = end;
+        if (start > 0 && word(start - 1)) || word(end) {
+            continue;
+        }
+        // Where the token after the keyword starts.
+        let token = code.len() - code[end..].trim_start().len();
+        let rest = &code[token..];
+        let asserts = rest.starts_with('{')
+            || rest.starts_with('(')
+            || ["fn", "impl", "trait", "extern"]
+                .iter()
+                .any(|item| rest.starts_with(item) && !word(token + item.len()));
+        if asserts {
+            // The blanked text is the text character for character, and a
+            // blanked character may have been more than one byte.
+            sites.push(code[..start].chars().count());
+        }
+    }
+    sites
+}
 
 /// The text with its comments and its string, byte-string and character
 /// literals blanked, so a pattern over the result reads code alone. What
@@ -183,13 +233,56 @@ impl Scan<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::without_comments_or_literals as code;
+    use super::{unsafe_sites, without_comments_or_literals as code};
 
     /// What the text reads as once a literal of `blanks` characters
     /// between `before` and `after` is blanked; the blanked text keeps its
     /// length, so the count is the literal's own.
     fn blanked(before: &str, blanks: usize, after: &str) -> String {
         format!("{before}{}{after}", " ".repeat(blanks))
+    }
+
+    #[test]
+    fn a_site_is_the_keyword_before_a_block_or_an_item_or_the_unsafe_attribute() {
+        assert_eq!(unsafe_sites("unsafe { a(); } unsafe fn b()"), vec![0, 16]);
+        assert_eq!(unsafe_sites("pub unsafe impl A for B {}"), vec![4]);
+        assert_eq!(
+            unsafe_sites("unsafe trait T {}\nunsafe extern \"C\" {}"),
+            vec![0, 18]
+        );
+        assert_eq!(
+            unsafe_sites("#[unsafe(no_mangle)]\npub extern \"C\" fn f() {}"),
+            vec![2]
+        );
+        assert_eq!(unsafe_sites("#![unsafe(export_name = \"f\")]"), vec![3]);
+    }
+
+    #[test]
+    fn the_token_that_makes_a_site_may_stand_on_a_later_line_past_a_comment() {
+        assert_eq!(unsafe_sites("unsafe\n{ a() }"), vec![0]);
+        assert_eq!(unsafe_sites("pub unsafe // why\n    fn f() {}"), vec![4]);
+        assert_eq!(unsafe_sites("unsafe /* one */ {}"), vec![0]);
+        assert!(unsafe_sites("unsafe\n").is_empty());
+    }
+
+    #[test]
+    fn an_offset_counts_characters_so_a_wide_literal_before_a_site_moves_it_by_one() {
+        assert_eq!(unsafe_sites("let s = \"é\"; unsafe {}"), vec![13]);
+        assert_eq!(unsafe_sites("let s = \"e\"; unsafe {}"), vec![13]);
+    }
+
+    #[test]
+    fn the_attribute_word_a_name_and_the_keyword_in_a_string_or_a_comment_are_not_sites() {
+        assert!(unsafe_sites("#![forbid(unsafe_code)]").is_empty());
+        assert!(unsafe_sites("let is_unsafe = 1; let unsafe_ = 2;").is_empty());
+        assert!(unsafe_sites("let unsafe_fn = 1; unsafe_impl()").is_empty());
+        assert!(unsafe_sites("unsafe fnord()").is_empty());
+        assert_eq!(
+            unsafe_sites("let s = \"unsafe { \\\" unsafe\"; unsafe {}"),
+            vec![30]
+        );
+        assert!(unsafe_sites("// unsafe { a(); }\n/* #[unsafe(no_mangle)] */").is_empty());
+        assert!(unsafe_sites(r##"let s = r#"unsafe fn b()"#;"##).is_empty());
     }
 
     #[test]

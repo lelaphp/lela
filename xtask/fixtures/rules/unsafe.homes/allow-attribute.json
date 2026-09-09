@@ -1,0 +1,1 @@
+{"tool_name":"Edit","tool_input":{"file_path":"ext/pcre/src/ffi/mod.rs","old_string":"let x = 1;","new_string":"#[unsafe(no_mangle)]\npub extern \"C\" fn go() {}"}}

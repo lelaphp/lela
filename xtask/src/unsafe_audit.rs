@@ -94,10 +94,17 @@ pub fn audit(root: &Path, krate: &Crate, homes: &[Home]) -> Result<Audit> {
     for path in sources {
         let text =
             std::fs::read_to_string(root.join(&path)).with_context(|| format!("reading {path}"))?;
-        for (line, code) in lines::code(&text, false) {
-            let sites = unsafe_sites(&code);
-            found.sites += sites;
-            if sites > 0 && !allowed(&path) {
+        // The file whole, not line by line: the token that makes the
+        // keyword a site may stand on the next line, and `permit` reads
+        // the written file whole, so the two sensors read one text.
+        let sites = rust::unsafe_sites(&text);
+        found.sites += sites.len();
+        if !allowed(&path) {
+            let line_of =
+                |offset: usize| text.chars().take(offset).filter(|c| *c == '\n').count() + 1;
+            let mut lines: Vec<usize> = sites.iter().map(|&at| line_of(at)).collect();
+            lines.dedup();
+            for line in lines {
                 found
                     .outside
                     .push(format!("{path}:{line}: unsafe outside the homes"));
@@ -123,31 +130,6 @@ pub fn audit(root: &Path, krate: &Crate, homes: &[Home]) -> Result<Audit> {
         }
     }
     Ok(found)
-}
-
-/// The `unsafe` keywords on one line of code: `unsafe {`, `unsafe fn`,
-/// `unsafe impl`, `unsafe trait`, `unsafe extern`; `unsafe_code` in an
-/// attribute is not one, and neither is the word inside a string literal.
-pub fn unsafe_sites(code: &str) -> usize {
-    let code = rust::without_comments_or_literals(code);
-    let bytes = code.as_bytes();
-    let mut count = 0;
-    let mut from = 0;
-    while let Some(at) = code[from..].find("unsafe") {
-        let start = from + at;
-        let end = start + "unsafe".len();
-        let word = |i: usize| {
-            bytes
-                .get(i)
-                .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
-        };
-        let preceded = start > 0 && word(start - 1);
-        if !preceded && !word(end) {
-            count += 1;
-        }
-        from = end;
-    }
-    count
 }
 
 /// One entry of `unsafe.homes`: a crate, a path pattern, or a module.
@@ -226,7 +208,7 @@ impl Home {
 
 #[cfg(test)]
 mod tests {
-    use super::{Home, unsafe_sites};
+    use super::Home;
     use crate::manifest::Crate;
 
     fn krate(name: &str) -> Crate {
@@ -239,17 +221,6 @@ mod tests {
             targets: Vec::new(),
             phpt: Vec::new(),
         }
-    }
-
-    #[test]
-    fn the_keyword_is_a_site_and_the_attribute_word_is_not() {
-        assert_eq!(unsafe_sites("#![forbid(unsafe_code)]"), 0);
-        assert_eq!(unsafe_sites("unsafe { a(); } unsafe fn b()"), 2);
-        assert_eq!(unsafe_sites("let is_unsafe = 1;"), 0);
-        assert_eq!(
-            unsafe_sites("let s = \"unsafe { \\\" unsafe\"; unsafe {}"),
-            1
-        );
     }
 
     #[test]
