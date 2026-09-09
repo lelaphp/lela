@@ -149,24 +149,9 @@ impl Subset {
             if let Some(subset) = Subset::of(manifest, krate) {
                 return Ok(subset);
             }
-            let owned: Vec<String> = krate
-                .subsets()
-                .iter()
-                .map(|under| under.to_string_lossy().into_owned())
-                .collect();
-            if owned.is_empty() {
-                bail!(
-                    "{}: the [[crate]] row names no phpt subset, so the crate has none and `done` asks it for no phpt reading",
-                    krate.name
-                );
-            }
-            let named: Vec<&str> = owned.iter().map(String::as_str).collect();
             bail!(
-                "{}: the [[crate]] row names {}, and the pinned php-src at {} ({}) has none of them",
-                krate.name,
-                listed(&named),
-                source.display(),
-                manifest.pin.source.tag
+                "{}: the [[crate]] row names no phpt subset, so the crate has none and `done` asks it for no phpt reading",
+                krate.name
             );
         }
         let under = PathBuf::from(named);
@@ -183,21 +168,32 @@ impl Subset {
         )
     }
 
-    /// The subset one crate owns: the directories of its row that the
-    /// pinned tree has, and nothing when it owns none or the tree has none
-    /// of them.
+    /// The subset one crate owns: every directory its row names, and
+    /// nothing when it names none. Whether the pinned tree has them is not
+    /// asked here: a directory the tree lacks is a reading that says so,
+    /// since dropping it quietly would leave `done` asking a crate for a
+    /// phpt reading nothing could write, which is the hole #18 closed.
     pub fn of(manifest: &Manifest, krate: &Crate) -> Option<Subset> {
         let source = &manifest.pin.source.path;
         let dirs: Vec<Dir> = krate
             .subsets()
             .into_iter()
-            .filter(|under| source.join(under).is_dir())
             .map(|under| Dir::at(source, under))
             .collect();
         (!dirs.is_empty()).then(|| Subset {
             scope: krate.name.clone(),
             dirs,
         })
+    }
+
+    /// The directories the subset names that the pinned tree does not
+    /// have, by their place in it.
+    pub fn absent(&self) -> Vec<&Path> {
+        self.dirs
+            .iter()
+            .filter(|place| !place.dir.is_dir())
+            .map(|place| place.under.as_path())
+            .collect()
     }
 
     /// The per-commit lane (harness §7): every subset of every crate the
@@ -276,7 +272,14 @@ impl Subset {
     /// tests of the same name are told apart.
     pub fn name(&self, test: &Path) -> String {
         let Some(place) = self.found_in(test) else {
-            return test.to_string_lossy().into_owned();
+            // Not a test of this subset: its name is its own, never the
+            // path this machine keeps it at, which `id` would carry into a
+            // divergence key.
+            return test
+                .file_name()
+                .unwrap_or(test.as_os_str())
+                .to_string_lossy()
+                .into_owned();
         };
         let inside = place.inside(test);
         let named = if self.dirs.len() > 1 {
@@ -498,7 +501,26 @@ impl Tally {
         } else {
             format!(": {}", listed(&against))
         };
+        let absent = subset.absent();
         match runner {
+            // A directory the row names and the pinned tree has not: the
+            // manifest and the pin disagree, and no run can settle it. It
+            // is the reading, ahead of whether an engine is built, because
+            // building one would not answer it.
+            _ if !absent.is_empty() => {
+                let named: Vec<String> = absent
+                    .iter()
+                    .map(|under| under.to_string_lossy().into_owned())
+                    .collect();
+                let named: Vec<&str> = named.iter().map(String::as_str).collect();
+                reading.status = Status::Fail;
+                reading.message = format!(
+                    "{scope}: the [[crate]] row names {}, and the pinned php-src at {} ({}) has no such directory",
+                    listed(&named),
+                    manifest.pin.source.path.display(),
+                    manifest.pin.source.tag
+                );
+            }
             Runner::Absent(why) => {
                 reading.status = Status::Skip;
                 reading.message =

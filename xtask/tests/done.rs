@@ -711,3 +711,45 @@ fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
         "done needs the merge base with main: {text}"
     );
 }
+
+/// #18's other half: the row is what asks, so a crate that is no
+/// extension and carries one is unmet without its reading, the way
+/// `ext/pcre` is.
+#[test]
+fn a_crate_with_a_row_and_no_reading_is_unmet_the_way_an_extension_is() {
+    let root = scratch("row");
+    let seams = std::fs::read_to_string(root.join("seams.toml")).unwrap();
+    let with_a_row = seams.replace(
+        "name = \"php_heap\"\nbudget = 20000",
+        "name = \"php_heap\"\nbudget = 20000\nphpt = [\"Zend/tests\"]",
+    );
+    assert_ne!(with_a_row, seams, "the tracked manifest still has the row");
+    std::fs::write(root.join("seams.toml"), with_a_row).unwrap();
+    sh(&root, &["git", "add", "."]);
+    sh(
+        &root,
+        &[
+            "git",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "the row",
+        ],
+    );
+
+    write(
+        &root,
+        "crates/php_heap/src/lib.rs",
+        "pub fn allocate() {}\n",
+    );
+    let verdict = judge(&root);
+    assert_eq!(verdict.crates, ["php_heap"], "{verdict:#?}");
+    assert!(
+        verdict
+            .unmet
+            .contains(&"phpt: no reading for php_heap".to_owned()),
+        "{verdict:#?}"
+    );
+}

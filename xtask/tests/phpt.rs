@@ -479,9 +479,43 @@ fn a_crate_whose_row_names_no_subset_says_so_rather_than_looking_for_a_directory
 }
 
 #[test]
+fn a_subset_the_pinned_tree_has_not_is_a_reading_that_says_so_and_not_a_silent_drop() {
+    let manifest = manifest_of(
+        "[[crate]]\nname = \"php_engine\"\nbudget = 1\nphpt = [\"Zend/tests\", \"Zend/nope\"]\n",
+    );
+    // `done` asks a crate for a phpt reading whenever its row names one,
+    // and it never reads the tree; so a directory the tree has not must be
+    // a reading a run can write, never a subset quietly dropped.
+    let subset = Subset::resolve(&manifest, "php_engine").unwrap();
+    assert_eq!(subset.absent(), [Path::new("Zend/nope")]);
+    let reading = Tally::default()
+        .reading(
+            workspace(),
+            &manifest,
+            &subset,
+            &Runner::Absent("no engine".to_owned()),
+            None,
+        )
+        .unwrap();
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert!(
+        reading.message.contains("Zend/nope") && reading.message.contains("php-8.5.9"),
+        "the row and the pin are both named: {}",
+        reading.message
+    );
+}
+
+#[test]
 fn a_bare_run_is_the_per_commit_lane_composed_from_the_crate_rows() {
     let manifest = manifest_of(
-        "[[crate]]\nname = \"php_engine\"\nbudget = 1\nphpt = [\"Zend/tests\", \"tests\"]\n         [[crate]]\nname = \"php_heap\"\nbudget = 1\n         [[crate]]\nname = \"php_sapi\"\nbudget = 1\nphpt = [\"sapi/cli/tests\"]\n         [[crate]]\nname = \"ext/pcre\"\nbudget = 1\n         [[crate]]\nname = \"ext/curl\"\nbudget = 1\nfeature = \"curl\"\n",
+        &[
+            "[[crate]]\nname = \"php_engine\"\nbudget = 1\nphpt = [\"Zend/tests\", \"tests\"]\n",
+            "[[crate]]\nname = \"php_heap\"\nbudget = 1\n",
+            "[[crate]]\nname = \"php_sapi\"\nbudget = 1\nphpt = [\"sapi/cli/tests\"]\n",
+            "[[crate]]\nname = \"ext/pcre\"\nbudget = 1\n",
+            "[[crate]]\nname = \"ext/curl\"\nbudget = 1\nfeature = \"curl\"\n",
+        ]
+        .concat(),
     );
     let lane: Vec<String> = Subset::lane(&manifest)
         .into_iter()
