@@ -50,6 +50,23 @@ fn oracle() -> Option<PathBuf> {
     }
 }
 
+/// The tracked pin's php-src tree, when it is on this machine. The tree
+/// the pin names is outside the clone (harness-design.md §5), so a runner
+/// has the corpus nowhere and the tests that resolve a subset of it say so
+/// and return, as the ones that spawn the oracle do.
+fn source() -> Option<PathBuf> {
+    let pin = manifest().pin;
+    if pin.source.path.is_dir() {
+        Some(pin.source.path)
+    } else {
+        eprintln!(
+            "the pinned php-src is not at {}; skipping",
+            pin.source.path.display()
+        );
+        None
+    }
+}
+
 /// A subset of one test, in a directory of this test's own, standing where
 /// `php-src/ext/fixture/tests` would.
 fn subset(name: &str, tests: &[(&str, &str)]) -> Subset {
@@ -301,6 +318,9 @@ fn the_subset_of_an_extension_is_its_tests_at_the_pinned_tag_and_the_scope_is_th
 
 #[test]
 fn a_corpus_directory_is_a_subset_and_an_unknown_name_names_both_forms_tried() {
+    if source().is_none() {
+        return;
+    }
     let manifest = manifest();
     let subset = Subset::resolve(&manifest, "Zend/tests").unwrap();
     assert_eq!(subset.scope, "Zend/tests");
@@ -334,6 +354,9 @@ fn a_tier_lane_and_a_control_are_readings_of_their_own() {
 
 #[test]
 fn with_no_engine_built_the_reading_is_a_skip_that_says_so_and_no_test_runs() {
+    if source().is_none() {
+        return;
+    }
     let root = std::env::temp_dir().join(format!("xtask-phpt-absent-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
@@ -480,6 +503,9 @@ fn a_crate_whose_row_names_no_subset_says_so_rather_than_looking_for_a_directory
 
 #[test]
 fn a_subset_the_pinned_tree_has_not_is_a_reading_that_says_so_and_not_a_silent_drop() {
+    if source().is_none() {
+        return;
+    }
     let manifest = manifest_of(
         "[[crate]]\nname = \"php_engine\"\nbudget = 1\nphpt = [\"Zend/tests\", \"Zend/nope\"]\n",
     );
