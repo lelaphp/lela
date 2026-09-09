@@ -108,27 +108,12 @@ fn lock_kind(manifest: &Manifest, seam: &Seam) -> LockKind {
     }
 }
 
-/// The crate a lock lives with: the `[[crate]]` row that names the lock,
-/// redirected by its `lock_from`.
-fn lock_home(manifest: &Manifest, lock: &str) -> Option<String> {
-    manifest
-        .crates
-        .iter()
-        .find(|c| c.lock.iter().any(|l| l == lock))
-        .map(|c| {
-            c.lock_from
-                .get(lock)
-                .cloned()
-                .unwrap_or_else(|| c.name.clone())
-        })
-}
-
 /// Where a seam's lock lives, relative to the root: the directory of the
 /// crate the lock lives with, and the lock file in it. `None` for a lock no
 /// `[[crate]]` row names. What `done` reads to say whether a lock that
 /// differs is in the diff (harness-design.md §4.5).
 pub fn lock_place(manifest: &Manifest, seam: &Seam) -> Option<(PathBuf, PathBuf)> {
-    let home = lock_home(manifest, &seam.lock)?;
+    let home = manifest.lock_home(&seam.lock)?;
     let dir = manifest_path(manifest, &home);
     let file = dir.join(&seam.lock);
     Some((dir, file))
@@ -147,7 +132,7 @@ fn seam_reading(
     if seam.lock == "api.lock" {
         reading.rule = String::from("api.lock-line");
     }
-    let home = lock_home(manifest, &seam.lock);
+    let home = manifest.lock_home(&seam.lock);
     let scope = home
         .as_deref()
         .map_or_else(|| PathBuf::from("."), |h| manifest_path(manifest, h));

@@ -57,7 +57,6 @@ use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 
 use crate::divergence::Registry;
-use crate::git::Stamp;
 use crate::lane::{self, Outcome};
 use crate::manifest::{Crate, Manifest};
 use crate::oracle::{Oracle, Runner};
@@ -310,15 +309,6 @@ impl Subset {
         }
         scope
     }
-
-    /// The crate the subset belongs to, whose sources the reading is
-    /// stamped over so `done` can tell a stale reading from a fresh one.
-    fn stamped(&self, manifest: &Manifest) -> PathBuf {
-        match manifest.crate_named(&self.scope) {
-            Some(krate) => krate.path(),
-            None => PathBuf::from("."),
-        }
-    }
 }
 
 /// Every file under `dir`, recursively; a missing directory has none.
@@ -447,7 +437,13 @@ pub fn reading(
             manifest.pin.source.tag
         )
     };
-    let mut reading = tally.reading(INSTRUMENT, &scope, &outcome, message)?;
+    // Stamped through the manifest's scope mapping: the crate whose subset
+    // it is, so `done` can tell a stale reading from a fresh one.
+    let mut reading = tally.reading(
+        Reading::for_scope(INSTRUMENT, &scope, manifest, root)?,
+        &outcome,
+        message,
+    )?;
     reading.count("tests", tally.found as u64)?;
     reading.count("passed", tally.count(Judgement::Pass))?;
     reading.count("failed", tally.count(Judgement::Fail))?;
@@ -461,7 +457,6 @@ pub fn reading(
         "percent".to_owned(),
         percent(tally.met(), tally.found as u64).into(),
     );
-    reading.stamp(&Stamp::take(root, &subset.stamped(manifest))?);
     Ok(reading)
 }
 

@@ -37,6 +37,13 @@ fn manifest_of(rows: &str) -> Manifest {
     manifest
 }
 
+/// The manifest a reading over the fixture's subset is stamped through:
+/// the subset stands where `ext/fixture`'s would, so its crate is the
+/// reading's scope and the manifest must name it (harness §4.5).
+fn fixture_manifest() -> Manifest {
+    manifest_of("[[crate]]\nname = \"ext/fixture\"\nbudget = 1\n")
+}
+
 /// The tracked pin's binary, when it is on this machine.
 fn oracle() -> Option<PathBuf> {
     let pin = manifest().pin;
@@ -195,7 +202,7 @@ fn a_missed_expectation_fails_with_the_difference_and_the_reading_names_the_file
     let reading = phpt::reading(
         &tally,
         workspace(),
-        &manifest(),
+        &fixture_manifest(),
         &subset,
         &Runner::Engine(oracle().unwrap()),
         None,
@@ -237,7 +244,7 @@ fn the_same_missed_expectation_passes_under_an_accepted_divergence_row() {
     let reading = phpt::reading(
         &tally,
         workspace(),
-        &manifest(),
+        &fixture_manifest(),
         &subset,
         &Runner::Engine(oracle().unwrap()),
         None,
@@ -423,7 +430,7 @@ fn with_no_engine_built_the_reading_is_a_skip_that_says_so_and_no_test_runs() {
 #[test]
 fn the_pinned_oracle_as_the_binary_is_the_runners_control_and_never_a_reading_of_the_engine() {
     let Some(binary) = oracle() else { return };
-    let manifest = manifest();
+    let manifest = fixture_manifest();
     let runner = Runner::resolve(workspace(), &manifest.pin, Some(&binary)).unwrap();
     assert!(matches!(runner, Runner::Control(_)), "{runner:?}");
 
@@ -464,7 +471,7 @@ fn a_subset_where_nothing_met_an_expectation_is_a_skip_and_not_a_green_reading()
     let reading = phpt::reading(
         &tally,
         workspace(),
-        &manifest(),
+        &fixture_manifest(),
         &subset,
         &Runner::Engine(oracle().unwrap()),
         None,
@@ -500,7 +507,7 @@ fn the_reading_carries_the_burndowns_one_number() {
     let reading = phpt::reading(
         &tally,
         workspace(),
-        &manifest(),
+        &fixture_manifest(),
         &subset,
         &Runner::Engine(oracle().unwrap()),
         None,
@@ -619,10 +626,28 @@ fn the_reading_of_an_extension_subset_is_stamped_over_the_crate_so_done_can_read
     .unwrap();
     assert_eq!(reading.scope, "ext/pcre");
     assert_eq!(
-        reading.tree,
+        reading.tree(),
         xtask::git::tree_hash(workspace(), Path::new("ext/pcre")).unwrap(),
         "done reads the reading as fresh only when the tree matches the crate's"
     );
+}
+
+/// A directory of the pinned corpus no crate owns is a scope the mapping
+/// knows only through the tree: its reading is stamped over the whole
+/// workspace, since no crate's sources are what it measures, and `done`
+/// never asks for it.
+#[test]
+fn a_corpus_directory_no_crate_owns_is_stamped_over_the_workspace() {
+    if source().is_none() {
+        return;
+    }
+    let manifest = manifest();
+    assert_eq!(manifest.scope_path("Zend/tests").unwrap(), Path::new("."));
+    assert_eq!(
+        manifest.scope_path("Zend/tests@control").unwrap(),
+        Path::new(".")
+    );
+    assert_eq!(manifest.scope_path("Zend/nowhere"), None);
 }
 
 #[test]

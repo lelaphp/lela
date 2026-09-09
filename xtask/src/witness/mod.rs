@@ -51,7 +51,6 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use crate::divergence::Registry;
-use crate::git::Stamp;
 use crate::lane::{self, Outcome};
 use crate::manifest::{Crate, Manifest, Rule};
 use crate::oracle::{Oracle, Runner};
@@ -220,11 +219,13 @@ pub fn reading(
         // first; the words are here so no rung is without any.
         Outcome::NothingRan => format!("{name}: no witness ran of {} found", run.found),
     };
-    let mut reading = run.reading(INSTRUMENT, name, &outcome, message)?;
-    if let Some(rule) = rule {
-        reading.rule.clone_from(&rule.id);
-        reading.adr = rule.adr.adr_field();
-    }
+    // Constructed here and not before the run, since `--accept` writes the
+    // sources the stamp is over.
+    let mut reading = run.reading(
+        under_rule(Reading::for_crate(INSTRUMENT, krate, root)?, rule),
+        &outcome,
+        message,
+    )?;
     reading.count("passed", run.count(Judgement::Pass))?;
     reading.count("failed", run.against().len() as u64)?;
     reading.count("diverged", run.count(Judgement::Diverged))?;
@@ -234,8 +235,17 @@ pub fn reading(
     reading.count("accepted", tally.captured.len() as u64)?;
     reading.count("unread", tally.problems.len() as u64)?;
     reading.count("wall_ms", declared_ms(tally.wall))?;
-    reading.stamp(&Stamp::take(root, &krate.path())?);
     Ok(reading)
+}
+
+/// The reading under the coverage rule, when the manifest has one: the
+/// rule's id and its ADR, on every reading the instrument writes.
+fn under_rule(mut reading: Reading, rule: Option<&Rule>) -> Reading {
+    if let Some(rule) = rule {
+        reading.rule.clone_from(&rule.id);
+        reading.adr = rule.adr.adr_field();
+    }
+    reading
 }
 
 /// The declared wall as the reading counts it; a witness the recipe would
@@ -280,13 +290,10 @@ pub fn run(
         if !ask.crates.is_empty() && !ask.crates.iter().any(|n| n == &krate.name) {
             continue;
         }
-        // The reading of a crate no witness runs for: the harness's, one
-        // not yet created, or one whose sources cannot be read.
-        let mut unrun = Reading::new(INSTRUMENT, &krate.name);
-        if let Some(rule) = rule {
-            unrun.rule.clone_from(&rule.id);
-            unrun.adr = rule.adr.adr_field();
-        }
+        // The reading of a crate no witness runs for, which nothing
+        // measured and so carries no stamp: the harness's, or one not yet
+        // created.
+        let mut unrun = under_rule(Reading::new(INSTRUMENT, &krate.name), rule);
         if krate.name == crate::done::HARNESS {
             // The harness measures the engine and carries no witness of its
             // own; `done` asks it for none either (§4.5).
@@ -306,10 +313,10 @@ pub fn run(
             // witness reading and a pass over sources never seen would
             // say the crate was measured when it was not.
             Err(unread) => {
-                unrun.status = Status::Fail;
-                unrun.message = format!("{}: {unread:#}", krate.name);
-                unrun.stamp(&Stamp::take(root, &krate.path())?);
-                readings.push(unrun);
+                let mut failed = under_rule(Reading::for_crate(INSTRUMENT, krate, root)?, rule);
+                failed.status = Status::Fail;
+                failed.message = format!("{}: {unread:#}", krate.name);
+                readings.push(failed);
                 continue;
             }
         };

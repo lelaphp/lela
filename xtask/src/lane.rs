@@ -197,16 +197,15 @@ impl<J: Judgement> Tally<J> {
         }
     }
 
-    /// The reading: `run` in its numbers, the rung's status, and the
-    /// lane's words. The lane adds its own counts and stamps it.
+    /// The reading the lane constructed, stamped over its scope, with
+    /// `run` in its numbers, the rung's status, and the lane's words. The
+    /// lane adds its own counts after.
     pub fn reading(
         &self,
-        instrument: &str,
-        scope: &str,
+        mut reading: Reading,
         outcome: &Outcome<'_>,
         message: String,
     ) -> Result<Reading> {
-        let mut reading = Reading::new(instrument, scope);
         reading.count("run", self.judged.len() as u64)?;
         reading.status = outcome.status();
         reading.message = message;
@@ -331,8 +330,7 @@ mod tests {
         assert_eq!(went, items);
         let reading = tally
             .reading(
-                "lane",
-                "ext/fixture",
+                Reading::new("lane", "ext/fixture"),
                 &tally.outcome(&engine()),
                 "words".to_owned(),
             )

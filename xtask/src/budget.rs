@@ -10,7 +10,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use crate::generated;
-use crate::git::{self, Stamp};
+use crate::git;
 use crate::lines;
 use crate::lock::CargoLock;
 use crate::manifest::{Budget, Crate, Manifest};
@@ -36,11 +36,17 @@ pub fn run(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
     Ok(readings)
 }
 
-/// One crate against its ceiling, and what it counted.
+/// One crate against its ceiling, and what it counted. A crate not yet
+/// created is measured by nothing and its reading carries no stamp.
 fn crate_reading(root: &Path, krate: &Crate) -> Result<(Reading, Count)> {
-    let mut reading = Reading::new("budget", &krate.name);
+    let created = sources::exists(root, krate);
+    let mut reading = if created {
+        Reading::for_crate("budget", krate, root)?
+    } else {
+        Reading::new("budget", &krate.name)
+    };
     reading.count("ceiling", krate.budget)?;
-    if !sources::exists(root, krate) {
+    if !created {
         reading.message = format!("{}: not yet created", krate.name);
         return Ok((reading, Count::default()));
     }
@@ -62,14 +68,13 @@ fn crate_reading(root: &Path, krate: &Crate) -> Result<(Reading, Count)> {
             krate.name, count.lines, krate.budget
         );
     }
-    reading.stamp(&Stamp::take(root, &krate.path())?);
     Ok((reading, count))
 }
 
 /// The workspace against `[budget]`: the pooled counts, every crate
 /// declared, no committed generated code outside the exceptions.
 fn workspace_reading(root: &Path, manifest: &Manifest, total: Count) -> Result<Reading> {
-    let mut reading = Reading::new("budget", "workspace");
+    let mut reading = Reading::for_scope("budget", "workspace", manifest, root)?;
     let budget: &Budget = &manifest.budget;
     let mut failures = Vec::new();
     let mut ceiling = |name: &str, value: u64, limit: u64, what: &str| -> Result<()> {
@@ -140,7 +145,6 @@ fn workspace_reading(root: &Path, manifest: &Manifest, total: Count) -> Result<R
         reading.status = Status::Fail;
         reading.message = failures.join("; ");
     }
-    reading.stamp(&Stamp::take(root, Path::new("."))?);
     Ok(reading)
 }
 
@@ -151,7 +155,7 @@ fn generated_readings(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> 
     let mut readings = Vec::new();
     for rule in &manifest.rules {
         for (file, from) in rule.predicate.generated.iter().flatten() {
-            let mut reading = Reading::new("budget", file);
+            let mut reading = Reading::for_scope("budget", file, manifest, root)?;
             reading.rule.clone_from(&rule.id);
             let source = manifest.rule(from);
             let adrs: Vec<&str> = source
@@ -190,7 +194,6 @@ fn generated_readings(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> 
                     reading.message = format!("{what}; run `xtask generate`. {}{cited}", rule.text);
                 }
             }
-            reading.stamp(&Stamp::take(root, Path::new(file))?);
             readings.push(reading);
         }
     }

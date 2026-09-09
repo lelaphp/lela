@@ -11,7 +11,6 @@ use std::process::{Command, Stdio};
 
 use xtask::divergence::Registry;
 use xtask::done::{self, Base, FRESH, Verdict};
-use xtask::git::tree_hash;
 use xtask::manifest::Manifest;
 use xtask::reading::{Reading, Status, Store};
 
@@ -117,13 +116,13 @@ fn judge_since(root: &Path, base: Option<&str>) -> Verdict {
     done::judge(root, &manifest, &registry, &store, base).unwrap()
 }
 
-/// A passing reading of `instrument` over `scope`, stamped with the
-/// scope's tree now.
+/// A passing reading of `instrument` over `scope`, stamped through the
+/// constructor with the scope's tree now.
 fn fresh(root: &Path, instrument: &str, scope: &str) -> Reading {
-    let mut reading = Reading::new(instrument, scope);
+    let manifest = Manifest::load(root).unwrap();
+    let mut reading = Reading::for_scope(instrument, scope, &manifest, root).unwrap();
     reading.status = Status::Pass;
     reading.message = format!("{scope}: measured");
-    reading.tree = tree_hash(root, Path::new(scope)).unwrap();
     reading.commit = "0000000".into();
     reading
 }
@@ -437,6 +436,48 @@ fn fresh_passing_readings_for_the_touched_crate_pass_and_an_edit_after_them_is_s
     }
 }
 
+/// The constructor and `done` agree on the path a scope's tree is hashed
+/// over: a reading written through it is fresh for its scope, and one
+/// byte under that scope makes every one of them stale (harness-design.md
+/// §4.5 condition 1, §13 D.18). The crate's readings go through
+/// `for_crate`; the subset's, whose scope is the crate's name, through
+/// `for_scope`, the two arms of the mapping a touched crate meets.
+#[test]
+fn a_reading_through_the_constructor_is_fresh_for_its_scope_and_stale_after_one_byte() {
+    let root = scratch("one-byte");
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    let manifest = Manifest::load(&root).unwrap();
+    let krate = manifest.crate_named("ext/pcre").unwrap();
+    let store = Store::of_workspace(&root);
+    for instrument in FRESH {
+        let mut reading = if instrument == "phpt" {
+            Reading::for_scope(instrument, "ext/pcre", &manifest, &root).unwrap()
+        } else {
+            Reading::for_crate(instrument, krate, &root).unwrap()
+        };
+        reading.status = Status::Pass;
+        reading.message = "measured".into();
+        store.write(&reading).unwrap();
+    }
+    let verdict = judge(&root);
+    assert!(verdict.met(), "{verdict:#?}");
+
+    let file = root.join("ext/pcre/src/lib.rs");
+    let mut text = std::fs::read(&file).unwrap();
+    text.push(b'\n');
+    std::fs::write(&file, text).unwrap();
+    let verdict = judge(&root);
+    let stale: Vec<&str> = verdict
+        .unmet
+        .iter()
+        .filter(|l| {
+            l.ends_with("the reading for ext/pcre is stale; ext/pcre changed since it was taken")
+        })
+        .map(|l| l.split(':').next().unwrap())
+        .collect();
+    assert_eq!(stale, FRESH, "{verdict:#?}");
+}
+
 #[test]
 fn a_failing_or_skipped_reading_is_unmet_with_its_message() {
     let root = scratch("failing");
@@ -494,12 +535,14 @@ fn a_kernel_or_native_without_a_witness_is_unmet_from_the_witness_reading() {
 fn a_lock_that_differs_must_be_in_the_diff_and_a_lock_in_the_diff_needs_its_reading() {
     let root = scratch("locks");
     let store = Store::of_workspace(&root);
+    // The seam's name is the scope; the mapping stamps it over the lock's
+    // home, `crates/php_heap`, which is what `done` hashes.
     let differs = |root: &Path| {
-        let mut reading = Reading::new("api-check", "heap");
+        let manifest = Manifest::load(root).unwrap();
+        let mut reading = Reading::for_scope("api-check", "heap", &manifest, root).unwrap();
         reading.status = Status::Fail;
         reading.message =
             "2 public items of php_heap have no line in crates/php_heap/heap.lock: Gc, Zval".into();
-        reading.tree = tree_hash(root, Path::new("crates/php_heap")).unwrap();
         reading
     };
     store.write(&differs(&root)).unwrap();
@@ -710,7 +753,7 @@ fn every_verdict_is_one_reading_of_done_over_the_workspace() {
         "{}",
         reading.message
     );
-    assert_eq!(reading.tree.len(), 40);
+    assert_eq!(reading.tree().len(), 40);
     assert_eq!(reading.commit.len(), 7);
 
     let stop = std::fs::read_to_string(fixtures().join("hooks/stop.json")).unwrap();

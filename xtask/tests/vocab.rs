@@ -174,7 +174,7 @@ fn the_instrument_writes_a_reading_per_crate_with_instrument_vocab() {
     assert_eq!(reading.rule, "vocab.avoid");
     assert_eq!(reading.status, Status::Fail);
     assert!(reading.message.contains("run"), "{}", reading.message);
-    assert!(!reading.tree.is_empty() && !reading.commit.is_empty());
+    assert!(!reading.tree().is_empty() && !reading.commit.is_empty());
     let hits = reading.numbers["hits"].to_string().parse::<i64>().unwrap();
     assert!(hits >= 3, "items and prose: {reading:#?}");
 

@@ -231,7 +231,7 @@ fn fresh_readings(
             unmet.push(format!("{instrument}: no reading for {name}"));
             continue;
         };
-        if reading.tree != tree {
+        if reading.tree() != tree {
             unmet.push(format!(
                 "{instrument}: the reading for {name} is stale; {name} changed since it was taken"
             ));
@@ -282,7 +282,7 @@ fn locks(
             }
             continue;
         };
-        let fresh = reading.tree == git::tree_hash(root, &dir)?;
+        let fresh = reading.tree() == git::tree_hash(root, &dir)?;
         match reading.status {
             Status::Fail if fresh => unmet.push(format!(
                 "{shown}: {}{}",

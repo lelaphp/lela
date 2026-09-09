@@ -8,7 +8,6 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use crate::git::Stamp;
 use crate::manifest::{Crate, Manifest};
 use crate::reading::{Reading, Status};
 use crate::rust;
@@ -31,10 +30,15 @@ pub fn run(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
         .collect::<Result<_>>()?;
     let mut readings = Vec::new();
     for krate in &manifest.crates {
-        let mut reading = Reading::new("unsafe-audit", &krate.name);
+        let created = sources::exists(root, krate);
+        let mut reading = if created {
+            Reading::for_crate("unsafe-audit", krate, root)?
+        } else {
+            Reading::new("unsafe-audit", &krate.name)
+        };
         RULE.clone_into(&mut reading.rule);
         reading.adr = rule.adr.adr_field();
-        if sources::exists(root, krate) {
+        if created {
             let audit = audit(root, krate, &homes)?;
             reading.count("sites", u64::try_from(audit.sites)?)?;
             reading.count("outside", u64::try_from(audit.outside.len())?)?;
@@ -55,7 +59,6 @@ pub fn run(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
                     rule.adr.adr_cited()
                 );
             }
-            reading.stamp(&Stamp::take(root, &krate.path())?);
         } else {
             reading.message = format!("{}: not yet created", krate.name);
         }

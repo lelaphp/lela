@@ -28,5 +28,5 @@ fn the_tracked_workspace_has_no_unsafe_outside_the_homes() {
     assert_eq!(xtask.status, Status::Pass);
     assert_eq!(xtask.numbers["sites"], 0.into());
     assert_eq!(xtask.numbers["outside"], 0.into());
-    assert!(!xtask.tree.is_empty(), "stamped");
+    assert!(!xtask.tree().is_empty(), "stamped");
 }

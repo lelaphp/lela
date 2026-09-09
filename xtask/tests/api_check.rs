@@ -69,7 +69,7 @@ fn the_clean_fixture_passes_every_rule() {
     assert_eq!(of(&readings, "ext/standard").status, Status::Pass);
     for reading in &readings {
         assert_eq!(reading.instrument, "api-check");
-        assert_eq!(reading.tree.len(), 40, "{}", reading.scope);
+        assert_eq!(reading.tree().len(), 40, "{}", reading.scope);
     }
 }
 

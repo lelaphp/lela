@@ -80,10 +80,14 @@ fn a_test_instrument_writes_one_reading_end_to_end() {
     let root = std::env::temp_dir().join(format!("xtask-instrument-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let manifest = Manifest::load(workspace()).unwrap();
-    let scope = manifest.scope_path("xtask").unwrap();
-    let mut reading = Reading::new("test", "xtask");
+    let mut reading = Reading::for_scope("test", "xtask", &manifest, workspace()).unwrap();
     reading.status = Status::Pass;
-    reading.stamp(&Stamp::take(workspace(), &scope).unwrap());
+    assert_eq!(
+        reading.tree(),
+        Stamp::take(workspace(), &manifest.scope_path("xtask").unwrap())
+            .unwrap()
+            .tree
+    );
     let store = Store::at(&root);
     let path = store.write(&reading).unwrap();
     assert_eq!(path, root.join("test/xtask.toml"));

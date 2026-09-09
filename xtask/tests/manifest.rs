@@ -208,3 +208,46 @@ fn a_crate_row_names_the_phpt_subsets_the_crate_owns() {
     // `done` reads: such a crate is not asked for a phpt reading.
     assert!(subsets("php_heap").is_empty());
 }
+
+/// The path a reading's `tree` is hashed over, one function for every
+/// scope kind a reading carries (harness-design.md §4.2, §4.5 condition
+/// 1): a crate's sources, a subset's crate, a lock's home, the workspace.
+#[test]
+fn a_scope_maps_to_the_path_its_reading_is_stamped_over() {
+    let text = format!(
+        "{MINIMAL}\n[[crate]]\nname = \"php_engine\"\nbudget = 1\nlock = [\"api.lock\", \"tier.lock\"]\nlock_from = {{ \"api.lock\" = \"php_ext\" }}\nphpt = [\"Zend/tests\"]\n[[crate]]\nname = \"php_ext\"\nbudget = 1\n[[crate]]\nname = \"ext/pcre\"\nbudget = 1\n[[crate]]\nname = \"xtask\"\nbudget = 1\n[[seam]]\nname = \"api\"\nproducer = \"php_engine\"\nconsumers = [\"ext/*\"]\nlock = \"api.lock\"\n[[seam]]\nname = \"tier\"\nproducer = \"php_engine\"\nconsumers = [\"php_jit\"]\nlock = \"tier.lock\"\n[[seam]]\nname = \"ops\"\nproducer = \"ops.toml\"\nconsumers = [\"php_engine\"]\nlock = \"ops.lock\"\ngenerated = true\n"
+    );
+    let manifest = Manifest::parse(&text).unwrap();
+    let path = |scope: &str| manifest.scope_path(scope);
+
+    // A crate: its sources, wherever the layout puts them.
+    assert_eq!(path("php_engine").unwrap(), Path::new("crates/php_engine"));
+    assert_eq!(path("ext/pcre").unwrap(), Path::new("ext/pcre"));
+    assert_eq!(path("xtask").unwrap(), Path::new("xtask"));
+
+    // A subset: the crate whose subset it is, under the crate's name and
+    // beside a tier lane or a control of the runner alike, so `done` finds
+    // the engine's reading under the crate and neither displaces it.
+    assert_eq!(path("ext/pcre@control").unwrap(), Path::new("ext/pcre"));
+    assert_eq!(
+        path("php_engine@jit").unwrap(),
+        Path::new("crates/php_engine")
+    );
+
+    // A lock: the seam's name maps to the directory the lock lives in, the
+    // crate `lock_from` names when the row says so, and the workspace for a
+    // lock no row names, which is what api-check's readings hash over.
+    assert_eq!(path("tier").unwrap(), Path::new("crates/php_engine"));
+    assert_eq!(path("api").unwrap(), Path::new("crates/php_ext"));
+    assert_eq!(path("ops").unwrap(), Path::new("."));
+
+    // The workspace.
+    assert_eq!(path("workspace").unwrap(), Path::new("."));
+
+    // A name the manifest has no row for maps to nothing: a reading over it
+    // would be one `done` never finds fresh, and the constructor refuses it.
+    // A parsed manifest has no pin, so no directory of the pinned corpus
+    // is known here either; that arm is phpt's test, beside the tree.
+    assert_eq!(path("php_nowhere"), None);
+    assert_eq!(path("ext/pcre/tests@control"), None);
+}

@@ -10,7 +10,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::git::{self, Stamp};
+use crate::git;
 use crate::manifest::{Crate, Manifest};
 use crate::reading::{Reading, Status};
 use crate::sources;
@@ -83,7 +83,7 @@ pub fn check(root: &Path, krate: &Crate) -> Result<Reading> {
         .current_dir(root)
         .output()
         .with_context(|| format!("running cargo clippy -p {package}"))?;
-    let mut reading = Reading::new(INSTRUMENT, &krate.name);
+    let mut reading = Reading::for_crate(INSTRUMENT, krate, root)?;
     if out.status.success() {
         reading.status = Status::Pass;
         reading.message = format!("{}: clippy clean, warnings denied", krate.name);
@@ -96,7 +96,6 @@ pub fn check(root: &Path, krate: &Crate) -> Result<Reading> {
         reading.status = Status::Fail;
         reading.message = format!("{}: clippy is not clean\n{}", krate.name, tail(&text, 40));
     }
-    reading.stamp(&Stamp::take(root, &krate.path())?);
     Ok(reading)
 }
 

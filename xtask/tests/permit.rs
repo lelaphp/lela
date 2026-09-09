@@ -372,7 +372,7 @@ fn a_denial_is_a_reading_with_instrument_permit_and_the_rule_id() {
         reading.message
     );
     assert!(reading.message.starts_with("Edit "), "{}", reading.message);
-    assert_eq!(reading.tree.len(), 40);
+    assert_eq!(reading.tree().len(), 40);
 }
 
 #[test]
@@ -1137,7 +1137,7 @@ fn the_refusal_is_a_reading_with_the_session_of_the_call_it_did_not_judge() {
         "{}",
         reading.message
     );
-    assert_eq!(reading.tree.len(), 40);
+    assert_eq!(reading.tree().len(), 40);
 }
 
 /// The outage of #16 was the loud staleness: a build that could not read

@@ -1,9 +1,14 @@
 //! The reading and its store (harness-design.md §4.2): one file per
 //! instrument and scope, overwritten each run, and an append-only log.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use xtask::manifest::Crate;
 use xtask::reading::{Reading, Status, Store};
+
+fn workspace() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+}
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("xtask-store-{name}-{}", std::process::id()));
@@ -11,15 +16,19 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
+/// A reading of the shape §4.2 draws, stamped through the constructor
+/// over the crate; the commit and the time are pinned, since the lines
+/// the tests read back are those, and the tree is whatever the crate's
+/// sources hash to today.
 fn reading(status: Status, failed: i64) -> Reading {
-    let mut reading = Reading::new("witness", "ext/pcre");
+    let krate: Crate = toml::from_str("name = \"ext/pcre\"\nbudget = 6000").unwrap();
+    let mut reading = Reading::for_crate("witness", &krate, workspace()).unwrap();
     reading.rule = "witness.coverage".into();
     reading.status = status;
     reading.numbers.insert("run".into(), 212.into());
     reading.numbers.insert("failed".into(), failed.into());
     reading.message = "ext/pcre: 3 witnesses differ from the oracle".into();
     reading.adr = "0004".into();
-    reading.tree = "9f3c".into();
     reading.commit = "0b62ae0".into();
     reading.at = "2026-09-07T01:05:49Z".parse().unwrap();
     reading

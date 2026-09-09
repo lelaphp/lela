@@ -538,12 +538,69 @@ impl Manifest {
             .collect()
     }
 
-    /// The path of a reading's scope, relative to the root: a crate's
-    /// sources, or the whole workspace for `"workspace"`.
+    /// The crate a lock lives with: the one whose row names it, or the
+    /// crate its `lock_from` entry names for a lock listed on one row and
+    /// generated from another (`api.lock` on `php_engine`'s row, from
+    /// `php_ext`). `None` for a lock no row names.
+    pub fn lock_home(&self, lock: &str) -> Option<String> {
+        self.crates
+            .iter()
+            .find(|c| c.lock.iter().any(|l| l == lock))
+            .map(|c| {
+                c.lock_from
+                    .get(lock)
+                    .cloned()
+                    .unwrap_or_else(|| c.name.clone())
+            })
+    }
+
+    /// The path a reading's `tree` is hashed over, relative to the root:
+    /// the one mapping from a scope to its sources, so what an instrument
+    /// stamps and what `done` hashes agree (harness-design.md §4.2, §4.5
+    /// condition 1). One arm per scope kind a reading carries:
+    ///
+    /// - `"workspace"`: the whole tree.
+    /// - a crate: its sources ([`Crate::path`]).
+    /// - a subset: the crate whose subset it is, under the crate's name
+    ///   and beside a tier lane or a control of the runner alike
+    ///   (`ext/pcre@jit`, `ext/pcre@control`), so `done` finds the
+    ///   engine's reading under the crate; a directory of the pinned
+    ///   corpus no crate owns (`Zend/tests`) is the whole tree, since no
+    ///   crate's sources are what it measures and `done` never asks for it.
+    /// - a lock: the seam's name maps to the directory the lock lives in,
+    ///   the crate [`Manifest::lock_home`] names, and the whole tree for a
+    ///   lock no row names.
+    /// - a generated file the manifest names (`ext/clippy.toml`): itself.
+    ///
+    /// `None` for a name none of these know, which the reading's
+    /// constructor refuses by name rather than stamping over a guess.
     pub fn scope_path(&self, scope: &str) -> Option<PathBuf> {
         if scope == "workspace" {
             return Some(PathBuf::from("."));
         }
-        self.crate_named(scope).map(Crate::path)
+        let name = scope.split_once('@').map_or(scope, |(name, _)| name);
+        if let Some(krate) = self.crate_named(name) {
+            return Some(krate.path());
+        }
+        if let Some(seam) = self.seams.iter().find(|s| s.name == name) {
+            return Some(
+                self.lock_home(&seam.lock)
+                    .and_then(|home| self.crate_named(&home))
+                    .map_or_else(|| PathBuf::from("."), Crate::path),
+            );
+        }
+        let generated = self
+            .rules
+            .iter()
+            .flat_map(|r| r.predicate.generated.iter().flatten())
+            .any(|(file, _)| file == name);
+        if generated {
+            return Some(PathBuf::from(name));
+        }
+        let corpus = self.pin.source.tree();
+        if !corpus.as_os_str().is_empty() && corpus.join(name).is_dir() {
+            return Some(PathBuf::from("."));
+        }
+        None
     }
 }

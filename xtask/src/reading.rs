@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use toml::value::Datetime;
 
 use crate::git::Stamp;
+use crate::manifest::{Crate, Manifest};
 
 /// Where the store lives, relative to the workspace root.
 pub const DIR: &str = "target/harness";
@@ -37,8 +38,14 @@ pub struct Reading {
     pub message: String,
     /// From the manifest when the rule names one, else empty.
     pub adr: String,
-    /// The git tree hash of the scope's sources at the time.
-    pub tree: String,
+    /// The git tree hash of the scope's sources at the time: what `done`
+    /// holds against the scope's hash now to call the reading fresh
+    /// (harness-design.md §4.2, §13 D.18). Private: a reading made through
+    /// [`Reading::for_crate`] or [`Reading::for_scope`] is hashed over the
+    /// manifest's mapping of its scope, [`Manifest::scope_path`], the path
+    /// `done` hashes; an instrument that stamps a reading it made with
+    /// [`Reading::new`] still chooses the path through [`Reading::stamp`].
+    tree: String,
     pub commit: String,
     pub at: Datetime,
     /// The session of the tool call a `permit` reading judged, from the
@@ -49,8 +56,46 @@ pub struct Reading {
 }
 
 impl Reading {
+    /// A reading of `instrument` over a crate, stamped over the crate's
+    /// sources now: the path the manifest maps the crate to
+    /// ([`Crate::path`]), which is the path `done` hashes to call the
+    /// reading fresh (harness-design.md §4.5 condition 1).
+    pub fn for_crate(instrument: &str, krate: &Crate, root: &Path) -> Result<Reading> {
+        Reading::stamped(instrument, &krate.name, root, &krate.path())
+    }
+
+    /// A reading of `instrument` over `scope`, stamped over the path the
+    /// manifest maps the scope to ([`Manifest::scope_path`]): a crate's
+    /// sources, a subset's crate, a lock's home, a generated file, a
+    /// directory of the pinned corpus, or the workspace. A scope the
+    /// manifest maps to nothing is refused by name rather than written,
+    /// since `done` could never find such a reading fresh and would say
+    /// only that it is not.
+    pub fn for_scope(
+        instrument: &str,
+        scope: &str,
+        manifest: &Manifest,
+        root: &Path,
+    ) -> Result<Reading> {
+        let path = manifest.scope_path(scope).with_context(|| {
+            format!(
+                "{instrument} over {scope:?}: the manifest names no crate, seam or generated file so called and the pinned corpus has no such directory, so there is no path to stamp the reading over"
+            )
+        })?;
+        Reading::stamped(instrument, scope, root, &path)
+    }
+
+    fn stamped(instrument: &str, scope: &str, root: &Path, path: &Path) -> Result<Reading> {
+        let mut reading = Reading::new(instrument, scope);
+        reading.stamp(&Stamp::take(root, path)?);
+        Ok(reading)
+    }
+
     /// A reading of `instrument` over `scope` with every other field at its
-    /// empty value and `at` at the Unix epoch; the instrument fills the rest.
+    /// empty value and `at` at the Unix epoch; the instrument fills the
+    /// rest. Its `tree` is empty, which is no scope's hash, so `done` finds
+    /// it fresh for nothing: the reading of a crate not yet created, which
+    /// nothing measured, or of an instrument that stamps it itself.
     pub fn new(instrument: &str, scope: &str) -> Reading {
         Reading {
             instrument: instrument.to_owned(),
@@ -71,6 +116,11 @@ impl Reading {
 }
 
 impl Reading {
+    /// The tree hash the reading was stamped with; empty when it was not.
+    pub fn tree(&self) -> &str {
+        &self.tree
+    }
+
     /// Record one count under `key`.
     pub fn count(&mut self, key: &str, n: u64) -> Result<()> {
         let n = i64::try_from(n).with_context(|| format!("{key} = {n} overflows a reading"))?;
@@ -78,7 +128,10 @@ impl Reading {
         Ok(())
     }
 
-    /// Put the stamp's tree, commit and time on the reading.
+    /// Put the stamp's tree, commit and time on the reading: what the
+    /// constructors above do over the manifest's path, and what an
+    /// instrument that makes its reading with [`Reading::new`] does over a
+    /// path of its own choosing.
     pub fn stamp(&mut self, stamp: &Stamp) {
         self.tree.clone_from(&stamp.tree);
         self.commit.clone_from(&stamp.commit);

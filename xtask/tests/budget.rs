@@ -72,7 +72,7 @@ fn the_tracked_workspace_passes_with_the_manifests_numbers() {
         i64::try_from(ceiling).unwrap().into()
     );
     assert!(int(&xtask.numbers["lines"]) < int(&xtask.numbers["ceiling"]));
-    assert!(!xtask.tree.is_empty(), "stamped");
+    assert!(!xtask.tree().is_empty(), "stamped");
 
     let ws = readings.iter().find(|r| r.scope == "workspace").unwrap();
     assert_eq!(ws.status, Status::Pass, "{}", ws.message);

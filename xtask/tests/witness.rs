@@ -381,7 +381,7 @@ fn the_reading_carries_run_failed_and_missing_and_is_scoped_to_the_crate() {
     assert_eq!(reading.numbers["run"], Number::Int(1));
     assert_eq!(reading.numbers["failed"], Number::Int(0));
     assert_eq!(reading.numbers["missing"], Number::Int(0));
-    assert!(!reading.tree.is_empty(), "the reading is stamped");
+    assert!(!reading.tree().is_empty(), "the reading is stamped");
 }
 
 #[test]
