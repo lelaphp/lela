@@ -41,7 +41,7 @@ fn a_snippet_runs_as_witness_php_and_its_output_is_normalised() {
     // an error message with the script's path and line, the scratch
     // directory itself, bytes on stderr, an exit code.
     let snippet = r#"echo "a\r\nb  \n"; trigger_error("x"); echo getcwd(), "\n"; fwrite(STDERR, "err\r\n"); exit(3);"#;
-    let out = oracle::run(&pin, Program::Snippet(snippet), None).unwrap();
+    let out = pin.oracle().run(Program::Snippet(snippet), None).unwrap();
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
         "a\nb  \n\nNotice: x in %SCRATCH%/witness.php on line 2\n%SCRATCH%"
@@ -54,7 +54,7 @@ fn a_snippet_runs_as_witness_php_and_its_output_is_normalised() {
 fn a_snippet_gives_the_bytes_php_gives_by_hand_under_the_recipe() {
     let Some(pin) = pin() else { return };
     let snippet = r#"var_dump(ini_get("precision"), ini_get("date.timezone"), getenv("LANG"), getenv("HOME"), error_reporting());"#;
-    let out = oracle::run(&pin, Program::Snippet(snippet), None).unwrap();
+    let out = pin.oracle().run(Program::Snippet(snippet), None).unwrap();
 
     // By hand: the recipe's arguments and ini as `-d`, the environment
     // cleared and rebuilt, the snippet as witness.php in a directory of its own.
@@ -100,14 +100,22 @@ fn a_regime_adds_its_ini_after_the_recipe() {
     // status; `jit-off` enables it with the tier off; `jit-tracing` turns
     // the tier on.
     let snippet = r"$s = opcache_get_status(); var_dump($s === false ? null : $s['jit']['on']);";
-    let none = oracle::run(&pin, Program::Snippet(snippet), None).unwrap();
+    let none = pin.oracle().run(Program::Snippet(snippet), None).unwrap();
     assert_eq!(String::from_utf8_lossy(&none.stdout), "NULL");
-    let off = oracle::run(&pin, Program::Snippet(snippet), Some("jit-off")).unwrap();
+    let off = pin
+        .oracle()
+        .run(Program::Snippet(snippet), Some("jit-off"))
+        .unwrap();
     assert_eq!(String::from_utf8_lossy(&off.stdout), "bool(false)");
-    let tracing = oracle::run(&pin, Program::Snippet(snippet), Some("jit-tracing")).unwrap();
+    let tracing = pin
+        .oracle()
+        .run(Program::Snippet(snippet), Some("jit-tracing"))
+        .unwrap();
     assert_eq!(String::from_utf8_lossy(&tracing.stdout), "bool(true)");
 
-    let err = oracle::run(&pin, Program::Snippet(snippet), Some("jit-fast"))
+    let err = pin
+        .oracle()
+        .run(Program::Snippet(snippet), Some("jit-fast"))
         .unwrap_err()
         .to_string();
     assert!(
@@ -124,7 +132,7 @@ fn a_file_runs_in_its_own_directory() {
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("case.php");
     std::fs::write(&file, "<?php\necho basename(__FILE__), ' ', getcwd();").unwrap();
-    let out = oracle::run(&pin, Program::File(&file), None).unwrap();
+    let out = pin.oracle().run(Program::File(&file), None).unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout), "case.php %SCRATCH%");
 }
 
@@ -133,7 +141,9 @@ fn a_digest_mismatch_refuses_the_run() {
     let Some(mut pin) = pin() else { return };
     let wrong = "0".repeat(32);
     pin.oracle.md5 = wrong.clone();
-    let err = oracle::run(&pin, Program::Snippet("echo 1;"), None)
+    let err = pin
+        .oracle()
+        .run(Program::Snippet("echo 1;"), None)
         .unwrap_err()
         .to_string();
     assert!(err.contains(&wrong), "the expected digest is named: {err}");
@@ -147,7 +157,9 @@ fn a_digest_mismatch_refuses_the_run() {
 fn a_program_past_the_timeout_is_refused() {
     let Some(mut pin) = pin() else { return };
     pin.recipe.limits.timeout_s = 1;
-    let err = oracle::run(&pin, Program::Snippet("while (true) {}"), None)
+    let err = pin
+        .oracle()
+        .run(Program::Snippet("while (true) {}"), None)
         .unwrap_err()
         .to_string();
     assert!(err.contains("1 s"), "the limit is named: {err}");

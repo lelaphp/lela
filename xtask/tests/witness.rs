@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use xtask::divergence::Registry;
 use xtask::manifest::Manifest;
-use xtask::phpt::Runner;
+use xtask::oracle::Runner;
 use xtask::reading::{Number, Status};
 use xtask::witness::{self, Ask, Judgement, Tally, fence};
 
@@ -78,7 +78,8 @@ fn judged(file: &Path, text: &str, registry: &Registry, accept: bool) -> Tally {
         crates: Vec::new(),
         accept,
     };
-    let tally = witness::judge(&manifest().pin, registry, &runner, &ask, &found).unwrap();
+    let manifest = manifest();
+    let tally = witness::judge(&manifest.pin.oracle(), registry, &runner, &ask, &found).unwrap();
     if accept {
         witness::capture(workspace(), &tally.captured).unwrap();
     }
@@ -104,6 +105,62 @@ fn a_witness_whose_bytes_are_the_oracle_s_passes() {
     let tally = judge(&block("/// ```expect\n/// 1\n/// ```\n"), &registry(""));
     assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
     assert!(tally.missing.is_empty(), "{tally:#?}");
+}
+
+#[test]
+fn the_digest_is_asserted_once_over_a_run_of_three_witnesses() {
+    if oracle().is_none() {
+        return;
+    }
+    let one = |n: u8| {
+        format!(
+            "/// ```php\n/// echo {n};\n/// ```\n/// ```expect\n/// {n}\n/// ```\npub fn native{n}() {{}}\n"
+        )
+    };
+    let text = format!("{}{}{}", one(1), one(2), one(3));
+    let found = fence::extract(Path::new("ext/fixture/src/lib.rs"), &text);
+    assert_eq!(found.witnesses.len(), 3, "{found:#?}");
+    let binary = oracle().unwrap();
+    let manifest = manifest();
+    assert_eq!(manifest.pin.digests_asserted(), 0);
+    let oracle = manifest.pin.oracle();
+    let tally = witness::judge(
+        &oracle,
+        &registry(""),
+        &Runner::Engine(binary),
+        &Ask::default(),
+        &found,
+    )
+    .unwrap();
+    assert_eq!(tally.judged.len(), 3, "{tally:#?}");
+    assert!(
+        tally.judged.iter().all(|j| j.judgement == Judgement::Pass),
+        "{tally:#?}"
+    );
+    assert_eq!(manifest.pin.digests_asserted(), 1);
+}
+
+#[test]
+fn a_digest_mismatch_refuses_the_run_and_is_not_a_bork_per_witness() {
+    if oracle().is_none() {
+        return;
+    }
+    let found = fence::extract(
+        Path::new("ext/fixture/src/lib.rs"),
+        &block("/// ```expect\n/// 1\n/// ```\n"),
+    );
+    let mut manifest = manifest();
+    manifest.pin.oracle.md5 = "0".repeat(32);
+    let err = witness::judge(
+        &manifest.pin.oracle(),
+        &registry(""),
+        &Runner::Absent("no engine".to_owned()),
+        &Ask::default(),
+        &found,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("the pin says"), "{err}");
 }
 
 #[test]
@@ -269,7 +326,7 @@ fn a_kernel_or_native_without_a_witness_is_missing_and_fails_the_crate() {
     assert_eq!(found.subjects.len(), 2, "{found:#?}");
 
     let tally = witness::judge(
-        &manifest.pin,
+        &manifest.pin.oracle(),
         &Registry::default(),
         &Runner::Absent("no engine".to_owned()),
         &Ask::default(),
@@ -360,7 +417,7 @@ fn a_block_the_grammar_cannot_read_fails_the_crate_where_it_stands() {
         "/// ```php\n/// echo 1;\n/// ```\n/// prose\npub fn native() {}\n",
     );
     let tally = witness::judge(
-        &manifest().pin,
+        &manifest().pin.oracle(),
         &Registry::default(),
         &Runner::Absent("no engine".to_owned()),
         &Ask::default(),

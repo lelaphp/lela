@@ -27,6 +27,7 @@ use crate::computed;
 use crate::generated;
 use crate::manifest::{Manifest, Rule};
 use crate::phpt;
+use crate::reading::listed;
 
 /// The facade every extension depends on (ADR-0004), relative to the root.
 const FACADE: &str = "crates/php_ext";
@@ -109,7 +110,7 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str) -> Result<Laid> {
         })
         .unwrap_or_default();
     let named: Vec<&str> = owned.iter().map(String::as_str).collect();
-    let subset = phpt::listed(&named);
+    let subset = listed(&named);
     if krate.is_some_and(|krate| phpt::Subset::of(manifest, krate).is_some()) {
         laid.notes
             .push(format!("phpt subset: {subset} at the pinned tag"));

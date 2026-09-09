@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 
 use xtask::divergence::Registry;
 use xtask::manifest::Manifest;
-use xtask::phpt::{self, Ask, Dir, Judgement, Runner, Subset, Tally};
+use xtask::oracle::Runner;
+use xtask::phpt::{self, Ask, Dir, Judgement, Subset, Tally};
 use xtask::reading::{Number, Status};
 
 fn workspace() -> &'static Path {
@@ -55,14 +56,11 @@ fn oracle() -> Option<PathBuf> {
 /// has the corpus nowhere and the tests that resolve a subset of it say so
 /// and return, as the ones that spawn the oracle do.
 fn source() -> Option<PathBuf> {
-    let pin = manifest().pin;
-    if pin.source.path.is_dir() {
-        Some(pin.source.path)
+    let tree = manifest().pin.source.tree();
+    if tree.is_dir() {
+        Some(tree)
     } else {
-        eprintln!(
-            "the pinned php-src is not at {}; skipping",
-            pin.source.path.display()
-        );
+        eprintln!("the pinned php-src is not at {}; skipping", tree.display());
         None
     }
 }
@@ -92,7 +90,9 @@ fn registry(text: &str) -> Registry {
 /// Run one subset with the pinned oracle standing in for the engine.
 fn run(subset: &Subset, registry: &Registry) -> Tally {
     let binary = oracle().unwrap();
-    phpt::run_subset(&manifest(), registry, &Runner::Engine(binary), None, subset).unwrap()
+    let manifest = manifest();
+    let oracle = manifest.pin.oracle();
+    phpt::run_subset(&oracle, registry, &Runner::Engine(binary), None, subset).unwrap()
 }
 
 fn only(tally: &Tally) -> (Judgement, String) {
@@ -115,6 +115,48 @@ fn a_test_that_meets_its_expect_section_passes() {
     );
     let tally = run(&subset, &registry(""));
     assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
+}
+
+#[test]
+fn the_digest_is_asserted_once_over_a_run_of_three_tests() {
+    if oracle().is_none() {
+        return;
+    }
+    // Three tests, each with a SKIPIF and a CLEAN section, so the oracle
+    // runs three times beside the binary under test and the pin is asked
+    // for its digest before the first program only (harness §4.3).
+    let test = |n: u8| {
+        format!(
+            "--TEST--\nn{n}\n--SKIPIF--\n<?php echo 'ok';\n--FILE--\n<?php echo {n};\n--CLEAN--\n<?php echo 'clean';\n--EXPECT--\n{n}\n"
+        )
+    };
+    let tests = [test(1), test(2), test(3)];
+    let subset = subset(
+        "digest",
+        &[
+            ("one.phpt", &tests[0]),
+            ("two.phpt", &tests[1]),
+            ("three.phpt", &tests[2]),
+        ],
+    );
+    let binary = oracle().unwrap();
+    let manifest = manifest();
+    assert_eq!(manifest.pin.digests_asserted(), 0);
+    let oracle = manifest.pin.oracle();
+    let tally = phpt::run_subset(
+        &oracle,
+        &registry(""),
+        &Runner::Engine(binary),
+        None,
+        &subset,
+    )
+    .unwrap();
+    assert_eq!(tally.judged.len(), 3, "{tally:#?}");
+    assert!(
+        tally.judged.iter().all(|j| j.judgement == Judgement::Pass),
+        "{tally:#?}"
+    );
+    assert_eq!(manifest.pin.digests_asserted(), 1);
 }
 
 #[test]
@@ -305,7 +347,7 @@ fn the_subset_of_an_extension_is_its_tests_at_the_pinned_tag_and_the_scope_is_th
         assert_eq!(subset.dirs[0].under, Path::new("ext/pcre/tests"));
         assert_eq!(
             subset.dirs[0].dir,
-            manifest.pin.source.path.join("ext/pcre/tests"),
+            manifest.pin.source.tree().join("ext/pcre/tests"),
             "the subset is the pinned tree's"
         );
         assert_eq!(
@@ -365,7 +407,8 @@ fn with_no_engine_built_the_reading_is_a_skip_that_says_so_and_no_test_runs() {
     assert!(matches!(runner, Runner::Absent(_)), "{runner:?}");
 
     let subset = Subset::resolve(&manifest, "pcre").unwrap();
-    let tally = phpt::run_subset(&manifest, &registry(""), &runner, None, &subset).unwrap();
+    let oracle = manifest.pin.oracle();
+    let tally = phpt::run_subset(&oracle, &registry(""), &runner, None, &subset).unwrap();
     assert!(tally.judged.is_empty());
     assert!(
         tally.found > 100,
@@ -393,7 +436,8 @@ fn the_pinned_oracle_as_the_binary_is_the_runners_control_and_never_a_reading_of
             "--TEST--\nEcho\n--FILE--\n<?php echo \"one\";\n--EXPECT--\none\n",
         )],
     );
-    let tally = phpt::run_subset(&manifest, &registry(""), &runner, None, &subset).unwrap();
+    let oracle = manifest.pin.oracle();
+    let tally = phpt::run_subset(&oracle, &registry(""), &runner, None, &subset).unwrap();
     assert_eq!(only(&tally).0, Judgement::Pass);
     let reading = tally
         .reading(workspace(), &manifest, &subset, &runner, None)
@@ -596,9 +640,9 @@ fn every_expectf_section_of_the_pinned_pcre_subset_compiles() {
         for (section, expectation) in [
             (
                 "EXPECTF",
-                phpt::expect::Expectation::Format as fn(String) -> _,
+                xtask::oracle::expect::Expectation::Format as fn(String) -> _,
             ),
-            ("EXPECTREGEX", phpt::expect::Expectation::Pattern),
+            ("EXPECTREGEX", xtask::oracle::expect::Expectation::Pattern),
         ] {
             let Some(body) = phpt.section(section) else {
                 continue;

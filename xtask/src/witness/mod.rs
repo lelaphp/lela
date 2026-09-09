@@ -9,7 +9,7 @@
 //! what `done` reads as its conditions 1 and 2.
 //!
 //! **What runs the snippet.** The same seam `phpt` names (design §8's
-//! `ScriptExec`): the engine's own binary through [`phpt::Runner`], one
+//! `ScriptExec`): the engine's own binary through [`oracle::Runner`], one
 //! process per witness under the recipe the oracle runs under. Until
 //! `crates/php` reaches `serve` there is no binary, and then the pinned
 //! oracle stands in: the run measures the fences and the oracle, not the
@@ -45,10 +45,9 @@ use anyhow::{Context, Result, bail};
 use crate::divergence::Registry;
 use crate::git::Stamp;
 use crate::manifest::{Crate, Manifest, Rule};
-use crate::oracle::{self, Invocation, Output, Pin, Program, Verdict as Compared};
-use crate::phpt::expect::Expectation;
-use crate::phpt::{Runner, listed};
-use crate::reading::{Reading, Status, Store};
+use crate::oracle::expect::Expectation;
+use crate::oracle::{self, Invocation, Oracle, Output, Pin, Program, Runner, Verdict as Compared};
+use crate::reading::{Reading, Status, Store, listed};
 use crate::sources;
 use fence::{Exit, Extracted, Witness};
 
@@ -297,6 +296,9 @@ pub fn run(
     if let Runner::Absent(why) = &runner {
         println!("witness: {why}");
     }
+    // One oracle for the run: the digest is asserted before the first
+    // snippet and never per witness or per crate (harness §4.3).
+    let oracle = manifest.pin.oracle();
     let mut readings = Vec::new();
     for krate in &manifest.crates {
         if !ask.crates.is_empty() && !ask.crates.iter().any(|n| n == &krate.name) {
@@ -320,7 +322,7 @@ pub fn run(
             continue;
         }
         let found = extract(root, krate, rule)?;
-        let tally = judge(&manifest.pin, registry, &runner, ask, &found)?;
+        let tally = judge(&oracle, registry, &runner, ask, &found)?;
         for line in &tally.problems {
             println!("bork {line}");
         }
@@ -405,7 +407,7 @@ fn covered(rule: Option<&Rule>, path: &Path) -> bool {
 /// Judge every witness of one crate, and count the kernels and natives
 /// without one.
 pub fn judge(
-    pin: &Pin,
+    oracle: &Oracle<'_>,
     registry: &Registry,
     runner: &Runner,
     ask: &Ask,
@@ -423,13 +425,13 @@ pub fn judge(
         ..Tally::default()
     };
     if !found.witnesses.is_empty() {
-        // The pin refuses the whole run on a digest mismatch (§4.3), so it
-        // is asserted once, before the first snippet and not per witness.
-        pin.assert_digest()?;
+        // A digest mismatch refuses the whole run (§4.3): asserted here,
+        // before the first snippet, and not caught per witness as a bork.
+        oracle.asserted()?;
     }
     for witness in &found.witnesses {
         tally.wall += witness.wall.unwrap_or_default();
-        let judged = judge_one(pin, registry, runner, ask, witness, &mut tally)?;
+        let judged = judge_one(oracle, registry, runner, ask, witness, &mut tally)?;
         tally.judged.push(judged);
     }
     Ok(tally)
@@ -438,14 +440,14 @@ pub fn judge(
 /// One witness, end to end: the oracle's run, the status `--accept` may
 /// capture from it, the run of record, and the verdict.
 fn judge_one(
-    pin: &Pin,
+    oracle: &Oracle<'_>,
     registry: &Registry,
     runner: &Runner,
     ask: &Ask,
     witness: &Witness,
     tally: &mut Tally,
 ) -> Result<Judged> {
-    let oracle_out = match oracle::run(pin, Program::Snippet(&witness.snippet), None) {
+    let oracle_out = match oracle.run(Program::Snippet(&witness.snippet), None) {
         Ok(out) => out,
         Err(trouble) => {
             return Ok(Judged::new(
@@ -488,14 +490,12 @@ fn judge_one(
     }
 
     let ran = match runner {
-        Runner::Engine(binary) => oracle::run_under(
-            pin,
-            &Invocation::new(binary, Program::Snippet(&witness.snippet)),
-        )
-        .with_context(|| format!("running {} through {}", witness.at(), binary.display()))?,
+        Runner::Engine(binary) => oracle
+            .run_under(&Invocation::new(binary, Program::Snippet(&witness.snippet)))
+            .with_context(|| format!("running {} through {}", witness.at(), binary.display()))?,
         _ => oracle_out,
     };
-    let met = match met(pin, witness, exit, &ran) {
+    let met = match met(oracle.pin(), witness, exit, &ran) {
         Ok(met) => met,
         Err(trouble) => {
             return Ok(Judged::new(
@@ -619,14 +619,5 @@ mod tests {
         assert_eq!(text, "status 3\nstdout:\nout\nstderr:\nerr\n");
         let signal = String::from_utf8(shown("", "", None)).unwrap();
         assert!(signal.starts_with("status a signal"), "{signal}");
-    }
-
-    #[test]
-    fn at_most_five_names_are_listed_and_the_rest_counted() {
-        assert_eq!(listed(&["a", "b"]), "a, b");
-        assert_eq!(
-            listed(&["a", "b", "c", "d", "e", "f"]),
-            "a, b, c, d, e and 1 more"
-        );
     }
 }

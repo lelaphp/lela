@@ -1,17 +1,32 @@
 //! The oracle module (harness-design.md §4.3, §8; design §8): the pinned
 //! `php`, its recipe, and the two functions every comparison goes through.
-//! `run` executes a program under the recipe and a regime and returns the
-//! normalised output; `compare` gives the verdict, consulting the divergence
-//! registry, so no instrument diffs on its own. The pin's grammar is this
-//! module's: `oracle.toml` is refused on a key outside it.
+//! [`Oracle::run`] executes a program under the recipe and a regime and
+//! returns the normalised output; `compare` gives the verdict, consulting
+//! the divergence registry, so no instrument diffs on its own. The pin's
+//! grammar is this module's: `oracle.toml` is refused on a key outside it.
+//!
+//! **What a lane holds.** Everything that touches the pin lives here, so
+//! the two lanes, `phpt` and `witness`, share this module and neither
+//! imports the other. An [`Oracle`] is the pin for the length of one run,
+//! its digest asserted once before the first program runs and never per
+//! program; a [`Runner`] is what the lane measured the engine with, or why
+//! it could not; [`Source::tree`] is where the pinned php-src is on this
+//! machine, which the runner and the tests that resolve a subset ask and
+//! never read off the pin themselves; and [`expect`] is how an expectation
+//! that is a pattern rather than bytes is met, which `verdict` takes as the
+//! caller's match.
 //!
 //! The version, the digest and the path are values of the pin and appear in
 //! no source file (§10 rule 5).
 
+pub mod expect;
+
+use std::cell::OnceCell;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -30,6 +45,21 @@ pub struct Pin {
     pub recipe: Recipe,
     #[serde(default)]
     pub regime: BTreeMap<String, Regime>,
+    /// How many times the digest was asserted through this pin; not a
+    /// value of the file.
+    #[serde(skip)]
+    asserted: Asserted,
+}
+
+/// A count of digest assertions: disclosure, so a test can hold a lane to
+/// one per run rather than one per program.
+#[derive(Debug, Default)]
+struct Asserted(AtomicU64);
+
+impl Clone for Asserted {
+    fn clone(&self) -> Asserted {
+        Asserted(AtomicU64::new(self.0.load(Ordering::Relaxed)))
+    }
 }
 
 /// `[oracle]`: the `php` binary by version, path on this machine, and digest.
@@ -47,8 +77,20 @@ pub struct Binary {
 pub struct Source {
     pub tag: String,
     pub commit: String,
-    pub path: PathBuf,
+    /// Where the file says the tree is on the maintainer's machine; read
+    /// through [`Source::tree`] and nowhere else.
+    path: PathBuf,
     pub phpt_files: u64,
+}
+
+impl Source {
+    /// Where the pinned php-src tree is on this machine. The one answer
+    /// the phpt runner and the tests that resolve a subset take, so the
+    /// location, alone among the pin's facts, can become machine-local
+    /// without a reader of the pin's path being left behind (#36).
+    pub fn tree(&self) -> PathBuf {
+        self.path.clone()
+    }
 }
 
 /// `[recipe]`: how a program is run and how its output is normalised.
@@ -115,8 +157,26 @@ impl Pin {
         })
     }
 
+    /// The pin as one run holds it: the digest is asserted before the
+    /// first program runs through the value and never again, so a lane of
+    /// any length hashes the binary once. Nothing runs under the pin
+    /// except through this.
+    pub fn oracle(&self) -> Oracle<'_> {
+        Oracle {
+            pin: self,
+            digest: OnceCell::new(),
+        }
+    }
+
+    /// How many times the digest was asserted through this pin: one per
+    /// run is the rule, and a test reads it.
+    pub fn digests_asserted(&self) -> u64 {
+        self.asserted.0.load(Ordering::Relaxed)
+    }
+
     /// The binary's digest against the pin's; a mismatch refuses the run.
-    pub fn assert_digest(&self) -> Result<()> {
+    fn assert_digest(&self) -> Result<()> {
+        self.asserted.0.fetch_add(1, Ordering::Relaxed);
         let path = &self.oracle.path;
         let bytes = fs::read(path)
             .with_context(|| format!("reading the pinned php at {}", path.display()))?;
@@ -195,95 +255,179 @@ impl<'a> Invocation<'a> {
     }
 }
 
-/// Run `program` under the pin's recipe, with `regime`'s ini after it when
-/// one is named, and return the normalised output. The digest is asserted
-/// first; the process runs with the recipe's environment alone, in the
-/// program's directory, under the recipe's timeout.
-pub fn run(pin: &Pin, program: Program<'_>, regime: Option<&str>) -> Result<Output> {
-    pin.assert_digest()?;
-    run_under(
-        pin,
-        &Invocation {
-            regime,
-            ..Invocation::new(&pin.oracle.path, program)
-        },
-    )
+/// The pinned oracle for the length of one run: the pin, and whether its
+/// digest has been asserted yet. Made by [`Pin::oracle`], once per run;
+/// every program the run executes goes through it.
+#[derive(Debug)]
+pub struct Oracle<'a> {
+    pin: &'a Pin,
+    /// What the one assertion found, kept so a mismatch refuses every
+    /// later run the same way rather than hashing again.
+    digest: OnceCell<Result<(), String>>,
 }
 
-/// Run one invocation under the recipe and return the normalised output.
-/// The digest is the pinned binary's alone and `run` asserts it; a phpt
-/// lane runs the engine's binary here, under the same recipe, which is
-/// what makes the two comparable (harness-design.md §4.3, design §8).
-pub fn run_under(pin: &Pin, call: &Invocation<'_>) -> Result<Output> {
-    let regime = call.regime.map(|name| pin.regime(name)).transpose()?;
-    let recipe = &pin.recipe;
-
-    let scratch = Scratch::for_program(recipe, call.program)?;
-    let mut cmd = Command::new(call.binary);
-    cmd.args(&recipe.args);
-    for ini in recipe
-        .ini
-        .iter()
-        .chain(regime.into_iter().flat_map(|r| &r.ini))
-        .chain(call.ini)
-    {
-        cmd.arg("-d").arg(ini);
+impl<'a> Oracle<'a> {
+    /// The pin: its recipe and its regimes, which a lane reads beside the
+    /// runs.
+    pub fn pin(&self) -> &'a Pin {
+        self.pin
     }
-    cmd.arg(&scratch.script)
-        .args(call.args)
-        .current_dir(&scratch.dir);
-    if recipe.env_clear {
-        cmd.env_clear();
+
+    /// Run `program` under the pinned binary and the recipe, with
+    /// `regime`'s ini after it when one is named, and return the
+    /// normalised output. The digest is asserted before the first run
+    /// through this value; the process runs with the recipe's environment
+    /// alone, in the program's directory, under the recipe's timeout.
+    pub fn run(&self, program: Program<'_>, regime: Option<&str>) -> Result<Output> {
+        self.asserted()?;
+        self.run_under(&Invocation {
+            regime,
+            ..Invocation::new(&self.pin.oracle.path, program)
+        })
     }
-    cmd.envs(&recipe.env);
-    cmd.envs(call.env.iter().map(|(name, value)| (name, value)));
-    let out_path = scratch.own.join("stdout");
-    let err_path = scratch.own.join("stderr");
-    let out_file = File::create(&out_path).context("creating the stdout file")?;
-    let err_file = if call.merge_streams {
-        out_file.try_clone().context("sharing the stdout file")?
-    } else {
-        File::create(&err_path).context("creating the stderr file")?
-    };
-    cmd.stdin(stdin_of(&scratch, call.stdin)?)
-        .stdout(out_file)
-        .stderr(err_file);
 
-    let started = Instant::now();
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("running {}", call.binary.display()))?;
-    let limit = Duration::from_secs(recipe.limits.timeout_s);
-    let status = loop {
-        if let Some(status) = child.try_wait().context("waiting for php")? {
-            break status;
-        }
-        if started.elapsed() > limit {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!(
-                "{} ran past the recipe's limit of {} s on {}",
-                call.binary.display(),
-                recipe.limits.timeout_s,
-                scratch.script.display()
-            );
-        }
-        thread::sleep(Duration::from_millis(5));
-    };
-    let wall = started.elapsed();
+    /// Run one invocation under the recipe and return the normalised
+    /// output. The digest is the pinned binary's alone and `run` asserts
+    /// it; a phpt lane runs the engine's binary here, under the same
+    /// recipe, which is what makes the two comparable (harness-design.md
+    /// §4.3, design §8).
+    pub fn run_under(&self, call: &Invocation<'_>) -> Result<Output> {
+        let pin = self.pin;
+        let regime = call.regime.map(|name| pin.regime(name)).transpose()?;
+        let recipe = &pin.recipe;
 
-    let stdout = fs::read(&out_path).context("reading php's stdout")?;
-    let stderr = if call.merge_streams {
-        Vec::new()
-    } else {
-        fs::read(&err_path).context("reading php's stderr")?
-    };
-    Ok(Output {
-        stdout: scratch.normalise(&recipe.normalise, stdout),
-        stderr: scratch.normalise(&recipe.normalise, stderr),
-        exit: status.code(),
-        wall,
-    })
+        let scratch = Scratch::for_program(recipe, call.program)?;
+        let mut cmd = Command::new(call.binary);
+        cmd.args(&recipe.args);
+        for ini in recipe
+            .ini
+            .iter()
+            .chain(regime.into_iter().flat_map(|r| &r.ini))
+            .chain(call.ini)
+        {
+            cmd.arg("-d").arg(ini);
+        }
+        cmd.arg(&scratch.script)
+            .args(call.args)
+            .current_dir(&scratch.dir);
+        if recipe.env_clear {
+            cmd.env_clear();
+        }
+        cmd.envs(&recipe.env);
+        cmd.envs(call.env.iter().map(|(name, value)| (name, value)));
+        let out_path = scratch.own.join("stdout");
+        let err_path = scratch.own.join("stderr");
+        let out_file = File::create(&out_path).context("creating the stdout file")?;
+        let err_file = if call.merge_streams {
+            out_file.try_clone().context("sharing the stdout file")?
+        } else {
+            File::create(&err_path).context("creating the stderr file")?
+        };
+        cmd.stdin(stdin_of(&scratch, call.stdin)?)
+            .stdout(out_file)
+            .stderr(err_file);
+
+        let started = Instant::now();
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("running {}", call.binary.display()))?;
+        let limit = Duration::from_secs(recipe.limits.timeout_s);
+        let status = loop {
+            if let Some(status) = child.try_wait().context("waiting for php")? {
+                break status;
+            }
+            if started.elapsed() > limit {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!(
+                    "{} ran past the recipe's limit of {} s on {}",
+                    call.binary.display(),
+                    recipe.limits.timeout_s,
+                    scratch.script.display()
+                );
+            }
+            thread::sleep(Duration::from_millis(5));
+        };
+        let wall = started.elapsed();
+
+        let stdout = fs::read(&out_path).context("reading php's stdout")?;
+        let stderr = if call.merge_streams {
+            Vec::new()
+        } else {
+            fs::read(&err_path).context("reading php's stderr")?
+        };
+        Ok(Output {
+            stdout: scratch.normalise(&recipe.normalise, stdout),
+            stderr: scratch.normalise(&recipe.normalise, stderr),
+            exit: status.code(),
+            wall,
+        })
+    }
+
+    /// Assert the digest now rather than at the first program: what a
+    /// lane does before its loop, so a mismatch refuses the run and not
+    /// each program in turn. The first call hashes; every later call,
+    /// here or from `run`, reads what it found.
+    pub fn asserted(&self) -> Result<()> {
+        self.digest
+            .get_or_init(|| self.pin.assert_digest().map_err(|e| format!("{e:#}")))
+            .clone()
+            .map_err(anyhow::Error::msg)
+    }
+}
+
+/// The engine's binary, the one `crates/php` builds (design §4.1).
+pub const ENGINE: &str = "php";
+
+/// What ran the program a lane measures: the fresh-process adapter of
+/// design §8's `ScriptExec` seam, shared by `phpt` and `witness`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Runner {
+    /// The engine's own binary, one process per program.
+    Engine(PathBuf),
+    /// The pinned oracle standing in for the engine: a control of the
+    /// lane itself and never a reading of the engine, so its reading is
+    /// a skip whatever the programs say.
+    Control(PathBuf),
+    /// Nothing to run, and why.
+    Absent(String),
+}
+
+impl Runner {
+    /// The binary to run: the one named, or the engine's where cargo puts
+    /// it. A binary whose digest is the pin's is the lane's control.
+    pub fn resolve(root: &Path, pin: &Pin, named: Option<&Path>) -> Result<Runner> {
+        if let Some(path) = named {
+            if !path.is_file() {
+                bail!("no binary at {}", path.display());
+            }
+            let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+            let digest = format!("{:x}", md5::compute(bytes));
+            let path = path.to_path_buf();
+            return Ok(if digest == pin.oracle.md5 {
+                Runner::Control(path)
+            } else {
+                Runner::Engine(path)
+            });
+        }
+        for profile in ["release", "debug"] {
+            let built = root.join("target").join(profile).join(ENGINE);
+            if built.is_file() {
+                return Ok(Runner::Engine(built));
+            }
+        }
+        Ok(Runner::Absent(format!(
+            "the engine's binary is not built: no target/release/{ENGINE} and no target/debug/{ENGINE}; a CLI request reaches `serve` with php_engine (design §5)"
+        )))
+    }
+
+    /// The binary, when there is one.
+    pub fn binary(&self) -> Option<&Path> {
+        match self {
+            Runner::Engine(path) | Runner::Control(path) => Some(path),
+            Runner::Absent(_) => None,
+        }
+    }
 }
 
 /// The program's stdin: a file holding what a test's `--STDIN--` gives,
@@ -385,7 +529,6 @@ impl Drop for Scratch {
 }
 
 fn unique() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     NEXT.fetch_add(1, Ordering::Relaxed)
 }

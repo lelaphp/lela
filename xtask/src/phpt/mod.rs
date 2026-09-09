@@ -6,9 +6,9 @@
 //! `done` reads as condition 1.
 //!
 //! **What runs the test.** Design §8's `ScriptExec` seam has two adapters:
-//! the fresh-process one, which is [`Runner`] here, and the in-process
-//! `Capture` sink under `Engine::serve`, which arrives with the engine. The
-//! process adapter runs the engine's own `php` under [`oracle::run_under`],
+//! the fresh-process one, [`oracle::Runner`], and the in-process `Capture`
+//! sink under `Engine::serve`, which arrives with the engine. The process
+//! adapter runs the engine's own `php` under [`Oracle::run_under`],
 //! the same recipe the oracle runs under, which is what makes the two
 //! comparable. Until `crates/php` is built there is no binary and the
 //! reading is a skip that says so.
@@ -42,7 +42,6 @@
 //! four of `sapi/cli/tests` that do are named in harness-design.md §12
 //! item 17.
 
-pub mod expect;
 pub mod file;
 
 use std::fs;
@@ -54,9 +53,9 @@ use regex_lite::Regex;
 
 use crate::git::Stamp;
 use crate::manifest::{Crate, Manifest};
-use crate::oracle::{self, Invocation, Output, Pin, Program, Verdict as Compared};
-use crate::reading::{Reading, Status};
-use expect::Expectation;
+use crate::oracle::expect::Expectation;
+use crate::oracle::{self, Invocation, Oracle, Output, Pin, Program, Runner, Verdict as Compared};
+use crate::reading::{Reading, Status, listed};
 use file::Phpt;
 
 use crate::divergence::Registry;
@@ -66,8 +65,6 @@ pub const INSTRUMENT: &str = "phpt";
 /// The first segment of a phpt divergence key, so a row names the corpus
 /// and not the path this machine keeps it at.
 pub const CORPUS: &str = "php-src";
-/// The engine's binary, the one `crates/php` builds (design §4.1).
-pub const ENGINE: &str = "php";
 /// The compiled tier's lane (jit-design.md §7): the engine runs with the
 /// `jit.mode` directive set and the corpus's expectations must hold
 /// unchanged under it, which is G5.
@@ -139,7 +136,7 @@ impl Subset {
     /// subsets are a crate's is the manifest's sentence, and an absent one
     /// is an answer, not a lookup that failed.
     pub fn resolve(manifest: &Manifest, name: &str) -> Result<Subset> {
-        let source = &manifest.pin.source.path;
+        let source = manifest.pin.source.tree();
         let named = name.trim_matches('/');
         let as_crate = format!("ext/{named}");
         if let Some(krate) = manifest
@@ -158,7 +155,7 @@ impl Subset {
         if source.join(&under).is_dir() {
             return Ok(Subset {
                 scope: named.to_owned(),
-                dirs: vec![Dir::at(source, under)],
+                dirs: vec![Dir::at(&source, under)],
             });
         }
         bail!(
@@ -174,11 +171,11 @@ impl Subset {
     /// since dropping it quietly would leave `done` asking a crate for a
     /// phpt reading nothing could write, which is the hole #18 closed.
     pub fn of(manifest: &Manifest, krate: &Crate) -> Option<Subset> {
-        let source = &manifest.pin.source.path;
+        let source = manifest.pin.source.tree();
         let dirs: Vec<Dir> = krate
             .subsets()
             .into_iter()
-            .map(|under| Dir::at(source, under))
+            .map(|under| Dir::at(&source, under))
             .collect();
         (!dirs.is_empty()).then(|| Subset {
             scope: krate.name.clone(),
@@ -213,13 +210,13 @@ impl Subset {
     /// Every subset of the corpus: the nightly lane's, which is `Zend`,
     /// `tests` and every `tests` directory under `ext` and `sapi`.
     pub fn corpus(manifest: &Manifest) -> Vec<Subset> {
-        let source = &manifest.pin.source.path;
+        let source = manifest.pin.source.tree();
         let mut subsets = Vec::new();
         let mut push = |under: PathBuf| {
             if source.join(&under).is_dir() {
                 subsets.push(Subset {
                     scope: under.to_string_lossy().into_owned(),
-                    dirs: vec![Dir::at(source, under)],
+                    dirs: vec![Dir::at(&source, under)],
                 });
             }
         };
@@ -334,57 +331,6 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// What runs a test's program: the fresh-process adapter of design §8's
-/// `ScriptExec` seam.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Runner {
-    /// The engine's own binary, one process per test.
-    Engine(PathBuf),
-    /// The pinned oracle standing in for the engine: a control of the
-    /// runner itself and never a reading of the engine, so its reading is
-    /// a skip whatever the tests say.
-    Control(PathBuf),
-    /// Nothing to run, and why.
-    Absent(String),
-}
-
-impl Runner {
-    /// The binary to run: the one named, or the engine's where cargo puts
-    /// it. A binary whose digest is the pin's is the runner's control.
-    pub fn resolve(root: &Path, pin: &Pin, named: Option<&Path>) -> Result<Runner> {
-        if let Some(path) = named {
-            if !path.is_file() {
-                bail!("no binary at {}", path.display());
-            }
-            let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-            let digest = format!("{:x}", md5::compute(bytes));
-            let path = path.to_path_buf();
-            return Ok(if digest == pin.oracle.md5 {
-                Runner::Control(path)
-            } else {
-                Runner::Engine(path)
-            });
-        }
-        for profile in ["release", "debug"] {
-            let built = root.join("target").join(profile).join(ENGINE);
-            if built.is_file() {
-                return Ok(Runner::Engine(built));
-            }
-        }
-        Ok(Runner::Absent(format!(
-            "the engine's binary is not built: no target/release/{ENGINE} and no target/debug/{ENGINE}; a CLI request reaches `serve` with php_engine (design §5)"
-        )))
-    }
-
-    /// The binary, when there is one.
-    pub fn binary(&self) -> Option<&Path> {
-        match self {
-            Runner::Engine(path) | Runner::Control(path) => Some(path),
-            Runner::Absent(_) => None,
-        }
-    }
 }
 
 /// What one test came to: upstream's outcomes less the two a leak checker
@@ -517,7 +463,7 @@ impl Tally {
                 reading.message = format!(
                     "{scope}: the [[crate]] row names {}, and the pinned php-src at {} ({}) has no such directory",
                     listed(&named),
-                    manifest.pin.source.path.display(),
+                    manifest.pin.source.tree().display(),
                     manifest.pin.source.tag
                 );
             }
@@ -581,17 +527,6 @@ fn percent(met: u64, found: u64) -> f64 {
     ratio.round() / 10.0
 }
 
-/// At most five names, and how many more there are; `witness` names its
-/// failures the same way.
-pub(crate) fn listed(names: &[&str]) -> String {
-    let shown = names.iter().take(5).copied().collect::<Vec<_>>().join(", ");
-    if names.len() > 5 {
-        format!("{shown} and {} more", names.len() - 5)
-    } else {
-        shown
-    }
-}
-
 /// What one `xtask phpt` run was asked for.
 #[derive(Debug, Clone, Default)]
 pub struct Ask {
@@ -635,16 +570,19 @@ pub fn run(
     if subsets.is_empty() {
         bail!(
             "no subset to run: no [[crate]] row of the manifest owns one the pinned php-src at {} has",
-            manifest.pin.source.path.display()
+            manifest.pin.source.tree().display()
         );
     }
     let runner = Runner::resolve(root, &manifest.pin, ask.engine.as_deref())?;
     if let Runner::Absent(why) = &runner {
         println!("phpt: {why}");
     }
+    // One oracle for the run: the digest is asserted before the first
+    // program and never per test, subset or section (harness §4.3).
+    let oracle = manifest.pin.oracle();
     let mut readings = Vec::new();
     for subset in &subsets {
-        let tally = run_subset(manifest, registry, &runner, ask.lane, subset)?;
+        let tally = run_subset(&oracle, registry, &runner, ask.lane, subset)?;
         readings.push(tally.reading(root, manifest, subset, &runner, ask.lane)?);
     }
     Ok(readings)
@@ -653,7 +591,7 @@ pub fn run(
 /// Run one subset: every test through the runner, each verdict printed as
 /// it is reached unless it passed.
 pub fn run_subset(
-    manifest: &Manifest,
+    oracle: &Oracle<'_>,
     registry: &Registry,
     runner: &Runner,
     lane: Option<Lane>,
@@ -667,7 +605,10 @@ pub fn run_subset(
     let Some(binary) = runner.binary() else {
         return Ok(tally);
     };
-    let adapter = Adapter::new(&manifest.pin, registry, binary, lane);
+    // A digest mismatch refuses the whole run (§4.3), before the first
+    // test rather than at its first SKIPIF.
+    oracle.asserted()?;
+    let adapter = Adapter::new(oracle, registry, binary, lane);
     for test in &tests {
         let judged = adapter.judge(subset, test)?;
         if judged.judgement != Judgement::Pass {
@@ -690,11 +631,11 @@ pub fn run_subset(
 }
 
 /// The fresh-process adapter of design §8's `ScriptExec` seam, bound to
-/// one run: the pin and the registry, the binary it runs, the tier lane it
-/// runs under, and the extensions that binary loads, which
+/// one run: the oracle and the registry, the binary it runs, the tier lane
+/// it runs under, and the extensions that binary loads, which
 /// `--EXTENSIONS--` is answered from.
 struct Adapter<'a> {
-    pin: &'a Pin,
+    oracle: &'a Oracle<'a>,
     registry: &'a Registry,
     binary: &'a Path,
     lane: Option<Lane>,
@@ -703,17 +644,17 @@ struct Adapter<'a> {
 
 impl<'a> Adapter<'a> {
     fn new(
-        pin: &'a Pin,
+        oracle: &'a Oracle<'a>,
         registry: &'a Registry,
         binary: &'a Path,
         lane: Option<Lane>,
     ) -> Adapter<'a> {
-        let loaded = loaded_extensions(pin, binary).unwrap_or_else(|e| {
+        let loaded = loaded_extensions(oracle, binary).unwrap_or_else(|e| {
             println!("phpt: {} lists no extension ({e:#})", binary.display());
             Vec::new()
         });
         Adapter {
-            pin,
+            oracle,
             registry,
             binary,
             lane,
@@ -756,7 +697,7 @@ impl<'a> Adapter<'a> {
             Ok(actual) => actual,
             Err(borked) => return Ok(Judged::new(&id, &name, Judgement::Bork, borked)),
         };
-        let Some(expectation) = expectation_of(self.pin, &phpt) else {
+        let Some(expectation) = expectation_of(self.oracle.pin(), &phpt) else {
             return Ok(Judged::new(
                 &id,
                 &name,
@@ -818,18 +759,17 @@ impl<'a> Adapter<'a> {
         let args = words(&phpt.text("ARGS").unwrap_or_default());
         let mut env = executable(self.binary);
         env.extend(env_of(phpt, test));
-        let output = oracle::run_under(
-            self.pin,
-            &Invocation {
+        let output = self
+            .oracle
+            .run_under(&Invocation {
                 ini,
                 args: &args,
                 env: &env,
                 stdin: phpt.section("STDIN"),
                 merge_streams: merges_streams(phpt),
                 ..Invocation::new(self.binary, Program::File(&program))
-            },
-        )
-        .with_context(|| format!("running {}", test.display()))?;
+            })
+            .with_context(|| format!("running {}", test.display()))?;
         drop(written);
         if let Some(body) = phpt.filled("CLEAN") {
             self.run_section(test, "clean", body)?;
@@ -849,7 +789,9 @@ impl<'a> Adapter<'a> {
     fn run_section(&self, test: &Path, kind: &str, body: &[u8]) -> Result<Output> {
         let program = test.with_extension(format!("{kind}.php"));
         let written = Written::new(&program, body)?;
-        let out = oracle::run(self.pin, Program::File(&program), None)
+        let out = self
+            .oracle
+            .run(Program::File(&program), None)
             .with_context(|| format!("running the {kind} section of {}", test.display()))?;
         drop(written);
         Ok(out)
@@ -877,9 +819,9 @@ impl<'a> Adapter<'a> {
 /// The extensions a binary loads under the recipe, as upstream asks for
 /// them: `Core` dropped, `Zend OPcache` mapped to `opcache` and the rest
 /// lowered (run-tests.php:2908-2916).
-fn loaded_extensions(pin: &Pin, binary: &Path) -> Result<Vec<String>> {
+fn loaded_extensions(oracle: &Oracle<'_>, binary: &Path) -> Result<Vec<String>> {
     let snippet = r#"echo implode("\n", get_loaded_extensions());"#;
-    let out = oracle::run_under(pin, &Invocation::new(binary, Program::Snippet(snippet)))?;
+    let out = oracle.run_under(&Invocation::new(binary, Program::Snippet(snippet)))?;
     Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
         .map(str::trim)

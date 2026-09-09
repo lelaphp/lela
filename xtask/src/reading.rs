@@ -291,3 +291,28 @@ pub(crate) fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     }
     Ok(())
 }
+
+/// At most five names, and how many more there are: how a reading's
+/// message names what missed, the same way in every lane.
+pub(crate) fn listed(names: &[&str]) -> String {
+    let shown = names.iter().take(5).copied().collect::<Vec<_>>().join(", ");
+    if names.len() > 5 {
+        format!("{shown} and {} more", names.len() - 5)
+    } else {
+        shown
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::listed;
+
+    #[test]
+    fn at_most_five_names_are_listed_and_the_rest_counted() {
+        assert_eq!(listed(&["a", "b"]), "a, b");
+        assert_eq!(
+            listed(&["a", "b", "c", "d", "e", "f"]),
+            "a, b, c, d, e and 1 more"
+        );
+    }
+}
