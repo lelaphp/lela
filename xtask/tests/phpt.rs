@@ -192,15 +192,15 @@ fn a_missed_expectation_fails_with_the_difference_and_the_reading_names_the_file
     assert_eq!(judgement, Judgement::Fail, "{tally:#?}");
     assert!(note.contains("-five") && note.contains("+four"), "{note}");
 
-    let reading = tally
-        .reading(
-            workspace(),
-            &manifest(),
-            &subset,
-            &Runner::Engine(oracle().unwrap()),
-            None,
-        )
-        .unwrap();
+    let reading = phpt::reading(
+        &tally,
+        workspace(),
+        &manifest(),
+        &subset,
+        &Runner::Engine(oracle().unwrap()),
+        None,
+    )
+    .unwrap();
     assert_eq!(reading.status, Status::Fail);
     assert_eq!(reading.instrument, "phpt");
     assert_eq!(reading.scope, "ext/fixture");
@@ -234,15 +234,15 @@ fn the_same_missed_expectation_passes_under_an_accepted_divergence_row() {
     assert_eq!(judgement, Judgement::Diverged, "{tally:#?}");
     assert!(note.contains("A person wrote why"), "{note}");
 
-    let reading = tally
-        .reading(
-            workspace(),
-            &manifest(),
-            &subset,
-            &Runner::Engine(oracle().unwrap()),
-            None,
-        )
-        .unwrap();
+    let reading = phpt::reading(
+        &tally,
+        workspace(),
+        &manifest(),
+        &subset,
+        &Runner::Engine(oracle().unwrap()),
+        None,
+    )
+    .unwrap();
     assert_eq!(reading.status, Status::Pass);
     assert_eq!(reading.numbers["diverged"], Number::Int(1));
 }
@@ -414,9 +414,7 @@ fn with_no_engine_built_the_reading_is_a_skip_that_says_so_and_no_test_runs() {
         tally.found > 100,
         "the subset was still counted: {tally:#?}"
     );
-    let reading = tally
-        .reading(workspace(), &manifest, &subset, &runner, None)
-        .unwrap();
+    let reading = phpt::reading(&tally, workspace(), &manifest, &subset, &runner, None).unwrap();
     assert_eq!(reading.status, Status::Skip);
     assert_eq!(reading.scope, "ext/pcre");
     assert!(reading.message.contains("not built"), "{}", reading.message);
@@ -439,9 +437,7 @@ fn the_pinned_oracle_as_the_binary_is_the_runners_control_and_never_a_reading_of
     let oracle = manifest.pin.oracle();
     let tally = phpt::run_subset(&oracle, &registry(""), &runner, None, &subset).unwrap();
     assert_eq!(only(&tally).0, Judgement::Pass);
-    let reading = tally
-        .reading(workspace(), &manifest, &subset, &runner, None)
-        .unwrap();
+    let reading = phpt::reading(&tally, workspace(), &manifest, &subset, &runner, None).unwrap();
     assert_eq!(
         reading.status,
         Status::Skip,
@@ -465,15 +461,15 @@ fn a_subset_where_nothing_met_an_expectation_is_a_skip_and_not_a_green_reading()
     );
     let tally = run(&subset, &registry(""));
     assert_eq!(only(&tally).0, Judgement::Skip);
-    let reading = tally
-        .reading(
-            workspace(),
-            &manifest(),
-            &subset,
-            &Runner::Engine(oracle().unwrap()),
-            None,
-        )
-        .unwrap();
+    let reading = phpt::reading(
+        &tally,
+        workspace(),
+        &manifest(),
+        &subset,
+        &Runner::Engine(oracle().unwrap()),
+        None,
+    )
+    .unwrap();
     assert_eq!(reading.status, Status::Skip, "{}", reading.message);
     assert!(
         reading.message.contains("no test of the subset ran"),
@@ -501,15 +497,15 @@ fn the_reading_carries_the_burndowns_one_number() {
         ],
     );
     let tally = run(&subset, &registry(""));
-    let reading = tally
-        .reading(
-            workspace(),
-            &manifest(),
-            &subset,
-            &Runner::Engine(oracle().unwrap()),
-            None,
-        )
-        .unwrap();
+    let reading = phpt::reading(
+        &tally,
+        workspace(),
+        &manifest(),
+        &subset,
+        &Runner::Engine(oracle().unwrap()),
+        None,
+    )
+    .unwrap();
     assert_eq!(reading.numbers["percent"], Number::Float(50.0));
 }
 
@@ -558,15 +554,15 @@ fn a_subset_the_pinned_tree_has_not_is_a_reading_that_says_so_and_not_a_silent_d
     // a reading a run can write, never a subset quietly dropped.
     let subset = Subset::resolve(&manifest, "php_engine").unwrap();
     assert_eq!(subset.absent(), [Path::new("Zend/nope")]);
-    let reading = Tally::default()
-        .reading(
-            workspace(),
-            &manifest,
-            &subset,
-            &Runner::Absent("no engine".to_owned()),
-            None,
-        )
-        .unwrap();
+    let reading = phpt::reading(
+        &Tally::default(),
+        workspace(),
+        &manifest,
+        &subset,
+        &Runner::Absent("no engine".to_owned()),
+        None,
+    )
+    .unwrap();
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
     assert!(
         reading.message.contains("Zend/nope") && reading.message.contains("php-8.5.9"),
@@ -612,9 +608,15 @@ fn the_reading_of_an_extension_subset_is_stamped_over_the_crate_so_done_can_read
     let manifest = manifest();
     let subset = Subset::resolve(&manifest, "pcre").unwrap();
     let runner = Runner::Absent("no engine".to_owned());
-    let reading = Tally::default()
-        .reading(workspace(), &manifest, &subset, &runner, None)
-        .unwrap();
+    let reading = phpt::reading(
+        &Tally::default(),
+        workspace(),
+        &manifest,
+        &subset,
+        &runner,
+        None,
+    )
+    .unwrap();
     assert_eq!(reading.scope, "ext/pcre");
     assert_eq!(
         reading.tree,

@@ -87,8 +87,8 @@ fn judged(file: &Path, text: &str, registry: &Registry, accept: bool) -> Tally {
 }
 
 fn only(tally: &Tally) -> (Judgement, String) {
-    assert_eq!(tally.judged.len(), 1, "{tally:#?}");
-    let judged = &tally.judged[0];
+    assert_eq!(tally.witnesses.judged.len(), 1, "{tally:#?}");
+    let judged = &tally.witnesses.judged[0];
     (judged.judgement, judged.note.clone())
 }
 
@@ -132,9 +132,13 @@ fn the_digest_is_asserted_once_over_a_run_of_three_witnesses() {
         &found,
     )
     .unwrap();
-    assert_eq!(tally.judged.len(), 3, "{tally:#?}");
+    assert_eq!(tally.witnesses.judged.len(), 3, "{tally:#?}");
     assert!(
-        tally.judged.iter().all(|j| j.judgement == Judgement::Pass),
+        tally
+            .witnesses
+            .judged
+            .iter()
+            .all(|j| j.judgement == Judgement::Pass),
         "{tally:#?}"
     );
     assert_eq!(manifest.pin.digests_asserted(), 1);
@@ -339,14 +343,14 @@ fn a_kernel_or_native_without_a_witness_is_missing_and_fails_the_crate() {
     assert_eq!(tally.missing.len(), 1, "{tally:#?}");
     assert!(tally.missing[0].contains("ctype_alpha"), "{tally:#?}");
 
-    let reading = tally
-        .reading(
-            &root,
-            krate,
-            Some(rule),
-            &Runner::Absent("no engine".into()),
-        )
-        .unwrap();
+    let reading = witness::reading(
+        &tally,
+        &root,
+        krate,
+        Some(rule),
+        &Runner::Absent("no engine".into()),
+    )
+    .unwrap();
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
     assert_eq!(reading.rule, tracked.id);
     assert_eq!(reading.numbers["missing"], Number::Int(1));
@@ -363,9 +367,14 @@ fn the_reading_carries_run_failed_and_missing_and_is_scoped_to_the_crate() {
     let krate = manifest.crate_named("ext/pcre").unwrap();
     let text = block("/// ```expect\n/// 1\n/// ```\n");
     let tally = judge(&text, &registry(""));
-    let reading = tally
-        .reading(workspace(), krate, None, &Runner::Engine(oracle().unwrap()))
-        .unwrap();
+    let reading = witness::reading(
+        &tally,
+        workspace(),
+        krate,
+        None,
+        &Runner::Engine(oracle().unwrap()),
+    )
+    .unwrap();
     assert_eq!(reading.instrument, "witness");
     assert_eq!(reading.scope, "ext/pcre");
     assert_eq!(reading.status, Status::Pass);
@@ -384,7 +393,7 @@ fn without_an_engine_the_reading_is_a_skip_that_says_so() {
     let krate = manifest.crate_named("ext/pcre").unwrap();
     let tally = judge(&block("/// ```expect\n/// 1\n/// ```\n"), &registry(""));
     let absent = Runner::Absent("the engine's binary is not built".to_owned());
-    let reading = tally.reading(workspace(), krate, None, &absent).unwrap();
+    let reading = witness::reading(&tally, workspace(), krate, None, &absent).unwrap();
     assert_eq!(reading.status, Status::Skip, "{reading:#?}");
     assert!(
         reading.message.contains("the engine ran none"),
@@ -398,14 +407,14 @@ fn without_an_engine_the_reading_is_a_skip_that_says_so() {
 fn a_crate_with_no_witness_and_nothing_that_needs_one_passes() {
     let manifest = manifest();
     let krate = manifest.crate_named("php_proto").unwrap();
-    let reading = Tally::default()
-        .reading(
-            workspace(),
-            krate,
-            None,
-            &Runner::Absent("no engine".to_owned()),
-        )
-        .unwrap();
+    let reading = witness::reading(
+        &Tally::default(),
+        workspace(),
+        krate,
+        None,
+        &Runner::Absent("no engine".to_owned()),
+    )
+    .unwrap();
     assert_eq!(reading.status, Status::Pass, "{reading:#?}");
     assert_eq!(reading.numbers["run"], Number::Int(0));
 }

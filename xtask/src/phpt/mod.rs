@@ -8,16 +8,21 @@
 //! **What runs the test.** Design §8's `ScriptExec` seam has two adapters:
 //! the fresh-process one, [`oracle::Runner`], and the in-process `Capture`
 //! sink under `Engine::serve`, which arrives with the engine. The process
-//! adapter runs the engine's own `php` under [`Oracle::run_under`],
-//! the same recipe the oracle runs under, which is what makes the two
-//! comparable. Until `crates/php` is built there is no binary and the
-//! reading is a skip that says so.
+//! adapter, `adapter`, runs the engine's own `php` under
+//! `Oracle::run_under`, the same recipe the oracle runs under, which is
+//! what makes the two comparable. Until `crates/php` is built there is no
+//! binary and the reading is a skip that says so.
 //!
 //! **What a difference means.** Every verdict goes through
 //! [`oracle::verdict`], so the divergence registry is what decides whether
 //! a difference is accepted, here as everywhere (harness §4.3). The key is
 //! `phpt:php-src/<path in the corpus>`, so a row names the corpus and not
 //! this machine.
+//!
+//! **What is the lane module's.** The tally, the print loop, the runner
+//! ladder and the reading's status are [`lane`]'s, shared with `witness`;
+//! this module contributes [`Judgement`], the per-item judge and the words
+//! of the subset's message.
 //!
 //! **What one run is.** One process per test, one test at a time, so
 //! `--CONFLICTS--` is honoured by construction: nothing else of the corpus
@@ -42,6 +47,7 @@
 //! four of `sapi/cli/tests` that do are named in harness-design.md §12
 //! item 17.
 
+mod adapter;
 pub mod file;
 
 use std::fs;
@@ -49,16 +55,14 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
-use regex_lite::Regex;
-
-use crate::git::Stamp;
-use crate::manifest::{Crate, Manifest};
-use crate::oracle::expect::Expectation;
-use crate::oracle::{self, Invocation, Oracle, Output, Pin, Program, Runner, Verdict as Compared};
-use crate::reading::{Reading, Status, listed};
-use file::Phpt;
 
 use crate::divergence::Registry;
+use crate::git::Stamp;
+use crate::lane::{self, Outcome};
+use crate::manifest::{Crate, Manifest};
+use crate::oracle::{Oracle, Runner};
+use crate::reading::{Reading, listed};
+use adapter::Adapter;
 
 /// The instrument's name, the reading's `instrument` field.
 pub const INSTRUMENT: &str = "phpt";
@@ -348,8 +352,10 @@ pub enum Judgement {
     XFail,
 }
 
-impl Judgement {
-    pub fn as_str(self) -> &'static str {
+impl lane::Judgement for Judgement {
+    const PASS: Judgement = Judgement::Pass;
+
+    fn as_str(self) -> &'static str {
         match self {
             Judgement::Pass => "pass",
             Judgement::Diverged => "diverged",
@@ -364,157 +370,99 @@ impl Judgement {
     fn counts_against(self) -> bool {
         matches!(self, Judgement::Fail | Judgement::Bork)
     }
-}
 
-/// One test's verdict.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Judged {
-    /// The divergence key, whatever the judgement.
-    pub id: String,
-    /// The test's name inside its subset.
-    pub name: String,
-    pub judgement: Judgement,
-    /// Why: the skip's reason, the borkage, the accepted row's reason, or
-    /// the difference.
-    pub note: String,
-}
-
-impl Judged {
-    fn new(id: &str, name: &str, judgement: Judgement, note: impl Into<String>) -> Judged {
-        Judged {
-            id: id.to_owned(),
-            name: name.to_owned(),
-            judgement,
-            note: note.into(),
-        }
+    fn met(self) -> bool {
+        matches!(self, Judgement::Pass | Judgement::Diverged)
     }
 }
+
+/// One test's verdict: its divergence key, its name inside the subset,
+/// the judgement and the note.
+pub type Judged = lane::Judged<Judgement>;
 
 /// What one subset's run came to.
-#[derive(Debug, Clone, Default)]
-pub struct Tally {
-    pub judged: Vec<Judged>,
-    /// The tests found, which is more than `judged` when nothing ran.
-    pub found: usize,
-}
+pub type Tally = lane::Tally<Judgement>;
 
-impl Tally {
-    fn count(&self, judgement: Judgement) -> u64 {
-        self.judged
-            .iter()
-            .filter(|j| j.judgement == judgement)
-            .count() as u64
-    }
-
-    /// The tests that fail the subset, by name.
-    pub fn against(&self) -> Vec<&str> {
-        self.judged
-            .iter()
-            .filter(|j| j.judgement.counts_against())
-            .map(|j| j.name.as_str())
-            .collect()
-    }
-
-    /// The subset's reading: the counts in `numbers`, the failures named in
-    /// the message, and the status the runner allows.
-    pub fn reading(
-        &self,
-        root: &Path,
-        manifest: &Manifest,
-        subset: &Subset,
-        runner: &Runner,
-        lane: Option<Lane>,
-    ) -> Result<Reading> {
-        let scope = subset.scope(runner, lane);
-        let mut reading = Reading::new(INSTRUMENT, &scope);
-        reading.count("tests", self.found as u64)?;
-        reading.count("run", self.judged.len() as u64)?;
-        reading.count("passed", self.count(Judgement::Pass))?;
-        reading.count("failed", self.count(Judgement::Fail))?;
-        reading.count("skipped", self.count(Judgement::Skip))?;
-        reading.count("borked", self.count(Judgement::Bork))?;
-        reading.count("xfailed", self.count(Judgement::XFail))?;
-        reading.count("diverged", self.count(Judgement::Diverged))?;
-        // The burndown's number: what met its expectation, over the tests
-        // the subset holds, so a `[[week]]` bar can read one figure.
-        let met = self.count(Judgement::Pass) + self.count(Judgement::Diverged);
-        reading
-            .numbers
-            .insert("percent".to_owned(), percent(met, self.found as u64).into());
-        let against = self.against();
-        let missed = if against.is_empty() {
-            String::new()
-        } else {
-            format!(": {}", listed(&against))
-        };
-        let absent = subset.absent();
-        match runner {
-            // A directory the row names and the pinned tree has not: the
-            // manifest and the pin disagree, and no run can settle it. It
-            // is the reading, ahead of whether an engine is built, because
-            // building one would not answer it.
-            _ if !absent.is_empty() => {
-                let named: Vec<String> = absent
-                    .iter()
-                    .map(|under| under.to_string_lossy().into_owned())
-                    .collect();
-                let named: Vec<&str> = named.iter().map(String::as_str).collect();
-                reading.status = Status::Fail;
-                reading.message = format!(
-                    "{scope}: the [[crate]] row names {}, and the pinned php-src at {} ({}) has no such directory",
-                    listed(&named),
-                    manifest.pin.source.tree().display(),
-                    manifest.pin.source.tag
-                );
+/// The subset's reading: the counts in `numbers`, the failures named in
+/// the message, and the status the ladder allows.
+pub fn reading(
+    tally: &Tally,
+    root: &Path,
+    manifest: &Manifest,
+    subset: &Subset,
+    runner: &Runner,
+    lane: Option<Lane>,
+) -> Result<Reading> {
+    let scope = subset.scope(runner, lane);
+    let absent = subset.absent();
+    // A directory the row names and the pinned tree has not: the manifest
+    // and the pin disagree, and no run can settle it. It is the reading,
+    // ahead of whether an engine is built, because building one would not
+    // answer it.
+    let outcome = if absent.is_empty() {
+        tally.outcome(runner)
+    } else {
+        Outcome::Failed
+    };
+    let message = if absent.is_empty() {
+        match &outcome {
+            Outcome::Failed => format!(
+                "{scope}: {} of {} missed their expectation{}",
+                tally.against().len(),
+                tally.judged.len(),
+                tally.missed()
+            ),
+            Outcome::Absent(why) => {
+                format!("{scope}: no subset run over {} tests; {why}", tally.found)
             }
-            Runner::Absent(why) => {
-                reading.status = Status::Skip;
-                reading.message =
-                    format!("{scope}: no subset run over {} tests; {why}", self.found);
-            }
-            Runner::Control(binary) => {
-                reading.status = Status::Skip;
-                reading.message = format!(
-                    "{scope}: {} of {} differ under {}, the pinned oracle; a control of the runner, not a reading of the engine{missed}",
-                    against.len(),
-                    self.judged.len(),
-                    binary.display()
-                );
-            }
-            Runner::Engine(_) if !against.is_empty() => {
-                reading.status = Status::Fail;
-                reading.message = format!(
-                    "{scope}: {} of {} missed their expectation{missed}",
-                    against.len(),
-                    self.judged.len()
-                );
-            }
-            // Nothing met an expectation: an empty subset, or one every
-            // test skipped out of. A green reading there would say the
-            // engine was measured when it was not.
-            Runner::Engine(_)
-                if self.count(Judgement::Pass) + self.count(Judgement::Diverged) == 0 =>
-            {
-                reading.status = Status::Skip;
-                reading.message = format!(
-                    "{scope}: no test of the subset ran; {} found, {} skipped",
-                    self.found,
-                    self.count(Judgement::Skip)
-                );
-            }
-            Runner::Engine(_) => {
-                reading.status = Status::Pass;
-                reading.message = format!(
-                    "{scope}: {} passed, {} skipped of {} tests",
-                    self.count(Judgement::Pass),
-                    self.count(Judgement::Skip),
-                    self.judged.len()
-                );
-            }
+            Outcome::Control(binary) => format!(
+                "{scope}: {} of {} differ under {}, the pinned oracle; a control of the runner, not a reading of the engine{}",
+                tally.against().len(),
+                tally.judged.len(),
+                binary.display(),
+                tally.missed()
+            ),
+            Outcome::NothingRan => format!(
+                "{scope}: no test of the subset ran; {} found, {} skipped",
+                tally.found,
+                tally.count(Judgement::Skip)
+            ),
+            Outcome::Passed => format!(
+                "{scope}: {} passed, {} skipped of {} tests",
+                tally.count(Judgement::Pass),
+                tally.count(Judgement::Skip),
+                tally.judged.len()
+            ),
         }
-        reading.stamp(&Stamp::take(root, &subset.stamped(manifest))?);
-        Ok(reading)
-    }
+    } else {
+        let named: Vec<String> = absent
+            .iter()
+            .map(|under| under.to_string_lossy().into_owned())
+            .collect();
+        let named: Vec<&str> = named.iter().map(String::as_str).collect();
+        format!(
+            "{scope}: the [[crate]] row names {}, and the pinned php-src at {} ({}) has no such directory",
+            listed(&named),
+            manifest.pin.source.tree().display(),
+            manifest.pin.source.tag
+        )
+    };
+    let mut reading = tally.reading(INSTRUMENT, &scope, &outcome, message)?;
+    reading.count("tests", tally.found as u64)?;
+    reading.count("passed", tally.count(Judgement::Pass))?;
+    reading.count("failed", tally.count(Judgement::Fail))?;
+    reading.count("skipped", tally.count(Judgement::Skip))?;
+    reading.count("borked", tally.count(Judgement::Bork))?;
+    reading.count("xfailed", tally.count(Judgement::XFail))?;
+    reading.count("diverged", tally.count(Judgement::Diverged))?;
+    // The burndown's number: what met its expectation, over the tests the
+    // subset holds, so a `[[week]]` bar can read one figure.
+    reading.numbers.insert(
+        "percent".to_owned(),
+        percent(tally.met(), tally.found as u64).into(),
+    );
+    reading.stamp(&Stamp::take(root, &subset.stamped(manifest))?);
+    Ok(reading)
 }
 
 /// What `met` is of `found`, to one decimal; nothing found is nothing met.
@@ -583,7 +531,7 @@ pub fn run(
     let mut readings = Vec::new();
     for subset in &subsets {
         let tally = run_subset(&oracle, registry, &runner, ask.lane, subset)?;
-        readings.push(tally.reading(root, manifest, subset, &runner, ask.lane)?);
+        readings.push(reading(&tally, root, manifest, subset, &runner, ask.lane)?);
     }
     Ok(readings)
 }
@@ -598,410 +546,14 @@ pub fn run_subset(
     subset: &Subset,
 ) -> Result<Tally> {
     let tests = subset.tests()?;
-    let mut tally = Tally {
-        judged: Vec::new(),
-        found: tests.len(),
-    };
     let Some(binary) = runner.binary() else {
-        return Ok(tally);
+        return Ok(Tally::found(tests.len()));
     };
     // A digest mismatch refuses the whole run (§4.3), before the first
     // test rather than at its first SKIPIF.
     oracle.asserted()?;
     let adapter = Adapter::new(oracle, registry, binary, lane);
-    for test in &tests {
-        let judged = adapter.judge(subset, test)?;
-        if judged.judgement != Judgement::Pass {
-            // A failure prints its difference: that is what a person reads
-            // to decide whether it is the engine's or the corpus's. Every
-            // other judgement is one line, its reason.
-            let note = if judged.judgement.counts_against() {
-                judged.note.clone()
-            } else {
-                judged.note.lines().next().unwrap_or_default().to_owned()
-            };
-            // The line is keyed by the divergence id, which is what a
-            // person writes a registry row against when the difference is
-            // one to accept (harness §4.3).
-            println!("{} {}: {note}", judged.judgement.as_str(), judged.id);
-        }
-        tally.judged.push(judged);
-    }
-    Ok(tally)
-}
-
-/// The fresh-process adapter of design §8's `ScriptExec` seam, bound to
-/// one run: the oracle and the registry, the binary it runs, the tier lane
-/// it runs under, and the extensions that binary loads, which
-/// `--EXTENSIONS--` is answered from.
-struct Adapter<'a> {
-    oracle: &'a Oracle<'a>,
-    registry: &'a Registry,
-    binary: &'a Path,
-    lane: Option<Lane>,
-    loaded: Vec<String>,
-}
-
-impl<'a> Adapter<'a> {
-    fn new(
-        oracle: &'a Oracle<'a>,
-        registry: &'a Registry,
-        binary: &'a Path,
-        lane: Option<Lane>,
-    ) -> Adapter<'a> {
-        let loaded = loaded_extensions(oracle, binary).unwrap_or_else(|e| {
-            println!("phpt: {} lists no extension ({e:#})", binary.display());
-            Vec::new()
-        });
-        Adapter {
-            oracle,
-            registry,
-            binary,
-            lane,
-            loaded,
-        }
-    }
-
-    /// One test, end to end.
-    fn judge(&self, subset: &Subset, test: &Path) -> Result<Judged> {
-        let id = subset.id(test);
-        let name = subset.name(test);
-        let phpt = match Phpt::load(test) {
-            Ok(phpt) => phpt,
-            Err(borked) => return Ok(Judged::new(&id, &name, Judgement::Bork, borked.0)),
-        };
-        if let Some(why) = unhosted(&phpt) {
-            return Ok(Judged::new(&id, &name, Judgement::Skip, why));
-        }
-        if let Some(why) = self.missing(&phpt) {
-            return Ok(Judged::new(&id, &name, Judgement::Skip, why));
-        }
-        let mut ini = match ini_of(&phpt, test) {
-            Ok(ini) => ini,
-            Err(why) => return Ok(Judged::new(&id, &name, Judgement::Skip, why)),
-        };
-        ini.extend(self.lane.map(Lane::ini));
-        let mut expected_to_fail = phpt.text("XFAIL").map(|why| why.trim().to_owned());
-        if let Some(body) = phpt.filled("SKIPIF") {
-            let out = self.run_section(test, "skip", body)?;
-            let said = String::from_utf8_lossy(&out.stdout).into_owned();
-            if let Some(reason) = reason_after("skip", &said) {
-                return Ok(Judged::new(&id, &name, Judgement::Skip, reason));
-            }
-            if let Some(reason) = reason_after("xfail", &said) {
-                expected_to_fail = Some(reason);
-            }
-        }
-
-        let actual = match self.run_program(&phpt, test, &ini)? {
-            Ok(actual) => actual,
-            Err(borked) => return Ok(Judged::new(&id, &name, Judgement::Bork, borked)),
-        };
-        let Some(expectation) = expectation_of(self.oracle.pin(), &phpt) else {
-            return Ok(Judged::new(
-                &id,
-                &name,
-                Judgement::Bork,
-                "missing section --EXPECT--, --EXPECTF-- or --EXPECTREGEX--",
-            ));
-        };
-        let (met, trouble) = match expectation.met(&actual) {
-            Ok(met) => (met, String::new()),
-            Err(e) => (false, format!("{e:#}\n")),
-        };
-        let compared = oracle::verdict(self.registry, &id, met, expectation.text(), &actual);
-        Ok(match (compared, expected_to_fail) {
-            (Compared::Same, Some(why)) => Judged::new(
-                &id,
-                &name,
-                Judgement::Pass,
-                format!("the XFAIL section says {why:?} and the test passes"),
-            ),
-            (Compared::Same, None) => Judged::new(&id, &name, Judgement::Pass, ""),
-            (Compared::Diverged(row), _) => {
-                Judged::new(&id, &name, Judgement::Diverged, row.reason)
-            }
-            (Compared::Differs(difference), Some(why)) => {
-                Judged::new(&id, &name, Judgement::XFail, format!("{why}\n{difference}"))
-            }
-            (Compared::Differs(difference), None) => Judged::new(
-                &id,
-                &name,
-                Judgement::Fail,
-                format!(
-                    "{trouble}the {} section is not what ran:\n{difference}",
-                    expectation.section()
-                ),
-            ),
-        })
-    }
-
-    /// The test's program, written where upstream writes it, run through
-    /// the binary under test with the sections that shape one run, and
-    /// taken away after; then `CLEAN`, which takes away what the test
-    /// left. A file already standing where the program goes borks the
-    /// test rather than being overwritten.
-    fn run_program(
-        &self,
-        phpt: &Phpt,
-        test: &Path,
-        ini: &[String],
-    ) -> Result<Result<Vec<u8>, String>> {
-        let program = test.with_extension("php");
-        if program.exists() {
-            return Ok(Err(format!(
-                "a file already stands where the test's program goes, {}",
-                program.display()
-            )));
-        }
-        let body = phpt.section("FILE").unwrap_or_default().to_vec();
-        let written = Written::new(&program, &body)?;
-        let args = words(&phpt.text("ARGS").unwrap_or_default());
-        let mut env = executable(self.binary);
-        env.extend(env_of(phpt, test));
-        let output = self
-            .oracle
-            .run_under(&Invocation {
-                ini,
-                args: &args,
-                env: &env,
-                stdin: phpt.section("STDIN"),
-                merge_streams: merges_streams(phpt),
-                ..Invocation::new(self.binary, Program::File(&program))
-            })
-            .with_context(|| format!("running {}", test.display()))?;
-        drop(written);
-        if let Some(body) = phpt.filled("CLEAN") {
-            self.run_section(test, "clean", body)?;
-        }
-        Ok(Ok(output.stdout))
-    }
-
-    /// A section that runs beside the test rather than as it: `SKIPIF`,
-    /// which decides whether the test applies at all, and `CLEAN`, which
-    /// takes away what it left. Neither is given the test's own `--INI--`,
-    /// as upstream gives neither. Both run under the oracle, not the
-    /// engine: what they answer must be true of the corpus whatever the
-    /// engine can do yet, and a young engine must not be trusted with
-    /// cleanup. Upstream runs them under the binary it is testing, so a
-    /// `SKIPIF` that asks what the engine has is answered here by php; it
-    /// is the runner's one known difference from upstream's verdicts.
-    fn run_section(&self, test: &Path, kind: &str, body: &[u8]) -> Result<Output> {
-        let program = test.with_extension(format!("{kind}.php"));
-        let written = Written::new(&program, body)?;
-        let out = self
-            .oracle
-            .run(Program::File(&program), None)
-            .with_context(|| format!("running the {kind} section of {}", test.display()))?;
-        drop(written);
-        Ok(out)
-    }
-
-    /// The `--EXTENSIONS--` the runner's binary does not load, in
-    /// upstream's words.
-    fn missing(&self, phpt: &Phpt) -> Option<String> {
-        let wanted = phpt.text("EXTENSIONS").unwrap_or_default().into_owned();
-        let missing: Vec<&str> = wanted
-            .split_whitespace()
-            .filter(|name| !self.loaded.iter().any(|had| had == &name.to_lowercase()))
-            .collect();
-        if missing.is_empty() {
-            return None;
-        }
-        Some(format!(
-            "Required extension{} missing: {}",
-            if missing.len() > 1 { "s" } else { "" },
-            missing.join(", ")
-        ))
-    }
-}
-
-/// The extensions a binary loads under the recipe, as upstream asks for
-/// them: `Core` dropped, `Zend OPcache` mapped to `opcache` and the rest
-/// lowered (run-tests.php:2908-2916).
-fn loaded_extensions(oracle: &Oracle<'_>, binary: &Path) -> Result<Vec<String>> {
-    let snippet = r#"echo implode("\n", get_loaded_extensions());"#;
-    let out = oracle.run_under(&Invocation::new(binary, Program::Snippet(snippet)))?;
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|name| !name.is_empty() && *name != "Core")
-        .map(|name| {
-            if name == "Zend OPcache" {
-                "opcache".to_owned()
-            } else {
-                name.to_lowercase()
-            }
-        })
-        .collect())
-}
-
-/// Why this runner cannot host a test: it serves the command line, and the
-/// three shapes below are another host's or another program's.
-fn unhosted(phpt: &Phpt) -> Option<String> {
-    if phpt.has("REDIRECTTEST") {
-        return Some("a --REDIRECTTEST--; this runner runs a subset, not a redirected set".into());
-    }
-    if phpt.is_cgi() {
-        return Some("a CGI test; this runner hosts the command line".into());
-    }
-    if phpt.has("PHPDBG") {
-        return Some("a --PHPDBG-- test; this engine has no debugger host".into());
-    }
-    None
-}
-
-/// Whether the two streams are captured as one, which is upstream's
-/// default and what `--CAPTURE_STDIO--` can narrow.
-fn merges_streams(phpt: &Phpt) -> bool {
-    match phpt.text("CAPTURE_STDIO") {
-        Some(capture) => {
-            let capture = capture.to_uppercase();
-            capture.contains("STDOUT") && capture.contains("STDERR")
-        }
-        None => true,
-    }
-}
-
-/// The expectation the test carries, normalised as php normalises it.
-fn expectation_of(pin: &Pin, phpt: &Phpt) -> Option<Expectation> {
-    if let Some(body) = phpt.section("EXPECT") {
-        return Some(Expectation::Exact(trimmed(pin, body)));
-    }
-    if let Some(body) = phpt.text("EXPECTF") {
-        return Some(Expectation::Format(trimmed_text(pin, &body)));
-    }
-    phpt.text("EXPECTREGEX")
-        .map(|body| Expectation::Pattern(trimmed_text(pin, &body)))
-}
-
-/// The recipe's normalisation over a section, which is what the output it
-/// is compared with has been through; the oracle module owns the rule.
-fn trimmed(pin: &Pin, body: &[u8]) -> Vec<u8> {
-    oracle::normalise(&pin.recipe.normalise, body.to_vec())
-}
-
-/// The same over a section a runner reads as words.
-fn trimmed_text(pin: &Pin, text: &str) -> String {
-    String::from_utf8_lossy(&trimmed(pin, text.as_bytes())).into_owned()
-}
-
-/// A test's `--INI--`, one `-d` line each, with upstream's four
-/// substitutions; an unset `{ENV:NAME}` is a skip with upstream's reason.
-fn ini_of(phpt: &Phpt, test: &Path) -> Result<Vec<String>, String> {
-    let Some(body) = phpt.text("INI") else {
-        return Ok(Vec::new());
-    };
-    let body = substituted(&body, test);
-    let mail = Regex::new(r"\{MAIL:(\S+)\}").map_err(|e| e.to_string())?;
-    let body = mail.replace_all(&body, "tee $1 >/dev/null").into_owned();
-    let env = Regex::new(r"\{ENV:(\S+)\}").map_err(|e| e.to_string())?;
-    let mut unset = None;
-    let body = replace_all(&env, &body, |name| {
-        std::env::var(name).unwrap_or_else(|_| {
-            unset = Some(format!("Environment variable {name} is not set"));
-            String::new()
-        })
-    });
-    if let Some(reason) = unset {
-        return Err(reason);
-    }
-    Ok(body
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.contains('='))
-        .map(str::to_owned)
-        .collect())
-}
-
-/// The binary under test, under the two names the corpus spawns it by
-/// (run-tests.php:670-673). The recipe's `TEST_PHP_EXECUTABLE` names the
-/// pinned oracle, which is right for a witness and wrong for a phpt lane:
-/// what a test spawns is the binary being measured, so these two stand
-/// over the recipe's and under the test's own `--ENV--`.
-fn executable(binary: &Path) -> Vec<(String, String)> {
-    let path = binary.to_string_lossy().into_owned();
-    let escaped = format!("'{}'", path.replace('\'', r"'\''"));
-    vec![
-        ("TEST_PHP_EXECUTABLE".to_owned(), path),
-        ("TEST_PHP_EXECUTABLE_ESCAPED".to_owned(), escaped),
-    ]
-}
-
-/// A test's `--ENV--`, one `NAME=value` a line.
-fn env_of(phpt: &Phpt, test: &Path) -> Vec<(String, String)> {
-    substituted(&phpt.text("ENV").unwrap_or_default(), test)
-        .lines()
-        .filter_map(|line| line.split_once('='))
-        .map(|(name, value)| (name.trim().to_owned(), value.trim().to_owned()))
-        .filter(|(name, _)| !name.is_empty())
-        .collect()
-}
-
-/// `{PWD}` and `{TMP}`, which stand for the test's own directory and the
-/// scratch one.
-fn substituted(body: &str, test: &Path) -> String {
-    let beside = test
-        .parent()
-        .map(|dir| dir.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let scratch = std::env::temp_dir().to_string_lossy().into_owned();
-    body.replace("{PWD}", &beside).replace("{TMP}", &scratch)
-}
-
-/// `Regex::replace_all` with a closure over the one capture, which
-/// `regex_lite` does not take directly.
-fn replace_all(regex: &Regex, text: &str, mut with: impl FnMut(&str) -> String) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut last = 0;
-    for found in regex.captures_iter(text) {
-        let Some(whole) = found.get(0) else { continue };
-        let name = found.get(1).map_or("", |m| m.as_str());
-        out.push_str(&text[last..whole.start()]);
-        out.push_str(&with(name));
-        last = whole.end();
-    }
-    out.push_str(&text[last..]);
-    out
-}
-
-/// The reason a `SKIPIF` gave, when its first word is `word`:
-/// upstream's `/^skip\s*(.+)/i` over the section's output.
-fn reason_after(word: &str, said: &str) -> Option<String> {
-    let said = said.trim_start();
-    if said.len() < word.len() || !said[..word.len()].eq_ignore_ascii_case(word) {
-        return None;
-    }
-    Some(
-        said[word.len()..]
-            .trim()
-            .lines()
-            .next()
-            .unwrap_or("")
-            .to_owned(),
-    )
-}
-
-/// A command line's words, split on whitespace: a test's `--ARGS--`.
-fn words(text: &str) -> Vec<String> {
-    text.split_whitespace().map(str::to_owned).collect()
-}
-
-/// A file written beside a test for the length of its run and taken away
-/// after, which is where upstream puts a test's program too.
-struct Written(PathBuf);
-
-impl Written {
-    fn new(path: &Path, body: &[u8]) -> Result<Written> {
-        fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
-        Ok(Written(path.to_path_buf()))
-    }
-}
-
-impl Drop for Written {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
+    Tally::judge(&tests, |test| adapter.judge(subset, test))
 }
 
 #[cfg(test)]
@@ -1012,33 +564,5 @@ mod tests {
     fn a_lane_names_the_engine_only_directive() {
         assert_eq!(Lane::Force.ini(), "jit.mode=force");
         assert_eq!(Lane::ExitFuzz.ini(), "jit.mode=exit-fuzz");
-    }
-
-    #[test]
-    fn a_skipif_reason_is_the_text_after_the_word() {
-        assert_eq!(
-            reason_after("skip", "skip no pcre\n").as_deref(),
-            Some("no pcre")
-        );
-        assert_eq!(
-            reason_after("skip", "SKIP  no pcre").as_deref(),
-            Some("no pcre")
-        );
-        assert_eq!(reason_after("skip", "skip").as_deref(), Some(""));
-        assert_eq!(reason_after("skip", "nothing"), None);
-        assert_eq!(
-            reason_after("xfail", "xfail known"),
-            Some("known".to_owned())
-        );
-    }
-
-    #[test]
-    fn the_streams_are_one_unless_capture_stdio_says_otherwise() {
-        let phpt = |text: &str| Phpt::parse(Path::new("x.phpt"), text.as_bytes()).unwrap();
-        let plain = phpt("--TEST--\nn\n--FILE--\nx\n--EXPECT--\n1\n");
-        assert!(merges_streams(&plain));
-        let one =
-            phpt("--TEST--\nn\n--CAPTURE_STDIO--\nSTDIN STDOUT\n--FILE--\nx\n--EXPECT--\n1\n");
-        assert!(!merges_streams(&one));
     }
 }

@@ -23,6 +23,7 @@ pub mod glossary;
 /// `xtask`'s own sources (harness-design.md §4.4, #16). Shared with
 /// `build.rs`, which includes the file rather than importing it.
 pub mod inputs;
+pub mod lane;
 pub mod lines;
 pub mod lock;
 pub mod manifest;

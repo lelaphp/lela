@@ -29,11 +29,17 @@
 //! native there without a witness raises `missing`, and `done` prints it
 //! per crate. What counts as one is [`fence::Subject`]'s sentence.
 //!
+//! **What is the lane module's.** The tally, the print loop, the runner
+//! ladder and the reading's status are [`lane`]'s, shared with `phpt`;
+//! this module contributes [`Judgement`], the per-item judge in `judge`
+//! and the words of the crate's message.
+//!
 //! **What `wall=D` is.** Disclosure. The declared durations are summed into
 //! the reading's `wall_ms` and gate nothing; the limit a run has is the
 //! recipe's.
 
 pub mod fence;
+mod judge;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -44,12 +50,12 @@ use anyhow::{Context, Result, bail};
 
 use crate::divergence::Registry;
 use crate::git::Stamp;
+use crate::lane::{self, Outcome};
 use crate::manifest::{Crate, Manifest, Rule};
-use crate::oracle::expect::Expectation;
-use crate::oracle::{self, Invocation, Oracle, Output, Pin, Program, Runner, Verdict as Compared};
-use crate::reading::{Reading, Status, Store, listed};
+use crate::oracle::{Oracle, Runner};
+use crate::reading::{Reading, Store, listed};
 use crate::sources;
-use fence::{Exit, Extracted, Witness};
+use fence::Extracted;
 
 /// The instrument's name, the reading's `instrument` field.
 pub const INSTRUMENT: &str = "witness";
@@ -71,8 +77,10 @@ pub enum Judgement {
     Bork,
 }
 
-impl Judgement {
-    pub fn as_str(self) -> &'static str {
+impl lane::Judgement for Judgement {
+    const PASS: Judgement = Judgement::Pass;
+
+    fn as_str(self) -> &'static str {
         match self {
             Judgement::Pass => "pass",
             Judgement::Diverged => "diverged",
@@ -89,33 +97,15 @@ impl Judgement {
             Judgement::Fail | Judgement::Unpinned | Judgement::Bork
         )
     }
-}
 
-/// One witness's verdict.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Judged {
-    /// The divergence key, whatever the judgement.
-    pub id: String,
-    /// Where the witness stands, `ext/pcre/src/lib.rs:31`.
-    pub at: String,
-    /// The item it documents, empty for a file's own doc.
-    pub subject: String,
-    pub judgement: Judgement,
-    /// Why: the difference, the accepted row's reason, or the trouble.
-    pub note: String,
-}
-
-impl Judged {
-    fn new(witness: &Witness, judgement: Judgement, note: impl Into<String>) -> Judged {
-        Judged {
-            id: witness.id(),
-            at: witness.at(),
-            subject: witness.subject.clone(),
-            judgement,
-            note: note.into(),
-        }
+    fn met(self) -> bool {
+        matches!(self, Judgement::Pass | Judgement::Diverged)
     }
 }
+
+/// One witness's verdict: its divergence key, where it stands as its
+/// name, the judgement and the note.
+pub type Judged = lane::Judged<Judgement>;
 
 /// The one thing `--accept` writes: a fence line, by the file and the line
 /// it stands on.
@@ -128,10 +118,11 @@ pub struct Captured {
     pub now: String,
 }
 
-/// What one crate's run came to.
+/// What one crate's run came to: the witnesses judged, and the coverage
+/// half beside them.
 #[derive(Debug, Clone, Default)]
 pub struct Tally {
-    pub judged: Vec<Judged>,
+    pub witnesses: lane::Tally<Judgement>,
     /// The kernels and natives the coverage scope holds.
     pub subjects: usize,
     /// Those of them without a witness, as `file:line item`.
@@ -145,121 +136,104 @@ pub struct Tally {
 }
 
 impl Tally {
-    fn count(&self, judgement: Judgement) -> u64 {
-        self.judged
-            .iter()
-            .filter(|j| j.judgement == judgement)
-            .count() as u64
-    }
-
-    /// The witnesses that fail the crate, by where they stand.
-    pub fn against(&self) -> Vec<&str> {
-        self.judged
-            .iter()
-            .filter(|j| j.judgement.counts_against())
-            .map(|j| j.at.as_str())
-            .collect()
-    }
-
     /// Whether the crate's reading fails: a witness that missed, a block
     /// the grammar could not read, or a kernel or native without one.
     pub fn failed(&self) -> bool {
-        !self.against().is_empty() || !self.problems.is_empty() || !self.missing.is_empty()
+        !self.witnesses.against().is_empty()
+            || !self.problems.is_empty()
+            || !self.missing.is_empty()
     }
+}
 
-    /// The crate's reading: the counts in `numbers`, what failed named in
-    /// the message, and the status the runner allows.
-    pub fn reading(
-        &self,
-        root: &Path,
-        krate: &Crate,
-        rule: Option<&Rule>,
-        runner: &Runner,
-    ) -> Result<Reading> {
-        let name = &krate.name;
-        let mut reading = Reading::new(INSTRUMENT, name);
-        if let Some(rule) = rule {
-            reading.rule.clone_from(&rule.id);
-            reading.adr = rule.adr.adr_field();
-        }
-        reading.count("run", self.judged.len() as u64)?;
-        reading.count("passed", self.count(Judgement::Pass))?;
-        reading.count("failed", self.against().len() as u64)?;
-        reading.count("diverged", self.count(Judgement::Diverged))?;
-        reading.count("unpinned", self.count(Judgement::Unpinned))?;
-        reading.count("subjects", self.subjects as u64)?;
-        reading.count("missing", self.missing.len() as u64)?;
-        reading.count("accepted", self.captured.len() as u64)?;
-        reading.count("unread", self.problems.len() as u64)?;
-        reading.count("wall_ms", declared_ms(self.wall))?;
-
-        let uncovered = if self.missing.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "; {} of {} kernels or natives without a witness: {}. {}",
-                self.missing.len(),
-                self.subjects,
-                listed(&self.missing.iter().map(String::as_str).collect::<Vec<_>>()),
-                rule.map(|r| r.text.as_str()).unwrap_or_default()
-            )
-        };
-        let unread = if self.problems.is_empty() {
-            String::new()
-        } else {
-            format!("; {}", self.problems.join("; "))
-        };
-        if self.failed() {
-            let against = self.against();
-            let missed = if against.is_empty() {
+/// The crate's reading: the counts in `numbers`, what failed named in the
+/// message, and the status the ladder allows. A witness that missed fails
+/// the crate whatever ran it, since what a fence pins is the oracle's and
+/// the oracle ran; a crate with no witness and nothing that needs one
+/// passes whatever ran, since the coverage half was measured.
+pub fn reading(
+    tally: &Tally,
+    root: &Path,
+    krate: &Crate,
+    rule: Option<&Rule>,
+    runner: &Runner,
+) -> Result<Reading> {
+    let name = &krate.name;
+    let run = &tally.witnesses;
+    let outcome = if tally.failed() {
+        Outcome::Failed
+    } else if run.judged.is_empty() {
+        Outcome::Passed
+    } else {
+        run.outcome(runner)
+    };
+    let message = match &outcome {
+        Outcome::Failed => {
+            let uncovered = if tally.missing.is_empty() {
                 String::new()
             } else {
-                format!(": {}", listed(&against))
+                format!(
+                    "; {} of {} kernels or natives without a witness: {}. {}",
+                    tally.missing.len(),
+                    tally.subjects,
+                    listed(&tally.missing.iter().map(String::as_str).collect::<Vec<_>>()),
+                    rule.map(|r| r.text.as_str()).unwrap_or_default()
+                )
             };
-            reading.status = Status::Fail;
-            reading.message = format!(
-                "{name}: {} of {} witnesses missed what they pin{missed}{uncovered}{unread}",
-                against.len(),
-                self.judged.len()
-            );
-        } else if self.judged.is_empty() {
-            reading.status = Status::Pass;
-            reading.message = format!("{name}: no witness, and no kernel or native that needs one");
-        } else {
-            // Every witness met what it pins. Whether that is a reading of
-            // the engine is the runner's to say: without the engine's own
-            // binary the pinned oracle ran them, which measures the fences
-            // and the oracle, and a green line must not stand where the
-            // engine's belongs.
-            match runner {
-                Runner::Engine(_) => {
-                    reading.status = Status::Pass;
-                    reading.message = format!(
-                        "{name}: {} witnesses pass over {} kernels or natives",
-                        self.judged.len(),
-                        self.subjects
-                    );
-                }
-                Runner::Control(binary) => {
-                    reading.status = Status::Skip;
-                    reading.message = format!(
-                        "{name}: {} witnesses agree with {}, the pinned oracle; a control of the fences, not a reading of the engine",
-                        self.judged.len(),
-                        binary.display()
-                    );
-                }
-                Runner::Absent(why) => {
-                    reading.status = Status::Skip;
-                    reading.message = format!(
-                        "{name}: {} witnesses agree with the pinned oracle, and the engine ran none; {why}",
-                        self.judged.len()
-                    );
-                }
-            }
+            let unread = if tally.problems.is_empty() {
+                String::new()
+            } else {
+                format!("; {}", tally.problems.join("; "))
+            };
+            format!(
+                "{name}: {} of {} witnesses missed what they pin{}{uncovered}{unread}",
+                run.against().len(),
+                run.judged.len(),
+                run.missed()
+            )
         }
-        reading.stamp(&Stamp::take(root, &krate.path())?);
-        Ok(reading)
+        Outcome::Passed if run.judged.is_empty() => {
+            format!("{name}: no witness, and no kernel or native that needs one")
+        }
+        Outcome::Passed => format!(
+            "{name}: {} witnesses pass over {} kernels or natives",
+            run.judged.len(),
+            tally.subjects
+        ),
+        // Every witness met what it pins, and whether that is a reading of
+        // the engine is the runner's to say: without the engine's own
+        // binary the pinned oracle ran them, which measures the fences and
+        // the oracle, and a green line must not stand where the engine's
+        // belongs.
+        Outcome::Control(binary) => format!(
+            "{name}: {} witnesses agree with {}, the pinned oracle; a control of the fences, not a reading of the engine",
+            run.judged.len(),
+            binary.display()
+        ),
+        Outcome::Absent(why) => format!(
+            "{name}: {} witnesses agree with the pinned oracle, and the engine ran none; {why}",
+            run.judged.len()
+        ),
+        // A witness that met nothing counts against the crate, so this
+        // rung is one the ladder has and this lane's pre-rung reaches
+        // first; the words are here so no rung is without any.
+        Outcome::NothingRan => format!("{name}: no witness ran of {} found", run.found),
+    };
+    let mut reading = run.reading(INSTRUMENT, name, &outcome, message)?;
+    if let Some(rule) = rule {
+        reading.rule.clone_from(&rule.id);
+        reading.adr = rule.adr.adr_field();
     }
+    reading.count("passed", run.count(Judgement::Pass))?;
+    reading.count("failed", run.against().len() as u64)?;
+    reading.count("diverged", run.count(Judgement::Diverged))?;
+    reading.count("unpinned", run.count(Judgement::Unpinned))?;
+    reading.count("subjects", tally.subjects as u64)?;
+    reading.count("missing", tally.missing.len() as u64)?;
+    reading.count("accepted", tally.captured.len() as u64)?;
+    reading.count("unread", tally.problems.len() as u64)?;
+    reading.count("wall_ms", declared_ms(tally.wall))?;
+    reading.stamp(&Stamp::take(root, &krate.path())?);
+    Ok(reading)
 }
 
 /// The declared wall as the reading counts it; a witness the recipe would
@@ -304,44 +278,30 @@ pub fn run(
         if !ask.crates.is_empty() && !ask.crates.iter().any(|n| n == &krate.name) {
             continue;
         }
-        let mut reading = Reading::new(INSTRUMENT, &krate.name);
+        // The reading of a crate no witness runs for: the harness's, or
+        // one not yet created.
+        let mut unrun = Reading::new(INSTRUMENT, &krate.name);
         if let Some(rule) = rule {
-            reading.rule.clone_from(&rule.id);
-            reading.adr = rule.adr.adr_field();
+            unrun.rule.clone_from(&rule.id);
+            unrun.adr = rule.adr.adr_field();
         }
         if krate.name == crate::done::HARNESS {
             // The harness measures the engine and carries no witness of its
             // own; `done` asks it for none either (§4.5).
-            reading.message = format!("{}: the harness carries no witness", krate.name);
-            readings.push(reading);
+            unrun.message = format!("{}: the harness carries no witness", krate.name);
+            readings.push(unrun);
             continue;
         }
         if !sources::exists(root, krate) {
-            reading.message = format!("{}: not yet created", krate.name);
-            readings.push(reading);
+            unrun.message = format!("{}: not yet created", krate.name);
+            readings.push(unrun);
             continue;
         }
         let found = extract(root, krate, rule)?;
+        for problem in &found.problems {
+            println!("bork {}", problem.at_line());
+        }
         let tally = judge(&oracle, registry, &runner, ask, &found)?;
-        for line in &tally.problems {
-            println!("bork {line}");
-        }
-        for judged in &tally.judged {
-            if judged.judgement != Judgement::Pass {
-                println!(
-                    "{} {} at {}{}: {}",
-                    judged.judgement.as_str(),
-                    judged.id,
-                    judged.at,
-                    if judged.subject.is_empty() {
-                        String::new()
-                    } else {
-                        format!(", {}", judged.subject)
-                    },
-                    judged.note
-                );
-            }
-        }
         for missing in &tally.missing {
             println!("missing {missing}");
         }
@@ -363,10 +323,10 @@ pub fn run(
                 "witness: {} declares {:.3} s of wall over {} witnesses",
                 krate.name,
                 tally.wall.as_secs_f64(),
-                tally.judged.len()
+                tally.witnesses.judged.len()
             );
         }
-        readings.push(tally.reading(root, krate, rule, &runner)?);
+        readings.push(reading(&tally, root, krate, rule, &runner)?);
     }
     Ok(readings)
 }
@@ -413,7 +373,19 @@ pub fn judge(
     ask: &Ask,
     found: &Extracted,
 ) -> Result<Tally> {
-    let mut tally = Tally {
+    if !found.witnesses.is_empty() {
+        // A digest mismatch refuses the whole run (§4.3): asserted here,
+        // before the first snippet, and not caught per witness as a bork.
+        oracle.asserted()?;
+    }
+    let mut captured = Vec::new();
+    let mut wall = Duration::ZERO;
+    let witnesses = lane::Tally::judge(&found.witnesses, |witness| {
+        wall += witness.wall.unwrap_or_default();
+        judge::one(oracle, registry, runner, ask, witness, &mut captured)
+    })?;
+    Ok(Tally {
+        witnesses,
         subjects: found.subjects.len(),
         missing: found
             .subjects
@@ -422,143 +394,9 @@ pub fn judge(
             .map(fence::Subject::at)
             .collect(),
         problems: found.problems.iter().map(fence::Problem::at_line).collect(),
-        ..Tally::default()
-    };
-    if !found.witnesses.is_empty() {
-        // A digest mismatch refuses the whole run (§4.3): asserted here,
-        // before the first snippet, and not caught per witness as a bork.
-        oracle.asserted()?;
-    }
-    for witness in &found.witnesses {
-        tally.wall += witness.wall.unwrap_or_default();
-        let judged = judge_one(oracle, registry, runner, ask, witness, &mut tally)?;
-        tally.judged.push(judged);
-    }
-    Ok(tally)
-}
-
-/// One witness, end to end: the oracle's run, the status `--accept` may
-/// capture from it, the run of record, and the verdict.
-fn judge_one(
-    oracle: &Oracle<'_>,
-    registry: &Registry,
-    runner: &Runner,
-    ask: &Ask,
-    witness: &Witness,
-    tally: &mut Tally,
-) -> Result<Judged> {
-    let oracle_out = match oracle.run(Program::Snippet(&witness.snippet), None) {
-        Ok(out) => out,
-        Err(trouble) => {
-            return Ok(Judged::new(
-                witness,
-                Judgement::Bork,
-                format!("the oracle did not run it: {trouble:#}"),
-            ));
-        }
-    };
-    let Some(status) = oracle_out.exit else {
-        return Ok(Judged::new(
-            witness,
-            Judgement::Bork,
-            "the oracle ended on a signal, so there is no status to pin",
-        ));
-    };
-
-    // The bare `exit` is the opt-in, and the only thing `--accept` writes:
-    // a status the fence already pins and the oracle no longer gives is a
-    // difference for the registry or for a fix, never one to repin over
-    // (design §8, the paragraph on witnesses in rustdoc).
-    let mut exit = witness.exit;
-    if ask.accept && exit == Exit::Bare {
-        tally.captured.push(Captured {
-            file: witness.file.clone(),
-            line: witness.fence,
-            was: witness.fence_line.clone(),
-            now: fence::pinned(&witness.fence_line, status),
-        });
-        exit = Exit::Pinned(status);
-    }
-    if exit == Exit::Bare {
-        return Ok(Judged::new(
-            witness,
-            Judgement::Unpinned,
-            format!(
-                "the fence's `exit` is bare and the oracle exits {status}; `xtask witness --accept` writes it, and nothing else does"
-            ),
-        ));
-    }
-
-    let ran = match runner {
-        Runner::Engine(binary) => oracle
-            .run_under(&Invocation::new(binary, Program::Snippet(&witness.snippet)))
-            .with_context(|| format!("running {} through {}", witness.at(), binary.display()))?,
-        _ => oracle_out,
-    };
-    let met = match met(oracle.pin(), witness, exit, &ran) {
-        Ok(met) => met,
-        Err(trouble) => {
-            return Ok(Judged::new(
-                witness,
-                Judgement::Bork,
-                format!("the pinned stream is not one this engine can match: {trouble:#}"),
-            ));
-        }
-    };
-    let id = witness.id();
-    let expected = shown(
-        &witness.stdout,
-        witness.stderr.as_deref().unwrap_or_default(),
-        exit.asserted(),
-    );
-    let actual = shown(
-        &String::from_utf8_lossy(&ran.stdout),
-        &String::from_utf8_lossy(&ran.stderr),
-        ran.exit,
-    );
-    Ok(
-        match oracle::verdict(registry, &id, met, &expected, &actual) {
-            Compared::Same => Judged::new(witness, Judgement::Pass, ""),
-            Compared::Diverged(row) => Judged::new(witness, Judgement::Diverged, row.reason),
-            Compared::Differs(difference) => Judged::new(
-                witness,
-                Judgement::Fail,
-                format!("what the fences pin is not what ran:\n{difference}"),
-            ),
-        },
-    )
-}
-
-/// Whether a run meets what the fences pin: the two streams as the phpt
-/// runner matches an `--EXPECTF--` section, since a witness's output lines
-/// carry the same wildcards (design §8), and the status exactly.
-fn met(pin: &Pin, witness: &Witness, exit: Exit, ran: &Output) -> Result<bool> {
-    if ran.exit != exit.asserted() {
-        return Ok(false);
-    }
-    let stdout = Expectation::Format(normalised(pin, &witness.stdout));
-    if !stdout.met(&ran.stdout)? {
-        return Ok(false);
-    }
-    let stderr = Expectation::Format(normalised(
-        pin,
-        witness.stderr.as_deref().unwrap_or_default(),
-    ));
-    stderr.met(&ran.stderr)
-}
-
-/// A pinned stream under the recipe's normalisation, which is what the run's
-/// own streams have been through; the oracle module owns the rule.
-fn normalised(pin: &Pin, text: &str) -> String {
-    let bytes = oracle::normalise(&pin.recipe.normalise, text.as_bytes().to_vec());
-    String::from_utf8_lossy(&bytes).into_owned()
-}
-
-/// The three streams of one run as one document: what a difference is shown
-/// as, and never a format anything reads back.
-fn shown(stdout: &str, stderr: &str, exit: Option<i32>) -> Vec<u8> {
-    let status = exit.map_or_else(|| "a signal".to_owned(), |code| code.to_string());
-    format!("status {status}\nstdout:\n{stdout}\nstderr:\n{stderr}\n").into_bytes()
+        wall,
+        captured,
+    })
 }
 
 /// Write the fence lines a run captured: each file under `root` read, the
@@ -607,17 +445,4 @@ pub fn command(
     let registry = Registry::load(root)?;
     let ask = Ask { crates, accept };
     crate::record(store, &run(root, manifest, &registry, &ask)?)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_shown_document_carries_the_status_and_both_streams() {
-        let text = String::from_utf8(shown("out", "err", Some(3))).unwrap();
-        assert_eq!(text, "status 3\nstdout:\nout\nstderr:\nerr\n");
-        let signal = String::from_utf8(shown("", "", None)).unwrap();
-        assert!(signal.starts_with("status a signal"), "{signal}");
-    }
 }
