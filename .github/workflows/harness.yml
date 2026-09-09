@@ -47,7 +47,18 @@ jobs:
       - run: cargo xtask budget
       - run: cargo xtask unsafe-audit
       - run: cargo xtask vocab
-      - run: cargo xtask done
+      # A push is judged since the branch's track, which `done` reads off
+      # the branch it stands on. A pull request's checkout is a detached
+      # merge commit, on no branch and so on no track, so the base is the
+      # ref the pull request targets, which is the track the Stop hook
+      # took (§4.5).
+      - name: done
+        run: |
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            cargo xtask done --base "$GITHUB_BASE_REF"
+          else
+            cargo xtask done
+          fi
       - name: the summary
         if: always()
         run: |

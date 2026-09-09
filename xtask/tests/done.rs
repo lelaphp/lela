@@ -856,13 +856,14 @@ fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
     );
 }
 
-/// CI per commit runs on the track branches as well as `main`, so a
-/// track's own commit is judged there since the same base the hook took,
-/// `main` (harness-design.md §4.5, §7). A pull request is not this: its
-/// checkout is a detached merge commit, which is on no track, so the job
-/// judges it since `main` whatever branch it came from.
+/// CI per commit runs on the track branches as well as `main`, and judges
+/// each since the base its Stop hook took (harness-design.md §4.5, §7). A
+/// push is on its branch, so `done` reads the track off it; a pull
+/// request's checkout is a detached merge commit, on no branch and so on
+/// no track, so the step passes the ref the pull request targets, which
+/// is that branch's track.
 #[test]
-fn ci_runs_the_per_commit_job_on_the_track_branches() {
+fn ci_runs_the_per_commit_job_on_the_track_branches_and_judges_since_the_same_base() {
     let text = read(".github/workflows/harness.yml");
     let on = &text[text.find("on:").unwrap()..text.find("jobs:").unwrap()];
     let branches = on
@@ -873,6 +874,20 @@ fn ci_runs_the_per_commit_job_on_the_track_branches() {
     assert!(
         branches.contains("t-*"),
         "the track branches are pushed to: {branches}"
+    );
+    let step = &text[text.find("- name: done").unwrap()..];
+    let step = &step[..step.find("\n      - ").unwrap_or(step.len())];
+    assert!(
+        step.contains("GITHUB_BASE_REF"),
+        "a pull request is judged since the ref it targets: {step}"
+    );
+    assert!(
+        step.contains("done --base \"$GITHUB_BASE_REF\""),
+        "the base is passed as the ref, which merge_base resolves on origin: {step}"
+    );
+    assert!(
+        step.contains("cargo xtask done\n"),
+        "a push passes nothing and gets the track off the branch: {step}"
     );
 }
 
