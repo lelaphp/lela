@@ -29,6 +29,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy -p xtask --all-targets -- -D warnings
+      # `new-ext` renders ext/AGENTS.md's extensions region with `computed
+      # run`, and the test that holds the template topology reads the row
+      # it wrote, so the binary is the test's dependency and not only the
+      # regions job's (§5).
+      - run: cargo install computed --locked
       - run: cargo test -p xtask
   per-commit:
     name: the instruments, then done
