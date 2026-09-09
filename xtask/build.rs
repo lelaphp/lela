@@ -1,7 +1,8 @@
 //! What the build records about what it judges by (harness-design.md §4.4):
-//! the digest of `seams.toml`, the rules, and of `xtask/src`, the code that
-//! reads them, as they stood when this binary was built, handed to the crate
-//! as `XTASK_MANIFEST_DIGEST` and `XTASK_SOURCES_DIGEST`. `permit` compares
+//! the digest of `seams.toml`, the rules, and of the `.rs` files under
+//! `xtask/src`, the code that reads them, as they stood when this binary was
+//! built, handed to the crate as `XTASK_MANIFEST_DIGEST` and
+//! `XTASK_SOURCES_DIGEST`. `permit` compares
 //! them with the tree and refuses to judge when either differs, so a build
 //! older than what it judges by is the loud kind of stale rather than the
 //! quiet kind that exits 0 and judges by rules, or with code, that have

@@ -50,6 +50,15 @@ pub fn sources_digest(root: &Path) -> io::Result<String> {
 /// `sources_digest` digests, and what `build.rs` asks cargo to watch. A
 /// directory that is not there holds no files, which a build made outside
 /// its workspace reads as a digest it cannot match.
+///
+/// The files are the ones the crate is compiled from, `*.rs` under
+/// `SOURCES_DIR`, and nothing else there: an editor's swap file or a
+/// `.DS_Store` left beside them is not a change to the code, and before this
+/// rule it moved the digest after the build, so every built candidate
+/// refused until cargo rebuilt (#48). The rule is stated here once, for both
+/// compilations. It is an extension filter and not a git call, since this
+/// file names nothing outside `std` and `sha1_smol`; a `.rs` file git ignores
+/// is still compiled, so it is still digested.
 pub fn source_files(root: &Path) -> io::Result<Vec<std::path::PathBuf>> {
     let mut files = Vec::new();
     collect(&root.join(SOURCES_DIR), &mut files)?;
@@ -57,7 +66,12 @@ pub fn source_files(root: &Path) -> io::Result<Vec<std::path::PathBuf>> {
     Ok(files)
 }
 
-/// Every file under `dir`, in no order.
+/// Whether `path` is one the crate is compiled from.
+fn is_source(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "rs")
+}
+
+/// Every source under `dir`, in no order.
 fn collect(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> io::Result<()> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Ok(());
@@ -66,7 +80,7 @@ fn collect(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> io::Result<()> {
         let path = entry?.path();
         if path.is_dir() {
             collect(&path, out)?;
-        } else {
+        } else if is_source(&path) {
             out.push(path);
         }
     }

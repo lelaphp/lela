@@ -1032,6 +1032,70 @@ fn a_build_the_harnesss_own_sources_moved_under_refuses_too() {
     built::judges(workspace(), workspace()).unwrap();
 }
 
+/// The digest is of the files the crate is compiled from, `*.rs` under
+/// `xtask/src`, and of nothing else there (#48): an editor's swap file or a
+/// `.DS_Store` left beside the sources is not a change to the code, so a
+/// built candidate over that tree still judges. A new `.rs` file is one,
+/// and it is in the list `build.rs` watches, so cargo rebuilds for it.
+#[test]
+fn a_file_that_is_not_rust_under_the_sources_does_not_move_the_digest() {
+    let root = scratch("sources-not-rust");
+    let src = root.join("xtask/src");
+    copy_tree(&workspace().join(inputs::SOURCES_DIR), &src);
+    assert_eq!(
+        inputs::sources_digest(&root).unwrap(),
+        built::SOURCES,
+        "a copy of the sources digests as the build did"
+    );
+    let before = inputs::source_files(&root).unwrap();
+    std::fs::write(src.join(".DS_Store"), b"   Bud1").unwrap();
+    std::fs::write(src.join(".permit.rs.swp"), "an editor's swap file").unwrap();
+    std::fs::write(src.join("phpt/notes.md"), "a note").unwrap();
+    assert_eq!(
+        inputs::sources_digest(&root).unwrap(),
+        built::SOURCES,
+        "and still does with files the crate is not compiled from beside them"
+    );
+    assert_eq!(
+        inputs::source_files(&root).unwrap(),
+        before,
+        "which build.rs does not watch either"
+    );
+    built::judges(workspace(), &root).unwrap();
+
+    std::fs::write(
+        src.join("phpt/notes.rs"),
+        "// a module the build has not seen\n",
+    )
+    .unwrap();
+    assert_ne!(
+        inputs::sources_digest(&root).unwrap(),
+        built::SOURCES,
+        "a new .rs file moves the digest"
+    );
+    assert!(
+        inputs::source_files(&root)
+            .unwrap()
+            .contains(&src.join("phpt/notes.rs")),
+        "and is in the list build.rs watches"
+    );
+    built::judges(workspace(), &root).unwrap_err();
+}
+
+/// `from` copied under `to`, every file and directory.
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
 /// permit's exit is 0 whatever it decides, so the refusal is the one thing
 /// it says with an exit: a build that would judge by rules it was not
 /// compiled against decides nothing, names both digests, and leaves the
