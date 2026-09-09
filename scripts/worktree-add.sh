@@ -54,27 +54,20 @@ if [ -e "$dir" ]; then
     refuse "$dir exists; retire it with scripts/worktree-retire.sh, or name another branch"
 fi
 
-# The track, and the ref the branch is taken off: the track's own branch
-# where the repository has it, `origin`'s otherwise, which is where a track
-# lives in a repository that has worktrees on its branches (ledger 14).
-track=main
-name=$branch
-while [ "${name%/*}" != "$name" ]; do
-    name=${name%/*}
-    if git show-ref --verify --quiet "refs/heads/$name" ||
-        git show-ref --verify --quiet "refs/remotes/origin/$name"; then
-        track=$name
-        break
-    fi
+# The track, and the ref the branch is taken off, asked of `xtask track`,
+# the one statement of the rule (harness-design.md §4.5): the clone's built
+# harness where one is, release before debug as the command hook tries
+# them, `cargo xtask` otherwise.
+xtask='cargo xtask'
+for candidate in target/release/xtask target/debug/xtask; do
+    [ -x "$candidate" ] && xtask=$candidate && break
 done
-base=
-for ref in "$track" "origin/$track"; do
-    if git rev-parse --verify --quiet "$ref^{commit}" >/dev/null; then
-        base=$ref
-        break
-    fi
-done
-[ -n "$base" ] || refuse "the track $track is neither a branch nor origin's; $branch has nothing to be taken off"
+facts=$($xtask --root "$root" track --branch "$branch") ||
+    refuse "xtask track could not say which track $branch is on; the line above says why"
+track=$(printf '%s\n' "$facts" | sed -n 's/^track: \([^ ]*\) (\(.*\))$/\1/p')
+base=$(printf '%s\n' "$facts" | sed -n 's/^track: \([^ ]*\) (\(.*\))$/\2/p')
+[ -n "$track" ] && [ -n "$base" ] ||
+    refuse "xtask track printed no track line for $branch: $facts"
 
 git worktree add -q -b "$branch" "$dir" "$base" ||
     refuse "git worktree add refused; nothing was laid down"

@@ -2,8 +2,8 @@
 //! conditions unmet for the changes since a base commit, computed from git
 //! and the store and nothing else, so its three callers (§4.5: the Stop
 //! command hook, pre-push, and CI per commit) read one list. The base is
-//! the merge base of `HEAD` with the branch's track ([`Base`]), or with
-//! `--base`; the changes are every file the working tree differs in from
+//! the merge base of `HEAD` with the branch's track ([`Base`], taken through
+//! `track`, the one statement of the rule), or with `--base`; the changes are every file the working tree differs in from
 //! it, committed since or not, plus the untracked files.
 //!
 //! The six conditions, one sentence each:
@@ -49,8 +49,6 @@ use crate::reading::{Number, Reading, Status, Store};
 
 /// The instrument name the reading carries.
 pub const INSTRUMENT: &str = "done";
-/// The track a branch with no track of its own is on.
-pub const MAIN: &str = "main";
 /// The instruments a touched crate needs a fresh passing reading from
 /// (condition 1). `phpt`'s is the reading over the subsets the crate's
 /// `[[crate]]` row owns, written under the crate's name.
@@ -82,39 +80,7 @@ pub fn instruments_of(krate: &Crate) -> impl Iterator<Item = &'static str> {
     })
 }
 
-/// The commit the changes are measured since, and the ref it was taken
-/// from: `--base`'s, or the branch's track ([`git::track`]), which is
-/// [`MAIN`] for a branch that is on none (harness-design.md §4.5).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Base {
-    pub since: String,
-    pub commit: String,
-}
-
-impl Base {
-    /// The base of a bare `done`: the branch's track, or [`MAIN`].
-    fn of(root: &Path, since: Option<&str>) -> Result<Base> {
-        let since = match since {
-            Some(since) => since.to_owned(),
-            None => git::track(root).unwrap_or_else(|| MAIN.to_owned()),
-        };
-        let commit = git::merge_base(root, &since)?;
-        Ok(Base { since, commit })
-    }
-}
-
-impl std::fmt::Display for Base {
-    /// The ref the base was taken from and the commit it resolved to, and
-    /// the commit alone when the ref was that commit.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let short = &self.commit[..self.commit.len().min(7)];
-        if self.since == self.commit || self.since == short {
-            write!(f, "{short}")
-        } else {
-            write!(f, "{} ({short})", self.since)
-        }
-    }
-}
+pub use crate::track::{Base, MAIN};
 
 /// What `done` found over one diff.
 #[derive(Debug, Clone, PartialEq, Eq)]

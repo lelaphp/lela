@@ -1,6 +1,7 @@
-//! The fixture's `xtask`: the two calls `scripts/worktree-add.sh` makes of
-//! the binary it built, answered the way the harness answers them, and
-//! nothing else. `status --session` lays `.claude/harness.local.md` down
+//! The fixture's `xtask`: the call `scripts/worktree-add.sh` makes of the
+//! binary it built, answered the way the harness answers it, and nothing
+//! else; `track`, which the command asks of the clone's harness before the
+//! worktree exists, is the real one's, placed by the test. `status --session` lays `.claude/harness.local.md` down
 //! when the clone has none (harness-design.md §5), which is what the test
 //! reads back; any other call is a usage error, so a command that grew a
 //! third call fails here rather than passing quietly.

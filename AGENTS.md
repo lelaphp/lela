@@ -122,6 +122,7 @@ Commands:
   status             Render one section from the manifest and the store, or with `--session` the map plus the local facts; computes nothing else
   permit             Judge one intended tool call from the `PreToolUse` hook's stdin; the decision is the JSON on stdout and the exit is 0 always
   done               The definition of done: print the conditions unmet for the changes since the base and exit 1 while any is; the Stop hook, pre-push and CI read the same list
+  track              Say which track this worktree's branch is on (the longest existing branch that is a proper path prefix of its name, `main` for a branch on none), the commit `done` measures since, and the root that holds the track's store; as text, or as one object. Writes no reading
   budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code and a stale generated file
   clippy             `cargo clippy` with every warning denied, on every target of each crate, as the reading `done` reads; one reading per crate
   phpt               Run the pinned `.phpt` corpus through the engine and hold each test to its `--EXPECT*--` section: the per-commit lane the manifest composes, or the subset named; one reading per subset, scoped to the crate whose subset it is
@@ -136,7 +137,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=f314bb7791fc774a40b112a885d33de30860d2b6a939c927c634c4311055200c out=ac7b82bdcb10640f6d8b1d3ede729c7c2258b90104441382205381a6255006ed -->
+<!-- /computed in=b34c00c776a68cb2e87a50cfa931064ae14e690ea73b161d2d13da982a73e902 out=19b217017f87cf999097f8a49bfb7eb6445946772ccded51c31e15ff98625797 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

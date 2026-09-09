@@ -2,7 +2,8 @@
 //! manifest and the oracle pin loaded by one reader, the oracle module that
 //! owns every comparison and the divergence registry, the reading and its
 //! store, the instruments, `permit`, the judge at the tool call, `done`,
-//! the definition of done, `vocab`, the glossary as a sensor, `phpt`, the
+//! the definition of done, `track`, the branch's track and its base,
+//! `vocab`, the glossary as a sensor, `phpt`, the
 //! subset runner, `witness`, the rustdoc witnesses, and `status`, the one
 //! renderer.
 #![forbid(unsafe_code)]
@@ -32,6 +33,7 @@ pub mod reading;
 pub mod rust;
 pub mod sources;
 pub mod status;
+pub mod track;
 pub mod unsafe_audit;
 pub mod vocab;
 pub mod witness;
@@ -77,6 +79,11 @@ pub fn run() -> Result<()> {
             permit::Adapter::CommandHook
         };
         return permit::run(&root, json.as_deref(), adapter);
+    }
+    // The track measures nothing and reads no manifest, so a worktree
+    // whose manifest is unreadable can still say which track it is on.
+    if let Command::Track { branch, json } = &cli.command {
+        return track_command(&root, branch.as_deref(), *json);
     }
     let manifest = Manifest::load(&root)?;
     let store = Store::of_workspace(&root);
@@ -154,6 +161,7 @@ pub fn run() -> Result<()> {
                 bail!("vocab: an avoided word is in use; the findings are above")
             }
         }
+        Command::Track { .. } => bail!("track: answered above"),
     }
 }
 
@@ -213,6 +221,17 @@ fn divergence_command(root: &Path, manifest: &Manifest, store: &Store) -> Result
         bail!("{}", reading.message);
     }
     println!("{}", reading.message);
+    Ok(())
+}
+
+/// `xtask track`: the facts as text, or as one object; no reading.
+fn track_command(root: &Path, branch: Option<&str>, json: bool) -> Result<()> {
+    let track = track::Track::of(root, branch)?;
+    if json {
+        println!("{}", track.to_json());
+    } else {
+        print!("{}", track.render());
+    }
     Ok(())
 }
 

@@ -86,6 +86,19 @@ pub enum Command {
         #[arg(long)]
         hook: bool,
     },
+    /// Say which track this worktree's branch is on (the longest existing
+    /// branch that is a proper path prefix of its name, `main` for a branch
+    /// on none), the commit `done` measures since, and the root that holds
+    /// the track's store; as text, or as one object. Writes no reading.
+    Track {
+        /// A branch other than `HEAD`'s, made or not yet: what the add
+        /// command asks before it takes the branch off its track.
+        #[arg(long, value_name = "NAME")]
+        branch: Option<String>,
+        /// Print the same facts as one JSON object.
+        #[arg(long)]
+        json: bool,
+    },
     /// Hold every crate to its line ceiling and the workspace to [budget];
     /// refuse committed generated code and a stale generated file.
     Budget,

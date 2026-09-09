@@ -2,7 +2,7 @@
 //! of its scope's sources, the commit, and the time. The tree hash is what
 //! makes a reading fresh or stale without a turn counter (harness-design.md
 //! §4.2): it covers the working tree, tracked and untracked files alike, so
-//! an unstaged edit changes it.
+//! an unstaged edit changes it. The track and its base are `track`'s.
 
 use std::fs;
 use std::io::Write;
@@ -234,61 +234,6 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
     (y, m, d)
-}
-
-/// The branch `HEAD` is on, or `None` when `HEAD` is detached.
-pub fn head_branch(root: &Path) -> Option<String> {
-    let name = git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"], None).ok()?;
-    let name = name.trim().to_owned();
-    (!name.is_empty()).then_some(name)
-}
-
-/// Whether `name` is a branch here: a local one, or `origin`'s, which is
-/// what a clone that has never checked the branch out has of it.
-fn is_branch(root: &Path, name: &str) -> bool {
-    [
-        format!("refs/heads/{name}"),
-        format!("refs/remotes/origin/{name}"),
-    ]
-    .iter()
-    .any(|r| git(root, &["show-ref", "--verify", "--quiet", r], None).is_ok())
-}
-
-/// The track `HEAD`'s branch is on: the longest existing branch that is a
-/// proper path prefix of its name, so a worktree on `t-opus-5/witness` is
-/// on the track `t-opus-5`. `None` for a branch whose prefixes name no
-/// branch, and for a detached `HEAD`, which is on no track.
-///
-/// The prefix is `origin`'s branch and not the clone's own: git's ref
-/// store refuses `refs/heads/t-opus-5` beside `refs/heads/t-opus-5/witness`,
-/// one path being a file and a directory at once, so a repository whose
-/// worktrees are on a track's branches has the track from the remote.
-pub fn track(root: &Path) -> Option<String> {
-    let branch = head_branch(root)?;
-    let mut name = branch.as_str();
-    while let Some((prefix, _)) = name.rsplit_once('/') {
-        if is_branch(root, prefix) {
-            return Some(prefix.to_owned());
-        }
-        name = prefix;
-    }
-    None
-}
-
-/// The merge base of `HEAD` and `other`: what `done` measures the changes
-/// since (harness-design.md §4.5), `other` being the branch's track when
-/// no `--base` is given. The branch first, then `origin`'s, for a checkout
-/// that has only the remote's.
-pub fn merge_base(root: &Path, other: &str) -> Result<String> {
-    let remote = format!("origin/{other}");
-    let mut last = None;
-    for name in [other, remote.as_str()] {
-        match git(root, &["merge-base", "HEAD", name], None) {
-            Ok(id) => return Ok(id.trim().to_owned()),
-            Err(err) => last = Some(err),
-        }
-    }
-    Err(last.unwrap_or_else(|| anyhow::anyhow!("no merge base with {other}")))
 }
 
 /// One file the working tree differs in from a base commit.

@@ -3,7 +3,8 @@
 //! retires it into the track's store. Both halves run against a fixture
 //! repository whose `xtask` is the fixture's stand-in
 //! (`xtask/fixtures/worktree`), so what is measured here is the command and
-//! not the harness it builds.
+//! not the harness it builds; the track it takes the branch off is asked
+//! of this crate's own `xtask track`, placed where the command looks.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -108,6 +109,12 @@ fn repository(name: &str) -> PathBuf {
         "{ \"enabledPlugins\": {} }\n",
     );
     write(&root, "scripts/hooks/pre-commit", "#!/bin/sh\nexit 0\n");
+    // The harness under test, where the add command looks for the clone's
+    // built one, so the track is resolved by `xtask track` itself while
+    // the worktree's own build stays the stand-in.
+    let built = root.join("target/debug/xtask");
+    fs::create_dir_all(built.parent().unwrap()).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_xtask"), &built).unwrap();
     sh(&root, &["git", "init", "-q", "-b", "main"]);
     sh(&root, &["git", "config", "core.hooksPath", "scripts/hooks"]);
     sh(&root, &["git", "add", "-A"]);
