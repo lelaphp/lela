@@ -26,6 +26,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::generated;
 use crate::manifest::{Manifest, Rule};
+use crate::phpt;
 
 /// The facade every extension depends on (ADR-0004), relative to the root.
 const FACADE: &str = "crates/php_ext";
@@ -100,15 +101,21 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str) -> Result<Laid> {
         )),
     }
 
-    let tests = manifest
-        .pin
-        .source
-        .path
-        .join("ext")
-        .join(name)
-        .join("tests");
-    let subset = format!("php-src/ext/{name}/tests");
-    if tests.is_dir() {
+    // Which subsets are the crate's is the `[[crate]]` row's sentence and
+    // is read there, never spelled again here (#18, harness §4.1).
+    let krate = manifest.crate_named(&row);
+    let owned: Vec<String> = krate
+        .map(|krate| {
+            krate
+                .subsets()
+                .iter()
+                .map(|under| format!("{}/{}", phpt::CORPUS, under.display()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let named: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let subset = phpt::listed(&named);
+    if krate.is_some_and(|krate| phpt::Subset::of(manifest, krate).is_some()) {
         laid.notes
             .push(format!("phpt subset: {subset} at the pinned tag"));
     } else {

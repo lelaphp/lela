@@ -156,6 +156,15 @@ fn the_crate_laid_down_has_the_template_topology() {
         "the phpt subset is named: {lib}"
     );
 
+    // The note names the subset the crate's row owns, read from the
+    // manifest rather than spelled a second time here (#18).
+    let note = laid
+        .notes
+        .iter()
+        .find(|n| n.starts_with("phpt subset:"))
+        .unwrap_or_else(|| panic!("{:#?}", laid.notes));
+    assert!(note.contains("php-src/ext/demo/tests"), "{note}");
+
     // Tests through the capture sink (design §4.10).
     let tests = read(&root, "ext/demo/tests/capture.rs");
     assert!(tests.contains("Capture"), "{tests}");
