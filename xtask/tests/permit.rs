@@ -1097,3 +1097,47 @@ fn a_build_over_the_manifest_it_was_compiled_against_judges_as_it_did() {
         "nothing was refused"
     );
 }
+
+/// `unsafe.homes` judges code, and the harness's own sensors carry the
+/// keyword in their negative controls, which are strings and comments: the
+/// audit's tests pin `unsafe_sites("unsafe { a(); }")`, and while that read
+/// as a site the file could not be written to at all (#18).
+#[test]
+fn an_unsafe_inside_a_string_or_a_comment_is_not_a_site() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let denied = |content: &str| {
+        let text = serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": { "file_path": "crates/php_engine/src/executor.rs", "content": content },
+        })
+        .to_string();
+        let call = Call::parse(&text).unwrap();
+        judge(&manifest, workspace(), &call)
+            .unwrap()
+            .findings
+            .iter()
+            .any(|f| f.rule == "unsafe.homes")
+    };
+
+    assert!(
+        denied("let x = unsafe { *p };"),
+        "a site outside the four homes is still denied"
+    );
+    assert!(denied("pub unsafe fn go() {}"));
+    for allowed in [
+        r#"let s = "unsafe { a(); }";"#,
+        r##"let s = r#"unsafe fn b()"#;"##,
+        "// unsafe { a(); }\nlet x = 1;",
+        "/* unsafe fn b() */\nlet x = 1;",
+        "let c = \'x\'; // a char literal is not a lifetime\nlet s = \"unsafe {\";",
+    ] {
+        assert!(!denied(allowed), "{allowed:?} carries no unsafe code");
+    }
+
+    // The file the ticket found: the audit's own source, unchanged.
+    let audit = std::fs::read_to_string(workspace().join("xtask/src/unsafe_audit.rs")).unwrap();
+    assert!(
+        !denied(&audit),
+        "the audit's own negative controls are strings, not sites"
+    );
+}
