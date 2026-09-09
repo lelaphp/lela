@@ -9,7 +9,6 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use crate::git::Stamp;
-use crate::lines;
 use crate::manifest::{Crate, Manifest};
 use crate::reading::{Reading, Status};
 use crate::rust;
@@ -118,7 +117,7 @@ pub fn audit(root: &Path, krate: &Crate, homes: &[Home]) -> Result<Audit> {
             let Ok(text) = std::fs::read_to_string(root.join(&path)) else {
                 continue;
             };
-            let has = lines::code(&text, false)
+            let has = rust::code_lines(&text, false)
                 .iter()
                 .any(|(_, code)| code.contains(&format!("#![{want}(unsafe_code)]")));
             if !has {

@@ -258,3 +258,18 @@ fn copy(from: &Path, to: &Path) {
         }
     }
 }
+
+/// What a line counter reads as code is what the `rust` module blanks
+/// around (#47): a character literal holding a quote and a raw string
+/// holding a comment marker. The counter `budget` read through before took
+/// the quote in `'"'` for a string's start and the `/*` inside a raw
+/// string for a comment, and counted four of the fixture's six lines.
+#[test]
+fn a_quote_in_a_character_literal_and_a_comment_marker_in_a_raw_string_are_counted_as_code() {
+    let root = fixture("budget", "quoted");
+    let manifest = Manifest::load(&root).unwrap();
+    let readings = budget::run(&root, &manifest).unwrap();
+    let heap = readings.iter().find(|r| r.scope == "php_heap").unwrap();
+    assert_eq!(heap.numbers["lines"], 6.into(), "{heap:#?}");
+    assert_eq!(heap.status, Status::Fail, "{heap:#?}");
+}

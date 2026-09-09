@@ -211,7 +211,7 @@ pub fn count(root: &Path, krate: &Crate) -> Result<Count> {
         let Some(text) = text_of(root, &path)? else {
             continue;
         };
-        let n = u64::try_from(lines::rust(&text))?;
+        let n = u64::try_from(lines::count(&path, &text))?;
         if sources::is_binding(&path) {
             out.bindings += n;
         } else {

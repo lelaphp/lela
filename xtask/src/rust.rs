@@ -1,18 +1,23 @@
-//! Reading Rust source as code: one function that returns the unsafe
-//! sites of a text, over one blanker of what is not code, so a sensor
-//! never fires on a word inside a string or a comment and the two sensors
-//! of one rule agree on what a site is.
+//! Reading Rust source as code: one scanner of what is not code, behind
+//! the unsafe sites of a text and its code lines, so a sensor never fires
+//! on a word inside a string or a comment, a budget counts what a comment
+//! marker inside a literal is not, and every reader agrees on which bytes
+//! are code.
 //!
 //! Two sensors of `unsafe.homes` read it. `permit` judges the whole written
-//! file at the tool call and `unsafe-audit` counts the sites of one line
-//! after `lines::code` has taken the comments away; before this module each
-//! carried a blanker of its own, and the harness's own negative controls
-//! are strings (`unsafe_sites("unsafe { a(); }")`), so the fidelity of the
-//! blanker decided whether a sensor could be edited at all (#18). The
-//! matcher then stayed split, `permit` on the keyword before a block or an
-//! item and the audit on every word-bounded keyword, so an unsafe attribute
-//! was a site for one and not the other (#46). A rule read two ways is two
-//! rules, which is what harness-design.md §4.1 says of a rule stated
+//! file at the tool call and `unsafe-audit` counts the sites of the file
+//! whole; before this module each carried a blanker of its own, and the
+//! harness's own negative controls are strings
+//! (`unsafe_sites("unsafe { a(); }")`), so the fidelity of the blanker
+//! decided whether a sensor could be edited at all (#18). The matcher then
+//! stayed split, `permit` on the keyword before a block or an item and the
+//! audit on every word-bounded keyword, so an unsafe attribute was a site
+//! for one and not the other (#46). The line counter `budget` read through
+//! kept a string scanner of its own, which knew escaped double-quoted
+//! strings and nothing else, so a quote inside a character literal opened
+//! a string that never closed and a `/*` inside a raw string opened a
+//! comment that swallowed the rest of the file (#47). A rule read two ways
+//! is two rules, which is what harness-design.md §4.1 says of a rule stated
 //! anywhere but the manifest, and what the two hook adapters were taught on
 //! 2026-09-08.
 
@@ -73,19 +78,85 @@ pub fn unsafe_sites(text: &str) -> Vec<usize> {
 /// close it. A literal or a comment left open at the end of the text is
 /// blanked to the end, which is what a fragment of one line is.
 pub fn without_comments_or_literals(text: &str) -> String {
+    scan(text, Literals::Blanked)
+}
+
+/// The code lines of a Rust text, as `(line number, code)` for every line
+/// that has any: the line with its comments blanked and its literals kept,
+/// `#[cfg(test)]` items left out when `skip_tests`, the attribute and the
+/// `mod` or `fn` under it to the end of its braces or its `;`. What a
+/// budget counts (harness-design.md §4.1): a line is code when anything on
+/// it is neither blank nor a comment, so a line inside a string that spans
+/// lines is one, and a line that is only a comment, however a quote in a
+/// literal before it reads, is not.
+pub fn code_lines(text: &str, skip_tests: bool) -> Vec<(usize, String)> {
+    // Inside a `#[cfg(test)]` item: brace depth, and whether a brace has
+    // opened yet (before it, a `;` ends the item).
+    let mut item: Option<(usize, bool)> = None;
+    scan(text, Literals::Kept)
+        .lines()
+        .enumerate()
+        .filter_map(|(i, line)| {
+            if let Some((depth, opened)) = item {
+                item = skip_test_item(line, depth, opened);
+                return None;
+            }
+            let trimmed = line.trim();
+            if skip_tests && trimmed.starts_with("#[cfg(test)]") {
+                item = skip_test_item(trimmed.trim_start_matches("#[cfg(test)]"), 0, false);
+                return None;
+            }
+            (!trimmed.is_empty()).then(|| (i + 1, line.to_owned()))
+        })
+        .collect()
+}
+
+/// Advance through one line of a test item; `None` when the item ended on it.
+fn skip_test_item(line: &str, mut depth: usize, mut opened: bool) -> Option<(usize, bool)> {
+    for c in line.chars() {
+        match c {
+            '{' => {
+                depth += 1;
+                opened = true;
+            }
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if opened && depth == 0 {
+                    return None;
+                }
+            }
+            ';' if !opened => return None,
+            _ => {}
+        }
+    }
+    Some((depth, opened))
+}
+
+/// One pass over the text, comments blanked and literals read by `literals`.
+fn scan(text: &str, literals: Literals) -> String {
     let chars: Vec<char> = text.chars().collect();
-    let mut scan = Scan {
+    let mut pass = Scan {
         chars: &chars,
         i: 0,
         out: String::with_capacity(text.len()),
+        literals,
     };
-    while scan.i < scan.chars.len() {
-        if scan.comment() || scan.raw_string() || scan.string() || scan.character() {
+    while pass.i < pass.chars.len() {
+        if pass.comment() || pass.raw_string() || pass.string() || pass.character() {
             continue;
         }
-        scan.keep();
+        pass.keep();
     }
-    scan.out
+    pass.out
+}
+
+/// What a scan writes for a literal: blanks, for a pattern that must not
+/// match inside one, or the literal itself, for a count of the lines that
+/// are not comment.
+#[derive(Clone, Copy)]
+enum Literals {
+    Blanked,
+    Kept,
 }
 
 /// One pass over the text: where it stands and what it has written.
@@ -93,6 +164,7 @@ struct Scan<'a> {
     chars: &'a [char],
     i: usize,
     out: String,
+    literals: Literals,
 }
 
 impl Scan<'_> {
@@ -120,6 +192,16 @@ impl Scan<'_> {
     fn blank_n(&mut self, n: usize) {
         for _ in 0..n {
             self.blank();
+        }
+    }
+
+    /// Take `n` characters of a literal, blanked or kept by the mode.
+    fn literal(&mut self, n: usize) {
+        for _ in 0..n {
+            match self.literals {
+                Literals::Blanked => self.blank(),
+                Literals::Kept => self.keep(),
+            }
         }
     }
 
@@ -170,12 +252,12 @@ impl Scan<'_> {
         if self.at(prefix + hashes) != '"' {
             return false;
         }
-        self.blank_n(prefix + hashes + 1);
+        self.literal(prefix + hashes + 1);
         while self.i < self.chars.len() {
             let closes = self.at(0) == '"' && (1..=hashes).all(|n| self.at(n) == '#');
-            self.blank();
+            self.literal(1);
             if closes {
-                self.blank_n(hashes);
+                self.literal(hashes);
                 break;
             }
         }
@@ -190,8 +272,8 @@ impl Scan<'_> {
             ('b', '"') => 2,
             _ => return false,
         };
-        self.blank_n(quote);
-        self.blank_to_the_closing('"');
+        self.literal(quote);
+        self.literal_to_the_closing('"');
         true
     }
 
@@ -201,19 +283,19 @@ impl Scan<'_> {
         if self.at(0) != '\'' || !(self.at(1) == '\\' || self.at(2) == '\'') {
             return false;
         }
-        self.blank_n(1);
-        self.blank_to_the_closing('\'');
+        self.literal(1);
+        self.literal_to_the_closing('\'');
         true
     }
 
-    /// Blank to the quote that closes the literal, an escaped one passing
+    /// Read to the quote that closes the literal, an escaped one passing
     /// with what it escapes.
-    fn blank_to_the_closing(&mut self, quote: char) {
+    fn literal_to_the_closing(&mut self, quote: char) {
         while self.i < self.chars.len() {
             let c = self.at(0);
-            self.blank();
+            self.literal(1);
             if c == '\\' {
-                self.blank();
+                self.literal(1);
             } else if c == quote {
                 break;
             }
@@ -233,11 +315,16 @@ impl Scan<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{unsafe_sites, without_comments_or_literals as code};
+    use super::{code_lines, unsafe_sites, without_comments_or_literals as code};
 
-    /// What the text reads as once a literal of `blanks` characters
-    /// between `before` and `after` is blanked; the blanked text keeps its
-    /// length, so the count is the literal's own.
+    /// How many lines a budget counts.
+    fn counted(text: &str) -> usize {
+        code_lines(text, true).len()
+    }
+
+    /// What the text reads as once a literal or a comment of `blanks`
+    /// characters between `before` and `after` is blanked; the blanked text
+    /// keeps its length, so the count is the literal's own.
     fn blanked(before: &str, blanks: usize, after: &str) -> String {
         format!("{before}{}{after}", " ".repeat(blanks))
     }
@@ -334,5 +421,81 @@ mod tests {
     fn a_literal_left_open_is_blanked_to_the_end_which_is_what_one_line_of_it_is() {
         assert_eq!(code(r#"let s = "unsafe {"#), "let s =          ");
         assert_eq!(code("/* unsafe {"), "           ");
+    }
+
+    #[test]
+    fn blank_and_comment_lines_are_not_counted() {
+        let text = "//! doc\n\n/// item doc\nfn a() {} // trailing\n  \n/* one */ let x = 1;\n";
+        assert_eq!(counted(text), 2);
+    }
+
+    #[test]
+    fn block_comments_span_lines_and_nest() {
+        let text = "fn a() {}\n/* start\n/* nested */ still\nend */ fn b() {}\nfn c() {}\n";
+        assert_eq!(counted(text), 3);
+    }
+
+    #[test]
+    fn a_cfg_test_item_is_left_out() {
+        let text = "fn a() {}\n#[cfg(test)]\nmod tests {\n    fn t() {\n    }\n}\nfn b() {}\n";
+        assert_eq!(counted(text), 2);
+        let text = "fn a() {}\n#[cfg(test)]\nmod tests;\nfn b() {}\n";
+        assert_eq!(counted(text), 2);
+        let text = "#[cfg(test)] fn t() { let x = 1; }\nfn b() {}\n";
+        assert_eq!(counted(text), 1);
+        assert_eq!(code_lines(text, false).len(), 2);
+    }
+
+    #[test]
+    fn a_comment_marker_inside_a_literal_is_code() {
+        let text = "let url = \"https://x\"; // real\nlet s = \"/* not\";\nfn a() {}\n";
+        assert_eq!(counted(text), 3);
+        assert_eq!(
+            code_lines(text, true)[0].1,
+            blanked("let url = \"https://x\"; ", "// real".len(), "")
+        );
+        let text = "let s = r#\"\n/* c // d\n\"#;\nfn a() {}\n";
+        assert_eq!(
+            code_lines(text, true),
+            vec![
+                (1, "let s = r#\"".to_owned()),
+                (2, "/* c // d".to_owned()),
+                (3, "\"#;".to_owned()),
+                (4, "fn a() {}".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_quote_inside_a_character_literal_opens_no_string() {
+        // The block comment after the character literal is one, and it
+        // ends where it ends.
+        let text = "let q = '\"'; /* a\nb */\nfn a() {}\n";
+        assert_eq!(
+            code_lines(text, true),
+            vec![
+                (1, "let q = '\"';     ".to_owned()),
+                (3, "fn a() {}".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_code_line_is_the_line_without_its_comments() {
+        let text = "fn a() {} // unsafe here is a word\n/* unsafe */ let x = 1;\n#[cfg(test)]\nfn t() { unsafe {} }\n";
+        let lines = code_lines(text, true);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0],
+            (
+                1,
+                blanked("fn a() {} ", "// unsafe here is a word".len(), "")
+            )
+        );
+        assert_eq!(
+            lines[1],
+            (2, blanked("", "/* unsafe */".len(), " let x = 1;"))
+        );
+        assert_eq!(code_lines(text, false).len(), 4);
     }
 }
