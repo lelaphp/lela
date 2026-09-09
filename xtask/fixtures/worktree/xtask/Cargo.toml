@@ -1,0 +1,9 @@
+# The fixture repository's stand-in for the harness binary, so that
+# `worktree-add.sh` can be run against a repository that is not this one:
+# the command builds `-p xtask` and then asks the built binary for the
+# local file, and both are what the test reads back.
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2024"
+publish = false
