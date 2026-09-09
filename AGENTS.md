@@ -35,7 +35,7 @@ I want Zend's design with better tooling, and nothing beside it. No second execu
 
 ## Before you call it done
 
-`xtask done` (harness §4.5) prints what is unmet since the merge base with `main`; the Stop hook, pre-push and CI run the same list. Walk it before proposing a change and say which entries applied: fresh passing readings for every touched crate, a witness on every kernel and native, a lock that differs in the same diff, no open divergence on a changed scope, `permit` over the diff denying nothing, and the manifest and the registry untouched or changed by a person.
+`xtask done` (harness §4.5) prints what is unmet since the merge base with the branch's track, `main` for a branch on none; the Stop hook, pre-push and CI run the same list. Walk it before proposing a change and say which entries applied: fresh passing readings for every touched crate, a witness on every kernel and native, a lock that differs in the same diff, no open divergence on a changed scope, `permit` over the diff denying nothing, and the manifest and the registry untouched or changed by a person.
 
 ## Verifying and committing
 
@@ -65,7 +65,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=3f324e572c0fc0a84577472b287666c51ee730f7bad776071348c45111be03d1 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=ce26b9ec76d4cd88b721ed86b336eee535dcb3017f59b1909b6c8a16423f0ebc out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine

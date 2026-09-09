@@ -156,6 +156,10 @@ _Avoid_: config, rules file, policy, `api-check`'s tables
 The one-shaped value an instrument writes after a run: instrument, scope, rule, status, numbers, message, ADR, the scope's tree hash, commit, time. Everything an agent or a person reads about the state of the engine is a rendering of readings by `xtask status`.
 _Avoid_: result, artefact, report, telemetry, output
 
+**Track**:
+The branch a set of branches is worked above, named by being a proper path prefix of theirs: `t-opus-5` for `t-opus-5/witness`. What `done` measures a turn since when it is given no base; a branch that is a prefix of none is on `main`. Git's ref store keeps a track and its branches from both being the clone's own, so a track a worktree is not on is the remote's.
+_Avoid_: parent branch, base branch, fork point
+
 **Divergence**:
 One accepted difference from the oracle, a row in `docs/divergence.toml` keyed by a witness hash, a phpt path, a compile-identity path or a trace site, with a kind, a reason, a status and a date. The oracle module consults the registry on every comparison; a person writes the reason.
 _Avoid_: recorded difference, known disagreement, XFAIL, exception, divergence-table row as a thing apart from the registry
