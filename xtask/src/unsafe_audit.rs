@@ -12,6 +12,7 @@ use crate::git::Stamp;
 use crate::lines;
 use crate::manifest::{Crate, Manifest};
 use crate::reading::{Reading, Status};
+use crate::rust;
 use crate::sources;
 
 /// The rule the audit reads.
@@ -128,7 +129,7 @@ pub fn audit(root: &Path, krate: &Crate, homes: &[Home]) -> Result<Audit> {
 /// `unsafe impl`, `unsafe trait`, `unsafe extern`; `unsafe_code` in an
 /// attribute is not one, and neither is the word inside a string literal.
 pub fn unsafe_sites(code: &str) -> usize {
-    let code = without_strings(code);
+    let code = rust::without_comments_or_literals(code);
     let bytes = code.as_bytes();
     let mut count = 0;
     let mut from = 0;
@@ -147,31 +148,6 @@ pub fn unsafe_sites(code: &str) -> usize {
         from = end;
     }
     count
-}
-
-/// The line with every `"..."` literal blanked, escapes honoured, so a
-/// word in a string is not a keyword. A literal that runs past the line
-/// is blanked to its end.
-fn without_strings(code: &str) -> String {
-    let mut out = String::with_capacity(code.len());
-    let mut chars = code.chars();
-    while let Some(c) = chars.next() {
-        if c != '"' {
-            out.push(c);
-            continue;
-        }
-        out.push(' ');
-        while let Some(c) = chars.next() {
-            match c {
-                '\\' => {
-                    chars.next();
-                }
-                '"' => break,
-                _ => {}
-            }
-        }
-    }
-    out
 }
 
 /// One entry of `unsafe.homes`: a crate, a path pattern, or a module.

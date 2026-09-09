@@ -29,6 +29,7 @@ pub mod oracle;
 pub mod permit;
 pub mod phpt;
 pub mod reading;
+pub mod rust;
 pub mod sources;
 pub mod status;
 pub mod unsafe_audit;

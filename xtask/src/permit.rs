@@ -33,6 +33,7 @@ use crate::built;
 use crate::git::{self, Stamp, git};
 use crate::manifest::{self, Manifest, Rule, scope_matches};
 use crate::reading::{Reading, Status, Store};
+use crate::rust;
 
 /// The instrument name every reading of permit carries.
 pub const INSTRUMENT: &str = "permit";
@@ -440,148 +441,8 @@ fn regex(pattern: &str) -> Regex {
 }
 
 fn has_unsafe(text: &str) -> bool {
-    regex(r"\bunsafe\s*(\{|fn\b|impl\b|trait\b|extern\b)").is_match(&code(text))
-}
-
-/// The text with its comments and its string, byte-string and character
-/// literals blanked, so a pattern over it reads code and nothing else. A
-/// sensor's negative control is a string (`unsafe_sites("unsafe { }")`)
-/// and a SAFETY note is a comment; neither is a site, and reading them as
-/// one froze the audit's own source to every write (#18). What is blanked
-/// keeps its length and its newlines, so an offset into the result is an
-/// offset into the text.
-fn code(text: &str) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let mut out = String::with_capacity(text.len());
-    let mut i = 0;
-    let at = |i: usize| chars.get(i).copied().unwrap_or('\0');
-    while i < chars.len() {
-        let c = at(i);
-        // A comment: to the line's end, or to the end of the block, which
-        // nests as Rust's do.
-        if c == '/' && at(i + 1) == '/' {
-            while i < chars.len() && at(i) != '\n' {
-                blank(&mut out, at(i));
-                i += 1;
-            }
-            continue;
-        }
-        if c == '/' && at(i + 1) == '*' {
-            let mut depth = 0;
-            while i < chars.len() {
-                if at(i) == '/' && at(i + 1) == '*' {
-                    depth += 1;
-                    blank(&mut out, at(i));
-                    blank(&mut out, at(i + 1));
-                    i += 2;
-                } else if at(i) == '*' && at(i + 1) == '/' {
-                    depth -= 1;
-                    blank(&mut out, at(i));
-                    blank(&mut out, at(i + 1));
-                    i += 2;
-                    if depth == 0 {
-                        break;
-                    }
-                } else {
-                    blank(&mut out, at(i));
-                    i += 1;
-                }
-            }
-            continue;
-        }
-        // A raw string, with the hashes that close it: `r"…"`, `br##"…"##`.
-        let raw = (c == 'r' && !starts_a_word(at(i.wrapping_sub(1))))
-            || (c == 'b' && at(i + 1) == 'r' && !starts_a_word(at(i.wrapping_sub(1))));
-        if raw {
-            let mut j = i + if c == 'b' { 2 } else { 1 };
-            let hashes = {
-                let start = j;
-                while at(j) == '#' {
-                    j += 1;
-                }
-                j - start
-            };
-            if at(j) == '"' {
-                while i <= j {
-                    blank(&mut out, at(i));
-                    i += 1;
-                }
-                i = blank_to_raw_end(&chars, i, hashes, &mut out);
-                continue;
-            }
-        }
-        // A string, whose backslash escapes the quote; `b"…"` is one too.
-        if c == '"' || (c == 'b' && at(i + 1) == '"') {
-            let quote = if c == '"' { i } else { i + 1 };
-            while i <= quote {
-                blank(&mut out, at(i));
-                i += 1;
-            }
-            while i < chars.len() {
-                let c = at(i);
-                blank(&mut out, c);
-                i += 1;
-                if c == '\\' {
-                    blank(&mut out, at(i));
-                    i += 1;
-                } else if c == '"' {
-                    break;
-                }
-            }
-            continue;
-        }
-        // A character literal, which a lifetime is not: `'a` carries no
-        // closing quote, and `'\n'` is escaped.
-        if c == '\'' && (at(i + 1) == '\\' || at(i + 2) == '\'') {
-            blank(&mut out, c);
-            i += 1;
-            while i < chars.len() {
-                let c = at(i);
-                blank(&mut out, c);
-                i += 1;
-                if c == '\\' {
-                    blank(&mut out, at(i));
-                    i += 1;
-                } else if c == '\'' {
-                    break;
-                }
-            }
-            continue;
-        }
-        out.push(c);
-        i += 1;
-    }
-    out
-}
-
-/// One character of a comment or a literal, as the blanked text keeps it:
-/// a newline, so lines are lines, and a space for everything else.
-fn blank(out: &mut String, c: char) {
-    out.push(if c == '\n' { '\n' } else { ' ' });
-}
-
-/// Past the end of a raw string opened with this many hashes.
-fn blank_to_raw_end(chars: &[char], mut i: usize, hashes: usize, out: &mut String) -> usize {
-    let at = |i: usize| chars.get(i).copied().unwrap_or('\0');
-    while i < chars.len() {
-        let closes = at(i) == '"' && (0..hashes).all(|n| at(i + 1 + n) == '#');
-        blank(out, at(i));
-        i += 1;
-        if closes {
-            for _ in 0..hashes {
-                blank(out, at(i));
-                i += 1;
-            }
-            break;
-        }
-    }
-    i
-}
-
-/// Whether the character can be part of an identifier, so `r` after one is
-/// the tail of a name (`str`) and never a raw string's prefix.
-fn starts_a_word(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
+    regex(r"\bunsafe\s*(\{|fn\b|impl\b|trait\b|extern\b)")
+        .is_match(&rust::without_comments_or_literals(text))
 }
 
 /// An `unsafe.homes` entry against a path: a crate name, a path pattern, or
