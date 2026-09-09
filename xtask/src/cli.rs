@@ -77,7 +77,8 @@ pub enum Command {
     /// since the base and exit 1 while any is; the Stop hook, pre-push and
     /// CI read the same list.
     Done {
-        /// Measure the changes since the merge base with this ref; default `main`.
+        /// Measure the changes since the merge base with this ref;
+        /// default the branch's track, and `main` for a branch on none.
         #[arg(long, value_name = "REF", conflicts_with = "hook")]
         base: Option<String>,
         /// Read the Stop hook's stdin: exit 0 when `stop_hook_active`,

@@ -136,7 +136,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=3d3b2f2928865d0519d6d2908ee81184073945912b3158e2cf3cc701d2481d50 out=ac7b82bdcb10640f6d8b1d3ede729c7c2258b90104441382205381a6255006ed -->
+<!-- /computed in=f314bb7791fc774a40b112a885d33de30860d2b6a939c927c634c4311055200c out=ac7b82bdcb10640f6d8b1d3ede729c7c2258b90104441382205381a6255006ed -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

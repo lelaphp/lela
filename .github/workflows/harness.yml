@@ -2,13 +2,13 @@
 # held by `computed check`, which runs no loader and needs no trust grant;
 # the harness's own tests hold the map, the hook wiring and the rules'
 # negative controls; and per commit the instruments run over the whole
-# workspace, then `done` judges the changes since the merge base with main,
-# the reading store is the only thing the run uploads, and the permits
-# section is the summary.
+# workspace, then `done` judges the changes since the branch's track, the
+# base the Stop hook took; the reading store is the only thing the run
+# uploads, and the permits section is the summary.
 name: harness
 on:
   push:
-    branches: [main]
+    branches: [main, "t-*"] # main and the track branches, whose base is main
   pull_request:
 jobs:
   regions:
@@ -36,7 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # done measures since the merge base with main
+          fetch-depth: 0 # done measures since the merge base with the track
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Each instrument exits 1 on a failing reading, which fails the job;

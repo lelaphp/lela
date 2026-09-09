@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use xtask::divergence::Registry;
-use xtask::done::{self, FRESH, Verdict};
+use xtask::done::{self, Base, FRESH, Verdict};
 use xtask::git::tree_hash;
 use xtask::manifest::Manifest;
 use xtask::reading::{Reading, Status, Store};
@@ -51,6 +51,23 @@ fn sh(root: &Path, args: &[&str]) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
+/// One commit of everything in the working tree.
+fn commit(root: &Path, message: &str) {
+    sh(root, &["git", "add", "-A"]);
+    sh(
+        root,
+        &[
+            "git",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        ],
+    );
+}
+
 /// A scratch repository: the tracked manifest, pin and registry, and the
 /// fixture's `ext/pcre` crate, committed once. Every change the tests make
 /// after this is the diff `done` judges with `--base HEAD`.
@@ -79,27 +96,19 @@ fn repository(name: &str, registry: &Path) -> PathBuf {
     }
     write(&root, ".gitignore", "target/\n");
     sh(&root, &["git", "init", "-q"]);
-    sh(&root, &["git", "add", "."]);
-    sh(
-        &root,
-        &[
-            "git",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-q",
-            "-m",
-            "scratch",
-        ],
-    );
+    commit(&root, "scratch");
     root
 }
 
 fn judge(root: &Path) -> Verdict {
+    judge_since(root, Some("HEAD"))
+}
+
+fn judge_since(root: &Path, base: Option<&str>) -> Verdict {
     let manifest = Manifest::load(root).unwrap();
     let registry = Registry::load(root).unwrap();
     let store = Store::of_workspace(root);
-    done::judge(root, &manifest, &registry, &store, Some("HEAD")).unwrap()
+    done::judge(root, &manifest, &registry, &store, base).unwrap()
 }
 
 /// A passing reading of `instrument` over `scope`, stamped with the
@@ -216,31 +225,19 @@ fn with_no_readings_every_instrument_of_the_touched_crate_is_unmet_and_the_exit_
     assert!(err.contains("6 conditions of done unmet"), "{err}");
 }
 
+/// A branch that is on no track is judged since `main`, and the commits
+/// it has made since count as its own.
 #[test]
-fn the_default_base_is_the_merge_base_with_main_so_commits_on_the_branch_count() {
+fn a_branch_on_no_track_is_judged_since_main_so_commits_on_it_count() {
     let root = scratch("main");
     sh(&root, &["git", "branch", "-M", "main"]);
     sh(&root, &["git", "checkout", "-q", "-b", "pcre-preg-match"]);
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
-    sh(&root, &["git", "add", "."]);
-    sh(
-        &root,
-        &[
-            "git",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-q",
-            "-m",
-            "preg_match",
-        ],
-    );
-    let manifest = Manifest::load(&root).unwrap();
-    let registry = Registry::load(&root).unwrap();
-    let store = Store::of_workspace(&root);
-    let verdict = done::judge(&root, &manifest, &registry, &store, None).unwrap();
+    commit(&root, "preg_match");
+    let verdict = judge_since(&root, None);
+    assert_eq!(verdict.base.since, "main");
     assert_eq!(
-        verdict.base,
+        verdict.base.commit,
         sh(&root, &["git", "rev-parse", "main"]).trim()
     );
     assert_eq!(verdict.crates, ["ext/pcre"], "{verdict:#?}");
@@ -248,6 +245,153 @@ fn the_default_base_is_the_merge_base_with_main_so_commits_on_the_branch_count()
     let (code, out, _) = xtask(&root, &["done"], None);
     assert_eq!(code, 1);
     assert!(out.contains("1 changed file since"), "{out}");
+}
+
+// ------------------------------------------- the base is the track
+
+/// A scratch repository on `t-opus-5/witness`, one commit past the track
+/// `t-opus-5`, which is itself one commit past `main`: the track's commit
+/// changes `ext/pcre`, this branch's changes `xtask`, so which crates the
+/// verdict names says which base it took. Returns the root and the track's
+/// commit.
+///
+/// The track is `origin/t-opus-5` and no local branch, because git's ref
+/// store refuses `refs/heads/t-opus-5` beside `refs/heads/t-opus-5/witness`
+/// — one path cannot be a file and a directory at once — which is also why
+/// an agent's worktree has the track as the remote's branch and not its own.
+fn on_a_track(name: &str) -> (PathBuf, String) {
+    let root = scratch(name);
+    sh(&root, &["git", "branch", "-M", "main"]);
+    sh(&root, &["git", "checkout", "-q", "-b", "the-track"]);
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    commit(&root, "the track's own change");
+    let track = sh(&root, &["git", "rev-parse", "HEAD"]).trim().to_owned();
+    sh(
+        &root,
+        &["git", "update-ref", "refs/remotes/origin/t-opus-5", &track],
+    );
+    sh(&root, &["git", "checkout", "-q", "main"]);
+    sh(&root, &["git", "branch", "-q", "-D", "the-track"]);
+    sh(
+        &root,
+        &[
+            "git",
+            "checkout",
+            "-q",
+            "-b",
+            "t-opus-5/witness",
+            "origin/t-opus-5",
+        ],
+    );
+    write(&root, "xtask/src/lib.rs", "pub fn measure() {}\n");
+    commit(&root, "the turn's change");
+    (root, track)
+}
+
+#[test]
+fn on_a_track_branch_a_bare_done_measures_since_the_track_and_names_it() {
+    let (root, track) = on_a_track("track");
+    let verdict = judge_since(&root, None);
+    assert_eq!(verdict.base.commit, track, "{verdict:#?}");
+    assert_eq!(verdict.base.since, "t-opus-5");
+    assert_eq!(
+        verdict.crates,
+        ["xtask"],
+        "the track's own change is not this turn's: {verdict:#?}"
+    );
+    let (code, out, err) = xtask(&root, &["done"], None);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(out.contains("since t-opus-5 ("), "{out}");
+}
+
+/// The head line names where the base came from: the ref and the commit
+/// it resolved to, and the commit alone when the ref given was that
+/// commit, which is what pre-push passes per ref.
+#[test]
+fn the_head_line_names_the_ref_and_the_commit_and_a_commit_only_once() {
+    let commit = "0f1e2d3c4b5a69788796a5b4c3d2e1f001234567";
+    let named = Base {
+        since: "t-opus-5".to_owned(),
+        commit: commit.to_owned(),
+    };
+    assert_eq!(named.to_string(), "t-opus-5 (0f1e2d3)");
+    for since in [commit, &commit[..7]] {
+        let a_commit = Base {
+            since: since.to_owned(),
+            commit: commit.to_owned(),
+        };
+        assert_eq!(a_commit.to_string(), "0f1e2d3");
+    }
+    // A ref whose name is a prefix of the commit is still a ref.
+    let prefix = Base {
+        since: "0f".to_owned(),
+        commit: commit.to_owned(),
+    };
+    assert_eq!(prefix.to_string(), "0f (0f1e2d3)");
+}
+
+#[test]
+fn a_track_that_is_only_a_remote_tracking_branch_is_still_the_base() {
+    let (root, track) = on_a_track("remote-track");
+    assert!(
+        sh(&root, &["git", "branch", "--list", "t-opus-5"])
+            .trim()
+            .is_empty(),
+        "the track is the remote's branch alone"
+    );
+    assert_eq!(judge_since(&root, None).base.commit, track);
+}
+
+#[test]
+fn on_the_track_itself_and_on_main_the_base_is_main() {
+    let root = scratch("track-itself");
+    sh(&root, &["git", "branch", "-M", "main"]);
+    sh(&root, &["git", "checkout", "-q", "-b", "t-opus-5"]);
+    assert_eq!(judge_since(&root, None).base.since, "main");
+    sh(&root, &["git", "checkout", "-q", "main"]);
+    assert_eq!(judge_since(&root, None).base.since, "main");
+}
+
+#[test]
+fn a_detached_head_or_a_prefix_that_names_no_branch_falls_back_to_main() {
+    let root = scratch("no-track");
+    sh(&root, &["git", "branch", "-M", "main"]);
+    sh(&root, &["git", "checkout", "-q", "-b", "t-opus-9/witness"]);
+    assert_eq!(judge_since(&root, None).base.since, "main");
+    sh(&root, &["git", "checkout", "-q", "--detach"]);
+    assert_eq!(judge_since(&root, None).base.since, "main");
+}
+
+#[test]
+fn base_overrides_the_track_inference() {
+    let (root, track) = on_a_track("base-wins");
+    let head = sh(&root, &["git", "rev-parse", "HEAD"]).trim().to_owned();
+    let verdict = judge_since(&root, Some("HEAD"));
+    assert_eq!(verdict.base.since, "HEAD");
+    assert_eq!(verdict.base.commit, head);
+    assert_ne!(verdict.base.commit, track);
+    assert!(verdict.crates.is_empty(), "{verdict:#?}");
+    let (code, out, err) = xtask(&root, &["done", "--base", &track], None);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(out.contains(&format!("since {}", &track[..7])), "{out}");
+}
+
+#[test]
+fn the_stop_hook_holds_a_turn_against_the_tracks_base() {
+    let (root, _) = on_a_track("hook-track");
+    let (code, out, err) = xtask(
+        &root,
+        &["done", "--hook"],
+        Some("{\"session_id\":\"s\",\"stop_hook_active\":false}"),
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    let block: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    let reason = block["reason"].as_str().unwrap();
+    assert!(reason.contains("since t-opus-5 ("), "{reason}");
+    assert!(
+        !reason.contains("ext/pcre"),
+        "the track's own change is not this turn's: {reason}"
+    );
 }
 
 #[test]
@@ -708,7 +852,27 @@ fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
     );
     assert!(
         text.contains("fetch-depth: 0"),
-        "done needs the merge base with main: {text}"
+        "done needs the merge base with the branch's track: {text}"
+    );
+}
+
+/// CI per commit runs on the track branches as well as `main`, so a
+/// track's own commit is judged there since the same base the hook took,
+/// `main` (harness-design.md §4.5, §7). A pull request is not this: its
+/// checkout is a detached merge commit, which is on no track, so the job
+/// judges it since `main` whatever branch it came from.
+#[test]
+fn ci_runs_the_per_commit_job_on_the_track_branches() {
+    let text = read(".github/workflows/harness.yml");
+    let on = &text[text.find("on:").unwrap()..text.find("jobs:").unwrap()];
+    let branches = on
+        .lines()
+        .find(|l| l.trim_start().starts_with("branches:"))
+        .unwrap_or_else(|| panic!("no push branches: {on}"));
+    assert!(branches.contains("main"), "{branches}");
+    assert!(
+        branches.contains("t-*"),
+        "the track branches are pushed to: {branches}"
     );
 }
 
@@ -725,19 +889,7 @@ fn a_crate_with_a_row_and_no_reading_is_unmet_the_way_an_extension_is() {
     );
     assert_ne!(with_a_row, seams, "the tracked manifest still has the row");
     std::fs::write(root.join("seams.toml"), with_a_row).unwrap();
-    sh(&root, &["git", "add", "."]);
-    sh(
-        &root,
-        &[
-            "git",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-q",
-            "-m",
-            "the row",
-        ],
-    );
+    commit(&root, "the row");
 
     write(
         &root,

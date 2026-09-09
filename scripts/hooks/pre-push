@@ -4,8 +4,8 @@
 # stdin, `<local ref> <local sha> <remote ref> <remote sha>`; `xtask done
 # --base <remote sha>` prints what is unmet in everything the push would
 # add and exits 1 while anything is, which refuses the push. A ref the
-# remote does not have yet (its sha all zeros) is judged since the merge
-# base with main, done's default. Installed per clone by the SessionStart
+# remote does not have yet (its sha all zeros) is judged since done's own
+# default, the merge base with the branch's track. Installed per clone by the SessionStart
 # hook, or by hand: `git config core.hooksPath scripts/hooks`. It goes
 # through cargo run, which rebuilds a stale binary rather than trusting
 # it; a person pushes once, so the build cost is nothing.

@@ -2,9 +2,9 @@
 //! conditions unmet for the changes since a base commit, computed from git
 //! and the store and nothing else, so its three callers (§4.5: the Stop
 //! command hook, pre-push, and CI per commit) read one list. The base is
-//! the merge base of `HEAD` with `main`, or with `--base`; the changes are
-//! every file the working tree differs in from it, committed since or not,
-//! plus the untracked files.
+//! the merge base of `HEAD` with the branch's track ([`Base`]), or with
+//! `--base`; the changes are every file the working tree differs in from
+//! it, committed since or not, plus the untracked files.
 //!
 //! The six conditions, one sentence each:
 //!
@@ -49,7 +49,7 @@ use crate::reading::{Number, Reading, Status, Store};
 
 /// The instrument name the reading carries.
 pub const INSTRUMENT: &str = "done";
-/// The branch the default base is the merge base with.
+/// The track a branch with no track of its own is on.
 pub const MAIN: &str = "main";
 /// The instruments a touched crate needs a fresh passing reading from
 /// (condition 1). `phpt`'s is the reading over the subsets the crate's
@@ -82,11 +82,45 @@ pub fn instruments_of(krate: &Crate) -> impl Iterator<Item = &'static str> {
     })
 }
 
+/// The commit the changes are measured since, and the ref it was taken
+/// from: `--base`'s, or the branch's track ([`git::track`]), which is
+/// [`MAIN`] for a branch that is on none (harness-design.md §4.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Base {
+    pub since: String,
+    pub commit: String,
+}
+
+impl Base {
+    /// The base of a bare `done`: the branch's track, or [`MAIN`].
+    fn of(root: &Path, since: Option<&str>) -> Result<Base> {
+        let since = match since {
+            Some(since) => since.to_owned(),
+            None => git::track(root).unwrap_or_else(|| MAIN.to_owned()),
+        };
+        let commit = git::merge_base(root, &since)?;
+        Ok(Base { since, commit })
+    }
+}
+
+impl std::fmt::Display for Base {
+    /// The ref the base was taken from and the commit it resolved to, and
+    /// the commit alone when the ref was that commit.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let short = &self.commit[..self.commit.len().min(7)];
+        if self.since == self.commit || self.since == short {
+            write!(f, "{short}")
+        } else {
+            write!(f, "{} ({short})", self.since)
+        }
+    }
+}
+
 /// What `done` found over one diff.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verdict {
-    /// The commit the changes are measured since.
-    pub base: String,
+    /// What the changes are measured since.
+    pub base: Base,
     pub changed: Vec<Change>,
     /// The manifest names of the crates with a changed file, in manifest order.
     pub crates: Vec<String>,
@@ -107,7 +141,7 @@ impl Verdict {
             "done: {} changed file{} since {} in {}\n",
             self.changed.len(),
             plural(self.changed.len()),
-            &self.base[..self.base.len().min(7)],
+            self.base,
             if self.crates.is_empty() {
                 "no crate".to_owned()
             } else {
@@ -185,7 +219,8 @@ fn names(id: &str, part: &str) -> bool {
     id.contains(&format!("/{}/", part.trim_matches('/')))
 }
 
-/// Judge the changes since the merge base with `base` (default `main`).
+/// Judge the changes since the merge base with `base`, the branch's
+/// track ([`Base::of`]) when none is given.
 pub fn judge(
     root: &Path,
     manifest: &Manifest,
@@ -193,8 +228,8 @@ pub fn judge(
     store: &Store,
     base: Option<&str>,
 ) -> Result<Verdict> {
-    let base = git::merge_base(root, base.unwrap_or(MAIN))?;
-    let changed = git::changed_since(root, &base)?;
+    let base = Base::of(root, base)?;
+    let changed = git::changed_since(root, &base.commit)?;
     let paths: Vec<&str> = changed.iter().map(|c| c.path.as_str()).collect();
     let crates: Vec<&Crate> = manifest.crates_of(&paths);
     let mut unmet = Vec::new();
@@ -204,7 +239,7 @@ pub fn judge(
         fresh_readings(root, store, krate, &mut unmet)?;
     }
     locks(root, manifest, store, &changed, &mut unmet)?;
-    open_rows(root, &base, registry, &crates, &changed, &mut unmet)?;
+    open_rows(root, &base.commit, registry, &crates, &changed, &mut unmet)?;
     over_the_diff(root, manifest, &changed, &mut unmet, &mut notes)?;
 
     Ok(Verdict {
