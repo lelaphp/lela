@@ -7,7 +7,9 @@
 # (the harness's own files are a note: a person commits those). Last,
 # `computed run` on the region files, always, since a staged change under
 # a crate makes a region stale without staging its file, plus the local
-# file by name; what it rewrote is re-staged, and a hand-edited region is
+# file by name, through `xtask regions`, which reads computed's exit once
+# for every caller and refuses a broken marker, a missing computed and an
+# untrusted clone; what it wrote is re-staged, and a hand-edited region is
 # refused, since only a person runs --force. Every command's own exit is
 # read; the commit is refused while any failed. Installed per clone by the
 # SessionStart hook, or by hand: `git config core.hooksPath scripts/hooks`.
@@ -28,19 +30,14 @@ step $X permit --diff
 
 regions='AGENTS.md ext/AGENTS.md data/INDEX.md docs/divergence.md'
 # shellcheck disable=SC2086
-rendered=$(computed run $regions .claude/harness.local.md 2>&1 >/dev/null)
-case $? in
-    0|1) ;;
-    2) echo "pre-commit: a computed marker is broken:" >&2; echo "$rendered" >&2; status=1 ;;
-    *) echo "pre-commit: computed did not run (cargo install computed)" >&2; status=1 ;;
-esac
-if echo "$rendered" | grep -q ' untrusted'; then
-    echo "pre-commit: this clone is not trusted, so its regions were not rendered; run \`computed trust\` once" >&2
+if rendered=$($X regions $regions .claude/harness.local.md); then
+    echo "$rendered" | grep -E ' written$' | cut -d: -f1 | sort -u | while read -r file; do
+        case " $regions " in *" $file "*) git add -- "$file" ;; esac
+    done
+else
+    echo "pre-commit: the regions were not rendered; the line above says why" >&2
     status=1
 fi
-echo "$rendered" | grep -E ' written$' | cut -d: -f1 | sort -u | while read -r file; do
-    case " $regions " in *" $file "*) git add -- "$file" ;; esac
-done
 # shellcheck disable=SC2086
 if ! computed check $regions >/dev/null 2>&1; then
     echo "pre-commit: a region is hand-edited or could not be rendered; run \`computed check\`:" >&2

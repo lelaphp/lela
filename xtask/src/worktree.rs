@@ -8,7 +8,8 @@
 //! * `computed` trust is keyed by the root path, so a new worktree is
 //!   untrusted: its regions answer `exec untrusted skipped`, the session
 //!   hook renders nothing and pre-commit refuses the first commit. The
-//!   grant is a person's (§11), so the line is printed, never run.
+//!   grant is a person's (§11), so the line is printed, never run; what
+//!   `computed` answered is read by [`computed::render`], once.
 //! * `PreToolUse` denies an `Edit` or a `Write` that no candidate judged,
 //!   and in a worktree with a cold `target/` the only candidate is `cargo
 //!   run … permit` inside the hook's 60 s timeout. So `xtask` is built
@@ -49,6 +50,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 
+use crate::computed;
 use crate::git::git;
 use crate::reading;
 use crate::track::{self, Track};
@@ -326,36 +328,17 @@ fn lay_local(dir: &Path) -> bool {
     }
 }
 
-/// The regions rendered where the worktree is trusted, and the grant
-/// printed as a person's line where it is not (§11).
+/// The local file rendered, read as [`computed::Answer`]: the regions
+/// rendered where the worktree is trusted, and the grant printed as a
+/// person's line where it is not (§11); a broken marker and a missing
+/// `computed` are complaints, since the file is laid down either way.
 fn trust(dir: &Path) {
-    let ran = Command::new("computed")
-        .args(["run", LOCAL])
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .output();
-    let trusted = match ran {
-        Ok(out) if matches!(out.status.code(), Some(0 | 1)) => {
-            !String::from_utf8_lossy(&out.stderr).contains(" untrusted")
-        }
-        Ok(out) if out.status.code() == Some(2) => {
-            complain(ADD, &format!("a computed marker in {LOCAL} is broken"));
-            false
-        }
-        _ => {
-            complain(ADD, "computed did not run (cargo install computed)");
-            false
-        }
-    };
-    if trusted {
-        say(ADD, &format!("rendered {LOCAL}"));
-    } else {
-        say(
-            ADD,
-            "this worktree is untrusted, so its regions are unrendered; a person runs, once (§11):",
-        );
-        println!("    computed trust {}", dir.display());
+    let files = [LOCAL.to_owned()];
+    match computed::render(dir, &files) {
+        Ok(computed::Answer::Rendered(_)) => say(ADD, &format!("rendered {LOCAL}")),
+        Ok(computed::Answer::Untrusted { .. }) => say(ADD, &computed::trust_line(dir)),
+        Ok(answer) => complain(ADD, &answer.refusal().unwrap_or_default()),
+        Err(err) => complain(ADD, &format!("{err:#}")),
     }
 }
 

@@ -124,6 +124,7 @@ Commands:
   done               The definition of done: print the conditions unmet for the changes since the base and exit 1 while any is; the Stop hook, pre-push and CI read the same list
   track              Say which track this worktree's branch is on (the longest existing branch that is a proper path prefix of its name, `main` for a branch on none), the commit `done` measures since, and the root that holds the track's store; as text, or as one object. Writes no reading
   worktree           A track's worktrees: `add` lays one down under .claude/worktrees/<branch> ready to be worked in, the branch off its track, `xtask` built there, the local file laid and rendered, the `computed trust` line printed as a person's; refuses a branch that exists and a directory that does. `retire` appends the worktree's log into its track's store, removes the worktree and prints the branch-delete line as a person's; refuses uncommitted work. Writes no reading
+  regions            Render the named files' regions with `computed run` and say what it did, one line per file, `written` or `unchanged`, for pre-commit to re-stage; refuses a broken marker, a missing `computed` and an untrusted checkout, whose `computed trust` line is printed as a person's. Writes no reading
   budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code and a stale generated file
   clippy             `cargo clippy` with every warning denied, on every target of each crate, as the reading `done` reads; one reading per crate
   phpt               Run the pinned `.phpt` corpus through the engine and hold each test to its `--EXPECT*--` section: the per-commit lane the manifest composes, or the subset named; one reading per subset, scoped to the crate whose subset it is
@@ -138,7 +139,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=4006221e8a652fcad9cd4eca82d89e2cc0337414ceaf8a00d33cbb81ad51a70a out=85c617032aa794c549d065aa5f0c979e75a25fdd0fb86f023c5ee33e5e704bde -->
+<!-- /computed in=f9fdc91b9e40353a1a9c779ffe365359b386905589feda249bdd78df47997c14 out=88a56b63a816a1cebcef332946b4da0570c27db510ec2b9be0213a4ea69ffd13 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

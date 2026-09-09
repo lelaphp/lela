@@ -13,6 +13,7 @@ pub mod budget;
 pub mod built;
 pub mod cli;
 pub mod clippy;
+pub mod computed;
 pub mod divergence;
 pub mod done;
 pub mod generated;
@@ -161,6 +162,7 @@ pub fn run() -> Result<()> {
             }
         }
         Command::Track { .. } => bail!("track: answered above"),
+        Command::Regions { .. } => bail!("regions: answered above"),
         Command::Worktree { .. } => bail!("worktree: answered above"),
     }
 }
@@ -226,12 +228,14 @@ fn divergence_command(root: &Path, manifest: &Manifest, store: &Store) -> Result
 
 /// The commands that measure nothing and read no manifest, answered
 /// before `Manifest::load`: the track, so a worktree whose manifest is
-/// unreadable can still say which track it is on, and the two halves of a
+/// unreadable can still say which track it is on; the two halves of a
 /// worktree, whose manifest is the worktree's, once built there, and is
-/// gone once it is retired.
+/// gone once it is retired; and the regions, which pre-commit renders
+/// whatever the manifest says.
 fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
     match command {
         Command::Track { branch, json } => Some(track_command(root, branch.as_deref(), *json)),
+        Command::Regions { files } => Some(computed::command(root, files)),
         Command::Worktree {
             command: WorktreeCommand::Add { branch },
         } => Some(worktree::add(root, branch).map(|_| ())),

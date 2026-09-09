@@ -110,6 +110,16 @@ pub enum Command {
         #[command(subcommand)]
         command: WorktreeCommand,
     },
+    /// Render the named files' regions with `computed run` and say what it
+    /// did, one line per file, `written` or `unchanged`, for pre-commit to
+    /// re-stage; refuses a broken marker, a missing `computed` and an
+    /// untrusted checkout, whose `computed trust` line is printed as a
+    /// person's. Writes no reading.
+    Regions {
+        /// The files, relative to the root.
+        #[arg(required = true, value_name = "FILE")]
+        files: Vec<String>,
+    },
     /// Hold every crate to its line ceiling and the workspace to [budget];
     /// refuse committed generated code and a stale generated file.
     Budget,

@@ -20,10 +20,10 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use crate::computed;
 use crate::generated;
 use crate::manifest::{Manifest, Rule};
 use crate::phpt;
@@ -94,12 +94,7 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str) -> Result<Laid> {
     for path in generated::write_all(root, manifest)? {
         laid.written.push(relative(root, &path));
     }
-    match render_guidance(root)? {
-        Some(rendered) => laid.written.push(rendered),
-        None => laid.notes.push(format!(
-            "{GUIDANCE}: `computed` is not on PATH; the extensions region is rendered by `computed run {GUIDANCE}`"
-        )),
-    }
+    render_guidance(root, &mut laid)?;
 
     // Which subsets are the crate's is the `[[crate]]` row's sentence and
     // is read there, never spelled again here (#18, harness §4.1).
@@ -302,30 +297,28 @@ fn add_member(root: &Path, row: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// Render the guidance file's regions with `computed run`, which answers 1
-/// when it wrote; the file when it was rendered, `None` when `computed` is
-/// not installed.
-fn render_guidance(root: &Path) -> Result<Option<String>> {
+/// The guidance file's regions rendered, read as [`computed::Answer`]:
+/// the file is written when its extensions region was; an untrusted
+/// checkout and a missing `computed` are notes, since the crate is laid
+/// down either way; a broken marker is a refusal.
+fn render_guidance(root: &Path, laid: &mut Laid) -> Result<()> {
     if !root.join(GUIDANCE).is_file() {
-        return Ok(None);
+        return Ok(());
     }
-    let out = match Command::new("computed")
-        .args(["run", GUIDANCE])
-        .current_dir(root)
-        .output()
-    {
-        Ok(out) => out,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err).context("running computed"),
-    };
-    match out.status.code() {
-        Some(0 | 1) => Ok(Some(GUIDANCE.to_owned())),
-        _ => bail!(
-            "computed run {GUIDANCE} failed: {}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        ),
+    let files = [GUIDANCE.to_owned()];
+    let answer = computed::render(root, &files)?;
+    if let computed::Answer::BrokenMarker(said) = &answer {
+        bail!("computed run {GUIDANCE}: {said}");
     }
+    if let Some(rendered) = answer.rendered() {
+        laid.written.extend(rendered.written.iter().cloned());
+    }
+    if let Some(refusal) = answer.refusal() {
+        laid.notes.push(format!(
+            "{GUIDANCE}: {refusal}; the extensions region is rendered by `computed run {GUIDANCE}`"
+        ));
+    }
+    Ok(())
 }
 
 fn relative(root: &Path, path: &Path) -> String {

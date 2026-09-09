@@ -762,10 +762,10 @@ fn the_stop_hook_runs_done_with_hook_and_pre_push_runs_done() {
 
 /// Pre-commit (harness-design.md §6 wiring): the instruments that exist,
 /// in the order the design lists them, `permit --diff` over the staged
-/// diff, and `computed run` on the region files plus the local one by
+/// diff, and `xtask regions` on the region files plus the local one by
 /// name, with what it wrote re-staged and a hand edit refused.
 #[test]
-fn pre_commit_runs_the_instruments_permit_over_the_diff_and_computed_run() {
+fn pre_commit_runs_the_instruments_permit_over_the_diff_and_regions() {
     let pre_commit = workspace().join("scripts/hooks/pre-commit");
     let whole = std::fs::read_to_string(&pre_commit).unwrap();
     assert!(whole.starts_with("#!/"), "{whole}");
@@ -784,7 +784,7 @@ fn pre_commit_runs_the_instruments_permit_over_the_diff_and_computed_run() {
         "unsafe-audit",
         "vocab",
         "permit --diff",
-        "computed run",
+        "regions",
     ] {
         let at = text
             .find(step)
@@ -799,7 +799,7 @@ fn pre_commit_runs_the_instruments_permit_over_the_diff_and_computed_run() {
         "docs/divergence.md",
         ".claude/harness.local.md",
     ] {
-        assert!(text.contains(file), "computed run names {file}: {text}");
+        assert!(text.contains(file), "regions names {file}: {text}");
     }
     assert!(
         text.contains("git add"),
