@@ -1,20 +1,24 @@
 //! The reading and its store (harness-design.md §4.2). Every instrument ends
-//! by writing one reading; every rendering reads them; nothing else touches
-//! the store. The store is `target/harness/<instrument>/<scope>.toml`, one
-//! file per key, overwritten on each run, and `target/harness/log.jsonl`,
-//! append-only, one line per reading.
+//! by writing its readings through [`Store::record`], the one writer; every
+//! rendering reads them; nothing else touches the store. The store is
+//! `target/harness/<instrument>/<scope>.toml`, one file per key, overwritten
+//! on each run, and `target/harness/log.jsonl`, append-only, one line per
+//! reading. The clock a reading's `at` is taken from, and the calendar that
+//! reads it back, live here too.
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use toml::value::Datetime;
+use toml::value::{Datetime, Offset, Time};
 
 use crate::git::Stamp;
 use crate::manifest::{Crate, Manifest};
+use crate::sources;
 
 /// Where the store lives, relative to the workspace root.
 pub const DIR: &str = "target/harness";
@@ -40,11 +44,11 @@ pub struct Reading {
     pub adr: String,
     /// The git tree hash of the scope's sources at the time: what `done`
     /// holds against the scope's hash now to call the reading fresh
-    /// (harness-design.md §4.2, §13 D.18). Private: a reading made through
-    /// [`Reading::for_crate`] or [`Reading::for_scope`] is hashed over the
-    /// manifest's mapping of its scope, [`Manifest::scope_path`], the path
-    /// `done` hashes; an instrument that stamps a reading it made with
-    /// [`Reading::new`] still chooses the path through [`Reading::stamp`].
+    /// (harness-design.md §4.2, §13 D.18). Private, and set by the
+    /// constructors alone: a reading made through [`Reading::for_crate`]
+    /// or [`Reading::for_scope`] is hashed over the manifest's mapping of
+    /// its scope, [`Manifest::scope_path`], the path `done` hashes; one
+    /// made through [`Reading::stamped_over`] says which path it was hashed over.
     tree: String,
     pub commit: String,
     pub at: Datetime,
@@ -59,9 +63,14 @@ impl Reading {
     /// A reading of `instrument` over a crate, stamped over the crate's
     /// sources now: the path the manifest maps the crate to
     /// ([`Crate::path`]), which is the path `done` hashes to call the
-    /// reading fresh (harness-design.md §4.5 condition 1).
+    /// reading fresh (harness-design.md §4.5 condition 1). A crate not yet
+    /// created is measured by nothing and its reading carries no stamp,
+    /// so `done` finds it fresh for nothing.
     pub fn for_crate(instrument: &str, krate: &Crate, root: &Path) -> Result<Reading> {
-        Reading::stamped(instrument, &krate.name, root, &krate.path())
+        if !sources::exists(root, krate) {
+            return Ok(Reading::new(instrument, &krate.name));
+        }
+        Reading::stamped_over(instrument, &krate.name, root, &krate.path())
     }
 
     /// A reading of `instrument` over `scope`, stamped over the path the
@@ -82,12 +91,27 @@ impl Reading {
                 "{instrument} over {scope:?}: the manifest names no crate, seam or generated file so called and the pinned corpus has no such directory, so there is no path to stamp the reading over"
             )
         })?;
-        Reading::stamped(instrument, scope, root, &path)
+        Reading::stamped_over(instrument, scope, root, &path)
     }
 
-    fn stamped(instrument: &str, scope: &str, root: &Path, path: &Path) -> Result<Reading> {
+    /// A reading of `instrument` over `scope`, stamped over `path`, relative
+    /// to the root, and timed now: the constructor for a scope the manifest
+    /// maps to no sources, which `done` never holds fresh. `permit`'s
+    /// readings are one: their scope is the rule that fired and their tree
+    /// is the file the call touched, or the manifest for a refusal to judge
+    /// (harness-design.md §4.4). The two constructors above come through
+    /// here over the manifest's path.
+    pub fn stamped_over(
+        instrument: &str,
+        scope: &str,
+        root: &Path,
+        path: &Path,
+    ) -> Result<Reading> {
+        let stamp = Stamp::take(root, path)?;
         let mut reading = Reading::new(instrument, scope);
-        reading.stamp(&Stamp::take(root, path)?);
+        reading.tree = stamp.tree;
+        reading.commit = stamp.commit;
+        reading.at = now()?;
         Ok(reading)
     }
 
@@ -95,7 +119,8 @@ impl Reading {
     /// empty value and `at` at the Unix epoch; the instrument fills the
     /// rest. Its `tree` is empty, which is no scope's hash, so `done` finds
     /// it fresh for nothing: the reading of a crate not yet created, which
-    /// nothing measured, or of an instrument that stamps it itself.
+    /// nothing measured, and the reading a rendering's test lays in a store
+    /// that is no git repository.
     pub fn new(instrument: &str, scope: &str) -> Reading {
         Reading {
             instrument: instrument.to_owned(),
@@ -126,16 +151,6 @@ impl Reading {
         let n = i64::try_from(n).with_context(|| format!("{key} = {n} overflows a reading"))?;
         self.numbers.insert(key.to_owned(), n.into());
         Ok(())
-    }
-
-    /// Put the stamp's tree, commit and time on the reading: what the
-    /// constructors above do over the manifest's path, and what an
-    /// instrument that makes its reading with [`Reading::new`] does over a
-    /// path of its own choosing.
-    pub fn stamp(&mut self, stamp: &Stamp) {
-        self.tree.clone_from(&stamp.tree);
-        self.commit.clone_from(&stamp.commit);
-        self.at = stamp.at;
     }
 
     /// The reading as JSON, `at` as an RFC 3339 string: the log line, and
@@ -267,8 +282,27 @@ impl Store {
         Ok(self.root.join(instrument).join(format!("{scope}.toml")))
     }
 
-    /// Write one reading: its file, overwritten, and one line of the log.
-    pub fn write(&self, reading: &Reading) -> Result<PathBuf> {
+    /// Record what an instrument measured: every reading written, in
+    /// order, as its file, overwritten, and one line of the log, and the
+    /// exit the instrument owes for them. The one writer of the store
+    /// (harness-design.md §4.2); an instrument that ignores the outcome
+    /// says so, as `permit` does, whose exit is 0 whatever it decides
+    /// (§4.4).
+    pub fn record(&self, readings: &[Reading]) -> Result<Outcome> {
+        for reading in readings {
+            self.write(reading)?;
+        }
+        Ok(Outcome::of(readings))
+    }
+
+    /// One reading: its file, overwritten, and its line of the log. The
+    /// line is rendered whole and handed to the file in one `write` under
+    /// `O_APPEND`, which the platforms the harness runs on land whole for
+    /// a line of this size, so two instruments appending at once do not
+    /// interleave inside a line. A write the kernel splits, which POSIX
+    /// does not rule out for a regular file, is the one case not covered:
+    /// the line tears, and a reader that tolerates a torn line is #56's.
+    fn write(&self, reading: &Reading) -> Result<()> {
         let path = self.path(&reading.instrument, &reading.scope)?;
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -276,15 +310,16 @@ impl Store {
         let text = toml::to_string(reading).context("rendering the reading")?;
         fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
 
-        let line = reading.to_json()?;
+        let mut line = reading.to_json()?.to_string();
+        line.push('\n');
         let log = self.root.join(LOG);
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&log)
             .with_context(|| format!("opening {}", log.display()))?;
-        writeln!(file, "{line}").with_context(|| format!("appending to {}", log.display()))?;
-        Ok(path)
+        file.write_all(line.as_bytes())
+            .with_context(|| format!("appending to {}", log.display()))
     }
 
     /// The reading of one instrument and scope, if one has been written.
@@ -332,6 +367,115 @@ impl Store {
     }
 }
 
+/// What an instrument's exit says about the readings it wrote: 1 while
+/// any reading fails, 0 when every one passes or is skipped. The rule
+/// harness-design.md §4.5 states for `done` (exit 1 while anything is
+/// unmet), made every instrument's here, so no instrument maps a status
+/// to an exit on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// Every reading passed or was skipped: exit 0.
+    Met,
+    /// `failed` of the `written` readings fail: exit 1.
+    Unmet { failed: usize, written: usize },
+}
+
+impl Outcome {
+    /// The rule over a set of readings.
+    pub fn of(readings: &[Reading]) -> Outcome {
+        let failed = readings.iter().filter(|r| r.status == Status::Fail).count();
+        if failed == 0 {
+            Outcome::Met
+        } else {
+            Outcome::Unmet {
+                failed,
+                written: readings.len(),
+            }
+        }
+    }
+
+    /// The outcome as the instrument's return: `main` exits 1 on an error
+    /// and 0 otherwise, so an unmet outcome is an error naming the count.
+    pub fn exit(self) -> Result<()> {
+        match self {
+            Outcome::Met => Ok(()),
+            Outcome::Unmet { failed, written } => bail!("{failed} of {written} readings fail"),
+        }
+    }
+}
+
+/// The current time in UTC as a TOML datetime, to the second: what a
+/// reading's `at` is, in one format, so its text orders as its instant
+/// does.
+pub fn now() -> Result<Datetime> {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("the clock is before 1970")?
+        .as_secs();
+    let (date, time) = (secs / 86_400, secs % 86_400);
+    let (y, m, d) = civil_from_days(i64::try_from(date).context("the clock is past the calendar")?);
+    let text = format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        time / 3600,
+        time / 60 % 60,
+        time % 60
+    );
+    text.parse()
+        .with_context(|| format!("{text} is not a datetime"))
+}
+
+/// Seconds since 1970-01-01 of a reading's `at`, which `now` writes in UTC
+/// to the second; what a window such as the fourteen days of the silent
+/// query (harness-design.md §7) is measured in.
+pub fn epoch_seconds(at: &Datetime) -> Result<i64> {
+    let date = at.date.with_context(|| format!("{at} has no date"))?;
+    let time = at.time.unwrap_or(Time {
+        hour: 0,
+        minute: 0,
+        second: 0,
+        nanosecond: 0,
+    });
+    let days = days_from_civil(
+        i64::from(date.year),
+        i64::from(date.month),
+        i64::from(date.day),
+    );
+    let seconds =
+        i64::from(time.hour) * 3600 + i64::from(time.minute) * 60 + i64::from(time.second);
+    let offset = at.offset.map_or(0, |o| match o {
+        Offset::Z => 0,
+        Offset::Custom { minutes } => i64::from(minutes) * 60,
+    });
+    Ok(days * 86_400 + seconds - offset)
+}
+
+/// A proleptic Gregorian date to days since 1970-01-01 (Howard Hinnant's
+/// `days_from_civil`), the inverse of `civil_from_days`.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = y - i64::from(m <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Days since 1970-01-01 to a proleptic Gregorian date (Howard Hinnant's
+/// `civil_from_days`).
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (y, m, d)
+}
+
 /// Every file under `dir`, recursively, in directory order.
 pub(crate) fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))? {
@@ -358,7 +502,7 @@ pub(crate) fn listed(names: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::listed;
+    use super::{civil_from_days, days_from_civil, listed};
 
     #[test]
     fn at_most_five_names_are_listed_and_the_rest_counted() {
@@ -367,5 +511,16 @@ mod tests {
             listed(&["a", "b", "c", "d", "e", "f"]),
             "a, b, c, d, e and 1 more"
         );
+    }
+
+    #[test]
+    fn civil_dates() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(19_782), (2024, 2, 29));
+        assert_eq!(civil_from_days(20_703), (2026, 9, 7));
+        for day in [0, 19_782, 20_703, -1, 1_000_000] {
+            let (y, m, d) = civil_from_days(day);
+            assert_eq!(days_from_civil(y, m, d), day);
+        }
     }
 }

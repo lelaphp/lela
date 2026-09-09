@@ -121,6 +121,14 @@ fn scratch(name: &str, krate: &str) -> PathBuf {
     std::fs::create_dir_all(target.join("src")).unwrap();
     let from = fixture("vocab.avoid");
     std::fs::copy(from.join("src/lib.rs"), target.join("src/lib.rs")).unwrap();
+    // A crate is one by its Cargo.toml, which is what its reading's stamp
+    // asks; the package name is the last segment of the crate's path.
+    let package = krate.rsplit('/').next().unwrap();
+    std::fs::write(
+        target.join("Cargo.toml"),
+        format!("[package]\nname = \"{package}\"\nedition = \"2024\"\n"),
+    )
+    .unwrap();
     for args in [
         vec!["init", "-q"],
         vec!["add", "."],

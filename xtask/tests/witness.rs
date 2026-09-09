@@ -364,7 +364,9 @@ fn the_reading_carries_run_failed_and_missing_and_is_scoped_to_the_crate() {
         return;
     }
     let manifest = manifest();
-    let krate = manifest.crate_named("ext/pcre").unwrap();
+    // A crate that exists, since the stamp is over its sources; the
+    // harness is the one created so far.
+    let krate = manifest.crate_named("xtask").unwrap();
     let text = block("/// ```expect\n/// 1\n/// ```\n");
     let tally = judge(&text, &registry(""));
     let reading = witness::reading(
@@ -376,7 +378,7 @@ fn the_reading_carries_run_failed_and_missing_and_is_scoped_to_the_crate() {
     )
     .unwrap();
     assert_eq!(reading.instrument, "witness");
-    assert_eq!(reading.scope, "ext/pcre");
+    assert_eq!(reading.scope, "xtask");
     assert_eq!(reading.status, Status::Pass);
     assert_eq!(reading.numbers["run"], Number::Int(1));
     assert_eq!(reading.numbers["failed"], Number::Int(0));

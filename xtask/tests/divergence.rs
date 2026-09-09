@@ -210,7 +210,7 @@ fn a_proposed_row_is_open_with_an_empty_reason_and_keeps_the_file_s_prose() {
 fn the_reason_instrument_passes_the_tracked_registry() {
     let manifest = Manifest::load(workspace()).unwrap();
     let registry = Registry::load(workspace()).unwrap();
-    let reading = divergence::reason(&registry, &manifest);
+    let reading = divergence::reason(&registry, &manifest, workspace()).unwrap();
     assert_eq!(reading.status, xtask::reading::Status::Pass, "{reading:?}");
     assert_eq!(reading.instrument, divergence::INSTRUMENT);
     assert_eq!(reading.rule, "divergence.reason");
@@ -241,7 +241,7 @@ fn every_rule_this_instrument_evaluates_has_a_fixture_that_fails() {
             panic!("rule {} has no fixture at {}: {e}", rule.id, path.display())
         });
         let registry = Registry::parse(&text).unwrap();
-        let reading = divergence::reason(&registry, &manifest);
+        let reading = divergence::reason(&registry, &manifest, workspace()).unwrap();
         assert_eq!(
             reading.status,
             xtask::reading::Status::Fail,

@@ -182,7 +182,7 @@ fn the_harness_crate_is_asked_for_clippy_api_check_budget_and_unsafe_audit_only(
     assert_eq!(verdict.unmet.len(), 4, "{verdict:#?}");
     let store = Store::of_workspace(&root);
     for instrument in done::instruments_of(&krate("xtask")) {
-        store.write(&fresh(&root, instrument, "xtask")).unwrap();
+        store.record(&[fresh(&root, instrument, "xtask")]).unwrap();
     }
     assert!(judge(&root).unmet.is_empty(), "{:#?}", judge(&root));
 }
@@ -416,7 +416,9 @@ fn fresh_passing_readings_for_the_touched_crate_pass_and_an_edit_after_them_is_s
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
     let store = Store::of_workspace(&root);
     for instrument in FRESH {
-        store.write(&fresh(&root, instrument, "ext/pcre")).unwrap();
+        store
+            .record(&[fresh(&root, instrument, "ext/pcre")])
+            .unwrap();
     }
     let verdict = judge(&root);
     assert!(verdict.met(), "{verdict:#?}");
@@ -457,7 +459,7 @@ fn a_reading_through_the_constructor_is_fresh_for_its_scope_and_stale_after_one_
         };
         reading.status = Status::Pass;
         reading.message = "measured".into();
-        store.write(&reading).unwrap();
+        store.record(std::slice::from_ref(&reading)).unwrap();
     }
     let verdict = judge(&root);
     assert!(verdict.met(), "{verdict:#?}");
@@ -496,7 +498,7 @@ fn a_failing_or_skipped_reading_is_unmet_with_its_message() {
             }
             _ => {}
         }
-        store.write(&reading).unwrap();
+        store.record(std::slice::from_ref(&reading)).unwrap();
     }
     let verdict = judge(&root);
     assert_eq!(
@@ -519,7 +521,7 @@ fn a_kernel_or_native_without_a_witness_is_unmet_from_the_witness_reading() {
         if instrument == "witness" {
             reading.count("missing", 2).unwrap();
         }
-        store.write(&reading).unwrap();
+        store.record(std::slice::from_ref(&reading)).unwrap();
     }
     let verdict = judge(&root);
     assert_eq!(
@@ -545,7 +547,7 @@ fn a_lock_that_differs_must_be_in_the_diff_and_a_lock_in_the_diff_needs_its_read
             "2 public items of php_heap have no line in crates/php_heap/heap.lock: Gc, Zval".into();
         reading
     };
-    store.write(&differs(&root)).unwrap();
+    store.record(&[differs(&root)]).unwrap();
     let about_locks = |verdict: &Verdict| -> Vec<String> {
         verdict
             .unmet
@@ -577,7 +579,7 @@ fn a_lock_that_differs_must_be_in_the_diff_and_a_lock_in_the_diff_needs_its_read
             .contains(&"api-check: no reading for php_heap".into()),
         "{verdict:#?}"
     );
-    store.write(&differs(&root)).unwrap();
+    store.record(&[differs(&root)]).unwrap();
     let verdict = judge(&root);
     let lines = about_locks(&verdict);
     assert_eq!(lines.len(), 1, "{verdict:#?}");

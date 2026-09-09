@@ -17,7 +17,7 @@ use serde_json::{Map, Value, json};
 use crate::api_check;
 use crate::cli::{Format, Section};
 use crate::divergence::{Kind, Registry, Status};
-use crate::git::{self, git};
+use crate::git::git;
 use crate::manifest::{Manifest, Measure, Week};
 use crate::permit;
 use crate::reading::{self, Reading, Store};
@@ -604,7 +604,7 @@ fn instruments(log: &[Reading], window_days: Option<u64>) -> Result<Vec<Instrume
     let since = match window_days {
         Some(days) => {
             let days = i64::try_from(days).context("silent_days is past the calendar")?;
-            Some(git::epoch_seconds(&git::now()?)? - days * 86_400)
+            Some(reading::epoch_seconds(&reading::now()?)? - days * 86_400)
         }
         None => None,
     };
@@ -624,7 +624,7 @@ fn instruments(log: &[Reading], window_days: Option<u64>) -> Result<Vec<Instrume
                 Some(since) => {
                     let mut recent = false;
                     for r in &failed {
-                        recent |= git::epoch_seconds(&r.at)? >= since;
+                        recent |= reading::epoch_seconds(&r.at)? >= since;
                     }
                     Some(!recent)
                 }
@@ -869,7 +869,7 @@ fn cell(text: &str) -> String {
 /// The newest reading that matches, by its `at`. The store holds one file
 /// per instrument and scope, so a rule measured by two instruments has two
 /// readings; the newer is shown. `at` is always UTC to the second in one
-/// format (`git::now`), so its text orders as its instant does.
+/// format (`reading::now`), so its text orders as its instant does.
 fn latest(readings: &[Reading], pick: impl Fn(&Reading) -> bool) -> Option<Reading> {
     readings
         .iter()

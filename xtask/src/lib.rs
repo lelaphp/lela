@@ -49,9 +49,8 @@ use clap::Parser;
 
 use cli::{Cli, Command, WorktreeCommand};
 use divergence::Registry;
-use git::Stamp;
 use manifest::Manifest;
-use reading::{Reading, Status, Store};
+use reading::{Outcome, Reading, Store};
 
 /// The workspace this binary was built in: the parent of `xtask/`.
 pub fn built_root() -> PathBuf {
@@ -102,7 +101,7 @@ pub fn run() -> Result<()> {
             bench, runs, diff, ..
         } => {
             if bench {
-                permit::run_bench(&root, runs)
+                permit::run_bench(&root, &manifest, &store, runs)
             } else if diff {
                 permit::run_diff(&root, &manifest)
             } else {
@@ -155,25 +154,22 @@ pub fn run() -> Result<()> {
         Command::Witness { crates, accept } => {
             witness::command(&root, &manifest, &store, crates, accept)
         }
-        Command::Vocab { crates } => {
-            if vocab::run(&root, &manifest, &store, &crates)? {
-                Ok(())
-            } else {
+        Command::Vocab { crates } => match vocab::run(&root, &manifest, &store, &crates)? {
+            Outcome::Met => Ok(()),
+            Outcome::Unmet { .. } => {
                 bail!("vocab: an avoided word is in use; the findings are above")
             }
-        }
+        },
         Command::Track { .. } => bail!("track: answered above"),
         Command::Regions { .. } => bail!("regions: answered above"),
         Command::Worktree { .. } => bail!("worktree: answered above"),
     }
 }
 
-/// What every instrument ends with: each reading written to the store and
-/// printed as one line; an error when any failed, so the exit status says so.
+/// What every instrument ends with: each reading printed as one line and
+/// the set recorded, whose outcome is the exit.
 pub fn record(store: &Store, readings: &[Reading]) -> Result<()> {
-    let mut failed = 0;
     for reading in readings {
-        store.write(reading)?;
         println!(
             "{} {} {}: {}",
             reading.status.as_str(),
@@ -181,14 +177,8 @@ pub fn record(store: &Store, readings: &[Reading]) -> Result<()> {
             reading.scope,
             reading.message
         );
-        if reading.status == Status::Fail {
-            failed += 1;
-        }
     }
-    if failed > 0 {
-        bail!("{failed} of {} readings failed", readings.len());
-    }
-    Ok(())
+    store.record(readings)?.exit()
 }
 
 /// `xtask phpt`: the subsets asked for, each run and each written.
@@ -217,14 +207,14 @@ fn phpt_command(
 /// hundred-line ceiling, and `witness` is the arm that tipped it.
 fn divergence_command(root: &Path, manifest: &Manifest, store: &Store) -> Result<()> {
     let registry = Registry::load(root)?;
-    let mut reading = divergence::reason(&registry, manifest);
-    reading.stamp(&Stamp::take(root, Path::new(divergence::FILE))?);
-    store.write(&reading)?;
-    if reading.status == Status::Fail {
-        bail!("{}", reading.message);
+    let reading = divergence::reason(&registry, manifest, root)?;
+    match store.record(std::slice::from_ref(&reading))? {
+        Outcome::Met => {
+            println!("{}", reading.message);
+            Ok(())
+        }
+        Outcome::Unmet { .. } => bail!("{}", reading.message),
     }
-    println!("{}", reading.message);
-    Ok(())
 }
 
 /// The commands that measure nothing and read no manifest, answered

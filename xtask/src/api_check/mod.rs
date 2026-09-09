@@ -27,11 +27,10 @@ mod workspace;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
-use crate::git::Stamp;
 use crate::manifest::{Edge, Manifest, Seam};
 use crate::reading::{Number, Reading, Status, Store};
 
@@ -41,27 +40,19 @@ use workspace::{Crates, Present};
 
 pub const INSTRUMENT: &str = "api-check";
 
-/// Run the instrument over `root`, write every reading to the store, print
-/// one line per reading, and fail when any reading fails.
+/// Run the instrument over `root`, print one line per reading, and record
+/// them; the outcome is the exit.
 pub fn run(manifest: &Manifest, root: &Path, store: &Store, write: bool) -> Result<()> {
     let readings = check(manifest, root, write)?;
-    let mut failed = 0;
     for reading in &readings {
-        store.write(reading)?;
         println!(
             "{INSTRUMENT} {:<14} {:<4} {}",
             reading.scope,
             reading.status.as_str(),
             reading.message
         );
-        if reading.status == Status::Fail {
-            failed += 1;
-        }
     }
-    if failed > 0 {
-        bail!("{failed} of {} readings fail", readings.len());
-    }
-    Ok(())
+    store.record(&readings)?.exit()
 }
 
 /// Every reading of one run: one per seam, then one per crate present.
@@ -108,17 +99,6 @@ fn lock_kind(manifest: &Manifest, seam: &Seam) -> LockKind {
     }
 }
 
-/// Where a seam's lock lives, relative to the root: the directory of the
-/// crate the lock lives with, and the lock file in it. `None` for a lock no
-/// `[[crate]]` row names. What `done` reads to say whether a lock that
-/// differs is in the diff (harness-design.md §4.5).
-pub fn lock_place(manifest: &Manifest, seam: &Seam) -> Option<(PathBuf, PathBuf)> {
-    let home = manifest.lock_home(&seam.lock)?;
-    let dir = manifest_path(manifest, &home);
-    let file = dir.join(&seam.lock);
-    Some((dir, file))
-}
-
 fn seam_reading(
     manifest: &Manifest,
     crates: &Crates,
@@ -126,17 +106,19 @@ fn seam_reading(
     seam: &Seam,
     write: bool,
 ) -> Result<Reading> {
-    let mut reading = Reading::new(INSTRUMENT, &seam.name);
-    reading.adr = adrs(&seam.adr);
-    // The manifest's `on = "pub"` note for the facade's lock.
-    if seam.lock == "api.lock" {
-        reading.rule = String::from("api.lock-line");
-    }
+    // Stamped over the lock's home, the manifest's mapping of the seam;
+    // taken again after a rewrite, which the stamp is then over.
+    let stamped = || -> Result<Reading> {
+        let mut reading = Reading::for_scope(INSTRUMENT, &seam.name, manifest, crates.root())?;
+        reading.adr = adrs(&seam.adr);
+        // The manifest's `on = "pub"` note for the facade's lock.
+        if seam.lock == "api.lock" {
+            reading.rule = String::from("api.lock-line");
+        }
+        Ok(reading)
+    };
+    let mut reading = stamped()?;
     let home = manifest.lock_home(&seam.lock);
-    let scope = home
-        .as_deref()
-        .map_or_else(|| PathBuf::from("."), |h| manifest_path(manifest, h));
-    reading.stamp(&Stamp::take(crates.root(), &scope)?);
     let skip = |mut reading: Reading, message: String| {
         reading.status = Status::Skip;
         reading.message = message;
@@ -184,7 +166,9 @@ fn seam_reading(
 
     let mut problems = hold_lock(seam, kind, &path, &shown, &subject, &generated, write)?;
     if write {
-        reading.stamp(&Stamp::take(crates.root(), &scope)?);
+        let mut rewritten = stamped()?;
+        rewritten.numbers = std::mem::take(&mut reading.numbers);
+        reading = rewritten;
     }
     if let Some(ceiling) = manifest.lock_ceiling(seam)
         && generated.len() as u64 > ceiling
@@ -296,11 +280,7 @@ fn crate_reading(
     inventory: &mut Inventory<'_>,
     krate: &Present,
 ) -> Result<Reading> {
-    let mut reading = Reading::new(INSTRUMENT, &krate.name);
-    reading.stamp(&Stamp::take(
-        crates.root(),
-        &manifest_path(manifest, &krate.name),
-    )?);
+    let mut reading = Reading::for_scope(INSTRUMENT, &krate.name, manifest, crates.root())?;
     let rows: Vec<&Edge> = manifest
         .edges
         .iter()
@@ -572,10 +552,4 @@ fn adr_cite(manifest: &Manifest, adr: &[&str]) -> String {
         })
         .collect();
     format!(" ({})", cites.join("; "))
-}
-
-fn manifest_path(manifest: &Manifest, crate_name: &str) -> PathBuf {
-    manifest
-        .scope_path(crate_name)
-        .unwrap_or_else(|| PathBuf::from("."))
 }

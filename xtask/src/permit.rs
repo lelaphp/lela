@@ -30,7 +30,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::built;
-use crate::git::{self, Stamp, git};
+use crate::git::{self, git};
 use crate::manifest::{self, Manifest, Rule, scope_matches};
 use crate::reading::{Reading, Status, Store};
 use crate::rust;
@@ -592,23 +592,28 @@ impl Adapter {
     }
 }
 
-/// Write one reading per finding the adapter records: scope and rule are
+/// Record one reading per finding the adapter records: scope and rule are
 /// the rule id, a denial fails and a note passes, the stamp is over the
-/// file the call touches.
+/// file the call touches. The outcome is dropped: the decision is in the
+/// hook's JSON and the exit is 0 whatever it was (harness-design.md §4.4).
 fn record(root: &Path, call: &Call, judgement: &Judgement, adapter: Adapter) -> Result<()> {
-    let findings: Vec<&Finding> = judgement
+    let touched = call.path(root).unwrap_or_else(|| PathBuf::from("."));
+    let mut readings: Vec<Reading> = Vec::new();
+    for finding in judgement
         .findings
         .iter()
         .filter(|f| adapter.records(f.kind))
-        .collect();
-    if findings.is_empty() {
-        return Ok(());
-    }
-    let store = Store::of_workspace(root);
-    let scope = call.path(root).unwrap_or_else(|| PathBuf::from("."));
-    let stamp = Stamp::take(root, &scope)?;
-    for finding in findings {
-        let mut reading = Reading::new(INSTRUMENT, &finding.rule);
+    {
+        // One call is one moment and one tree: the first finding's stamp
+        // is every finding's, and git is spawned once per call.
+        let mut reading = match readings.first() {
+            Some(first) => {
+                let mut reading = first.clone();
+                reading.scope.clone_from(&finding.rule);
+                reading
+            }
+            None => Reading::stamped_over(INSTRUMENT, &finding.rule, root, &touched)?,
+        };
         reading.rule.clone_from(&finding.rule);
         reading.status = match finding.kind {
             Kind::Deny => Status::Fail,
@@ -622,9 +627,9 @@ fn record(root: &Path, call: &Call, judgement: &Judgement, adapter: Adapter) -> 
         );
         reading.adr = finding.adr.first().cloned().unwrap_or_default();
         reading.session.clone_from(&call.session_id);
-        reading.stamp(&stamp);
-        store.write(&reading)?;
+        readings.push(reading);
     }
+    Store::of_workspace(root).record(&readings)?;
     Ok(())
 }
 
@@ -693,18 +698,19 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
 /// was up. Best effort, since the refusal stands whether or not the store
 /// takes it.
 fn record_the_refusal(root: &Path, call: &Call, err: &anyhow::Error) {
-    let mut reading = Reading::new(INSTRUMENT, STALE_RULE);
-    STALE_RULE.clone_into(&mut reading.rule);
-    reading.status = Status::Fail;
-    reading.message = format!(
-        "{} {}: this call was not judged. {err:#}",
-        call.tool_name,
-        call.subject(root)
-    );
-    reading.session.clone_from(&call.session_id);
-    let recorded = Stamp::take(root, Path::new(manifest::FILE))
-        .map(|stamp| reading.stamp(&stamp))
-        .and_then(|()| Store::of_workspace(root).write(&reading));
+    let recorded = Reading::stamped_over(INSTRUMENT, STALE_RULE, root, Path::new(manifest::FILE))
+        .and_then(|mut reading| {
+            STALE_RULE.clone_into(&mut reading.rule);
+            reading.status = Status::Fail;
+            reading.message = format!(
+                "{} {}: this call was not judged. {err:#}",
+                call.tool_name,
+                call.subject(root)
+            );
+            reading.session.clone_from(&call.session_id);
+            Store::of_workspace(root).record(&[reading])
+        });
+    // The refusal is the exit already; the outcome of recording it is not.
     if let Err(err) = recorded {
         eprintln!("xtask permit: the refusal to judge was not recorded: {err:#}");
     }
@@ -1018,8 +1024,8 @@ pub fn scratch_workspace(root: &Path, dir: &Path) -> Result<()> {
 }
 
 /// `permit --bench`: measure, print one line per shape and the verdict,
-/// write the reading.
-pub fn run_bench(root: &Path, runs: usize) -> Result<()> {
+/// record the reading, over the harness crate whose sources the judge is.
+pub fn run_bench(root: &Path, manifest: &Manifest, store: &Store, runs: usize) -> Result<()> {
     let measured = bench(root, runs)?;
     let verdict = if measured.meets_the_bar() {
         "pass"
@@ -1040,7 +1046,7 @@ pub fn run_bench(root: &Path, runs: usize) -> Result<()> {
     for (name, q) in &measured.shapes {
         println!("  {}", line(name, q));
     }
-    let mut reading = Reading::new(INSTRUMENT, "bench");
+    let mut reading = Reading::for_scope(INSTRUMENT, crate::done::HARNESS, manifest, root)?;
     reading.status = if measured.meets_the_bar() {
         Status::Pass
     } else {
@@ -1072,9 +1078,7 @@ pub fn run_bench(root: &Path, runs: usize) -> Result<()> {
         "permit at the tool call: p99 {:.1} ms against the bar of {BAR_MS:.0} ms (harness-design.md §4.4)",
         measured.all.p99
     );
-    reading.stamp(&Stamp::take(root, Path::new("xtask"))?);
-    Store::of_workspace(root).write(&reading)?;
-    Ok(())
+    store.record(&[reading])?.exit()
 }
 
 #[cfg(test)]

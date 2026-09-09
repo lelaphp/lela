@@ -42,10 +42,10 @@ use serde_json::{Value, json};
 
 use crate::api_check;
 use crate::divergence::{self, Registry};
-use crate::git::{self, Change, Stamp};
+use crate::git::{self, Change};
 use crate::manifest::{Crate, Manifest};
 use crate::permit;
-use crate::reading::{Number, Reading, Status, Store};
+use crate::reading::{Number, Outcome, Reading, Status, Store};
 
 /// The instrument name the reading carries.
 pub const INSTRUMENT: &str = "done";
@@ -142,8 +142,8 @@ impl Verdict {
     }
 
     /// The reading: `done` over `workspace`, stamped over the whole tree.
-    pub fn reading(&self, root: &Path) -> Result<Reading> {
-        let mut reading = Reading::new(INSTRUMENT, "workspace");
+    pub fn reading(&self, manifest: &Manifest, root: &Path) -> Result<Reading> {
+        let mut reading = Reading::for_scope(INSTRUMENT, "workspace", manifest, root)?;
         reading.status = if self.met() {
             Status::Pass
         } else {
@@ -163,7 +163,6 @@ impl Verdict {
                 self.unmet.join("; ")
             )
         };
-        reading.stamp(&Stamp::take(root, Path::new("."))?);
         Ok(reading)
     }
 }
@@ -269,9 +268,17 @@ fn locks(
     unmet: &mut Vec<String>,
 ) -> Result<()> {
     for seam in &manifest.seams {
-        let Some((dir, file)) = api_check::lock_place(manifest, seam) else {
+        // A lock no [[crate]] row names has no home to hash. One that
+        // has is hashed where the manifest maps the seam, the one
+        // mapping, so the hash here is the one api-check stamped the
+        // seam's reading with.
+        if manifest.lock_home(&seam.lock).is_none() {
+            continue;
+        }
+        let Some(dir) = manifest.scope_path(&seam.name) else {
             continue;
         };
+        let file = dir.join(&seam.lock);
         let shown = file.display().to_string();
         let in_diff = changed.iter().any(|c| Path::new(&c.path) == file);
         let Some(reading) = store.read(api_check::INSTRUMENT, &seam.name)? else {
@@ -392,16 +399,15 @@ pub fn run(
     base: Option<&str>,
 ) -> Result<()> {
     let verdict = judge(root, manifest, registry, store, base)?;
-    store.write(&verdict.reading(root)?)?;
+    let outcome = store.record(&[verdict.reading(manifest, root)?])?;
     print!("{}", verdict.render());
-    if verdict.met() {
-        Ok(())
-    } else {
-        bail!(
+    match outcome {
+        Outcome::Met => Ok(()),
+        Outcome::Unmet { .. } => bail!(
             "{} condition{} of done unmet",
             verdict.unmet.len(),
             plural(verdict.unmet.len())
-        )
+        ),
     }
 }
 
@@ -435,7 +441,12 @@ pub fn hook(
     }
     match judge(root, manifest, registry, store, None) {
         Ok(verdict) => {
-            if let Err(err) = verdict.reading(root).and_then(|r| store.write(&r)) {
+            // The hook's exit is 0 and its verdict is the JSON; the
+            // outcome of recording it is neither.
+            let recorded = verdict
+                .reading(manifest, root)
+                .and_then(|r| store.record(&[r]));
+            if let Err(err) = recorded {
                 eprintln!("xtask done: the verdict stands but was not recorded: {err:#}");
             }
             verdict.hook_output()

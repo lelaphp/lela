@@ -183,7 +183,7 @@ impl Registry {
                 kind.prefix()
             );
         }
-        let since = crate::git::now()?
+        let since = reading::now()?
             .date
             .context("the clock gave no date")?
             .to_string();
@@ -252,10 +252,10 @@ impl Counts {
 /// The `divergence-reason` instrument's reading over the workspace: fail
 /// when an accepted row has no reason, naming each such row and printing
 /// the text of the manifest rule whose `check` predicate names this
-/// instrument; the counts are the numbers. The stamp is the caller's.
-pub fn reason(registry: &Registry, manifest: &Manifest) -> Reading {
+/// instrument; the counts are the numbers.
+pub fn reason(registry: &Registry, manifest: &Manifest, root: &Path) -> Result<Reading> {
     let rule = manifest.rule_checked_by(INSTRUMENT);
-    let mut reading = Reading::new(INSTRUMENT, "workspace");
+    let mut reading = Reading::for_scope(INSTRUMENT, "workspace", manifest, root)?;
     if let Some(rule) = rule {
         reading.rule.clone_from(&rule.id);
         reading.adr = rule.adr.iter().collect::<Vec<_>>().join(", ");
@@ -291,5 +291,5 @@ pub fn reason(registry: &Registry, manifest: &Manifest) -> Reading {
             rule.map(|r| r.text.as_str()).unwrap_or_default()
         );
     }
-    reading
+    Ok(reading)
 }

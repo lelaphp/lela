@@ -98,13 +98,13 @@ fn locks_and_budget_render_the_readings_the_instruments_wrote() {
     let mut api = Reading::new("api-check", "api");
     api.status = Status::Pass;
     api.numbers.insert("items".into(), 301.into());
-    store.write(&api).unwrap();
+    store.record(std::slice::from_ref(&api)).unwrap();
 
     let mut heap = Reading::new("budget", "php_heap");
     heap.status = Status::Fail;
     heap.numbers.insert("lines".into(), 20001.into());
     heap.message = "php_heap: 20001 lines over the ceiling of 20000".into();
-    store.write(&heap).unwrap();
+    store.record(std::slice::from_ref(&heap)).unwrap();
 
     let (ok, md, _) = status(&root, &["--section", "locks"]);
     assert!(ok);
@@ -167,7 +167,7 @@ fn the_local_sections_render_from_the_store_alone() {
     phpt.numbers.insert("passed".into(), 9.into());
     phpt.numbers.insert("failed".into(), 1.into());
     phpt.message = "Zend/tests: 1 of 10 failed".into();
-    store.write(&phpt).unwrap();
+    store.record(std::slice::from_ref(&phpt)).unwrap();
     let (ok, md, _) = status(&root, &["--section", "phpt"]);
     assert!(ok);
     assert!(
@@ -181,8 +181,8 @@ fn the_local_sections_render_from_the_store_alone() {
     denial.status = Status::Fail;
     denial.adr = String::new();
     denial.message = "Edit seams.toml: Harness configuration ... by a person.".into();
-    store.write(&denial).unwrap();
-    store.write(&denial).unwrap();
+    store.record(std::slice::from_ref(&denial)).unwrap();
+    store.record(std::slice::from_ref(&denial)).unwrap();
     let (ok, md, _) = status(&root, &["--section", "permits"]);
     assert!(ok, "{md}");
     let row = md.lines().find(|l| l.contains("harness.self")).unwrap();
@@ -322,10 +322,10 @@ fn permits_counts_denials_per_session_and_in_total() {
     denial.status = Status::Fail;
     denial.message = "Edit seams.toml: edited by a person.".into();
     denial.session = "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11".into();
-    store.write(&denial).unwrap();
-    store.write(&denial).unwrap();
+    store.record(std::slice::from_ref(&denial)).unwrap();
+    store.record(std::slice::from_ref(&denial)).unwrap();
     denial.session = "9a8b7c6d-0000-4000-8000-000000000000".into();
-    store.write(&denial).unwrap();
+    store.record(std::slice::from_ref(&denial)).unwrap();
 
     let (ok, md, err) = status(&root, &["--section", "permits"]);
     assert!(ok, "{err}");
@@ -368,7 +368,7 @@ fn permits_carries_a_row_for_the_rules_permit_judges_by_that_are_its_own() {
     refusal.status = Status::Fail;
     refusal.message = "Edit seams.toml: this call was not judged.".into();
     refusal.session = "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11".into();
-    store.write(&refusal).unwrap();
+    store.record(std::slice::from_ref(&refusal)).unwrap();
 
     let (ok, md, err) = status(&root, &["--section", "permits"]);
     assert!(ok, "{err}");
@@ -406,20 +406,20 @@ fn permits_lists_the_instruments_and_the_candidates_for_silent() {
 
     let mut budget = Reading::new("budget", "php_heap");
     budget.status = Status::Pass;
-    store.write(&budget).unwrap();
-    store.write(&budget).unwrap();
+    store.record(std::slice::from_ref(&budget)).unwrap();
+    store.record(std::slice::from_ref(&budget)).unwrap();
 
     let mut vocab = Reading::new("vocab", "php_heap");
     vocab.status = Status::Pass;
-    store.write(&vocab).unwrap();
+    store.record(std::slice::from_ref(&vocab)).unwrap();
     vocab.scope = "fixture".into();
     vocab.status = Status::Fail;
-    vocab.at = xtask::git::now().unwrap();
-    store.write(&vocab).unwrap();
+    vocab.at = xtask::reading::now().unwrap();
+    store.record(std::slice::from_ref(&vocab)).unwrap();
 
     let mut old = Reading::new("clippy", "php_heap");
     old.status = Status::Fail;
-    store.write(&old).unwrap();
+    store.record(std::slice::from_ref(&old)).unwrap();
 
     let (ok, md, err) = status(&root, &["--section", "permits"]);
     assert!(ok, "{err}");
@@ -504,15 +504,15 @@ reads = [{ instrument = "vocab", scope = "xtask", number = "avoided", max = 0 }]
     let store = Store::of_workspace(&root);
     let mut budget = Reading::new("budget", "xtask");
     budget.status = Status::Pass;
-    store.write(&budget).unwrap();
+    store.record(std::slice::from_ref(&budget)).unwrap();
     let mut lines = Reading::new("budget", "xtask");
     lines.status = Status::Pass;
     lines.numbers.insert("lines".into(), 6508.into());
-    store.write(&lines).unwrap();
+    store.record(std::slice::from_ref(&lines)).unwrap();
     let mut items = Reading::new("api-check", "api");
     items.status = Status::Fail;
     items.numbers.insert("items".into(), 412.5.into());
-    store.write(&items).unwrap();
+    store.record(std::slice::from_ref(&items)).unwrap();
     let mut crashed = Reading::new("vocab", "xtask");
     crashed.status = Status::Fail;
     crashed.numbers.insert("avoided".into(), 0.into());
@@ -541,7 +541,7 @@ reads = [{ instrument = "vocab", scope = "xtask", number = "avoided", max = 0 }]
         "{}",
         rows[2]
     );
-    store.write(&crashed).unwrap();
+    store.record(std::slice::from_ref(&crashed)).unwrap();
     let (ok, md, _) = status(&root, &["--section", "week", "--week", "3"]);
     assert!(ok);
     assert!(
@@ -585,10 +585,10 @@ fn permits_marks_this_session_and_the_session_block_carries_it() {
     denial.status = Status::Fail;
     denial.message = "Edit seams.toml: edited by a person.".into();
     denial.session = "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11".into();
-    store.write(&denial).unwrap();
+    store.record(std::slice::from_ref(&denial)).unwrap();
     denial.session = "9a8b7c6d-0000-4000-8000-000000000000".into();
-    store.write(&denial).unwrap();
-    store.write(&denial).unwrap();
+    store.record(std::slice::from_ref(&denial)).unwrap();
+    store.record(std::slice::from_ref(&denial)).unwrap();
 
     let this = "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11";
     let (ok, md, err) = status(&root, &["--section", "permits", "--session-id", this]);

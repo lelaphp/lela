@@ -475,11 +475,14 @@ fn bench_measures_p99_against_the_bar_and_writes_a_reading() {
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("p99"), "{out}");
     assert!(out.contains("100 ms"), "the bar is named: {out}");
+    // The judge's cost is a reading over the harness crate, whose sources
+    // the judge is; the store's key is the manifest's scope.
     let reading = Store::of_workspace(&root)
-        .read("permit", "bench")
+        .read("permit", "xtask")
         .unwrap()
         .expect("the bench is a reading");
     assert_eq!(reading.numbers["runs"], 6.into());
+    assert_eq!(reading.tree().len(), 40, "stamped over the harness crate");
     assert!(
         reading.numbers.contains_key("p99_ms"),
         "{:?}",

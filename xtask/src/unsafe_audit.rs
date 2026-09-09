@@ -31,11 +31,7 @@ pub fn run(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
     let mut readings = Vec::new();
     for krate in &manifest.crates {
         let created = sources::exists(root, krate);
-        let mut reading = if created {
-            Reading::for_crate("unsafe-audit", krate, root)?
-        } else {
-            Reading::new("unsafe-audit", &krate.name)
-        };
+        let mut reading = Reading::for_crate("unsafe-audit", krate, root)?;
         RULE.clone_into(&mut reading.rule);
         reading.adr = rule.adr.adr_field();
         if created {

@@ -24,10 +24,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::git::Stamp;
 use crate::glossary::{self, Avoided, Glossary};
 use crate::manifest::{Crate, Manifest, Rule};
-use crate::reading::{self, Reading, Status, Store};
+use crate::reading::{self, Outcome, Reading, Status, Store};
 
 /// The instrument's name, the reading's `instrument` field.
 pub const INSTRUMENT: &str = "vocab";
@@ -105,9 +104,9 @@ pub struct Scan {
 }
 
 /// Run the instrument over the manifest's crates, or over `only` when it
-/// names some, and write a reading per crate that exists. `Ok(true)` when
-/// every reading passed.
-pub fn run(root: &Path, manifest: &Manifest, store: &Store, only: &[String]) -> Result<bool> {
+/// names some, and record a reading per crate that exists; the outcome is
+/// the exit.
+pub fn run(root: &Path, manifest: &Manifest, store: &Store, only: &[String]) -> Result<Outcome> {
     let rules: Vec<&Rule> = manifest
         .rules
         .iter()
@@ -132,7 +131,7 @@ pub fn run(root: &Path, manifest: &Manifest, store: &Store, only: &[String]) -> 
     }
     let glossary_file = rule.predicate.avoid_from.as_deref().unwrap_or_default();
     let glossary = Glossary::load(&root.join(glossary_file))?;
-    let mut all_pass = true;
+    let mut readings = Vec::new();
     for krate in &manifest.crates {
         if !only.is_empty() && !only.iter().any(|n| n == &krate.name) {
             continue;
@@ -140,14 +139,12 @@ pub fn run(root: &Path, manifest: &Manifest, store: &Store, only: &[String]) -> 
         let Some(scan) = scan_in_scope(root, rule, krate, &glossary)? else {
             continue;
         };
-        let reading = reading_of(&scan, root, rule, krate)?;
         for finding in &scan.findings {
             println!("{}/{finding}", krate.path().display());
         }
-        all_pass &= reading.status == Status::Pass;
-        store.write(&reading)?;
+        readings.push(reading_of(&scan, root, rule, krate)?);
     }
-    Ok(all_pass)
+    store.record(&readings)
 }
 
 /// Scan `krate` under `rule`'s scope: its sources. `None` when the scope
@@ -170,7 +167,7 @@ fn scan_in_scope(
 /// The reading of one crate's scan: `numbers` are the counts and the hits,
 /// `message` lists every finding under the rule's text.
 fn reading_of(scan: &Scan, root: &Path, rule: &Rule, krate: &Crate) -> Result<Reading> {
-    let mut reading = Reading::new(INSTRUMENT, &krate.name);
+    let mut reading = Reading::for_crate(INSTRUMENT, krate, root)?;
     reading.rule.clone_from(&rule.id);
     reading.adr = rule.adr.iter().collect::<Vec<_>>().join(", ");
     reading.numbers = BTreeMap::from([
@@ -199,7 +196,6 @@ fn reading_of(scan: &Scan, root: &Path, rule: &Rule, krate: &Crate) -> Result<Re
             .join("\n");
         format!("{}: {}\n{list}", krate.name, rule.text)
     };
-    reading.stamp(&Stamp::take(root, &krate.path())?);
     Ok(reading)
 }
 

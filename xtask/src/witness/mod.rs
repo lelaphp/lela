@@ -290,10 +290,9 @@ pub fn run(
         if !ask.crates.is_empty() && !ask.crates.iter().any(|n| n == &krate.name) {
             continue;
         }
-        // The reading of a crate no witness runs for, which nothing
-        // measured and so carries no stamp: the harness's, or one not yet
-        // created.
-        let mut unrun = under_rule(Reading::new(INSTRUMENT, &krate.name), rule);
+        // The reading of a crate no witness runs for: the harness's, or
+        // one not yet created, which carries no stamp.
+        let mut unrun = under_rule(Reading::for_crate(INSTRUMENT, krate, root)?, rule);
         if krate.name == crate::done::HARNESS {
             // The harness measures the engine and carries no witness of its
             // own; `done` asks it for none either (§4.5).

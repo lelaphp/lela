@@ -39,14 +39,9 @@ pub fn run(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
 /// One crate against its ceiling, and what it counted. A crate not yet
 /// created is measured by nothing and its reading carries no stamp.
 fn crate_reading(root: &Path, krate: &Crate) -> Result<(Reading, Count)> {
-    let created = sources::exists(root, krate);
-    let mut reading = if created {
-        Reading::for_crate("budget", krate, root)?
-    } else {
-        Reading::new("budget", &krate.name)
-    };
+    let mut reading = Reading::for_crate("budget", krate, root)?;
     reading.count("ceiling", krate.budget)?;
-    if !created {
+    if !sources::exists(root, krate) {
         reading.message = format!("{}: not yet created", krate.name);
         return Ok((reading, Count::default()));
     }
