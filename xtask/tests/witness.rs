@@ -491,3 +491,63 @@ fn the_harness_crate_carries_no_witness_of_its_own() {
         readings[0]
     );
 }
+
+/// A crate whose sources cannot be read is a failing reading naming the
+/// crate and the file, never a crate quietly skipped: `done` asks it for a
+/// witness reading, and a pass over sources the grammar never saw would
+/// say the crate was measured when it was not.
+#[test]
+fn a_crate_whose_sources_cannot_be_read_fails_and_names_the_crate() {
+    let root = std::env::temp_dir().join(format!("xtask-witness-unread-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("ext/pcre/src")).unwrap();
+    fs::write(
+        root.join("ext/pcre/Cargo.toml"),
+        "[package]\nname = \"php_ext_pcre\"\n",
+    )
+    .unwrap();
+    // Two bytes no text is: the file is there and is not one the fence
+    // grammar can read.
+    fs::write(root.join("ext/pcre/src/lib.rs"), [0xff, 0xfe]).unwrap();
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["add", "-A"],
+        vec![
+            "-c",
+            "user.name=x",
+            "-c",
+            "user.email=x@x",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "scratch",
+        ],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+    let readings = witness::run(
+        &root,
+        &manifest(),
+        &Registry::default(),
+        &Ask {
+            crates: vec!["ext/pcre".to_owned()],
+            accept: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(readings.len(), 1, "{readings:#?}");
+    let reading = &readings[0];
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert!(
+        reading.message.starts_with("ext/pcre:") && reading.message.contains("src/lib.rs"),
+        "{}",
+        reading.message
+    );
+}

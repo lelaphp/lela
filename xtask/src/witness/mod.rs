@@ -32,7 +32,9 @@
 //! **What is the lane module's.** The tally, the print loop, the runner
 //! ladder and the reading's status are [`lane`]'s, shared with `phpt`;
 //! this module contributes [`Judgement`], the per-item judge in `judge`
-//! and the words of the crate's message.
+//! and the words of the crate's message. A crate whose sources cannot be
+//! read is a failing reading naming the crate and the file, never a crate
+//! quietly skipped, as a phpt subset the pinned tree has not is.
 //!
 //! **What `wall=D` is.** Disclosure. The declared durations are summed into
 //! the reading's `wall_ms` and gate nothing; the limit a run has is the
@@ -53,7 +55,7 @@ use crate::git::Stamp;
 use crate::lane::{self, Outcome};
 use crate::manifest::{Crate, Manifest, Rule};
 use crate::oracle::{Oracle, Runner};
-use crate::reading::{Reading, Store, listed};
+use crate::reading::{Reading, Status, Store, listed};
 use crate::sources;
 use fence::Extracted;
 
@@ -278,8 +280,8 @@ pub fn run(
         if !ask.crates.is_empty() && !ask.crates.iter().any(|n| n == &krate.name) {
             continue;
         }
-        // The reading of a crate no witness runs for: the harness's, or
-        // one not yet created.
+        // The reading of a crate no witness runs for: the harness's, one
+        // not yet created, or one whose sources cannot be read.
         let mut unrun = Reading::new(INSTRUMENT, &krate.name);
         if let Some(rule) = rule {
             unrun.rule.clone_from(&rule.id);
@@ -297,7 +299,20 @@ pub fn run(
             readings.push(unrun);
             continue;
         }
-        let found = extract(root, krate, rule)?;
+        let found = match extract(root, krate, rule) {
+            Ok(found) => found,
+            // A source the grammar could not read: the crate's reading
+            // fails and names it, since `done` asks the crate for a
+            // witness reading and a pass over sources never seen would
+            // say the crate was measured when it was not.
+            Err(unread) => {
+                unrun.status = Status::Fail;
+                unrun.message = format!("{}: {unread:#}", krate.name);
+                unrun.stamp(&Stamp::take(root, &krate.path())?);
+                readings.push(unrun);
+                continue;
+            }
+        };
         for problem in &found.problems {
             println!("bork {}", problem.at_line());
         }
@@ -343,11 +358,8 @@ pub fn extract(root: &Path, krate: &Crate, rule: Option<&Rule>) -> Result<Extrac
     let mut out = Extracted::default();
     for path in sources::rust(root, krate)? {
         let file = root.join(&path);
-        let Ok(text) = fs::read_to_string(&file) else {
-            // A source that is not text is not one this grammar reads;
-            // `budget` is the sensor that says so.
-            continue;
-        };
+        let text = fs::read_to_string(&file)
+            .with_context(|| format!("{path} is not a source the fence grammar can read"))?;
         let mut found = fence::extract(Path::new(&path), &text);
         if !covered(rule, Path::new(&path)) {
             found.subjects.clear();
