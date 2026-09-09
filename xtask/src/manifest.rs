@@ -80,7 +80,8 @@ pub struct Budget {
     pub bindings: u64,
 }
 
-/// `[[crate]]`: one crate and its ceiling; nothing about `unsafe`.
+/// `[[crate]]`: one crate, its ceiling and the subsets of the pinned
+/// corpus it is measured by; nothing about `unsafe`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Crate {
@@ -93,6 +94,12 @@ pub struct Crate {
     pub feature: Option<String>,
     #[serde(default)]
     pub targets: Vec<String>,
+    /// The directories of the pinned php-src tree whose `.phpt` tests are
+    /// this crate's, relative to it (`Zend/tests`). An extension's are its
+    /// own by the design and are not written here; a crate with neither is
+    /// not asked for a phpt reading.
+    #[serde(default)]
+    pub phpt: Vec<String>,
 }
 
 impl Crate {
@@ -105,6 +112,28 @@ impl Crate {
         } else {
             Path::new("crates").join(&self.name)
         }
+    }
+
+    /// The subsets of the pinned corpus this crate owns, relative to the
+    /// pinned tree: the ones its row names, or `ext/<name>/tests` for an
+    /// extension, whose subset the design already states (design §12,
+    /// `ext/AGENTS.md`). A crate that owns none is not asked for a phpt
+    /// reading, and `phpt` refuses to guess one for it (harness §4.5
+    /// condition 1, §7).
+    pub fn subsets(&self) -> Vec<PathBuf> {
+        if !self.phpt.is_empty() {
+            return self.phpt.iter().map(PathBuf::from).collect();
+        }
+        match self.name.strip_prefix("ext/") {
+            Some(extension) => vec![Path::new("ext").join(extension).join("tests")],
+            None => Vec::new(),
+        }
+    }
+
+    /// Whether the crate is behind a feature, and so outside the default
+    /// build the per-commit lane measures (harness §7).
+    pub fn optional(&self) -> bool {
+        self.feature.is_some()
     }
 }
 

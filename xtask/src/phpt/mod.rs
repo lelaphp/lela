@@ -23,9 +23,17 @@
 //! `--CONFLICTS--` is honoured by construction: nothing else of the corpus
 //! is running while a test does.
 //!
+//! **Which subsets a lane runs.** The `[[crate]]` row, and nothing here:
+//! a crate owns the directories of the corpus its row names, an extension
+//! owns `ext/<name>/tests` by the design, and a crate that owns none is
+//! asked for no phpt reading. A bare call is the per-commit lane, which is
+//! every subset of every crate the default build has, in manifest order
+//! (harness §7); `--subset` is one crate's subsets or one directory of the
+//! pinned tree.
+//!
 //! **What is not run here.** The full corpus, the nightly verdict control
 //! and the tier's lanes are CI's, under the manifest's `lanes.nightly`
-//! rule; `--subset` is the form an agent runs. A CGI-shaped test, a
+//! rule; the per-commit lane and one subset are an agent's to run. A CGI-shaped test, a
 //! `--PHPDBG--` one and a `--REDIRECTTEST--` are skipped with their reason:
 //! this runner hosts the command line. Beyond those, the process adapter
 //! gives a test one stdin and two streams captured as one, so a test that
@@ -45,7 +53,7 @@ use clap::ValueEnum;
 use regex_lite::Regex;
 
 use crate::git::Stamp;
-use crate::manifest::Manifest;
+use crate::manifest::{Crate, Manifest};
 use crate::oracle::{self, Invocation, Output, Pin, Program, Verdict as Compared};
 use crate::reading::{Reading, Status};
 use expect::Expectation;
@@ -85,54 +93,125 @@ impl Lane {
     }
 }
 
-/// One subset of the corpus: where its tests are and what a reading of it
-/// is scoped to.
+/// One directory of the corpus: where it stands in the pinned tree, and
+/// where it stands on this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Subset {
-    /// The reading's scope: the crate whose subset it is (`ext/pcre`), or
-    /// the corpus directory (`Zend/tests`).
-    pub scope: String,
+pub struct Dir {
     /// The directory, relative to the pinned php-src tree.
     pub under: PathBuf,
-    /// The directory on this machine.
+    /// The same directory on this machine.
     pub dir: PathBuf,
 }
 
+impl Dir {
+    fn at(source: &Path, under: PathBuf) -> Dir {
+        Dir {
+            dir: source.join(&under),
+            under,
+        }
+    }
+
+    /// Where the test stands inside this directory.
+    fn inside<'a>(&self, test: &'a Path) -> &'a Path {
+        test.strip_prefix(&self.dir).unwrap_or(test)
+    }
+}
+
+/// One subset of the corpus: the directories its tests are in and what a
+/// reading of it is scoped to. A crate's subset is every directory its
+/// `[[crate]]` row owns, so the crate is measured by one reading whatever
+/// number of the corpus's directories it is held to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Subset {
+    /// The reading's scope: the crate whose subset it is (`ext/pcre`,
+    /// `php_engine`), or the corpus directory when a caller named one
+    /// (`Zend/tests`), which no crate owns and `done` never reads.
+    pub scope: String,
+    /// The directories, in the order the row names them.
+    pub dirs: Vec<Dir>,
+}
+
 impl Subset {
-    /// The subset a name asks for: an extension by name (`pcre`,
-    /// `ext/pcre`), whose tests are `php-src/ext/<name>/tests` and whose
-    /// scope is the crate, or a directory of the pinned tree
-    /// (`Zend/tests`), whose scope is that path.
+    /// The subset a name asks for: a crate of the manifest by name
+    /// (`php_engine`, `pcre`, `ext/pcre`), whose subsets its row owns, or
+    /// a directory of the pinned tree (`Zend/tests`), whose scope is that
+    /// path. A crate that owns none is refused by saying so: which
+    /// subsets are a crate's is the manifest's sentence, and an absent one
+    /// is an answer, not a lookup that failed.
     pub fn resolve(manifest: &Manifest, name: &str) -> Result<Subset> {
         let source = &manifest.pin.source.path;
         let named = name.trim_matches('/');
-        let as_crate = if named.starts_with("ext/") {
-            named.to_owned()
-        } else {
-            format!("ext/{named}")
-        };
-        if let Some(krate) = manifest.crate_named(&as_crate) {
-            let extension = krate.name.strip_prefix("ext/").unwrap_or(&krate.name);
-            let under = Path::new("ext").join(extension).join("tests");
-            return Ok(Subset::at(source, krate.name.clone(), under));
+        let as_crate = format!("ext/{named}");
+        if let Some(krate) = manifest
+            .crate_named(named)
+            .or_else(|| manifest.crate_named(&as_crate))
+        {
+            if let Some(subset) = Subset::of(manifest, krate) {
+                return Ok(subset);
+            }
+            let owned: Vec<String> = krate
+                .subsets()
+                .iter()
+                .map(|under| under.to_string_lossy().into_owned())
+                .collect();
+            if owned.is_empty() {
+                bail!(
+                    "{}: the [[crate]] row names no phpt subset, so the crate has none and `done` asks it for no phpt reading",
+                    krate.name
+                );
+            }
+            let named: Vec<&str> = owned.iter().map(String::as_str).collect();
+            bail!(
+                "{}: the [[crate]] row names {}, and the pinned php-src at {} ({}) has none of them",
+                krate.name,
+                listed(&named),
+                source.display(),
+                manifest.pin.source.tag
+            );
         }
         let under = PathBuf::from(named);
         if source.join(&under).is_dir() {
-            return Ok(Subset::at(source, named.to_owned(), under));
+            return Ok(Subset {
+                scope: named.to_owned(),
+                dirs: vec![Dir::at(source, under)],
+            });
         }
         bail!(
-            "no subset {name:?}: the manifest has no crate {as_crate}, and the pinned php-src at {} ({}) has no {named}",
+            "no subset {name:?}: the manifest has no crate {named} and no crate {as_crate}, and the pinned php-src at {} ({}) has no {named}",
             source.display(),
             manifest.pin.source.tag
         )
     }
 
-    fn at(source: &Path, scope: String, under: PathBuf) -> Subset {
-        Subset {
-            dir: source.join(&under),
-            scope,
-            under,
-        }
+    /// The subset one crate owns: the directories of its row that the
+    /// pinned tree has, and nothing when it owns none or the tree has none
+    /// of them.
+    pub fn of(manifest: &Manifest, krate: &Crate) -> Option<Subset> {
+        let source = &manifest.pin.source.path;
+        let dirs: Vec<Dir> = krate
+            .subsets()
+            .into_iter()
+            .filter(|under| source.join(under).is_dir())
+            .map(|under| Dir::at(source, under))
+            .collect();
+        (!dirs.is_empty()).then(|| Subset {
+            scope: krate.name.clone(),
+            dirs,
+        })
+    }
+
+    /// The per-commit lane (harness §7): every subset of every crate the
+    /// default build has, in manifest order. The row is the statement and
+    /// this is its only reader, so the lane is never a second copy of the
+    /// design's table; a crate behind a feature is outside the default
+    /// build and outside the lane.
+    pub fn lane(manifest: &Manifest) -> Vec<Subset> {
+        manifest
+            .crates
+            .iter()
+            .filter(|krate| !krate.optional())
+            .filter_map(|krate| Subset::of(manifest, krate))
+            .collect()
     }
 
     /// Every subset of the corpus: the nightly lane's, which is `Zend`,
@@ -140,11 +219,16 @@ impl Subset {
     pub fn corpus(manifest: &Manifest) -> Vec<Subset> {
         let source = &manifest.pin.source.path;
         let mut subsets = Vec::new();
-        for name in ["Zend/tests", "tests"] {
-            let under = PathBuf::from(name);
+        let mut push = |under: PathBuf| {
             if source.join(&under).is_dir() {
-                subsets.push(Subset::at(source, name.to_owned(), under));
+                subsets.push(Subset {
+                    scope: under.to_string_lossy().into_owned(),
+                    dirs: vec![Dir::at(source, under)],
+                });
             }
+        };
+        for name in ["Zend/tests", "tests"] {
+            push(PathBuf::from(name));
         }
         for parent in ["ext", "sapi"] {
             let Ok(entries) = fs::read_dir(source.join(parent)) else {
@@ -156,37 +240,56 @@ impl Subset {
                 let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                     continue;
                 };
-                let under = Path::new(parent).join(name).join("tests");
-                if source.join(&under).is_dir() {
-                    let scope = under.to_string_lossy().into_owned();
-                    subsets.push(Subset::at(source, scope, under));
-                }
+                push(Path::new(parent).join(name).join("tests"));
             }
         }
         subsets
     }
 
-    /// Every `.phpt` under the subset's directory, sorted.
+    /// Every `.phpt` under the subset's directories, sorted within each.
     pub fn tests(&self) -> Result<Vec<PathBuf>> {
-        let mut found = Vec::new();
-        walk(&self.dir, &mut found)
-            .with_context(|| format!("listing the subset at {}", self.dir.display()))?;
-        found.retain(|path| path.extension().is_some_and(|e| e == "phpt"));
-        found.sort();
-        Ok(found)
+        let mut all = Vec::new();
+        for place in &self.dirs {
+            let mut found = Vec::new();
+            walk(&place.dir, &mut found)
+                .with_context(|| format!("listing the subset at {}", place.dir.display()))?;
+            found.retain(|path| path.extension().is_some_and(|e| e == "phpt"));
+            found.sort();
+            all.append(&mut found);
+        }
+        Ok(all)
     }
 
-    /// The divergence key of one test: `phpt:php-src/ext/pcre/tests/x.phpt`.
+    /// The divergence key of one test: `phpt:php-src/ext/pcre/tests/x.phpt`,
+    /// where the test stands in the corpus whichever directory of the
+    /// subset it came from.
     pub fn id(&self, test: &Path) -> String {
-        format!("phpt:{CORPUS}/{}/{}", self.under.display(), self.name(test))
+        let under = match self.found_in(test) {
+            Some(place) => place.under.join(place.inside(test)),
+            None => PathBuf::from(self.name(test)),
+        };
+        format!("phpt:{CORPUS}/{}", under.display())
     }
 
-    /// The test's name inside the subset.
+    /// The test's name inside the subset: inside its directory, with the
+    /// directory named as well when the subset has more than one, so two
+    /// tests of the same name are told apart.
     pub fn name(&self, test: &Path) -> String {
-        test.strip_prefix(&self.dir)
-            .unwrap_or(test)
-            .to_string_lossy()
-            .into_owned()
+        let Some(place) = self.found_in(test) else {
+            return test.to_string_lossy().into_owned();
+        };
+        let inside = place.inside(test);
+        let named = if self.dirs.len() > 1 {
+            place.under.join(inside)
+        } else {
+            inside.to_path_buf()
+        };
+        named.to_string_lossy().into_owned()
+    }
+
+    /// The directory of the subset the test was found under.
+    fn found_in(&self, test: &Path) -> Option<&Dir> {
+        self.dirs.iter().find(|place| test.starts_with(&place.dir))
     }
 
     /// The reading's scope: the subset's, and what the run was beside it,
@@ -491,14 +594,25 @@ pub fn run(
     let subsets = match &ask.subset {
         Some(name) => vec![Subset::resolve(manifest, name)?],
         None if ask.full => Subset::corpus(manifest),
-        // Which subsets a lane runs is the design's sentence (harness §7)
-        // and belongs in the manifest, not in a copy here; until it has a
-        // row, a caller names the subset it wants.
-        None => bail!("name a subset with --subset, or the whole corpus with --full"),
+        // The per-commit lane, composed from the `[[crate]]` rows that own
+        // a subset (harness §7). The row is where the lane lives, so
+        // neither this function nor the design's table is a second copy of
+        // the other.
+        None => {
+            let lane = Subset::lane(manifest);
+            let scopes: Vec<&str> = lane.iter().map(|s| s.scope.as_str()).collect();
+            println!(
+                "phpt: the per-commit lane, {} subset{} the manifest names: {}",
+                lane.len(),
+                if lane.len() == 1 { "" } else { "s" },
+                listed(&scopes)
+            );
+            lane
+        }
     };
     if subsets.is_empty() {
         bail!(
-            "no subset to run: the pinned php-src at {} has none of them",
+            "no subset to run: no [[crate]] row of the manifest owns one the pinned php-src at {} has",
             manifest.pin.source.path.display()
         );
     }

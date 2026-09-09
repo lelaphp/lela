@@ -98,14 +98,15 @@ pub enum Command {
         #[arg(long)]
         staged: bool,
     },
-    /// Run a subset of the pinned `.phpt` corpus through the engine and
-    /// hold each test to its `--EXPECT*--` section; one reading per subset,
-    /// scoped to the crate whose subset it is.
+    /// Run the pinned `.phpt` corpus through the engine and hold each test
+    /// to its `--EXPECT*--` section: the per-commit lane the manifest
+    /// composes, or the subset named; one reading per subset, scoped to
+    /// the crate whose subset it is.
     Phpt {
-        /// The subset: an extension by name (`pcre`, `ext/pcre`) or a
-        /// directory of the pinned php-src tree (`Zend/tests`). One of
-        /// this and `--full` is named; which subsets a lane runs is the
-        /// design's sentence and belongs in the manifest.
+        /// The subset: a crate by name (`php_engine`, `pcre`, `ext/pcre`),
+        /// whose subsets its `[[crate]]` row owns, or a directory of the
+        /// pinned php-src tree (`Zend/tests`). Without it, the per-commit
+        /// lane: every subset the manifest's rows own.
         #[arg(long, value_name = "NAME", conflicts_with = "full")]
         subset: Option<String>,
         /// Every subset of the corpus: the nightly lane, which CI runs.

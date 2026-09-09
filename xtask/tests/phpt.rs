@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use xtask::divergence::Registry;
 use xtask::manifest::Manifest;
-use xtask::phpt::{self, Ask, Judgement, Runner, Subset, Tally};
+use xtask::phpt::{self, Ask, Dir, Judgement, Runner, Subset, Tally};
 use xtask::reading::{Number, Status};
 
 fn workspace() -> &'static Path {
@@ -22,6 +22,18 @@ fn workspace() -> &'static Path {
 
 fn manifest() -> Manifest {
     Manifest::load(workspace()).unwrap()
+}
+
+/// A manifest of these `[[crate]]` rows under the tracked pin: the rows a
+/// person writes in `seams.toml`, resolved against the pinned tree without
+/// the tracked manifest having to carry the crate they name.
+fn manifest_of(rows: &str) -> Manifest {
+    let text = format!(
+        "[oracle]\npin = \"oracle.toml\"\n[budget]\ntotal = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\nclean_build_release_s = 1\napi_items = 1\nbindings = 1\n{rows}"
+    );
+    let mut manifest = Manifest::parse(&text).unwrap();
+    manifest.pin = self::manifest().pin;
+    manifest
 }
 
 /// The tracked pin's binary, when it is on this machine.
@@ -49,8 +61,10 @@ fn subset(name: &str, tests: &[(&str, &str)]) -> Subset {
     }
     Subset {
         scope: "ext/fixture".to_owned(),
-        under: PathBuf::from("ext/fixture/tests"),
-        dir,
+        dirs: vec![Dir {
+            under: PathBuf::from("ext/fixture/tests"),
+            dir,
+        }],
     }
 }
 
@@ -270,14 +284,15 @@ fn the_subset_of_an_extension_is_its_tests_at_the_pinned_tag_and_the_scope_is_th
     for name in ["pcre", "ext/pcre"] {
         let subset = Subset::resolve(&manifest, name).unwrap();
         assert_eq!(subset.scope, "ext/pcre");
-        assert_eq!(subset.under, Path::new("ext/pcre/tests"));
+        assert_eq!(subset.dirs.len(), 1, "{subset:#?}");
+        assert_eq!(subset.dirs[0].under, Path::new("ext/pcre/tests"));
         assert_eq!(
-            subset.dir,
+            subset.dirs[0].dir,
             manifest.pin.source.path.join("ext/pcre/tests"),
             "the subset is the pinned tree's"
         );
         assert_eq!(
-            subset.id(&subset.dir.join("preg_match_basic.phpt")),
+            subset.id(&subset.dirs[0].dir.join("preg_match_basic.phpt")),
             "phpt:php-src/ext/pcre/tests/preg_match_basic.phpt",
             "the divergence key names the corpus, not this machine"
         );
@@ -289,7 +304,7 @@ fn a_corpus_directory_is_a_subset_and_an_unknown_name_names_both_forms_tried() {
     let manifest = manifest();
     let subset = Subset::resolve(&manifest, "Zend/tests").unwrap();
     assert_eq!(subset.scope, "Zend/tests");
-    assert_eq!(subset.under, Path::new("Zend/tests"));
+    assert_eq!(subset.dirs[0].under, Path::new("Zend/tests"));
 
     let error = Subset::resolve(&manifest, "nope").unwrap_err().to_string();
     assert!(
@@ -432,14 +447,60 @@ fn the_reading_carries_the_burndowns_one_number() {
 }
 
 #[test]
-fn a_run_with_no_subset_says_what_to_ask_for_rather_than_running_a_lane() {
-    let error = phpt::run(workspace(), &manifest(), &registry(""), &Ask::default())
+fn a_crate_resolves_to_every_subset_its_row_names() {
+    let manifest = manifest_of(
+        "[[crate]]\nname = \"php_engine\"\nbudget = 1\nphpt = [\"Zend/tests\", \"tests\"]\n",
+    );
+    let subset = Subset::resolve(&manifest, "php_engine").unwrap();
+    assert_eq!(subset.scope, "php_engine");
+    let under: Vec<&Path> = subset.dirs.iter().map(|d| d.under.as_path()).collect();
+    assert_eq!(under, [Path::new("Zend/tests"), Path::new("tests")]);
+    assert_eq!(
+        subset.id(&subset.dirs[1].dir.join("basic/lambda.phpt")),
+        "phpt:php-src/tests/basic/lambda.phpt",
+        "the key names where the test stands in the corpus, whichever directory it came from"
+    );
+}
+
+#[test]
+fn a_crate_whose_row_names_no_subset_says_so_rather_than_looking_for_a_directory() {
+    let manifest = manifest_of("[[crate]]\nname = \"php_heap\"\nbudget = 1\n");
+    let error = Subset::resolve(&manifest, "php_heap")
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("--subset") && error.contains("--full"),
+        error.contains("php_heap") && error.contains("no phpt subset"),
         "{error}"
     );
+    assert!(
+        !error.contains("php-src"),
+        "the row is the answer, not the pinned tree: {error}"
+    );
+}
+
+#[test]
+fn a_bare_run_is_the_per_commit_lane_composed_from_the_crate_rows() {
+    let manifest = manifest_of(
+        "[[crate]]\nname = \"php_engine\"\nbudget = 1\nphpt = [\"Zend/tests\", \"tests\"]\n         [[crate]]\nname = \"php_heap\"\nbudget = 1\n         [[crate]]\nname = \"php_sapi\"\nbudget = 1\nphpt = [\"sapi/cli/tests\"]\n         [[crate]]\nname = \"ext/pcre\"\nbudget = 1\n         [[crate]]\nname = \"ext/curl\"\nbudget = 1\nfeature = \"curl\"\n",
+    );
+    let lane: Vec<String> = Subset::lane(&manifest)
+        .into_iter()
+        .map(|subset| subset.scope)
+        .collect();
+    // §7's per-commit row: Zend/tests and tests/ with php_engine, sapi/cli
+    // with php_sapi, and the default extensions' own. A crate behind a
+    // feature is not in the default build, and one with no subset owns none.
+    assert_eq!(lane, ["php_engine", "php_sapi", "ext/pcre"]);
+}
+
+#[test]
+fn a_run_with_no_subset_runs_the_lane_rather_than_refusing() {
+    let manifest = manifest_of("[[crate]]\nname = \"ext/ctype\"\nbudget = 1\n");
+    // No engine is built here, so every subset of the lane is a skip that
+    // says so; what is under test is that the lane composed at all.
+    let readings = phpt::run(workspace(), &manifest, &registry(""), &Ask::default()).unwrap();
+    let scopes: Vec<&str> = readings.iter().map(|r| r.scope.as_str()).collect();
+    assert_eq!(scopes, ["ext/ctype"], "{readings:#?}");
 }
 
 #[test]

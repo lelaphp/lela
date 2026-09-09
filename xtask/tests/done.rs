@@ -178,6 +178,24 @@ fn krate(name: &str) -> xtask::manifest::Crate {
 }
 
 #[test]
+fn a_crate_is_asked_for_a_phpt_reading_only_where_the_manifest_gives_it_one() {
+    // An engine crate the manifest gives no subset is not asked, the way
+    // the harness crate is not; the resolver's error is never what says so.
+    let asked: Vec<&str> = done::instruments_of(&krate("php_heap")).collect();
+    assert_eq!(
+        asked,
+        ["clippy", "witness", "api-check", "budget", "unsafe-audit"]
+    );
+
+    // The same crate with a row that names one is asked, and with no
+    // reading for it the condition is unmet.
+    let row: xtask::manifest::Crate =
+        toml::from_str("name = \"php_heap\"\nbudget = 1\nphpt = [\"Zend/tests\"]").unwrap();
+    let asked: Vec<&str> = done::instruments_of(&row).collect();
+    assert_eq!(asked, FRESH);
+}
+
+#[test]
 fn with_no_readings_every_instrument_of_the_touched_crate_is_unmet_and_the_exit_is_1() {
     let root = scratch("none");
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");

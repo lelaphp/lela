@@ -124,7 +124,7 @@ Commands:
   done               The definition of done: print the conditions unmet for the changes since the base and exit 1 while any is; the Stop hook, pre-push and CI read the same list
   budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code and a stale generated file
   clippy             `cargo clippy` with every warning denied, on every target of each crate, as the reading `done` reads; one reading per crate
-  phpt               Run a subset of the pinned `.phpt` corpus through the engine and hold each test to its `--EXPECT*--` section; one reading per subset, scoped to the crate whose subset it is
+  phpt               Run the pinned `.phpt` corpus through the engine and hold each test to its `--EXPECT*--` section: the per-commit lane the manifest composes, or the subset named; one reading per subset, scoped to the crate whose subset it is
   unsafe-audit       Allow `unsafe` only in the homes the manifest's unsafe.homes rule names
   generate           Write the files the manifest's `generated` rules render (ext/clippy.toml)
   divergence-reason  Hold the divergence registry to the manifest rule whose `check` names this instrument: an accepted row has a reason a person wrote
@@ -136,7 +136,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=616a2360f6a4c19d9209867c2df7c1624a9ed9fe058f408637c5269ce4098e63 out=79a69e20b3ee8888167b483d7632d44e54d3ba85385abb65d4acddf128386623 -->
+<!-- /computed in=3d3b2f2928865d0519d6d2908ee81184073945912b3158e2cf3cc701d2481d50 out=ac7b82bdcb10640f6d8b1d3ede729c7c2258b90104441382205381a6255006ed -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

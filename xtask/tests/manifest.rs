@@ -182,3 +182,29 @@ fn telemetry_carries_the_silent_window_and_is_optional() {
     let err = Manifest::parse(&text).unwrap_err().to_string();
     assert!(err.contains("silent"), "the offending key is named: {err}");
 }
+
+#[test]
+fn a_crate_row_names_the_phpt_subsets_the_crate_owns() {
+    let text = format!(
+        "{MINIMAL}\n[[crate]]\nname = \"php_engine\"\nbudget = 1\nphpt = [\"Zend/tests\", \"tests\"]\n[[crate]]\nname = \"php_heap\"\nbudget = 1\n[[crate]]\nname = \"ext/pcre\"\nbudget = 1\n[[crate]]\nname = \"ext/spl\"\nbudget = 1\nphpt = [\"ext/spl/tests\", \"Zend/tests/generators\"]\n"
+    );
+    let manifest = Manifest::parse(&text).unwrap();
+    let subsets = |name: &str| manifest.crate_named(name).unwrap().subsets();
+    assert_eq!(
+        subsets("php_engine"),
+        [Path::new("Zend/tests"), Path::new("tests")]
+    );
+    // An extension's subset is its own by the design (§12, ext/AGENTS.md),
+    // so its row says nothing; a row that names subsets is what it owns.
+    assert_eq!(subsets("ext/pcre"), [Path::new("ext/pcre/tests")]);
+    assert_eq!(
+        subsets("ext/spl"),
+        [
+            Path::new("ext/spl/tests"),
+            Path::new("Zend/tests/generators")
+        ]
+    );
+    // A crate the corpus has no directory for owns none, which is the case
+    // `done` reads: such a crate is not asked for a phpt reading.
+    assert!(subsets("php_heap").is_empty());
+}

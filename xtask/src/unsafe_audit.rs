@@ -261,6 +261,7 @@ mod tests {
             lock_from: std::collections::BTreeMap::new(),
             feature: None,
             targets: Vec::new(),
+            phpt: Vec::new(),
         }
     }
 

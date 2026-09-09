@@ -52,8 +52,8 @@ pub const INSTRUMENT: &str = "done";
 /// The branch the default base is the merge base with.
 pub const MAIN: &str = "main";
 /// The instruments a touched crate needs a fresh passing reading from
-/// (condition 1). `phpt`'s is the reading over the crate's own subset,
-/// written under the crate's name.
+/// (condition 1). `phpt`'s is the reading over the subsets the crate's
+/// `[[crate]]` row owns, written under the crate's name.
 pub const FRESH: [&str; 6] = [
     "clippy",
     "witness",
@@ -63,17 +63,23 @@ pub const FRESH: [&str; 6] = [
     "phpt",
 ];
 
-/// The harness crate; it has no kernel, no native and no phpt subset.
+/// The harness crate; it has no kernel and no native.
 pub const HARNESS: &str = "xtask";
 
-/// The instruments condition 1 asks of one crate: all of [`FRESH`] for an
-/// engine or extension crate; for the harness, the ones that measure it,
-/// since `witness` and `phpt` have nothing to read there.
+/// The instruments condition 1 asks of one crate: all of [`FRESH`], less
+/// `witness` for the harness, which has no kernel and no native, and less
+/// `phpt` for a crate the manifest gives no subset. Which crate owns which
+/// of the corpus is the `[[crate]]` row's sentence, so a crate that owns
+/// none is not asked here rather than asked and answered by the runner's
+/// error (harness §4.1, §4.5 condition 1).
 pub fn instruments_of(krate: &Crate) -> impl Iterator<Item = &'static str> {
     let harness = krate.name == HARNESS;
-    FRESH
-        .into_iter()
-        .filter(move |i| !harness || !matches!(*i, "witness" | "phpt"))
+    let measured_by_the_corpus = !krate.subsets().is_empty();
+    FRESH.into_iter().filter(move |i| match *i {
+        "witness" => !harness,
+        "phpt" => measured_by_the_corpus,
+        _ => true,
+    })
 }
 
 /// What `done` found over one diff.
