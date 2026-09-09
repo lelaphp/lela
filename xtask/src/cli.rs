@@ -103,7 +103,9 @@ pub enum Command {
     /// ready to be worked in, the branch off its track, `xtask` built there,
     /// the local file laid and rendered, the `computed trust` line printed
     /// as a person's; refuses a branch that exists and a directory that
-    /// does. Writes no reading.
+    /// does. `retire` appends the worktree's log into its track's store,
+    /// removes the worktree and prints the branch-delete line as a
+    /// person's; refuses uncommitted work. Writes no reading.
     Worktree {
         #[command(subcommand)]
         command: WorktreeCommand,
@@ -180,13 +182,18 @@ pub enum Command {
     },
 }
 
-/// The halves of a track's worktree `xtask` has; the retire half is
-/// `scripts/worktree-retire.sh` still.
+/// The two halves of a track's worktree.
 #[derive(Debug, Subcommand)]
 pub enum WorktreeCommand {
     /// Lay the worktree for a branch down, ready to be worked in.
     Add {
         /// The branch, not yet made; it names its own track.
+        branch: String,
+    },
+    /// Append the worktree's log into its track's store, then remove the
+    /// worktree; the branch is kept.
+    Retire {
+        /// The branch a worktree is on; it names its own track.
         branch: String,
     },
 }

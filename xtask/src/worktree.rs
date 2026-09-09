@@ -1,7 +1,8 @@
 //! A track's worktrees (harness-design.md §4.2, §5, §11): where one lives,
-//! and `xtask worktree add`, which lays one down ready to be worked in. A
+//! `xtask worktree add`, which lays one down ready to be worked in, and
+//! `xtask worktree retire`, which keeps its evidence and removes it. A
 //! track runs an agent per worktree on a branch off its track branch, and
-//! three facts about a fresh worktree are why this is an instrument and
+//! three facts about a fresh worktree are why the add is an instrument and
 //! not a bare `git worktree add`:
 //!
 //! * `computed` trust is keyed by the root path, so a new worktree is
@@ -25,14 +26,32 @@
 //! exists, refuse before anything is laid down, as `new-ext` does. Nothing
 //! is measured here and no reading is written: the readings are the
 //! worktree's own, once an agent is in it.
+//!
+//! The retire is where a track keeps that evidence. A worktree's readings
+//! live in its own `target/harness/` and removing the worktree removes
+//! them, so the worktree's `log.jsonl` is appended into the track's store
+//! first, the root [`Track::of`] names for the branch, and only then is
+//! the worktree removed, which keeps a merged agent's denials in the
+//! `permits` section the console reads (§4.2). The log alone: every line
+//! of it ends in a newline, so appending one to another is the whole
+//! join. The per-key files beside it stay with the worktree, each being a
+//! scope's latest run over a tree the track does not have, until the
+//! design says they are the track's (§4.2). A worktree with uncommitted
+//! work is a refusal after the append, since the worktree's copy is
+//! emptied once appended and the call that follows cannot count the same
+//! readings twice. The branch is kept; deleting it is a person's line,
+//! printed.
 
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 
 use crate::git::git;
-use crate::track::Track;
+use crate::reading;
+use crate::track::{self, Track};
 
 /// Where a worktree lives, under the main checkout, one directory per
 /// branch: the one convention `permit` resolves a call's workspace by and
@@ -44,8 +63,10 @@ pub const WORKTREES: &str = ".claude/worktrees";
 /// The local file the session hook renders (harness-design.md §5).
 const LOCAL: &str = ".claude/harness.local.md";
 
-/// The prefix of every line printed, so a person reads whose line it is.
-const SAY: &str = "worktree add";
+/// The prefix of every line a half prints, so a person reads whose line
+/// it is.
+const ADD: &str = "worktree add";
+const RETIRE: &str = "worktree retire";
 
 /// A worktree that is laid down but not ready to be worked in: the lines
 /// printed before it say what failed. Its own error, so the exit can say
@@ -96,7 +117,7 @@ pub fn add(root: &Path, branch: &str) -> Result<PathBuf> {
     }
     if dir.exists() {
         bail!(
-            "{} exists; retire it with scripts/worktree-retire.sh, or name another branch",
+            "{} exists; retire it with `xtask worktree retire`, or name another branch",
             dir.display()
         );
     }
@@ -117,13 +138,16 @@ pub fn add(root: &Path, branch: &str) -> Result<PathBuf> {
         None,
     )
     .context("git worktree add refused; nothing was laid down")?;
-    say(&format!(
-        "{branch} off the track {} at {} ({})",
-        track.name,
-        track.at,
-        &track.base[..track.base.len().min(7)]
-    ));
-    say(&format!("worktree {}", dir.display()));
+    say(
+        ADD,
+        &format!(
+            "{branch} off the track {} at {} ({})",
+            track.name,
+            track.at,
+            &track.base[..track.base.len().min(7)]
+        ),
+    );
+    say(ADD, &format!("worktree {}", dir.display()));
 
     let mut ready = true;
     ready &= build(&dir);
@@ -131,19 +155,99 @@ pub fn add(root: &Path, branch: &str) -> Result<PathBuf> {
     trust(&dir);
     carried_over(&dir);
     if ready {
-        say(&format!("ready: cd {}", dir.display()));
+        say(ADD, &format!("ready: cd {}", dir.display()));
         Ok(dir)
     } else {
         Err(NotReady { dir }.into())
     }
 }
 
-fn say(line: &str) {
-    println!("{SAY}: {line}");
+fn say(half: &str, line: &str) {
+    println!("{half}: {line}");
 }
 
-fn complain(line: &str) {
-    eprintln!("{SAY}: {line}");
+fn complain(half: &str, line: &str) {
+    eprintln!("{half}: {line}");
+}
+
+/// Retire the worktree on `branch`: its log appended into the track's
+/// store and emptied, the worktree removed, the branch kept. A branch no
+/// worktree is on, the main worktree and uncommitted work are refusals;
+/// the last one after the append, which the lines say.
+pub fn retire(root: &Path, branch: &str) -> Result<()> {
+    let track = Track::of(root, Some(branch))
+        .with_context(|| format!("which track {branch} is on could not be said"))?;
+    let store = &track.store;
+    let dir = track::worktrees(store)?
+        .into_iter()
+        .find_map(|(path, on)| (on.as_deref() == Some(branch)).then_some(path))
+        .with_context(|| format!("no worktree is on {branch}"))?;
+    if dir == *store {
+        bail!(
+            "{} is the main worktree, which is the track's own root; it is not retired",
+            dir.display()
+        );
+    }
+    let appended = append_log(&dir, store)?;
+    git(store, &["worktree", "remove", &dir.to_string_lossy()], None).with_context(|| {
+        if appended {
+            "git worktree remove refused; the readings are appended already, so commit or discard what is uncommitted and call again"
+        } else {
+            "git worktree remove refused; commit or discard what is uncommitted and call again"
+        }
+    })?;
+    say(RETIRE, &format!("removed {}", dir.display()));
+    say(
+        RETIRE,
+        &format!(
+            "the branch is kept; a person deletes it once it is merged: git branch -D {branch}"
+        ),
+    );
+    Ok(())
+}
+
+/// The worktree's log appended into the store at `root` and emptied,
+/// so a removal that refuses and the call that follows it cannot count
+/// the same readings twice; the per-key files beside it stay. Whether
+/// anything was appended.
+fn append_log(dir: &Path, root: &Path) -> Result<bool> {
+    let from = dir.join(reading::DIR).join(reading::LOG);
+    // Bytes, not text: a line the worktree wrote is appended as it is.
+    let text = match fs::read(&from) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", from.display())),
+    };
+    if text.is_empty() {
+        say(
+            RETIRE,
+            &format!(
+                "{} is missing or empty: this worktree wrote no readings",
+                from.display()
+            ),
+        );
+        return Ok(false);
+    }
+    let to = root.join(reading::DIR).join(reading::LOG);
+    let store = to.parent().context("the log is inside the store")?;
+    fs::create_dir_all(store)
+        .with_context(|| format!("cannot write the track's store at {}", store.display()))?;
+    OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&to)
+        .and_then(|mut log| log.write_all(&text))
+        .with_context(|| format!("cannot append to {}", to.display()))?;
+    fs::write(&from, "").with_context(|| format!("cannot empty {}", from.display()))?;
+    say(
+        RETIRE,
+        &format!(
+            "appended {} readings to {} and emptied the worktree's; the per-key files beside it stay with the worktree",
+            text.split(|b| *b == b'\n').count() - 1,
+            to.display()
+        ),
+    );
+    Ok(true)
 }
 
 /// `xtask` built here, so the first `Edit` is judged rather than waiting
@@ -157,20 +261,23 @@ fn build(dir: &Path) -> bool {
     match built {
         Ok(status) if status.success() => {
             say(
+                ADD,
                 "built target/debug/xtask: the first Edit in it is judged by this build, not by a cold cargo run",
             );
             true
         }
         Ok(_) => {
             complain(
+                ADD,
                 "cargo build -p xtask failed; an Edit there is judged by a cold cargo run or denied",
             );
             false
         }
         Err(err) => {
-            complain(&format!(
-                "cargo did not run ({err}); an Edit there is judged by nothing"
-            ));
+            complain(
+                ADD,
+                &format!("cargo did not run ({err}); an Edit there is judged by nothing"),
+            );
             false
         }
     }
@@ -189,10 +296,13 @@ fn built(dir: &Path) -> Option<PathBuf> {
 /// whether it is there.
 fn lay_local(dir: &Path) -> bool {
     let Some(built) = built(dir) else {
-        complain(&format!(
-            "no built xtask under {}/target; the worktree has no local file",
-            dir.display()
-        ));
+        complain(
+            ADD,
+            &format!(
+                "no built xtask under {}/target; the worktree has no local file",
+                dir.display()
+            ),
+        );
         return false;
     };
     let laid = Command::new(&built)
@@ -203,11 +313,14 @@ fn lay_local(dir: &Path) -> bool {
         .status();
     match laid {
         Ok(status) if status.success() => {
-            say(&format!("laid {LOCAL} down"));
+            say(ADD, &format!("laid {LOCAL} down"));
             true
         }
         _ => {
-            complain("xtask status --session failed; the worktree has no local file");
+            complain(
+                ADD,
+                "xtask status --session failed; the worktree has no local file",
+            );
             false
         }
     }
@@ -227,18 +340,19 @@ fn trust(dir: &Path) {
             !String::from_utf8_lossy(&out.stderr).contains(" untrusted")
         }
         Ok(out) if out.status.code() == Some(2) => {
-            complain(&format!("a computed marker in {LOCAL} is broken"));
+            complain(ADD, &format!("a computed marker in {LOCAL} is broken"));
             false
         }
         _ => {
-            complain("computed did not run (cargo install computed)");
+            complain(ADD, "computed did not run (cargo install computed)");
             false
         }
     };
     if trusted {
-        say(&format!("rendered {LOCAL}"));
+        say(ADD, &format!("rendered {LOCAL}"));
     } else {
         say(
+            ADD,
             "this worktree is untrusted, so its regions are unrendered; a person runs, once (§11):",
         );
         println!("    computed trust {}", dir.display());
@@ -248,26 +362,38 @@ fn trust(dir: &Path) {
 /// What the clone already has, reported rather than set again.
 fn carried_over(dir: &Path) {
     match git(dir, &["config", "core.hooksPath"], None) {
-        Ok(hooks) if !hooks.trim().is_empty() => say(&format!(
-            "carried over: core.hooksPath={}, which is repository config",
-            hooks.trim()
-        )),
+        Ok(hooks) if !hooks.trim().is_empty() => say(
+            ADD,
+            &format!(
+                "carried over: core.hooksPath={}, which is repository config",
+                hooks.trim()
+            ),
+        ),
         _ => say(
+            ADD,
             "core.hooksPath is unset, so pre-commit and pre-push are not wired; the session hook points it at scripts/hooks",
         ),
     }
     if dir.join(".claude/settings.json").is_file() {
         say(
+            ADD,
             "carried over: .claude/settings.json, which is tracked, so the plugin settings are the clone's",
         );
     } else {
-        say(".claude/settings.json is missing, so this worktree loads no harness plugin");
+        say(
+            ADD,
+            ".claude/settings.json is missing, so this worktree loads no harness plugin",
+        );
     }
     if dir.join("oracle.toml").is_file() {
         say(
+            ADD,
             "carried over: oracle.toml, which is tracked, and the php-src tree it pins, which is outside the clone; `xtask phpt` says if that tree is gone",
         );
     } else {
-        say("oracle.toml is missing, so this worktree has no oracle and no pinned php-src");
+        say(
+            ADD,
+            "oracle.toml is missing, so this worktree has no oracle and no pinned php-src",
+        );
     }
 }

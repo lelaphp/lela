@@ -1,5 +1,5 @@
 //! The track worktree (harness-design.md §4.2, §5, §11): `xtask worktree
-//! add` lays one down ready to be worked in and `scripts/worktree-retire.sh`
+//! add` lays one down ready to be worked in and `xtask worktree retire`
 //! retires it into the track's store. Both run against a scratch repository
 //! holding this working tree's tracked files, so the harness the add builds
 //! in the worktree and asks for the local file is this one, and the store
@@ -58,10 +58,21 @@ fn joined(out: &std::process::Output) -> (i32, String) {
 
 /// The instrument, this crate's own binary, run against the scratch root.
 fn add(root: &Path, args: &[&str]) -> (i32, String) {
+    worktree(root, "add", args)
+}
+
+/// The retire half, run against `root`, which is the checkout the
+/// instrument is asked from: the track's own or a worktree of it.
+fn retire(root: &Path, args: &[&str]) -> (i32, String) {
+    worktree(root, "retire", args)
+}
+
+/// One half of `xtask worktree`, run from and against `root`.
+fn worktree(root: &Path, half: &str, args: &[&str]) -> (i32, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
         .arg("--root")
         .arg(root)
-        .args(["worktree", "add"])
+        .args(["worktree", half])
         .args(args)
         .current_dir(root)
         .env_remove("CARGO")
@@ -75,7 +86,7 @@ fn add(root: &Path, args: &[&str]) -> (i32, String) {
     joined(&out)
 }
 
-/// One of the two commands, run from the scratch repository.
+/// One of the two commands under `scripts/`, run from the scratch repository.
 fn command(root: &Path, name: &str, args: &[&str]) -> (i32, String) {
     let out = Command::new("bash")
         .arg(workspace().join("scripts").join(name))
@@ -343,7 +354,13 @@ fn a_branch_on_no_track_is_taken_off_main_through_the_add_command() {
 /// The retire half: a worktree's readings live in its own `target/harness/`
 /// and removing the worktree removes them, so the log is appended into the
 /// track's store first and the track's `status --section permits` counts
-/// the retired agent's denials (harness-design.md §4.2).
+/// the retired agent's denials (harness-design.md §4.2). The store is the
+/// one `Track::of` names, so a retire asked from a checkout that is not the
+/// track's root, here the worktree itself, lands the readings there too.
+/// The per-key files beside the log stay with the worktree: each is a
+/// scope's latest run, and the track's own are not overwritten by a tree
+/// the track does not have; that is today's answer, until the design
+/// says otherwise (§4.2).
 #[test]
 fn retiring_appends_the_readings_to_the_tracks_store_and_removes_the_worktree() {
     let root = repository("retire");
@@ -358,16 +375,27 @@ fn retiring_appends_the_readings_to_the_tracks_store_and_removes_the_worktree() 
     denial.session = "the-retired-agent".to_owned();
     let line = serde_json::to_string(&denial.to_json().unwrap()).unwrap();
     write(&dir, "target/harness/log.jsonl", &format!("{line}\n"));
+    let mut clippy = Reading::new("clippy", "xtask");
+    clippy.message = "the worktree's clippy over xtask".to_owned();
+    write(
+        &dir,
+        "target/harness/clippy/xtask.toml",
+        &toml::to_string(&clippy).unwrap(),
+    );
+    clippy.message = "the track's clippy over xtask".to_owned();
+    let tracks_own = toml::to_string(&clippy).unwrap();
+    write(&root, "target/harness/clippy/xtask.toml", &tracks_own);
 
     // A removal that refuses has appended the readings already, so the
-    // call that follows it must not count them a second time.
+    // call that follows it must not count them a second time. Both calls
+    // are asked from the worktree, which is not the track's root.
     write(&dir, "uncommitted.rs", "fn left_behind() {}\n");
-    let (code, dirty) = command(&root, "worktree-retire.sh", &["t-x/witness"]);
+    let (code, dirty) = retire(&dir, &["t-x/witness"]);
     assert_eq!(code, 1, "{dirty}");
     assert!(dir.is_dir(), "{dirty}");
     fs::remove_file(dir.join("uncommitted.rs")).unwrap();
 
-    let (code, out) = command(&root, "worktree-retire.sh", &["t-x/witness"]);
+    let (code, out) = retire(&dir, &["t-x/witness"]);
     assert_eq!(code, 0, "{out}");
     assert_eq!(
         fs::read_to_string(root.join("target/harness/log.jsonl"))
@@ -382,6 +410,11 @@ fn retiring_appends_the_readings_to_the_tracks_store_and_removes_the_worktree() 
 
     let appended = fs::read_to_string(root.join("target/harness/log.jsonl")).unwrap();
     assert!(appended.contains("the-retired-agent"), "{appended}");
+    assert_eq!(
+        fs::read_to_string(root.join("target/harness/clippy/xtask.toml")).unwrap(),
+        tracks_own,
+        "the per-key files stay with the worktree: {out}"
+    );
 
     let manifest = Manifest::load(&root).unwrap();
     let registry = Registry::load(&root).unwrap();
@@ -414,10 +447,35 @@ fn retiring_appends_the_readings_to_the_tracks_store_and_removes_the_worktree() 
     );
     assert!(out.contains("git branch -D t-x/witness"), "{out}");
 
-    // The main worktree is not a thing this command retires.
-    let (code, main) = command(&root, "worktree-retire.sh", &["main"]);
+    // The main worktree is not a thing this command retires, nor is a
+    // branch no worktree is on; and no branch is a usage error.
+    let (code, main) = retire(&root, &["main"]);
     assert_eq!(code, 1, "{main}");
     assert_eq!(worktrees(&root).len(), 1, "{main}");
+    let (code, gone) = retire(&root, &["t-x/witness"]);
+    assert_eq!(code, 1, "{gone}");
+    let (code, usage) = retire(&root, &[]);
+    assert_eq!(code, 2, "{usage}");
 
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// `scripts/worktree-retire.sh` is one `exec` of the instrument, so a
+/// worktree that wrote no readings is retired through it: nothing is
+/// appended, the worktree is removed and the branch-delete line is a
+/// person's.
+#[test]
+fn a_worktree_with_no_readings_is_retired_through_the_retire_command() {
+    let root = repository("retire-none");
+    let (code, out) = add(&root, &["t-x/quiet"]);
+    assert_eq!(code, 0, "{out}");
+    let dir = worktree_of(&root, "t-x/quiet");
+    let (code, out) = command(&root, "worktree-retire.sh", &["t-x/quiet"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("worktree retire: "), "{out}");
+    assert!(out.contains("wrote no readings"), "{out}");
+    assert!(!dir.exists(), "{out}");
+    assert!(!root.join("target/harness/log.jsonl").exists(), "{out}");
+    assert!(out.contains("git branch -D t-x/quiet"), "{out}");
     let _ = fs::remove_dir_all(&root);
 }

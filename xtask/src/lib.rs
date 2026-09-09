@@ -226,14 +226,18 @@ fn divergence_command(root: &Path, manifest: &Manifest, store: &Store) -> Result
 
 /// The commands that measure nothing and read no manifest, answered
 /// before `Manifest::load`: the track, so a worktree whose manifest is
-/// unreadable can still say which track it is on, and the add half of a
-/// worktree, whose manifest is the worktree's, once built there.
+/// unreadable can still say which track it is on, and the two halves of a
+/// worktree, whose manifest is the worktree's, once built there, and is
+/// gone once it is retired.
 fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
     match command {
         Command::Track { branch, json } => Some(track_command(root, branch.as_deref(), *json)),
         Command::Worktree {
             command: WorktreeCommand::Add { branch },
         } => Some(worktree::add(root, branch).map(|_| ())),
+        Command::Worktree {
+            command: WorktreeCommand::Retire { branch },
+        } => Some(worktree::retire(root, branch)),
         _ => None,
     }
 }

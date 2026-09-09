@@ -230,9 +230,27 @@ fn short(commit: &str) -> &str {
 /// The main worktree of the repository `root` is in: the first entry of
 /// `git worktree list`, the path git prints, which is canonical.
 fn main_worktree(root: &Path) -> Result<PathBuf> {
-    let list = git(root, &["worktree", "list", "--porcelain"], None)?;
-    list.lines()
-        .find_map(|l| l.strip_prefix("worktree "))
-        .map(PathBuf::from)
+    worktrees(root)?
+        .into_iter()
+        .next()
+        .map(|(path, _)| path)
         .context("git worktree list names no main worktree")
+}
+
+/// Every worktree of the repository `root` is in, the main one first,
+/// each with the branch it is on, `None` for a detached `HEAD`: `git
+/// worktree list --porcelain`, one stanza per worktree.
+pub(crate) fn worktrees(root: &Path) -> Result<Vec<(PathBuf, Option<String>)>> {
+    let list = git(root, &["worktree", "list", "--porcelain"], None)?;
+    let mut found = Vec::new();
+    for line in list.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            found.push((PathBuf::from(path), None));
+        } else if let Some(branch) = line.strip_prefix("branch refs/heads/")
+            && let Some(last) = found.last_mut()
+        {
+            last.1 = Some(branch.to_owned());
+        }
+    }
+    Ok(found)
 }
