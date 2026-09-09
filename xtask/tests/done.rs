@@ -81,6 +81,12 @@ fn scratch_with_an_open_row(name: &str) -> PathBuf {
     repository(name, &fixtures().join("done/divergence.toml"))
 }
 
+/// The branch is `main` by name and not by default: `git init` takes it
+/// from `init.defaultBranch`, which is `main` on a workstation that set it
+/// and `master` on a runner that did not, and a scratch repository on
+/// `master` is on no track, falls back to `main`, and has no `main` to
+/// take a merge base with. The three tests that pass no `--base` read the
+/// branch this line pins.
 fn repository(name: &str, registry: &Path) -> PathBuf {
     let root = std::env::temp_dir().join(format!("xtask-done-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -95,7 +101,7 @@ fn repository(name: &str, registry: &Path) -> PathBuf {
         write(&root, &format!("ext/pcre/{file}"), &text);
     }
     write(&root, ".gitignore", "target/\n");
-    sh(&root, &["git", "init", "-q"]);
+    sh(&root, &["git", "init", "-q", "-b", "main"]);
     commit(&root, "scratch");
     root
 }
