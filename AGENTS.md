@@ -129,13 +129,14 @@ Commands:
   generate           Write the files the manifest's `generated` rules render (ext/clippy.toml)
   divergence-reason  Hold the divergence registry to the manifest rule whose `check` names this instrument: an accepted row has a reason a person wrote
   new-ext            Lay one extension crate down at ext/<name> in the template topology: the facade as its one dependency, `extension()`, state on the value, a test through the capture sink, a witness, ext/clippy.toml rewritten and the row in ext/AGENTS.md; refuses an existing one
+  witness            Extract every `php` fence and its `expect` fence from a crate's rustdoc, run each snippet under the oracle's recipe as `witness.php` and hold it to what the fence pins; count the kernels and natives without one. One reading per crate
   vocab              The glossary as a sensor: `_Avoid_` words in public item names and rustdoc prose, never in a lock; one reading per crate
 
 Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=f0d4e0f008cfca3f787714065cbf3b0ee80a55de8e0a0b8a0209ea597e00a573 out=7b2b15ef01f6793f6f53e2ed6f2d9e23be34a7d22ab29cb1133e1b979e555d12 -->
+<!-- /computed in=616a2360f6a4c19d9209867c2df7c1624a9ed9fe058f408637c5269ce4098e63 out=79a69e20b3ee8888167b483d7632d44e54d3ba85385abb65d4acddf128386623 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

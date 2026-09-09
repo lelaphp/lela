@@ -456,8 +456,9 @@ fn percent(met: u64, found: u64) -> f64 {
     ratio.round() / 10.0
 }
 
-/// At most five names, and how many more there are.
-fn listed(names: &[&str]) -> String {
+/// At most five names, and how many more there are; `witness` names its
+/// failures the same way.
+pub(crate) fn listed(names: &[&str]) -> String {
     let shown = names.iter().take(5).copied().collect::<Vec<_>>().join(", ");
     if names.len() > 5 {
         format!("{shown} and {} more", names.len() - 5)

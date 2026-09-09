@@ -253,6 +253,63 @@ impl Predicates {
     }
 }
 
+impl Rule {
+    /// Whether the rule's `scope` covers `path`: the manifest's `scope` key
+    /// is one grammar, and every sensor that reads it reads it here
+    /// (harness-design.md §4.1). A rule without a scope covers nothing on
+    /// its own; what such a rule judges is its predicate's.
+    pub fn covers(&self, path: &Path) -> bool {
+        self.scope
+            .iter()
+            .any(|pattern| scope_matches(pattern, path))
+    }
+}
+
+/// Whether `path` is at or under the scope pattern: `*` is one segment or
+/// part of one, `**` any number of segments, and a pattern that ends before
+/// the path does names a directory the path is under.
+pub fn scope_matches(pattern: &str, path: &Path) -> bool {
+    let pattern: Vec<&str> = pattern
+        .trim_end_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    let path = path.to_string_lossy();
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    segments_match(&pattern, &segments)
+}
+
+fn segments_match(pattern: &[&str], path: &[&str]) -> bool {
+    match (pattern.split_first(), path.split_first()) {
+        (None, _) => true,
+        (Some((&"**", rest)), _) => {
+            segments_match(rest, path)
+                || path
+                    .first()
+                    .is_some_and(|_| segments_match(pattern, &path[1..]))
+        }
+        (Some((first, rest)), Some((segment, tail))) => {
+            segment_matches(first, segment) && segments_match(rest, tail)
+        }
+        (Some(_), None) => false,
+    }
+}
+
+/// One segment against a pattern in which `*` matches any run of characters.
+fn segment_matches(pattern: &str, segment: &str) -> bool {
+    match pattern.split_once('*') {
+        None => pattern == segment,
+        Some((head, tail)) => {
+            segment.starts_with(head)
+                && segment[head.len()..]
+                    .char_indices()
+                    .map(|(i, _)| i)
+                    .chain(std::iter::once(segment.len() - head.len()))
+                    .any(|i| segment_matches(tail, &segment[head.len() + i..]))
+        }
+    }
+}
+
 /// A key the file writes as one string or as a list of them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -399,6 +456,15 @@ impl Manifest {
 
     pub fn rule(&self, id: &str) -> Option<&Rule> {
         self.rules.iter().find(|r| r.id == id)
+    }
+
+    /// The rule whose `check` predicate names `instrument`: how a sensor
+    /// that reads the tree after the write finds the rule it evaluates
+    /// (harness-design.md §4.1, §4.4).
+    pub fn rule_checked_by(&self, instrument: &str) -> Option<&Rule> {
+        self.rules
+            .iter()
+            .find(|r| r.predicate.check.as_deref() == Some(instrument))
     }
 
     /// The ceiling on a seam's lock width: `[budget] api_items` for the api

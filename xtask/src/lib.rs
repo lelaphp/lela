@@ -3,7 +3,8 @@
 //! owns every comparison and the divergence registry, the reading and its
 //! store, the instruments, `permit`, the judge at the tool call, `done`,
 //! the definition of done, `vocab`, the glossary as a sensor, `phpt`, the
-//! subset runner, and `status`, the one renderer.
+//! subset runner, `witness`, the rustdoc witnesses, and `status`, the one
+//! renderer.
 #![forbid(unsafe_code)]
 
 pub mod api_check;
@@ -32,6 +33,7 @@ pub mod sources;
 pub mod status;
 pub mod unsafe_audit;
 pub mod vocab;
+pub mod witness;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -130,17 +132,7 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         Command::ApiCheck { write } => api_check::run(&manifest, &root, &store, write),
-        Command::DivergenceReason => {
-            let registry = Registry::load(&root)?;
-            let mut reading = divergence::reason(&registry, &manifest);
-            reading.stamp(&Stamp::take(&root, Path::new(divergence::FILE))?);
-            store.write(&reading)?;
-            if reading.status == Status::Fail {
-                bail!("{}", reading.message);
-            }
-            println!("{}", reading.message);
-            Ok(())
-        }
+        Command::DivergenceReason => divergence_command(&root, &manifest, &store),
         Command::NewExt { name } => {
             let laid = new_ext::run(&root, &manifest, &name)?;
             for path in &laid.written {
@@ -150,6 +142,9 @@ pub fn run() -> Result<()> {
                 println!("{note}");
             }
             Ok(())
+        }
+        Command::Witness { crates, accept } => {
+            witness::command(&root, &manifest, &store, crates, accept)
         }
         Command::Vocab { crates } => {
             if vocab::run(&root, &manifest, &store, &crates)? {
@@ -202,6 +197,22 @@ fn phpt_command(
         engine,
     };
     record(store, &phpt::run(root, manifest, &registry, &ask)?)
+}
+
+/// `xtask divergence-reason`: the registry against the rule whose `check`
+/// names it. A helper of the shape `phpt` and `status` have, so that the
+/// dispatch above stays a list of one arm per instrument: it is at clippy's
+/// hundred-line ceiling, and `witness` is the arm that tipped it.
+fn divergence_command(root: &Path, manifest: &Manifest, store: &Store) -> Result<()> {
+    let registry = Registry::load(root)?;
+    let mut reading = divergence::reason(&registry, manifest);
+    reading.stamp(&Stamp::take(root, Path::new(divergence::FILE))?);
+    store.write(&reading)?;
+    if reading.status == Status::Fail {
+        bail!("{}", reading.message);
+    }
+    println!("{}", reading.message);
+    Ok(())
 }
 
 /// `xtask status`: one section, or with no section the map and the local

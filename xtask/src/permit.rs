@@ -31,7 +31,7 @@ use serde_json::{Value, json};
 
 use crate::built;
 use crate::git::{self, Stamp, git};
-use crate::manifest::{self, Manifest, Rule};
+use crate::manifest::{self, Manifest, Rule, scope_matches};
 use crate::reading::{Reading, Status, Store};
 
 /// The instrument name every reading of permit carries.
@@ -299,7 +299,7 @@ fn evaluate(
     // A rule with a scope judges a file in it and nothing else.
     if !rule.scope.is_empty() {
         match path {
-            Some(path) if rule.scope.iter().any(|s| scope_matches(s, path)) => {}
+            Some(path) if rule.covers(path) => {}
             _ => return Ok(None),
         }
     }
@@ -333,51 +333,6 @@ fn evaluate(
 
 fn is_rust_source(path: &Path) -> bool {
     path.extension().is_some_and(|e| e == "rs")
-}
-
-/// Whether `path` is at or under the scope pattern: `*` is one segment or
-/// part of one, `**` any number of segments, and a pattern that ends before
-/// the path does names a directory the path is under.
-fn scope_matches(pattern: &str, path: &Path) -> bool {
-    let pattern: Vec<&str> = pattern
-        .trim_end_matches('/')
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
-    let path = path.to_string_lossy();
-    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    segments_match(&pattern, &segments)
-}
-
-fn segments_match(pattern: &[&str], path: &[&str]) -> bool {
-    match (pattern.split_first(), path.split_first()) {
-        (None, _) => true,
-        (Some((&"**", rest)), _) => {
-            segments_match(rest, path)
-                || path
-                    .first()
-                    .is_some_and(|_| segments_match(pattern, &path[1..]))
-        }
-        (Some((first, rest)), Some((segment, tail))) => {
-            segment_matches(first, segment) && segments_match(rest, tail)
-        }
-        (Some(_), None) => false,
-    }
-}
-
-/// One segment against a pattern in which `*` matches any run of characters.
-fn segment_matches(pattern: &str, segment: &str) -> bool {
-    match pattern.split_once('*') {
-        None => pattern == segment,
-        Some((head, tail)) => {
-            segment.starts_with(head)
-                && segment[head.len()..]
-                    .char_indices()
-                    .map(|(i, _)| i)
-                    .chain(std::iter::once(segment.len() - head.len()))
-                    .any(|i| segment_matches(tail, &segment[head.len() + i..]))
-        }
-    }
 }
 
 /// The tokens of each simple command in a shell line, split on unquoted

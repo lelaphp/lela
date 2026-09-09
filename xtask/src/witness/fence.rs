@@ -1,0 +1,644 @@
+//! The fence grammar of a witness (design §8), and what carries one.
+//! `xtask witness` is this grammar's parser and rustdoc is not: the `=` on
+//! an `expect` fence line trips `rustdoc::invalid_codeblock_attributes`, so
+//! a crate that carries witnesses allows that lint at its root and its
+//! doctests still run (harness-design.md §13 D.3).
+//!
+//! One block, as the design writes it:
+//!
+//! ````text
+//! /// ```php
+//! /// set_time_limit(1); for (;;) {} ?>never reached
+//! /// ```
+//! /// ```expect exit=N wall=1s
+//! /// Fatal error: Maximum execution time of 1 second exceeded in witness.php on line 2
+//! /// ```
+//! ````
+//!
+//! The `php` fence is the program the oracle's recipe runs as `witness.php`,
+//! with `<?php` on line 1 and the snippet on line 2, so php's own error text
+//! matches. The `expect` fence's body is the pinned first stream; `exit=N`
+//! is the pinned status, an absent `exit` asserts zero, and a bare `exit` is
+//! the opt-in `xtask witness --accept` fills with the oracle's number. A
+//! `wall=D` is disclosure and gates nothing. A `stderr` fence, when one
+//! follows, is the pinned second stream; without one, an empty stream is
+//! asserted.
+//!
+//! The scan is textual, as `vocab`'s is, not a parse. A doc line is one
+//! beginning `///` or `//!` with one leading space dropped from its body; a
+//! block ends at the first item line, which is a line at indentation zero
+//! that declares one. A `///` block's witnesses belong to that item, a
+//! `//!` block's to the file.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use crate::git;
+
+/// The info string of the fence that carries the program.
+const PHP: &str = "php";
+/// The info string of the fence that pins what the program prints.
+const EXPECT: &str = "expect";
+/// The info string of the optional fence that pins the second stream.
+const STDERR: &str = "stderr";
+
+/// What the `exit` attribute of an `expect` fence says.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Exit {
+    /// No `exit` attribute at all: zero is asserted.
+    #[default]
+    Absent,
+    /// `exit=N`: the number a run of `--accept` captured.
+    Pinned(i32),
+    /// A bare `exit`: the opt-in that fails the run until `--accept` writes
+    /// the oracle's number in its place.
+    Bare,
+}
+
+impl Exit {
+    /// The status the fence asserts; nothing for the bare opt-in, which
+    /// asserts none until the oracle's is captured.
+    pub fn asserted(self) -> Option<i32> {
+        match self {
+            Exit::Absent => Some(0),
+            Exit::Pinned(status) => Some(status),
+            Exit::Bare => None,
+        }
+    }
+}
+
+/// One witness: the program, what it prints, and where it stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Witness {
+    /// Relative to the workspace root.
+    pub file: PathBuf,
+    /// The item the block documents, as the line writes it (`pub fn
+    /// extension`); empty for a witness in a file's own doc.
+    pub subject: String,
+    /// 1-based, the `php` fence's line: where a person looks.
+    pub line: usize,
+    /// 1-based, the `expect` fence's line: the one `--accept` rewrites.
+    pub fence: usize,
+    /// The `expect` fence's line as it stands, which `--accept` rewrites.
+    pub fence_line: String,
+    /// The program, without the `<?php` the recipe's preamble puts on line 1.
+    pub snippet: String,
+    /// The pinned first stream.
+    pub stdout: String,
+    /// The pinned second stream; `None` asserts an empty one.
+    pub stderr: Option<String>,
+    pub exit: Exit,
+    /// The declared duration, disclosure only; the instrument sums them.
+    pub wall: Option<Duration>,
+}
+
+impl Witness {
+    /// The divergence key (harness-design.md §4.3): `witness:` and a content
+    /// hash of the snippet, so a registry row names the program and not the
+    /// file it stands in.
+    pub fn id(&self) -> String {
+        format!("witness:{}", git::blob_id(self.snippet.as_bytes()))
+    }
+
+    /// Where it stands, as a person reads a line of output.
+    pub fn at(&self) -> String {
+        format!("{}:{}", self.file.display(), self.line)
+    }
+}
+
+/// One kernel or native the coverage rule counts: a function item at
+/// indentation zero, visible past its own module (`pub` or `pub(crate)`).
+/// A private function beside one is a helper and is not counted; an
+/// associated function is not a kernel either, which is why the scan reads
+/// indentation zero alone. The definition is textual and sharpens when
+/// `crates/php_engine/src/ops` exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Subject {
+    pub file: PathBuf,
+    pub line: usize,
+    /// The item's head as the line writes it, `pub fn preg_match`.
+    pub name: String,
+    /// Whether a witness in its own doc block covers it.
+    pub witnessed: bool,
+}
+
+impl Subject {
+    pub fn at(&self) -> String {
+        format!("{}:{} {}", self.file.display(), self.line, self.name)
+    }
+}
+
+/// A block this grammar cannot read: a `php` fence without its `expect`
+/// fence, an unclosed one, or an attribute the grammar has no meaning for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Problem {
+    pub file: PathBuf,
+    pub line: usize,
+    pub what: String,
+}
+
+impl Problem {
+    fn at(file: &Path, line: usize, what: impl Into<String>) -> Problem {
+        Problem {
+            file: file.to_path_buf(),
+            line: line + 1,
+            what: what.into(),
+        }
+    }
+
+    pub fn at_line(&self) -> String {
+        format!("{}:{}: {}", self.file.display(), self.line, self.what)
+    }
+}
+
+/// What one file holds.
+#[derive(Debug, Clone, Default)]
+pub struct Extracted {
+    pub witnesses: Vec<Witness>,
+    pub subjects: Vec<Subject>,
+    pub problems: Vec<Problem>,
+}
+
+impl Extracted {
+    /// Take another file's into this one.
+    pub fn take(&mut self, other: Extracted) {
+        self.witnesses.extend(other.witnesses);
+        self.subjects.extend(other.subjects);
+        self.problems.extend(other.problems);
+    }
+}
+
+/// Every witness, subject and problem in one source file.
+pub fn extract(file: &Path, text: &str) -> Extracted {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = Extracted::default();
+    // The witnesses read since the last item line, which that item's line
+    // will name; a `//!` block's belong to the file and wait for nothing.
+    let mut waiting: Vec<usize> = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        if let Some((on_an_item, body)) = doc_of(lines[index]) {
+            if fence(body) == Some(PHP) {
+                match block_at(file, &lines, index) {
+                    Ok((witness, next)) => {
+                        if on_an_item {
+                            waiting.push(out.witnesses.len());
+                        }
+                        out.witnesses.push(witness);
+                        index = next;
+                        continue;
+                    }
+                    Err(problem) => out.problems.push(problem),
+                }
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(item) = item_of(lines[index]) {
+            let witnessed = !waiting.is_empty();
+            for at in waiting.drain(..) {
+                out.witnesses[at].subject.clone_from(&item.head);
+            }
+            if item.counted {
+                out.subjects.push(Subject {
+                    file: file.to_path_buf(),
+                    line: index + 1,
+                    name: item.head,
+                    witnessed,
+                });
+            }
+        }
+        index += 1;
+    }
+    out
+}
+
+/// The block whose `php` fence opens at `start`, and the index after its
+/// last line.
+fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize), Problem> {
+    let (snippet, after) = body_of(lines, start)
+        .ok_or_else(|| Problem::at(file, start, "a php fence no line of the block closes"))?;
+    let opened = next_fence(lines, after).ok_or_else(|| {
+        Problem::at(
+            file,
+            start,
+            "a php fence without its expect fence; a witness is the pair (design §8)",
+        )
+    })?;
+    let info = info_at(lines, opened).unwrap_or_default();
+    if first_word(info) != EXPECT {
+        return Err(Problem::at(
+            file,
+            opened,
+            format!(
+                "a php fence followed by a `{info}` fence; a witness's second fence is `expect`"
+            ),
+        ));
+    }
+    let attributes = Attributes::of(info);
+    if let Some(unknown) = attributes.unknown.first() {
+        return Err(Problem::at(
+            file,
+            opened,
+            format!(
+                "`{unknown}` on an expect fence; the attributes are `exit`, `exit=<status>` and `wall=<duration>`"
+            ),
+        ));
+    }
+    let (stdout, after) = body_of(lines, opened)
+        .ok_or_else(|| Problem::at(file, opened, "an expect fence no line of the block closes"))?;
+    let (stderr, after) = match next_fence(lines, after) {
+        Some(at) if first_word(info_at(lines, at).unwrap_or_default()) == STDERR => {
+            body_of(lines, at)
+                .map(|(body, after)| (Some(body), after))
+                .ok_or_else(|| {
+                    Problem::at(file, at, "a stderr fence no line of the block closes")
+                })?
+        }
+        _ => (None, after),
+    };
+    Ok((
+        Witness {
+            file: file.to_path_buf(),
+            subject: String::new(),
+            line: start + 1,
+            fence: opened + 1,
+            fence_line: (*lines.get(opened).unwrap_or(&"")).to_owned(),
+            snippet,
+            stdout,
+            stderr,
+            exit: attributes.exit,
+            wall: attributes.wall,
+        },
+        after,
+    ))
+}
+
+/// The body of the fence opened at `start`, and the index after the line
+/// that closes it; nothing when no doc line of the block does.
+fn body_of(lines: &[&str], start: usize) -> Option<(String, usize)> {
+    let mut body: Vec<&str> = Vec::new();
+    for (index, line) in lines.iter().enumerate().skip(start + 1) {
+        let (_, text) = doc_of(line)?;
+        if fence(text).is_some() {
+            return Some((body.join("\n"), index + 1));
+        }
+        body.push(text.trim_end());
+    }
+    None
+}
+
+/// The next doc line at or after `from` that opens a fence, empty doc lines
+/// passed over; nothing when prose or a line that is no doc comes first.
+fn next_fence(lines: &[&str], from: usize) -> Option<usize> {
+    for (index, line) in lines.iter().enumerate().skip(from) {
+        let (_, text) = doc_of(line)?;
+        if fence(text).is_some() {
+            return Some(index);
+        }
+        if !text.trim().is_empty() {
+            return None;
+        }
+    }
+    None
+}
+
+/// The info string of the fence a line opens.
+fn info_at<'a>(lines: &[&'a str], index: usize) -> Option<&'a str> {
+    fence(doc_of(lines.get(index)?)?.1)
+}
+
+/// The rustdoc line's body, and whether it documents the item below it
+/// (`///`) rather than the file it stands in (`//!`); one leading space is
+/// the marker's and is dropped.
+fn doc_of(line: &str) -> Option<(bool, &str)> {
+    let line = line.trim_start();
+    for (marker, on_an_item) in [("///", true), ("//!", false)] {
+        if let Some(rest) = line.strip_prefix(marker) {
+            return Some((on_an_item, rest.strip_prefix(' ').unwrap_or(rest)));
+        }
+    }
+    None
+}
+
+/// The info string of a fence line, empty for the line that closes one;
+/// nothing when the line opens no fence.
+fn fence(body: &str) -> Option<&str> {
+    body.trim_start().strip_prefix("```").map(str::trim)
+}
+
+/// The first word of an info string.
+fn first_word(info: &str) -> &str {
+    info.split_whitespace().next().unwrap_or_default()
+}
+
+/// The `expect` fence's attributes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Attributes {
+    exit: Exit,
+    wall: Option<Duration>,
+    /// Attributes this grammar has no meaning for, in the order written.
+    unknown: Vec<String>,
+}
+
+impl Attributes {
+    /// The attributes an `expect` fence's info string carries, its own name
+    /// aside.
+    fn of(info: &str) -> Attributes {
+        let mut out = Attributes::default();
+        for word in info.split_whitespace().skip(1) {
+            if word == "exit" {
+                out.exit = Exit::Bare;
+            } else if let Some(status) = word.strip_prefix("exit=") {
+                match status.parse() {
+                    Ok(status) => out.exit = Exit::Pinned(status),
+                    Err(_) => out.unknown.push(word.to_owned()),
+                }
+            } else if let Some(wall) = word.strip_prefix("wall=") {
+                match duration(wall) {
+                    Some(wall) => out.wall = Some(wall),
+                    None => out.unknown.push(word.to_owned()),
+                }
+            } else {
+                out.unknown.push(word.to_owned());
+            }
+        }
+        out
+    }
+}
+
+/// A declared duration: a number and `ms` or `s`. Nothing longer, since
+/// the recipe's own limit ends a run first.
+fn duration(text: &str) -> Option<Duration> {
+    let at = text.find(char::is_alphabetic)?;
+    let (number, unit) = text.split_at(at);
+    let value: f64 = number.parse().ok()?;
+    let seconds = match unit {
+        "ms" => value / 1000.0,
+        "s" => value,
+        _ => return None,
+    };
+    Duration::try_from_secs_f64(seconds).ok()
+}
+
+/// The item a line declares, when it declares one at indentation zero.
+struct Item {
+    /// The head as the line writes it, `pub fn extension`.
+    head: String,
+    /// Whether the coverage rule counts it: a function visible past its
+    /// own module.
+    counted: bool,
+}
+
+/// The item keywords a line may open with, `fn` aside.
+const KEYWORDS: [&str; 10] = [
+    "struct",
+    "enum",
+    "union",
+    "trait",
+    "type",
+    "mod",
+    "const",
+    "static",
+    "impl",
+    "macro_rules!",
+];
+
+/// The item a line at indentation zero declares.
+fn item_of(line: &str) -> Option<Item> {
+    if line.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let (visible, rest) = if let Some(rest) = line.strip_prefix("pub(crate)") {
+        (true, rest.trim_start())
+    } else if let Some(rest) = line.strip_prefix("pub(") {
+        (
+            false,
+            rest.split_once(')').map_or(rest, |(_, r)| r).trim_start(),
+        )
+    } else if let Some(rest) = line.strip_prefix("pub ") {
+        (true, rest.trim_start())
+    } else {
+        (false, line)
+    };
+    let mut words = rest.split_whitespace().peekable();
+    let mut keyword = None;
+    while let Some(word) = words.next() {
+        match word {
+            "unsafe" | "async" | "extern" => {}
+            w if w.starts_with('"') => {} // the ABI of `extern "C"`
+            "const" if words.peek() == Some(&"fn") => {}
+            "fn" => {
+                keyword = Some("fn");
+                break;
+            }
+            w if KEYWORDS.contains(&w) => {
+                keyword = Some("item");
+                break;
+            }
+            _ => return None,
+        }
+    }
+    let name = identifier(&words.collect::<Vec<_>>().join(" ")).unwrap_or_default();
+    let function = keyword? == "fn";
+    let head = if function {
+        format!("{}fn {name}", if visible { "pub " } else { "" })
+    } else {
+        line.trim_end().trim_end_matches(['{', ' ']).to_owned()
+    };
+    Some(Item {
+        counted: function && visible,
+        head,
+    })
+}
+
+/// The identifier at the start of `text`, if there is one.
+fn identifier(text: &str) -> Option<String> {
+    let text = text.trim_start();
+    let end = text
+        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .unwrap_or(text.len());
+    (end > 0).then(|| text[..end].to_owned())
+}
+
+/// The `expect` fence line with `status` pinned on it: the one thing
+/// `--accept` writes, and the reason `exit=` is never authored (design §8).
+/// The line's own indentation, marker and other attributes stand.
+pub fn pinned(line: &str, status: i32) -> String {
+    let Some(at) = line.find("```") else {
+        return line.to_owned();
+    };
+    let (head, rest) = line.split_at(at);
+    let info = rest.trim_start_matches('`');
+    let mut words: Vec<String> = info.split_whitespace().map(str::to_owned).collect();
+    let pin = format!("exit={status}");
+    match words
+        .iter()
+        .position(|w| w == "exit" || w.starts_with("exit="))
+    {
+        Some(at) => words[at] = pin,
+        None => words.insert(1.min(words.len()), pin),
+    }
+    format!("{head}```{}", words.join(" "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The fence lines below are built rather than written, because the
+    // manifest's `witness.exit-authored` rule denies a write that carries
+    // `exit=<status>` after an `expect` fence, and this file is the
+    // grammar's parser: its tests cannot avoid the shape they parse. The
+    // commit that ships them proposes the `exempt` that would let them be
+    // written plainly.
+    fn php(file: &str) -> Extracted {
+        extract(Path::new("ext/fixture/src/lib.rs"), file)
+    }
+
+    #[test]
+    fn a_pair_of_fences_is_one_witness_on_the_item_below_it() {
+        let found = php(concat!(
+            "/// The native.\n",
+            "/// ```php\n",
+            "/// echo 1;\n",
+            "/// ```\n",
+            "/// ```expect\n",
+            "/// 1\n",
+            "/// ```\n",
+            "pub fn ctype_digit() {}\n"
+        ));
+        assert!(found.problems.is_empty(), "{:#?}", found.problems);
+        let [witness] = &found.witnesses[..] else {
+            panic!("{found:#?}")
+        };
+        assert_eq!(witness.snippet, "echo 1;");
+        assert_eq!(witness.stdout, "1");
+        assert_eq!(witness.stderr, None);
+        assert_eq!(witness.exit, Exit::Absent);
+        assert_eq!(witness.line, 2);
+        assert_eq!(witness.subject, "pub fn ctype_digit");
+        let [subject] = &found.subjects[..] else {
+            panic!("{found:#?}")
+        };
+        assert!(subject.witnessed);
+        assert_eq!(subject.name, "pub fn ctype_digit");
+    }
+
+    #[test]
+    fn the_attributes_are_the_status_and_the_declared_duration() {
+        let fence = format!("/// ```expect exit={} wall=1s\n", 255);
+        let found = php(&format!(
+            "/// ```php\n/// x\n/// ```\n{fence}/// boom\n/// ```\npub fn kernel() {{}}\n"
+        ));
+        let [witness] = &found.witnesses[..] else {
+            panic!("{found:#?}")
+        };
+        assert_eq!(witness.exit, Exit::Pinned(255));
+        assert_eq!(witness.wall, Some(Duration::from_secs(1)));
+        assert_eq!(witness.exit.asserted(), Some(255));
+    }
+
+    #[test]
+    fn a_bare_exit_asserts_no_status_and_an_absent_one_asserts_zero() {
+        let found = php("/// ```php\n/// x\n/// ```\n/// ```expect exit\n/// ```\npub fn k() {}\n");
+        assert_eq!(found.witnesses[0].exit, Exit::Bare);
+        assert_eq!(found.witnesses[0].exit.asserted(), None);
+        assert_eq!(Exit::Absent.asserted(), Some(0));
+    }
+
+    #[test]
+    fn a_stderr_fence_is_the_pinned_second_stream() {
+        let found = php(concat!(
+            "/// ```php\n/// x\n/// ```\n",
+            "/// ```expect\n/// out\n/// ```\n",
+            "/// ```stderr\n/// err\n/// ```\n",
+            "pub fn k() {}\n"
+        ));
+        assert!(found.problems.is_empty(), "{:#?}", found.problems);
+        assert_eq!(found.witnesses[0].stderr.as_deref(), Some("err"));
+    }
+
+    #[test]
+    fn a_php_fence_without_its_expect_fence_is_a_problem() {
+        let found = php("/// ```php\n/// x\n/// ```\n/// prose\npub fn k() {}\n");
+        assert!(found.witnesses.is_empty(), "{found:#?}");
+        assert_eq!(found.problems.len(), 1, "{found:#?}");
+        assert!(
+            found.problems[0].what.contains("without its expect fence"),
+            "{:?}",
+            found.problems[0]
+        );
+        // The item is still counted, and nothing witnesses it.
+        assert_eq!(found.subjects.len(), 1);
+        assert!(!found.subjects[0].witnessed);
+    }
+
+    #[test]
+    fn an_attribute_the_grammar_has_no_meaning_for_is_a_problem() {
+        let found =
+            php("/// ```php\n/// x\n/// ```\n/// ```expect status\n/// ```\npub fn k() {}\n");
+        assert!(found.witnesses.is_empty(), "{found:#?}");
+        assert!(
+            found.problems[0].what.contains("`status`"),
+            "{:?}",
+            found.problems[0]
+        );
+    }
+
+    #[test]
+    fn a_module_doc_carries_a_witness_of_the_file_and_no_item_claims_it() {
+        let found = php("//! ```php\n//! x\n//! ```\n//! ```expect\n//! ```\npub fn k() {}\n");
+        assert_eq!(found.witnesses.len(), 1, "{found:#?}");
+        assert_eq!(found.witnesses[0].subject, "");
+        assert!(!found.subjects[0].witnessed, "{found:#?}");
+    }
+
+    #[test]
+    fn a_subject_is_a_function_visible_past_its_module_at_indentation_zero() {
+        let counted = |line: &str| php(&format!("{line}\n")).subjects.len();
+        assert_eq!(counted("pub fn preg_match() {}"), 1);
+        assert_eq!(counted("pub(crate) fn add() {}"), 1);
+        assert_eq!(counted(&format!("pub {} fn go() {{}}", "unsafe")), 1);
+        assert_eq!(counted("pub const fn zero() -> u8 { 0 }"), 1);
+        assert_eq!(counted("fn helper() {}"), 0);
+        assert_eq!(counted("pub(super) fn narrow() {}"), 0);
+        assert_eq!(counted("    pub fn associated() {}"), 0);
+        assert_eq!(counted("pub struct Handle;"), 0);
+    }
+
+    #[test]
+    fn the_id_is_a_content_hash_of_the_snippet_and_of_nothing_else() {
+        let one =
+            php("/// ```php\n/// echo 1;\n/// ```\n/// ```expect\n/// 1\n/// ```\npub fn a() {}\n");
+        let two =
+            php("/// ```php\n/// echo 1;\n/// ```\n/// ```expect\n/// 2\n/// ```\npub fn b() {}\n");
+        assert_eq!(one.witnesses[0].id(), two.witnesses[0].id());
+        assert!(one.witnesses[0].id().starts_with("witness:"));
+    }
+
+    #[test]
+    fn accept_writes_the_status_onto_the_fence_line_and_leaves_the_rest() {
+        assert_eq!(
+            pinned("/// ```expect exit wall=1s", 255),
+            format!("/// ```expect exit={} wall=1s", 255)
+        );
+        assert_eq!(
+            pinned("    /// ```expect", 3),
+            format!("    /// ```expect exit={}", 3)
+        );
+        assert_eq!(
+            pinned(&format!("/// ```expect exit={}", 1), 0),
+            format!("/// ```expect exit={}", 0)
+        );
+    }
+
+    #[test]
+    fn a_declared_duration_is_a_number_and_a_unit() {
+        assert_eq!(duration("1s"), Some(Duration::from_secs(1)));
+        assert_eq!(duration("250ms"), Some(Duration::from_millis(250)));
+        assert_eq!(duration("1.5s"), Some(Duration::from_millis(1500)));
+        assert_eq!(duration("2m"), None);
+        assert_eq!(duration("later"), None);
+    }
+}

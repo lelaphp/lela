@@ -254,10 +254,7 @@ impl Counts {
 /// the text of the manifest rule whose `check` predicate names this
 /// instrument; the counts are the numbers. The stamp is the caller's.
 pub fn reason(registry: &Registry, manifest: &Manifest) -> Reading {
-    let rule = manifest
-        .rules
-        .iter()
-        .find(|r| r.predicate.check.as_deref() == Some(INSTRUMENT));
+    let rule = manifest.rule_checked_by(INSTRUMENT);
     let mut reading = Reading::new(INSTRUMENT, "workspace");
     if let Some(rule) = rule {
         reading.rule.clone_from(&rule.id);

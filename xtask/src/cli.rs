@@ -134,6 +134,19 @@ pub enum Command {
         /// The extension's name as php-src spells it, with a `[[crate]]` row.
         name: String,
     },
+    /// Extract every `php` fence and its `expect` fence from a crate's
+    /// rustdoc, run each snippet under the oracle's recipe as `witness.php`
+    /// and hold it to what the fence pins; count the kernels and natives
+    /// without one. One reading per crate.
+    Witness {
+        /// Only these crates, by manifest name; default every crate that exists.
+        #[arg(long = "crate", value_name = "NAME")]
+        crates: Vec<String>,
+        /// Write the oracle's status onto each `expect` fence line that
+        /// does not already pin it; the only thing that writes an `exit`.
+        #[arg(long)]
+        accept: bool,
+    },
     /// The glossary as a sensor: `_Avoid_` words in public item names and
     /// rustdoc prose, never in a lock; one reading per crate.
     Vocab {
