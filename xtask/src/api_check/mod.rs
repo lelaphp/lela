@@ -6,10 +6,10 @@
 //! - A seam's lock is regenerated and diffed against the committed file. An
 //!   item lock (`heap.lock`, `unit.lock`, `api.lock`, and `xtask.lock`, the
 //!   harness's own, #55) is the public items of the crate the lock lives
-//!   with, `lock_from` deciding which for the facade; an import lock (`sapi.lock`, `tier.lock`, the ones an `[[edge]]`
-//!   cites by `lock` or `allowlist`, or a seam with `allowlist = true`) is
-//!   what the consumers `use` from the producer. `api.lock` is held under
-//!   `[budget] api_items`.
+//!   with, `lock_from` deciding which for the facade; an import lock
+//!   (`sapi.lock`, `tier.lock`, the ones an `[[edge]]` cites by `lock` or
+//!   `allowlist`, or a seam with `allowlist = true`) is what the consumers
+//!   `use` from the producer. `api.lock` is held under `[budget] api_items`.
 //! - A crate's workspace dependencies are held to the `[[edge]]` rows whose
 //!   `from` matches it: every row is exclusive, so `only = true` restates
 //!   what the check does for each crate. A `use` path across a `deny = true`

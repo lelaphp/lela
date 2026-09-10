@@ -691,24 +691,18 @@ impl Manifest {
             })
     }
 
-    /// The `on = "pub"` rule whose scope lies under the crate whose
-    /// `[[crate]]` row lists `lock`: the note at the tool call that a new
-    /// public item needs its lock line in the same commit (`api.lock-line`
-    /// over `crates/php_engine/src/api/**` for `api.lock`, `xtask.lock-line`
-    /// over `xtask/src/**` for `xtask.lock`). The lock's reading carries the
-    /// rule's id, so the note and the failing diff read as one rule. `None`
-    /// for a lock no row lists or no such rule stands over.
+    /// The `on = "pub"` rule named for `lock`, `<lock>-line`: the note at
+    /// the tool call that a new public item needs its lock line in the same
+    /// commit (`api.lock-line` for `api.lock`, `xtask.lock-line` for
+    /// `xtask.lock`). The lock's reading carries the rule's id, so the note
+    /// and the failing diff read as one rule. The name and not the crate
+    /// row is the key, since one row lists several locks and the rule is
+    /// one lock's. `None` for a lock with no such rule.
     pub fn lock_line_rule(&self, lock: &str) -> Option<&Rule> {
-        let row = self
-            .crates
+        let id = format!("{lock}-line");
+        self.rules
             .iter()
-            .find(|c| c.lock.iter().any(|l| l == lock))?;
-        let under = row.path();
-        self.rules.iter().find(|r| {
-            r.predicate.on.as_deref() == Some("pub")
-                && !r.scope.is_empty()
-                && r.scope.iter().all(|s| Path::new(s).starts_with(&under))
-        })
+            .find(|r| r.id == id && r.predicate.on.as_deref() == Some("pub"))
     }
 
     /// The path a reading's `tree` is hashed over, relative to the root:

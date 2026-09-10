@@ -278,3 +278,17 @@ fn a_scope_maps_to_the_path_its_reading_is_stamped_over() {
     assert_eq!(path("php_nowhere"), None);
     assert_eq!(path("ext/pcre/tests@control"), None);
 }
+
+/// The lock-line rule is one lock's, keyed by its name, `<lock>-line`:
+/// `php_engine`'s row lists three locks and only `api.lock` has the rule.
+#[test]
+fn the_lock_line_rule_is_the_locks_own_and_not_its_rows() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    assert_eq!(
+        manifest.lock_line_rule("api.lock").map(|r| r.id.as_str()),
+        Some("api.lock-line")
+    );
+    assert_eq!(manifest.lock_line_rule("sapi.lock").map(|r| &r.id), None);
+    assert_eq!(manifest.lock_line_rule("tier.lock").map(|r| &r.id), None);
+    assert_eq!(manifest.lock_line_rule("heap.lock").map(|r| &r.id), None);
+}
