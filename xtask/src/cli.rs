@@ -92,11 +92,12 @@ pub(crate) enum Command {
         #[arg(long)]
         hook: bool,
     },
-    /// Say which track this worktree's branch is on (the longest existing
-    /// branch that is a proper path prefix of its name, `main` for a branch
-    /// on none), the commit `done` measures since, the root that holds
-    /// the track's store, and the ticket the branch records; as text, or
-    /// as one object. Writes no reading.
+    /// Say which track the branch is on, the commit `done` measures since,
+    /// the track's store root and the branch's ticket; as text or as one
+    /// object. Writes no reading.
+    ///
+    /// The track is the longest existing branch that is a proper path
+    /// prefix of the branch's name, `main` for a branch on none.
     Track {
         /// A branch other than `HEAD`'s, made or not yet: what the add
         /// command asks before it takes the branch off its track.
@@ -106,36 +107,44 @@ pub(crate) enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// A track's worktrees: `add` lays one down under .claude/worktrees/<branch>
-    /// ready to be worked in, the branch off its track with the ticket it
-    /// is for recorded on it, `xtask` built there,
-    /// the local file laid and rendered, the `computed trust` line printed
-    /// as a person's; refuses a branch that exists and a directory that
-    /// does. `retire` appends the worktree's log into its track's store,
-    /// removes the worktree and prints the branch-delete line as a
-    /// person's; refuses uncommitted work. Writes no reading.
+    /// A track's worktrees: `add` lays one down under .claude/worktrees/<branch>,
+    /// `retire` appends its log into the track's store and removes it.
+    /// Writes no reading.
+    ///
+    /// `add` lays the worktree down ready to be worked in, the branch off
+    /// its track with the ticket it is for recorded on it, `xtask` built
+    /// there, the local file laid and rendered, the `computed trust` line
+    /// printed as a person's; refuses a branch that exists and a directory
+    /// that does. `retire` appends the worktree's log into its track's
+    /// store, removes the worktree and prints the branch-delete line as a
+    /// person's; refuses uncommitted work.
     Worktree {
         #[command(subcommand)]
         command: WorktreeCommand,
     },
-    /// A ticket, one GitHub issue: `read <n>` fetches it through `gh`,
-    /// holds it to the boxes under its `## Acceptance criteria` heading
-    /// and writes a reading of instrument `ticket`, the unticked named;
-    /// `close <n>` does the same and then closes it, naming what the work
-    /// opened (`--opens <n>`, repeatable, or `--opens-nothing`) through the
-    /// tracker's blocking relation, refusing while a box is unticked, while
-    /// a successor is not open, and while neither flag is given, changing
-    /// nothing at the tracker. No number is the branch's ticket, as `xtask
-    /// track` reads it. The one way an agent closes a ticket.
+    /// A ticket, one GitHub issue: `read <n>` holds it to its acceptance
+    /// criteria and writes the reading; `close <n>` does the same and then
+    /// closes it, naming what the work opened.
+    ///
+    /// `read <n>` fetches the issue through `gh`, holds it to the boxes
+    /// under its `## Acceptance criteria` heading and writes a reading of
+    /// instrument `ticket`, the unticked named. `close <n>` names what the
+    /// work opened (`--opens <n>`, repeatable, or `--opens-nothing`)
+    /// through the tracker's blocking relation, refusing while a box is
+    /// unticked, while a successor is not open, and while neither flag is
+    /// given, changing nothing at the tracker. No number is the branch's
+    /// ticket, as `xtask track` reads it. The one way an agent closes a
+    /// ticket.
     Ticket {
         #[command(subcommand)]
         command: TicketCommand,
     },
     /// Render the named files' regions with `computed run` and say what it
-    /// did, one line per file, `written` or `unchanged`, for pre-commit to
-    /// re-stage; refuses a broken marker, a missing `computed` and an
-    /// untrusted checkout, whose `computed trust` line is printed as a
-    /// person's. Writes no reading.
+    /// did, one line per file, for pre-commit to re-stage. Writes no reading.
+    ///
+    /// Each line is `written` or `unchanged`. Refuses a broken marker, a
+    /// missing `computed` and an untrusted checkout, whose `computed trust`
+    /// line is printed as a person's.
     Regions {
         /// The files, relative to the root.
         #[arg(required = true, value_name = "FILE")]
@@ -155,9 +164,10 @@ pub(crate) enum Command {
         staged: bool,
     },
     /// Run the pinned `.phpt` corpus through the engine and hold each test
-    /// to its `--EXPECT*--` section: the per-commit lane the manifest
-    /// composes, or the subset named; one reading per subset, scoped to
-    /// the crate whose subset it is.
+    /// to its `--EXPECT*--` section; one reading per subset, scoped to the
+    /// crate whose subset it is.
+    ///
+    /// Without `--subset`, the per-commit lane the manifest composes.
     Phpt {
         /// The subset: a crate by name (`php_engine`, `pcre`, `ext/pcre`),
         /// whose subsets its `[[crate]]` row owns, or a directory of the
@@ -183,18 +193,22 @@ pub(crate) enum Command {
     /// Hold the divergence registry to the manifest rule whose `check` names
     /// this instrument: an accepted row has a reason a person wrote.
     DivergenceReason,
-    /// Lay one extension crate down at ext/<name> in the template topology:
-    /// the facade as its one dependency, `extension()`, state on the value,
-    /// a test through the capture sink, a witness, ext/clippy.toml
-    /// rewritten and the row in ext/AGENTS.md; refuses an existing one.
+    /// Lay one extension crate down at ext/<name> in the template topology,
+    /// ext/clippy.toml rewritten and its row in ext/AGENTS.md; refuses an
+    /// existing one.
+    ///
+    /// The template: the facade as its one dependency, `extension()`, state
+    /// on the value, a test through the capture sink and a witness.
     NewExt {
         /// The extension's name as php-src spells it, with a `[[crate]]` row.
         name: String,
     },
     /// Extract every `php` fence and its `expect` fence from a crate's
-    /// rustdoc, run each snippet under the oracle's recipe as `witness.php`
-    /// and hold it to what the fence pins; count the kernels and natives
-    /// without one. One reading per crate.
+    /// rustdoc, run each under the oracle's recipe and hold it to what the
+    /// fence pins. One reading per crate.
+    ///
+    /// Each snippet runs as `witness.php`; the kernels and natives without
+    /// a witness are counted.
     Witness {
         /// Only these crates, by manifest name; default every crate that exists.
         #[arg(long = "crate", value_name = "NAME", conflicts_with = "staged")]

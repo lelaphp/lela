@@ -103,6 +103,35 @@ fn the_ceiling_counts_what_a_person_wrote_and_not_what_a_region_rendered() {
     assert_eq!(prose(&padded), written + 1);
 }
 
+/// The body of a region by name: the lines between its opener and closer.
+fn region<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
+    let mut lines = text.lines();
+    let opener = format!(" name={name}");
+    lines
+        .by_ref()
+        .find(|l| l.starts_with("<!-- computed ") && l.contains(&opener))
+        .unwrap_or_else(|| panic!("no region {name}"));
+    lines
+        .take_while(|l| !l.starts_with("<!-- /computed"))
+        .collect()
+}
+
+/// A help line says what the instrument does in one sentence and leaves
+/// the rest to `xtask <name> --help` (#64): the `instruments` region is
+/// the map's widest, and a line of it stays under 200 characters.
+#[test]
+fn every_help_line_of_the_instruments_region_is_under_200_characters() {
+    let map = read("AGENTS.md");
+    let lines = region(&map, "instruments");
+    assert!(lines.len() > 10, "the region renders `xtask --help`");
+    let widest = lines.iter().max_by_key(|l| l.len()).unwrap();
+    assert!(
+        widest.len() < 200,
+        "an `xtask --help` line is {} characters; the summary is one sentence, the rest is the subcommand's own --help: {widest}",
+        widest.len()
+    );
+}
+
 #[test]
 fn ext_and_data_have_their_regions() {
     let ext = read("ext/AGENTS.md");

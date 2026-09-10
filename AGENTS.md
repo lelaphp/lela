@@ -124,25 +124,25 @@ Commands:
   status             Render one section from the manifest and the store, or with `--session` the map plus the local facts; computes nothing else
   permit             Judge one intended call from the `PreToolUse` hook's stdin; the decision is the JSON on stdout and the exit is 0 always
   done               The definition of done: print the conditions unmet for the changes since the base and exit 1 while any is; the Stop hook, pre-push and CI read the same list
-  track              Say which track this worktree's branch is on (the longest existing branch that is a proper path prefix of its name, `main` for a branch on none), the commit `done` measures since, the root that holds the track's store, and the ticket the branch records; as text, or as one object. Writes no reading
-  worktree           A track's worktrees: `add` lays one down under .claude/worktrees/<branch> ready to be worked in, the branch off its track with the ticket it is for recorded on it, `xtask` built there, the local file laid and rendered, the `computed trust` line printed as a person's; refuses a branch that exists and a directory that does. `retire` appends the worktree's log into its track's store, removes the worktree and prints the branch-delete line as a person's; refuses uncommitted work. Writes no reading
-  ticket             A ticket, one GitHub issue: `read <n>` fetches it through `gh`, holds it to the boxes under its `## Acceptance criteria` heading and writes a reading of instrument `ticket`, the unticked named; `close <n>` does the same and then closes it, naming what the work opened (`--opens <n>`, repeatable, or `--opens-nothing`) through the tracker's blocking relation, refusing while a box is unticked, while a successor is not open, and while neither flag is given, changing nothing at the tracker. No number is the branch's ticket, as `xtask track` reads it. The one way an agent closes a ticket
-  regions            Render the named files' regions with `computed run` and say what it did, one line per file, `written` or `unchanged`, for pre-commit to re-stage; refuses a broken marker, a missing `computed` and an untrusted checkout, whose `computed trust` line is printed as a person's. Writes no reading
+  track              Say which track the branch is on, the commit `done` measures since, the track's store root and the branch's ticket; as text or as one object. Writes no reading
+  worktree           A track's worktrees: `add` lays one down under .claude/worktrees/<branch>, `retire` appends its log into the track's store and removes it. Writes no reading
+  ticket             A ticket, one GitHub issue: `read <n>` holds it to its acceptance criteria and writes the reading; `close <n>` does the same and then closes it, naming what the work opened
+  regions            Render the named files' regions with `computed run` and say what it did, one line per file, for pre-commit to re-stage. Writes no reading
   budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code and a stale generated file
   clippy             `cargo clippy` with every warning denied, on every target of each crate, as the reading `done` reads; one reading per crate
-  phpt               Run the pinned `.phpt` corpus through the engine and hold each test to its `--EXPECT*--` section: the per-commit lane the manifest composes, or the subset named; one reading per subset, scoped to the crate whose subset it is
+  phpt               Run the pinned `.phpt` corpus through the engine and hold each test to its `--EXPECT*--` section; one reading per subset, scoped to the crate whose subset it is
   unsafe-audit       Allow `unsafe` only in the homes the manifest's unsafe.homes rule names
   generate           Write the files the manifest's `generated` rules render (ext/clippy.toml)
   divergence-reason  Hold the divergence registry to the manifest rule whose `check` names this instrument: an accepted row has a reason a person wrote
-  new-ext            Lay one extension crate down at ext/<name> in the template topology: the facade as its one dependency, `extension()`, state on the value, a test through the capture sink, a witness, ext/clippy.toml rewritten and the row in ext/AGENTS.md; refuses an existing one
-  witness            Extract every `php` fence and its `expect` fence from a crate's rustdoc, run each snippet under the oracle's recipe as `witness.php` and hold it to what the fence pins; count the kernels and natives without one. One reading per crate
+  new-ext            Lay one extension crate down at ext/<name> in the template topology, ext/clippy.toml rewritten and its row in ext/AGENTS.md; refuses an existing one
+  witness            Extract every `php` fence and its `expect` fence from a crate's rustdoc, run each under the oracle's recipe and hold it to what the fence pins. One reading per crate
   vocab              The glossary as a sensor: `_Avoid_` words in public item names and rustdoc prose, never in a lock; one reading per crate
 
 Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=fcfcccf16cf0f337f0b54aeff9fb739a4eb9cfb6ac972a867a02e7c9615bcbe4 out=70bef6029567c6196d1522a719ab6d853d99317e332383c0e5b423d7058f8fe2 -->
+<!-- /computed in=592a52d8cde3ad3ee3484ee4860ec033d1992a99643e86ca4d38526edb902512 out=1ee85c8f91458b8fbb0f8f1d1cf08440093252c3d93ef3cc5b82f830cb139b35 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
