@@ -8,6 +8,8 @@ use xtask::manifest::Manifest;
 use xtask::reading::{Number, Status, Store};
 use xtask::{budget, generated, lock};
 
+mod common;
+
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
 }
@@ -34,7 +36,7 @@ fn scratch(name: &str) -> PathBuf {
 #[test]
 fn a_file_that_is_not_text_is_counted_as_no_lines_and_not_as_a_failure() {
     let root = scratch("not-text");
-    xtask::permit::scratch_workspace(workspace(), &root).unwrap();
+    common::scratch_workspace(workspace(), &root).unwrap();
     std::fs::copy(workspace().join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
     let manifest = Manifest::load(&root).unwrap();
     let before = budget::run(&root, &manifest).unwrap();

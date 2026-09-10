@@ -4,9 +4,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use xtask::manifest::Manifest;
-use xtask::permit::{self, Call, Kind, judge, judged_at_the_tool_call, scratch_workspace};
+use xtask::permit::{self, Call, Kind, judge, judged_at_the_tool_call};
 use xtask::reading::{Status, Store};
 use xtask::{built, inputs};
+
+mod common;
+use common::scratch_workspace;
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
