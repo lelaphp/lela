@@ -10,7 +10,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$CLAUDE_PROJECT_DIR\" && in=$(cat) && { for x in target/release/xtask target/debug/xtask; do [ -x \"$x\" ] && printf '%s' \"$in\" | \"$x\" permit && exit 0; done; printf '%s' \"$in\" | cargo run -q -p xtask -- permit || printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"xtask permit did not judge this call: every candidate refused or failed to run. An Edit or a Write no judge saw does not proceed; a Bash call still does, so the harness can be repaired. Rebuild it: cargo build -p xtask.\"}}'; }",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && in=$(cat) && { for x in target/release/xtask target/debug/xtask; do [ -x \"$x\" ] && printf '%s' \"$in\" | \"$x\" permit 2>/dev/null && exit 0; done; printf '%s' \"$in\" | cargo run -q -p xtask -- permit || printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"xtask permit did not judge this call: every candidate refused or failed to run. An Edit or a Write no judge saw does not proceed; a Bash call still does, so the harness can be repaired. Rebuild it: cargo build -p xtask.\"}}'; }",
             "timeout": 60
           }
         ]
@@ -20,7 +20,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$CLAUDE_PROJECT_DIR\" && in=$(cat) && { for x in target/release/xtask target/debug/xtask; do [ -x \"$x\" ] && printf '%s' \"$in\" | \"$x\" permit && exit 0; done; printf '%s' \"$in\" | cargo run -q -p xtask -- permit; }",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && in=$(cat) && { for x in target/release/xtask target/debug/xtask; do [ -x \"$x\" ] && printf '%s' \"$in\" | \"$x\" permit 2>/dev/null && exit 0; done; printf '%s' \"$in\" | cargo run -q -p xtask -- permit; }",
             "timeout": 60
           }
         ]
