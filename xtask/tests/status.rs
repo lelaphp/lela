@@ -159,7 +159,7 @@ fn a_section_that_has_no_renderer_yet_is_refused() {
 #[test]
 fn the_local_sections_render_from_the_store_alone() {
     let root = scratch("local");
-    for section in ["phpt", "witness", "mutants", "permits", "bundle"] {
+    for section in ["phpt", "witness", "mutants", "ticket", "permits", "bundle"] {
         let (ok, md, err) = status(&root, &["--section", section]);
         assert!(ok, "{section}: {err}");
         assert!(md.contains("no reading"), "{section}: {md}");
@@ -179,6 +179,26 @@ fn the_local_sections_render_from_the_store_alone() {
         "{md}"
     );
     assert!(!md.contains("no reading"), "{md}");
+
+    let mut ticket = Reading::new("ticket", "28");
+    ticket.status = Status::Pass;
+    ticket.numbers.insert("criteria".into(), 7.into());
+    ticket.numbers.insert("ticked".into(), 7.into());
+    ticket.numbers.insert("unticked".into(), 0.into());
+    ticket.commit = "905018f".into();
+    ticket.session = "session-abc".into();
+    ticket.message = "#28: 7 of 7 criteria ticked; closed by xtask ticket close at 905018f".into();
+    store.record(std::slice::from_ref(&ticket)).unwrap();
+    let (ok, md, _) = status(&root, &["--section", "ticket"]);
+    assert!(ok, "{md}");
+    let row = md
+        .lines()
+        .find(|l| l.contains("| 28 |"))
+        .unwrap_or_else(|| panic!("{md}"));
+    assert!(
+        row.contains("905018f") && row.contains("session-") && row.contains("unticked=0"),
+        "what closed it and the session, from the store alone: {row}"
+    );
 
     let mut denial = Reading::new("permit", "harness.self");
     denial.rule = "harness.self".into();

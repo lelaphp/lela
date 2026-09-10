@@ -118,6 +118,17 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: WorktreeCommand,
     },
+    /// A ticket, one GitHub issue: `read <n>` fetches it through `gh`,
+    /// holds it to the boxes under its `## Acceptance criteria` heading
+    /// and writes a reading of instrument `ticket`, the unticked named;
+    /// `close <n>` does the same and then closes it, refusing while a box
+    /// is unticked and changing nothing at the tracker. No number is the
+    /// branch's ticket, as `xtask track` reads it. The one way an agent
+    /// closes a ticket.
+    Ticket {
+        #[command(subcommand)]
+        command: TicketCommand,
+    },
     /// Render the named files' regions with `computed run` and say what it
     /// did, one line per file, `written` or `unchanged`, for pre-commit to
     /// re-stage; refuses a broken marker, a missing `computed` and an
@@ -225,6 +236,31 @@ pub(crate) enum WorktreeCommand {
     },
 }
 
+/// Read the criteria, or read them and close.
+#[derive(Debug, Subcommand)]
+pub(crate) enum TicketCommand {
+    /// Fetch the issue, hold it to its acceptance criteria, write the
+    /// reading; exit 1 while a box is unticked.
+    Read {
+        /// The issue number; without it, the branch's recorded ticket.
+        number: Option<u64>,
+        /// The session the reading carries, the way a `permit` reading
+        /// carries the hook's `session_id`; empty when none is named.
+        #[arg(long = "session-id", value_name = "ID")]
+        session_id: Option<String>,
+    },
+    /// Read as `read` does, then close the issue at the tracker with a
+    /// comment naming the commit; refuse while a box is unticked.
+    Close {
+        /// The issue number; without it, the branch's recorded ticket.
+        number: Option<u64>,
+        /// The session the reading carries, the way a `permit` reading
+        /// carries the hook's `session_id`; empty when none is named.
+        #[arg(long = "session-id", value_name = "ID")]
+        session_id: Option<String>,
+    },
+}
+
 /// The sections of harness-design.md §4.6 that have a renderer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Section {
@@ -242,6 +278,9 @@ pub enum Section {
     Witness,
     /// The mutants readings, one row per crate.
     Mutants,
+    /// The ticket readings, one row per ticket: its criteria, what closed
+    /// it and the session.
+    Ticket,
     /// Each rule permit judges: its last finding, denial or note, and the
     /// denials the log holds per session and in total; then the log per
     /// instrument, with the candidates for silent (the CI section of §7).

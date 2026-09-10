@@ -1567,3 +1567,76 @@ fn an_unsafe_attribute_is_a_site_outside_a_home_and_not_a_finding_inside_one() {
         "the attribute inside a home is allowed at the edit"
     );
 }
+
+/// The two rows #28 proposes for a person to add: a ticket closes through
+/// `xtask ticket close` and by nothing else, so `gh issue close` and `gh
+/// issue reopen` are denied by `deny_argv` with `with`, the shape
+/// `git.no-verify` has, and the same act through `gh api` with a closing
+/// or reopening state by a `deny_pattern`. Each fixture is held under the
+/// row, as the tracked file carries it or as the constructors build it.
+#[test]
+fn the_proposed_ticket_close_rules_fire_on_their_fixtures_and_not_on_their_neighbours() {
+    let manifest = with_the_ticket_close_rules(Manifest::load(workspace()).unwrap());
+    for rule in ["ticket.close", "ticket.close-api"] {
+        let dir = fixtures().join("rules").join(rule);
+        let allowed = judge(&manifest, workspace(), &call(&dir.join("allow.json"))).unwrap();
+        assert!(allowed.denial().is_none(), "{rule}: {allowed:?}");
+        for fixture in [dir.join("deny.json"), dir.join("deny-reopen.json")] {
+            let judged = judge(&manifest, workspace(), &call(&fixture)).unwrap();
+            assert_eq!(
+                judged.denial().map(|f| f.rule.as_str()),
+                Some(rule),
+                "{}: {judged:?}",
+                fixture.display()
+            );
+        }
+    }
+    for line in [
+        "gh api --method PATCH /repos/o/r/issues/28 --input /tmp/close.json",
+        "gh api graphql -f query='mutation { closeIssue(input: {issueId: \"I_1\"}) { issue { id } } }'",
+    ] {
+        let judged = judge(&manifest, workspace(), &bash(line)).unwrap();
+        assert_eq!(
+            judged.denial().map(|f| f.rule.as_str()),
+            Some("ticket.close-api"),
+            "{line}: {judged:?}"
+        );
+    }
+    for line in [
+        "gh pr close 3",
+        "cargo xtask ticket close 28",
+        "gh api repos/o/r/issues?state=closed",
+    ] {
+        let judged = judge(&manifest, workspace(), &bash(line)).unwrap();
+        assert!(judged.denial().is_none(), "{line}: {judged:?}");
+    }
+}
+
+/// The manifest with the two `ticket.close*` rows #28 proposes, as the
+/// tracked file carries them or as the constructors build them.
+fn with_the_ticket_close_rules(mut manifest: Manifest) -> Manifest {
+    if manifest.rule("ticket.close").is_none() {
+        let mut rule = Rule::named("ticket.close", "");
+        rule.scope = OneOrMany::None;
+        rule.tool = OneOrMany::One("Bash".to_owned());
+        rule.predicate.deny = None;
+        rule.predicate.deny_argv = Some(vec!["close".to_owned(), "reopen".to_owned()]);
+        rule.predicate.with = OneOrMany::One("gh issue".to_owned());
+        "A ticket closes through `xtask ticket close`, the instrument that read its acceptance criteria; `gh issue close` and `gh issue reopen` are not available to agents."
+            .clone_into(&mut rule.text);
+        manifest.rules.push(rule);
+    }
+    if manifest.rule("ticket.close-api").is_none() {
+        let mut rule = Rule::named("ticket.close-api", "");
+        rule.scope = OneOrMany::None;
+        rule.tool = OneOrMany::One("Bash".to_owned());
+        rule.predicate.deny = None;
+        rule.predicate.deny_pattern = Some(
+            r#"gh\s+api\b[^|;&]*([\s'"]state=(closed|open)\b|"state"\s*:\s*"(closed|open)"|--input\b|(close|reopen)Issue\()"#.to_owned(),
+        );
+        "The same act through `gh api`: an issue's state is set by `xtask ticket close` and by nothing else."
+            .clone_into(&mut rule.text);
+        manifest.rules.push(rule);
+    }
+    manifest
+}

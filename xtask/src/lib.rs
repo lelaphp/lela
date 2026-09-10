@@ -3,7 +3,7 @@
 //! owns every comparison and the divergence registry, the reading and its
 //! store, the instruments, `permit`, the judge at the hook's call, `done`,
 //! the definition of done, `track`, the branch's track and its base,
-//! `vocab`, the glossary as a sensor, `phpt`, the
+//! `vocab`, the glossary as a sensor, `ticket`, the closer, `phpt`, the
 //! subset runner, `witness`, the rustdoc witnesses, and `status`, the one
 //! renderer.
 //!
@@ -42,6 +42,7 @@ mod rust;
 mod sources;
 pub mod status;
 mod tally;
+pub mod ticket;
 pub mod track;
 pub mod unsafe_audit;
 pub mod vocab;
@@ -55,7 +56,7 @@ use std::process::ExitCode;
 use anyhow::{Result, bail};
 use clap::Parser;
 
-use cli::{Cli, Command, WorktreeCommand};
+use cli::{Cli, Command, TicketCommand, WorktreeCommand};
 use divergence::Registry;
 use manifest::Manifest;
 use reading::{Outcome, Reading, Store};
@@ -185,6 +186,7 @@ fn command_line() -> Result<()> {
                 bail!("vocab: an avoided word is in use; the findings are above")
             }
         },
+        Command::Ticket { command } => ticket_command(&root, &store, command),
         Command::Track { .. } => bail!("track: answered above"),
         Command::Regions { .. } => bail!("regions: answered above"),
         Command::Worktree { .. } => bail!("worktree: answered above"),
@@ -204,6 +206,24 @@ pub(crate) fn record(store: &Store, readings: &[Reading]) -> Result<()> {
         );
     }
     store.record(readings)?.exit()
+}
+
+/// `xtask ticket read` and `close`: the ticket named or the branch's, read
+/// through the `gh` on `PATH`, one reading recorded.
+fn ticket_command(root: &Path, store: &Store, command: TicketCommand) -> Result<()> {
+    let (act, number, session_id) = match command {
+        TicketCommand::Read { number, session_id } => (ticket::Act::Read, number, session_id),
+        TicketCommand::Close { number, session_id } => (ticket::Act::Close, number, session_id),
+    };
+    let ticket = ticket::ticket_of(root, number)?;
+    let reading = ticket::run(
+        root,
+        &ticket::Gh::on_path(),
+        act,
+        ticket,
+        session_id.as_deref(),
+    )?;
+    record(store, std::slice::from_ref(&reading))
 }
 
 /// `xtask phpt`: the subsets asked for, each run and each written.

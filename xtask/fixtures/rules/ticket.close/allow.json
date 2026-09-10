@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"gh issue view 28 --json title,body && gh issue list --state closed --label ready-for-agent; cargo xtask ticket close 28; gh issue edit 28 --body-file /tmp/body.md","description":"Read the ticket, list the closed ones, close through the instrument"}}

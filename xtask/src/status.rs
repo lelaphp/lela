@@ -71,6 +71,7 @@ pub fn render(
         Section::Phpt => (instrument(&readings, "phpt"), INSTRUMENT),
         Section::Witness => (instrument(&readings, "witness"), INSTRUMENT),
         Section::Mutants => (instrument(&readings, "mutants"), INSTRUMENT),
+        Section::Ticket => (instrument(&readings, "ticket"), TICKET),
         Section::Permits => {
             return permits(manifest, &readings, &store.log()?, format, session_id);
         }
@@ -259,11 +260,7 @@ impl Row {
                 list.iter()
                     .map(|s| {
                         let id = s["session"].as_str().unwrap_or("");
-                        let id = if id.is_empty() {
-                            "-"
-                        } else {
-                            id.get(..8).unwrap_or(id)
-                        };
+                        let id = if id.is_empty() { "-" } else { short(id) };
                         format!("{id}={}", s["denials"])
                     })
                     .collect::<Vec<_>>()
@@ -941,6 +938,36 @@ const BUDGET: Columns = (&["crate", "lines", "ceiling", "reading", "message"], |
 const INSTRUMENT: Columns = (&["scope", "reading", "numbers", "message"], |r| {
     vec![r.fact("scope"), r.status(), r.numbers(), r.message()]
 });
+
+/// The first eight characters of a session id, enough to tell sessions
+/// apart in a row.
+fn short(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
+}
+
+/// The `ticket` section: one row per ticket the instrument read, with
+/// what closed it, the commit and the session, from the store alone.
+const TICKET: Columns = (
+    &[
+        "ticket", "reading", "numbers", "commit", "session", "message",
+    ],
+    |r| {
+        vec![
+            r.fact("scope"),
+            r.status(),
+            r.numbers(),
+            r.reading
+                .as_ref()
+                .map(|x| x.commit.clone())
+                .unwrap_or_default(),
+            r.reading
+                .as_ref()
+                .map(|x| short(&x.session).to_owned())
+                .unwrap_or_default(),
+            r.message(),
+        ]
+    },
+);
 
 const PERMITS: Columns = (
     &[

@@ -31,9 +31,10 @@ pub const LOG: &str = "log.jsonl";
 pub struct Reading {
     /// `witness | phpt | compile-identity | crosscheck | port-map | api-check
     /// | budget | unsafe-audit | bench | fuzz | mutants | permit | done | vocab
-    /// | divergence-reason`.
+    /// | divergence-reason | ticket`.
     pub instrument: String,
-    /// A crate, a corpus subset, a bar's id such as `G1`, or `"workspace"`.
+    /// A crate, a corpus subset, a bar's id such as `G1`, a ticket's
+    /// number, or `"workspace"`.
     pub scope: String,
     /// A manifest rule id when one applies, else empty.
     pub rule: String,
