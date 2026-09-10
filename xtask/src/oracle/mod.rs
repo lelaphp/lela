@@ -13,7 +13,10 @@
 //! it could not; [`Source::tree`] is where the pinned php-src is on this
 //! machine, the tree [`TREE_VARIABLE`] names first and the pin's path
 //! second, which the runner and the tests that resolve a subset ask and
-//! never read off the pin themselves; and [`expect`] is how an expectation
+//! never read off the pin themselves; [`Promise`] is what a runner says
+//! this machine has of the pin, so a test that would skip for a fact the
+//! machine has not fails instead where the fact was promised (#38); and
+//! [`expect`] is how an expectation
 //! that is a pattern rather than bytes is met, which `verdict` takes as the
 //! caller's match.
 //!
@@ -45,6 +48,107 @@ use crate::divergence::{Divergence, Registry};
 /// among the pin's facts, is machine-local; the tag, the commit and the
 /// file count are the file's.
 pub const TREE_VARIABLE: &str = "TEST_PHP_SRCDIR";
+
+/// The environment variable a runner sets to say what of the pin this
+/// machine has (#38): a whitespace-separated list of the words
+/// [`Promise::word`] gives, `tree` for the pinned php-src and `oracle` for
+/// the pinned php. A test that would skip for a fact the machine has not,
+/// saying so on stderr, fails instead where the fact was promised, naming
+/// what it looked for; so a runner whose provisioning broke turns red
+/// rather than quietly measuring less. The name is stated here and
+/// nowhere else; the workflow spells it in `env:`, on the steps that
+/// set [`TREE_VARIABLE`].
+pub const PROMISE_VARIABLE: &str = "XTASK_PROMISED";
+
+/// One fact of the pin a machine can promise to have: the tree or the
+/// binary. What a guarded test asks through [`Promise::or_skip`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Promise {
+    /// The pinned php-src, where [`Source::tree`] answers.
+    Tree,
+    /// The pinned php, at [`Binary::file`].
+    Oracle,
+}
+
+impl Promise {
+    const ALL: [Promise; 2] = [Promise::Tree, Promise::Oracle];
+
+    /// The word [`PROMISE_VARIABLE`] lists for this fact.
+    pub fn word(self) -> &'static str {
+        match self {
+            Promise::Tree => "tree",
+            Promise::Oracle => "oracle",
+        }
+    }
+
+    /// What every guarded test asks (#38): `found` when it is, and
+    /// otherwise `None` after saying so on stderr, as the tests skip
+    /// today, unless this machine promised the fact through
+    /// [`PROMISE_VARIABLE`], in which case the error names what was
+    /// looked for and the promise. Reads the variable off the process;
+    /// [`Promised::or_skip`] is the same decision over a value handed in.
+    pub fn or_skip<T>(self, found: Result<T>) -> Result<Option<T>> {
+        Promised::load()?.or_skip(self, found)
+    }
+}
+
+/// What this machine promised of the pin: the words [`PROMISE_VARIABLE`]
+/// lists, as [`Promised::load`] read them or a test handed them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Promised(Vec<Promise>);
+
+impl Promised {
+    /// The promise as this machine makes it: [`PROMISE_VARIABLE`] in the
+    /// process's environment, nothing promised where it is unset.
+    pub fn load() -> Result<Promised> {
+        match std::env::var_os(PROMISE_VARIABLE) {
+            Some(value) => Promised::parse(&value.to_string_lossy()),
+            None => Ok(Promised::default()),
+        }
+    }
+
+    /// The promise as a value of the variable says it: each
+    /// whitespace-separated word one of [`Promise::word`]'s. A word
+    /// outside them is refused naming it and the words the variable
+    /// takes, so a misspelt promise is never an unmade one.
+    pub fn parse(value: &str) -> Result<Promised> {
+        let mut promised = Vec::new();
+        for word in value.split_whitespace() {
+            let Some(promise) = Promise::ALL.into_iter().find(|p| p.word() == word) else {
+                bail!(
+                    "{PROMISE_VARIABLE} lists {word:?}, which promises nothing; the words it takes are {}",
+                    Promise::ALL.map(Promise::word).join(" and ")
+                );
+            };
+            if !promised.contains(&promise) {
+                promised.push(promise);
+            }
+        }
+        Ok(Promised(promised))
+    }
+
+    /// Whether this machine promised the fact.
+    pub fn holds(&self, promise: Promise) -> bool {
+        self.0.contains(&promise)
+    }
+
+    /// [`Promise::or_skip`] over this promise: `found` when it is;
+    /// otherwise `None` after saying so on stderr, or an error naming
+    /// what was looked for and the promise where the fact was promised.
+    pub fn or_skip<T>(&self, promise: Promise, found: Result<T>) -> Result<Option<T>> {
+        match found {
+            Ok(found) => Ok(Some(found)),
+            Err(absent) if self.holds(promise) => Err(anyhow::anyhow!(
+                "{absent:#}; {PROMISE_VARIABLE} promised the {}",
+                promise.word()
+            )),
+            Err(absent) => {
+                eprintln!("{absent}; skipping");
+                Ok(None)
+            }
+        }
+    }
+}
 
 /// `oracle.toml`: the pinned oracle and its invocation recipe, read through
 /// the manifest's `[oracle]` row and nowhere else.
@@ -80,6 +184,23 @@ pub struct Binary {
     pub version: String,
     pub path: PathBuf,
     pub md5: String,
+}
+
+impl Binary {
+    /// The pinned php on this machine: its path when a file is there, and
+    /// otherwise an error naming the path and the version. What a test
+    /// that spawns php asks through [`Promise::or_skip`].
+    pub fn file(&self) -> Result<&Path> {
+        if self.path.is_file() {
+            Ok(&self.path)
+        } else {
+            bail!(
+                "the pinned php {} is not at {}",
+                self.version,
+                self.path.display()
+            )
+        }
+    }
 }
 
 /// `[source]`: the php-src tree at the same tag.

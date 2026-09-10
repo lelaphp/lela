@@ -11,24 +11,24 @@ use std::process::Command;
 
 use xtask::divergence::Registry;
 use xtask::manifest::Manifest;
-use xtask::oracle::{self, Pin, Program, TREE_VARIABLE, Verdict};
+use xtask::oracle::{
+    self, PROMISE_VARIABLE, Pin, Program, Promise, Promised, TREE_VARIABLE, Verdict,
+};
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
 }
 
-/// The tracked pin, when the binary it names is on this machine.
+/// The tracked pin, when the binary it names is on this machine; a
+/// failure where this machine promised the binary (#38).
 fn pin() -> Option<Pin> {
     let pin = Manifest::load(workspace()).unwrap().pin;
-    if pin.oracle.path.is_file() {
-        Some(pin)
-    } else {
-        eprintln!(
-            "the pinned php is not at {}; skipping",
-            pin.oracle.path.display()
-        );
-        None
-    }
+    // The path borrows the pin, so the question is asked of the unit and
+    // the pin handed back whole.
+    Promise::Oracle
+        .or_skip(pin.oracle.file().map(drop))
+        .unwrap()
+        .map(|()| pin)
 }
 
 fn registry() -> Registry {
@@ -319,16 +319,113 @@ fn a_tree_that_is_no_checkout_states_no_commit_and_is_taken_at_its_word() {
 /// What a runner that sets the variable claims: the tree is there and at
 /// the pin's commit. Held whenever the variable is set, so a runner whose
 /// checkout drifted from `[source].commit` fails here naming both
-/// revisions, and never skips as an absent tree would (#37).
+/// revisions, and never skips as an absent tree would (#37). A runner
+/// that promised the tree and set no variable fails here too, naming
+/// both (#38).
 #[test]
 fn a_tree_the_variable_names_is_at_the_pin() {
     if std::env::var_os(TREE_VARIABLE).is_none_or(|value| value.is_empty()) {
+        assert!(
+            !Promised::load().unwrap().holds(Promise::Tree),
+            "{PROMISE_VARIABLE} promised the tree and {TREE_VARIABLE} is unset"
+        );
         eprintln!("{TREE_VARIABLE} is unset; nothing claims a tree, skipping");
         return;
     }
     let pin = Manifest::load(workspace()).unwrap().pin;
     let tree = pin.source.tree().unwrap();
     assert!(tree.is_dir(), "{}", tree.display());
+}
+
+/// The promise (#38): what a runner says this machine has of the pin,
+/// the words the variable lists. A word outside the two is refused
+/// naming them, so a misspelt promise is never an unmade one.
+#[test]
+fn a_promise_is_the_words_the_variable_lists_and_an_unknown_word_is_refused() {
+    let none = Promised::parse("").unwrap();
+    assert!(!none.holds(Promise::Tree) && !none.holds(Promise::Oracle));
+    let tree = Promised::parse("tree").unwrap();
+    assert!(tree.holds(Promise::Tree) && !tree.holds(Promise::Oracle));
+    let both = Promised::parse(" oracle\ttree ").unwrap();
+    assert!(both.holds(Promise::Tree) && both.holds(Promise::Oracle));
+    let err = Promised::parse("tree php-src").unwrap_err().to_string();
+    assert!(
+        err.contains("php-src") && err.contains(PROMISE_VARIABLE),
+        "the word and the variable are named: {err}"
+    );
+    assert!(
+        err.contains("tree") && err.contains("oracle"),
+        "the words the variable takes are named: {err}"
+    );
+}
+
+/// The decision every guarded test takes (#38): a fact the pin names
+/// that this machine has not is a skip, said on stderr, unless the
+/// machine promised it, in which case it is a failure naming what was
+/// looked for and the promise. A fact the machine has is the fact,
+/// promised or not.
+#[test]
+fn where_the_tree_is_promised_an_absent_tree_is_a_failure_naming_what_it_looked_for() {
+    let pin = pin_with_path(Path::new("/nowhere/pinned/php-src"))
+        .on_this_machine(Some(PathBuf::from("/nowhere/named/php-src")));
+    let absent = || pin.source.tree();
+
+    let unpromised = Promised::parse("").unwrap();
+    assert!(
+        unpromised
+            .or_skip(Promise::Tree, absent())
+            .unwrap()
+            .is_none()
+    );
+    let other = Promised::parse("oracle").unwrap();
+    assert!(other.or_skip(Promise::Tree, absent()).unwrap().is_none());
+
+    let promised = Promised::parse("tree").unwrap();
+    let err = promised
+        .or_skip(Promise::Tree, absent())
+        .unwrap_err()
+        .to_string();
+    for looked_for in [
+        &format!("{TREE_VARIABLE}=/nowhere/named/php-src"),
+        "/nowhere/pinned/php-src",
+        &pin.source.tag,
+        PROMISE_VARIABLE,
+    ] {
+        assert!(err.contains(looked_for), "{looked_for} is named: {err}");
+    }
+
+    let named = fixture_tree("promised");
+    let here = pin_with_path(&named);
+    assert_eq!(
+        promised
+            .or_skip(Promise::Tree, here.source.tree())
+            .unwrap()
+            .unwrap(),
+        named
+    );
+}
+
+/// The binary's half of the same promise: `Binary::file` is the path
+/// when a file is there and otherwise names the path and the version,
+/// which is what the promise's failure carries.
+#[test]
+fn an_absent_binary_names_its_path_and_version() {
+    let mut pin = pin_with_path(Path::new("/nowhere"));
+    pin.oracle.path = PathBuf::from("/nowhere/bin/php");
+    let err = pin.oracle.file().unwrap_err().to_string();
+    assert!(
+        err.contains("/nowhere/bin/php") && err.contains(&pin.oracle.version),
+        "{err}"
+    );
+    let err = Promised::parse("oracle")
+        .unwrap()
+        .or_skip(Promise::Oracle, pin.oracle.file())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("/nowhere/bin/php") && err.contains(PROMISE_VARIABLE),
+        "{err}"
+    );
 }
 
 #[test]

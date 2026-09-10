@@ -9,7 +9,8 @@
 //! the engine that will be measured does not exist yet. They say so on
 //! stderr and return when the pinned binary is not on this machine, as
 //! the ones that resolve a subset of the real corpus do when the pinned
-//! tree is on neither place `Source::tree` looks; the rest run anywhere,
+//! tree is on neither place `Source::tree` looks, and fail there instead
+//! where this machine promised the fact (#38); the rest run anywhere,
 //! the subsets they resolve being a fixture tree's.
 
 use std::fs;
@@ -18,7 +19,7 @@ use std::path::{Path, PathBuf};
 use super::*;
 use crate::divergence::Registry;
 use crate::manifest::{Crate, Manifest};
-use crate::oracle::Runner;
+use crate::oracle::{Promise, Runner};
 
 fn workspace() -> PathBuf {
     crate::built_root()
@@ -60,29 +61,19 @@ fn resolve(manifest: &Manifest, name: &str) -> Result<Subset> {
     Subset::resolve(manifest, &manifest.pin.source.tree()?, name)
 }
 
-/// The tracked pin's binary, when it is on this machine.
+/// The tracked pin's binary, when it is on this machine; a failure where
+/// this machine promised the binary (#38).
 fn oracle() -> Option<PathBuf> {
     let pin = manifest().pin;
-    if pin.oracle.path.is_file() {
-        Some(pin.oracle.path)
-    } else {
-        eprintln!(
-            "the pinned php is not at {}; skipping",
-            pin.oracle.path.display()
-        );
-        None
-    }
+    Promise::Oracle
+        .or_skip(pin.oracle.file().map(Path::to_path_buf))
+        .unwrap()
 }
 
-/// The tracked pin's php-src tree, when it is on this machine.
+/// The tracked pin's php-src tree, when it is on this machine; a failure
+/// where this machine promised the tree (#38).
 fn source() -> Option<PathBuf> {
-    match manifest().pin.source.tree() {
-        Ok(tree) => Some(tree),
-        Err(absent) => {
-            eprintln!("{absent}; skipping");
-            None
-        }
-    }
+    Promise::Tree.or_skip(manifest().pin.source.tree()).unwrap()
 }
 
 /// A subset of one directory of this test's own, standing where

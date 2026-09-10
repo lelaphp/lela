@@ -9,7 +9,8 @@
 //! standing where the engine's binary would, since the engine that will be
 //! measured does not exist yet: the runner reads the file as an engine,
 //! since its bytes are not the oracle's. They say so on stderr and return
-//! when the pinned binary is not on this machine; the rest run anywhere.
+//! when the pinned binary is not on this machine, unless the machine
+//! promised it (#38); the rest run anywhere.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ use std::process::Command;
 
 use xtask::divergence::Registry;
 use xtask::manifest::{Crate, Manifest};
-use xtask::oracle::Pin;
+use xtask::oracle::{Pin, Promise};
 use xtask::phpt::{self, Ask};
 use xtask::reading::{Number, Reading, Status};
 
@@ -52,32 +53,23 @@ fn fixture_tree() -> PathBuf {
     tree
 }
 
-/// The tracked pin's binary, when it is on this machine.
+/// The tracked pin's binary, when it is on this machine; a failure where
+/// this machine promised the binary (#38).
 fn oracle() -> Option<PathBuf> {
     let pin = manifest().pin;
-    if pin.oracle.path.is_file() {
-        Some(pin.oracle.path)
-    } else {
-        eprintln!(
-            "the pinned php is not at {}; skipping",
-            pin.oracle.path.display()
-        );
-        None
-    }
+    Promise::Oracle
+        .or_skip(pin.oracle.file().map(Path::to_path_buf))
+        .unwrap()
 }
 
 /// The tracked pin's php-src tree, when it is on this machine: what the
 /// variable names, else the pin's path (harness-design.md §4.3). A runner
 /// that sets neither has the corpus nowhere, and the tests that run a
-/// subset of it say so and return, as the ones that spawn the oracle do.
+/// subset of it say so and return, as the ones that spawn the oracle do;
+/// where the runner promised the tree, they fail naming both places
+/// tried (#38).
 fn source() -> Option<PathBuf> {
-    match manifest().pin.source.tree() {
-        Ok(tree) => Some(tree),
-        Err(absent) => {
-            eprintln!("{absent}; skipping");
-            None
-        }
-    }
+    Promise::Tree.or_skip(manifest().pin.source.tree()).unwrap()
 }
 
 fn registry(text: &str) -> Registry {

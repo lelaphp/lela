@@ -90,6 +90,7 @@ manifest::scope_matches
 new_ext::Laid
 new_ext::run
 oracle::Binary
+oracle::Binary::file
 oracle::ENGINE
 oracle::Invocation
 oracle::Invocation::new
@@ -101,6 +102,7 @@ oracle::Oracle::asserted
 oracle::Oracle::pin
 oracle::Oracle::run
 oracle::Oracle::run_under
+oracle::PROMISE_VARIABLE
 oracle::Pin
 oracle::Pin::digests_asserted
 oracle::Pin::load
@@ -109,6 +111,14 @@ oracle::Pin::oracle
 oracle::Pin::parse
 oracle::Pin::regime
 oracle::Program
+oracle::Promise
+oracle::Promise::or_skip
+oracle::Promise::word
+oracle::Promised
+oracle::Promised::holds
+oracle::Promised::load
+oracle::Promised::or_skip
+oracle::Promised::parse
 oracle::Recipe
 oracle::Regime
 oracle::Runner
@@ -125,13 +135,13 @@ oracle::diff
 oracle::normalise
 oracle::verdict
 permit::Adapter
+permit::Arguments
 permit::Call
 permit::Call::parse
 permit::Call::path
 permit::Call::workspace
 permit::Finding
 permit::Finding::reason
-permit::Arguments
 permit::Judgement
 permit::Judgement::denial
 permit::Judgement::hook_stdout

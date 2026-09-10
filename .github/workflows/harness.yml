@@ -72,7 +72,17 @@ jobs:
       # cache, or the reverse. What holds the tree to `[source].commit`
       # is `Source::tree()`, which refuses a checkout at another commit
       # naming both revisions; the one-test step fails the job there,
-      # before the suite, and the suite reads the same tree.
+      # before the suite, and the suite reads the same tree. The promise
+      # (#38): `oracle::PROMISE_VARIABLE`, spelled in `env:` on the two
+      # steps that set the tree's variable, lists what of the pin this
+      # runner has, so a test
+      # that would skip for an absent tree fails instead naming both
+      # places it looked; a provisioning step that breaks turns the job
+      # red rather than measuring less in silence. The tree alone is
+      # promised: the pinned php is a macOS keg (oracle.toml) that this
+      # ubuntu runner cannot have, so the tests that spawn it skip here
+      # until the pin names a binary the runner can have, which is a
+      # person's.
       # The wall-clock, measured on the dev machine (2026-09-10, M-series,
       # residential link): the shallow clone 9.6 s and the sparse checkout
       # 2.4 s, 132 MB in the tree and 31 MB under `.git`, 21414 `.phpt`
@@ -111,10 +121,12 @@ jobs:
       - name: the tree is at the pin's commit
         env:
           TEST_PHP_SRCDIR: ${{ runner.temp }}/php-src
+          XTASK_PROMISED: tree
         run: cargo test -p xtask --test oracle a_tree_the_variable_names_is_at_the_pin
       - run: cargo test -p xtask
         env:
           TEST_PHP_SRCDIR: ${{ runner.temp }}/php-src
+          XTASK_PROMISED: tree
   per-commit:
     name: the instruments, then done
     runs-on: ubuntu-latest
