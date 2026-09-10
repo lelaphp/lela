@@ -46,7 +46,8 @@
 //! store's own append, one line per write, so a retire during a run tears
 //! no line of either log (#56). The per-key files beside it stay with the
 //! worktree, each being a scope's latest run over a tree the track does
-//! not have, until the design says they are the track's (§4.2). A
+//! not have, and copying one in would hand `done` a reading that is
+//! fresh for nothing (§5, "A track's worktrees"; #35). A
 //! worktree with uncommitted work is a refusal after the append, since
 //! the worktree's copy is emptied once appended and the call that follows
 //! cannot count the same readings twice. The branch is kept, and the

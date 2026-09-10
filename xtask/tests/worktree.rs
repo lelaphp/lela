@@ -358,8 +358,8 @@ fn a_branch_on_no_track_is_taken_off_main_through_the_add_command() {
 /// track's root, here the worktree itself, lands the readings there too.
 /// The per-key files beside the log stay with the worktree: each is a
 /// scope's latest run, and the track's own are not overwritten by a tree
-/// the track does not have; that is today's answer, until the design
-/// says otherwise (§4.2).
+/// the track does not have, which is what the design says (§5, "A
+/// track's worktrees"; #35).
 #[test]
 fn retiring_appends_the_readings_to_the_tracks_store_and_removes_the_worktree() {
     let root = repository("retire");
