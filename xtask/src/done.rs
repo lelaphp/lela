@@ -55,6 +55,8 @@ use crate::reply;
 
 /// The instrument name the reading carries.
 pub(crate) const INSTRUMENT: &str = "done";
+/// The scope of the verdict's reading: the whole tree.
+pub(crate) const WORKSPACE: &str = "workspace";
 /// The instruments a touched crate needs a fresh passing reading from
 /// (condition 1). `phpt`'s is the reading over the subsets the crate's
 /// `[[crate]]` row owns, written under the crate's name.
@@ -143,7 +145,7 @@ impl Verdict {
 
     /// The reading: `done` over `workspace`, stamped over the whole tree.
     pub(crate) fn reading(&self, manifest: &Manifest, root: &Path) -> Result<Reading> {
-        let mut reading = Reading::for_scope(INSTRUMENT, "workspace", manifest, root)?;
+        let mut reading = Reading::for_scope(INSTRUMENT, WORKSPACE, manifest, root)?;
         reading.status = if self.met() {
             Status::Pass
         } else {
@@ -458,7 +460,10 @@ pub(crate) fn hook(
     };
     // The hook's exit is 0 and its verdict is the JSON; the outcome of
     // recording it is neither.
-    let recorded = verdict.reading(manifest, root).and_then(|r| {
+    let recorded = verdict.reading(manifest, root).and_then(|mut r| {
+        // The Stop's verdict carries the session: what marks a later
+        // turn's close as this turn's and not an earlier one's.
+        stop.session_id.clone_into(&mut r.session);
         let mut readings = vec![r];
         if let Some(unfiled) = &unfiled {
             readings.push(unfiled.reading(root, &stop.session_id)?);

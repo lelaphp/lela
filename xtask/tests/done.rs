@@ -935,7 +935,7 @@ fn with_the_stop_rule(root: &Path) {
 /// A `ticket` reading of a close, as `xtask ticket close` writes it: it
 /// counts `opens`, passes, and names the session the call named.
 fn closed(root: &Path, ticket: &str, session: &str) {
-    let mut reading = Reading::new("ticket", ticket);
+    let mut reading = Reading::stamped_over("ticket", ticket, root, Path::new(".")).unwrap();
     reading.status = Status::Pass;
     reading.count("criteria", 3).unwrap();
     reading.count("opens", 0).unwrap();
@@ -1008,6 +1008,12 @@ fn the_hook_holds_a_session_that_closed_a_ticket_to_its_reply_once() {
         reading.message
     );
 
+    let store_session = store.read("done", "workspace").unwrap().unwrap().session;
+    assert_eq!(
+        store_session, SESSION,
+        "the Stop's verdict carries the session"
+    );
+
     let active = stop_fixture("deny.json")
         .replace("\"stop_hook_active\": false", "\"stop_hook_active\": true");
     assert_ne!(active, stop_fixture("deny.json"));
@@ -1016,14 +1022,49 @@ fn the_hook_holds_a_session_that_closed_a_ticket_to_its_reply_once() {
     assert_eq!(out, "", "the second Stop passes");
 
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    closed(&root, "29", SESSION);
     let (_, out, _) = xtask(&root, &["done", "--hook"], Some(&stop_fixture("deny.json")));
     let block: serde_json::Value = serde_json::from_str(&out).unwrap();
     let reason = block["reason"].as_str().unwrap();
     let list = reason
         .find("unmet:\n- clippy: no reading for ext/pcre")
         .unwrap();
-    let reply = reason.find("This session closed #28;").unwrap();
+    // #28's close is this turn's only while the first Stop above fell in
+    // the same second as it, the grain `at` has; #29's always is.
+    let reply = reason.find("#29; its last reply").unwrap();
+    assert!(reason.contains("This session closed #"), "{reason}");
     assert!(list < reply, "the list, then the reply: {reason}");
+}
+
+/// A close is this turn's while no Stop of this session has passed since
+/// it: a close the previous Stop read is not held again three turns
+/// later, whatever the later reply says, and a close by this session
+/// after that Stop is.
+#[test]
+fn a_close_the_previous_stop_read_is_not_held_again_on_a_later_turn() {
+    let root = scratch("reply-turns");
+    with_the_stop_rule(&root);
+    let mut old = Reading::new("ticket", "28");
+    old.status = Status::Pass;
+    old.count("opens", 0).unwrap();
+    SESSION.clone_into(&mut old.session);
+    Store::of_workspace(&root).record(&[old]).unwrap();
+    let plain = std::fs::read_to_string(fixtures().join("hooks/stop.json")).unwrap();
+    let (code, out, err) = xtask(&root, &["done", "--hook"], Some(&plain));
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "", "the earlier turn's Stop, with a plain reply");
+    let (code, out, err) = xtask(&root, &["done", "--hook"], Some(&stop_fixture("deny.json")));
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        out, "",
+        "the close at the epoch was read by the Stop before"
+    );
+    closed(&root, "29", SESSION);
+    let (_, out, _) = xtask(&root, &["done", "--hook"], Some(&stop_fixture("deny.json")));
+    assert!(
+        out.contains("This session closed #29;"),
+        "a close since that Stop is this turn's: {out}"
+    );
 }
 
 /// A session that closed no ticket is not read at all: the same reply
@@ -1088,7 +1129,7 @@ fn every_rule_at_the_stop_has_a_reply_that_fires_and_one_that_does_not() {
     let at_the_stop: Vec<&str> = manifest
         .rules
         .iter()
-        .filter(|r| r.tool.iter().any(|t| t == "Stop"))
+        .filter(|r| !xtask::permit::judged_at_the_call(r) && r.predicate.deny_pattern.is_some())
         .map(|r| r.id.as_str())
         .collect();
     assert_eq!(at_the_stop, [STOP_RULE]);

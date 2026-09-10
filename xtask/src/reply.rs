@@ -13,7 +13,11 @@
 //! a session that closed nothing has its reply read by nothing here. A
 //! close whose reading names no session is nobody's and is not read
 //! either, since holding every later session to it would block each of
-//! them once.
+//! them once. And a close is this turn's while no Stop of this session
+//! has passed since it: the `done` reading a Stop writes over the
+//! workspace carries the session, and a close taken before this session's
+//! latest one was read by that Stop already, so a turn three later is not
+//! held to it.
 //!
 //! The word list is the sensor and lives where the rules do: a manifest
 //! row with `tool = "Stop"` and a `deny_pattern` over the reply, sentence
@@ -31,7 +35,7 @@ use anyhow::{Context, Result};
 use regex_lite::Regex;
 
 use crate::manifest::Manifest;
-use crate::reading::{Reading, Status, Store};
+use crate::reading::{Reading, Status, Store, epoch_seconds};
 use crate::ticket;
 use crate::track::Ticket;
 
@@ -46,15 +50,19 @@ pub(crate) struct Unfiled {
 }
 
 impl Unfiled {
-    /// The block's reason: the rule's text, what this session closed, the
-    /// sentences that read as work left unfiled, and what to do.
-    pub(crate) fn render(&self) -> String {
-        let closed = self
-            .closed
+    /// The tickets closed, as they are cited: `#28, #29`.
+    fn closed_cited(&self) -> String {
+        self.closed
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
-            .join(", ");
+            .join(", ")
+    }
+
+    /// The block's reason: the rule's text, what this session closed, the
+    /// sentences that read as work left unfiled, and what to do.
+    pub(crate) fn render(&self) -> String {
+        let closed = self.closed_cited();
         let sentences = self
             .sentences
             .iter()
@@ -79,11 +87,7 @@ impl Unfiled {
         session_id.clone_into(&mut reading.session);
         reading.message = format!(
             "the reply after closing {} reads as work left unfiled in {} sentence{}: {}",
-            self.closed
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", "),
+            self.closed_cited(),
             self.sentences.len(),
             if self.sentences.len() == 1 { "" } else { "s" },
             self.sentences.join(" | ")
@@ -92,13 +96,30 @@ impl Unfiled {
     }
 }
 
-/// The tickets `session_id` closed, as the store holds them: the latest
-/// `ticket` reading per ticket that is a close (it counts `opens`), passed,
-/// and names this session. An empty session names nobody and matches none.
+/// The tickets `session_id` closed this turn, as the store holds them:
+/// the latest `ticket` reading per ticket that is a close (it counts
+/// `opens`), passed, names this session, and is no older than the
+/// session's latest Stop in the log, the `done` reading over the
+/// workspace that carries the session; a close the previous Stop already
+/// read is not this turn's. An empty session names nobody and matches
+/// none.
 pub(crate) fn closed_by(store: &Store, session_id: &str) -> Result<Vec<Ticket>> {
     if session_id.is_empty() {
         return Ok(Vec::new());
     }
+    let previous_stop = store
+        .log()?
+        .readings
+        .iter()
+        .filter(|r| {
+            r.instrument == crate::done::INSTRUMENT
+                && r.scope == crate::done::WORKSPACE
+                && r.session == session_id
+        })
+        .map(|r| epoch_seconds(&r.at))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .max();
     let mut closed: Vec<Ticket> = store
         .readings()?
         .into_iter()
@@ -107,6 +128,9 @@ pub(crate) fn closed_by(store: &Store, session_id: &str) -> Result<Vec<Ticket>> 
                 && r.status == Status::Pass
                 && r.numbers.contains_key("opens")
                 && r.session == session_id
+        })
+        .filter(|r| {
+            previous_stop.is_none_or(|stop| epoch_seconds(&r.at).is_ok_and(|at| at >= stop))
         })
         .filter_map(|r| r.scope.parse().ok().map(Ticket::new))
         .collect();
@@ -123,6 +147,7 @@ pub(crate) fn read(manifest: &Manifest, closed: &[Ticket], reply: &str) -> Resul
     if closed.is_empty() {
         return Ok(None);
     }
+    let numbered = ticket_number();
     for rule in manifest.rules.iter().filter(|r| r.at_the_stop()) {
         let Some(pattern) = &rule.predicate.deny_pattern else {
             continue;
@@ -131,7 +156,7 @@ pub(crate) fn read(manifest: &Manifest, closed: &[Ticket], reply: &str) -> Resul
             .with_context(|| format!("rule \"{}\": deny_pattern is not a regex", rule.id))?;
         let sentences: Vec<String> = sentences(reply)
             .into_iter()
-            .filter(|s| !names_another_ticket(s, closed))
+            .filter(|s| !names_another_ticket(&numbered, s, closed))
             .filter(|s| regex.is_match(s))
             .map(str::to_owned)
             .collect();
@@ -149,14 +174,22 @@ pub(crate) fn read(manifest: &Manifest, closed: &[Ticket], reply: &str) -> Resul
 
 /// The sentences of a reply: split at a line end and after `.`, `!` or
 /// `?` followed by whitespace, each trimmed of the list marker and the
-/// whitespace around it, the empty ones dropped.
+/// whitespace around it, the empty ones dropped. The `.` of a numbered
+/// list's marker, `1.` with nothing but digits before it, ends nothing.
 fn sentences(text: &str) -> Vec<&str> {
     let mut out = Vec::new();
     for line in text.lines() {
         let mut start = 0;
         let bytes = line.as_bytes();
         for (i, b) in bytes.iter().enumerate() {
+            // `.` is ASCII, so `i` is a char boundary; the slice is taken
+            // for a stop alone, never inside a wider character.
+            let marker = *b == b'.' && {
+                let so_far = line[start..i].trim();
+                !so_far.is_empty() && so_far.bytes().all(|d| d.is_ascii_digit())
+            };
             let ends = matches!(b, b'.' | b'!' | b'?')
+                && !marker
                 && bytes.get(i + 1).is_none_or(u8::is_ascii_whitespace);
             if ends {
                 out.push(&line[start..=i]);
@@ -165,24 +198,29 @@ fn sentences(text: &str) -> Vec<&str> {
         }
         out.push(&line[start..]);
     }
+    let numbered = Regex::new(r"^\d+\.\s+")
+        .unwrap_or_else(|err| unreachable!("the list marker pattern: {err}"));
     out.into_iter()
         .map(|s| {
             let s = s.trim();
-            ["- ", "* ", "+ "]
+            let s = ["- ", "* ", "+ "]
                 .iter()
                 .find_map(|m| s.strip_prefix(m))
-                .unwrap_or(s)
-                .trim()
+                .unwrap_or(s);
+            numbered.find(s).map_or(s, |m| &s[m.end()..]).trim()
         })
         .filter(|s| !s.is_empty())
         .collect()
 }
 
+/// A ticket cited by number, `#40`.
+fn ticket_number() -> Regex {
+    Regex::new(r"#(\d+)\b").unwrap_or_else(|err| unreachable!("the ticket number pattern: {err}"))
+}
+
 /// Whether the sentence names a ticket by number other than one closed:
 /// `#40` in a reply that closed `#28` names a filed thing.
-fn names_another_ticket(sentence: &str, closed: &[Ticket]) -> bool {
-    let numbered = Regex::new(r"#(\d+)\b")
-        .unwrap_or_else(|err| unreachable!("the ticket number pattern: {err}"));
+fn names_another_ticket(numbered: &Regex, sentence: &str, closed: &[Ticket]) -> bool {
     numbered.captures_iter(sentence).any(|c| {
         c.get(1)
             .and_then(|m| m.as_str().parse::<u64>().ok())
@@ -192,7 +230,7 @@ fn names_another_ticket(sentence: &str, closed: &[Ticket]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{names_another_ticket, read, sentences};
+    use super::{names_another_ticket, read, sentences, ticket_number};
     use crate::manifest::{Manifest, OneOrMany, Rule};
     use crate::track::Ticket;
 
@@ -211,13 +249,17 @@ mod tests {
     #[test]
     fn a_reply_is_split_into_sentences_at_line_ends_and_after_stops_before_whitespace() {
         assert_eq!(
-            sentences("Done. Two things.\n- One is a person's!\n* v1.2 stands? Yes\n\n"),
+            sentences(
+                "Done. Two things.\n- One is a person's!\n* v1.2 stands? Yes\n1. First. 2. Second\n\n"
+            ),
             [
                 "Done.",
                 "Two things.",
                 "One is a person's!",
                 "v1.2 stands?",
-                "Yes"
+                "Yes",
+                "First.",
+                "Second"
             ]
         );
     }
@@ -225,9 +267,14 @@ mod tests {
     #[test]
     fn a_sentence_naming_a_ticket_other_than_the_one_closed_names_a_filed_thing() {
         let closed = [Ticket::new(28)];
-        assert!(names_another_ticket("filed as #40.", &closed));
-        assert!(!names_another_ticket("#28's rows are a person's.", &closed));
-        assert!(!names_another_ticket("no number here", &closed));
+        let numbered = ticket_number();
+        assert!(names_another_ticket(&numbered, "filed as #40.", &closed));
+        assert!(!names_another_ticket(
+            &numbered,
+            "#28's rows are a person's.",
+            &closed
+        ));
+        assert!(!names_another_ticket(&numbered, "no number here", &closed));
     }
 
     /// The sentences that fire are named, one that names a filed ticket

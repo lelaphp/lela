@@ -54,8 +54,9 @@ pub struct Reading {
     pub commit: String,
     pub at: Datetime,
     /// The session of the call a `permit` reading judged, from the
-    /// hook's `session_id`; empty for every other instrument, and for a
-    /// call that carried none.
+    /// hook's `session_id`; the session a `ticket` close named, and the
+    /// one a `done --hook` verdict was taken in; empty for every other
+    /// instrument, and for a call that carried none.
     #[serde(default)]
     pub session: String,
 }
