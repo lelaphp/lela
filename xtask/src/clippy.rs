@@ -110,15 +110,11 @@ fn tail(text: &str, n: usize) -> String {
 mod tests {
     use super::*;
 
-    fn krate(name: &str) -> Crate {
-        toml::from_str(&format!("name = \"{name}\"\nbudget = 1")).unwrap()
-    }
-
     #[test]
     fn the_package_is_the_cargo_name() {
-        assert_eq!(package(&krate("xtask")), "xtask");
-        assert_eq!(package(&krate("php_heap")), "php_heap");
-        assert_eq!(package(&krate("ext/pcre")), "php_ext_pcre");
+        assert_eq!(package(&Crate::named("xtask")), "xtask");
+        assert_eq!(package(&Crate::named("php_heap")), "php_heap");
+        assert_eq!(package(&Crate::named("ext/pcre")), "php_ext_pcre");
     }
 
     #[test]

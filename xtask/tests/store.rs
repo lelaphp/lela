@@ -21,7 +21,7 @@ fn scratch(name: &str) -> PathBuf {
 /// the tests read back are those, and the tree is whatever the crate's
 /// sources hash to today.
 fn reading(status: Status, failed: i64) -> Reading {
-    let krate: Crate = toml::from_str("name = \"ext/pcre\"\nbudget = 6000").unwrap();
+    let krate = Crate::named("ext/pcre");
     let mut reading = Reading::for_crate("witness", &krate, workspace()).unwrap();
     reading.rule = "witness.coverage".into();
     reading.status = status;
@@ -169,12 +169,12 @@ fn the_time_is_utc_to_the_second_and_reads_back_as_epoch_seconds() {
 /// constructor carries no stamp, so `done` finds it fresh for nothing.
 #[test]
 fn a_crate_not_yet_created_gets_a_reading_without_a_stamp() {
-    let krate: Crate = toml::from_str("name = \"ext/absent\"\nbudget = 6000").unwrap();
+    let krate = Crate::named("ext/absent");
     let reading = Reading::for_crate("budget", &krate, workspace()).unwrap();
     assert_eq!(reading.tree(), "");
     assert_eq!(reading.commit, "");
     assert_eq!(reading.at.to_string(), "1970-01-01T00:00:00Z");
-    let existing: Crate = toml::from_str("name = \"xtask\"\nbudget = 14000").unwrap();
+    let existing = Crate::named("xtask");
     let stamped = Reading::for_crate("budget", &existing, workspace()).unwrap();
     assert_eq!(stamped.tree().len(), 40);
     assert!(stamped.at.to_string().ends_with('Z'));

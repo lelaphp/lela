@@ -209,33 +209,27 @@ mod tests {
     use super::Home;
     use crate::manifest::Crate;
 
-    fn krate(name: &str) -> Crate {
-        Crate {
-            name: name.to_owned(),
-            budget: 1,
-            lock: crate::manifest::OneOrMany::None,
-            lock_from: std::collections::BTreeMap::new(),
-            feature: None,
-            targets: Vec::new(),
-            phpt: Vec::new(),
-        }
-    }
-
     #[test]
     fn the_four_home_shapes_cover_what_they_name() {
         let heap = Home::parse("php_heap").unwrap();
-        assert!(heap.covers(&krate("php_heap"), "crates/php_heap/src/lib.rs"));
-        assert!(!heap.covers(&krate("php_unit"), "crates/php_unit/src/lib.rs"));
+        assert!(heap.covers(&Crate::named("php_heap"), "crates/php_heap/src/lib.rs"));
+        assert!(!heap.covers(&Crate::named("php_unit"), "crates/php_unit/src/lib.rs"));
 
         let ffi = Home::parse("ext/*/src/ffi/").unwrap();
-        assert!(ffi.covers(&krate("ext/pcre"), "ext/pcre/src/ffi/mod.rs"));
-        assert!(ffi.covers(&krate("ext/pcre"), "ext/pcre/src/ffi/deep/x.rs"));
-        assert!(!ffi.covers(&krate("ext/pcre"), "ext/pcre/src/lib.rs"));
+        assert!(ffi.covers(&Crate::named("ext/pcre"), "ext/pcre/src/ffi/mod.rs"));
+        assert!(ffi.covers(&Crate::named("ext/pcre"), "ext/pcre/src/ffi/deep/x.rs"));
+        assert!(!ffi.covers(&Crate::named("ext/pcre"), "ext/pcre/src/lib.rs"));
 
         let code = Home::parse("php_jit::table::code").unwrap();
-        assert!(code.covers(&krate("php_jit"), "crates/php_jit/src/table/code.rs"));
-        assert!(code.covers(&krate("php_jit"), "crates/php_jit/src/table/code/pages.rs"));
-        assert!(!code.covers(&krate("php_jit"), "crates/php_jit/src/table/mod.rs"));
-        assert!(!code.covers(&krate("php_jit"), "crates/php_jit/src/table/codec.rs"));
+        assert!(code.covers(&Crate::named("php_jit"), "crates/php_jit/src/table/code.rs"));
+        assert!(code.covers(
+            &Crate::named("php_jit"),
+            "crates/php_jit/src/table/code/pages.rs"
+        ));
+        assert!(!code.covers(&Crate::named("php_jit"), "crates/php_jit/src/table/mod.rs"));
+        assert!(!code.covers(
+            &Crate::named("php_jit"),
+            "crates/php_jit/src/table/codec.rs"
+        ));
     }
 }

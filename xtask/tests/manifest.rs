@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use xtask::manifest::Manifest;
+use xtask::manifest::{Crate, Edge, Manifest, Rule, Seam};
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -35,6 +35,33 @@ clean_build_release_s = 1
 api_items = 1
 bindings = 1
 "#;
+
+/// A row a test builds by name (`Crate::named` and the constructors beside
+/// it) is the row the parser reads from the file with that name and
+/// nothing else on it, so a constructor cannot drift from the grammar.
+#[test]
+fn a_row_built_by_name_is_the_row_the_file_would_parse() {
+    let text = format!(
+        "{MINIMAL}\n[[crate]]\nname = \"php_heap\"\nbudget = 1\n[[seam]]\nname = \"api\"\nproducer = \"php_engine\"\nlock = \"api.lock\"\n[[edge]]\nfrom = \"php_bundle\"\nto = \"php_ext\"\n[[rule]]\nid = \"x.deny\"\nscope = \"ext/*\"\ndeny = true\ntext = \"x.deny\"\n"
+    );
+    let parsed = Manifest::parse(&text).unwrap();
+    let built = Manifest::named("php_heap");
+    assert_eq!(built.budget, parsed.budget);
+    assert_eq!(built.crates, parsed.crates);
+    assert_eq!(built.oracle.pin, parsed.oracle.pin);
+    assert_eq!(Seam::named("api", "php_engine"), parsed.seams[0]);
+    assert_eq!(Edge::between("php_bundle", "php_ext"), parsed.edges[0]);
+    assert_eq!(Rule::named("x.deny", "ext/*"), parsed.rules[0]);
+    assert_eq!(Rule::named("x.deny", "ext/*").predicate.named(), ["deny"]);
+
+    let row = Crate::named("php_engine")
+        .with_phpt(&["Zend/tests", "tests"])
+        .with_feature("jit");
+    let text = format!(
+        "{MINIMAL}\n[[crate]]\nname = \"php_engine\"\nbudget = 1\nfeature = \"jit\"\nphpt = [\"Zend/tests\", \"tests\"]\n"
+    );
+    assert_eq!(row, Manifest::parse(&text).unwrap().crates[0]);
+}
 
 #[test]
 fn a_key_outside_the_grammar_is_refused_by_name() {

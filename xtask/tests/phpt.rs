@@ -12,7 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use xtask::divergence::Registry;
-use xtask::manifest::Manifest;
+use xtask::manifest::{Crate, Manifest};
 use xtask::oracle::Runner;
 use xtask::phpt::{self, Ask, Dir, Judgement, Subset, Tally};
 use xtask::reading::{Number, Status};
@@ -28,11 +28,8 @@ fn manifest() -> Manifest {
 /// A manifest of these `[[crate]]` rows under the tracked pin: the rows a
 /// person writes in `seams.toml`, resolved against the pinned tree without
 /// the tracked manifest having to carry the crate they name.
-fn manifest_of(rows: &str) -> Manifest {
-    let text = format!(
-        "[oracle]\npin = \"oracle.toml\"\n[budget]\ntotal = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\nclean_build_release_s = 1\napi_items = 1\nbindings = 1\n{rows}"
-    );
-    let mut manifest = Manifest::parse(&text).unwrap();
+fn manifest_of(rows: impl IntoIterator<Item = Crate>) -> Manifest {
+    let mut manifest = Manifest::of(rows);
     manifest.pin = self::manifest().pin;
     manifest
 }
@@ -41,7 +38,7 @@ fn manifest_of(rows: &str) -> Manifest {
 /// the subset stands where `ext/fixture`'s would, so its crate is the
 /// reading's scope and the manifest must name it (harness §4.5).
 fn fixture_manifest() -> Manifest {
-    manifest_of("[[crate]]\nname = \"ext/fixture\"\nbudget = 1\n")
+    manifest_of([Crate::named("ext/fixture")])
 }
 
 /// The tracked pin's binary, when it is on this machine.
@@ -518,9 +515,7 @@ fn the_reading_carries_the_burndowns_one_number() {
 
 #[test]
 fn a_crate_resolves_to_every_subset_its_row_names() {
-    let manifest = manifest_of(
-        "[[crate]]\nname = \"php_engine\"\nbudget = 1\nphpt = [\"Zend/tests\", \"tests\"]\n",
-    );
+    let manifest = manifest_of([Crate::named("php_engine").with_phpt(&["Zend/tests", "tests"])]);
     let subset = Subset::resolve(&manifest, "php_engine").unwrap();
     assert_eq!(subset.scope, "php_engine");
     let under: Vec<&Path> = subset.dirs.iter().map(|d| d.under.as_path()).collect();
@@ -534,7 +529,7 @@ fn a_crate_resolves_to_every_subset_its_row_names() {
 
 #[test]
 fn a_crate_whose_row_names_no_subset_says_so_rather_than_looking_for_a_directory() {
-    let manifest = manifest_of("[[crate]]\nname = \"php_heap\"\nbudget = 1\n");
+    let manifest = manifest_of([Crate::named("php_heap")]);
     let error = Subset::resolve(&manifest, "php_heap")
         .unwrap_err()
         .to_string();
@@ -553,9 +548,8 @@ fn a_subset_the_pinned_tree_has_not_is_a_reading_that_says_so_and_not_a_silent_d
     if source().is_none() {
         return;
     }
-    let manifest = manifest_of(
-        "[[crate]]\nname = \"php_engine\"\nbudget = 1\nphpt = [\"Zend/tests\", \"Zend/nope\"]\n",
-    );
+    let manifest =
+        manifest_of([Crate::named("php_engine").with_phpt(&["Zend/tests", "Zend/nope"])]);
     // `done` asks a crate for a phpt reading whenever its row names one,
     // and it never reads the tree; so a directory the tree has not must be
     // a reading a run can write, never a subset quietly dropped.
@@ -580,16 +574,13 @@ fn a_subset_the_pinned_tree_has_not_is_a_reading_that_says_so_and_not_a_silent_d
 
 #[test]
 fn a_bare_run_is_the_per_commit_lane_composed_from_the_crate_rows() {
-    let manifest = manifest_of(
-        &[
-            "[[crate]]\nname = \"php_engine\"\nbudget = 1\nphpt = [\"Zend/tests\", \"tests\"]\n",
-            "[[crate]]\nname = \"php_heap\"\nbudget = 1\n",
-            "[[crate]]\nname = \"php_sapi\"\nbudget = 1\nphpt = [\"sapi/cli/tests\"]\n",
-            "[[crate]]\nname = \"ext/pcre\"\nbudget = 1\n",
-            "[[crate]]\nname = \"ext/curl\"\nbudget = 1\nfeature = \"curl\"\n",
-        ]
-        .concat(),
-    );
+    let manifest = manifest_of([
+        Crate::named("php_engine").with_phpt(&["Zend/tests", "tests"]),
+        Crate::named("php_heap"),
+        Crate::named("php_sapi").with_phpt(&["sapi/cli/tests"]),
+        Crate::named("ext/pcre"),
+        Crate::named("ext/curl").with_feature("curl"),
+    ]);
     let lane: Vec<String> = Subset::lane(&manifest)
         .into_iter()
         .map(|subset| subset.scope)
@@ -602,7 +593,7 @@ fn a_bare_run_is_the_per_commit_lane_composed_from_the_crate_rows() {
 
 #[test]
 fn a_run_with_no_subset_runs_the_lane_rather_than_refusing() {
-    let manifest = manifest_of("[[crate]]\nname = \"ext/ctype\"\nbudget = 1\n");
+    let manifest = manifest_of([Crate::named("ext/ctype")]);
     // No engine is built here, so every subset of the lane is a skip that
     // says so; what is under test is that the lane composed at all.
     let readings = phpt::run(workspace(), &manifest, &registry(""), &Ask::default()).unwrap();

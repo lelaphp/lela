@@ -25,6 +25,7 @@ pub const FILE: &str = "seams.toml";
 /// `seams.toml` at its current value, with the oracle pin loaded through it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct Manifest {
     pub oracle: PinRow,
     pub budget: Budget,
@@ -53,6 +54,7 @@ pub struct Manifest {
 /// §7), optional; without it `status` renders no silent column and says so.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct Telemetry {
     /// An instrument with readings and no failure this many days is a
     /// candidate for silent.
@@ -62,13 +64,15 @@ pub struct Telemetry {
 /// `[oracle]`: the only place the manifest says where the pin is.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct PinRow {
     pub pin: String,
 }
 
 /// `[budget]`: the workspace-wide ceilings (design §4.1, §10).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct Budget {
     pub total: u64,
     pub new: u64,
@@ -80,10 +84,28 @@ pub struct Budget {
     pub bindings: u64,
 }
 
+impl Budget {
+    /// Every ceiling `n`: the table a test builds when no ceiling is what
+    /// it measures.
+    pub fn flat(n: u64) -> Budget {
+        Budget {
+            total: n,
+            new: n,
+            docs: n,
+            harness: n,
+            lock_packages: n,
+            clean_build_release_s: n,
+            api_items: n,
+            bindings: n,
+        }
+    }
+}
+
 /// `[[crate]]`: one crate, its ceiling and the subsets of the pinned
 /// corpus it is measured by; nothing about `unsafe`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct Crate {
     pub name: String,
     pub budget: u64,
@@ -103,6 +125,36 @@ pub struct Crate {
 }
 
 impl Crate {
+    /// A row by name alone, as the file would parse `name` and a ceiling of
+    /// one: what a test that cares for the name builds. The rows are
+    /// non-exhaustive outside `manifest`, so a test names the field it
+    /// cares about here or by assignment and never spells out the rest.
+    pub fn named(name: &str) -> Crate {
+        Crate {
+            name: name.to_owned(),
+            budget: 1,
+            lock: OneOrMany::None,
+            lock_from: BTreeMap::new(),
+            feature: None,
+            targets: Vec::new(),
+            phpt: Vec::new(),
+        }
+    }
+
+    /// The row with these `phpt` subsets, relative to the pinned tree.
+    #[must_use]
+    pub fn with_phpt(mut self, subsets: &[&str]) -> Crate {
+        self.phpt = subsets.iter().map(|s| (*s).to_owned()).collect();
+        self
+    }
+
+    /// The row behind `feature`, and so outside the default build.
+    #[must_use]
+    pub fn with_feature(mut self, feature: &str) -> Crate {
+        self.feature = Some(feature.to_owned());
+        self
+    }
+
     /// Where the crate's sources are, relative to the workspace root:
     /// `ext/<name>` for an extension, `crates/<name>` otherwise, and
     /// `xtask` for the harness.
@@ -138,8 +190,9 @@ impl Crate {
 }
 
 /// `[[seam]]`: one locked seam (design §4.5).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct Seam {
     pub name: String,
     pub producer: String,
@@ -157,9 +210,28 @@ pub struct Seam {
     pub sections: Vec<String>,
 }
 
+impl Seam {
+    /// A seam by name alone, its lock `<name>.lock` and its producer
+    /// `producer`, the two keys the file cannot leave out; nothing else.
+    pub fn named(name: &str, producer: &str) -> Seam {
+        Seam {
+            name: name.to_owned(),
+            producer: producer.to_owned(),
+            facade: None,
+            consumers: Vec::new(),
+            lock: format!("{name}.lock"),
+            adr: OneOrMany::None,
+            generated: false,
+            allowlist: false,
+            sections: Vec::new(),
+        }
+    }
+}
+
 /// `[[edge]]`: one permitted (or denied) dependency edge (design §4.2).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct Edge {
     pub from: String,
     pub to: OneOrMany,
@@ -176,13 +248,31 @@ pub struct Edge {
     pub deny: bool,
 }
 
+impl Edge {
+    /// A permitted edge from `from` to `to` alone.
+    pub fn between(from: &str, to: &str) -> Edge {
+        Edge {
+            from: from.to_owned(),
+            to: OneOrMany::One(to.to_owned()),
+            adr: OneOrMany::None,
+            reexports_only: false,
+            only: false,
+            order: None,
+            allowlist: None,
+            lock: None,
+            deny: false,
+        }
+    }
+}
+
 /// `[[rule]]`: an `id`, a scope or a tool, one predicate, an optional `adr`,
 /// and the `text` a failure prints; for an `on` rule, which never denies,
 /// it is the note an allow carries. Two rules of the tracked manifest
 /// (`unsafe.homes`, `generated.committed`) carry neither scope nor tool, so
 /// their absence is not refused.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct Rule {
     pub id: String,
     #[serde(default)]
@@ -202,8 +292,9 @@ pub struct Rule {
 /// grammar so the file parses; `Manifest::parse` then holds every rule to
 /// exactly one. `unless` and `with` qualify `deny_pattern` and `deny_argv`
 /// and are refused beside any other predicate.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct Predicates {
     pub deny_types: Option<Vec<String>>,
     pub allow: Option<Vec<String>>,
@@ -283,6 +374,24 @@ impl Predicates {
 }
 
 impl Rule {
+    /// A rule by id alone over `scope`, carrying `deny = true`, the one
+    /// predicate with nothing to name, so the row passes the grammar
+    /// `parse` holds a rule to; its text is its id.
+    pub fn named(id: &str, scope: &str) -> Rule {
+        Rule {
+            id: id.to_owned(),
+            scope: OneOrMany::One(scope.to_owned()),
+            tool: OneOrMany::None,
+            exempt: Vec::new(),
+            adr: OneOrMany::None,
+            text: id.to_owned(),
+            predicate: Predicates {
+                deny: Some(true),
+                ..Predicates::default()
+            },
+        }
+    }
+
     /// Whether the rule's `scope` covers `path`: the manifest's `scope` key
     /// is one grammar, and every sensor that reads it reads it here
     /// (harness-design.md §4.1). A rule without a scope covers nothing on
@@ -390,6 +499,7 @@ impl<const N: usize> PartialEq<[&str; N]> for OneOrMany {
 /// the readings it names and rendered by `status --section week` (§9).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct Week {
     /// The days of the bar as the design's table writes them, `"3-7"`.
     pub days: String,
@@ -406,6 +516,7 @@ pub struct Week {
 /// within `min` and `max`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct Measure {
     pub instrument: String,
     pub scope: String,
@@ -415,6 +526,32 @@ pub struct Measure {
 }
 
 impl Manifest {
+    /// A manifest of these `[[crate]]` rows and nothing else: the `[oracle]`
+    /// row names `oracle.toml`, every ceiling is one, and the pin and the
+    /// root are empty as `parse` leaves them, for a test to fill from the
+    /// tracked manifest when the rows are resolved against the pinned tree.
+    pub fn of(crates: impl IntoIterator<Item = Crate>) -> Manifest {
+        Manifest {
+            oracle: PinRow {
+                pin: "oracle.toml".to_owned(),
+            },
+            budget: Budget::flat(1),
+            telemetry: None,
+            crates: crates.into_iter().collect(),
+            seams: Vec::new(),
+            edges: Vec::new(),
+            rules: Vec::new(),
+            weeks: Vec::new(),
+            pin: Pin::default(),
+            root: PathBuf::new(),
+        }
+    }
+
+    /// A manifest of one crate row by name alone ([`Crate::named`]).
+    pub fn named(krate: &str) -> Manifest {
+        Manifest::of([Crate::named(krate)])
+    }
+
     /// Load `seams.toml` from the workspace root, then the pin it names.
     pub fn load(root: &Path) -> Result<Manifest> {
         let path = root.join(FILE);
