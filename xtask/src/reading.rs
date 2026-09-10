@@ -282,17 +282,31 @@ impl Store {
         Ok(self.root.join(instrument).join(format!("{scope}.toml")))
     }
 
-    /// Record what an instrument measured: every reading written, in
-    /// order, as its file, overwritten, and one line of the log, and the
-    /// exit the instrument owes for them. The one writer of the store
+    /// Record what an instrument held: every reading written, in order,
+    /// as its file, overwritten, and one line of the log, and the exit
+    /// the instrument owes for them. The one writer of the store
     /// (harness-design.md §4.2); an instrument that ignores the outcome
     /// says so, as `permit` does, whose exit is 0 whatever it decides
-    /// (§4.4).
+    /// (§4.4), and a measurement records through
+    /// [`Store::record_measurement`], which owes none.
     pub fn record(&self, readings: &[Reading]) -> Result<Outcome> {
         for reading in readings {
             self.write(reading)?;
         }
         Ok(Outcome::of(readings))
+    }
+
+    /// Record what a measurement read, every reading written as
+    /// [`Store::record`] writes it, and owe no exit for it: the one
+    /// exception to the exit rule, stated here on the writer. A bench's
+    /// reading keeps `pass` or `fail` against its bar, so `status` shows
+    /// it, and the command exits 0 whatever the reading says, since a
+    /// bench number is a claim a person reads with the A/A control
+    /// (AGENTS.md; harness-design.md §4.4; #61). `permit --bench` records
+    /// through here, and so does a `bench` instrument when one exists: a
+    /// measurement's exit is not its status.
+    pub fn record_measurement(&self, readings: &[Reading]) -> Result<()> {
+        self.record(readings).map(|_| ())
     }
 
     /// One reading: its file, overwritten, and its line of the log, which
@@ -460,7 +474,9 @@ impl Log {
 /// any reading fails, 0 when every one passes or is skipped. The rule
 /// harness-design.md §4.5 states for `done` (exit 1 while anything is
 /// unmet), made every instrument's here, so no instrument maps a status
-/// to an exit on its own.
+/// to an exit on its own. The one exception is a measurement, which
+/// records through [`Store::record_measurement`] and owes no exit (§4.4,
+/// #61).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     /// Every reading passed or was skipped: exit 0.

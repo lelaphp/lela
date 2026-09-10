@@ -173,6 +173,7 @@ reading::Store::path
 reading::Store::read
 reading::Store::readings
 reading::Store::record
+reading::Store::record_measurement
 reading::Store::root
 reading::epoch_seconds
 reading::now

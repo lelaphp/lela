@@ -384,6 +384,52 @@ fn permits_carries_a_row_for_the_rules_permit_judges_by_that_are_its_own() {
     );
 }
 
+/// The bench's reading is a measurement whose exit is not its status
+/// (harness-design.md §4.4, #61), and the section renders it as before:
+/// a `fail` against the bar is one reading and one failure of `permit`
+/// in the instruments table, and no rule's row, since it judged none.
+#[test]
+fn permits_renders_the_bench_reading_as_before() {
+    let root = scratch("bench-row");
+    let store = Store::of_workspace(&root);
+    let mut bench = Reading::new("permit", "xtask");
+    bench.status = Status::Fail;
+    bench.numbers.insert("p99_ms".into(), 67.0.into());
+    bench.numbers.insert("bar_ms".into(), 100.0.into());
+    bench.message = "permit at the tool call: p99 67.0 ms against the bar of 100 ms".into();
+    store
+        .record_measurement(std::slice::from_ref(&bench))
+        .unwrap();
+
+    let (ok, md, err) = status(&root, &["--section", "permits"]);
+    assert!(ok, "{err}");
+    let row = md
+        .lines()
+        .find(|l| l.starts_with("| permit |"))
+        .unwrap_or_else(|| panic!("no line for permit:\n{md}"));
+    assert!(row.contains("| 1 | 1 |"), "one reading, one failure: {row}");
+    let (ok, json, _) = status(&root, &["--section", "permits", "--format", "json"]);
+    assert!(ok);
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let permit = value["instruments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["instrument"] == "permit")
+        .unwrap()
+        .clone();
+    assert_eq!(permit["readings"], 1);
+    assert_eq!(permit["failures"], 1);
+    assert!(
+        value["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["denials"] == 0),
+        "a missed bar is no denial: {json}"
+    );
+}
+
 /// The query behind the CI summary (harness-design.md §7): readings and
 /// failures per instrument from the log, and an instrument with readings
 /// but no failure in fourteen days is a candidate for silent; one whose

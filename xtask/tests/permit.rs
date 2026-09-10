@@ -532,6 +532,29 @@ fn bench_measures_p99_against_the_bar_and_writes_a_reading() {
     );
 }
 
+/// The bench is a measurement, not a gate (harness-design.md §4.4, #61):
+/// with the bar missed the exit is 0, the reading records `fail` and the
+/// numbers, and the verdict is printed for a person to read.
+#[test]
+fn bench_with_the_bar_missed_exits_zero_and_records_fail() {
+    let root = scratch("bench-missed");
+    let (code, out, err) = permit(&root, "", &["--bench", "--runs", "3", "--bar", "0"]);
+    assert_eq!(code, 0, "a measurement's exit is not its status: {err}");
+    assert!(out.contains("bar p99 ≤ 0 ms: fail"), "{out}");
+    let reading = Store::of_workspace(&root)
+        .read("permit", "xtask")
+        .unwrap()
+        .expect("the bench is a reading");
+    assert_eq!(reading.status, Status::Fail);
+    assert_eq!(reading.numbers["runs"], 3.into());
+    assert_eq!(reading.numbers["bar_ms"], 0.0.into());
+    assert!(
+        reading.numbers["p99_ms"].as_f64() > 0.0,
+        "{:?}",
+        reading.numbers
+    );
+}
+
 fn sh(root: &Path, args: &[&str]) {
     let out = Command::new(args[0])
         .args(&args[1..])

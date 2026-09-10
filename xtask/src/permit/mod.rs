@@ -35,7 +35,7 @@ mod region;
 mod rules;
 
 pub use adapters::{Adapter, run};
-pub(crate) use bench::run_bench;
+pub(crate) use bench::{BAR_MS, run_bench};
 pub use call::{Call, ToolInput};
 pub(crate) use diff::judge_files;
 pub(crate) use diff::{run_diff, working_files};

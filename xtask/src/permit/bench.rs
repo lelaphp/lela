@@ -15,8 +15,9 @@ use crate::git::git;
 use crate::manifest::{self, Manifest};
 use crate::reading::{Reading, Status, Store};
 
-/// The bar of §4.4: p99 latency at the tool call, in milliseconds.
-const BAR_MS: f64 = 100.0;
+/// The bar of §4.4: p99 latency at the tool call, in milliseconds. What
+/// `--bar` defaults to; a test misses it on purpose by passing a lower one.
+pub(crate) const BAR_MS: f64 = 100.0;
 
 /// What `--bench` measured: the quantiles over every call, and over each
 /// shape, since a denial pays for its reading and an allow does not.
@@ -48,8 +49,8 @@ impl Quantiles {
 
 impl Bench {
     /// The bar is on every call the hook makes, denials included.
-    fn meets_the_bar(&self) -> bool {
-        self.all.p99 <= BAR_MS
+    fn meets_the_bar(&self, bar_ms: f64) -> bool {
+        self.all.p99 <= bar_ms
     }
 }
 
@@ -174,14 +175,18 @@ fn scratch_workspace(root: &Path, dir: &Path) -> Result<()> {
 
 /// `permit --bench`: measure, print one line per shape and the verdict,
 /// record the reading, over the harness crate whose sources the judge is.
+/// A measurement and not a gate (§4.4, #61): the reading carries `pass`
+/// or `fail` against `bar_ms`, and the exit is 0 whatever it says, since
+/// a bench number is a claim a person reads with the A/A control.
 pub(crate) fn run_bench(
     root: &Path,
     manifest: &Manifest,
     store: &Store,
     runs: usize,
+    bar_ms: f64,
 ) -> Result<()> {
     let measured = bench(root, runs)?;
-    let verdict = if measured.meets_the_bar() {
+    let verdict = if measured.meets_the_bar(bar_ms) {
         "pass"
     } else {
         "fail"
@@ -193,7 +198,7 @@ pub(crate) fn run_bench(
         )
     };
     println!(
-        "permit --bench: {} runs; {}; bar p99 ≤ {BAR_MS:.0} ms: {verdict}",
+        "permit --bench: {} runs; {}; bar p99 ≤ {bar_ms:.0} ms: {verdict}",
         measured.runs,
         line("all", &measured.all)
     );
@@ -201,7 +206,7 @@ pub(crate) fn run_bench(
         println!("  {}", line(name, q));
     }
     let mut reading = Reading::for_scope(INSTRUMENT, crate::done::HARNESS, manifest, root)?;
-    reading.status = if measured.meets_the_bar() {
+    reading.status = if measured.meets_the_bar(bar_ms) {
         Status::Pass
     } else {
         Status::Fail
@@ -209,7 +214,7 @@ pub(crate) fn run_bench(
     reading
         .numbers
         .insert("runs".into(), i64::try_from(measured.runs)?.into());
-    reading.numbers.insert("bar_ms".into(), BAR_MS.into());
+    reading.numbers.insert("bar_ms".into(), bar_ms.into());
     reading
         .numbers
         .insert("p50_ms".into(), measured.all.p50.into());
@@ -229,8 +234,8 @@ pub(crate) fn run_bench(
             .insert(format!("{key}_p99_ms"), q.p99.into());
     }
     reading.message = format!(
-        "permit at the tool call: p99 {:.1} ms against the bar of {BAR_MS:.0} ms (harness-design.md §4.4)",
+        "permit at the tool call: p99 {:.1} ms against the bar of {bar_ms:.0} ms (harness-design.md §4.4)",
         measured.all.p99
     );
-    store.record(&[reading])?.exit()
+    store.record_measurement(&[reading])
 }

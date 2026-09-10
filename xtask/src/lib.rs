@@ -124,16 +124,13 @@ fn command_line() -> Result<()> {
         // The judge itself returned above; what is left of `permit` are the
         // two callers that read the manifest as a whole.
         Command::Permit {
-            bench, runs, diff, ..
-        } => {
-            if bench {
-                permit::run_bench(&root, &manifest, &store, runs)
-            } else if diff {
-                permit::run_diff(&root, &manifest)
-            } else {
-                bail!("permit: the judge at the tool call is run above")
-            }
-        }
+            bench: true,
+            runs,
+            bar,
+            ..
+        } => permit::run_bench(&root, &manifest, &store, runs, bar),
+        Command::Permit { diff: true, .. } => permit::run_diff(&root, &manifest),
+        Command::Permit { .. } => bail!("permit: the judge at the tool call is run above"),
         Command::Done { base, hook } => {
             let registry = Registry::load(&root)?;
             if hook {

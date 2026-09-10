@@ -91,7 +91,10 @@ fn a_missing_reading_is_none_and_a_missing_store_has_no_readings() {
 
 /// The exit-code rule (harness-design.md §4.2, §4.5): an instrument whose
 /// readings all pass or are skipped exits 0, and one with any failing
-/// reading exits 1, however many it wrote.
+/// reading exits 1, however many it wrote. The one exception is the
+/// measurement (§4.4, #61): a bench's reading keeps `fail` against its
+/// bar, so `status` shows it, and the writer owes no exit for it, since a
+/// bench number is a claim a person reads with the A/A control.
 #[test]
 fn a_failing_reading_is_exit_one_and_a_pass_or_a_skip_is_exit_zero() {
     let mut skipped = reading(Status::Skip, 0);
@@ -116,6 +119,19 @@ fn a_failing_reading_is_exit_one_and_a_pass_or_a_skip_is_exit_zero() {
     .exit()
     .unwrap_err();
     assert_eq!(err.to_string(), "1 of 3 readings fail");
+
+    // The exception: a measurement's exit is not its status.
+    let store = Store::at(scratch("measurement"));
+    let missed = reading(Status::Fail, 3);
+    store
+        .record_measurement(&[reading(Status::Pass, 0), missed.clone()])
+        .unwrap();
+    assert_eq!(
+        store.read("witness", "ext/pcre").unwrap().as_ref(),
+        Some(&missed),
+        "the reading records fail and its numbers"
+    );
+    assert_eq!(store.log().unwrap().readings.len(), 2);
 }
 
 /// One call records every reading, in order, and says what the exit is.

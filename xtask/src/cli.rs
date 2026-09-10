@@ -66,12 +66,18 @@ pub(crate) enum Command {
         /// content (pre-commit); exit 1 while any is denied.
         #[arg(long, conflicts_with = "bench")]
         diff: bool,
-        /// Measure p99 latency at the tool call against the 100 ms bar.
+        /// Measure p99 latency at the tool call against the bar: a
+        /// measurement, not a gate, so the reading says pass or fail and
+        /// the exit is 0 whatever it says.
         #[arg(long)]
         bench: bool,
         /// How many calls `--bench` times.
         #[arg(long, default_value_t = 100, requires = "bench")]
         runs: usize,
+        /// The p99 bar `--bench` holds the reading to, in milliseconds;
+        /// harness-design.md §4.4's by default.
+        #[arg(long, default_value_t = crate::permit::BAR_MS, value_name = "MS", requires = "bench")]
+        bar: f64,
     },
     /// The definition of done: print the conditions unmet for the changes
     /// since the base and exit 1 while any is; the Stop hook, pre-push and
