@@ -98,8 +98,8 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
         },
         |json| Ok(json.to_owned()),
     );
-    let (root, call) = match text.and_then(|text| Call::parse(&text)) {
-        Ok(call) => (call.workspace(root), call),
+    let call = match text.and_then(|text| Call::parse(&text)) {
+        Ok(call) => call,
         Err(err) => {
             println!(
                 "{}",
@@ -108,24 +108,31 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
             return Ok(());
         }
     };
+    // The workspace whose manifest judges the call, and the checkout it is
+    // in, whose store takes the readings and whose manifest this build is
+    // held to: the two differ for a fixture workspace, whose manifest no
+    // build is compiled against (#57).
+    let workspace = call.workspace(root);
+    let checkout = call.checkout(root);
     // What this build judges by: the manifest in front of it, the sources
     // it was built from, and the manifest readable as rules. Any of the
     // three failing is a refusal to decide, and a refusal decides nothing
     // whichever way the decision would have fallen.
-    let manifest = built::judges(&root, &crate::built_root()).and_then(|()| Manifest::load(&root));
+    let manifest =
+        built::judges(&checkout, &crate::built_root()).and_then(|()| Manifest::load(&workspace));
     let manifest = match manifest {
         Ok(manifest) => manifest,
         Err(err) => {
-            record_the_refusal(&root, &call, &err);
+            record_the_refusal(&checkout, &call, &err);
             return Err(err);
         }
     };
-    match judge(&manifest, &root, &call) {
+    match judge(&manifest, &workspace, &call) {
         Ok(judgement) => {
             if let Some(output) = judgement.hook_output() {
                 println!("{output}");
             }
-            if let Err(err) = record(&root, &call, &judgement, adapter) {
+            if let Err(err) = record(&checkout, &call, &judgement, adapter) {
                 eprintln!("xtask permit: the decision stands but was not recorded: {err:#}");
             }
         }

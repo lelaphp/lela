@@ -3,8 +3,9 @@
 //! tree and by pre-commit's `permit --diff` over the index
 //! (harness-design.md §4.4, §4.5, §6).
 
+use std::collections::btree_map::{BTreeMap, Entry};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -91,24 +92,57 @@ impl Judged {
     }
 }
 
-/// Judge `files`, each a path and the content that would be committed
-/// there.
+/// Judge `files`, each a path relative to `root` and the content that
+/// would be committed there. A file in a workspace of its own under
+/// `root`, a fixture that carries a manifest, is judged by that manifest
+/// as the hook judges an edit to it (`Call::workspace`, #57); the
+/// manifest is read once per workspace, and one that cannot be read is
+/// the error, since a file no manifest describes is not a file nothing
+/// denies.
 pub fn judge_files(manifest: &Manifest, root: &Path, files: &[(String, String)]) -> Result<Judged> {
-    let a_persons = manifest
-        .rules
-        .iter()
-        .filter(|r| r.predicate.deny == Some(true))
-        .map(|r| r.id.clone())
-        .collect();
+    let mut a_persons: Vec<String> = a_persons_of(manifest).collect();
+    let mut nested: BTreeMap<PathBuf, Manifest> = BTreeMap::new();
     let mut judged = Vec::new();
     for (path, content) in files {
-        let judgement = judge(manifest, root, &Call::write_of(path, Some(content)))?;
+        let call = Call::write_of(&root.join(path).to_string_lossy(), Some(content));
+        let judgement = match call.nested(root) {
+            None => judge(manifest, root, &call)?,
+            Some(workspace) => {
+                let own = match nested.entry(workspace.clone()) {
+                    Entry::Occupied(entry) => entry.into_mut(),
+                    Entry::Vacant(entry) => {
+                        let own = Manifest::load(&workspace).with_context(|| {
+                            format!(
+                                "{path} is judged by the manifest of {}",
+                                workspace.display()
+                            )
+                        })?;
+                        for id in a_persons_of(&own) {
+                            if !a_persons.contains(&id) {
+                                a_persons.push(id);
+                            }
+                        }
+                        entry.insert(own)
+                    }
+                };
+                judge(own, &workspace, &call)?
+            }
+        };
         judged.push((path.clone(), judgement));
     }
     Ok(Judged {
         files: judged,
         a_persons,
     })
+}
+
+/// The ids of the rules a manifest marks `deny = true`.
+fn a_persons_of(manifest: &Manifest) -> impl Iterator<Item = String> + '_ {
+    manifest
+        .rules
+        .iter()
+        .filter(|r| r.predicate.deny == Some(true))
+        .map(|r| r.id.clone())
 }
 
 /// The staged files with their staged content: what a commit would take.

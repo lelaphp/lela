@@ -20,10 +20,14 @@
 //! `build.rs` when either input changes, so the candidate that rebuilds
 //! always carries the digest of what it is about to read.
 //!
-//! The manifest is compared against the workspace the call belongs to,
-//! since that is where the rules that would apply are; the sources against
-//! the workspace this binary was built in, since that is the code it was
-//! built from, and one binary cannot run another checkout's.
+//! The manifest is compared against the checkout the call belongs to,
+//! since that is where the rules a build could have been compiled against
+//! are: a fixture workspace inside it carries a manifest of its own that
+//! judges the call (#57) and that no build is compiled against, so the
+//! build that judges by it is held to the checkout's. The sources are
+//! compared against the workspace this binary was built in, since that is
+//! the code it was built from, and one binary cannot run another
+//! checkout's.
 
 use std::path::Path;
 
@@ -38,8 +42,9 @@ pub const MANIFEST: &str = env!("XTASK_MANIFEST_DIGEST");
 /// The digest of `xtask/src` as it stood when this binary was compiled.
 pub const SOURCES: &str = env!("XTASK_SOURCES_DIGEST");
 
-/// This build against what it judges by: the manifest of `workspace`, and
-/// its own sources in `built_root`, the workspace it was compiled in.
+/// This build against what it judges by: the manifest of `checkout`, the
+/// one the call belongs to, and its own sources in `built_root`, the
+/// workspace it was compiled in.
 /// `Ok` when both are what it was compiled against, and an error naming the
 /// one that is not when either has moved. The caller refuses to judge on
 /// that error rather than deciding by rules or with code it was not built
@@ -51,9 +56,9 @@ pub const SOURCES: &str = env!("XTASK_SOURCES_DIGEST");
 /// to understand, which is the whole of what went wrong in #16; the cost of
 /// the blunt answer is a rebuild, which the candidate that closes the
 /// hook's list does anyway.
-pub fn judges(workspace: &Path, built_root: &Path) -> Result<()> {
-    let manifest = manifest_digest(workspace)
-        .with_context(|| format!("reading the manifest of {}", workspace.display()))?;
+pub fn judges(checkout: &Path, built_root: &Path) -> Result<()> {
+    let manifest = manifest_digest(checkout)
+        .with_context(|| format!("reading the manifest of {}", checkout.display()))?;
     let sources = sources_digest(built_root)
         .with_context(|| format!("reading the sources of {}", built_root.display()))?;
     if MANIFEST.is_empty() || SOURCES.is_empty() {
@@ -66,7 +71,7 @@ pub fn judges(workspace: &Path, built_root: &Path) -> Result<()> {
         bail!(
             "this build was compiled against seams.toml {MANIFEST} and {} is {manifest}: it \
              would judge by rules it was not built against. {REBUILD}",
-            workspace.join(crate::inputs::MANIFEST_FILE).display()
+            checkout.join(crate::inputs::MANIFEST_FILE).display()
         );
     }
     if sources != SOURCES {

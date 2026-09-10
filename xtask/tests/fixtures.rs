@@ -113,14 +113,22 @@ fn an_unsafe_block_outside_the_homes_fails_naming_the_file_and_the_rule() {
     let readings = unsafe_audit::run(&root, &manifest).unwrap();
     let heap = readings.iter().find(|r| r.scope == "php_heap").unwrap();
     assert_eq!(heap.status, Status::Pass, "a home passes: {heap:#?}");
-    assert_eq!(heap.numbers["sites"], 1.into());
+    // The block, the block whose brace stands on the next line, which the
+    // audit sees only while it reads the file whole, and the unsafe
+    // attribute: a site as a block is (#46), in the fixture itself now
+    // that the fixture's own manifest judges an edit to it (#57).
+    assert_eq!(heap.numbers["sites"], 3.into());
     let pcre = readings.iter().find(|r| r.scope == "ext/pcre").unwrap();
     assert_eq!(
         pcre.status,
         Status::Pass,
         "an extension with bindings is deny with the allowance on ffi: {pcre:#?}"
     );
-    assert_eq!(pcre.numbers["sites"], 1.into());
+    assert_eq!(
+        pcre.numbers["sites"],
+        2.into(),
+        "the block and the attribute are two sites"
+    );
     let unit = readings.iter().find(|r| r.scope == "php_unit").unwrap();
     assert_eq!(unit.status, Status::Fail, "{unit:#?}");
     assert_eq!(unit.rule, "unsafe.homes");
@@ -154,109 +162,6 @@ fn a_hand_edited_generated_file_fails_under_generated_committed() {
         "{}",
         clippy.message
     );
-}
-
-/// An unsafe attribute, `#[unsafe(no_mangle)]`, asserts an unsafe contract
-/// as a block does and is a site for the audit as it is for `permit` (#46).
-/// The control is the rule's fixture with the attribute written into one
-/// source outside a home and one inside, in a scratch copy: `permit` judges
-/// the fixture's own sources by the workspace's homes, under which no
-/// fixture source is in one, so the attribute cannot be committed into the
-/// fixture until a person exempts `xtask/fixtures/**` from the rule.
-#[test]
-fn an_unsafe_attribute_outside_the_homes_fails_the_audit_and_inside_one_passes() {
-    let root = std::env::temp_dir().join(format!(
-        "xtask-fixtures-unsafe-attribute-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    copy(&fixture("rules", "unsafe.homes"), &root);
-    // The fixture pins the real oracle by a path relative to its own
-    // place; the copy stands elsewhere.
-    let manifest_path = root.join("seams.toml");
-    let manifest_text = std::fs::read_to_string(&manifest_path).unwrap().replace(
-        "pin = \"../../../../oracle.toml\"",
-        &format!("pin = \"{}\"", workspace().join("oracle.toml").display()),
-    );
-    std::fs::write(&manifest_path, manifest_text).unwrap();
-    let attribute = "\n#[unsafe(no_mangle)]\npub extern \"C\" fn exported() {}\n";
-    // A block whose brace stands on the line after the keyword: a site the
-    // audit sees only while it reads the file whole, as `permit` does.
-    let split = "pub fn split(p: *const u8) -> u8 {\n    unsafe\n    { *p }\n}\n";
-    for (source, extra) in [
-        ("crates/php_unit/src/lib.rs", split),
-        ("ext/pcre/src/ffi/mod.rs", ""),
-    ] {
-        let path = root.join(source);
-        let mut text = std::fs::read_to_string(&path).unwrap();
-        text.push_str(attribute);
-        text.push_str(extra);
-        std::fs::write(&path, text).unwrap();
-    }
-    for args in [
-        vec!["init", "-q", "-b", "main"],
-        vec!["add", "-A"],
-        vec![
-            "-c",
-            "user.name=x",
-            "-c",
-            "user.email=x@x",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-q",
-            "-m",
-            "scratch",
-        ],
-    ] {
-        let status = std::process::Command::new("git")
-            .args(&args)
-            .current_dir(&root)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?}");
-    }
-    let manifest = Manifest::load(&root).unwrap();
-    let readings = unsafe_audit::run(&root, &manifest).unwrap();
-    let pcre = readings.iter().find(|r| r.scope == "ext/pcre").unwrap();
-    assert_eq!(
-        pcre.status,
-        Status::Pass,
-        "the attribute in a home: {pcre:#?}"
-    );
-    assert_eq!(
-        pcre.numbers["sites"],
-        2.into(),
-        "the block and the attribute are two sites"
-    );
-    let unit = readings.iter().find(|r| r.scope == "php_unit").unwrap();
-    assert_eq!(unit.status, Status::Fail, "{unit:#?}");
-    assert_eq!(
-        unit.numbers["sites"],
-        3.into(),
-        "the block, the attribute and the split block"
-    );
-    for line in [4, 7, 10] {
-        assert!(
-            unit.message
-                .contains(&format!("crates/php_unit/src/lib.rs:{line}")),
-            "line {line} is named: {}",
-            unit.message
-        );
-    }
-}
-
-fn copy(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to).unwrap();
-    for entry in std::fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let target = to.join(entry.file_name());
-        if entry.path().is_dir() {
-            copy(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), target).unwrap();
-        }
-    }
 }
 
 /// What a line counter reads as code is what the `rust` module blanks

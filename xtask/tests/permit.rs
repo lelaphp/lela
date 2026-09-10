@@ -185,16 +185,23 @@ fn the_harness_files_are_denied_by_their_absolute_path() {
     }
 }
 
+/// A worktree carries the tracked manifest, so it is a workspace of its
+/// own by the one rule (`Call::workspace`, #57); it also has a `.git`, so
+/// it is the checkout its readings go to. This one is gitignored.
+fn lay_worktree(worktree: &Path) {
+    std::fs::create_dir_all(worktree).unwrap();
+    std::fs::write(worktree.join(".git"), "gitdir: nowhere\n").unwrap();
+    std::fs::copy(workspace().join("seams.toml"), worktree.join("seams.toml")).unwrap();
+}
+
 #[test]
 fn a_file_in_an_agent_worktree_is_judged_against_that_checkout() {
     let manifest = Manifest::load(workspace()).unwrap();
-    // A worktree is a checkout: it has a `.git`. This one is gitignored.
     let worktree = workspace().join(format!(
         ".claude/worktrees/agent-permit-{}",
         std::process::id()
     ));
-    std::fs::create_dir_all(&worktree).unwrap();
-    std::fs::write(worktree.join(".git"), "gitdir: nowhere\n").unwrap();
+    lay_worktree(&worktree);
     let text = serde_json::json!({
         "tool_name": "Write",
         "cwd": worktree.to_str().unwrap(),
@@ -236,8 +243,8 @@ fn a_file_in_an_agent_worktree_is_judged_against_that_checkout() {
         plain.workspace(workspace()),
         workspace().canonicalize().unwrap()
     );
-    // A directory under .claude/worktrees without a `.git` is not a
-    // checkout; its files are the main one's `.claude/**`.
+    // A directory under .claude/worktrees without a manifest is not a
+    // workspace; its files are the main one's `.claude/**`.
     let stray = workspace().join(".claude/worktrees/notes/todo.md");
     let dir = Call::parse(
         &serde_json::json!({"tool_name": "Write",
@@ -260,8 +267,7 @@ fn a_file_in_an_agent_worktree_is_judged_against_that_checkout() {
 fn a_worktree_named_by_a_branch_with_a_slash_is_a_checkout_of_its_own() {
     let track = workspace().join(format!(".claude/worktrees/t-permit-{}", std::process::id()));
     let worktree = track.join("witness");
-    std::fs::create_dir_all(&worktree).unwrap();
-    std::fs::write(worktree.join(".git"), "gitdir: nowhere\n").unwrap();
+    lay_worktree(&worktree);
     let call = Call::parse(
         &serde_json::json!({"tool_name": "Edit", "cwd": worktree.to_str().unwrap(),
             "tool_input": {"file_path": worktree.join("seams.toml").to_str().unwrap(),
@@ -273,6 +279,173 @@ fn a_worktree_named_by_a_branch_with_a_slash_is_a_checkout_of_its_own() {
     assert_eq!(root, worktree.canonicalize().unwrap());
     assert_eq!(call.path(&root).unwrap(), Path::new("seams.toml"));
     std::fs::remove_dir_all(&track).unwrap();
+}
+
+/// The unsafe attribute written into a file of the `unsafe.homes` fixture.
+fn edit_of(file: &Path) -> Call {
+    Call::parse(
+        &serde_json::json!({"tool_name": "Edit", "cwd": workspace().to_str().unwrap(),
+            "tool_input": {"file_path": file.to_str().unwrap(), "old_string": "}\n",
+                "new_string": "}\n\n#[unsafe(no_mangle)]\npub extern \"C\" fn go() {}\n"}})
+        .to_string(),
+    )
+    .unwrap()
+}
+
+/// A fixture that carries a `seams.toml` is a workspace of its own, and a
+/// call into it is judged by that manifest and not the workspace's
+/// (#57): under the `unsafe.homes` fixture's rule, `ext/pcre/src/ffi/` is
+/// a home and `php_unit` is not, which is the fixture's own text and the
+/// workspace's rule says neither. The main checkout's own files resolve
+/// to the main checkout.
+#[test]
+fn a_fixture_with_a_manifest_of_its_own_is_judged_by_that_manifest() {
+    let dir = fixtures().join("rules/unsafe.homes");
+    let inside = edit_of(&dir.join("ext/pcre/src/ffi/mod.rs"));
+    let root = inside.workspace(workspace());
+    assert_eq!(
+        root,
+        dir.canonicalize().unwrap(),
+        "the fixture is the workspace"
+    );
+    assert_eq!(
+        inside.path(&root).unwrap(),
+        Path::new("ext/pcre/src/ffi/mod.rs"),
+        "and the path is relative to it"
+    );
+    let manifest = Manifest::load(&root).unwrap();
+    let judged = judge(&manifest, &root, &inside).unwrap();
+    assert!(
+        judged.denial().is_none(),
+        "a home of the fixture's manifest: {judged:#?}"
+    );
+    let outside = edit_of(&dir.join("crates/php_unit/src/lib.rs"));
+    assert_eq!(outside.workspace(workspace()), root);
+    let denial = judge(&manifest, &root, &outside).unwrap();
+    let denial = denial.denial().expect("outside the fixture's homes");
+    assert_eq!(denial.rule, "unsafe.homes");
+    assert!(
+        denial.text.contains("(fixture)"),
+        "the fixture's text, not the workspace's: {}",
+        denial.text
+    );
+    // Under the workspace's manifest no fixture source is in a home, which
+    // is the freeze #57 lifts.
+    let workspaces = Manifest::load(workspace()).unwrap();
+    assert!(
+        judge(&workspaces, workspace(), &inside)
+            .unwrap()
+            .denial()
+            .is_some(),
+        "the workspace's rule would deny the home"
+    );
+
+    // A call without a file is placed by its cwd in a checkout alone: a
+    // shell standing in the fixture is judged by the checkout's manifest,
+    // which carries the shell rules the fixture's does not.
+    let shell = Call::parse(
+        &serde_json::json!({"tool_name": "Bash", "cwd": dir.to_str().unwrap(),
+            "tool_input": {"command": "git commit --no-verify -m x"}})
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        shell.workspace(workspace()),
+        workspace().canonicalize().unwrap()
+    );
+    assert_eq!(
+        judge(&workspaces, workspace(), &shell)
+            .unwrap()
+            .denial()
+            .map(|f| f.rule.clone())
+            .as_deref(),
+        Some("git.no-verify")
+    );
+}
+
+/// The main checkout: a file of the workspace itself resolves to the
+/// workspace, and the path is relative to it.
+#[test]
+fn a_file_of_the_main_checkout_is_judged_by_its_manifest() {
+    let own = edit_of(&workspace().join("crates/php_heap/src/lib.rs"));
+    assert_eq!(
+        own.workspace(workspace()),
+        workspace().canonicalize().unwrap()
+    );
+    assert_eq!(
+        own.path(workspace()).unwrap(),
+        Path::new("crates/php_heap/src/lib.rs")
+    );
+    let manifest = Manifest::load(workspace()).unwrap();
+    assert!(
+        judge(&manifest, workspace(), &own)
+            .unwrap()
+            .denial()
+            .is_none(),
+        "php_heap is a home of the workspace's manifest"
+    );
+}
+
+/// A fixture without a manifest of its own is judged by the workspace's,
+/// as before #57: its directory is under the workspace and nothing
+/// between them carries a `seams.toml`.
+#[test]
+fn a_fixture_without_a_manifest_is_judged_by_the_workspaces() {
+    let file = fixtures().join("rules/ext.no-locks/deny.json");
+    assert!(
+        !file.parent().unwrap().join("seams.toml").exists(),
+        "the fixture carries no manifest"
+    );
+    let call = edit_of(&file);
+    assert_eq!(
+        call.workspace(workspace()),
+        workspace().canonicalize().unwrap()
+    );
+    assert_eq!(
+        call.path(workspace()).unwrap(),
+        Path::new("xtask/fixtures/rules/ext.no-locks/deny.json")
+    );
+}
+
+/// `permit --diff` and `done` apply the same resolution to a diff that
+/// touches a fixture source (#57): the diff judge resolves each file's
+/// workspace as the hook does, so a source in a home of the fixture's
+/// manifest passes and one outside it is refused with the fixture's text.
+#[test]
+fn diff_judges_a_fixture_source_by_the_fixture_manifest() {
+    let root = scratch("diff-fixture");
+    let fixture = "xtask/fixtures/rules/unsafe.homes";
+    let manifest = std::fs::read_to_string(fixtures().join("rules/unsafe.homes/seams.toml"))
+        .unwrap()
+        .replace(
+            "pin = \"../../../../oracle.toml\"",
+            &format!("pin = \"{}\"", workspace().join("oracle.toml").display()),
+        );
+    write(&root, &format!("{fixture}/seams.toml"), &manifest);
+    write(
+        &root,
+        &format!("{fixture}/ext/pcre/Cargo.toml"),
+        "[package]\nname = \"pcre\"\n",
+    );
+    let site = "pub fn read(p: *const u8) -> u8 {\n    unsafe { *p }\n}\n";
+    write(&root, &format!("{fixture}/ext/pcre/src/ffi/mod.rs"), site);
+    sh(&root, &["git", "add", "-A"]);
+    let (code, out, err) = permit(&root, "", &["--diff"]);
+    assert_eq!(code, 0, "a home of the fixture's manifest: {out}{err}");
+
+    write(
+        &root,
+        &format!("{fixture}/crates/php_unit/src/lib.rs"),
+        site,
+    );
+    sh(&root, &["git", "add", "-A"]);
+    let (code, out, _) = permit(&root, "", &["--diff"]);
+    assert_eq!(code, 1, "outside the fixture's homes: {out}");
+    assert!(
+        out.contains(&format!("deny {fixture}/crates/php_unit/src/lib.rs"))
+            && out.contains("(fixture)"),
+        "the path is the checkout's and the text the fixture's: {out}"
+    );
 }
 
 #[test]
