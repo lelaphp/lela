@@ -13,7 +13,9 @@
 //! `Result`, is a spelling that is code: that spelling, written exactly,
 //! is not a hit, and a public item so named is not one either. Words are
 //! runs of letters and digits; a hyphen or an underscore separates two
-//! words, and a possessive `'s` is dropped.
+//! words, and a possessive `'s` is dropped. An entry that is itself one
+//! backticked identifier, `Next` under Edge, avoids that spelling as
+//! written and not the word: the backticks say it is code.
 //!
 //! A term stands under the nearest Markdown heading above it, and a rule
 //! may hold its scope to one heading's terms alone
@@ -41,20 +43,26 @@ pub struct Term {
 }
 
 /// One avoided phrase: its text as the glossary wrote it, less the
-/// explanation; its words, lowercased; and the spellings its explanation
-/// marks as code, which are not the word.
+/// explanation; its words, lowercased; the spellings its explanation
+/// marks as code, which are not the word; and whether the phrase is
+/// itself a code spelling, met by that spelling alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Phrase {
     pub text: String,
     pub words: Vec<String>,
     pub code: Vec<String>,
+    pub spelled: bool,
 }
 
 impl Phrase {
     /// Whether `words` (as written, any case) carry this phrase, starting
     /// at some position: the lowercased words match, and a one-word phrase
-    /// is not met by a spelling its glossary entry marks as code.
+    /// is not met by a spelling its glossary entry marks as code. A phrase
+    /// the glossary wrote as code is met by that spelling, written exactly.
     pub fn occurs_in(&self, words: &[String]) -> bool {
+        if self.spelled {
+            return words.contains(&self.text);
+        }
         words.windows(self.words.len()).any(|window| {
             window
                 .iter()
@@ -168,8 +176,20 @@ impl Glossary {
         let mut out: Vec<Avoided> = Vec::new();
         for term in &self.terms {
             for phrase in &term.avoid {
-                match out.iter_mut().find(|a| a.phrase.words == phrase.words) {
-                    Some(seen) => seen.terms.push(term.name.clone()),
+                match out
+                    .iter_mut()
+                    .find(|a| a.phrase.words == phrase.words && a.phrase.spelled == phrase.spelled)
+                {
+                    // Every term's code spellings hold: Instrument's
+                    // `script_name` is not lost behind Unit's plain "script".
+                    Some(seen) => {
+                        seen.terms.push(term.name.clone());
+                        for spelling in &phrase.code {
+                            if !seen.phrase.code.contains(spelling) {
+                                seen.phrase.code.push(spelling.clone());
+                            }
+                        }
+                    }
                     None => out.push(Avoided {
                         phrase: phrase.clone(),
                         terms: vec![term.name.clone()],
@@ -220,17 +240,29 @@ fn phrase(entry: &str) -> Option<Phrase> {
     let mut code = Vec::new();
     let mut depth = 0u32;
     let mut span: Option<String> = None;
+    // The backticked identifiers of the phrase itself, outside any
+    // parenthetical.
+    let mut spelled: Vec<String> = Vec::new();
     for c in entry.chars() {
         match c {
-            '`' if depth > 0 => match span.take() {
-                Some(s) if is_identifier(&s) => code.push(s),
+            '`' => match span.take() {
+                Some(s) if depth > 0 && is_identifier(&s) => code.push(s),
+                Some(s) if depth == 0 => {
+                    if is_identifier(&s) {
+                        spelled.push(s.clone());
+                    }
+                    text.push_str(&s);
+                }
                 Some(_) => {}
                 None => span = Some(String::new()),
             },
             '(' => depth += 1,
             ')' => depth = depth.saturating_sub(1),
-            '`' | '"' | '\u{201c}' | '\u{201d}' => {}
-            _ if depth == 0 => text.push(c),
+            '"' | '\u{201c}' | '\u{201d}' => {}
+            _ if depth == 0 => match span.as_mut() {
+                Some(s) => s.push(c),
+                None => text.push(c),
+            },
             _ => {
                 if let Some(s) = span.as_mut() {
                     s.push(c);
@@ -248,7 +280,15 @@ fn phrase(entry: &str) -> Option<Phrase> {
         .iter()
         .map(|w| w.to_lowercase())
         .collect::<Vec<_>>();
-    (!words.is_empty()).then_some(Phrase { text, words, code })
+    // `Next` alone is code and is avoided as spelled; `Func` table is a
+    // phrase whose words are read as words.
+    let spelled = matches!(spelled.as_slice(), [one] if *one == text);
+    (!words.is_empty()).then_some(Phrase {
+        text,
+        words,
+        code,
+        spelled,
+    })
 }
 
 fn is_identifier(s: &str) -> bool {
@@ -302,6 +342,33 @@ mod tests {
         let p = phrase("feedback (the `MapPtr<[Feedback]>` of §5.14)").unwrap();
         assert!(p.code.is_empty());
         assert!(p.occurs_in(&["Feedback".into()]));
+    }
+
+    #[test]
+    fn a_phrase_that_is_one_backticked_identifier_is_avoided_as_spelled() {
+        let p = phrase("`Next` (the handler's return inside the loop)").unwrap();
+        assert!(p.spelled);
+        assert!(p.occurs_in(&["returns".into(), "Next".into()]));
+        assert!(!p.occurs_in(&["the".into(), "next".into(), "opline".into()]));
+        assert!(!p.occurs_in(&["NEXT".into()]));
+        let p = phrase("`Func` table").unwrap();
+        assert!(!p.spelled);
+        assert!(p.occurs_in(&["func".into(), "Table".into()]));
+    }
+
+    #[test]
+    fn two_terms_avoiding_one_word_keep_both_code_spellings() {
+        let g = Glossary::parse(
+            "**Unit**:\n_Avoid_: module, script\n\n**Instrument**:\n_Avoid_: check, script (php's `script_name`)\n",
+        )
+        .unwrap();
+        let script = g
+            .avoided_phrases()
+            .into_iter()
+            .find(|a| a.phrase.text == "script")
+            .unwrap();
+        assert_eq!(script.terms, ["Unit", "Instrument"]);
+        assert_eq!(script.phrase.code, ["script_name"]);
     }
 
     #[test]
