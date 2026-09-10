@@ -199,6 +199,9 @@ status::session
 track::Base
 track::Base::of
 track::Found
+track::Ticket
+track::Ticket::new
+track::Ticket::number
 track::Track
 track::Track::of
 track::Track::render

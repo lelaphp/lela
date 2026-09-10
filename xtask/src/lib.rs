@@ -253,8 +253,8 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
         Command::Track { branch, json } => Some(track_command(root, branch.as_deref(), *json)),
         Command::Regions { files } => Some(computed::command(root, files)),
         Command::Worktree {
-            command: WorktreeCommand::Add { branch },
-        } => Some(worktree::add(root, branch).map(|_| ())),
+            command: WorktreeCommand::Add { branch, ticket },
+        } => Some(worktree::add(root, branch, ticket.map(track::Ticket::new)).map(|_| ())),
         Command::Worktree {
             command: WorktreeCommand::Retire { branch },
         } => Some(worktree::retire(root, branch)),

@@ -478,3 +478,49 @@ fn a_worktree_with_no_readings_is_retired_through_the_retire_command() {
     assert!(out.contains("git branch -D t-x/quiet"), "{out}");
     let _ = fs::remove_dir_all(&root);
 }
+
+/// The track's record names its ticket (#30): the add writes it on the
+/// branch, `xtask track` in the worktree reads it by name, a second
+/// branch on the same ticket is refused before anything is laid down, and
+/// the retire keeps the record with the branch it keeps.
+#[test]
+fn an_add_records_the_ticket_and_a_retire_keeps_it_with_the_branch() {
+    let root = repository("ticket");
+    let (code, out) = add(&root, &["t-x/thirty", "--ticket", "30"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("#30"), "the ticket is named: {out}");
+    let dir = worktree_of(&root, "t-x/thirty");
+    let track = Command::new(dir.join("target/debug/xtask"))
+        .args(["track", "--json"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let facts: serde_json::Value = serde_json::from_slice(&track.stdout).unwrap();
+    assert_eq!(facts["ticket"], 30, "{facts}");
+
+    // A second branch on the same ticket is refused and nothing is laid down.
+    let listed = worktrees(&root);
+    let (code, again) = add(&root, &["t-x/thirty-again", "--ticket", "30"]);
+    assert_eq!(code, 1, "{again}");
+    assert!(
+        again.contains("t-x/thirty"),
+        "names the branch that has it: {again}"
+    );
+    assert_eq!(worktrees(&root), listed, "{again}");
+    assert!(
+        !sh(&root, &["git", "branch", "--list", "t-x/thirty-again"]).contains("again"),
+        "{again}"
+    );
+
+    let (code, out) = retire(&root, &["t-x/thirty"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("#30"), "the record is named as kept: {out}");
+    assert_eq!(
+        sh(&root, &["git", "config", "branch.t-x/thirty.ticket"]).trim(),
+        "30",
+        "the record stays with the branch"
+    );
+    let (code, out) = worktree(&root, "add", &["t-x/thirty-again", "--ticket", "30"]);
+    assert_eq!(code, 1, "the retired branch still holds the ticket: {out}");
+    let _ = fs::remove_dir_all(&root);
+}

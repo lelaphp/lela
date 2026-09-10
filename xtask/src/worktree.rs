@@ -23,10 +23,19 @@
 //! The branch names its own track ([`Track::of`]): the longest existing
 //! branch that is a proper path prefix of it, `main` for a branch on none,
 //! which is the track `xtask done` will judge the worktree against (§4.5).
-//! A branch that exists, on the clone or on `origin`, and a directory that
-//! exists, refuse before anything is laid down, as `new-ext` does. Nothing
-//! is measured here and no reading is written: the readings are the
-//! worktree's own, once an agent is in it.
+//! A branch that exists, on the clone or on `origin`, a directory that
+//! exists, and a ticket another branch already records, refuse before
+//! anything is laid down, as `new-ext` does. Nothing is measured here and
+//! no reading is written: the readings are the worktree's own, once an
+//! agent is in it.
+//!
+//! The ticket the branch's work is for is the add's to record (#30):
+//! `--ticket` writes it on the branch, where the track module reads it by
+//! name, so a reader that asks whether the work of a branch is done need
+//! not be told the number. A branch laid down with none records none,
+//! and `xtask track` says so rather than guessing from the name. One
+//! branch per ticket: a second add on a ticket a branch records is
+//! refused, naming that branch, so no ticket is closed twice.
 //!
 //! The retire is where a track keeps that evidence. A worktree's readings
 //! live in its own `target/harness/` and removing the worktree removes
@@ -40,8 +49,8 @@
 //! not have, until the design says they are the track's (§4.2). A
 //! worktree with uncommitted work is a refusal after the append, since
 //! the worktree's copy is emptied once appended and the call that follows
-//! cannot count the same readings twice. The branch is kept; deleting it
-//! is a person's line, printed.
+//! cannot count the same readings twice. The branch is kept, and the
+//! ticket record with it; deleting it is a person's line, printed.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -52,7 +61,7 @@ use anyhow::{Context, Result, bail};
 use crate::computed;
 use crate::git::git;
 use crate::reading::{self, Store};
-use crate::track::{self, Track};
+use crate::track::{self, Ticket, Track};
 
 /// Where a worktree lives, under the main checkout, one directory per
 /// branch: the one convention `permit` resolves a call's workspace by and
@@ -89,10 +98,11 @@ impl std::fmt::Display for NotReady {
 
 impl std::error::Error for NotReady {}
 
-/// Lay the worktree for `branch` down under `root`, or refuse and change
-/// nothing. `Ok` is the worktree's directory, ready; [`NotReady`] is the
-/// directory laid down with a fact missing.
-pub fn add(root: &Path, branch: &str) -> Result<PathBuf> {
+/// Lay the worktree for `branch` down under `root`, recording `ticket` on
+/// the branch where one is given, or refuse and change nothing. `Ok` is
+/// the worktree's directory, ready; [`NotReady`] is the directory laid
+/// down with a fact missing.
+pub fn add(root: &Path, branch: &str, ticket: Option<Ticket>) -> Result<PathBuf> {
     let dir = root.join(WORKTREES).join(branch);
     if git(
         root,
@@ -122,6 +132,13 @@ pub fn add(root: &Path, branch: &str) -> Result<PathBuf> {
             dir.display()
         );
     }
+    if let Some(ticket) = ticket
+        && let Some(other) = track::branch_of_ticket(root, ticket)
+    {
+        bail!(
+            "{ticket} is {other}'s already; work in its worktree, or have a person delete that branch once its work is merged, or name another ticket"
+        );
+    }
 
     let track = Track::of(root, Some(branch))
         .with_context(|| format!("which track {branch} is on could not be said"))?;
@@ -149,6 +166,19 @@ pub fn add(root: &Path, branch: &str) -> Result<PathBuf> {
         ),
     );
     say(ADD, &format!("worktree {}", dir.display()));
+    match ticket {
+        Some(ticket) => {
+            track::record_ticket(root, branch, ticket)?;
+            say(
+                ADD,
+                &format!("for {ticket}, recorded on the branch, which `xtask track` reads by name"),
+            );
+        }
+        None => say(
+            ADD,
+            "for no ticket: none was named, and `xtask track` says so rather than guessing from the branch name",
+        ),
+    }
 
     let mut ready = true;
     ready &= build(&dir);
@@ -198,10 +228,14 @@ pub fn retire(root: &Path, branch: &str) -> Result<()> {
         }
     })?;
     say(RETIRE, &format!("removed {}", dir.display()));
+    let record = match track.ticket {
+        Some(ticket) => format!(", and the record that it is for {ticket} with it"),
+        None => String::new(),
+    };
     say(
         RETIRE,
         &format!(
-            "the branch is kept; a person deletes it once it is merged: git branch -D {branch}"
+            "the branch is kept{record}; a person deletes it once it is merged: git branch -D {branch}"
         ),
     );
     Ok(())

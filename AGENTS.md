@@ -124,8 +124,8 @@ Commands:
   status             Render one section from the manifest and the store, or with `--session` the map plus the local facts; computes nothing else
   permit             Judge one intended call from the `PreToolUse` hook's stdin; the decision is the JSON on stdout and the exit is 0 always
   done               The definition of done: print the conditions unmet for the changes since the base and exit 1 while any is; the Stop hook, pre-push and CI read the same list
-  track              Say which track this worktree's branch is on (the longest existing branch that is a proper path prefix of its name, `main` for a branch on none), the commit `done` measures since, and the root that holds the track's store; as text, or as one object. Writes no reading
-  worktree           A track's worktrees: `add` lays one down under .claude/worktrees/<branch> ready to be worked in, the branch off its track, `xtask` built there, the local file laid and rendered, the `computed trust` line printed as a person's; refuses a branch that exists and a directory that does. `retire` appends the worktree's log into its track's store, removes the worktree and prints the branch-delete line as a person's; refuses uncommitted work. Writes no reading
+  track              Say which track this worktree's branch is on (the longest existing branch that is a proper path prefix of its name, `main` for a branch on none), the commit `done` measures since, the root that holds the track's store, and the ticket the branch records; as text, or as one object. Writes no reading
+  worktree           A track's worktrees: `add` lays one down under .claude/worktrees/<branch> ready to be worked in, the branch off its track with the ticket it is for recorded on it, `xtask` built there, the local file laid and rendered, the `computed trust` line printed as a person's; refuses a branch that exists and a directory that does. `retire` appends the worktree's log into its track's store, removes the worktree and prints the branch-delete line as a person's; refuses uncommitted work. Writes no reading
   regions            Render the named files' regions with `computed run` and say what it did, one line per file, `written` or `unchanged`, for pre-commit to re-stage; refuses a broken marker, a missing `computed` and an untrusted checkout, whose `computed trust` line is printed as a person's. Writes no reading
   budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code and a stale generated file
   clippy             `cargo clippy` with every warning denied, on every target of each crate, as the reading `done` reads; one reading per crate
@@ -141,7 +141,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=65aa18b245eed599ec17f65c394f377e12eb83137a2b683489bdb95c20470c31 out=76480cb54ed3ca50974d82417643527100d6b8fcaea9ae70dda8d5f441c01ef7 -->
+<!-- /computed in=870625c1599bb491c85d6e13253f329832c2edfaba41fe1c4d1678d45fe5ea89 out=6b640806f2ab39ce0a5232f365ca8a5d9610e878f33e1ab7b9da676f63a4247d -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

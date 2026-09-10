@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use xtask::track::{Base, Found, Track};
+use xtask::track::{Base, Found, Ticket, Track};
 
 fn sh(root: &Path, args: &[&str]) -> String {
     let out = Command::new(args[0])
@@ -271,4 +271,45 @@ fn track_is_listed_by_the_help() {
     let (code, out, _) = xtask(Path::new("."), &["--help"]);
     assert_eq!(code, 0);
     assert!(out.contains("\n  track "), "{out}");
+}
+
+/// The ticket is a record on the branch, read by name (#30): a branch
+/// with none says so, and nothing is guessed from a branch name that
+/// happens to carry a number.
+#[test]
+fn a_branch_names_its_ticket_by_record_and_never_by_its_name() {
+    let root = on_a_track("ticket");
+    let none = Track::of(&root, None).unwrap();
+    assert_eq!(none.ticket, None);
+    let (code, out, _) = xtask(&root, &["track"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("ticket: none"), "stated plainly: {out}");
+    let (_, out, _) = xtask(&root, &["track", "--json"]);
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(value["ticket"], serde_json::Value::Null);
+
+    sh(&root, &["git", "checkout", "-q", "-b", "t-opus-5/issue-30"]);
+    let named = Track::of(&root, None).unwrap();
+    assert_eq!(named.ticket, None, "a number in the name is not a ticket");
+
+    sh(
+        &root,
+        &["git", "config", "branch.t-opus-5/witness.ticket", "30"],
+    );
+    let recorded = Track::of(&root, Some("t-opus-5/witness")).unwrap();
+    assert_eq!(recorded.ticket, Some(Ticket::new(30)));
+    let (code, out, _) = xtask(&root, &["track", "--branch", "t-opus-5/witness"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("ticket: #30"), "{out}");
+    let (_, out, _) = xtask(&root, &["track", "--branch", "t-opus-5/witness", "--json"]);
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(value["ticket"], 30);
+
+    // A record that is not a number is an error, not a track with none.
+    sh(
+        &root,
+        &["git", "config", "branch.t-opus-5/witness.ticket", "thirty"],
+    );
+    let err = Track::of(&root, Some("t-opus-5/witness")).unwrap_err();
+    assert!(format!("{err:#}").contains("thirty"), "{err:#}");
 }

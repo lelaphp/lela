@@ -1,15 +1,24 @@
 //! The track (CONTEXT.md, harness-design.md §4.5): the branch a set of
 //! branches is worked above, named by being a proper path prefix of theirs.
-//! Three things every reader of a track asks are answered here, for one
+//! Four things every reader of a track asks are answered here, for one
 //! worktree, by [`Track::of`]: which track its branch is on, the commit
-//! `done` measures since, and which root holds the track's store. `xtask
-//! track` prints them, as text or as one JSON object, and writes no
-//! reading, since it measures nothing; `done` takes its base through
-//! [`Base::of`]; and the add command asks for a branch not yet made.
+//! `done` measures since, which root holds the track's store, and which
+//! ticket the branch's work is for. `xtask track` prints them, as text or
+//! as one JSON object, and writes no reading, since it measures nothing;
+//! `done` takes its base through [`Base::of`]; and the add command asks
+//! for a branch not yet made.
 //!
 //! The rule once lived in `done`'s reads and again in a prefix loop of the
 //! add command, and the console was about to write a third. This module
 //! is the one statement the three read.
+//!
+//! The ticket is a record on the branch, `branch.<name>.ticket` in the
+//! repository's configuration (#30): git's own per-branch record, shared
+//! by every worktree of the clone, written once by `xtask worktree add
+//! --ticket`, read by name here, kept when the worktree is retired, since
+//! the branch is, and gone with the branch when a person deletes it. A
+//! branch with no record names no ticket, which is stated, and no reader
+//! guesses one from a number in the branch's name.
 
 use std::path::{Path, PathBuf};
 
@@ -42,6 +51,28 @@ impl Found {
     }
 }
 
+/// The ticket a branch's work is for: the number of the GitHub issue
+/// recorded on the branch when its worktree was laid down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ticket(u64);
+
+impl Ticket {
+    pub fn new(number: u64) -> Ticket {
+        Ticket(number)
+    }
+
+    pub fn number(self) -> u64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for Ticket {
+    /// As an issue is cited: `#30`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#{}", self.0)
+    }
+}
+
 /// One worktree's track and what follows from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Track {
@@ -62,6 +93,9 @@ pub struct Track {
     /// worktree, which is the checkout every linked worktree was added
     /// from (harness-design.md §4.2, §5).
     pub store: PathBuf,
+    /// The ticket recorded on the branch; `None` for a branch that names
+    /// none and for a detached `HEAD`.
+    pub ticket: Option<Ticket>,
 }
 
 impl Track {
@@ -88,6 +122,10 @@ impl Track {
             None => "HEAD",
         };
         let base = merge_base(root, from, &at)?;
+        let ticket = match &branch {
+            Some(b) => ticket_of(root, b)?,
+            None => None,
+        };
         Ok(Track {
             branch,
             found,
@@ -95,6 +133,7 @@ impl Track {
             at,
             base,
             store: main_worktree(root)?,
+            ticket,
         })
     }
 
@@ -108,8 +147,14 @@ impl Track {
             }
             _ => "none; HEAD is detached, which is on no track".to_owned(),
         };
+        let ticket = match self.ticket {
+            Some(ticket) => format!("{ticket}, what the branch's work is for"),
+            None => {
+                "none; the branch records no ticket, and none is guessed from its name".to_owned()
+            }
+        };
         format!(
-            "branch: {branch}\ntrack: {} ({})\nbase: {}, what done measures since\nstore: {}, whose target/harness is the track's\n",
+            "branch: {branch}\ntrack: {} ({})\nbase: {}, what done measures since\nstore: {}, whose target/harness is the track's\nticket: {ticket}\n",
             self.name,
             self.at,
             short(&self.base),
@@ -126,6 +171,7 @@ impl Track {
             "at": self.at,
             "base": self.base,
             "store": self.store,
+            "ticket": self.ticket.map(Ticket::number),
         })
     }
 }
@@ -176,6 +222,56 @@ pub(crate) fn head_branch(root: &Path) -> Option<String> {
     let name = git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"], None).ok()?;
     let name = name.trim().to_owned();
     (!name.is_empty()).then_some(name)
+}
+
+/// The configuration key that is the branch's ticket record.
+fn ticket_key(branch: &str) -> String {
+    format!("branch.{branch}.ticket")
+}
+
+/// The ticket recorded on `branch`, `None` where the branch records none;
+/// a record that is not a number is an error, not a branch with none.
+fn ticket_of(root: &Path, branch: &str) -> Result<Option<Ticket>> {
+    let key = ticket_key(branch);
+    let Ok(text) = git(root, &["config", "--get", &key], None) else {
+        return Ok(None);
+    };
+    let text = text.trim();
+    let number = text
+        .parse()
+        .with_context(|| format!("{key} is {text:?}, not an issue number"))?;
+    Ok(Some(Ticket(number)))
+}
+
+/// The ticket recorded on `branch`: the one write of the record.
+pub(crate) fn record_ticket(root: &Path, branch: &str, ticket: Ticket) -> Result<()> {
+    let key = ticket_key(branch);
+    git(root, &["config", &key, &ticket.number().to_string()], None)
+        .with_context(|| format!("cannot record {ticket} as {key}"))?;
+    Ok(())
+}
+
+/// The branch whose record names `ticket`, if one does: what refuses a
+/// second branch on the same ticket, so no ticket is closed twice.
+pub(crate) fn branch_of_ticket(root: &Path, ticket: Ticket) -> Option<String> {
+    let number = ticket.number().to_string();
+    let found = git(
+        root,
+        &[
+            "config",
+            "--get-regexp",
+            r"^branch\..*\.ticket$",
+            &format!("^{number}$"),
+        ],
+        None,
+    )
+    .ok()?;
+    found.lines().find_map(|line| {
+        let (key, _) = line.split_once(' ')?;
+        key.strip_prefix("branch.")?
+            .strip_suffix(".ticket")
+            .map(str::to_owned)
+    })
 }
 
 /// Whether `name` is a branch here: a local one, or `origin`'s, which is

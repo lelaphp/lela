@@ -94,8 +94,9 @@ pub(crate) enum Command {
     },
     /// Say which track this worktree's branch is on (the longest existing
     /// branch that is a proper path prefix of its name, `main` for a branch
-    /// on none), the commit `done` measures since, and the root that holds
-    /// the track's store; as text, or as one object. Writes no reading.
+    /// on none), the commit `done` measures since, the root that holds
+    /// the track's store, and the ticket the branch records; as text, or
+    /// as one object. Writes no reading.
     Track {
         /// A branch other than `HEAD`'s, made or not yet: what the add
         /// command asks before it takes the branch off its track.
@@ -106,7 +107,8 @@ pub(crate) enum Command {
         json: bool,
     },
     /// A track's worktrees: `add` lays one down under .claude/worktrees/<branch>
-    /// ready to be worked in, the branch off its track, `xtask` built there,
+    /// ready to be worked in, the branch off its track with the ticket it
+    /// is for recorded on it, `xtask` built there,
     /// the local file laid and rendered, the `computed trust` line printed
     /// as a person's; refuses a branch that exists and a directory that
     /// does. `retire` appends the worktree's log into its track's store,
@@ -204,10 +206,16 @@ pub(crate) enum Command {
 /// The two halves of a track's worktree.
 #[derive(Debug, Subcommand)]
 pub(crate) enum WorktreeCommand {
-    /// Lay the worktree for a branch down, ready to be worked in.
+    /// Lay the worktree for a branch down, ready to be worked in, with
+    /// the ticket its work is for recorded on the branch.
     Add {
         /// The branch, not yet made; it names its own track.
         branch: String,
+        /// The issue the branch's work is for, recorded on the branch and
+        /// read by `xtask track`; one branch per ticket. Without it the
+        /// branch records none, which `xtask track` says.
+        #[arg(long, value_name = "N")]
+        ticket: Option<u64>,
     },
     /// Append the worktree's log into its track's store, then remove the
     /// worktree; the branch is kept.
