@@ -1,0 +1,27 @@
+# php_bundle: the enabled set and the tier's name (ADR-0004; design §4.1,
+# §4.10, §7.1), php-src's `internal_functions.c`. One feature per extension,
+# each an optional dependency, the default set as far as ported; a person
+# removes a non-default extension from `default` when porting it. `xtask
+# new-ext <name>` appends the dependency and the feature; `api-check` holds
+# `enabled()` to the crate graph.
+[package]
+name = "php_bundle"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The enabled set of extensions and the tier's name"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# The compiled tier (design §4.1, §11): a name that enables nothing until
+# php_jit exists, when it enables the crate on the four targets.
+jit = []
+
+# The facade for `Extension` and `Nop`; the extensions as `new-ext` adds them.
+[dependencies]
+php_ext = { path = "../php_ext" }

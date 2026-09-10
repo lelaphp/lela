@@ -150,6 +150,7 @@ Options:
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
+├── php_bundle
 ├── php_compile
 ├── php_engine
 ├── php_ext
@@ -158,7 +159,7 @@ Options:
 ├── php_syntax
 └── php_unit
 ```
-<!-- /computed in=0a092c11777e0627bcbd40b279f804a7a629940821bd929fc654310650fe28ba out=e69712a433b3a530815bd382af4350bf3e0a1f52a137b730c470546300b0df01 -->
+<!-- /computed in=5367b71544e0c166a5149f140d58a07c422081ef9e6118cd2d499beaa7531484 out=f7a4ce94d06c883b4763abda90521324fbf102e2ab5ff774ce5c52a13ef8c047 -->
 <!-- computed tree src=ext depth=1 name=layout-ext | do not edit; run computed -->
 ```
 .
