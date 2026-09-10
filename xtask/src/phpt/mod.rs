@@ -19,8 +19,8 @@
 //! `phpt:php-src/<path in the corpus>`, so a row names the corpus and not
 //! this machine.
 //!
-//! **What is the lane module's.** The tally, the print loop, the runner
-//! ladder and the reading's status are [`lane`]'s, shared with `witness`;
+//! **What is the tally's.** The verdicts, the print loop, the runner
+//! ladder and the reading's status are [`tally`]'s, shared with `witness`;
 //! this module contributes [`Judgement`], the per-item judge and the words
 //! of the subset's message.
 //!
@@ -57,10 +57,10 @@ use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 
 use crate::divergence::Registry;
-use crate::lane::{self, Outcome};
 use crate::manifest::{Crate, Manifest};
 use crate::oracle::{Oracle, Runner};
 use crate::reading::{Reading, listed};
+use crate::tally::{self, Outcome};
 use adapter::Adapter;
 
 /// The instrument's name, the reading's `instrument` field.
@@ -342,7 +342,7 @@ pub(crate) enum Judgement {
     XFail,
 }
 
-impl lane::Judgement for Judgement {
+impl tally::Judgement for Judgement {
     const PASS: Judgement = Judgement::Pass;
 
     fn as_str(self) -> &'static str {
@@ -368,10 +368,10 @@ impl lane::Judgement for Judgement {
 
 /// One test's verdict: its divergence key, its name inside the subset,
 /// the judgement and the note.
-pub(crate) type Judged = lane::Judged<Judgement>;
+pub(crate) type Judged = tally::Judged<Judgement>;
 
 /// What one subset's run came to.
-pub(crate) type Tally = lane::Tally<Judgement>;
+pub(crate) type Tally = tally::Tally<Judgement>;
 
 /// The subset's reading: the counts in `numbers`, the failures named in
 /// the message, and the status the ladder allows.

@@ -30,7 +30,6 @@ mod glossary;
 /// `xtask`'s own sources (harness-design.md §4.4, #16). Shared with
 /// `build.rs`, which includes the file rather than importing it.
 mod inputs;
-mod lane;
 mod lines;
 mod lock;
 pub mod manifest;
@@ -42,6 +41,7 @@ pub mod reading;
 mod rust;
 mod sources;
 pub mod status;
+mod tally;
 pub mod track;
 pub mod unsafe_audit;
 pub mod vocab;

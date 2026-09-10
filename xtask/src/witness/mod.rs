@@ -29,8 +29,8 @@
 //! native there without a witness raises `missing`, and `done` prints it
 //! per crate. What counts as one is [`fence::Subject`]'s sentence.
 //!
-//! **What is the lane module's.** The tally, the print loop, the runner
-//! ladder and the reading's status are [`lane`]'s, shared with `phpt`;
+//! **What is the tally's.** The verdicts, the print loop, the runner
+//! ladder and the reading's status are [`tally`]'s, shared with `phpt`;
 //! this module contributes [`Judgement`], the per-item judge in `judge`
 //! and the words of the crate's message. A crate whose sources cannot be
 //! read is a failing reading naming the crate and the file, never a crate
@@ -53,11 +53,11 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use crate::divergence::Registry;
-use crate::lane::{self, Outcome};
 use crate::manifest::{Crate, Manifest, Rule};
 use crate::oracle::{Oracle, Runner};
 use crate::reading::{Reading, Status, Store, listed};
 use crate::sources;
+use crate::tally::{self, Outcome};
 use fence::Extracted;
 
 /// The instrument's name, the reading's `instrument` field.
@@ -80,7 +80,7 @@ pub(crate) enum Judgement {
     Bork,
 }
 
-impl lane::Judgement for Judgement {
+impl tally::Judgement for Judgement {
     const PASS: Judgement = Judgement::Pass;
 
     fn as_str(self) -> &'static str {
@@ -108,7 +108,7 @@ impl lane::Judgement for Judgement {
 
 /// One witness's verdict: its divergence key, where it stands as its
 /// name, the judgement and the note.
-pub(crate) type Judged = lane::Judged<Judgement>;
+pub(crate) type Judged = tally::Judged<Judgement>;
 
 /// The one thing `--accept` writes: a fence line, by the file and the line
 /// it stands on.
@@ -125,7 +125,7 @@ pub(crate) struct Captured {
 /// half beside them.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Tally {
-    pub witnesses: lane::Tally<Judgement>,
+    pub witnesses: tally::Tally<Judgement>,
     /// The kernels and natives the coverage scope holds.
     pub subjects: usize,
     /// Those of them without a witness, as `file:line item`.
@@ -400,7 +400,7 @@ pub(crate) fn judge(
     }
     let mut captured = Vec::new();
     let mut wall = Duration::ZERO;
-    let witnesses = lane::Tally::judge(&found.witnesses, |witness| {
+    let witnesses = tally::Tally::judge(&found.witnesses, |witness| {
         wall += witness.wall.unwrap_or_default();
         judge::one(oracle, registry, runner, ask, witness, &mut captured)
     })?;

@@ -1,5 +1,5 @@
 //! How one witness is judged: the per-item judge `witness` contributes to
-//! the lane module. The snippet runs under the oracle, whose status is what
+//! the tally. The snippet runs under the oracle, whose status is what
 //! `--accept` captures onto a bare `exit`; then under the engine when there
 //! is one, the oracle's run standing in otherwise; and the two streams and
 //! the status are held to what the fences pin through [`oracle::verdict`],

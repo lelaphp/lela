@@ -5,7 +5,7 @@
 //! `--CAPTURE_STDIO--`), its `SKIPIF` and `CLEAN` sections run beside it
 //! under the oracle, and its output held to its `--EXPECT*--` section with
 //! php's normalisation. The verdict goes through [`oracle::verdict`], so
-//! the registry decides what a difference means (harness §4.3). The lane,
+//! the registry decides what a difference means (harness §4.3). The tally,
 //! the subsets and the reading are `phpt`'s; this is the per-item judge it
 //! contributes.
 

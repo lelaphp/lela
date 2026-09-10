@@ -1,11 +1,13 @@
-//! One lane of the behaviour harness (harness-design.md §4.2, §4.3, §7):
-//! what `phpt` and `witness` hold in common once each has said what one
-//! item is and how it is judged. A lane runs its items through the
-//! [`Runner`], keeps the verdicts as a [`Tally`], and ends as one reading.
-//! The tally owns the print loop, the counts, the runner ladder and the
-//! reading's status; a lane contributes its [`Judgement`], a per-item judge
-//! and the words of its message, and nothing else. The compile-identity
-//! lane, when it comes, is the third caller.
+//! The tally behind the behaviour harness's lanes (harness-design.md §4.2,
+//! §4.3, §7): what `phpt` and `witness` hold in common once each has said
+//! what one item is and how it is judged. A tally is the verdicts of one
+//! run of a corpus through the [`Runner`], and what follows from them: the
+//! print loop, the counts, the runner ladder and the reading's status. A
+//! lane is a scheduled run of a corpus, the per-commit subsets or the
+//! nightly whole (harness §7), and never this module; a lane contributes
+//! its [`Judgement`], a per-item judge and the words of its message, and
+//! nothing else. The compile-identity lane, when it comes, is the third
+//! caller.
 //!
 //! **The runner ladder.** What ran decides what a green tally means. A
 //! [`Runner::Control`] is the pinned oracle standing where the engine
@@ -69,7 +71,8 @@ impl<J> Judged<J> {
     }
 }
 
-/// What one run of a lane came to.
+/// What one run of a corpus came to: the verdicts, and the counts that
+/// read off them.
 #[derive(Debug, Clone)]
 pub struct Tally<J> {
     pub judged: Vec<Judged<J>>,
@@ -330,7 +333,7 @@ mod tests {
         assert_eq!(went, items);
         let reading = tally
             .reading(
-                Reading::new("lane", "ext/fixture"),
+                Reading::new("tally", "ext/fixture"),
                 &tally.outcome(&engine()),
                 "words".to_owned(),
             )
