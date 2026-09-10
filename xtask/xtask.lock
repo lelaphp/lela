@@ -1,4 +1,4 @@
-api_check::check
+api_check::hold
 api_check::run
 budget::run
 cli::Format
@@ -184,7 +184,7 @@ track::Track::of
 track::Track::render
 track::Track::to_json
 unsafe_audit::run
-vocab::check
+vocab::hold
 vocab::run
 witness::Ask
 witness::run

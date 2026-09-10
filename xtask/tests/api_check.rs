@@ -20,7 +20,7 @@ fn fixture(name: &str) -> PathBuf {
 
 fn readings(name: &str) -> Vec<Reading> {
     let manifest = Manifest::load(workspace()).unwrap();
-    api_check::check(&manifest, &fixture(name), false).unwrap()
+    api_check::hold(&manifest, &fixture(name), false).unwrap()
 }
 
 fn failures(readings: &[Reading]) -> Vec<&Reading> {
@@ -148,7 +148,7 @@ fn a_bundle_order_that_is_not_topological_fails() {
 #[test]
 fn the_workspace_today_has_no_failing_reading() {
     let manifest = Manifest::load(workspace()).unwrap();
-    let readings = api_check::check(&manifest, workspace(), false).unwrap();
+    let readings = api_check::hold(&manifest, workspace(), false).unwrap();
     let failed: Vec<String> = failures(&readings)
         .iter()
         .map(|r| format!("{}: {}", r.scope, r.message))
@@ -212,7 +212,7 @@ fn with_the_harness_rows(mut manifest: Manifest) -> Manifest {
 #[test]
 fn a_public_item_of_the_harness_without_its_lock_line_fails_naming_xtask_lock() {
     let manifest = with_the_harness_rows(Manifest::load(workspace()).unwrap());
-    let readings = api_check::check(&manifest, &fixture("harness-lock"), false).unwrap();
+    let readings = api_check::hold(&manifest, &fixture("harness-lock"), false).unwrap();
     let harness = of(&readings, "harness");
     assert_eq!(harness.status, Status::Fail, "{}", harness.message);
     assert!(
@@ -239,7 +239,7 @@ fn a_public_item_of_the_harness_without_its_lock_line_fails_naming_xtask_lock() 
 #[test]
 fn the_harness_lock_is_current_over_the_tracked_workspace() {
     let manifest = with_the_harness_rows(Manifest::load(workspace()).unwrap());
-    let readings = api_check::check(&manifest, workspace(), false).unwrap();
+    let readings = api_check::hold(&manifest, workspace(), false).unwrap();
     let harness = of(&readings, "harness");
     assert_eq!(
         harness.status,

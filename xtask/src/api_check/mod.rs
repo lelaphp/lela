@@ -12,7 +12,7 @@
 //!   `use` from the producer. `api.lock` is held under `[budget] api_items`.
 //! - A crate's workspace dependencies are held to the `[[edge]]` rows whose
 //!   `from` matches it: every row is exclusive, so `only = true` restates
-//!   what the check does for each crate. A `use` path across a `deny = true`
+//!   what the instrument does for each crate. A `use` path across a `deny = true`
 //!   module edge fails; a `reexports_only` crate may define nothing.
 //! - `php_bundle`'s registration order, read as the order of
 //!   `php_ext_<name>::extension()` in its sources, is held topological over
@@ -43,7 +43,7 @@ pub(crate) const INSTRUMENT: &str = "api-check";
 /// Run the instrument over `root`, print one line per reading, and record
 /// them; the outcome is the exit.
 pub fn run(manifest: &Manifest, root: &Path, store: &Store, write: bool) -> Result<()> {
-    let readings = check(manifest, root, write)?;
+    let readings = hold(manifest, root, write)?;
     for reading in &readings {
         println!(
             "{INSTRUMENT} {:<14} {:<4} {}",
@@ -58,7 +58,7 @@ pub fn run(manifest: &Manifest, root: &Path, store: &Store, write: bool) -> Resu
 /// Every reading of one run: one per seam, then one per crate present.
 /// With `write`, a lock that differs is rewritten and its reading reports
 /// that instead of failing.
-pub fn check(manifest: &Manifest, root: &Path, write: bool) -> Result<Vec<Reading>> {
+pub fn hold(manifest: &Manifest, root: &Path, write: bool) -> Result<Vec<Reading>> {
     let crates = Crates::scan(manifest, root)?;
     let mut inventory = Inventory::new(&crates);
     let mut readings = Vec::new();

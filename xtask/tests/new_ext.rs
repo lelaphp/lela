@@ -198,7 +198,7 @@ fn the_crate_laid_down_has_the_template_topology() {
     std::fs::copy(workspace().join("CONTEXT.md"), root.join("CONTEXT.md")).unwrap();
     let mut tracked = Manifest::load(workspace()).unwrap();
     tracked.crates.push(Crate::named("ext/demo"));
-    let readings = vocab::check(&root, &tracked, &["ext/demo".to_owned()]).unwrap();
+    let readings = vocab::hold(&root, &tracked, &["ext/demo".to_owned()]).unwrap();
     let demo = of(&readings, "ext/demo");
     assert_eq!(demo.status, Status::Pass, "{}", demo.message);
     assert!(laid.dir.is_dir());
@@ -220,7 +220,7 @@ fn the_crate_laid_down_passes_the_three_instruments_untouched() {
     assert!(failed(&readings).is_empty(), "{:?}", failed(&readings));
     assert_eq!(of(&readings, "ext/demo").status, Status::Pass);
 
-    let readings = api_check::check(&manifest, &root, false).unwrap();
+    let readings = api_check::hold(&manifest, &root, false).unwrap();
     assert!(failed(&readings).is_empty(), "{:?}", failed(&readings));
     let demo = of(&readings, "ext/demo");
     assert_eq!(demo.status, Status::Pass, "{}", demo.message);
@@ -235,7 +235,7 @@ fn the_crate_laid_down_passes_the_three_instruments_untouched() {
     let mut text = std::fs::read_to_string(&cargo).unwrap();
     text.push_str("php_engine = { path = \"../../crates/php_engine\" }\n");
     std::fs::write(&cargo, text).unwrap();
-    let readings = api_check::check(&manifest, &root, false).unwrap();
+    let readings = api_check::hold(&manifest, &root, false).unwrap();
     let demo = of(&readings, "ext/demo");
     assert_eq!(demo.status, Status::Fail, "{}", demo.message);
     assert!(demo.message.contains("php_engine"), "{}", demo.message);

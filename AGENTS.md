@@ -65,7 +65,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=90d1ec6033b778510783285eb774cecf618a38f769d314354dab0a7b40266670 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=9bd5cfb22672143070dea187545a0ae783b13df33e70b3606f33e3cfe9e14c58 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -118,7 +118,7 @@ The harness for the third engine
 Usage: xtask [OPTIONS] <COMMAND>
 
 Commands:
-  api-check          Hold the seams: regenerate and diff each lock, check crate edges, `use` paths and the bundle order; one reading per seam and per crate
+  api-check          Hold the seams: regenerate and diff each lock, hold crate edges, `use` paths and the bundle order; one reading per seam and per crate
   status             Render one section from the manifest and the store, or with `--session` the map plus the local facts; computes nothing else
   permit             Judge one intended tool call from the `PreToolUse` hook's stdin; the decision is the JSON on stdout and the exit is 0 always
   done               The definition of done: print the conditions unmet for the changes since the base and exit 1 while any is; the Stop hook, pre-push and CI read the same list
@@ -139,7 +139,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=e2af368b6bf93ff42af677a32e2f80a949291639e37f388b71dcd5c67a85a438 out=88a56b63a816a1cebcef332946b4da0570c27db510ec2b9be0213a4ea69ffd13 -->
+<!-- /computed in=43d3fcac19034f86f84367f23598cddef0c0f0f2307547bcbcc40c5cad6b0682 out=445a2fd617d95255813f7c49aaa97f6807a2fb2b211b03b696f541e5650567a2 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

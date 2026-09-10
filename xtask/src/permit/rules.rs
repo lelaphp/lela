@@ -1,5 +1,5 @@
 //! The rules: one call against the manifest's `[[rule]]` rows in order,
-//! after the region-body check, and the judgement that comes out, with the
+//! after the region-body rule, and the judgement that comes out, with the
 //! hook's JSON it renders to. The deep part of the judge: the conservative
 //! shell split, the flag clusters, the type mentions, the `unsafe` homes
 //! and the `pub` count all live here and nowhere else.
@@ -122,7 +122,7 @@ pub fn judged_at_the_tool_call(rule: &Rule) -> bool {
     rule.predicate.describes_a_call()
 }
 
-/// Judge one call: the region-body check, then the manifest's rules in
+/// Judge one call: the region-body rule, then the manifest's rules in
 /// order.
 pub fn judge(manifest: &Manifest, root: &Path, call: &Call) -> Result<Judgement> {
     let path = call.path(root);

@@ -107,13 +107,13 @@ pub(crate) struct Scan {
 /// names some, and record a reading per crate that exists; the outcome is
 /// the exit.
 pub fn run(root: &Path, manifest: &Manifest, store: &Store, only: &[String]) -> Result<Outcome> {
-    store.record(&check(root, manifest, only)?)
+    store.record(&hold(root, manifest, only)?)
 }
 
 /// Every reading of one run, each finding printed as it is found: one per
 /// crate the rule's scope covers and that exists, or per crate `only`
-/// names. The library entry, as `api_check::check` is; `run` records.
-pub fn check(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Reading>> {
+/// names. The library entry, as `api_check::hold` is; `run` records.
+pub fn hold(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Reading>> {
     let rules: Vec<&Rule> = manifest
         .rules
         .iter()

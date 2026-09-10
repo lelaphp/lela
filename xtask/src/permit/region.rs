@@ -1,4 +1,4 @@
-//! The region-body check of revision 2: a computed region's body is
+//! The region-body rule of revision 2: a computed region's body is
 //! rendered by `computed run` and never edited (computed ADR 0005). Not a
 //! manifest rule, so it runs before them and carries [`REGION_RULE`].
 
@@ -50,7 +50,7 @@ fn regions(text: &str) -> Vec<Region<'_>> {
     out
 }
 
-/// The region-body check: an `Edit` whose `old_string` lies in a body, or a
+/// The region-body rule: an `Edit` whose `old_string` lies in a body, or a
 /// `Write` that leaves a body other than it found, is denied. A `Write`'s
 /// regions pair with the file's by opener, or by position when an opener
 /// changed; a region the `Write` removes is a template change, not a body

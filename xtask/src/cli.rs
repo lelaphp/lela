@@ -23,7 +23,7 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    /// Hold the seams: regenerate and diff each lock, check crate edges,
+    /// Hold the seams: regenerate and diff each lock, hold crate edges,
     /// `use` paths and the bundle order; one reading per seam and per crate.
     ApiCheck {
         /// Rewrite each lock file from the sources instead of failing on a diff.

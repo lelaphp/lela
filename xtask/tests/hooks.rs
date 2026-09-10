@@ -249,8 +249,8 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
     assert_eq!(status, "", "what computed wrote is in the commit");
 }
 
-/// A region a hand edited is refused with the line naming `computed
-/// check` and what it said; the change stays staged for the person.
+/// A region a hand edited is refused with the line naming
+/// `computed check` and what it said; the change stays staged for the person.
 #[test]
 fn a_hand_edited_region_refuses_the_commit_naming_computed_check() {
     let scratch = scratch("hand-edited", &Computed::HandEdited);

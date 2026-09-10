@@ -61,7 +61,7 @@ fn quantile(sorted: &[f64], percent: usize) -> f64 {
 }
 
 /// The shapes `--bench` cycles: an allowed Edit that reads a file for the
-/// region check, an allowed Bash call, and a denied Edit that writes a
+/// region-body rule, an allowed Bash call, and a denied Edit that writes a
 /// reading.
 fn bench_shapes() -> [(&'static str, Value); 3] {
     [

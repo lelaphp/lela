@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use xtask::manifest::Manifest;
+use xtask::manifest::{Manifest, OneOrMany};
 use xtask::reading::{Number, Reading, Status, Store};
 use xtask::vocab;
 
@@ -73,7 +73,7 @@ fn scratch(name: &str, krate: &str, from: &Path) -> PathBuf {
 fn fixture_reading(name: &str) -> Reading {
     let root = scratch(name, "crates/php_ext", &fixture("vocab.avoid"));
     let manifest = Manifest::load(&root).unwrap();
-    let readings = vocab::check(&root, &manifest, &["php_ext".to_owned()]).unwrap();
+    let readings = vocab::hold(&root, &manifest, &["php_ext".to_owned()]).unwrap();
     assert_eq!(readings.len(), 1, "{readings:#?}");
     readings.into_iter().next().unwrap()
 }
@@ -226,7 +226,7 @@ fn every_rule_vocab_evaluates_has_a_fixture_that_fails() {
             dir.display()
         );
         let root = scratch(&format!("rule-{}", rule.id), "crates/php_ext", &dir);
-        let readings = vocab::check(
+        let readings = vocab::hold(
             &root,
             &Manifest::load(&root).unwrap(),
             &["php_ext".to_owned()],
@@ -240,4 +240,54 @@ fn every_rule_vocab_evaluates_has_a_fixture_that_fails() {
             rule.id
         );
     }
+}
+
+/// The tracked `vocab.avoid` rule with `xtask` in its scope, the row a
+/// person adds (#58). Once the tracked scope covers the harness this adds
+/// nothing.
+fn with_the_harness_in_scope(mut manifest: Manifest) -> Manifest {
+    let rule = manifest
+        .rules
+        .iter_mut()
+        .find(|r| r.predicate.avoid_from.is_some())
+        .expect("the manifest has the vocab.avoid rule");
+    if !rule.covers(Path::new("xtask")) {
+        let mut scope: Vec<String> = rule.scope.iter().map(str::to_owned).collect();
+        scope.push("xtask".to_owned());
+        rule.scope = OneOrMany::Many(scope);
+    }
+    manifest
+}
+
+/// The verb for what an instrument does to a rule or a crate is `hold`, and
+/// the glossary's Instrument entry avoids `check` (#58): under the widened
+/// scope the harness's reading names `check` in no rustdoc sentence and in
+/// no public item beyond the two that spell a name the manifest grammar and
+/// the instrument list fix, `api_check` for `api-check` and the `check`
+/// predicate of a `[[rule]]`. The reading as a whole is a person's decision
+/// while the sensor reads the harness's own words (`run`, `lock`, `hook`,
+/// `region`) in the engine's sense.
+#[test]
+fn the_harness_names_nothing_check_that_hold_could_name() {
+    let manifest = with_the_harness_in_scope(Manifest::load(workspace()).unwrap());
+    let readings = vocab::hold(workspace(), &manifest, &["xtask".to_owned()]).unwrap();
+    assert_eq!(readings.len(), 1, "{readings:#?}");
+    let reading = &readings[0];
+    assert_eq!(reading.scope, "xtask");
+    assert_eq!(reading.rule, "vocab.avoid");
+    // Each finding less its `file:line:` head, which moves with the sources.
+    let check: Vec<&str> = findings(reading)
+        .into_iter()
+        .filter_map(|f| f.split_once(": ").map(|(_, rest)| rest))
+        .filter(|f| f.starts_with("\"check\" "))
+        .collect();
+    assert_eq!(
+        check,
+        [
+            "\"check\" names `pub mod api_check`; the glossary says \"Instrument\"",
+            "\"check\" names `pub field check`; the glossary says \"Instrument\"",
+        ],
+        "{}",
+        reading.message
+    );
 }
