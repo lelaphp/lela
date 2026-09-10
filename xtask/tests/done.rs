@@ -787,6 +787,38 @@ fn the_stop_hook_runs_done_with_hook() {
     );
 }
 
+/// CI's test job holds the function-hook module the way ledger 8 says
+/// (harness-design.md §1 revision 8, §6): the declarations are written
+/// by the pinned Claude Code's `/plugin-types` on the runner, since they
+/// are gitignored, then `tsc -p harness-plugins` reads them and `claude
+/// plugin validate --strict` reads the manifest and the module, all
+/// before the crate's tests. The comments are stripped first, so a step
+/// named in prose does not stand in for the step.
+#[test]
+fn ci_test_job_writes_the_declarations_then_typechecks_and_validates_the_module() {
+    let text = read(".github/workflows/harness.yml");
+    let job = &text[text.find("\n  xtask:").unwrap()..text.find("\n  per-commit:").unwrap()];
+    let steps = job
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut last = 0;
+    for step in [
+        "@anthropic-ai/claude-code@",
+        "/plugin-types",
+        "tsc -p harness-plugins",
+        "plugin validate harness-plugins --strict",
+        "run: cargo test -p xtask",
+    ] {
+        let at = steps
+            .find(step)
+            .unwrap_or_else(|| panic!("the test job lacks {step}: {steps}"));
+        assert!(at > last, "{step} is out of order: {steps}");
+        last = at;
+    }
+}
+
 /// CI per commit (harness-design.md §7): the same instruments over the
 /// workspace, then `done`; the reading store is the only thing the run
 /// uploads; the summary is the permits section.
