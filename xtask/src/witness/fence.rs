@@ -486,12 +486,6 @@ pub fn pinned(line: &str, status: i32) -> String {
 mod tests {
     use super::*;
 
-    // The fence lines below are built rather than written, because the
-    // manifest's `witness.exit-authored` rule denies a write that carries
-    // `exit=<status>` after an `expect` fence, and this file is the
-    // grammar's parser: its tests cannot avoid the shape they parse. The
-    // commit that ships them proposes the `exempt` that would let them be
-    // written plainly.
     fn php(file: &str) -> Extracted {
         extract(Path::new("ext/fixture/src/lib.rs"), file)
     }
@@ -527,7 +521,7 @@ mod tests {
 
     #[test]
     fn the_attributes_are_the_status_and_the_declared_duration() {
-        let fence = format!("/// ```expect exit={} wall=1s\n", 255);
+        let fence = "/// ```expect exit=255 wall=1s\n";
         let found = php(&format!(
             "/// ```php\n/// x\n/// ```\n{fence}/// boom\n/// ```\npub fn kernel() {{}}\n"
         ));
@@ -621,16 +615,10 @@ mod tests {
     fn accept_writes_the_status_onto_the_fence_line_and_leaves_the_rest() {
         assert_eq!(
             pinned("/// ```expect exit wall=1s", 255),
-            format!("/// ```expect exit={} wall=1s", 255)
+            "/// ```expect exit=255 wall=1s"
         );
-        assert_eq!(
-            pinned("    /// ```expect", 3),
-            format!("    /// ```expect exit={}", 3)
-        );
-        assert_eq!(
-            pinned(&format!("/// ```expect exit={}", 1), 0),
-            format!("/// ```expect exit={}", 0)
-        );
+        assert_eq!(pinned("    /// ```expect", 3), "    /// ```expect exit=3");
+        assert_eq!(pinned("/// ```expect exit=1", 0), "/// ```expect exit=0");
     }
 
     #[test]

@@ -223,7 +223,7 @@ fn a_bare_exit_fails_the_run_and_accept_is_what_writes_it() {
     assert_eq!(count(&reading, "accepted"), 1);
     let written = fs::read_to_string(&file).unwrap();
     assert!(
-        written.contains(&format!("```expect exit={}", 3)),
+        written.contains("```expect exit=3"),
         "the oracle's status is on the fence line: {written}"
     );
     // Nothing else of the file moved.
@@ -246,10 +246,7 @@ fn accept_writes_the_bare_opt_in_alone_and_never_repins_a_status() {
     // pins none while the oracle exits 3: both are differences for a person
     // to read, and `--accept` leaves both where they stand.
     for (name, fences) in [
-        (
-            "repin-pinned",
-            format!("/// ```expect exit={}\n/// ```\n", 0),
-        ),
+        ("repin-pinned", "/// ```expect exit=0\n/// ```\n".to_owned()),
         ("repin-absent", "/// ```expect\n/// ```\n".to_owned()),
     ] {
         let text = format!("/// ```php\n/// exit(3);\n/// ```\n{fences}pub fn native() {{}}\n");
