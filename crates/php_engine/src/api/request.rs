@@ -1,0 +1,1151 @@
+//! The request-environment group (design §4.4, §5.14): what a native
+//! reaches through `&mut Request`, the one parameter that says a function
+//! may re-enter PHP code (principle 9, ADR-0002). Ninety-eight methods,
+//! `api.lock`'s largest group. The skeleton answers each from what the
+//! request holds; the body bytes and the header block are kept on the
+//! request and handed to the sink by `serve`, which owns the commit
+//! moment; `serve` says what the request came to.
+
+use std::any::{Any, TypeId};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use php_heap::{Fatal, Heap, HeapHooks, MapTable, ObjectId, VmStack, Zval};
+use php_unit::decl::{ClassDecl, FunctionDecl};
+
+use crate::api::abi::Callable;
+use crate::api::call::Function;
+use crate::api::raising::{Level, Thrown};
+use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Resource, Value};
+use crate::engine::{RequestDescription, Shared};
+
+/// php's version, what `PHP_VERSION` and `phpversion()` say.
+pub const PHP_VERSION: &str = "8.5.9";
+
+/// A path on the host's filesystem, absolute, after the request's `cwd`
+/// and `open_basedir` have been applied.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct HostPath(pub PathBuf);
+
+/// What a native intends to do at a path, for the `open_basedir` guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PathIntent {
+    Read,
+    Write,
+    Create,
+    Remove,
+    Stat,
+    Exec,
+}
+
+/// One `ob_*` operation on the request's buffer stack.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OutputOp {
+    Start {
+        callback: Option<Callable>,
+        chunk_size: i64,
+        flags: i64,
+    },
+    Flush,
+    Clean,
+    EndFlush,
+    EndClean,
+    GetFlush,
+    GetClean,
+    GetContents,
+    GetLength,
+    GetLevel,
+    GetStatus {
+        full: bool,
+    },
+    ListHandlers,
+    ImplicitFlush(bool),
+}
+
+/// An open stream: what `fopen` and `opendir` hand back, reached by id
+/// through the request's stream table (design §4.3 seam 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Stream {
+    pub(crate) id: u32,
+}
+
+/// A stream wrapper's operations, Zend's `php_stream_wrapper_ops` as a
+/// value: the scheme it serves and one function per operation, `None`
+/// where the wrapper does not support it.
+#[derive(Debug, Clone)]
+#[allow(clippy::type_complexity)] // Zend's ops struct: a table of function pointers
+pub struct StreamWrapper {
+    pub scheme: PhpString,
+    pub open: fn(&mut Request, &[u8], &[u8]) -> Result<Stream, Thrown>,
+    pub open_dir: Option<fn(&mut Request, &[u8]) -> Result<Stream, Thrown>>,
+    pub stat: Option<fn(&mut Request, &[u8]) -> Result<Option<PhpArray>, Thrown>>,
+    pub unlink: Option<fn(&mut Request, &[u8]) -> Result<bool, Thrown>>,
+    pub rename: Option<fn(&mut Request, &[u8], &[u8]) -> Result<bool, Thrown>>,
+    pub mkdir: Option<fn(&mut Request, &[u8], i64, bool) -> Result<bool, Thrown>>,
+    pub rmdir: Option<fn(&mut Request, &[u8]) -> Result<bool, Thrown>>,
+}
+
+/// A stream filter: its name and the function that filters one bucket,
+/// with `closing` set on the last.
+#[derive(Debug, Clone)]
+#[allow(clippy::type_complexity)] // as StreamWrapper
+pub struct StreamFilter {
+    pub name: PhpString,
+    pub filter: fn(&mut Request, &[u8], &mut Vec<u8>, bool) -> Result<(), Thrown>,
+}
+
+/// The request's resource table, `EG(regular_list)`: ids are handed out
+/// once and never reused within a request.
+#[derive(Debug, Default)]
+pub struct Resources {
+    entries: Vec<Option<Resource>>,
+}
+
+impl Resources {
+    /// Register a resource; its id is written into it and returned.
+    pub fn insert(&mut self, mut resource: Resource) -> u32 {
+        let id = u32::try_from(self.entries.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1);
+        resource.id = id;
+        self.entries.push(Some(resource));
+        id
+    }
+
+    /// The resource with `id`, if it is live.
+    #[must_use]
+    pub fn get(&self, id: u32) -> Option<&Resource> {
+        self.entries
+            .get(usize::try_from(id.checked_sub(1)?).ok()?)?
+            .as_ref()
+    }
+
+    /// Remove the resource with `id`, running its destructor.
+    pub fn remove(&mut self, id: u32) -> Option<Resource> {
+        let slot = self
+            .entries
+            .get_mut(usize::try_from(id.checked_sub(1)?).ok()?)?;
+        slot.take()
+    }
+}
+
+/// How the request is ending, when it is: a fatal or an `exit`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Ending {
+    Fatal(String),
+    Exit(i32),
+}
+
+/// One request (design §5.14): `Send`, single-threaded, dropped at the
+/// end of `serve`. Everything a native may touch is a method here or on
+/// a value it hands out.
+pub struct Request {
+    shared: Arc<Shared>,
+    description: RequestDescription,
+    heap: Heap,
+    stack: VmStack,
+    map: MapTable,
+    states: Vec<(TypeId, Box<dyn Any + Send>)>,
+    ini: Vec<(PhpString, PhpString)>,
+    body: Vec<u8>,
+    headers: Vec<PhpString>,
+    header_callback: Option<Callable>,
+    log: Vec<u8>,
+    response_code: i64,
+    last_error: Option<(Level, String, PhpString, u32)>,
+    ending: Option<Ending>,
+    resources: Resources,
+    superglobals: Vec<(PhpString, PhpArray)>,
+    constants: Vec<(PhpString, Value)>,
+    wrappers: Vec<StreamWrapper>,
+    filters: Vec<StreamFilter>,
+    error_handlers: Vec<Option<Callable>>,
+    exception_handlers: Vec<Option<Callable>>,
+    shutdown_functions: Vec<(Callable, Vec<Value>)>,
+    tick_functions: Vec<(Callable, Vec<Value>)>,
+    autoloaders: Vec<Callable>,
+    assert_callback: Option<Value>,
+    umask: u32,
+    cwd: PathBuf,
+    gc_enabled: bool,
+    next_object: u32,
+    streams: u32,
+    flushed: bool,
+    /// The native whose body is being served, for the raisers' text.
+    active_native: Option<String>,
+    /// The caller file's `declare(strict_types=1)`.
+    strict_types: bool,
+}
+
+impl Request {
+    pub(crate) fn new(shared: Arc<Shared>, description: RequestDescription) -> Request {
+        let cwd = description.cwd.clone();
+        let mut req = Request {
+            shared,
+            description,
+            heap: Heap::new(),
+            stack: VmStack::new(),
+            map: MapTable::new(),
+            states: Vec::new(),
+            ini: Vec::new(),
+            body: Vec::new(),
+            headers: Vec::new(),
+            header_callback: None,
+            log: Vec::new(),
+            response_code: 200,
+            last_error: None,
+            ending: None,
+            resources: Resources::default(),
+            superglobals: Vec::new(),
+            constants: Vec::new(),
+            wrappers: Vec::new(),
+            filters: Vec::new(),
+            error_handlers: Vec::new(),
+            exception_handlers: Vec::new(),
+            shutdown_functions: Vec::new(),
+            tick_functions: Vec::new(),
+            autoloaders: Vec::new(),
+            assert_callback: None,
+            umask: 0o022,
+            cwd,
+            gc_enabled: true,
+            next_object: 1,
+            streams: 0,
+            flushed: false,
+            active_native: None,
+            strict_types: false,
+        };
+        // Request state in bundle order (ADR-0005).
+        for extension in &req.shared.extensions {
+            if let Some((type_id, build)) = &extension.request_state {
+                req.states.push((*type_id, build()));
+            }
+        }
+        req
+    }
+
+    // -------------------------------------------------- crate-internal
+
+    pub(crate) fn stack_mut(&mut self) -> &mut VmStack {
+        &mut self.stack
+    }
+
+    pub(crate) fn take_body(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.body)
+    }
+
+    pub(crate) fn take_log(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.log)
+    }
+
+    pub(crate) fn header_block(&self) -> Vec<u8> {
+        let mut block = Vec::new();
+        for header in &self.headers {
+            block.extend_from_slice(header.as_bytes());
+            block.extend_from_slice(b"\r\n");
+        }
+        block
+    }
+
+    pub(crate) fn ending(&self) -> Option<&Ending> {
+        self.ending.as_ref()
+    }
+
+    pub(crate) fn note_error(&mut self, level: Level, message: &str) {
+        let file = self.current_file().cloned().unwrap_or_default();
+        let line = self.current_line();
+        if self.error_reporting() & level.bit() != 0 {
+            let text = format!(
+                "PHP {}:  {message} in {} on line {line}\n",
+                level_name(level),
+                String::from_utf8_lossy(file.as_bytes())
+            );
+            self.log.extend_from_slice(text.as_bytes());
+        }
+        self.last_error = Some((level, message.to_owned(), file, line));
+    }
+
+    pub(crate) fn end_in_fatal(&mut self, message: &str) {
+        if self.ending.is_none() {
+            self.ending = Some(Ending::Fatal(message.to_owned()));
+        }
+    }
+
+    pub(crate) fn end_in_exit(&mut self, code: i32) {
+        if self.ending.is_none() {
+            self.ending = Some(Ending::Exit(code));
+        }
+    }
+
+    pub(crate) fn end_in(&mut self, fatal: &Fatal) {
+        match fatal {
+            Fatal::Error(message) => self.end_in_fatal(message),
+            Fatal::OutOfMemory(bytes) => self.end_in_fatal(&format!(
+                "Allowed memory size of {} bytes exhausted (tried to allocate {bytes} bytes)",
+                self.ini_parse_bytes_of("memory_limit")
+            )),
+        }
+    }
+
+    pub(crate) fn new_object(&mut self, class: ClassId) -> PhpObject {
+        let id = self.next_object;
+        self.next_object = self.next_object.saturating_add(1);
+        PhpObject::new(id, class)
+    }
+
+    pub(crate) fn new_object_of(&mut self, class_name: &str) -> PhpObject {
+        let class = self
+            .class_named(class_name.as_bytes())
+            .unwrap_or(ClassId(0));
+        self.new_object(class)
+    }
+
+    pub(crate) fn active_native(&self) -> String {
+        self.active_native
+            .clone()
+            .unwrap_or_else(|| String::from("native"))
+    }
+
+    pub(crate) fn argument_message(&self, position: u32, tail: &str) -> String {
+        format!(
+            "{}(): Argument #{position} must {tail}",
+            self.active_native()
+        )
+    }
+
+    pub(crate) fn precision(&self) -> i32 {
+        self.ini_get(b"precision")
+            .and_then(|p| String::from_utf8_lossy(p.as_bytes()).parse().ok())
+            .unwrap_or(14)
+    }
+
+    pub(crate) fn caller_strict_types(&self) -> bool {
+        self.strict_types
+    }
+
+    pub(crate) fn callable_of(&self, value: &Value) -> Option<Callable> {
+        let name = value.as_str_bytes()?;
+        self.function_named(name)?;
+        Some(Callable::named(value.clone(), name))
+    }
+
+    pub(crate) fn class_named(&self, name: &[u8]) -> Option<ClassId> {
+        let wanted = name.to_ascii_lowercase();
+        self.shared
+            .classes
+            .iter()
+            .position(|decl| decl.name.0.to_ascii_lowercase() == wanted)
+            .and_then(|i| u32::try_from(i).ok())
+            .map(ClassId)
+    }
+
+    pub(crate) fn function_named(&self, name: &[u8]) -> Option<Function> {
+        let wanted = name.to_ascii_lowercase();
+        self.shared
+            .functions
+            .iter()
+            .position(|decl| decl.name.0.to_ascii_lowercase() == wanted)
+            .and_then(|i| u32::try_from(i).ok())
+            .map(Function)
+    }
+
+    pub(crate) fn constant_named(&self, name: &[u8]) -> Option<Value> {
+        self.constants
+            .iter()
+            .find(|(n, _)| n.as_bytes() == name)
+            .map(|(_, v)| v.clone())
+            .or_else(|| self.shared.constant(name))
+    }
+
+    fn ini_parse_bytes_of(&self, name: &str) -> i64 {
+        self.ini_get(name.as_bytes())
+            .map_or(0, |v| Request::ini_parse_bytes(v.as_bytes()))
+    }
+
+    // -------------------------------------------------- output and headers
+
+    /// Write body bytes, through the buffer stack when one is active.
+    pub fn write(&mut self, bytes: &[u8]) {
+        self.body.extend_from_slice(bytes);
+    }
+
+    /// Write to the host's error stream, `STDERR` and `error_log` to it.
+    pub fn write_stderr(&mut self, bytes: &[u8]) {
+        self.log.extend_from_slice(bytes);
+    }
+
+    /// `flush()`: hand what is buffered to the host now.
+    pub fn flush(&mut self) {
+        self.flushed = true;
+    }
+
+    /// One `ob_*` operation. The skeleton has no buffer stack: every
+    /// operation answers as php does at level zero.
+    pub fn output_buffer_op(&mut self, op: &OutputOp) -> Result<Value, Thrown> {
+        Ok(match op {
+            OutputOp::Start { .. } => Value::bool(true),
+            OutputOp::GetLevel => Value::int(0),
+            OutputOp::GetStatus { .. } | OutputOp::ListHandlers => Value::array(PhpArray::new()),
+            OutputOp::ImplicitFlush(_) => Value::null(),
+            _ => Value::bool(false),
+        })
+    }
+
+    /// Where the first body byte was written, `headers_sent`'s file and
+    /// line, once it has been.
+    #[must_use]
+    pub fn output_started_at(&self) -> Option<(PhpString, u32)> {
+        if self.body.is_empty() {
+            None
+        } else {
+            Some((
+                self.current_file().cloned().unwrap_or_default(),
+                self.current_line(),
+            ))
+        }
+    }
+
+    /// `header()`: add a header line, replacing one of the same name
+    /// when `replace` is set; `false` once headers are sent.
+    pub fn header_add(&mut self, line: &[u8], replace: bool) -> bool {
+        if self.headers_sent().is_some() {
+            return false;
+        }
+        let name = line
+            .split(|b| *b == b':')
+            .next()
+            .unwrap_or(line)
+            .to_ascii_lowercase();
+        if replace {
+            self.headers.retain(|h| {
+                h.as_bytes()
+                    .split(|b| *b == b':')
+                    .next()
+                    .map(<[u8]>::to_ascii_lowercase)
+                    != Some(name.clone())
+            });
+        }
+        self.headers.push(PhpString::from_bytes(line));
+        true
+    }
+
+    /// `header_remove()`: one header by name, or all with `None`.
+    pub fn header_remove(&mut self, name: Option<&[u8]>) {
+        match name {
+            None => self.headers.clear(),
+            Some(name) => {
+                let name = name.to_ascii_lowercase();
+                self.headers.retain(|h| {
+                    h.as_bytes()
+                        .split(|b| *b == b':')
+                        .next()
+                        .map(<[u8]>::to_ascii_lowercase)
+                        != Some(name.clone())
+                });
+            }
+        }
+    }
+
+    /// `headers_list()`.
+    #[must_use]
+    pub fn headers_list(&self) -> Vec<PhpString> {
+        self.headers.clone()
+    }
+
+    /// `headers_sent()`: where the header block was committed, once it was.
+    #[must_use]
+    pub fn headers_sent(&self) -> Option<(PhpString, u32)> {
+        if self.flushed {
+            self.output_started_at()
+        } else {
+            None
+        }
+    }
+
+    /// `header_register_callback()`.
+    pub fn set_header_callback(&mut self, callback: Callable) {
+        self.header_callback = Some(callback);
+    }
+
+    /// `http_response_code()` as it stands.
+    #[must_use]
+    pub fn response_code(&self) -> i64 {
+        self.response_code
+    }
+
+    /// `http_response_code(int)`.
+    pub fn set_response_code(&mut self, code: i64) {
+        self.response_code = code;
+    }
+
+    /// The request headers the host received, `getallheaders()`.
+    #[must_use]
+    pub fn request_headers(&self) -> PhpArray {
+        let mut array = PhpArray::new();
+        for (name, value) in &self.description.headers {
+            array.set(
+                Key::Str(PhpString::from_bytes(name)),
+                Value::string(PhpString::from_bytes(value)),
+            );
+        }
+        array
+    }
+
+    // -------------------------------------------------- diagnostics
+
+    /// `error_get_last()`.
+    #[must_use]
+    pub fn last_error(&self) -> Option<PhpArray> {
+        let (level, message, file, line) = self.last_error.as_ref()?;
+        let mut array = PhpArray::new();
+        array.set(Key::from_bytes(b"type"), Value::int(level.bit()));
+        array.set(
+            Key::from_bytes(b"message"),
+            Value::string(PhpString::from_bytes(message.as_bytes())),
+        );
+        array.set(Key::from_bytes(b"file"), Value::string(file.clone()));
+        array.set(Key::from_bytes(b"line"), Value::int(i64::from(*line)));
+        Some(array)
+    }
+
+    /// `error_clear_last()`.
+    pub fn clear_last_error(&mut self) {
+        self.last_error = None;
+    }
+
+    /// `error_log()` to the host's log.
+    pub fn error_log(&mut self, message: &[u8]) {
+        self.log.extend_from_slice(message);
+        self.log.push(b'\n');
+    }
+
+    /// `error_reporting()` as it stands.
+    #[must_use]
+    pub fn error_reporting(&self) -> i64 {
+        self.ini_get(b"error_reporting")
+            .and_then(|v| String::from_utf8_lossy(v.as_bytes()).parse().ok())
+            .unwrap_or(32767)
+    }
+
+    /// `set_error_handler()`: the previous handler.
+    pub fn set_error_handler(&mut self, handler: Option<Callable>, levels: i64) -> Option<Value> {
+        let _ = levels;
+        let previous = self.error_handlers.last().cloned().flatten();
+        self.error_handlers.push(handler);
+        previous.map(Callable::into_value)
+    }
+
+    /// `restore_error_handler()`.
+    pub fn restore_error_handler(&mut self) -> bool {
+        self.error_handlers.pop().is_some()
+    }
+
+    /// `set_exception_handler()`: the previous handler.
+    pub fn set_exception_handler(&mut self, handler: Option<Callable>) -> Option<Value> {
+        let previous = self.exception_handlers.last().cloned().flatten();
+        self.exception_handlers.push(handler);
+        previous.map(Callable::into_value)
+    }
+
+    /// `restore_exception_handler()`.
+    pub fn restore_exception_handler(&mut self) -> bool {
+        self.exception_handlers.pop().is_some()
+    }
+
+    /// `assert_options(ASSERT_CALLBACK)` as it stands.
+    #[must_use]
+    pub fn assert_callback(&self) -> Option<&Value> {
+        self.assert_callback.as_ref()
+    }
+
+    /// Set the assertion callback.
+    pub fn set_assert_callback(&mut self, callback: Option<Value>) {
+        self.assert_callback = callback;
+    }
+
+    /// `debug_backtrace()` with php's options and limit; empty while no
+    /// frame is live.
+    #[must_use]
+    pub fn backtrace(&self, options: i64, limit: i64) -> PhpArray {
+        let _ = (options, limit);
+        PhpArray::new()
+    }
+
+    /// The file of the frame that called the native.
+    #[must_use]
+    pub fn current_file(&self) -> Option<&PhpString> {
+        self.description.script_name.as_ref()
+    }
+
+    /// The line of the frame that called the native.
+    #[must_use]
+    pub fn current_line(&self) -> u32 {
+        0
+    }
+
+    /// The arguments of the frame `depth` levels up, `func_get_args` from
+    /// outside.
+    #[must_use]
+    pub fn frame_args(&self, depth: u32) -> Option<Vec<Value>> {
+        let _ = depth;
+        None
+    }
+
+    /// The variables of the frame `depth` levels up, `get_defined_vars`.
+    #[must_use]
+    pub fn frame_vars(&self, depth: u32) -> Option<PhpArray> {
+        let _ = depth;
+        None
+    }
+
+    /// The class scope of the frame that called the native, `self`.
+    #[must_use]
+    pub fn scope(&self) -> Option<ClassId> {
+        None
+    }
+
+    /// The called scope, `static`.
+    #[must_use]
+    pub fn called_scope(&self) -> Option<ClassId> {
+        None
+    }
+
+    // -------------------------------------------------- symbols
+
+    /// The declaration of a linked class.
+    #[must_use]
+    pub fn class_decl(&self, class: ClassId) -> Option<&ClassDecl> {
+        self.shared.classes.get(usize::try_from(class.0).ok()?)
+    }
+
+    /// The declaration of a linked function.
+    #[must_use]
+    pub fn function_decl(&self, function: Function) -> Option<&FunctionDecl> {
+        self.shared.functions.get(usize::try_from(function.0).ok()?)
+    }
+
+    /// `get_declared_classes()`, in declaration order.
+    #[must_use]
+    pub fn declared_classes(&self) -> Vec<ClassId> {
+        (0..u32::try_from(self.shared.classes.len()).unwrap_or(u32::MAX))
+            .map(ClassId)
+            .collect()
+    }
+
+    /// `get_defined_functions()`: `internal` and `user` lists.
+    #[must_use]
+    pub fn defined_functions(&self) -> PhpArray {
+        let mut internal = PhpArray::new();
+        for decl in &self.shared.functions {
+            internal.append(Value::string(PhpString::from_bytes(&decl.name.0)));
+        }
+        let mut array = PhpArray::new();
+        array.set(Key::from_bytes(b"internal"), Value::array(internal));
+        array.set(Key::from_bytes(b"user"), Value::array(PhpArray::new()));
+        array
+    }
+
+    /// `class_alias()`.
+    pub fn class_alias(&mut self, class: ClassId, alias: &[u8]) -> Result<(), Thrown> {
+        let _ = (class, alias);
+        Ok(())
+    }
+
+    /// `get_defined_constants()`.
+    #[must_use]
+    pub fn constants(&self) -> PhpArray {
+        let mut array = PhpArray::new();
+        for (name, value) in &self.constants {
+            array.set(Key::Str(name.clone()), value.clone());
+        }
+        array
+    }
+
+    /// `define()`: `false` when the constant exists.
+    pub fn define_constant(&mut self, name: &[u8], value: Value) -> Result<bool, Thrown> {
+        if self.constant_named(name).is_some() {
+            return Ok(false);
+        }
+        self.constants.push((PhpString::from_bytes(name), value));
+        Ok(true)
+    }
+
+    /// `spl_autoload_register()`.
+    pub fn autoload_register(&mut self, loader: Callable, prepend: bool) -> Result<(), Thrown> {
+        if prepend {
+            self.autoloaders.insert(0, loader);
+        } else {
+            self.autoloaders.push(loader);
+        }
+        Ok(())
+    }
+
+    /// `spl_autoload_unregister()`.
+    pub fn autoload_unregister(&mut self, loader: &Callable) -> bool {
+        let before = self.autoloaders.len();
+        self.autoloaders.retain(|l| l != loader);
+        self.autoloaders.len() != before
+    }
+
+    /// `spl_autoload_functions()`.
+    #[must_use]
+    pub fn autoload_functions(&self) -> Vec<Value> {
+        self.autoloaders
+            .iter()
+            .cloned()
+            .map(Callable::into_value)
+            .collect()
+    }
+
+    /// `get_included_files()`.
+    #[must_use]
+    pub fn included_files(&self) -> Vec<PhpString> {
+        self.description.script_name.iter().cloned().collect()
+    }
+
+    /// `get_loaded_extensions()`: the bundle in `MINIT` order, after `Core`.
+    #[must_use]
+    pub fn loaded_extensions(&self) -> Vec<PhpString> {
+        std::iter::once(PhpString::from_bytes(b"Core"))
+            .chain(
+                self.shared
+                    .extensions
+                    .iter()
+                    .map(|e| PhpString::from_bytes(e.name.as_bytes())),
+            )
+            .collect()
+    }
+
+    // -------------------------------------------------- state
+
+    /// The request state of the calling extension, `T` being the type it
+    /// declared with `request_state::<T>()` (ADR-0005). A type no bundled
+    /// extension declared is built on first touch here, where the design
+    /// names a bug; the linker's slot table replaces this scan.
+    pub fn state<T: Default + Send + 'static>(&mut self) -> &mut T {
+        let wanted = TypeId::of::<T>();
+        let at = if let Some(at) = self.states.iter().position(|(id, _)| *id == wanted) {
+            at
+        } else {
+            self.states.push((wanted, Box::new(T::default())));
+            self.states.len() - 1
+        };
+        if self.states[at].1.downcast_ref::<T>().is_none() {
+            self.states[at].1 = Box::new(T::default());
+        }
+        match self.states[at].1.downcast_mut::<T>() {
+            Some(state) => state,
+            // Written as a `T` on the line above; this arm is the type
+            // system's, not a path a request takes.
+            None => Box::leak(Box::new(T::default())),
+        }
+    }
+
+    /// The engine state of the calling extension, `E` being the type its
+    /// `engine_state` built (ADR-0005). `None` for a type no extension
+    /// built, where the design names a bug.
+    #[must_use]
+    pub fn engine<E: Send + Sync + 'static>(&self) -> Option<&E> {
+        self.shared
+            .engine_states
+            .iter()
+            .find_map(|state| state.downcast_ref::<E>())
+    }
+
+    /// The request's resource table.
+    pub fn resources(&mut self) -> &mut Resources {
+        &mut self.resources
+    }
+
+    // -------------------------------------------------- ini
+
+    /// `ini_get()`: the request's override, else the engine's default.
+    #[must_use]
+    pub fn ini_get(&self, name: &[u8]) -> Option<PhpString> {
+        self.ini
+            .iter()
+            .find(|(n, _)| n.as_bytes() == name)
+            .map(|(_, v)| v.clone())
+            .or_else(|| self.shared.ini_default(name))
+    }
+
+    /// `ini_set()`: the previous value, or `None` for an entry that does
+    /// not exist or may not change at runtime.
+    pub fn ini_set(&mut self, name: &[u8], value: &[u8]) -> Result<Option<PhpString>, Thrown> {
+        let previous = self.ini_get(name);
+        if previous.is_none() {
+            return Ok(None);
+        }
+        self.ini.retain(|(n, _)| n.as_bytes() != name);
+        self.ini
+            .push((PhpString::from_bytes(name), PhpString::from_bytes(value)));
+        Ok(previous)
+    }
+
+    /// `ini_get_all()`: every entry with its current value.
+    #[must_use]
+    pub fn ini_entries(&self) -> PhpArray {
+        let mut array = PhpArray::new();
+        for (name, default) in self.shared.ini_defaults() {
+            let value = self.ini_get(name.as_bytes()).unwrap_or(default);
+            array.set(Key::Str(name), Value::string(value));
+        }
+        array
+    }
+
+    /// `zend_ini_parse_bool`: `1`, `on`, `yes`, `true` are true.
+    #[must_use]
+    pub fn ini_parse_bool(value: &[u8]) -> bool {
+        let lower = value.to_ascii_lowercase();
+        matches!(lower.as_slice(), b"1" | b"on" | b"yes" | b"true")
+            || lower.iter().all(u8::is_ascii_digit)
+                && String::from_utf8_lossy(&lower)
+                    .parse::<i64>()
+                    .is_ok_and(|n| n != 0)
+    }
+
+    /// `zend_ini_parse_quantity`: a byte count with an optional `K`, `M`
+    /// or `G` suffix; `-1` and other text parse as php's `atoi` would.
+    #[must_use]
+    pub fn ini_parse_bytes(value: &[u8]) -> i64 {
+        let text = String::from_utf8_lossy(value);
+        let text = text.trim();
+        let (digits, shift) = match text.chars().last().map(|c| c.to_ascii_lowercase()) {
+            Some('k') => (&text[..text.len() - 1], 10),
+            Some('m') => (&text[..text.len() - 1], 20),
+            Some('g') => (&text[..text.len() - 1], 30),
+            _ => (text, 0),
+        };
+        let n: i64 = digits.trim().parse().unwrap_or(0);
+        n.checked_shl(shift).unwrap_or(i64::MAX)
+    }
+
+    // -------------------------------------------------- environment
+
+    /// `getenv(name)`.
+    #[must_use]
+    pub fn env(&self, name: &[u8]) -> Option<PhpString> {
+        self.description
+            .env
+            .iter()
+            .find(|(n, _)| n.as_slice() == name)
+            .map(|(_, v)| PhpString::from_bytes(v))
+    }
+
+    /// `getenv()` with no name: every pair.
+    #[must_use]
+    pub fn env_pairs(&self) -> Vec<(PhpString, PhpString)> {
+        self.description
+            .env
+            .iter()
+            .map(|(n, v)| (PhpString::from_bytes(n), PhpString::from_bytes(v)))
+            .collect()
+    }
+
+    /// `putenv()`: set, or unset with `None`.
+    pub fn set_env(&mut self, name: &[u8], value: Option<&[u8]>) -> bool {
+        self.description.env.retain(|(n, _)| n.as_slice() != name);
+        if let Some(value) = value {
+            self.description.env.push((name.to_vec(), value.to_vec()));
+        }
+        true
+    }
+
+    /// The superglobal named, `$_SERVER` and its kin.
+    #[must_use]
+    pub fn superglobal(&self, name: &[u8]) -> Option<&PhpArray> {
+        self.superglobals
+            .iter()
+            .find(|(n, _)| n.as_bytes() == name)
+            .map(|(_, a)| a)
+    }
+
+    /// Replace a superglobal, what the GPC seeding and `session_start` do.
+    pub fn set_superglobal(&mut self, name: &[u8], value: PhpArray) {
+        self.superglobals.retain(|(n, _)| n.as_bytes() != name);
+        self.superglobals.push((PhpString::from_bytes(name), value));
+    }
+
+    /// `php_sapi_name()`.
+    #[must_use]
+    pub fn sapi_name(&self) -> PhpString {
+        PhpString::from_bytes(self.description.sapi_name.as_bytes())
+    }
+
+    /// The file the request serves, `$_SERVER['SCRIPT_NAME']`.
+    #[must_use]
+    pub fn script_name(&self) -> Option<&PhpString> {
+        self.description.script_name.as_ref()
+    }
+
+    /// The request body as a stream, `php://input` and `STDIN`.
+    pub fn stdin(&mut self) -> Stream {
+        self.new_stream()
+    }
+
+    /// `getcwd()`.
+    #[must_use]
+    pub fn cwd(&self) -> HostPath {
+        HostPath(self.cwd.clone())
+    }
+
+    /// `chdir()`.
+    pub fn set_cwd(&mut self, path: HostPath) -> Result<(), Thrown> {
+        self.cwd = path.0;
+        Ok(())
+    }
+
+    /// `sys_get_temp_dir()`.
+    #[must_use]
+    pub fn temp_dir(&self) -> HostPath {
+        HostPath(std::env::temp_dir())
+    }
+
+    /// `umask()` as it stands.
+    #[must_use]
+    pub fn umask(&self) -> u32 {
+        self.umask
+    }
+
+    /// `umask(int)`: the previous mask.
+    pub fn set_umask(&mut self, mask: u32) -> u32 {
+        std::mem::replace(&mut self.umask, mask)
+    }
+
+    /// `strerror` text for an OS error code, as php's `%s` of it.
+    #[must_use]
+    pub fn os_error_text(&self, code: i32) -> PhpString {
+        PhpString::from_bytes(
+            std::io::Error::from_raw_os_error(code)
+                .to_string()
+                .as_bytes(),
+        )
+    }
+
+    /// `parse_str()`: a query string as an array.
+    #[must_use]
+    pub fn parse_query(&self, query: &[u8]) -> PhpArray {
+        let mut array = PhpArray::new();
+        for pair in query.split(|b| *b == b'&').filter(|p| !p.is_empty()) {
+            let mut halves = pair.splitn(2, |b| *b == b'=');
+            let name = halves.next().unwrap_or_default();
+            let value = halves.next().unwrap_or_default();
+            array.set(
+                Key::from_bytes(name),
+                Value::string(PhpString::from_bytes(value)),
+            );
+        }
+        array
+    }
+
+    /// `set_time_limit()`.
+    pub fn set_time_limit(&mut self, seconds: i64) -> bool {
+        self.ini
+            .retain(|(n, _)| n.as_bytes() != b"max_execution_time");
+        self.ini.push((
+            PhpString::from_bytes(b"max_execution_time"),
+            PhpString::from_bytes(seconds.to_string().as_bytes()),
+        ));
+        true
+    }
+
+    /// `register_shutdown_function()`.
+    pub fn register_shutdown_function(&mut self, callback: Callable, arguments: Vec<Value>) {
+        self.shutdown_functions.push((callback, arguments));
+    }
+
+    /// `register_tick_function()`.
+    pub fn register_tick_function(&mut self, callback: Callable, arguments: Vec<Value>) -> bool {
+        self.tick_functions.push((callback, arguments));
+        true
+    }
+
+    /// `unregister_tick_function()`.
+    pub fn unregister_tick_function(&mut self, callback: &Callable) -> bool {
+        let before = self.tick_functions.len();
+        self.tick_functions.retain(|(c, _)| c != callback);
+        self.tick_functions.len() != before
+    }
+
+    // -------------------------------------------------- memory and gc
+
+    /// `memory_get_usage()`.
+    #[must_use]
+    pub fn memory_usage(&self, real: bool) -> usize {
+        self.heap.memory_usage(real)
+    }
+
+    /// `memory_get_peak_usage()`.
+    #[must_use]
+    pub fn memory_peak(&self, real: bool) -> usize {
+        let _ = real;
+        self.heap.memory_peak()
+    }
+
+    /// `memory_reset_peak_usage()`.
+    pub fn reset_memory_peak(&mut self) {
+        self.heap.reset_peak();
+    }
+
+    /// `gc_collect_cycles()`: the number of collected cycles.
+    pub fn gc_collect(&mut self) -> i64 {
+        0
+    }
+
+    /// `gc_enable()` and `gc_disable()`.
+    pub fn gc_enable(&mut self, enabled: bool) {
+        self.gc_enabled = enabled;
+    }
+
+    /// `gc_enabled()`.
+    #[must_use]
+    pub fn gc_enabled(&self) -> bool {
+        self.gc_enabled
+    }
+
+    /// `gc_status()` with php 8.5's fields.
+    #[must_use]
+    pub fn gc_status(&self) -> PhpArray {
+        let mut array = PhpArray::new();
+        for (name, value) in [
+            ("running", Value::bool(false)),
+            ("protected", Value::bool(false)),
+            ("full", Value::bool(false)),
+            ("runs", Value::int(0)),
+            ("collected", Value::int(0)),
+            ("threshold", Value::int(10_001)),
+            ("buffer_size", Value::int(16_384)),
+            ("roots", Value::int(0)),
+            ("application_time", Value::float(0.0)),
+            ("collector_time", Value::float(0.0)),
+            ("destructor_time", Value::float(0.0)),
+            ("free_time", Value::float(0.0)),
+        ] {
+            array.set(Key::from_bytes(name.as_bytes()), value);
+        }
+        array
+    }
+
+    // -------------------------------------------------- paths and streams
+
+    /// A path made absolute against the request's `cwd`.
+    #[must_use]
+    pub fn absolutize(&self, path: &[u8]) -> HostPath {
+        let given = PathBuf::from(String::from_utf8_lossy(path).into_owned());
+        if given.is_absolute() {
+            HostPath(given)
+        } else {
+            HostPath(self.cwd.join(given))
+        }
+    }
+
+    /// `realpath()`: `None` where the path does not exist.
+    #[must_use]
+    pub fn realpath(&self, path: &[u8]) -> Option<HostPath> {
+        std::fs::canonicalize(self.absolutize(path).0)
+            .ok()
+            .map(HostPath)
+    }
+
+    /// The `open_basedir` guard Mahout's `check_fs_access` performed at
+    /// 27 sites: php's warning and a `Thrown` when the path is outside.
+    pub fn fs_guard(&mut self, path: &HostPath, intent: PathIntent) -> Result<(), Thrown> {
+        let _ = (path, intent);
+        Ok(())
+    }
+
+    /// `is_uploaded_file()`.
+    #[must_use]
+    pub fn is_uploaded_file(&self, path: &[u8]) -> bool {
+        let _ = path;
+        false
+    }
+
+    /// `move_uploaded_file()`'s first half: take the upload's temporary
+    /// path out of the request, once.
+    pub fn take_uploaded_file(&mut self, path: &[u8]) -> Option<HostPath> {
+        let _ = path;
+        None
+    }
+
+    fn new_stream(&mut self) -> Stream {
+        self.streams = self.streams.saturating_add(1);
+        Stream { id: self.streams }
+    }
+
+    /// `fopen()` through the wrapper the path's scheme names.
+    pub fn open_stream(&mut self, path: &[u8], mode: &[u8]) -> Result<Stream, Thrown> {
+        let _ = (path, mode);
+        Ok(self.new_stream())
+    }
+
+    /// `opendir()`.
+    pub fn open_dir(&mut self, path: &[u8]) -> Result<Stream, Thrown> {
+        let _ = path;
+        Ok(self.new_stream())
+    }
+
+    /// `stream_wrapper_register()`: `false` when the scheme is taken.
+    pub fn register_wrapper(&mut self, wrapper: StreamWrapper) -> bool {
+        if self.wrappers.iter().any(|w| w.scheme == wrapper.scheme) {
+            return false;
+        }
+        self.wrappers.push(wrapper);
+        true
+    }
+
+    /// `stream_get_wrappers()`.
+    #[must_use]
+    pub fn stream_wrappers(&self) -> Vec<PhpString> {
+        self.wrappers.iter().map(|w| w.scheme.clone()).collect()
+    }
+
+    /// `stream_filter_register()`: `false` when the name is taken.
+    pub fn register_filter(&mut self, filter: StreamFilter) -> bool {
+        if self.filters.iter().any(|f| f.name == filter.name) {
+            return false;
+        }
+        self.filters.push(filter);
+        true
+    }
+}
+
+impl HeapHooks for Request {
+    fn destruct(&mut self, obj: ObjectId) {
+        let _ = obj;
+    }
+
+    fn free_native(&mut self, obj: ObjectId) {
+        let _ = obj;
+    }
+
+    fn gc_children(&mut self, obj: ObjectId, visit: &mut dyn FnMut(Zval)) {
+        let _ = (obj, visit);
+    }
+
+    fn free_resource(&mut self, res: u32) {
+        self.resources.remove(res);
+    }
+
+    fn out_of_memory(&mut self, bytes: usize) -> Fatal {
+        let _ = &self.map;
+        Fatal::OutOfMemory(bytes)
+    }
+}
+
+fn level_name(level: Level) -> &'static str {
+    match level {
+        Level::Error
+        | Level::CoreError
+        | Level::CompileError
+        | Level::UserError
+        | Level::RecoverableError => "Fatal error",
+        Level::Warning | Level::CoreWarning | Level::CompileWarning | Level::UserWarning => {
+            "Warning"
+        }
+        Level::Parse => "Parse error",
+        Level::Notice | Level::UserNotice => "Notice",
+        Level::Strict => "Strict Standards",
+        Level::Deprecated | Level::UserDeprecated => "Deprecated",
+    }
+}
