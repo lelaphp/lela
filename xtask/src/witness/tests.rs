@@ -121,6 +121,49 @@ fn the_digest_is_asserted_once_over_a_run_of_three_witnesses() {
     assert_eq!(manifest.pin.digests_asserted(), 1);
 }
 
+/// Coverage first, the digest only before a snippet runs (#65): with no
+/// binary at the pin's path the kernel without a witness still fails the
+/// crate, the witness is a snippet that did not run rather than a
+/// refusal, and the pin is never hashed.
+#[test]
+fn an_absent_oracle_leaves_the_coverage_half_judged_and_the_witness_unrun() {
+    let text = format!(
+        "{}/// A kernel without one.\npub fn kernel() {{}}\n",
+        block("/// ```expect\n/// 1\n/// ```\n")
+    );
+    let found = fence::extract(Path::new("ext/fixture/src/lib.rs"), &text);
+    assert_eq!(found.witnesses.len(), 1, "{found:#?}");
+    assert_eq!(found.subjects.len(), 2, "{found:#?}");
+    let mut manifest = manifest();
+    manifest.pin.oracle.path = PathBuf::from("/no-php-here");
+    let oracle = manifest.pin.oracle();
+    let tally = judge(
+        &oracle,
+        &registry(""),
+        &Runner::Absent("no engine".to_owned()),
+        &Ask::default(),
+        &found,
+    )
+    .unwrap();
+    assert!(tally.failed(), "{tally:#?}");
+    assert_eq!(tally.missing.len(), 1, "{tally:#?}");
+    assert!(tally.witnesses.judged.is_empty(), "{tally:#?}");
+    assert_eq!(tally.witnesses.found, 1);
+    assert_eq!(tally.witnesses.not_run(), 1);
+    assert!(
+        tally
+            .oracle_absent
+            .as_deref()
+            .is_some_and(|why| why.contains("/no-php-here")),
+        "{tally:#?}"
+    );
+    assert_eq!(
+        manifest.pin.digests_asserted(),
+        0,
+        "nothing ran, so nothing hashed"
+    );
+}
+
 #[test]
 fn a_digest_mismatch_refuses_the_run_and_is_not_a_bork_per_witness() {
     if oracle().is_none() {

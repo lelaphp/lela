@@ -25,7 +25,10 @@
 //! [`Tally::complete`]: green there means the pinned oracle was here to
 //! have run what there was none of, and without it the rung is
 //! [`Outcome::OracleAbsent`], a skip that says why, since a green line
-//! without the oracle is a claim.
+//! without the oracle is a claim. The same rung holds a tally whose items
+//! were found and none run because the oracle was not here to run them:
+//! coverage is the lane's and is judged first, and a snippet that did not
+//! run is counted, never a refusal (#65).
 
 use std::fmt;
 use std::path::Path;
@@ -106,9 +109,10 @@ pub enum Outcome<'a> {
     Control(&'a Path),
     /// The engine ran and nothing met its expectation.
     NothingRan,
-    /// Nothing was there to run, and the pinned oracle was not here to
-    /// have run it: the green a complete tally would read is a claim
-    /// without the oracle, and this is the skip that says why.
+    /// Nothing ran, and the pinned oracle was not here to have run it,
+    /// whether nothing was found or what was found could not run: the
+    /// green a complete tally would read is a claim without the oracle,
+    /// and this is the skip that says why.
     OracleAbsent(&'a str),
     /// The engine ran and every item met its expectation.
     Passed,
@@ -175,6 +179,12 @@ impl<J: Judgement> Tally<J> {
             .count() as u64
     }
 
+    /// The items found and not run: what the reading counts when the
+    /// oracle was not here to run them.
+    pub fn not_run(&self) -> u64 {
+        self.found.saturating_sub(self.judged.len()) as u64
+    }
+
     /// The items that met what they were held to.
     pub fn met(&self) -> u64 {
         self.judged.iter().filter(|j| j.judgement.met()).count() as u64
@@ -219,8 +229,9 @@ impl<J: Judgement> Tally<J> {
     /// for the engine. Green means the oracle agreed, so the pass stands
     /// only while the pinned oracle is here to have run what there was
     /// none of; `absent` is why it is not, and then the rung is a skip
-    /// that says so. A tally that ran anything ran it under the oracle,
-    /// and the word is the ladder's.
+    /// that says so, whether nothing was found or what was found did not
+    /// run for want of the oracle (`not_run` counts those). A tally that
+    /// ran anything ran it under the oracle, and the word is the ladder's.
     pub fn complete<'a>(&self, absent: Option<&'a str>) -> Outcome<'a> {
         match absent {
             Some(why) if self.judged.is_empty() => Outcome::OracleAbsent(why),
@@ -357,6 +368,15 @@ mod tests {
             tally(&[Went::Pass]).complete(Some("not at /pinned/php")),
             Outcome::Passed
         );
+        // Items found and none run, since the oracle was not here to run
+        // them: the same rung, with the count of what did not run on it
+        // (#65). Coverage is the lane's and was judged before this.
+        assert_eq!(
+            Tally::<Went>::found(3).complete(Some("not at /pinned/php")),
+            Outcome::OracleAbsent("not at /pinned/php")
+        );
+        assert_eq!(Tally::<Went>::found(3).not_run(), 3);
+        assert_eq!(tally(&[Went::Pass]).not_run(), 0);
     }
 
     #[test]
