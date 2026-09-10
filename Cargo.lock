@@ -185,6 +185,10 @@ name = "php_heap"
 version = "0.0.0"
 
 [[package]]
+name = "php_macros"
+version = "0.0.0"
+
+[[package]]
 name = "php_syntax"
 version = "0.0.0"
 

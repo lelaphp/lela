@@ -1,0 +1,21 @@
+# php_macros: the three attributes and `tentative` (design §4.1, §7.1;
+# ADR-0002). A pass-through here: each attribute hands its item back
+# unchanged, so a native written against api.lock compiles before the
+# expansion exists. The edge to php_engine the manifest permits is taken
+# when the expansion names its types.
+[package]
+name = "php_macros"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The native attributes: php_function, php_class, php_const, tentative"
+
+[lib]
+proc-macro = true
+
+[lints]
+workspace = true
+
+[dependencies]
