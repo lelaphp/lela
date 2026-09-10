@@ -37,6 +37,13 @@ pub struct CompileError {
     pub line: u32,
 }
 
+/// Parse and compile one source file: what the engine calls for the
+/// file it serves, an `include` or an `eval`, since its edges reach the compiler
+/// and not the syntax crate (design §4.2).
+pub fn compile_source(source: &[u8], options: &Options) -> Result<Unit, CompileError> {
+    compile(&php_syntax::parse(source), options)
+}
+
 /// Compile one parsed file into a unit.
 ///
 /// The stub compiles every input as php compiles an empty file: one
