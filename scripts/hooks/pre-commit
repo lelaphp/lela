@@ -18,8 +18,8 @@
 # first (#62): harness-plugins/types is a tracked generated file, written
 # by the committer's own Claude Code from a directory outside the clone
 # with an empty HOME and CLAUDE_CONFIG_DIR, so no settings, plugin or hook
-# load, under the flag that gates `/plugin-types`; `tsc` then holds the
-# module to it and `plugin validate --strict` reads the manifest,
+# load, under the variable that gates `/plugin-types`; `tsc` then holds
+# the module to it and `plugin validate --strict` reads the manifest,
 # hooks.json and the module, and what was written is staged. Without
 # `claude` on PATH that step is skipped by name and the commit goes on:
 # CI holds the module to the committed file. Installed per clone by the
@@ -31,6 +31,18 @@ X='cargo xtask'
 status=0
 step() {
     "$@" || { echo "pre-commit: $* failed" >&2; status=1; }
+}
+# What the hook stages goes into the index git hands it, the one the
+# commit's tree is written from whether or not the commit names paths. A
+# commit that names paths keeps a second index for after the commit,
+# `index.lock`, which git renames into place and which would otherwise
+# show what the hook staged as missing from the index, so that one takes
+# it too.
+stage() {
+    git add -- "$@"
+    case "${GIT_INDEX_FILE:-}" in
+        *next-index-*) GIT_INDEX_FILE="$(git rev-parse --git-dir)/index.lock" git add -- "$@" ;;
+    esac
 }
 # A node program (`claude`, `npx`) leaves O_NONBLOCK on the stdout it
 # inherits, and every instrument after it through the same pipe then fails
@@ -58,10 +70,14 @@ declarations() {
 }
 if ! git diff --cached --quiet -- harness-plugins; then
     if command -v claude >/dev/null 2>&1; then
-        step declarations
+        if declarations; then
+            stage harness-plugins/types
+        else
+            echo "pre-commit: claude -p \"/plugin-types $root/harness-plugins/types\" failed; nothing of harness-plugins/types was staged" >&2
+            status=1
+        fi
         step buffered npx -y -p typescript@5.9.3 tsc -p harness-plugins
         step buffered claude plugin validate harness-plugins --strict
-        git add -- harness-plugins/types
     else
         echo "pre-commit: claude is not on PATH; skipped rewriting harness-plugins/types, tsc and plugin validate" >&2
     fi
@@ -79,7 +95,7 @@ regions='AGENTS.md ext/AGENTS.md data/INDEX.md docs/divergence.md'
 # shellcheck disable=SC2086
 if rendered=$($X regions $regions .claude/harness.local.md); then
     echo "$rendered" | grep -E ' written$' | cut -d: -f1 | sort -u | while read -r file; do
-        case " $regions " in *" $file "*) git add -- "$file" ;; esac
+        case " $regions " in *" $file "*) stage "$file" ;; esac
     done
 else
     echo "pre-commit: the regions were not rendered; the line above says why" >&2

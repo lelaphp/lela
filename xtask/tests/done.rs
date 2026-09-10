@@ -795,7 +795,7 @@ fn ci_test_job_typechecks_the_module_against_the_committed_declarations() {
         "@anthropic-ai/claude-code",
         "/plugin-types",
         "plugin validate",
-        "claude ",
+        "run: claude",
     ] {
         assert!(
             !steps.contains(gone),

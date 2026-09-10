@@ -33,12 +33,12 @@ const LOCAL: &str = ".claude/harness.local.md";
 /// repository, `bin` holds `cargo` and `computed`, `plugin-bin` holds
 /// `claude` and `npx`, `cargo.log`, `computed.log` and `plugin.log` hold
 /// one line per call, and `refuse` names the one `cargo` call that exits
-/// 1, when a test writes it. `claude` says whether `plugin-bin` is on the
-/// hook's `PATH`: off, the hook finds no `claude` at all.
+/// 1, when a test writes it. `claude_on_path` says whether `plugin-bin`
+/// is on the hook's `PATH`: off, the hook finds no `claude` at all.
 struct Scratch {
     dir: PathBuf,
     root: PathBuf,
-    claude: bool,
+    claude_on_path: bool,
 }
 
 /// The stand-in `computed` for each case, as the shell that answers `run`
@@ -98,7 +98,7 @@ fn scratch(name: &str, computed: &Computed) -> Scratch {
     let scratch = Scratch {
         dir: dir.clone(),
         root: fs::canonicalize(&root).unwrap(),
-        claude: true,
+        claude_on_path: true,
     };
     scratch.git(&["add", "."], false);
     scratch.git(&["commit", "-q", "-m", "regions and a crate"], false);
@@ -145,7 +145,7 @@ fn scratch(name: &str, computed: &Computed) -> Scratch {
         &plugin_bin.join("claude"),
         &format!(
             "#!/bin/sh\n\
-             printf 'claude %s cwd=%s home=%s config=%s flag=%s\\n' \"$*\" \"$PWD\" \"$HOME\" \"${{CLAUDE_CONFIG_DIR:-}}\" \"${{CLAUDE_CODE_ENABLE_FUNCTION_HOOKS:-}}\" >> '{log}'\n\
+             printf 'claude %s cwd=%s home=%s config=%s gate=%s\\n' \"$*\" \"$PWD\" \"$HOME\" \"${{CLAUDE_CONFIG_DIR:-}}\" \"${{CLAUDE_CODE_ENABLE_FUNCTION_HOOKS:-}}\" >> '{log}'\n\
              if [ \"$1\" = -p ]; then dir=\"${{2#/plugin-types }}\"; mkdir -p \"$dir\"; printf '// Written by Claude Code 9.9.9.\\n' > \"$dir/claude-code.d.ts\"; fi\n\
              exit 0\n",
             log = log.display(),
@@ -167,7 +167,7 @@ impl Scratch {
     /// Without `claude`, `PATH` is the stand-ins and the system's own
     /// directories alone, so the hook finds no `claude` anywhere.
     fn run(&self, args: &[&str], hooked: bool) -> (i32, String) {
-        let path = if self.claude {
+        let path = if self.claude_on_path {
             format!(
                 "{}:{}",
                 self.dir.join("plugin-bin").display(),
@@ -228,15 +228,14 @@ impl Scratch {
         fs::write(self.dir.join("refuse"), call).unwrap();
     }
 
-    /// A change under the plugin, staged, and the commit through the hook.
+    /// A change under the plugin, staged, and the commit through the hook
+    /// by pathspec, the shape AGENTS.md asks for, so the test holds that
+    /// what the hook stages reaches such a commit.
     fn stage_plugin_and_commit(&self) -> (i32, String) {
-        write(
-            &self.root,
-            "harness-plugins/hooks/harness.ts",
-            "export const register = () => {};\n",
-        );
-        self.git(&["add", "--", "harness-plugins/hooks/harness.ts"], false);
-        self.run(&["commit", "-q", "-m", "the module"], true)
+        let path = "harness-plugins/hooks/harness.ts";
+        write(&self.root, path, "export const register = () => {};\n");
+        self.git(&["add", "--", path], false);
+        self.run(&["commit", "-q", "-m", "the module", "--", path], true)
     }
 
     /// A change under the crate, staged, and the commit through the hook.
@@ -307,12 +306,12 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
 /// The declarations step (#62): with a path under `harness-plugins/`
 /// staged, the committer's own Claude Code rewrites the tracked
 /// declaration file, `claude -p "/plugin-types <root>/harness-plugins/types"`
-/// with the flag that gates the command set, from a directory outside the
-/// clone with `HOME` and `CLAUDE_CONFIG_DIR` pointing at empty ones, so no
-/// settings, plugin or hook of the clone or the committer load; then
-/// `tsc` through the pinned `npx`, then `plugin validate --strict`; what
-/// was written is re-staged, so the commit carries the file whose header
-/// names the version.
+/// with the variable that gates the command set, from a directory outside
+/// the clone with `HOME` and `CLAUDE_CONFIG_DIR` pointing at empty ones,
+/// so no settings, plugin or hook of the clone or the committer load;
+/// then `tsc` through the pinned `npx`, then `plugin validate --strict`;
+/// what was written is re-staged, so the commit, by pathspec, carries the
+/// file whose header names the version.
 #[test]
 fn pre_commit_rewrites_the_declarations_when_the_plugin_is_staged() {
     let scratch = scratch("declarations", &Computed::Rendered);
@@ -331,7 +330,7 @@ fn pre_commit_rewrites_the_declarations_when_the_plugin_is_staged() {
     let cwd = fields.next().unwrap();
     let home = fields.next().unwrap().strip_prefix("home=").unwrap();
     let config = fields.next().unwrap().strip_prefix("config=").unwrap();
-    assert_eq!(fields.next(), Some("flag=1"), "{types}");
+    assert_eq!(fields.next(), Some("gate=1"), "{types}");
     for (name, dir) in [("cwd", cwd), ("HOME", home), ("CLAUDE_CONFIG_DIR", config)] {
         assert!(!dir.is_empty(), "{name} is empty: {types}");
         assert!(
@@ -383,7 +382,7 @@ fn pre_commit_rewrites_the_declarations_when_the_plugin_is_staged() {
 #[test]
 fn pre_commit_without_claude_skips_the_declarations_by_name_and_allows_the_commit() {
     let mut scratch = scratch("no-claude", &Computed::Rendered);
-    scratch.claude = false;
+    scratch.claude_on_path = false;
     let before = scratch.head();
     let (code, out) = scratch.stage_plugin_and_commit();
     assert_eq!(code, 0, "{out}");
