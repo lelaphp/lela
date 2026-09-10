@@ -134,19 +134,18 @@ pub(crate) struct Subset {
 impl Subset {
     /// The subset a name asks for: a crate of the manifest by name
     /// (`php_engine`, `pcre`, `ext/pcre`), whose subsets its row owns, or
-    /// a directory of the pinned tree (`Zend/tests`), whose scope is that
-    /// path. A crate that owns none is refused by saying so: which
-    /// subsets are a crate's is the manifest's sentence, and an absent one
-    /// is an answer, not a lookup that failed.
-    pub(crate) fn resolve(manifest: &Manifest, name: &str) -> Result<Subset> {
-        let source = manifest.pin.source.tree();
+    /// a directory of the pinned tree at `source` (`Zend/tests`), whose
+    /// scope is that path. A crate that owns none is refused by saying so:
+    /// which subsets are a crate's is the manifest's sentence, and an
+    /// absent one is an answer, not a lookup that failed.
+    pub(crate) fn resolve(manifest: &Manifest, source: &Path, name: &str) -> Result<Subset> {
         let named = name.trim_matches('/');
         let as_crate = format!("ext/{named}");
         if let Some(krate) = manifest
             .crate_named(named)
             .or_else(|| manifest.crate_named(&as_crate))
         {
-            if let Some(subset) = Subset::of(manifest, krate) {
+            if let Some(subset) = Subset::of(source, krate) {
                 return Ok(subset);
             }
             bail!(
@@ -158,7 +157,7 @@ impl Subset {
         if source.join(&under).is_dir() {
             return Ok(Subset {
                 scope: named.to_owned(),
-                dirs: vec![Dir::at(&source, under)],
+                dirs: vec![Dir::at(source, under)],
             });
         }
         bail!(
@@ -168,17 +167,17 @@ impl Subset {
         )
     }
 
-    /// The subset one crate owns: every directory its row names, and
-    /// nothing when it names none. Whether the pinned tree has them is not
-    /// asked here: a directory the tree lacks is a reading that says so,
-    /// since dropping it quietly would leave `done` asking a crate for a
-    /// phpt reading nothing could write, which is the hole #18 closed.
-    pub(crate) fn of(manifest: &Manifest, krate: &Crate) -> Option<Subset> {
-        let source = manifest.pin.source.tree();
+    /// The subset one crate owns: every directory its row names under the
+    /// pinned tree at `source`, and nothing when it names none. Whether
+    /// the tree has them is not asked here: a directory the tree lacks is
+    /// a reading that says so, since dropping it quietly would leave
+    /// `done` asking a crate for a phpt reading nothing could write, which
+    /// is the hole #18 closed.
+    pub(crate) fn of(source: &Path, krate: &Crate) -> Option<Subset> {
         let dirs: Vec<Dir> = krate
             .subsets()
             .into_iter()
-            .map(|under| Dir::at(&source, under))
+            .map(|under| Dir::at(source, under))
             .collect();
         (!dirs.is_empty()).then(|| Subset {
             scope: krate.name.clone(),
@@ -197,29 +196,29 @@ impl Subset {
     }
 
     /// The per-commit lane (harness §7): every subset of every crate the
-    /// default build has, in manifest order. The row is the statement and
-    /// this is its only reader, so the lane is never a second copy of the
-    /// design's table; a crate behind a feature is outside the default
-    /// build and outside the lane.
-    pub(crate) fn lane(manifest: &Manifest) -> Vec<Subset> {
+    /// default build has, in manifest order, under the pinned tree at
+    /// `source`. The row is the statement and this is its only reader, so
+    /// the lane is never a second copy of the design's table; a crate
+    /// behind a feature is outside the default build and outside the lane.
+    pub(crate) fn lane(manifest: &Manifest, source: &Path) -> Vec<Subset> {
         manifest
             .crates
             .iter()
             .filter(|krate| !krate.optional())
-            .filter_map(|krate| Subset::of(manifest, krate))
+            .filter_map(|krate| Subset::of(source, krate))
             .collect()
     }
 
-    /// Every subset of the corpus: the nightly lane's, which is `Zend`,
-    /// `tests` and every `tests` directory under `ext` and `sapi`.
-    pub(crate) fn corpus(manifest: &Manifest) -> Vec<Subset> {
-        let source = manifest.pin.source.tree();
+    /// Every subset of the corpus at `source`: the nightly lane's, which
+    /// is `Zend`, `tests` and every `tests` directory under `ext` and
+    /// `sapi`.
+    pub(crate) fn corpus(source: &Path) -> Vec<Subset> {
         let mut subsets = Vec::new();
         let mut push = |under: PathBuf| {
             if source.join(&under).is_dir() {
                 subsets.push(Subset {
                     scope: under.to_string_lossy().into_owned(),
-                    dirs: vec![Dir::at(&source, under)],
+                    dirs: vec![Dir::at(source, under)],
                 });
             }
         };
@@ -379,6 +378,7 @@ pub(crate) fn reading(
     tally: &Tally,
     root: &Path,
     manifest: &Manifest,
+    source: &Path,
     subset: &Subset,
     runner: &Runner,
     lane: Option<Lane>,
@@ -439,7 +439,7 @@ pub(crate) fn reading(
         format!(
             "{scope}: the [[crate]] row names {}, and the pinned php-src at {} ({}) has no such directory",
             listed(&named),
-            manifest.pin.source.tree().display(),
+            source.display(),
             manifest.pin.source.tag
         )
     };
@@ -497,15 +497,18 @@ pub fn run(
     registry: &Registry,
     ask: &Ask,
 ) -> Result<Vec<Reading>> {
+    // Where the tree is on this machine is the oracle module's one answer;
+    // an absent tree refuses the run naming both places it looked.
+    let source = manifest.pin.source.tree()?;
     let subsets = match &ask.subset {
-        Some(name) => vec![Subset::resolve(manifest, name)?],
-        None if ask.full => Subset::corpus(manifest),
+        Some(name) => vec![Subset::resolve(manifest, &source, name)?],
+        None if ask.full => Subset::corpus(&source),
         // The per-commit lane, composed from the `[[crate]]` rows that own
         // a subset (harness §7). The row is where the lane lives, so
         // neither this function nor the design's table is a second copy of
         // the other.
         None => {
-            let lane = Subset::lane(manifest);
+            let lane = Subset::lane(manifest, &source);
             let scopes: Vec<&str> = lane.iter().map(|s| s.scope.as_str()).collect();
             println!(
                 "phpt: the per-commit lane, {} subset{} the manifest names: {}",
@@ -519,7 +522,7 @@ pub fn run(
     if subsets.is_empty() {
         bail!(
             "no subset to run: no [[crate]] row of the manifest owns one the pinned php-src at {} has",
-            manifest.pin.source.tree().display()
+            source.display()
         );
     }
     let runner = Runner::resolve(root, &manifest.pin, ask.engine.as_deref())?;
@@ -532,7 +535,9 @@ pub fn run(
     let mut readings = Vec::new();
     for subset in &subsets {
         let tally = run_subset(&oracle, registry, &runner, ask.lane, subset)?;
-        readings.push(reading(&tally, root, manifest, subset, &runner, ask.lane)?);
+        readings.push(reading(
+            &tally, root, manifest, &source, subset, &runner, ask.lane,
+        )?);
     }
     Ok(readings)
 }

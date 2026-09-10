@@ -104,6 +104,7 @@ oracle::Oracle::run_under
 oracle::Pin
 oracle::Pin::digests_asserted
 oracle::Pin::load
+oracle::Pin::on_this_machine
 oracle::Pin::oracle
 oracle::Pin::parse
 oracle::Pin::regime
@@ -115,6 +116,7 @@ oracle::Runner::binary
 oracle::Runner::resolve
 oracle::Source
 oracle::Source::tree
+oracle::TREE_VARIABLE
 oracle::Verdict
 oracle::Verdict::met
 oracle::Verdict::render

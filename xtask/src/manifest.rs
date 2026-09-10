@@ -811,8 +811,9 @@ impl Manifest {
         if generated {
             return Some(PathBuf::from(name));
         }
-        let corpus = self.pin.source.tree();
-        if !corpus.as_os_str().is_empty() && corpus.join(name).is_dir() {
+        if let Ok(corpus) = self.pin.source.tree()
+            && corpus.join(name).is_dir()
+        {
             return Some(PathBuf::from("."));
         }
         None

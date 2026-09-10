@@ -11,7 +11,8 @@
 //! its digest asserted once before the first program runs and never per
 //! program; a [`Runner`] is what the lane measured the engine with, or why
 //! it could not; [`Source::tree`] is where the pinned php-src is on this
-//! machine, which the runner and the tests that resolve a subset ask and
+//! machine, the tree [`TREE_VARIABLE`] names first and the pin's path
+//! second, which the runner and the tests that resolve a subset ask and
 //! never read off the pin themselves; and [`expect`] is how an expectation
 //! that is a pattern rather than bytes is met, which `verdict` takes as the
 //! caller's match.
@@ -34,6 +35,16 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::divergence::{Divergence, Registry};
+
+/// The environment variable that names the pinned php-src tree on this
+/// machine, consulted ahead of the pin's `[source].path` (#36). The name
+/// is upstream's own, what `run-tests.php:179` at the tag reads for the
+/// same tree, and it is stated here and nowhere else: the messages print
+/// it from here, a test hands its value to [`Pin::on_this_machine`], and
+/// a runner that provisions the tree sets it (#37). The location, alone
+/// among the pin's facts, is machine-local; the tag, the commit and the
+/// file count are the file's.
+pub const TREE_VARIABLE: &str = "TEST_PHP_SRCDIR";
 
 /// `oracle.toml`: the pinned oracle and its invocation recipe, read through
 /// the manifest's `[oracle]` row and nowhere else.
@@ -81,15 +92,39 @@ pub struct Source {
     /// through [`Source::tree`] and nowhere else.
     path: PathBuf,
     pub phpt_files: u64,
+    /// The tree [`TREE_VARIABLE`] names on this machine, as [`Pin::load`]
+    /// read it or a test handed it; not a value of the file, and absent
+    /// under [`Pin::parse`], which is the pin as the file says it.
+    #[serde(skip)]
+    named: Option<PathBuf>,
 }
 
 impl Source {
-    /// Where the pinned php-src tree is on this machine. The one answer
-    /// the phpt runner and the tests that resolve a subset take, so the
-    /// location, alone among the pin's facts, can become machine-local
-    /// without a reader of the pin's path being left behind (#36).
-    pub fn tree(&self) -> PathBuf {
-        self.path.clone()
+    /// Where the pinned php-src tree is on this machine: the directory
+    /// [`TREE_VARIABLE`] names when it is one, else the pin's path when it
+    /// is one. The one answer the phpt runner and the tests that resolve a
+    /// subset take, so the location, alone among the pin's facts, is
+    /// machine-local (#36). An absent tree is an error naming both places
+    /// tried, so a runner's failure reads as an unset variable and not as
+    /// a path that could never have existed there.
+    pub fn tree(&self) -> Result<PathBuf> {
+        if let Some(named) = &self.named
+            && named.is_dir()
+        {
+            return Ok(named.clone());
+        }
+        if self.path.is_dir() {
+            return Ok(self.path.clone());
+        }
+        let variable = match &self.named {
+            Some(named) => format!("{TREE_VARIABLE}={} is not a directory", named.display()),
+            None => format!("{TREE_VARIABLE} is unset"),
+        };
+        bail!(
+            "the pinned php-src ({}) is at neither place tried: {variable}, and the pin's path {} is not a directory",
+            self.tag,
+            self.path.display()
+        )
     }
 }
 
@@ -131,16 +166,32 @@ pub struct Regime {
 }
 
 impl Pin {
-    /// Load the pin at `path`.
+    /// Load the pin at `path` as this machine has it: the file's facts,
+    /// and the tree [`TREE_VARIABLE`] names in the process's environment.
     pub fn load(path: &Path) -> Result<Pin> {
         let text = fs::read_to_string(path)
             .with_context(|| format!("reading the oracle pin {}", path.display()))?;
-        Pin::parse(&text).with_context(|| format!("{}", path.display()))
+        let pin = Pin::parse(&text).with_context(|| format!("{}", path.display()))?;
+        // An empty value is unset, as `getenv` reads it in run-tests.php.
+        let named = std::env::var_os(TREE_VARIABLE)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        Ok(pin.on_this_machine(named))
     }
 
-    /// Parse the pin's text and hold it to the grammar.
+    /// Parse the pin's text and hold it to the grammar. The pin is as the
+    /// file says it, blind to this machine; `load` consults the machine.
     pub fn parse(text: &str) -> Result<Pin> {
         Ok(toml::from_str(text)?)
+    }
+
+    /// The pin with the tree [`TREE_VARIABLE`] names on this machine:
+    /// `load` hands the process's value, and a test hands the tree it laid
+    /// down, which [`Source::tree`] then answers ahead of the pin's path.
+    #[must_use]
+    pub fn on_this_machine(mut self, named: Option<PathBuf>) -> Pin {
+        self.source.named = named;
+        self
     }
 
     /// The regime by name; an unknown name is refused beside the known ones.

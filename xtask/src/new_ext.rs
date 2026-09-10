@@ -111,7 +111,7 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str) -> Result<Laid> {
         .unwrap_or_default();
     let named: Vec<&str> = owned.iter().map(String::as_str).collect();
     let subset = listed(&named);
-    if krate.is_some_and(|krate| phpt::Subset::of(manifest, krate).is_some()) {
+    if krate.is_some_and(|krate| !krate.subsets().is_empty()) {
         laid.notes
             .push(format!("phpt subset: {subset} at the pinned tag"));
     } else {

@@ -3,14 +3,15 @@
 //! returns the verdict every instrument uses and never lets one diff alone.
 //!
 //! The tests that spawn php need the pinned binary at the path the pin names
-//! and say so on stderr when it is absent; the rest run anywhere.
+//! and say so on stderr when it is absent; the rest run anywhere, the tree
+//! `Source::tree` answers being a fixture's.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use xtask::divergence::Registry;
 use xtask::manifest::Manifest;
-use xtask::oracle::{self, Pin, Program, Verdict};
+use xtask::oracle::{self, Pin, Program, TREE_VARIABLE, Verdict};
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -163,6 +164,77 @@ fn a_program_past_the_timeout_is_refused() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("1 s"), "the limit is named: {err}");
+}
+
+/// The tracked pin as the file says it, its `[source].path` at `path`,
+/// blind to this machine: what `parse` gives, the variable unread.
+fn pin_with_path(path: &Path) -> Pin {
+    let text = std::fs::read_to_string(workspace().join("oracle.toml")).unwrap();
+    let mut in_source = false;
+    let text: Vec<String> = text
+        .lines()
+        .map(|line| {
+            if line.starts_with('[') {
+                in_source = line.trim() == "[source]";
+            }
+            if in_source && line.starts_with("path = ") {
+                format!("path = {:?}", path.display().to_string())
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect();
+    Pin::parse(&text.join("\n")).unwrap()
+}
+
+/// A directory standing where the pinned php-src would.
+fn fixture_tree(name: &str) -> PathBuf {
+    let tree = std::env::temp_dir().join(format!("xtask-oracle-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&tree).unwrap();
+    tree
+}
+
+#[test]
+fn the_tree_is_what_the_variable_names_when_it_is_a_directory() {
+    let named = fixture_tree("named");
+    let pin = pin_with_path(Path::new("/nowhere/php-src")).on_this_machine(Some(named.clone()));
+    assert_eq!(pin.source.tree().unwrap(), named);
+    // Ahead of the pin's path even where that is a directory too.
+    let pinned = fixture_tree("pinned");
+    let pin = pin_with_path(&pinned).on_this_machine(Some(named.clone()));
+    assert_eq!(pin.source.tree().unwrap(), named);
+}
+
+#[test]
+fn the_tree_is_the_pins_path_when_the_variable_is_unset() {
+    let pinned = fixture_tree("fallback");
+    let pin = pin_with_path(&pinned);
+    assert_eq!(pin.source.tree().unwrap(), pinned);
+    // A variable naming no directory is not the tree either.
+    let pin = pin_with_path(&pinned).on_this_machine(Some(PathBuf::from("/nowhere/php-src")));
+    assert_eq!(pin.source.tree().unwrap(), pinned);
+}
+
+#[test]
+fn an_absent_tree_names_the_variable_and_the_pins_path_and_not_one_of_them() {
+    let pin = pin_with_path(Path::new("/nowhere/pinned/php-src"));
+    let err = pin.source.tree().unwrap_err().to_string();
+    assert!(err.contains(TREE_VARIABLE), "the variable is named: {err}");
+    assert!(err.contains("unset"), "and its state: {err}");
+    assert!(
+        err.contains("/nowhere/pinned/php-src"),
+        "the pin's path is named: {err}"
+    );
+    assert!(err.contains("php-8.5"), "and the tag the tree is at: {err}");
+    // Set to no directory, the value is what is named, so a typo reads
+    // as one.
+    let pin = pin.on_this_machine(Some(PathBuf::from("/nowhere/named/php-src")));
+    let err = pin.source.tree().unwrap_err().to_string();
+    assert!(
+        err.contains(&format!("{TREE_VARIABLE}=/nowhere/named/php-src")),
+        "{err}"
+    );
+    assert!(err.contains("/nowhere/pinned/php-src"), "{err}");
 }
 
 #[test]

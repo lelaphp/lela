@@ -13,6 +13,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use xtask::divergence::Registry;
 use xtask::manifest::{Crate, Manifest};
@@ -31,13 +32,24 @@ fn manifest() -> Manifest {
     Manifest::load(workspace()).unwrap()
 }
 
-/// A manifest of these `[[crate]]` rows under the tracked pin: the rows a
-/// person writes in `seams.toml`, resolved against the pinned tree without
-/// the tracked manifest having to carry the crate they name.
+/// A manifest of these `[[crate]]` rows under the tracked pin with its
+/// tree the fixture's: the rows a person writes in `seams.toml`, resolved
+/// against a tree without the tracked manifest having to carry the crate
+/// they name or this machine the corpus.
 fn manifest_of(rows: impl IntoIterator<Item = Crate>) -> Manifest {
     let mut manifest = Manifest::of(rows);
-    manifest.pin = self::manifest().pin;
+    manifest.pin = pin_over(&fixture_tree());
     manifest
+}
+
+/// A tree standing where the pinned php-src would, with the directories
+/// the per-commit lane's rows name and no test in them.
+fn fixture_tree() -> PathBuf {
+    let tree = std::env::temp_dir().join(format!("xtask-phpt-tree-{}", std::process::id()));
+    for under in ["Zend/tests", "tests", "sapi/cli/tests", "ext/pcre/tests"] {
+        fs::create_dir_all(tree.join(under)).unwrap();
+    }
+    tree
 }
 
 /// The tracked pin's binary, when it is on this machine.
@@ -54,17 +66,17 @@ fn oracle() -> Option<PathBuf> {
     }
 }
 
-/// The tracked pin's php-src tree, when it is on this machine. The tree
-/// the pin names is outside the clone (harness-design.md §5), so a runner
-/// has the corpus nowhere and the tests that resolve a subset of it say so
-/// and return, as the ones that spawn the oracle do.
+/// The tracked pin's php-src tree, when it is on this machine: what the
+/// variable names, else the pin's path (harness-design.md §4.3). A runner
+/// that sets neither has the corpus nowhere, and the tests that run a
+/// subset of it say so and return, as the ones that spawn the oracle do.
 fn source() -> Option<PathBuf> {
-    let tree = manifest().pin.source.tree();
-    if tree.is_dir() {
-        Some(tree)
-    } else {
-        eprintln!("the pinned php-src is not at {}; skipping", tree.display());
-        None
+    match manifest().pin.source.tree() {
+        Ok(tree) => Some(tree),
+        Err(absent) => {
+            eprintln!("{absent}; skipping");
+            None
+        }
     }
 }
 
@@ -138,26 +150,15 @@ impl Scratch {
     }
 }
 
-/// The tracked pin with its `[source]` tree at `corpus`: the path is the
-/// pin's own and `parse` is the way in.
+/// The tracked pin with its tree at `corpus`, as if the variable named
+/// it: the way a test points the pin at a tree of its own.
 fn pin_over(corpus: &Path) -> Pin {
-    let text = fs::read_to_string(workspace().join("oracle.toml")).unwrap();
-    let mut in_source = false;
-    let text: Vec<String> = text
-        .lines()
-        .map(|line| {
-            if line.starts_with('[') {
-                in_source = line.trim() == "[source]";
-            }
-            if in_source && line.starts_with("path = ") {
-                format!("path = {:?}", corpus.display().to_string())
-            } else {
-                line.to_owned()
-            }
-        })
-        .collect();
-    let pin = Pin::parse(&text.join("\n")).unwrap();
-    assert_eq!(pin.source.tree(), corpus, "the tree is the scratch corpus");
+    let pin = manifest().pin.on_this_machine(Some(corpus.to_path_buf()));
+    assert_eq!(
+        pin.source.tree().unwrap(),
+        corpus,
+        "the tree is the scratch corpus"
+    );
     pin
 }
 
@@ -332,9 +333,6 @@ fn with_no_engine_built_the_reading_is_a_skip_that_says_so_and_no_test_runs() {
 
 #[test]
 fn a_subset_the_pinned_tree_has_not_is_a_reading_that_says_so_and_not_a_silent_drop() {
-    if source().is_none() {
-        return;
-    }
     let manifest =
         manifest_of([Crate::named("php_engine").with_phpt(&["Zend/tests", "Zend/nope"])]);
     // `done` asks a crate for a phpt reading whenever its row names one,
@@ -390,7 +388,8 @@ fn a_run_with_no_subset_runs_the_lane_rather_than_refusing() {
 
 #[test]
 fn the_reading_of_an_extension_subset_is_stamped_over_the_crate_so_done_can_read_it() {
-    let manifest = manifest();
+    let mut manifest = manifest();
+    manifest.pin = pin_over(&fixture_tree());
     let ask = Ask {
         subset: Some("pcre".to_owned()),
         ..Ask::default()
@@ -432,6 +431,67 @@ fn a_corpus_directory_no_crate_owns_is_stamped_over_the_workspace() {
         Path::new(".")
     );
     assert_eq!(manifest.scope_path("Zend/nowhere"), None);
+}
+
+/// `Pin::load` is where the variable is read, so this is the one test
+/// that sets it: the binary, over a scratch clone whose pin names a tree
+/// that is nowhere, resolves `Zend/tests` from the fixture the variable
+/// names, and with the variable naming no directory refuses naming both.
+#[test]
+fn the_variable_names_the_tree_to_a_run_of_the_binary() {
+    let root = std::env::temp_dir().join(format!("xtask-phpt-variable-{}", std::process::id()));
+    scratch_workspace(workspace(), &root).unwrap();
+    // The scratch clone's pin, its `[source].path` pointed nowhere, so the
+    // fallback is absent whichever machine this runs on.
+    let pinned = root.join("nowhere-pinned");
+    let pin = root.join("oracle.toml");
+    let mut in_source = false;
+    let text: Vec<String> = fs::read_to_string(&pin)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            if line.starts_with('[') {
+                in_source = line.trim() == "[source]";
+            }
+            if in_source && line.starts_with("path = ") {
+                format!("path = {:?}", pinned.display().to_string())
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect();
+    fs::write(&pin, text.join("\n")).unwrap();
+    let tree = fixture_tree();
+    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("--root")
+        .arg(&root)
+        .args(["phpt", "--subset", "Zend/tests"])
+        .env(xtask::oracle::TREE_VARIABLE, &tree)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stdout.contains("Zend/tests") && !stderr.contains("neither place"),
+        "the subset resolved under the fixture:\n{stdout}\n{stderr}"
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("--root")
+        .arg(&root)
+        .args(["phpt", "--subset", "Zend/tests"])
+        .env(xtask::oracle::TREE_VARIABLE, root.join("nowhere"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(!out.status.success());
+    assert!(
+        stderr.contains(&format!(
+            "{}={}",
+            xtask::oracle::TREE_VARIABLE,
+            root.join("nowhere").display()
+        )) && stderr.contains(&pinned.display().to_string()),
+        "both places are named: {stderr}"
+    );
 }
 
 #[test]

@@ -7,8 +7,10 @@
 //! The tests that spawn php run the pinned oracle as the binary under
 //! test, which is the runner's own control: it measures the judge, since
 //! the engine that will be measured does not exist yet. They say so on
-//! stderr and return when the pinned binary is not on this machine; the
-//! rest run anywhere.
+//! stderr and return when the pinned binary is not on this machine, as
+//! the ones that resolve a subset of the real corpus do when the pinned
+//! tree is on neither place `Source::tree` looks; the rest run anywhere,
+//! the subsets they resolve being a fixture tree's.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -26,11 +28,36 @@ fn manifest() -> Manifest {
     Manifest::load(&workspace()).unwrap()
 }
 
-/// A manifest of these `[[crate]]` rows under the tracked pin.
+/// A manifest of these `[[crate]]` rows under the tracked pin, its tree
+/// the fixture's.
 fn manifest_of(rows: impl IntoIterator<Item = Crate>) -> Manifest {
     let mut manifest = Manifest::of(rows);
-    manifest.pin = self::manifest().pin;
+    manifest.pin = self::manifest().pin.on_this_machine(Some(fixture_tree()));
     manifest
+}
+
+/// The tracked manifest with its tree the fixture's.
+fn tracked_over_fixture() -> Manifest {
+    let mut manifest = manifest();
+    manifest.pin = manifest.pin.clone().on_this_machine(Some(fixture_tree()));
+    manifest
+}
+
+/// A tree standing where the pinned php-src would, with the directories
+/// the per-commit lane's rows name and no test in them: what a subset
+/// resolves to is held here, and what one runs to is held over the real
+/// corpus by the tests that skip without it.
+fn fixture_tree() -> PathBuf {
+    let tree = std::env::temp_dir().join(format!("xtask-phpt-tree-{}", std::process::id()));
+    for under in ["Zend/tests", "tests", "sapi/cli/tests", "ext/pcre/tests"] {
+        fs::create_dir_all(tree.join(under)).unwrap();
+    }
+    tree
+}
+
+/// `Subset::resolve` over the tree the manifest's pin answers.
+fn resolve(manifest: &Manifest, name: &str) -> Result<Subset> {
+    Subset::resolve(manifest, &manifest.pin.source.tree()?, name)
 }
 
 /// The tracked pin's binary, when it is on this machine.
@@ -49,12 +76,12 @@ fn oracle() -> Option<PathBuf> {
 
 /// The tracked pin's php-src tree, when it is on this machine.
 fn source() -> Option<PathBuf> {
-    let tree = manifest().pin.source.tree();
-    if tree.is_dir() {
-        Some(tree)
-    } else {
-        eprintln!("the pinned php-src is not at {}; skipping", tree.display());
-        None
+    match manifest().pin.source.tree() {
+        Ok(tree) => Some(tree),
+        Err(absent) => {
+            eprintln!("{absent}; skipping");
+            None
+        }
     }
 }
 
@@ -307,16 +334,16 @@ fn the_test_s_own_ini_reaches_the_run() {
 
 #[test]
 fn the_subset_of_an_extension_is_its_tests_at_the_pinned_tag_and_the_scope_is_the_crate() {
-    let manifest = manifest();
+    let manifest = tracked_over_fixture();
     for name in ["pcre", "ext/pcre"] {
-        let subset = Subset::resolve(&manifest, name).unwrap();
+        let subset = resolve(&manifest, name).unwrap();
         assert_eq!(subset.scope, "ext/pcre");
         assert_eq!(subset.dirs.len(), 1, "{subset:#?}");
         assert_eq!(subset.dirs[0].under, Path::new("ext/pcre/tests"));
         assert_eq!(
             subset.dirs[0].dir,
-            manifest.pin.source.tree().join("ext/pcre/tests"),
-            "the subset is the pinned tree's"
+            fixture_tree().join("ext/pcre/tests"),
+            "the subset is the tree's the variable names"
         );
         assert_eq!(
             subset.id(&subset.dirs[0].dir.join("preg_match_basic.phpt")),
@@ -332,11 +359,11 @@ fn a_corpus_directory_is_a_subset_and_an_unknown_name_names_both_forms_tried() {
         return;
     }
     let manifest = manifest();
-    let subset = Subset::resolve(&manifest, "Zend/tests").unwrap();
+    let subset = resolve(&manifest, "Zend/tests").unwrap();
     assert_eq!(subset.scope, "Zend/tests");
     assert_eq!(subset.dirs[0].under, Path::new("Zend/tests"));
 
-    let error = Subset::resolve(&manifest, "nope").unwrap_err().to_string();
+    let error = resolve(&manifest, "nope").unwrap_err().to_string();
     assert!(
         error.contains("ext/nope") && error.contains("nope"),
         "{error}"
@@ -344,8 +371,23 @@ fn a_corpus_directory_is_a_subset_and_an_unknown_name_names_both_forms_tried() {
 }
 
 #[test]
+fn a_subset_resolves_under_the_tree_the_pin_was_handed_ahead_of_the_pins_path() {
+    // The fixture is what the variable names; the pin's path, the
+    // maintainer's tree or nothing, is not consulted while it is there.
+    let manifest = manifest_of([Crate::named("ext/pcre")]);
+    let tree = fixture_tree();
+    assert_eq!(manifest.pin.source.tree().unwrap(), tree);
+    let corpus = resolve(&manifest, "Zend/tests").unwrap();
+    assert_eq!(corpus.scope, "Zend/tests");
+    assert_eq!(corpus.dirs[0].dir, tree.join("Zend/tests"));
+    let extension = resolve(&manifest, "pcre").unwrap();
+    assert_eq!(extension.dirs[0].dir, tree.join("ext/pcre/tests"));
+    assert_eq!(extension.absent(), Vec::<&Path>::new(), "{extension:#?}");
+}
+
+#[test]
 fn a_tier_lane_and_a_control_are_readings_of_their_own() {
-    let subset = Subset::resolve(&manifest(), "pcre").unwrap();
+    let subset = resolve(&tracked_over_fixture(), "pcre").unwrap();
     let engine = Runner::Engine(PathBuf::from("target/debug/php"));
     assert_eq!(subset.scope(&engine, None), "ext/pcre");
     assert_eq!(subset.scope(&engine, Some(Lane::Force)), "ext/pcre@force");
@@ -362,7 +404,7 @@ fn a_tier_lane_and_a_control_are_readings_of_their_own() {
 #[test]
 fn a_crate_resolves_to_every_subset_its_row_names() {
     let manifest = manifest_of([Crate::named("php_engine").with_phpt(&["Zend/tests", "tests"])]);
-    let subset = Subset::resolve(&manifest, "php_engine").unwrap();
+    let subset = resolve(&manifest, "php_engine").unwrap();
     assert_eq!(subset.scope, "php_engine");
     let under: Vec<&Path> = subset.dirs.iter().map(|d| d.under.as_path()).collect();
     assert_eq!(under, [Path::new("Zend/tests"), Path::new("tests")]);
@@ -376,9 +418,7 @@ fn a_crate_resolves_to_every_subset_its_row_names() {
 #[test]
 fn a_crate_whose_row_names_no_subset_says_so_rather_than_looking_for_a_directory() {
     let manifest = manifest_of([Crate::named("php_heap")]);
-    let error = Subset::resolve(&manifest, "php_heap")
-        .unwrap_err()
-        .to_string();
+    let error = resolve(&manifest, "php_heap").unwrap_err().to_string();
     assert!(
         error.contains("php_heap") && error.contains("no phpt subset"),
         "{error}"
@@ -391,12 +431,9 @@ fn a_crate_whose_row_names_no_subset_says_so_rather_than_looking_for_a_directory
 
 #[test]
 fn a_directory_the_pinned_tree_has_not_is_kept_and_named_absent() {
-    if source().is_none() {
-        return;
-    }
     let manifest =
         manifest_of([Crate::named("php_engine").with_phpt(&["Zend/tests", "Zend/nope"])]);
-    let subset = Subset::resolve(&manifest, "php_engine").unwrap();
+    let subset = resolve(&manifest, "php_engine").unwrap();
     assert_eq!(subset.dirs.len(), 2, "{subset:#?}");
     assert_eq!(subset.absent(), [Path::new("Zend/nope")]);
 }
@@ -410,7 +447,7 @@ fn the_per_commit_lane_is_composed_from_the_crate_rows() {
         Crate::named("ext/pcre"),
         Crate::named("ext/curl").with_feature("curl"),
     ]);
-    let lane: Vec<String> = Subset::lane(&manifest)
+    let lane: Vec<String> = Subset::lane(&manifest, &fixture_tree())
         .into_iter()
         .map(|subset| subset.scope)
         .collect();
@@ -423,13 +460,10 @@ fn the_per_commit_lane_is_composed_from_the_crate_rows() {
 #[test]
 fn every_expectf_section_of_the_pinned_pcre_subset_compiles() {
     use crate::oracle::expect::Expectation;
-    let manifest = manifest();
-    let subset = Subset::resolve(&manifest, "pcre").unwrap();
-    let Ok(tests) = subset.tests() else { return };
-    if tests.is_empty() {
-        eprintln!("the pinned php-src tree is not on this machine; skipping");
-        return;
-    }
+    let Some(tree) = source() else { return };
+    let subset = Subset::resolve(&manifest(), &tree, "pcre").unwrap();
+    let tests = subset.tests().unwrap();
+    assert!(!tests.is_empty(), "the pinned tree has ext/pcre/tests");
     let mut seen = 0;
     for test in tests {
         let Ok(phpt) = file::Phpt::load(&test) else {

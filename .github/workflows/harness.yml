@@ -56,6 +56,11 @@ jobs:
         run: claude -p "/plugin-types $GITHUB_WORKSPACE/.claude/types"
       - run: npx -y -p typescript@5.9.3 tsc -p harness-plugins
       - run: claude plugin validate harness-plugins --strict
+      # The tests that resolve a subset of the real corpus find the pinned
+      # php-src tree where the variable `oracle::TREE_VARIABLE` names
+      # first and at the pin's path second (#36); the name is stated there
+      # alone. This runner sets it once #37 lays the tree down at the
+      # pin's commit; until then those tests skip, saying so on stderr.
       - run: cargo test -p xtask
   per-commit:
     name: the instruments, then done
