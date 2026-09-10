@@ -691,6 +691,26 @@ impl Manifest {
             })
     }
 
+    /// The `on = "pub"` rule whose scope lies under the crate whose
+    /// `[[crate]]` row lists `lock`: the note at the tool call that a new
+    /// public item needs its lock line in the same commit (`api.lock-line`
+    /// over `crates/php_engine/src/api/**` for `api.lock`, `xtask.lock-line`
+    /// over `xtask/src/**` for `xtask.lock`). The lock's reading carries the
+    /// rule's id, so the note and the failing diff read as one rule. `None`
+    /// for a lock no row lists or no such rule stands over.
+    pub fn lock_line_rule(&self, lock: &str) -> Option<&Rule> {
+        let row = self
+            .crates
+            .iter()
+            .find(|c| c.lock.iter().any(|l| l == lock))?;
+        let under = row.path();
+        self.rules.iter().find(|r| {
+            r.predicate.on.as_deref() == Some("pub")
+                && !r.scope.is_empty()
+                && r.scope.iter().all(|s| Path::new(s).starts_with(&under))
+        })
+    }
+
     /// The path a reading's `tree` is hashed over, relative to the root:
     /// the one mapping from a scope to its sources, so what an instrument
     /// stamps and what `done` hashes agree (harness-design.md §4.2, §4.5

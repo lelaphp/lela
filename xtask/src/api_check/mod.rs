@@ -4,9 +4,9 @@
 //! writes one reading per seam and one per crate:
 //!
 //! - A seam's lock is regenerated and diffed against the committed file. An
-//!   item lock (`heap.lock`, `unit.lock`, `api.lock`) is the public items of
-//!   the crate the lock lives with, `lock_from` deciding which for the
-//!   facade; an import lock (`sapi.lock`, `tier.lock`, the ones an `[[edge]]`
+//!   item lock (`heap.lock`, `unit.lock`, `api.lock`, and `xtask.lock`, the
+//!   harness's own, #55) is the public items of the crate the lock lives
+//!   with, `lock_from` deciding which for the facade; an import lock (`sapi.lock`, `tier.lock`, the ones an `[[edge]]`
 //!   cites by `lock` or `allowlist`, or a seam with `allowlist = true`) is
 //!   what the consumers `use` from the producer. `api.lock` is held under
 //!   `[budget] api_items`.
@@ -111,9 +111,11 @@ fn seam_reading(
     let stamped = || -> Result<Reading> {
         let mut reading = Reading::for_scope(INSTRUMENT, &seam.name, manifest, crates.root())?;
         reading.adr = adrs(&seam.adr);
-        // The manifest's `on = "pub"` note for the facade's lock.
-        if seam.lock == "api.lock" {
-            reading.rule = String::from("api.lock-line");
+        // The manifest's `on = "pub"` rule over the lock's home, the note at
+        // the tool call that a new public item needs its line: the reading
+        // carries its id, so the note and the failing diff read as one rule.
+        if let Some(rule) = manifest.lock_line_rule(&seam.lock) {
+            reading.rule.clone_from(&rule.id);
         }
         Ok(reading)
     };

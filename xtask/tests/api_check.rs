@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use xtask::api_check;
-use xtask::manifest::Manifest;
+use xtask::manifest::{Manifest, OneOrMany, Rule, Seam};
 use xtask::reading::{Reading, Status};
 
 fn workspace() -> &'static Path {
@@ -142,8 +142,9 @@ fn a_bundle_order_that_is_not_topological_fails() {
     assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
 }
 
-/// The tracked workspace: every seam whose producer does not exist yet is a
-/// skip, and the harness itself is within its edges.
+/// The tracked workspace: every seam whose lock has no home present yet,
+/// or that is generated, is a skip, and the harness itself is within its
+/// edges.
 #[test]
 fn the_workspace_today_has_no_failing_reading() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -154,9 +155,112 @@ fn the_workspace_today_has_no_failing_reading() {
         .collect();
     assert!(failed.is_empty(), "{}", failed.join("\n"));
     assert_eq!(of(&readings, "xtask").status, Status::Pass);
+    let unmeasured = manifest
+        .seams
+        .iter()
+        .filter(|seam| {
+            seam.generated
+                || manifest
+                    .lock_home(&seam.lock)
+                    .and_then(|home| manifest.crate_named(&home))
+                    .is_none_or(|home| !workspace().join(home.path()).join("Cargo.toml").is_file())
+        })
+        .count();
     assert_eq!(
         readings.iter().filter(|r| r.status == Status::Skip).count(),
-        manifest.seams.len(),
-        "one skip per seam: {readings:#?}"
+        unmeasured,
+        "one skip per seam without a home present: {readings:#?}"
     );
+}
+
+/// The rows a person adds for the harness's own lock (#55, harness §11:
+/// the agent proposes, the person commits), on a manifest that does not
+/// carry them yet: the `harness` seam over `xtask.lock`, the lock on the
+/// `xtask` crate row, and the `xtask.lock-line` rule that notes a new
+/// public item at the tool call. Once the tracked manifest carries them
+/// this adds nothing, and the two tests below hold the tracked rows.
+fn with_the_harness_rows(mut manifest: Manifest) -> Manifest {
+    if !manifest.seams.iter().any(|s| s.lock == "xtask.lock") {
+        let mut seam = Seam::named("harness", "xtask");
+        "xtask.lock".clone_into(&mut seam.lock);
+        seam.consumers = vec!["xtask".to_owned()];
+        manifest.seams.push(seam);
+    }
+    let row = manifest
+        .crates
+        .iter_mut()
+        .find(|c| c.name == "xtask")
+        .expect("the manifest has the xtask row");
+    if !row.lock.iter().any(|l| l == "xtask.lock") {
+        row.lock = OneOrMany::One("xtask.lock".to_owned());
+    }
+    if manifest.rule("xtask.lock-line").is_none() {
+        let mut rule = Rule::named("xtask.lock-line", "xtask/src/**");
+        rule.predicate.deny = None;
+        rule.predicate.on = Some("pub".to_owned());
+        "A new pub item in xtask needs its xtask.lock line in the same commit."
+            .clone_into(&mut rule.text);
+        manifest.rules.push(rule);
+    }
+    manifest
+}
+
+/// The negative control of the harness's lock: a public item with no line
+/// in `xtask/xtask.lock` fails the `harness` seam, the reading names the
+/// lock and the item and carries the `on = "pub"` rule over `xtask/src`,
+/// and a `pub(crate)` item is no public item.
+#[test]
+fn a_public_item_of_the_harness_without_its_lock_line_fails_naming_xtask_lock() {
+    let manifest = with_the_harness_rows(Manifest::load(workspace()).unwrap());
+    let readings = api_check::check(&manifest, &fixture("harness-lock"), false).unwrap();
+    let harness = of(&readings, "harness");
+    assert_eq!(harness.status, Status::Fail, "{}", harness.message);
+    assert!(
+        harness.message.contains("xtask/xtask.lock"),
+        "{}",
+        harness.message
+    );
+    assert!(harness.message.contains("measure"), "{}", harness.message);
+    assert!(
+        !harness.message.contains("inside"),
+        "pub(crate) is not public: {}",
+        harness.message
+    );
+    assert_eq!(harness.rule, "xtask.lock-line");
+    assert_eq!(harness.numbers["items"], 2.into());
+    assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
+}
+
+/// The committed `xtask/xtask.lock` is the harness's public items as they
+/// stand: held here under the rows before a person commits them, so a new
+/// public item without its line fails this test the way it will fail
+/// `api-check` once the row is the manifest's, and `xtask api-check
+/// --write` is what regenerates it then.
+#[test]
+fn the_harness_lock_is_current_over_the_tracked_workspace() {
+    let manifest = with_the_harness_rows(Manifest::load(workspace()).unwrap());
+    let readings = api_check::check(&manifest, workspace(), false).unwrap();
+    let harness = of(&readings, "harness");
+    assert_eq!(
+        harness.status,
+        Status::Pass,
+        "{}; a new public item of xtask needs its line in xtask/xtask.lock in the same commit",
+        harness.message
+    );
+    assert!(
+        harness.message.contains("xtask/xtask.lock"),
+        "{}",
+        harness.message
+    );
+    assert_eq!(harness.rule, "xtask.lock-line");
+    assert_eq!(
+        harness.tree(),
+        of(&readings, "xtask").tree(),
+        "the lock's reading is stamped over its home, the harness"
+    );
+    let failed: Vec<String> = failures(&readings)
+        .iter()
+        .map(|r| format!("{}: {}", r.scope, r.message))
+        .collect();
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
 }

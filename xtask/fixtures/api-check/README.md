@@ -14,3 +14,4 @@ built; the instrument reads manifests and sources.
 | `edge`      | a crate dependency outside its `[[edge]]` rows  | fail |
 | `deny-edge` | a `use` path across a `deny = true` module edge | fail |
 | `bundle`    | a bundle order that is not topological          | fail |
+| `harness-lock` | a public item of the harness with no line in `xtask.lock`, under the rows #55 proposes | fail |

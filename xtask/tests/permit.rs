@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use xtask::manifest::Manifest;
+use xtask::manifest::{Manifest, Rule};
 use xtask::permit::{Call, Kind, judge, judged_at_the_tool_call};
 use xtask::reading::{Status, Store};
 
@@ -104,6 +104,39 @@ fn every_rule_with_a_tool_or_a_scope_is_judged_or_is_an_after_the_write_sensor()
             after_the_write
         );
     }
+}
+
+/// The fixture of the `xtask.lock-line` rule #55 proposes, judged under
+/// the rule as its row would read, before a person commits it: the note
+/// fires on a new `pub` item under `xtask/src` and not on its neighbour.
+/// Once the tracked manifest carries the row, the walk above holds it and
+/// this adds nothing.
+#[test]
+fn the_proposed_xtask_lock_line_rule_notes_its_fixture_and_not_its_neighbour() {
+    let mut manifest = Manifest::load(workspace()).unwrap();
+    if manifest.rule("xtask.lock-line").is_none() {
+        let mut rule = Rule::named("xtask.lock-line", "xtask/src/**");
+        rule.predicate.deny = None;
+        rule.predicate.on = Some("pub".to_owned());
+        manifest.rules.push(rule);
+    }
+    let dir = fixtures().join("rules/xtask.lock-line");
+    let judged = judge(&manifest, workspace(), &call(&dir.join("note.json"))).unwrap();
+    let finding = judged
+        .findings
+        .iter()
+        .find(|f| f.rule == "xtask.lock-line")
+        .unwrap_or_else(|| panic!("the note did not fire: {judged:?}"));
+    assert_eq!(finding.kind, Kind::Note);
+    assert!(
+        judged.denial().is_none(),
+        "a note is not a denial: {judged:?}"
+    );
+    let judged = judge(&manifest, workspace(), &call(&dir.join("allow.json"))).unwrap();
+    assert!(
+        judged.findings.iter().all(|f| f.rule != "xtask.lock-line"),
+        "the neighbour fired: {judged:?}"
+    );
 }
 
 #[test]
