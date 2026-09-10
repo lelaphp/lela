@@ -187,6 +187,35 @@ fn the_adr_index_lists_every_adr_with_its_title_status_and_date() {
 /// The function-hook module, the one place the engine's cap is stated.
 const HOOK: &str = "harness-plugins/hooks/harness.ts";
 
+/// The declarations the module is typechecked against: a tracked file
+/// Claude Code writes (#62), whose first line names the build that wrote
+/// it, so the version the module was held to is a sensed fact and not a
+/// pin stated elsewhere; and the tsconfig beside it includes that
+/// directory, not a gitignored one.
+#[test]
+fn the_committed_declarations_carry_the_version_that_wrote_them() {
+    let header = read("harness-plugins/types/claude-code.d.ts");
+    let first = header.lines().next().unwrap_or_default();
+    let version = first
+        .strip_prefix("// Written by Claude Code ")
+        .and_then(|rest| rest.strip_suffix('.'))
+        .unwrap_or_else(|| panic!("the header names no build: {first}"));
+    assert!(
+        version.split('.').count() == 3 && version.split('.').all(|n| n.parse::<u32>().is_ok()),
+        "the version is three numbers: {first}"
+    );
+    let tsconfig: serde_json::Value =
+        serde_json::from_str(&read("harness-plugins/tsconfig.json")).unwrap();
+    let include = tsconfig["include"].as_array().unwrap();
+    assert!(include.iter().any(|i| i == "types"), "{include:?}");
+    assert!(
+        !include
+            .iter()
+            .any(|i| i.as_str().unwrap_or_default().contains(".claude")),
+        "{include:?}"
+    );
+}
+
 /// The room a block keeps under the cap: what a day's growth of the
 /// regions came to before the block was measured (#64), so a region that
 /// crosses the line fails here and not a session.

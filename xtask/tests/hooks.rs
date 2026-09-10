@@ -29,13 +29,16 @@ const REGIONS: [&str; 4] = [
 ];
 const LOCAL: &str = ".claude/harness.local.md";
 
-/// A scratch repository with the two stand-ins beside it: `root` is the
-/// repository, `bin` holds `cargo` and `computed`, `cargo.log` and
-/// `computed.log` hold one line per call, and `refuse` names the one
-/// `cargo` call that exits 1, when a test writes it.
+/// A scratch repository with the stand-ins beside it: `root` is the
+/// repository, `bin` holds `cargo` and `computed`, `plugin-bin` holds
+/// `claude` and `npx`, `cargo.log`, `computed.log` and `plugin.log` hold
+/// one line per call, and `refuse` names the one `cargo` call that exits
+/// 1, when a test writes it. `claude` says whether `plugin-bin` is on the
+/// hook's `PATH`: off, the hook finds no `claude` at all.
 struct Scratch {
     dir: PathBuf,
     root: PathBuf,
+    claude: bool,
 }
 
 /// The stand-in `computed` for each case, as the shell that answers `run`
@@ -95,6 +98,7 @@ fn scratch(name: &str, computed: &Computed) -> Scratch {
     let scratch = Scratch {
         dir: dir.clone(),
         root: fs::canonicalize(&root).unwrap(),
+        claude: true,
     };
     scratch.git(&["add", "."], false);
     scratch.git(&["commit", "-q", "-m", "regions and a crate"], false);
@@ -130,14 +134,48 @@ fn scratch(name: &str, computed: &Computed) -> Scratch {
             body = computed.body(),
         ),
     );
+    // The committer's Claude Code and npm, as the declarations step finds
+    // them: `claude -p "/plugin-types <dir>"` writes the header line the
+    // real one writes and records where and under what it ran; `plugin
+    // validate` and `npx` record the call alone.
+    let plugin_bin = dir.join("plugin-bin");
+    fs::create_dir_all(&plugin_bin).unwrap();
+    let log = dir.join("plugin.log");
+    executable(
+        &plugin_bin.join("claude"),
+        &format!(
+            "#!/bin/sh\n\
+             printf 'claude %s cwd=%s home=%s config=%s flag=%s\\n' \"$*\" \"$PWD\" \"$HOME\" \"${{CLAUDE_CONFIG_DIR:-}}\" \"${{CLAUDE_CODE_ENABLE_FUNCTION_HOOKS:-}}\" >> '{log}'\n\
+             if [ \"$1\" = -p ]; then dir=\"${{2#/plugin-types }}\"; mkdir -p \"$dir\"; printf '// Written by Claude Code 9.9.9.\\n' > \"$dir/claude-code.d.ts\"; fi\n\
+             exit 0\n",
+            log = log.display(),
+        ),
+    );
+    executable(
+        &plugin_bin.join("npx"),
+        &format!(
+            "#!/bin/sh\nprintf 'npx %s\\n' \"$*\" >> '{log}'\nexit 0\n",
+            log = log.display(),
+        ),
+    );
     scratch
 }
 
 impl Scratch {
     /// `git` in the repository, with the stand-ins first on `PATH` when
     /// `hooked`, so a hook git runs finds them; the exit and both streams.
+    /// Without `claude`, `PATH` is the stand-ins and the system's own
+    /// directories alone, so the hook finds no `claude` anywhere.
     fn run(&self, args: &[&str], hooked: bool) -> (i32, String) {
-        let path = std::env::var("PATH").unwrap_or_default();
+        let path = if self.claude {
+            format!(
+                "{}:{}",
+                self.dir.join("plugin-bin").display(),
+                std::env::var("PATH").unwrap_or_default()
+            )
+        } else {
+            "/usr/bin:/bin".to_owned()
+        };
         let mut command = Command::new("git");
         command
             .args(["-c", "commit.gpgsign=false"])
@@ -188,6 +226,17 @@ impl Scratch {
     /// The one `cargo` call, `<subcommand> <first argument>`, that exits 1.
     fn refuse(&self, call: &str) {
         fs::write(self.dir.join("refuse"), call).unwrap();
+    }
+
+    /// A change under the plugin, staged, and the commit through the hook.
+    fn stage_plugin_and_commit(&self) -> (i32, String) {
+        write(
+            &self.root,
+            "harness-plugins/hooks/harness.ts",
+            "export const register = () => {};\n",
+        );
+        self.git(&["add", "--", "harness-plugins/hooks/harness.ts"], false);
+        self.run(&["commit", "-q", "-m", "the module"], true)
     }
 
     /// A change under the crate, staged, and the commit through the hook.
@@ -248,6 +297,105 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
     assert!(agents.ends_with("rendered\n"), "{agents}");
     let status = scratch.git(&["status", "--porcelain"], false);
     assert_eq!(status, "", "what computed wrote is in the commit");
+    assert_eq!(
+        scratch.calls("plugin"),
+        Vec::<String>::new(),
+        "nothing under harness-plugins/ was staged, so the declarations step did not run"
+    );
+}
+
+/// The declarations step (#62): with a path under `harness-plugins/`
+/// staged, the committer's own Claude Code rewrites the tracked
+/// declaration file, `claude -p "/plugin-types <root>/harness-plugins/types"`
+/// with the flag that gates the command set, from a directory outside the
+/// clone with `HOME` and `CLAUDE_CONFIG_DIR` pointing at empty ones, so no
+/// settings, plugin or hook of the clone or the committer load; then
+/// `tsc` through the pinned `npx`, then `plugin validate --strict`; what
+/// was written is re-staged, so the commit carries the file whose header
+/// names the version.
+#[test]
+fn pre_commit_rewrites_the_declarations_when_the_plugin_is_staged() {
+    let scratch = scratch("declarations", &Computed::Rendered);
+    let before = scratch.head();
+    let (code, out) = scratch.stage_plugin_and_commit();
+    assert_eq!(code, 0, "{out}");
+    assert_ne!(scratch.head(), before, "the commit was allowed: {out}");
+
+    let root = scratch.root.display();
+    let calls = scratch.calls("plugin");
+    assert_eq!(calls.len(), 3, "{calls:?}");
+    let types = &calls[0];
+    let prefix = format!("claude -p /plugin-types {root}/harness-plugins/types cwd=");
+    assert!(types.starts_with(&prefix), "{types}");
+    let mut fields = types[prefix.len()..].split(' ');
+    let cwd = fields.next().unwrap();
+    let home = fields.next().unwrap().strip_prefix("home=").unwrap();
+    let config = fields.next().unwrap().strip_prefix("config=").unwrap();
+    assert_eq!(fields.next(), Some("flag=1"), "{types}");
+    for (name, dir) in [("cwd", cwd), ("HOME", home), ("CLAUDE_CONFIG_DIR", config)] {
+        assert!(!dir.is_empty(), "{name} is empty: {types}");
+        assert!(
+            !dir.starts_with(&format!("{root}/")) && dir != root.to_string(),
+            "{name} is inside the clone: {types}"
+        );
+        assert_ne!(
+            Some(dir.to_owned()),
+            std::env::var("HOME").ok(),
+            "{name} is the committer's own: {types}"
+        );
+    }
+    assert_eq!(
+        calls[1],
+        "npx -y -p typescript@5.9.3 tsc -p harness-plugins"
+    );
+    // The validate runs in the clone, under the committer's own environment.
+    assert!(
+        calls[2].starts_with(&format!(
+            "claude plugin validate harness-plugins --strict cwd={root} "
+        )),
+        "{}",
+        calls[2]
+    );
+
+    let committed = scratch.git(&["show", "--name-only", "--format=", "HEAD"], false);
+    let mut files: Vec<_> = committed.lines().collect();
+    files.sort_unstable();
+    assert_eq!(
+        files,
+        [
+            "AGENTS.md",
+            "harness-plugins/hooks/harness.ts",
+            "harness-plugins/types/claude-code.d.ts"
+        ]
+    );
+    let header = scratch.git(
+        &["show", "HEAD:harness-plugins/types/claude-code.d.ts"],
+        false,
+    );
+    assert_eq!(header, "// Written by Claude Code 9.9.9.\n");
+    let status = scratch.git(&["status", "--porcelain"], false);
+    assert_eq!(status, "", "what claude wrote is in the commit");
+}
+
+/// Without `claude` on `PATH` the declarations step is skipped by name,
+/// nothing else of it runs, and the commit is allowed: CI holds the
+/// module to the committed file.
+#[test]
+fn pre_commit_without_claude_skips_the_declarations_by_name_and_allows_the_commit() {
+    let mut scratch = scratch("no-claude", &Computed::Rendered);
+    scratch.claude = false;
+    let before = scratch.head();
+    let (code, out) = scratch.stage_plugin_and_commit();
+    assert_eq!(code, 0, "{out}");
+    assert_ne!(scratch.head(), before, "the commit was allowed: {out}");
+    assert!(
+        out.contains("pre-commit: claude is not on PATH; skipped"),
+        "{out}"
+    );
+    assert!(out.contains("harness-plugins/types"), "{out}");
+    assert_eq!(scratch.calls("plugin"), Vec::<String>::new());
+    let committed = scratch.git(&["show", "--name-only", "--format=", "HEAD"], false);
+    assert!(!committed.contains("harness-plugins/types"), "{committed}");
 }
 
 /// A region a hand edited is refused with the line naming

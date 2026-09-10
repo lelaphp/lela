@@ -5,5 +5,5 @@ target/
 # The worktrees: a track's, laid by `xtask worktree add`, and Claude Code's own.
 /.claude/worktrees/
 
-# The function-hook declarations /plugin-types writes for this build; regenerated, never edited.
+# Where the function-hook declarations were written before #62; they are tracked at harness-plugins/types now, and a stale copy here does no harm.
 .claude/types/

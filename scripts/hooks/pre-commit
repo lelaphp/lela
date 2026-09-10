@@ -13,15 +13,59 @@
 # for every caller and refuses a broken marker, a missing computed and an
 # untrusted clone; what it wrote is re-staged, and a hand-edited region is
 # refused, since only a person runs --force. Every command's own exit is
-# read; the commit is refused while any failed. Installed per clone by the
+# read; the commit is refused while any failed. When a path under
+# harness-plugins/ is staged, the function-hook declarations are rewritten
+# first (#62): harness-plugins/types is a tracked generated file, written
+# by the committer's own Claude Code from a directory outside the clone
+# with an empty HOME and CLAUDE_CONFIG_DIR, so no settings, plugin or hook
+# load, under the flag that gates `/plugin-types`; `tsc` then holds the
+# module to it and `plugin validate --strict` reads the manifest,
+# hooks.json and the module, and what was written is staged. Without
+# `claude` on PATH that step is skipped by name and the commit goes on:
+# CI holds the module to the committed file. Installed per clone by the
 # SessionStart hook, or by hand: `git config core.hooksPath scripts/hooks`.
 set -u
 cd "$(git rev-parse --show-toplevel)"
+root=$PWD
 X='cargo xtask'
 status=0
 step() {
     "$@" || { echo "pre-commit: $* failed" >&2; status=1; }
 }
+# A node program (`claude`, `npx`) leaves O_NONBLOCK on the stdout it
+# inherits, and every instrument after it through the same pipe then fails
+# to print with EAGAIN; so each runs on a pipe of its own, its text echoed
+# after, its exit read.
+buffered() {
+    local out exit
+    out=$("$@" 2>&1)
+    exit=$?
+    [ -n "$out" ] && printf '%s\n' "$out"
+    return "$exit"
+}
+declarations() {
+    local outside exit
+    outside=$(mktemp -d) || return 1
+    mkdir -p "$outside/home" "$outside/config"
+    (
+        cd "$outside" && HOME="$outside/home" CLAUDE_CONFIG_DIR="$outside/config" \
+            CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
+            buffered claude -p "/plugin-types $root/harness-plugins/types"
+    )
+    exit=$?
+    rm -rf "$outside"
+    return "$exit"
+}
+if ! git diff --cached --quiet -- harness-plugins; then
+    if command -v claude >/dev/null 2>&1; then
+        step declarations
+        step buffered npx -y -p typescript@5.9.3 tsc -p harness-plugins
+        step buffered claude plugin validate harness-plugins --strict
+        git add -- harness-plugins/types
+    else
+        echo "pre-commit: claude is not on PATH; skipped rewriting harness-plugins/types, tsc and plugin validate" >&2
+    fi
+fi
 step cargo fmt --check
 step $X clippy --staged
 step $X api-check
