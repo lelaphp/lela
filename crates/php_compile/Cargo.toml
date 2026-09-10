@@ -1,0 +1,17 @@
+# php_compile: single pass typed tree -> php_unit::Unit (design §4.1, §6.1).
+[package]
+name = "php_compile"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The compiler: tree to unit, after zend_compile.c"
+
+[lints]
+workspace = true
+
+[dependencies]
+php_heap = { path = "../php_heap" }
+php_syntax = { path = "../php_syntax" }
+php_unit = { path = "../php_unit" }
