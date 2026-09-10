@@ -167,6 +167,14 @@ name = "php_heap"
 version = "0.0.0"
 
 [[package]]
+name = "php_unit"
+version = "0.0.0"
+dependencies = [
+ "php_heap",
+ "toml",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"

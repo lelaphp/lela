@@ -81,14 +81,14 @@ third-engine-design.md
 | seam | lock | items | ceiling | reading |
 |---|---|---|---|---|
 | heap | heap.lock | 51 |  | pass |
-| unit | unit.lock |  |  | skip |
+| unit | unit.lock | 35 |  | pass |
 | ops | ops.lock |  |  | skip |
 | api | api.lock |  | 400 | skip |
 | sapi | sapi.lock |  |  | skip |
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 237 |  | pass |
 
-<!-- /computed in=338aca224168b1832e9f9abf1c1d3e5a488be406475baa676a2724297f6e779f out=221c059dda1614851feaf8b9e73c630d02a11e98b26f8db7e3e9c115f456ca60 -->
+<!-- /computed in=aa0c8f3cd157bb8d4fe611b7054bb3a716eb5354aa5e6e72696bf373312d74e7 out=9322594fcfa947c2907b8468593eb428e41173fe8dc5b9b9e43082792504d827 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -151,9 +151,10 @@ Options:
 ```
 .
 ├── php_ext
-└── php_heap
+├── php_heap
+└── php_unit
 ```
-<!-- /computed in=17252c1b03ffbe8d202c830816135a23d2d2d8ed7dbbee427c3d323433087949 out=070e3a36abca005a2f452afdf163ed11dd66c380b42f016201664299f0d77dc4 -->
+<!-- /computed in=432718407e440df4b539a5586dff3479cdba10c7ae24a245a4775ba07edad6dd out=3cce056adaa5d85a3d8f979b08fe15d59e52944b7abf453cf09faa37bc316863 -->
 <!-- computed tree src=ext depth=1 name=layout-ext | do not edit; run computed -->
 ```
 .
