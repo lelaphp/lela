@@ -442,7 +442,7 @@ fn instrument(readings: &[Reading], name: &str) -> Vec<Row> {
 /// The `permits` section (harness-design.md §4.6, §10 rule 6): each rule
 /// `permit` judges, its last finding in the store, and the denials the
 /// append-only log holds per session, newest session first, and in total;
-/// then the query behind the CI summary (§7): the log per instrument, its
+/// then the query behind CI's §7 section: the log per instrument, its
 /// readings and failures, and whether none failed in the last fourteen
 /// days, which makes it a candidate for silent.
 fn permits(
@@ -520,7 +520,7 @@ fn permit_rows(
     let manifests = manifest
         .rules
         .iter()
-        .filter(|rule| permit::judged_at_the_tool_call(rule))
+        .filter(|rule| permit::judged_at_the_call(rule))
         .map(|rule| (rule.id.clone(), rule.adr.iter().collect::<Vec<_>>()));
     let permits = [permit::REGION_RULE, permit::STALE_RULE]
         .into_iter()
@@ -583,7 +583,7 @@ fn denials_per_session(log: &[Reading], rule: &str) -> Vec<(String, usize)> {
         .collect()
 }
 
-/// One instrument's line of the CI summary (harness-design.md §7).
+/// One instrument's line of what CI renders (harness-design.md §7).
 struct InstrumentLine {
     name: String,
     readings: usize,

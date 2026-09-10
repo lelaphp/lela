@@ -202,7 +202,7 @@ mod tests {
                     pub use self::rwlock::{\n    RwLock, RwLockReadGuard,\n};\n\
                     pub use ::lock_api;\n\
                     pub struct Once(u8);\n\
-                    pub type Result<T> = core::result::Result<T, E>;\n\
+                    pub type Verdict<T> = core::result::Result<T, E>;\n\
                     pub fn f() {}\n\
                     struct Private;\n";
         assert_eq!(
@@ -213,9 +213,9 @@ mod tests {
                 "MutexGuard",
                 "Once",
                 "RawMutex",
-                "Result",
                 "RwLock",
-                "RwLockReadGuard"
+                "RwLockReadGuard",
+                "Verdict"
             ]
         );
     }

@@ -15,7 +15,7 @@ use crate::git::git;
 use crate::manifest::{self, Manifest};
 use crate::reading::{Reading, Status, Store};
 
-/// The bar of §4.4: p99 latency at the tool call, in milliseconds. What
+/// The bar of §4.4: p99 latency at the call, in milliseconds. What
 /// `--bar` defaults to; a test misses it on purpose by passing a lower one.
 pub(crate) const BAR_MS: f64 = 100.0;
 
@@ -175,7 +175,7 @@ fn scratch_workspace(root: &Path, dir: &Path) -> Result<()> {
 
 /// `permit --bench`: measure, print one line per shape and the verdict,
 /// record the reading, over the harness crate whose sources the judge is.
-/// A measurement and not a gate (§4.4, #61): the reading carries `pass`
+/// A measurement, which owes no exit (§4.4, #61): the reading carries `pass`
 /// or `fail` against `bar_ms`, and the exit is 0 whatever it says, since
 /// a bench number is a claim a person reads with the A/A control.
 pub(crate) fn run_bench(

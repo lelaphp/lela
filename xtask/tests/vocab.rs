@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use xtask::manifest::{Manifest, OneOrMany};
+use xtask::manifest::{AvoidFrom, Manifest, Rule};
 use xtask::reading::{Number, Reading, Status, Store};
 use xtask::vocab;
 
@@ -42,30 +42,7 @@ fn scratch(name: &str, krate: &str, from: &Path) -> PathBuf {
         format!("[package]\nname = \"{package}\"\nedition = \"2024\"\n"),
     )
     .unwrap();
-    for args in [
-        vec!["init", "-q"],
-        vec!["add", "."],
-        vec![
-            "-c",
-            "user.name=xtask",
-            "-c",
-            "user.email=xtask@localhost",
-            "commit",
-            "-q",
-            "-m",
-            "fixture",
-        ],
-    ] {
-        let ok = Command::new("git")
-            .arg("-C")
-            .arg(&dir)
-            .args(args)
-            .status()
-            .unwrap()
-            .success();
-        assert!(ok);
-    }
-    dir
+    committed(dir)
 }
 
 /// The one reading of `php_ext` over the `vocab.avoid` fixture standing as
@@ -204,10 +181,75 @@ fn a_crate_that_does_not_exist_yet_gets_no_reading() {
     );
 }
 
+/// `dir` as a repository with everything under it in one commit, so a
+/// reading can be stamped.
+fn committed(dir: PathBuf) -> PathBuf {
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=xtask",
+            "-c",
+            "user.email=xtask@localhost",
+            "commit",
+            "-q",
+            "-m",
+            "fixture",
+        ],
+    ] {
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(args)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+    }
+    dir
+}
+
+/// A copy of the fixture at `from` in a scratch directory, whole, with the
+/// tracked pin beside it where the fixture's manifest points, and one
+/// commit: a fixture that carries its own `seams.toml` is a workspace of
+/// its own (#57), and the pin it names by path is the real one.
+fn scratch_workspace(name: &str, from: &Path) -> PathBuf {
+    let base = std::env::temp_dir().join(format!("xtask-vocab-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("a/b/c/d");
+    copy_tree(from, &dir);
+    std::fs::copy(workspace().join("oracle.toml"), base.join("oracle.toml")).unwrap();
+    committed(dir)
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+/// The readings of `vocab` over the fixture at `dir` under the manifest
+/// the fixture carries.
+fn fixture_readings(name: &str, dir: &Path) -> Vec<Reading> {
+    let root = scratch_workspace(name, dir);
+    let manifest = Manifest::load(&root).unwrap();
+    vocab::hold(&root, &manifest, &[]).unwrap()
+}
+
 /// Every rule `vocab` evaluates (the manifest's `avoid_from` rules, harness
 /// §4.1) has a negative-control fixture under `fixtures/rules/<id>/` that
-/// must fail under the instrument. The rules of the other instruments are
-/// theirs to control.
+/// must fail under the instrument: judged by the manifest the fixture
+/// carries when it carries one (#57), and standing as `crates/php_ext`
+/// under the tracked manifest otherwise. The rules of the other
+/// instruments are theirs to control.
 #[test]
 fn every_rule_vocab_evaluates_has_a_fixture_that_fails() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -225,13 +267,18 @@ fn every_rule_vocab_evaluates_has_a_fixture_that_fails() {
             rule.id,
             dir.display()
         );
-        let root = scratch(&format!("rule-{}", rule.id), "crates/php_ext", &dir);
-        let readings = vocab::hold(
-            &root,
-            &Manifest::load(&root).unwrap(),
-            &["php_ext".to_owned()],
-        )
-        .unwrap();
+        let name = format!("rule-{}", rule.id);
+        let readings = if dir.join("seams.toml").is_file() {
+            fixture_readings(&name, &dir)
+        } else {
+            let root = scratch(&name, "crates/php_ext", &dir);
+            vocab::hold(
+                &root,
+                &Manifest::load(&root).unwrap(),
+                &["php_ext".to_owned()],
+            )
+            .unwrap()
+        };
         assert!(
             readings
                 .iter()
@@ -242,50 +289,123 @@ fn every_rule_vocab_evaluates_has_a_fixture_that_fails() {
     }
 }
 
-/// The tracked `vocab.avoid` rule with `xtask` in its scope, the row a
-/// person adds (#58). Once the tracked scope covers the harness this adds
-/// nothing.
-fn with_the_harness_in_scope(mut manifest: Manifest) -> Manifest {
-    let rule = manifest
+/// A rule whose `avoid_from` names a section holds its scope to the terms
+/// under that heading alone (#63): over the `vocab.harness` fixture, whose
+/// glossary has an Engine section and a Harness section, the Harness
+/// words fire in prose and in a name, the Engine words (`run`, `registry`)
+/// do not, `Result` is the code spelling the section's own entry marks,
+/// and the fixture under the crate's `fixtures/` is not read. Without the
+/// grammar the fixture's manifest does not load.
+#[test]
+fn a_section_holds_its_scope_to_that_sections_terms_and_a_fixture_under_the_crate_is_not_read() {
+    let readings = fixture_readings("section", &fixture("vocab.harness"));
+    assert_eq!(readings.len(), 1, "{readings:#?}");
+    let reading = &readings[0];
+    assert_eq!(reading.scope, "xtask");
+    assert_eq!(reading.rule, "vocab.harness");
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    let found = findings(reading);
+    assert_eq!(
+        found,
+        [
+            "src/lib.rs:6: \"scoreboard\" in rustdoc prose; the glossary says \"Tally\"",
+            "src/lib.rs:10: \"summary\" names `pub fn summary`; the glossary says \"Tally\"",
+        ],
+        "{}",
+        reading.message
+    );
+    assert_eq!(reading.numbers["hits"], Number::count(2));
+    assert_eq!(
+        reading.numbers["items"],
+        Number::count(3),
+        "the fixture's items are not counted"
+    );
+}
+
+/// Two `avoid_from` rules whose scopes cover one crate are refused by
+/// name: the store holds one vocab reading per crate.
+#[test]
+fn two_rules_over_one_crate_are_refused() {
+    let dir = fixture("vocab.harness");
+    let root = scratch_workspace("two", &dir);
+    let mut manifest = Manifest::load(&root).unwrap();
+    let mut second = Rule::named("vocab.whole", "xtask");
+    second.predicate.deny = None;
+    second.predicate.avoid_from = Some(AvoidFrom::File("CONTEXT.md".to_owned()));
+    manifest.rules.push(second);
+    let err = vocab::hold(&root, &manifest, &[]).unwrap_err().to_string();
+    assert!(
+        err.contains("2 rules") && err.contains("vocab.harness, vocab.whole"),
+        "{err}"
+    );
+}
+
+/// The tracked manifest with the row a person adds (#63): a second
+/// `avoid_from` rule over `xtask` that reads the glossary's Harness section
+/// alone, built through the constructors while no tracked rule covers the
+/// harness. Once one does this adds nothing.
+fn with_the_harness_rule(mut manifest: Manifest) -> Manifest {
+    let covered = manifest
         .rules
-        .iter_mut()
-        .find(|r| r.predicate.avoid_from.is_some())
-        .expect("the manifest has the vocab.avoid rule");
-    if !rule.covers(Path::new("xtask")) {
-        let mut scope: Vec<String> = rule.scope.iter().map(str::to_owned).collect();
-        scope.push("xtask".to_owned());
-        rule.scope = OneOrMany::Many(scope);
+        .iter()
+        .any(|r| r.predicate.avoid_from.is_some() && r.covers(Path::new("xtask")));
+    if !covered {
+        let mut rule = Rule::named("vocab.harness", "xtask");
+        rule.predicate.deny = None;
+        rule.predicate.avoid_from = Some(AvoidFrom::Section {
+            file: "CONTEXT.md".to_owned(),
+            section: "Harness".to_owned(),
+        });
+        "The Harness section's _Avoid_ words appear in no public item name or rustdoc prose of the harness."
+            .clone_into(&mut rule.text);
+        manifest.rules.push(rule);
     }
     manifest
 }
 
-/// The verb for what an instrument does to a rule or a crate is `hold`, and
-/// the glossary's Instrument entry avoids `check` (#58): under the widened
-/// scope the harness's reading names `check` in no rustdoc sentence and in
-/// no public item beyond the two that spell a name the manifest grammar and
-/// the instrument list fix, `api_check` for `api-check` and the `check`
-/// predicate of a `[[rule]]`. The reading as a whole is a person's decision
-/// while the sensor reads the harness's own words (`run`, `lock`, `hook`,
-/// `region`) in the engine's sense.
+/// The harness held to the glossary's Harness section alone (#63): under
+/// the row `with_the_harness_rule` builds, `vocab` over `xtask` is one
+/// reading of rule `vocab.harness`, its rustdoc prose read and clean, and
+/// its public items clean beyond the names that are a grammar's: the
+/// instrument `api-check`'s module, the manifest's `check`, `tool` and
+/// `[telemetry]` keys, the pin's `script_name`, which is php's, and the
+/// hook's `tool_name` and `tool_input`. Those pass once the glossary's
+/// parentheticals mark them as code, a person's edit, and this list is
+/// then empty and the reading a pass.
 #[test]
-fn the_harness_names_nothing_check_that_hold_could_name() {
-    let manifest = with_the_harness_in_scope(Manifest::load(workspace()).unwrap());
+fn the_harness_reads_clean_under_the_harness_section_beyond_the_grammars_names() {
+    let manifest = with_the_harness_rule(Manifest::load(workspace()).unwrap());
     let readings = vocab::hold(workspace(), &manifest, &["xtask".to_owned()]).unwrap();
     assert_eq!(readings.len(), 1, "{readings:#?}");
     let reading = &readings[0];
     assert_eq!(reading.scope, "xtask");
-    assert_eq!(reading.rule, "vocab.avoid");
+    assert_eq!(reading.rule, "vocab.harness");
+    let count = |n: &str| reading.numbers[n].to_string().parse::<i64>().unwrap();
+    assert!(
+        count("items") > 100 && count("prose") > 1000,
+        "{reading:#?}"
+    );
     // Each finding less its `file:line:` head, which moves with the sources.
-    let check: Vec<&str> = findings(reading)
+    let found: Vec<&str> = findings(reading)
         .into_iter()
         .filter_map(|f| f.split_once(": ").map(|(_, rest)| rest))
-        .filter(|f| f.starts_with("\"check\" "))
         .collect();
+    let prose: Vec<&&str> = found
+        .iter()
+        .filter(|f| f.contains("in rustdoc prose"))
+        .collect();
+    assert!(prose.is_empty(), "{prose:#?}");
     assert_eq!(
-        check,
+        found,
         [
             "\"check\" names `pub mod api_check`; the glossary says \"Instrument\"",
+            "\"telemetry\" names `pub field telemetry`; the glossary says \"Reading\"",
+            "\"telemetry\" names `pub struct Telemetry`; the glossary says \"Reading\"",
+            "\"tool\" names `pub field tool`; the glossary says \"Instrument\"",
             "\"check\" names `pub field check`; the glossary says \"Instrument\"",
+            "\"script\" names `pub field script_name`; the glossary says \"Instrument\"",
+            "\"tool\" names `pub field tool_name`; the glossary says \"Instrument\"",
+            "\"tool\" names `pub field tool_input`; the glossary says \"Instrument\"",
         ],
         "{}",
         reading.message

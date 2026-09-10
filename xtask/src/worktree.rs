@@ -15,7 +15,7 @@
 //!   run … permit` inside the hook's 60 s timeout. So `xtask` is built
 //!   here, before the agent arrives, at the worktree's own HEAD, which is
 //!   what `built` compares its digests against (§12 item 8).
-//! * `core.hooksPath` is repository config and `.claude/settings.json` and
+//! * `core.hooksPath` is repository configuration and `.claude/settings.json` and
 //!   `oracle.toml` are tracked, so all three carry over on their own, as
 //!   the php-src tree the pin names does by being outside the clone. They
 //!   are reported, not set again.

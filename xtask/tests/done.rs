@@ -800,7 +800,7 @@ fn ci_test_job_writes_the_declarations_then_typechecks_and_validates_the_module(
 
 /// CI per commit (harness-design.md §7): the same instruments over the
 /// workspace, then `done`; the reading store is the only thing the run
-/// uploads; the summary is the permits section.
+/// uploads; what it renders is the permits section.
 #[test]
 fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
     let text = read(".github/workflows/harness.yml");

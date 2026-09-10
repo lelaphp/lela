@@ -51,7 +51,7 @@ pub(crate) enum Command {
         #[arg(long)]
         session: bool,
     },
-    /// Judge one intended tool call from the `PreToolUse` hook's stdin; the
+    /// Judge one intended call from the `PreToolUse` hook's stdin; the
     /// decision is the JSON on stdout and the exit is 0 always.
     Permit {
         /// The call as a JSON argument instead of stdin.
@@ -66,9 +66,9 @@ pub(crate) enum Command {
         /// content (pre-commit); exit 1 while any is denied.
         #[arg(long, conflicts_with = "bench")]
         diff: bool,
-        /// Measure p99 latency at the tool call against the bar: a
-        /// measurement, not a gate, so the reading says pass or fail and
-        /// the exit is 0 whatever it says.
+        /// Measure p99 latency at the call against the bar: a
+        /// measurement, which owes no exit, so the reading says pass or
+        /// fail and the exit is 0 whatever it says.
         #[arg(long)]
         bench: bool,
         /// How many calls `--bench` times.
@@ -233,7 +233,7 @@ pub enum Section {
     Mutants,
     /// Each rule permit judges: its last finding, denial or note, and the
     /// denials the log holds per session and in total; then the log per
-    /// instrument, with the candidates for silent (the CI summary).
+    /// instrument, with the candidates for silent (the CI section of §7).
     Permits,
     /// The weekly exit bar table: each `[[week]]` of the manifest with
     /// pass, fail or "no reading" from the readings it names.

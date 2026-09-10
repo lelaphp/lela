@@ -13,8 +13,9 @@ use anyhow::{Context, Result};
 use regex_lite::Regex;
 
 /// The one expectation a test carries. `--EXPECT--` is bytes, as the
-/// output is; the two pattern forms are words, and a byte of the output
-/// that is no character reaches the match as the replacement character.
+/// program's stdout is; the two pattern forms are words, and a byte of
+/// that stdout that is no character reaches the match as the replacement
+/// character.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expectation {
     /// `--EXPECT--`: the bytes, exactly.

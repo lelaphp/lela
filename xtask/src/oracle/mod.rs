@@ -1,7 +1,7 @@
 //! The oracle module (harness-design.md §4.3, §8; design §8): the pinned
 //! `php`, its recipe, and the two functions every comparison goes through.
 //! [`Oracle::run`] executes a program under the recipe and a regime and
-//! returns the normalised output; `compare` gives the verdict, consulting
+//! returns what it wrote, normalised; `compare` gives the verdict, consulting
 //! the divergence registry, so no instrument diffs on its own. The pin's
 //! grammar is this module's: `oracle.toml` is refused on a key outside it.
 //!
@@ -93,7 +93,7 @@ impl Source {
     }
 }
 
-/// `[recipe]`: how a program is run and how its output is normalised.
+/// `[recipe]`: how a program is run and how its streams are normalised.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Recipe {
@@ -193,7 +193,7 @@ impl Pin {
     }
 }
 
-/// What `run` executes: a snippet, written as the recipe's script with its
+/// What `run` executes: a snippet, written to the recipe's `script_name` with its
 /// preamble, or a file that already is a program, run from its directory.
 #[derive(Debug, Clone, Copy)]
 pub enum Program<'a> {
@@ -201,9 +201,9 @@ pub enum Program<'a> {
     File(&'a Path),
 }
 
-/// The normalised output of one run.
+/// What one run wrote and how it ended, normalised.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Output {
+pub struct Observation {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     /// The exit code, or `None` when a signal ended the process.
@@ -226,7 +226,7 @@ pub struct Invocation<'a> {
     pub regime: Option<&'a str>,
     /// Ini after the recipe's and the regime's: a test's `--INI--`.
     pub ini: &'a [String],
-    /// Arguments after the script: a test's `--ARGS--`.
+    /// Arguments after the program's path: a test's `--ARGS--`.
     pub args: &'a [String],
     /// Environment entries added to the recipe's: a test's `--ENV--`.
     pub env: &'a [(String, String)],
@@ -274,11 +274,11 @@ impl<'a> Oracle<'a> {
     }
 
     /// Run `program` under the pinned binary and the recipe, with
-    /// `regime`'s ini after it when one is named, and return the
-    /// normalised output. The digest is asserted before the first run
+    /// `regime`'s ini after it when one is named, and return what
+    /// it wrote, normalised. The digest is asserted before the first run
     /// through this value; the process runs with the recipe's environment
     /// alone, in the program's directory, under the recipe's timeout.
-    pub fn run(&self, program: Program<'_>, regime: Option<&str>) -> Result<Output> {
+    pub fn run(&self, program: Program<'_>, regime: Option<&str>) -> Result<Observation> {
         self.asserted()?;
         self.run_under(&Invocation {
             regime,
@@ -286,12 +286,12 @@ impl<'a> Oracle<'a> {
         })
     }
 
-    /// Run one invocation under the recipe and return the normalised
-    /// output. The digest is the pinned binary's alone and `run` asserts
+    /// Run one invocation under the recipe and return what it wrote,
+    /// normalised. The digest is the pinned binary's alone and `run` asserts
     /// it; a phpt lane runs the engine's binary here, under the same
     /// recipe, which is what makes the two comparable (harness-design.md
     /// §4.3, design §8).
-    pub fn run_under(&self, call: &Invocation<'_>) -> Result<Output> {
+    pub fn run_under(&self, call: &Invocation<'_>) -> Result<Observation> {
         let pin = self.pin;
         let regime = call.regime.map(|name| pin.regime(name)).transpose()?;
         let recipe = &pin.recipe;
@@ -356,7 +356,7 @@ impl<'a> Oracle<'a> {
         } else {
             fs::read(&err_path).context("reading php's stderr")?
         };
-        Ok(Output {
+        Ok(Observation {
             stdout: scratch.normalise(&recipe.normalise, stdout),
             stderr: scratch.normalise(&recipe.normalise, stderr),
             exit: status.code(),
@@ -467,7 +467,7 @@ pub fn normalise(rules: &Normalise, bytes: Vec<u8>) -> Vec<u8> {
     bytes[start..end].to_vec()
 }
 
-/// Where a program runs: its directory and script, and a directory of this
+/// Where a program runs: its directory and the file it is written to, and a directory of this
 /// run's own for the streams, removed on drop.
 struct Scratch {
     dir: PathBuf,

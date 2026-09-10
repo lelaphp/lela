@@ -33,7 +33,7 @@ pub struct Reading {
     /// | budget | unsafe-audit | bench | fuzz | mutants | permit | done | vocab
     /// | divergence-reason`.
     pub instrument: String,
-    /// A crate, a corpus subset, a gate id, or `"workspace"`.
+    /// A crate, a corpus subset, a bar's id such as `G1`, or `"workspace"`.
     pub scope: String,
     /// A manifest rule id when one applies, else empty.
     pub rule: String,
@@ -52,7 +52,7 @@ pub struct Reading {
     tree: String,
     pub commit: String,
     pub at: Datetime,
-    /// The session of the tool call a `permit` reading judged, from the
+    /// The session of the call a `permit` reading judged, from the
     /// hook's `session_id`; empty for every other instrument, and for a
     /// call that carried none.
     #[serde(default)]
@@ -298,7 +298,7 @@ impl Store {
 
     /// Record what a measurement read, every reading written as
     /// [`Store::record`] writes it, and owe no exit for it: the one
-    /// exception to the exit rule, stated here on the writer. A bench's
+    /// case the exit rule leaves out, stated here on the writer. A bench's
     /// reading keeps `pass` or `fail` against its bar, so `status` shows
     /// it, and the command exits 0 whatever the reading says, since a
     /// bench number is a claim a person reads with the A/A control
@@ -474,7 +474,7 @@ impl Log {
 /// any reading fails, 0 when every one passes or is skipped. The rule
 /// harness-design.md §4.5 states for `done` (exit 1 while anything is
 /// unmet), made every instrument's here, so no instrument maps a status
-/// to an exit on its own. The one exception is a measurement, which
+/// to an exit on its own. A measurement alone stands outside it: it
 /// records through [`Store::record_measurement`] and owes no exit (§4.4,
 /// #61).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

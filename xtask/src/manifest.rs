@@ -50,8 +50,9 @@ pub struct Manifest {
     pub root: PathBuf,
 }
 
-/// `[telemetry]`: the sensor telemetry's one number (harness-design.md
-/// §7), optional; without it `status` renders no silent column and says so.
+/// `[telemetry]`: the one number the silent-instrument query of
+/// harness-design.md §7 reads, optional; without it `status` renders no
+/// silent column and says so.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -265,11 +266,11 @@ impl Edge {
     }
 }
 
-/// `[[rule]]`: an `id`, a scope or a tool, one predicate, an optional `adr`,
-/// and the `text` a failure prints; for an `on` rule, which never denies,
-/// it is the note an allow carries. Two rules of the tracked manifest
-/// (`unsafe.homes`, `generated.committed`) carry neither scope nor tool, so
-/// their absence is not refused.
+/// `[[rule]]`: an `id`, a `scope` or a `tool`, one predicate, an optional
+/// `adr`, and the `text` a failure prints; for an `on` rule, which never
+/// denies, it is the note an allow carries. Two rules of the tracked
+/// manifest (`unsafe.homes`, `generated.committed`) carry neither `scope`
+/// nor `tool`, so their absence is not refused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -306,8 +307,39 @@ pub struct Predicates {
     pub deny: Option<bool>,
     pub deny_lints: Option<Vec<String>>,
     pub check: Option<String>,
-    pub avoid_from: Option<String>,
+    pub avoid_from: Option<AvoidFrom>,
     pub generated: Option<BTreeMap<String, String>>,
+}
+
+/// `avoid_from`: the glossary a `vocab` rule reads for its `_Avoid_` lists,
+/// whole (`avoid_from = "CONTEXT.md"`) or one heading of it
+/// (`avoid_from = { file = "CONTEXT.md", section = "Harness" }`), whose
+/// terms alone the scope is held to (harness-design.md §5). The harness
+/// means `lock`, `region` and `registry` in the sense the glossary's
+/// Harness terms give them, which its engine terms avoid, so the harness is
+/// held to that section and the engine to the file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AvoidFrom {
+    File(String),
+    Section { file: String, section: String },
+}
+
+impl AvoidFrom {
+    /// The glossary file, relative to the root.
+    pub fn file(&self) -> &str {
+        match self {
+            AvoidFrom::File(file) | AvoidFrom::Section { file, .. } => file,
+        }
+    }
+
+    /// The heading the scope is held to; `None` for the whole file.
+    pub fn section(&self) -> Option<&str> {
+        match self {
+            AvoidFrom::File(_) => None,
+            AvoidFrom::Section { section, .. } => Some(section),
+        }
+    }
 }
 
 impl Predicates {
@@ -348,7 +380,7 @@ impl Predicates {
     }
 
     /// Whether the predicate describes one write or one command, so `permit`
-    /// can judge it before the tool runs: `deny`, `deny_argv`, `deny_pattern`,
+    /// can judge it before the call runs: `deny`, `deny_argv`, `deny_pattern`,
     /// `deny_types`, `allow`, `on`. The other four read the tree after the
     /// write (harness-design.md §4.4).
     pub fn describes_a_call(&self) -> bool {
@@ -692,7 +724,7 @@ impl Manifest {
     }
 
     /// The `on = "pub"` rule named for `lock`, `<lock>-line`: the note at
-    /// the tool call that a new public item needs its lock line in the same
+    /// the call that a new public item needs its lock line in the same
     /// commit (`api.lock-line` for `api.lock`, `xtask.lock-line` for
     /// `xtask.lock`). The lock's reading carries the rule's id, so the note
     /// and the failing diff read as one rule. The name and not the crate

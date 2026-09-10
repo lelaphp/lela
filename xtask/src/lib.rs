@@ -1,7 +1,7 @@
 //! The harness for the third engine (`harness-design.md` §4): the seam
 //! manifest and the oracle pin loaded by one reader, the oracle module that
 //! owns every comparison and the divergence registry, the reading and its
-//! store, the instruments, `permit`, the judge at the tool call, `done`,
+//! store, the instruments, `permit`, the judge at the hook's call, `done`,
 //! the definition of done, `track`, the branch's track and its base,
 //! `vocab`, the glossary as a sensor, `phpt`, the
 //! subset runner, `witness`, the rustdoc witnesses, and `status`, the one
@@ -225,7 +225,7 @@ fn phpt_command(
 }
 
 /// `xtask divergence-reason`: the registry against the rule whose `check`
-/// names it. A helper of the shape `phpt` and `status` have, so that the
+/// names it. A function of the shape `phpt` and `status` have, so that the
 /// dispatch above stays a list of one arm per instrument: it is at clippy's
 /// hundred-line ceiling, and `witness` is the arm that tipped it.
 fn divergence_command(root: &Path, manifest: &Manifest, store: &Store) -> Result<()> {

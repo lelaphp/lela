@@ -21,7 +21,7 @@
 //! the oracle's status in place of a bare `exit` or a stale one, so the
 //! status is a function of snippet and oracle, captured and never authored.
 //! The manifest's `witness.exit-authored` rule denies the other path at the
-//! tool call, and this is why: nothing an agent writes can put a number
+//! call, and this is why: nothing an agent writes can put a number
 //! there. Read the diff it produces.
 //!
 //! **What coverage is.** The manifest's `witness.coverage` rule names the
@@ -37,7 +37,7 @@
 //! quietly skipped, as a phpt subset the pinned tree has not is.
 //!
 //! **What `wall=D` is.** Disclosure. The declared durations are summed into
-//! the reading's `wall_ms` and gate nothing; the limit a run has is the
+//! the reading's `wall_ms` and stop nothing; the limit a run has is the
 //! recipe's.
 
 pub(crate) mod fence;

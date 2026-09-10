@@ -100,7 +100,7 @@ impl Witness {
         format!("witness:{}", git::blob_id(self.snippet.as_bytes()))
     }
 
-    /// Where it stands, as a person reads a line of output.
+    /// Where it stands, as a person reads a printed line.
     pub fn at(&self) -> String {
         format!("{}:{}", self.file.display(), self.line)
     }
@@ -108,7 +108,7 @@ impl Witness {
 
 /// One kernel or native the coverage rule counts: a function item at
 /// indentation zero, visible past its own module (`pub` or `pub(crate)`).
-/// A private function beside one is a helper and is not counted; an
+/// A private function beside one is not counted; an
 /// associated function is not a kernel either, which is why the scan reads
 /// indentation zero alone. The definition is textual and sharpens when
 /// `crates/php_engine/src/ops` exists.

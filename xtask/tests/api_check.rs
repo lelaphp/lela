@@ -177,7 +177,7 @@ fn the_workspace_today_has_no_failing_reading() {
 /// the agent proposes, the person commits), on a manifest that does not
 /// carry them yet: the `harness` seam over `xtask.lock`, the lock on the
 /// `xtask` crate row, and the `xtask.lock-line` rule that notes a new
-/// public item at the tool call. Once the tracked manifest carries them
+/// public item at the call. Once the tracked manifest carries them
 /// this adds nothing, and the two tests below hold the tracked rows.
 fn with_the_harness_rows(mut manifest: Manifest) -> Manifest {
     if !manifest.seams.iter().any(|s| s.lock == "xtask.lock") {

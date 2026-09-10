@@ -9,10 +9,16 @@
 //! Matching is by whole word and ignores case, so `Registry` the type is
 //! `registry` the word. The one scoping the design asks for, `Result` is not
 //! `result`, is read from the glossary itself: an identifier the entry's
-//! parenthetical writes in backticks (`result (which means `Result` in
-//! Rust)`) is a spelling that is code, and that spelling, written exactly,
-//! is not a hit. Words are runs of letters and digits; a hyphen or an
-//! underscore separates two words, and a possessive `'s` is dropped.
+//! parenthetical writes in backticks, as the Return entry's does for
+//! `Result`, is a spelling that is code: that spelling, written exactly,
+//! is not a hit, and a public item so named is not one either. Words are
+//! runs of letters and digits; a hyphen or an underscore separates two
+//! words, and a possessive `'s` is dropped.
+//!
+//! A term stands under the nearest Markdown heading above it, and a rule
+//! may hold its scope to one heading's terms alone
+//! (`avoid_from = { file, section }`): the harness is held to `### Harness`,
+//! whose terms mean `lock`, `region` and `registry` as the harness does.
 
 use std::fs;
 use std::path::Path;
@@ -25,10 +31,12 @@ pub struct Glossary {
     pub terms: Vec<Term>,
 }
 
-/// One `**Name**:` entry and the phrases it avoids.
+/// One `**Name**:` entry and the phrases it avoids, under the heading
+/// above it (`Harness` for `### Harness`; empty above the first).
 #[derive(Debug, Clone)]
 pub struct Term {
     pub name: String,
+    pub section: String,
     pub avoid: Vec<Phrase>,
 }
 
@@ -76,14 +84,26 @@ impl Glossary {
     /// term above it is refused; a term with no `_Avoid_` line avoids nothing.
     pub fn parse(text: &str) -> Result<Glossary> {
         let mut terms: Vec<Term> = Vec::new();
+        let mut section = String::new();
+        let mut in_fence = false;
         for (index, line) in text.lines().enumerate() {
             let line = line.trim();
-            if let Some(name) = line
+            if line.starts_with("```") {
+                in_fence = !in_fence;
+            } else if in_fence {
+                // A fence is an example, not the glossary.
+            } else if let Some(heading) = line.strip_prefix('#') {
+                heading
+                    .trim_start_matches('#')
+                    .trim()
+                    .clone_into(&mut section);
+            } else if let Some(name) = line
                 .strip_prefix("**")
                 .and_then(|rest| rest.strip_suffix("**:"))
             {
                 terms.push(Term {
                     name: name.trim().to_owned(),
+                    section: section.clone(),
                     avoid: Vec::new(),
                 });
             } else if let Some(list) = line.strip_prefix("_Avoid_:") {
@@ -104,6 +124,36 @@ impl Glossary {
             }
         }
         Ok(Glossary { terms })
+    }
+
+    /// The terms under the heading `name` alone, in file order; refused
+    /// when no term stands under it, since a section that avoids nothing
+    /// would hold a scope to nothing and read as a pass.
+    pub fn section(&self, name: &str) -> Result<Glossary> {
+        let terms: Vec<Term> = self
+            .terms
+            .iter()
+            .filter(|t| t.section == name)
+            .cloned()
+            .collect();
+        if terms.is_empty() {
+            bail!(
+                "no term stands under a heading {name:?}; the headings are {}",
+                self.headings().join(", ")
+            );
+        }
+        Ok(Glossary { terms })
+    }
+
+    /// Every heading a term stands under, once, in file order.
+    fn headings(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for term in &self.terms {
+            if !out.contains(&term.section) {
+                out.push(term.section.clone());
+            }
+        }
+        out
     }
 
     /// The term named `name`, if the glossary has it.
@@ -290,6 +340,22 @@ mod tests {
     #[test]
     fn an_avoid_line_with_no_term_is_refused() {
         assert!(Glossary::parse("_Avoid_: x\n").is_err());
+    }
+
+    #[test]
+    fn a_section_is_the_terms_under_its_heading_and_an_empty_one_is_refused() {
+        let text = "## Language\n\n### Engine\n\n**A**:\n_Avoid_: x\n\n```\n# a comment in an example, not a heading\n**D**:\n_Avoid_: w\n```\n\n### Harness\n\n**B**:\n_Avoid_: y\n\n**C**:\n_Avoid_: z\n";
+        let g = Glossary::parse(text).unwrap();
+        assert_eq!(g.term("A").unwrap().section, "Engine");
+        assert!(g.term("D").is_none(), "a fence is not read");
+        let harness = g.section("Harness").unwrap();
+        let names: Vec<&str> = harness.terms.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["B", "C"]);
+        let phrases = harness.avoided_phrases();
+        let avoided: Vec<&str> = phrases.iter().map(|a| a.phrase.text.as_str()).collect();
+        assert_eq!(avoided, ["y", "z"]);
+        let err = g.section("Language").unwrap_err().to_string();
+        assert!(err.contains("Engine, Harness"), "{err}");
     }
     /// The tracked glossary, read as the sensor reads it.
     #[test]

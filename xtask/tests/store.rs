@@ -91,8 +91,8 @@ fn a_missing_reading_is_none_and_a_missing_store_has_no_readings() {
 
 /// The exit-code rule (harness-design.md §4.2, §4.5): an instrument whose
 /// readings all pass or are skipped exits 0, and one with any failing
-/// reading exits 1, however many it wrote. The one exception is the
-/// measurement (§4.4, #61): a bench's reading keeps `fail` against its
+/// reading exits 1, however many it wrote. A measurement alone stands
+/// outside it (§4.4, #61): a bench's reading keeps `fail` against its
 /// bar, so `status` shows it, and the writer owes no exit for it, since a
 /// bench number is a claim a person reads with the A/A control.
 #[test]

@@ -137,7 +137,7 @@ impl Verdict {
 
     /// The Stop hook's stdout: the block with the list while anything is
     /// unmet, nothing otherwise (harness-design.md §13 D.16).
-    pub(crate) fn hook_output(&self) -> Option<Value> {
+    pub(crate) fn hook_stdout(&self) -> Option<Value> {
         (!self.met()).then(|| block(&self.render()))
     }
 
@@ -449,7 +449,7 @@ pub(crate) fn hook(
             if let Err(err) = recorded {
                 eprintln!("xtask done: the verdict stands but was not recorded: {err:#}");
             }
-            verdict.hook_output()
+            verdict.hook_stdout()
         }
         Err(err) => Some(block(&format!("done could not judge the changes: {err:#}"))),
     }

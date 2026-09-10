@@ -8,7 +8,7 @@
 //! quiet kind that exits 0 and judges by rules, or with code, that have
 //! moved (#16 item 1 and its residue).
 //!
-//! `src/inputs.rs` is included rather than imported: a build script cannot
+//! `src/inputs.rs` is included rather than imported: `build.rs` cannot
 //! depend on the lib it builds, and one definition of the digest in two
 //! compilations is what keeps the value taken here and the value taken at
 //! run time the same.

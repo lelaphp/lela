@@ -1,6 +1,6 @@
 //! `xtask phpt`, the subset runner (harness-design.md §3, §7, §8; design
 //! §8). One subset of the pinned corpus is run through the engine under the
-//! oracle's own recipe, each test's output held to its `--EXPECT*--`
+//! oracle's own recipe, what each test wrote held to its `--EXPECT*--`
 //! section with php's normalisation, and the subset ends as one reading of
 //! instrument `phpt`, scoped to the crate whose subset it is, which is what
 //! `done` reads as condition 1.
@@ -481,7 +481,7 @@ fn percent(met: u64, found: u64) -> f64 {
 pub struct Ask {
     /// One subset by name; one of this and `full` is named.
     pub subset: Option<String>,
-    /// The whole corpus: the nightly lane, denied at the tool call.
+    /// The whole corpus: the nightly lane, denied at the call.
     pub full: bool,
     pub lane: Option<Lane>,
     /// The binary the process adapter runs; without it, the engine's own

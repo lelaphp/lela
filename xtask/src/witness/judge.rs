@@ -11,7 +11,9 @@ use super::fence::{Exit, Witness};
 use super::{Ask, Captured, Judged, Judgement, fence};
 use crate::divergence::Registry;
 use crate::oracle::expect::Expectation;
-use crate::oracle::{self, Invocation, Oracle, Output, Pin, Program, Runner, Verdict as Compared};
+use crate::oracle::{
+    self, Invocation, Observation, Oracle, Pin, Program, Runner, Verdict as Compared,
+};
 
 /// A verdict on one witness, placed where it stands and at the item it
 /// documents, which is what the printed line says after the id.
@@ -119,9 +121,9 @@ pub(super) fn one(
 }
 
 /// Whether a run meets what the fences pin: the two streams as the phpt
-/// runner matches an `--EXPECTF--` section, since a witness's output lines
+/// runner matches an `--EXPECTF--` section, since the lines a witness pins
 /// carry the same wildcards (design §8), and the status exactly.
-fn met(pin: &Pin, witness: &Witness, exit: Exit, ran: &Output) -> Result<bool> {
+fn met(pin: &Pin, witness: &Witness, exit: Exit, ran: &Observation) -> Result<bool> {
     if ran.exit != exit.asserted() {
         return Ok(false);
     }

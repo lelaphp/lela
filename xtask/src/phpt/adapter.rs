@@ -3,7 +3,7 @@
 //! it and run through the binary under test with the sections that shape
 //! one run (`--INI--`, `--ARGS--`, `--ENV--`, `--STDIN--`,
 //! `--CAPTURE_STDIO--`), its `SKIPIF` and `CLEAN` sections run beside it
-//! under the oracle, and its output held to its `--EXPECT*--` section with
+//! under the oracle, and what it wrote held to its `--EXPECT*--` section with
 //! php's normalisation. The verdict goes through [`oracle::verdict`], so
 //! the registry decides what a difference means (harness §4.3). The tally,
 //! the subsets and the reading are `phpt`'s; this is the per-item judge it
@@ -19,7 +19,7 @@ use super::file::Phpt;
 use super::{Judged, Judgement, Lane, Subset};
 use crate::divergence::Registry;
 use crate::oracle::expect::Expectation;
-use crate::oracle::{self, Invocation, Oracle, Output, Pin, Program, Verdict as Compared};
+use crate::oracle::{self, Invocation, Observation, Oracle, Pin, Program, Verdict as Compared};
 
 /// The fresh-process adapter of design §8's `ScriptExec` seam, bound to
 /// one run: the oracle and the registry, the binary it runs, the tier lane
@@ -177,7 +177,7 @@ impl<'a> Adapter<'a> {
     /// cleanup. Upstream runs them under the binary it is testing, so a
     /// `SKIPIF` that asks what the engine has is answered here by php; it
     /// is the runner's one known difference from upstream's verdicts.
-    fn run_section(&self, test: &Path, kind: &str, body: &[u8]) -> Result<Output> {
+    fn run_section(&self, test: &Path, kind: &str, body: &[u8]) -> Result<Observation> {
         let program = test.with_extension(format!("{kind}.php"));
         let written = Written::new(&program, body)?;
         let out = self
@@ -266,7 +266,7 @@ fn expectation_of(pin: &Pin, phpt: &Phpt) -> Option<Expectation> {
         .map(|body| Expectation::Pattern(trimmed_text(pin, &body)))
 }
 
-/// The recipe's normalisation over a section, which is what the output it
+/// The recipe's normalisation over a section, which is what the stdout it
 /// is compared with has been through; the oracle module owns the rule.
 fn trimmed(pin: &Pin, body: &[u8]) -> Vec<u8> {
     oracle::normalise(&pin.recipe.normalise, body.to_vec())
@@ -357,7 +357,7 @@ fn replace_all(regex: &Regex, text: &str, mut with: impl FnMut(&str) -> String) 
 }
 
 /// The reason a `SKIPIF` gave, when its first word is `word`:
-/// upstream's `/^skip\s*(.+)/i` over the section's output.
+/// upstream's `/^skip\s*(.+)/i` over what the section wrote.
 fn reason_after(word: &str, said: &str) -> Option<String> {
     let said = said.trim_start();
     if said.len() < word.len() || !said[..word.len()].eq_ignore_ascii_case(word) {

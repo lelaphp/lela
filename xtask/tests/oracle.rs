@@ -1,5 +1,5 @@
 //! The oracle module (harness-design.md §4.3): `run` executes a program under
-//! the pinned recipe and regime and returns normalised output; `compare`
+//! the pinned recipe and regime and returns what it wrote, normalised; `compare`
 //! returns the verdict every instrument uses and never lets one diff alone.
 //!
 //! The tests that spawn php need the pinned binary at the path the pin names

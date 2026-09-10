@@ -5,7 +5,7 @@
 //! are code.
 //!
 //! Two sensors of `unsafe.homes` read it. `permit` judges the whole written
-//! file at the tool call and `unsafe-audit` counts the sites of the file
+//! file at the call and `unsafe-audit` counts the sites of the file
 //! whole; before this module each carried a blanker of its own, and the
 //! harness's own negative controls are strings
 //! (`unsafe_sites("unsafe { a(); }")`), so the fidelity of the blanker
@@ -68,9 +68,9 @@ pub fn unsafe_sites(text: &str) -> Vec<usize> {
 }
 
 /// The text with its comments and its string, byte-string and character
-/// literals blanked, so a pattern over the result reads code alone. What
+/// literals blanked, so a pattern over it reads code alone. What
 /// is blanked keeps its length and its newlines, so an offset into the
-/// result is an offset into the text.
+/// blanked text is an offset into the text.
 ///
 /// A raw string closes on its own hash count, a block comment nests as
 /// Rust's does, a backslash escapes the quote that would end a string, and

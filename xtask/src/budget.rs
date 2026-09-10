@@ -1,7 +1,7 @@
 //! `xtask budget` (design §4.1, §10; harness-design.md §6, §12 item 6):
 //! every `[[crate]]` against its ceiling, the workspace against `[budget]`,
-//! committed generated code refused outside the declared exception, and
-//! that exception held to its regenerated form. The numbers are the
+//! committed generated code refused unless the manifest declares it, and
+//! a declared file held to its regenerated form. The numbers are the
 //! manifest's; nothing here states one. One reading per crate, one for the
 //! workspace, one per generated file.
 

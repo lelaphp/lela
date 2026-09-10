@@ -430,7 +430,7 @@ fn permits_renders_the_bench_reading_as_before() {
     );
 }
 
-/// The query behind the CI summary (harness-design.md §7): readings and
+/// The query behind CI's §7 section (harness-design.md): readings and
 /// failures per instrument from the log, and an instrument with readings
 /// but no failure in fourteen days is a candidate for silent; one whose
 /// fixture failed within the window is not.

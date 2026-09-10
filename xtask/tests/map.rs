@@ -1,6 +1,6 @@
 //! The context layer (harness-design.md §5): the map is short, its regions
 //! are the ones the design names, the per-directory guidance and the data index have
-//! their regions, the ADR index script lists every ADR, and the
+//! their regions, `scripts/adr-index.sh` lists every ADR, and the
 //! `SessionStart` hook is wired for the four matchers.
 
 use std::path::Path;

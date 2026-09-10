@@ -19,7 +19,7 @@ use crate::rust;
 /// The hook event the shipped adapter wires (§6).
 const HOOK_EVENT: &str = "PreToolUse";
 
-/// A rule's verdict on one call: a deny stops the tool, a note rides on
+/// A rule's verdict on one call: a deny stops the call, a note rides on
 /// the allow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -88,7 +88,7 @@ impl Judgement {
     }
 
     /// The hook's stdout: the deny, the allow with its notes, or nothing.
-    pub fn hook_output(&self) -> Option<Value> {
+    pub fn hook_stdout(&self) -> Option<Value> {
         if let Some(denial) = self.denial() {
             return Some(deny_output(&denial.reason()));
         }
@@ -117,8 +117,8 @@ pub(super) fn deny_output(reason: &str) -> Value {
 }
 
 /// Whether a rule describes a write or a command, so permit can judge it
-/// before the tool runs.
-pub fn judged_at_the_tool_call(rule: &Rule) -> bool {
+/// before the call runs.
+pub fn judged_at_the_call(rule: &Rule) -> bool {
     rule.predicate.describes_a_call()
 }
 

@@ -1,5 +1,5 @@
-//! `xtask permit`, the judge at the tool call (harness-design.md §4.4). It
-//! reads one intended tool call as the `PreToolUse` hook receives it, evaluates
+//! `xtask permit`, the judge at the hook's call (harness-design.md §4.4). It
+//! reads one intended call as the `PreToolUse` hook receives it, evaluates
 //! the region-body rule and then every manifest rule that describes a write
 //! or a command, in the manifest's order, and prints the hook's JSON: a deny
 //! with the rule's text and ADR, an allow whose `additionalContext` carries
@@ -36,10 +36,10 @@ mod rules;
 
 pub use adapters::{Adapter, run};
 pub(crate) use bench::{BAR_MS, run_bench};
-pub use call::{Call, ToolInput};
+pub use call::{Arguments, Call};
 pub(crate) use diff::judge_files;
 pub(crate) use diff::{run_diff, working_files};
-pub use rules::{Finding, Judgement, Kind, judge, judged_at_the_tool_call};
+pub use rules::{Finding, Judgement, Kind, judge, judged_at_the_call};
 
 /// The instrument name every reading of permit carries.
 pub(crate) const INSTRUMENT: &str = "permit";

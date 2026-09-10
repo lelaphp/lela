@@ -1,4 +1,4 @@
-//! One intended tool call as the hook receives it, and where it lands: the
+//! One intended call as the hook receives it, and where it lands: the
 //! file relative to the workspace, the workspace whose manifest judges the
 //! call, and the checkout that workspace is in.
 
@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::manifest;
 
-/// One intended tool call, as the hook receives it on stdin. `cwd` places
+/// One intended call, as the hook receives it on stdin. `cwd` places
 /// a call without a file in a worktree; `session_id` is what a reading
 /// carries so denials count per session (§10 rule 6); the other keys of
 /// the recorded shape (`permission_mode`, …) are carried by the JSON and
@@ -18,7 +18,7 @@ use crate::manifest;
 pub struct Call {
     pub tool_name: String,
     #[serde(default)]
-    pub tool_input: ToolInput,
+    pub tool_input: Arguments,
     #[serde(default)]
     pub cwd: Option<String>,
     #[serde(default)]
@@ -28,7 +28,7 @@ pub struct Call {
 /// The fields of `tool_input` a rule can read: an `Edit`'s, a `Write`'s or
 /// a `Bash` call's.
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct ToolInput {
+pub struct Arguments {
     pub file_path: Option<String>,
     pub old_string: Option<String>,
     pub new_string: Option<String>,
@@ -48,10 +48,10 @@ impl Call {
     pub(super) fn write_of(path: &str, content: Option<&str>) -> Call {
         Call {
             tool_name: "Write".to_owned(),
-            tool_input: ToolInput {
+            tool_input: Arguments {
                 file_path: Some(path.to_owned()),
                 content: content.map(str::to_owned),
-                ..ToolInput::default()
+                ..Arguments::default()
             },
             cwd: None,
             session_id: String::new(),

@@ -1,10 +1,10 @@
-//! `xtask permit`, the judge at the tool call (harness-design.md §4.4).
+//! `xtask permit`, the judge at the hook's call (harness-design.md §4.4).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use xtask::manifest::{Manifest, Rule};
-use xtask::permit::{Call, Kind, judge, judged_at_the_tool_call};
+use xtask::permit::{Call, Kind, judge, judged_at_the_call};
 use xtask::reading::{Status, Store};
 
 mod common;
@@ -31,7 +31,7 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
     let judged: Vec<_> = manifest
         .rules
         .iter()
-        .filter(|r| judged_at_the_tool_call(r))
+        .filter(|r| judged_at_the_call(r))
         .collect();
     assert!(
         judged.len() >= 8,
@@ -80,7 +80,7 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
     }
 }
 
-/// Every rule with a tool or a scope is either judged here, with its
+/// Every rule with a `tool` or a `scope` is either judged here, with its
 /// fixture, or carries one of the four predicates that read the tree after
 /// the write; a fifth kind cannot fall between the two.
 #[test]
@@ -97,10 +97,10 @@ fn every_rule_with_a_tool_or_a_scope_is_judged_or_is_an_after_the_write_sensor()
             || p.avoid_from.is_some()
             || p.generated.is_some();
         assert!(
-            judged_at_the_tool_call(rule) != after_the_write,
+            judged_at_the_call(rule) != after_the_write,
             "{}: judged {}, after the write {}",
             rule.id,
-            judged_at_the_tool_call(rule),
+            judged_at_the_call(rule),
             after_the_write
         );
     }
@@ -142,7 +142,7 @@ fn the_proposed_xtask_lock_line_rule_notes_its_fixture_and_not_its_neighbour() {
 #[test]
 fn a_rule_without_a_fixture_fails() {
     let manifest = Manifest::load(workspace()).unwrap();
-    for rule in manifest.rules.iter().filter(|r| judged_at_the_tool_call(r)) {
+    for rule in manifest.rules.iter().filter(|r| judged_at_the_call(r)) {
         let dir = fixtures().join("rules").join(&rule.id);
         assert!(dir.join("allow.json").is_file(), "{}", dir.display());
         assert!(
@@ -705,7 +705,7 @@ fn bench_measures_p99_against_the_bar_and_writes_a_reading() {
     );
 }
 
-/// The bench is a measurement, not a gate (harness-design.md §4.4, #61):
+/// The bench is a measurement, which owes no exit (harness-design.md §4.4, #61):
 /// with the bar missed the exit is 0, the reading records `fail` and the
 /// numbers, and the verdict is printed for a person to read.
 #[test]
@@ -867,9 +867,9 @@ fn pre_tool_use_entries() -> Vec<(Vec<String>, serde_json::Value)> {
         .collect()
 }
 
-/// The one command hooks.json declares for one tool at `PreToolUse`: the
+/// The one command hooks.json declares for one `tool_name` at `PreToolUse`: the
 /// line the hook runs before every call of it. Two entries walk the same
-/// candidates and differ in what they do when none judges, so the tool
+/// candidates and differ in what they do when none judges, so the `tool_name`
 /// picks the line (#16 items 2 and 5).
 fn pre_tool_use_command(tool: &str) -> String {
     let commands: Vec<String> = pre_tool_use_entries()
@@ -887,7 +887,7 @@ fn pre_tool_use_command(tool: &str) -> String {
 }
 
 /// `PreToolUse` hands the call to permit, over the three tools the design
-/// names, from the workspace root (harness-design.md §4.4). Each tool is
+/// names, from the workspace root (harness-design.md §4.4). Each of them is
 /// named by exactly one entry, so no call is judged twice by the command
 /// hook and none is left to no entry at all.
 #[test]

@@ -129,7 +129,7 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
     };
     match judge(&manifest, &workspace, &call) {
         Ok(judgement) => {
-            if let Some(output) = judgement.hook_output() {
+            if let Some(output) = judgement.hook_stdout() {
                 println!("{output}");
             }
             if let Err(err) = record(&checkout, &call, &judgement, adapter) {

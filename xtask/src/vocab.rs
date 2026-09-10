@@ -1,10 +1,14 @@
-//! `xtask vocab`, the glossary as a sensor (harness-design.md §5). The
-//! manifest's `avoid_from` rule names the glossary, which is read for its
-//! `_Avoid_` lists, and every crate the rule's scope covers is scanned: the
-//! names of its public items and the prose of its rustdoc. A lock file is
-//! not read: its lines mirror php's own names, which the engine copies on
-//! purpose. One reading per crate, of instrument `vocab`; a crate whose
-//! sources do not exist yet gets none.
+//! `xtask vocab`, the glossary as a sensor (harness-design.md §5). Each
+//! `avoid_from` rule of the manifest names the glossary, whole or one
+//! heading of it, which is read for its `_Avoid_` lists, and every crate
+//! the rule's scope covers is scanned: the names of its public items and
+//! the prose of its rustdoc. A crate is held by one rule; two rules that
+//! cover one crate are refused, since the store holds one vocab reading
+//! per crate. A lock file is not read: its lines mirror php's own names,
+//! which the engine copies on purpose. A `fixtures/` directory under a
+//! crate is not read either: what is under it is another crate's sources,
+//! laid there to fail some instrument on purpose. One reading per crate,
+//! of instrument `vocab`; a crate whose sources do not exist yet gets none.
 //!
 //! The scan is textual, not a parse. A public item is a line beginning
 //! `pub` followed by an item keyword and a name, a `pub` field, a variant of
@@ -111,41 +115,45 @@ pub fn run(root: &Path, manifest: &Manifest, store: &Store, only: &[String]) -> 
 }
 
 /// Every reading of one run, each finding printed as it is found: one per
-/// crate the rule's scope covers and that exists, or per crate `only`
+/// crate some rule's scope covers and that exists, or per crate `only`
 /// names. The library entry, as `api_check::hold` is; `run` records.
 pub fn hold(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Reading>> {
-    let rules: Vec<&Rule> = manifest
+    let rules: Vec<(&Rule, Glossary)> = manifest
         .rules
         .iter()
-        .filter(|r| r.predicate.avoid_from.is_some())
-        .collect();
-    let rule = match rules.as_slice() {
-        [] => bail!("the manifest has no rule with `avoid_from`; nothing for vocab to read"),
-        [rule] => *rule,
-        many => bail!(
-            "the manifest has {} rules with `avoid_from` ({}); the store holds one vocab reading per crate, so vocab evaluates one",
-            many.len(),
-            many.iter()
-                .map(|r| r.id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    };
+        .filter_map(|r| r.predicate.avoid_from.as_ref().map(|from| (r, from)))
+        .map(|(rule, from)| {
+            let glossary = Glossary::load(&root.join(from.file()))?;
+            let glossary = match from.section() {
+                Some(section) => glossary
+                    .section(section)
+                    .with_context(|| format!("rule {}: {}", rule.id, from.file()))?,
+                None => glossary,
+            };
+            Ok((rule, glossary))
+        })
+        .collect::<Result<_>>()?;
+    if rules.is_empty() {
+        bail!("the manifest has no rule with `avoid_from`; nothing for vocab to read");
+    }
     for name in only {
         if manifest.crate_named(name).is_none() {
             bail!("the manifest has no crate named {name:?}");
         }
     }
-    let glossary_file = rule.predicate.avoid_from.as_deref().unwrap_or_default();
-    let glossary = Glossary::load(&root.join(glossary_file))?;
     let mut readings = Vec::new();
     for krate in &manifest.crates {
         if !only.is_empty() && !only.iter().any(|n| n == &krate.name) {
             continue;
         }
-        let Some(scan) = scan_in_scope(root, rule, krate, &glossary)? else {
+        let Some((rule, glossary)) = rule_over(&rules, krate)? else {
             continue;
         };
+        let dir = root.join(krate.path());
+        if !dir.is_dir() {
+            continue;
+        }
+        let scan = scan_crate(&dir, glossary)?;
         for finding in &scan.findings {
             println!("{}/{finding}", krate.path().display());
         }
@@ -154,21 +162,31 @@ pub fn hold(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Rea
     Ok(readings)
 }
 
-/// Scan `krate` under `rule`'s scope: its sources. `None` when the scope
-/// does not cover it or its directory does not exist.
-fn scan_in_scope(
-    root: &Path,
-    rule: &Rule,
+/// The one rule whose scope covers `krate`, with its glossary; `None`
+/// when no rule does, and two are refused by name.
+fn rule_over<'a>(
+    rules: &'a [(&'a Rule, Glossary)],
     krate: &Crate,
-    glossary: &Glossary,
-) -> Result<Option<Scan>> {
+) -> Result<Option<(&'a Rule, &'a Glossary)>> {
     let path = krate.path();
-    let dir = root.join(&path);
-    let covered = rule.scope.iter().any(|pattern| matches(pattern, &path));
-    if !covered || !dir.is_dir() {
-        return Ok(None);
+    let covering: Vec<(&Rule, &Glossary)> = rules
+        .iter()
+        .filter(|(rule, _)| rule.scope.iter().any(|pattern| matches(pattern, &path)))
+        .map(|(rule, glossary)| (*rule, glossary))
+        .collect();
+    match covering.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some(*one)),
+        many => bail!(
+            "{} rules with `avoid_from` cover {} ({}); the store holds one vocab reading per crate, so one rule holds it",
+            many.len(),
+            path.display(),
+            many.iter()
+                .map(|(r, _)| r.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
-    Ok(Some(scan_crate(&dir, glossary)?))
 }
 
 /// The reading of one crate's scan: `numbers` are the counts and the hits,
@@ -206,8 +224,8 @@ fn reading_of(scan: &Scan, root: &Path, rule: &Rule, krate: &Crate) -> Result<Re
     Ok(reading)
 }
 
-/// Scan one crate directory: every `.rs` file under it, `target/` aside.
-/// The findings' files are relative to `dir`.
+/// Scan one crate directory: every `.rs` file under it, `target/` and
+/// `fixtures/` aside. The findings' files are relative to `dir`.
 pub(crate) fn scan_crate(dir: &Path, glossary: &Glossary) -> Result<Scan> {
     let avoided = glossary.avoided_phrases();
     let mut scan = Scan::default();
@@ -251,8 +269,13 @@ fn scan_source(file: &Path, text: &str, avoided: &[Avoided], scan: &mut Scan) {
         } else if let Some((subject, name)) = items.public_item(line, indent) {
             scan.items += 1;
             let mut words = identifier_words(&name);
-            words.push(name);
-            for hit in hits(&words, avoided) {
+            words.push(name.clone());
+            // A name the glossary marks as code (`Result`, and an
+            // identifier a parenthetical writes in backticks) is not the word.
+            for hit in hits(&words, avoided)
+                .into_iter()
+                .filter(|hit| !hit.phrase.code.contains(&name))
+            {
                 scan.findings
                     .push(Finding::at(file, index + 1, Where::Item, &subject, hit));
             }
@@ -424,7 +447,8 @@ fn matches(pattern: &str, path: &Path) -> bool {
     }
 }
 
-/// Every `.rs` file under `dir`, in path order; `target/` is skipped.
+/// Every `.rs` file under `dir`, in path order; `target/` is skipped, and
+/// so is `fixtures/`, whose files are other crates' sources.
 fn rust_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     reading::walk(dir, &mut files)?;
@@ -434,7 +458,7 @@ fn rust_files(dir: &Path) -> Result<Vec<PathBuf>> {
                 .strip_prefix(dir)
                 .unwrap_or(p)
                 .iter()
-                .any(|part| part == "target")
+                .any(|part| part == "target" || part == "fixtures")
     });
     files.sort();
     Ok(files)
@@ -444,7 +468,26 @@ fn rust_files(dir: &Path) -> Result<Vec<PathBuf>> {
 mod tests {
     use std::path::Path;
 
-    use super::{Items, identifier_words, matches, use_name};
+    use super::{Items, Scan, Where, identifier_words, matches, scan_source, use_name};
+    use crate::glossary::Glossary;
+
+    #[test]
+    fn a_public_item_whose_whole_name_the_glossary_marks_as_code_is_not_a_hit() {
+        let glossary = Glossary::parse(
+            "**Instrument**:\n_Avoid_: tool (the hook's `tool_name` is Claude Code's)\n",
+        )
+        .unwrap();
+        let source = "pub tool_name: String,\npub tool: u8,\n/// The tool's name.\npub fn f() {}\n";
+        let mut scan = Scan::default();
+        scan_source(
+            Path::new("a.rs"),
+            source,
+            &glossary.avoided_phrases(),
+            &mut scan,
+        );
+        let sites: Vec<(usize, Where)> = scan.findings.iter().map(|f| (f.line, f.site)).collect();
+        assert_eq!(sites, [(2, Where::Item), (3, Where::Prose)]);
+    }
 
     #[test]
     fn identifiers_split_into_their_words() {

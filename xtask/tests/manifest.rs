@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use xtask::manifest::{Crate, Edge, Manifest, Rule, Seam};
+use xtask::manifest::{AvoidFrom, Crate, Edge, Manifest, Rule, Seam};
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -291,4 +291,34 @@ fn the_lock_line_rule_is_the_locks_own_and_not_its_rows() {
     assert_eq!(manifest.lock_line_rule("sapi.lock").map(|r| &r.id), None);
     assert_eq!(manifest.lock_line_rule("tier.lock").map(|r| &r.id), None);
     assert_eq!(manifest.lock_line_rule("heap.lock").map(|r| &r.id), None);
+}
+
+/// `avoid_from` is the glossary file, or a table naming the file and one
+/// heading of it (#63); a table without the file is refused.
+#[test]
+fn avoid_from_names_the_glossary_whole_or_one_section_of_it() {
+    let head = "[oracle]\npin = \"oracle.toml\"\n[budget]\ntotal = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\nclean_build_release_s = 1\napi_items = 1\nbindings = 1\n";
+    let whole = format!(
+        "{head}[[rule]]\nid = \"vocab.avoid\"\nscope = \"crates/*\"\navoid_from = \"CONTEXT.md\"\ntext = \"t\"\n"
+    );
+    let rule = Manifest::parse(&whole).unwrap().rules.remove(0);
+    let from = rule.predicate.avoid_from.as_ref().unwrap();
+    assert_eq!(from, &AvoidFrom::File("CONTEXT.md".to_owned()));
+    assert_eq!((from.file(), from.section()), ("CONTEXT.md", None));
+
+    let section = format!(
+        "{head}[[rule]]\nid = \"vocab.harness\"\nscope = \"xtask\"\navoid_from = {{ file = \"CONTEXT.md\", section = \"Harness\" }}\ntext = \"t\"\n"
+    );
+    let rule = Manifest::parse(&section).unwrap().rules.remove(0);
+    let from = rule.predicate.avoid_from.as_ref().unwrap();
+    assert_eq!(
+        (from.file(), from.section()),
+        ("CONTEXT.md", Some("Harness"))
+    );
+    assert_eq!(rule.predicate.named(), ["avoid_from"]);
+
+    let bare = format!(
+        "{head}[[rule]]\nid = \"vocab.harness\"\nscope = \"xtask\"\navoid_from = {{ section = \"Harness\" }}\ntext = \"t\"\n"
+    );
+    assert!(Manifest::parse(&bare).is_err());
 }

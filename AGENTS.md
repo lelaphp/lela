@@ -122,7 +122,7 @@ Usage: xtask [OPTIONS] <COMMAND>
 Commands:
   api-check          Hold the seams: regenerate and diff each lock, hold crate edges, `use` paths and the bundle order; one reading per seam and per crate
   status             Render one section from the manifest and the store, or with `--session` the map plus the local facts; computes nothing else
-  permit             Judge one intended tool call from the `PreToolUse` hook's stdin; the decision is the JSON on stdout and the exit is 0 always
+  permit             Judge one intended call from the `PreToolUse` hook's stdin; the decision is the JSON on stdout and the exit is 0 always
   done               The definition of done: print the conditions unmet for the changes since the base and exit 1 while any is; the Stop hook, pre-push and CI read the same list
   track              Say which track this worktree's branch is on (the longest existing branch that is a proper path prefix of its name, `main` for a branch on none), the commit `done` measures since, and the root that holds the track's store; as text, or as one object. Writes no reading
   worktree           A track's worktrees: `add` lays one down under .claude/worktrees/<branch> ready to be worked in, the branch off its track, `xtask` built there, the local file laid and rendered, the `computed trust` line printed as a person's; refuses a branch that exists and a directory that does. `retire` appends the worktree's log into its track's store, removes the worktree and prints the branch-delete line as a person's; refuses uncommitted work. Writes no reading
@@ -141,7 +141,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=6f977d90ee79a8f33df4fd427af8c8ce7d5c40a6c40275c29af8707e6601ec84 out=445a2fd617d95255813f7c49aaa97f6807a2fb2b211b03b696f541e5650567a2 -->
+<!-- /computed in=d3d6ebc0ce1c2b22ef3ff307fa0fe0a9ada9d06f995c9bae3f1b752bf29e962c out=76480cb54ed3ca50974d82417643527100d6b8fcaea9ae70dda8d5f441c01ef7 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
