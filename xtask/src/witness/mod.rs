@@ -274,6 +274,9 @@ pub struct Ask {
     /// Capture the oracle's status onto each fence line that does not
     /// already pin it.
     pub accept: bool,
+    /// Only the crates with a staged change, pre-commit's touched crates
+    /// (harness §6), as `clippy --staged` runs over; with `crates` empty.
+    pub staged: bool,
 }
 
 /// Run what was asked for: one reading per crate, each written by the
@@ -289,6 +292,19 @@ pub fn run(
             bail!("the manifest has no crate named {name:?}");
         }
     }
+    let crates = if ask.staged {
+        if !ask.crates.is_empty() {
+            bail!("witness: --staged names its own crates; drop --crate");
+        }
+        let touched = sources::staged_crates(root, manifest)?;
+        if touched.is_empty() {
+            println!("witness: no crate has a staged change");
+            return Ok(Vec::new());
+        }
+        touched
+    } else {
+        ask.crates.clone()
+    };
     let rule = coverage_rule(manifest);
     let runner = Runner::resolve(root, &manifest.pin, None)?;
     if let Runner::Absent(why) = &runner {
@@ -299,7 +315,7 @@ pub fn run(
     let oracle = manifest.pin.oracle();
     let mut readings = Vec::new();
     for krate in &manifest.crates {
-        if !ask.crates.is_empty() && !ask.crates.iter().any(|n| n == &krate.name) {
+        if !crates.is_empty() && !crates.iter().any(|n| n == &krate.name) {
             continue;
         }
         // The reading of a crate no witness runs for: the harness's, or
@@ -479,8 +495,13 @@ pub(crate) fn command(
     store: &Store,
     crates: Vec<String>,
     accept: bool,
+    staged: bool,
 ) -> Result<()> {
     let registry = Registry::load(root)?;
-    let ask = Ask { crates, accept };
+    let ask = Ask {
+        crates,
+        accept,
+        staged,
+    };
     crate::record(store, &run(root, manifest, &registry, &ask)?)
 }

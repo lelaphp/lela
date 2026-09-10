@@ -1,6 +1,8 @@
 //! What a crate's sources are, for the instruments that read them
 //! (`budget`, `unsafe-audit`): the `.rs` files under the crate's path that
-//! git does not ignore, less its tests, benches, examples and fixtures.
+//! git does not ignore, less its tests, benches, examples and fixtures;
+//! and which crates a staged change touches, for the instruments
+//! pre-commit runs over them (`clippy`, `witness`).
 
 use std::path::{Path, PathBuf};
 
@@ -81,6 +83,19 @@ pub fn undeclared(root: &Path, manifest: &Manifest) -> Vec<String> {
         out.push("xtask".to_owned());
     }
     out
+}
+
+/// The crates with a staged change, by manifest name: pre-commit's touched
+/// crates (harness-design.md §6), what `clippy --staged` and `witness
+/// --staged` run over.
+pub(crate) fn staged_crates(root: &Path, manifest: &Manifest) -> Result<Vec<String>> {
+    let staged = git::staged(root)?;
+    let paths: Vec<&str> = staged.iter().map(|c| c.path.as_str()).collect();
+    Ok(manifest
+        .crates_of(&paths)
+        .into_iter()
+        .map(|c| c.name.clone())
+        .collect())
 }
 
 #[cfg(test)]

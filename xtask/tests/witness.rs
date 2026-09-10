@@ -123,6 +123,7 @@ fn run(root: &Path, registry: &Registry, accept: bool) -> Reading {
         &Ask {
             crates: vec!["ext/fixture".to_owned()],
             accept,
+            staged: false,
         },
     )
     .unwrap();
@@ -289,6 +290,7 @@ fn a_kernel_or_native_without_a_witness_is_missing_and_fails_the_crate() {
         &Ask {
             crates: vec!["ext/pcre".to_owned()],
             accept: false,
+            staged: false,
         },
     )
     .unwrap();
@@ -371,6 +373,7 @@ fn a_crate_with_no_witness_and_the_oracle_absent_is_a_skip_that_says_so() {
         &Ask {
             crates: vec!["ext/fixture".to_owned()],
             accept: false,
+            staged: false,
         },
     )
     .unwrap();
@@ -408,6 +411,7 @@ fn a_crate_with_no_witness_under_a_drifted_oracle_refuses_the_run() {
         &Ask {
             crates: vec!["ext/fixture".to_owned()],
             accept: false,
+            staged: false,
         },
     )
     .unwrap_err()
@@ -436,6 +440,7 @@ fn a_kernel_without_a_witness_fails_whether_or_not_the_oracle_is_here() {
         &Ask {
             crates: vec!["ext/fixture".to_owned()],
             accept: false,
+            staged: false,
         },
     )
     .unwrap();
@@ -477,6 +482,7 @@ fn the_instrument_writes_one_reading_per_crate_and_names_an_unknown_one() {
         &Ask {
             crates: vec!["php_proto".to_owned()],
             accept: false,
+            staged: false,
         },
     )
     .unwrap();
@@ -490,6 +496,7 @@ fn the_instrument_writes_one_reading_per_crate_and_names_an_unknown_one() {
         &Ask {
             crates: vec!["php_nope".to_owned()],
             accept: false,
+            staged: false,
         },
     )
     .unwrap_err()
@@ -507,6 +514,7 @@ fn the_harness_crate_carries_no_witness_of_its_own() {
         &Ask {
             crates: vec!["xtask".to_owned()],
             accept: false,
+            staged: false,
         },
     )
     .unwrap();
@@ -565,6 +573,7 @@ fn a_crate_whose_sources_cannot_be_read_fails_and_names_the_crate() {
         &Ask {
             crates: vec!["ext/pcre".to_owned()],
             accept: false,
+            staged: false,
         },
     )
     .unwrap();
@@ -576,4 +585,37 @@ fn a_crate_whose_sources_cannot_be_read_fails_and_names_the_crate() {
         "{}",
         reading.message
     );
+}
+
+/// `--staged` is pre-commit's call (harness §6): the crates with a staged
+/// change and no other, one reading each, and no reading when no crate is
+/// touched, as `clippy --staged` answers.
+#[test]
+fn staged_narrows_the_run_to_the_crates_with_a_staged_change() {
+    let root = scratch("staged", "pub fn native() {}\n", false);
+    let staged = |crates: Vec<String>| {
+        witness::run(
+            &root,
+            &fixture_manifest(),
+            &Registry::default(),
+            &Ask {
+                crates,
+                accept: false,
+                staged: true,
+            },
+        )
+        .unwrap()
+    };
+    assert!(staged(Vec::new()).is_empty(), "nothing is staged yet");
+
+    let added = Command::new("git")
+        .args(["add", "--", "ext/fixture"])
+        .current_dir(&root)
+        .status()
+        .unwrap();
+    assert!(added.success(), "git add ext/fixture");
+    let readings = staged(Vec::new());
+    assert_eq!(readings.len(), 1, "{readings:#?}");
+    assert_eq!(readings[0].scope, "ext/fixture");
+    assert_ne!(readings[0].status, Status::Fail, "{:#?}", readings[0]);
 }

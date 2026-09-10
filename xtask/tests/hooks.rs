@@ -227,6 +227,7 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
             "xtask budget".to_owned(),
             "xtask unsafe-audit".to_owned(),
             "xtask vocab".to_owned(),
+            "xtask witness --staged".to_owned(),
             "xtask permit --diff".to_owned(),
             format!("xtask regions {regions}"),
         ]

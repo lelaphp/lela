@@ -68,6 +68,7 @@ fn judged(file: &Path, text: &str, registry: &Registry, accept: bool) -> Tally {
     let ask = Ask {
         crates: Vec::new(),
         accept,
+        staged: false,
     };
     let manifest = manifest();
     let tally = judge(&manifest.pin.oracle(), registry, &runner, &ask, &found).unwrap();

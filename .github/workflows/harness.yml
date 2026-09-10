@@ -74,6 +74,15 @@ jobs:
       - run: cargo xtask budget
       - run: cargo xtask unsafe-audit
       - run: cargo xtask vocab
+      # The witness reading `done`'s condition 1 asks every touched crate
+      # for (§4.5, §7: witnesses run per commit over all crates). A kernel
+      # or native without a witness fails here and names the coverage
+      # rule's text. The pinned php is not on this runner, so a crate with
+      # nothing to run reads `skip`, not `pass` (#60), and `done` lists it
+      # unmet for a touched crate until the oracle is at the pin's path
+      # here; the pin is a person's. `phpt` stays out until a crate's
+      # subset has a home (#18).
+      - run: cargo xtask witness
       # A push is judged since the branch's track, which `done` reads off
       # the branch it stands on. A pull request's checkout is a detached
       # merge commit, on no branch and so on no track, so the base is the

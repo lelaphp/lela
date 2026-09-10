@@ -10,7 +10,6 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::git;
 use crate::manifest::{Crate, Manifest};
 use crate::reading::{Reading, Status};
 use crate::sources;
@@ -51,13 +50,7 @@ pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Read
 /// `--staged`: the crates with a staged change, pre-commit's touched
 /// crates (harness-design.md §6); no readings when no crate is touched.
 pub fn run_staged(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
-    let staged = git::staged(root)?;
-    let paths: Vec<&str> = staged.iter().map(|c| c.path.as_str()).collect();
-    let touched: Vec<String> = manifest
-        .crates_of(&paths)
-        .into_iter()
-        .map(|c| c.name.clone())
-        .collect();
+    let touched = sources::staged_crates(root, manifest)?;
     if touched.is_empty() {
         println!("clippy: no crate has a staged change");
         return Ok(Vec::new());

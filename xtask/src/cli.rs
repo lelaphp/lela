@@ -182,8 +182,11 @@ pub(crate) enum Command {
     /// without one. One reading per crate.
     Witness {
         /// Only these crates, by manifest name; default every crate that exists.
-        #[arg(long = "crate", value_name = "NAME")]
+        #[arg(long = "crate", value_name = "NAME", conflicts_with = "staged")]
         crates: Vec<String>,
+        /// Only the crates with a staged change (pre-commit's touched crates).
+        #[arg(long)]
+        staged: bool,
         /// Write the oracle's status onto each `expect` fence line that
         /// does not already pin it; the only thing that writes an `exit`.
         #[arg(long)]
