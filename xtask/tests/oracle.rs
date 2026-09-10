@@ -337,31 +337,48 @@ fn a_tree_the_variable_names_is_at_the_pin() {
     assert!(tree.is_dir(), "{}", tree.display());
 }
 
-/// The variable's name is stated in the harness alone (#36): a workflow
-/// cannot read a Rust constant, so `env:` spells the name where a runner
-/// sets it, and this holds that spelling to [`TREE_VARIABLE`] and the
-/// promise's to [`PROMISE_VARIABLE`], so a rename of either constant
-/// fails here naming the workflow, and never leaves a runner setting a
-/// name nothing reads. Every step that sets one variable sets the other,
-/// since a tree named and not promised skips in silence where it is
-/// absent (#38). The comments are stripped first, so a name cited in prose
-/// does not stand in for the setting.
+/// The variable's name is stated in one place that both the code and CI
+/// read (#36): `oracle::TREE_VARIABLE`, which `status --section oracle`
+/// renders and the workflow reads off it, setting the tree under that
+/// name through `$GITHUB_ENV`. So the workflow spells neither name, in
+/// an `env:` block or anywhere outside a comment, and it does run the
+/// section and read both variables off its JSON; the promise travels the
+/// same way, since a tree named and not promised skips in silence where
+/// it is absent (#38). The comments are stripped first, so a name cited
+/// in prose does not stand in for a setting; the negative control is a
+/// key that looks like one of the two under another spelling, which the
+/// harness would never read.
 #[test]
-fn ci_spells_the_variables_the_oracle_module_states() {
+fn ci_reads_the_variables_off_the_oracle_section_and_spells_neither() {
     let text = std::fs::read_to_string(workspace().join(".github/workflows/harness.yml")).unwrap();
-    let mut tree = Vec::new();
-    let mut promise = Vec::new();
     let mut env = false;
+    let mut section = false;
+    let mut reads = Vec::new();
     for (n, line) in text.lines().enumerate() {
         let trimmed = line.trim_start();
         if trimmed.starts_with('#') {
             continue;
         }
+        for name in [TREE_VARIABLE, PROMISE_VARIABLE] {
+            assert!(
+                !trimmed.contains(name),
+                "line {}: {name} is spelled in the workflow; the section states it",
+                n + 1
+            );
+        }
+        if trimmed.contains("status --section oracle") {
+            section = true;
+        }
+        for key in ["tree.variable", "promise.variable"] {
+            if trimmed.contains(key) {
+                reads.push(key);
+            }
+        }
         if trimmed == "env:" {
             env = true;
             continue;
         }
-        let Some((key, value)) = trimmed.split_once(": ") else {
+        let Some((key, _)) = trimmed.split_once(": ") else {
             env = false;
             continue;
         };
@@ -369,33 +386,25 @@ fn ci_spells_the_variables_the_oracle_module_states() {
             env = false;
             continue;
         }
-        if key == TREE_VARIABLE {
-            tree.push((n + 1, value.to_owned()));
-        } else if key == PROMISE_VARIABLE {
-            promise.push((n + 1, value.to_owned()));
-        } else {
-            assert!(
-                !key.contains("SRCDIR") && !key.contains("PROMISED"),
-                "line {}: {key} is set and neither {TREE_VARIABLE} nor {PROMISE_VARIABLE} is what the harness reads",
-                n + 1
-            );
-        }
-    }
-    assert!(
-        !tree.is_empty(),
-        "no step sets {TREE_VARIABLE}, the name the oracle module states:\n{text}"
-    );
-    assert_eq!(
-        tree.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
-        promise.iter().map(|(n, _)| n - 1).collect::<Vec<_>>(),
-        "each step that sets {TREE_VARIABLE} promises the tree on the next line: {tree:?} against {promise:?}"
-    );
-    for (n, value) in &promise {
         assert!(
-            Promised::parse(value).unwrap().holds(Promise::Tree),
-            "line {n}: {PROMISE_VARIABLE}={value} does not promise the tree"
+            !key.contains("SRCDIR") && !key.contains("PROMISED"),
+            "line {}: {key} is set and neither {TREE_VARIABLE} nor {PROMISE_VARIABLE} is what the harness reads",
+            n + 1
         );
     }
+    assert!(
+        section,
+        "no step runs `status --section oracle`, where the names are read:\n{text}"
+    );
+    assert_eq!(
+        reads,
+        ["tree.variable", "promise.variable"],
+        "the step reads both names off the section's JSON"
+    );
+    assert!(
+        text.contains("GITHUB_ENV"),
+        "the names read are set for the steps that follow"
+    );
 }
 
 /// The promise (#38): what a runner says this machine has of the pin,

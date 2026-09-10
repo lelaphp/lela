@@ -128,6 +128,8 @@ oracle::Runner
 oracle::Runner::binary
 oracle::Runner::resolve
 oracle::Source
+oracle::Source::named
+oracle::Source::path
 oracle::Source::tree
 oracle::TREE_VARIABLE
 oracle::Verdict

@@ -51,8 +51,10 @@ jobs:
       # The pinned php-src (#37): the tree the tests that resolve a subset
       # of the real corpus read, found where the variable
       # `oracle::TREE_VARIABLE` names first and at the pin's path second
-      # (#36). The name is stated in the harness alone and spelled once
-      # here, in `env:`, until `status` renders the pin. The tag and the
+      # (#36). The name is stated in the harness alone: the step below
+      # reads it off `xtask status --section oracle`, whose JSON carries
+      # the two variables by name, and sets the tree under it through
+      # `$GITHUB_ENV`, so this file spells neither name. The tag and the
       # commit are the pin's, read off `oracle.toml` by a parse and never
       # copied here, so a person's bump moves the checkout and the cache
       # key with it. The checkout is sparse and shallow: one commit at the
@@ -65,8 +67,8 @@ jobs:
       # is `Source::tree()`, which refuses a checkout at another commit
       # naming both revisions; the one-test step fails the job there,
       # before the suite, and the suite reads the same tree. The promise
-      # (#38): `oracle::PROMISE_VARIABLE`, spelled in `env:` on the two
-      # steps that set the tree's variable, lists what of the pin this
+      # (#38): `oracle::PROMISE_VARIABLE`, read off the same section and
+      # set beside the tree's variable, lists what of the pin this
       # runner has, so a test
       # that would skip for an absent tree fails instead naming both
       # places it looked; a provisioning step that breaks turns the job
@@ -110,15 +112,16 @@ jobs:
           git clone --quiet --no-checkout --depth 1 --branch "$TAG" https://github.com/php/php-src.git "$RUNNER_TEMP/php-src"
           git -C "$RUNNER_TEMP/php-src" sparse-checkout set --no-cone $CORPUS_DIRS
           git -C "$RUNNER_TEMP/php-src" checkout --quiet
+      - name: the tree's variable and the promise's, named by the harness and set for the steps below
+        run: |
+          cargo xtask status --section oracle --format json > "$RUNNER_TEMP/oracle.json"
+          tree=$(jq -r .tree.variable "$RUNNER_TEMP/oracle.json")
+          promise=$(jq -r .promise.variable "$RUNNER_TEMP/oracle.json")
+          echo "$tree=$RUNNER_TEMP/php-src" >> "$GITHUB_ENV"
+          echo "$promise=tree" >> "$GITHUB_ENV"
       - name: the tree is at the pin's commit
-        env:
-          TEST_PHP_SRCDIR: ${{ runner.temp }}/php-src
-          XTASK_PROMISED: tree
         run: cargo test -p xtask --test oracle a_tree_the_variable_names_is_at_the_pin
       - run: cargo test -p xtask
-        env:
-          TEST_PHP_SRCDIR: ${{ runner.temp }}/php-src
-          XTASK_PROMISED: tree
   per-commit:
     name: the instruments, then done
     runs-on: ubuntu-latest

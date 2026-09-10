@@ -56,8 +56,8 @@ pub const TREE_VARIABLE: &str = "TEST_PHP_SRCDIR";
 /// saying so on stderr, fails instead where the fact was promised, naming
 /// what it looked for; so a runner whose provisioning broke turns red
 /// rather than quietly measuring less. The name is stated here and
-/// nowhere else; the workflow spells it in `env:`, on the steps that
-/// set [`TREE_VARIABLE`].
+/// nowhere else; the workflow reads it, beside [`TREE_VARIABLE`], off
+/// `xtask status --section oracle` and sets it under that name (#36).
 pub const PROMISE_VARIABLE: &str = "XTASK_PROMISED";
 
 /// One fact of the pin a machine can promise to have: the tree or the
@@ -210,7 +210,8 @@ pub struct Source {
     pub tag: String,
     pub commit: String,
     /// Where the file says the tree is on the maintainer's machine; read
-    /// through [`Source::tree`] and nowhere else.
+    /// through [`Source::tree`] and nowhere else, and stated by
+    /// [`Source::path`] for the renderer.
     path: PathBuf,
     pub phpt_files: u64,
     /// The tree [`TREE_VARIABLE`] names on this machine, as [`Pin::load`]
@@ -258,6 +259,19 @@ impl Source {
 }
 
 impl Source {
+    /// Where the pin says the tree is, as the file states it: what
+    /// `status --section oracle` renders beside [`Source::named`], never
+    /// what a lane reads the tree from, which is [`Source::tree`].
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// What [`TREE_VARIABLE`] names on this machine, as [`Pin::load`] read
+    /// it or a test handed it; none where it is unset or empty.
+    pub fn named(&self) -> Option<&Path> {
+        self.named.as_deref()
+    }
+
     /// Hold a checkout at `tree` to the pin's commit: `HEAD` there must
     /// begin with `[source].commit`, which the pin states abbreviated.
     /// The tree is a checkout when it has a `.git`, a directory or a

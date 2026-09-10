@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use xtask::oracle::{PROMISE_VARIABLE, TREE_VARIABLE};
 use xtask::reading::{Reading, Status, Store};
 
 fn workspace() -> &'static Path {
@@ -208,6 +209,192 @@ fn the_rows_of_crates_not_yet_created_fold_into_one() {
     );
     assert!(md.contains("| ext/pcre@control |"), "{md}");
     assert!(!md.contains("crates not yet created"), "{md}");
+}
+
+/// `status` with the two variables of the pin as the test wants them,
+/// set or removed, since the process running the tests may carry either
+/// (CI sets both for the suite).
+fn status_with_pin(
+    root: &Path,
+    args: &[&str],
+    tree: Option<&Path>,
+    promise: Option<&str>,
+) -> (bool, String, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_xtask"));
+    command.arg("--root").arg(root).arg("status").args(args);
+    match tree {
+        Some(tree) => command.env(TREE_VARIABLE, tree),
+        None => command.env_remove(TREE_VARIABLE),
+    };
+    match promise {
+        Some(promise) => command.env(PROMISE_VARIABLE, promise),
+        None => command.env_remove(PROMISE_VARIABLE),
+    };
+    let out = command.output().unwrap();
+    (
+        out.status.success(),
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+    )
+}
+
+/// A scratch workspace whose pin's `[source].path` is `path`: the tracked
+/// `oracle.toml` with that one line rewritten in the copy, the tracked
+/// file untouched.
+fn scratch_with_pin_path(name: &str, path: &Path) -> PathBuf {
+    let root = scratch(name);
+    let pin = root.join("oracle.toml");
+    let mut in_source = false;
+    let text: Vec<String> = std::fs::read_to_string(&pin)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            if line.starts_with('[') {
+                in_source = line.trim() == "[source]";
+            }
+            if in_source && line.starts_with("path = ") {
+                format!("path = {:?}", path.display().to_string())
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect();
+    std::fs::write(&pin, text.join("\n") + "\n").unwrap();
+    root
+}
+
+/// A directory standing where the pinned php-src would.
+fn fixture_tree(name: &str) -> PathBuf {
+    let tree =
+        std::env::temp_dir().join(format!("xtask-status-oracle-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&tree).unwrap();
+    tree
+}
+
+/// The `oracle` section as JSON, under the two variables as given.
+fn oracle_json(root: &Path, tree: Option<&Path>, promise: Option<&str>) -> serde_json::Value {
+    let (ok, json, err) = status_with_pin(
+        root,
+        &["--section", "oracle", "--format", "json"],
+        tree,
+        promise,
+    );
+    assert!(ok, "{err}");
+    serde_json::from_str(&json).unwrap()
+}
+
+/// The `oracle` section (#36): the pin as this machine has it, the
+/// variables by name and whether set, the pin's path, and where the tree
+/// was found. Here the variable names a tree: found there, ahead of the
+/// pin's path, which is a directory too.
+#[test]
+fn oracle_finds_the_tree_the_variable_names_and_states_both_names() {
+    let named = fixture_tree("named");
+    let pinned = fixture_tree("named-pinned");
+    let root = scratch_with_pin_path("oracle-named", &pinned);
+    let (ok, md, err) =
+        status_with_pin(&root, &["--section", "oracle"], Some(&named), Some("tree"));
+    assert!(ok, "{err}");
+    let named_text = named.display().to_string();
+    assert!(
+        md.contains(&format!("| tree | {TREE_VARIABLE} | {named_text} | set |")),
+        "{md}"
+    );
+    assert!(
+        md.contains(&format!("| promise | {PROMISE_VARIABLE} | tree | set |")),
+        "{md}"
+    );
+    assert!(
+        md.contains(&format!(
+            "| found |  | {named_text} | named by {TREE_VARIABLE} |"
+        )),
+        "{md}"
+    );
+    let json = oracle_json(&root, Some(&named), Some("tree"));
+    assert_eq!(json["tree"]["variable"], TREE_VARIABLE);
+    assert_eq!(json["tree"]["set"], true);
+    assert_eq!(json["tree"]["value"], named_text);
+    assert_eq!(json["promise"]["variable"], PROMISE_VARIABLE);
+    assert_eq!(json["promise"]["set"], true);
+    assert_eq!(json["promise"]["value"], "tree");
+    assert_eq!(json["pin"]["path"], pinned.display().to_string());
+    assert_eq!(json["pin"]["directory"], true);
+    assert_eq!(json["found"]["at"], "variable");
+    assert_eq!(json["found"]["path"], named_text);
+    assert_eq!(json["found"]["error"], serde_json::Value::Null);
+}
+
+/// With the variable unset, the pin's path is the tree, and both rows
+/// say unset.
+#[test]
+fn oracle_falls_back_to_the_pins_path_when_the_variable_is_unset() {
+    let pinned = fixture_tree("pinned");
+    let root = scratch_with_pin_path("oracle-pinned", &pinned);
+    let (ok, md, err) = status_with_pin(&root, &["--section", "oracle"], None, None);
+    assert!(ok, "{err}");
+    assert!(
+        md.contains(&format!("| tree | {TREE_VARIABLE} |  | unset |")),
+        "{md}"
+    );
+    assert!(
+        md.contains(&format!("| promise | {PROMISE_VARIABLE} |  | unset |")),
+        "{md}"
+    );
+    assert!(
+        md.contains(&format!("| pin |  | {} | a directory |", pinned.display())),
+        "{md}"
+    );
+    assert!(
+        md.contains(&format!(
+            "| found |  | {} | the pin's path |",
+            pinned.display()
+        )),
+        "{md}"
+    );
+    let json = oracle_json(&root, None, None);
+    assert_eq!(json["tree"]["set"], false);
+    assert_eq!(json["tree"]["value"], serde_json::Value::Null);
+    assert_eq!(json["promise"]["set"], false);
+    assert_eq!(json["promise"]["value"], serde_json::Value::Null);
+    assert_eq!(json["found"]["at"], "pin");
+    assert_eq!(json["found"]["path"], pinned.display().to_string());
+}
+
+/// With neither present, the found row names the variable, its state and
+/// the pin's path, and the section renders rather than failing, writing
+/// nothing.
+#[test]
+fn oracle_names_both_places_when_the_tree_is_at_neither() {
+    let nowhere = Path::new("/nowhere/pinned/php-src");
+    let root = scratch_with_pin_path("oracle-absent", nowhere);
+    let (ok, md, err) = status_with_pin(&root, &["--section", "oracle"], None, None);
+    assert!(ok, "{err}");
+    assert!(
+        md.contains(&format!(
+            "| pin |  | {} | not a directory |",
+            nowhere.display()
+        )),
+        "{md}"
+    );
+    let found = md.lines().find(|l| l.starts_with("| found |")).unwrap();
+    assert!(found.contains("absent:"), "{found}");
+    assert!(
+        found.contains(&format!("{TREE_VARIABLE} is unset")),
+        "{found}"
+    );
+    assert!(found.contains(&nowhere.display().to_string()), "{found}");
+    let json = oracle_json(&root, None, None);
+    assert_eq!(json["found"]["at"], serde_json::Value::Null);
+    assert_eq!(json["found"]["path"], serde_json::Value::Null);
+    let error = json["found"]["error"].as_str().unwrap();
+    assert!(
+        error.contains(TREE_VARIABLE) && error.contains("/nowhere/pinned/php-src"),
+        "{error}"
+    );
+    assert!(
+        !root.join("target").exists(),
+        "status ran nothing and wrote nothing"
+    );
 }
 
 #[test]

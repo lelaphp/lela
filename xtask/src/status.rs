@@ -20,6 +20,7 @@ use crate::cli::{Format, Section};
 use crate::divergence::{Kind, Registry, Status};
 use crate::git::git;
 use crate::manifest::{Manifest, Measure, SCRIPTS, Week};
+use crate::oracle::{PROMISE_VARIABLE, Pin, TREE_VARIABLE};
 use crate::permit;
 use crate::reading::{self, Log, Reading, Store};
 use crate::sources::NOT_YET_CREATED;
@@ -92,6 +93,7 @@ pub fn render(
         Section::Week => return week_section(manifest, &readings, week, format),
         Section::Bundle => (bundle(manifest, &readings), BUNDLE),
         Section::Git => return git_section(root, format),
+        Section::Oracle => return oracle_section(&manifest.pin, format),
     };
     Ok(match format {
         Format::Json => {
@@ -927,6 +929,91 @@ fn git_section(root: &Path, format: Format) -> Result<String> {
         Format::Md => format!(
             "```\n$ git log --oneline -10\n{log}\n$ git status --short --branch\n{status}```\n"
         ),
+    })
+}
+
+/// The `oracle` section: the pin as this machine has it (#36), from the
+/// pin and the process's environment alone. Four rows: the tree's
+/// variable by name, its value and whether it is set; the promise's
+/// likewise; the pin's path and whether it is a directory; and where
+/// [`crate::oracle::Source::tree`] found the tree, the variable's or the
+/// pin's, or the absence it named. CI reads the two names off the JSON,
+/// `tree.variable` and `promise.variable`, and sets them under those
+/// names, so the workflow spells neither.
+fn oracle_section(pin: &Pin, format: Format) -> Result<String> {
+    let source = &pin.source;
+    let named = source.named();
+    let promise = std::env::var_os(PROMISE_VARIABLE).map(|v| v.to_string_lossy().into_owned());
+    let pinned = source.path();
+    let found = source.tree();
+    let at = match &found {
+        Ok(tree) if named == Some(tree.as_path()) => Some("variable"),
+        Ok(_) => Some("pin"),
+        Err(_) => None,
+    };
+    let set = |is: bool| if is { "set" } else { "unset" };
+    let display = |p: Option<&Path>| p.map(|p| p.display().to_string());
+    Ok(match format {
+        Format::Json => serde_json::to_string_pretty(&json!({
+            "tree": {
+                "variable": TREE_VARIABLE,
+                "value": display(named),
+                "set": named.is_some(),
+            },
+            "promise": {
+                "variable": PROMISE_VARIABLE,
+                "value": promise,
+                "set": promise.is_some(),
+            },
+            "pin": {
+                "path": pinned.display().to_string(),
+                "directory": pinned.is_dir(),
+            },
+            "found": {
+                "path": found.as_ref().ok().map(|p| p.display().to_string()),
+                "at": at,
+                "error": found.as_ref().err().map(|e| format!("{e:#}")),
+            },
+        }))?,
+        Format::Md => {
+            let mut out = String::new();
+            let _ = writeln!(out, "| fact | variable | value | state |");
+            let _ = writeln!(out, "|---|---|---|---|");
+            let _ = writeln!(
+                out,
+                "| tree | {TREE_VARIABLE} | {} | {} |",
+                cell(&display(named).unwrap_or_default()),
+                set(named.is_some())
+            );
+            let _ = writeln!(
+                out,
+                "| promise | {PROMISE_VARIABLE} | {} | {} |",
+                cell(promise.as_deref().unwrap_or_default()),
+                set(promise.is_some())
+            );
+            let _ = writeln!(
+                out,
+                "| pin |  | {} | {} |",
+                cell(&pinned.display().to_string()),
+                if pinned.is_dir() {
+                    "a directory"
+                } else {
+                    "not a directory"
+                }
+            );
+            let (path, state) = match &found {
+                Ok(tree) => (
+                    tree.display().to_string(),
+                    match at {
+                        Some("variable") => format!("named by {TREE_VARIABLE}"),
+                        _ => "the pin's path".to_owned(),
+                    },
+                ),
+                Err(e) => (String::new(), format!("absent: {e:#}")),
+            };
+            let _ = writeln!(out, "| found |  | {} | {} |", cell(&path), cell(&state));
+            out
+        }
     })
 }
 

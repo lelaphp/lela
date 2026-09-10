@@ -322,6 +322,11 @@ pub enum Section {
     Git,
     /// The bundle's registration order against the crate graph.
     Bundle,
+    /// The pin as this machine has it: the tree's variable and the
+    /// promise's, each by name and whether it is set, the pin's path, and
+    /// which of the two places the tree was found at. CI reads the names
+    /// here and spells them nowhere (#36).
+    Oracle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
