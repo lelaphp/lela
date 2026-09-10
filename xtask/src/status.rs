@@ -20,7 +20,7 @@ use crate::divergence::{Kind, Registry, Status};
 use crate::git::git;
 use crate::manifest::{Manifest, Measure, Week};
 use crate::permit;
-use crate::reading::{self, Reading, Store};
+use crate::reading::{self, Log, Reading, Store};
 
 /// What a section says when no instrument has measured a row.
 pub(crate) const NO_READING: &str = "no reading";
@@ -142,7 +142,8 @@ pub fn session(
         out.push('\n');
     }
     if let Some(id) = session_id {
-        let rows: Vec<Row> = permit_rows(manifest, &store.readings()?, &store.log()?, Some(id))
+        let log = store.log()?;
+        let rows: Vec<Row> = permit_rows(manifest, &store.readings()?, &log.readings, Some(id))
             .into_iter()
             .filter(|r| r.facts.get("this_session").and_then(Value::as_u64) > Some(0))
             .collect();
@@ -152,6 +153,9 @@ pub fn session(
                 "\n## permits this session\n\n{}",
                 table(PERMITS, &rows)
             );
+        }
+        if let Some(note) = log.unreadable_note() {
+            let _ = writeln!(out, "\n{note}");
         }
     }
     Ok(out)
@@ -444,17 +448,18 @@ fn instrument(readings: &[Reading], name: &str) -> Vec<Row> {
 fn permits(
     manifest: &Manifest,
     readings: &[Reading],
-    log: &[Reading],
+    log: &Log,
     format: Format,
     this: Option<&str>,
 ) -> Result<String> {
-    let rules = permit_rows(manifest, readings, log, this);
+    let rules = permit_rows(manifest, readings, &log.readings, this);
     let window = manifest.telemetry.as_ref().map(|t| t.silent_days);
-    let instruments = instruments(log, window)?;
+    let instruments = instruments(&log.readings, window)?;
     Ok(match format {
         Format::Json => serde_json::to_string_pretty(&json!({
             "session": this,
             "silent_days": window,
+            "unreadable": log.unreadable,
             "rules": rules.iter().map(Row::json).collect::<Result<Vec<_>>>()?,
             "instruments": instruments.iter().map(InstrumentLine::json).collect::<Vec<_>>(),
         }))?,
@@ -492,6 +497,9 @@ fn permits(
                     out,
                     "\nThe candidates for silent are not rendered: `[telemetry] silent_days` is unset in seams.toml (harness-design.md §7)."
                 );
+            }
+            if let Some(note) = log.unreadable_note() {
+                let _ = writeln!(out, "\n{note}");
             }
             out
         }

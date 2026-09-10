@@ -143,6 +143,8 @@ phpt::Lane
 phpt::run
 reading::DIR
 reading::LOG
+reading::Log
+reading::Log::unreadable_note
 reading::Number
 reading::Number::as_f64
 reading::Number::count
@@ -163,6 +165,7 @@ reading::Status
 reading::Status::ALL
 reading::Status::as_str
 reading::Store
+reading::Store::append
 reading::Store::at
 reading::Store::log
 reading::Store::of_workspace

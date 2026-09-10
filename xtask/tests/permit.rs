@@ -639,7 +639,7 @@ fn a_denial_carries_the_session_of_the_call() {
     assert_eq!(code, 0, "{err}");
     let log = Store::of_workspace(&root).log().unwrap();
     assert_eq!(
-        log.last().unwrap().session,
+        log.readings.last().unwrap().session,
         "",
         "a call without a session is recorded without one"
     );

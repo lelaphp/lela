@@ -33,18 +33,17 @@
 //! them, so the worktree's `log.jsonl` is appended into the track's store
 //! first, the root [`Track::of`] names for the branch, and only then is
 //! the worktree removed, which keeps a merged agent's denials in the
-//! `permits` section the console reads (§4.2). The log alone: every line
-//! of it ends in a newline, so appending one to another is the whole
-//! join. The per-key files beside it stay with the worktree, each being a
-//! scope's latest run over a tree the track does not have, until the
-//! design says they are the track's (§4.2). A worktree with uncommitted
-//! work is a refusal after the append, since the worktree's copy is
-//! emptied once appended and the call that follows cannot count the same
-//! readings twice. The branch is kept; deleting it is a person's line,
-//! printed.
+//! `permits` section the console reads (§4.2). The log alone, through the
+//! store's own append, one line per write, so a retire during a run tears
+//! no line of either log (#56). The per-key files beside it stay with the
+//! worktree, each being a scope's latest run over a tree the track does
+//! not have, until the design says they are the track's (§4.2). A
+//! worktree with uncommitted work is a refusal after the append, since
+//! the worktree's copy is emptied once appended and the call that follows
+//! cannot count the same readings twice. The branch is kept; deleting it
+//! is a person's line, printed.
 
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -52,7 +51,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::computed;
 use crate::git::git;
-use crate::reading;
+use crate::reading::{self, Store};
 use crate::track::{self, Track};
 
 /// Where a worktree lives, under the main checkout, one directory per
@@ -230,22 +229,16 @@ fn append_log(dir: &Path, root: &Path) -> Result<bool> {
         );
         return Ok(false);
     }
-    let to = root.join(reading::DIR).join(reading::LOG);
-    let store = to.parent().context("the log is inside the store")?;
-    fs::create_dir_all(store)
-        .with_context(|| format!("cannot write the track's store at {}", store.display()))?;
-    OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(&to)
-        .and_then(|mut log| log.write_all(&text))
+    let store = Store::of_workspace(root);
+    let to = store.root().join(reading::LOG);
+    let appended = store
+        .append(&text)
         .with_context(|| format!("cannot append to {}", to.display()))?;
     fs::write(&from, "").with_context(|| format!("cannot empty {}", from.display()))?;
     say(
         RETIRE,
         &format!(
-            "appended {} readings to {} and emptied the worktree's; the per-key files beside it stay with the worktree",
-            text.split(|b| *b == b'\n').count() - 1,
+            "appended {appended} lines to {} and emptied the worktree's; the per-key files beside it stay with the worktree",
             to.display()
         ),
     );

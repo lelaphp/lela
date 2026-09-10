@@ -736,7 +736,11 @@ fn every_verdict_is_one_reading_of_done_over_the_workspace() {
 
     let stop = std::fs::read_to_string(fixtures().join("hooks/stop.json")).unwrap();
     xtask(&root, &["done", "--hook"], Some(&stop));
-    assert_eq!(store.log().unwrap().len(), 2, "the hook writes one too");
+    assert_eq!(
+        store.log().unwrap().readings.len(),
+        2,
+        "the hook writes one too"
+    );
 }
 
 // ---------------------------------------------------------------- the wiring

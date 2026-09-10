@@ -651,3 +651,47 @@ fn permits_marks_this_session_and_the_session_block_carries_it() {
     assert!(ok, "a head that is not JSON is no session, not an error");
     assert!(!text.contains("this session"), "{text}");
 }
+
+/// A torn line in the log (#56) degrades the `permits` section rather than
+/// the session: the section renders the readings around it and names the
+/// line, and `--session` prints the map and the local facts with the note
+/// under this session's block, where before both failed on the line.
+#[test]
+fn a_torn_log_line_is_named_and_the_rest_of_the_section_and_the_session_render() {
+    let root = scratch("torn");
+    std::fs::write(root.join("AGENTS.md"), "# The map\n").unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/store/torn.jsonl");
+    let store = Store::of_workspace(&root);
+    std::fs::create_dir_all(store.root()).unwrap();
+    std::fs::copy(&fixture, store.root().join("log.jsonl")).unwrap();
+
+    let (ok, md, err) = status(&root, &["--section", "permits"]);
+    assert!(ok, "{err}");
+    let row = md.lines().find(|l| l.contains("harness.self")).unwrap();
+    assert!(
+        row.contains("| 1 |"),
+        "the readable denial is counted: {row}"
+    );
+    let row = md.lines().find(|l| l.contains("lanes.nightly")).unwrap();
+    assert!(row.contains("| 1 |"), "and the one after the tear: {row}");
+    assert!(
+        md.contains("log.jsonl: 2 lines unreadable at 2, 3."),
+        "the torn lines are named: {md}"
+    );
+
+    let (ok, json, _) = status(&root, &["--section", "permits", "--format", "json"]);
+    assert!(ok);
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["unreadable"], serde_json::json!([2, 3]));
+
+    let this = "5e55100c-0000-4000-8000-000000000000";
+    let head = format!(r#"{{"session_id":"{this}","hook_event_name":"SessionStart"}}"#);
+    let (ok, text, err) = status_with_stdin(&root, &["--session"], &head);
+    assert!(ok, "{err}");
+    assert!(text.starts_with("# The map\n"), "{text}");
+    assert!(text.contains("## permits this session"), "{text}");
+    assert!(
+        text.contains("log.jsonl: 2 lines unreadable at 2, 3."),
+        "{text}"
+    );
+}

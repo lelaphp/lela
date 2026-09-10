@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use xtask::manifest::Crate;
-use xtask::reading::{self, Outcome, Reading, Status, Store};
+use xtask::reading::{self, Log, Outcome, Reading, Status, Store};
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -139,7 +139,7 @@ fn a_set_of_readings_is_recorded_together_and_the_outcome_is_the_exit() {
         2,
         "two keys, one overwritten"
     );
-    let log = store.log().unwrap();
+    let log = store.log().unwrap().readings;
     assert_eq!(log.len(), 3);
     assert_eq!(
         log.iter().map(|r| r.status).collect::<Vec<_>>(),
@@ -178,4 +178,123 @@ fn a_crate_not_yet_created_gets_a_reading_without_a_stamp() {
     let stamped = Reading::for_crate("budget", &existing, workspace()).unwrap();
     assert_eq!(stamped.tree().len(), 40);
     assert!(stamped.at.to_string().ends_with('Z'));
+}
+
+/// A reading reaches the log whole or not at all (#56): two instruments
+/// appending at once, which pre-commit and a track's worktrees do, each
+/// hand a line to the file in one write, so a few hundred readings from two
+/// writers over one log leave every line parseable and every one present.
+/// The lines are longer than macOS's `PIPE_BUF` of 512 bytes, so this
+/// exercises the case the writer's rustdoc calls not covered on paper,
+/// and shows what the platform does in practice rather than proving it.
+#[test]
+fn two_writers_over_one_log_tear_no_line() {
+    let store = Store::at(scratch("two-writers"));
+    let per_writer: usize = 200;
+    let writers: Vec<_> = (0..2)
+        .map(|w| {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                for i in 0..per_writer {
+                    let mut reading = reading(Status::Fail, i64::try_from(i).unwrap());
+                    reading.scope = format!("ext/writer-{w}");
+                    reading.message = format!("writer {w} reading {i}: {}", "x".repeat(600));
+                    store.record(std::slice::from_ref(&reading)).unwrap();
+                }
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.join().unwrap();
+    }
+
+    let text = std::fs::read_to_string(store.root().join("log.jsonl")).unwrap();
+    assert_eq!(text.lines().count(), 2 * per_writer);
+    for (i, line) in text.lines().enumerate() {
+        Reading::from_json(line).unwrap_or_else(|e| panic!("line {} is torn: {e:#}", i + 1));
+    }
+    let log = store.log().unwrap();
+    assert_eq!(log.unreadable, Vec::<usize>::new());
+    assert_eq!(log.readings.len(), 2 * per_writer);
+    for w in 0..2 {
+        let of: Vec<usize> = log
+            .readings
+            .iter()
+            .filter(|r| r.scope == format!("ext/writer-{w}"))
+            .map(|r| match r.numbers["failed"] {
+                reading::Number::Int(n) => usize::try_from(n).unwrap(),
+                reading::Number::Float(_) => usize::MAX,
+            })
+            .collect();
+        assert_eq!(
+            of,
+            (0..per_writer).collect::<Vec<_>>(),
+            "writer {w} in order"
+        );
+    }
+}
+
+/// A torn line, which a write the kernel split leaves behind, is counted
+/// by its number and named, and the rest of the log is read: the fixture
+/// holds the shape found in the maintainer's log, a line that is the head
+/// of one reading with another whole inside it, then the tail.
+#[test]
+fn a_torn_line_is_counted_and_named_and_the_rest_is_read() {
+    let store = Store::at(scratch("torn"));
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/store/torn.jsonl");
+    std::fs::create_dir_all(store.root()).unwrap();
+    std::fs::copy(&fixture, store.root().join("log.jsonl")).unwrap();
+
+    let log = store.log().unwrap();
+    assert_eq!(log.unreadable, vec![2, 3]);
+    assert_eq!(log.readings.len(), 2, "{log:#?}");
+    assert_eq!(log.readings[0].rule, "harness.self");
+    assert_eq!(log.readings[1].rule, "lanes.nightly");
+    assert_eq!(
+        log.unreadable_note().as_deref(),
+        Some("log.jsonl: 2 lines unreadable at 2, 3.")
+    );
+
+    let one = Log {
+        readings: Vec::new(),
+        unreadable: vec![10_019],
+    };
+    assert_eq!(
+        one.unreadable_note().as_deref(),
+        Some("log.jsonl: 1 line unreadable at 10019.")
+    );
+    assert_eq!(Log::default().unreadable_note(), None);
+    let many = Log {
+        readings: Vec::new(),
+        unreadable: (1..=7).collect(),
+    };
+    assert_eq!(
+        many.unreadable_note().as_deref(),
+        Some("log.jsonl: 7 lines unreadable at 1, 2, 3, 4, 5 and 2 more.")
+    );
+}
+
+/// A log another store wrote, the retire's, is appended one line per write
+/// through the same append a reading takes: a line the worktree tore stays
+/// torn and tears nothing beside it, and a last line without its newline
+/// gets one, so the line written next does not join it.
+#[test]
+fn another_stores_log_is_appended_one_line_per_write() {
+    let store = Store::at(scratch("append"));
+    store.record(&[reading(Status::Pass, 0)]).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/store/torn.jsonl");
+    let mut foreign = std::fs::read(&fixture).unwrap();
+    foreign.pop();
+    assert!(!foreign.ends_with(b"\n"), "the last line has no newline");
+
+    assert_eq!(store.append(&foreign).unwrap(), 4);
+    store.record(&[reading(Status::Fail, 3)]).unwrap();
+    assert_eq!(store.append(b"").unwrap(), 0);
+
+    let text = std::fs::read_to_string(store.root().join("log.jsonl")).unwrap();
+    assert_eq!(text.lines().count(), 6, "{text}");
+    let log = store.log().unwrap();
+    assert_eq!(log.unreadable, vec![3, 4]);
+    assert_eq!(log.readings.len(), 4);
+    assert_eq!(log.readings[3].status, Status::Fail);
 }

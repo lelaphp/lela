@@ -295,13 +295,8 @@ impl Store {
         Ok(Outcome::of(readings))
     }
 
-    /// One reading: its file, overwritten, and its line of the log. The
-    /// line is rendered whole and handed to the file in one `write` under
-    /// `O_APPEND`, which the platforms the harness runs on land whole for
-    /// a line of this size, so two instruments appending at once do not
-    /// interleave inside a line. A write the kernel splits, which POSIX
-    /// does not rule out for a regular file, is the one case not covered:
-    /// the line tears, and a reader that tolerates a torn line is #56's.
+    /// One reading: its file, overwritten, and its line of the log, which
+    /// goes through [`Store::append_line`], the one append.
     fn write(&self, reading: &Reading) -> Result<()> {
         let path = self.path(&reading.instrument, &reading.scope)?;
         if let Some(dir) = path.parent() {
@@ -312,14 +307,65 @@ impl Store {
 
         let mut line = reading.to_json()?.to_string();
         line.push('\n');
+        self.append_line(line.as_bytes())
+    }
+
+    /// Every line of `lines`, a log another store wrote, appended to this
+    /// store's log, each through [`Store::append_line`]: the retire of a
+    /// worktree (`xtask worktree retire`) lands its log here, and a retire
+    /// during a run cannot tear a line of either. A line is appended as
+    /// it is, bytes and not text, so one the worktree tore stays torn and
+    /// tears nothing beside it; a last line without its newline is given
+    /// one. How many lines were appended.
+    pub fn append(&self, lines: &[u8]) -> Result<usize> {
+        let mut count = 0;
+        for line in lines.split_inclusive(|b| *b == b'\n') {
+            if line.ends_with(b"\n") {
+                self.append_line(line)?;
+            } else {
+                let mut whole = line.to_vec();
+                whole.push(b'\n');
+                self.append_line(&whole)?;
+            }
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// The one append to the log, and the rule that a line reaches it whole
+    /// or not at all (#56): `line`, rendered whole with its newline, is
+    /// handed to the file in one `write` on a descriptor opened with
+    /// `O_APPEND`, so two instruments appending at once, which pre-commit
+    /// and a track's worktrees do, cannot interleave inside a line. POSIX
+    /// promises a whole write only under `PIPE_BUF` (4096 bytes on Linux,
+    /// 512 on macOS), and the platforms the harness runs on land a single
+    /// `O_APPEND` write to a regular file whole in practice; a reading
+    /// longer than `PIPE_BUF` is the one case not covered on paper: it is
+    /// still handed over in one call, and if the kernel splits it the line
+    /// tears, which [`Store::log`] counts and names rather than fails on.
+    /// A short write is an error, never retried, since a retry could only
+    /// tear the line it means to finish.
+    fn append_line(&self, line: &[u8]) -> Result<()> {
         let log = self.root.join(LOG);
+        if let Some(dir) = log.parent() {
+            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&log)
             .with_context(|| format!("opening {}", log.display()))?;
-        file.write_all(line.as_bytes())
-            .with_context(|| format!("appending to {}", log.display()))
+        let written = file
+            .write(line)
+            .with_context(|| format!("appending to {}", log.display()))?;
+        if written != line.len() {
+            bail!(
+                "appending to {}: {written} of {} bytes were written, so the line is torn",
+                log.display(),
+                line.len()
+            );
+        }
+        Ok(())
     }
 
     /// The reading of one instrument and scope, if one has been written.
@@ -331,19 +377,30 @@ impl Store {
         Self::read_file(&path).map(Some)
     }
 
-    /// Every line of the append-only log, oldest first: what the store held
-    /// across every run and every session. A missing log is empty.
-    pub fn log(&self) -> Result<Vec<Reading>> {
+    /// The append-only log, oldest first: what the store held across every
+    /// run and every session, and the lines it could not read. A missing
+    /// log is empty. A line that is not a reading, which a write the kernel
+    /// split leaves behind (see [`Store::append_line`]), is counted by its
+    /// number and skipped rather than failing the whole log, so a torn line
+    /// degrades one section and never the session.
+    pub fn log(&self) -> Result<Log> {
         let path = self.root.join(LOG);
         if !path.exists() {
-            return Ok(Vec::new());
+            return Ok(Log::default());
         }
         let text =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        text.lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|line| Reading::from_json(line).with_context(|| format!("{}", path.display())))
-            .collect()
+        let mut log = Log::default();
+        for (i, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match Reading::from_json(line) {
+                Ok(reading) => log.readings.push(reading),
+                Err(_) => log.unreadable.push(i + 1),
+            }
+        }
+        Ok(log)
     }
 
     /// Every reading in the store, in path order. A missing store is empty.
@@ -364,6 +421,38 @@ impl Store {
         let text =
             fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         toml::from_str(&text).with_context(|| format!("{}", path.display()))
+    }
+}
+
+/// The log as read: every line that is a reading, in the log's order, and
+/// the number of every line that is not, 1-based as an editor counts.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Log {
+    pub readings: Vec<Reading>,
+    pub unreadable: Vec<usize>,
+}
+
+impl Log {
+    /// What a rendering says about the lines it could not read, `log.jsonl:
+    /// 1 line unreadable at 10019.`, at most five named and the rest
+    /// counted; none when every line read. One string, so every section
+    /// says it the same way.
+    pub fn unreadable_note(&self) -> Option<String> {
+        if self.unreadable.is_empty() {
+            return None;
+        }
+        let lines: Vec<String> = self.unreadable.iter().map(usize::to_string).collect();
+        let names: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let noun = if self.unreadable.len() == 1 {
+            "line"
+        } else {
+            "lines"
+        };
+        Some(format!(
+            "{LOG}: {} {noun} unreadable at {}.",
+            self.unreadable.len(),
+            listed(&names)
+        ))
     }
 }
 
