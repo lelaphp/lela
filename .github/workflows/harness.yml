@@ -35,28 +35,19 @@ jobs:
       # it wrote, so the binary is the test's dependency and not only the
       # regions job's (§5).
       - run: cargo install computed --locked
-      # The function-hook module (harness-design.md §1 revision 8, §6).
-      # Its declarations are gitignored and written by the running Claude
-      # Code's `/plugin-types`, so the runner installs the pinned build and
-      # writes them from a directory outside the clone, where no project
-      # settings, plugin or SessionStart hook load; `-p` with this command
-      # ran with no credentials, an empty HOME and an empty
-      # CLAUDE_CONFIG_DIR on the dev machine. Then `tsc` holds the module
-      # to them and `plugin validate --strict` reads the manifest,
-      # hooks.json and the module's source. The pin is the build the
-      # module was typechecked against on 2026-09-10; the surface is
-      # early access and moves between releases, and moving the pin is a
-      # person's edit until the `types-version` region §4.4 names exists.
-      # The wall-clock, measured on the dev machine (2026-09-10, M-series,
-      # warm npm cache): the install 7.7 s, `/plugin-types` 0.5 s, `tsc`
-      # 1.7 s of which 0.5 s is the compiler itself, `validate` 0.6 s; the
-      # runner's figure, with a cold npm cache, is read off the first run.
-      - run: npm install -g --no-fund --no-audit @anthropic-ai/claude-code@2.1.267
-      - name: the declarations, written by /plugin-types
-        working-directory: ${{ runner.temp }}
-        run: claude -p "/plugin-types $GITHUB_WORKSPACE/.claude/types"
+      # The function-hook module (harness-design.md §1 revision 8, §6;
+      # #62). Its declarations are a tracked generated file,
+      # harness-plugins/types, rewritten at pre-commit by the committer's
+      # own Claude Code whenever a path under harness-plugins/ is staged;
+      # the build that wrote them is the header line of the committed
+      # file, `// Written by Claude Code <version>.`, which `cargo test -p
+      # xtask --test map` reads, so no Claude Code is installed here and
+      # no pin is stated here. `tsc` holds the module to the committed
+      # file; `plugin validate --strict` ran at the same pre-commit. The
+      # wall-clock, measured on the dev machine (2026-09-10, M-series,
+      # warm npm cache): `tsc` 0.9 s; the runner's figure, with a cold npm
+      # cache, is read off the first run.
       - run: npx -y -p typescript@5.9.3 tsc -p harness-plugins
-      - run: claude plugin validate harness-plugins --strict
       # The pinned php-src (#37): the tree the tests that resolve a subset
       # of the real corpus read, found where the variable
       # `oracle::TREE_VARIABLE` names first and at the pin's path second
