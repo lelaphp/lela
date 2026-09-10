@@ -108,7 +108,14 @@ fn the_crate_laid_down_has_the_template_topology() {
         deps["php_ext"]["path"].as_str(),
         Some("../../crates/php_ext")
     );
-    assert!(cargo.get("dev-dependencies").is_none(), "{cargo:?}");
+    // The test face for tests/ alone: the same crate, its `test` feature on.
+    let dev = cargo["dev-dependencies"].as_table().unwrap();
+    assert_eq!(dev.len(), 1, "{dev:?}");
+    assert_eq!(
+        dev["php_ext"]["features"].as_array().map(Vec::len),
+        Some(1),
+        "{dev:?}"
+    );
     assert_eq!(cargo["lints"]["workspace"].as_bool(), Some(true));
 
     // `extension()`, state on the value, no lock, the witness, the lints.

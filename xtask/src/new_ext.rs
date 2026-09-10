@@ -126,8 +126,9 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str) -> Result<Laid> {
     Ok(laid)
 }
 
-/// The crate's manifest: the facade as its one dependency, the workspace's
-/// lints and package fields.
+/// The crate's manifest: the facade as its one dependency, the same crate
+/// with its `test` feature for the tests alone, the workspace's lints and
+/// package fields.
 fn cargo_toml(name: &str) -> String {
     format!(
         "# ext/{name}: one crate per extension (ADR-0004), laid down by `xtask new-ext`.\n\
@@ -145,7 +146,11 @@ fn cargo_toml(name: &str) -> String {
          \n\
          # The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).\n\
          [dependencies]\n\
-         php_ext = {{ path = \"../../{FACADE}\" }}\n"
+         php_ext = {{ path = \"../../{FACADE}\" }}\n\
+         \n\
+         # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).\n\
+         [dev-dependencies]\n\
+         php_ext = {{ path = \"../../{FACADE}\", features = [\"test\"] }}\n"
     )
 }
 
