@@ -102,18 +102,26 @@ pub struct Source {
 impl Source {
     /// Where the pinned php-src tree is on this machine: the directory
     /// [`TREE_VARIABLE`] names when it is one, else the pin's path when it
-    /// is one. The one answer the phpt runner and the tests that resolve a
-    /// subset take, so the location, alone among the pin's facts, is
-    /// machine-local (#36). An absent tree is an error naming both places
-    /// tried, so a runner's failure reads as an unset variable and not as
-    /// a path that could never have existed there.
+    /// is one, held to the pin's commit. The one answer the phpt runner
+    /// and the tests that resolve a subset take, so the location, alone
+    /// among the pin's facts, is machine-local (#36). An absent tree is an
+    /// error naming both places tried, so a runner's failure reads as an
+    /// unset variable and not as a path that could never have existed
+    /// there. A tree that is a checkout at another commit is refused
+    /// naming both revisions and is never passed over for the other place
+    /// (#37): a corpus at the wrong revision measures the wrong thing,
+    /// more quietly than no corpus at all. A tree that is no checkout, a
+    /// tarball unpacked at the tag, states no commit and is taken at its
+    /// word.
     pub fn tree(&self) -> Result<PathBuf> {
         if let Some(named) = &self.named
             && named.is_dir()
         {
+            self.held(named, &format!("named by {TREE_VARIABLE}"))?;
             return Ok(named.clone());
         }
         if self.path.is_dir() {
+            self.held(&self.path, "the pin's path")?;
             return Ok(self.path.clone());
         }
         let variable = match &self.named {
@@ -125,6 +133,38 @@ impl Source {
             self.tag,
             self.path.display()
         )
+    }
+}
+
+impl Source {
+    /// Hold a checkout at `tree` to the pin's commit: `HEAD` there must
+    /// begin with `[source].commit`, which the pin states abbreviated.
+    /// The tree is a checkout when it has a `.git`, a directory or a
+    /// worktree's file; git is asked in the tree itself, so a scratch
+    /// directory inside some other repository is not read as that
+    /// repository's checkout. `how` says which place the tree was found
+    /// through, so the refusal names it beside both revisions.
+    fn held(&self, tree: &Path, how: &str) -> Result<()> {
+        if !tree.join(".git").exists() {
+            return Ok(());
+        }
+        let head = crate::git::git(tree, &["rev-parse", "--verify", "HEAD^{commit}"], None)
+            .with_context(|| {
+                format!(
+                    "reading the commit of the php-src checkout at {}",
+                    tree.display()
+                )
+            })?;
+        let head = head.trim();
+        if self.commit.is_empty() || !head.starts_with(&self.commit) {
+            bail!(
+                "the php-src checkout at {} ({how}) is at commit {head}; the pin says {} ({}). Lay the tree down at the pin's tag, or name another with {TREE_VARIABLE}; the pin moves only by a person's hand",
+                tree.display(),
+                self.commit,
+                self.tag
+            );
+        }
+        Ok(())
     }
 }
 

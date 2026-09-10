@@ -237,6 +237,100 @@ fn an_absent_tree_names_the_variable_and_the_pins_path_and_not_one_of_them() {
     assert!(err.contains("/nowhere/pinned/php-src"), "{err}");
 }
 
+/// A git checkout standing where the pinned php-src would, at one commit
+/// of its own, and that commit as `git rev-parse HEAD` prints it.
+fn fixture_checkout(name: &str) -> (PathBuf, String) {
+    let tree = fixture_tree(name);
+    let _ = std::fs::remove_dir_all(&tree);
+    std::fs::create_dir_all(&tree).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&tree)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "-q"]);
+    git(&[
+        "-c",
+        "user.name=xtask",
+        "-c",
+        "user.email=xtask@example",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "the fixture's one commit",
+    ]);
+    let head = git(&["rev-parse", "HEAD"]);
+    (tree, head)
+}
+
+#[test]
+fn a_checkout_at_the_pins_commit_is_the_tree() {
+    let (tree, head) = fixture_checkout("held");
+    let mut pin = pin_with_path(&tree);
+    pin.source.commit = head[..8].to_owned();
+    assert_eq!(pin.source.tree().unwrap(), tree);
+    // Through the variable as through the pin's path.
+    let pin = pin_with_path(Path::new("/nowhere/php-src")).on_this_machine(Some(tree.clone()));
+    let mut pin = pin;
+    pin.source.commit = head[..8].to_owned();
+    assert_eq!(pin.source.tree().unwrap(), tree);
+}
+
+#[test]
+fn a_checkout_at_another_commit_is_refused_naming_both_revisions() {
+    let (tree, head) = fixture_checkout("drifted");
+    // The tracked pin's commit is upstream's; the fixture's is its own.
+    let pin = pin_with_path(&tree);
+    let pinned = pin.source.commit.clone();
+    let err = pin.source.tree().unwrap_err().to_string();
+    assert!(err.contains(&head), "the tree's commit is named: {err}");
+    assert!(err.contains(&pinned), "and the pin's: {err}");
+    assert!(err.contains("php-8.5"), "with the tag: {err}");
+    assert!(
+        err.contains(&tree.display().to_string()),
+        "and where the tree is: {err}"
+    );
+    // The variable naming it is no different: a wrong tree is refused, not
+    // passed over for the pin's path.
+    let pinned_dir = fixture_tree("drifted-fallback");
+    let pin = pin_with_path(&pinned_dir).on_this_machine(Some(tree));
+    let err = pin.source.tree().unwrap_err().to_string();
+    assert!(err.contains(&head) && err.contains(TREE_VARIABLE), "{err}");
+}
+
+#[test]
+fn a_tree_that_is_no_checkout_states_no_commit_and_is_taken_at_its_word() {
+    // The fixture trees above have no `.git`; a tarball at the tag is the
+    // same, and the pin's commit cannot be read off it.
+    let tree = fixture_tree("unpacked");
+    assert_eq!(pin_with_path(&tree).source.tree().unwrap(), tree);
+}
+
+/// What a runner that sets the variable claims: the tree is there and at
+/// the pin's commit. Held whenever the variable is set, so a runner whose
+/// checkout drifted from `[source].commit` fails here naming both
+/// revisions, and never skips as an absent tree would (#37).
+#[test]
+fn a_tree_the_variable_names_is_at_the_pin() {
+    if std::env::var_os(TREE_VARIABLE).is_none_or(|value| value.is_empty()) {
+        eprintln!("{TREE_VARIABLE} is unset; nothing claims a tree, skipping");
+        return;
+    }
+    let pin = Manifest::load(workspace()).unwrap().pin;
+    let tree = pin.source.tree().unwrap();
+    assert!(tree.is_dir(), "{}", tree.display());
+}
+
 #[test]
 fn the_pin_refuses_a_key_outside_its_grammar() {
     let text = std::fs::read_to_string(workspace().join("oracle.toml")).unwrap();

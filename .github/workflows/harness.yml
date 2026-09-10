@@ -56,12 +56,65 @@ jobs:
         run: claude -p "/plugin-types $GITHUB_WORKSPACE/.claude/types"
       - run: npx -y -p typescript@5.9.3 tsc -p harness-plugins
       - run: claude plugin validate harness-plugins --strict
-      # The tests that resolve a subset of the real corpus find the pinned
-      # php-src tree where the variable `oracle::TREE_VARIABLE` names
-      # first and at the pin's path second (#36); the name is stated there
-      # alone. This runner sets it once #37 lays the tree down at the
-      # pin's commit; until then those tests skip, saying so on stderr.
+      # The pinned php-src (#37): the tree the tests that resolve a subset
+      # of the real corpus read, found where the variable
+      # `oracle::TREE_VARIABLE` names first and at the pin's path second
+      # (#36). The name is stated in the harness alone and spelled once
+      # here, in `env:`, until `status` renders the pin. The tag and the
+      # commit are the pin's, read off `oracle.toml` by a parse and never
+      # copied here, so a person's bump moves the checkout and the cache
+      # key with it. The checkout is sparse and shallow: one commit at the
+      # tag, and of the tree only `Zend/tests`, `tests`, `sapi/cli/tests`
+      # and every `ext/*/tests`, the directories a `[[crate]]` row can
+      # own, stated once in `CORPUS_DIRS`; cached by the pinned commit and
+      # a digest of that list, so a second run restores it rather than
+      # cloning again and a narrower list never restores a wider tree's
+      # cache, or the reverse. What holds the tree to `[source].commit`
+      # is `Source::tree()`, which refuses a checkout at another commit
+      # naming both revisions; the one-test step fails the job there,
+      # before the suite, and the suite reads the same tree.
+      # The wall-clock, measured on the dev machine (2026-09-10, M-series,
+      # residential link): the shallow clone 9.6 s and the sparse checkout
+      # 2.4 s, 132 MB in the tree and 31 MB under `.git`, 21414 `.phpt`
+      # files; with `--filter=blob:none` the clone is 1.0 s and the
+      # checkout 13.3 s, so the plain shallow clone is the one taken. The
+      # runner's figures, cold and from cache, are read off the first two
+      # runs.
+      - name: the pin's tag and commit, and the sparse set's digest
+        id: pin
+        env:
+          CORPUS_DIRS: /Zend/tests/ /tests/ /sapi/cli/tests/ /ext/*/tests/
+        run: |
+          python3 - >> "$GITHUB_OUTPUT" <<'EOF'
+          import hashlib, os, tomllib
+          with open("oracle.toml", "rb") as pin:
+              source = tomllib.load(pin)["source"]
+          dirs = hashlib.sha256(os.environ["CORPUS_DIRS"].encode()).hexdigest()[:12]
+          print(f"tag={source['tag']}\ncommit={source['commit']}\ndirs={dirs}")
+          EOF
+      - name: the pinned php-src, from the cache
+        id: corpus
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/php-src
+          key: php-src-${{ steps.pin.outputs.commit }}-${{ steps.pin.outputs.dirs }}
+      - name: the pinned php-src, checked out sparse and shallow at the tag
+        if: steps.corpus.outputs.cache-hit != 'true'
+        env:
+          TAG: ${{ steps.pin.outputs.tag }}
+          CORPUS_DIRS: /Zend/tests/ /tests/ /sapi/cli/tests/ /ext/*/tests/
+        run: |
+          set -f # the patterns are git's, not the shell's
+          git clone --quiet --no-checkout --depth 1 --branch "$TAG" https://github.com/php/php-src.git "$RUNNER_TEMP/php-src"
+          git -C "$RUNNER_TEMP/php-src" sparse-checkout set --no-cone $CORPUS_DIRS
+          git -C "$RUNNER_TEMP/php-src" checkout --quiet
+      - name: the tree is at the pin's commit
+        env:
+          TEST_PHP_SRCDIR: ${{ runner.temp }}/php-src
+        run: cargo test -p xtask --test oracle a_tree_the_variable_names_is_at_the_pin
       - run: cargo test -p xtask
+        env:
+          TEST_PHP_SRCDIR: ${{ runner.temp }}/php-src
   per-commit:
     name: the instruments, then done
     runs-on: ubuntu-latest
