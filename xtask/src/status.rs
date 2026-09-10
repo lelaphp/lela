@@ -21,6 +21,7 @@ use crate::git::git;
 use crate::manifest::{Manifest, Measure, SCRIPTS, Week};
 use crate::permit;
 use crate::reading::{self, Log, Reading, Store};
+use crate::sources::NOT_YET_CREATED;
 
 /// What a section says when no instrument has measured a row.
 pub(crate) const NO_READING: &str = "no reading";
@@ -66,11 +67,23 @@ pub fn render(
     let (rows, columns): (Vec<Row>, Columns) = match section {
         Section::Rules => (rules(manifest, &readings), RULES),
         Section::Locks => (locks(manifest, &readings), LOCKS),
-        Section::Budget => (budget(manifest, &readings), BUDGET),
+        Section::Budget => (
+            fold_uncreated(budget(manifest, &readings), "crate")?,
+            BUDGET,
+        ),
         Section::Divergence => return divergence(registry, format),
-        Section::Phpt => (instrument(&readings, "phpt"), INSTRUMENT),
-        Section::Witness => (instrument(&readings, "witness"), INSTRUMENT),
-        Section::Mutants => (instrument(&readings, "mutants"), INSTRUMENT),
+        Section::Phpt => (
+            fold_uncreated(instrument(&readings, "phpt"), "scope")?,
+            INSTRUMENT,
+        ),
+        Section::Witness => (
+            fold_uncreated(instrument(&readings, "witness"), "scope")?,
+            INSTRUMENT,
+        ),
+        Section::Mutants => (
+            fold_uncreated(instrument(&readings, "mutants"), "scope")?,
+            INSTRUMENT,
+        ),
         Section::Ticket => (instrument(&readings, "ticket"), TICKET),
         Section::Permits => {
             return permits(manifest, &readings, &store.log()?, format, session_id);
@@ -347,6 +360,39 @@ fn budget(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
         latest_of(readings, "budget", SCRIPTS),
     ));
     rows
+}
+
+/// The rows whose reading says its crate is not yet created, folded into
+/// one at the end of the section (#64): twenty rows of "not yet created"
+/// carry one fact, and the session block has a cap. The row's `key` cell
+/// says "N crates not yet created", its reading is a skip naming them,
+/// stamped at the newest of the folded, and a lone row stays as it is.
+fn fold_uncreated(rows: Vec<Row>, key: &str) -> Result<Vec<Row>> {
+    let uncreated = |row: &Row| {
+        row.reading.as_ref().is_some_and(|r| {
+            r.message
+                .starts_with(&format!("{}: {NOT_YET_CREATED}", r.scope))
+        })
+    };
+    if rows.iter().filter(|r| uncreated(r)).count() < 2 {
+        return Ok(rows);
+    }
+    let (folded, mut kept): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(uncreated);
+    let readings: Vec<&Reading> = folded.iter().filter_map(|r| r.reading.as_ref()).collect();
+    let names: Vec<&str> = readings.iter().map(|r| r.scope.as_str()).collect();
+    let Some(newest) = readings.iter().max_by_key(|r| r.at.to_string()) else {
+        return Ok(kept);
+    };
+    let count = readings.len();
+    let mut reading = Reading::new(&newest.instrument, &format!("{count} crates"));
+    reading.at = newest.at;
+    reading.message = format!("{NOT_YET_CREATED}: {}", names.join(", "));
+    reading.count("crates", count as u64)?;
+    kept.push(Row::new(
+        &[(key, json!(format!("{count} crates {NOT_YET_CREATED}")))],
+        Some(reading),
+    ));
+    Ok(kept)
 }
 
 /// The divergence section: the registry's rows, then counts by kind (rows)

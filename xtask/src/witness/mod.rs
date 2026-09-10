@@ -329,7 +329,7 @@ pub fn run(
             continue;
         }
         if !sources::exists(root, krate) {
-            unrun.message = format!("{}: not yet created", krate.name);
+            unrun.message = format!("{}: {}", krate.name, sources::NOT_YET_CREATED);
             readings.push(unrun);
             continue;
         }

@@ -145,6 +145,71 @@ fn locks_and_budget_render_the_readings_the_instruments_wrote() {
     assert_eq!(row["reading"]["numbers"]["lines"], 20001);
 }
 
+/// Rows whose reading says the crate is not yet created fold into one row
+/// at the end of the section, "N crates not yet created", naming them
+/// (#64): twenty such rows carry one fact, and the session block has a
+/// cap. A lone one stays as it is, and a crate that is measured keeps its
+/// row; the fold reads the message alone, as budget, witness and phpt
+/// write it.
+#[test]
+fn the_rows_of_crates_not_yet_created_fold_into_one() {
+    let root = scratch("uncreated");
+    let store = Store::of_workspace(&root);
+    for name in ["php_heap", "php_unit", "ext/pcre"] {
+        let mut reading = Reading::new("budget", name);
+        reading.message = format!("{name}: not yet created");
+        store.record(std::slice::from_ref(&reading)).unwrap();
+    }
+    let mut xtask = Reading::new("budget", "xtask");
+    xtask.status = Status::Pass;
+    xtask.numbers.insert("lines".into(), 11298.into());
+    xtask.message = "xtask: 11298 lines under the ceiling of 14000".into();
+    store.record(std::slice::from_ref(&xtask)).unwrap();
+
+    let (ok, md, err) = status(&root, &["--section", "budget"]);
+    assert!(ok, "{err}");
+    let folded = md
+        .lines()
+        .find(|l| l.starts_with("| 3 crates not yet created |"))
+        .unwrap_or_else(|| panic!("{md}"));
+    assert!(
+        folded.contains("| skip | not yet created: php_heap, php_unit, ext/pcre |"),
+        "{folded}"
+    );
+    assert_eq!(md.lines().last(), Some(folded), "the fold is the last row");
+    assert!(
+        !md.lines().any(|l| l.starts_with("| php_heap |")),
+        "a folded crate has no row of its own: {md}"
+    );
+    assert!(md.contains("| xtask | 11298 |"), "{md}");
+    assert!(
+        md.contains("| php_syntax |  | 26000 | no reading |"),
+        "{md}"
+    );
+
+    let (ok, json, _) = status(&root, &["--section", "budget", "--format", "json"]);
+    assert!(ok);
+    let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let row = rows.as_array().unwrap().last().unwrap();
+    assert_eq!(row["crate"], "3 crates not yet created");
+    assert_eq!(row["reading"]["numbers"]["crates"], 3);
+
+    let mut phpt = Reading::new("phpt", "ext/pcre");
+    phpt.message = "ext/pcre: not yet created; the subset holds 165 tests".into();
+    store.record(std::slice::from_ref(&phpt)).unwrap();
+    let mut control = Reading::new("phpt", "ext/pcre@control");
+    control.message = "ext/pcre@control: 0 of 165 differ".into();
+    store.record(std::slice::from_ref(&control)).unwrap();
+    let (ok, md, _) = status(&root, &["--section", "phpt"]);
+    assert!(ok);
+    assert!(
+        md.lines().any(|l| l.starts_with("| ext/pcre | skip |")),
+        "a lone row stays: {md}"
+    );
+    assert!(md.contains("| ext/pcre@control |"), "{md}");
+    assert!(!md.contains("crates not yet created"), "{md}");
+}
+
 #[test]
 fn a_section_that_has_no_renderer_yet_is_refused() {
     let root = scratch("unknown");

@@ -60,6 +60,7 @@ use crate::divergence::Registry;
 use crate::manifest::{Crate, Manifest};
 use crate::oracle::{Oracle, Runner};
 use crate::reading::{Reading, listed};
+use crate::sources;
 use crate::tally::{self, Outcome};
 use adapter::Adapter;
 
@@ -385,16 +386,33 @@ pub(crate) fn reading(
 ) -> Result<Reading> {
     let scope = subset.scope(runner, lane);
     let absent = subset.absent();
+    // A subset of a crate not yet created: its tests are that crate's, and
+    // an engine built without it would not answer for it, so the reading
+    // says so ahead of whether an engine is built, as `budget` and
+    // `witness` do; the control of the runner is the oracle's, whatever
+    // stands where the crate would (#64).
+    let uncreated = !matches!(runner, Runner::Control(_))
+        && manifest
+            .crate_named(&subset.scope)
+            .is_some_and(|krate| !sources::exists(root, krate));
     // A directory the row names and the pinned tree has not: the manifest
     // and the pin disagree, and no run can settle it. It is the reading,
     // ahead of whether an engine is built, because building one would not
     // answer it.
-    let outcome = if absent.is_empty() {
-        tally.outcome(runner)
-    } else {
+    let outcome = if !absent.is_empty() {
         Outcome::Failed
+    } else if uncreated {
+        Outcome::Absent(sources::NOT_YET_CREATED)
+    } else {
+        tally.outcome(runner)
     };
-    let message = if absent.is_empty() {
+    let message = if uncreated && absent.is_empty() {
+        format!(
+            "{scope}: {}; the subset holds {} tests",
+            sources::NOT_YET_CREATED,
+            tally.found
+        )
+    } else if absent.is_empty() {
         match &outcome {
             Outcome::Failed => format!(
                 "{scope}: {} of {} missed their expectation{}",

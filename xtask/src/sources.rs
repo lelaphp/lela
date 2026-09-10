@@ -49,6 +49,10 @@ pub fn is_binding(path: &str) -> bool {
         && parts.next().is_some()
 }
 
+/// What a reading says of a crate that has no `Cargo.toml` yet, after the
+/// scope and a colon; `status` folds the rows that say it into one (#64).
+pub(crate) const NOT_YET_CREATED: &str = "not yet created";
+
 /// Whether the crate has been created: its directory holds a `Cargo.toml`.
 pub fn exists(root: &Path, krate: &Crate) -> bool {
     root.join(krate.path()).join("Cargo.toml").is_file()

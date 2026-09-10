@@ -126,7 +126,7 @@ fn crate_reading(root: &Path, krate: &Crate) -> Result<(Reading, Count)> {
     let mut reading = Reading::for_crate("budget", krate, root)?;
     reading.count("ceiling", krate.budget)?;
     if !sources::exists(root, krate) {
-        reading.message = format!("{}: not yet created", krate.name);
+        reading.message = format!("{}: {}", krate.name, sources::NOT_YET_CREATED);
         return Ok((reading, Count::default()));
     }
     let count = count(root, krate)?;

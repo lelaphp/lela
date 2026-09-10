@@ -56,7 +56,7 @@ pub fn run(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
                 );
             }
         } else {
-            reading.message = format!("{}: not yet created", krate.name);
+            reading.message = format!("{}: {}", krate.name, sources::NOT_YET_CREATED);
         }
         readings.push(reading);
     }

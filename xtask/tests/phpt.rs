@@ -310,17 +310,43 @@ fn with_no_engine_built_the_reading_is_a_skip_that_says_so_and_no_test_runs() {
         subset: Some("pcre".to_owned()),
         ..Ask::default()
     };
+    // The crate the subset is of has no Cargo.toml in the scratch: the
+    // reading says so ahead of the engine's binary (#64).
     let readings = phpt::run(&root, &manifest, &registry(""), &ask).unwrap();
     assert_eq!(readings.len(), 1, "{readings:#?}");
     let reading = &readings[0];
     assert_eq!(reading.status, Status::Skip, "{reading:#?}");
     assert_eq!(reading.scope, "ext/pcre");
-    assert!(reading.message.contains("not built"), "{}", reading.message);
+    assert!(
+        reading
+            .message
+            .starts_with("ext/pcre: not yet created; the subset holds "),
+        "{}",
+        reading.message
+    );
     assert_eq!(count(reading, "run"), 0);
     assert!(
         count(reading, "tests") > 100,
         "the subset was still counted: {reading:#?}"
     );
+
+    // With the crate laid down, what is absent is the engine's binary.
+    fs::create_dir_all(root.join("ext/pcre/src")).unwrap();
+    fs::write(
+        root.join("ext/pcre/Cargo.toml"),
+        "[package]\nname = \"pcre\"\n",
+    )
+    .unwrap();
+    let readings = phpt::run(&root, &manifest, &registry(""), &ask).unwrap();
+    let reading = &readings[0];
+    assert_eq!(reading.status, Status::Skip, "{reading:#?}");
+    assert!(reading.message.contains("not built"), "{}", reading.message);
+    assert!(
+        !reading.message.contains("not yet created"),
+        "{}",
+        reading.message
+    );
+    assert_eq!(count(reading, "run"), 0);
 }
 
 #[test]
