@@ -25,3 +25,7 @@ _Avoid_: scoreboard, summary
 **Reading**:
 The one-shaped value an instrument writes after a run.
 _Avoid_: result (which means `Result` in Rust), report
+
+**Ticket**:
+One GitHub issue, filed once.
+_Avoid_: leftover, follow-up

@@ -23,3 +23,7 @@ pub enum Kind {
     Serve,
     Handle,
 }
+
+/// A thing found and not done, under a word that hides whether it was
+/// filed; the follow-up is the same thing under the other word.
+pub struct Leftover;

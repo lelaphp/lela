@@ -134,6 +134,27 @@ fn prose_using_an_avoided_word_fails_and_the_same_word_as_a_type_name_passes() {
     );
 }
 
+/// The glossary's Ticket entry (#27): the two words that hide whether a
+/// thing found and not done was filed, `leftover` and `follow-up`, fire in
+/// a public name and in prose, and the finding names the term. A hyphen
+/// in the glossary's phrase is a word boundary, so `follow-up` in prose is
+/// the phrase as written.
+#[test]
+fn a_thing_found_and_not_done_is_a_ticket_and_the_words_that_hide_it_fail() {
+    let reading = fixture_reading("ticket");
+    let found = findings(&reading);
+    for line in [
+        "src/lib.rs:28: \"follow-up\" in rustdoc prose; the glossary says \"Ticket\"",
+        "src/lib.rs:29: \"leftover\" names `pub struct Leftover`; the glossary says \"Ticket\"",
+    ] {
+        assert!(found.contains(&line), "{line}: {found:#?}");
+    }
+    assert!(
+        !found.iter().any(|f| f.starts_with("src/lib.rs:27:")),
+        "the words the entry replaces them with pass: {found:#?}"
+    );
+}
+
 #[test]
 fn the_instrument_writes_a_reading_per_crate_with_instrument_vocab() {
     let root = scratch("reading", "crates/php_ext", &fixture("vocab.avoid"));
@@ -310,14 +331,17 @@ fn a_section_holds_its_scope_to_that_sections_terms_and_a_fixture_under_the_crat
         [
             "src/lib.rs:6: \"scoreboard\" in rustdoc prose; the glossary says \"Tally\"",
             "src/lib.rs:10: \"summary\" names `pub fn summary`; the glossary says \"Tally\"",
+            "src/lib.rs:15: \"leftover\" in rustdoc prose; the glossary says \"Ticket\"",
+            "src/lib.rs:15: \"follow-up\" in rustdoc prose; the glossary says \"Ticket\"",
+            "src/lib.rs:16: \"leftover\" names `pub fn leftover`; the glossary says \"Ticket\"",
         ],
         "{}",
         reading.message
     );
-    assert_eq!(reading.numbers["hits"], Number::count(2));
+    assert_eq!(reading.numbers["hits"], Number::count(5));
     assert_eq!(
         reading.numbers["items"],
-        Number::count(3),
+        Number::count(4),
         "the fixture's items are not counted"
     );
 }

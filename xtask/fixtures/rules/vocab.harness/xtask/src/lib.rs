@@ -11,3 +11,6 @@ pub fn summary() {}
 
 /// The type the glossary marks as code passes bare, in a name and in prose.
 pub type Result<T> = core::result::Result<T, ()>;
+
+/// What the harness found and did not do: a leftover, or a follow-up.
+pub fn leftover() {}

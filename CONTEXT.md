@@ -168,6 +168,10 @@ _Avoid_: result, artefact, report, telemetry, output
 The branch a set of branches is worked above, named by being a proper path prefix of theirs: `t-opus-5` for `t-opus-5/witness`. What `done` measures a turn since when it is given no base; a branch that is a prefix of none is on `main`. Git's ref store keeps a track and its branches from both being the clone's own, so a track a worktree is not on is the remote's.
 _Avoid_: parent branch, base branch, fork point
 
+**Ticket**:
+One GitHub issue in this repository: what happened, what to build, its acceptance criteria and what blocks it, filed once and closed by the commit whose `Ticket:` trailer names it. A thing found and not done is a ticket of its own, filed before the turn ends; the only question it raises is whose, and that is a label, not a noun: `ready-for-agent` for an act an agent may take, `for-a-person` for one that is a person's alone (harness §11): a manifest row, a divergence reason, an oracle bump, a design revision. A branch records the ticket its work is for. The prose no sensor reads is the commit message and the ticket itself, where a person reads the word before anything closes, and the harness's own rustdoc until the manifest holds `xtask` to this section (#63); that is acceptable because the entry's words are two, and a person reads both places.
+_Avoid_: leftover (hides whether the thing was filed), follow-up (hides whose it is)
+
 **Divergence**:
 One accepted difference from the oracle, a row in `docs/divergence.toml` keyed by a witness hash, a phpt path, a compile-identity path or a trace site, with a kind, a reason, a status and a date. The oracle module consults the registry on every comparison; a person writes the reason.
 _Avoid_: recorded difference, known disagreement, XFAIL, exception, divergence-table row as a thing apart from the registry
