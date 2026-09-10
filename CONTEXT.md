@@ -42,7 +42,7 @@ _Avoid_: builtin, internal function, intrinsic
 
 **Parameter / Argument**:
 A parameter is a declared slot on a function; an argument is the value passed to it at a call. Php's error text keeps this distinction ("Argument #1 ($x)") and so does the engine.
-_Avoid_: arg, param as nouns for the value; `Ret` for a return
+_Avoid_: arg (php's `arg_type_error`, `arg_value_error`, `arg_count_error`, `arg_null_deprecated`), param (php's `coerce_param`) as nouns for the value; `Ret` for a return
 
 **Return**:
 The value a native hands back to the engine.
@@ -74,13 +74,13 @@ _Avoid_: tenant, ext state, globals (php's word for the per-thread struct this r
 
 **Engine state**:
 One extension's per-engine value, built at module startup from the startup ini and immutable afterwards, shared by every request. What changes across requests lives in the engine's cache of immutable values inside it, never behind a lock the extension owns.
-_Avoid_: module globals, persistent state, static
+_Avoid_: module globals, persistent state, static (php's `read_static_prop`, `write_static_prop`)
 
 ### Requests
 
 **Request description**:
 Everything a host knows about one request before it starts: arguments, environment, working directory, server variables, request headers, body stream, SAPI name, and whether it is a web request. One plain value, handed over once.
-_Avoid_: SAPI (the host), context, config
+_Avoid_: SAPI (the host; php's `sapi_name`), context, config
 
 **Output sink**:
 Where a request's bytes go: one rendered header block, then body bytes. The engine owns headers, status, output buffering and the commit moment; a sink only writes.
@@ -88,11 +88,11 @@ _Avoid_: backend, writer, transport
 
 **Host**:
 A program that builds request descriptions and supplies output sinks: the CLI, CGI, the FastCGI worker, the dev server, the in-process test harness. Hosts parse protocols and contain no engine policy.
-_Avoid_: SAPI as a synonym for the crate (SAPI is what php calls the host role), driver
+_Avoid_: SAPI as a synonym for the crate (SAPI is what php calls the host role; php's `sapi_name`), driver
 
 **Serve**:
 The one request transaction: compile, seed superglobals, run, commit headers, shut down, report observables. Every host crosses it; the embed API is this and nothing else.
-_Avoid_: run, execute, handle
+_Avoid_: run, execute (`tier::execute`, the tier's entry, design §4.3), handle
 
 ### Correctness
 
@@ -120,7 +120,7 @@ _Avoid_: feedback (the per-request `MapPtr<[Feedback]>` of `research/third-engin
 
 **Interrupt**:
 The one flag on a request that the execution timer and signal delivery set and nothing else touches. The loop tests it at a back-edge, at a frame's activation and after every `Resume`; compiled code tests it once per loop iteration and exits when it is set; the interrupt helper that runs at the check raises the timeout fatal or dispatches the pending signals.
-_Avoid_: vm_interrupt (php's field), timeout flag, pending signal, tick
+_Avoid_: vm_interrupt (php's field), timeout flag, pending signal, tick (php's `register_tick_function`, `unregister_tick_function`)
 
 **Trace**:
 One recorded straight-line path through the op arrays, compiled to machine code, holding its unit alive, with exits back to the interpreter. A root starts at a hot safepoint; a side trace starts at a hot exit of another trace.
@@ -162,7 +162,7 @@ _Avoid_: config, rules file, policy, `api-check`'s tables
 
 **Reading**:
 The one-shaped value an instrument writes after a run: instrument, scope, rule, status, numbers, message, ADR, the scope's tree hash, commit, time. Everything an agent or a person reads about the state of the engine is a rendering of readings by `xtask status`.
-_Avoid_: result, artefact, report, telemetry (the manifest's `[telemetry]` table: the field `telemetry` and `Telemetry`, its type), output
+_Avoid_: result, artefact, report, telemetry (the manifest's `[telemetry]` table: the field `telemetry` and `Telemetry`, its type), output (php's `OutputOp`, `output_buffer_op`, `output_started_at`; seam 4's `OutputSink`)
 
 **Track**:
 The branch a set of branches is worked above, named by being a proper path prefix of theirs: `t-opus-5` for `t-opus-5/witness`. What `done` measures a turn since when it is given no base; a branch that is a prefix of none is on `main`. Git's ref store keeps a track and its branches from both being the clone's own, so a track a worktree is not on is the remote's.
@@ -174,4 +174,4 @@ _Avoid_: leftover (hides whether the thing was filed), follow-up (hides whose it
 
 **Divergence**:
 One accepted difference from the oracle, a row in `docs/divergence.toml` keyed by a witness hash, a phpt path, a compile-identity path or a trace site, with a kind, a reason, a status and a date. The oracle module consults the registry on every comparison; a person writes the reason.
-_Avoid_: recorded difference, known disagreement, XFAIL, exception, divergence-table row as a thing apart from the registry
+_Avoid_: recorded difference, known disagreement, XFAIL, exception (php's `set_exception_handler`, `restore_exception_handler`; `Thrown::exception`), divergence-table row as a thing apart from the registry
