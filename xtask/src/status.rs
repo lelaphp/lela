@@ -18,7 +18,7 @@ use crate::api_check;
 use crate::cli::{Format, Section};
 use crate::divergence::{Kind, Registry, Status};
 use crate::git::git;
-use crate::manifest::{Manifest, Measure, Week};
+use crate::manifest::{Manifest, Measure, SCRIPTS, Week};
 use crate::permit;
 use crate::reading::{self, Log, Reading, Store};
 
@@ -322,8 +322,11 @@ fn locks(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
         .collect()
 }
 
+/// The budget section: one row per `[[crate]]`, then `scripts/**` against
+/// `[budget] scripts`, whose ceiling cell is empty while a person has not
+/// written the row.
 fn budget(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
-    manifest
+    let mut rows: Vec<Row> = manifest
         .crates
         .iter()
         .map(|krate| {
@@ -335,7 +338,18 @@ fn budget(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
                 latest_of(readings, "budget", &krate.name),
             )
         })
-        .collect()
+        .collect();
+    rows.push(Row::new(
+        &[
+            ("crate", json!(SCRIPTS)),
+            (
+                "ceiling",
+                json!(manifest.budget.scripts.as_ref().map(|s| s.ceiling)),
+            ),
+        ],
+        latest_of(readings, "budget", SCRIPTS),
+    ));
+    rows
 }
 
 /// The divergence section: the registry's rows, then counts by kind (rows)

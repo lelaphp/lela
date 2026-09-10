@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use xtask::manifest::{AvoidFrom, Crate, Edge, Manifest, Rule, Seam};
+use xtask::manifest::{AvoidFrom, Crate, Edge, Manifest, Rule, Scripts, Seam};
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -35,6 +35,35 @@ clean_build_release_s = 1
 api_items = 1
 bindings = 1
 "#;
+
+/// `[budget] scripts` is one row, the ceiling and the generators it leaves
+/// out, read as the file writes it and absent when the file has none; the
+/// constructor a test builds it by is the row the file would parse (#34).
+#[test]
+fn the_scripts_row_is_the_ceiling_and_its_generators_and_is_absent_when_unwritten() {
+    let parsed = Manifest::parse(MINIMAL).unwrap();
+    assert_eq!(parsed.budget.scripts, None);
+    let text = format!(
+        "{MINIMAL}scripts = {{ ceiling = 150, generators = [\"scripts/census.sh\", \"scripts/extract_ops.py\"] }}\n"
+    );
+    let parsed = Manifest::parse(&text).unwrap();
+    assert_eq!(
+        parsed.budget.scripts,
+        Some(Scripts::new(
+            150,
+            &["scripts/census.sh", "scripts/extract_ops.py"]
+        ))
+    );
+    let text = format!("{MINIMAL}scripts = {{ ceiling = 150 }}\n");
+    let parsed = Manifest::parse(&text).unwrap();
+    assert_eq!(parsed.budget.scripts, Some(Scripts::new(150, &[])));
+    let text = format!("{MINIMAL}scripts = {{ ceiling = 150, exclude = [] }}\n");
+    let err = Manifest::parse(&text).unwrap_err().to_string();
+    assert!(
+        err.contains("exclude"),
+        "a key outside the row is refused by name: {err}"
+    );
+}
 
 /// A row a test builds by name (`Crate::named` and the constructors beside
 /// it) is the row the parser reads from the file with that name and

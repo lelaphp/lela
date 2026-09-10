@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Three counted lines under a ceiling of two: the fixture is one line over.
+exit 0

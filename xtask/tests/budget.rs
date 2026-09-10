@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use xtask::budget;
-use xtask::manifest::Manifest;
+use xtask::manifest::{Manifest, Scripts};
 use xtask::reading::{Number, Status, Store};
 
 mod common;
@@ -102,6 +102,132 @@ fn the_tracked_workspace_passes_with_the_manifests_numbers() {
         absent.status,
         Status::Skip,
         "a crate not yet created is skipped"
+    );
+}
+
+/// A manifest without the `[budget] scripts` row, which a person writes:
+/// the reading is a skip that still says what the tree measures, file by
+/// file, so the number the row needs is read off it.
+#[test]
+fn without_the_scripts_row_the_tree_is_measured_and_held_to_nothing() {
+    let root = scratch("no-row");
+    common::scratch_workspace(workspace(), &root).unwrap();
+    std::fs::copy(workspace().join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
+    std::fs::create_dir_all(root.join("scripts/hooks")).unwrap();
+    std::fs::write(
+        root.join("scripts/hooks/pre-commit"),
+        "#!/usr/bin/env bash\nexit 0\n",
+    )
+    .unwrap();
+    let mut manifest = Manifest::load(&root).unwrap();
+    manifest.budget.scripts = None;
+    let readings = budget::run(&root, &manifest).unwrap();
+    let scripts = readings.iter().find(|r| r.scope == "scripts").unwrap();
+    assert_eq!(scripts.status, Status::Skip, "{scripts:#?}");
+    assert!(!scripts.numbers.contains_key("ceiling"));
+    assert_eq!(scripts.numbers["lines"], 2.into());
+    assert!(
+        scripts.message.contains("no `[budget] scripts` row")
+            && scripts
+                .message
+                .contains("made up of scripts/hooks/pre-commit 2"),
+        "{}",
+        scripts.message
+    );
+    assert!(!scripts.tree().is_empty(), "stamped over scripts/");
+}
+
+/// The mechanism, held without the row in the tracked manifest: a scratch
+/// tree with a hook and a generator, the row built as the file would parse
+/// it, and the generator's lines left out of the count. Everything under
+/// `scripts/` counts except what the row names, and the instrument reads
+/// the row rather than a list of its own (#34).
+#[test]
+fn the_scripts_row_names_the_generators_and_everything_else_under_scripts_counts() {
+    let root = scratch("scripts");
+    common::scratch_workspace(workspace(), &root).unwrap();
+    std::fs::copy(workspace().join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
+    std::fs::create_dir_all(root.join("scripts/hooks")).unwrap();
+    std::fs::write(
+        root.join("scripts/hooks/pre-commit"),
+        "#!/usr/bin/env bash\nexit 0\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("scripts/adr-index.sh"),
+        "#!/usr/bin/env bash\n\nls\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("scripts/extract.py"),
+        "import sys\n\nprint(1)\nprint(2)\nprint(3)\nprint(4)\n",
+    )
+    .unwrap();
+    let mut manifest = Manifest::load(&root).unwrap();
+
+    manifest.budget.scripts = Some(Scripts::new(4, &["scripts/extract.py"]));
+    let readings = budget::run(&root, &manifest).unwrap();
+    let scripts = readings.iter().find(|r| r.scope == "scripts").unwrap();
+    assert_eq!(scripts.status, Status::Pass, "{scripts:#?}");
+    assert_eq!(
+        scripts.numbers["lines"],
+        4.into(),
+        "two and two, the generator's five left out"
+    );
+    assert_eq!(scripts.numbers["files"], 2.into());
+    assert_eq!(scripts.numbers["ceiling"], 4.into());
+    assert!(
+        scripts
+            .message
+            .contains("made up of scripts/adr-index.sh 2, scripts/hooks/pre-commit 2")
+            && scripts
+                .message
+                .contains("generators not counted: scripts/extract.py"),
+        "{}",
+        scripts.message
+    );
+
+    manifest.budget.scripts = Some(Scripts::new(4, &[]));
+    let readings = budget::run(&root, &manifest).unwrap();
+    let scripts = readings.iter().find(|r| r.scope == "scripts").unwrap();
+    assert_eq!(
+        scripts.status,
+        Status::Fail,
+        "a row naming no generator counts them: {scripts:#?}"
+    );
+    assert_eq!(scripts.numbers["lines"], 9.into());
+    assert!(
+        scripts.message.contains("9 lines over the ceiling of 4")
+            && scripts.message.contains("scripts/extract.py 5")
+            && !scripts.message.contains("generators not counted"),
+        "{}",
+        scripts.message
+    );
+
+    manifest.budget.scripts = Some(Scripts::new(9, &["scripts/extract_ops.py"]));
+    let readings = budget::run(&root, &manifest).unwrap();
+    let scripts = readings.iter().find(|r| r.scope == "scripts").unwrap();
+    assert_eq!(
+        scripts.status,
+        Status::Fail,
+        "a generator the row names that is no tracked file is a failure, not a file that quietly counts: {scripts:#?}"
+    );
+    assert_eq!(
+        scripts.numbers["lines"],
+        9.into(),
+        "under the ceiling, and still a failure"
+    );
+    assert!(
+        scripts
+            .message
+            .contains("names scripts/extract_ops.py as a generator and no tracked file under scripts/ is so called"),
+        "{}",
+        scripts.message
+    );
+    assert!(
+        !scripts.message.contains("over the ceiling"),
+        "{}",
+        scripts.message
     );
 }
 

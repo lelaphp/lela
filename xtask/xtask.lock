@@ -82,6 +82,9 @@ manifest::Rule
 manifest::Rule::covers
 manifest::Rule::exempts
 manifest::Rule::named
+manifest::SCRIPTS
+manifest::Scripts
+manifest::Scripts::new
 manifest::Seam
 manifest::Seam::named
 manifest::Telemetry

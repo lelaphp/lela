@@ -127,6 +127,10 @@ fn locks_and_budget_render_the_readings_the_instruments_wrote() {
         "{md}"
     );
     assert!(md.contains("php_unit") && md.contains("no reading"), "{md}");
+    assert!(
+        md.lines().any(|l| l.starts_with("| scripts |")),
+        "scripts/** has its row beside the crates (#34): {md}"
+    );
 
     let (ok, json, _) = status(&root, &["--section", "budget", "--format", "json"]);
     assert!(ok);

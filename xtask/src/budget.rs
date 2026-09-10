@@ -3,7 +3,8 @@
 //! committed generated code refused unless the manifest declares it, and
 //! a declared file held to its regenerated form. The numbers are the
 //! manifest's; nothing here states one. One reading per crate, one for the
-//! workspace, one per generated file.
+//! workspace, one for `scripts/**` against `[budget] scripts`, one per
+//! generated file.
 
 use std::path::Path;
 
@@ -13,7 +14,7 @@ use crate::generated;
 use crate::git;
 use crate::lines;
 use crate::lock::CargoLock;
-use crate::manifest::{Budget, Crate, Manifest};
+use crate::manifest::{self, Budget, Crate, Manifest};
 use crate::reading::{Reading, Status};
 use crate::sources;
 
@@ -32,8 +33,91 @@ pub fn run(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
         readings.push(reading);
     }
     readings.push(workspace_reading(root, manifest, total)?);
+    readings.push(scripts_reading(root, manifest)?);
     readings.extend(generated_readings(root, manifest)?);
     Ok(readings)
+}
+
+/// What a line under `scripts/` is, for the failure text: the count
+/// `lines` makes for a text that is not Rust or TOML.
+const SCRIPTS_LINE_TEXT: &str =
+    "a line ceiling is design §4.1, principle 7: size is a gate; lines are non-blank";
+
+/// `scripts/**` against `[budget] scripts`: every tracked file under the
+/// directory counts except the generators the row names, and the message
+/// says what makes the count up, file by file, so a failure names what to
+/// shrink. A generator the row names that is no tracked file is a failure,
+/// since a row that says one thing while the count does another is worse
+/// than no row. Without the row, which a person writes, the count is
+/// measured and held to nothing: a skip that says the number.
+fn scripts_reading(root: &Path, manifest: &Manifest) -> Result<Reading> {
+    let mut reading = Reading::for_scope("budget", manifest::SCRIPTS, manifest, root)?;
+    let row = manifest.budget.scripts.as_ref();
+    let generators: &[String] = row.map_or(&[], |s| s.generators.as_slice());
+    let mut counted = Vec::new();
+    let mut excluded = Vec::new();
+    let mut lines = 0;
+    for path in git::files(root, Path::new(manifest::SCRIPTS))? {
+        if generators.contains(&path) {
+            excluded.push(path);
+            continue;
+        }
+        let Some(n) = lines_of(root, &path)? else {
+            continue;
+        };
+        lines += n;
+        counted.push(format!("{path} {n}"));
+    }
+    let unmatched: Vec<&str> = generators
+        .iter()
+        .filter(|g| !excluded.contains(g))
+        .map(String::as_str)
+        .collect();
+    reading.count("lines", lines)?;
+    reading.count("files", u64::try_from(counted.len())?)?;
+    let mut made_up = if counted.is_empty() {
+        "made up of nothing".to_owned()
+    } else {
+        format!("made up of {}", counted.join(", "))
+    };
+    if !excluded.is_empty() {
+        made_up = format!("{made_up}; generators not counted: {}", excluded.join(", "));
+    }
+    let Some(row) = row else {
+        reading.status = Status::Skip;
+        reading.message = format!(
+            "{}: {lines} lines, {made_up}; no `[budget] scripts` row holds them to a ceiling, and a person writes one",
+            manifest::SCRIPTS
+        );
+        return Ok(reading);
+    };
+    reading.count("ceiling", row.ceiling)?;
+    let mut failures = Vec::new();
+    if lines > row.ceiling {
+        failures.push(format!(
+            "{}: {lines} lines over the ceiling of {}, {made_up} ({SCRIPTS_LINE_TEXT})",
+            manifest::SCRIPTS,
+            row.ceiling
+        ));
+    }
+    for name in unmatched {
+        failures.push(format!(
+            "`[budget] scripts` names {name} as a generator and no tracked file under {}/ is so called",
+            manifest::SCRIPTS
+        ));
+    }
+    if failures.is_empty() {
+        reading.status = Status::Pass;
+        reading.message = format!(
+            "{}: {lines} lines under the ceiling of {}, {made_up}",
+            manifest::SCRIPTS,
+            row.ceiling
+        );
+    } else {
+        reading.status = Status::Fail;
+        reading.message = failures.join("; ");
+    }
+    Ok(reading)
 }
 
 /// One crate against its ceiling, and what it counted. A crate not yet
@@ -242,11 +326,17 @@ fn harness(root: &Path) -> Result<u64> {
 fn sum(root: &Path, paths: &[String]) -> Result<u64> {
     let mut n = 0;
     for path in paths {
-        if let Some(text) = text_of(root, path)? {
-            n += u64::try_from(lines::count(path, &text))?;
-        }
+        n += lines_of(root, path)?.unwrap_or(0);
     }
     Ok(n)
+}
+
+/// The counted lines of one file, or `None` for a file that is not text.
+fn lines_of(root: &Path, path: &str) -> Result<Option<u64>> {
+    match text_of(root, path)? {
+        Some(text) => Ok(Some(u64::try_from(lines::count(path, &text))?)),
+        None => Ok(None),
+    }
 }
 
 /// The text of one file to count, or `None` when the file is not text: a

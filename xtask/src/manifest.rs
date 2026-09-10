@@ -22,6 +22,11 @@ use crate::oracle::Pin;
 /// The file name of the manifest at the workspace root.
 pub const FILE: &str = "seams.toml";
 
+/// The scope of `budget`'s reading over `scripts/**`, and the directory
+/// it is stamped over: the one tree beside the crates that a `[budget]`
+/// row holds (`[budget] scripts`).
+pub const SCRIPTS: &str = "scripts";
+
 /// `seams.toml` at its current value, with the oracle pin loaded through it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -83,11 +88,17 @@ pub struct Budget {
     pub clean_build_release_s: u64,
     pub api_items: u64,
     pub bindings: u64,
+    /// `scripts/**` against its ceiling, with what under it is a generator
+    /// and not counted; absent while a person has not written the row,
+    /// and `budget` then counts the tree and holds it to nothing.
+    #[serde(default)]
+    pub scripts: Option<Scripts>,
 }
 
 impl Budget {
     /// Every ceiling `n`: the table a test builds when no ceiling is what
-    /// it measures.
+    /// it measures. The optional `scripts` row stays absent, as the file
+    /// without it parses.
     pub fn flat(n: u64) -> Budget {
         Budget {
             total: n,
@@ -98,6 +109,32 @@ impl Budget {
             clean_build_release_s: n,
             api_items: n,
             bindings: n,
+            scripts: None,
+        }
+    }
+}
+
+/// `[budget] scripts`: the one statement of what `scripts/**` is held to
+/// and what under it counts. Every tracked file under `scripts/` counts
+/// except the `generators`, named by path relative to the root; which
+/// files those are, and why, is the row's own comment to say. `budget`
+/// reads this row and keeps no list of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct Scripts {
+    pub ceiling: u64,
+    #[serde(default)]
+    pub generators: Vec<String>,
+}
+
+impl Scripts {
+    /// The row as the file would parse `ceiling` and `generators`: what a
+    /// test builds to hold a scratch tree without writing the row.
+    pub fn new(ceiling: u64, generators: &[&str]) -> Scripts {
+        Scripts {
+            ceiling,
+            generators: generators.iter().map(|g| (*g).to_owned()).collect(),
         }
     }
 }
@@ -774,6 +811,8 @@ impl Manifest {
     /// condition 1). One arm per scope kind a reading carries:
     ///
     /// - `"workspace"`: the whole tree.
+    /// - [`SCRIPTS`]: the `scripts/` directory, which `[budget] scripts`
+    ///   holds.
     /// - a crate: its sources ([`Crate::path`]).
     /// - a subset: the crate whose subset it is, under the crate's name
     ///   and beside a tier lane or a control of the runner alike
@@ -791,6 +830,9 @@ impl Manifest {
     pub fn scope_path(&self, scope: &str) -> Option<PathBuf> {
         if scope == "workspace" {
             return Some(PathBuf::from("."));
+        }
+        if scope == SCRIPTS {
+            return Some(PathBuf::from(SCRIPTS));
         }
         let name = scope.split_once('@').map_or(scope, |(name, _)| name);
         if let Some(krate) = self.crate_named(name) {

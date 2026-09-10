@@ -90,6 +90,42 @@ fn a_crate_one_line_over_its_ceiling_fails_with_the_ceiling_and_the_design_text(
     );
 }
 
+/// `scripts/**` against `[budget] scripts` (#34): the hook's three lines
+/// are over a ceiling of two, the message says what makes the count up
+/// file by file, and the generator the row names is not in it, so its six
+/// lines would not have rescued or sunk the reading either way.
+#[test]
+fn scripts_over_their_ceiling_fail_naming_each_counted_file_and_the_generator_left_out() {
+    let root = fixture("budget", "scripts");
+    let manifest = Manifest::load(&root).unwrap();
+    let readings = budget::run(&root, &manifest).unwrap();
+    let scripts = readings.iter().find(|r| r.scope == "scripts").unwrap();
+    assert_eq!(scripts.status, Status::Fail, "{scripts:#?}");
+    assert_eq!(scripts.numbers["lines"], 3.into());
+    assert_eq!(scripts.numbers["files"], 1.into());
+    assert_eq!(scripts.numbers["ceiling"], 2.into());
+    assert!(
+        scripts
+            .message
+            .contains("3 lines over the ceiling of 2, made up of scripts/hooks/pre-commit 3"),
+        "{}",
+        scripts.message
+    );
+    assert!(
+        scripts
+            .message
+            .contains("generators not counted: scripts/generate.sh"),
+        "{}",
+        scripts.message
+    );
+    assert!(
+        scripts.message.contains("design §4.1"),
+        "{}",
+        scripts.message
+    );
+    assert!(!scripts.tree().is_empty(), "stamped over scripts/");
+}
+
 #[test]
 fn committed_generated_code_outside_the_declared_exception_fails_the_workspace() {
     let root = fixture("budget", "generated-code");
