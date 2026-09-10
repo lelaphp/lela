@@ -417,6 +417,12 @@ pub(crate) fn reading(
                 tally.found,
                 tally.count(Judgement::Skip)
             ),
+            // A rung this lane never asks for, since an empty subset is
+            // not a measurement of the engine; the words are here so no
+            // rung is without any.
+            Outcome::OracleAbsent(why) => {
+                format!("{scope}: nothing to run and the pinned oracle is absent; {why}")
+            }
             Outcome::Passed => format!(
                 "{scope}: {} passed, {} skipped of {} tests",
                 tally.count(Judgement::Pass),

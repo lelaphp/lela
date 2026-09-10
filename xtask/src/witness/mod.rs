@@ -136,6 +136,11 @@ pub(crate) struct Tally {
     pub wall: Duration,
     /// The fence lines `--accept` wrote.
     pub captured: Vec<Captured>,
+    /// Where the pinned php is not, when there was no witness to run and
+    /// it is not on this machine: what a complete tally's green would
+    /// claim. With a witness to run, or a binary at the path whose digest
+    /// is not the pin's, the run is refused instead (§4.3).
+    pub oracle_absent: Option<String>,
 }
 
 impl Tally {
@@ -151,8 +156,10 @@ impl Tally {
 /// The crate's reading: the counts in `numbers`, what failed named in the
 /// message, and the status the ladder allows. A witness that missed fails
 /// the crate whatever ran it, since what a fence pins is the oracle's and
-/// the oracle ran; a crate with no witness and nothing that needs one
-/// passes whatever ran, since the coverage half was measured.
+/// the oracle ran; a crate with no witness and nothing that needs one is
+/// complete whatever ran, since the coverage half was measured, and green
+/// there only while the pinned oracle is here: without it the pass would
+/// be a claim, and the reading is a skip that says so (harness §4.3).
 pub(crate) fn reading(
     tally: &Tally,
     root: &Path,
@@ -165,7 +172,7 @@ pub(crate) fn reading(
     let outcome = if tally.failed() {
         Outcome::Failed
     } else if run.judged.is_empty() {
-        Outcome::Passed
+        run.complete(tally.oracle_absent.as_deref())
     } else {
         run.outcome(runner)
     };
@@ -197,6 +204,9 @@ pub(crate) fn reading(
         Outcome::Passed if run.judged.is_empty() => {
             format!("{name}: no witness, and no kernel or native that needs one")
         }
+        Outcome::OracleAbsent(why) => format!(
+            "{name}: coverage complete, oracle absent; no witness, and no kernel or native that needs one, and a green line without the pinned oracle is a claim; {why}"
+        ),
         Outcome::Passed => format!(
             "{name}: {} witnesses pass over {} kernels or natives",
             run.judged.len(),
@@ -393,11 +403,18 @@ pub(crate) fn judge(
     ask: &Ask,
     found: &Extracted,
 ) -> Result<Tally> {
-    if !found.witnesses.is_empty() {
-        // A digest mismatch refuses the whole run (§4.3): asserted here,
-        // before the first snippet, and not caught per witness as a bork.
+    // A digest mismatch refuses the whole run (§4.3): asserted here,
+    // before the first snippet, and not caught per witness as a bork. The
+    // one case that is not a refusal is the pinned binary not being on
+    // this machine with nothing to run under it: that is the word on what
+    // a complete tally's green would claim, and the reading says it.
+    let pinned = &oracle.pin().oracle.path;
+    let oracle_absent = if found.witnesses.is_empty() && !pinned.is_file() {
+        Some(format!("the pinned php is not at {}", pinned.display()))
+    } else {
         oracle.asserted()?;
-    }
+        None
+    };
     let mut captured = Vec::new();
     let mut wall = Duration::ZERO;
     let witnesses = tally::Tally::judge(&found.witnesses, |witness| {
@@ -416,6 +433,7 @@ pub(crate) fn judge(
         problems: found.problems.iter().map(fence::Problem::at_line).collect(),
         wall,
         captured,
+        oracle_absent,
     })
 }
 

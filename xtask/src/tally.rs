@@ -19,7 +19,13 @@
 //! met its expectation is a skip and not a pass: an empty subset, or one
 //! every test skipped out of, and a green reading there would say the
 //! engine was measured when it was not. The ladder holds this once, here,
-//! and [`Outcome::NothingRan`] is the rung.
+//! and [`Outcome::NothingRan`] is the rung. A lane whose empty tally is a
+//! measurement of its own, the witness lane over a crate with no witness
+//! and nothing that needs one, has a rung of its own ahead of the ladder,
+//! [`Tally::complete`]: green there means the pinned oracle was here to
+//! have run what there was none of, and without it the rung is
+//! [`Outcome::OracleAbsent`], a skip that says why, since a green line
+//! without the oracle is a claim.
 
 use std::fmt;
 use std::path::Path;
@@ -100,6 +106,10 @@ pub enum Outcome<'a> {
     Control(&'a Path),
     /// The engine ran and nothing met its expectation.
     NothingRan,
+    /// Nothing was there to run, and the pinned oracle was not here to
+    /// have run it: the green a complete tally would read is a claim
+    /// without the oracle, and this is the skip that says why.
+    OracleAbsent(&'a str),
     /// The engine ran and every item met its expectation.
     Passed,
 }
@@ -108,7 +118,10 @@ impl Outcome<'_> {
     pub fn status(&self) -> Status {
         match self {
             Outcome::Failed => Status::Fail,
-            Outcome::Absent(_) | Outcome::Control(_) | Outcome::NothingRan => Status::Skip,
+            Outcome::Absent(_)
+            | Outcome::Control(_)
+            | Outcome::NothingRan
+            | Outcome::OracleAbsent(_) => Status::Skip,
             Outcome::Passed => Status::Pass,
         }
     }
@@ -197,6 +210,21 @@ impl<J: Judgement> Tally<J> {
             Runner::Engine(_) if !self.against().is_empty() => Outcome::Failed,
             Runner::Engine(_) if self.met() == 0 => Outcome::NothingRan,
             Runner::Engine(_) => Outcome::Passed,
+        }
+    }
+
+    /// The rung ahead of the ladder for a lane whose tally with nothing
+    /// run is a measurement of its own: a crate with no witness and no
+    /// kernel or native that needs one is complete, whatever stands in
+    /// for the engine. Green means the oracle agreed, so the pass stands
+    /// only while the pinned oracle is here to have run what there was
+    /// none of; `absent` is why it is not, and then the rung is a skip
+    /// that says so. A tally that ran anything ran it under the oracle,
+    /// and the word is the ladder's.
+    pub fn complete<'a>(&self, absent: Option<&'a str>) -> Outcome<'a> {
+        match absent {
+            Some(why) if self.judged.is_empty() => Outcome::OracleAbsent(why),
+            _ => Outcome::Passed,
         }
     }
 
@@ -305,6 +333,30 @@ mod tests {
         assert_eq!(Outcome::Control(Path::new("php")).status(), Status::Skip);
         assert_eq!(Outcome::Absent("not built").status(), Status::Skip);
         assert_eq!(Outcome::Passed.status(), Status::Pass);
+    }
+
+    #[test]
+    fn a_complete_tally_with_nothing_run_is_green_only_with_the_oracle() {
+        // Nothing to run and the pinned oracle here to have run it: the
+        // measurement is complete, whatever runner stands in for the
+        // engine. Without the oracle the same green would be a claim, and
+        // the rung is a skip that says why.
+        let empty = Tally::<Went>::default();
+        assert_eq!(empty.complete(None), Outcome::Passed);
+        assert_eq!(
+            empty.complete(Some("not at /pinned/php")),
+            Outcome::OracleAbsent("not at /pinned/php")
+        );
+        assert_eq!(
+            Outcome::OracleAbsent("not at /pinned/php").status(),
+            Status::Skip
+        );
+        // The rung is the empty tally's alone: one that ran anything was
+        // run by the oracle and stands on the ladder.
+        assert_eq!(
+            tally(&[Went::Pass]).complete(Some("not at /pinned/php")),
+            Outcome::Passed
+        );
     }
 
     #[test]

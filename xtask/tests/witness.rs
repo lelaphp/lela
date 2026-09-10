@@ -339,14 +339,112 @@ fn without_an_engine_the_reading_is_a_skip_that_says_so() {
     assert!(reading.message.contains("not built"), "{}", reading.message);
 }
 
+/// Nothing to run is complete only with the pinned oracle here to have
+/// run it: green means the oracle agreed, and without the oracle the pass
+/// would be a claim (#60). The engine's absence is another matter: the
+/// coverage half was measured whatever stands in for it.
 #[test]
-fn a_crate_with_no_witness_and_nothing_that_needs_one_passes() {
+fn a_crate_with_no_witness_and_nothing_that_needs_one_passes_with_the_oracle() {
+    if oracle().is_none() {
+        return;
+    }
     let root = scratch("nothing", "pub fn native() {}\n", false);
     let reading = run(&root, &registry(""), false);
     assert_eq!(reading.status, Status::Pass, "{reading:#?}");
     assert_eq!(count(&reading, "run"), 0);
     assert!(
         reading.message.contains("no witness"),
+        "{}",
+        reading.message
+    );
+}
+
+#[test]
+fn a_crate_with_no_witness_and_the_oracle_absent_is_a_skip_that_says_so() {
+    let root = scratch("nothing-absent", "pub fn native() {}\n", false);
+    let mut manifest = fixture_manifest();
+    manifest.pin.oracle.path = root.join("no-php-here");
+    let readings = witness::run(
+        &root,
+        &manifest,
+        &registry(""),
+        &Ask {
+            crates: vec!["ext/fixture".to_owned()],
+            accept: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(readings.len(), 1, "{readings:#?}");
+    let reading = &readings[0];
+    assert_eq!(reading.status, Status::Skip, "{reading:#?}");
+    assert_eq!(count(reading, "run"), 0);
+    assert_eq!(count(reading, "missing"), 0);
+    assert!(
+        reading.message.contains("coverage complete, oracle absent"),
+        "{}",
+        reading.message
+    );
+    assert!(
+        reading.message.contains("no-php-here"),
+        "the skip names where the pin looked: {}",
+        reading.message
+    );
+}
+
+/// The skip is for a binary that is not here. One that is here and is not
+/// the pin's refuses the run, nothing to run or not (§4.3).
+#[test]
+fn a_crate_with_no_witness_under_a_drifted_oracle_refuses_the_run() {
+    if oracle().is_none() {
+        return;
+    }
+    let root = scratch("nothing-drifted", "pub fn native() {}\n", false);
+    let mut manifest = fixture_manifest();
+    manifest.pin.oracle.md5 = "0".repeat(32);
+    let err = witness::run(
+        &root,
+        &manifest,
+        &registry(""),
+        &Ask {
+            crates: vec!["ext/fixture".to_owned()],
+            accept: false,
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("the pin says"), "{err}");
+}
+
+/// A kernel without a witness fails the crate whether or not the oracle
+/// is here: the coverage half is measured without it. The crate carries
+/// no witness, so nothing asserts the pin; one with a witness refuses the
+/// run under an absent pin as it always did (§4.3).
+#[test]
+fn a_kernel_without_a_witness_fails_whether_or_not_the_oracle_is_here() {
+    let root = scratch("uncovered-absent", "pub fn native() {}\n", false);
+    let mut manifest = fixture_manifest();
+    manifest.rules = self::manifest().rules;
+    manifest.pin.oracle.path = root.join("no-php-here");
+    let rule = manifest
+        .rule_checked_by("witness-coverage")
+        .expect("the manifest carries the coverage rule")
+        .clone();
+    let readings = witness::run(
+        &root,
+        &manifest,
+        &registry(""),
+        &Ask {
+            crates: vec!["ext/fixture".to_owned()],
+            accept: false,
+        },
+    )
+    .unwrap();
+    let reading = &readings[0];
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert_eq!(count(reading, "missing"), 1);
+    assert_eq!(count(reading, "run"), 0);
+    assert!(
+        reading.message.contains("native") && reading.message.contains(&rule.text),
         "{}",
         reading.message
     );
