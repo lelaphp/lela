@@ -456,6 +456,23 @@ fn a_workspace_without_the_bundle_refuses_before_any_edit() {
 }
 
 #[test]
+fn a_bundle_the_edit_cannot_read_refuses_before_any_edit() {
+    let root = scratch("malformed");
+    let cargo = root.join("crates/php_bundle/Cargo.toml");
+    let text = std::fs::read_to_string(&cargo).unwrap();
+    std::fs::write(&cargo, text.replace("[features]", "[not-features]")).unwrap();
+    let manifest = Manifest::load(&root).unwrap();
+    let before = read(&root, "Cargo.toml");
+    let err = new_ext::run(&root, &manifest, "demo")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("[features]"), "{err}");
+    assert!(!root.join("ext/demo").exists(), "nothing written");
+    assert_eq!(read(&root, "Cargo.toml"), before);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn a_workspace_without_the_facade_refuses() {
     let root = scratch("facade");
     std::fs::remove_dir_all(root.join("crates/php_ext")).unwrap();

@@ -52,6 +52,27 @@ pub struct Laid {
     pub notes: Vec<String>,
 }
 
+/// One file's edit, computed before it is made: the text the file is to
+/// hold and one line saying what changed in it.
+struct Edit {
+    path: PathBuf,
+    before: String,
+    after: String,
+    note: String,
+}
+
+impl Edit {
+    /// Write the file when the edit changed it; whether it did.
+    fn write(&self) -> Result<bool> {
+        if self.after == self.before {
+            return Ok(false);
+        }
+        fs::write(&self.path, &self.after)
+            .with_context(|| format!("writing {}", self.path.display()))?;
+        Ok(true)
+    }
+}
+
 /// Lay `ext/<name>` down, or refuse and write nothing.
 pub fn run(root: &Path, manifest: &Manifest, name: &str) -> Result<Laid> {
     if name.is_empty()
@@ -80,6 +101,11 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str) -> Result<Laid> {
     if dir.exists() {
         bail!("{row} exists; new-ext lays a crate down once and never overwrites");
     }
+    // The bundle's two edits are computed here, so a bundle whose shape the
+    // edit cannot read refuses before anything is written; they are
+    // written after the crate is.
+    let feature = bundle_feature(root, name)?;
+    let line = bundle_line(root, name)?;
 
     let mut laid = Laid {
         dir: dir.clone(),
@@ -101,10 +127,12 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str) -> Result<Laid> {
     if add_member(root, &row)? {
         laid.written.push("Cargo.toml".to_owned());
     }
-    laid.notes.push(bundle_feature(root, name)?);
-    laid.written.push(format!("{BUNDLE}/Cargo.toml"));
-    laid.notes.push(bundle_line(root, name)?);
-    laid.written.push(format!("{BUNDLE}/src/lib.rs"));
+    for edit in [feature, line] {
+        if edit.write()? {
+            laid.written.push(relative(root, &edit.path));
+        }
+        laid.notes.push(edit.note);
+    }
     for path in generated::write_all(root, manifest)? {
         laid.written.push(relative(root, &path));
     }
@@ -312,13 +340,13 @@ fn push_array(text: &str, start: usize, item: &str) -> Result<(usize, String)> {
 /// found textually so the word in a comment is not the line.
 fn key_line(text: &str, table: &str, key: &str) -> Option<usize> {
     let mut at = 0;
-    let mut inside = table.is_empty();
+    let mut inside = false;
     for line in text.lines() {
         let here = at;
         at += line.len() + 1;
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
-            inside = trimmed == format!("[{table}]");
+            inside = header(trimmed) == format!("[{table}]");
             continue;
         }
         if inside
@@ -330,6 +358,11 @@ fn key_line(text: &str, table: &str, key: &str) -> Option<usize> {
         }
     }
     None
+}
+
+/// A TOML header line without the comment after it.
+fn header(line: &str) -> &str {
+    line.split('#').next().unwrap_or(line).trim()
 }
 
 /// The offset just after the last entry of the `[table]` of a TOML text,
@@ -346,7 +379,7 @@ fn table_end(text: &str, table: &str) -> Option<usize> {
             if end.is_some() {
                 break;
             }
-            if trimmed == format!("[{table}]") {
+            if header(trimmed) == format!("[{table}]") {
                 end = Some(here + line.len());
             }
             continue;
@@ -362,8 +395,8 @@ fn table_end(text: &str, table: &str) -> Option<usize> {
 /// dependency and the feature `<name> = ["dep:php_ext_<name>"]`, listed
 /// in `default`; a person removes a non-default extension from `default`
 /// when porting it (design §4.10). The edit is textual, so the comments
-/// stay; what was done is the line returned.
-fn bundle_feature(root: &Path, name: &str) -> Result<String> {
+/// stay; nothing is written here.
+fn bundle_feature(root: &Path, name: &str) -> Result<Edit> {
     let path = root.join(BUNDLE).join("Cargo.toml");
     let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let table: toml::Table =
@@ -404,17 +437,20 @@ fn bundle_feature(root: &Path, name: &str) -> Result<String> {
         );
         did.push(format!("{package} as an optional dependency at ext/{name}"));
     }
-    if out != text {
-        fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
-    }
-    Ok(format!(
+    let note = format!(
         "{BUNDLE}/Cargo.toml: {}",
         if did.is_empty() {
             format!("already carries the feature {name} and {package}")
         } else {
             did.join(", ")
         }
-    ))
+    );
+    Ok(Edit {
+        path,
+        before: text,
+        after: out,
+        note,
+    })
 }
 
 /// The bundle's `enabled()` gains `php_ext_<name>::extension` behind
@@ -422,14 +458,22 @@ fn bundle_feature(root: &Path, name: &str) -> Result<String> {
 /// declared, last is a topological order by construction, and when a
 /// person later declares one, `api-check` names both crates until the
 /// line is moved by hand. The tier's alias is never touched. The edit is
-/// textual, so the comments stay; what was done is the line returned.
-fn bundle_line(root: &Path, name: &str) -> Result<String> {
+/// textual, so the comments stay; nothing is written here.
+fn bundle_line(root: &Path, name: &str) -> Result<Edit> {
     let path = root.join(BUNDLE).join("src/lib.rs");
     let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let package = format!("php_ext_{name}");
     let entry = format!("{package}::extension");
+    let mut at = 0;
     let head = text
-        .find("fn enabled(")
+        .lines()
+        .map(|line| {
+            let here = at;
+            at += line.len() + 1;
+            (here, line.trim_start())
+        })
+        .find(|(_, line)| line.starts_with("pub fn enabled(") || line.starts_with("fn enabled("))
+        .map(|(here, _)| here)
         .with_context(|| format!("{} has no `fn enabled(`", path.display()))?;
     let body = head + text[head..].find('{').context("enabled() has no body")?;
     let open = body
@@ -455,9 +499,12 @@ fn bundle_line(root: &Path, name: &str) -> Result<String> {
     let close = close.context("enabled()'s slice has no `]`")?;
     let inside = &text[open + 1..close];
     if inside.contains(&entry) {
-        return Ok(format!(
-            "{BUNDLE}/src/lib.rs: enabled() already lists {entry}"
-        ));
+        return Ok(Edit {
+            path,
+            after: text.clone(),
+            before: text,
+            note: format!("{BUNDLE}/src/lib.rs: enabled() already lists {entry}"),
+        });
     }
     let line_start = text[..open].rfind('\n').map_or(0, |i| i + 1);
     let outer = &text[line_start..open];
@@ -484,10 +531,14 @@ fn bundle_line(root: &Path, name: &str) -> Result<String> {
     };
     let mut out = text.clone();
     out.insert_str(at, &insert);
-    fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
-    Ok(format!(
-        "{BUNDLE}/src/lib.rs: enabled() gains {entry} behind feature {name}, last; api-check holds the order to the crate graph (ADR-0004)"
-    ))
+    Ok(Edit {
+        path,
+        before: text,
+        after: out,
+        note: format!(
+            "{BUNDLE}/src/lib.rs: enabled() gains {entry} behind feature {name}, last; api-check holds the order to the crate graph (ADR-0004)"
+        ),
+    })
 }
 
 /// The guidance file's regions rendered, read as [`computed::Answer`]:
