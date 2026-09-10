@@ -332,7 +332,7 @@ fn status_command(
         )?
     } else {
         let id = session_id.or_else(status::session_of_stdin);
-        status::session(manifest, store, root, id.as_deref())?
+        status::session(manifest, store, root, id.as_deref(), format)?
     };
     std::io::stdout().write_all(text.as_bytes())?;
     Ok(())

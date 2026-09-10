@@ -9,10 +9,13 @@
 // context; after a Bash call that ran an instrument it invalidates
 // `prompt.context`, so the next read of the facts is fresh (§7, "what the
 // agent sees"). `prompt.context` renders the local facts and appends the
-// map plus the local facts as one block, `xtask status --session`, with
-// the session's id so the permits section can say "this session" (§4.6);
-// the SessionStart command hook prints no map, so a session without this
-// module has none (§5).
+// map and the local facts as two blocks, `xtask status --session --format
+// json`, with the session's id so the permits section can say "this
+// session" (§4.6); the engine caps one block at BLOCK_CAP characters and
+// skips a hook whose block is over it, so each stands on its own and one
+// over the cap is cut with a note rather than the session losing both
+// (#64). The SessionStart command hook prints no map, so a session
+// without this module has none (§5).
 //
 // The command hook in hooks.json beside this file judges the same call
 // beneath this one. A denial here ends the call and is recorded here; an
@@ -62,8 +65,24 @@ async function xtask($: EngineInterface): Promise<readonly (readonly string[])[]
   return [...built.filter((bin): bin is readonly string[] => bin !== undefined), CARGO_XTASK];
 }
 
-/// The name of the block the map and the local facts render under.
-const BLOCK = 'harness';
+/// The names of the two blocks, the map and the local facts.
+const BLOCKS = { map: 'harness-map', facts: 'harness-facts' } as const;
+
+/// The engine's cap on one context block, in characters: a block over it
+/// is "the wrong shape" and the whole hook is skipped. Stated here once;
+/// `cargo test -p xtask --test map` reads this line and holds each block
+/// under it with room, so a region that grows past it fails a test and
+/// not a session (#64).
+const BLOCK_CAP = 32_000;
+
+/// A block held to the cap: over it, cut to fit with a line saying so,
+/// since the note is worth more than the tail and the engine would
+/// otherwise drop both blocks.
+function capped(name: string, text: string): { name: string; text: string } {
+  if (text.length <= BLOCK_CAP) return { name, text };
+  const note = `\n\nharness: this block was ${text.length} characters, over the engine's cap of ${BLOCK_CAP}, and is cut here; \`cargo test -p xtask --test map\` holds it.\n`;
+  return { name, text: text.slice(0, BLOCK_CAP - note.length) + note };
+}
 
 /// The tools permit judges: the command hook's matcher (§4.4).
 const JUDGED = ['Edit', 'Write', 'Bash'] as const;
@@ -149,12 +168,17 @@ export const register: Register = (on, options) => {
       .run(['computed', 'run', '.claude/harness.local.md'], { cwd, timeoutMs: 60_000 })
       .catch(() => undefined);
     const run = await $.process
-      .run([...CARGO_XTASK, 'status', '--session', '--session-id', id], { cwd, timeoutMs: 120_000 })
+      .run([...CARGO_XTASK, 'status', '--session', '--session-id', id, '--format', 'json'], {
+        cwd,
+        timeoutMs: 120_000,
+      })
       .catch((err: unknown) => ({ exitCode: -1, stdout: '', stderr: String(err) }));
-    const text =
-      run.exitCode === 0
-        ? run.stdout
-        : `harness: \`xtask status --session\` did not run (exit ${run.exitCode}); the map and the local facts are missing from this block. Fix the build of xtask.\n${run.stderr}`;
-    return { blocks: [...out.blocks.filter((b) => b.name !== BLOCK), { name: BLOCK, text }] };
+    const ours = out.blocks.filter((b) => b.name !== BLOCKS.map && b.name !== BLOCKS.facts);
+    if (run.exitCode !== 0) {
+      const text = `harness: \`xtask status --session\` did not run (exit ${run.exitCode}); the map and the local facts are missing from this session. Fix the build of xtask.\n${run.stderr}`;
+      return { blocks: [...ours, capped(BLOCKS.map, text)] };
+    }
+    const { map, facts } = JSON.parse(run.stdout) as { map: string; facts: string };
+    return { blocks: [...ours, capped(BLOCKS.map, map), capped(BLOCKS.facts, facts)] };
   });
 };

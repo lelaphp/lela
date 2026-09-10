@@ -394,6 +394,23 @@ Read CONTEXT.md first.
     );
     assert!(!text.contains("unrendered"), "{text}");
 
+    // As JSON, the two blocks the function hook hands the engine (#64):
+    // the map as the file is, the facts with the note that they are
+    // unrendered; the Markdown is the two joined.
+    std::fs::write(&local, "# Local\n\n<!-- /computed -->\n").unwrap();
+    let (ok, json, err) = status(&root, &["--session", "--format", "json"]);
+    assert!(ok, "{err}");
+    let blocks: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(blocks["map"], "# The map\n\nRead CONTEXT.md first.\n");
+    let facts = blocks["facts"].as_str().unwrap();
+    assert!(facts.starts_with("# Local\n"), "{facts}");
+    assert!(facts.contains("unrendered"), "{facts}");
+    let (_, text, _) = status(&root, &["--session"]);
+    assert_eq!(
+        text,
+        format!("{}\n{facts}", blocks["map"].as_str().unwrap())
+    );
+
     let (ok, _, err) = status(&root, &["--session", "--section", "rules"]);
     assert!(!ok, "one of --section and --session: {err}");
     let (ok, _, _) = status(&root, &[]);
@@ -805,6 +822,20 @@ fn permits_marks_this_session_and_the_session_block_carries_it() {
     assert!(
         !text.lines().any(|l| l.contains("ext.no-locks")),
         "only the rules this session fired: {text}"
+    );
+    let (ok, json, _) = status_with_stdin(&root, &["--session", "--format", "json"], &head);
+    assert!(ok);
+    let blocks: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert!(
+        blocks["facts"]
+            .as_str()
+            .unwrap()
+            .contains("## permits this session"),
+        "this session's denials are the facts block's: {blocks}"
+    );
+    assert!(
+        !blocks["map"].as_str().unwrap().contains("permits"),
+        "{blocks}"
     );
 
     let quiet = r#"{"session_id":"00000000-0000-4000-8000-000000000000","hook_event_name":"SessionStart","source":"startup"}"#;

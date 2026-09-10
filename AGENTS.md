@@ -121,7 +121,7 @@ Usage: xtask [OPTIONS] <COMMAND>
 
 Commands:
   api-check          Hold the seams: regenerate and diff each lock, hold crate edges, `use` paths and the bundle order; one reading per seam and per crate
-  status             Render one section from the manifest and the store, or with `--session` the map plus the local facts; computes nothing else
+  status             Render one section from the manifest and the store, or with `--session` the map and the local facts; computes nothing else
   permit             Judge one intended call from the `PreToolUse` hook's stdin; the decision is the JSON on stdout and the exit is 0 always
   done               The definition of done: print the conditions unmet for the changes since the base and exit 1 while any is; the Stop hook, pre-push and CI read the same list
   track              Say which track the branch is on, the commit `done` measures since, the track's store root and the branch's ticket; as text or as one object. Writes no reading
@@ -142,7 +142,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=592a52d8cde3ad3ee3484ee4860ec033d1992a99643e86ca4d38526edb902512 out=1ee85c8f91458b8fbb0f8f1d1cf08440093252c3d93ef3cc5b82f830cb139b35 -->
+<!-- /computed in=ac7ac252c53ead12d3ea491df5459a5abae2588e2a62323da1fc02259b15abc9 out=96033b79923adb3c9cfd87729cff1d9b84f2fb7192cd05b009d00514db1d5a9c -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

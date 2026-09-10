@@ -31,7 +31,7 @@ pub(crate) enum Command {
         write: bool,
     },
     /// Render one section from the manifest and the store, or with
-    /// `--session` the map plus the local facts; computes nothing else.
+    /// `--session` the map and the local facts; computes nothing else.
     Status {
         #[arg(long, required_unless_present = "session", conflicts_with = "session")]
         section: Option<Section>,
@@ -46,8 +46,10 @@ pub(crate) enum Command {
         /// stdin head instead.
         #[arg(long = "session-id", value_name = "ID")]
         session_id: Option<String>,
-        /// Print AGENTS.md and .claude/harness.local.md in one block, for
-        /// the `SessionStart` hook; the local file is laid down when missing.
+        /// Print AGENTS.md and .claude/harness.local.md for the function
+        /// hook's `prompt.context`: as one text, or with `--format json` as
+        /// the two blocks `map` and `facts`, each under the engine's cap on
+        /// its own; the local file is laid down when missing.
         #[arg(long)]
         session: bool,
     },

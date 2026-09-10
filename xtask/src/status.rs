@@ -2,9 +2,10 @@
 //! manifest, the divergence registry, the store and its log, and for the
 //! `git` section the repository, and computes nothing else; a section that
 //! needs a command of its own is a missing instrument. `--session` prints
-//! the map and the local facts in one block for the session-start hook
-//! (§5), laying the local file down from its template when the clone has
-//! none.
+//! the map and the local facts for the function hook's `prompt.context`
+//! (§5), as one text or, in JSON, as the two blocks the hook hands the
+//! engine, laying the local file down from its template when the clone
+//! has none.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -120,19 +121,25 @@ pub(crate) fn session_of_stdin() -> Option<String> {
         .map(str::to_owned)
 }
 
-/// The map and the local facts in one block, then, when `session_id` is
-/// known and the log holds a denial of its own, the rules this session
-/// fired with their counts (§4.6, "this session"). The map is tracked and
-/// must exist; the local file is written from `local_template` when the
-/// clone has none, so the hook's `computed run` has a file to render next
-/// time.
+/// The map and the local facts, the latter followed, when `session_id`
+/// is known and the log holds a denial of its own, by the rules this
+/// session fired with their counts (§4.6, "this session"). As Markdown
+/// the two are one text, the map first; as JSON they are the object
+/// `{"map", "facts"}`, since the engine caps a context block and the hook
+/// hands them over as two (#64). The map is tracked and must exist; the
+/// local file is written from `local_template` when the clone has none,
+/// so the hook's `computed run` has a file to render next time.
 pub fn session(
     manifest: &Manifest,
     store: &Store,
     root: &Path,
     session_id: Option<&str>,
+    format: Format,
 ) -> Result<String> {
-    let map = fs::read_to_string(root.join(MAP)).with_context(|| format!("reading {MAP}"))?;
+    let mut map = fs::read_to_string(root.join(MAP)).with_context(|| format!("reading {MAP}"))?;
+    if !map.ends_with('\n') {
+        map.push('\n');
+    }
     let local_path = root.join(LOCAL);
     if !local_path.exists() {
         if let Some(dir) = local_path.parent() {
@@ -140,20 +147,14 @@ pub fn session(
         }
         fs::write(&local_path, local_template()).with_context(|| format!("writing {LOCAL}"))?;
     }
-    let local = fs::read_to_string(&local_path).with_context(|| format!("reading {LOCAL}"))?;
-    let mut out = map;
-    if !out.ends_with('\n') {
-        out.push('\n');
+    let mut facts = fs::read_to_string(&local_path).with_context(|| format!("reading {LOCAL}"))?;
+    if !facts.ends_with('\n') {
+        facts.push('\n');
     }
-    out.push('\n');
-    out.push_str(&local);
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
-    if local.lines().any(|l| l.trim() == "<!-- /computed -->") {
-        out.push('\n');
-        out.push_str(UNRENDERED);
-        out.push('\n');
+    if facts.lines().any(|l| l.trim() == "<!-- /computed -->") {
+        facts.push('\n');
+        facts.push_str(UNRENDERED);
+        facts.push('\n');
     }
     if let Some(id) = session_id {
         let log = store.log()?;
@@ -163,16 +164,19 @@ pub fn session(
             .collect();
         if !rows.is_empty() {
             let _ = write!(
-                out,
+                facts,
                 "\n## permits this session\n\n{}",
                 table(PERMITS, &rows)
             );
         }
         if let Some(note) = log.unreadable_note() {
-            let _ = writeln!(out, "\n{note}");
+            let _ = writeln!(facts, "\n{note}");
         }
     }
-    Ok(out)
+    Ok(match format {
+        Format::Json => serde_json::to_string(&json!({ "map": map, "facts": facts }))?,
+        Format::Md => format!("{map}\n{facts}"),
+    })
 }
 
 /// The local file with every region unrendered: one volatile `exec` per
