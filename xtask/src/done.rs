@@ -31,7 +31,12 @@
 //! `data/pre-day-1.md` §4): exit 0 and nothing printed when
 //! `stop_hook_active` is true, otherwise `{"decision":"block","reason":…}`
 //! with the list while anything is unmet. Every verdict is one reading,
-//! `done` over `workspace`.
+//! `done` over `workspace`. At the Stop, and there alone, the reply is
+//! read as well (#32, the `reply` module): a session the store says closed a
+//! ticket whose `last_assistant_message` carries the language of not
+//! filing is held once with the sentences it matched, a second reading of
+//! `done` over the rule; the second Stop passes as it always did, so the
+//! hold costs one turn.
 
 use std::io::Read;
 use std::path::Path;
@@ -46,6 +51,7 @@ use crate::git::{self, Change};
 use crate::manifest::{Crate, Manifest};
 use crate::permit;
 use crate::reading::{Number, Outcome, Reading, Status, Store};
+use crate::reply;
 
 /// The instrument name the reading carries.
 pub(crate) const INSTRUMENT: &str = "done";
@@ -133,12 +139,6 @@ impl Verdict {
             }
         }
         out
-    }
-
-    /// The Stop hook's stdout: the block with the list while anything is
-    /// unmet, nothing otherwise (harness-design.md §13 D.16).
-    pub(crate) fn hook_stdout(&self) -> Option<Value> {
-        (!self.met()).then(|| block(&self.render()))
     }
 
     /// The reading: `done` over `workspace`, stamped over the whole tree.
@@ -411,11 +411,17 @@ pub fn run(
     }
 }
 
-/// The Stop hook's stdin: the one key `done` reads.
+/// The Stop hook's stdin: the keys `done` reads (harness-design.md §13
+/// D.16). The reply is read only for a session the store says closed a
+/// ticket.
 #[derive(Debug, Deserialize)]
 struct StopStdin {
     #[serde(default)]
     stop_hook_active: bool,
+    #[serde(default)]
+    session_id: String,
+    #[serde(default)]
+    last_assistant_message: String,
 }
 
 const UNREAD_STDIN: &str = "done could not read the Stop hook's stdin";
@@ -439,19 +445,34 @@ pub(crate) fn hook(
     if stop.stop_hook_active {
         return None;
     }
-    match judge(root, manifest, registry, store, None) {
-        Ok(verdict) => {
-            // The hook's exit is 0 and its verdict is the JSON; the
-            // outcome of recording it is neither.
-            let recorded = verdict
-                .reading(manifest, root)
-                .and_then(|r| store.record(&[r]));
-            if let Err(err) = recorded {
-                eprintln!("xtask done: the verdict stands but was not recorded: {err:#}");
-            }
-            verdict.hook_stdout()
+    let verdict = match judge(root, manifest, registry, store, None) {
+        Ok(verdict) => verdict,
+        Err(err) => return Some(block(&format!("done could not judge the changes: {err:#}"))),
+    };
+    // The reply, for a session that closed a ticket and no other.
+    let unfiled = match reply::closed_by(store, &stop.session_id)
+        .and_then(|closed| reply::read(manifest, &closed, &stop.last_assistant_message))
+    {
+        Ok(unfiled) => unfiled,
+        Err(err) => return Some(block(&format!("done could not read the reply: {err:#}"))),
+    };
+    // The hook's exit is 0 and its verdict is the JSON; the outcome of
+    // recording it is neither.
+    let recorded = verdict.reading(manifest, root).and_then(|r| {
+        let mut readings = vec![r];
+        if let Some(unfiled) = &unfiled {
+            readings.push(unfiled.reading(root, &stop.session_id)?);
         }
-        Err(err) => Some(block(&format!("done could not judge the changes: {err:#}"))),
+        store.record(&readings)
+    });
+    if let Err(err) = recorded {
+        eprintln!("xtask done: the verdict stands but was not recorded: {err:#}");
+    }
+    match (verdict.met(), unfiled) {
+        (true, None) => None,
+        (false, None) => Some(block(&verdict.render())),
+        (true, Some(unfiled)) => Some(block(&unfiled.render())),
+        (false, Some(unfiled)) => Some(block(&format!("{}{}", verdict.render(), unfiled.render()))),
     }
 }
 

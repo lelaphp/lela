@@ -38,6 +38,7 @@ pub mod oracle;
 pub mod permit;
 pub mod phpt;
 pub mod reading;
+mod reply;
 mod rust;
 mod sources;
 pub mod status;
