@@ -313,6 +313,7 @@ id = "witness.exit-authored"
 scope = "**/*.rs"
 deny_pattern = '```expect[^\n]*\bexit=\d+'
 unless = "xtask witness --accept"
+exempt = ["xtask/src/witness/**", "xtask/tests/witness.rs"] # the parser of the fence grammar and its tests carry the shape they parse (#23)
 text = "exit= in a witness is captured by `xtask witness --accept`, never authored."
 
 [[rule]]
@@ -328,6 +329,12 @@ avoid_from = "CONTEXT.md" # grammar: avoid_from, harness §5
 text = "The glossary's _Avoid_ words appear in no public item name or rustdoc prose; a lock line mirrors php's names and is not read."
 
 [[rule]]
+id = "vocab.harness"
+scope = "xtask"
+avoid_from = { file = "CONTEXT.md", section = "Harness" } # grammar: avoid_from, harness §5
+text = "The Harness section's _Avoid_ words appear in no public item name or rustdoc prose of the harness; xtask/fixtures/** are other crates' sources and are not read."
+
+[[rule]]
 id = "generated.committed"
 generated = { "ext/clippy.toml" = "ext.no-locks" } # grammar: generated, design §10
 text = "ext/clippy.toml is generated from the manifest and committed; a stale copy fails budget."
@@ -338,6 +345,25 @@ tool = "Bash"
 deny_argv = ["--no-verify", "-n"]
 with = "commit"
 text = "Commits run the pre-commit hook; --no-verify is not available to agents."
+
+[[rule]]
+id = "ticket.close"
+tool = "Bash"
+deny_argv = ["close", "reopen"]
+with = "gh issue"
+text = "A ticket closes through `xtask ticket close`, the instrument that read its acceptance criteria; `gh issue close` and `gh issue reopen` are not available to agents."
+
+[[rule]]
+id = "ticket.close-api"
+tool = "Bash"
+deny_pattern = '''gh\s+api\b[^|;&]*([\s'"]state=(closed|open)\b|"state"\s*:\s*"(closed|open)"|--input\b|(close|reopen)Issue\()'''
+text = "The same act through `gh api`: an issue's state is set by `xtask ticket close` and by nothing else."
+
+[[rule]]
+id = "ticket.reply-unfiled"
+tool = "Stop"
+deny_pattern = '(?i)\b(left (for|to) a person|for a person to|handed (off )?to a person|a person (decides|must|should|will|would|has to)|is a person.?s( alone)?|worth (filing|a ticket)|(needs|deserves|wants) (a|its own) ticket|should be filed|not (yet )?filed|left open|leaves? open|open question|still to (do|decide)|not (yet )?done|remains? (to be|to do|undone|open)|in a later (commit|turn|session|ticket)|next turn|future work|follow[- ]?ups?|leftovers?|out of scope|todo)\b'
+text = "A session that closed a ticket names what it found and did not do in a ticket, a divergence row or a rule proposed in a commit message, never in its reply alone (CONTEXT.md, Ticket): a reply that hands work to a person, leaves a decision open or calls a thing worth filing is held once. A heuristic beside the close's own conditions; the second Stop passes."
 
 [[rule]]
 id = "lanes.nightly"
