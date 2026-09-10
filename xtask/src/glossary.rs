@@ -107,6 +107,7 @@ impl Glossary {
     }
 
     /// The term named `name`, if the glossary has it.
+    #[cfg(test)]
     pub fn term(&self, name: &str) -> Option<&Term> {
         self.terms.iter().find(|t| t.name == name)
     }
@@ -289,5 +290,33 @@ mod tests {
     #[test]
     fn an_avoid_line_with_no_term_is_refused() {
         assert!(Glossary::parse("_Avoid_: x\n").is_err());
+    }
+    /// The tracked glossary, read as the sensor reads it.
+    #[test]
+    fn the_glossary_reads_each_term_with_its_avoided_phrases() {
+        let glossary = Glossary::load(&crate::built_root().join("CONTEXT.md")).unwrap();
+        let serve = glossary.term("Serve").unwrap();
+        let avoided: Vec<&str> = serve.avoid.iter().map(|a| a.text.as_str()).collect();
+        assert_eq!(avoided, ["run", "execute", "handle"]);
+
+        // A parenthetical explanation and a qualifier are not part of the phrase.
+        let linked = glossary.term("Linked table").unwrap();
+        let avoided: Vec<&str> = linked.avoid.iter().map(|a| a.text.as_str()).collect();
+        assert_eq!(avoided, ["class table", "registry"]);
+        let native = glossary.term("Parameter / Argument").unwrap();
+        let avoided: Vec<&str> = native.avoid.iter().map(|a| a.text.as_str()).collect();
+        assert_eq!(avoided, ["arg", "param", "Ret"]);
+
+        // A phrase avoided under two terms names both.
+        let phrases = glossary.avoided_phrases();
+        let registry = phrases
+            .iter()
+            .find(|a| a.phrase.text == "registry")
+            .unwrap();
+        assert_eq!(registry.terms, ["Linked table", "Bundle"]);
+
+        // The glossary's own carve-out: `result (which means `Result` in Rust)`.
+        let result = phrases.iter().find(|a| a.phrase.text == "result").unwrap();
+        assert_eq!(result.phrase.code, ["Result"]);
     }
 }

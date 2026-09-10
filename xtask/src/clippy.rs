@@ -16,11 +16,11 @@ use crate::reading::{Reading, Status};
 use crate::sources;
 
 /// The instrument name the reading carries.
-pub const INSTRUMENT: &str = "clippy";
+pub(crate) const INSTRUMENT: &str = "clippy";
 
 /// The cargo package of a manifest crate: `php_ext_<name>` for
 /// `ext/<name>` (ADR-0004), the name itself otherwise.
-pub fn package(krate: &Crate) -> String {
+pub(crate) fn package(krate: &Crate) -> String {
     match krate.name.strip_prefix("ext/") {
         Some(name) => format!("php_ext_{name}"),
         None => krate.name.clone(),
@@ -67,7 +67,7 @@ pub fn run_staged(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
 
 /// One crate's reading: pass when cargo exits 0, fail with the tail of
 /// what clippy printed otherwise.
-pub fn check(root: &Path, krate: &Crate) -> Result<Reading> {
+pub(crate) fn check(root: &Path, krate: &Crate) -> Result<Reading> {
     let package = package(krate);
     let out = Command::new("cargo")
         .args([

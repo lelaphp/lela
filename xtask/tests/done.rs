@@ -11,9 +11,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use xtask::divergence::Registry;
-use xtask::done::{self, Base, FRESH, Verdict};
-use xtask::manifest::{Crate, Manifest};
+use xtask::done::{self, FRESH, Verdict};
+use xtask::manifest::Manifest;
 use xtask::reading::{Reading, Status, Store};
+use xtask::track::Base;
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -156,15 +157,11 @@ fn xtask(root: &Path, args: &[&str], stdin: Option<&str>) -> (i32, String, Strin
 
 // ---------------------------------------------------------------- 1, 2
 
+/// Over a diff in xtask, the harness's own sources, witness and phpt are
+/// not on the list, and the four that are pass when fresh; which four is
+/// `done`'s own unit test.
 #[test]
 fn the_harness_crate_is_asked_for_clippy_api_check_budget_and_unsafe_audit_only() {
-    let asked: Vec<&str> = done::instruments_of(&Crate::named("xtask")).collect();
-    assert_eq!(asked, ["clippy", "api-check", "budget", "unsafe-audit"]);
-    let asked: Vec<&str> = done::instruments_of(&Crate::named("ext/pcre")).collect();
-    assert_eq!(asked, FRESH);
-
-    // Over a diff in xtask, the harness's own sources, witness and phpt are
-    // not on the list, and the four that are pass when fresh.
     let root = scratch("harness");
     write(
         &root,
@@ -182,27 +179,10 @@ fn the_harness_crate_is_asked_for_clippy_api_check_budget_and_unsafe_audit_only(
     );
     assert_eq!(verdict.unmet.len(), 4, "{verdict:#?}");
     let store = Store::of_workspace(&root);
-    for instrument in done::instruments_of(&Crate::named("xtask")) {
+    for instrument in ["clippy", "api-check", "budget", "unsafe-audit"] {
         store.record(&[fresh(&root, instrument, "xtask")]).unwrap();
     }
     assert!(judge(&root).unmet.is_empty(), "{:#?}", judge(&root));
-}
-
-#[test]
-fn a_crate_is_asked_for_a_phpt_reading_only_where_the_manifest_gives_it_one() {
-    // An engine crate the manifest gives no subset is not asked, the way
-    // the harness crate is not; the resolver's error is never what says so.
-    let asked: Vec<&str> = done::instruments_of(&Crate::named("php_heap")).collect();
-    assert_eq!(
-        asked,
-        ["clippy", "witness", "api-check", "budget", "unsafe-audit"]
-    );
-
-    // The same crate with a row that names one is asked, and with no
-    // reading for it the condition is unmet.
-    let row = Crate::named("php_heap").with_phpt(&["Zend/tests"]);
-    let asked: Vec<&str> = done::instruments_of(&row).collect();
-    assert_eq!(asked, FRESH);
 }
 
 #[test]

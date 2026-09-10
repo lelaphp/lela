@@ -197,13 +197,13 @@ fn generated_readings(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> 
 
 /// One crate's count: its own lines, and its bindings pooled apart.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct Count {
+pub(crate) struct Count {
     pub lines: u64,
     pub bindings: u64,
 }
 
 /// Count one crate's sources.
-pub fn count(root: &Path, krate: &Crate) -> Result<Count> {
+pub(crate) fn count(root: &Path, krate: &Crate) -> Result<Count> {
     let mut out = Count::default();
     for path in sources::rust(root, krate)? {
         let Some(text) = text_of(root, &path)? else {
@@ -263,7 +263,7 @@ fn text_of(root: &Path, path: &str) -> Result<Option<String>> {
 /// component, or an `@generated` marker in the first lines, outside the
 /// files the manifest declares as generated and committed. The harness's
 /// own negative controls hold generated code on purpose and are left out.
-pub fn committed_generated(root: &Path, exceptions: &[&str]) -> Result<Vec<String>> {
+pub(crate) fn committed_generated(root: &Path, exceptions: &[&str]) -> Result<Vec<String>> {
     let mut out = Vec::new();
     for dir in sources::CRATE_DIRS {
         for path in git::files(root, Path::new(dir))? {

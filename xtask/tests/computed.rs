@@ -156,6 +156,11 @@ fn regions_is_a_subcommand_and_needs_a_file() {
     let dir = stand_in("usage", "", 0);
     let (code, out, err) = regions(&dir, &[]);
     assert_eq!(code, 2, "{out}{err}");
-    assert!(xtask::cli::instruments().iter().any(|i| i == "regions"));
+    let help = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("\n  regions "), "{help}");
     let _ = fs::remove_dir_all(&dir);
 }

@@ -29,11 +29,11 @@ use crate::manifest::{Crate, Manifest, Rule};
 use crate::reading::{self, Outcome, Reading, Status, Store};
 
 /// The instrument's name, the reading's `instrument` field.
-pub const INSTRUMENT: &str = "vocab";
+pub(crate) const INSTRUMENT: &str = "vocab";
 
 /// Where an avoided word was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Where {
+pub(crate) enum Where {
     /// The name of a public item.
     Item,
     /// Rustdoc prose.
@@ -43,7 +43,7 @@ pub enum Where {
 /// One avoided word found: where, in what, and the terms the glossary
 /// offers instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Finding {
+pub(crate) struct Finding {
     /// Relative to the crate's directory.
     pub file: PathBuf,
     pub line: usize,
@@ -95,7 +95,7 @@ fn quoted(terms: &[String]) -> String {
 
 /// What one scan counted and found.
 #[derive(Debug, Default)]
-pub struct Scan {
+pub(crate) struct Scan {
     /// Public items whose names were read.
     pub items: i64,
     /// Rustdoc prose lines read.
@@ -107,6 +107,13 @@ pub struct Scan {
 /// names some, and record a reading per crate that exists; the outcome is
 /// the exit.
 pub fn run(root: &Path, manifest: &Manifest, store: &Store, only: &[String]) -> Result<Outcome> {
+    store.record(&check(root, manifest, only)?)
+}
+
+/// Every reading of one run, each finding printed as it is found: one per
+/// crate the rule's scope covers and that exists, or per crate `only`
+/// names. The library entry, as `api_check::check` is; `run` records.
+pub fn check(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Reading>> {
     let rules: Vec<&Rule> = manifest
         .rules
         .iter()
@@ -144,7 +151,7 @@ pub fn run(root: &Path, manifest: &Manifest, store: &Store, only: &[String]) -> 
         }
         readings.push(reading_of(&scan, root, rule, krate)?);
     }
-    store.record(&readings)
+    Ok(readings)
 }
 
 /// Scan `krate` under `rule`'s scope: its sources. `None` when the scope
@@ -201,7 +208,7 @@ fn reading_of(scan: &Scan, root: &Path, rule: &Rule, krate: &Crate) -> Result<Re
 
 /// Scan one crate directory: every `.rs` file under it, `target/` aside.
 /// The findings' files are relative to `dir`.
-pub fn scan_crate(dir: &Path, glossary: &Glossary) -> Result<Scan> {
+pub(crate) fn scan_crate(dir: &Path, glossary: &Glossary) -> Result<Scan> {
     let avoided = glossary.avoided_phrases();
     let mut scan = Scan::default();
     for file in rust_files(dir)? {

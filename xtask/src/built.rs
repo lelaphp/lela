@@ -29,7 +29,6 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-pub use crate::inputs::digest;
 use crate::inputs::{manifest_digest, sources_digest};
 
 /// The digest of `seams.toml` as it stood when this binary was compiled.
@@ -83,3 +82,127 @@ pub fn judges(workspace: &Path, built_root: &Path) -> Result<()> {
 /// What a person or an agent does about it; the hook does it by walking to
 /// the candidate that rebuilds.
 const REBUILD: &str = "Rebuild it: `cargo build -p xtask`, or run it through `cargo run -p xtask`.";
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::{MANIFEST, SOURCES, judges};
+    use crate::built_root;
+    use crate::inputs::{SOURCES_DIR, manifest_digest, source_files, sources_digest};
+
+    fn scratch(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("xtask-built-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// `from` copied under `to`, every file and directory.
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.path().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).unwrap();
+            }
+        }
+    }
+
+    /// This build carries the digest of what it judges by, the manifest
+    /// beside it and its own sources, each taken by `build.rs` and by
+    /// `inputs` the same way, so a build standing over its own workspace
+    /// judges.
+    #[test]
+    fn this_build_carries_the_digest_of_what_it_was_compiled_against() {
+        let workspace = built_root();
+        assert_eq!(
+            MANIFEST,
+            manifest_digest(&workspace).unwrap(),
+            "build.rs and inputs take one digest of the manifest"
+        );
+        assert_eq!(
+            SOURCES,
+            sources_digest(&workspace).unwrap(),
+            "and one of the harness's own sources"
+        );
+        judges(&workspace, &workspace).unwrap();
+    }
+
+    /// A build stale in its own code judges by a matcher that has since
+    /// been fixed, with no rule moved at all: the residue of #16 item 1,
+    /// and the half an exit code and a manifest digest both miss.
+    #[test]
+    fn a_build_the_harnesss_own_sources_moved_under_refuses_too() {
+        let workspace = built_root();
+        let root = scratch("stale-sources");
+        let src = root.join("xtask/src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("permit.rs"),
+            "// a matcher of an earlier revision\n",
+        )
+        .unwrap();
+        let err = judges(&workspace, &root).unwrap_err().to_string();
+        assert!(err.contains("xtask/src"), "{err}");
+        assert!(err.contains(SOURCES), "the digest compiled in: {err}");
+        assert!(err.contains("cargo build -p xtask"), "the repair: {err}");
+        // The manifest is the workspace's, and it is not what moved.
+        judges(&workspace, &workspace).unwrap();
+    }
+
+    /// The digest is of the files the crate is compiled from, `*.rs` under
+    /// `xtask/src`, and of nothing else there (#48): an editor's swap file
+    /// or a `.DS_Store` left beside the sources is not a change to the
+    /// code, so a built candidate over that tree still judges. A new `.rs`
+    /// file is one, and it is in the list `build.rs` watches, so cargo
+    /// rebuilds for it.
+    #[test]
+    fn a_file_that_is_not_rust_under_the_sources_does_not_move_the_digest() {
+        let workspace = built_root();
+        let root = scratch("sources-not-rust");
+        let src = root.join("xtask/src");
+        copy_tree(&workspace.join(SOURCES_DIR), &src);
+        assert_eq!(
+            sources_digest(&root).unwrap(),
+            SOURCES,
+            "a copy of the sources digests as the build did"
+        );
+        let before = source_files(&root).unwrap();
+        std::fs::write(src.join(".DS_Store"), b"   Bud1").unwrap();
+        std::fs::write(src.join(".permit.rs.swp"), "an editor's swap file").unwrap();
+        std::fs::write(src.join("phpt/notes.md"), "a note").unwrap();
+        assert_eq!(
+            sources_digest(&root).unwrap(),
+            SOURCES,
+            "and still does with files the crate is not compiled from beside them"
+        );
+        assert_eq!(
+            source_files(&root).unwrap(),
+            before,
+            "which build.rs does not watch either"
+        );
+        judges(&workspace, &root).unwrap();
+
+        std::fs::write(
+            src.join("phpt/notes.rs"),
+            "// a module the build has not seen\n",
+        )
+        .unwrap();
+        assert_ne!(
+            sources_digest(&root).unwrap(),
+            SOURCES,
+            "a new .rs file moves the digest"
+        );
+        assert!(
+            source_files(&root)
+                .unwrap()
+                .contains(&src.join("phpt/notes.rs")),
+            "and is in the list build.rs watches"
+        );
+        judges(&workspace, &root).unwrap_err();
+    }
+}

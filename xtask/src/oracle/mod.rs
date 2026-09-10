@@ -19,7 +19,7 @@
 //! The version, the digest and the path are values of the pin and appear in
 //! no source file (§10 rule 5).
 
-pub mod expect;
+pub(crate) mod expect;
 
 use std::cell::OnceCell;
 use std::collections::BTreeMap;

@@ -60,7 +60,7 @@ use crate::track::{self, Track};
 /// this instrument lays a worktree under, so a worktree it made is a
 /// checkout of its own to the judge. Claude Code's own worktrees are laid
 /// here too, and the directory is ignored.
-pub const WORKTREES: &str = ".claude/worktrees";
+pub(crate) const WORKTREES: &str = ".claude/worktrees";
 
 /// The local file the session hook renders (harness-design.md §5).
 const LOCAL: &str = ".claude/harness.local.md";
@@ -74,7 +74,7 @@ const RETIRE: &str = "worktree retire";
 /// printed before it say what failed. Its own error, so the exit can say
 /// that nothing needs undoing, as a refusal's does that nothing was done.
 #[derive(Debug)]
-pub struct NotReady {
+pub(crate) struct NotReady {
     pub dir: PathBuf,
 }
 

@@ -6,34 +6,41 @@
 //! `vocab`, the glossary as a sensor, `phpt`, the
 //! subset runner, `witness`, the rustdoc witnesses, and `status`, the one
 //! renderer.
+//!
+//! What the crate exposes is what a caller of an instrument needs and
+//! nothing beside it (#55): [`run`], the binary's body; each instrument's
+//! run function with the arguments it takes and the value it returns; the
+//! data modules, [`manifest`], [`oracle`] with the pin, [`divergence`]
+//! with the registry, and [`reading`]. Everything else is crate-private,
+//! and a test that needs an internal is a unit test beside it.
 #![forbid(unsafe_code)]
 
 pub mod api_check;
 pub mod budget;
-pub mod built;
+mod built;
 pub mod cli;
 pub mod clippy;
 pub mod computed;
 pub mod divergence;
 pub mod done;
 pub mod generated;
-pub mod git;
-pub mod glossary;
+mod git;
+mod glossary;
 /// What a build of the harness judges by, digested: the seam manifest and
 /// `xtask`'s own sources (harness-design.md §4.4, #16). Shared with
 /// `build.rs`, which includes the file rather than importing it.
-pub mod inputs;
-pub mod lane;
-pub mod lines;
-pub mod lock;
+mod inputs;
+mod lane;
+mod lines;
+mod lock;
 pub mod manifest;
 pub mod new_ext;
 pub mod oracle;
 pub mod permit;
 pub mod phpt;
 pub mod reading;
-pub mod rust;
-pub mod sources;
+mod rust;
+mod sources;
 pub mod status;
 pub mod track;
 pub mod unsafe_audit;
@@ -43,6 +50,7 @@ pub mod worktree;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use anyhow::{Result, bail};
 use clap::Parser;
@@ -53,14 +61,32 @@ use manifest::Manifest;
 use reading::{Outcome, Reading, Store};
 
 /// The workspace this binary was built in: the parent of `xtask/`.
-pub fn built_root() -> PathBuf {
+pub(crate) fn built_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
 }
 
-/// Run the command line; the binary's whole body.
-pub fn run() -> Result<()> {
+/// The binary's whole body: the command line run, an error printed as
+/// `xtask: <err>`, and the exit. A worktree laid down but not ready is
+/// neither done nor undone: 3, so a caller can tell it from a refusal
+/// that changed nothing, which is 1.
+pub fn run() -> ExitCode {
+    match command_line() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("xtask: {err:#}");
+            if err.downcast_ref::<worktree::NotReady>().is_some() {
+                ExitCode::from(3)
+            } else {
+                ExitCode::from(1)
+            }
+        }
+    }
+}
+
+/// The command line, dispatched: one arm per instrument.
+fn command_line() -> Result<()> {
     let cli = Cli::parse();
     let root = cli.root.unwrap_or_else(built_root);
     // The judge at the tool call reads the manifest itself: a manifest it
@@ -168,7 +194,7 @@ pub fn run() -> Result<()> {
 
 /// What every instrument ends with: each reading printed as one line and
 /// the set recorded, whose outcome is the exit.
-pub fn record(store: &Store, readings: &[Reading]) -> Result<()> {
+pub(crate) fn record(store: &Store, readings: &[Reading]) -> Result<()> {
     for reading in readings {
         println!(
             "{} {} {}: {}",

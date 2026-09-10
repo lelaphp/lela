@@ -13,7 +13,7 @@ use crate::phpt::Lane;
     about = "The harness for the third engine",
     disable_help_subcommand = true
 )]
-pub struct Cli {
+pub(crate) struct Cli {
     /// The workspace root; defaults to the workspace this binary was built in.
     #[arg(long, global = true, value_name = "DIR")]
     pub root: Option<PathBuf>,
@@ -22,7 +22,7 @@ pub struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum Command {
+pub(crate) enum Command {
     /// Hold the seams: regenerate and diff each lock, check crate edges,
     /// `use` paths and the bundle order; one reading per seam and per crate.
     ApiCheck {
@@ -194,7 +194,7 @@ pub enum Command {
 
 /// The two halves of a track's worktree.
 #[derive(Debug, Subcommand)]
-pub enum WorktreeCommand {
+pub(crate) enum WorktreeCommand {
     /// Lay the worktree for a branch down, ready to be worked in.
     Add {
         /// The branch, not yet made; it names its own track.
@@ -246,7 +246,7 @@ pub enum Format {
 
 /// The subcommands `xtask` has, by name: what a reading's `instrument`
 /// and a `[[week]]` read may name. `xtask --help` is the same list.
-pub fn instruments() -> Vec<String> {
+pub(crate) fn instruments() -> Vec<String> {
     Cli::command()
         .get_subcommands()
         .map(|c| c.get_name().to_owned())

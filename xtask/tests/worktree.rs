@@ -15,7 +15,6 @@ use xtask::manifest::Manifest;
 use xtask::permit::{Call, judge};
 use xtask::reading::{Reading, Status, Store};
 use xtask::status;
-use xtask::worktree::WORKTREES;
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -106,7 +105,7 @@ fn command(root: &Path, name: &str, args: &[&str]) -> (i32, String) {
 /// Where a worktree of `root` lives: under the main checkout, one
 /// directory per branch, where `permit` resolves a workspace.
 fn worktree_of(root: &Path, branch: &str) -> PathBuf {
-    root.join(WORKTREES).join(branch)
+    root.join(".claude/worktrees").join(branch)
 }
 
 /// A scratch repository: this working tree's files, tracked or not yet, so the

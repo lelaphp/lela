@@ -40,8 +40,10 @@
 //! the reading's `wall_ms` and gate nothing; the limit a run has is the
 //! recipe's.
 
-pub mod fence;
+pub(crate) mod fence;
 mod judge;
+#[cfg(test)]
+mod tests;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -59,13 +61,13 @@ use crate::sources;
 use fence::Extracted;
 
 /// The instrument's name, the reading's `instrument` field.
-pub const INSTRUMENT: &str = "witness";
+pub(crate) const INSTRUMENT: &str = "witness";
 /// What the manifest's coverage rule names in its `check` predicate.
-pub const COVERAGE: &str = "witness-coverage";
+pub(crate) const COVERAGE: &str = "witness-coverage";
 
 /// What one witness came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Judgement {
+pub(crate) enum Judgement {
     Pass,
     /// The bytes differ and an accepted registry row says so.
     Diverged,
@@ -106,12 +108,12 @@ impl lane::Judgement for Judgement {
 
 /// One witness's verdict: its divergence key, where it stands as its
 /// name, the judgement and the note.
-pub type Judged = lane::Judged<Judgement>;
+pub(crate) type Judged = lane::Judged<Judgement>;
 
 /// The one thing `--accept` writes: a fence line, by the file and the line
 /// it stands on.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Captured {
+pub(crate) struct Captured {
     pub file: PathBuf,
     /// 1-based.
     pub line: usize,
@@ -122,7 +124,7 @@ pub struct Captured {
 /// What one crate's run came to: the witnesses judged, and the coverage
 /// half beside them.
 #[derive(Debug, Clone, Default)]
-pub struct Tally {
+pub(crate) struct Tally {
     pub witnesses: lane::Tally<Judgement>,
     /// The kernels and natives the coverage scope holds.
     pub subjects: usize,
@@ -139,7 +141,7 @@ pub struct Tally {
 impl Tally {
     /// Whether the crate's reading fails: a witness that missed, a block
     /// the grammar could not read, or a kernel or native without one.
-    pub fn failed(&self) -> bool {
+    pub(crate) fn failed(&self) -> bool {
         !self.witnesses.against().is_empty()
             || !self.problems.is_empty()
             || !self.missing.is_empty()
@@ -151,7 +153,7 @@ impl Tally {
 /// the crate whatever ran it, since what a fence pins is the oracle's and
 /// the oracle ran; a crate with no witness and nothing that needs one
 /// passes whatever ran, since the coverage half was measured.
-pub fn reading(
+pub(crate) fn reading(
     tally: &Tally,
     root: &Path,
     krate: &Crate,
@@ -354,13 +356,13 @@ pub fn run(
 
 /// The manifest rule whose `check` predicate names this instrument's
 /// coverage half.
-pub fn coverage_rule(manifest: &Manifest) -> Option<&Rule> {
+pub(crate) fn coverage_rule(manifest: &Manifest) -> Option<&Rule> {
     manifest.rule_checked_by(COVERAGE)
 }
 
 /// Every witness in a crate's sources, and every kernel or native the
 /// coverage rule's scope covers there.
-pub fn extract(root: &Path, krate: &Crate, rule: Option<&Rule>) -> Result<Extracted> {
+pub(crate) fn extract(root: &Path, krate: &Crate, rule: Option<&Rule>) -> Result<Extracted> {
     let mut out = Extracted::default();
     for path in sources::rust(root, krate)? {
         let file = root.join(&path);
@@ -384,7 +386,7 @@ fn covered(rule: Option<&Rule>, path: &Path) -> bool {
 
 /// Judge every witness of one crate, and count the kernels and natives
 /// without one.
-pub fn judge(
+pub(crate) fn judge(
     oracle: &Oracle<'_>,
     registry: &Registry,
     runner: &Runner,
@@ -420,7 +422,7 @@ pub fn judge(
 /// Write the fence lines a run captured: each file under `root` read, the
 /// lines replaced, the file written back. Nothing else of the file moves,
 /// which is what makes the diff `--accept` produces one a person can read.
-pub fn capture(root: &Path, captured: &[Captured]) -> Result<()> {
+pub(crate) fn capture(root: &Path, captured: &[Captured]) -> Result<()> {
     let mut by_file: BTreeMap<&Path, Vec<&Captured>> = BTreeMap::new();
     for one in captured {
         by_file.entry(&one.file).or_default().push(one);
@@ -453,7 +455,7 @@ pub fn capture(root: &Path, captured: &[Captured]) -> Result<()> {
 
 /// The command line's entry: run what the two flags asked for and write
 /// every reading.
-pub fn command(
+pub(crate) fn command(
     root: &Path,
     manifest: &Manifest,
     store: &Store,

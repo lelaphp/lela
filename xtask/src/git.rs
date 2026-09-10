@@ -267,4 +267,96 @@ mod tests {
             "ce013625030ba8dba906f756967f9e9ca394464a"
         );
     }
+    use std::path::Path;
+
+    use super::{Stamp, files, head_commit, tree_hash};
+    use crate::built_root;
+    use crate::manifest::Manifest;
+    use crate::reading::{Outcome, Reading, Status, Store};
+
+    #[test]
+    fn a_stamp_has_a_tree_hash_and_a_commit() {
+        let stamp = Stamp::take(&built_root(), Path::new("xtask")).unwrap();
+        assert_eq!(stamp.tree.len(), 40, "{}", stamp.tree);
+        assert!(stamp.tree.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(!stamp.commit.is_empty());
+    }
+
+    #[test]
+    fn the_tree_hash_follows_the_sources_it_covers() {
+        let root = built_root();
+        let a = Stamp::take(&root, Path::new("xtask")).unwrap();
+        let b = Stamp::take(&root, Path::new("docs")).unwrap();
+        assert_ne!(a.tree, b.tree);
+        assert_eq!(a.tree, Stamp::take(&root, Path::new("xtask")).unwrap().tree);
+    }
+
+    /// The stamp computed in process is the one git would compute: the
+    /// tree hash matches `hash-object` over the same listing and the
+    /// commit matches `rev-parse --short HEAD`.
+    #[test]
+    fn the_stamp_agrees_with_git() {
+        let root = built_root();
+        let out = |args: &[&str], stdin: Option<&str>| {
+            let mut child = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            if let Some(text) = stdin {
+                std::io::Write::write_all(&mut child.stdin.take().unwrap(), text.as_bytes())
+                    .unwrap();
+            }
+            String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
+        };
+        assert_eq!(
+            head_commit(&root).unwrap(),
+            out(&["rev-parse", "--short", "HEAD"], None).trim()
+        );
+        let paths = files(&root, Path::new("docs")).unwrap();
+        let absolute = paths
+            .iter()
+            .map(|p| root.join(p).display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let ids = out(&["hash-object", "--stdin-paths"], Some(&absolute));
+        let mut listing = String::new();
+        for (p, id) in paths.iter().zip(ids.lines()) {
+            listing.push_str(id);
+            listing.push(' ');
+            listing.push_str(p);
+            listing.push('\n');
+        }
+        assert_eq!(
+            tree_hash(&root, Path::new("docs")).unwrap(),
+            out(&["hash-object", "--stdin"], Some(&listing)).trim()
+        );
+    }
+
+    /// The whole path an instrument takes: manifest, stamp, reading, store.
+    #[test]
+    fn a_test_instrument_writes_one_reading_end_to_end() {
+        let workspace = built_root();
+        let root = std::env::temp_dir().join(format!("xtask-instrument-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let manifest = Manifest::load(&workspace).unwrap();
+        let mut reading = Reading::for_scope("test", "xtask", &manifest, &workspace).unwrap();
+        reading.status = Status::Pass;
+        assert_eq!(
+            reading.tree(),
+            Stamp::take(&workspace, &manifest.scope_path("xtask").unwrap())
+                .unwrap()
+                .tree
+        );
+        let store = Store::at(&root);
+        assert_eq!(
+            store.record(std::slice::from_ref(&reading)).unwrap(),
+            Outcome::Met
+        );
+        assert!(root.join("test/xtask.toml").is_file());
+        assert_eq!(store.read("test", "xtask").unwrap().unwrap(), reading);
+    }
 }

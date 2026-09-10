@@ -37,16 +37,16 @@ mod rules;
 pub use adapters::{Adapter, run};
 pub(crate) use bench::run_bench;
 pub use call::{Call, ToolInput};
-pub use diff::{Judged, judge_files};
+pub(crate) use diff::judge_files;
 pub(crate) use diff::{run_diff, working_files};
 pub use rules::{Finding, Judgement, Kind, judge, judged_at_the_tool_call};
 
 /// The instrument name every reading of permit carries.
-pub const INSTRUMENT: &str = "permit";
+pub(crate) const INSTRUMENT: &str = "permit";
 /// The region-body check is computed's ADR 0005, not a manifest rule; this
 /// is the id its readings and denials carry.
-pub const REGION_RULE: &str = "computed.region-body";
+pub(crate) const REGION_RULE: &str = "computed.region-body";
 /// A build refusing to judge by a manifest it was not compiled against is
 /// permit's own, not a manifest rule either; this is the id its readings
 /// carry (#16).
-pub const STALE_RULE: &str = "permit.stale-build";
+pub(crate) const STALE_RULE: &str = "permit.stale-build";

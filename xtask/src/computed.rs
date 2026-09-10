@@ -30,7 +30,7 @@ use anyhow::{Context, Result, bail};
 
 /// What `computed run` did, interpreted once.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Answer {
+pub(crate) enum Answer {
     /// It ran under a trust grant: the files named, those with a region
     /// written, and its own lines.
     Rendered(Rendered),
@@ -47,7 +47,7 @@ pub enum Answer {
 /// The files named, those written, and what `computed` said about every
 /// region.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub struct Rendered {
+pub(crate) struct Rendered {
     pub named: Vec<String>,
     pub written: Vec<String>,
     pub said: String,
@@ -60,7 +60,7 @@ const INSTALL: &str = "computed did not run (cargo install computed)";
 /// read once for `new-ext`, `worktree add` and, through `xtask regions`,
 /// pre-commit. The one reader not here is the `SessionStart` line of
 /// `harness-plugins/hooks/hooks.json`, a person's file.
-pub fn render(root: &Path, files: &[String]) -> Result<Answer> {
+pub(crate) fn render(root: &Path, files: &[String]) -> Result<Answer> {
     let out = match Command::new("computed")
         .arg("run")
         .args(files)
@@ -115,7 +115,7 @@ fn said_untrusted(said: &str) -> bool {
 }
 
 /// The sentence for a root without a grant, with the line a person runs.
-pub fn trust_line(root: &Path) -> String {
+pub(crate) fn trust_line(root: &Path) -> String {
     format!(
         "this checkout is untrusted, so its exec regions are unrendered; a person runs, once (harness-design.md §11): computed trust {}",
         root.display()
@@ -124,7 +124,7 @@ pub fn trust_line(root: &Path) -> String {
 
 impl Answer {
     /// What was rendered, for the two answers that rendered anything.
-    pub fn rendered(&self) -> Option<&Rendered> {
+    pub(crate) fn rendered(&self) -> Option<&Rendered> {
         match self {
             Answer::Rendered(rendered) | Answer::Untrusted { rendered, .. } => Some(rendered),
             Answer::BrokenMarker(_) | Answer::NotInstalled => None,
@@ -133,7 +133,7 @@ impl Answer {
 
     /// One line per file named, `written` or `unchanged`, for the caller
     /// that re-stages; empty when nothing was rendered.
-    pub fn lines(&self) -> String {
+    pub(crate) fn lines(&self) -> String {
         let Some(rendered) = self.rendered() else {
             return String::new();
         };
@@ -159,7 +159,7 @@ impl Answer {
 
     /// The refusal, when the answer is one: an untrusted root, a broken
     /// marker, or no `computed`; `None` for a rendering.
-    pub fn refusal(&self) -> Option<String> {
+    pub(crate) fn refusal(&self) -> Option<String> {
         match self {
             Answer::Rendered(_) => None,
             Answer::Untrusted { root, .. } => Some(trust_line(root)),

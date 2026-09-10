@@ -4,9 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use xtask::manifest::Manifest;
-use xtask::permit::{self, Call, Kind, judge, judged_at_the_tool_call};
+use xtask::permit::{Call, Kind, judge, judged_at_the_tool_call};
 use xtask::reading::{Status, Store};
-use xtask::{built, inputs};
 
 mod common;
 use common::scratch_workspace;
@@ -996,112 +995,6 @@ fn the_stale_fixture_parses_and_lets_through_what_the_manifest_on_disk_denies() 
     );
 }
 
-/// This build carries the digest of what it judges by, the manifest beside
-/// it and its own sources, each taken by `build.rs` and by `inputs` the
-/// same way, so a build standing over its own workspace judges.
-#[test]
-fn this_build_carries_the_digest_of_what_it_was_compiled_against() {
-    assert_eq!(
-        built::MANIFEST,
-        inputs::manifest_digest(workspace()).unwrap(),
-        "build.rs and inputs take one digest of the manifest"
-    );
-    assert_eq!(
-        built::SOURCES,
-        inputs::sources_digest(workspace()).unwrap(),
-        "and one of the harness's own sources"
-    );
-    built::judges(workspace(), workspace()).unwrap();
-}
-
-/// A build stale in its own code judges by a matcher that has since been
-/// fixed, with no rule moved at all: the residue of #16 item 1, and the
-/// half an exit code and a manifest digest both miss.
-#[test]
-fn a_build_the_harnesss_own_sources_moved_under_refuses_too() {
-    let root = scratch("stale-sources");
-    let src = root.join("xtask/src");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::write(
-        src.join("permit.rs"),
-        "// a matcher of an earlier revision\n",
-    )
-    .unwrap();
-    let err = built::judges(workspace(), &root).unwrap_err().to_string();
-    assert!(err.contains("xtask/src"), "{err}");
-    assert!(
-        err.contains(built::SOURCES),
-        "the digest compiled in: {err}"
-    );
-    assert!(err.contains("cargo build -p xtask"), "the repair: {err}");
-    // The manifest is the workspace's, and it is not what moved.
-    built::judges(workspace(), workspace()).unwrap();
-}
-
-/// The digest is of the files the crate is compiled from, `*.rs` under
-/// `xtask/src`, and of nothing else there (#48): an editor's swap file or a
-/// `.DS_Store` left beside the sources is not a change to the code, so a
-/// built candidate over that tree still judges. A new `.rs` file is one,
-/// and it is in the list `build.rs` watches, so cargo rebuilds for it.
-#[test]
-fn a_file_that_is_not_rust_under_the_sources_does_not_move_the_digest() {
-    let root = scratch("sources-not-rust");
-    let src = root.join("xtask/src");
-    copy_tree(&workspace().join(inputs::SOURCES_DIR), &src);
-    assert_eq!(
-        inputs::sources_digest(&root).unwrap(),
-        built::SOURCES,
-        "a copy of the sources digests as the build did"
-    );
-    let before = inputs::source_files(&root).unwrap();
-    std::fs::write(src.join(".DS_Store"), b"   Bud1").unwrap();
-    std::fs::write(src.join(".permit.rs.swp"), "an editor's swap file").unwrap();
-    std::fs::write(src.join("phpt/notes.md"), "a note").unwrap();
-    assert_eq!(
-        inputs::sources_digest(&root).unwrap(),
-        built::SOURCES,
-        "and still does with files the crate is not compiled from beside them"
-    );
-    assert_eq!(
-        inputs::source_files(&root).unwrap(),
-        before,
-        "which build.rs does not watch either"
-    );
-    built::judges(workspace(), &root).unwrap();
-
-    std::fs::write(
-        src.join("phpt/notes.rs"),
-        "// a module the build has not seen\n",
-    )
-    .unwrap();
-    assert_ne!(
-        inputs::sources_digest(&root).unwrap(),
-        built::SOURCES,
-        "a new .rs file moves the digest"
-    );
-    assert!(
-        inputs::source_files(&root)
-            .unwrap()
-            .contains(&src.join("phpt/notes.rs")),
-        "and is in the list build.rs watches"
-    );
-    built::judges(workspace(), &root).unwrap_err();
-}
-
-/// `from` copied under `to`, every file and directory.
-fn copy_tree(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to).unwrap();
-    for entry in std::fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let target = to.join(entry.file_name());
-        if entry.path().is_dir() {
-            copy_tree(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), &target).unwrap();
-        }
-    }
-}
-
 /// permit's exit is 0 whatever it decides, so the refusal is the one thing
 /// it says with an exit: a build that would judge by rules it was not
 /// compiled against decides nothing, names both digests, and leaves the
@@ -1116,9 +1009,14 @@ fn a_build_the_manifest_moved_under_refuses_to_judge_rather_than_judging_stale()
     assert_ne!(code, 0, "the build that cannot judge exits non-zero: {out}");
     assert!(out.trim().is_empty(), "and decides nothing: {out}");
     assert!(err.contains("seams.toml"), "{err}");
+    // The digest compiled in, sha1 as `build.rs` prints it: a 40-digit
+    // hex word beside the manifest's, which the refusal names both of.
     assert!(
-        err.contains(built::MANIFEST),
-        "the digest compiled in: {err}"
+        err.split(|c: char| !c.is_ascii_hexdigit())
+            .filter(|w| w.len() == 40)
+            .count()
+            >= 2,
+        "both digests are named: {err}"
     );
 }
 
@@ -1131,11 +1029,11 @@ fn the_refusal_is_a_reading_with_the_session_of_the_call_it_did_not_judge() {
     let (code, _, err) = permit(&root, &stdin, &[]);
     assert_ne!(code, 0, "{err}");
     let reading = Store::of_workspace(&root)
-        .read("permit", permit::STALE_RULE)
+        .read("permit", "permit.stale-build")
         .unwrap()
         .expect("the refusal was recorded");
     assert_eq!(reading.instrument, "permit");
-    assert_eq!(reading.rule, permit::STALE_RULE);
+    assert_eq!(reading.rule, "permit.stale-build");
     assert_eq!(reading.status, Status::Fail);
     assert_eq!(reading.session, "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11");
     assert!(
@@ -1166,7 +1064,7 @@ fn a_manifest_the_build_cannot_read_is_a_refusal_it_records() {
     assert!(out.trim().is_empty(), "and decides nothing: {out}");
     assert!(err.contains("seams.toml"), "{err}");
     let reading = Store::of_workspace(&root)
-        .read("permit", permit::STALE_RULE)
+        .read("permit", "permit.stale-build")
         .unwrap()
         .expect("the refusal was recorded");
     assert_eq!(reading.status, Status::Fail);
@@ -1184,7 +1082,7 @@ fn a_build_over_the_manifest_it_was_compiled_against_judges_as_it_did() {
     assert!(out.contains("harness.self"), "{out}");
     assert!(
         Store::of_workspace(&root)
-            .read("permit", permit::STALE_RULE)
+            .read("permit", "permit.stale-build")
             .unwrap()
             .is_none(),
         "nothing was refused"

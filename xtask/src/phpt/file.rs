@@ -209,13 +209,6 @@ impl Phpt {
         self.section(name).filter(|body| !body.is_empty())
     }
 
-    /// The test's title, the `--TEST--` line.
-    pub fn title(&self) -> String {
-        self.text("TEST")
-            .map(|title| title.trim().to_owned())
-            .unwrap_or_default()
-    }
-
     /// Whether the test is a CGI one, which this runner does not host
     /// (upstream's `isCGI`, run-tests.php:3737-3748).
     pub fn is_cgi(&self) -> bool {
@@ -288,7 +281,7 @@ mod tests {
     #[test]
     fn the_sections_are_the_text_between_the_openers() {
         let phpt = parse("--TEST--\nname\n--FILE--\n<?php echo 1;\n--EXPECT--\n1\n").unwrap();
-        assert_eq!(phpt.title(), "name");
+        assert_eq!(phpt.text("TEST").unwrap().trim(), "name");
         assert_eq!(section(&phpt, "FILE"), Some("<?php echo 1;\n"));
         assert_eq!(section(&phpt, "EXPECT"), Some("1\n"));
     }

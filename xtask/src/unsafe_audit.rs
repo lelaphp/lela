@@ -14,7 +14,7 @@ use crate::rust;
 use crate::sources;
 
 /// The rule the audit reads.
-pub const RULE: &str = "unsafe.homes";
+pub(crate) const RULE: &str = "unsafe.homes";
 
 /// Audit every created crate; one reading each.
 pub fn run(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
@@ -65,7 +65,7 @@ pub fn run(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
 
 /// What the audit found in one crate.
 #[derive(Debug, Default)]
-pub struct Audit {
+pub(crate) struct Audit {
     /// Every `unsafe` site in the crate's sources.
     pub sites: usize,
     /// The sites outside the homes, as `path:line`.
@@ -75,7 +75,7 @@ pub struct Audit {
 }
 
 /// Audit one crate's sources against the homes.
-pub fn audit(root: &Path, krate: &Crate, homes: &[Home]) -> Result<Audit> {
+pub(crate) fn audit(root: &Path, krate: &Crate, homes: &[Home]) -> Result<Audit> {
     let mut found = Audit::default();
     let whole = homes.iter().any(|h| h.covers_whole(krate));
     let allowed = |path: &str| homes.iter().any(|h| h.covers(krate, path));
@@ -132,7 +132,7 @@ pub fn audit(root: &Path, krate: &Crate, homes: &[Home]) -> Result<Audit> {
 
 /// One entry of `unsafe.homes`: a crate, a path pattern, or a module.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Home {
+pub(crate) enum Home {
     /// The whole crate: `php_heap`.
     Crate(String),
     /// A directory pattern over source paths: `ext/*/src/ffi/`.
@@ -143,7 +143,7 @@ pub enum Home {
 }
 
 impl Home {
-    pub fn parse(text: &str) -> Result<Home> {
+    pub(crate) fn parse(text: &str) -> Result<Home> {
         if text.contains('/') {
             let parts: Vec<String> = text
                 .trim_end_matches('/')
@@ -177,7 +177,7 @@ impl Home {
     }
 
     /// Whether the source at `path` (relative to the root) is in this home.
-    pub fn covers(&self, krate: &Crate, path: &str) -> bool {
+    pub(crate) fn covers(&self, krate: &Crate, path: &str) -> bool {
         match self {
             Home::Crate(name) => *name == krate.name,
             Home::Path(pattern) => {

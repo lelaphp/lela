@@ -15,7 +15,7 @@ use crate::lock::{CargoLock, package_of};
 use crate::manifest::{Manifest, Rule};
 
 /// Every generated file the manifest names, with its rendering.
-pub fn render_all(root: &Path, manifest: &Manifest) -> Result<BTreeMap<String, String>> {
+pub(crate) fn render_all(root: &Path, manifest: &Manifest) -> Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
     for rule in &manifest.rules {
         for (file, from) in rule.predicate.generated.iter().flatten() {
@@ -40,7 +40,7 @@ pub fn write_all(root: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>> {
 }
 
 /// Render one generated file from the rule it is derived from.
-pub fn render(root: &Path, manifest: &Manifest, file: &str, from: &str) -> Result<String> {
+pub(crate) fn render(root: &Path, manifest: &Manifest, file: &str, from: &str) -> Result<String> {
     let rule = manifest.rule(from).with_context(|| {
         format!("{file} is generated from rule {from}, which the manifest lacks")
     })?;

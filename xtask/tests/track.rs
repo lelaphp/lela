@@ -9,8 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use xtask::done::Base;
-use xtask::track::{Found, MAIN, Track};
+use xtask::track::{Base, Found, Track};
 
 fn sh(root: &Path, args: &[&str]) -> String {
     let out = Command::new(args[0])
@@ -141,8 +140,8 @@ fn a_branch_whose_prefixes_name_no_branch_is_on_main_and_says_so() {
     let track = Track::of(&root, None).unwrap();
     assert_eq!(track.branch.as_deref(), Some("pcre/preg-match"));
     assert_eq!(track.found, Found::NoPrefix);
-    assert_eq!(track.name, MAIN);
-    assert_eq!(track.at, MAIN);
+    assert_eq!(track.name, "main");
+    assert_eq!(track.at, "main");
     assert_eq!(track.base, rev(&root, "main"));
 
     let (code, out, _) = xtask(&root, &["track"]);
@@ -155,7 +154,7 @@ fn a_branch_whose_prefixes_name_no_branch_is_on_main_and_says_so() {
 fn the_track_itself_and_main_are_on_main() {
     let root = scratch("itself");
     let track = Track::of(&root, None).unwrap();
-    assert_eq!(track.name, MAIN);
+    assert_eq!(track.name, "main");
     assert_eq!(track.found, Found::NoPrefix);
     assert_eq!(track.base, rev(&root, "HEAD"));
     let (_, out, _) = xtask(&root, &["track"]);
@@ -169,7 +168,7 @@ fn a_detached_head_is_on_no_track_and_is_stated_not_refused() {
     let track = Track::of(&root, None).unwrap();
     assert_eq!(track.branch, None);
     assert_eq!(track.found, Found::Detached);
-    assert_eq!(track.name, MAIN);
+    assert_eq!(track.name, "main");
     assert_eq!(track.base, rev(&root, "main"));
 
     let (code, out, err) = xtask(&root, &["track"]);
@@ -272,5 +271,4 @@ fn track_is_listed_by_the_help() {
     let (code, out, _) = xtask(Path::new("."), &["--help"]);
     assert_eq!(code, 0);
     assert!(out.contains("\n  track "), "{out}");
-    assert!(xtask::cli::instruments().contains(&"track".to_owned()));
 }

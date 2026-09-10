@@ -38,7 +38,7 @@ use inventory::{Inventory, Leaf, extension_calls, uses};
 use lock::{Diff, Lock, list};
 use workspace::{Crates, Present};
 
-pub const INSTRUMENT: &str = "api-check";
+pub(crate) const INSTRUMENT: &str = "api-check";
 
 /// Run the instrument over `root`, print one line per reading, and record
 /// them; the outcome is the exit.

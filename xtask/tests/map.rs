@@ -1,13 +1,10 @@
 //! The context layer (harness-design.md §5): the map is short, its regions
-//! are the ones the design names, the local file's template is the seven
-//! volatile sections, the per-directory guidance and the data index have
+//! are the ones the design names, the per-directory guidance and the data index have
 //! their regions, the ADR index script lists every ADR, and the
 //! `SessionStart` hook is wired for the four matchers.
 
 use std::path::Path;
 use std::process::Command;
-
-use xtask::status::{LOCAL_SECTIONS, local_template};
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -104,25 +101,6 @@ fn the_ceiling_counts_what_a_person_wrote_and_not_what_a_region_rendered() {
 
     let padded = format!("a line a person wrote\n{map}");
     assert_eq!(prose(&padded), written + 1);
-}
-
-#[test]
-fn the_local_template_is_the_seven_volatile_sections() {
-    let template = local_template();
-    for name in LOCAL_SECTIONS {
-        let line = opener(&template, name).unwrap();
-        assert!(line.contains(" volatile "), "{line}");
-        assert!(line.contains(&format!("status --section {name}")), "{line}");
-    }
-    assert_eq!(
-        template.matches("<!-- /computed -->").count(),
-        LOCAL_SECTIONS.len()
-    );
-    let ignored = read(".gitignore");
-    assert!(
-        ignored.contains("/.claude/harness.local.md"),
-        "the local file is gitignored"
-    );
 }
 
 #[test]

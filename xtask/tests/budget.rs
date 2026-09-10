@@ -4,9 +4,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use xtask::budget;
 use xtask::manifest::Manifest;
 use xtask::reading::{Number, Status, Store};
-use xtask::{budget, generated, lock};
 
 mod common;
 
@@ -85,11 +85,16 @@ fn the_tracked_workspace_passes_with_the_manifests_numbers() {
             "{key}"
         );
     }
+    // The count is `Cargo.lock`'s `[[package]]` tables, as `cargo tree`
+    // would count the default build's packages.
+    let packages = std::fs::read_to_string(workspace().join("Cargo.lock"))
+        .unwrap()
+        .lines()
+        .filter(|l| *l == "[[package]]")
+        .count();
     assert_eq!(
         ws.numbers["lock_packages"],
-        i64::try_from(lock::CargoLock::load(workspace()).unwrap().packages())
-            .unwrap()
-            .into()
+        i64::try_from(packages).unwrap().into()
     );
 
     let absent = readings.iter().find(|r| r.scope == "php_heap").unwrap();
@@ -100,28 +105,30 @@ fn the_tracked_workspace_passes_with_the_manifests_numbers() {
     );
 }
 
+/// The committed file is the manifest's rendering: `budget` regenerates
+/// it and holds the two equal under the `generated.committed` rule, so a
+/// stale copy is its failing reading and "run `xtask generate`" its repair.
 #[test]
 fn the_committed_clippy_toml_is_the_manifests_rendering() {
     let manifest = Manifest::load(workspace()).unwrap();
-    let rendered = generated::render_all(workspace(), &manifest).unwrap();
-    assert_eq!(rendered.len(), 1, "{:?}", rendered.keys());
-    let (file, want) = rendered.iter().next().unwrap();
-    assert_eq!(file, "ext/clippy.toml");
-    let have = std::fs::read_to_string(workspace().join(file)).unwrap();
-    assert_eq!(have, *want, "run `xtask generate`");
-
     let readings = budget::run(workspace(), &manifest).unwrap();
-    let clippy = readings.iter().find(|r| r.scope == file.as_str()).unwrap();
-    assert_eq!(clippy.status, Status::Pass);
-    assert_eq!(clippy.rule, "generated.committed");
+    let generated: Vec<&xtask::reading::Reading> = readings
+        .iter()
+        .filter(|r| r.rule == "generated.committed")
+        .collect();
+    assert_eq!(generated.len(), 1, "{generated:#?}");
+    let clippy = generated[0];
+    assert_eq!(clippy.scope, "ext/clippy.toml");
+    assert_eq!(clippy.status, Status::Pass, "{}", clippy.message);
 }
 
+/// The rendering is read as committed, which the test above holds equal
+/// to what the manifest renders.
 #[test]
 fn the_rendering_carries_every_denied_type_with_the_rule_text_and_adr() {
     let manifest = Manifest::load(workspace()).unwrap();
     let rule = manifest.rule("ext.no-locks").unwrap();
-    let text =
-        generated::render(workspace(), &manifest, "ext/clippy.toml", "ext.no-locks").unwrap();
+    let text = std::fs::read_to_string(workspace().join("ext/clippy.toml")).unwrap();
     for ty in rule.predicate.deny_types.as_ref().unwrap() {
         if let Some(prefix) = ty.strip_suffix("::*") {
             assert!(

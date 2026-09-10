@@ -23,13 +23,13 @@ use crate::permit;
 use crate::reading::{self, Reading, Store};
 
 /// What a section says when no instrument has measured a row.
-pub const NO_READING: &str = "no reading";
+pub(crate) const NO_READING: &str = "no reading";
 /// The map: what an agent reads first (harness-design.md §5).
-pub const MAP: &str = "AGENTS.md";
+pub(crate) const MAP: &str = "AGENTS.md";
 /// The local region file, gitignored, rendered only by name (§5).
-pub const LOCAL: &str = ".claude/harness.local.md";
+pub(crate) const LOCAL: &str = ".claude/harness.local.md";
 /// The volatile sections of the local file, in the order it renders them.
-pub const LOCAL_SECTIONS: [&str; 7] = [
+pub(crate) const LOCAL_SECTIONS: [&str; 7] = [
     "budget",
     "phpt",
     "witness",
@@ -91,7 +91,7 @@ pub fn render(
 /// carries (harness-design.md D.16); none at a terminal, on an empty
 /// stdin, or on a head that is not JSON, since a session is a fact and not
 /// a condition.
-pub fn session_of_stdin() -> Option<String> {
+pub(crate) fn session_of_stdin() -> Option<String> {
     use std::io::{IsTerminal, Read};
     let mut stdin = std::io::stdin();
     if stdin.is_terminal() {
@@ -159,7 +159,7 @@ pub fn session(
 
 /// The local file with every region unrendered: one volatile `exec` per
 /// section of `LOCAL_SECTIONS`, each `cargo xtask status --section <name>`.
-pub fn local_template() -> String {
+pub(crate) fn local_template() -> String {
     let mut out = String::from(
         "# Local facts\n\n\
          The volatile sections of harness-design.md §5, one region per section, \
@@ -969,4 +969,34 @@ fn table((head, line): Columns, rows: &[Row]) -> String {
         let _ = writeln!(out, "| {} |", line(row).join(" | "));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LOCAL_SECTIONS, local_template};
+
+    /// The opener of a region by name, if the text has one.
+    fn opener<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+        text.lines()
+            .find(|l| l.starts_with("<!-- computed ") && l.contains(&format!(" name={name}")))
+    }
+
+    #[test]
+    fn the_local_template_is_the_seven_volatile_sections() {
+        let template = local_template();
+        for name in LOCAL_SECTIONS {
+            let line = opener(&template, name).unwrap();
+            assert!(line.contains(" volatile "), "{line}");
+            assert!(line.contains(&format!("status --section {name}")), "{line}");
+        }
+        assert_eq!(
+            template.matches("<!-- /computed -->").count(),
+            LOCAL_SECTIONS.len()
+        );
+        let ignored = std::fs::read_to_string(crate::built_root().join(".gitignore")).unwrap();
+        assert!(
+            ignored.contains("/.claude/harness.local.md"),
+            "the local file is gitignored"
+        );
+    }
 }

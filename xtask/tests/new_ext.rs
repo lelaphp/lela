@@ -9,10 +9,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use xtask::glossary::Glossary;
-use xtask::manifest::Manifest;
+use xtask::manifest::{Crate, Manifest};
 use xtask::reading::{Reading, Status};
-use xtask::{api_check, budget, generated, new_ext, unsafe_audit, vocab};
+use xtask::{api_check, budget, new_ext, unsafe_audit, vocab};
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -178,10 +177,11 @@ fn the_crate_laid_down_has_the_template_topology() {
         members.iter().any(|m| m.as_str() == Some("ext/demo")),
         "{members:?}"
     );
-    assert_eq!(
-        read(&root, "ext/clippy.toml"),
-        generated::render(&root, &manifest, "ext/clippy.toml", "ext.no-locks").unwrap()
-    );
+    // `ext/clippy.toml` is rewritten as the manifest renders it, which
+    // `budget` holds under `generated.committed`.
+    let readings = budget::run(&root, &manifest).unwrap();
+    let clippy = of(&readings, "ext/clippy.toml");
+    assert_eq!(clippy.status, Status::Pass, "{}", clippy.message);
 
     // The row in the extensions region.
     let agents = read(&root, "ext/AGENTS.md");
@@ -192,10 +192,16 @@ fn the_crate_laid_down_has_the_template_topology() {
         laid.written
     );
 
-    // No word the glossary avoids, in prose or in a public name.
-    let glossary = Glossary::load(&workspace().join("CONTEXT.md")).unwrap();
-    let scan = vocab::scan_crate(&laid.dir, &glossary).unwrap();
-    assert!(scan.findings.is_empty(), "{:#?}", scan.findings);
+    // No word the glossary avoids, in prose or in a public name: `vocab`
+    // over the laid crate, under the tracked manifest's rule and glossary,
+    // with the crate's row added since the tracked manifest has none.
+    std::fs::copy(workspace().join("CONTEXT.md"), root.join("CONTEXT.md")).unwrap();
+    let mut tracked = Manifest::load(workspace()).unwrap();
+    tracked.crates.push(Crate::named("ext/demo"));
+    let readings = vocab::check(&root, &tracked, &["ext/demo".to_owned()]).unwrap();
+    let demo = of(&readings, "ext/demo");
+    assert_eq!(demo.status, Status::Pass, "{}", demo.message);
+    assert!(laid.dir.is_dir());
     let _ = std::fs::remove_dir_all(&root);
 }
 

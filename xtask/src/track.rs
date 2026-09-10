@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use crate::git::git;
 
 /// The track a branch with no track of its own is on.
-pub const MAIN: &str = "main";
+pub(crate) const MAIN: &str = "main";
 
 /// How a track was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,7 +172,7 @@ impl std::fmt::Display for Base {
 }
 
 /// The branch `HEAD` is on, or `None` when `HEAD` is detached.
-pub fn head_branch(root: &Path) -> Option<String> {
+pub(crate) fn head_branch(root: &Path) -> Option<String> {
     let name = git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"], None).ok()?;
     let name = name.trim().to_owned();
     (!name.is_empty()).then_some(name)

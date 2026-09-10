@@ -48,7 +48,7 @@ use crate::permit;
 use crate::reading::{Number, Outcome, Reading, Status, Store};
 
 /// The instrument name the reading carries.
-pub const INSTRUMENT: &str = "done";
+pub(crate) const INSTRUMENT: &str = "done";
 /// The instruments a touched crate needs a fresh passing reading from
 /// (condition 1). `phpt`'s is the reading over the subsets the crate's
 /// `[[crate]]` row owns, written under the crate's name.
@@ -62,7 +62,7 @@ pub const FRESH: [&str; 6] = [
 ];
 
 /// The harness crate; it has no kernel and no native.
-pub const HARNESS: &str = "xtask";
+pub(crate) const HARNESS: &str = "xtask";
 
 /// The instruments condition 1 asks of one crate: all of [`FRESH`], less
 /// `witness` for the harness, which has no kernel and no native, and less
@@ -70,7 +70,7 @@ pub const HARNESS: &str = "xtask";
 /// of the corpus is the `[[crate]]` row's sentence, so a crate that owns
 /// none is not asked here rather than asked and answered by the runner's
 /// error (harness §4.1, §4.5 condition 1).
-pub fn instruments_of(krate: &Crate) -> impl Iterator<Item = &'static str> {
+pub(crate) fn instruments_of(krate: &Crate) -> impl Iterator<Item = &'static str> {
     let harness = krate.name == HARNESS;
     let measured_by_the_corpus = !krate.subsets().is_empty();
     FRESH.into_iter().filter(move |i| match *i {
@@ -80,7 +80,7 @@ pub fn instruments_of(krate: &Crate) -> impl Iterator<Item = &'static str> {
     })
 }
 
-pub use crate::track::{Base, MAIN};
+pub(crate) use crate::track::Base;
 
 /// What `done` found over one diff.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,12 +137,12 @@ impl Verdict {
 
     /// The Stop hook's stdout: the block with the list while anything is
     /// unmet, nothing otherwise (harness-design.md §13 D.16).
-    pub fn hook_output(&self) -> Option<Value> {
+    pub(crate) fn hook_output(&self) -> Option<Value> {
         (!self.met()).then(|| block(&self.render()))
     }
 
     /// The reading: `done` over `workspace`, stamped over the whole tree.
-    pub fn reading(&self, manifest: &Manifest, root: &Path) -> Result<Reading> {
+    pub(crate) fn reading(&self, manifest: &Manifest, root: &Path) -> Result<Reading> {
         let mut reading = Reading::for_scope(INSTRUMENT, "workspace", manifest, root)?;
         reading.status = if self.met() {
             Status::Pass
@@ -425,7 +425,7 @@ const UNREAD_STDIN: &str = "done could not read the Stop hook's stdin";
 /// judging; whatever goes wrong before a verdict is a block that says so,
 /// since the second Stop releases a held turn and nothing releases a
 /// silent pass.
-pub fn hook(
+pub(crate) fn hook(
     root: &Path,
     manifest: &Manifest,
     registry: &Registry,
@@ -464,5 +464,35 @@ pub fn run_hook(root: &Path, manifest: &Manifest, registry: &Registry, store: &S
     };
     if let Some(output) = output {
         println!("{output}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FRESH, instruments_of};
+    use crate::manifest::Crate;
+
+    #[test]
+    fn the_harness_crate_is_asked_for_clippy_api_check_budget_and_unsafe_audit_only() {
+        let asked: Vec<&str> = instruments_of(&Crate::named("xtask")).collect();
+        assert_eq!(asked, ["clippy", "api-check", "budget", "unsafe-audit"]);
+        let asked: Vec<&str> = instruments_of(&Crate::named("ext/pcre")).collect();
+        assert_eq!(asked, FRESH);
+    }
+
+    /// An engine crate the manifest gives no subset is not asked for a
+    /// phpt reading, the way the harness crate is not; the resolver's
+    /// error is never what says so. The same crate with a row that names
+    /// one is asked.
+    #[test]
+    fn a_crate_is_asked_for_a_phpt_reading_only_where_the_manifest_gives_it_one() {
+        let asked: Vec<&str> = instruments_of(&Crate::named("php_heap")).collect();
+        assert_eq!(
+            asked,
+            ["clippy", "witness", "api-check", "budget", "unsafe-audit"]
+        );
+        let row = Crate::named("php_heap").with_phpt(&["Zend/tests"]);
+        let asked: Vec<&str> = instruments_of(&row).collect();
+        assert_eq!(asked, FRESH);
     }
 }
