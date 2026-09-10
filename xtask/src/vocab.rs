@@ -271,11 +271,15 @@ fn scan_source(file: &Path, text: &str, avoided: &[Avoided], scan: &mut Scan) {
             let mut words = identifier_words(&name);
             words.push(name.clone());
             // A name the glossary marks as code (`Result`, and an
-            // identifier a parenthetical writes in backticks) is not the word.
-            for hit in hits(&words, avoided)
-                .into_iter()
-                .filter(|hit| !hit.phrase.code.contains(&name))
-            {
+            // identifier a parenthetical writes in backticks) is not the
+            // word; a spelling written as a path marks the item its last
+            // segment names.
+            for hit in hits(&words, avoided).into_iter().filter(|hit| {
+                !hit.phrase
+                    .code
+                    .iter()
+                    .any(|spelling| spelling.rsplit("::").next() == Some(name.as_str()))
+            }) {
                 scan.findings
                     .push(Finding::at(file, index + 1, Where::Item, &subject, hit));
             }
@@ -487,6 +491,23 @@ mod tests {
         );
         let sites: Vec<(usize, Where)> = scan.findings.iter().map(|f| (f.line, f.site)).collect();
         assert_eq!(sites, [(2, Where::Item), (3, Where::Prose)]);
+    }
+
+    #[test]
+    fn a_public_item_a_path_spelling_names_is_not_a_hit_and_the_word_in_prose_is() {
+        let glossary =
+            Glossary::parse("**Divergence**:\n_Avoid_: exception (php's `Thrown::exception`)\n")
+                .unwrap();
+        let source = "pub fn exception() {}\n/// Throws an exception.\npub fn f() {}\n";
+        let mut scan = Scan::default();
+        scan_source(
+            Path::new("a.rs"),
+            source,
+            &glossary.avoided_phrases(),
+            &mut scan,
+        );
+        let sites: Vec<(usize, Where)> = scan.findings.iter().map(|f| (f.line, f.site)).collect();
+        assert_eq!(sites, [(2, Where::Prose)]);
     }
 
     #[test]

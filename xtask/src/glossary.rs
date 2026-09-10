@@ -11,7 +11,9 @@
 //! `result`, is read from the glossary itself: an identifier the entry's
 //! parenthetical writes in backticks, as the Return entry's does for
 //! `Result`, is a spelling that is code: that spelling, written exactly,
-//! is not a hit, and a public item so named is not one either. Words are
+//! is not a hit, and a public item so named is not one either; a spelling
+//! written as a path, `Thrown::exception`, marks the item its last segment
+//! names and never the word, so the prose stays held. Words are
 //! runs of letters and digits; a hyphen or an underscore separates two
 //! words, and a possessive `'s` is dropped. An entry that is itself one
 //! backticked identifier, `Next` under Edge, avoids that spelling as
@@ -246,7 +248,7 @@ fn phrase(entry: &str) -> Option<Phrase> {
     for c in entry.chars() {
         match c {
             '`' => match span.take() {
-                Some(s) if depth > 0 && is_identifier(&s) => code.push(s),
+                Some(s) if depth > 0 && is_path(&s) => code.push(s),
                 Some(s) if depth == 0 => {
                     if is_identifier(&s) {
                         spelled.push(s.clone());
@@ -293,6 +295,11 @@ fn phrase(entry: &str) -> Option<Phrase> {
 
 fn is_identifier(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// An identifier, or identifiers joined by `::`: `Result`, `Thrown::exception`.
+fn is_path(s: &str) -> bool {
+    !s.is_empty() && s.split("::").all(is_identifier)
 }
 
 /// The words of a run of prose or of a glossary entry, as written: runs of
@@ -342,6 +349,14 @@ mod tests {
         let p = phrase("feedback (the `MapPtr<[Feedback]>` of §5.14)").unwrap();
         assert!(p.code.is_empty());
         assert!(p.occurs_in(&["Feedback".into()]));
+    }
+
+    #[test]
+    fn a_backticked_path_in_the_explanation_is_a_code_spelling_and_not_the_word() {
+        let p = phrase("exception (php's `Thrown::exception`)").unwrap();
+        assert_eq!(p.words, ["exception"]);
+        assert_eq!(p.code, ["Thrown::exception"]);
+        assert!(p.occurs_in(&["an".into(), "exception".into()]));
     }
 
     #[test]
