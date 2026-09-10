@@ -293,10 +293,13 @@ pub struct Rule {
     pub predicate: Predicates,
 }
 
-/// The ten predicates of harness-design.md §4.1, each optional in the
-/// grammar so the file parses; `Manifest::parse` then holds every rule to
-/// exactly one. `unless` and `with` qualify `deny_pattern` and `deny_argv`
-/// and are refused beside any other predicate.
+/// The predicates of harness-design.md §4.1, ten there and `require_argv`
+/// beside them (#33), each optional in the grammar so the file parses;
+/// `Manifest::parse` then holds every rule to exactly one. `unless`
+/// qualifies `deny_pattern`; `with` qualifies `deny_argv` and
+/// `require_argv`, one phrase or a list of them, a word or a command and
+/// its subcommand (`"git add"`); each is refused beside any other
+/// predicate.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -306,7 +309,9 @@ pub struct Predicates {
     pub deny_pattern: Option<String>,
     pub unless: Option<String>,
     pub deny_argv: Option<Vec<String>>,
-    pub with: Option<String>,
+    pub require_argv: Option<String>,
+    #[serde(default)]
+    pub with: OneOrMany,
     pub on: Option<String>,
     pub deny: Option<bool>,
     pub deny_lints: Option<Vec<String>>,
@@ -347,12 +352,14 @@ impl AvoidFrom {
 }
 
 impl Predicates {
-    /// The ten predicate names, in the design's order.
-    pub const NAMES: [&'static str; 10] = [
+    /// The predicate names, in the design's order, `require_argv` after
+    /// the `deny_argv` it stands beside.
+    pub const NAMES: [&'static str; 11] = [
         "deny_types",
         "allow",
         "deny_pattern",
         "deny_argv",
+        "require_argv",
         "on",
         "deny",
         "deny_lints",
@@ -368,6 +375,7 @@ impl Predicates {
             self.allow.is_some(),
             self.deny_pattern.is_some(),
             self.deny_argv.is_some(),
+            self.require_argv.is_some(),
             self.on.is_some(),
             self.deny.is_some(),
             self.deny_lints.is_some(),
@@ -384,12 +392,13 @@ impl Predicates {
     }
 
     /// Whether the predicate describes one write or one command, so `permit`
-    /// can judge it before the call runs: `deny`, `deny_argv`, `deny_pattern`,
-    /// `deny_types`, `allow`, `on`. The other four read the tree after the
-    /// write (harness-design.md §4.4).
+    /// can judge it before the call runs: `deny`, `deny_argv`, `require_argv`,
+    /// `deny_pattern`, `deny_types`, `allow`, `on`. The other four read the
+    /// tree after the write (harness-design.md §4.4).
     pub fn describes_a_call(&self) -> bool {
         self.deny.is_some()
             || self.deny_argv.is_some()
+            || self.require_argv.is_some()
             || self.deny_pattern.is_some()
             || self.deny_types.is_some()
             || self.allow.is_some()
@@ -397,11 +406,11 @@ impl Predicates {
     }
 
     /// A qualifier that has no predicate to qualify: `unless` without
-    /// `deny_pattern`, `with` without `deny_argv`.
+    /// `deny_pattern`, `with` without `deny_argv` or `require_argv`.
     pub fn orphaned_qualifier(&self) -> Option<&'static str> {
         if self.unless.is_some() && self.deny_pattern.is_none() {
             Some("unless")
-        } else if self.with.is_some() && self.deny_argv.is_none() {
+        } else if !self.with.is_empty() && self.deny_argv.is_none() && self.require_argv.is_none() {
             Some("with")
         } else {
             None
@@ -657,9 +666,15 @@ impl Manifest {
                     Predicates::NAMES.join(", ")
                 );
             }
+            if rule.predicate.with.iter().any(|w| w.trim().is_empty()) {
+                bail!(
+                    "rule \"{}\" has an empty `with` phrase; a phrase is a word or a command and its subcommand",
+                    rule.id
+                );
+            }
             if let Some(qualifier) = rule.predicate.orphaned_qualifier() {
                 bail!(
-                    "rule \"{}\" has `{qualifier}` beside `{}`; `unless` qualifies deny_pattern and `with` qualifies deny_argv",
+                    "rule \"{}\" has `{qualifier}` beside `{}`; `unless` qualifies deny_pattern and `with` qualifies deny_argv or require_argv",
                     rule.id,
                     named[0]
                 );

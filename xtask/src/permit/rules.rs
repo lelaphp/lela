@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use super::call::Call;
 use super::region::region_body;
-use crate::manifest::{Manifest, Rule, scope_matches};
+use crate::manifest::{Manifest, OneOrMany, Rule, scope_matches};
 use crate::rust;
 
 /// The hook event the shipped adapter wires (§6).
@@ -164,7 +164,10 @@ fn evaluate(
         return Ok(None);
     } else if let Some(argv) = &p.deny_argv {
         call.command()
-            .is_some_and(|c| argv_denied(c, argv, p.with.as_deref()))
+            .is_some_and(|c| argv_denied(c, argv, &p.with))
+    } else if let Some(separator) = &p.require_argv {
+        call.command()
+            .is_some_and(|c| argv_missing(c, separator, &p.with))
     } else if let Some(pattern) = &p.deny_pattern {
         let subject = call.command().or_else(|| call.written());
         let regex = Regex::new(pattern)
@@ -240,16 +243,88 @@ fn commands(line: &str) -> Vec<Vec<String>> {
     commands
 }
 
-/// `deny_argv` with `with`: a command whose tokens include the `with` word
-/// and one of the denied flags, as a token or as a letter in a cluster of
-/// short flags (`-anm` carries `-n`).
-fn argv_denied(line: &str, denied: &[String], with: Option<&str>) -> bool {
+/// `deny_argv` with `with`: a command that carries one of the `with`
+/// phrases and one of the denied flags, as a token or as a letter in a
+/// cluster of short flags (`-anm` carries `-n`).
+fn argv_denied(line: &str, denied: &[String], with: &OneOrMany) -> bool {
     commands(line).iter().any(|tokens| {
-        with.is_none_or(|w| tokens.iter().any(|t| t == w))
+        carries_a_phrase(tokens, with)
             && tokens
                 .iter()
                 .any(|t| denied.iter().any(|d| flag_matches(d, t)))
     })
+}
+
+/// `require_argv` with `with`: a command that carries one of the `with`
+/// phrases and not the separator, or the separator and nothing after it,
+/// or after it a name for the tree rather than for files: `.`, `..`, a
+/// `:` pathspec magic (`:/`) or a `*` the shell left unexpanded. The
+/// separator is `--` for git, after which every token is a path; what
+/// stands before it is the command's own and not read, so `git add -A --
+/// src` is bounded to `src` and passes.
+fn argv_missing(line: &str, separator: &str, with: &OneOrMany) -> bool {
+    commands(line).iter().any(|tokens| {
+        carries_a_phrase(tokens, with)
+            && match tokens.iter().position(|t| t == separator) {
+                None => true,
+                Some(at) => {
+                    let paths = &tokens[at + 1..];
+                    paths.is_empty() || paths.iter().any(|p| names_the_tree(p))
+                }
+            }
+    })
+}
+
+/// `.`, `..`, `./`, `../`, a `:` pathspec magic (`:/`) or a glob the
+/// shell left unexpanded (`'*'`, `'./*'`): a name for the tree, or for
+/// whatever is in it, rather than for files the agent wrote.
+fn names_the_tree(path: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    let path = path.strip_prefix("./").unwrap_or(path);
+    path.is_empty() || path == "." || path == ".." || path.starts_with(':') || path.contains('*')
+}
+
+/// Whether the tokens carry one of the phrases; none is every command.
+/// A phrase's words stand in order with only options and their values
+/// between them: `git add` is `git -C dir add` and `git --no-pager add`,
+/// and is not `git log --grep add`, whose `log` is neither an option nor
+/// the value of one. One word is that word wherever it stands.
+fn carries_a_phrase(tokens: &[String], with: &OneOrMany) -> bool {
+    with.is_empty()
+        || with.iter().any(|phrase| {
+            let words: Vec<&str> = phrase.split_whitespace().collect();
+            let Some((first, rest)) = words.split_first() else {
+                return false;
+            };
+            tokens
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t == first)
+                .any(|(at, _)| follows(&tokens[at..], rest))
+        })
+}
+
+/// Whether the words follow `tokens[0]` in order, with only an option
+/// (`-x`, `--x`) or the token after one between two of them.
+fn follows(tokens: &[String], words: &[&str]) -> bool {
+    let mut at = 1;
+    for word in words {
+        loop {
+            let Some(token) = tokens.get(at) else {
+                return false;
+            };
+            if token == word {
+                at += 1;
+                break;
+            }
+            let option = |i: usize| tokens.get(i).is_some_and(|t| t.starts_with('-'));
+            if !option(at) && !option(at - 1) {
+                return false;
+            }
+            at += 1;
+        }
+    }
+    true
 }
 
 fn flag_matches(denied: &str, token: &str) -> bool {
@@ -364,26 +439,56 @@ mod tests {
     #[test]
     fn a_denied_flag_is_a_token_or_a_letter_in_a_cluster_beside_the_with_word() {
         let denied = ["--no-verify".to_owned(), "-n".to_owned()];
-        assert!(argv_denied("git commit -n -m x", &denied, Some("commit")));
-        assert!(argv_denied("git commit -anm x", &denied, Some("commit")));
-        assert!(argv_denied(
-            "git commit --no-verify",
-            &denied,
-            Some("commit")
-        ));
-        assert!(!argv_denied("git log -n 3", &denied, Some("commit")));
+        let commit = OneOrMany::One("commit".to_owned());
+        assert!(argv_denied("git commit -n -m x", &denied, &commit));
+        assert!(argv_denied("git commit -anm x", &denied, &commit));
+        assert!(argv_denied("git commit --no-verify", &denied, &commit));
+        assert!(!argv_denied("git log -n 3", &denied, &commit));
         // A quoted flag is still the flag; conservative is the design's word.
-        assert!(argv_denied("git commit -m '-n'", &denied, Some("commit")));
-        assert!(!argv_denied(
-            "git commit -m 'no -n here'",
-            &denied,
-            Some("commit")
-        ));
-        assert!(!argv_denied(
-            "git commit --no-verify-x",
-            &denied,
-            Some("commit")
-        ));
+        assert!(argv_denied("git commit -m '-n'", &denied, &commit));
+        assert!(!argv_denied("git commit -m 'no -n here'", &denied, &commit));
+        assert!(!argv_denied("git commit --no-verify-x", &denied, &commit));
+        assert!(argv_denied("git commit -n", &denied, &OneOrMany::None));
+    }
+
+    #[test]
+    fn a_phrase_is_its_words_in_order_with_only_options_between_them() {
+        let git_add = OneOrMany::Many(vec!["git add".to_owned(), "git commit".to_owned()]);
+        let carries = |line: &str| carries_a_phrase(&commands(line)[0], &git_add);
+        assert!(carries("git add -- src"));
+        assert!(carries("git -C /tmp/x add -- src"));
+        assert!(carries("git --no-pager -c user.name=x commit -- src"));
+        assert!(!carries("git log --grep add"));
+        assert!(!carries("git worktree add -b x dir"));
+        assert!(!carries("cargo add serde"));
+        assert!(carries("git commit -m x"));
+    }
+
+    #[test]
+    fn the_separator_is_required_and_what_follows_it_names_files() {
+        let with = OneOrMany::Many(vec!["git add".to_owned(), "git commit".to_owned()]);
+        let missing = |line: &str| argv_missing(line, "--", &with);
+        assert!(missing("git add -A"));
+        assert!(missing("git add ."));
+        assert!(missing("git add -u"));
+        assert!(missing("git add -- ."));
+        assert!(missing("git add -- ':/'"));
+        assert!(missing("git add -- ./"));
+        assert!(missing("git add -- ../"));
+        assert!(missing("git add -- './*'"));
+        assert!(missing("git add -- 'xtask/*'"));
+        assert!(missing("git add --"));
+        assert!(missing("git commit -m x"));
+        assert!(missing("git commit --amend --no-edit"));
+        assert!(missing("git commit -am x"));
+        assert!(missing("cargo fmt && git add -A && git commit -m x"));
+        assert!(!missing("git add -- xtask/src/permit/rules.rs"));
+        assert!(!missing("git add -A -- xtask/src"));
+        assert!(!missing("git commit -F /tmp/msg -- xtask/src AGENTS.md"));
+        assert!(!missing("git commit --amend -F /tmp/msg -- xtask/src"));
+        assert!(!missing("git commit -m 'add -- nothing' -- AGENTS.md"));
+        assert!(!missing("git status && git diff --cached -- xtask"));
+        assert!(!missing("git log --grep add"));
     }
 
     #[test]

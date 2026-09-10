@@ -384,6 +384,38 @@ fn permits_carries_a_row_for_the_rules_permit_judges_by_that_are_its_own() {
     );
 }
 
+/// The row #33 proposes, `git.pathspec`, appended to the scratch
+/// manifest verbatim: the file parses with it, and `permits` carries the
+/// rule's row, so a denial is visible where the facts are. Once the
+/// tracked manifest carries the row this proves the same of it.
+#[test]
+fn permits_carries_a_row_for_the_proposed_git_pathspec_rule() {
+    let root = scratch("permit-pathspec-row");
+    let manifest = root.join("seams.toml");
+    let mut text = std::fs::read_to_string(&manifest).unwrap();
+    if !text.contains("id = \"git.pathspec\"") {
+        text.push_str(
+            "\n[[rule]]\nid = \"git.pathspec\"\ntool = \"Bash\"\nwith = [\"git add\", \"git commit\"]\nrequire_argv = \"--\"\ntext = \"An agent stages and commits by pathspec, `git add -- <paths>` and `git commit -F <file> -- <paths>`: the index is shared with every session in the checkout.\"\n",
+        );
+        std::fs::write(&manifest, text).unwrap();
+    }
+    let store = Store::of_workspace(&root);
+    let mut denial = Reading::new("permit", "git add -A && git commit -m x");
+    denial.rule = "git.pathspec".into();
+    denial.status = Status::Fail;
+    denial.message = "An agent stages and commits by pathspec".into();
+    denial.session = "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11".into();
+    store.record(std::slice::from_ref(&denial)).unwrap();
+
+    let (ok, md, err) = status(&root, &["--section", "permits"]);
+    assert!(ok, "{err}");
+    let row = md
+        .lines()
+        .find(|l| l.contains("git.pathspec"))
+        .unwrap_or_else(|| panic!("no row for the rule:\n{md}"));
+    assert!(row.contains("| 1 |"), "the denial is counted: {row}");
+}
+
 /// The bench's reading is a measurement whose exit is not its status
 /// (harness-design.md §4.4, #61), and the section renders it as before:
 /// a `fail` against the bar is one reading and one failure of `permit`

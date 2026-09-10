@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git add -A && git commit -m \"feat(xtask): the whole index, whoever staged it\"","description":"Stage everything and commit"}}

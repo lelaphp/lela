@@ -107,6 +107,18 @@ fn a_rule_with_two_predicates_is_refused() {
 }
 
 #[test]
+fn an_empty_with_phrase_is_refused() {
+    let text = format!(
+        "{MINIMAL}\n[[rule]]\nid = \"x.blank\"\ntool = \"Bash\"\nrequire_argv = \"--\"\nwith = [\"git add\", \"\"]\ntext = \"t\"\n"
+    );
+    let err = Manifest::parse(&text).unwrap_err().to_string();
+    assert!(
+        err.contains("x.blank") && err.contains("empty `with`"),
+        "{err}"
+    );
+}
+
+#[test]
 fn a_qualifier_without_its_predicate_is_refused() {
     let text = format!(
         "{MINIMAL}\n[[rule]]\nid = \"x.orphan\"\ntool = \"Bash\"\ncheck = \"c\"\nunless = \"u\"\ntext = \"t\"\n"

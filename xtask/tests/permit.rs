@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use xtask::manifest::{Manifest, Rule};
+use xtask::manifest::{Manifest, OneOrMany, Rule};
 use xtask::permit::{Call, Kind, judge, judged_at_the_call};
 use xtask::reading::{Status, Store};
 
@@ -137,6 +137,85 @@ fn the_proposed_xtask_lock_line_rule_notes_its_fixture_and_not_its_neighbour() {
         judged.findings.iter().all(|f| f.rule != "xtask.lock-line"),
         "the neighbour fired: {judged:?}"
     );
+}
+
+/// The rule #33 proposes, `git.pathspec`, built through the constructors
+/// as its row would read, so the predicate is proven before a person
+/// commits the row: `require_argv = "--"` with `with = ["git add", "git
+/// commit"]` denies a `git add` over the whole tree and a `git commit`
+/// that names no path, with the rule's id and text in the denial, and
+/// lets the pathspec forms and the hooks' own `git add -- <file>` through.
+/// Once the tracked manifest carries the row, the walk above holds it and
+/// this adds nothing.
+#[test]
+fn the_proposed_git_pathspec_rule_denies_its_fixture_and_not_its_neighbour() {
+    let manifest = with_the_pathspec_rule(Manifest::load(workspace()).unwrap());
+    let rule = manifest.rule("git.pathspec").unwrap();
+    let dir = fixtures().join("rules/git.pathspec");
+    let judged = judge(&manifest, workspace(), &call(&dir.join("deny.json"))).unwrap();
+    let denial = judged
+        .denial()
+        .unwrap_or_else(|| panic!("the denial did not fire: {judged:?}"));
+    assert_eq!(denial.rule, "git.pathspec");
+    assert!(
+        denial.reason().contains("git.pathspec"),
+        "{}",
+        denial.reason()
+    );
+    assert!(denial.reason().contains(&rule.text), "{}", denial.reason());
+    let judged = judge(&manifest, workspace(), &call(&dir.join("allow.json"))).unwrap();
+    assert!(
+        judged.findings.iter().all(|f| f.rule != "git.pathspec"),
+        "the neighbour fired: {judged:?}"
+    );
+    for line in [
+        "git add .",
+        "git add -u",
+        "git commit --amend --no-edit",
+        "git add -- .",
+        "git -C /Users/x/dax-php commit -F /tmp/msg",
+    ] {
+        let judged = judge(&manifest, workspace(), &bash(line)).unwrap();
+        assert_eq!(
+            judged.denial().map(|f| f.rule.as_str()),
+            Some("git.pathspec"),
+            "{line}: {judged:?}"
+        );
+    }
+    for line in [
+        "git add -- AGENTS.md",
+        "git commit --amend -F /tmp/msg -- xtask/src",
+        "git add -A -- xtask/fixtures/rules/git.pathspec",
+        "git worktree add -b t/x .claude/worktrees/t/x main",
+        "cargo add serde",
+    ] {
+        let judged = judge(&manifest, workspace(), &bash(line)).unwrap();
+        assert!(judged.denial().is_none(), "{line}: {judged:?}");
+    }
+}
+
+/// The manifest with the `git.pathspec` row #33 proposes, as the tracked
+/// file carries it or as the constructors build it.
+fn with_the_pathspec_rule(mut manifest: Manifest) -> Manifest {
+    if manifest.rule("git.pathspec").is_none() {
+        let mut rule = Rule::named("git.pathspec", "");
+        rule.scope = OneOrMany::None;
+        rule.tool = OneOrMany::One("Bash".to_owned());
+        rule.predicate.deny = None;
+        rule.predicate.require_argv = Some("--".to_owned());
+        rule.predicate.with = OneOrMany::Many(vec!["git add".to_owned(), "git commit".to_owned()]);
+        "An agent stages and commits by pathspec, `git add -- <paths>` and `git commit -F <file> -- <paths>`: the index is shared with every session in the checkout."
+            .clone_into(&mut rule.text);
+        manifest.rules.push(rule);
+    }
+    manifest
+}
+
+fn bash(line: &str) -> Call {
+    Call::parse(
+        &serde_json::json!({"tool_name": "Bash", "tool_input": {"command": line}}).to_string(),
+    )
+    .unwrap()
 }
 
 #[test]
