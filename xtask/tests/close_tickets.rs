@@ -302,3 +302,75 @@ fn a_ticket_without_opens_is_refused_by_the_instrument_and_a_bad_value_fails_the
         "no reading was written for it"
     );
 }
+
+/// The job that calls the caller (#25; harness-design.md §7): on a push to
+/// `main` alone, after the regions, test and per-commit jobs are green,
+/// with `issues: write` for the comment, the close and the edge, handing
+/// the caller the pushed range and the run's URL; a pull request and a
+/// track branch settle nothing.
+#[test]
+fn the_tickets_job_runs_on_a_push_to_main_alone_after_the_per_commit_job_with_issues_write() {
+    let text = fs::read_to_string(workspace().join(".github/workflows/harness.yml")).unwrap();
+    let at = text
+        .find("\n  tickets:")
+        .expect("the workflow has a tickets job");
+    let per_commit = text
+        .find("\n  per-commit:")
+        .expect("the workflow has a per-commit job");
+    assert!(
+        at > per_commit,
+        "the tickets job is laid down after per-commit"
+    );
+    let job = &text[at..];
+    let lines = job
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>();
+    let line = |key: &str| {
+        lines
+            .iter()
+            .find(|l| l.trim_start().starts_with(key))
+            .unwrap_or_else(|| panic!("the tickets job lacks {key}: {job}"))
+    };
+    let when = line("if:");
+    assert!(
+        when.contains("github.event_name == 'push'")
+            && when.contains("github.ref == 'refs/heads/main'"),
+        "a push to main alone: {when}"
+    );
+    // A status check function in `if:` replaces the default `success()`
+    // gate on `needs:`, so one here would run the job over a red lane.
+    for function in ["always()", "cancelled()", "failure()"] {
+        assert!(
+            !when.contains(function),
+            "the job waits on the three jobs being green: {when}"
+        );
+    }
+    let needs = line("needs:");
+    for job in ["regions", "xtask", "per-commit"] {
+        assert!(needs.contains(job), "after {job}: {needs}");
+    }
+    let permissions = job
+        .find("permissions:")
+        .expect("the job states its permissions");
+    let permissions = &job[permissions..job[permissions..].find("steps:").unwrap() + permissions];
+    assert!(
+        permissions.contains("issues: write"),
+        "the token can comment, close and edit: {permissions}"
+    );
+    let call = line("run: scripts/close-tickets.sh");
+    for argument in [
+        "github.event.before",
+        "github.sha",
+        "actions/runs/${{ github.run_id }}",
+    ] {
+        assert!(
+            call.contains(argument),
+            "the caller is handed {argument}: {call}"
+        );
+    }
+    assert!(
+        job.contains("GH_TOKEN: ${{ github.token }}"),
+        "gh has the job's token: {job}"
+    );
+}
