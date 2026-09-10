@@ -145,8 +145,16 @@ _Avoid_: transition, continuation, `Next` (the handler's return inside the loop)
 ### Harness
 
 **Instrument**:
-One `xtask` subcommand that measures or judges something and ends by writing a reading: `witness`, `phpt`, `compile-identity`, `crosscheck`, `port-map`, `api-check`, `budget`, `unsafe-audit`, `bench`, `fuzz`, `mutants`, `permit`, `done`, `vocab`. The design of record for the harness is `harness-design.md`.
+One `xtask` subcommand that measures or judges something and ends by writing a reading: `witness`, `phpt`, `compile-identity`, `crosscheck`, `port-map`, `api-check`, `budget`, `unsafe-audit`, `bench`, `fuzz`, `mutants`, `permit`, `done`, `vocab`. What an instrument does to a crate or a rule is to *hold* it. The design of record for the harness is `harness-design.md`.
 _Avoid_: check, gate (that is a numbered pass/fail bar such as G1), tool, script
+
+**Command**:
+One `xtask` subcommand that acts or answers and writes no reading: `track`, `worktree`, `regions`, `new-ext`, `generate`, `status`. A command is not an instrument, so `done` and `status` never look for its reading; what it answers is asked again each time.
+_Avoid_: helper, utility, subtool
+
+**Tally**:
+The one module behind the corpus lanes: the runner ladder (a control is a skip, an absent oracle is a skip, the engine is pass or fail), the rule that nothing run is not green, the print loop and the reading. A lane contributes its judgement and how to judge one item.
+_Avoid_: scoreboard, summary, aggregator
 
 **Seam manifest**:
 The one tracked data file, `seams.toml`, that declares each seam once: producer, consumers, lock file, permitted edges, `unsafe` homes, forbidden types, line ceilings, the ADR that decided it, and the text a failure prints. Every rule sensor is derived from it; a rule stated anywhere else is a copy.

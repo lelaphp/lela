@@ -77,6 +77,7 @@ budget = 1000
 [[crate]]
 name = "xtask"
 budget = 14000
+lock = "xtask.lock"                        # harness §4.1, revision 16: the harness holds its own interface
 
 # ---------------------------------------------------------------- ext/
 # One crate per extension, package `php_ext_<name>` at `ext/<name>` (ADR-0004).
@@ -188,6 +189,11 @@ lock = "tier.lock"
 allowlist = true
 sections = ["face", "kernels"]
 adr = "0006"
+[[seam]]
+name = "harness"                          # revision 16: xtask's public items are the instruments and the data; nothing in the workspace imports it
+producer = "xtask"
+consumers = []
+lock = "xtask.lock"
 
 # ---------------------------------------------------------------- edges
 # Design §4.2. A manifest edge outside this list fails `api-check`; so does a
@@ -290,6 +296,11 @@ id = "api.lock-line"
 scope = "crates/php_engine/src/api/**"
 on = "pub"
 text = "A new pub item in api needs its api.lock line in the same commit; api ≤ 400 items."
+[[rule]]
+id = "xtask.lock-line"
+scope = "xtask/src/**"
+on = "pub"
+text = "A new pub item in xtask needs its xtask.lock line in the same commit."
 
 [[rule]]
 id = "ext.pub-beyond-extension"
