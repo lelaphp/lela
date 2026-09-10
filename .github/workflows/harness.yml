@@ -4,7 +4,8 @@
 # negative controls; and per commit the instruments run over the whole
 # workspace, then `done` judges the changes since the branch's track, the
 # base the Stop hook took; the reading store is the only thing the run
-# uploads, and the permits section is the summary.
+# uploads, and the permits section is the summary. On a push to main a
+# fourth job settles the tickets the commits name (#25).
 name: harness
 on:
   push:
@@ -176,5 +177,51 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: harness
+          path: target/harness
+          if-no-files-found: warn
+  # The tickets the push settles (#25; CONTEXT.md, Ticket): on a push to
+  # main alone, after the three jobs above are green, each commit's
+  # `Ticket: #<n>` trailer names the ticket it settles and its `Opens:`
+  # trailer what the work opened, `#<m>, #<k>` or `nothing`, and
+  # `scripts/close-tickets.sh` runs `xtask ticket close <n>` for each with
+  # the flags the trailer spells (#29), the run's URL as the session the
+  # reading carries. The instrument decides: a ticket with a box unticked
+  # is refused and commented with the boxes that remain, and stays open;
+  # a ticket closed is commented with the commit, the run and where the
+  # readings are. A number cited in prose, or a commit with no trailer,
+  # closes nothing. The job is red when a ticket could not be told or a
+  # trailer names no ticket, never for what the instrument decided, since
+  # the ticket's own comment is where that is read; a pull request and a
+  # track branch settle nothing. The token needs `issues: write` for the
+  # comment, the close and the blocking edge, and `gh issue edit
+  # --add-blocking` needs the runner's gh at 2.98 or later, which the
+  # version step prints. The store this job writes, one `ticket` reading
+  # per trailer, is uploaded as `tickets` beside the per-commit job's
+  # `harness`. Held by `cargo test -p xtask --test close_tickets` over a
+  # fixture range with both outcomes and both non-trailers.
+  tickets:
+    name: the tickets the push settles
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [regions, xtask, per-commit]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the pushed range, before..after
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: gh --version
+      - name: close, through the instrument
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/close-tickets.sh "${{ github.event.before }}" "${{ github.sha }}" "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      - name: the ticket readings, the upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tickets
           path: target/harness
           if-no-files-found: warn

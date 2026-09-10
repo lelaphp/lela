@@ -800,7 +800,8 @@ fn ci_test_job_writes_the_declarations_then_typechecks_and_validates_the_module(
 
 /// CI per commit (harness-design.md §7): the same instruments over the
 /// workspace, then `done`; the reading store is the only thing the run
-/// uploads; what it renders is the permits section.
+/// uploads, its store and the tickets job's; what it renders is the permits
+/// section.
 #[test]
 fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
     let text = read(".github/workflows/harness.yml");
@@ -821,18 +822,18 @@ fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
         assert!(at > last, "{step} is out of order: {text}");
         last = at;
     }
-    assert_eq!(
-        text.matches("upload-artifact").count(),
-        1,
-        "one upload, the store: {text}"
-    );
-    let upload = text.find("upload-artifact").unwrap();
-    let step = &text[upload..];
-    let step = &step[..step.find("\n      - ").unwrap_or(step.len())];
-    assert!(
-        step.contains("path: target/harness"),
-        "the upload is the store: {step}"
-    );
+    // Two jobs upload, per commit and the tickets job (#25), and each
+    // uploads its store and nothing else.
+    let uploads = text.match_indices("upload-artifact").collect::<Vec<_>>();
+    assert_eq!(uploads.len(), 2, "the two stores: {text}");
+    for (upload, _) in uploads {
+        let step = &text[upload..];
+        let step = &step[..step.find("\n      - ").unwrap_or(step.len())];
+        assert!(
+            step.contains("path: target/harness"),
+            "the upload is the store: {step}"
+        );
+    }
     assert!(
         text.contains("fetch-depth: 0"),
         "done needs the merge base with the branch's track: {text}"
