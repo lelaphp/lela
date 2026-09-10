@@ -1,8 +1,9 @@
 //! `xtask done`, the definition of done (harness-design.md §4.5, §13 D.16,
 //! D.18): the six conditions over a scratch repository, each provoked by a
 //! fixture and read back from the verdict; the Stop hook shapes; and the
-//! wiring of the Stop hook and pre-push. The instruments whose readings
-//! `done` reads have their own fixtures beside them; here a reading is
+//! wiring of the Stop hook (the two git hooks run in `tests/hooks.rs`).
+//! The instruments whose readings `done` reads have their own fixtures
+//! beside them; here a reading is
 //! written by hand into the store, since what is under test is how `done`
 //! reads it, not how it was measured.
 
@@ -766,7 +767,7 @@ fn every_verdict_is_one_reading_of_done_over_the_workspace() {
 // ---------------------------------------------------------------- the wiring
 
 #[test]
-fn the_stop_hook_runs_done_with_hook_and_pre_push_runs_done() {
+fn the_stop_hook_runs_done_with_hook() {
     let hooks: serde_json::Value =
         serde_json::from_str(&read("harness-plugins/hooks/hooks.json")).unwrap();
     let stop = &hooks["hooks"]["Stop"];
@@ -784,86 +785,6 @@ fn the_stop_hook_runs_done_with_hook_and_pre_push_runs_done() {
         "Stop takes no matcher: {}",
         entries[0]
     );
-
-    let pre_push = workspace().join("scripts/hooks/pre-push");
-    let text = std::fs::read_to_string(&pre_push).unwrap();
-    assert!(text.starts_with("#!/"), "{text}");
-    assert!(text.contains("cargo xtask done"), "{text}");
-    // The push is judged against what the remote has: the remote sha git
-    // hands the hook on stdin is the base, and a ref the remote lacks
-    // (all zeros) falls back to done's own default.
-    assert!(text.contains("--base \"$remote_sha\""), "{text}");
-    assert!(
-        text.contains("0000000000000000000000000000000000000000"),
-        "{text}"
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&pre_push).unwrap().permissions().mode();
-        assert!(mode & 0o111 != 0, "pre-push is executable: {mode:o}");
-    }
-}
-
-/// Pre-commit (harness-design.md §6 wiring): the instruments that exist,
-/// in the order the design lists them, `permit --diff` over the staged
-/// diff, and `xtask regions` on the region files plus the local one by
-/// name, with what it wrote re-staged and a hand edit refused.
-#[test]
-fn pre_commit_runs_the_instruments_permit_over_the_diff_and_regions() {
-    let pre_commit = workspace().join("scripts/hooks/pre-commit");
-    let whole = std::fs::read_to_string(&pre_commit).unwrap();
-    assert!(whole.starts_with("#!/"), "{whole}");
-    // The commands, not the comment that describes them.
-    let text: String = whole
-        .lines()
-        .filter(|l| !l.trim_start().starts_with('#'))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let mut last = 0;
-    for step in [
-        "cargo fmt --check",
-        "clippy --staged",
-        "api-check",
-        "budget",
-        "unsafe-audit",
-        "vocab",
-        "permit --diff",
-        "regions",
-    ] {
-        let at = text
-            .find(step)
-            .unwrap_or_else(|| panic!("pre-commit lacks {step}: {text}"));
-        assert!(at > last, "{step} is out of order: {text}");
-        last = at;
-    }
-    for file in [
-        "AGENTS.md",
-        "ext/AGENTS.md",
-        "data/INDEX.md",
-        "docs/divergence.md",
-        ".claude/harness.local.md",
-    ] {
-        assert!(text.contains(file), "regions names {file}: {text}");
-    }
-    assert!(
-        text.contains("git add"),
-        "what computed wrote is re-staged: {text}"
-    );
-    assert!(
-        text.contains("computed check"),
-        "a hand edit is refused: {text}"
-    );
-    assert!(
-        !text.contains("--force"),
-        "a person decides --force: {text}"
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&pre_commit).unwrap().permissions().mode();
-        assert!(mode & 0o111 != 0, "pre-commit is executable: {mode:o}");
-    }
 }
 
 /// CI per commit (harness-design.md §7): the same instruments over the
