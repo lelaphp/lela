@@ -179,7 +179,9 @@ fn a_push_closes_what_the_trailers_name_and_tells_each_ticket_what_the_instrumen
     scratch.commit("a number in prose\n\nCites #5 in prose and Ticket: #5 in a paragraph that is not the last.\n\nSo the trailer block is this paragraph, with no trailer in it.\n");
     let refused = scratch
         .commit("unticked boxes\n\nThe boxes are not ticked yet.\n\nOpens: nothing\nTicket: #7\n");
-    let closed = scratch.commit("ticked, opens nothing\n\nOpens: nothing\nTicket: #8\n");
+    // A `---` line in the body is prose, not git's patch divider: the
+    // trailers after it are still read.
+    let closed = scratch.commit("ticked, opens nothing\n\nA rule in the body:\n\n---\n\nand the trailers after it.\n\nOpens: nothing\nTicket: #8\n");
     let opening = scratch.commit("ticked, opens one\n\nOpens: #10\nTicket: #9\n");
     let after = scratch.head();
 
@@ -249,8 +251,10 @@ fn a_push_closes_what_the_trailers_name_and_tells_each_ticket_what_the_instrumen
 
 /// `Opens:` missing is the instrument's refusal, commented like any other;
 /// a `Ticket:` value that names no ticket is the job's own failure, with
-/// the tracker asked nothing for it; and a `before` git does not have makes
-/// the range `after` alone.
+/// the tracker asked nothing for it; an `Opens:` value that is neither a
+/// ticket nor `nothing` is told to the ticket and red, with the instrument
+/// not asked; and a `before` git does not have makes the range `after`
+/// alone.
 #[test]
 fn a_ticket_without_opens_is_refused_by_the_instrument_and_a_bad_value_fails_the_job() {
     let scratch = Scratch::lay("flags");
@@ -278,4 +282,23 @@ fn a_ticket_without_opens_is_refused_by_the_instrument_and_a_bad_value_fails_the
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("names no ticket"), "{out}");
     assert_eq!(scratch.calls().len(), 1, "nothing asked for it");
+
+    let neither = scratch.commit("opens what\n\nOpens: #10, later\nTicket: #8\n");
+    let (code, out) = scratch.close(&bad, &neither);
+    assert_eq!(code, 1, "{out}");
+    let calls = scratch.calls();
+    assert_eq!(
+        calls.len(),
+        2,
+        "told, and the instrument not asked: {calls:?}"
+    );
+    assert!(
+        calls[1].starts_with("issue comment 8 --body Not closed")
+            && calls[1].contains("`Opens: later` is neither a ticket nor `nothing`"),
+        "{calls:?}"
+    );
+    assert!(
+        !scratch.root.join("target/harness").exists(),
+        "no reading was written for it"
+    );
 }
