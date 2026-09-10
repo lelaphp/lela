@@ -143,8 +143,8 @@ fn a_bundle_order_that_is_not_topological_fails() {
 }
 
 /// The tracked workspace: every seam whose lock has no home present yet,
-/// or that is generated, is a skip, and the harness itself is within its
-/// edges.
+/// that is generated, or that is diffed per section, is a skip, and the
+/// harness itself is within its edges.
 #[test]
 fn the_workspace_today_has_no_failing_reading() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -160,6 +160,7 @@ fn the_workspace_today_has_no_failing_reading() {
         .iter()
         .filter(|seam| {
             seam.generated
+                || !seam.sections.is_empty()
                 || manifest
                     .lock_home(&seam.lock)
                     .and_then(|home| manifest.crate_named(&home))
@@ -169,7 +170,7 @@ fn the_workspace_today_has_no_failing_reading() {
     assert_eq!(
         readings.iter().filter(|r| r.status == Status::Skip).count(),
         unmeasured,
-        "one skip per seam without a home present: {readings:#?}"
+        "one skip per seam without a home present or measured: {readings:#?}"
     );
 }
 
