@@ -80,6 +80,7 @@ manifest::Predicates::named
 manifest::Predicates::orphaned_qualifier
 manifest::Rule
 manifest::Rule::covers
+manifest::Rule::exempts
 manifest::Rule::named
 manifest::Seam
 manifest::Seam::named

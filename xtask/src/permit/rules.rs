@@ -146,6 +146,11 @@ fn evaluate(
     if !rule.tool.is_empty() && !rule.tool.iter().any(|t| t == call.tool_name) {
         return Ok(None);
     }
+    // A file the rule's exempt covers is not judged by it, whatever the
+    // predicate; the grammar is the scope's (#23).
+    if path.is_some_and(|path| rule.exempts(path)) {
+        return Ok(None);
+    }
     // A rule with a scope judges a file in it and nothing else.
     if !rule.scope.is_empty() {
         match path {

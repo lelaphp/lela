@@ -270,7 +270,11 @@ impl Edge {
 /// `adr`, and the `text` a failure prints; for an `on` rule, which never
 /// denies, it is the note an allow carries. Two rules of the tracked
 /// manifest (`unsafe.homes`, `generated.committed`) carry neither `scope`
-/// nor `tool`, so their absence is not refused.
+/// nor `tool`, so their absence is not refused. `exempt` is the paths the
+/// rule does not judge, in `scope`'s grammar: `permit` reads it for every
+/// predicate it judges (#23), so `xtask/src/witness/fence.rs`, the parser
+/// of the fence grammar `witness.exit-authored` denies, can carry the
+/// shape it parses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -429,10 +433,22 @@ impl Rule {
     /// (harness-design.md §4.1). A rule without a scope covers nothing on
     /// its own; what such a rule judges is its predicate's.
     pub fn covers(&self, path: &Path) -> bool {
-        self.scope
-            .iter()
-            .any(|pattern| scope_matches(pattern, path))
+        any_matches(self.scope.iter(), path)
     }
+
+    /// Whether the rule's `exempt` covers `path`, under the grammar
+    /// `covers` reads: a call at an exempt path is not judged by the rule.
+    /// A rule without an exempt exempts nothing, and so does an exempt for
+    /// a call without a file, a `Bash` call: an exempt names files.
+    pub fn exempts(&self, path: &Path) -> bool {
+        any_matches(self.exempt.iter().map(String::as_str), path)
+    }
+}
+
+/// The one reading of a list of scope patterns against a path, which
+/// `scope` and `exempt` share.
+fn any_matches<'a>(mut patterns: impl Iterator<Item = &'a str>, path: &Path) -> bool {
+    patterns.any(|pattern| scope_matches(pattern, path))
 }
 
 /// Whether `path` is at or under the scope pattern: `*` is one segment or
