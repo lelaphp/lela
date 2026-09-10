@@ -80,7 +80,7 @@ third-engine-design.md
 
 | seam | lock | items | ceiling | reading |
 |---|---|---|---|---|
-| heap | heap.lock |  |  | skip |
+| heap | heap.lock | 51 |  | pass |
 | unit | unit.lock |  |  | skip |
 | ops | ops.lock |  |  | skip |
 | api | api.lock |  | 400 | skip |
@@ -88,7 +88,7 @@ third-engine-design.md
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 237 |  | pass |
 
-<!-- /computed in=455bfd7d9c7e9cfcc017728e52da3f71ffa71289e52abf298232dbf54f907bab out=dd8fa19338073dca886e195b8c3528a0fc5800f916b0e4d6c92bc8691e9a3f6a -->
+<!-- /computed in=338aca224168b1832e9f9abf1c1d3e5a488be406475baa676a2724297f6e779f out=221c059dda1614851feaf8b9e73c630d02a11e98b26f8db7e3e9c115f456ca60 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -150,9 +150,10 @@ Options:
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
-└── php_ext
+├── php_ext
+└── php_heap
 ```
-<!-- /computed in=9f0136b5f4fd541e073442f8a06659d0111c9413126e447c87d6793e6e866a6c out=d686c3a3adc50126cc7f7622e563fd7e0fb76a7713bde7b4246769baab3fc229 -->
+<!-- /computed in=17252c1b03ffbe8d202c830816135a23d2d2d8ed7dbbee427c3d323433087949 out=070e3a36abca005a2f452afdf163ed11dd66c380b42f016201664299f0d77dc4 -->
 <!-- computed tree src=ext depth=1 name=layout-ext | do not edit; run computed -->
 ```
 .
