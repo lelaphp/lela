@@ -121,10 +121,12 @@ pub(crate) enum Command {
     /// A ticket, one GitHub issue: `read <n>` fetches it through `gh`,
     /// holds it to the boxes under its `## Acceptance criteria` heading
     /// and writes a reading of instrument `ticket`, the unticked named;
-    /// `close <n>` does the same and then closes it, refusing while a box
-    /// is unticked and changing nothing at the tracker. No number is the
-    /// branch's ticket, as `xtask track` reads it. The one way an agent
-    /// closes a ticket.
+    /// `close <n>` does the same and then closes it, naming what the work
+    /// opened (`--opens <n>`, repeatable, or `--opens-nothing`) through the
+    /// tracker's blocking relation, refusing while a box is unticked, while
+    /// a successor is not open, and while neither flag is given, changing
+    /// nothing at the tracker. No number is the branch's ticket, as `xtask
+    /// track` reads it. The one way an agent closes a ticket.
     Ticket {
         #[command(subcommand)]
         command: TicketCommand,
@@ -249,8 +251,11 @@ pub(crate) enum TicketCommand {
         #[arg(long = "session-id", value_name = "ID")]
         session_id: Option<String>,
     },
-    /// Read as `read` does, then close the issue at the tracker with a
-    /// comment naming the commit; refuse while a box is unticked.
+    /// Read as `read` does, then set the blocking edge to each ticket the
+    /// work opened and close the issue at the tracker with a comment naming
+    /// the commit and the successors; refuse while a box is unticked, while
+    /// a successor is closed or missing, and without `--opens` or
+    /// `--opens-nothing`.
     Close {
         /// The issue number; without it, the branch's recorded ticket.
         number: Option<u64>,
@@ -258,6 +263,15 @@ pub(crate) enum TicketCommand {
         /// carries the hook's `session_id`; empty when none is named.
         #[arg(long = "session-id", value_name = "ID")]
         session_id: Option<String>,
+        /// A ticket filed for what this work found and did not do; once
+        /// per ticket. Each must exist and be open; whose it is, an agent's
+        /// or a person's, is not held: the bar is that it was filed.
+        #[arg(long = "opens", value_name = "N")]
+        opens: Vec<u64>,
+        /// The assertion that the work found nothing to file, recorded in
+        /// the reading with the session that made it.
+        #[arg(long = "opens-nothing")]
+        opens_nothing: bool,
     },
 }
 

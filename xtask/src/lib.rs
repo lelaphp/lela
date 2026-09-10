@@ -209,13 +209,26 @@ pub(crate) fn record(store: &Store, readings: &[Reading]) -> Result<()> {
 }
 
 /// `xtask ticket read` and `close`: the ticket named or the branch's, read
-/// through the `gh` on `PATH`, one reading recorded.
+/// through the `gh` on `PATH`, one reading recorded; a close names what it
+/// opened before anything is fetched.
 fn ticket_command(root: &Path, store: &Store, command: TicketCommand) -> Result<()> {
-    let (act, number, session_id) = match command {
-        TicketCommand::Read { number, session_id } => (ticket::Act::Read, number, session_id),
-        TicketCommand::Close { number, session_id } => (ticket::Act::Close, number, session_id),
+    let (act, ticket, session_id) = match command {
+        TicketCommand::Read { number, session_id } => (
+            ticket::Act::Read,
+            ticket::ticket_of(root, number)?,
+            session_id,
+        ),
+        TicketCommand::Close {
+            number,
+            session_id,
+            opens,
+            opens_nothing,
+        } => {
+            let ticket = ticket::ticket_of(root, number)?;
+            let successors = ticket::Successors::named(ticket, &opens, opens_nothing)?;
+            (ticket::Act::Close(successors), ticket, session_id)
+        }
     };
-    let ticket = ticket::ticket_of(root, number)?;
     let reading = ticket::run(
         root,
         &ticket::Gh::on_path(),

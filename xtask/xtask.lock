@@ -206,11 +206,14 @@ ticket::Criteria::met
 ticket::Criteria::parse
 ticket::Gh
 ticket::Gh::at
+ticket::Gh::blocking
 ticket::Gh::close
 ticket::Gh::on_path
 ticket::Gh::view
 ticket::Issue
 ticket::State
+ticket::Successors
+ticket::Successors::named
 ticket::run
 ticket::ticket_of
 track::Base

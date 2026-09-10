@@ -10,7 +10,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use xtask::reading::Status;
-use xtask::ticket::{Act, Gh, run};
+use xtask::ticket::{Act, Gh, Successors, run};
 use xtask::track::Ticket;
 
 fn workspace() -> &'static Path {
@@ -30,23 +30,44 @@ impl Recorded {
         let dir = std::env::temp_dir().join(format!("xtask-ticket-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("issues")).unwrap();
+        let recorded = Recorded { dir };
+        recorded.answering(None);
+        recorded
+    }
+
+    /// Lay the `gh` down: `issue view` from the transcript, every other
+    /// call written to `calls`, and the verb named, `edit` or `close`,
+    /// refused with `gh`'s text after being written down.
+    fn answering(&self, refusing: Option<&str>) {
+        let refusal = refusing
+            .map(|verb| {
+                format!(
+                    "if [ \"$2\" = {verb} ]; then echo 'GraphQL: no permission' >&2; exit 1; fi\n"
+                )
+            })
+            .unwrap_or_default();
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then cat '{}/issues/'\"$3\".json; exit $?; fi\nprintf '%s\\n' \"$*\" >> '{}/calls'\nexit 0\n",
-            dir.display(),
-            dir.display()
+            "#!/bin/sh\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then cat '{0}/issues/'\"$3\".json; exit $?; fi\nprintf '%s\\n' \"$*\" >> '{0}/calls'\n{refusal}exit 0\n",
+            self.dir.display()
         );
-        fs::write(dir.join("gh"), script).unwrap();
-        fs::set_permissions(dir.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
-        Recorded { dir }
+        fs::write(self.dir.join("gh"), script).unwrap();
+        fs::set_permissions(self.dir.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     fn issue(&self, number: u64, state: &str, body: &str) {
+        self.labelled(number, state, body, &[]);
+    }
+
+    /// An issue with labels, as the tracker answers them; the instrument
+    /// does not read them.
+    fn labelled(&self, number: u64, state: &str, body: &str, labels: &[&str]) {
         let issue = serde_json::json!({
             "number": number,
             "title": format!("ticket {number}"),
             "body": body,
             "state": state,
             "url": format!("https://example.invalid/issues/{number}"),
+            "labels": labels.iter().map(|name| serde_json::json!({"name": name})).collect::<Vec<_>>(),
         });
         fs::write(
             self.dir.join(format!("issues/{number}.json")),
@@ -109,7 +130,7 @@ fn close_refuses_while_a_box_is_unticked_and_changes_nothing_at_the_tracker() {
     let reading = run(
         workspace(),
         &recorded.gh(),
-        Act::Close,
+        Act::Close(Successors::Nothing),
         Ticket::new(7),
         Some("s1"),
     )
@@ -127,7 +148,7 @@ fn close_refuses_while_a_box_is_unticked_and_changes_nothing_at_the_tracker() {
     let reading = run(
         workspace(),
         &recorded.gh(),
-        Act::Close,
+        Act::Close(Successors::Nothing),
         Ticket::new(9),
         None,
     )
@@ -143,7 +164,7 @@ fn close_refuses_while_a_box_is_unticked_and_changes_nothing_at_the_tracker() {
     let reading = run(
         workspace(),
         &recorded.gh(),
-        Act::Close,
+        Act::Close(Successors::Nothing),
         Ticket::new(10),
         None,
     )
@@ -167,7 +188,7 @@ fn close_with_every_box_ticked_closes_and_records_what_closed_it_and_the_session
     let reading = run(
         workspace(),
         &recorded.gh(),
-        Act::Close,
+        Act::Close(Successors::Nothing),
         Ticket::new(8),
         Some("session-abc"),
     )
@@ -189,22 +210,222 @@ fn close_with_every_box_ticked_closes_and_records_what_closed_it_and_the_session
     );
 }
 
+/// The successors are fetched, each must be open, and the edge is the
+/// tracker's own blocking relation set before the close; the reading
+/// carries them by number (#29). Whose a successor is is not held:
+/// one `for-a-person`, one `ready-for-agent`.
+#[test]
+fn close_names_what_it_opened_through_the_tracker_s_blocking_relation() {
+    let recorded = Recorded::lay("opens");
+    recorded.issue(8, "OPEN", TICKED);
+    recorded.labelled(
+        9,
+        "OPEN",
+        "## Acceptance criteria\n\n- [ ] later\n",
+        &["for-a-person"],
+    );
+    recorded.labelled(10, "OPEN", "no criteria yet", &["ready-for-agent"]);
+    let reading = run(
+        workspace(),
+        &recorded.gh(),
+        Act::Close(Successors::Tickets(vec![Ticket::new(9), Ticket::new(10)])),
+        Ticket::new(8),
+        Some("s2"),
+    )
+    .unwrap();
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    assert_eq!(reading.numbers["opens"], 2.into());
+    assert!(
+        reading.message.contains("opens #9, #10"),
+        "{}",
+        reading.message
+    );
+    let calls = recorded.calls();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[0], "issue edit 8 --add-blocking 9,10");
+    assert!(
+        calls[1].starts_with("issue close 8 --comment ") && calls[1].contains("opens #9, #10"),
+        "the comment names them too: {calls:?}"
+    );
+}
+
+/// `--opens-nothing` is an assertion: no edge, the close alone, and the
+/// reading says who asserted it (#29).
+#[test]
+fn opens_nothing_is_an_assertion_the_reading_carries_with_its_session() {
+    let recorded = Recorded::lay("nothing");
+    recorded.issue(8, "OPEN", TICKED);
+    let reading = run(
+        workspace(),
+        &recorded.gh(),
+        Act::Close(Successors::Nothing),
+        Ticket::new(8),
+        Some("s3"),
+    )
+    .unwrap();
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    assert_eq!(reading.numbers["opens"], 0.into());
+    assert_eq!(reading.session, "s3");
+    assert!(
+        reading
+            .message
+            .contains("opens nothing, asserted in session s3"),
+        "{}",
+        reading.message
+    );
+    let calls = recorded.calls();
+    assert_eq!(calls.len(), 1, "no edge for nothing: {calls:?}");
+    assert!(
+        calls[0].starts_with("issue close 8 --comment ") && calls[0].contains("opens nothing"),
+        "{calls:?}"
+    );
+
+    let unnamed = run(
+        workspace(),
+        &recorded.gh(),
+        Act::Close(Successors::Nothing),
+        Ticket::new(8),
+        None,
+    )
+    .unwrap();
+    assert!(
+        unnamed
+            .message
+            .contains("opens nothing, asserted with no session named"),
+        "{}",
+        unnamed.message
+    );
+}
+
+/// A successor that is closed, missing or unreadable refuses the close,
+/// and the tracker is asked nothing but `issue view` (#29).
+#[test]
+fn close_refuses_a_successor_that_is_closed_missing_or_unreadable_and_changes_nothing() {
+    let recorded = Recorded::lay("successor");
+    recorded.issue(8, "OPEN", TICKED);
+    recorded.issue(9, "CLOSED", "done already");
+    fs::write(recorded.dir.join("issues/11.json"), "not an issue").unwrap();
+    for (successor, expected) in [
+        (9, "#9, which is closed"),
+        (404, "#404 could not be read from the tracker"),
+        (11, "#11: gh's answer is not an issue"),
+    ] {
+        let reading = run(
+            workspace(),
+            &recorded.gh(),
+            Act::Close(Successors::Tickets(vec![Ticket::new(successor)])),
+            Ticket::new(8),
+            None,
+        )
+        .unwrap();
+        assert_eq!(reading.status, Status::Fail, "{}", reading.message);
+        assert!(
+            reading.message.contains(expected)
+                && reading
+                    .message
+                    .contains("not closed, nothing changed at the tracker"),
+            "{}",
+            reading.message
+        );
+        assert_eq!(
+            reading.numbers["opens"],
+            1.into(),
+            "the call is recorded as made"
+        );
+    }
+    assert!(recorded.calls().is_empty(), "{:?}", recorded.calls());
+}
+
+/// The edge is set before the close: a tracker that refuses the edge
+/// leaves the ticket open and unchanged (#29).
+#[test]
+fn a_tracker_that_refuses_the_edge_leaves_the_ticket_open() {
+    let recorded = Recorded::lay("edge");
+    recorded.issue(8, "OPEN", TICKED);
+    recorded.issue(9, "OPEN", "later");
+    recorded.answering(Some("edit"));
+    let reading = run(
+        workspace(),
+        &recorded.gh(),
+        Act::Close(Successors::Tickets(vec![Ticket::new(9)])),
+        Ticket::new(8),
+        None,
+    )
+    .unwrap();
+    assert_eq!(reading.status, Status::Fail);
+    assert!(
+        reading.message.contains("no permission")
+            && reading
+                .message
+                .contains("not closed, nothing changed at the tracker"),
+        "{}",
+        reading.message
+    );
+    assert_eq!(
+        recorded.calls(),
+        ["issue edit 8 --add-blocking 9"],
+        "the edge was asked and refused; the close was not asked"
+    );
+
+    // A `Tickets` built empty by hand names nothing and is refused the
+    // same way, before the tracker is asked.
+    let empty = run(
+        workspace(),
+        &recorded.gh(),
+        Act::Close(Successors::Tickets(vec![])),
+        Ticket::new(8),
+        None,
+    )
+    .unwrap();
+    assert_eq!(empty.status, Status::Fail);
+    assert!(
+        empty.message.contains("opens no ticket") && empty.message.contains("nothing changed"),
+        "{}",
+        empty.message
+    );
+    assert_eq!(recorded.calls().len(), 1, "{:?}", recorded.calls());
+}
+
+/// The edge is set and then the close is refused: the reading says the
+/// edge stands, since the tracker did change (#29).
+#[test]
+fn a_tracker_that_refuses_the_close_after_the_edge_says_the_edge_stands() {
+    let recorded = Recorded::lay("edge-stands");
+    recorded.issue(8, "OPEN", TICKED);
+    recorded.issue(9, "OPEN", "later");
+    recorded.answering(Some("close"));
+    let reading = run(
+        workspace(),
+        &recorded.gh(),
+        Act::Close(Successors::Tickets(vec![Ticket::new(9)])),
+        Ticket::new(8),
+        None,
+    )
+    .unwrap();
+    assert_eq!(reading.status, Status::Fail);
+    assert!(
+        reading
+            .message
+            .contains("opens #9; the edge to what it opened stands")
+            && reading.message.contains("no permission")
+            && !reading.message.contains("nothing changed"),
+        "{}",
+        reading.message
+    );
+    let calls = recorded.calls();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[0], "issue edit 8 --add-blocking 9");
+}
+
 #[test]
 fn a_tracker_that_refuses_the_close_is_a_failed_reading_carrying_its_text() {
     let recorded = Recorded::lay("refused");
     recorded.issue(8, "OPEN", TICKED);
-    fs::write(
-        recorded.dir.join("gh"),
-        format!(
-            "#!/bin/sh\nif [ \"$2\" = view ]; then cat '{}/issues/'\"$3\".json; exit 0; fi\necho 'GraphQL: no permission' >&2; exit 1\n",
-            recorded.dir.display()
-        ),
-    )
-    .unwrap();
+    recorded.answering(Some("close"));
     let reading = run(
         workspace(),
         &recorded.gh(),
-        Act::Close,
+        Act::Close(Successors::Nothing),
         Ticket::new(8),
         None,
     )

@@ -126,7 +126,7 @@ Commands:
   done               The definition of done: print the conditions unmet for the changes since the base and exit 1 while any is; the Stop hook, pre-push and CI read the same list
   track              Say which track this worktree's branch is on (the longest existing branch that is a proper path prefix of its name, `main` for a branch on none), the commit `done` measures since, the root that holds the track's store, and the ticket the branch records; as text, or as one object. Writes no reading
   worktree           A track's worktrees: `add` lays one down under .claude/worktrees/<branch> ready to be worked in, the branch off its track with the ticket it is for recorded on it, `xtask` built there, the local file laid and rendered, the `computed trust` line printed as a person's; refuses a branch that exists and a directory that does. `retire` appends the worktree's log into its track's store, removes the worktree and prints the branch-delete line as a person's; refuses uncommitted work. Writes no reading
-  ticket             A ticket, one GitHub issue: `read <n>` fetches it through `gh`, holds it to the boxes under its `## Acceptance criteria` heading and writes a reading of instrument `ticket`, the unticked named; `close <n>` does the same and then closes it, refusing while a box is unticked and changing nothing at the tracker. No number is the branch's ticket, as `xtask track` reads it. The one way an agent closes a ticket
+  ticket             A ticket, one GitHub issue: `read <n>` fetches it through `gh`, holds it to the boxes under its `## Acceptance criteria` heading and writes a reading of instrument `ticket`, the unticked named; `close <n>` does the same and then closes it, naming what the work opened (`--opens <n>`, repeatable, or `--opens-nothing`) through the tracker's blocking relation, refusing while a box is unticked, while a successor is not open, and while neither flag is given, changing nothing at the tracker. No number is the branch's ticket, as `xtask track` reads it. The one way an agent closes a ticket
   regions            Render the named files' regions with `computed run` and say what it did, one line per file, `written` or `unchanged`, for pre-commit to re-stage; refuses a broken marker, a missing `computed` and an untrusted checkout, whose `computed trust` line is printed as a person's. Writes no reading
   budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code and a stale generated file
   clippy             `cargo clippy` with every warning denied, on every target of each crate, as the reading `done` reads; one reading per crate
@@ -142,7 +142,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=c4a0a50105726fcf6616a86c5204f38c37998ea434b58da924041e7dd7f03956 out=5b754ed6a3afd9cb73b986c810575eb5084f9b43d07fdc45ffd1782d406cf582 -->
+<!-- /computed in=fcfcccf16cf0f337f0b54aeff9fb739a4eb9cfb6ac972a867a02e7c9615bcbe4 out=70bef6029567c6196d1522a719ab6d853d99317e332383c0e5b423d7058f8fe2 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

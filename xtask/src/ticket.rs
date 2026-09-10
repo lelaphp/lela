@@ -15,7 +15,26 @@
 //!
 //! The reading holds the ticket to its boxes: `pass` when every criterion
 //! is ticked, `fail` while one is not, and `fail` for a ticket with no
-//! criteria at all, since a ticket with no box cannot be shown done. A close that went through records what closed it: the commit and
+//! criteria at all, since a ticket with no box cannot be shown done.
+//!
+//! Ticked boxes are not enough (#29): work that found a thing it did not
+//! do has three homes, a ticket of its own, a divergence row, or a rule
+//! proposed in a commit message, and a reply is not one of them. So a close
+//! names what it opened, as an argument and not a sentence after it:
+//! `--opens <n>` for each ticket filed, repeatable, or `--opens-nothing`,
+//! and a close that names neither is refused before the tracker is asked
+//! anything ([`Successors::named`]). Each successor is fetched and must be
+//! open; one that is closed, missing or unreadable refuses the close with
+//! nothing changed. Whose the successor is is not held, `for-a-person`
+//! as good as `ready-for-agent`: the bar is that it was filed. The edge is
+//! the tracker's own blocking relation, `gh issue edit <n> --add-blocking`,
+//! set before the close, so it is what `gh issue view` prints as
+//! `blocking` and `blocked-by` and not a heading appended to a body. The
+//! reading counts the successors as `opens` and names them in the message;
+//! `--opens-nothing` is an assertion, written there with the session that
+//! made it, which is what a person holds someone to later.
+//!
+//! A close that went through records what closed it: the commit and
 //! tree it was stamped at, the way every reading is, and the session the
 //! call named, the way a `permit` reading carries the hook's `session_id`
 //! (harness-design.md §4.2); the tracker gets the same in the closing
@@ -49,11 +68,105 @@ pub(crate) const INSTRUMENT: &str = "ticket";
 /// regard to case at level two.
 const HEADING: &str = "acceptance criteria";
 
-/// What `xtask ticket` does: read the criteria, or read them and close.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What `xtask ticket` does: read the criteria, or read them and close,
+/// naming what the work opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Act {
     Read,
-    Close,
+    Close(Successors),
+}
+
+/// What a close names as opened: the tickets filed for what the work
+/// found and did not do, or the assertion that there was nothing to file.
+/// One of the two, always (#29).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Successors {
+    Tickets(Vec<Ticket>),
+    Nothing,
+}
+
+impl Successors {
+    /// From the flags of `close`: `--opens <n>`, repeatable, or
+    /// `--opens-nothing`. Refuses a call that gives neither and one that
+    /// gives both, naming the two, and a ticket that opens itself; a
+    /// number named twice counts once.
+    pub fn named(closing: Ticket, opens: &[u64], nothing: bool) -> Result<Successors> {
+        match (opens.is_empty(), nothing) {
+            (true, false) => bail!(
+                "`xtask ticket close` names what the work opened: `--opens <n>` for each ticket filed, repeatable, or `--opens-nothing`; without one of the two nothing closes"
+            ),
+            (false, true) => bail!(
+                "`--opens {}` and `--opens-nothing` contradict each other; give one of the two",
+                opens
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" --opens ")
+            ),
+            (true, true) => Ok(Successors::Nothing),
+            (false, false) => {
+                let mut tickets: Vec<Ticket> = Vec::new();
+                for &number in opens {
+                    let ticket = Ticket::new(number);
+                    if ticket == closing {
+                        bail!(
+                            "{closing} cannot open itself; name the ticket filed for what was found"
+                        );
+                    }
+                    if !tickets.contains(&ticket) {
+                        tickets.push(ticket);
+                    }
+                }
+                Ok(Successors::Tickets(tickets))
+            }
+        }
+    }
+
+    /// The tickets named, none for the assertion.
+    fn tickets(&self) -> &[Ticket] {
+        match self {
+            Successors::Tickets(tickets) => tickets,
+            Successors::Nothing => &[],
+        }
+    }
+
+    /// Each successor exists at the tracker and is open; the first that is
+    /// not is the refusal.
+    fn held_open(&self, gh: &Gh, root: &Path) -> Result<()> {
+        if let Successors::Tickets(tickets) = self
+            && tickets.is_empty()
+        {
+            bail!("opens no ticket and asserts nothing; `--opens <n>` or `--opens-nothing`");
+        }
+        for &successor in self.tickets() {
+            let issue = gh
+                .view(root, successor)
+                .with_context(|| format!("opens {successor}"))?;
+            if issue.state == State::Closed {
+                bail!("opens {successor}, which is closed; a successor is an open ticket");
+            }
+        }
+        Ok(())
+    }
+
+    /// What the message and the closing comment say: the successors by
+    /// number, or the assertion with the session that made it.
+    fn describe(&self, session_id: Option<&str>) -> String {
+        match self {
+            Successors::Tickets(tickets) => format!(
+                "opens {}",
+                tickets
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Successors::Nothing => match session_id {
+                Some(id) => format!("opens nothing, asserted in session {id}"),
+                None => "opens nothing, asserted with no session named".to_owned(),
+            },
+        }
+    }
 }
 
 /// The acceptance criteria of one ticket body: every box under the
@@ -223,6 +336,28 @@ impl Gh {
             .with_context(|| format!("{ticket}: gh's answer is not an issue"))
     }
 
+    /// `gh issue edit <n> --add-blocking <a,b>`: the edge from the ticket
+    /// closing to each it opened, the tracker's own blocking relation.
+    /// Nothing is asked for no successors.
+    pub fn blocking(&self, root: &Path, ticket: Ticket, successors: &[Ticket]) -> Result<()> {
+        if successors.is_empty() {
+            return Ok(());
+        }
+        let number = ticket.number().to_string();
+        let opened = successors
+            .iter()
+            .map(|t| t.number().to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        gh(
+            &self.program,
+            root,
+            &["issue", "edit", &number, "--add-blocking", &opened],
+        )
+        .with_context(|| format!("{ticket}'s edge to what it opened was not set"))?;
+        Ok(())
+    }
+
     /// `gh issue close <n> --comment <text>`: the one act.
     pub fn close(&self, root: &Path, ticket: Ticket, comment: &str) -> Result<()> {
         let number = ticket.number().to_string();
@@ -276,8 +411,9 @@ pub fn ticket_of(root: &Path, number: Option<u64>) -> Result<Ticket> {
 /// `xtask ticket read` and `close`: the issue fetched through `gh`, the
 /// criteria read, the reading of instrument `ticket` over the ticket's
 /// number, stamped over the workspace as `done`'s is, and for a close with
-/// every box ticked the act at the tracker before the reading is written.
-/// The caller records the reading; its status is the exit.
+/// every box ticked and every successor open the edge and then the act at
+/// the tracker before the reading is written. The caller records the
+/// reading; its status is the exit.
 pub fn run(
     root: &Path,
     gh: &Gh,
@@ -296,6 +432,9 @@ pub fn run(
     reading.count("criteria", criteria.count() as u64)?;
     reading.count("ticked", criteria.ticked.len() as u64)?;
     reading.count("unticked", criteria.unticked.len() as u64)?;
+    if let Act::Close(successors) = &act {
+        reading.count("opens", successors.tickets().len() as u64)?;
+    }
     session_id
         .unwrap_or_default()
         .clone_into(&mut reading.session);
@@ -327,8 +466,8 @@ pub fn run(
             format!(
                 "{ticket}: {boxes}; unticked: {names}{}",
                 match act {
-                    Act::Read => String::new(),
-                    Act::Close => "; not closed, nothing changed at the tracker".to_owned(),
+                    Act::Read => "",
+                    Act::Close(_) => "; not closed, nothing changed at the tracker",
                 }
             ),
         ),
@@ -336,27 +475,43 @@ pub fn run(
             Status::Pass,
             format!("{ticket}: {boxes}; {}", issue.state.as_str()),
         ),
-        Act::Close if issue.state == State::Closed => (
+        Act::Close(_) if issue.state == State::Closed => (
             Status::Fail,
             format!("{ticket}: {boxes}; closed already, nothing changed at the tracker"),
         ),
-        Act::Close => {
+        Act::Close(successors) => {
+            let opened = successors.describe(session_id);
             let comment = format!(
-                "Closed by `xtask ticket close` at {}: {boxes}.",
+                "Closed by `xtask ticket close` at {}: {boxes}; {opened}.",
                 reading.commit
             );
-            match gh.close(root, ticket, &comment) {
+            let closed = successors
+                .held_open(gh, root)
+                .and_then(|()| gh.blocking(root, ticket, successors.tickets()))
+                .map_err(|err| format!("{err:#}; not closed, nothing changed at the tracker"))
+                .and_then(|()| {
+                    // The edge is set by now; a close the tracker refuses
+                    // leaves it standing, and the message says so.
+                    gh.close(root, ticket, &comment).map_err(|err| {
+                        let edge = match successors {
+                            Successors::Tickets(_) => "; the edge to what it opened stands",
+                            Successors::Nothing => "",
+                        };
+                        format!("{opened}{edge}; {err:#}")
+                    })
+                });
+            match closed {
                 Ok(()) => (
                     Status::Pass,
                     format!(
-                        "{ticket}: {boxes}; closed by xtask ticket close at {}{}",
+                        "{ticket}: {boxes}; {opened}; closed by xtask ticket close at {}{}",
                         reading.commit,
                         session_id
                             .map(|id| format!(" in session {id}"))
                             .unwrap_or_default()
                     ),
                 ),
-                Err(err) => (Status::Fail, format!("{ticket}: {boxes}; {err:#}")),
+                Err(text) => (Status::Fail, format!("{ticket}: {boxes}; {text}")),
             }
         }
     };
@@ -367,7 +522,53 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::Criteria;
+    use super::{Criteria, Successors};
+    use crate::track::Ticket;
+
+    /// The grammar of the flags (#29): one of the two, not neither, not
+    /// both, not the ticket itself, each successor once.
+    #[test]
+    fn a_close_names_its_successors_or_asserts_none_and_never_neither() {
+        let closing = Ticket::new(29);
+        let neither = Successors::named(closing, &[], false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            neither.contains("--opens <n>") && neither.contains("--opens-nothing"),
+            "{neither}"
+        );
+        let both = Successors::named(closing, &[31], true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            both.contains("--opens 31") && both.contains("--opens-nothing"),
+            "{both}"
+        );
+        let itself = Successors::named(closing, &[31, 29], false)
+            .unwrap_err()
+            .to_string();
+        assert!(itself.contains("#29 cannot open itself"), "{itself}");
+        assert_eq!(
+            Successors::named(closing, &[], true).unwrap(),
+            Successors::Nothing
+        );
+        assert_eq!(
+            Successors::named(closing, &[31, 32, 31], false).unwrap(),
+            Successors::Tickets(vec![Ticket::new(31), Ticket::new(32)])
+        );
+        assert_eq!(
+            Successors::Tickets(vec![Ticket::new(31), Ticket::new(32)]).describe(Some("s")),
+            "opens #31, #32"
+        );
+        assert_eq!(
+            Successors::Nothing.describe(Some("s1")),
+            "opens nothing, asserted in session s1"
+        );
+        assert_eq!(
+            Successors::Nothing.describe(None),
+            "opens nothing, asserted with no session named"
+        );
+    }
 
     /// The grammar over a body with ticked, unticked, indented and
     /// non-criteria boxes (#28).
