@@ -1,0 +1,23 @@
+# php_ext: the facade every extension depends on (ADR-0004; design §4.1,
+# §7.1). Re-exports only: php_engine::api, php_engine::tier::Nop and the
+# attributes; api.lock is this crate's public surface.
+[package]
+name = "php_ext"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The facade: php_engine::api, tier::Nop and the native attributes, and nothing defined"
+
+[lints]
+workspace = true
+
+[features]
+# The test face (design §4.3 seam 4): `php_ext::test::{Capture, Engine}`,
+# enabled by an extension's dev-dependency alone.
+test = ["php_engine/test"]
+
+[dependencies]
+php_engine = { path = "../php_engine" }
+php_macros = { path = "../php_macros" }

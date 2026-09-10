@@ -83,12 +83,12 @@ third-engine-design.md
 | heap | heap.lock | 51 |  | pass |
 | unit | unit.lock | 35 |  | pass |
 | ops | ops.lock |  |  | skip |
-| api | api.lock |  | 400 | skip |
-| sapi | sapi.lock |  |  | skip |
+| api | api.lock | 308 | 400 | pass |
+| sapi | sapi.lock | 0 |  | pass |
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 237 |  | pass |
 
-<!-- /computed in=aa0c8f3cd157bb8d4fe611b7054bb3a716eb5354aa5e6e72696bf373312d74e7 out=9322594fcfa947c2907b8468593eb428e41173fe8dc5b9b9e43082792504d827 -->
+<!-- /computed in=838dd56d4e630d14beac60bb2921f6c5d3c7f0167682c1b55d005c464d643798 out=312e485ea87338d693fb86caaa45b269c4954105c42926173927b675c33bb267 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -151,12 +151,14 @@ Options:
 ```
 .
 ├── php_compile
+├── php_engine
 ├── php_ext
 ├── php_heap
+├── php_macros
 ├── php_syntax
 └── php_unit
 ```
-<!-- /computed in=a3e657303121935cdccec3f4af499a186a5ec74b91eeeb606f912b8884fded68 out=8f234c759d11c56f75a40f87c676f85c6bd3134a4085b35a4aafa10848c9ebf2 -->
+<!-- /computed in=0a092c11777e0627bcbd40b279f804a7a629940821bd929fc654310650fe28ba out=e69712a433b3a530815bd382af4350bf3e0a1f52a137b730c470546300b0df01 -->
 <!-- computed tree src=ext depth=1 name=layout-ext | do not edit; run computed -->
 ```
 .

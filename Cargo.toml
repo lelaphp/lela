@@ -4,7 +4,7 @@
 # only `api.lock` today.
 [workspace]
 resolver = "3"
-members = ["crates/php_heap", "crates/php_unit", "crates/php_syntax", "crates/php_compile", "crates/php_engine", "crates/php_macros", "xtask"]
+members = ["crates/*", "xtask"]
 
 [workspace.package]
 edition = "2024"
