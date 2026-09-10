@@ -389,15 +389,14 @@ fn with_the_harness_rule(mut manifest: Manifest) -> Manifest {
 
 /// The harness held to the glossary's Harness section alone (#63): under
 /// the row `with_the_harness_rule` builds, `vocab` over `xtask` is one
-/// reading of rule `vocab.harness`, its rustdoc prose read and clean, and
-/// its public items clean beyond the names that are a grammar's: the
-/// instrument `api-check`'s module, the manifest's `check`, `tool` and
-/// `[telemetry]` keys, the pin's `script_name`, which is php's, and the
-/// hook's `tool_name` and `tool_input`. Those pass once the glossary's
-/// parentheticals mark them as code, a person's edit, and this list is
-/// then empty and the reading a pass.
+/// passing reading of rule `vocab.harness`, its rustdoc prose read and
+/// clean, and its public items clean, the names that are a grammar's
+/// included: the instrument `api-check`'s module, the manifest's `check`,
+/// `tool` and `[telemetry]` keys, the pin's `script_name`, which is php's,
+/// and the hook's `tool_name` and `tool_input` are the spellings the
+/// Harness section's parentheticals mark as code.
 #[test]
-fn the_harness_reads_clean_under_the_harness_section_beyond_the_grammars_names() {
+fn the_harness_reads_clean_under_the_harness_section() {
     let manifest = with_the_harness_rule(Manifest::load(workspace()).unwrap());
     let readings = vocab::hold(workspace(), &manifest, &["xtask".to_owned()]).unwrap();
     assert_eq!(readings.len(), 1, "{readings:#?}");
@@ -419,19 +418,6 @@ fn the_harness_reads_clean_under_the_harness_section_beyond_the_grammars_names()
         .filter(|f| f.contains("in rustdoc prose"))
         .collect();
     assert!(prose.is_empty(), "{prose:#?}");
-    assert_eq!(
-        found,
-        [
-            "\"check\" names `pub mod api_check`; the glossary says \"Instrument\"",
-            "\"telemetry\" names `pub field telemetry`; the glossary says \"Reading\"",
-            "\"telemetry\" names `pub struct Telemetry`; the glossary says \"Reading\"",
-            "\"tool\" names `pub field tool`; the glossary says \"Instrument\"",
-            "\"check\" names `pub field check`; the glossary says \"Instrument\"",
-            "\"script\" names `pub field script_name`; the glossary says \"Instrument\"",
-            "\"tool\" names `pub field tool_name`; the glossary says \"Instrument\"",
-            "\"tool\" names `pub field tool_input`; the glossary says \"Instrument\"",
-        ],
-        "{}",
-        reading.message
-    );
+    assert!(found.is_empty(), "{}", reading.message);
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
 }

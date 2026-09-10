@@ -146,7 +146,7 @@ _Avoid_: transition, continuation, `Next` (the handler's return inside the loop)
 
 **Instrument**:
 One `xtask` subcommand that measures or judges something and ends by writing a reading: `witness`, `phpt`, `compile-identity`, `crosscheck`, `port-map`, `api-check`, `budget`, `unsafe-audit`, `bench`, `fuzz`, `mutants`, `permit`, `done`, `vocab`. What an instrument does to a crate or a rule is to *hold* it. The design of record for the harness is `harness-design.md`.
-_Avoid_: check, gate (that is a numbered pass/fail bar such as G1), tool, script
+_Avoid_: check (the manifest's `check` predicate and `api_check`, its module), gate (that is a numbered pass/fail bar such as G1), tool (a rule's `tool`, and the hook's `tool_name` and `tool_input`, Claude Code's words), script (php's `script_name`)
 
 **Command**:
 One `xtask` subcommand that acts or answers and writes no reading: `track`, `worktree`, `regions`, `new-ext`, `generate`, `status`. A command is not an instrument, so `done` and `status` never look for its reading; what it answers is asked again each time.
@@ -162,7 +162,7 @@ _Avoid_: config, rules file, policy, `api-check`'s tables
 
 **Reading**:
 The one-shaped value an instrument writes after a run: instrument, scope, rule, status, numbers, message, ADR, the scope's tree hash, commit, time. Everything an agent or a person reads about the state of the engine is a rendering of readings by `xtask status`.
-_Avoid_: result, artefact, report, telemetry, output
+_Avoid_: result, artefact, report, telemetry (the manifest's `[telemetry]` table: the field `telemetry` and `Telemetry`, its type), output
 
 **Track**:
 The branch a set of branches is worked above, named by being a proper path prefix of theirs: `t-opus-5` for `t-opus-5/witness`. What `done` measures a turn since when it is given no base; a branch that is a prefix of none is on `main`. Git's ref store keeps a track and its branches from both being the clone's own, so a track a worktree is not on is the remote's.
