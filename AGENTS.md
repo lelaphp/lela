@@ -65,7 +65,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=4fe1eca5580d667f768af62e40ad274c9c72370b598d7c72602850f1f8e8ea65 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=ecfbbb87be99ee27c649217868855506f0a6564caca795e2f034e03c4d0244b7 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -138,7 +138,7 @@ Commands:
   unsafe-audit       Allow `unsafe` only in the homes the manifest's unsafe.homes rule names
   generate           Write the files the manifest's `generated` rules render (ext/clippy.toml)
   divergence-reason  Hold the divergence registry to the manifest rule whose `check` names this instrument: an accepted row has a reason a person wrote
-  new-ext            Lay one extension crate down at ext/<name> in the template topology, ext/clippy.toml rewritten and its row in ext/AGENTS.md; refuses an existing one
+  new-ext            Lay one extension crate down at ext/<name> in the template topology, its line in `php_bundle`, ext/clippy.toml and its row in ext/AGENTS.md; refuses an existing one
   witness            Extract every `php` fence and its `expect` fence from a crate's rustdoc, run each under the oracle's recipe and hold it to what the fence pins. One reading per crate
   vocab              The glossary as a sensor: `_Avoid_` words in public item names and rustdoc prose, never in a lock; one reading per crate
 
@@ -146,7 +146,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=d08e7f0976f7abd6d4a0c91b7d6c018fe23f8d3cde08167d2c564f2f2a2f22b6 out=96033b79923adb3c9cfd87729cff1d9b84f2fb7192cd05b009d00514db1d5a9c -->
+<!-- /computed in=20407f1f124b12aca5ae18fc62badb851d321ee93d37e51d8017bcd8fdcf0ba6 out=d981550c3d8ffe53a6927da1e3d751eb820fe2f2be92d2181d9568a0a3472f6b -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

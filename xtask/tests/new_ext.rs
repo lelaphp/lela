@@ -2,7 +2,9 @@
 //! harness-design.md §5, design §4.10, ADR-0004, ADR-0005): the crate it
 //! lays down has the template topology, passes `budget`, `unsafe-audit`
 //! and `api-check` untouched, its row is rendered into the extensions
-//! region of `ext/AGENTS.md`, and a second run for the same name refuses.
+//! region of `ext/AGENTS.md`, the bundle gains its feature and its
+//! `enabled()` line (#14; ADR-0004), and a second run for the same name
+//! refuses.
 //! The fixture is copied to a scratch directory first; nothing is generated
 //! in place, and the workspace's own `ext/` gains no crate.
 
@@ -213,6 +215,91 @@ fn the_crate_laid_down_has_the_template_topology() {
 }
 
 #[test]
+fn the_bundle_gains_the_feature_and_the_enabled_line() {
+    let root = scratch("bundle-edit");
+    let manifest = Manifest::load(&root).unwrap();
+    let laid = new_ext::run(&root, &manifest, "demo").unwrap();
+
+    // The optional dependency, the feature in default, and the `enabled()`
+    // line behind the feature (#14; ADR-0004); the tier's alias as it was,
+    // and never in `enabled()`.
+    let bundle: toml::Table = toml::from_str(&read(&root, "crates/php_bundle/Cargo.toml")).unwrap();
+    assert_eq!(
+        bundle["features"]["demo"]
+            .as_array()
+            .and_then(|a| a[0].as_str()),
+        Some("dep:php_ext_demo"),
+        "{bundle:?}"
+    );
+    assert!(
+        bundle["features"]["default"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str() == Some("demo")),
+        "{bundle:?}"
+    );
+    assert_eq!(bundle["features"]["jit"].as_array().map(Vec::len), Some(0));
+    let dep = bundle["dependencies"]["php_ext_demo"].as_table().unwrap();
+    assert_eq!(dep["path"].as_str(), Some("../../ext/demo"));
+    assert_eq!(dep["optional"].as_bool(), Some(true));
+    let text = read(&root, "crates/php_bundle/Cargo.toml");
+    assert!(
+        text.contains("# A name that enables nothing until php_jit exists."),
+        "the edit is textual and the comments stay: {text}"
+    );
+    let lib = read(&root, "crates/php_bundle/src/lib.rs");
+    assert!(
+        lib.contains(
+            "    &[\n        #[cfg(feature = \"demo\")]\n        php_ext_demo::extension,\n    ]\n"
+        ),
+        "{lib}"
+    );
+    assert!(lib.contains("pub type Tier = php_ext::Nop;"), "{lib}");
+    let enabled = &lib[lib.find("fn enabled(").unwrap()..lib.find("pub type Tier").unwrap()];
+    assert!(
+        !enabled.contains("Nop") && !enabled.contains("Tier"),
+        "the tier is not an extension (design §7.1): {enabled}"
+    );
+    for file in [
+        "crates/php_bundle/Cargo.toml",
+        "crates/php_bundle/src/lib.rs",
+    ] {
+        assert!(laid.written.iter().any(|w| w == file), "{:?}", laid.written);
+    }
+    // The two edits are printed, and nothing about the bundle is left.
+    assert!(
+        laid.notes
+            .iter()
+            .any(|n| n.starts_with("crates/php_bundle/Cargo.toml:")
+                && n.contains("demo = [\"dep:php_ext_demo\"]")
+                && n.contains("in default")
+                && n.contains("php_ext_demo as an optional dependency at ext/demo")),
+        "{:#?}",
+        laid.notes
+    );
+    assert!(
+        laid.notes
+            .iter()
+            .any(|n| n.starts_with("crates/php_bundle/src/lib.rs:")
+                && n.contains("php_ext_demo::extension")
+                && n.contains("feature demo")),
+        "{:#?}",
+        laid.notes
+    );
+    assert!(
+        laid.notes
+            .iter()
+            .filter(|n| n.starts_with("left:"))
+            .all(|n| !n.contains("php_bundle")),
+        "{:#?}",
+        laid.notes
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn the_crate_laid_down_passes_the_three_instruments_untouched() {
     let root = scratch("instruments");
     let manifest = Manifest::load(&root).unwrap();
@@ -236,6 +323,10 @@ fn the_crate_laid_down_passes_the_three_instruments_untouched() {
         "nothing public beyond extension(): {}",
         demo.message
     );
+    // The bundle's order holds with the one line, and the line is counted.
+    let bundle = of(&readings, "php_bundle");
+    assert_eq!(bundle.status, Status::Pass, "{}", bundle.message);
+    assert_eq!(bundle.numbers["extensions"], 1.into(), "{}", bundle.message);
 
     // A second engine dependency on the generated crate is outside its edges.
     let cargo = root.join("ext/demo/Cargo.toml");
@@ -257,6 +348,10 @@ fn a_second_run_for_the_same_name_refuses_and_changes_nothing() {
     let lib = root.join("ext/demo/src/lib.rs");
     std::fs::write(&lib, "// edited after generation\n").unwrap();
     let before = read(&root, "Cargo.toml");
+    let bundle_before = (
+        read(&root, "crates/php_bundle/Cargo.toml"),
+        read(&root, "crates/php_bundle/src/lib.rs"),
+    );
 
     let err = new_ext::run(&root, &manifest, "demo")
         .unwrap_err()
@@ -268,6 +363,9 @@ fn a_second_run_for_the_same_name_refuses_and_changes_nothing() {
         "// edited after generation\n"
     );
     assert_eq!(read(&root, "Cargo.toml"), before);
+    // The refusal is before any edit: the bundle carries the line once.
+    assert_eq!(read(&root, "crates/php_bundle/Cargo.toml"), bundle_before.0);
+    assert_eq!(read(&root, "crates/php_bundle/src/lib.rs"), bundle_before.1);
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -286,6 +384,74 @@ fn a_name_without_a_crate_row_refuses_naming_the_manifest() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("Demo"), "a name is lowercase: {err}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_second_crate_is_appended_last_and_a_hand_reordering_fails_api_check_naming_both() {
+    let root = scratch("order");
+    let manifest = Manifest::load(&root).unwrap();
+    new_ext::run(&root, &manifest, "demo").unwrap();
+    new_ext::run(&root, &manifest, "other").unwrap();
+    let lib = read(&root, "crates/php_bundle/src/lib.rs");
+    let demo = lib.find("php_ext_demo::extension").unwrap();
+    let other = lib.find("php_ext_other::extension").unwrap();
+    assert!(demo < other, "appended last: {lib}");
+    let bundle: toml::Table = toml::from_str(&read(&root, "crates/php_bundle/Cargo.toml")).unwrap();
+    assert_eq!(
+        bundle["features"]["default"].as_array().map(Vec::len),
+        Some(2),
+        "{bundle:?}"
+    );
+
+    // `other` comes to depend on `demo`, as standard does on random: the
+    // order written, demo first, is still topological.
+    let cargo = root.join("ext/other/Cargo.toml");
+    let mut text = std::fs::read_to_string(&cargo).unwrap();
+    text.push_str("php_ext_demo = { path = \"../demo\" }\n");
+    std::fs::write(&cargo, text).unwrap();
+    let readings = api_check::hold(&manifest, &root, false).unwrap();
+    let bundle = of(&readings, "php_bundle");
+    assert_eq!(bundle.status, Status::Pass, "{}", bundle.message);
+    assert_eq!(bundle.numbers["extensions"], 2.into());
+
+    // Reordered by hand, dependant first: api-check names both crates.
+    let demo_block = "        #[cfg(feature = \"demo\")]\n        php_ext_demo::extension,\n";
+    let other_block = "        #[cfg(feature = \"other\")]\n        php_ext_other::extension,\n";
+    assert!(lib.contains(&format!("{demo_block}{other_block}")), "{lib}");
+    std::fs::write(
+        root.join("crates/php_bundle/src/lib.rs"),
+        lib.replace(
+            &format!("{demo_block}{other_block}"),
+            &format!("{other_block}{demo_block}"),
+        ),
+    )
+    .unwrap();
+    let readings = api_check::hold(&manifest, &root, false).unwrap();
+    let bundle = of(&readings, "php_bundle");
+    assert_eq!(bundle.status, Status::Fail, "{}", bundle.message);
+    assert!(bundle.message.contains("ext/other"), "{}", bundle.message);
+    assert!(bundle.message.contains("ext/demo"), "{}", bundle.message);
+    assert!(
+        bundle.message.contains("not topological"),
+        "{}",
+        bundle.message
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_workspace_without_the_bundle_refuses_before_any_edit() {
+    let root = scratch("bundle");
+    std::fs::remove_dir_all(root.join("crates/php_bundle")).unwrap();
+    let manifest = Manifest::load(&root).unwrap();
+    let before = read(&root, "Cargo.toml");
+    let err = new_ext::run(&root, &manifest, "demo")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("crates/php_bundle"), "{err}");
+    assert!(!root.join("ext/demo").exists());
+    assert_eq!(read(&root, "Cargo.toml"), before);
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -316,6 +482,15 @@ fn the_binary_prints_what_it_laid_down_and_exits_nonzero_on_a_refusal() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(stdout.contains("ext/demo/src/lib.rs"), "{stdout}");
+    assert!(
+        stdout.contains("wrote crates/php_bundle/Cargo.toml")
+            && stdout.contains("wrote crates/php_bundle/src/lib.rs"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("crates/php_bundle/src/lib.rs: enabled() gains php_ext_demo::extension"),
+        "the two edits are printed: {stdout}"
+    );
     let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
         .args(["--root", root.to_str().unwrap(), "new-ext", "demo"])
         .output()

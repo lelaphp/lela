@@ -6,15 +6,18 @@
 //! bare `exit` opt-in for `xtask witness --accept` to fill (design §8); the
 //! lints the manifest denies under `ext/*` at its root. The
 //! generated `ext/clippy.toml` is rewritten so it covers the new crate, the
-//! crate joins the workspace members, and the `extensions` region of
+//! crate joins the workspace members, the bundle gains the crate as an
+//! optional dependency behind a feature of its name and one line in
+//! `enabled()` (ADR-0004; design §4.10), and the `extensions` region of
 //! `ext/AGENTS.md` is rendered. Nothing is measured here: the readings are
 //! `budget`'s, `unsafe-audit`'s and `api-check`'s, which the crate passes
-//! untouched.
+//! untouched, and `api-check` holds the bundle's order.
 //!
-//! Three refusals, each before anything is written: a name with no
+//! Four refusals, each before anything is written: a name with no
 //! `[[crate]]` row (the ceiling is the manifest's, and the row is a
 //! person's), a workspace without `crates/php_ext` (the one dependency
-//! must exist), and a directory already at `ext/<name>` (the crate is laid
+//! must exist), one without `crates/php_bundle` (the crate the extension
+//! reaches), and a directory already at `ext/<name>` (the crate is laid
 //! down once and never overwritten).
 
 use std::fmt::Write as _;
@@ -34,6 +37,9 @@ const FACADE: &str = "crates/php_ext";
 
 /// The per-directory guidance whose `extensions` region lists the crates.
 const GUIDANCE: &str = "ext/AGENTS.md";
+
+/// The enabled set every extension reaches (ADR-0004), relative to the root.
+const BUNDLE: &str = "crates/php_bundle";
 
 /// What one run laid down.
 #[derive(Debug)]
@@ -67,6 +73,9 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str) -> Result<Laid> {
     if !root.join(FACADE).join("Cargo.toml").is_file() {
         bail!("{FACADE} is not a crate yet; the facade lands before any extension (ADR-0004)");
     }
+    if !root.join(BUNDLE).join("Cargo.toml").is_file() {
+        bail!("{BUNDLE} is not a crate yet; the bundle lands before any extension (ADR-0004)");
+    }
     let dir = root.join(&row);
     if dir.exists() {
         bail!("{row} exists; new-ext lays a crate down once and never overwrites");
@@ -92,6 +101,10 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str) -> Result<Laid> {
     if add_member(root, &row)? {
         laid.written.push("Cargo.toml".to_owned());
     }
+    laid.notes.push(bundle_feature(root, name)?);
+    laid.written.push(format!("{BUNDLE}/Cargo.toml"));
+    laid.notes.push(bundle_line(root, name)?);
+    laid.written.push(format!("{BUNDLE}/src/lib.rs"));
     for path in generated::write_all(root, manifest)? {
         laid.written.push(relative(root, &path));
     }
@@ -120,9 +133,8 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str) -> Result<Laid> {
             manifest.pin.source.tag
         ));
     }
-    laid.notes.push(format!(
-        "left: the `php_ext_{name}` line in php_bundle's manifest and its entry in `enabled()`, in module-startup order (ADR-0004); the witness's verdict through `xtask witness --accept`"
-    ));
+    laid.notes
+        .push("left: the witness's verdict through `xtask witness --accept`".to_owned());
     Ok(laid)
 }
 
@@ -258,23 +270,21 @@ fn add_member(root: &Path, row: &str) -> Result<bool> {
         return Ok(false);
     }
     // The `members =` line itself, not the word in a comment above it.
-    let mut at = 0;
-    let start = text
-        .lines()
-        .map(|line| {
-            let here = at;
-            at += line.len() + 1;
-            (here, line)
-        })
-        .find(|(_, line)| {
-            line.trim_start()
-                .strip_prefix("members")
-                .is_some_and(|rest| rest.trim_start().starts_with('='))
-        })
-        .map(|(here, _)| here)
+    let start = key_line(&text, "workspace", "members")
         .context("the root Cargo.toml has no `members =` line")?;
-    let open = start + text[start..].find('[').context("members has no `[`")?;
-    let close = open + text[open..].find(']').context("members has no `]`")?;
+    let (at, insert) = push_array(&text, start, row)?;
+    let mut out = text.clone();
+    out.insert_str(at, &insert);
+    fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
+    Ok(true)
+}
+
+/// Where and what to insert so `item` joins the array whose `[` follows
+/// `start`: after the last element with its comma and, in a one-per-line
+/// list, on its own line with the list's indent.
+fn push_array(text: &str, start: usize, item: &str) -> Result<(usize, String)> {
+    let open = start + text[start..].find('[').context("no `[`")?;
+    let close = open + text[open..].find(']').context("no `]`")?;
     let inside = &text[open + 1..close];
     let last = inside.trim_end();
     let comma = if last.is_empty() || last.ends_with(',') {
@@ -282,25 +292,202 @@ fn add_member(root: &Path, row: &str) -> Result<bool> {
     } else {
         ","
     };
-    let (at, insert) = if inside.contains('\n') {
-        // One member per line: after the last one, with its indent.
+    Ok(if inside.contains('\n') {
         let indent = inside
             .lines()
             .find(|l| !l.trim().is_empty())
             .map_or("    ", |l| &l[..l.len() - l.trim_start().len()]);
         (
             open + 1 + last.len(),
-            format!("{comma}\n{indent}\"{row}\","),
+            format!("{comma}\n{indent}\"{item}\","),
         )
     } else if last.is_empty() {
-        (close, format!("\"{row}\""))
+        (close, format!("\"{item}\""))
     } else {
-        (open + 1 + last.len(), format!("{comma} \"{row}\""))
+        (open + 1 + last.len(), format!("{comma} \"{item}\""))
+    })
+}
+
+/// The offset of the `key =` line inside the `[table]` of a TOML text,
+/// found textually so the word in a comment is not the line.
+fn key_line(text: &str, table: &str, key: &str) -> Option<usize> {
+    let mut at = 0;
+    let mut inside = table.is_empty();
+    for line in text.lines() {
+        let here = at;
+        at += line.len() + 1;
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            inside = trimmed == format!("[{table}]");
+            continue;
+        }
+        if inside
+            && trimmed
+                .strip_prefix(key)
+                .is_some_and(|rest| rest.trim_start().starts_with('='))
+        {
+            return Some(here);
+        }
+    }
+    None
+}
+
+/// The offset just after the last entry of the `[table]` of a TOML text,
+/// where one more line goes; blank lines and the comment above the next
+/// header stay with the next header.
+fn table_end(text: &str, table: &str) -> Option<usize> {
+    let mut at = 0;
+    let mut end = None;
+    for line in text.lines() {
+        let here = at;
+        at += line.len() + 1;
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            if end.is_some() {
+                break;
+            }
+            if trimmed == format!("[{table}]") {
+                end = Some(here + line.len());
+            }
+            continue;
+        }
+        if end.is_some() && !trimmed.is_empty() && !trimmed.starts_with('#') {
+            end = Some(here + line.len());
+        }
+    }
+    end
+}
+
+/// The bundle's manifest gains `php_ext_<name>` as an optional path
+/// dependency and the feature `<name> = ["dep:php_ext_<name>"]`, listed
+/// in `default`; a person removes a non-default extension from `default`
+/// when porting it (design §4.10). The edit is textual, so the comments
+/// stay; what was done is the line returned.
+fn bundle_feature(root: &Path, name: &str) -> Result<String> {
+    let path = root.join(BUNDLE).join("Cargo.toml");
+    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let table: toml::Table =
+        toml::from_str(&text).with_context(|| format!("{}", path.display()))?;
+    let package = format!("php_ext_{name}");
+    let has = |section: &str, key: &str| {
+        table
+            .get(section)
+            .and_then(toml::Value::as_table)
+            .is_some_and(|t| t.contains_key(key))
+    };
+    let mut out = text.clone();
+    let mut did: Vec<String> = Vec::new();
+    if !has("features", name) {
+        let at = table_end(&out, "features")
+            .with_context(|| format!("{} has no [features] table", path.display()))?;
+        out.insert_str(at, &format!("\n{name} = [\"dep:{package}\"]"));
+        did.push(format!("the feature {name} = [\"dep:{package}\"]"));
+    }
+    let listed = table
+        .get("features")
+        .and_then(|f| f.get("default"))
+        .and_then(toml::Value::as_array)
+        .is_some_and(|d| d.iter().any(|v| v.as_str() == Some(name)));
+    if !listed {
+        let start = key_line(&out, "features", "default")
+            .with_context(|| format!("{} has no `default =` line", path.display()))?;
+        let (at, insert) = push_array(&out, start, name)?;
+        out.insert_str(at, &insert);
+        did.push("in default".to_owned());
+    }
+    if !has("dependencies", &package) {
+        let at = table_end(&out, "dependencies")
+            .with_context(|| format!("{} has no [dependencies] table", path.display()))?;
+        out.insert_str(
+            at,
+            &format!("\n{package} = {{ path = \"../../ext/{name}\", optional = true }}"),
+        );
+        did.push(format!("{package} as an optional dependency at ext/{name}"));
+    }
+    if out != text {
+        fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(format!(
+        "{BUNDLE}/Cargo.toml: {}",
+        if did.is_empty() {
+            format!("already carries the feature {name} and {package}")
+        } else {
+            did.join(", ")
+        }
+    ))
+}
+
+/// The bundle's `enabled()` gains `php_ext_<name>::extension` behind
+/// `#[cfg(feature = "<name>")]`, appended last: with no `ext/*` edge
+/// declared, last is a topological order by construction, and when a
+/// person later declares one, `api-check` names both crates until the
+/// line is moved by hand. The tier's alias is never touched. The edit is
+/// textual, so the comments stay; what was done is the line returned.
+fn bundle_line(root: &Path, name: &str) -> Result<String> {
+    let path = root.join(BUNDLE).join("src/lib.rs");
+    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let package = format!("php_ext_{name}");
+    let entry = format!("{package}::extension");
+    let head = text
+        .find("fn enabled(")
+        .with_context(|| format!("{} has no `fn enabled(`", path.display()))?;
+    let body = head + text[head..].find('{').context("enabled() has no body")?;
+    let open = body
+        + text[body..]
+            .find("&[")
+            .context("enabled() returns no slice")?
+        + 1;
+    let mut depth = 1usize;
+    let mut close = None;
+    for (i, c) in text[open + 1..].char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + 1 + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close.context("enabled()'s slice has no `]`")?;
+    let inside = &text[open + 1..close];
+    if inside.contains(&entry) {
+        return Ok(format!(
+            "{BUNDLE}/src/lib.rs: enabled() already lists {entry}"
+        ));
+    }
+    let line_start = text[..open].rfind('\n').map_or(0, |i| i + 1);
+    let outer = &text[line_start..open];
+    let outer = &outer[..outer.len() - outer.trim_start().len()];
+    let last = inside.trim_end();
+    let (at, insert) = if last.is_empty() {
+        let indent = format!("{outer}    ");
+        (
+            close,
+            format!("\n{indent}#[cfg(feature = \"{name}\")]\n{indent}{entry},\n{outer}"),
+        )
+    } else {
+        let indent = inside
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .map_or(format!("{outer}    "), |l| {
+                l[..l.len() - l.trim_start().len()].to_owned()
+            });
+        let comma = if last.ends_with(',') { "" } else { "," };
+        (
+            open + 1 + last.len(),
+            format!("{comma}\n{indent}#[cfg(feature = \"{name}\")]\n{indent}{entry},"),
+        )
     };
     let mut out = text.clone();
     out.insert_str(at, &insert);
     fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
-    Ok(true)
+    Ok(format!(
+        "{BUNDLE}/src/lib.rs: enabled() gains {entry} behind feature {name}, last; api-check holds the order to the crate graph (ADR-0004)"
+    ))
 }
 
 /// The guidance file's regions rendered, read as [`computed::Answer`]:

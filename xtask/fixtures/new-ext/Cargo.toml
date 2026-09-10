@@ -1,7 +1,7 @@
 # The fixture workspace: the facade is a member; `new-ext` adds the crate it lays down.
 [workspace]
 resolver = "3"
-members = ["crates/php_ext"]
+members = ["crates/php_ext", "crates/php_bundle"]
 
 [workspace.package]
 edition = "2024"

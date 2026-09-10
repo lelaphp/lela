@@ -1,6 +1,7 @@
-# The positive control of `xtask new-ext` (harness-design.md §5, ticket #9):
-# a workspace with the facade present, one `[[crate]]` row for `ext/demo`
-# and the rules the generated crate must pass untouched. The pin is the
+# The positive control of `xtask new-ext` (harness-design.md §5, tickets #9
+# and #14): a workspace with the facade and the bundle present, `[[crate]]`
+# rows for `ext/demo` and `ext/other` and the rules the generated crate must
+# pass untouched; the bundle's edge carries the order api-check holds. The pin is the
 # real one, by path. The test copies this tree to a scratch directory and
 # lays the crate down there; nothing is generated in place.
 [oracle]
@@ -19,13 +20,25 @@ bindings = 1000
 name = "php_ext"
 budget = 200
 [[crate]]
+name = "php_bundle"
+budget = 500
+[[crate]]
 name = "ext/demo"
+budget = 500
+[[crate]]
+name = "ext/other"
 budget = 500
 
 [[edge]]
 from = "ext/*"
 to = ["php_ext", "ext/*"]
 only = true
+adr = "0004"
+
+[[edge]]
+from = "php_bundle"
+to = ["ext/*", "php_ext"]
+order = "topological"
 adr = "0004"
 
 [[rule]]

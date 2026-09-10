@@ -196,8 +196,8 @@ pub(crate) enum Command {
     /// this instrument: an accepted row has a reason a person wrote.
     DivergenceReason,
     /// Lay one extension crate down at ext/<name> in the template topology,
-    /// ext/clippy.toml rewritten and its row in ext/AGENTS.md; refuses an
-    /// existing one.
+    /// its line in `php_bundle`, ext/clippy.toml and its row in ext/AGENTS.md;
+    /// refuses an existing one.
     ///
     /// The template: the facade as its one dependency, `extension()`, state
     /// on the value, a test through the capture sink and a witness.

@@ -1,0 +1,15 @@
+# The fixture's bundle, shaped as crates/php_bundle is: `new-ext` appends
+# the optional dependency, the feature and the `enabled()` line here.
+[package]
+name = "php_bundle"
+version = "0.0.0"
+edition = "2024"
+
+[features]
+default = []
+# A name that enables nothing until php_jit exists.
+jit = []
+
+# The facade, and the extensions as `new-ext` adds them.
+[dependencies]
+php_ext = { path = "../php_ext" }
