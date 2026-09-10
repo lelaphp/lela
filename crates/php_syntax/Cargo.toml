@@ -1,0 +1,16 @@
+# php_syntax: lexer, lossless token stream, typed tree, parser (design §4.9,
+# ADR-0003). A stub here: `Parsed` and `parse()` alone, so php_compile's
+# edge and signature exist; the Mahout port is its own ticket.
+[package]
+name = "php_syntax"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The syntax: lossless tokens and a typed tree in a safe arena; a stub until the port lands"
+
+[lints]
+workspace = true
+
+[dependencies]

@@ -150,11 +150,13 @@ Options:
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
+├── php_compile
 ├── php_ext
 ├── php_heap
+├── php_syntax
 └── php_unit
 ```
-<!-- /computed in=432718407e440df4b539a5586dff3479cdba10c7ae24a245a4775ba07edad6dd out=3cce056adaa5d85a3d8f979b08fe15d59e52944b7abf453cf09faa37bc316863 -->
+<!-- /computed in=a3e657303121935cdccec3f4af499a186a5ec74b91eeeb606f912b8884fded68 out=8f234c759d11c56f75a40f87c676f85c6bd3134a4085b35a4aafa10848c9ebf2 -->
 <!-- computed tree src=ext depth=1 name=layout-ext | do not edit; run computed -->
 ```
 .
