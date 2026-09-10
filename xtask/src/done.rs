@@ -6,7 +6,8 @@
 //! `track`, the one statement of the rule), or with `--base`; the changes are every file the working tree differs in from
 //! it, committed since or not, plus the untracked files.
 //!
-//! The six conditions, one sentence each:
+//! The conditions, one sentence each: the six of §4.5, and the seventh
+//! #31 proposes for it, a person's sentence still to land there:
 //!
 //! 1. Every crate with a changed file has a fresh passing reading from each
 //!    of [`FRESH`]. Fresh means the reading's `tree` is the content hash over
@@ -26,6 +27,40 @@
 //!    manifest's `deny = true` rule covers) are unchanged, or changed by a
 //!    person; the hook cannot tell, so such a change is a note, never an
 //!    unmet condition, and pre-push, run by the person, passes on it.
+//! 7. The ticket the branch records (`Track::of`'s `ticket`, #30) has no
+//!    unticked acceptance box: the `ticket` reading over its number, the
+//!    one `xtask ticket read` writes (#28), is fresh and passes, and its
+//!    message names the boxes when it does not; a ticket with no box at
+//!    all is held the same way, since it cannot be shown done, and a
+//!    close the tracker refused with every box ticked is met here, the
+//!    boxes being the condition and not the close. A branch that records
+//!    no ticket, and a detached `HEAD`, are not asked and nothing here
+//!    says the word, the way `xtask` is not asked for a witness (#31).
+//!    In practice this is the Stop hook's and pre-push's condition: the
+//!    record is the clone's own configuration, which a push does not
+//!    carry, and a pull request's checkout is detached, so CI's `done`
+//!    is not asked and has no store to answer from if it were.
+//!
+//! **What makes a `ticket` reading fresh** (#31). A ticket has no tree of
+//! its own, so the reading is stamped over the workspace, and it is fresh
+//! while the workspace's tree hash still matches: the reading is a claim
+//! about a pairing, the boxes as the tracker had them and the work as it
+//! stood, and when the work changes the claim is re-asserted by reading
+//! again, which fetches the body again. The rule is §13 D.18's applied to
+//! the whole tree, and `done` never reaches the tracker: it is computed
+//! from git and the store and nothing else, the Stop hook runs it at
+//! every turn end, offline or not, and the one tracker call is `xtask
+//! ticket read` at the agent's hand after its last edit, outside the
+//! hook. What the rule costs, written down: every write after the read
+//! stales it, the ones an instrument makes included (`witness --accept`,
+//! `regions`, `generate`), so on a branch with a ticket the read is the
+//! last act of a turn that wrote anything, one `gh` call per such turn.
+//! What it does not catch: a body edited at the tracker while the work
+//! stands still is a green `done` until the next edit of the work, after
+//! which the reading is stale and the read that refreshes it sees the
+//! new box. An age window was the other candidate,
+//! and it is weaker in both directions: it lets a reading stand over work
+//! that changed under it, and stales one over work that did not.
 //!
 //! With `--hook` the command reads the Stop hook's stdin (the shape in
 //! `data/pre-day-1.md` §4): exit 0 and nothing printed when
@@ -52,6 +87,8 @@ use crate::manifest::{Crate, Manifest};
 use crate::permit;
 use crate::reading::{Number, Outcome, Reading, Status, Store};
 use crate::reply;
+use crate::ticket;
+use crate::track::{self, Ticket};
 
 /// The instrument name the reading carries.
 pub(crate) const INSTRUMENT: &str = "done";
@@ -98,6 +135,9 @@ pub struct Verdict {
     pub changed: Vec<Change>,
     /// The manifest names of the crates with a changed file, in manifest order.
     pub crates: Vec<String>,
+    /// The ticket the branch records, the one condition 7 asked; `None`
+    /// for a branch that records none, which is not asked.
+    pub ticket: Option<Ticket>,
     /// One sentence per unmet condition, in the order of the conditions.
     pub unmet: Vec<String>,
     /// What the hook cannot tell: the harness's own files in the diff.
@@ -112,7 +152,7 @@ impl Verdict {
     /// The list as text: the head line, the unmet conditions, the notes.
     pub fn render(&self) -> String {
         let mut out = format!(
-            "done: {} changed file{} since {} in {}\n",
+            "done: {} changed file{} since {} in {}{}\n",
             self.changed.len(),
             plural(self.changed.len()),
             self.base,
@@ -120,7 +160,10 @@ impl Verdict {
                 "no crate".to_owned()
             } else {
                 self.crates.join(", ")
-            }
+            },
+            self.ticket
+                .map(|ticket| format!(", for {ticket}"))
+                .unwrap_or_default()
         );
         if self.met() {
             out.push_str("every condition of done is met\n");
@@ -199,6 +242,7 @@ pub fn judge(
     let changed = git::changed_since(root, &base.commit)?;
     let paths: Vec<&str> = changed.iter().map(|c| c.path.as_str()).collect();
     let crates: Vec<&Crate> = manifest.crates_of(&paths);
+    let ticket = track::head_ticket(root)?;
     let mut unmet = Vec::new();
     let mut notes = Vec::new();
 
@@ -208,14 +252,54 @@ pub fn judge(
     locks(root, manifest, store, &changed, &mut unmet)?;
     open_rows(root, &base.commit, registry, &crates, &changed, &mut unmet)?;
     over_the_diff(root, manifest, &changed, &mut unmet, &mut notes)?;
+    if let Some(ticket) = ticket {
+        boxes(root, store, ticket, &mut unmet)?;
+    }
 
     Ok(Verdict {
         base,
         changed,
         crates: crates.iter().map(|c| c.name.clone()).collect(),
+        ticket,
         unmet,
         notes,
     })
+}
+
+/// Condition 7: the branch's ticket has no unticked box, read from the
+/// `ticket` reading over its number and never from the tracker. The
+/// reading is fresh while the workspace's tree, [`ticket::STAMPED_OVER`],
+/// still matches (the rule at the top of this module); a
+/// missing or stale one says what to run, and a failing one carries the
+/// instrument's message, which names each unticked box.
+fn boxes(root: &Path, store: &Store, ticket: Ticket, unmet: &mut Vec<String>) -> Result<()> {
+    const READ: &str = "run `cargo xtask ticket read`";
+    let Some(reading) = store.read(ticket::INSTRUMENT, &ticket::scope(ticket))? else {
+        unmet.push(format!("ticket: no reading for {ticket}; {READ}"));
+        return Ok(());
+    };
+    if reading.tree() != git::tree_hash(root, Path::new(ticket::STAMPED_OVER))? {
+        unmet.push(format!(
+            "ticket: the reading for {ticket} is stale; the tree changed since it was read; {READ}"
+        ));
+        return Ok(());
+    }
+    // The boxes are the condition, read from the numbers: a close the
+    // tracker refused with every box ticked fails as a reading and is
+    // met here, since the ticket has no unticked box; a reading that
+    // counts nothing is held to its status.
+    let count = |key: &str| match reading.numbers.get(key) {
+        Some(Number::Int(n)) => Some(*n),
+        _ => None,
+    };
+    let held = match (count("criteria"), count("unticked")) {
+        (Some(criteria), Some(unticked)) => criteria == 0 || unticked > 0,
+        _ => reading.status != Status::Pass,
+    };
+    if held {
+        unmet.push(format!("ticket: {}", reading.message));
+    }
+    Ok(())
 }
 
 /// Conditions 1 and 2 for one touched crate.

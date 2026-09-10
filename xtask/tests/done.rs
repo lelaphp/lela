@@ -1152,3 +1152,195 @@ fn a_rule_at_the_stop_is_not_judged_at_the_call() {
     let rule = manifest.rule(STOP_RULE).unwrap();
     assert!(!xtask::permit::judged_at_the_call(rule));
 }
+
+// ---------------------------------------------------------------- 7 (#31)
+
+/// A recorded `gh` in the scratch repository that answers `issue view
+/// <n>` with the fixture body named, so the `ticket` reading `done` reads
+/// is the one the instrument writes, and nothing reaches the tracker.
+fn ticket_read(root: &Path, number: u64, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = root.join("target/gh");
+    std::fs::create_dir_all(&dir).unwrap();
+    let issue = serde_json::json!({
+        "number": number,
+        "title": format!("ticket {number}"),
+        "body": std::fs::read_to_string(fixtures().join("done/ticket").join(body)).unwrap(),
+        "state": "OPEN",
+        "url": format!("https://example.invalid/issues/{number}"),
+    });
+    std::fs::write(dir.join("issue.json"), issue.to_string()).unwrap();
+    let gh = dir.join("gh");
+    std::fs::write(
+        &gh,
+        format!("#!/bin/sh\ncat '{}/issue.json'\n", dir.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let reading = xtask::ticket::run(
+        root,
+        &xtask::ticket::Gh::at(&gh),
+        xtask::ticket::Act::Read,
+        xtask::track::Ticket::new(number),
+        None,
+    )
+    .unwrap();
+    Store::of_workspace(root).record(&[reading]).unwrap();
+}
+
+fn about_the_ticket(verdict: &Verdict) -> Vec<String> {
+    verdict
+        .unmet
+        .iter()
+        .filter(|l| l.starts_with("ticket"))
+        .cloned()
+        .collect()
+}
+
+/// Condition 7 over a branch that records its ticket: no reading is
+/// unmet and says what to run; the fixture with an unticked box is unmet
+/// with the box named; the fully ticked one is met; and one byte of the
+/// working tree after the read makes it stale, since the reading is
+/// stamped over the workspace and `done` reaches no tracker.
+#[test]
+fn the_tracks_ticket_is_held_to_its_boxes_from_the_store_and_stale_after_an_edit() {
+    let root = scratch("ticket");
+    sh(&root, &["git", "config", "branch.main.ticket", "31"]);
+    let verdict = judge(&root);
+    assert_eq!(verdict.ticket, Some(xtask::track::Ticket::new(31)));
+    assert_eq!(
+        about_the_ticket(&verdict),
+        ["ticket: no reading for #31; run `cargo xtask ticket read`"],
+        "{verdict:#?}"
+    );
+    assert!(!verdict.met());
+    let (code, out, err) = xtask(&root, &["done", "--base", "HEAD"], None);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(out.contains("for #31\n"), "the head line names it: {out}");
+    assert!(out.contains("- ticket: no reading for #31"), "{out}");
+
+    ticket_read(&root, 31, "unticked.md");
+    let verdict = judge(&root);
+    let lines = about_the_ticket(&verdict);
+    assert_eq!(lines.len(), 1, "{verdict:#?}");
+    assert!(
+        lines[0].starts_with("ticket: #31: 1 of 3 criteria ticked; unticked: (1) the thing is measured; (2) harness §4.5 gains the sentence, by a person"),
+        "{lines:?}"
+    );
+    assert!(!verdict.met());
+
+    ticket_read(&root, 31, "ticked.md");
+    let verdict = judge(&root);
+    assert!(verdict.met(), "{verdict:#?}");
+    let (code, out, _) = xtask(&root, &["done", "--base", "HEAD"], None);
+    assert_eq!(code, 0, "{out}");
+
+    // The reading is over the tree; the work changed since, so the claim
+    // is re-asserted by reading again, and not by `done` asking gh.
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    let verdict = judge(&root);
+    assert_eq!(
+        about_the_ticket(&verdict),
+        [
+            "ticket: the reading for #31 is stale; the tree changed since it was read; run `cargo xtask ticket read`"
+        ],
+        "{verdict:#?}"
+    );
+    ticket_read(&root, 31, "ticked.md");
+    let verdict = judge(&root);
+    assert!(about_the_ticket(&verdict).is_empty(), "{verdict:#?}");
+}
+
+/// A reading of another ticket is not the branch's: the scope is the
+/// number, and #30's reading says nothing for #31.
+#[test]
+fn a_reading_of_another_ticket_does_not_answer_for_the_branchs_own() {
+    let root = scratch("other-ticket");
+    sh(&root, &["git", "config", "branch.main.ticket", "31"]);
+    ticket_read(&root, 30, "ticked.md");
+    let verdict = judge(&root);
+    assert_eq!(
+        about_the_ticket(&verdict),
+        ["ticket: no reading for #31; run `cargo xtask ticket read`"],
+        "{verdict:#?}"
+    );
+}
+
+/// A branch that records no ticket, and a detached `HEAD`, are not asked
+/// and say nothing about tickets, a reading in the store or not.
+#[test]
+fn a_branch_that_records_no_ticket_is_not_asked_and_says_nothing_about_tickets() {
+    let root = scratch("no-ticket");
+    ticket_read(&root, 31, "unticked.md");
+    let verdict = judge(&root);
+    assert_eq!(verdict.ticket, None);
+    assert!(verdict.met(), "{verdict:#?}");
+    let (code, out, _) = xtask(&root, &["done", "--base", "HEAD"], None);
+    assert_eq!(code, 0);
+    assert!(!out.contains("ticket"), "{out}");
+    let (_, out, _) = xtask(&root, &["done", "--base", "HEAD", "--hook"], None);
+    assert!(!out.contains("ticket"), "{out}");
+
+    sh(&root, &["git", "config", "branch.main.ticket", "31"]);
+    sh(&root, &["git", "checkout", "-q", "--detach"]);
+    let verdict = judge(&root);
+    assert_eq!(verdict.ticket, None);
+    assert!(verdict.met(), "{verdict:#?}");
+}
+
+/// The Stop hook holds the turn on the ticket's boxes as it holds it on
+/// every other condition, from the store alone.
+#[test]
+fn the_stop_hook_holds_a_turn_on_the_tickets_unticked_boxes() {
+    let root = scratch("hook-ticket");
+    sh(&root, &["git", "config", "branch.main.ticket", "31"]);
+    ticket_read(&root, 31, "unticked.md");
+    let stop = std::fs::read_to_string(fixtures().join("hooks/stop.json")).unwrap();
+    let (code, out, err) = xtask(&root, &["done", "--hook"], Some(&stop));
+    assert_eq!(code, 0, "{err}");
+    let block: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    let reason = block["reason"].as_str().unwrap();
+    assert!(
+        reason
+            .contains("- ticket: #31: 1 of 3 criteria ticked; unticked: (1) the thing is measured"),
+        "{reason}"
+    );
+    ticket_read(&root, 31, "ticked.md");
+    let (_, out, _) = xtask(&root, &["done", "--hook"], Some(&stop));
+    assert_eq!(out, "", "every box ticked: the turn ends");
+}
+
+/// The boxes are the condition and not the close: a `close` the tracker
+/// refused with every box ticked is a failed reading and is met here,
+/// and a ticket with no box is held, since it cannot be shown done.
+#[test]
+fn a_refused_close_with_every_box_ticked_is_met_and_a_ticket_with_no_box_is_not() {
+    let root = scratch("refused-close");
+    sh(&root, &["git", "config", "branch.main.ticket", "31"]);
+    let store = Store::of_workspace(&root);
+    let mut refused = Reading::stamped_over("ticket", "31", &root, Path::new(".")).unwrap();
+    refused.status = Status::Fail;
+    refused.count("criteria", 3).unwrap();
+    refused.count("ticked", 3).unwrap();
+    refused.count("unticked", 0).unwrap();
+    refused.count("opens", 0).unwrap();
+    refused.message =
+        "#31: 3 of 3 criteria ticked; closed already, nothing changed at the tracker".into();
+    store.record(&[refused]).unwrap();
+    let verdict = judge(&root);
+    assert!(verdict.met(), "{verdict:#?}");
+
+    let mut boxless = Reading::stamped_over("ticket", "31", &root, Path::new(".")).unwrap();
+    boxless.status = Status::Fail;
+    boxless.count("criteria", 0).unwrap();
+    boxless.count("ticked", 0).unwrap();
+    boxless.count("unticked", 0).unwrap();
+    boxless.message = "#31 has no box under `## Acceptance criteria`; nothing to hold it to".into();
+    store.record(&[boxless]).unwrap();
+    let verdict = judge(&root);
+    assert_eq!(
+        about_the_ticket(&verdict),
+        ["ticket: #31 has no box under `## Acceptance criteria`; nothing to hold it to"],
+        "{verdict:#?}"
+    );
+}

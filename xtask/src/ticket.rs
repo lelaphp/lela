@@ -64,6 +64,11 @@ use crate::track::{Ticket, Track};
 
 /// The instrument name every reading of ticket carries.
 pub(crate) const INSTRUMENT: &str = "ticket";
+/// The path every reading of ticket is stamped over: the workspace, since
+/// a ticket has no tree of its own, so `done` holds the reading fresh
+/// while the workspace's tree still matches (#31; the rule is stated in
+/// `done`'s rustdoc). One statement, read by the writer and the reader.
+pub(crate) const STAMPED_OVER: &str = ".";
 /// The heading whose boxes are the acceptance criteria, matched without
 /// regard to case at level two.
 const HEADING: &str = "acceptance criteria";
@@ -392,6 +397,12 @@ fn gh(program: &Path, root: &Path, args: &[&str]) -> Result<String> {
     String::from_utf8(out.stdout).context("gh wrote something that is not UTF-8")
 }
 
+/// The scope a ticket's reading is written under: its number, the key
+/// `done` reads it back by.
+pub(crate) fn scope(ticket: Ticket) -> String {
+    ticket.number().to_string()
+}
+
 /// The ticket named, or the branch's; a branch that records none is a
 /// refusal that names the branch.
 pub fn ticket_of(root: &Path, number: Option<u64>) -> Result<Ticket> {
@@ -423,12 +434,8 @@ pub fn run(
 ) -> Result<Reading> {
     let issue = gh.view(root, ticket)?;
     let criteria = Criteria::parse(&issue.body);
-    let mut reading = Reading::stamped_over(
-        INSTRUMENT,
-        &ticket.number().to_string(),
-        root,
-        Path::new("."),
-    )?;
+    let mut reading =
+        Reading::stamped_over(INSTRUMENT, &scope(ticket), root, Path::new(STAMPED_OVER))?;
     reading.count("criteria", criteria.count() as u64)?;
     reading.count("ticked", criteria.ticked.len() as u64)?;
     reading.count("unticked", criteria.unticked.len() as u64)?;

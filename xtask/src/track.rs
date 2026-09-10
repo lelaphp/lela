@@ -243,6 +243,18 @@ fn ticket_of(root: &Path, branch: &str) -> Result<Option<Ticket>> {
     Ok(Some(Ticket(number)))
 }
 
+/// The ticket recorded on the branch `HEAD` is on, `None` for a branch
+/// that records none and for a detached `HEAD`: what `done` asks for
+/// condition 7 (#31, proposed for harness-design.md §4.5), the record alone, with no
+/// merge base taken, so a base a caller passed is not second-guessed and
+/// a track that is missing is not a reason to skip the ticket.
+pub(crate) fn head_ticket(root: &Path) -> Result<Option<Ticket>> {
+    match head_branch(root) {
+        Some(branch) => ticket_of(root, &branch),
+        None => Ok(None),
+    }
+}
+
 /// The ticket recorded on `branch`: the one write of the record.
 pub(crate) fn record_ticket(root: &Path, branch: &str, ticket: Ticket) -> Result<()> {
     let key = ticket_key(branch);
