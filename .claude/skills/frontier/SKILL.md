@@ -1,10 +1,10 @@
 ---
 name: frontier
-description: A track's map at one row of third-engine-design.md §11 and its batches of tickets; `/frontier chart <days>` lays the map down and files the first batch; run from a track's clone or from main.
+description: A track's map at one row of third-engine-design.md §11 and its batches of tickets; `/frontier chart <days>` lays the map down and files the first batch, `/frontier work` files the next when the frontier empties; run from a track's clone or from main.
 disable-model-invocation: true
 ---
 
-A track works a frontier: the open, unblocked tickets `xtask track next` names. This skill is what fills it, one batch per session, from a **map** on the tracker. `chart <days>` lays the map down at the §11 row the engine stands at and files the first batch. `work`, the next batch when the frontier empties, is #84 and is written beside chart when it lands. A session runs one mode once: it files, prints what it filed and ends. Nothing here measures the engine and nothing here decides for the design of record.
+A track works a frontier: the open, unblocked tickets `xtask track next` names. This skill is what fills it, one batch per session, from a **map** on the tracker. `chart <days>` lays the map down at the §11 row the engine stands at and files the first batch. `work` files the next batch when the frontier empties: it indexes the closes since the last batch on the map and graduates the fog they made sharp. A session runs one mode once: it files, prints what it filed and ends. Nothing here measures the engine and nothing here decides for the design of record.
 
 ## Where you stand
 
@@ -81,3 +81,13 @@ Blocking is the tracker's own relation, wired in a second pass once the numbers 
 4. File the first three to five tickets of the row: the work the renderings show undone that is sharp enough to ticket now, each one concern with acceptance boxes `done` can hold, each a sub-issue of the map, typed and labelled as above. What is not sharp stays in the fog.
 5. Wire blocking in the second pass, then write the `## Blocked by` list of each ticket from the relation as it now is.
 6. Print what you filed: the map by title and number, each ticket by title, number, type and what blocks it. Then end; charting is one session's work and resolves no ticket.
+
+## work
+
+1. Read where you stand and the renderings. `cargo run -q -p xtask -- track next` says `none` when the frontier is empty; while it names a ticket, stop and say so: work files nothing on top of a frontier still standing. Find the map, the one open `frontier:map` issue carrying `track:<name>` from a clone and none from main (`gh issue list --label frontier:map --state open --json number,title,labels`); without one, or with two, stop and name it, since `chart <days>` lays a map down and work walks one.
+2. Load the map body, the low-resolution view. The closes since the last batch are the map's closed sub-issues with no line under Decisions so far and none under Out of scope; the map indexes every close, so a missing line is what marks one new. Zoom each: its body and the closing comment `xtask ticket close` left, naming the commit and what the work opened. Append one line per close to Decisions so far, `[<title>](url), <gist>`, the gist one line and the detail left in the ticket.
+3. Rule out of scope what a resolution showed sits past the destination: a sub-issue, open or closed, whose work lies beyond the row's exit bar. Take it off the frontier, `gh issue edit <n> --remove-label ready-for-agent --add-label for-a-person`, comment on it naming the destination it sits past, and gist it under Out of scope with the link and the reason. The close itself is a person's: `gh issue close` is not available to you (ticket.close) and `xtask ticket close` closes work that met its boxes. A ticket ruled out gets no line under Decisions so far; that section is the route walked.
+4. Graduate the fog: each patch of Not yet specified the closes made sharp becomes tickets, filed as in A ticket, three to five in the batch, each a sub-issue of the map, typed and labelled. Delete the graduated patch from Not yet specified so it lives only as its tickets; a patch that graduated in part stays, rewritten to what is still dim. A patch no close sharpened stays as it is, and one the closes showed past the destination moves to Out of scope. A decision the batch needs is a `frontier:decision` ticket for `/grill-design`, never the planner's own. A ticket on the map the closes invalidated is edited to what still holds, or ruled out of scope. With the fog empty and nothing to graduate the map is walked: say so, file nothing; the row's exit bar is measured by the instruments, and the next row is a person's `chart <days>`.
+5. Wire blocking in the second pass, then write the `## Blocked by` list of each new ticket from the relation as it now is.
+6. Write the map body back once, `gh issue edit <map> --body-file <file>`, with Decisions so far, Not yet specified and Out of scope as steps 2 to 4 left them.
+7. Print what you filed: each gist appended by title, each ticket ruled out by title and why, each ticket filed by title, number, type and what blocks it. Then end; one batch is one session's work and resolves no ticket.
