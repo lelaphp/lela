@@ -116,16 +116,15 @@ impl VmStack {
         }
     }
 
-    /// Pop the entry slot the guard is the receipt for. A guard from an
-    /// inner serving that is already gone pops nothing.
+    /// Pop the entry slot the guard is the receipt for, and any an inner
+    /// serving left standing, so a serving that ended without popping its
+    /// own cannot leave one behind.
     // Taking the receipt by value is the point: one serving pops its own
     // entry slot once, and a `Copy` guard could pop it twice.
     #[allow(clippy::needless_pass_by_value)]
     pub fn pop_entry(&mut self, guard: EntryGuard) {
         let EntryGuard { at } = guard;
-        if self.entries.len() == at {
-            self.entries.pop();
-        }
+        self.entries.truncate(at.saturating_sub(1));
     }
 }
 
