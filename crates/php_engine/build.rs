@@ -1,0 +1,141 @@
+//! The dispatch of design §4.3 seam 7, generated from `ops.toml` at the
+//! workspace root over `php_unit::Opcode`: one `match` arm per opcode the
+//! engine has a handler for, and one arm for every other opcode, which
+//! ends the request in the internal-error fatal that names it.
+//!
+//! The spec is `ops.toml` and the bodies are `src/handlers.rs`, and this
+//! build joins them, so a handler whose name is no opcode of the spec is
+//! a build error rather than a body nothing dispatches to (design §5.8).
+//! The handler for `ZEND_INIT_FCALL` is `fn init_fcall`, php's name in
+//! snake case, in a raw identifier where Rust needs one.
+//!
+//! Written to `OUT_DIR/dispatch.rs` and included, never committed (design
+//! §10).
+
+use std::collections::BTreeMap;
+use std::env;
+use std::fmt::Write as _;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+fn main() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let spec = root.join("../../ops.toml");
+    let bodies = root.join("src/handlers.rs");
+    println!("cargo:rerun-if-changed={}", spec.display());
+    println!("cargo:rerun-if-changed={}", bodies.display());
+    let out = PathBuf::from(env::var("OUT_DIR").unwrap_or_default()).join("dispatch.rs");
+    match generate(&spec, &bodies) {
+        Ok(text) => {
+            if let Err(e) = fs::write(&out, text) {
+                println!("cargo:warning=writing {}: {e}", out.display());
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            println!("cargo:warning={e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
+    let opcodes = opcodes(spec)?;
+    let handlers = handlers(bodies)?;
+    let mut arms = String::new();
+    for (name, handler) in &handlers {
+        let Some(variant) = opcodes.get(name) else {
+            return Err(format!(
+                "{}: `fn {handler}` is no opcode of ops.toml; a handler is one opcode's, named as php names it",
+                bodies.display()
+            ));
+        };
+        let _ = writeln!(
+            arms,
+            "        Opcode::{variant} => crate::handlers::{handler}::<T>(req, frame, code, op),"
+        );
+    }
+    Ok(format!(
+        "/// The one dispatch (design §4.3 seam 7, §5.8), generated from\n\
+         /// `ops.toml` and the handlers beside it: the handler at the frame's\n\
+         /// opline, or the fatal for an opcode this engine does not serve yet.\n\
+         /// A handler that leaves a throwable pending says so with\n\
+         /// [`Stepped::Threw`], which is the pending test the loop performs.\n\
+         pub(crate) fn dispatch<T: Tier>(\n\
+         \x20   req: &mut Request,\n\
+         \x20   frame: FrameRef,\n\
+         \x20   code: &OpArray,\n\
+         \x20   op: &Opline,\n\
+         ) -> Result<Stepped, Fatal> {{\n\
+         \x20   match op.opcode {{\n\
+         {arms}\
+         \x20       other => Err(Fatal::Error(format!(\n\
+         \x20           \"InternalError: {{}} has no handler in this engine yet\",\n\
+         \x20           other.name()\n\
+         \x20       ))),\n\
+         \x20   }}\n\
+         }}\n"
+    ))
+}
+
+/// php's opcode names against the enum variant `php_unit` generates.
+fn opcodes(path: &Path) -> Result<BTreeMap<String, String>, String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let table: toml::Table = toml::from_str(&text).map_err(|e| e.to_string())?;
+    let rows = table
+        .get("op")
+        .and_then(toml::Value::as_array)
+        .ok_or("ops.toml has no [[op]] rows")?;
+    let mut out = BTreeMap::new();
+    for row in rows {
+        let name = row
+            .get("name")
+            .and_then(toml::Value::as_str)
+            .ok_or("an [[op]] row without a name")?;
+        out.insert(snake(name), camel(name));
+    }
+    Ok(out)
+}
+
+/// The handlers `src/handlers.rs` declares: php's name in snake case
+/// against the identifier to call, which is the same with the `r#` of a
+/// raw identifier kept.
+fn handlers(path: &Path) -> Result<Vec<(String, String)>, String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("pub(crate) fn ") else {
+            continue;
+        };
+        let handler = rest.split(['<', '(']).next().unwrap_or_default().trim();
+        if handler.is_empty() {
+            continue;
+        }
+        out.push((
+            handler.trim_start_matches("r#").to_owned(),
+            handler.to_owned(),
+        ));
+    }
+    Ok(out)
+}
+
+/// `INIT_FCALL` as `init_fcall`, which is how a handler is named.
+fn snake(name: &str) -> String {
+    name.to_ascii_lowercase()
+}
+
+/// `INIT_FCALL` as `InitFcall`, the variant `php_unit`'s `build.rs` emits.
+fn camel(name: &str) -> String {
+    name.split('_')
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first
+                    .to_uppercase()
+                    .chain(chars.map(|c| c.to_ascii_lowercase()))
+                    .collect(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}

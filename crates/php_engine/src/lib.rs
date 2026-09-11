@@ -2,10 +2,10 @@
 //! face [`api`], the tier seam [`tier`], the linker, and `serve`. Three
 //! faces, each locked: the host's (`Engine`, `serve`, `sapi.lock`), the
 //! extension's (`api`, measured on `php_ext` as `api.lock`) and the
-//! tier's (`tier.lock`). This skeleton lays every face down as compilable
-//! signatures over bodies that answer trivially or end the request in an
-//! internal-error fatal; the kernels and the loop are Lane B and C of
-//! design §11.
+//! tier's (`tier.lock`). The loop over `php_unit::Opcode` is [`tier`], its
+//! dispatch generated from `ops.toml` in `build.rs`, its handlers in
+//! `handlers` and its semantics in `ops`; the rest of the kernels and the
+//! natives are Lane B and C of design §11.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -18,8 +18,17 @@
 )]
 
 pub mod api;
+mod classes;
 mod engine;
-#[cfg(feature = "test")]
+mod exec;
+mod handlers;
+mod natives;
+mod ops;
+#[cfg(test)]
+mod probe;
+// The test face is on for an extension's dev-dependency, and for this
+// crate's own tests, which read a served request the same way.
+#[cfg(any(feature = "test", test))]
 pub mod test;
 pub mod tier;
 

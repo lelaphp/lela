@@ -2,9 +2,15 @@
 //! loop asks the tier at three safepoints and nowhere else, through one
 //! method bound per engine. `Nop` is the interpreter's own adapter; the
 //! compiled tier is `php_jit::Jit`. The word each safepoint carries is
-//! two atomics whose bits only the tier interprets. `execute` and `step`
-//! are the loop's two entries; this skeleton has no loop, and each ends
-//! the request in the internal-error fatal that names it.
+//! two atomics whose bits only the tier interprets.
+//!
+//! [`execute`] and [`step`] are the loop's two entries: one dispatch over
+//! `php_unit::Opcode` (design §5.8), generated from `ops.toml` in this
+//! crate's `build.rs` and generic over the tier, so `Nop` folds the
+//! safepoint away. `execute` raises `Site::Entry` for the frame it is
+//! given, after that frame's prologue; `RETURN` raises `Site::Return` for
+//! every other frame and for no entry frame, which the stack's entry slot
+//! says.
 
 use std::sync::atomic::AtomicU32;
 
@@ -12,6 +18,7 @@ use php_heap::{Fatal, FrameRef};
 
 use crate::api::abi::Extension;
 use crate::api::request::Request;
+use crate::exec;
 
 /// The number of a safepoint within its op array; zero is the entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -116,24 +123,92 @@ pub enum Stepped {
     Done,
 }
 
-fn no_loop(what: &str) -> Fatal {
-    Fatal::Error(format!(
-        "InternalError: php_engine::tier::{what} has no dispatch loop yet; the engine serves nothing"
-    ))
+/// The generated dispatch (design §4.3 seam 7): one `match` arm per
+/// opcode `ops.toml` names, over the handlers beside it.
+mod dispatch {
+    use php_heap::{Fatal, FrameRef};
+    use php_unit::{OpArray, Opcode, Opline};
+
+    use crate::api::request::Request;
+    use crate::tier::{Stepped, Tier};
+
+    include!(concat!(env!("OUT_DIR"), "/dispatch.rs"));
+}
+
+/// What a handler does with the flow a safepoint answered. `Continue` is
+/// the whole of it while `Nop` is the only adapter; a tier that served
+/// code is `php_jit`'s and lands with it (ADR-0006).
+pub(crate) fn continued(flow: Flow) -> Result<(), Fatal> {
+    match flow {
+        Flow::Continue => Ok(()),
+        Flow::Bail(fatal) => Err(fatal),
+        Flow::Resume(_) => Err(Fatal::Error(String::from(
+            "InternalError: a tier served code and this loop has no resumption for it yet",
+        ))),
+    }
 }
 
 /// The dispatch loop over `frame` until the entry frame returns, asking
 /// `T` at the safepoints. `Ok(())` exactly when the entry frame has
 /// returned; `Err` carries the fatal.
 pub fn execute<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal> {
-    let _ = (req, frame);
-    Err(no_loop("execute"))
+    let guard = req.stack_mut().push_entry(frame);
+    let outcome = serve::<T>(req, frame);
+    req.stack_mut().pop_entry(guard);
+    outcome
+}
+
+/// The loop itself, with the entry slot standing.
+fn serve<T: Tier>(req: &mut Request, entry: FrameRef) -> Result<(), Fatal> {
+    let mut frame = entry;
+    // The activation of a frame, after its prologue has run without
+    // raising; `execute` raises it for its own entry frame whatever the
+    // caller is, as php's counter handler fires (design §4.3 seam 8).
+    continued(T::safepoint(req, frame, Site::Entry))?;
+    loop {
+        let Some(code) = req.vm().code(frame) else {
+            return Err(no_frame(frame));
+        };
+        let at = req.vm().opline(frame);
+        let Some(op) = exec::opline_at(&code, at) else {
+            return Err(past_the_end(frame, at));
+        };
+        match dispatch::dispatch::<T>(req, frame, &code, op)? {
+            Stepped::Same(at) | Stepped::Moved(at) | Stepped::Popped(at) => frame = at,
+            Stepped::Pushed(at) => {
+                frame = at;
+                continued(T::safepoint(req, frame, Site::Entry))?;
+            }
+            Stepped::Threw(_) => return req.uncaught(),
+            Stepped::Done => return Ok(()),
+        }
+    }
 }
 
 /// Exactly one handler, the one at the frame's opline, with `Nop` at the
 /// safepoints; what it did to the frame chain is reported, and a
 /// throwable it raised is left pending.
 pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
-    let _ = (req, frame);
-    Err(no_loop("step"))
+    let Some(code) = req.vm().code(frame) else {
+        return Err(no_frame(frame));
+    };
+    let at = req.vm().opline(frame);
+    let Some(op) = exec::opline_at(&code, at) else {
+        return Err(past_the_end(frame, at));
+    };
+    dispatch::dispatch::<Nop>(req, frame, &code, op)
+}
+
+fn no_frame(frame: FrameRef) -> Fatal {
+    Fatal::Error(format!(
+        "InternalError: frame {} is serving no op array",
+        frame.0
+    ))
+}
+
+fn past_the_end(frame: FrameRef, at: u32) -> Fatal {
+    Fatal::Error(format!(
+        "InternalError: frame {} stands at opline {at}, past the end of its op array",
+        frame.0
+    ))
 }

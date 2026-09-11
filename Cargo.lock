@@ -185,6 +185,7 @@ dependencies = [
  "php_compile",
  "php_heap",
  "php_unit",
+ "toml",
 ]
 
 [[package]]

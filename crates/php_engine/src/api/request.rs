@@ -10,7 +10,8 @@ use std::any::{Any, TypeId};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use php_heap::{Fatal, Heap, HeapHooks, MapTable, ObjectId, VmStack, Zval};
+use php_heap::{Fatal, FrameRef, Heap, HeapHooks, MapTable, ObjectId, VmStack, Zval};
+use php_unit::OpArray;
 use php_unit::decl::{ClassDecl, FunctionDecl};
 
 use crate::api::abi::Callable;
@@ -18,6 +19,7 @@ use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Resource, Value};
 use crate::engine::{RequestDescription, Shared};
+use crate::exec::Vm;
 
 /// php's version, what `PHP_VERSION` and `phpversion()` say.
 pub const PHP_VERSION: &str = "8.5.9";
@@ -144,6 +146,7 @@ pub struct Request {
     description: RequestDescription,
     heap: Heap,
     stack: VmStack,
+    vm: Vm,
     map: MapTable,
     states: Vec<(TypeId, Box<dyn Any + Send>)>,
     ini: Vec<(PhpString, PhpString)>,
@@ -175,6 +178,11 @@ pub struct Request {
     active_native: Option<String>,
     /// The caller file's `declare(strict_types=1)`.
     strict_types: bool,
+    /// php's `EG(exception)`: the throwable a handler left pending, which
+    /// the loop reads at the `Threw` edge.
+    pending: Option<PhpObject>,
+    /// What the entry frame of the innermost serving returned.
+    returned: Value,
 }
 
 impl Request {
@@ -185,6 +193,7 @@ impl Request {
             description,
             heap: Heap::new(),
             stack: VmStack::new(),
+            vm: Vm::default(),
             map: MapTable::new(),
             states: Vec::new(),
             ini: Vec::new(),
@@ -214,6 +223,8 @@ impl Request {
             flushed: false,
             active_native: None,
             strict_types: false,
+            pending: None,
+            returned: Value::null(),
         };
         // Request state in bundle order (ADR-0005).
         for extension in &req.shared.extensions {
@@ -228,6 +239,96 @@ impl Request {
 
     pub(crate) fn stack_mut(&mut self) -> &mut VmStack {
         &mut self.stack
+    }
+
+    /// The engine's half of the frames: what the loop and the handlers
+    /// read (design §5.6).
+    pub(crate) fn vm(&self) -> &Vm {
+        &self.vm
+    }
+
+    pub(crate) fn vm_mut(&mut self) -> &mut Vm {
+        &mut self.vm
+    }
+
+    /// Push a frame for `code`: its shape on the VM stack and its engine
+    /// state, which are pushed and popped together and share a
+    /// `FrameRef`.
+    pub(crate) fn push_frame(&mut self, code: Arc<OpArray>) -> FrameRef {
+        let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
+        let frame = self.stack.push_frame(slots);
+        self.vm.push(code);
+        frame
+    }
+
+    pub(crate) fn pop_frame(&mut self) {
+        self.vm.pop();
+        self.stack.pop_frame();
+    }
+
+    /// What the entry frame of the innermost serving returned.
+    pub(crate) fn set_returned(&mut self, value: Value) {
+        self.returned = value;
+    }
+
+    /// Leave what a raise made pending where the loop reads it, php's
+    /// `EG(exception)`. A `Thrown` that carries none is a fatal or an
+    /// `exit` the raiser already recorded on the request.
+    pub(crate) fn leave_pending(&mut self, thrown: &Thrown) {
+        if self.pending.is_none() {
+            self.pending = thrown.exception().cloned();
+        }
+    }
+
+    /// The pending throwable at the end of a serving, as php renders an
+    /// uncaught one at the request boundary (design §5.9). Nothing
+    /// pending means the request is ending in the fatal or the `exit` the
+    /// raiser recorded, and the loop has nothing to add.
+    pub(crate) fn uncaught(&mut self) -> Result<(), Fatal> {
+        let Some(throwable) = self.pending.take() else {
+            return Ok(());
+        };
+        let class = self.class_decl(throwable.class()).map_or_else(
+            || String::from("Error"),
+            |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
+        );
+        let message = throwable
+            .prop(b"message")
+            .and_then(|value| value.as_str_bytes().map(String::from_utf8_lossy))
+            .unwrap_or_default()
+            .into_owned();
+        Err(Fatal::Error(format!("Uncaught {class}: {message}")))
+    }
+
+    /// Serve one native: its entry with the arguments as passed, with the
+    /// name the raisers render in their text (ADR-0002).
+    pub(crate) fn serve_native(
+        &mut self,
+        function: Function,
+        name: &PhpString,
+        arguments: &[Value],
+    ) -> Result<Value, Thrown> {
+        let Some(entry) = self
+            .shared
+            .functions
+            .get(usize::try_from(function.0).unwrap_or(usize::MAX))
+            .map(|(_, entry)| *entry)
+        else {
+            return Err(crate::api::raising::throw(
+                self,
+                "Error",
+                &format!(
+                    "Call to undefined function {}()",
+                    String::from_utf8_lossy(name.as_bytes())
+                ),
+            ));
+        };
+        let outer = self
+            .active_native
+            .replace(String::from_utf8_lossy(name.as_bytes()).into_owned());
+        let served = entry(self, arguments);
+        self.active_native = outer;
+        served
     }
 
     pub(crate) fn take_body(&mut self) -> Vec<u8> {
@@ -344,7 +445,7 @@ impl Request {
         self.shared
             .functions
             .iter()
-            .position(|decl| decl.name.0.to_ascii_lowercase() == wanted)
+            .position(|(decl, _)| decl.name.0.to_ascii_lowercase() == wanted)
             .and_then(|i| u32::try_from(i).ok())
             .map(Function)
     }
@@ -621,7 +722,10 @@ impl Request {
     /// The declaration of a linked function.
     #[must_use]
     pub fn function_decl(&self, function: Function) -> Option<&FunctionDecl> {
-        self.shared.functions.get(usize::try_from(function.0).ok()?)
+        self.shared
+            .functions
+            .get(usize::try_from(function.0).ok()?)
+            .map(|(decl, _)| decl)
     }
 
     /// `get_declared_classes()`, in declaration order.
@@ -636,7 +740,7 @@ impl Request {
     #[must_use]
     pub fn defined_functions(&self) -> PhpArray {
         let mut internal = PhpArray::new();
-        for decl in &self.shared.functions {
+        for (decl, _) in &self.shared.functions {
             internal.append(Value::string(PhpString::from_bytes(&decl.name.0)));
         }
         let mut array = PhpArray::new();

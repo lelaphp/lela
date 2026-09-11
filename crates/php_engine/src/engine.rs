@@ -1,10 +1,16 @@
 //! `Engine` and `serve` (design §5.14): the process-wide, `Sync` engine
-//! and the one request transaction every host crosses. The skeleton
-//! compiles the source through `php_compile`, builds the request with
-//! every extension's request state, serves `rinit`, hands the entry frame
-//! to the tier-bound loop, which has no handlers yet and ends the request
-//! in its internal-error fatal, serves `rshutdown` in reverse, renders
-//! what php renders, and hands the bytes to the sink.
+//! and the one request transaction every host crosses. It compiles the
+//! source through `php_compile`, builds the request with every
+//! extension's request state, serves `rinit`, hands the main op array's
+//! entry frame to the tier-bound loop, serves `rshutdown` in reverse,
+//! renders what php renders, and hands the bytes to the sink.
+//!
+//! The engine's own declarations go in first: the natives design §13
+//! moves out of `ext/standard` and the throwable classes Zend declares,
+//! so an engine with no extensions serves a program that uses Zend alone
+//! (design §4.10).
+// The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
+#![allow(rustdoc::invalid_codeblock_attributes)]
 
 use std::any::Any;
 use std::path::PathBuf;
@@ -14,7 +20,7 @@ use php_heap::{Fatal, FrameRef};
 use php_unit::Unit;
 use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, Name};
 
-use crate::api::abi::{Extension, StartupIni};
+use crate::api::abi::{Entry, Extension, StartupIni};
 use crate::api::request::{Ending, Request};
 use crate::api::values::{PhpString, Value};
 use crate::tier::{Nop, Tier, execute};
@@ -67,7 +73,7 @@ type Loop = fn(&mut Request, FrameRef) -> Result<(), Fatal>;
 /// engine states, the ini defaults and the loop (design §5.14).
 pub(crate) struct Shared {
     pub(crate) extensions: Vec<Extension>,
-    pub(crate) functions: Vec<FunctionDecl>,
+    pub(crate) functions: Vec<(FunctionDecl, Entry)>,
     pub(crate) classes: Vec<ClassDecl>,
     constants: Vec<ConstDecl>,
     pub(crate) engine_states: Vec<Box<dyn Any + Send + Sync>>,
@@ -196,13 +202,13 @@ impl EngineBuilder {
             .filter_map(|e| e.engine_state.as_ref())
             .map(|build| build(&startup))
             .collect();
-        let functions = extensions
-            .iter()
-            .flat_map(|e| e.functions.iter().map(|(decl, _)| decl.clone()))
+        let functions = crate::natives::natives()
+            .into_iter()
+            .chain(extensions.iter().flat_map(|e| e.functions.iter().cloned()))
             .collect();
-        let classes = extensions
-            .iter()
-            .flat_map(|e| e.classes.iter().cloned())
+        let classes = crate::classes::zend_classes()
+            .into_iter()
+            .chain(extensions.iter().flat_map(|e| e.classes.iter().cloned()))
             .collect();
         let constants = extensions
             .iter()
@@ -226,7 +232,7 @@ impl EngineBuilder {
 /// by every request thread.
 #[derive(Clone)]
 pub struct Engine {
-    shared: Arc<Shared>,
+    pub(crate) shared: Arc<Shared>,
 }
 
 impl Engine {
@@ -255,6 +261,17 @@ impl Engine {
 
     /// The one request transaction (design §5.14): compile, seed, serve,
     /// commit, shut down, observe.
+    ///
+    /// An engine with no extensions serves what uses Zend alone (design
+    /// §4.10): the loop over the main op array, `ECHO` through the
+    /// string kernel, and the engine's own natives.
+    ///
+    /// ```php
+    /// echo 1; var_dump(extension_loaded('Core'));
+    /// ```
+    /// ```expect
+    /// 1bool(true)
+    /// ```
     pub fn serve(&self, description: RequestDescription, sink: &mut dyn OutputSink) -> Observables {
         let source = description.source.clone().or_else(|| {
             description
@@ -325,17 +342,155 @@ impl Engine {
 
 /// The unit's main op array served on a fresh entry frame; the loop's
 /// fatal, if any, ends the request.
-fn serve_unit(req: &mut Request, unit: &Unit, entry: Loop) {
-    let slots = usize::try_from(unit.main.num_cvs + unit.main.num_tmps).unwrap_or(0);
-    let frame = req.stack_mut().push_frame(slots);
-    let outcome = {
-        let mut guard = req.stack_mut().push_entry(frame);
-        let _ = guard.stack();
-        drop(guard);
-        entry(req, frame)
-    };
-    if let Err(fatal) = outcome {
+fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
+    let frame = req.push_frame(Arc::new(unit.main.clone()));
+    if let Err(fatal) = entry(req, frame) {
         req.end_in(&fatal);
     }
-    req.stack_mut().pop_frame();
+    req.pop_frame();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::probe::{Asked, Probe};
+    use crate::tier::Site;
+
+    /// Everything the request wrote, kept, as `Capture` keeps it behind
+    /// the `test` feature.
+    #[derive(Default)]
+    struct Kept {
+        body: Vec<u8>,
+        log: Vec<u8>,
+    }
+
+    impl OutputSink for Kept {
+        fn write(&mut self, bytes: &[u8]) {
+            self.body.extend_from_slice(bytes);
+        }
+        fn flush(&mut self) {}
+        fn send_headers(&mut self, _: &[u8]) {}
+        fn log(&mut self, line: &[u8]) {
+            self.log.extend_from_slice(line);
+        }
+    }
+
+    fn description(source: &str) -> RequestDescription {
+        RequestDescription {
+            sapi_name: String::from("cli"),
+            script_name: Some(PhpString::from_bytes(b"witness.php")),
+            source: Some(source.as_bytes().to_vec()),
+            ..RequestDescription::default()
+        }
+    }
+
+    fn served(engine: &Engine, source: &str) -> (String, Observables) {
+        let mut sink = Kept::default();
+        let observables = engine.serve(description(source), &mut sink);
+        (
+            String::from_utf8_lossy(&sink.body).into_owned(),
+            observables,
+        )
+    }
+
+    #[test]
+    fn an_engine_with_no_extensions_serves_what_uses_zend_alone() {
+        let engine = Engine::builder().build();
+        let (body, observables) = served(&engine, "<?php echo 1;");
+        assert_eq!(body, "1");
+        assert_eq!(observables.exit_code, 0);
+        assert_eq!(observables.fatal, None);
+    }
+
+    /// The same request through the `Capture` sink, which is the shape
+    /// every extension's own test reads (design §4.3 seam 4, §4.10).
+    #[test]
+    fn the_capture_sink_holds_what_a_zend_only_request_wrote() {
+        let served = Engine::builder()
+            .build()
+            .serve_capture("<?php echo 1;", crate::test::Capture::default());
+        assert_eq!(served.stdout, b"1");
+        assert_eq!(served.exit_code, 0);
+        assert_eq!(served.fatal, None);
+        let served = Engine::builder().build().serve_capture(
+            "<?php var_dump(extension_loaded('Core'));",
+            crate::test::Capture::default(),
+        );
+        assert_eq!(served.stdout, b"bool(true)\n");
+    }
+
+    #[test]
+    fn the_call_sequence_reaches_a_native_and_writes_what_it_returned() {
+        let engine = Engine::builder().build();
+        let (body, _) = served(&engine, "<?php var_dump(extension_loaded('Core'));");
+        assert_eq!(body, "bool(true)\n");
+        let (body, _) = served(&engine, "<?php var_dump(extension_loaded('nope'));");
+        assert_eq!(body, "bool(false)\n");
+    }
+
+    #[test]
+    fn echo_writes_each_part_as_php_converts_it() {
+        let engine = Engine::builder().build();
+        let (body, _) = served(
+            &engine,
+            "<?php echo 1, \"|\", true, \"|\", null, \"|\", 2.5;",
+        );
+        assert_eq!(body, "1|1||2.5");
+    }
+
+    #[test]
+    fn a_call_of_a_name_nothing_declares_ends_the_request_as_php_names_it() {
+        let engine = Engine::builder().build();
+        let (_, observables) = served(&engine, "<?php nope();");
+        assert_eq!(
+            observables
+                .fatal
+                .as_deref()
+                .map(|text| text.contains("Uncaught Error: Call to undefined function nope()")),
+            Some(true),
+            "{:?}",
+            observables.fatal
+        );
+        assert_eq!(observables.exit_code, 255);
+    }
+
+    #[test]
+    fn an_opcode_with_no_handler_ends_the_request_naming_it() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), description(""));
+        let main = php_unit::OpArray {
+            oplines: vec![php_unit::Opline {
+                opcode: php_unit::Opcode::Add,
+                ..php_unit::Opline::default()
+            }]
+            .into_boxed_slice(),
+            ..php_unit::OpArray::default()
+        };
+        let frame = req.push_frame(Arc::new(main));
+        assert_eq!(
+            crate::tier::execute::<Nop>(&mut req, frame),
+            Err(Fatal::Error(String::from(
+                "InternalError: ZEND_ADD has no handler in this engine yet"
+            )))
+        );
+    }
+
+    /// Design §4.3 seam 8: `Site::Entry` is raised for the entry frame of
+    /// an `execute` whatever the caller is, and `Site::Return` for no
+    /// entry frame, which the stack's entry slot says.
+    #[test]
+    fn the_loop_asks_the_tier_at_the_entry_and_at_no_entry_frames_return() {
+        let engine = Engine::builder().tier::<Probe>().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), description(""));
+        let unit = engine
+            .unit(b"<?php echo 1;", b"witness.php")
+            .unwrap_or_default();
+        let frame = req.push_frame(Arc::new(unit.main.clone()));
+        assert_eq!(crate::tier::execute::<Probe>(&mut req, frame), Ok(()));
+        assert_eq!(
+            req.state::<Asked>().0,
+            vec![(Site::Entry, frame)],
+            "the entry frame is activated, and its own return raises no site"
+        );
+    }
 }
