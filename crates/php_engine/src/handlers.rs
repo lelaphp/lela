@@ -73,7 +73,8 @@ pub(crate) fn init_fcall<T: Tier>(
     req.vm_mut().push_call(CallState {
         function,
         name,
-        arguments: Vec::with_capacity(count),
+        arguments: Vec::new(),
+        count,
     });
     Ok(advance(req, frame))
 }
@@ -140,19 +141,21 @@ pub(crate) fn r#return<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let returned = exec::operand(req.vm(), frame, code, op.op1_type, op.op1);
-    let entry = req.stack_mut().entry() == frame;
-    if !entry {
-        continued(T::safepoint(req, frame, Site::Return(SafepointIdx(op.out))))?;
-    }
-    if entry {
+    if req.stack_mut().entry() == frame {
         req.set_returned(returned);
         return Ok(Stepped::Done);
     }
-    // Nothing pushes a callee frame yet, so there is no caller slot to
-    // write `returned` into; that arrives with the call opcodes that push
-    // one (`DO_UCALL`, design §11 days 3–7).
+    continued(T::safepoint(req, frame, Site::Return(SafepointIdx(op.out))))?;
+    let returns_to = req.vm().returns_to(frame);
     req.pop_frame();
-    Ok(Stepped::Popped(req.stack_mut().current()))
+    let caller = req.stack_mut().current();
+    if let Some((at, slot)) = returns_to {
+        req.vm_mut().set_slot(at, slot, returned);
+    }
+    // The caller stands at the call opline that pushed this frame, and
+    // goes on from the one after it.
+    req.vm_mut().advance(caller);
+    Ok(Stepped::Popped(caller))
 }
 
 /// `ZEND_VM_NEXT_OPCODE`: the same frame, at the opline after this one.
@@ -165,12 +168,21 @@ fn advance(req: &mut Request, frame: FrameRef) -> Stepped {
 /// call frame being built, at the argument number `op2` names.
 fn send(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let value = exec::operand(req.vm(), frame, code, op.op1_type, op.op1);
-    let at = usize::try_from(op.op2.saturating_sub(1)).unwrap_or(0);
+    let at = usize::try_from(op.op2.saturating_sub(1)).unwrap_or(usize::MAX);
     let Some(call) = req.vm_mut().building_call() else {
         return Err(Fatal::Error(String::from(
             "InternalError: a SEND_* opline with no call frame under it",
         )));
     };
+    // The `INIT_FCALL` said how many arguments the call has, so an
+    // argument number past that is a compiler bug and not an allocation.
+    if at >= call.count {
+        return Err(Fatal::Error(format!(
+            "InternalError: a SEND_* opline places argument {} of a call of {}",
+            at.saturating_add(1),
+            call.count
+        )));
+    }
     if call.arguments.len() <= at {
         call.arguments.resize_with(at + 1, Value::null);
     }
@@ -184,26 +196,29 @@ fn send(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge
 mod tests {
     use std::sync::Arc;
 
-    use php_unit::{Opcode, OperandKind};
+    use php_unit::{Opcode, OperandKind, Unit};
 
     use super::*;
     use crate::engine::{Engine, RequestDescription};
     use crate::probe::{Asked, Probe};
 
-    /// An op array of one `RETURN null` whose safepoint number is
-    /// `number`, as the compiler writes it into `result`.
-    fn returning(number: u32) -> Arc<OpArray> {
-        Arc::new(OpArray {
-            oplines: vec![Opline {
-                opcode: Opcode::Return,
-                op1_type: OperandKind::Const,
-                op1: 0,
-                out: number,
-                ..Opline::default()
-            }]
-            .into_boxed_slice(),
-            literals: vec![php_heap::Zval::null()].into_boxed_slice(),
-            ..OpArray::default()
+    /// A unit whose main op array is one `RETURN null`, its safepoint
+    /// number `number`, as the compiler writes it into `result`.
+    fn returning(number: u32) -> Arc<Unit> {
+        Arc::new(Unit {
+            main: OpArray {
+                oplines: vec![Opline {
+                    opcode: Opcode::Return,
+                    op1_type: OperandKind::Const,
+                    op1: 0,
+                    out: number,
+                    ..Opline::default()
+                }]
+                .into_boxed_slice(),
+                literals: vec![php_heap::Zval::null()].into_boxed_slice(),
+                ..OpArray::default()
+            },
+            ..Unit::default()
         })
     }
 
@@ -214,14 +229,15 @@ mod tests {
     fn a_return_in_no_entry_frame_raises_the_return_safepoint_and_pops() {
         let engine = Engine::builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
-        let code = returning(1);
-        let outer = req.push_frame(Arc::clone(&code));
+        let unit = returning(1);
+        let outer = req.push_frame(Arc::clone(&unit));
         let guard = req.stack_mut().push_entry(outer);
-        let inner = req.push_frame(Arc::clone(&code));
+        let inner = req.push_frame(Arc::clone(&unit));
+        let code = crate::exec::code_of(&unit);
         let op = code.oplines.first().copied().unwrap_or_default();
 
         assert_eq!(
-            r#return::<Probe>(&mut req, inner, &code, &op),
+            r#return::<Probe>(&mut req, inner, code, &op),
             Ok(Stepped::Popped(outer))
         );
         assert_eq!(
@@ -231,7 +247,7 @@ mod tests {
 
         // The entry frame's own return raises nothing and ends the loop.
         assert_eq!(
-            r#return::<Probe>(&mut req, outer, &code, &op),
+            r#return::<Probe>(&mut req, outer, code, &op),
             Ok(Stepped::Done)
         );
         assert_eq!(req.state::<Asked>().0.len(), 1);

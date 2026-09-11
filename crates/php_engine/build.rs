@@ -42,6 +42,7 @@ fn main() {
 fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
     let opcodes = opcodes(spec)?;
     let handlers = handlers(bodies)?;
+    undispatched(bodies, &opcodes, &handlers)?;
     let mut arms = String::new();
     for (name, handler) in &handlers {
         let Some(variant) = opcodes.get(name) else {
@@ -76,6 +77,41 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
          \x20   }}\n\
          }}\n"
     ))
+}
+
+/// A body named after an opcode that the dispatch does not reach: a
+/// handler indented into another item, or one whose visibility keeps the
+/// generated `match` from naming it. Either way it is a body nothing
+/// dispatches to, which is what this build exists to refuse.
+fn undispatched(
+    bodies: &Path,
+    opcodes: &BTreeMap<String, String>,
+    handlers: &[(String, String)],
+) -> Result<(), String> {
+    let text =
+        fs::read_to_string(bodies).map_err(|e| format!("reading {}: {e}", bodies.display()))?;
+    for line in text.lines() {
+        let Some((_, rest)) = line.split_once("fn ") else {
+            continue;
+        };
+        let name = rest
+            .split(['<', '('])
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .trim_start_matches("r#");
+        if !opcodes.contains_key(name) {
+            continue;
+        }
+        if handlers.iter().any(|(dispatched, _)| dispatched == name) {
+            continue;
+        }
+        return Err(format!(
+            "{}: `fn {name}` is the handler for an opcode of ops.toml and the dispatch does not reach it; a handler is `pub(crate) fn` at the top of the file",
+            bodies.display()
+        ));
+    }
+    Ok(())
 }
 
 /// php's opcode names against the enum variant `php_unit` generates.

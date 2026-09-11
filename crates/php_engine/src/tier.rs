@@ -12,9 +12,11 @@
 //! every other frame and for no entry frame, which the stack's entry slot
 //! says.
 
+use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 
 use php_heap::{Fatal, FrameRef};
+use php_unit::Unit;
 
 use crate::api::abi::Extension;
 use crate::api::request::Request;
@@ -163,17 +165,13 @@ fn serve<T: Tier>(req: &mut Request, entry: FrameRef) -> Result<(), Fatal> {
     let mut frame = entry;
     // The activation of a frame, after its prologue has run without
     // raising; `execute` raises it for its own entry frame whatever the
-    // caller is, as php's counter handler fires (design §4.3 seam 8).
+    // caller is, as php's own counter fires (design §4.3 seam 8).
     continued(T::safepoint(req, frame, Site::Entry))?;
     loop {
-        let Some(code) = req.vm().code(frame) else {
-            return Err(no_frame(frame));
-        };
-        let at = req.vm().opline(frame);
-        let Some(op) = exec::opline_at(&code, at) else {
-            return Err(past_the_end(frame, at));
-        };
-        match dispatch::dispatch::<T>(req, frame, &code, op)? {
+        let unit = standing(req, frame)?;
+        let code = exec::code_of(&unit);
+        let op = *at_opline(req, frame, code)?;
+        match dispatch::dispatch::<T>(req, frame, code, &op)? {
             Stepped::Same(at) | Stepped::Moved(at) | Stepped::Popped(at) => frame = at,
             Stepped::Pushed(at) => {
                 frame = at;
@@ -189,26 +187,34 @@ fn serve<T: Tier>(req: &mut Request, entry: FrameRef) -> Result<(), Fatal> {
 /// safepoints; what it did to the frame chain is reported, and a
 /// throwable it raised is left pending.
 pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
-    let Some(code) = req.vm().code(frame) else {
-        return Err(no_frame(frame));
-    };
+    let unit = standing(req, frame)?;
+    let code = exec::code_of(&unit);
+    let op = *at_opline(req, frame, code)?;
+    dispatch::dispatch::<Nop>(req, frame, code, &op)
+}
+
+/// What `frame` is serving, held by its own share of the unit so the
+/// oplines can be read while the request is borrowed.
+fn standing(req: &Request, frame: FrameRef) -> Result<Arc<Unit>, Fatal> {
+    req.vm().serving(frame).ok_or_else(|| {
+        Fatal::Error(format!(
+            "InternalError: frame {} is serving no op array",
+            frame.0
+        ))
+    })
+}
+
+/// The opline `frame` stands at.
+fn at_opline<'a>(
+    req: &Request,
+    frame: FrameRef,
+    code: &'a php_unit::OpArray,
+) -> Result<&'a php_unit::Opline, Fatal> {
     let at = req.vm().opline(frame);
-    let Some(op) = exec::opline_at(&code, at) else {
-        return Err(past_the_end(frame, at));
-    };
-    dispatch::dispatch::<Nop>(req, frame, &code, op)
-}
-
-fn no_frame(frame: FrameRef) -> Fatal {
-    Fatal::Error(format!(
-        "InternalError: frame {} is serving no op array",
-        frame.0
-    ))
-}
-
-fn past_the_end(frame: FrameRef, at: u32) -> Fatal {
-    Fatal::Error(format!(
-        "InternalError: frame {} stands at opline {at}, past the end of its op array",
-        frame.0
-    ))
+    exec::opline_at(code, at).ok_or_else(|| {
+        Fatal::Error(format!(
+            "InternalError: frame {} stands at opline {at}, past the end of its op array",
+            frame.0
+        ))
+    })
 }

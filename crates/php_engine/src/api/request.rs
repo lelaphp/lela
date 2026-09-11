@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use php_heap::{Fatal, FrameRef, Heap, HeapHooks, MapTable, ObjectId, VmStack, Zval};
-use php_unit::OpArray;
+use php_unit::Unit;
 use php_unit::decl::{ClassDecl, FunctionDecl};
 
 use crate::api::abi::Callable;
@@ -19,7 +19,7 @@ use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Resource, Value};
 use crate::engine::{RequestDescription, Shared};
-use crate::exec::Vm;
+use crate::exec::{self, Vm};
 
 /// php's version, what `PHP_VERSION` and `phpversion()` say.
 pub const PHP_VERSION: &str = "8.5.9";
@@ -251,13 +251,14 @@ impl Request {
         &mut self.vm
     }
 
-    /// Push a frame for `code`: its shape on the VM stack and its engine
-    /// state, which are pushed and popped together and share a
+    /// Push a frame for `unit`'s op array: its shape on the VM stack and
+    /// its engine state, which are pushed and popped together and share a
     /// `FrameRef`.
-    pub(crate) fn push_frame(&mut self, code: Arc<OpArray>) -> FrameRef {
+    pub(crate) fn push_frame(&mut self, unit: Arc<Unit>) -> FrameRef {
+        let code = exec::code_of(&unit);
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
         let frame = self.stack.push_frame(slots);
-        self.vm.push(code);
+        self.vm.push(unit);
         frame
     }
 
@@ -415,9 +416,20 @@ impl Request {
     }
 
     pub(crate) fn precision(&self) -> i32 {
-        self.ini_get(b"precision")
-            .and_then(|p| String::from_utf8_lossy(p.as_bytes()).parse().ok())
-            .unwrap_or(14)
+        self.ini_number(b"precision", 14)
+    }
+
+    /// `serialize_precision`, what `var_dump`, `var_export`, `serialize`
+    /// and `json_encode` print a float at; -1, its default, asks for the
+    /// shortest text that reads back as the same double.
+    pub(crate) fn serialize_precision(&self) -> i32 {
+        self.ini_number(b"serialize_precision", -1)
+    }
+
+    fn ini_number(&self, name: &[u8], default: i32) -> i32 {
+        self.ini_get(name)
+            .and_then(|value| String::from_utf8_lossy(value.as_bytes()).parse().ok())
+            .unwrap_or(default)
     }
 
     pub(crate) fn caller_strict_types(&self) -> bool {

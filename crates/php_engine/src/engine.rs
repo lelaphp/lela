@@ -343,7 +343,7 @@ impl Engine {
 /// The unit's main op array served on a fresh entry frame; the loop's
 /// fatal, if any, ends the request.
 fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
-    let frame = req.push_frame(Arc::new(unit.main.clone()));
+    let frame = req.push_frame(Arc::clone(unit));
     if let Err(fatal) = entry(req, frame) {
         req.end_in(&fatal);
     }
@@ -458,15 +458,18 @@ mod tests {
     fn an_opcode_with_no_handler_ends_the_request_naming_it() {
         let engine = Engine::builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), description(""));
-        let main = php_unit::OpArray {
-            oplines: vec![php_unit::Opline {
-                opcode: php_unit::Opcode::Add,
-                ..php_unit::Opline::default()
-            }]
-            .into_boxed_slice(),
-            ..php_unit::OpArray::default()
+        let unit = Unit {
+            main: php_unit::OpArray {
+                oplines: vec![php_unit::Opline {
+                    opcode: php_unit::Opcode::Add,
+                    ..php_unit::Opline::default()
+                }]
+                .into_boxed_slice(),
+                ..php_unit::OpArray::default()
+            },
+            ..Unit::default()
         };
-        let frame = req.push_frame(Arc::new(main));
+        let frame = req.push_frame(Arc::new(unit));
         assert_eq!(
             crate::tier::execute::<Nop>(&mut req, frame),
             Err(Fatal::Error(String::from(
@@ -485,7 +488,8 @@ mod tests {
         let unit = engine
             .unit(b"<?php echo 1;", b"witness.php")
             .unwrap_or_default();
-        let frame = req.push_frame(Arc::new(unit.main.clone()));
+        let unit = Unit::clone(&unit);
+        let frame = req.push_frame(Arc::new(unit));
         assert_eq!(crate::tier::execute::<Probe>(&mut req, frame), Ok(()));
         assert_eq!(
             req.state::<Asked>().0,

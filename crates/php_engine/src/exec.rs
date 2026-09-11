@@ -13,19 +13,25 @@
 use std::sync::Arc;
 
 use php_heap::{FrameRef, Zval};
-use php_unit::{ConstIdx, OpArray, OperandKind, Opline};
+use php_unit::{ConstIdx, OpArray, OperandKind, Opline, Unit};
 
 use crate::api::call::Function;
 use crate::api::values::{PhpString, Value};
 
 /// One frame's engine state.
 pub(crate) struct FrameState {
-    /// The op array being served.
-    pub(crate) code: Arc<OpArray>,
+    /// The unit being served, shared with every other request serving it
+    /// and never copied (design §5.14). Which of its op arrays the frame
+    /// is in is the main one, until the call opcodes that push a frame
+    /// pick another (`DO_UCALL`, design §11 days 3–7).
+    pub(crate) unit: Arc<Unit>,
     /// Where in it the loop stands.
     pub(crate) opline: u32,
     /// The CVs, then the temporaries past the last CV.
     pub(crate) slots: Vec<Value>,
+    /// The caller's slot for what this frame returns, when the call that
+    /// pushed it wants the value.
+    pub(crate) returns_to: Option<(FrameRef, u32)>,
 }
 
 /// One call between its `INIT_FCALL` and the `DO_*CALL` that serves it:
@@ -37,6 +43,8 @@ pub(crate) struct CallState {
     pub(crate) name: PhpString,
     /// The arguments the `SEND_*` oplines have placed.
     pub(crate) arguments: Vec<Value>,
+    /// How many the `INIT_FCALL` said there are, which bounds them.
+    pub(crate) count: usize,
 }
 
 /// Every frame's engine state, and the calls being built.
@@ -49,12 +57,14 @@ pub(crate) struct Vm {
 impl Vm {
     /// Push one frame's state; its place is the `FrameRef` the VM stack
     /// gave the frame, and the two are pushed and popped together.
-    pub(crate) fn push(&mut self, code: Arc<OpArray>) {
+    pub(crate) fn push(&mut self, unit: Arc<Unit>) {
+        let code = code_of(&unit);
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
         self.frames.push(FrameState {
-            code,
+            unit,
             opline: 0,
             slots: vec![Value::null(); slots],
+            returns_to: None,
         });
     }
 
@@ -70,10 +80,16 @@ impl Vm {
         self.frames.get_mut(frame.0 as usize)
     }
 
-    /// The op array being served in `frame`, shared so the loop can read
-    /// its oplines while the request is borrowed.
-    pub(crate) fn code(&self, frame: FrameRef) -> Option<Arc<OpArray>> {
-        self.at(frame).map(|state| Arc::clone(&state.code))
+    /// The unit being served in `frame`, shared rather than copied, so
+    /// the loop can read its oplines while the request is borrowed.
+    pub(crate) fn serving(&self, frame: FrameRef) -> Option<Arc<Unit>> {
+        self.at(frame).map(|state| Arc::clone(&state.unit))
+    }
+
+    /// Where `frame` is to write what it returns, and nothing when the
+    /// call that pushed it wants no value.
+    pub(crate) fn returns_to(&self, frame: FrameRef) -> Option<(FrameRef, u32)> {
+        self.at(frame).and_then(|state| state.returns_to)
     }
 
     /// Where the loop stands in `frame`.
@@ -119,6 +135,11 @@ impl Vm {
     pub(crate) fn take_call(&mut self) -> Option<CallState> {
         self.calls.pop()
     }
+}
+
+/// The op array of `unit` a frame serves.
+pub(crate) fn code_of(unit: &Unit) -> &OpArray {
+    &unit.main
 }
 
 /// The slot a `TMP`/`VAR` operand names: temporaries stand past the last

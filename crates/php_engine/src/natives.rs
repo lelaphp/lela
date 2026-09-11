@@ -43,7 +43,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 /// `php_var_dump`: each value's type and contents, one line each.
 ///
 /// ```php
-/// var_dump(true, false, null, 1, -2, 2.5, "demo", extension_loaded('Core'));
+/// var_dump(true, false, null, 1, -2, 2.5, 0.1, "demo", extension_loaded('Core'));
 /// ```
 /// ```expect
 /// bool(true)
@@ -52,6 +52,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 /// int(1)
 /// int(-2)
 /// float(2.5)
+/// float(0.1)
 /// string(4) "demo"
 /// bool(true)
 /// ```
@@ -76,9 +77,8 @@ fn dumped(req: &mut Request, value: &Value) -> PhpString {
         return PhpString::from_bytes(format!("int({n})\n").as_bytes());
     }
     if let Some(f) = value.as_float() {
-        // php dumps a float at `serialize_precision`, whose -1 default
-        // means the shortest text that reads back as the same double.
-        let text = crate::ops::double_to_string(f, 17);
+        // `php_var_dump` prints a float with `%.*H` at `serialize_precision`.
+        let text = crate::ops::double_to_string(f, req.serialize_precision());
         return PhpString::from_bytes(
             format!("float({})\n", String::from_utf8_lossy(text.as_bytes())).as_bytes(),
         );
@@ -89,7 +89,6 @@ fn dumped(req: &mut Request, value: &Value) -> PhpString {
         line.append(b"\"\n");
         return line;
     }
-    let _ = req;
     PhpString::from_bytes(b"NULL\n")
 }
 

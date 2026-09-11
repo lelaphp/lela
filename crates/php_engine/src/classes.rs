@@ -11,6 +11,7 @@ use php_unit::decl::{ClassDecl, ClassFlags, ClassKind, EnumBacking, Name};
 /// `Throwable` and the throwables php declares under it, parents first.
 pub(crate) fn zend_classes() -> Vec<ClassDecl> {
     vec![
+        declared(b"Stringable", ClassKind::Interface, None),
         declared(b"Throwable", ClassKind::Interface, None),
         declared(b"Exception", ClassKind::Class, None),
         declared(b"Error", ClassKind::Class, None),
@@ -32,9 +33,15 @@ fn declared(name: &[u8], kind: ClassKind, parent: Option<&[u8]>) -> ClassDecl {
         kind,
         flags: ClassFlags::default(),
         parent: parent.map(|p| Name(p.into())),
-        interfaces: match kind {
-            ClassKind::Interface => Vec::new(),
-            _ => vec![Name(b"Throwable".as_slice().into())],
+        // php declares the interfaces on `Exception` and `Error` alone
+        // and the rest inherit them (`zend_register_default_classes`);
+        // the linker is what carries them down (design §6.2).
+        interfaces: match (kind, parent) {
+            (ClassKind::Class, None) => vec![
+                Name(b"Throwable".as_slice().into()),
+                Name(b"Stringable".as_slice().into()),
+            ],
+            _ => Vec::new(),
         },
         traits: Vec::new(),
         backing: EnumBacking::Pure,
