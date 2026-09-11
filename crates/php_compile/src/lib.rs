@@ -100,7 +100,7 @@ mod tests {
         let unit = unit_of(b"<?php var_dump(extension_loaded('demo'));");
         assert_eq!(
             unit.dump(),
-            "$_main:\n     ; (lines=7, args=0, vars=0, tmps=1)\n\
+            "$_main:\n     ; (lines=7, args=0, vars=0, tmps=2)\n\
              0000 INIT_FCALL CONST[0]\n\
              0001 INIT_FCALL CONST[1]\n\
              0002 SEND_VAL CONST[2]\n\
@@ -111,6 +111,10 @@ mod tests {
         );
         assert_eq!(unit.main.oplines[0].extended_value, 1, "one argument");
         assert_eq!(unit.main.cache_size, 2, "one cache slot per INIT_FCALL");
+        assert_eq!(
+            unit.main.num_tmps, 2,
+            "one temporary per call, as php counts them here"
+        );
     }
 
     #[test]

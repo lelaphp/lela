@@ -132,7 +132,7 @@ impl Emit {
             }
             Stmt::Echo(parts) => {
                 for part in parts {
-                    let value = self.expr(part, true);
+                    let value = self.expr(part);
                     self.push(Opline {
                         opcode: Opcode::Echo,
                         op1_type: value.kind(),
@@ -142,21 +142,20 @@ impl Emit {
                 }
             }
             Stmt::Effect(expr) => {
-                self.expr(expr, false);
+                self.expr(expr);
             }
         }
     }
 
-    /// Compile `expr` and say where its value is. `used` is php's
-    /// `result_used`: a call whose value nothing reads writes none.
-    fn expr(&mut self, expr: &Expr, used: bool) -> Where {
+    /// Compile `expr` and say where its value is.
+    fn expr(&mut self, expr: &Expr) -> Where {
         match expr {
             Expr::Null => Where::Constant(self.constant(Zval::null())),
             Expr::Bool(b) => Where::Constant(self.constant(Zval::bool(*b))),
             Expr::Int(n) => Where::Constant(self.constant(Zval::long(*n))),
             Expr::Float(f) => Where::Constant(self.constant(Zval::double(*f))),
             Expr::Str(bytes) => Where::Constant(self.constant(Zval::string(Str::intern(bytes)))),
-            Expr::Call { name, arguments } => self.call(name, arguments, used),
+            Expr::Call { name, arguments } => self.call(name, arguments),
         }
     }
 
@@ -165,7 +164,12 @@ impl Emit {
     /// has is a native, so the call op is `DO_ICALL`; the compile-time
     /// table that also answers `INIT_FCALL_BY_NAME` and `DO_UCALL` comes
     /// with the engine's declarations.
-    fn call(&mut self, name: &[u8], arguments: &[Expr], used: bool) -> Where {
+    ///
+    /// Every call is given a temporary for what it returns. php leaves
+    /// the field unused on a call nothing reads, and an [`Opline`] has
+    /// nowhere to say so: the design's twenty-four bytes carry
+    /// `op1_type` and `op2_type` and no third (design §5.7).
+    fn call(&mut self, name: &[u8], arguments: &[Expr]) -> Where {
         let lowered = self.constant(Zval::string(Str::intern(&unqualified(name))));
         let count = u32::try_from(arguments.len()).unwrap_or(0);
         let slot = self.cache_slot();
@@ -178,7 +182,7 @@ impl Emit {
             ..Opline::default()
         });
         for (at, argument) in arguments.iter().enumerate() {
-            let value = self.expr(argument, true);
+            let value = self.expr(argument);
             let number = u32::try_from(at).unwrap_or(0) + 1;
             self.push(Opline {
                 // php sends a VAR by `SEND_VAR` and anything else by
@@ -194,7 +198,7 @@ impl Emit {
                 ..Opline::default()
             });
         }
-        let out = if used { self.temporary() } else { 0 };
+        let out = self.temporary();
         self.push(Opline {
             opcode: Opcode::DoIcall,
             out,

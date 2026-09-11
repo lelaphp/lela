@@ -7,8 +7,9 @@
 //! it, so when §4.9's copy lands this file goes and `emit` is given the
 //! tree instead.
 //!
-//! What it reads: the open and close tags with the text around them, an
-//! `echo` of one or more expressions, an expression statement, and inside
+//! What it reads: the open and close tags with the text around them,
+//! `<?=` as the `echo` php reads it as, an `echo` of one or more
+//! expressions, the empty statement, an expression statement, and inside
 //! an expression a number, a single- or double-quoted string with no
 //! interpolation, `true`, `false`, `null`, and a call of a named function.
 //! Anything else is a [`crate::CompileError`], so what this cannot read is
@@ -63,8 +64,8 @@ pub(crate) fn read(source: &[u8]) -> Result<Read, Trouble> {
         if reader.at >= reader.source.len() {
             return Ok(out);
         }
-        reader.open_tag();
-        reader.statements(&mut out)?;
+        let short = reader.open_tag();
+        reader.statements(&mut out, short)?;
     }
 }
 
@@ -80,7 +81,14 @@ impl Reader<'_> {
     }
 
     fn starts_with(&self, text: &[u8]) -> bool {
-        self.source[self.at..].starts_with(text)
+        self.source
+            .get(self.at..)
+            .is_some_and(|rest| rest.starts_with(text))
+    }
+
+    /// The bytes from `start` to where the reader stands.
+    fn taken(&self, start: usize) -> Vec<u8> {
+        self.source.get(start..self.at).unwrap_or_default().to_vec()
     }
 
     fn bump(&mut self, by: usize) {
@@ -108,19 +116,27 @@ impl Reader<'_> {
         {
             self.bump(1);
         }
-        self.source[start..self.at].to_vec()
+        self.taken(start)
     }
 
-    fn open_tag(&mut self) {
+    /// Step over the open tag; `true` for `<?=`, which php reads as an
+    /// `echo` of the statement that follows it.
+    fn open_tag(&mut self) -> bool {
         if self.starts_with(b"<?php") {
             self.bump(5);
-        } else if self.starts_with(b"<?=") {
-            self.bump(3);
+            return false;
         }
+        if self.starts_with(b"<?=") {
+            self.bump(3);
+            return true;
+        }
+        false
     }
 
     /// Every statement up to the close tag or the end of the source.
-    fn statements(&mut self, out: &mut Read) -> Result<(), Trouble> {
+    /// `short` is `<?=`, whose first statement php reads as an `echo`.
+    fn statements(&mut self, out: &mut Read, short: bool) -> Result<(), Trouble> {
+        let mut short = short;
         loop {
             self.skip_trivia();
             if self.at >= self.source.len() {
@@ -129,39 +145,55 @@ impl Reader<'_> {
             if self.starts_with(b"?>") {
                 self.bump(2);
                 // php eats one newline directly after a close tag.
-                if self.byte(0) == Some(b'\n') {
+                if self.starts_with(b"\r\n") {
+                    self.bump(2);
+                } else if self.byte(0) == Some(b'\n') {
                     self.bump(1);
                 }
                 return Ok(());
             }
             let line = self.line;
-            let statement = self.statement()?;
-            out.push((statement, line));
+            let statement = if short {
+                short = false;
+                Some(Stmt::Echo(self.echoed()?))
+            } else {
+                self.statement()?
+            };
+            if let Some(statement) = statement {
+                out.push((statement, line));
+            }
         }
     }
 
-    fn statement(&mut self) -> Result<Stmt, Trouble> {
+    /// One statement, or nothing for the empty statement `;`.
+    fn statement(&mut self) -> Result<Option<Stmt>, Trouble> {
         if self.byte(0) == Some(b';') {
             self.bump(1);
-            return Ok(Stmt::Echo(Vec::new()));
+            return Ok(None);
         }
         if self.word_ahead(b"echo") {
             self.bump(4);
-            let mut parts = vec![self.expr()?];
-            loop {
-                self.skip_trivia();
-                if self.byte(0) == Some(b',') {
-                    self.bump(1);
-                    parts.push(self.expr()?);
-                    continue;
-                }
-                self.end_of_statement()?;
-                return Ok(Stmt::Echo(parts));
-            }
+            return Ok(Some(Stmt::Echo(self.echoed()?)));
         }
         let expr = self.expr()?;
         self.end_of_statement()?;
-        Ok(Stmt::Effect(expr))
+        Ok(Some(Stmt::Effect(expr)))
+    }
+
+    /// The expressions of an `echo`, which `<?=` has too, up to the end
+    /// of the statement.
+    fn echoed(&mut self) -> Result<Vec<Expr>, Trouble> {
+        let mut parts = vec![self.expr()?];
+        loop {
+            self.skip_trivia();
+            if self.byte(0) == Some(b',') {
+                self.bump(1);
+                parts.push(self.expr()?);
+                continue;
+            }
+            self.end_of_statement()?;
+            return Ok(parts);
+        }
     }
 
     /// A `;`, or a close tag, which php accepts in its place.
@@ -234,7 +266,7 @@ impl Reader<'_> {
         {
             self.bump(1);
         }
-        self.source[start..self.at].to_vec()
+        self.taken(start)
     }
 
     fn digit_ahead(&self, ahead: usize) -> bool {
@@ -267,7 +299,8 @@ impl Reader<'_> {
                 break;
             }
         }
-        let digits: String = self.source[start..self.at]
+        let digits: String = self
+            .taken(start)
             .iter()
             .filter(|b| **b != b'_')
             .map(|b| char::from(*b))
@@ -334,6 +367,14 @@ impl Reader<'_> {
                         Some(b'f') => 0x0c,
                         Some(b'e') => 0x1b,
                         Some(b @ (b'\\' | b'"' | b'$')) => b,
+                        // `\x41`, `\101` and `\u{1F600}` are php's other
+                        // escapes; refused rather than read as the
+                        // backslash php does not leave there.
+                        Some(b'x' | b'u' | b'0'..=b'7') => {
+                            return Err(
+                                self.trouble("a string escape this compiler cannot read yet")
+                            );
+                        }
                         _ => {
                             bytes.push(b'\\');
                             self.bump(1);
@@ -430,5 +471,49 @@ mod tests {
     fn what_it_cannot_read_is_refused_at_its_line() {
         let trouble = read(b"<?php\n$x = 1;").err();
         assert_eq!(trouble.map(|t| t.line), Some(2));
+    }
+
+    #[test]
+    fn a_short_echo_tag_echoes_what_follows_it() {
+        let read = read(b"<?= 1, 2 ?>after").unwrap_or_default();
+        assert_eq!(
+            read,
+            vec![
+                (Stmt::Echo(vec![Expr::Int(1), Expr::Int(2)]), 1),
+                (Stmt::Inline(b"after".to_vec()), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_empty_statement_is_no_statement_at_all() {
+        assert_eq!(read(b"<?php ;;").unwrap_or_default(), Vec::new());
+    }
+
+    #[test]
+    fn a_string_escape_it_cannot_read_is_refused_rather_than_mis_read() {
+        for source in [
+            b"<?php echo \"\\x41\";".as_slice(),
+            b"<?php echo \"\\101\";".as_slice(),
+            b"<?php echo \"\\u{1F600}\";".as_slice(),
+        ] {
+            assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
+        }
+    }
+
+    #[test]
+    fn a_close_tag_eats_one_newline_however_it_is_written() {
+        assert_eq!(
+            read(b"<?php echo 1; ?>\r\nafter").unwrap_or_default().len(),
+            2,
+            "the echo and the text after it, with the newline eaten"
+        );
+        assert_eq!(
+            read(b"<?php echo 1; ?>\r\nafter")
+                .unwrap_or_default()
+                .last()
+                .cloned(),
+            Some((Stmt::Inline(b"after".to_vec()), 2))
+        );
     }
 }
