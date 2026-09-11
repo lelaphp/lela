@@ -6,19 +6,18 @@
 //! grammar is this module's: `oracle.toml` is refused on a key outside it.
 //!
 //! **What a lane holds.** Everything that touches the pin lives here, so
-//! the two lanes, `phpt` and `witness`, share this module and neither
-//! imports the other. An [`Oracle`] is the pin for the length of one run,
-//! its digest asserted once before the first program runs and never per
-//! program; a [`Runner`] is what the lane measured the engine with, or why
-//! it could not; [`Source::tree`] is where the pinned php-src is on this
-//! machine, the tree [`TREE_VARIABLE`] names first and the pin's path
-//! second, which the runner and the tests that resolve a subset ask and
-//! never read off the pin themselves; [`Promise`] is what a runner says
-//! this machine has of the pin, so a test that would skip for a fact the
-//! machine has not fails instead where the fact was promised (#38); and
-//! [`expect`] is how an expectation
-//! that is a pattern rather than bytes is met, which `verdict` takes as the
-//! caller's match.
+//! the three lanes, `phpt`, `witness` and `compile-identity`, share this
+//! module and none imports another. An [`Oracle`] is the pin for the
+//! length of one run, its digest asserted once before the first program
+//! runs and never per program; a [`Runner`] is what the lane measured the
+//! engine with, or why it could not; [`Source::tree`] is where the pinned
+//! php-src is on this machine, the tree [`TREE_VARIABLE`] names first and
+//! the pin's path second, which the runner and the tests that resolve a
+//! subset ask and never read off the pin themselves; [`Promise`] is what a
+//! runner says this machine has of the pin, so a test that would skip for
+//! a fact the machine has not fails instead where the fact was promised
+//! (#38); and [`expect`] is how an expectation that is a pattern rather
+//! than bytes is met, which `verdict` takes as the caller's match.
 //!
 //! The version, the digest and the path are values of the pin and appear in
 //! no source file (§10 rule 5).

@@ -1,13 +1,12 @@
 //! The tally behind the behaviour harness's lanes (harness-design.md §4.2,
-//! §4.3, §7): what `phpt` and `witness` hold in common once each has said
-//! what one item is and how it is judged. A tally is the verdicts of one
+//! §4.3, §7): what `phpt`, `witness` and `compile-identity` hold in common
+//! once each has said what one item is and how it is judged. A tally is the verdicts of one
 //! run of a corpus through the [`Runner`], and what follows from them: the
 //! print loop, the counts, the runner ladder and the reading's status. A
 //! lane is a scheduled run of a corpus, the per-commit subsets or the
 //! nightly whole (harness §7), and never this module; a lane contributes
 //! its [`Judgement`], a per-item judge and the words of its message, and
-//! nothing else. The compile-identity lane, when it comes, is the third
-//! caller.
+//! nothing else.
 //!
 //! **The runner ladder.** What ran decides what a green tally means. A
 //! [`Runner::Control`] is the pinned oracle standing where the engine
@@ -34,7 +33,8 @@
 //! run is counted, never a refusal (#65).
 
 use std::fmt;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
@@ -193,6 +193,18 @@ impl<J: Judgement> Tally<J> {
         self.judged.iter().filter(|j| j.judgement.met()).count() as u64
     }
 
+    /// What met of what was found, to one decimal: the burndown's number,
+    /// which a `[[week]]` bar reads off one reading. Nothing found is
+    /// nothing met.
+    pub fn percent(&self) -> f64 {
+        if self.found == 0 {
+            return 0.0;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let ratio = (self.met() as f64 / self.found as f64) * 1000.0;
+        ratio.round() / 10.0
+    }
+
     /// The items that fail the reading, by name.
     pub fn against(&self) -> Vec<&str> {
         self.judged
@@ -256,6 +268,26 @@ impl<J: Judgement> Tally<J> {
         reading.message = message;
         Ok(reading)
     }
+}
+
+/// Every file under `dir`, recursively, in no order: what a lane walks a
+/// corpus with, whether the corpus is the pinned tree's subsets or a
+/// directory of files. A directory that is not there has none, since
+/// whether the corpus is where it should be is the lane's sentence and
+/// not this walk's.
+pub fn files_under(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if path.is_dir() {
+            files_under(&path, out)?;
+        } else {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

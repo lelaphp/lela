@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 
 use crate::phpt::Lane;
 
@@ -217,6 +217,13 @@ pub(crate) enum Command {
         #[arg(long, value_name = "PATH")]
         tree: Option<PathBuf>,
     },
+    /// Compile a corpus under the oracle's dump recipe and under the
+    /// engine, and hold every file to byte-identity; one reading per
+    /// corpus, scoped to the corpus.
+    ///
+    /// Without an argument, the per-commit corpus of design §6.1: every
+    /// file of `Zend/tests`, `tests` and `sapi/cli` of the pinned php-src.
+    CompileIdentity(Identity),
     /// Allow `unsafe` only in the homes the manifest's unsafe.homes rule names.
     UnsafeAudit,
     /// Write the files the manifest's `generated` rules render (ext/clippy.toml).
@@ -279,6 +286,25 @@ pub(crate) enum Command {
         #[arg(long = "crate", value_name = "NAME")]
         crates: Vec<String>,
     },
+}
+
+/// What one `compile-identity` run is asked for, flattened onto the
+/// command so the dispatch has one line for the instrument as it has for
+/// every other.
+#[derive(Debug, Args)]
+pub(crate) struct Identity {
+    /// One file, on request: its verdict is printed, a difference is the
+    /// exit, and nothing is recorded.
+    #[arg(long, value_name = "PATH", conflicts_with = "corpus")]
+    pub file: Option<PathBuf>,
+    /// A corpus at a directory of its own: the nightly whole, which CI
+    /// runs.
+    #[arg(long, value_name = "DIR")]
+    pub corpus: Option<PathBuf>,
+    /// The binary whose dump is held to the oracle's; without it, the
+    /// engine's own where cargo puts it.
+    #[arg(long, value_name = "PATH")]
+    pub engine: Option<PathBuf>,
 }
 
 /// What is done to a track rather than asked of it.

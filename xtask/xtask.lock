@@ -5,6 +5,9 @@ cli::Format
 cli::Section
 clippy::run
 clippy::run_staged
+compile_identity::Ask
+compile_identity::REGIME
+compile_identity::run
 computed::command
 divergence::Counts
 divergence::Counts::cell

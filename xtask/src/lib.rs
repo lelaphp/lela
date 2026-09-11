@@ -4,7 +4,8 @@
 //! store, the instruments, `permit`, the judge at the hook's call, `done`,
 //! the definition of done, `track`, the branch's track and its base,
 //! `vocab`, the glossary as a sensor, `ticket`, the closer, `phpt`, the
-//! subset runner, `witness`, the rustdoc witnesses, and `status`, the one
+//! subset runner, `witness`, the rustdoc witnesses, `compile_identity`,
+//! op-array identity against php's own dump, and `status`, the one
 //! renderer.
 //!
 //! What the crate exposes is what a caller of an instrument needs and
@@ -20,6 +21,7 @@ pub mod budget;
 mod built;
 pub mod cli;
 pub mod clippy;
+pub mod compile_identity;
 pub mod computed;
 pub mod divergence;
 pub mod done;
@@ -164,6 +166,7 @@ fn command_line() -> Result<()> {
             engine,
         } => phpt_command(&root, &manifest, &store, subset, full, jit, engine),
         Command::PortMap { tree } => port_map::command(&root, &manifest, &store, tree.as_deref()),
+        Command::CompileIdentity(ask) => identity_command(&root, &manifest, &store, ask),
         Command::UnsafeAudit => record(&store, &unsafe_audit::run(&root, &manifest)?),
         Command::Generate => {
             for path in generated::write_all(&root, &manifest)? {
@@ -280,6 +283,27 @@ fn phpt_command(
         engine,
     };
     record(store, &phpt::run(root, manifest, &registry, &ask)?)
+}
+
+/// `xtask compile-identity`: the corpus asked for, dumped twice and
+/// written; or one file, whose verdict is the exit and which records
+/// nothing.
+fn identity_command(
+    root: &Path,
+    manifest: &Manifest,
+    store: &Store,
+    ask: cli::Identity,
+) -> Result<()> {
+    let registry = Registry::load(root)?;
+    let ask = compile_identity::Ask {
+        file: ask.file,
+        corpus: ask.corpus,
+        engine: ask.engine,
+    };
+    record(
+        store,
+        &compile_identity::run(root, manifest, &registry, &ask)?,
+    )
 }
 
 /// `xtask divergence-reason`: the registry against the rule whose `check`

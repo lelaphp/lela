@@ -247,7 +247,7 @@ impl Subset {
         let mut all = Vec::new();
         for place in &self.dirs {
             let mut found = Vec::new();
-            walk(&place.dir, &mut found)
+            tally::files_under(&place.dir, &mut found)
                 .with_context(|| format!("listing the subset at {}", place.dir.display()))?;
             found.retain(|path| path.extension().is_some_and(|e| e == "phpt"));
             found.sort();
@@ -309,22 +309,6 @@ impl Subset {
         }
         scope
     }
-}
-
-/// Every file under `dir`, recursively; a missing directory has none.
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Ok(());
-    };
-    for entry in entries {
-        let path = entry?.path();
-        if path.is_dir() {
-            walk(&path, out)?;
-        } else {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 /// What one test came to: upstream's outcomes less the two a leak checker
@@ -485,21 +469,10 @@ pub(crate) fn reading(
     )?;
     // The burndown's number: what met its expectation, over the tests the
     // subset holds, so a `[[week]]` bar can read one figure.
-    reading.numbers.insert(
-        "percent".to_owned(),
-        percent(tally.met(), tally.found as u64).into(),
-    );
+    reading
+        .numbers
+        .insert("percent".to_owned(), tally.percent().into());
     Ok(reading)
-}
-
-/// What `met` is of `found`, to one decimal; nothing found is nothing met.
-fn percent(met: u64, found: u64) -> f64 {
-    if found == 0 {
-        return 0.0;
-    }
-    #[allow(clippy::cast_precision_loss)]
-    let ratio = (met as f64 / found as f64) * 1000.0;
-    ratio.round() / 10.0
 }
 
 /// What one `xtask phpt` run was asked for.
