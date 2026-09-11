@@ -131,9 +131,9 @@ pub(crate) enum Command {
     ///
     /// `add` lays the worktree down ready to be worked in, the branch off
     /// its track with the ticket it is for recorded on it, `xtask` built
-    /// there, the local file laid and rendered, the `computed trust` line
-    /// printed as a person's; refuses a branch that exists and a directory
-    /// that does. `retire` appends the worktree's log into its track's
+    /// there, the local file laid and rendered under the clone's grant,
+    /// which covers the worktree and asks for none of its own (#74, §11);
+    /// refuses a branch that exists and a directory that does. `retire` appends the worktree's log into its track's
     /// store, removes the worktree and prints the branch-delete line as a
     /// person's; refuses uncommitted work.
     Worktree {
