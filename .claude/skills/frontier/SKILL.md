@@ -1,10 +1,10 @@
 ---
 name: frontier
-description: A track's map at one row of third-engine-design.md §11 and its batches of tickets; `/frontier chart <days>` lays the map down and files the first batch, `/frontier work` files the next when the frontier empties; run from a track's clone or from main.
+description: A track's chart at one row of third-engine-design.md §11 and its batches of tickets; `/frontier chart <days>` lays the chart down and files the first batch, `/frontier work` files the next when the frontier empties; run from a track's clone or from main.
 disable-model-invocation: true
 ---
 
-A track works a frontier: the open, unblocked tickets `xtask track next` names. This skill is what fills it, one batch per session, from a **map** on the tracker. `chart <days>` lays the map down at the §11 row the engine stands at and files the first batch. `work` files the next batch when the frontier empties: it indexes the closes since the last batch on the map and graduates the fog they made sharp. A session runs one mode once: it files, prints what it filed and ends. Nothing here measures the engine and nothing here decides for the design of record.
+A track works a frontier: the open, unblocked tickets `xtask track next` names. This skill is what fills it, one batch per session, from a **chart** on the tracker. `chart <days>` lays the chart down at the §11 row the engine stands at and files the first batch. `work` files the next batch when the frontier empties: it indexes the closes since the last batch on the chart and graduates the fog they made sharp. A session runs one mode once: it files, prints what it filed and ends. Nothing here measures the engine and nothing here decides for the design of record.
 
 ## Where you stand
 
@@ -16,16 +16,16 @@ A track works a frontier: the open, unblocked tickets `xtask track next` names. 
 
 Four labels, each created when `gh label list --json name --jq '.[].name'` lacks it, and described so a person reads them cold:
 
-- `frontier:map`: The map of one track's frontier; its tickets are its sub-issues
+- `frontier:chart`: The chart of one track's frontier; its tickets are its sub-issues
 - `frontier:research`: A fact outside the tree that a decision waits on; resolved by `/research`
 - `frontier:decision`: A decision the design of record does not make; resolved by `/grill-design`, a person's
 - `track:<name>`: Only the <name> track works this ticket; a ticket with no track: label is every track's
 
 `gh label create <name> --description "<text>" --color <hex>`; a label that exists is left as it is.
 
-## The map
+## The chart
 
-One issue, labelled `frontier:map` (and `track:<name>` from a clone), titled `Map: <track> at §11 days <row>`. Its body is the whole map at low resolution, loaded once per session; open tickets are not listed on it, they are its open sub-issues:
+One issue, labelled `frontier:chart` (and `track:<name>` from a clone), titled `Chart: <track> at §11 days <row>`. Its body is the whole chart at low resolution, loaded once per session; open tickets are not listed on it, they are its open sub-issues:
 
 ```markdown
 ## Destination
@@ -38,7 +38,7 @@ One issue, labelled `frontier:map` (and `track:<name>` from a clone), titled `Ma
 
 ## Decisions so far
 
-<!-- one line per closed ticket: [<title>](url), a one-line gist; the map indexes, the ticket holds the detail -->
+<!-- one line per closed ticket: [<title>](url), a one-line gist; the chart indexes, the ticket holds the detail -->
 
 ## Not yet specified
 
@@ -49,11 +49,11 @@ One issue, labelled `frontier:map` (and `track:<name>` from a clone), titled `Ma
 <!-- work ruled past the destination; closed, never graduates -->
 ```
 
-The map indexes and never restates: a decision lives in its ticket, the map gists it and links. In everything a person reads, a ticket goes by its title with the link inside the name, never by a bare number.
+The chart indexes and never restates: a decision lives in its ticket, the chart gists it and links. In everything a person reads, a ticket goes by its title with the link inside the name, never by a bare number.
 
 ## A ticket
 
-One concern of the row, sized to one session, filed as a sub-issue of the map (`gh issue create --parent <map>`) with the body shape every ticket in this repository has, since `xtask ticket read` holds a ticket to the boxes under `## Acceptance criteria`:
+One concern of the row, sized to one session, filed as a sub-issue of the chart (`gh issue create --parent <chart>`) with the body shape every ticket in this repository has, since `xtask ticket read` holds a ticket to the boxes under `## Acceptance criteria`:
 
 ```markdown
 ## What to build
@@ -77,17 +77,17 @@ Blocking is the tracker's own relation, wired in a second pass once the numbers 
 
 1. Read where you stand, the row named in the argument and the renderings. Without a row, or with one that is no `Days` cell of §11, stop and say so; chart files nothing on a guess.
 2. Create the labels the batch needs that are missing.
-3. File the map: Destination from the row's exit bar, Notes, Decisions so far empty, the fog of the row sketched under Not yet specified, Out of scope empty.
-4. File the first three to five tickets of the row: the work the renderings show undone that is sharp enough to ticket now, each one concern with acceptance boxes `done` can hold, each a sub-issue of the map, typed and labelled as above. What is not sharp stays in the fog.
+3. File the chart: Destination from the row's exit bar, Notes, Decisions so far empty, the fog of the row sketched under Not yet specified, Out of scope empty.
+4. File the first three to five tickets of the row: the work the renderings show undone that is sharp enough to ticket now, each one concern with acceptance boxes `done` can hold, each a sub-issue of the chart, typed and labelled as above. What is not sharp stays in the fog.
 5. Wire blocking in the second pass, then write the `## Blocked by` list of each ticket from the relation as it now is.
-6. Print what you filed: the map by title and number, each ticket by title, number, type and what blocks it. Then end; charting is one session's work and resolves no ticket.
+6. Print what you filed: the chart by title and number, each ticket by title, number, type and what blocks it. Then end; charting is one session's work and resolves no ticket.
 
 ## work
 
-1. Read where you stand and the renderings. `cargo run -q -p xtask -- track next` says `none` when the frontier is empty; while it names a ticket, stop and say so: work files nothing on top of a frontier still standing. Find the map, the one open `frontier:map` issue carrying `track:<name>` from a clone and none from main (`gh issue list --label frontier:map --state open --json number,title,labels`); without one, or with two, stop and name it, since `chart <days>` lays a map down and work walks one.
-2. Load the map body, the low-resolution view. The closes since the last batch are the map's closed sub-issues with no line under Decisions so far and none under Out of scope; the map indexes every close, so a missing line is what marks one new. Zoom each: its body and the closing comment `xtask ticket close` left, naming the commit and what the work opened. Append one line per close to Decisions so far, `[<title>](url), <gist>`, the gist one line and the detail left in the ticket.
+1. Read where you stand and the renderings. `cargo run -q -p xtask -- track next` says `none` when the frontier is empty; while it names a ticket, stop and say so: work files nothing on top of a frontier still standing. Find the chart, the one open `frontier:chart` issue carrying `track:<name>` from a clone and none from main (`gh issue list --label frontier:chart --state open --json number,title,labels`); without one, or with two, stop and name it, since `chart <days>` lays a chart down and work walks one.
+2. Load the chart body, the low-resolution view. The closes since the last batch are the chart's closed sub-issues with no line under Decisions so far and none under Out of scope; the chart indexes every close, so a missing line is what marks one new. Zoom each: its body and the closing comment `xtask ticket close` left, naming the commit and what the work opened. Append one line per close to Decisions so far, `[<title>](url), <gist>`, the gist one line and the detail left in the ticket.
 3. Rule out of scope what a resolution showed sits past the destination: a sub-issue, open or closed, whose work lies beyond the row's exit bar. Take it off the frontier, `gh issue edit <n> --remove-label ready-for-agent --add-label for-a-person`, comment on it naming the destination it sits past, and gist it under Out of scope with the link and the reason. The close itself is a person's: `gh issue close` is not available to you (ticket.close) and `xtask ticket close` closes work that met its boxes. A ticket ruled out gets no line under Decisions so far; that section is the route walked.
-4. Graduate the fog: each patch of Not yet specified the closes made sharp becomes tickets, filed as in A ticket, three to five in the batch, each a sub-issue of the map, typed and labelled. Delete the graduated patch from Not yet specified so it lives only as its tickets; a patch that graduated in part stays, rewritten to what is still dim. A patch no close sharpened stays as it is, and one the closes showed past the destination moves to Out of scope. A decision the batch needs is a `frontier:decision` ticket for `/grill-design`, never the planner's own. A ticket on the map the closes invalidated is edited to what still holds, or ruled out of scope. With the fog empty and nothing to graduate the map is walked: say so, file nothing; the row's exit bar is measured by the instruments, and the next row is a person's `chart <days>`.
+4. Graduate the fog: each patch of Not yet specified the closes made sharp becomes tickets, filed as in A ticket, three to five in the batch, each a sub-issue of the chart, typed and labelled. Delete the graduated patch from Not yet specified so it lives only as its tickets; a patch that graduated in part stays, rewritten to what is still dim. A patch no close sharpened stays as it is, and one the closes showed past the destination moves to Out of scope. A decision the batch needs is a `frontier:decision` ticket for `/grill-design`, never the planner's own. A ticket on the chart the closes invalidated is edited to what still holds, or ruled out of scope. With the fog empty and nothing to graduate the chart is walked: say so, file nothing; the row's exit bar is measured by the instruments, and the next row is a person's `chart <days>`.
 5. Wire blocking in the second pass, then write the `## Blocked by` list of each new ticket from the relation as it now is.
-6. Write the map body back once, `gh issue edit <map> --body-file <file>`, with Decisions so far, Not yet specified and Out of scope as steps 2 to 4 left them.
+6. Write the chart body back once, `gh issue edit <chart> --body-file <file>`, with Decisions so far, Not yet specified and Out of scope as steps 2 to 4 left them.
 7. Print what you filed: each gist appended by title, each ticket ruled out by title and why, each ticket filed by title, number, type and what blocks it. Then end; one batch is one session's work and resolves no ticket.
