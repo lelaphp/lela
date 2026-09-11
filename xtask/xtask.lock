@@ -249,9 +249,12 @@ track_work::Session::prompt
 track_work::Skill
 track_work::Skill::name
 track_work::Skill::of
+track_work::Swept
+track_work::Swept::render
 track_work::Worked
 track_work::Worked::render
 track_work::command
+track_work::sweep
 track_work::work
 unsafe_audit::run
 vocab::hold

@@ -39,6 +39,14 @@ fn rev(root: &Path, name: &str) -> String {
     sh(root, &["git", "rev-parse", name]).trim().to_owned()
 }
 
+/// Whether `commit` is in the history of `tip`: what a merge back and a
+/// catch-up both leave behind, where neither ref is the other's tip.
+fn holds(root: &Path, tip: &str, commit: &str) -> bool {
+    sh(root, &["git", "rev-list", tip])
+        .lines()
+        .any(|line| line == commit)
+}
+
 fn has_ref(root: &Path, name: &str) -> bool {
     Command::new("git")
         .args([
@@ -230,6 +238,17 @@ impl Scratch {
             .to_string(),
         )
         .unwrap();
+    }
+
+    /// The ticket `issue view <n>` answers with for `number`, closed:
+    /// what the tracker has once a person closed a ticket whose session
+    /// had ended with it open (#116).
+    fn closes(&self, number: u64) {
+        let file = self.dir.join(format!("view.{number}.json"));
+        let text = fs::read_to_string(&file)
+            .unwrap()
+            .replace("\"OPEN\"", "\"CLOSED\"");
+        fs::write(&file, text).unwrap();
     }
 
     /// What the session does when started, for every ticket.
@@ -926,5 +945,209 @@ fn a_frontier_that_stays_empty_ends_the_run_and_a_record_not_auto_refuses() {
         1,
         "no second session: {out}"
     );
+    let _ = fs::remove_dir_all(&scratch.dir);
+}
+
+/// A worktree left standing by an earlier run, whose ticket a person
+/// closed afterwards and whose branch is ahead, is swept before the
+/// frontier is consulted (#116): the track is fast-forwarded to its tip,
+/// pushed to `origin` and the worktree retired, one line naming the
+/// ticket and the commit. The sweep is idempotent: the run that left it
+/// standing said nothing of a sweep, and the run after the sweep says
+/// nothing either and moves no ref.
+#[test]
+fn a_standing_worktree_whose_ticket_closed_is_swept_before_the_frontier() {
+    let scratch = Scratch::lay("sweep-ahead");
+    scratch.tracker(&[20], 20);
+    scratch.viewed(20);
+    scratch.act_on(20, "commit");
+    let before = rev(&scratch.root, "origin/t-x");
+
+    // The first run leaves #20 standing, and sweeps nothing.
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(!out.contains("swept"), "nothing to sweep: {out}");
+    assert!(scratch.worktree("t-x/t20").is_dir(), "{out}");
+    let tip = rev(&scratch.root, "t-x/t20");
+    assert_ne!(tip, before, "the session committed: {out}");
+    assert_eq!(rev(&scratch.origin, "t-x"), before, "{out}");
+
+    // A person closes it, and main moved under the track meanwhile. The
+    // sweep is the run's first act, before the catch-up, so the branch
+    // is still a fast-forward of the track when it is judged; catch the
+    // track up first and the merge would make it none, forever.
+    scratch.closes(20);
+    let main = scratch.land("main", "landed.txt", "on main\n");
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.lines().any(|line| line
+            == format!(
+                "track work: swept #20, closed since its session at {}; t-x fast-forwarded to it and pushed to origin, t-x/t20 retired",
+                &tip[..7]
+            )),
+        "{out}"
+    );
+    let lines: Vec<&str> = out.lines().collect();
+    let swept = lines
+        .iter()
+        .position(|line| line.starts_with("track work: swept #20"))
+        .unwrap_or_else(|| panic!("{out}"));
+    let synced = lines
+        .iter()
+        .position(|line| line.starts_with("track sync: t-x caught up with main"))
+        .unwrap_or_else(|| panic!("{out}"));
+    assert!(swept < synced, "the sweep is the run's first act: {out}");
+    let now = rev(&scratch.root, "origin/t-x");
+    assert!(holds(&scratch.root, &now, &tip), "the work landed: {out}");
+    assert!(holds(&scratch.root, &now, &main), "main landed: {out}");
+    assert!(!scratch.worktree("t-x/t20").exists(), "retired: {out}");
+    assert_eq!(scratch.worktrees().len(), 1, "{out}");
+    assert_eq!(
+        sh(&scratch.root, &["git", "config", "branch.t-x/t20.ticket"]).trim(),
+        "20",
+        "the branch and its record are kept: {out}"
+    );
+    assert!(out.contains("none: the frontier of t-x is empty"), "{out}");
+
+    // Nothing left to sweep: no line about it, and no ref moves.
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("swept"), "{out}");
+    assert!(!out.contains("#20"), "{out}");
+    assert_eq!(rev(&scratch.origin, "t-x"), now, "{out}");
+    assert_eq!(rev(&scratch.root, "HEAD"), now, "{out}");
+    let _ = fs::remove_dir_all(&scratch.dir);
+}
+
+/// A worktree of another track is none of this track's business: the
+/// sweep leaves it standing whatever its ticket says, and moves no ref
+/// of it (#116).
+#[test]
+fn a_worktree_of_another_track_is_not_swept() {
+    let scratch = Scratch::lay("sweep-other");
+    scratch.tracker(&[], 30);
+    scratch.viewed(30);
+    scratch.closes(30);
+    let before = rev(&scratch.root, "origin/t-x");
+    sh(
+        &scratch.root,
+        &["git", "push", "-q", "origin", "HEAD:refs/heads/t-y"],
+    );
+    let dir = scratch.root.join(".claude/worktrees/t-y/t30");
+    sh(
+        &scratch.root,
+        &[
+            "git",
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "t-y/t30",
+            dir.to_str().unwrap(),
+            "origin/t-y",
+        ],
+    );
+    sh(
+        &scratch.root,
+        &["git", "config", "branch.t-y/t30.ticket", "30"],
+    );
+    fs::write(dir.join("other.txt"), "the other track's\n").unwrap();
+    sh(&dir, &["git", "add", "--", "other.txt"]);
+    sh(
+        &dir,
+        &[
+            "git",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/var/empty",
+            "commit",
+            "-q",
+            "-m",
+            "the other track's work",
+        ],
+    );
+    let other = rev(&scratch.root, "t-y/t30");
+
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("#30"), "another track's: {out}");
+    assert!(!out.contains("swept"), "{out}");
+    assert!(dir.is_dir(), "stands: {out}");
+    assert_eq!(rev(&scratch.root, "t-y/t30"), other, "{out}");
+    assert_eq!(rev(&scratch.origin, "t-y"), before, "no ref moved: {out}");
+    assert_eq!(rev(&scratch.origin, "t-x"), before, "{out}");
+    let _ = fs::remove_dir_all(&scratch.dir);
+}
+
+/// A standing worktree whose ticket closed with the branch not ahead of
+/// the track is left standing and named, and the run goes on to the
+/// frontier (#116): the session committed nothing, so its branch is the
+/// track's own commit, and no ref moves.
+#[test]
+fn a_standing_worktree_closed_but_not_ahead_is_named_and_stands() {
+    let scratch = Scratch::lay("sweep-behind");
+    scratch.tracker(&[20], 20);
+    scratch.viewed(20);
+    scratch.act_on(20, "");
+    let before = rev(&scratch.root, "origin/t-x");
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 1, "{out}");
+    assert_eq!(rev(&scratch.root, "t-x/t20"), before, "{out}");
+
+    scratch.closes(20);
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.lines().any(|line| line
+            == format!(
+                "track work: #20 closed, but the branch is not ahead of the track: the branch is the track's own commit, {}, the branch at {}; the worktree stands at {} for a person, nothing retired",
+                &before[..7],
+                &before[..7],
+                scratch.worktree("t-x/t20").display()
+            )),
+        "{out}"
+    );
+    assert!(!out.contains("swept"), "nothing merged back: {out}");
+    assert!(scratch.worktree("t-x/t20").is_dir(), "stands: {out}");
+    assert_eq!(scratch.worktrees().len(), 2, "{out}");
+    assert_eq!(rev(&scratch.origin, "t-x"), before, "no ref moved: {out}");
+    assert!(out.contains("none: the frontier of t-x is empty"), "{out}");
+    let _ = fs::remove_dir_all(&scratch.dir);
+}
+
+/// A standing worktree whose ticket is still open is left standing and
+/// named, and the run goes on (#116): the work is the session's to
+/// finish, so nothing is merged back and no ref moves, however far ahead
+/// the branch is.
+#[test]
+fn a_standing_worktree_whose_ticket_is_open_is_named_and_stands() {
+    let scratch = Scratch::lay("sweep-open");
+    scratch.tracker(&[20], 20);
+    scratch.viewed(20);
+    scratch.act_on(20, "commit");
+    let before = rev(&scratch.root, "origin/t-x");
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 1, "{out}");
+
+    let tip = rev(&scratch.root, "t-x/t20");
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.lines().any(|line| line
+            == format!(
+                "track work: #20 is still open at the tracker, the branch at {}; the worktree stands at {} for a person, nothing retired",
+                &tip[..7],
+                scratch.worktree("t-x/t20").display()
+            )),
+        "{out}"
+    );
+    assert!(!out.contains("swept"), "nothing merged back: {out}");
+    assert!(scratch.worktree("t-x/t20").is_dir(), "stands: {out}");
+    assert_eq!(scratch.worktrees().len(), 2, "{out}");
+    assert_eq!(rev(&scratch.origin, "t-x"), before, "no ref moved: {out}");
+    assert_eq!(rev(&scratch.root, "t-x/t20"), tip, "{out}");
+    assert!(out.contains("none: the frontier of t-x is empty"), "{out}");
     let _ = fs::remove_dir_all(&scratch.dir);
 }

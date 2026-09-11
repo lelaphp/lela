@@ -30,6 +30,34 @@
 //! ticket's record kept with its branch, nothing retired, and the line
 //! says so; the console shows the worktree.
 //!
+//! A worktree left standing is not left standing for good (#116). Its
+//! branch records its ticket, so [`track_next::next`] names that ticket
+//! no more, and finished work whose ticket a person closed afterwards
+//! would rot beside a frontier that keeps growing. So a run begins by
+//! sweeping the track's standing worktrees, [`sweep`]: a worktree whose
+//! ticket has since closed and whose branch is ahead of the track is
+//! fast-forwarded, pushed and retired, down the one path a close takes,
+//! [`merge_back`]; one whose ticket is still open, or whose branch is
+//! not ahead, is left standing and named, and the run goes on. Each is
+//! one line, [`Swept::render`], and a sweep with nothing to merge back
+//! prints none of them and moves no ref, so a run over a track with no
+//! standing worktree reads as it did before.
+//!
+//! The sweep is the run's first act, before the catch-up with main and
+//! so before the frontier is consulted, because a stranded branch
+//! descends from the track as it stood when the branch was laid down:
+//! catch the track up first and the merge main brings makes every such
+//! branch no fast-forward, and every sweep would answer "not ahead"
+//! forever. It is the run's act and not the step's, so a worktree this
+//! run leaves standing is not swept again by the step after it; a ticket
+//! closed while the run is going is the next run's to sweep. Two
+//! stranded branches off one tip are not both fast-forwards: the first
+//! moves the track and the second stands, named, since the track moves
+//! by fast-forward alone and rebasing a person's branch is a person's.
+//! A clone whose track is `main` sweeps nothing, since
+//! every branch on no track of its own would answer to that name and a
+//! worktree a person laid down is not this run's to retire.
+//!
 //! Without `--one` the step repeats while `track next` names a ticket
 //! (#78): a ticket the session left open, or closed with the branch not
 //! ahead of the track, is the session's failure and does not stop the
@@ -344,6 +372,57 @@ impl Worked {
     }
 }
 
+/// What the sweep did to one standing worktree of the track (#116): the
+/// same three facts a [`Worked`] carries, the ticket, the commit and the
+/// reason, said the same way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Swept {
+    /// The ticket closed since its session ended and the branch was ahead:
+    /// the track is at `commit`, pushed, and the worktree on `branch`
+    /// retired.
+    MergedBack {
+        ticket: Ticket,
+        branch: String,
+        commit: String,
+        track: String,
+    },
+    /// The worktree at `dir` stands on, `why`: its ticket is still open,
+    /// or it closed with the branch not ahead of the track.
+    Stands {
+        ticket: Ticket,
+        commit: String,
+        dir: PathBuf,
+        why: String,
+    },
+}
+
+impl Swept {
+    /// The one line: the ticket, the commit and the outcome.
+    pub fn render(&self) -> String {
+        match self {
+            Swept::MergedBack {
+                ticket,
+                branch,
+                commit,
+                track,
+            } => format!(
+                "{WORK}: swept {ticket}, closed since its session at {}; {track} fast-forwarded to it and pushed to origin, {branch} retired\n",
+                short(commit)
+            ),
+            Swept::Stands {
+                ticket,
+                commit,
+                dir,
+                why,
+            } => format!(
+                "{WORK}: {ticket} {why}, the branch at {}; the worktree stands at {} for a person, nothing retired\n",
+                short(commit),
+                dir.display()
+            ),
+        }
+    }
+}
+
 /// The closing line of a run: `how` it ended, how many tickets it worked
 /// and each with its outcome.
 fn outcomes(worked: &[Worked], how: &str) -> String {
@@ -412,35 +491,130 @@ pub fn work(root: &Path, gh: &Gh) -> Result<Worked> {
             why: format!("is open after the session ({status})"),
         });
     }
-    if let Some(why) = not_ahead(root, &track, &tip)? {
-        return Ok(Worked::Standing {
+    match merge_back(root, &track, ticket, &branch, &tip, &dir)? {
+        Some(why) => Ok(Worked::Standing {
             ticket,
             commit: tip,
             dir,
             why: format!("closed, but the branch is not ahead of the track: {why}"),
-        });
+        }),
+        None => Ok(Worked::Closed {
+            ticket,
+            branch,
+            commit: tip,
+            track: track.name,
+        }),
     }
-    fast_forward(WORK, root, &track, &tip).with_context(|| {
+}
+
+/// The branch of a closed ticket merged back into its track: the
+/// fast-forward, the push to `origin` and the retire, in that order, or
+/// why `tip` is not ahead of the track, which merges nothing back and
+/// leaves the worktree at `dir` standing. The one path a close takes,
+/// whether the session that did the work has just ended or ended a run
+/// ago and [`sweep`] found it (#116); a fast-forward or a retire that
+/// refuses is a failure of the harness, named against the worktree.
+fn merge_back(
+    root: &Path,
+    track: &Track,
+    ticket: Ticket,
+    branch: &str,
+    tip: &str,
+    dir: &Path,
+) -> Result<Option<String>> {
+    if let Some(why) = not_ahead(root, track, tip)? {
+        return Ok(Some(why));
+    }
+    fast_forward(WORK, root, track, tip).with_context(|| {
         format!(
             "{ticket} closed, but the track did not move to {}; the worktree stands at {}, nothing retired",
-            short(&tip),
+            short(tip),
             dir.display()
         )
     })?;
-    worktree::retire(root, &branch).with_context(|| {
+    worktree::retire(root, branch).with_context(|| {
         format!(
             "{ticket} closed and {} pushed at {}, but the worktree stands at {}; retire it by hand once it is clean",
             track.name,
-            short(&tip),
+            short(tip),
             dir.display()
         )
     })?;
-    Ok(Worked::Closed {
-        ticket,
-        branch,
-        commit: tip,
-        track: track.name,
-    })
+    Ok(None)
+}
+
+/// The track's standing worktrees swept (#116): each one [`standing`]
+/// names, oldest ticket first, its ticket read from the tracker, and the
+/// branch of a closed one merged back by [`merge_back`]. The track is
+/// read again at each worktree, since a merge back moves it, which is
+/// also why the second of two branches off one tip stands: it no longer
+/// descends from the track the first moved. An empty answer is a sweep
+/// that moved no ref and has nothing to say.
+pub fn sweep(root: &Path, gh: &Gh) -> Result<Vec<Swept>> {
+    let mut swept = Vec::new();
+    for (dir, branch, ticket) in standing(root, &Track::of(root, None)?)? {
+        let track = Track::of(root, None)?;
+        let tip = rev(root, &format!("refs/heads/{branch}"))?;
+        let issue = gh.view(root, ticket)?;
+        if issue.state != State::Closed {
+            swept.push(Swept::Stands {
+                ticket,
+                commit: tip,
+                dir,
+                why: "is still open at the tracker".to_owned(),
+            });
+            continue;
+        }
+        swept.push(
+            match merge_back(root, &track, ticket, &branch, &tip, &dir)? {
+                Some(why) => Swept::Stands {
+                    ticket,
+                    commit: tip,
+                    dir,
+                    why: format!("closed, but the branch is not ahead of the track: {why}"),
+                },
+                None => Swept::MergedBack {
+                    ticket,
+                    branch,
+                    commit: tip,
+                    track: track.name,
+                },
+            },
+        );
+    }
+    Ok(swept)
+}
+
+/// The worktrees a sweep looks at: every linked worktree of the clone,
+/// the main one left out, that is on a branch of `track` recording a
+/// ticket, by ticket number, which is the tracker's order of filing. A
+/// branch that records none was laid down for no ticket and is a
+/// person's, and so is every worktree of a clone whose track is
+/// `main`, where a branch on no track of its own answers
+/// to the name and none of them is this run's. A worktree whose own
+/// track cannot be said is left alone rather than swept blind.
+fn standing(root: &Path, track: &Track) -> Result<Vec<(PathBuf, String, Ticket)>> {
+    if track.name == track::MAIN {
+        return Ok(Vec::new());
+    }
+    let mut found = Vec::new();
+    for (dir, on) in track::worktrees(&track.store)? {
+        let Some(branch) = on else { continue };
+        if dir == track.store {
+            continue;
+        }
+        let Ok(its) = Track::of(root, Some(&branch)) else {
+            continue;
+        };
+        if its.name != track.name {
+            continue;
+        }
+        if let Some(ticket) = its.ticket {
+            found.push((dir, branch, ticket));
+        }
+    }
+    found.sort_by_key(|(_, _, ticket)| ticket.number());
+    Ok(found)
 }
 
 /// The frontier of `track` filled by a `/frontier` session in the clone
@@ -463,6 +637,11 @@ fn fill(root: &Path, gh: &Gh, session: &Session, track: &str) -> Result<Option<N
 /// ticket left open is the exit 1.
 pub fn command(root: &Path, one: bool) -> Result<()> {
     let gh = Gh::on_path();
+    for outcome in sweep(root, &gh)
+        .context("the track's standing worktrees were not swept, so nothing is laid down")?
+    {
+        print!("{}", outcome.render());
+    }
     if one {
         let outcome = work(root, &gh)?;
         if let Worked::Standing { .. } = outcome {
