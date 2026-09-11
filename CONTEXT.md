@@ -172,6 +172,18 @@ _Avoid_: parent branch, base branch, fork point
 One GitHub issue in this repository: what happened, what to build, its acceptance criteria and what blocks it, filed once and closed by the commit whose `Ticket:` trailer names it. A thing found and not done is a ticket of its own, filed before the turn ends; the only question it raises is whose, and that is a label, not a noun: `ready-for-agent` for an act an agent may take, `for-a-person` for one that is a person's alone (harness §11): a manifest row, a divergence reason, an oracle bump, a design revision. A branch records the ticket its work is for. The prose no sensor reads is the commit message and the ticket itself, where a person reads the word before anything closes, and the harness's own rustdoc until the manifest holds `xtask` to this section (#63); that is acceptable because the entry's words are two, and a person reads both places.
 _Avoid_: leftover (hides whether the thing was filed), follow-up (hides whose it is)
 
+**Map**:
+`AGENTS.md` at the workspace root: what an agent reads first, a person's prose and the rest rendered as computed regions, handed to a session by the function hook's `prompt.context` as the `map` block of `xtask status --session`. §5 has called it the map since revision 1 and the harness spells the word in its own code, so the map is this file and nothing else. It says where a session starts and never where the track is going; that is the track's chart.
+_Avoid_: context file, system prompt, a track's map (the chart is that, and the two were one word until revision 22)
+
+**Frontier**:
+What a track has left to work, as the tracker has it: the open tickets labelled `ready-for-agent` that no open ticket blocks, carry no `track:` label naming another track, and no branch of the clone records. `xtask track next` names the oldest by number, `xtask track work` runs them until none is named, and the frontier is empty when `next` says `none`, which is when `/frontier work` fills it again. It is a state of the tracker read fresh each time, never a list a session keeps.
+_Avoid_: backlog (everything not yet done; a frontier is what is workable now), sprint, milestone
+
+**Chart**:
+One issue on the tracker, labelled `frontier:chart`, that says where one track is going: a Destination taken from the row of design §11 the engine stands at, the route walked as a line per closed ticket, the fog of work not yet sharp enough to ticket, and what is ruled past the destination. Its open sub-issues are the tickets, so the chart indexes and never restates, and a session loads it cold in one read. `/frontier chart <days>` lays it down and files the first batch; `/frontier work` files the next when the frontier empties. The noun is the verb that writes it.
+_Avoid_: roadmap, board, a track's map (revision 22 settled the word on `AGENTS.md`)
+
 **Divergence**:
 One accepted difference from the oracle, a row in `docs/divergence.toml` keyed by a witness hash, a phpt path, a compile-identity path or a trace site, with a kind, a reason, a status and a date. The oracle module consults the registry on every comparison; a person writes the reason.
 _Avoid_: recorded difference, known disagreement, XFAIL, exception (php's `set_exception_handler`, `restore_exception_handler`; `Thrown::exception`), divergence-table row as a thing apart from the registry
