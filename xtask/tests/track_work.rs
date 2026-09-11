@@ -271,6 +271,58 @@ impl Scratch {
         (out.status.code().unwrap_or(-1), text)
     }
 
+    /// One commit on origin's `branch` writing `content` to `file`, made
+    /// from a branch of the clone that is deleted after; the clone is
+    /// left where it was, or detached at the commit when the branch is
+    /// the track's, since a track's clone sits at its track's tip.
+    fn land(&self, branch: &str, file: &str, content: &str) -> String {
+        let head = rev(&self.root, "HEAD");
+        sh(
+            &self.root,
+            &[
+                "git",
+                "checkout",
+                "-q",
+                "-b",
+                "landing",
+                &format!("origin/{branch}"),
+            ],
+        );
+        fs::write(self.root.join(file), content).unwrap();
+        sh(&self.root, &["git", "add", "--", file]);
+        sh(
+            &self.root,
+            &[
+                "git",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/var/empty",
+                "commit",
+                "-q",
+                "-m",
+                "landed",
+            ],
+        );
+        let landed = rev(&self.root, "HEAD");
+        sh(
+            &self.root,
+            &[
+                "git",
+                "-c",
+                "core.hooksPath=/var/empty",
+                "push",
+                "-q",
+                "origin",
+                &format!("landing:refs/heads/{branch}"),
+            ],
+        );
+        let back = if branch == "t-x" { &landed } else { &head };
+        sh(&self.root, &["git", "checkout", "-q", "--detach", back]);
+        sh(&self.root, &["git", "branch", "-q", "-D", "landing"]);
+        landed
+    }
+
     fn wrote(&self, name: &str) -> String {
         fs::read_to_string(self.dir.join(name))
             .unwrap_or_default()
@@ -563,5 +615,79 @@ fn a_tracker_that_stops_answering_stops_the_run_named() {
         out.contains("stopped by the harness after 1 ticket: #20 closed"),
         "{out}"
     );
+    let _ = fs::remove_dir_all(&scratch.dir);
+}
+
+/// The track is caught up with main before the ticket (#80): main moved
+/// under the track, so the run's first act fast-forwards the track to
+/// main's tip, pushes it, follows it with HEAD and builds `xtask`, and
+/// the ticket's worktree is laid down off that tip; the sync's line is
+/// printed before the ticket's.
+#[test]
+fn the_track_is_caught_up_with_main_before_the_ticket() {
+    let scratch = Scratch::lay("sync");
+    scratch.tracker(&[20], 20);
+    scratch.act("commit close");
+    let before = rev(&scratch.root, "origin/t-x");
+    let main = scratch.land("main", "landed.txt", "on main\n");
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 0, "{out}");
+    let tip = rev(&scratch.root, "t-x/t20");
+    assert_eq!(
+        sh(&scratch.root, &["git", "rev-parse", "t-x/t20^"]).trim(),
+        main,
+        "the worktree was laid down off main's tip: {out}"
+    );
+    assert_eq!(rev(&scratch.origin, "t-x"), tip, "{out}");
+    assert_eq!(rev(&scratch.root, "HEAD"), tip, "{out}");
+    let lines: Vec<&str> = out.lines().collect();
+    let synced = lines
+        .iter()
+        .position(|line| line.starts_with("track sync: t-x caught up with main"))
+        .unwrap_or_else(|| panic!("{out}"));
+    let worked = lines
+        .iter()
+        .position(|line| line.starts_with("track work: #20 closed at"))
+        .unwrap_or_else(|| panic!("{out}"));
+    assert!(synced < worked, "{out}");
+    assert!(
+        lines.contains(
+            &format!(
+                "track sync: t-x caught up with main ({}): fast-forwarded {} to {}; pushed to origin, HEAD follows, xtask built",
+                &main[..7],
+                &before[..7],
+                &main[..7]
+            )
+            .as_str()
+        ),
+        "{out}"
+    );
+    let _ = fs::remove_dir_all(&scratch.dir);
+}
+
+/// A sync that refuses stops the run as a failure of the harness, named:
+/// main and the track conflict, so no worktree is laid down, no session
+/// starts, and the exit names the conflict.
+#[test]
+fn a_sync_that_refuses_stops_the_run_named() {
+    let scratch = Scratch::lay("conflict");
+    scratch.tracker(&[20], 20);
+    scratch.act("commit close");
+    let track = scratch.land("t-x", "README.md", "the track's\n");
+    scratch.land("main", "README.md", "main's\n");
+    let (code, out) = scratch.work(&[]);
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("main does not merge into t-x: conflicts in README.md"),
+        "{out}"
+    );
+    assert!(
+        out.contains("stopped by the harness after no ticket"),
+        "{out}"
+    );
+    assert_eq!(rev(&scratch.origin, "t-x"), track, "{out}");
+    assert_eq!(scratch.worktrees().len(), 1, "no worktree laid down: {out}");
+    assert!(!has_ref(&scratch.root, "refs/heads/t-x/t20"), "{out}");
+    assert_eq!(scratch.wrote("session.args"), "", "no session started");
     let _ = fs::remove_dir_all(&scratch.dir);
 }

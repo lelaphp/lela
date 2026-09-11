@@ -1,6 +1,9 @@
 //! The frontier until it empties, one ticket at a time from start to
 //! retire without a person (#77, #78; harness-design.md §4.4, §4.5, §5):
 //! `xtask track work`. From inside a track's clone it
+//! catches the track up with main first, [`track_sync::sync`] (#80), so
+//! the harness the session runs under is no older than main's and the
+//! worktree is laid down off a track that has main; then it
 //! asks [`track_next::next`] for the ticket, lays the ticket's worktree
 //! down with the branch `<track>/t<n>` recording it, as `worktree add
 //! --ticket` does, and starts a headless Claude Code session in the
@@ -22,10 +25,10 @@
 //! run, since its branch records it and the frontier names it no more,
 //! and the run ends at "none" with one line per ticket and, once any was
 //! worked, a closing line naming each with its outcome. A failure of the
-//! harness itself stops the run and is named: a tracker that does not
-//! answer, a build that does not stand, a session program that does not
-//! start, a push refused, a retire that will not; what was worked before
-//! it is named the same way in the error. `--one` runs the step once and
+//! harness itself stops the run and is named: a sync that refuses, a
+//! tracker that does not answer, a build that does not stand, a session
+//! program that does not start, a push refused, a retire that will not;
+//! what was worked before it is named the same way in the error. `--one` runs the step once and
 //! exits 1 when the ticket is left to a person.
 //!
 //! What the session is started with (#75): `claude -p --model
@@ -57,6 +60,7 @@ use crate::git::git;
 use crate::ticket::{Gh, State};
 use crate::track::{self, Model, Ticket, Track, fast_forward, not_ahead, rev, short};
 use crate::track_next;
+use crate::track_sync;
 use crate::worktree::{self, say};
 
 /// The prefix of every line printed, so a person reads whose line it is.
@@ -217,11 +221,11 @@ fn outcomes(worked: &[Worked], how: &str) -> String {
     }
 }
 
-/// One ticket, start to retire: the track's next ticket, its worktree,
-/// the session, and on a close the fast-forward, the push and the
-/// retire. A session that ends with the ticket open, or closed with the
-/// branch not ahead of the track, is an outcome naming the worktree that
-/// stands; a failure of the harness is the error.
+/// One ticket, start to retire: the track caught up with main, its next
+/// ticket, its worktree, the session, and on a close the fast-forward,
+/// the push and the retire. A session that ends with the ticket open, or
+/// closed with the branch not ahead of the track, is an outcome naming
+/// the worktree that stands; a failure of the harness is the error.
 pub fn work(root: &Path, gh: &Gh) -> Result<Worked> {
     let track = Track::of(root, None)?;
     let Some(model) = track.model.clone() else {
@@ -233,6 +237,11 @@ pub fn work(root: &Path, gh: &Gh) -> Result<Worked> {
     let session = Session::of(root, model);
     git(root, &["remote", "get-url", "origin"], None)
         .context("the repository has no origin, and the track's branch is pushed to it; nothing is laid down")?;
+    let synced = track_sync::sync(root)
+        .context("the track was not caught up with main, so nothing is laid down")?;
+    print!("{}", synced.render());
+    // Read again: the sync moved the track, and its base with it.
+    let track = Track::of(root, None)?;
     let Some(next) = track_next::next(root, gh, &track.name)? else {
         return Ok(Worked::Nothing { track: track.name });
     };
