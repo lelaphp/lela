@@ -152,7 +152,7 @@ impl Scratch {
             "#!/bin/sh\nif [ \"$1\" = issue ] && [ \"$2\" = list ]; then cat '{dir}/list.json'; exit $?; fi\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then f='{dir}/view.'$3'.json'; [ -f \"$f\" ] || f='{dir}/view.json'; cat \"$f\"; exit $?; fi\nprintf '%s\\n' \"$*\" >> '{dir}/calls'\nexit 0\n"
         );
         let claude = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{dir}/session.args'\npwd -P >> '{dir}/session.cwd'\nprintf '%s\\n' \"${{CLAUDE_CODE_SUBAGENT_MODEL-unset}}\" >> '{dir}/session.subagent'\n# the ticket: the last argument is the prompt, `/implement <n>`\nfor a; do last=$a; done; n=${{last##* }}\nact=$(cat '{dir}/act.'$n 2>/dev/null || cat '{dir}/act')\nview='{dir}/view.'$n'.json'; [ -f \"$view\" ] || view='{dir}/view.json'\ncase \"$act\" in *commit*) echo worked > worked.$n.txt && git add -- worked.$n.txt && git -c commit.gpgsign=false -c core.hooksPath=/var/empty -c user.name=x -c user.email=x@x commit -q -m 'the work' -- worked.$n.txt || exit 3;; esac\ncase \"$act\" in *close*) sed 's/\"OPEN\"/\"CLOSED\"/' \"$view\" > '{dir}/view.tmp' && mv '{dir}/view.tmp' \"$view\";; esac\nexit 0\n"
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{dir}/session.args'\npwd -P >> '{dir}/session.cwd'\nprintf '%s\\n' \"${{CLAUDE_CODE_SUBAGENT_MODEL-unset}}\" >> '{dir}/session.subagent'\n# the ticket: the last argument is the prompt, `/<skill> <n>`\nfor a; do last=$a; done; n=${{last##* }}\nact=$(cat '{dir}/act.'$n 2>/dev/null || cat '{dir}/act')\nview='{dir}/view.'$n'.json'; [ -f \"$view\" ] || view='{dir}/view.json'\ncase \"$act\" in *commit*) echo worked > worked.$n.txt && git add -- worked.$n.txt && git -c commit.gpgsign=false -c core.hooksPath=/var/empty -c user.name=x -c user.email=x@x commit -q -m 'the work' -- worked.$n.txt || exit 3;; esac\ncase \"$act\" in *close*) sed 's/\"OPEN\"/\"CLOSED\"/' \"$view\" > '{dir}/view.tmp' && mv '{dir}/view.tmp' \"$view\";; esac\nexit 0\n"
         );
         for (name, text) in [("gh", gh), ("claude", claude)] {
             let file = self.dir.join("bin").join(name);
@@ -202,6 +202,24 @@ impl Scratch {
             .to_string(),
         )
         .unwrap();
+    }
+
+    /// One more label on the listed ticket `number`, as the tracker
+    /// spells it: how a test puts a ticket on the frontier's research or
+    /// decision side (#81).
+    fn label(&self, number: u64, label: &str) {
+        let file = self.dir.join("list.json");
+        let mut issues: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        for issue in issues.as_array_mut().unwrap() {
+            if issue["number"] == number {
+                issue["labels"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({"name": label}));
+            }
+        }
+        fs::write(&file, issues.to_string()).unwrap();
     }
 
     /// The ticket `issue view <n>` answers with for `number` alone, open.
@@ -687,6 +705,68 @@ fn a_sync_that_refuses_stops_the_run_named() {
     );
     assert_eq!(rev(&scratch.origin, "t-x"), track, "{out}");
     assert_eq!(scratch.worktrees().len(), 1, "no worktree laid down: {out}");
+    assert!(!has_ref(&scratch.root, "refs/heads/t-x/t20"), "{out}");
+    assert_eq!(scratch.wrote("session.args"), "", "no session started");
+    let _ = fs::remove_dir_all(&scratch.dir);
+}
+
+/// A ticket labelled `frontier:research` starts the session on
+/// `/research <n>` (#81): the prompt is the one thing that changes, the
+/// model, the mode and the effort as #75 set them, and the path from the
+/// close to the retire is the same.
+#[test]
+fn a_research_ticket_starts_the_session_on_research() {
+    let scratch = Scratch::lay("research");
+    scratch.tracker(&[20], 20);
+    scratch.label(20, "frontier:research");
+    scratch.act("commit close");
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(
+        scratch.wrote("session.args"),
+        "-p --model claude-opus-5 --permission-mode bypassPermissions --effort high /research 20"
+    );
+    assert_eq!(scratch.wrote("session.subagent"), "claude-sonnet-5");
+    assert!(out.contains("#20 closed at"), "{out}");
+    assert!(!scratch.worktree("t-x/t20").exists(), "retired: {out}");
+    let _ = fs::remove_dir_all(&scratch.dir);
+}
+
+/// A ticket labelled `frontier:decision` starts the session on
+/// `/grill-design <n>` (#81).
+#[test]
+fn a_decision_ticket_starts_the_session_on_grill_design() {
+    let scratch = Scratch::lay("decision");
+    scratch.tracker(&[20], 20);
+    scratch.label(20, "frontier:decision");
+    scratch.act("commit close");
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(
+        scratch.wrote("session.args"),
+        "-p --model claude-opus-5 --permission-mode bypassPermissions --effort high /grill-design 20"
+    );
+    assert!(out.contains("#20 closed at"), "{out}");
+    let _ = fs::remove_dir_all(&scratch.dir);
+}
+
+/// A ticket carrying both `frontier:` labels names no one skill: the
+/// step refuses before any worktree is laid down, naming the ticket and
+/// both labels, no session started (#81).
+#[test]
+fn a_ticket_with_both_frontier_labels_refuses_before_a_worktree() {
+    let scratch = Scratch::lay("both");
+    scratch.tracker(&[20], 20);
+    scratch.label(20, "frontier:research");
+    scratch.label(20, "frontier:decision");
+    scratch.act("commit close");
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("#20"), "{out}");
+    assert!(out.contains("frontier:research"), "{out}");
+    assert!(out.contains("frontier:decision"), "{out}");
+    assert!(out.contains("nothing is laid down"), "{out}");
+    assert_eq!(scratch.worktrees().len(), 1, "{out}");
     assert!(!has_ref(&scratch.root, "refs/heads/t-x/t20"), "{out}");
     assert_eq!(scratch.wrote("session.args"), "", "no session started");
     let _ = fs::remove_dir_all(&scratch.dir);

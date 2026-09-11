@@ -245,6 +245,9 @@ track_work::Session
 track_work::Session::arguments
 track_work::Session::of
 track_work::Session::prompt
+track_work::Skill
+track_work::Skill::name
+track_work::Skill::of
 track_work::Worked
 track_work::Worked::render
 track_work::command

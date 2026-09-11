@@ -30,12 +30,15 @@ const READY: &str = "ready-for-agent";
 /// The prefix of the label that names the one track working a ticket.
 const TRACK_LABEL: &str = "track:";
 
-/// The ticket a track works next: its number, title and url.
+/// The ticket a track works next: its number, title and url, and its
+/// labels as the tracker spells them, which `track work` reads the
+/// session's skill from (#81).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Next {
     pub number: u64,
     pub title: String,
     pub url: String,
+    pub labels: Vec<String>,
 }
 
 impl Next {
@@ -71,6 +74,7 @@ pub fn next(root: &Path, gh: &Gh, track: &str) -> Result<Option<Next>> {
         number: open.number,
         title: open.title.clone(),
         url: open.url.clone(),
+        labels: open.label_names().map(str::to_owned).collect(),
     }))
 }
 

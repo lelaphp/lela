@@ -120,6 +120,7 @@ fn the_four_filters_pass_a_ticket_over_and_the_oldest_left_is_next() {
             number: 20,
             title: "ticket 20".to_owned(),
             url: "https://example.invalid/issues/20".to_owned(),
+            labels: vec!["ready-for-agent".to_owned()],
         }),
         "10 is recorded by a branch, 11 is blocked by the open 12, 12 has no label, 14 is t-x's, 30 is main's"
     );
@@ -185,6 +186,7 @@ fn a_found_ticket_is_printed_by_number_and_title() {
         number: 20,
         title: "ticket 20".to_owned(),
         url: "https://example.invalid/issues/20".to_owned(),
+        labels: vec!["ready-for-agent".to_owned()],
     };
     assert_eq!(Next::render(Some(&found), "t-y"), "#20 ticket 20\n");
     assert_eq!(

@@ -8,7 +8,12 @@
 //! down with the branch `<track>/t<n>` recording it, as `worktree add
 //! --ticket` does, and starts a headless Claude Code session in the
 //! worktree on the model the clone records, with a prompt that names
-//! the ticket and runs `/implement <n>`. The hooks that already exist
+//! the ticket and runs the skill its label chooses (#81): `/research
+//! <n>` for a ticket labelled `frontier:research`, `/grill-design <n>`
+//! for `frontier:decision`, and `/implement <n>` for any other, as
+//! [`Skill::of`] says; a ticket carrying both `frontier:` labels names
+//! no one skill and is refused before any worktree is laid down, named.
+//! The prompt is the one thing the label changes. The hooks that already exist
 //! police the session: `permit` judges each call and the Stop hook holds
 //! the turn until `done` is green and the ticket's boxes are ticked, so
 //! nothing here judges the work. When the session ends with the ticket
@@ -80,6 +85,62 @@ const PROGRAM: &str = "claude";
 const PROGRAM_KEY: &str = "track.session.program";
 const MODE_KEY: &str = "track.permission-mode";
 const EFFORT_KEY: &str = "track.effort";
+/// The prefix of the label that says which side of the frontier a
+/// ticket is on; the rest of the label is the side.
+const FRONTIER_LABEL: &str = "frontier:";
+const RESEARCH: &str = "research";
+const DECISION: &str = "decision";
+
+/// The skill a session starts on, chosen by the ticket's `frontier:`
+/// label: a research ticket is read, a decision ticket is grilled, and
+/// any other is built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Skill {
+    /// `/implement <n>`: a ticket with no `frontier:` label.
+    Implement,
+    /// `/research <n>`: a ticket labelled `frontier:research`.
+    Research,
+    /// `/grill-design <n>`: a ticket labelled `frontier:decision`.
+    GrillDesign,
+}
+
+impl Skill {
+    /// The skill `ticket`'s labels choose, from the labels as the tracker
+    /// spells them; both `frontier:` labels at once is a refusal that
+    /// names the ticket and the labels, and a `frontier:` label naming
+    /// neither side is one too, since a side no skill answers is not
+    /// built by default.
+    pub fn of<'a>(ticket: Ticket, labels: impl IntoIterator<Item = &'a str>) -> Result<Skill> {
+        let sides = labels
+            .into_iter()
+            .filter_map(|label| label.strip_prefix(FRONTIER_LABEL))
+            .collect::<Vec<_>>();
+        match sides.as_slice() {
+            [] => Ok(Skill::Implement),
+            [side] if *side == RESEARCH => Ok(Skill::Research),
+            [side] if *side == DECISION => Ok(Skill::GrillDesign),
+            [side] => bail!(
+                "{ticket} is labelled {FRONTIER_LABEL}{side}, a side of the frontier no skill answers; `{FRONTIER_LABEL}{RESEARCH}` and `{FRONTIER_LABEL}{DECISION}` are the two, and nothing is laid down"
+            ),
+            many => bail!(
+                "{ticket} is labelled {}, and a ticket is on one side of the frontier; a person takes one label off, and nothing is laid down",
+                many.iter()
+                    .map(|side| format!("{FRONTIER_LABEL}{side}"))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            ),
+        }
+    }
+
+    /// The skill's name as the prompt invokes it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Skill::Implement => "implement",
+            Skill::Research => "research",
+            Skill::GrillDesign => "grill-design",
+        }
+    }
+}
 
 /// One headless session as it is started: the program, the model per
 /// role, the permission mode and the effort.
@@ -105,13 +166,14 @@ impl Session {
         }
     }
 
-    /// The prompt: it names the ticket and runs `/implement <n>`.
-    pub fn prompt(ticket: Ticket) -> String {
-        format!("/implement {}", ticket.number())
+    /// The prompt: it names the ticket and runs the skill on it,
+    /// `/<skill> <n>`.
+    pub fn prompt(skill: Skill, ticket: Ticket) -> String {
+        format!("/{} {}", skill.name(), ticket.number())
     }
 
     /// The arguments after the program, in the order they are passed.
-    pub fn arguments(&self, ticket: Ticket) -> Vec<String> {
+    pub fn arguments(&self, skill: Skill, ticket: Ticket) -> Vec<String> {
         vec![
             "-p".to_owned(),
             "--model".to_owned(),
@@ -120,7 +182,7 @@ impl Session {
             self.permission_mode.clone(),
             "--effort".to_owned(),
             self.effort.clone(),
-            Session::prompt(ticket),
+            Session::prompt(skill, ticket),
         ]
     }
 
@@ -129,9 +191,9 @@ impl Session {
     /// ticket closed at the tracker is the one signal, since the hooks
     /// judged the session's turns; a program that does not start is an
     /// error.
-    fn run(&self, dir: &Path, ticket: Ticket) -> Result<ExitStatus> {
+    fn run(&self, dir: &Path, skill: Skill, ticket: Ticket) -> Result<ExitStatus> {
         Command::new(&self.program)
-            .args(self.arguments(ticket))
+            .args(self.arguments(skill, ticket))
             .env(SUBAGENT_VARIABLE, self.model.subagent())
             .current_dir(dir)
             .stdin(Stdio::null())
@@ -246,6 +308,7 @@ pub fn work(root: &Path, gh: &Gh) -> Result<Worked> {
         return Ok(Worked::Nothing { track: track.name });
     };
     let ticket = Ticket::new(next.number);
+    let skill = Skill::of(ticket, next.labels.iter().map(String::as_str))?;
     let branch = format!("{}/t{}", track.name, next.number);
     say(WORK, &format!("{ticket} {}: on {branch}", next.title));
 
@@ -255,12 +318,12 @@ pub fn work(root: &Path, gh: &Gh) -> Result<Worked> {
         &format!(
             "session: {} {} in {}, subagents on {}",
             session.program.display(),
-            session.arguments(ticket).join(" "),
+            session.arguments(skill, ticket).join(" "),
             dir.display(),
             session.model.subagent()
         ),
     );
-    let status = session.run(&dir, ticket)?;
+    let status = session.run(&dir, skill, ticket)?;
     say(WORK, &format!("the session ended: {status}"));
     let tip = rev(root, &format!("refs/heads/{branch}"))?;
     let issue = gh.view(root, ticket)?;
@@ -335,5 +398,46 @@ pub fn command(root: &Path, one: bool) -> Result<()> {
             return Ok(());
         }
         worked.push(outcome);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No `frontier:` label builds; one names its side; two is a refusal
+    /// naming both, and a side no skill answers is one naming it.
+    #[test]
+    fn the_frontier_label_chooses_the_skill() {
+        let ticket = Ticket::new(20);
+        assert_eq!(
+            Skill::of(ticket, ["ready-for-agent", "track:main"]).unwrap(),
+            Skill::Implement
+        );
+        assert_eq!(
+            Skill::of(ticket, ["ready-for-agent", "frontier:research"]).unwrap(),
+            Skill::Research
+        );
+        assert_eq!(
+            Skill::of(ticket, ["frontier:decision"]).unwrap(),
+            Skill::GrillDesign
+        );
+        let both = Skill::of(ticket, ["frontier:research", "frontier:decision"]).unwrap_err();
+        assert!(
+            both.to_string()
+                .contains("#20 is labelled frontier:research and frontier:decision"),
+            "{both}"
+        );
+        let other = Skill::of(ticket, ["frontier:build"]).unwrap_err();
+        assert!(
+            other
+                .to_string()
+                .contains("frontier:build, a side of the frontier no skill answers"),
+            "{other}"
+        );
+        assert_eq!(
+            Session::prompt(Skill::GrillDesign, ticket),
+            "/grill-design 20"
+        );
     }
 }
