@@ -280,6 +280,53 @@ pub struct Issue {
     pub url: String,
 }
 
+/// One open issue as `gh issue list` answers it: what the frontier is
+/// judged from, the labels and the blocking relation carried as the
+/// tracker spells them.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Open {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub labels: Vec<Label>,
+    #[serde(rename = "blockedBy")]
+    pub blocked_by: BlockedBy,
+}
+
+impl Open {
+    /// The ticket's labels by name.
+    pub fn label_names(&self) -> impl Iterator<Item = &str> {
+        self.labels.iter().map(|label| label.name.as_str())
+    }
+
+    /// Whether an open ticket blocks this one; a closed blocker does not.
+    pub fn blocked(&self) -> bool {
+        self.blocked_by
+            .nodes
+            .iter()
+            .any(|blocker| blocker.state == State::Open)
+    }
+}
+
+/// One label, by name.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Label {
+    pub name: String,
+}
+
+/// The tickets blocking one, as the tracker nests them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct BlockedBy {
+    pub nodes: Vec<Blocker>,
+}
+
+/// One ticket in a blocking relation: its number and whether it is open.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Blocker {
+    pub number: u64,
+    pub state: State,
+}
+
 /// An issue's state as `gh` spells it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -339,6 +386,29 @@ impl Gh {
         .with_context(|| format!("{ticket} could not be read from the tracker"))?;
         serde_json::from_str(&text)
             .with_context(|| format!("{ticket}: gh's answer is not an issue"))
+    }
+
+    /// `gh issue list --state open --json …`: every open issue with its
+    /// labels and what blocks it, the one call `track next` makes (#73).
+    /// Every open issue, not the labelled ones alone, so the frontier's
+    /// filters are judged here, where a test can hold each of them.
+    pub fn open(&self, root: &Path) -> Result<Vec<Open>> {
+        let text = gh(
+            &self.program,
+            root,
+            &[
+                "issue",
+                "list",
+                "--state",
+                "open",
+                "--limit",
+                "1000",
+                "--json",
+                "number,title,url,labels,blockedBy",
+            ],
+        )
+        .context("the open tickets could not be listed from the tracker")?;
+        serde_json::from_str(&text).context("gh's answer is not a list of issues")
     }
 
     /// `gh issue edit <n> --add-blocking <a,b>`: the edge from the ticket

@@ -104,6 +104,9 @@ pub(crate) enum Command {
     /// `new <name>` lays a track down: `origin/<name>` at `main`, a clone
     /// beside the repository detached at it, `xtask` built there, the
     /// console's row, the `computed trust` line printed as a person's.
+    /// `next` names the ticket the track works next, the oldest open
+    /// `ready-for-agent` ticket that is unblocked, this track's and on no
+    /// branch of this clone.
     #[command(args_conflicts_with_subcommands = true)]
     Track {
         /// A branch other than `HEAD`'s, made or not yet: what the add
@@ -250,6 +253,20 @@ pub(crate) enum TrackCommand {
         /// The track's name, a branch not yet made, with no slash: it is
         /// the path prefix of its branches' names.
         name: String,
+    },
+    /// The ticket the track works next: the oldest open `ready-for-agent`
+    /// ticket that no open ticket blocks, that carries no `track:<name>`
+    /// label naming another track, and that no branch of this clone
+    /// records; "none" when the frontier is empty. Reads the tracker
+    /// through the ticket module and writes no reading.
+    Next {
+        /// The track, by name; default the branch's, `main` for a branch
+        /// on none and for a detached `HEAD`, which a track's own clone is.
+        #[arg(long, value_name = "NAME")]
+        track: Option<String>,
+        /// Print the answer as one JSON object.
+        #[arg(long)]
+        json: bool,
     },
 }
 

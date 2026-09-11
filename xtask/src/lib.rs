@@ -46,6 +46,7 @@ mod tally;
 pub mod ticket;
 pub mod track;
 pub mod track_new;
+pub mod track_next;
 pub mod unsafe_audit;
 pub mod vocab;
 pub mod witness;
@@ -289,6 +290,10 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
             command: Some(TrackCommand::New { name }),
             ..
         } => Some(track_new::lay(root, name).map(|_| ())),
+        Command::Track {
+            command: Some(TrackCommand::Next { track, json }),
+            ..
+        } => Some(track_next::command(root, track.as_deref(), *json)),
         Command::Track { branch, json, .. } => Some(track_command(root, branch.as_deref(), *json)),
         Command::Regions { files } => Some(computed::command(root, files)),
         Command::Worktree {

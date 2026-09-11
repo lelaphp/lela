@@ -202,6 +202,8 @@ run
 status::render
 status::session
 ticket::Act
+ticket::BlockedBy
+ticket::Blocker
 ticket::Criteria
 ticket::Criteria::count
 ticket::Criteria::met
@@ -211,8 +213,13 @@ ticket::Gh::at
 ticket::Gh::blocking
 ticket::Gh::close
 ticket::Gh::on_path
+ticket::Gh::open
 ticket::Gh::view
 ticket::Issue
+ticket::Label
+ticket::Open
+ticket::Open::blocked
+ticket::Open::label_names
 ticket::State
 ticket::Successors
 ticket::Successors::named
@@ -229,6 +236,11 @@ track::Track::of
 track::Track::render
 track::Track::to_json
 track_new::lay
+track_next::Next
+track_next::Next::render
+track_next::Next::to_json
+track_next::command
+track_next::next
 unsafe_audit::run
 vocab::hold
 vocab::run
