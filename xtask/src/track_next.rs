@@ -15,7 +15,9 @@
 //! "no branch yet" is the clone's own record, `branch.<name>.ticket`, the
 //! one [`track::branch_of_ticket`] reads, and never a look across tracks.
 //! The tracker is reached through [`Gh::open`], the ticket module's one
-//! list, and through nothing else here.
+//! list, and through nothing else here. The same list answers what the
+//! track waits on (#85): its open tickets labelled `for-a-person`, which
+//! `track work` prints when the frontier stays empty.
 
 use std::path::Path;
 
@@ -27,6 +29,8 @@ use crate::track::{self, Ticket, Track};
 
 /// The label a ticket an agent may take carries.
 const READY: &str = "ready-for-agent";
+/// The label a ticket that is a person's alone carries (harness §11).
+const PERSON: &str = "for-a-person";
 /// The prefix of the label that names the one track working a ticket.
 const TRACK_LABEL: &str = "track:";
 
@@ -70,12 +74,30 @@ pub fn next(root: &Path, gh: &Gh, track: &str) -> Result<Option<Next>> {
     Ok(frontier(&open, track, |ticket| {
         track::branch_of_ticket(root, ticket).is_some()
     })
-    .map(|open| Next {
-        number: open.number,
-        title: open.title.clone(),
-        url: open.url.clone(),
-        labels: open.label_names().map(str::to_owned).collect(),
-    }))
+    .cloned()
+    .map(Next::from))
+}
+
+/// The open tickets `track` waits on a person for: those labelled
+/// `for-a-person` that are not another track's, by number.
+pub fn for_a_person(root: &Path, gh: &Gh, track: &str) -> Result<Vec<Next>> {
+    let mut open = gh.open(root)?;
+    open.retain(|ticket| ticket.label_names().any(|name| name == PERSON));
+    open.retain(|ticket| is_tracks(ticket, track));
+    open.sort_by_key(|ticket| ticket.number);
+    Ok(open.into_iter().map(Next::from).collect())
+}
+
+impl From<Open> for Next {
+    fn from(open: Open) -> Next {
+        let labels = open.label_names().map(str::to_owned).collect();
+        Next {
+            number: open.number,
+            title: open.title,
+            url: open.url,
+            labels,
+        }
+    }
 }
 
 /// The oldest of the open tickets that pass the four filters, `recorded`

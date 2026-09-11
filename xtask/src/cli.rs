@@ -300,12 +300,18 @@ pub(crate) enum TrackCommand {
     /// with the ticket open, or closed with the branch not ahead of the
     /// track, leaves the worktree standing for a person and the run goes
     /// on; a failure of the harness itself, a sync that refuses included,
-    /// stops it, named. Prints one line per ticket naming the ticket, the
+    /// stops it, named. With `track.frontier=auto` recorded on the clone,
+    /// "none" from `next` starts a `/frontier` session in the clone and
+    /// the run goes on with what it filed; a frontier still empty after
+    /// it ends the run listing the track's open `for-a-person` tickets.
+    /// Prints one line per ticket naming the ticket, the
     /// commit and the outcome, then a closing line once any was worked;
     /// writes no reading.
     Work {
-        /// One ticket alone: the line printed, and exit 1 with the reason
-        /// when the session leaves the ticket to a person.
+        /// One step alone, a `/frontier` session before it when the clone
+        /// records `track.frontier=auto` and the frontier is empty: the
+        /// line printed, and exit 1 with the reason when the session
+        /// leaves the ticket to a person.
         #[arg(long)]
         one: bool,
     },

@@ -29,7 +29,11 @@
 //! records the model its sessions run on, role-keyed (#75):
 //! `track.model.session` and `track.model.subagent`, the second
 //! defaulting to the first. A clone with no record names no model,
-//! which is stated, and none is guessed from the track's name.
+//! which is stated, and none is guessed from the track's name. A third
+//! record, `track.frontier=auto` (#85), says the track fills its own
+//! frontier: `track work` starts a `/frontier` session in the clone when
+//! `next` answers "none". A clone without it works the frontier it is
+//! given and stops.
 
 use std::path::{Path, PathBuf};
 
@@ -341,6 +345,24 @@ const NAME_KEY: &str = "track.name";
 /// role (#75).
 const SESSION_KEY: &str = "track.model.session";
 const SUBAGENT_KEY: &str = "track.model.subagent";
+
+/// The configuration key that says the track fills its own frontier
+/// (#85), and the one value it takes.
+const FRONTIER_KEY: &str = "track.frontier";
+const AUTO: &str = "auto";
+
+/// Whether the clone records `track.frontier=auto`; unset is `false`,
+/// and a record that is neither is an error naming it, not a clone that
+/// records none.
+pub(crate) fn fills_own_frontier(root: &Path) -> Result<bool> {
+    match config(root, FRONTIER_KEY).as_deref() {
+        None => Ok(false),
+        Some(AUTO) => Ok(true),
+        Some(other) => bail!(
+            "{FRONTIER_KEY} is {other:?}, and `{AUTO}` is the one value it takes; unset it, or `git config {FRONTIER_KEY} {AUTO}`"
+        ),
+    }
+}
 
 /// One configuration value, `None` where the key is unset or empty:
 /// the clone's records, read here and by `track work` for its own.

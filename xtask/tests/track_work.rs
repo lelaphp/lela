@@ -145,14 +145,16 @@ impl Scratch {
     /// and the subagents' model to what earlier sessions wrote, then does
     /// what `act.<n>` says, or `act` where the test wrote none for the
     /// ticket: `commit` commits a file named for the ticket on the branch, `close` flips the
-    /// ticket's recorded state to closed, and either or both.
+    /// ticket's recorded state to closed, and either or both. Started on
+    /// `/frontier` (#85) it runs the shell file `act.frontier` instead,
+    /// where the test writes what the planning session files.
     fn stand_ins(&self) {
         let dir = self.dir.display();
         let gh = format!(
             "#!/bin/sh\nif [ \"$1\" = issue ] && [ \"$2\" = list ]; then cat '{dir}/list.json'; exit $?; fi\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then f='{dir}/view.'$3'.json'; [ -f \"$f\" ] || f='{dir}/view.json'; cat \"$f\"; exit $?; fi\nprintf '%s\\n' \"$*\" >> '{dir}/calls'\nexit 0\n"
         );
         let claude = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{dir}/session.args'\npwd -P >> '{dir}/session.cwd'\nprintf '%s\\n' \"${{CLAUDE_CODE_SUBAGENT_MODEL-unset}}\" >> '{dir}/session.subagent'\n# the ticket: the last argument is the prompt, `/<skill> <n>`\nfor a; do last=$a; done; n=${{last##* }}\nact=$(cat '{dir}/act.'$n 2>/dev/null || cat '{dir}/act')\nview='{dir}/view.'$n'.json'; [ -f \"$view\" ] || view='{dir}/view.json'\ncase \"$act\" in *commit*) echo worked > worked.$n.txt && git add -- worked.$n.txt && git -c commit.gpgsign=false -c core.hooksPath=/var/empty -c user.name=x -c user.email=x@x commit -q -m 'the work' -- worked.$n.txt || exit 3;; esac\ncase \"$act\" in *close*) sed 's/\"OPEN\"/\"CLOSED\"/' \"$view\" > '{dir}/view.tmp' && mv '{dir}/view.tmp' \"$view\";; esac\nexit 0\n"
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{dir}/session.args'\npwd -P >> '{dir}/session.cwd'\nprintf '%s\\n' \"${{CLAUDE_CODE_SUBAGENT_MODEL-unset}}\" >> '{dir}/session.subagent'\n# the ticket: the last argument is the prompt, `/<skill> <n>`\nfor a; do last=$a; done; n=${{last##* }}\nif [ \"$last\" = /frontier ]; then sh '{dir}/act.frontier'; exit $?; fi\nact=$(cat '{dir}/act.'$n 2>/dev/null || cat '{dir}/act')\nview='{dir}/view.'$n'.json'; [ -f \"$view\" ] || view='{dir}/view.json'\ncase \"$act\" in *commit*) echo worked > worked.$n.txt && git add -- worked.$n.txt && git -c commit.gpgsign=false -c core.hooksPath=/var/empty -c user.name=x -c user.email=x@x commit -q -m 'the work' -- worked.$n.txt || exit 3;; esac\ncase \"$act\" in *close*) sed 's/\"OPEN\"/\"CLOSED\"/' \"$view\" > '{dir}/view.tmp' && mv '{dir}/view.tmp' \"$view\";; esac\nexit 0\n"
         );
         for (name, text) in [("gh", gh), ("claude", claude)] {
             let file = self.dir.join("bin").join(name);
@@ -175,21 +177,9 @@ impl Scratch {
     fn tracker(&self, open: &[u64], viewed: u64) {
         let issues = open
             .iter()
-            .map(|number| {
-                serde_json::json!({
-                    "number": number,
-                    "title": format!("ticket {number}"),
-                    "url": format!("https://example.invalid/issues/{number}"),
-                    "labels": [{"name": "ready-for-agent"}],
-                    "blockedBy": {"nodes": [], "totalCount": 0},
-                })
-            })
+            .map(|&number| (number, ["ready-for-agent"].as_slice()))
             .collect::<Vec<_>>();
-        fs::write(
-            self.dir.join("list.json"),
-            serde_json::Value::Array(issues).to_string(),
-        )
-        .unwrap();
+        fs::write(self.dir.join("list.json"), listed(&issues)).unwrap();
         fs::write(
             self.dir.join("view.json"),
             serde_json::json!({
@@ -246,6 +236,22 @@ impl Scratch {
     /// What the session does when started for `number`.
     fn act_on(&self, number: u64, act: &str) {
         fs::write(self.dir.join(format!("act.{number}")), act).unwrap();
+    }
+
+    /// What the session started on `/frontier` does, as shell: the first
+    /// time it replaces the tracker's open list with `list.next.json`,
+    /// written from `filed`, the tickets it filed, each with its labels;
+    /// the second time it files nothing (#85).
+    fn frontier_files(&self, filed: &[(u64, &[&str])]) {
+        fs::write(self.dir.join("list.next.json"), listed(filed)).unwrap();
+        let dir = self.dir.display();
+        fs::write(
+            self.dir.join("act.frontier"),
+            format!(
+                "if [ ! -f '{dir}/planned' ]; then touch '{dir}/planned'; cp '{dir}/list.next.json' '{dir}/list.json'; fi\nexit 0\n"
+            ),
+        )
+        .unwrap();
     }
 
     /// One more shell line the session runs after its act, before it
@@ -358,6 +364,24 @@ impl Scratch {
             .filter_map(|l| l.strip_prefix("worktree ").map(str::to_owned))
             .collect()
     }
+}
+
+/// The tracker's open list, each ticket with its labels as the tracker
+/// spells them, unblocked.
+fn listed(issues: &[(u64, &[&str])]) -> String {
+    let issues = issues
+        .iter()
+        .map(|(number, labels)| {
+            serde_json::json!({
+                "number": number,
+                "title": format!("ticket {number}"),
+                "url": format!("https://example.invalid/issues/{number}"),
+                "labels": labels.iter().map(|name| serde_json::json!({"name": name})).collect::<Vec<_>>(),
+                "blockedBy": {"nodes": [], "totalCount": 0},
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::Value::Array(issues).to_string()
 }
 
 /// The whole path, `--one`: the next ticket, its worktree on `<track>/t<n>`, the
@@ -495,12 +519,15 @@ fn a_tip_not_ahead_of_the_track_stands() {
 }
 
 /// A clone with no model record refuses before any worktree is laid
-/// down, and an empty frontier lays none down and is not an error.
+/// down, and an empty frontier lays none down and is not an error: with
+/// no `track.frontier` record the run ends at "none" and starts no
+/// `/frontier` session, though the stand-in would file a ticket (#85).
 #[test]
 fn no_model_refuses_before_a_worktree_and_an_empty_frontier_is_none() {
     let scratch = Scratch::lay("refuse");
     scratch.tracker(&[20], 20);
     scratch.act("commit close");
+    scratch.frontier_files(&[(21, &["ready-for-agent"])]);
     sh(
         &scratch.root,
         &["git", "config", "--unset", "track.model.subagent"],
@@ -526,6 +553,7 @@ fn no_model_refuses_before_a_worktree_and_an_empty_frontier_is_none() {
     assert!(out.contains("none: the frontier of t-x is empty"), "{out}");
     assert_eq!(scratch.worktrees().len(), 1, "{out}");
     assert_eq!(scratch.wrote("session.args"), "", "no session started");
+    assert!(!scratch.dir.join("planned").exists(), "no planner: {out}");
     let _ = fs::remove_dir_all(&scratch.dir);
 }
 
@@ -769,5 +797,120 @@ fn a_ticket_with_both_frontier_labels_refuses_before_a_worktree() {
     assert_eq!(scratch.worktrees().len(), 1, "{out}");
     assert!(!has_ref(&scratch.root, "refs/heads/t-x/t20"), "{out}");
     assert_eq!(scratch.wrote("session.args"), "", "no session started");
+    let _ = fs::remove_dir_all(&scratch.dir);
+}
+
+/// With `track.frontier=auto` the run fills its own frontier (#85): the
+/// one ticket closed, `next` answers "none", so a `/frontier` session is
+/// started in the clone itself, on the same model, mode and effort, and
+/// the run goes on with the ticket it filed; that one closed, the
+/// frontier is still empty after the second `/frontier` session, which
+/// ends the run listing the track's open `for-a-person` tickets, those
+/// of another track left out.
+#[test]
+fn an_empty_frontier_is_filled_by_a_frontier_session_until_it_stays_empty() {
+    let scratch = Scratch::lay("auto");
+    scratch.tracker(&[20], 20);
+    scratch.viewed(20);
+    scratch.viewed(21);
+    scratch.act_on(20, "commit close");
+    scratch.act_on(21, "commit close");
+    scratch.frontier_files(&[
+        (21, &["ready-for-agent"]),
+        (30, &["for-a-person", "track:t-x"]),
+        (31, &["for-a-person", "track:main"]),
+        (32, &["for-a-person"]),
+    ]);
+    sh(&scratch.root, &["git", "config", "track.frontier", "auto"]);
+    let (code, out) = scratch.work(&[]);
+    assert_eq!(code, 0, "{out}");
+
+    let first = rev(&scratch.root, "t-x/t20");
+    let second = rev(&scratch.root, "t-x/t21");
+    assert_eq!(rev(&scratch.origin, "t-x"), second, "{out}");
+    assert_eq!(
+        sh(&scratch.root, &["git", "rev-parse", "t-x/t21^"]).trim(),
+        first,
+        "the filed ticket was laid down off the moved track: {out}"
+    );
+    assert!(!scratch.worktree("t-x/t20").exists(), "retired: {out}");
+    assert!(!scratch.worktree("t-x/t21").exists(), "retired: {out}");
+
+    // Four sessions: the ticket, the planner in the clone, the ticket it
+    // filed, the planner again.
+    let session = "-p --model claude-opus-5 --permission-mode bypassPermissions --effort high";
+    assert_eq!(
+        scratch.wrote("session.args"),
+        format!(
+            "{session} /implement 20\n{session} /frontier\n{session} /implement 21\n{session} /frontier"
+        )
+    );
+    assert_eq!(
+        scratch.wrote("session.cwd"),
+        format!(
+            "{}\n{}\n{}\n{}",
+            scratch.worktree("t-x/t20").display(),
+            scratch.root.display(),
+            scratch.worktree("t-x/t21").display(),
+            scratch.root.display()
+        )
+    );
+    assert_eq!(
+        scratch.wrote("session.subagent"),
+        "claude-sonnet-5\nclaude-sonnet-5\nclaude-sonnet-5\nclaude-sonnet-5"
+    );
+
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(
+        lines.contains(
+            &"track work: none: the frontier of t-x is still empty after the /frontier session; nothing laid down; the track waits on 2 for-a-person tickets:"
+        ),
+        "{out}"
+    );
+    assert!(lines.contains(&"  #30 ticket 30"), "{out}");
+    assert!(lines.contains(&"  #32 ticket 32"), "{out}");
+    assert!(!out.contains("#31"), "another track's: {out}");
+    assert!(
+        lines.contains(
+            &"track work: the frontier of t-x is empty after 2 tickets: #20 closed, #21 closed"
+        ),
+        "{out}"
+    );
+    let _ = fs::remove_dir_all(&scratch.dir);
+}
+
+/// With the record, `--one` on an empty frontier starts the planner
+/// once; a frontier still empty with no `for-a-person` ticket says so in
+/// the line, exit 0; and a record that is not `auto` refuses, named,
+/// before any session.
+#[test]
+fn a_frontier_that_stays_empty_ends_the_run_and_a_record_not_auto_refuses() {
+    let scratch = Scratch::lay("still");
+    scratch.tracker(&[], 20);
+    scratch.frontier_files(&[]);
+    sh(&scratch.root, &["git", "config", "track.frontier", "auto"]);
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(
+        scratch.wrote("session.args"),
+        "-p --model claude-opus-5 --permission-mode bypassPermissions --effort high /frontier"
+    );
+    assert!(
+        out.contains(
+            "track work: none: the frontier of t-x is still empty after the /frontier session; nothing laid down; the track waits on no for-a-person ticket"
+        ),
+        "{out}"
+    );
+    assert_eq!(scratch.worktrees().len(), 1, "{out}");
+
+    sh(&scratch.root, &["git", "config", "track.frontier", "yes"]);
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("track.frontier is \"yes\""), "{out}");
+    assert_eq!(
+        scratch.wrote("session.args").lines().count(),
+        1,
+        "no second session: {out}"
+    );
     let _ = fs::remove_dir_all(&scratch.dir);
 }
