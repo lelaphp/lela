@@ -47,6 +47,7 @@ pub mod ticket;
 pub mod track;
 pub mod track_new;
 pub mod track_next;
+pub mod track_sync;
 pub mod track_work;
 pub mod unsafe_audit;
 pub mod vocab;
@@ -303,6 +304,10 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
             command: Some(TrackCommand::Next { track, json }),
             ..
         } => Some(track_next::command(root, track.as_deref(), *json)),
+        Command::Track {
+            command: Some(TrackCommand::Sync),
+            ..
+        } => Some(track_sync::command(root)),
         Command::Track {
             command: Some(TrackCommand::Work { one }),
             ..

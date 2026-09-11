@@ -110,8 +110,9 @@ pub(crate) enum Command {
     /// the `computed trust` line printed as a person's.
     /// `next` names the ticket the track works next, the oldest open
     /// `ready-for-agent` ticket that is unblocked, this track's and on no
-    /// branch of this clone. `work` takes that ticket from start to
-    /// retire without a person.
+    /// branch of this clone. `sync` catches the track up with main.
+    /// `work` takes that ticket from start to retire without a person,
+    /// syncing before each.
     #[command(args_conflicts_with_subcommands = true)]
     Track {
         /// A branch other than `HEAD`'s, made or not yet: what the add
@@ -282,17 +283,26 @@ pub(crate) enum TrackCommand {
         #[arg(long)]
         json: bool,
     },
-    /// The frontier until it empties, without a person: for each ticket
-    /// `next` names, its worktree laid down on `<track>/t<n>`, a headless
-    /// session in it on the model the clone records, and when the session
-    /// ends with the ticket closed, the track's branch fast-forwarded to
-    /// the worktree's tip, pushed to origin and the worktree retired. A
-    /// session that ends with the ticket open, or closed with the branch
-    /// not ahead of the track, leaves the worktree standing for a person
-    /// and the run goes on; a failure of the harness itself stops it,
-    /// named. Prints one line per ticket naming the ticket, the commit
-    /// and the outcome, then a closing line once any was worked; writes
+    /// The track caught up with main: from inside the track's clone,
+    /// `origin/main` merged into the track's branch, the branch pushed
+    /// to origin, the clone re-detached at the new tip and `xtask` built
+    /// there, so the track never runs a harness older than main's; one
+    /// line says what moved. A merge that conflicts refuses, names the
+    /// conflict, and changes neither the branch nor the clone. Writes
     /// no reading.
+    Sync,
+    /// The frontier until it empties, without a person: for each ticket
+    /// `next` names, the track caught up with main first, its worktree
+    /// laid down on `<track>/t<n>`, a headless session in it on the model
+    /// the clone records, and when the session ends with the ticket
+    /// closed, the track's branch fast-forwarded to the worktree's tip,
+    /// pushed to origin and the worktree retired. A session that ends
+    /// with the ticket open, or closed with the branch not ahead of the
+    /// track, leaves the worktree standing for a person and the run goes
+    /// on; a failure of the harness itself, a sync that refuses included,
+    /// stops it, named. Prints one line per ticket naming the ticket, the
+    /// commit and the outcome, then a closing line once any was worked;
+    /// writes no reading.
     Work {
         /// One ticket alone: the line printed, and exit 1 with the reason
         /// when the session leaves the ticket to a person.

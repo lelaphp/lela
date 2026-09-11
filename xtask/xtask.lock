@@ -236,6 +236,11 @@ track_next::Next::render
 track_next::Next::to_json
 track_next::command
 track_next::next
+track_sync::How
+track_sync::Synced
+track_sync::Synced::render
+track_sync::command
+track_sync::sync
 track_work::Session
 track_work::Session::arguments
 track_work::Session::of
