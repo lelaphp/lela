@@ -593,10 +593,16 @@ fn permits(
 }
 
 /// One row per rule `permit` judges by: its last finding, the denials per
-/// session and in total, and, when `this` names a session, its count. The
-/// manifest's rules, then permit's own two, which no manifest row names
-/// and which a section that read the manifest alone would leave unsaid
-/// (#16).
+/// session and in total, the calls handed to the next candidate, and, when
+/// `this` names a session, its count. The manifest's rules, then permit's
+/// own three, which no manifest row names and which a section that read
+/// the manifest alone would leave unsaid (#16).
+///
+/// The two columns are two questions and #118 is what came of answering
+/// them with one number: `denials` counts what a rule refused, `handed on`
+/// counts the calls a build passed to the candidate that rebuilds, which
+/// judged them. A walk is not a refusal, so the second never adds to the
+/// first.
 fn permit_rows(
     manifest: &Manifest,
     readings: &[Reading],
@@ -608,14 +614,22 @@ fn permit_rows(
         .iter()
         .filter(|rule| permit::judged_at_the_call(rule))
         .map(|rule| (rule.id.clone(), rule.adr.iter().collect::<Vec<_>>()));
-    let permits = [permit::REGION_RULE, permit::STALE_RULE]
-        .into_iter()
-        .map(|id| (id.to_owned(), Vec::new()));
+    let permits = [
+        permit::REGION_RULE,
+        permit::STALE_RULE,
+        permit::UNJUDGED_RULE,
+    ]
+    .into_iter()
+    .map(|id| (id.to_owned(), Vec::new()));
     manifests
         .chain(permits)
         .map(|(id, adr)| {
-            let sessions = denials_per_session(log, &id);
+            let sessions = per_session(log, &id, reading::Status::Fail);
             let denials: usize = sessions.iter().map(|(_, n)| n).sum();
+            let handed_on: usize = per_session(log, &id, reading::Status::Skip)
+                .iter()
+                .map(|(_, n)| n)
+                .sum();
             let this_session = this.map_or(Value::Null, |session| {
                 json!(
                     sessions
@@ -629,6 +643,7 @@ fn permit_rows(
                     ("rule", json!(id)),
                     ("adr", json!(adr)),
                     ("denials", json!(denials)),
+                    ("handed_on", json!(handed_on)),
                     ("this_session", this_session),
                     (
                         "sessions",
@@ -648,14 +663,14 @@ fn permit_rows(
         .collect()
 }
 
-/// The denials of one rule in the log, counted per session and ordered by
-/// each session's last denial, newest first; the log is append-only, so
-/// its order is time's.
-fn denials_per_session(log: &[Reading], rule: &str) -> Vec<(String, usize)> {
+/// The readings of one rule at one status in the log, counted per session
+/// and ordered by each session's last one, newest first; the log is
+/// append-only, so its order is time's. `Fail` is what a rule denied,
+/// `Skip` what a build handed to the next candidate.
+fn per_session(log: &[Reading], rule: &str, status: reading::Status) -> Vec<(String, usize)> {
     let mut seen: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
     for (i, r) in log.iter().enumerate() {
-        if r.instrument == permit::INSTRUMENT && r.rule == rule && r.status == reading::Status::Fail
-        {
+        if r.instrument == permit::INSTRUMENT && r.rule == rule && r.status == status {
             let entry = seen.entry(&r.session).or_insert((i, 0));
             entry.0 = i;
             entry.1 += 1;
@@ -1155,6 +1170,7 @@ const PERMITS: Columns = (
         "reading",
         "at",
         "denials",
+        "handed on",
         "this session",
         "sessions",
         "message",
@@ -1169,6 +1185,7 @@ const PERMITS: Columns = (
                 .map(|x| x.at.to_string())
                 .unwrap_or_default(),
             r.fact("denials"),
+            r.fact("handed_on"),
             r.fact("this_session"),
             r.sessions(),
             r.message(),
