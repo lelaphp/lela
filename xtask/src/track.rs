@@ -341,8 +341,9 @@ const NAME_KEY: &str = "track.name";
 const SESSION_KEY: &str = "track.model.session";
 const SUBAGENT_KEY: &str = "track.model.subagent";
 
-/// One configuration value, `None` where the key is unset or empty.
-fn config(root: &Path, key: &str) -> Option<String> {
+/// One configuration value, `None` where the key is unset or empty:
+/// the clone's records, read here and by `track work` for its own.
+pub(crate) fn config(root: &Path, key: &str) -> Option<String> {
     let text = git(root, &["config", "--get", key], None).ok()?;
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_owned())
@@ -450,8 +451,8 @@ fn merge_base(root: &Path, from: &str, other: &str) -> Result<String> {
 }
 
 /// The first seven characters, what `rev-parse --short` prints on a small
-/// repository.
-fn short(commit: &str) -> &str {
+/// repository; `track work` cites commits the same way.
+pub(crate) fn short(commit: &str) -> &str {
     &commit[..commit.len().min(7)]
 }
 

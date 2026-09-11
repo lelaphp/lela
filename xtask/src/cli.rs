@@ -110,7 +110,8 @@ pub(crate) enum Command {
     /// the `computed trust` line printed as a person's.
     /// `next` names the ticket the track works next, the oldest open
     /// `ready-for-agent` ticket that is unblocked, this track's and on no
-    /// branch of this clone.
+    /// branch of this clone. `work` takes that ticket from start to
+    /// retire without a person.
     #[command(args_conflicts_with_subcommands = true)]
     Track {
         /// A branch other than `HEAD`'s, made or not yet: what the add
@@ -281,6 +282,15 @@ pub(crate) enum TrackCommand {
         #[arg(long)]
         json: bool,
     },
+    /// One ticket from start to retire without a person: the ticket
+    /// `next` names, its worktree laid down on `<track>/t<n>`, a headless
+    /// session in it on the model the clone records, and when the session
+    /// ends with the ticket closed, the track's branch fast-forwarded to
+    /// the worktree's tip, pushed to origin and the worktree retired. A
+    /// session that ends with the ticket open leaves the worktree standing
+    /// and exits 1 with the reason. Prints one line naming the ticket, the
+    /// commit and the outcome; writes no reading.
+    Work,
 }
 
 /// The two halves of a track's worktree.

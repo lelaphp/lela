@@ -5,11 +5,13 @@
 //! three facts about a fresh worktree are why the add is an instrument and
 //! not a bare `git worktree add`:
 //!
-//! * `computed` trust is keyed by the root path, so a new worktree is
-//!   untrusted: its regions answer `exec untrusted skipped`, the session
-//!   hook renders nothing and pre-commit refuses the first commit. The
-//!   grant is a person's (§11), so the line is printed, never run; what
-//!   `computed` answered is read by [`computed::render`], once.
+//! * `computed` trust is a person's grant (§11), and the grant on a clone
+//!   covers every repository under the granted path, its worktrees among
+//!   them (#74, revision 18), so the local file is rendered here and no
+//!   trust line is printed and none waited on; a worktree `computed`
+//!   still answers untrusted for is said to be unrendered, with no line
+//!   to run. What `computed` answered is read by [`computed::render`],
+//!   once.
 //! * `PreToolUse` denies an `Edit` or a `Write` that no candidate judged,
 //!   and in a worktree with a cold `target/` the only candidate is `cargo
 //!   run … permit` inside the hook's 60 s timeout. So `xtask` is built
@@ -346,14 +348,21 @@ fn lay_local(dir: &Path) -> bool {
 }
 
 /// The local file rendered, read as [`computed::Answer`]: the regions
-/// rendered where the worktree is trusted, and the grant printed as a
-/// person's line where it is not (§11); a broken marker and a missing
-/// `computed` are complaints, since the file is laid down either way.
+/// rendered where the clone's grant covers the worktree, and said to be
+/// unrendered where `computed` answers untrusted, with no line to run,
+/// since the grant is the clone's and a worktree asks for none (#74,
+/// §11); a broken marker and a missing `computed` are complaints, since
+/// the file is laid down either way.
 fn trust(dir: &Path) {
     let files = [LOCAL.to_owned()];
     match computed::render(dir, &files) {
         Ok(computed::Answer::Rendered(_)) => say(ADD, &format!("rendered {LOCAL}")),
-        Ok(computed::Answer::Untrusted { .. }) => say(ADD, &computed::trust_line(dir)),
+        Ok(computed::Answer::Untrusted { .. }) => say(
+            ADD,
+            &format!(
+                "{LOCAL}'s exec regions are unrendered here; the clone's grant covers the worktree (#74), so no grant is asked for it"
+            ),
+        ),
         Ok(answer) => complain(ADD, &answer.refusal().unwrap_or_default()),
         Err(err) => complain(ADD, &format!("{err:#}")),
     }

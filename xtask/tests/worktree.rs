@@ -176,7 +176,8 @@ fn worktrees(root: &Path) -> Vec<String> {
 /// The add instrument: one call creates the branch off its track, adds the
 /// worktree, builds `xtask` so the first `Edit` is judged by a built
 /// binary rather than a cold `cargo run` (§12 item 8), lays the local file
-/// down and prints the `computed trust` line as a person's to run (§11).
+/// down and prints no trust line, the clone's grant covering the
+/// worktree (#74, §11).
 #[test]
 fn an_add_lays_a_worktree_down_ready_to_be_worked_in() {
     let root = repository("add");
@@ -208,17 +209,11 @@ fn an_add_lays_a_worktree_down_ready_to_be_worked_in() {
     assert_eq!(facts["branch"], "t-x/witness", "{facts}");
     assert_eq!(facts["store"], root.to_str().unwrap(), "{facts}");
 
-    // The local file is laid down by that build and rendered, and the
-    // grant that would render it is printed rather than run.
+    // The local file is laid down by that build, and no grant is asked
+    // for the worktree: the clone's covers it (#74).
     assert!(dir.join(".claude/harness.local.md").is_file(), "{out}");
-    assert!(
-        out.contains(&format!("computed trust {}", dir.display())),
-        "{out}"
-    );
-    assert!(
-        out.contains("a person runs, once"),
-        "the grant is a person's: {out}"
-    );
+    assert!(!out.contains("computed trust"), "no trust line: {out}");
+    assert!(!out.contains("a person runs"), "no grant waited on: {out}");
 
     // What the clone already has is reported, not repeated.
     assert!(out.contains("core.hooksPath"), "{out}");

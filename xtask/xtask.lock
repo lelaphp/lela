@@ -244,6 +244,14 @@ track_next::Next::render
 track_next::Next::to_json
 track_next::command
 track_next::next
+track_work::Session
+track_work::Session::arguments
+track_work::Session::of
+track_work::Session::prompt
+track_work::Worked
+track_work::Worked::render
+track_work::command
+track_work::work
 unsafe_audit::run
 vocab::hold
 vocab::run
