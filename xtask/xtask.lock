@@ -14,7 +14,6 @@ divergence::INSTRUMENT
 divergence::Kind
 divergence::Kind::ALL
 divergence::Kind::as_str
-divergence::Kind::of
 divergence::Kind::prefix
 divergence::Registry
 divergence::Registry::accepted
@@ -133,8 +132,6 @@ oracle::Source::path
 oracle::Source::tree
 oracle::TREE_VARIABLE
 oracle::Verdict
-oracle::Verdict::met
-oracle::Verdict::render
 oracle::compare
 oracle::diff
 oracle::normalise
@@ -152,10 +149,7 @@ permit::Judgement::denial
 permit::Judgement::hook_stdout
 permit::Judgement::notes
 permit::Kind
-permit::Kind::ALL
-permit::Kind::as_str
 permit::Kind::of
-permit::Kind::prefix
 permit::judge
 permit::judged_at_the_call
 permit::run
@@ -172,7 +166,6 @@ reading::Number::count
 reading::Outcome
 reading::Outcome::exit
 reading::Outcome::of
-reading::Outcome::status
 reading::Reading
 reading::Reading::count
 reading::Reading::for_crate
@@ -183,7 +176,6 @@ reading::Reading::stamped_over
 reading::Reading::to_json
 reading::Reading::tree
 reading::Status
-reading::Status::ALL
 reading::Status::as_str
 reading::Store
 reading::Store::append

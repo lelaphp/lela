@@ -17,9 +17,14 @@
 //! outside the workspace is one line, the re-exported name; a glob of one is
 //! the line `<module>::*`.
 //!
-//! Known limits: `#[path]` on a `mod` is not read; an inherent impl is
-//! attached to the type of the same name anywhere in its crate; `cfg` is
-//! not evaluated, so a `pub` item behind a feature is always listed.
+//! An inherent impl is attached to the type its self type resolves to from
+//! the module the impl is in: a plain name is the type defined there or
+//! brought in by a `use` there, a glob included, and `crate::`, `self::`
+//! and `super::` paths are followed, so two types of one name in one crate
+//! each list their own methods alone.
+//!
+//! Known limits: `#[path]` on a `mod` is not read; `cfg` is not evaluated,
+//! so a `pub` item behind a feature is always listed.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -67,6 +72,10 @@ impl ModId {
     }
 }
 
+/// The inherent-impl surface of one crate: the `pub` associated items
+/// under the module and name of the type each impl resolves to.
+type AssocTable = HashMap<(ModId, String), BTreeSet<String>>;
+
 /// A module's items, and where a `mod x;` inside it is looked for.
 struct Module {
     items: Vec<Item>,
@@ -90,8 +99,8 @@ pub struct Inventory<'a> {
     crates: &'a Crates,
     modules: HashMap<ModId, Option<Rc<Module>>>,
     /// Per crate: the `pub` associated items of inherent impls, by the
-    /// name of the type they are for.
-    assoc: HashMap<String, Rc<HashMap<String, BTreeSet<String>>>>,
+    /// module and name of the type each resolves to.
+    assoc: HashMap<String, Rc<AssocTable>>,
 }
 
 impl<'a> Inventory<'a> {
@@ -217,8 +226,8 @@ impl<'a> Inventory<'a> {
     }
 
     /// The associated items of the item `name` defined in `module`: a
-    /// trait's items, and the `pub` items of inherent impls for a type of
-    /// that name in the crate.
+    /// trait's items, and the `pub` items of the inherent impls that
+    /// resolve to that type.
     fn surface(&mut self, module: &ModId, name: &str) -> Result<Vec<String>> {
         let mut out = Vec::new();
         if let Some(m) = self.module(module)? {
@@ -235,18 +244,20 @@ impl<'a> Inventory<'a> {
                 }
             }
         }
-        if let Some(items) = self.assoc(&module.krate)?.get(name) {
+        let key = (module.clone(), name.to_owned());
+        if let Some(items) = self.assoc(&module.krate)?.get(&key) {
             out.extend(items.iter().cloned());
         }
         Ok(out)
     }
 
-    /// The inherent-impl surface of one crate, by type name, read once.
-    fn assoc(&mut self, krate: &str) -> Result<Rc<HashMap<String, BTreeSet<String>>>> {
+    /// The inherent-impl surface of one crate, by the module and name of
+    /// the type each impl resolves to, read once.
+    fn assoc(&mut self, krate: &str) -> Result<Rc<AssocTable>> {
         if let Some(found) = self.assoc.get(krate) {
             return Ok(Rc::clone(found));
         }
-        let mut table: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let mut table = AssocTable::new();
         let mut todo = vec![ModId::root(krate)];
         let mut visited = HashSet::new();
         while let Some(id) = todo.pop() {
@@ -260,10 +271,11 @@ impl<'a> Inventory<'a> {
                 match item {
                     Item::Mod(m) => todo.push(id.child(&m.ident.to_string())),
                     Item::Impl(i) if i.trait_.is_none() => {
-                        let Some(type_name) = self_type_name(&i.self_ty) else {
+                        let Some(segs) = self_type_path(&i.self_ty) else {
                             continue;
                         };
-                        let entry = table.entry(type_name).or_default();
+                        let key = self.self_type(&id, &module, &segs)?;
+                        let entry = table.entry(key).or_default();
                         for assoc in &i.items {
                             match assoc {
                                 ImplItem::Const(c) if is_pub(&c.vis) => {
@@ -286,6 +298,64 @@ impl<'a> Inventory<'a> {
         let table = Rc::new(table);
         self.assoc.insert(krate.to_owned(), Rc::clone(&table));
         Ok(table)
+    }
+
+    /// The module and name of the type an inherent impl in `module` (`id`)
+    /// resolves to, from its self type `segs`: the first segment is what a
+    /// `use` there brings in under that name, of any visibility, else an
+    /// item defined there or brought in by a glob for a plain name, else a
+    /// path followed from `crate`, `self`, `super` or a child module. A
+    /// self type that resolves to nothing is keyed by the module the impl
+    /// is in and the last segment, which no listed item asks for: its
+    /// methods are not listed.
+    fn self_type(
+        &mut self,
+        id: &ModId,
+        module: &Module,
+        segs: &[String],
+    ) -> Result<(ModId, String)> {
+        let last = segs.last().cloned().unwrap_or_default();
+        let fallback = (id.clone(), last.clone());
+        let Some((first, rest)) = segs.split_first() else {
+            return Ok(fallback);
+        };
+        let uses: Vec<UsePath> = module
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Use(u) => Some(flatten(&u.tree)),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let named = uses
+            .iter()
+            .find(|p| matches!(&p.leaf, Leaf::Name(alias) if alias == first));
+        let mut target = match named {
+            Some(path) => {
+                let mut full = path.segs.clone();
+                full.extend(rest.iter().cloned());
+                self.resolve(id, &full, 0)?
+            }
+            None if rest.is_empty() => self.lookup(id, first, 0)?,
+            None => self.resolve(id, segs, 0)?,
+        };
+        if matches!(target, Target::Opaque) && rest.is_empty() {
+            for path in uses.iter().filter(|p| p.leaf == Leaf::Glob) {
+                if let Target::Module(m) = self.resolve(id, &path.segs, 0)?
+                    && m != *id
+                {
+                    target = self.lookup(&m, first, 0)?;
+                    if !matches!(target, Target::Opaque) {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(match target {
+            Target::Item { module, name } => (module, name),
+            Target::Module(_) | Target::Opaque => fallback,
+        })
     }
 
     /// What `segs`, a `use` path written in module `from`, names.
@@ -505,14 +575,21 @@ fn item_kind(item: &Item) -> &'static str {
     }
 }
 
-/// The last segment of an inherent impl's self type: `Cache` for
-/// `impl Cache<'a>`, `Request` for `impl crate::request::Request`.
-fn self_type_name(ty: &Type) -> Option<String> {
+/// The segments of an inherent impl's self type: `[Cache]` for
+/// `impl Cache<'a>`, `[crate, request, Request]` for
+/// `impl crate::request::Request`.
+fn self_type_path(ty: &Type) -> Option<Vec<String>> {
     match ty {
-        Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
-        Type::Reference(r) => self_type_name(&r.elem),
-        Type::Group(g) => self_type_name(&g.elem),
-        Type::Paren(p) => self_type_name(&p.elem),
+        Type::Path(p) => Some(
+            p.path
+                .segments
+                .iter()
+                .map(|s| s.ident.to_string())
+                .collect(),
+        ),
+        Type::Reference(r) => self_type_path(&r.elem),
+        Type::Group(g) => self_type_path(&g.elem),
+        Type::Paren(p) => self_type_path(&p.elem),
         _ => None,
     }
 }
@@ -653,5 +730,44 @@ fn walk_tree(tree: &UseTree, prefix: &mut Vec<String>, out: &mut Vec<UsePath>) {
                 walk_tree(item, prefix, out);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::manifest::Manifest;
+
+    /// The `same-name` fixture: `reading::Outcome` and `work::Outcome`, with
+    /// `work.rs` writing impls as a plain name, `self::`, `crate::` and a
+    /// module imported by `use`, and `glob.rs` through a glob and `super::`
+    /// (#79). The crate is named `php_heap` for `Crates::scan` alone, which
+    /// finds a crate through a manifest row.
+    #[test]
+    fn an_inherent_impl_lands_under_the_type_it_is_written_on_alone() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/api-check/same-name");
+        let manifest = Manifest::named("php_heap");
+        let crates = Crates::scan(&manifest, &root).unwrap();
+        let mut inventory = Inventory::new(&crates);
+        let items = inventory
+            .public_items(crates.named("php_heap").unwrap())
+            .unwrap();
+        let lines: Vec<&str> = items.iter().map(String::as_str).collect();
+        assert_eq!(
+            lines,
+            [
+                "reading::Outcome",
+                "reading::Outcome::globbed",
+                "reading::Outcome::of",
+                "reading::Outcome::render",
+                "work::Outcome",
+                "work::Outcome::above",
+                "work::Outcome::exit",
+                "work::Outcome::status",
+                "work::Outcome::worked",
+            ]
+        );
     }
 }
