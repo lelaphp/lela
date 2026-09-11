@@ -60,7 +60,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 
 use crate::computed;
-use crate::git::git;
+use crate::git::{git, has_ref};
 use crate::reading::{self, Store};
 use crate::track::{self, Ticket, Track};
 
@@ -105,24 +105,12 @@ impl std::error::Error for NotReady {}
 /// down with a fact missing.
 pub fn add(root: &Path, branch: &str, ticket: Option<Ticket>) -> Result<PathBuf> {
     let dir = root.join(WORKTREES).join(branch);
-    if git(
-        root,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{branch}"),
-        ],
-        None,
-    )
-    .is_ok()
-    {
+    if has_ref(root, &format!("refs/heads/{branch}")) {
         bail!(
             "the branch {branch} exists; work in its worktree, retire it, or name another branch"
         );
     }
-    let remote = format!("refs/remotes/origin/{branch}");
-    if git(root, &["rev-parse", "--verify", "--quiet", &remote], None).is_ok() {
+    if has_ref(root, &format!("refs/remotes/origin/{branch}")) {
         bail!(
             "origin has {branch}, so an agent is on it; check it out with `git worktree add <dir> {branch}`, or name another branch"
         );
@@ -182,10 +170,10 @@ pub fn add(root: &Path, branch: &str, ticket: Option<Ticket>) -> Result<PathBuf>
     }
 
     let mut ready = true;
-    ready &= build(&dir);
+    ready &= build(ADD, &dir);
     ready &= lay_local(&dir);
     trust(&dir);
-    carried_over(&dir);
+    carried_over(ADD, &dir);
     if ready {
         say(ADD, &format!("ready: cd {}", dir.display()));
         Ok(dir)
@@ -194,12 +182,12 @@ pub fn add(root: &Path, branch: &str, ticket: Option<Ticket>) -> Result<PathBuf>
     }
 }
 
-fn say(half: &str, line: &str) {
-    println!("{half}: {line}");
+pub(crate) fn say(whose: &str, line: &str) {
+    println!("{whose}: {line}");
 }
 
-fn complain(half: &str, line: &str) {
-    eprintln!("{half}: {line}");
+pub(crate) fn complain(whose: &str, line: &str) {
+    eprintln!("{whose}: {line}");
 }
 
 /// Retire the worktree on `branch`: its log appended into the track's
@@ -281,8 +269,9 @@ fn append_log(dir: &Path, root: &Path) -> Result<bool> {
 }
 
 /// `xtask` built here, so the first `Edit` is judged rather than waiting
-/// on a build; whether it was.
-fn build(dir: &Path) -> bool {
+/// on a build; whether it was. `whose` prefixes the lines, since `track
+/// new` builds its clone through this too.
+pub(crate) fn build(whose: &str, dir: &Path) -> bool {
     let built = Command::new("cargo")
         .args(["build", "-q", "-p", "xtask"])
         .current_dir(dir)
@@ -291,21 +280,21 @@ fn build(dir: &Path) -> bool {
     match built {
         Ok(status) if status.success() => {
             say(
-                ADD,
+                whose,
                 "built target/debug/xtask: the first Edit in it is judged by this build, not by a cold cargo run",
             );
             true
         }
         Ok(_) => {
             complain(
-                ADD,
+                whose,
                 "cargo build -p xtask failed; an Edit there is judged by a cold cargo run or denied",
             );
             false
         }
         Err(err) => {
             complain(
-                ADD,
+                whose,
                 &format!("cargo did not run ({err}); an Edit there is judged by nothing"),
             );
             false
@@ -370,40 +359,41 @@ fn trust(dir: &Path) {
     }
 }
 
-/// What the clone already has, reported rather than set again.
-fn carried_over(dir: &Path) {
+/// What the clone already has, said rather than set again; `whose`
+/// prefixes the lines.
+pub(crate) fn carried_over(whose: &str, dir: &Path) {
     match git(dir, &["config", "core.hooksPath"], None) {
         Ok(hooks) if !hooks.trim().is_empty() => say(
-            ADD,
+            whose,
             &format!(
                 "carried over: core.hooksPath={}, which is repository config",
                 hooks.trim()
             ),
         ),
         _ => say(
-            ADD,
+            whose,
             "core.hooksPath is unset, so pre-commit and pre-push are not wired; the session hook points it at scripts/hooks",
         ),
     }
     if dir.join(".claude/settings.json").is_file() {
         say(
-            ADD,
+            whose,
             "carried over: .claude/settings.json, which is tracked, so the plugin settings are the clone's",
         );
     } else {
         say(
-            ADD,
+            whose,
             ".claude/settings.json is missing, so this worktree loads no harness plugin",
         );
     }
     if dir.join("oracle.toml").is_file() {
         say(
-            ADD,
+            whose,
             "carried over: oracle.toml, which is tracked, and the php-src tree it pins, which is outside the clone; `xtask phpt` says if that tree is gone",
         );
     } else {
         say(
-            ADD,
+            whose,
             "oracle.toml is missing, so this worktree has no oracle and no pinned php-src",
         );
     }

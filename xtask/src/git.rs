@@ -135,6 +135,11 @@ pub fn blob_id(content: &[u8]) -> String {
     hash.digest().to_string()
 }
 
+/// Whether `root` has the ref `name` (`refs/heads/x`, `refs/remotes/origin/x`).
+pub(crate) fn has_ref(root: &Path, name: &str) -> bool {
+    git(root, &["rev-parse", "--verify", "--quiet", name], None).is_ok()
+}
+
 /// Run git in `root` and return its stdout; a non-zero exit is an error
 /// carrying git's stderr.
 pub(crate) fn git(root: &Path, args: &[&str], stdin: Option<&str>) -> Result<String> {

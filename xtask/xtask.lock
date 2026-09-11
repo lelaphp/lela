@@ -228,6 +228,7 @@ track::Track
 track::Track::of
 track::Track::render
 track::Track::to_json
+track_new::lay
 unsafe_audit::run
 vocab::hold
 vocab::run

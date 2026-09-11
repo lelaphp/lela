@@ -100,6 +100,11 @@ pub(crate) enum Command {
     ///
     /// The track is the longest existing branch that is a proper path
     /// prefix of the branch's name, `main` for a branch on none.
+    ///
+    /// `new <name>` lays a track down: `origin/<name>` at `main`, a clone
+    /// beside the repository detached at it, `xtask` built there, the
+    /// console's row, the `computed trust` line printed as a person's.
+    #[command(args_conflicts_with_subcommands = true)]
     Track {
         /// A branch other than `HEAD`'s, made or not yet: what the add
         /// command asks before it takes the branch off its track.
@@ -108,6 +113,8 @@ pub(crate) enum Command {
         /// Print the same facts as one JSON object.
         #[arg(long)]
         json: bool,
+        #[command(subcommand)]
+        command: Option<TrackCommand>,
     },
     /// A track's worktrees: `add` lays one down under .claude/worktrees/<branch>,
     /// `retire` appends its log into the track's store and removes it.
@@ -229,6 +236,20 @@ pub(crate) enum Command {
         /// Only these crates, by manifest name; default every crate that exists.
         #[arg(long = "crate", value_name = "NAME")]
         crates: Vec<String>,
+    },
+}
+
+/// What is done to a track rather than asked of it.
+#[derive(Debug, Subcommand)]
+pub(crate) enum TrackCommand {
+    /// Lay a track down: push `main` to `origin/<name>`, clone origin
+    /// beside the repository detached at it, build `xtask` there, add the
+    /// console's row and print the trust line; refuses a branch that
+    /// exists, on the clone or on origin, and a directory that does.
+    New {
+        /// The track's name, a branch not yet made, with no slash: it is
+        /// the path prefix of its branches' names.
+        name: String,
     },
 }
 

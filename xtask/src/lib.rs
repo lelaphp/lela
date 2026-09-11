@@ -45,6 +45,7 @@ pub mod status;
 mod tally;
 pub mod ticket;
 pub mod track;
+pub mod track_new;
 pub mod unsafe_audit;
 pub mod vocab;
 pub mod witness;
@@ -57,7 +58,7 @@ use std::process::ExitCode;
 use anyhow::{Result, bail};
 use clap::Parser;
 
-use cli::{Cli, Command, TicketCommand, WorktreeCommand};
+use cli::{Cli, Command, TicketCommand, TrackCommand, WorktreeCommand};
 use divergence::Registry;
 use manifest::Manifest;
 use reading::{Outcome, Reading, Store};
@@ -284,7 +285,11 @@ fn divergence_command(root: &Path, manifest: &Manifest, store: &Store) -> Result
 /// whatever the manifest says.
 fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
     match command {
-        Command::Track { branch, json } => Some(track_command(root, branch.as_deref(), *json)),
+        Command::Track {
+            command: Some(TrackCommand::New { name }),
+            ..
+        } => Some(track_new::lay(root, name).map(|_| ())),
+        Command::Track { branch, json, .. } => Some(track_command(root, branch.as_deref(), *json)),
         Command::Regions { files } => Some(computed::command(root, files)),
         Command::Worktree {
             command: WorktreeCommand::Add { branch, ticket },
