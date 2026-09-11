@@ -287,9 +287,17 @@ fn divergence_command(root: &Path, manifest: &Manifest, store: &Store) -> Result
 fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
     match command {
         Command::Track {
-            command: Some(TrackCommand::New { name }),
+            command:
+                Some(TrackCommand::New {
+                    name,
+                    model,
+                    subagent_model,
+                }),
             ..
-        } => Some(track_new::lay(root, name).map(|_| ())),
+        } => {
+            let model = track::Model::new(model.clone(), subagent_model.clone());
+            Some(track_new::lay(root, name, &model).map(|_| ()))
+        }
         Command::Track {
             command: Some(TrackCommand::Next { track, json }),
             ..

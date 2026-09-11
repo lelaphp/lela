@@ -9,7 +9,11 @@
 //! the store. So the command, in order: pushes `main` to `origin/<name>`;
 //! clones `origin` beside the repository, named `<repository>-<name>`,
 //! and detaches the clone at the track, so the clone has no branch of the
-//! track's name either; builds `xtask` in the clone, so the first hook
+//! track's name either; records the track and its model on the clone,
+//! `track.name`, `track.model.session` and `track.model.subagent`, where
+//! [`Track::of`] reads them, since a detached `HEAD` names no track of
+//! its own and no reader guesses one from a directory's name (#76, #75);
+//! builds `xtask` in the clone, so the first hook
 //! call there is judged by a built binary and not by a cold `cargo run`
 //! inside the hook's timeout (§12 item 8); adds the track's row to the
 //! console's track list, `console/tracks.json`, after the rows it had,
@@ -32,7 +36,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::computed;
 use crate::git::{git, has_ref};
-use crate::track::MAIN;
+use crate::track::{self, MAIN, Model};
 use crate::worktree::{self, NotReady, complain, say};
 
 /// The console's track list: each track's name and the directory its
@@ -43,9 +47,10 @@ const TRACKS: &str = "console/tracks.json";
 const NEW: &str = "track new";
 
 /// Lay the track `name` down: `origin/<name>` at `main`, the clone beside
-/// `root`, `xtask` built there, the console's row, the trust line printed;
-/// or refuse and change nothing. `Ok` is the clone's directory, ready.
-pub fn lay(root: &Path, name: &str) -> Result<PathBuf> {
+/// `root` recording the track and `model`, `xtask` built there, the
+/// console's row, the trust line printed; or refuse and change nothing.
+/// `Ok` is the clone's directory, ready.
+pub fn lay(root: &Path, name: &str, model: &Model) -> Result<PathBuf> {
     if name.is_empty() || name.contains('/') {
         bail!(
             "{name:?} is not a track's name: a track names its branches by being a path prefix of theirs, so it has no slash of its own"
@@ -123,6 +128,7 @@ pub fn lay(root: &Path, name: &str) -> Result<PathBuf> {
             dir.display()
         ),
     );
+    record(&dir, name, model)?;
 
     let ready = worktree::build(NEW, &dir);
     fs::write(&list, rows).with_context(|| format!("cannot write {}", list.display()))?;
@@ -144,6 +150,39 @@ pub fn lay(root: &Path, name: &str) -> Result<PathBuf> {
         );
         Err(NotReady { dir }.into())
     }
+}
+
+/// The track and its model recorded on the clone at `dir`, and said, one
+/// line per record; a clone that refuses the record is an error naming
+/// the line to run by hand.
+fn record(dir: &Path, name: &str, model: &Model) -> Result<()> {
+    track::record_track(dir, name, model).with_context(|| {
+        format!(
+            "the clone at {} could not record its track; record it by hand: git config track.name {name}",
+            dir.display()
+        )
+    })?;
+    say(
+        NEW,
+        &format!(
+            "recorded track.name={name} on the clone, which `xtask track` reads for its detached HEAD"
+        ),
+    );
+    let subagent = match &model.subagent {
+        Some(subagent) => format!("track.model.subagent={subagent}"),
+        None => format!(
+            "no track.model.subagent, so subagents run on the session's, {}",
+            model.session
+        ),
+    };
+    say(
+        NEW,
+        &format!(
+            "recorded track.model.session={} and {subagent}",
+            model.session
+        ),
+    );
+    Ok(())
 }
 
 /// Where the track's root goes: beside `root`, named after it, as

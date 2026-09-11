@@ -95,15 +95,19 @@ pub(crate) enum Command {
         hook: bool,
     },
     /// Say which track the branch is on, the commit `done` measures since,
-    /// the track's store root and the branch's ticket; as text or as one
-    /// object. Writes no reading.
+    /// the track's store root, the branch's ticket and the track's model;
+    /// as text or as one object. Writes no reading.
     ///
     /// The track is the longest existing branch that is a proper path
-    /// prefix of the branch's name, `main` for a branch on none.
+    /// prefix of the branch's name, `main` for a branch on none; for a
+    /// detached `HEAD` it is the clone's record, which a track's own clone
+    /// carries, and `main` where there is none. The model is the clone's
+    /// record too, one per role, and a clone with none says so.
     ///
-    /// `new <name>` lays a track down: `origin/<name>` at `main`, a clone
-    /// beside the repository detached at it, `xtask` built there, the
-    /// console's row, the `computed trust` line printed as a person's.
+    /// `new <name> --model <name>` lays a track down: `origin/<name>` at
+    /// `main`, a clone beside the repository detached at it and recording
+    /// its track and its model, `xtask` built there, the console's row,
+    /// the `computed trust` line printed as a person's.
     /// `next` names the ticket the track works next, the oldest open
     /// `ready-for-agent` ticket that is unblocked, this track's and on no
     /// branch of this clone.
@@ -246,13 +250,22 @@ pub(crate) enum Command {
 #[derive(Debug, Subcommand)]
 pub(crate) enum TrackCommand {
     /// Lay a track down: push `main` to `origin/<name>`, clone origin
-    /// beside the repository detached at it, build `xtask` there, add the
-    /// console's row and print the trust line; refuses a branch that
-    /// exists, on the clone or on origin, and a directory that does.
+    /// beside the repository detached at it, record the track and its
+    /// model on the clone, build `xtask` there, add the console's row and
+    /// print the trust line; refuses a branch that exists, on the clone
+    /// or on origin, and a directory that does.
     New {
         /// The track's name, a branch not yet made, with no slash: it is
         /// the path prefix of its branches' names.
         name: String,
+        /// The model the track's sessions run on, recorded on the clone
+        /// as `track.model.session` and read by `xtask track`.
+        #[arg(long, value_name = "NAME")]
+        model: String,
+        /// The model the sessions' subagents run on, recorded as
+        /// `track.model.subagent`; the session's when not given.
+        #[arg(long, value_name = "NAME")]
+        subagent_model: Option<String>,
     },
     /// The ticket the track works next: the oldest open `ready-for-agent`
     /// ticket that no open ticket blocks, that carries no `track:<name>`

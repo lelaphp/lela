@@ -3,13 +3,14 @@
 //! One test per shape over a scratch repository of the kind the `done`
 //! tests use: a branch on a track, a branch whose prefixes name no branch,
 //! the track itself, a detached `HEAD`, a branch not yet made (what the
-//! add command asks for), and a linked worktree, whose store is the main
-//! worktree's.
+//! add command asks for), a linked worktree, whose store is the main
+//! worktree's, a track's own clone, detached at the track it records
+//! (#76), and the model the clone records, one per role (#75).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use xtask::track::{Base, Found, Ticket, Track};
+use xtask::track::{Base, Found, Model, Ticket, Track};
 
 fn sh(root: &Path, args: &[&str]) -> String {
     let out = Command::new(args[0])
@@ -312,4 +313,130 @@ fn a_branch_names_its_ticket_by_record_and_never_by_its_name() {
     );
     let err = Track::of(&root, Some("t-opus-5/witness")).unwrap_err();
     assert!(format!("{err:#}").contains("thirty"), "{err:#}");
+}
+
+/// A track's own clone is detached at `origin/<name>` and records its
+/// track (#76): read for a detached `HEAD` alone, since a branch names
+/// its own track, and never from the commit `HEAD` is at, which two
+/// tracks laid down from one `main` share.
+#[test]
+fn a_tracks_clone_reads_the_track_it_records_not_main() {
+    let root = on_a_track("record");
+    sh(
+        &root,
+        &["git", "checkout", "-q", "--detach", "origin/t-opus-5"],
+    );
+    sh(&root, &["git", "config", "track.name", "t-opus-5"]);
+    let track = Track::of(&root, None).unwrap();
+    assert_eq!(track.branch, None);
+    assert_eq!(track.found, Found::Record);
+    assert_eq!(track.name, "t-opus-5");
+    assert_eq!(track.at, "origin/t-opus-5");
+    assert_eq!(track.base, rev(&root, "origin/t-opus-5"));
+    assert_eq!(track.store, root);
+
+    let (code, out, err) = xtask(&root, &["track"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("branch: none"), "{out}");
+    assert!(out.contains("track: t-opus-5 (origin/t-opus-5)"), "{out}");
+    assert!(out.contains("which the clone records"), "{out}");
+    let (_, out, _) = xtask(&root, &["track", "--json"]);
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(value["branch"], serde_json::Value::Null);
+    assert_eq!(value["found"], "record");
+    assert_eq!(value["track"], "t-opus-5");
+
+    // A branch of the clone names its own track; the record is not asked.
+    sh(&root, &["git", "checkout", "-q", "main"]);
+    let on_main = Track::of(&root, None).unwrap();
+    assert_eq!(on_main.found, Found::NoPrefix);
+    assert_eq!(on_main.name, "main");
+
+    // A record naming a track that is nowhere is an error, not main.
+    sh(&root, &["git", "checkout", "-q", "--detach"]);
+    sh(&root, &["git", "config", "track.name", "t-gone"]);
+    let err = Track::of(&root, None).unwrap_err();
+    assert!(format!("{err:#}").contains("t-gone"), "{err:#}");
+}
+
+/// The model is a record on the clone, one key per role (#75): a clone
+/// with none says so, nothing is guessed from the track's name, and the
+/// subagents' role defaults to the session's.
+#[test]
+fn a_track_names_its_model_by_record_and_never_by_its_name() {
+    let root = on_a_track("model");
+    sh(
+        &root,
+        &["git", "checkout", "-q", "--detach", "origin/t-opus-5"],
+    );
+    sh(&root, &["git", "config", "track.name", "t-opus-5"]);
+    let none = Track::of(&root, None).unwrap();
+    assert_eq!(none.model, None, "opus in the name is not a record");
+    let (code, out, _) = xtask(&root, &["track"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("model.session: none"), "stated plainly: {out}");
+    assert!(
+        out.contains("model.subagent: none"),
+        "stated plainly: {out}"
+    );
+    let (_, out, _) = xtask(&root, &["track", "--json"]);
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(value["model"], serde_json::Value::Null);
+
+    // The session's alone: the subagents' is the session's.
+    sh(
+        &root,
+        &["git", "config", "track.model.session", "claude-opus-5"],
+    );
+    let one = Track::of(&root, None).unwrap();
+    assert_eq!(
+        one.model,
+        Some(Model::new("claude-opus-5".to_owned(), None))
+    );
+    assert_eq!(one.model.as_ref().unwrap().subagent(), "claude-opus-5");
+    let (_, out, _) = xtask(&root, &["track"]);
+    assert!(out.contains("model.session: claude-opus-5"), "{out}");
+    assert!(
+        out.contains("model.subagent: claude-opus-5, the session's"),
+        "{out}"
+    );
+    let (_, out, _) = xtask(&root, &["track", "--json"]);
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(value["model"]["session"], "claude-opus-5");
+    assert_eq!(value["model"]["subagent"], "claude-opus-5");
+
+    // Both roles.
+    sh(
+        &root,
+        &["git", "config", "track.model.subagent", "claude-sonnet-5"],
+    );
+    let both = Track::of(&root, None).unwrap();
+    assert_eq!(
+        both.model,
+        Some(Model::new(
+            "claude-opus-5".to_owned(),
+            Some("claude-sonnet-5".to_owned())
+        ))
+    );
+    let (_, out, _) = xtask(&root, &["track"]);
+    assert!(out.contains("model.session: claude-opus-5"), "{out}");
+    assert!(out.contains("model.subagent: claude-sonnet-5"), "{out}");
+    let (_, out, _) = xtask(&root, &["track", "--json"]);
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(value["model"]["session"], "claude-opus-5");
+    assert_eq!(value["model"]["subagent"], "claude-sonnet-5");
+
+    // The record is read on a branch too: it is the clone's, not HEAD's.
+    sh(&root, &["git", "checkout", "-q", "t-opus-5/witness"]);
+    let on_branch = Track::of(&root, None).unwrap();
+    assert_eq!(on_branch.model, both.model);
+
+    // The subagents' role recorded with no session's is an error, since
+    // the default runs the other way.
+    sh(&root, &["git", "config", "--unset", "track.model.session"]);
+    let err = Track::of(&root, None).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("track.model.session"),
+        "{err:#}"
+    );
 }

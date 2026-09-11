@@ -133,13 +133,23 @@ fn repository(name: &str) -> (PathBuf, PathBuf) {
 }
 
 /// The one command: `origin/<name>` at `main`, a clone beside the
-/// repository detached at it, `xtask` built there, the console's row,
-/// the trust line printed; and in a branch of the clone `xtask track`
-/// reads the track as the clone's.
+/// repository detached at it and recording its track and its model,
+/// `xtask` built there, the console's row, the trust line printed; and
+/// `xtask track` in the clone, detached and in a branch of it, reads the
+/// track as the clone's.
 #[test]
 fn a_track_is_laid_down_by_one_command() {
     let (root, origin) = repository("lay");
-    let (code, out) = track_new(&root, &["t-y"]);
+    let (code, out) = track_new(
+        &root,
+        &[
+            "t-y",
+            "--model",
+            "claude-opus-5",
+            "--subagent-model",
+            "claude-sonnet-5",
+        ],
+    );
     assert_eq!(code, 0, "{out}");
 
     // origin/<name> is main.
@@ -172,10 +182,33 @@ fn a_track_is_laid_down_by_one_command() {
         "the clone's origin is the repository's: {out}"
     );
 
-    // xtask is built in the clone, and a branch of the track in it reads
-    // the track as <name> with the clone as its store.
+    // The clone records its track and its model, one key per role.
+    assert_eq!(
+        sh(&clone, &["git", "config", "--get-regexp", "^track\\."]),
+        "track.name t-y\ntrack.model.session claude-opus-5\ntrack.model.subagent claude-sonnet-5\n",
+        "{out}"
+    );
+    assert!(out.contains("track.model.session=claude-opus-5"), "{out}");
+
+    // xtask is built in the clone; detached, the clone reads the track it
+    // records and its model, and a branch of the track in it reads the
+    // track as <name>, both with the clone as the store.
     let built = clone.join("target/debug/xtask");
     assert!(built.is_file(), "no built xtask: {out}");
+    let track = Command::new(&built)
+        .args(["track", "--json"])
+        .current_dir(&clone)
+        .output()
+        .unwrap();
+    let facts: serde_json::Value =
+        serde_json::from_slice(&track.stdout).unwrap_or_else(|e| panic!("{e}: {out}"));
+    assert_eq!(facts["branch"], serde_json::Value::Null, "{facts}");
+    assert_eq!(facts["found"], "record", "{facts}");
+    assert_eq!(facts["track"], "t-y", "not main: {facts}");
+    assert_eq!(facts["at"], "origin/t-y", "{facts}");
+    assert_eq!(facts["store"], clone.to_str().unwrap(), "{facts}");
+    assert_eq!(facts["model"]["session"], "claude-opus-5", "{facts}");
+    assert_eq!(facts["model"]["subagent"], "claude-sonnet-5", "{facts}");
     sh(
         &clone,
         &["git", "checkout", "-q", "-b", "t-y/x", "origin/t-y"],
@@ -191,6 +224,7 @@ fn a_track_is_laid_down_by_one_command() {
     assert_eq!(facts["track"], "t-y", "{facts}");
     assert_eq!(facts["at"], "origin/t-y", "{facts}");
     assert_eq!(facts["store"], clone.to_str().unwrap(), "{facts}");
+    assert_eq!(facts["model"]["session"], "claude-opus-5", "{facts}");
 
     // The console's track list carries the row, after the rows it had.
     let list = fs::read_to_string(root.join("console/tracks.json")).unwrap();
@@ -234,7 +268,7 @@ fn an_existing_branch_or_directory_refuses_and_changes_nothing() {
 
     // The repository's own branch.
     sh(&root, &["git", "branch", "t-local"]);
-    let (code, out) = track_new(&root, &["t-local"]);
+    let (code, out) = track_new(&root, &["t-local", "--model", "claude-opus-5"]);
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("t-local"), "{out}");
     unchanged("t-local", &out);
@@ -249,7 +283,7 @@ fn an_existing_branch_or_directory_refuses_and_changes_nothing() {
         &root,
         &["git", "update-ref", "-d", "refs/remotes/origin/t-remote"],
     );
-    let (code, out) = track_new(&root, &["t-remote"]);
+    let (code, out) = track_new(&root, &["t-remote", "--model", "claude-opus-5"]);
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("t-remote"), "{out}");
     assert!(
@@ -264,7 +298,7 @@ fn an_existing_branch_or_directory_refuses_and_changes_nothing() {
 
     // The directory.
     fs::create_dir_all(root.parent().unwrap().join("repo-t-dir")).unwrap();
-    let (code, out) = track_new(&root, &["t-dir"]);
+    let (code, out) = track_new(&root, &["t-dir", "--model", "claude-opus-5"]);
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("repo-t-dir"), "{out}");
     assert!(!has_ref(&origin, "refs/heads/t-dir"), "{out}");
@@ -275,13 +309,17 @@ fn an_existing_branch_or_directory_refuses_and_changes_nothing() {
     );
 
     // A name with a slash is not a track's, the track being the prefix.
-    let (code, out) = track_new(&root, &["t/dir"]);
+    let (code, out) = track_new(&root, &["t/dir", "--model", "claude-opus-5"]);
     assert_eq!(code, 1, "{out}");
     unchanged("t/dir", &out);
 
-    // No name is a usage error.
-    let (code, out) = track_new(&root, &[]);
+    // No name is a usage error, and so is no model: a track laid down by
+    // the command records one.
+    let (code, out) = track_new(&root, &["--model", "claude-opus-5"]);
     assert_eq!(code, 2, "{out}");
+    let (code, out) = track_new(&root, &["t-z"]);
+    assert_eq!(code, 2, "{out}");
+    unchanged("t-z", &out);
 
     let _ = fs::remove_dir_all(root.parent().unwrap());
 }
