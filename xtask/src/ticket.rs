@@ -278,6 +278,10 @@ pub struct Issue {
     pub body: String,
     pub state: State,
     pub url: String,
+    /// The tickets this one blocks, nested as `blockedBy` is; an edge the
+    /// tracker has is not set again, since it refuses a second one.
+    #[serde(default)]
+    pub blocking: BlockedBy,
 }
 
 /// One open issue as `gh issue list` answers it: what the frontier is
@@ -380,7 +384,7 @@ impl Gh {
                 "view",
                 &number,
                 "--json",
-                "number,title,body,state,url",
+                "number,title,body,state,url,blocking",
             ],
         )
         .with_context(|| format!("{ticket} could not be read from the tracker"))?;
@@ -562,9 +566,17 @@ pub fn run(
                 "Closed by `xtask ticket close` at {}: {boxes}; {opened}.",
                 reading.commit
             );
+            // The edges the tracker has already stand; only the rest are set,
+            // so a close retried after one that failed past this point lands.
+            let missing = successors
+                .tickets()
+                .iter()
+                .copied()
+                .filter(|t| !issue.blocking.nodes.iter().any(|n| n.number == t.number()))
+                .collect::<Vec<_>>();
             let closed = successors
                 .held_open(gh, root)
-                .and_then(|()| gh.blocking(root, ticket, successors.tickets()))
+                .and_then(|()| gh.blocking(root, ticket, &missing))
                 .map_err(|err| format!("{err:#}; not closed, nothing changed at the tracker"))
                 .and_then(|()| {
                     // The edge is set by now; a close the tracker refuses

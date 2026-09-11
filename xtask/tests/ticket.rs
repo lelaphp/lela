@@ -61,6 +61,12 @@ impl Recorded {
     /// An issue with labels, as the tracker answers them; the instrument
     /// does not read them.
     fn labelled(&self, number: u64, state: &str, body: &str, labels: &[&str]) {
+        self.blocking(number, state, body, labels, &[]);
+    }
+
+    /// An issue that already blocks the numbered ones at the tracker, as
+    /// `gh issue view --json blocking` nests them, each open.
+    fn blocking(&self, number: u64, state: &str, body: &str, labels: &[&str], blocking: &[u64]) {
         let issue = serde_json::json!({
             "number": number,
             "title": format!("ticket {number}"),
@@ -68,6 +74,7 @@ impl Recorded {
             "state": state,
             "url": format!("https://example.invalid/issues/{number}"),
             "labels": labels.iter().map(|name| serde_json::json!({"name": name})).collect::<Vec<_>>(),
+            "blocking": {"nodes": blocking.iter().map(|n| serde_json::json!({"number": n, "state": "OPEN"})).collect::<Vec<_>>()},
         });
         fs::write(
             self.dir.join(format!("issues/{number}.json")),
@@ -247,6 +254,47 @@ fn close_names_what_it_opened_through_the_tracker_s_blocking_relation() {
         calls[1].starts_with("issue close 8 --comment ") && calls[1].contains("opens #9, #10"),
         "the comment names them too: {calls:?}"
     );
+}
+
+/// An edge the tracker already has is not set again: the tracker refuses
+/// a second `--add-blocking` of the same ticket, and a close retried after
+/// one that set the edge and failed later would otherwise never land.
+/// Only the missing edge is asked for; with none missing, none is.
+#[test]
+fn close_sets_only_the_edges_the_tracker_does_not_have_yet() {
+    let recorded = Recorded::lay("edges");
+    recorded.blocking(8, "OPEN", TICKED, &[], &[9]);
+    recorded.issue(9, "OPEN", "no criteria yet");
+    recorded.issue(10, "OPEN", "no criteria yet");
+    let reading = run(
+        workspace(),
+        &recorded.gh(),
+        Act::Close(Successors::Tickets(vec![Ticket::new(9), Ticket::new(10)])),
+        Ticket::new(8),
+        None,
+    )
+    .unwrap();
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    let calls = recorded.calls();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[0], "issue edit 8 --add-blocking 10");
+    assert!(calls[1].starts_with("issue close 8 "), "{calls:?}");
+
+    let recorded = Recorded::lay("edges-all");
+    recorded.blocking(8, "OPEN", TICKED, &[], &[9]);
+    recorded.issue(9, "OPEN", "no criteria yet");
+    let reading = run(
+        workspace(),
+        &recorded.gh(),
+        Act::Close(Successors::Tickets(vec![Ticket::new(9)])),
+        Ticket::new(8),
+        None,
+    )
+    .unwrap();
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    let calls = recorded.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(calls[0].starts_with("issue close 8 "), "{calls:?}");
 }
 
 /// `--opens-nothing` is an assertion: no edge, the close alone, and the
