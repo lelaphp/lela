@@ -157,10 +157,11 @@ Options:
 ├── php_ext
 ├── php_heap
 ├── php_macros
+├── php_proto
 ├── php_syntax
 └── php_unit
 ```
-<!-- /computed in=5367b71544e0c166a5149f140d58a07c422081ef9e6118cd2d499beaa7531484 out=f7a4ce94d06c883b4763abda90521324fbf102e2ab5ff774ce5c52a13ef8c047 -->
+<!-- /computed in=62c8d4eb7e0d891921f7853bfacb567cbfa43bcf8d335dd47f18e0f65fb0e7f7 out=22b7791847b5363075cddae77c8635dcae17777b01394a46cf72d03054abdcd9 -->
 <!-- computed tree src=ext depth=1 name=layout-ext | do not edit; run computed -->
 ```
 .

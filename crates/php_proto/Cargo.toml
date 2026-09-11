@@ -1,0 +1,17 @@
+# php_proto: the protocol codecs (design §4.8). Bytes in, plain values out,
+# and back; `php_sapi` turns what they decode into a request description.
+# No dependency: the point of the crate is that a protocol test builds
+# without the engine (design §4.6).
+[package]
+name = "php_proto"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The protocol codecs: the FastCGI record wire format; the dev server's HTTP/1.x framing and CGI environment parsing as each lands"
+
+[lints]
+workspace = true
+
+[dependencies]
