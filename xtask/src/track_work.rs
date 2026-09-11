@@ -13,7 +13,13 @@
 //! for `frontier:decision`, and `/implement <n>` for any other, as
 //! [`Skill::of`] says; a ticket carrying both `frontier:` labels names
 //! no one skill and is refused before any worktree is laid down, named.
-//! The prompt is the one thing the label changes. The hooks that already exist
+//! The skill's line is the one thing the label changes: under it every
+//! prompt names the exit condition this run reads back (#115), that the
+//! session ends by running `cargo xtask ticket close <n>` and, when
+//! something outside the ticket blocks that close, files the blocker as
+//! a ticket and names it in its reply, so the contract travels with the
+//! job rather than resting on a skill file elsewhere in the filesystem.
+//! The hooks that already exist
 //! police the session: `permit` judges each call and the Stop hook holds
 //! the turn until `done` is green and the ticket's boxes are ticked, so
 //! nothing here judges the work. When the session ends with the ticket
@@ -180,10 +186,24 @@ impl Session {
         }
     }
 
-    /// The prompt: it names the ticket and runs the skill on it,
-    /// `/<skill> <n>`.
+    /// The prompt: its first line names the ticket and runs the skill on
+    /// it, `/<skill> <n>`, and the rest names the exit condition this run
+    /// reads back, the same for every skill, since the one signal is the
+    /// ticket closed at the tracker and a session that ends with it open
+    /// leaves the worktree standing however finished its work is.
     pub fn prompt(skill: Skill, ticket: Ticket) -> String {
-        format!("/{} {}", skill.name(), ticket.number())
+        let n = ticket.number();
+        format!(
+            "/{} {n}\n\n\
+             The session ends by running `cargo xtask ticket close {n}`. That close is the one \
+             signal this run reads back: a ticket still open at the tracker leaves the worktree \
+             standing for a person, however finished the work is. The close holds the ticket to \
+             its acceptance criteria, so tick each box the work meets first, and it takes \
+             `--opens <m>` for every ticket this work filed, or `--opens-nothing`.\n\n\
+             When something outside this ticket blocks the close, file that blocker with `gh \
+             issue create`, name its number in your reply, and leave the ticket open.\n",
+            skill.name()
+        )
     }
 
     /// The arguments after the program, in the order they are passed,
@@ -507,9 +527,33 @@ mod tests {
                 .contains("frontier:build, a side of the frontier no skill answers"),
             "{other}"
         );
-        assert_eq!(
-            Session::prompt(Skill::GrillDesign, ticket),
-            "/grill-design 20"
-        );
+    }
+
+    /// Every skill's prompt opens on its own line, `/<skill> <n>`, and
+    /// every one of them names the close that ends the session and the
+    /// filed ticket that stands in for it when it cannot.
+    #[test]
+    fn the_prompt_names_the_skill_the_ticket_and_the_close() {
+        let ticket = Ticket::new(20);
+        for (skill, line) in [
+            (Skill::Implement, "/implement 20"),
+            (Skill::Research, "/research 20"),
+            (Skill::GrillDesign, "/grill-design 20"),
+        ] {
+            let prompt = Session::prompt(skill, ticket);
+            assert_eq!(prompt.lines().next(), Some(line), "{prompt}");
+            assert!(
+                prompt.contains("cargo xtask ticket close 20"),
+                "{skill:?} names no close: {prompt}"
+            );
+            assert!(
+                prompt.contains("--opens-nothing"),
+                "{skill:?} names neither successor: {prompt}"
+            );
+            assert!(
+                prompt.contains("gh issue create"),
+                "{skill:?} says nothing of a blocker: {prompt}"
+            );
+        }
     }
 }

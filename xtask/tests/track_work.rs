@@ -147,14 +147,18 @@ impl Scratch {
     /// ticket: `commit` commits a file named for the ticket on the branch, `close` flips the
     /// ticket's recorded state to closed, and either or both. Started on
     /// `/frontier` (#85) it runs the shell file `act.frontier` instead,
-    /// where the test writes what the planning session files.
+    /// where the test writes what the planning session files. The prompt
+    /// is the last argument and runs to several lines (#115), so
+    /// `session.args` records its first line, `/<skill> <n>`, which is
+    /// also where the ticket is read from, and `session.prompt` keeps the
+    /// whole of it for a test that reads the rest.
     fn stand_ins(&self) {
         let dir = self.dir.display();
         let gh = format!(
             "#!/bin/sh\nif [ \"$1\" = issue ] && [ \"$2\" = list ]; then cat '{dir}/list.json'; exit $?; fi\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then f='{dir}/view.'$3'.json'; [ -f \"$f\" ] || f='{dir}/view.json'; cat \"$f\"; exit $?; fi\nprintf '%s\\n' \"$*\" >> '{dir}/calls'\nexit 0\n"
         );
         let claude = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{dir}/session.args'\npwd -P >> '{dir}/session.cwd'\nprintf '%s\\n' \"${{CLAUDE_CODE_SUBAGENT_MODEL-unset}}\" >> '{dir}/session.subagent'\n# the ticket: the last argument is the prompt, `/<skill> <n>`\nfor a; do last=$a; done; n=${{last##* }}\nif [ \"$last\" = /frontier ]; then sh '{dir}/act.frontier'; exit $?; fi\nact=$(cat '{dir}/act.'$n 2>/dev/null || cat '{dir}/act')\nview='{dir}/view.'$n'.json'; [ -f \"$view\" ] || view='{dir}/view.json'\ncase \"$act\" in *commit*) echo worked > worked.$n.txt && git add -- worked.$n.txt && git -c commit.gpgsign=false -c core.hooksPath=/var/empty -c user.name=x -c user.email=x@x commit -q -m 'the work' -- worked.$n.txt || exit 3;; esac\ncase \"$act\" in *close*) sed 's/\"OPEN\"/\"CLOSED\"/' \"$view\" > '{dir}/view.tmp' && mv '{dir}/view.tmp' \"$view\";; esac\nexit 0\n"
+            "#!/bin/sh\n# the last argument is the prompt; its first line is `/<skill> <n>`\nrest=''; i=0\nfor a; do i=$((i+1)); [ $i -lt $# ] && rest=\"$rest $a\"; prompt=$a; done\nline=$(printf '%s\\n' \"$prompt\" | sed -n 1p); n=${{line##* }}\nprintf '%s\\n' \"${{rest# }} $line\" >> '{dir}/session.args'\nprintf '%s\\n' \"$prompt\" >> '{dir}/session.prompt'\npwd -P >> '{dir}/session.cwd'\nprintf '%s\\n' \"${{CLAUDE_CODE_SUBAGENT_MODEL-unset}}\" >> '{dir}/session.subagent'\nif [ \"$line\" = /frontier ]; then sh '{dir}/act.frontier'; exit $?; fi\nact=$(cat '{dir}/act.'$n 2>/dev/null || cat '{dir}/act')\nview='{dir}/view.'$n'.json'; [ -f \"$view\" ] || view='{dir}/view.json'\ncase \"$act\" in *commit*) echo worked > worked.$n.txt && git add -- worked.$n.txt && git -c commit.gpgsign=false -c core.hooksPath=/var/empty -c user.name=x -c user.email=x@x commit -q -m 'the work' -- worked.$n.txt || exit 3;; esac\ncase \"$act\" in *close*) sed 's/\"OPEN\"/\"CLOSED\"/' \"$view\" > '{dir}/view.tmp' && mv '{dir}/view.tmp' \"$view\";; esac\nexit 0\n"
         );
         for (name, text) in [("gh", gh), ("claude", claude)] {
             let file = self.dir.join("bin").join(name);
@@ -427,6 +431,16 @@ fn a_closed_ticket_is_fast_forwarded_pushed_and_retired() {
     assert_eq!(
         scratch.wrote("session.args"),
         "-p --model claude-opus-5 --permission-mode bypassPermissions --effort high /implement 20"
+    );
+    // The prompt names the exit condition the run reads back (#115).
+    let prompt = scratch.wrote("session.prompt");
+    assert!(
+        prompt.contains("cargo xtask ticket close 20"),
+        "the prompt names no close: {prompt}"
+    );
+    assert!(
+        prompt.contains("gh issue create"),
+        "the prompt says nothing of a blocker: {prompt}"
     );
     assert_eq!(scratch.wrote("session.subagent"), "claude-sonnet-5");
     assert_eq!(
@@ -739,9 +753,9 @@ fn a_sync_that_refuses_stops_the_run_named() {
 }
 
 /// A ticket labelled `frontier:research` starts the session on
-/// `/research <n>` (#81): the prompt is the one thing that changes, the
-/// model, the mode and the effort as #75 set them, and the path from the
-/// close to the retire is the same.
+/// `/research <n>` (#81): the skill's line is the one thing that
+/// changes, the model, the mode and the effort as #75 set them, and the
+/// path from the close to the retire is the same.
 #[test]
 fn a_research_ticket_starts_the_session_on_research() {
     let scratch = Scratch::lay("research");
