@@ -12,5 +12,10 @@
         "path": "."
       }
     }
+  },
+  "permissions": {
+    "allow": [
+      "Bash(gh issue edit:*)"
+    ]
   }
 }
