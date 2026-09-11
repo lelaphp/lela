@@ -370,6 +370,26 @@ impl Scratch {
         landed
     }
 
+    /// One section of `xtask status` over the clone's store, as Markdown:
+    /// what a person reads the run back from (#117).
+    fn section(&self, name: &str) -> String {
+        let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .arg("--root")
+            .arg(&self.root)
+            .args(["status", "--section", name])
+            .current_dir(&self.root)
+            .env_remove("CARGO")
+            .env_remove("CARGO_MANIFEST_DIR")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "status --section {name}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    }
+
     fn wrote(&self, name: &str) -> String {
         fs::read_to_string(self.dir.join(name))
             .unwrap_or_default()
@@ -596,7 +616,10 @@ fn no_model_refuses_before_a_worktree_and_an_empty_frontier_is_none() {
 /// person and does not stop the run, since its branch records the
 /// ticket and `track next` names it no more; the run ends at "none",
 /// exit 0, one line per ticket and a closing line naming each with its
-/// outcome.
+/// outcome. A run that lands one ticket and strands another is also what
+/// the readings say (#117): one per step scoped to the ticket, a pass and
+/// a fail, each with its commit and its reason, and the run's own closing
+/// one, which is what `status --section track` renders the run from.
 #[test]
 fn the_frontier_is_worked_until_it_empties_past_a_ticket_left_open() {
     let scratch = Scratch::lay("frontier");
@@ -663,6 +686,33 @@ fn the_frontier_is_worked_until_it_empties_past_a_ticket_left_open() {
             &"track work: the frontier of t-x is empty after 2 tickets: #20 closed, #21 standing"
         ),
         "{out}"
+    );
+
+    // One reading per step and one for the run, which is what the section
+    // renders, in the order the run took them (#117).
+    let section = scratch.section("track");
+    let rows: Vec<&str> = section.lines().skip(2).collect();
+    assert_eq!(rows.len(), 3, "{section}");
+    assert!(rows[0].starts_with("| 20 | pass |  | "), "{section}");
+    assert!(rows[0].contains(&first[..7]), "{section}");
+    assert!(
+        rows[0].contains("#20 closed at") && rows[0].contains("t-x/t20 retired"),
+        "{section}"
+    );
+    assert!(rows[1].starts_with("| 21 | fail |  | "), "{section}");
+    assert!(rows[1].contains(&second[..7]), "{section}");
+    assert!(
+        rows[1].contains("#21 is open after the session") && rows[1].contains("stands at"),
+        "{section}"
+    );
+    assert!(rows[2].starts_with("| run | fail | "), "{section}");
+    assert!(
+        rows[2].contains("landed=1 run=2 standing=1"),
+        "how many it worked and how many landed: {section}"
+    );
+    assert!(
+        rows[2].contains("the frontier of t-x is empty after 2 tickets: #20 closed, #21 standing"),
+        "how it ended: {section}"
     );
     let _ = fs::remove_dir_all(&scratch.dir);
 }

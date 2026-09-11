@@ -98,9 +98,23 @@
 //! The track's branch moves only by fast-forward: a tip that is not
 //! ahead of the track, the track's own commit included, refuses, with
 //! the worktree standing. No trust line is printed and no grant waited
-//! on: `computed` covers a worktree by its clone's grant (#74). A
-//! command, not an instrument: the readings are the worktree's own,
-//! appended by the retire, and none is written here.
+//! on: `computed` covers a worktree by its clone's grant (#74).
+//!
+//! What a run leaves behind is not stdout alone (#117). Every step is
+//! held by [`hold`]: its verdict, [`Landed`], joins the run's [`Tally`]
+//! and its own reading is written to the clone's store, scoped to the
+//! ticket as a `ticket` reading is, a pass on a ticket landed and a fail
+//! on a worktree standing, with the commit its branch is at and the
+//! reason in the message. A sweep's step is held the same way, since
+//! what it does to a worktree is what a step does to one. The run itself
+//! writes one more, [`record_run`], scoped to [`RUN`]: how many tickets
+//! it worked, how many landed and how it ended, written whatever the run
+//! came to, so a run the harness stopped leaves the record of what it
+//! worked rather than a terminal to reconstruct it from. `xtask status
+//! --section track` renders the last of them. The worktree's own
+//! readings still come in by the retire, as they did; these are the
+//! run's, and their status is never the run's exit, which says whether
+//! the harness stood and not whether a session landed its ticket.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -108,7 +122,9 @@ use std::process::{Command, ExitStatus, Stdio};
 use anyhow::{Context, Result, bail};
 
 use crate::git::git;
-use crate::ticket::{Gh, State};
+use crate::reading::{Reading, Status, Store};
+use crate::tally::{Judged, Judgement, Outcome, Tally};
+use crate::ticket::{self, Gh, STAMPED_OVER, State};
 use crate::track::{self, Model, Ticket, Track, fast_forward, not_ahead, rev, short};
 use crate::track_next::{self, Next};
 use crate::track_sync;
@@ -116,6 +132,16 @@ use crate::worktree::{self, say};
 
 /// The prefix of every line printed, so a person reads whose line it is.
 const WORK: &str = "track work";
+/// The instrument's name, the `instrument` field of every reading a run
+/// writes (#117).
+pub(crate) const INSTRUMENT: &str = "track-work";
+/// The scope of the run's own reading; every other is a ticket's number,
+/// the scope a `ticket` reading is written under.
+pub(crate) const RUN: &str = "run";
+/// How the closing reading of a run the harness stopped opens.
+const STOPPED: &str = "stopped by the harness after";
+/// How the closing reading of a `--one` run opens.
+const ONE_STEP: &str = "the one step worked";
 
 /// The permission mode a session runs under unless the clone records
 /// `track.permission-mode`: every call is judged by `permit` through the
@@ -316,11 +342,30 @@ pub enum Worked {
 }
 
 impl Worked {
-    /// The one line: the ticket, the commit and the outcome.
+    /// The one line: the prefix and what the outcome says, and under a
+    /// frontier still empty the tickets the track waits on.
     pub fn render(&self) -> String {
+        let head = format!("{WORK}: {}\n", self.said());
+        match self {
+            Worked::StillEmpty { waits_on, .. } => std::iter::once(head)
+                .chain(
+                    waits_on
+                        .iter()
+                        .map(|ticket| format!("  #{} {}\n", ticket.number, ticket.title)),
+                )
+                .collect(),
+            _ => head,
+        }
+    }
+
+    /// What the line says after the prefix: the ticket, the commit and
+    /// the outcome, in one sentence, which is also the message of the
+    /// step's reading (#117), so the terminal and the store say the same
+    /// thing in the same words.
+    fn said(&self) -> String {
         match self {
             Worked::Nothing { track } => {
-                format!("{WORK}: none: the frontier of {track} is empty; nothing laid down\n")
+                format!("none: the frontier of {track} is empty; nothing laid down")
             }
             Worked::StillEmpty { track, waits_on } => {
                 let waits = match waits_on.len() {
@@ -328,16 +373,9 @@ impl Worked {
                     1 => "1 for-a-person ticket:".to_owned(),
                     n => format!("{n} for-a-person tickets:"),
                 };
-                let head = format!(
-                    "{WORK}: none: the frontier of {track} is still empty after the {FRONTIER_PROMPT} session; nothing laid down; the track waits on {waits}"
-                );
-                let tickets = waits_on
-                    .iter()
-                    .map(|ticket| format!("  #{} {}", ticket.number, ticket.title));
-                std::iter::once(head)
-                    .chain(tickets)
-                    .map(|line| line + "\n")
-                    .collect()
+                format!(
+                    "none: the frontier of {track} is still empty after the {FRONTIER_PROMPT} session; nothing laid down; the track waits on {waits}"
+                )
             }
             Worked::Closed {
                 ticket,
@@ -345,7 +383,7 @@ impl Worked {
                 commit,
                 track,
             } => format!(
-                "{WORK}: {ticket} closed at {}; {track} fast-forwarded to it and pushed to origin, {branch} retired\n",
+                "{ticket} closed at {}; {track} fast-forwarded to it and pushed to origin, {branch} retired",
                 short(commit)
             ),
             Worked::Standing {
@@ -354,22 +392,69 @@ impl Worked {
                 dir,
                 why,
             } => format!(
-                "{WORK}: {ticket} {why}, the branch at {}; the worktree stands at {} for a person, nothing retired\n",
+                "{ticket} {why}, the branch at {}; the worktree stands at {} for a person, nothing retired",
                 short(commit),
                 dir.display()
             ),
         }
     }
 
-    /// The ticket and its outcome in one word, as the closing line lists
-    /// them; an empty frontier worked no ticket and has none.
-    fn brief(&self) -> Option<String> {
+    /// The step's verdict, which the tally holds and the step's reading is
+    /// written from; an empty frontier worked no ticket and has none.
+    fn judged(&self) -> Option<Judged<Landed>> {
         match self {
             Worked::Nothing { .. } | Worked::StillEmpty { .. } => None,
-            Worked::Closed { ticket, .. } => Some(format!("{ticket} closed")),
-            Worked::Standing { ticket, .. } => Some(format!("{ticket} standing")),
+            Worked::Closed { ticket, commit, .. } => {
+                Some(verdict(*ticket, commit, Landed::Closed, self.said()))
+            }
+            Worked::Standing { ticket, commit, .. } => {
+                Some(verdict(*ticket, commit, Landed::Standing, self.said()))
+            }
         }
     }
+}
+
+/// What one step of a run came to, the two outcomes a ticket has: the
+/// judgement the run's [`Tally`] holds and the step's reading takes its
+/// status from (#117).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Landed {
+    /// The ticket closed and its branch is on the track.
+    Closed,
+    /// The worktree stands for a person, and the ticket is the session's
+    /// to have finished.
+    Standing,
+}
+
+impl Judgement for Landed {
+    const PASS: Landed = Landed::Closed;
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Landed::Closed => "closed",
+            Landed::Standing => "standing",
+        }
+    }
+
+    /// A worktree standing is the session's failure, and the run's
+    /// reading says so; what it is not is the run's exit.
+    fn counts_against(self) -> bool {
+        self == Landed::Standing
+    }
+
+    fn met(self) -> bool {
+        self == Landed::Closed
+    }
+}
+
+/// One step's verdict: the ticket's number as the scope its reading is
+/// written under and the ticket as the closing line names it, the commit
+/// its branch is at where the verdict places the item, and `said`, which
+/// is the line's words and the reading's message.
+fn verdict(ticket: Ticket, commit: &str, landed: Landed, said: String) -> Judged<Landed> {
+    let mut judged = Judged::new(&ticket::scope(ticket), &ticket.to_string(), landed, said);
+    short(commit).clone_into(&mut judged.place);
+    judged
 }
 
 /// What the sweep did to one standing worktree of the track (#116): the
@@ -399,6 +484,12 @@ pub enum Swept {
 impl Swept {
     /// The one line: the ticket, the commit and the outcome.
     pub fn render(&self) -> String {
+        format!("{WORK}: {}\n", self.said())
+    }
+
+    /// What the line says after the prefix, and the message of the step's
+    /// reading (#117), as a [`Worked`]'s is.
+    fn said(&self) -> String {
         match self {
             Swept::MergedBack {
                 ticket,
@@ -406,7 +497,7 @@ impl Swept {
                 commit,
                 track,
             } => format!(
-                "{WORK}: swept {ticket}, closed since its session at {}; {track} fast-forwarded to it and pushed to origin, {branch} retired\n",
+                "swept {ticket}, closed since its session at {}; {track} fast-forwarded to it and pushed to origin, {branch} retired",
                 short(commit)
             ),
             Swept::Stands {
@@ -415,23 +506,95 @@ impl Swept {
                 dir,
                 why,
             } => format!(
-                "{WORK}: {ticket} {why}, the branch at {}; the worktree stands at {} for a person, nothing retired\n",
+                "{ticket} {why}, the branch at {}; the worktree stands at {} for a person, nothing retired",
                 short(commit),
                 dir.display()
             ),
         }
     }
+
+    /// The step's verdict: what the sweep did to one worktree is what a
+    /// step does to one, so it is judged and read back the same way.
+    fn judged(&self) -> Judged<Landed> {
+        match self {
+            Swept::MergedBack { ticket, commit, .. } => {
+                verdict(*ticket, commit, Landed::Closed, self.said())
+            }
+            Swept::Stands { ticket, commit, .. } => {
+                verdict(*ticket, commit, Landed::Standing, self.said())
+            }
+        }
+    }
 }
 
-/// The closing line of a run: `how` it ended, how many tickets it worked
-/// and each with its outcome.
-fn outcomes(worked: &[Worked], how: &str) -> String {
-    let briefs = worked.iter().filter_map(Worked::brief).collect::<Vec<_>>();
+/// The closing line of a run, and the message of its reading: `how` it
+/// ended, how many tickets it worked and each with its outcome.
+fn outcomes(tally: &Tally<Landed>, how: &str) -> String {
+    let briefs = tally
+        .judged
+        .iter()
+        .map(|judged| format!("{} {}", judged.name, judged.judgement.as_str()))
+        .collect::<Vec<_>>();
     match briefs.len() {
         0 => format!("{how} no ticket"),
         1 => format!("{how} 1 ticket: {}", briefs[0]),
         n => format!("{how} {n} tickets: {}", briefs.join(", ")),
     }
+}
+
+/// One step held (#117): its verdict kept for the run's closing reading,
+/// and its own reading written under the ticket's number, a pass on a
+/// ticket landed on the track and a fail on a worktree left standing,
+/// carrying the commit its branch is at and the reason. The reading is
+/// stamped over the workspace, which is what a ticket's is stamped over,
+/// since a step has no tree of its own. The status written is never the
+/// run's exit: a ticket left standing is the session's failure and does
+/// not stop the run. A step that worked no ticket has no verdict and
+/// writes nothing.
+fn hold(
+    root: &Path,
+    store: &Store,
+    tally: &mut Tally<Landed>,
+    judged: Option<Judged<Landed>>,
+) -> Result<()> {
+    let Some(judged) = judged else {
+        return Ok(());
+    };
+    let mut reading = Reading::stamped_over(INSTRUMENT, &judged.id, root, Path::new(STAMPED_OVER))?;
+    reading.status = match judged.judgement {
+        Landed::Closed => Status::Pass,
+        Landed::Standing => Status::Fail,
+    };
+    judged.place.clone_into(&mut reading.commit);
+    reading.message.clone_from(&judged.note);
+    store.record(std::slice::from_ref(&reading))?;
+    tally.found += 1;
+    tally.judged.push(judged);
+    Ok(())
+}
+
+/// The run's own reading, scoped to [`RUN`]: how many tickets it worked
+/// and how many landed in its numbers, `how` it ended and each ticket's
+/// outcome in its message. A run that landed nothing is a skip and not a
+/// pass, the tally's rung for a run that measured nothing; a run that
+/// left a worktree standing fails. Written whatever the run came to, so a
+/// run the harness stopped leaves the record of what it worked.
+fn record_run(root: &Path, store: &Store, tally: &Tally<Landed>, how: &str) -> Result<()> {
+    let standing = tally.against().len() as u64;
+    let outcome = match (standing, tally.met()) {
+        (0, 0) => Outcome::NothingRan,
+        (0, _) => Outcome::Passed,
+        _ => Outcome::Failed,
+    };
+    let mut reading = tally.reading(
+        Reading::stamped_over(INSTRUMENT, RUN, root, Path::new(STAMPED_OVER))?,
+        &outcome,
+        outcomes(tally, how),
+    )?;
+    reading.count("landed", tally.met())?;
+    reading.count("standing", standing)?;
+    store.record(std::slice::from_ref(&reading))?;
+    Ok(())
 }
 
 /// One ticket, start to retire: the track caught up with main, its next
@@ -632,43 +795,78 @@ fn fill(root: &Path, gh: &Gh, session: &Session, track: &str) -> Result<Option<N
     track_next::next(root, gh, track)
 }
 
+/// How a run ended: the words its closing reading opens with, and the
+/// refusal a `--one` step whose ticket was left to a person ends on,
+/// which is the exit and not a failure of the harness.
+struct Ended {
+    how: String,
+    refused: Option<String>,
+}
+
 /// `xtask track work`: the tracker on `PATH`, the frontier worked until
 /// it empties and the closing line printed, or with `one` a single step whose
-/// ticket left open is the exit 1.
+/// ticket left open is the exit 1. Every step's reading and the run's own
+/// are written whatever the run came to (#117), and the run's error, where
+/// it has one, is the error it ends on.
 pub fn command(root: &Path, one: bool) -> Result<()> {
+    let store = Store::of_workspace(root);
+    let mut tally = Tally::default();
+    let ended = run(root, &store, &mut tally, one);
+    let how = match &ended {
+        Ok(ended) => ended.how.clone(),
+        Err(_) => STOPPED.to_owned(),
+    };
+    let written = record_run(root, &store, &tally, &how);
+    let ended = ended?;
+    written?;
+    match ended.refused {
+        Some(line) => bail!("{line}"),
+        None => Ok(()),
+    }
+}
+
+/// The run itself: the sweep, then one step or the frontier until it
+/// empties, each held by [`hold`] as it is reached, so a run the harness
+/// stops keeps the steps it took.
+fn run(root: &Path, store: &Store, tally: &mut Tally<Landed>, one: bool) -> Result<Ended> {
     let gh = Gh::on_path();
     for outcome in sweep(root, &gh)
         .context("the track's standing worktrees were not swept, so nothing is laid down")?
     {
         print!("{}", outcome.render());
+        hold(root, store, tally, Some(outcome.judged()))?;
     }
     if one {
         let outcome = work(root, &gh)?;
-        if let Worked::Standing { .. } = outcome {
-            bail!("{}", outcome.render().trim_end());
-        }
-        print!("{}", outcome.render());
-        return Ok(());
+        hold(root, store, tally, outcome.judged())?;
+        let refused = if let Worked::Standing { .. } = outcome {
+            Some(outcome.render().trim_end().to_owned())
+        } else {
+            print!("{}", outcome.render());
+            None
+        };
+        return Ok(Ended {
+            how: ONE_STEP.to_owned(),
+            refused,
+        });
     }
-    let mut worked = Vec::new();
     loop {
-        let outcome = work(root, &gh).with_context(|| {
-            format!(
-                "{WORK}: {}",
-                outcomes(&worked, "stopped by the harness after")
-            )
-        })?;
+        let outcome =
+            work(root, &gh).with_context(|| format!("{WORK}: {}", outcomes(tally, STOPPED)))?;
         print!("{}", outcome.render());
-        if let Worked::Nothing { track } | Worked::StillEmpty { track, .. } = &outcome {
-            if !worked.is_empty() {
-                say(
-                    WORK,
-                    &outcomes(&worked, &format!("the frontier of {track} is empty after")),
-                );
+        let empty = match &outcome {
+            Worked::Nothing { track } | Worked::StillEmpty { track, .. } => {
+                Some(format!("the frontier of {track} is empty after"))
             }
-            return Ok(());
+            _ => None,
+        };
+        hold(root, store, tally, outcome.judged())?;
+        if let Some(how) = empty {
+            if !tally.judged.is_empty() {
+                say(WORK, &outcomes(tally, &how));
+            }
+            return Ok(Ended { how, refused: None });
         }
-        worked.push(outcome);
     }
 }
 

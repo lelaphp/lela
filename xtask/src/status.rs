@@ -24,6 +24,7 @@ use crate::oracle::{PROMISE_VARIABLE, Pin, TREE_VARIABLE};
 use crate::permit;
 use crate::reading::{self, Log, Reading, Store};
 use crate::sources::NOT_YET_CREATED;
+use crate::track_work;
 
 /// What a section says when no instrument has measured a row.
 pub(crate) const NO_READING: &str = "no reading";
@@ -87,6 +88,7 @@ pub fn render(
             INSTRUMENT,
         ),
         Section::Ticket => (instrument(&readings, "ticket"), TICKET),
+        Section::Track => (last_run(&store.log()?), TRACK),
         Section::Permits => {
             return permits(manifest, &readings, &store.log()?, format, session_id);
         }
@@ -499,6 +501,27 @@ fn instrument(readings: &[Reading], name: &str) -> Vec<Row> {
     scopes
         .into_iter()
         .map(|scope| Row::new(&[("scope", json!(scope))], latest_of(readings, name, scope)))
+        .collect()
+}
+
+/// The `track` section: the last run of `xtask track work`, read off the
+/// append-only log, whose order is the order the readings were written in
+/// (#117). One row per step of that run, then the run's own, scoped to
+/// [`track_work::RUN`], which is what closes it; a run still going is
+/// every step it has taken so far. The runs before it are in the log and
+/// not here: the section is the last run.
+fn last_run(log: &Log) -> Vec<Row> {
+    let of_the_instrument: Vec<&Reading> = log
+        .readings
+        .iter()
+        .filter(|r| r.instrument == track_work::INSTRUMENT)
+        .collect();
+    let closed = |readings: &[&Reading]| readings.iter().rposition(|r| r.scope == track_work::RUN);
+    let end = closed(&of_the_instrument).map_or(of_the_instrument.len(), |at| at + 1);
+    let start = closed(&of_the_instrument[..end.saturating_sub(1)]).map_or(0, |at| at + 1);
+    of_the_instrument[start..end]
+        .iter()
+        .map(|r| Row::new(&[("ticket", json!(r.scope))], Some((*r).clone())))
         .collect()
 }
 
@@ -1100,6 +1123,25 @@ const TICKET: Columns = (
             r.reading
                 .as_ref()
                 .map(|x| short(&x.session).to_owned())
+                .unwrap_or_default(),
+            r.message(),
+        ]
+    },
+);
+
+/// The `track` section: one row per step of the last run, the ticket it
+/// worked, its outcome, the commit its branch is at and the reason; the
+/// run's own row says `run` and carries its counts.
+const TRACK: Columns = (
+    &["ticket", "reading", "numbers", "commit", "message"],
+    |r| {
+        vec![
+            r.fact("ticket"),
+            r.status(),
+            r.numbers(),
+            r.reading
+                .as_ref()
+                .map(|x| x.commit.clone())
                 .unwrap_or_default(),
             r.message(),
         ]
