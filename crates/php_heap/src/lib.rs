@@ -28,11 +28,13 @@
 mod hooks;
 mod map;
 mod stack;
+mod string;
 mod zval;
 
 pub use hooks::{Fatal, HeapHooks};
 pub use map::{MapPtr, MapTable};
 pub use stack::{EntryGuard, Frame, FrameRef, Slot, VmStack};
+pub use string::Str;
 pub use zval::{ObjectId, Zval, ZvalType};
 
 /// The per-request heap (design §5.13): the allocator every string, array,

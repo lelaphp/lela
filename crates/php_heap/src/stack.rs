@@ -102,33 +102,39 @@ impl VmStack {
             .unwrap_or_else(|| self.current())
     }
 
-    /// Pushed by the loop on entry; the guard pops on drop, so an `Err`
-    /// pops too, since shutdown functions and destructors serve again
-    /// after a fatal.
-    pub fn push_entry(&mut self, f: FrameRef) -> EntryGuard<'_> {
+    /// Pushed by the loop on entry, and popped by [`VmStack::pop_entry`]
+    /// when that serving ends, on the fatal path as on the normal one,
+    /// since shutdown functions and destructors serve again after a
+    /// fatal. The guard is the receipt: the loop holds the request and
+    /// not the stack while it dispatches, so the pairing is a value it
+    /// carries rather than a borrow it keeps.
+    #[must_use = "the entry slot is popped by VmStack::pop_entry, which takes this"]
+    pub fn push_entry(&mut self, f: FrameRef) -> EntryGuard {
         self.entries.push(f);
-        EntryGuard { stack: self }
+        EntryGuard {
+            at: self.entries.len(),
+        }
+    }
+
+    /// Pop the entry slot the guard is the receipt for. A guard from an
+    /// inner serving that is already gone pops nothing.
+    // Taking the receipt by value is the point: one serving pops its own
+    // entry slot once, and a `Copy` guard could pop it twice.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn pop_entry(&mut self, guard: EntryGuard) {
+        let EntryGuard { at } = guard;
+        if self.entries.len() == at {
+            self.entries.pop();
+        }
     }
 }
 
-/// What [`VmStack::push_entry`] hands back: the entry slot is popped when
-/// this drops.
+/// What [`VmStack::push_entry`] hands back, and what
+/// [`VmStack::pop_entry`] takes: one serving's claim on the entry slot.
 #[derive(Debug)]
-pub struct EntryGuard<'a> {
-    stack: &'a mut VmStack,
-}
-
-impl EntryGuard<'_> {
-    /// The stack the guard holds, for the loop that owns both.
-    pub fn stack(&mut self) -> &mut VmStack {
-        self.stack
-    }
-}
-
-impl Drop for EntryGuard<'_> {
-    fn drop(&mut self) {
-        self.stack.entries.pop();
-    }
+pub struct EntryGuard {
+    /// The depth of the entry slot stack with this serving's frame on it.
+    at: usize,
 }
 
 #[cfg(test)]
@@ -139,13 +145,12 @@ mod tests {
     fn the_entry_slot_pops_with_its_guard() {
         let mut stack = VmStack::new();
         let outer = stack.push_frame(2);
-        {
-            let mut guard = stack.push_entry(outer);
-            let inner = guard.stack().push_frame(1);
-            assert_eq!(guard.stack().entry(), outer);
-            assert_eq!(guard.stack().current(), inner);
-            guard.stack().pop_frame();
-        }
+        let guard = stack.push_entry(outer);
+        let inner = stack.push_frame(1);
+        assert_eq!(stack.entry(), outer);
+        assert_eq!(stack.current(), inner);
+        stack.pop_frame();
+        stack.pop_entry(guard);
         assert_eq!(stack.entry(), outer);
         if let Some(f) = stack.frame_mut(outer) {
             f.set(Slot(1), Zval::long(9));

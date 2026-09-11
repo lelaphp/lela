@@ -1,6 +1,8 @@
 //! The zval (design §5.1): sixteen bytes, `Copy`, no `Drop`. Zend's type
 //! numbering is kept so that the all-zero value is `IS_UNDEF`.
 
+use crate::Str;
+
 /// The type byte of a zval, numbered as `Zend/zend_types.h` numbers it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(u8)]
@@ -78,6 +80,13 @@ impl Zval {
         Zval::scalar(ZvalType::Double, d.to_bits())
     }
 
+    /// An interned string, php's `ZVAL_INTERNED_STR`: not refcounted,
+    /// which is what a compiled program's strings are.
+    #[must_use]
+    pub const fn string(s: Str) -> Zval {
+        Zval::scalar(ZvalType::String, s.payload())
+    }
+
     /// The type byte.
     #[must_use]
     pub const fn kind(self) -> ZvalType {
@@ -98,6 +107,15 @@ impl Zval {
     pub const fn as_double(self) -> Option<f64> {
         match self.kind {
             ZvalType::Double => Some(f64::from_bits(self.value)),
+            _ => None,
+        }
+    }
+
+    /// The interned string of a `String`, else `None`.
+    #[must_use]
+    pub fn as_str(self) -> Option<Str> {
+        match self.kind {
+            ZvalType::String => Some(Str::from_payload(self.value)),
             _ => None,
         }
     }
@@ -140,6 +158,11 @@ mod tests {
         assert_eq!(Zval::long(-3).as_long(), Some(-3));
         assert_eq!(Zval::double(0.5).as_double(), Some(0.5));
         assert_eq!(Zval::bool(true).as_bool(), Some(true));
+        assert_eq!(
+            Zval::string(Str::intern(b"php")).as_str().map(Str::bytes),
+            Some(&b"php"[..])
+        );
+        assert_eq!(Zval::long(1).as_str(), None);
         assert!(!Zval::null().is_refcounted());
     }
 }
