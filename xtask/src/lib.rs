@@ -304,9 +304,9 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
             ..
         } => Some(track_next::command(root, track.as_deref(), *json)),
         Command::Track {
-            command: Some(TrackCommand::Work),
+            command: Some(TrackCommand::Work { one }),
             ..
-        } => Some(track_work::command(root)),
+        } => Some(track_work::command(root, *one)),
         Command::Track { branch, json, .. } => Some(track_command(root, branch.as_deref(), *json)),
         Command::Regions { files } => Some(computed::command(root, files)),
         Command::Worktree {

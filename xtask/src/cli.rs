@@ -282,15 +282,23 @@ pub(crate) enum TrackCommand {
         #[arg(long)]
         json: bool,
     },
-    /// One ticket from start to retire without a person: the ticket
+    /// The frontier until it empties, without a person: for each ticket
     /// `next` names, its worktree laid down on `<track>/t<n>`, a headless
     /// session in it on the model the clone records, and when the session
     /// ends with the ticket closed, the track's branch fast-forwarded to
     /// the worktree's tip, pushed to origin and the worktree retired. A
-    /// session that ends with the ticket open leaves the worktree standing
-    /// and exits 1 with the reason. Prints one line naming the ticket, the
-    /// commit and the outcome; writes no reading.
-    Work,
+    /// session that ends with the ticket open, or closed with the branch
+    /// not ahead of the track, leaves the worktree standing for a person
+    /// and the run goes on; a failure of the harness itself stops it,
+    /// named. Prints one line per ticket naming the ticket, the commit
+    /// and the outcome, then a closing line once any was worked; writes
+    /// no reading.
+    Work {
+        /// One ticket alone: the line printed, and exit 1 with the reason
+        /// when the session leaves the ticket to a person.
+        #[arg(long)]
+        one: bool,
+    },
 }
 
 /// The two halves of a track's worktree.

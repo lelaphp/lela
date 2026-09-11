@@ -1,5 +1,6 @@
-//! One ticket from start to retire without a person (#77; harness-design.md
-//! §4.4, §4.5, §5): `xtask track work`. From inside a track's clone it
+//! The frontier until it empties, one ticket at a time from start to
+//! retire without a person (#77, #78; harness-design.md §4.4, §4.5, §5):
+//! `xtask track work`. From inside a track's clone it
 //! asks [`track_next::next`] for the ticket, lays the ticket's worktree
 //! down with the branch `<track>/t<n>` recording it, as `worktree add
 //! --ticket` does, and starts a headless Claude Code session in the
@@ -12,8 +13,20 @@
 //! worktree's tip, pushed to `origin`, and the worktree retired, which
 //! appends its readings into the track's store. When the session ends
 //! with the ticket open, the worktree is left standing for a person, the
-//! ticket's record kept with its branch, nothing retired, and the exit
+//! ticket's record kept with its branch, nothing retired, and the line
 //! says so; the console shows the worktree.
+//!
+//! Without `--one` the step repeats while `track next` names a ticket
+//! (#78): a ticket the session left open, or closed with the branch not
+//! ahead of the track, is the session's failure and does not stop the
+//! run, since its branch records it and the frontier names it no more,
+//! and the run ends at "none" with one line per ticket and, once any was
+//! worked, a closing line naming each with its outcome. A failure of the
+//! harness itself stops the run and is named: a tracker that does not
+//! answer, a build that does not stand, a session program that does not
+//! start, a push refused, a retire that will not; what was worked before
+//! it is named the same way in the error. `--one` runs the step once and
+//! exits 1 when the ticket is left to a person.
 //!
 //! What the session is started with (#75): `claude -p --model
 //! <track.model.session>`, the subagents' model handed to the child
@@ -128,7 +141,7 @@ impl Session {
     }
 }
 
-/// What one call did.
+/// What one step did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Worked {
     /// The frontier of the track is empty; nothing was laid down.
@@ -140,6 +153,16 @@ pub enum Worked {
         branch: String,
         commit: String,
         track: String,
+    },
+    /// The session ended and the ticket is the session's to finish, `why`:
+    /// open, or closed with the branch not ahead of the track. The
+    /// worktree at `dir` stands for a person with the branch at `commit`,
+    /// nothing retired.
+    Standing {
+        ticket: Ticket,
+        commit: String,
+        dir: PathBuf,
+        why: String,
     },
 }
 
@@ -159,14 +182,46 @@ impl Worked {
                 "{WORK}: {ticket} closed at {}; {track} fast-forwarded to it and pushed to origin, {branch} retired\n",
                 short(commit)
             ),
+            Worked::Standing {
+                ticket,
+                commit,
+                dir,
+                why,
+            } => format!(
+                "{WORK}: {ticket} {why}, the branch at {}; the worktree stands at {} for a person, nothing retired\n",
+                short(commit),
+                dir.display()
+            ),
         }
+    }
+
+    /// The ticket and its outcome in one word, as the closing line lists
+    /// them; an empty frontier worked no ticket and has none.
+    fn brief(&self) -> Option<String> {
+        match self {
+            Worked::Nothing { .. } => None,
+            Worked::Closed { ticket, .. } => Some(format!("{ticket} closed")),
+            Worked::Standing { ticket, .. } => Some(format!("{ticket} standing")),
+        }
+    }
+}
+
+/// The closing line of a run: `how` it ended, how many tickets it worked
+/// and each with its outcome.
+fn outcomes(worked: &[Worked], how: &str) -> String {
+    let briefs = worked.iter().filter_map(Worked::brief).collect::<Vec<_>>();
+    match briefs.len() {
+        0 => format!("{how} no ticket"),
+        1 => format!("{how} 1 ticket: {}", briefs[0]),
+        n => format!("{how} {n} tickets: {}", briefs.join(", ")),
     }
 }
 
 /// One ticket, start to retire: the track's next ticket, its worktree,
 /// the session, and on a close the fast-forward, the push and the
-/// retire. A session that ends with the ticket open is an error naming
-/// the worktree that stands.
+/// retire. A session that ends with the ticket open, or closed with the
+/// branch not ahead of the track, is an outcome naming the worktree that
+/// stands; a failure of the harness is the error.
 pub fn work(root: &Path, gh: &Gh) -> Result<Worked> {
     let track = Track::of(root, None)?;
     let Some(model) = track.model.clone() else {
@@ -201,15 +256,24 @@ pub fn work(root: &Path, gh: &Gh) -> Result<Worked> {
     let tip = rev(root, &format!("refs/heads/{branch}"))?;
     let issue = gh.view(root, ticket)?;
     if issue.state != State::Closed {
-        bail!(
-            "{ticket} is open after the session ({status}), the branch at {}; the worktree stands at {} for a person, nothing retired",
-            short(&tip),
-            dir.display()
-        );
+        return Ok(Worked::Standing {
+            ticket,
+            commit: tip,
+            dir,
+            why: format!("is open after the session ({status})"),
+        });
+    }
+    if let Some(why) = not_ahead(root, &track, &tip)? {
+        return Ok(Worked::Standing {
+            ticket,
+            commit: tip,
+            dir,
+            why: format!("closed, but the branch is not ahead of the track: {why}"),
+        });
     }
     fast_forward(root, &track, &tip).with_context(|| {
         format!(
-            "{ticket} closed, but the branch at {} is not ahead of the track; the worktree stands at {}, nothing retired",
+            "{ticket} closed, but the track did not move to {}; the worktree stands at {}, nothing retired",
             short(&tip),
             dir.display()
         )
@@ -230,6 +294,25 @@ pub fn work(root: &Path, gh: &Gh) -> Result<Worked> {
     })
 }
 
+/// Why `tip` is no fast-forward of the track, `None` when it is one: the
+/// track's own commit, or a commit that does not descend from it.
+fn not_ahead(root: &Path, track: &Track, tip: &str) -> Result<Option<String>> {
+    let old = rev(root, &track.at)?;
+    if old == *tip {
+        return Ok(Some(format!(
+            "the branch is the track's own commit, {}",
+            short(&old)
+        )));
+    }
+    if git(root, &["merge-base", "--is-ancestor", &old, tip], None).is_err() {
+        return Ok(Some(format!(
+            "the track is at {}, which the branch does not descend from",
+            short(&old)
+        )));
+    }
+    Ok(None)
+}
+
 /// The track's branch moved to `tip` and pushed, by fast-forward alone:
 /// `origin/<name>` through the push first, since a push refused leaves
 /// nothing moved, then the clone's own branch where it has one, through
@@ -238,14 +321,8 @@ pub fn work(root: &Path, gh: &Gh) -> Result<Worked> {
 /// is detached at its track.
 fn fast_forward(root: &Path, track: &Track, tip: &str) -> Result<()> {
     let old = rev(root, &track.at)?;
-    if old == *tip {
-        bail!("the branch is the track's own commit, {}", short(&old));
-    }
-    if git(root, &["merge-base", "--is-ancestor", &old, tip], None).is_err() {
-        bail!(
-            "the track is at {}, which the branch does not descend from",
-            short(&old)
-        );
+    if let Some(why) = not_ahead(root, track, tip)? {
+        bail!("{why}");
     }
     let name = &track.name;
     git(
@@ -306,9 +383,37 @@ fn rev(root: &Path, name: &str) -> Result<String> {
     .with_context(|| format!("{name} names no commit"))
 }
 
-/// `xtask track work`: the tracker on `PATH`, the outcome printed.
-pub fn command(root: &Path) -> Result<()> {
-    let outcome = work(root, &Gh::on_path())?;
-    print!("{}", outcome.render());
-    Ok(())
+/// `xtask track work`: the tracker on `PATH`, the frontier worked until
+/// it empties and the closing line printed, or with `one` a single step whose
+/// ticket left open is the exit 1.
+pub fn command(root: &Path, one: bool) -> Result<()> {
+    let gh = Gh::on_path();
+    if one {
+        let outcome = work(root, &gh)?;
+        if let Worked::Standing { .. } = outcome {
+            bail!("{}", outcome.render().trim_end());
+        }
+        print!("{}", outcome.render());
+        return Ok(());
+    }
+    let mut worked = Vec::new();
+    loop {
+        let outcome = work(root, &gh).with_context(|| {
+            format!(
+                "{WORK}: {}",
+                outcomes(&worked, "stopped by the harness after")
+            )
+        })?;
+        print!("{}", outcome.render());
+        if let Worked::Nothing { track } = &outcome {
+            if !worked.is_empty() {
+                say(
+                    WORK,
+                    &outcomes(&worked, &format!("the frontier of {track} is empty after")),
+                );
+            }
+            return Ok(());
+        }
+        worked.push(outcome);
+    }
 }
