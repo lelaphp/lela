@@ -37,6 +37,7 @@ pub mod new_ext;
 pub mod oracle;
 pub mod permit;
 pub mod phpt;
+pub mod port_map;
 pub mod reading;
 mod reply;
 mod rust;
@@ -161,6 +162,7 @@ fn command_line() -> Result<()> {
             jit,
             engine,
         } => phpt_command(&root, &manifest, &store, subset, full, jit, engine),
+        Command::PortMap { tree } => port_map::command(&root, &manifest, &store, tree.as_deref()),
         Command::UnsafeAudit => record(&store, &unsafe_audit::run(&root, &manifest)?),
         Command::Generate => {
             for path in generated::write_all(&root, &manifest)? {

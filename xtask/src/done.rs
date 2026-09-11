@@ -85,7 +85,7 @@ use crate::divergence::{self, Registry};
 use crate::git::{self, Change};
 use crate::manifest::{Crate, Manifest};
 use crate::permit;
-use crate::reading::{Number, Outcome, Reading, Status, Store};
+use crate::reading::{Number, Outcome, Reading, Status, Store, plural};
 use crate::reply;
 use crate::ticket;
 use crate::track::{self, Ticket};
@@ -215,11 +215,6 @@ impl Verdict {
 /// The hold at Stop, the shape recorded in data/pre-day-1.md §4.
 fn block(reason: &str) -> Value {
     json!({ "decision": "block", "reason": reason })
-}
-
-/// `"s"` past one.
-fn plural(n: usize) -> &'static str {
-    if n == 1 { "" } else { "s" }
 }
 
 /// Whether `id` names `part` as whole path segments: `ext/pcre` is in

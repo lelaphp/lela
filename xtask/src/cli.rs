@@ -204,6 +204,19 @@ pub(crate) enum Command {
         #[arg(long, value_name = "PATH")]
         engine: Option<PathBuf>,
     },
+    /// Join the Mahout census to `api.lock`: every item `same`, `renamed`
+    /// or `gone`, the rows the port has not taken as the number. One
+    /// reading, at the crate the lock lives with.
+    ///
+    /// Without `--tree`, the committed census `data/port-map.v0.toml`.
+    PortMap {
+        /// Regenerate the census against the inherited Mahout tree, which
+        /// lives outside this repository, and join that instead; a tree
+        /// the census cannot read is a skip of the regeneration and never
+        /// a pass.
+        #[arg(long, value_name = "PATH")]
+        tree: Option<PathBuf>,
+    },
     /// Allow `unsafe` only in the homes the manifest's unsafe.homes rule names.
     UnsafeAudit,
     /// Write the files the manifest's `generated` rules render (ext/clippy.toml).
@@ -393,6 +406,9 @@ pub enum Section {
     Witness,
     /// The mutants readings, one row per crate.
     Mutants,
+    /// The port-map reading: the census joined to `api.lock`, with the
+    /// rows the port has not taken.
+    PortMap,
     /// The ticket readings, one row per ticket: its criteria, what closed
     /// it and the session.
     Ticket,

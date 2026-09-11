@@ -22,7 +22,7 @@
 //! reading, as the manifest's `ext.pub-beyond-extension` note asks.
 
 mod inventory;
-mod lock;
+pub(crate) mod lock;
 mod workspace;
 
 use std::collections::{BTreeMap, BTreeSet};

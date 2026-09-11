@@ -22,6 +22,7 @@ use crate::git::git;
 use crate::manifest::{Manifest, Measure, SCRIPTS, Week};
 use crate::oracle::{PROMISE_VARIABLE, Pin, TREE_VARIABLE};
 use crate::permit;
+use crate::port_map;
 use crate::reading::{self, Log, Reading, Store};
 use crate::sources::NOT_YET_CREATED;
 
@@ -86,6 +87,7 @@ pub fn render(
             fold_uncreated(instrument(&readings, "mutants"), "scope")?,
             INSTRUMENT,
         ),
+        Section::PortMap => (instrument(&readings, port_map::INSTRUMENT), INSTRUMENT),
         Section::Ticket => (instrument(&readings, "ticket"), TICKET),
         Section::Permits => {
             return permits(manifest, &readings, &store.log()?, format, session_id);

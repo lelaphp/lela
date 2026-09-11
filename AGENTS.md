@@ -135,6 +135,7 @@ Commands:
   budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code and a stale generated file
   clippy             `cargo clippy` with every warning denied, on every target of each crate, as the reading `done` reads; one reading per crate
   phpt               Run the pinned `.phpt` corpus through the engine and hold each test to its `--EXPECT*--` section; one reading per subset, scoped to the crate whose subset it is
+  port-map           Join the Mahout census to `api.lock`: every item `same`, `renamed` or `gone`, the rows the port has not taken as the number. One reading, at the crate the lock lives with
   unsafe-audit       Allow `unsafe` only in the homes the manifest's unsafe.homes rule names
   generate           Write the files the manifest's `generated` rules render (ext/clippy.toml)
   divergence-reason  Hold the divergence registry to the manifest rule whose `check` names this instrument: an accepted row has a reason a person wrote
@@ -146,7 +147,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=0949d90d9422e0735a6b6728ac5e3f67ebde2bc8a105b4669a1e4609bfa88c3c out=2c83c38f0bbbfc24371817243dd8ef0cff6feca79f703e116f4319e85df26a06 -->
+<!-- /computed in=ad1f46c5aadb6e71617be5b608d1da5b7f67a9bc8373e40b9a9c8f6b55428027 out=94dae5e6b2ec4295d9fc1adfe25ac8ee7d6436036798f4a1591c69bcd9c6eca6 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

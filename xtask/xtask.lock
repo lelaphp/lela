@@ -156,6 +156,10 @@ permit::run
 phpt::Ask
 phpt::Lane
 phpt::run
+port_map::CENSUS
+port_map::INSTRUMENT
+port_map::SEED
+port_map::command
 reading::DIR
 reading::LOG
 reading::Log
