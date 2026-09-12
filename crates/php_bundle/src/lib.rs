@@ -16,7 +16,48 @@ use php_ext::abi::Extension;
 /// `api-check` names both crates until it is moved.
 #[must_use]
 pub fn enabled() -> &'static [fn() -> Extension] {
-    &[]
+    &[
+        #[cfg(feature = "standard")]
+        php_ext_standard::extension,
+        #[cfg(feature = "spl")]
+        php_ext_spl::extension,
+        #[cfg(feature = "date")]
+        php_ext_date::extension,
+        #[cfg(feature = "reflection")]
+        php_ext_reflection::extension,
+        #[cfg(feature = "pcre")]
+        php_ext_pcre::extension,
+        #[cfg(feature = "mbstring")]
+        php_ext_mbstring::extension,
+        #[cfg(feature = "session")]
+        php_ext_session::extension,
+        #[cfg(feature = "pdo")]
+        php_ext_pdo::extension,
+        #[cfg(feature = "dom")]
+        php_ext_dom::extension,
+        #[cfg(feature = "random")]
+        php_ext_random::extension,
+        #[cfg(feature = "pdo_mysql")]
+        php_ext_pdo_mysql::extension,
+        #[cfg(feature = "filter")]
+        php_ext_filter::extension,
+        #[cfg(feature = "tokenizer")]
+        php_ext_tokenizer::extension,
+        #[cfg(feature = "json")]
+        php_ext_json::extension,
+        #[cfg(feature = "openssl")]
+        php_ext_openssl::extension,
+        #[cfg(feature = "curl")]
+        php_ext_curl::extension,
+        #[cfg(feature = "iconv")]
+        php_ext_iconv::extension,
+        #[cfg(feature = "pdo_sqlite")]
+        php_ext_pdo_sqlite::extension,
+        #[cfg(feature = "ctype")]
+        php_ext_ctype::extension,
+        #[cfg(feature = "hash")]
+        php_ext_hash::extension,
+    ]
 }
 
 /// The tier, named once (design §4.3 seam 8): the interpreter alone until

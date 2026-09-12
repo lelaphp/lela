@@ -166,6 +166,26 @@ Options:
 ```
 .
 ├── AGENTS.md
-└── clippy.toml
+├── clippy.toml
+├── ctype
+├── curl
+├── date
+├── dom
+├── filter
+├── hash
+├── iconv
+├── json
+├── mbstring
+├── openssl
+├── pcre
+├── pdo
+├── pdo_mysql
+├── pdo_sqlite
+├── random
+├── reflection
+├── session
+├── spl
+├── standard
+└── tokenizer
 ```
-<!-- /computed in=b79427b807153f594393f176c0cf681c8e5c6d8daf4b63a6a12b4e7de1fe2b6a out=17d2f15969dd83d101598d8d652d14071b4363f72c9f9092dfb9323b6938ee54 -->
+<!-- /computed in=facc5db3e5124a5e0d969a8e533e21804b5160530145f3c363e1bb30c96d1c75 out=98d3faf5502df40e95a6a77b691f664c23bc16f52c564ed43b02eb9c3e23246b -->

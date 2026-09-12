@@ -11,8 +11,28 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 <!-- computed tree src=. depth=1 dirs name=extensions | do not edit; run computed -->
 ```
 .
+├── ctype
+├── curl
+├── date
+├── dom
+├── filter
+├── hash
+├── iconv
+├── json
+├── mbstring
+├── openssl
+├── pcre
+├── pdo
+├── pdo_mysql
+├── pdo_sqlite
+├── random
+├── reflection
+├── session
+├── spl
+├── standard
+└── tokenizer
 ```
-<!-- /computed in=c1e0a1f9e38e0dc30b7a78368a133864692469a48041f89b856691efb382f206 out=b347635fd4f0f31acca43658a179aaf5ab4d5c8dfd566be799a195d1c895e9d9 -->
+<!-- /computed in=dec63b5cf8b5af46d5c5a3d019f16e2fc18aaf8533631ba31a7234efb5c9c70b out=95ab3077f071595e43a9de51dd8b93a9260e65c36f0df5ff1ef75ce841e32fec -->
 
 <!-- computed exec cmd="cargo xtask status --section bundle" inputs=../seams.toml name=bundle-order | do not edit; run computed -->
 

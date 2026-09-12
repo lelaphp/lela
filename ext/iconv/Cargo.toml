@@ -1,0 +1,20 @@
+# ext/iconv: one crate per extension (ADR-0004), laid down by `xtask new-ext`.
+[package]
+name = "php_ext_iconv"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The iconv extension, php-src/ext/iconv"
+
+[lints]
+workspace = true
+
+# The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
+[dependencies]
+php_ext = { path = "../../crates/php_ext" }
+
+# The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
+[dev-dependencies]
+php_ext = { path = "../../crates/php_ext", features = ["test"] }

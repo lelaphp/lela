@@ -17,11 +17,51 @@ description = "The enabled set of extensions and the tier's name"
 workspace = true
 
 [features]
-default = []
+default = ["standard", "spl", "date", "reflection", "pcre", "mbstring", "session", "pdo", "dom", "random", "pdo_mysql", "filter", "tokenizer", "json", "openssl", "curl", "iconv", "pdo_sqlite", "ctype", "hash"]
 # The compiled tier (design §4.1, §11): a name that enables nothing until
 # php_jit exists, when it enables the crate on the four targets.
 jit = []
+standard = ["dep:php_ext_standard"]
+spl = ["dep:php_ext_spl"]
+date = ["dep:php_ext_date"]
+reflection = ["dep:php_ext_reflection"]
+pcre = ["dep:php_ext_pcre"]
+mbstring = ["dep:php_ext_mbstring"]
+session = ["dep:php_ext_session"]
+pdo = ["dep:php_ext_pdo"]
+dom = ["dep:php_ext_dom"]
+random = ["dep:php_ext_random"]
+pdo_mysql = ["dep:php_ext_pdo_mysql"]
+filter = ["dep:php_ext_filter"]
+tokenizer = ["dep:php_ext_tokenizer"]
+json = ["dep:php_ext_json"]
+openssl = ["dep:php_ext_openssl"]
+curl = ["dep:php_ext_curl"]
+iconv = ["dep:php_ext_iconv"]
+pdo_sqlite = ["dep:php_ext_pdo_sqlite"]
+ctype = ["dep:php_ext_ctype"]
+hash = ["dep:php_ext_hash"]
 
 # The facade for `Extension` and `Nop`; the extensions as `new-ext` adds them.
 [dependencies]
 php_ext = { path = "../php_ext" }
+php_ext_standard = { path = "../../ext/standard", optional = true }
+php_ext_spl = { path = "../../ext/spl", optional = true }
+php_ext_date = { path = "../../ext/date", optional = true }
+php_ext_reflection = { path = "../../ext/reflection", optional = true }
+php_ext_pcre = { path = "../../ext/pcre", optional = true }
+php_ext_mbstring = { path = "../../ext/mbstring", optional = true }
+php_ext_session = { path = "../../ext/session", optional = true }
+php_ext_pdo = { path = "../../ext/pdo", optional = true }
+php_ext_dom = { path = "../../ext/dom", optional = true }
+php_ext_random = { path = "../../ext/random", optional = true }
+php_ext_pdo_mysql = { path = "../../ext/pdo_mysql", optional = true }
+php_ext_filter = { path = "../../ext/filter", optional = true }
+php_ext_tokenizer = { path = "../../ext/tokenizer", optional = true }
+php_ext_json = { path = "../../ext/json", optional = true }
+php_ext_openssl = { path = "../../ext/openssl", optional = true }
+php_ext_curl = { path = "../../ext/curl", optional = true }
+php_ext_iconv = { path = "../../ext/iconv", optional = true }
+php_ext_pdo_sqlite = { path = "../../ext/pdo_sqlite", optional = true }
+php_ext_ctype = { path = "../../ext/ctype", optional = true }
+php_ext_hash = { path = "../../ext/hash", optional = true }
