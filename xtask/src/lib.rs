@@ -217,7 +217,8 @@ pub(crate) fn record(store: &Store, readings: &[Reading]) -> Result<()> {
 
 /// `xtask ticket read` and `close`: the ticket named or the branch's, read
 /// through the `gh` on `PATH`, one reading recorded; a close names what it
-/// opened before anything is fetched.
+/// opened before anything is fetched, and the branch's track, read once
+/// here, says which label its successors carry.
 fn ticket_command(root: &Path, store: &Store, command: TicketCommand) -> Result<()> {
     let (act, ticket, session_id) = match command {
         TicketCommand::Read { number, session_id } => (
@@ -242,6 +243,7 @@ fn ticket_command(root: &Path, store: &Store, command: TicketCommand) -> Result<
         act,
         ticket,
         session_id.as_deref(),
+        &track::Track::of(root, None)?.name,
     )?;
     record(store, std::slice::from_ref(&reading))
 }

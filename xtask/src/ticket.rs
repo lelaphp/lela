@@ -26,7 +26,17 @@
 //! anything ([`Successors::named`]). Each successor is fetched and must be
 //! open; one that is closed, missing or unreadable refuses the close with
 //! nothing changed. Whose the successor is is not held, `for-a-person`
-//! as good as `ready-for-agent`: the bar is that it was filed. The edge is
+//! as good as `ready-for-agent`: the bar is that it was filed. Which
+//! track's it is, is held (#141): a ticket carrying no `track:` label is
+//! every track's (CONTEXT.md, Frontier), so a close running on a track
+//! refuses a successor without that track's label, names the `gh issue
+//! edit <n> --add-label track:<name>` that adds it, and asks the tracker
+//! for nothing. Nothing originates the label otherwise: the skills carry
+//! the closing ticket's when it has one, so a ticket filed off an
+//! unlabelled one landed in both frontiers, and the close is the session's
+//! last act and the only instrument that already reads the tracker. A
+//! close on `main` asks nothing of a successor's labels, since a ticket
+//! filed from the main checkout is every track's by design. The edge is
 //! the tracker's own blocking relation, `gh issue edit <n> --add-blocking`,
 //! set before the close, so it is what `gh issue view` prints as
 //! `blocking` and `blocked-by` and not a heading appended to a body. The
@@ -60,7 +70,8 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::reading::{Reading, Status};
-use crate::track::{Ticket, Track};
+use crate::track::{MAIN, Ticket, Track};
+use crate::track_next::TRACK_LABEL;
 
 /// The instrument name every reading of ticket carries.
 pub(crate) const INSTRUMENT: &str = "ticket";
@@ -135,20 +146,29 @@ impl Successors {
         }
     }
 
-    /// Each successor exists at the tracker and is open; the first that is
-    /// not is the refusal.
-    fn held_open(&self, gh: &Gh, root: &Path) -> Result<()> {
+    /// Each successor exists at the tracker, is open, and on a track
+    /// carries that track's label; the first that is not is the refusal.
+    fn held(&self, gh: &Gh, root: &Path, track: &str) -> Result<()> {
         if let Successors::Tickets(tickets) = self
             && tickets.is_empty()
         {
             bail!("opens no ticket and asserts nothing; `--opens <n>` or `--opens-nothing`");
         }
+        let label = (track != MAIN).then(|| format!("{TRACK_LABEL}{track}"));
         for &successor in self.tickets() {
             let issue = gh
                 .view(root, successor)
                 .with_context(|| format!("opens {successor}"))?;
             if issue.state == State::Closed {
                 bail!("opens {successor}, which is closed; a successor is an open ticket");
+            }
+            if let Some(label) = &label
+                && !issue.labels.iter().any(|carried| &carried.name == label)
+            {
+                bail!(
+                    "opens {successor}, which carries no `{label}` label; a ticket filed on the {track} track is that track's, and one with no `{TRACK_LABEL}` label is every track's: `gh issue edit {} --add-label {label}`",
+                    successor.number()
+                );
             }
         }
         Ok(())
@@ -278,6 +298,10 @@ pub struct Issue {
     pub body: String,
     pub state: State,
     pub url: String,
+    /// The labels the tracker carries on it, which a close reads to hold a
+    /// successor to its track (#141).
+    #[serde(default)]
+    pub labels: Vec<Label>,
     /// The tickets this one blocks, nested as `blockedBy` is; an edge the
     /// tracker has is not set again, since it refuses a second one.
     #[serde(default)]
@@ -373,7 +397,8 @@ impl Gh {
         }
     }
 
-    /// `gh issue view <n> --json …`, one issue.
+    /// `gh issue view <n> --json …`, one issue, its labels among them,
+    /// since a close holds a successor to the track it was filed on.
     pub fn view(&self, root: &Path, ticket: Ticket) -> Result<Issue> {
         let number = ticket.number().to_string();
         let text = gh(
@@ -384,7 +409,7 @@ impl Gh {
                 "view",
                 &number,
                 "--json",
-                "number,title,body,state,url,blocking",
+                "number,title,body,state,url,labels,blocking",
             ],
         )
         .with_context(|| format!("{ticket} could not be read from the tracker"))?;
@@ -496,15 +521,21 @@ pub fn ticket_of(root: &Path, number: Option<u64>) -> Result<Ticket> {
 /// `xtask ticket read` and `close`: the issue fetched through `gh`, the
 /// criteria read, the reading of instrument `ticket` over the ticket's
 /// number, stamped over the workspace as `done`'s is, and for a close with
-/// every box ticked and every successor open the edge and then the act at
+/// every box ticked and every successor held the edge and then the act at
 /// the tracker before the reading is written. The caller records the
 /// reading; its status is the exit.
+///
+/// `track` is the track the close runs on, the name [`Track::of`] answers,
+/// which a successor's `track:` label is held to; the command line reads
+/// it once and hands it down, the way `track next` takes the track it
+/// answers for.
 pub fn run(
     root: &Path,
     gh: &Gh,
     act: Act,
     ticket: Ticket,
     session_id: Option<&str>,
+    track: &str,
 ) -> Result<Reading> {
     let issue = gh.view(root, ticket)?;
     let criteria = Criteria::parse(&issue.body);
@@ -575,7 +606,7 @@ pub fn run(
                 .filter(|t| !issue.blocking.nodes.iter().any(|n| n.number == t.number()))
                 .collect::<Vec<_>>();
             let closed = successors
-                .held_open(gh, root)
+                .held(gh, root, track)
                 .and_then(|()| gh.blocking(root, ticket, &missing))
                 .map_err(|err| format!("{err:#}; not closed, nothing changed at the tracker"))
                 .and_then(|()| {

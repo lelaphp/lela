@@ -58,8 +58,8 @@ impl Recorded {
         self.labelled(number, state, body, &[]);
     }
 
-    /// An issue with labels, as the tracker answers them; the instrument
-    /// does not read them.
+    /// An issue with labels, as the tracker answers them, which a close on
+    /// a track holds a successor to (#141).
     fn labelled(&self, number: u64, state: &str, body: &str, labels: &[&str]) {
         self.blocking(number, state, body, labels, &[]);
     }
@@ -105,7 +105,15 @@ const TICKED: &str = "## Acceptance criteria\n\n- [x] one\n- [X] two\n";
 fn read_counts_the_boxes_and_names_the_unticked() {
     let recorded = Recorded::lay("read");
     recorded.issue(7, "OPEN", UNTICKED);
-    let reading = run(workspace(), &recorded.gh(), Act::Read, Ticket::new(7), None).unwrap();
+    let reading = run(
+        workspace(),
+        &recorded.gh(),
+        Act::Read,
+        Ticket::new(7),
+        None,
+        "main",
+    )
+    .unwrap();
     assert_eq!(reading.instrument, "ticket");
     assert_eq!(reading.scope, "7");
     assert_eq!(reading.status, Status::Fail);
@@ -124,7 +132,15 @@ fn read_counts_the_boxes_and_names_the_unticked() {
     );
 
     recorded.issue(8, "OPEN", TICKED);
-    let reading = run(workspace(), &recorded.gh(), Act::Read, Ticket::new(8), None).unwrap();
+    let reading = run(
+        workspace(),
+        &recorded.gh(),
+        Act::Read,
+        Ticket::new(8),
+        None,
+        "main",
+    )
+    .unwrap();
     assert_eq!(reading.status, Status::Pass);
     assert_eq!(reading.numbers["unticked"], 0.into());
     assert!(recorded.calls().is_empty());
@@ -140,6 +156,7 @@ fn close_refuses_while_a_box_is_unticked_and_changes_nothing_at_the_tracker() {
         Act::Close(Successors::Nothing),
         Ticket::new(7),
         Some("s1"),
+        "main",
     )
     .unwrap();
     assert_eq!(reading.status, Status::Fail);
@@ -158,6 +175,7 @@ fn close_refuses_while_a_box_is_unticked_and_changes_nothing_at_the_tracker() {
         Act::Close(Successors::Nothing),
         Ticket::new(9),
         None,
+        "main",
     )
     .unwrap();
     assert_eq!(reading.status, Status::Fail);
@@ -174,6 +192,7 @@ fn close_refuses_while_a_box_is_unticked_and_changes_nothing_at_the_tracker() {
         Act::Close(Successors::Nothing),
         Ticket::new(10),
         None,
+        "main",
     )
     .unwrap();
     assert_eq!(reading.status, Status::Fail);
@@ -198,6 +217,7 @@ fn close_with_every_box_ticked_closes_and_records_what_closed_it_and_the_session
         Act::Close(Successors::Nothing),
         Ticket::new(8),
         Some("session-abc"),
+        "main",
     )
     .unwrap();
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
@@ -238,6 +258,7 @@ fn close_names_what_it_opened_through_the_tracker_s_blocking_relation() {
         Act::Close(Successors::Tickets(vec![Ticket::new(9), Ticket::new(10)])),
         Ticket::new(8),
         Some("s2"),
+        "main",
     )
     .unwrap();
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
@@ -272,6 +293,7 @@ fn close_sets_only_the_edges_the_tracker_does_not_have_yet() {
         Act::Close(Successors::Tickets(vec![Ticket::new(9), Ticket::new(10)])),
         Ticket::new(8),
         None,
+        "main",
     )
     .unwrap();
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
@@ -289,12 +311,104 @@ fn close_sets_only_the_edges_the_tracker_does_not_have_yet() {
         Act::Close(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
+        "main",
     )
     .unwrap();
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
     let calls = recorded.calls();
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert!(calls[0].starts_with("issue close 8 "), "{calls:?}");
+}
+
+/// A close running on a track refuses a successor that carries no
+/// `track:<name>` label, names the edit that adds it, and asks the tracker
+/// for nothing but the two `issue view` calls (#141).
+#[test]
+fn close_on_a_track_refuses_a_successor_that_carries_no_track_label() {
+    let recorded = Recorded::lay("unlabelled");
+    recorded.labelled(8, "OPEN", TICKED, &["track:t-opus-5"]);
+    recorded.labelled(9, "OPEN", "no criteria yet", &["ready-for-agent"]);
+    let reading = run(
+        workspace(),
+        &recorded.gh(),
+        Act::Close(Successors::Tickets(vec![Ticket::new(9)])),
+        Ticket::new(8),
+        None,
+        "t-opus-5",
+    )
+    .unwrap();
+    assert_eq!(reading.status, Status::Fail, "{}", reading.message);
+    assert!(
+        reading
+            .message
+            .contains("opens #9, which carries no `track:t-opus-5` label")
+            && reading
+                .message
+                .contains("`gh issue edit 9 --add-label track:t-opus-5`")
+            && reading
+                .message
+                .contains("not closed, nothing changed at the tracker"),
+        "{}",
+        reading.message
+    );
+    assert!(
+        recorded.calls().is_empty(),
+        "no edge and no close: {:?}",
+        recorded.calls()
+    );
+
+    // Another track's label is no more this track's than none at all.
+    recorded.labelled(9, "OPEN", "no criteria yet", &["track:main"]);
+    let reading = run(
+        workspace(),
+        &recorded.gh(),
+        Act::Close(Successors::Tickets(vec![Ticket::new(9)])),
+        Ticket::new(8),
+        None,
+        "t-opus-5",
+    )
+    .unwrap();
+    assert_eq!(reading.status, Status::Fail, "{}", reading.message);
+    assert!(recorded.calls().is_empty(), "{:?}", recorded.calls());
+}
+
+/// The successor carrying the track's label closes as it always did, and
+/// from the main checkout an unlabelled successor is every track's, so
+/// nothing is asked of its labels (#141).
+#[test]
+fn a_successor_carrying_the_track_label_closes_and_main_asks_nothing() {
+    let recorded = Recorded::lay("labelled");
+    recorded.labelled(8, "OPEN", TICKED, &["track:t-opus-5"]);
+    recorded.labelled(9, "OPEN", "no criteria yet", &["track:t-opus-5"]);
+    let reading = run(
+        workspace(),
+        &recorded.gh(),
+        Act::Close(Successors::Tickets(vec![Ticket::new(9)])),
+        Ticket::new(8),
+        None,
+        "t-opus-5",
+    )
+    .unwrap();
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    let calls = recorded.calls();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[0], "issue edit 8 --add-blocking 9");
+    assert!(calls[1].starts_with("issue close 8 "), "{calls:?}");
+
+    let recorded = Recorded::lay("unlabelled-main");
+    recorded.issue(8, "OPEN", TICKED);
+    recorded.issue(9, "OPEN", "no criteria yet");
+    let reading = run(
+        workspace(),
+        &recorded.gh(),
+        Act::Close(Successors::Tickets(vec![Ticket::new(9)])),
+        Ticket::new(8),
+        None,
+        "main",
+    )
+    .unwrap();
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    assert_eq!(recorded.calls().len(), 2, "{:?}", recorded.calls());
 }
 
 /// `--opens-nothing` is an assertion: no edge, the close alone, and the
@@ -309,6 +423,7 @@ fn opens_nothing_is_an_assertion_the_reading_carries_with_its_session() {
         Act::Close(Successors::Nothing),
         Ticket::new(8),
         Some("s3"),
+        "main",
     )
     .unwrap();
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
@@ -334,6 +449,7 @@ fn opens_nothing_is_an_assertion_the_reading_carries_with_its_session() {
         Act::Close(Successors::Nothing),
         Ticket::new(8),
         None,
+        "main",
     )
     .unwrap();
     assert!(
@@ -364,6 +480,7 @@ fn close_refuses_a_successor_that_is_closed_missing_or_unreadable_and_changes_no
             Act::Close(Successors::Tickets(vec![Ticket::new(successor)])),
             Ticket::new(8),
             None,
+            "main",
         )
         .unwrap();
         assert_eq!(reading.status, Status::Fail, "{}", reading.message);
@@ -398,6 +515,7 @@ fn a_tracker_that_refuses_the_edge_leaves_the_ticket_open() {
         Act::Close(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
+        "main",
     )
     .unwrap();
     assert_eq!(reading.status, Status::Fail);
@@ -423,6 +541,7 @@ fn a_tracker_that_refuses_the_edge_leaves_the_ticket_open() {
         Act::Close(Successors::Tickets(vec![])),
         Ticket::new(8),
         None,
+        "main",
     )
     .unwrap();
     assert_eq!(empty.status, Status::Fail);
@@ -448,6 +567,7 @@ fn a_tracker_that_refuses_the_close_after_the_edge_says_the_edge_stands() {
         Act::Close(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
+        "main",
     )
     .unwrap();
     assert_eq!(reading.status, Status::Fail);
@@ -476,6 +596,7 @@ fn a_tracker_that_refuses_the_close_is_a_failed_reading_carrying_its_text() {
         Act::Close(Successors::Nothing),
         Ticket::new(8),
         None,
+        "main",
     )
     .unwrap();
     assert_eq!(reading.status, Status::Fail);
@@ -491,6 +612,7 @@ fn a_tracker_that_refuses_the_close_is_a_failed_reading_carrying_its_text() {
         Act::Read,
         Ticket::new(404),
         None,
+        "main",
     );
     assert!(
         missing.is_err(),

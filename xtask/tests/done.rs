@@ -1229,6 +1229,7 @@ fn ticket_read(root: &Path, number: u64, body: &str) {
         xtask::ticket::Act::Read,
         xtask::track::Ticket::new(number),
         None,
+        "main",
     )
     .unwrap();
     Store::of_workspace(root).record(&[reading]).unwrap();
