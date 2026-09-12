@@ -264,6 +264,64 @@ mod tests {
         );
     }
 
+    /// php sweeps the wholly free bin `runs` before it declares the
+    /// limit reached (`zend_mm_gc`), so the limit is met where php's is
+    /// met and not before: a request holding every slot it took is
+    /// stopped, and the same request having given them back goes on,
+    /// out of the pages the sweep handed back and with no chunk more.
+    #[test]
+    fn the_limit_is_met_after_the_sweep_of_free_bin_runs_and_not_before() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        heap.set_memory_limit(2 * mm::CHUNK_SIZE);
+        // A string of 3000 bytes is the 3072-byte bin, four slots to a
+        // `run` of three pages, so two chunks hold 340 `runs` and the
+        // next one meets the limit.
+        let mut held = Vec::new();
+        let fatal = loop {
+            match heap.string(&[b'x'; 3000]) {
+                Ok(s) => held.push(s),
+                Err(f) => break f,
+            }
+        };
+        assert_eq!(held.len(), 340 * 4);
+        assert_eq!(heap.memory_usage(true), 2 * mm::CHUNK_SIZE);
+        assert_eq!(
+            fatal,
+            Fatal::Error(
+                "Allowed memory size of 4194304 bytes exhausted (tried to allocate 12288 bytes)"
+                    .to_string()
+            )
+        );
+        // A 1760-byte string is the 1792-byte bin, a `run` of seven
+        // pages, which neither chunk has free. Nothing is on a free
+        // list, so the sweep collects nothing and the limit stands.
+        assert_eq!(
+            heap.string(&[b'x'; 1760]).err(),
+            Some(Fatal::Error(
+                "Allowed memory size of 4194304 bytes exhausted (tried to allocate 28672 bytes)"
+                    .to_string()
+            ))
+        );
+        // Every slot back on its bin's free list. The pages are still
+        // the request's until the sweep walks them, so the same
+        // allocation still finds no seven free pages anywhere.
+        for s in held.drain(..) {
+            heap.release_string(s);
+        }
+        assert_eq!(heap.memory_usage(false), 0);
+        assert_eq!(heap.memory_usage(true), 2 * mm::CHUNK_SIZE);
+        let swept = heap.string(&[b'x'; 1760]);
+        assert!(swept.is_ok(), "the sweep did not give the free runs back");
+        // The 1020 pages of the 340 `runs`, and the chunk the sweep
+        // emptied kept against the next growth, as php keeps one.
+        assert_eq!(heap.memory_usage(true), 2 * mm::CHUNK_SIZE);
+        assert_eq!(heap.memory_usage(false), 1792);
+        if let Ok(s) = swept {
+            heap.release_string(s);
+        }
+    }
+
     /// A request that outgrows one chunk takes more of them, gives the
     /// pages back as it frees, and leaves no mapping behind when it ends,
     /// which is php's mass release at request end.

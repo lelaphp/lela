@@ -19,10 +19,13 @@
 //! allocator aligned to its own size, which is what makes the chunk of
 //! an address a mask away, and the header is zeroed on the way in.
 //!
-//! What is not copied here: `zend_mm_gc` (`Z/Zend/zend_alloc.c:2101`), the
-//! sweep of wholly free bin `runs` php makes before it declares the limit
-//! reached. Without it a request meets the limit marginally earlier than
-//! php's would.
+//! Before it declares the limit reached or the system out of memory, php
+//! sweeps: `zend_mm_gc` (`Z/Zend/zend_alloc.c:2101`) counts the free slots
+//! of every bin `run` into the page map word that holds that count,
+//! gives back the `runs` whose slots are all free, and the caller asks
+//! again. [`Mm::gc`] is that function, called where php calls it, so a
+//! request that filled a bin and gave it back goes on exactly as far as
+//! php's does.
 
 // A page number, a page count and a bin number are all under 512 here and
 // a chunk count is a handful: the narrowing casts below hold what php
@@ -78,6 +81,9 @@ const IS_LRUN: u32 = 0x4000_0000;
 const IS_SRUN: u32 = 0x8000_0000;
 const LRUN_PAGES_MASK: u32 = 0x0000_03ff;
 const SRUN_BIN_NUM_MASK: u32 = 0x0000_001f;
+const SRUN_FREE_COUNTER_MASK: u32 = 0x01ff_0000;
+const SRUN_FREE_COUNTER_SHIFT: u32 = 16;
+const NRUN_OFFSET_MASK: u32 = 0x01ff_0000;
 const NRUN_OFFSET_SHIFT: u32 = 16;
 
 /// One chunk's header, in its page zero: which pages are taken, how far
@@ -252,7 +258,7 @@ impl Mm {
         } else {
             let pages_count = info & LRUN_PAGES_MASK;
             self.size = self.size.saturating_sub(pages_count as usize * PAGE_SIZE);
-            self.free_pages(chunk, page_num as u32, pages_count);
+            self.free_pages(chunk, page_num as u32, pages_count, true);
         }
     }
 
@@ -384,20 +390,32 @@ impl Mm {
 
     /// One more chunk on the list: the cache's newest if it has one, else
     /// a fresh mapping, which is where php holds a request to its
-    /// `memory_limit` (`Z/Zend/zend_alloc.c:1038-1076`).
+    /// `memory_limit` (`Z/Zend/zend_alloc.c:1038-1076`). Both ways of
+    /// failing here sweep first: php's `goto get_chunk` is the loop, so a
+    /// sweep that emptied a chunk into the cache is taken from the cache
+    /// on the way round and the limit is never reached.
     fn grow(&mut self, asked: usize) -> Result<NonNull<Chunk>, Fatal> {
-        let chunk = if let Some(chunk) = self.cached.pop() {
-            chunk
-        } else {
+        let chunk = loop {
+            if let Some(chunk) = self.cached.pop() {
+                break chunk;
+            }
             if CHUNK_SIZE > self.limit - self.real_size.min(self.limit) {
+                if self.gc() != 0 {
+                    continue;
+                }
                 return Err(limit_exhausted(self.limit, asked));
             }
-            let Some(chunk) = chunk_alloc(CHUNK_SIZE) else {
+            let mapped = match chunk_alloc(CHUNK_SIZE) {
+                Some(chunk) => Some(chunk),
+                None if self.gc() != 0 => chunk_alloc(CHUNK_SIZE),
+                None => None,
+            };
+            let Some(chunk) = mapped else {
                 return Err(out_of_memory(self.real_size, asked));
             };
             self.real_size += CHUNK_SIZE;
             self.real_peak = self.real_peak.max(self.real_size);
-            chunk
+            break chunk;
         };
         // SAFETY: the tail of the list is a chunk this heap initialised.
         let num = self
@@ -411,9 +429,17 @@ impl Mm {
     }
 
     /// `zend_mm_free_pages_ex` (`Z/Zend/zend_alloc.c:1178`): the `run` goes
-    /// back to the chunk, and a chunk that is wholly free and is not the
-    /// main one leaves the list.
-    fn free_pages(&mut self, chunk: NonNull<Chunk>, page_num: u32, pages_count: u32) {
+    /// back to the chunk, and with `free_chunk` a chunk that is wholly
+    /// free and is not the main one leaves the list. The sweep passes
+    /// `false`, because it deletes the chunk itself once it has walked
+    /// the whole of it.
+    fn free_pages(
+        &mut self,
+        chunk: NonNull<Chunk>,
+        page_num: u32,
+        pages_count: u32,
+        free_chunk: bool,
+    ) {
         // SAFETY: the run being freed is in this chunk, so its header is
         // ours to write and nothing else holds it.
         let header = unsafe { &mut *chunk.as_ptr() };
@@ -424,7 +450,7 @@ impl Mm {
             header.free_tail = page_num;
         }
         let empty = header.free_pages == PAGES - FIRST_PAGE;
-        if empty && self.chunks.first() != Some(&chunk) {
+        if free_chunk && empty && self.chunks.first() != Some(&chunk) {
             self.delete_chunk(chunk);
         }
     }
@@ -476,15 +502,131 @@ impl Mm {
         }
     }
 
+    /// `zend_mm_gc` (`Z/Zend/zend_alloc.c:2101`): the sweep of wholly free
+    /// bin `runs` php makes before it declares the limit reached, and the
+    /// bytes it collected.
+    ///
+    /// Two passes over each of the thirty free lists, then one over the
+    /// chunks. The first pass counts the free slots of each `run` it
+    /// meets into the free-slot count of that `run`'s page map word; the
+    /// second unlinks every slot of a `run` whose count reached the
+    /// `run`'s element count; the walk of the chunks gives those `runs`
+    /// back and resets the count of every other, so the next sweep
+    /// starts from zero.
+    fn gc(&mut self) -> usize {
+        for (bin_num, &elements) in BIN_ELEMENTS.iter().enumerate() {
+            let elements = elements as u32;
+            let mut has_free_pages = false;
+            let mut next = NonNull::new(self.free_slot[bin_num]);
+            while let Some(slot) = next {
+                let (chunk, page_num) = run_of(slot);
+                // SAFETY: a slot on the free list is free memory of this
+                // heap, so its chunk is one of ours, its header is
+                // initialised and no other reference to it is live.
+                let header = unsafe { &mut *chunk.as_ptr() };
+                let free_counter = srun_free_counter(header.map[page_num]) + 1;
+                if free_counter == elements {
+                    has_free_pages = true;
+                }
+                // php's `ZEND_MM_SRUN_EX`, which does not mask the count
+                // it lays in: bin zero's `run` holds 512 slots and the
+                // field is nine bits, so the count of a wholly free `run`
+                // of that bin reads back as zero and the passes below
+                // leave it alone, as php's leave it alone.
+                header.map[page_num] =
+                    IS_SRUN | bin_num as u32 | (free_counter << SRUN_FREE_COUNTER_SHIFT);
+                // SAFETY: the slot is free memory of this heap, whose
+                // first word is the next free slot of the same bin.
+                next = NonNull::new(unsafe { slot.as_ref() }.next);
+            }
+            if !has_free_pages {
+                continue;
+            }
+            let mut prev: Option<NonNull<FreeSlot>> = None;
+            let mut next = NonNull::new(self.free_slot[bin_num]);
+            while let Some(slot) = next {
+                // SAFETY: the slot is free memory of this heap, whose
+                // first word is the next free slot of the same bin.
+                let after = unsafe { slot.as_ref() }.next;
+                let (chunk, page_num) = run_of(slot);
+                // SAFETY: the chunk the slot sits in is one this heap
+                // mapped and initialised.
+                let info = unsafe { &*chunk.as_ptr() }.map[page_num];
+                if srun_free_counter(info) == elements {
+                    match prev {
+                        // SAFETY: the previous slot is free memory of
+                        // this heap and its whole content is its link.
+                        Some(prev) => unsafe { prev.as_ptr().write(FreeSlot { next: after }) },
+                        None => self.free_slot[bin_num] = after,
+                    }
+                } else {
+                    prev = Some(slot);
+                }
+                next = NonNull::new(after);
+            }
+        }
+        let main = self.chunks.first().copied();
+        let mut collected = 0;
+        for chunk in self.chunks.clone() {
+            let mut page_num = FIRST_PAGE;
+            loop {
+                // SAFETY: every chunk on the list is one this heap mapped
+                // and initialised, and no other reference to its header
+                // is live.
+                let header = unsafe { &*chunk.as_ptr() };
+                // php re-reads the tail each time round, because freeing
+                // a `run` at the tail moves it.
+                if page_num >= header.free_tail {
+                    break;
+                }
+                let taken = bitset_is_set(&header.free_map, page_num);
+                let info = header.map[page_num as usize];
+                if !taken {
+                    page_num += 1;
+                    continue;
+                }
+                if info & IS_SRUN == 0 {
+                    page_num += info & LRUN_PAGES_MASK;
+                    continue;
+                }
+                let bin_num = (info & SRUN_BIN_NUM_MASK) as usize;
+                let pages_count = BIN_PAGES[bin_num];
+                if srun_free_counter(info) == BIN_ELEMENTS[bin_num] as u32 {
+                    self.free_pages(chunk, page_num, pages_count, false);
+                    collected += pages_count;
+                } else {
+                    // SAFETY: the chunk is one this heap mapped and
+                    // initialised, and no other reference to it is live.
+                    let header = unsafe { &mut *chunk.as_ptr() };
+                    header.map[page_num as usize] = IS_SRUN | bin_num as u32;
+                }
+                page_num += pages_count;
+            }
+            // SAFETY: the chunk is one this heap mapped and initialised.
+            let free_pages = unsafe { &*chunk.as_ptr() }.free_pages;
+            if free_pages == PAGES - FIRST_PAGE && main != Some(chunk) {
+                self.delete_chunk(chunk);
+            }
+        }
+        collected as usize * PAGE_SIZE
+    }
+
     /// `zend_mm_alloc_huge` (`Z/Zend/zend_alloc.c:1916`): a mapping of its
     /// own, rounded up to a page, counted in both the bin accounting and
     /// the real size.
     fn alloc_huge(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
         let new_size = size.next_multiple_of(PAGE_SIZE);
-        if new_size > self.limit - self.real_size.min(self.limit) {
+        if new_size > self.limit - self.real_size.min(self.limit)
+            && (self.gc() == 0 || new_size > self.limit - self.real_size.min(self.limit))
+        {
             return Err(limit_exhausted(self.limit, size));
         }
-        let Some(at) = chunk_alloc(new_size) else {
+        let mapped = match chunk_alloc(new_size) {
+            Some(at) => Some(at),
+            None if self.gc() != 0 => chunk_alloc(new_size),
+            None => None,
+        };
+        let Some(at) = mapped else {
             return Err(out_of_memory(self.real_size, size));
         };
         let at = at.cast::<u8>();
@@ -578,6 +720,29 @@ fn chunk_of(at: NonNull<u8>) -> NonNull<Chunk> {
     // covers the whole chunk, so the header it lands on is in range.
     at.map_addr(|addr| NonZeroUsize::new(addr.get() & !(CHUNK_SIZE - 1)).unwrap_or(addr))
         .cast()
+}
+
+/// The chunk and the first page of the bin `run` a free slot sits in:
+/// php's step back over the `NRUN` pages that stand before the `run`'s
+/// head (`Z/Zend/zend_alloc.c:2126-2136`).
+fn run_of(slot: NonNull<FreeSlot>) -> (NonNull<Chunk>, usize) {
+    let at = slot.cast::<u8>();
+    let chunk = chunk_of(at);
+    let page_num = (at.as_ptr().addr() & (CHUNK_SIZE - 1)) / PAGE_SIZE;
+    // SAFETY: the slot is inside this chunk, so the chunk is one this
+    // heap mapped and its header is initialised.
+    let info = unsafe { &*chunk.as_ptr() }.map[page_num];
+    if info & IS_LRUN == 0 {
+        return (chunk, page_num);
+    }
+    let offset = ((info & NRUN_OFFSET_MASK) >> NRUN_OFFSET_SHIFT) as usize;
+    (chunk, page_num - offset)
+}
+
+/// `ZEND_MM_SRUN_FREE_COUNTER`: the free slots the sweep has counted in
+/// the `run` this page map word heads.
+fn srun_free_counter(info: u32) -> u32 {
+    (info & SRUN_FREE_COUNTER_MASK) >> SRUN_FREE_COUNTER_SHIFT
 }
 
 /// The mappings this process holds, which the tests read to see that a
@@ -677,6 +842,11 @@ fn best_fit(chunk: &mut Chunk, pages_count: u32) -> Option<u32> {
         }
         tmp |= tmp.wrapping_sub(1);
     }
+}
+
+/// `zend_mm_bitset_is_set`: the bit stands while the page is taken.
+fn bitset_is_set(map: &[u64; PAGE_MAP_LEN], page: u32) -> bool {
+    map[page as usize / 64] & (1 << (page % 64)) != 0
 }
 
 /// `zend_mm_bitset_set_range`.
