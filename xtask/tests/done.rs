@@ -1350,3 +1350,96 @@ fn a_refused_close_with_every_box_ticked_is_met_and_a_ticket_with_no_box_is_not(
         "{verdict:#?}"
     );
 }
+
+/// The two skips the missing engine binary causes are met, and `done`
+/// reaches green for a crate that owns a phpt subset on a checkout with no
+/// engine built (#106, #132). Both would be unmet under the rule they
+/// replace, which held every reading to its status: the assertions that
+/// each verdict is empty are what fails on that behaviour.
+///
+/// The causes the decision did not excuse are held as before, so the
+/// excuse does not spread: a phpt skip of a crate not yet created or one
+/// whose every test skipped writes `engine_absent` zero, and a witness
+/// skip with nothing judged is the run the pinned oracle was absent for.
+#[test]
+fn the_skips_the_missing_engine_binary_causes_are_met_and_the_others_are_not() {
+    let root = scratch("no-binary");
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    let store = Store::of_workspace(&root);
+    let skip = |instrument: &str, numbers: &[(&str, u64)]| {
+        let mut reading = fresh(&root, instrument, "ext/pcre");
+        reading.status = Status::Skip;
+        reading.message = format!("{instrument}: the engine's binary is not built");
+        for (key, n) in numbers {
+            reading.count(key, *n).unwrap();
+        }
+        reading
+    };
+    for instrument in FRESH {
+        store
+            .record(&[fresh(&root, instrument, "ext/pcre")])
+            .unwrap();
+    }
+
+    // The oracle ran every fence in the engine's place, and the corpus
+    // could not run at all: both are met, so the crate is done.
+    store
+        .record(&[
+            skip("witness", &[("run", 6), ("failed", 0), ("missing", 0)]),
+            skip(
+                "phpt",
+                &[
+                    ("engine_absent", 1),
+                    ("failed", 0),
+                    ("diverged", 0),
+                    ("borked", 0),
+                ],
+            ),
+        ])
+        .unwrap();
+    let verdict = judge(&root);
+    assert!(verdict.met(), "{verdict:#?}");
+
+    // A phpt skip of a crate not yet created, or one whose every test
+    // skipped: the lane says the binary was there, so this is not the rung.
+    store
+        .record(&[skip(
+            "phpt",
+            &[
+                ("engine_absent", 0),
+                ("failed", 0),
+                ("diverged", 0),
+                ("borked", 0),
+            ],
+        )])
+        .unwrap();
+    let verdict = judge(&root);
+    assert_eq!(verdict.unmet.len(), 1, "{verdict:#?}");
+    assert!(
+        verdict.unmet[0].starts_with("phpt: ext/pcre skip:"),
+        "{verdict:#?}"
+    );
+
+    // A witness skip with nothing judged is the run the pinned oracle was
+    // absent for, and a green line without the oracle is a claim.
+    store
+        .record(&[
+            skip(
+                "phpt",
+                &[
+                    ("engine_absent", 1),
+                    ("failed", 0),
+                    ("diverged", 0),
+                    ("borked", 0),
+                ],
+            ),
+            skip("witness", &[("run", 0), ("failed", 0), ("missing", 0)]),
+        ])
+        .unwrap();
+    let verdict = judge(&root);
+    assert_eq!(verdict.unmet.len(), 1, "{verdict:#?}");
+    assert!(
+        verdict.unmet[0].starts_with("witness: ext/pcre skip:"),
+        "{verdict:#?}"
+    );
+}
