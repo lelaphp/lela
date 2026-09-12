@@ -469,7 +469,7 @@ fn a_closed_ticket_is_fast_forwarded_pushed_and_retired() {
     // The session was started as decided (#75), in the worktree.
     assert_eq!(
         scratch.wrote("session.args"),
-        "-p --model claude-opus-5 --permission-mode bypassPermissions --effort high /implement 20"
+        "-p --model claude-opus-5 --permission-mode auto --effort high /implement 20"
     );
     // The prompt names the exit condition the run reads back (#115).
     let prompt = scratch.wrote("session.prompt");
@@ -653,7 +653,7 @@ fn the_frontier_is_worked_until_it_empties_past_a_ticket_left_open() {
     // Both sessions started, each in its own worktree.
     assert_eq!(
         scratch.wrote("session.args"),
-        "-p --model claude-opus-5 --permission-mode bypassPermissions --effort high /implement 20\n-p --model claude-opus-5 --permission-mode bypassPermissions --effort high /implement 21"
+        "-p --model claude-opus-5 --permission-mode auto --effort high /implement 20\n-p --model claude-opus-5 --permission-mode auto --effort high /implement 21"
     );
     assert_eq!(
         scratch.wrote("session.cwd"),
@@ -835,7 +835,7 @@ fn a_research_ticket_starts_the_session_on_research() {
     assert_eq!(code, 0, "{out}");
     assert_eq!(
         scratch.wrote("session.args"),
-        "-p --model claude-opus-5 --permission-mode bypassPermissions --effort high /research 20"
+        "-p --model claude-opus-5 --permission-mode auto --effort high /research 20"
     );
     assert_eq!(scratch.wrote("session.subagent"), "claude-sonnet-5");
     assert!(out.contains("#20 closed at"), "{out}");
@@ -855,7 +855,7 @@ fn a_decision_ticket_starts_the_session_on_grill_design() {
     assert_eq!(code, 0, "{out}");
     assert_eq!(
         scratch.wrote("session.args"),
-        "-p --model claude-opus-5 --permission-mode bypassPermissions --effort high /grill-design 20"
+        "-p --model claude-opus-5 --permission-mode auto --effort high /grill-design 20"
     );
     assert!(out.contains("#20 closed at"), "{out}");
     let _ = fs::remove_dir_all(&scratch.dir);
@@ -921,7 +921,7 @@ fn an_empty_frontier_is_filled_by_a_frontier_session_until_it_stays_empty() {
 
     // Four sessions: the ticket, the planner in the clone, the ticket it
     // filed, the planner again.
-    let session = "-p --model claude-opus-5 --permission-mode bypassPermissions --effort high";
+    let session = "-p --model claude-opus-5 --permission-mode auto --effort high";
     assert_eq!(
         scratch.wrote("session.args"),
         format!(
@@ -976,7 +976,7 @@ fn a_frontier_that_stays_empty_ends_the_run_and_a_record_not_auto_refuses() {
     assert_eq!(code, 0, "{out}");
     assert_eq!(
         scratch.wrote("session.args"),
-        "-p --model claude-opus-5 --permission-mode bypassPermissions --effort high /frontier"
+        "-p --model claude-opus-5 --permission-mode auto --effort high /frontier"
     );
     assert!(
         out.contains(

@@ -144,9 +144,11 @@ const STOPPED: &str = "stopped by the harness after";
 const ONE_STEP: &str = "the one step worked";
 
 /// The permission mode a session runs under unless the clone records
-/// `track.permission-mode`: every call is judged by `permit` through the
-/// hooks, so nothing is left for a prompt no one answers.
-pub(crate) const PERMISSION_MODE: &str = "bypassPermissions";
+/// `track.permission-mode`: `permit` judges every call against the
+/// manifest through the hooks, and `auto` decides the rest without
+/// asking, so nothing is left for a prompt no one answers and nothing
+/// runs with the permission checks switched off.
+pub(crate) const PERMISSION_MODE: &str = "auto";
 /// The effort a session runs at unless the clone records `track.effort`.
 pub(crate) const EFFORT: &str = "high";
 /// The environment variable Claude Code reads the subagents' model from.
