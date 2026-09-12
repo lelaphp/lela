@@ -13,7 +13,9 @@
 //!    of [`FRESH`]. Fresh means the reading's `tree` is the content hash over
 //!    the crate's sources now (§13 D.18), the hash every instrument stamps;
 //!    an instrument that does not exist yet has written no reading, so its
-//!    condition is unmet and the list is honest from day one.
+//!    condition is unmet and the list is honest from day one. The one
+//!    reading held to its numbers instead of its status is the `witness`
+//!    skip the missing engine binary causes, [`oracle_stood_in`] (#106).
 //! 2. Every kernel or native added has a witness: the `witness` reading's
 //!    `missing` is zero for the crate.
 //! 3. A lock that differs from its regenerated form is in the diff, read
@@ -302,6 +304,37 @@ fn boxes(root: &Path, store: &Store, ticket: Ticket, unmet: &mut Vec<String>) ->
     Ok(())
 }
 
+/// Whether a reading that is not a pass is met all the same because the
+/// pinned oracle ran what the engine's own binary would have (#106).
+///
+/// `xtask witness` runs each fence under the oracle and then under the
+/// engine's binary when there is one. There is none until `crates/php`
+/// reaches `serve`, so the runner ladder falls back to the oracle and the
+/// reading is the skip that says so, which is the distinction the skip
+/// exists to keep: the engine matching php is not php matching itself.
+/// Condition 1 cannot ask for that reading before the binary exists, and
+/// #96 is the first commit to carry a witness, so holding the skip to its
+/// status would stop every crate that carries one, the twenty `ext/*` of
+/// #100 included.
+///
+/// So a witness skip is held to its numbers instead, for as long as there
+/// is no binary: every fence that ran agreed, `failed == 0`, and every
+/// kernel and native has one, `missing == 0`. What this does not accept is
+/// a skip with nothing judged, `run == 0`, the run the oracle itself was
+/// absent for and the one where nothing ran at all: a green line without
+/// the pinned oracle is a claim, and it stays unmet.
+fn oracle_stood_in(instrument: &str, reading: &Reading) -> bool {
+    let count = |key: &str| match reading.numbers.get(key) {
+        Some(Number::Int(n)) => Some(*n),
+        _ => None,
+    };
+    instrument == "witness"
+        && reading.status == Status::Skip
+        && count("run").is_some_and(|run| run > 0)
+        && count("failed") == Some(0)
+        && count("missing") == Some(0)
+}
+
 /// Conditions 1 and 2 for one touched crate.
 fn fresh_readings(
     root: &Path,
@@ -322,7 +355,7 @@ fn fresh_readings(
             ));
             continue;
         }
-        if reading.status != Status::Pass {
+        if reading.status != Status::Pass && !oracle_stood_in(instrument, &reading) {
             unmet.push(format!(
                 "{instrument}: {name} {}: {}",
                 reading.status.as_str(),
@@ -579,8 +612,9 @@ pub fn run_hook(root: &Path, manifest: &Manifest, registry: &Registry, store: &S
 
 #[cfg(test)]
 mod tests {
-    use super::{FRESH, instruments_of};
+    use super::{FRESH, instruments_of, oracle_stood_in};
     use crate::manifest::Crate;
+    use crate::reading::{Reading, Status};
 
     #[test]
     fn the_harness_crate_is_asked_for_clippy_api_check_budget_and_unsafe_audit_only() {
@@ -604,5 +638,36 @@ mod tests {
         let row = Crate::named("php_heap").with_phpt(&["Zend/tests"]);
         let asked: Vec<&str> = instruments_of(&row).collect();
         assert_eq!(asked, FRESH);
+    }
+
+    /// A witness skip the missing engine binary caused is met by its
+    /// numbers (#106): the oracle ran every fence, all of them agreed and
+    /// no kernel is uncovered. The skip with nothing judged is the run the
+    /// oracle itself was absent for and stays unmet, since a green line
+    /// without the pinned oracle is a claim. Every other instrument is
+    /// held to its status whatever its numbers say.
+    #[test]
+    fn a_witness_skip_the_missing_binary_caused_is_held_to_its_numbers() {
+        let skip = |run: u64, failed: u64, missing: u64| {
+            let mut reading = Reading::new("witness", "php_engine");
+            reading.status = Status::Skip;
+            reading.count("run", run).unwrap();
+            reading.count("failed", failed).unwrap();
+            reading.count("missing", missing).unwrap();
+            reading
+        };
+        // The oracle stood in for the engine and every fence agreed.
+        assert!(oracle_stood_in("witness", &skip(5, 0, 0)));
+        // Nothing was judged: the oracle was not there to judge it.
+        assert!(!oracle_stood_in("witness", &skip(0, 0, 0)));
+        // A fence missed what it pins, and a kernel without a witness.
+        assert!(!oracle_stood_in("witness", &skip(5, 1, 0)));
+        assert!(!oracle_stood_in("witness", &skip(5, 0, 2)));
+        // Another instrument's skip is its status, numbers or not.
+        assert!(!oracle_stood_in("phpt", &skip(5, 0, 0)));
+        // A witness reading that is not a skip is not this rung at all.
+        let mut failed = skip(5, 0, 0);
+        failed.status = Status::Fail;
+        assert!(!oracle_stood_in("witness", &failed));
     }
 }
