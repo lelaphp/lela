@@ -7,7 +7,7 @@ use std::path::Path;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use super::{Counted, PortMap, Ported, Source, Status, census, join, key, read};
+use super::{Counted, PortMap, Ported, Source, Status, census, declares, join, key, read};
 use crate::api_check::lock::Lock;
 
 fn workspace() -> &'static Path {
@@ -217,13 +217,43 @@ fn a_tree_without_crates_is_refused_and_nothing_is_joined() {
 }
 
 /// The evidence is the extensions ported here, and there are none yet,
-/// so no row of the committed census is resolved.
+/// so no row of the committed census is resolved. The twenty crates
+/// `new-ext` laid down are not the evidence: each stands on disk with an
+/// `extension()` that declares nothing, and a crate that declares no
+/// native has ported nothing.
 #[test]
 fn no_extension_is_ported_yet_so_the_port_has_reached_no_row() {
     let manifest = crate::manifest::Manifest::load(workspace()).unwrap();
+    let laid: Vec<&str> = manifest
+        .crates
+        .iter()
+        .map(|krate| krate.name.as_str())
+        .filter(|name| name.starts_with("ext/"))
+        .filter(|name| workspace().join(name).join("Cargo.toml").is_file())
+        .collect();
+    assert!(!laid.is_empty(), "the crates are laid down");
     let ported = Ported::read(workspace(), &manifest);
     assert!(ported.crates.is_empty(), "{:?}", ported.crates);
     assert!(!ported.reached(1));
+}
+
+/// What tells a ported extension from one `new-ext` laid down: the crate
+/// root the template writes declares no native, and one line of an
+/// attribute makes it declare one.
+#[test]
+fn the_template_declares_no_native_and_one_attribute_declares_one() {
+    let template = crate::new_ext::lib_rs(
+        &crate::manifest::Manifest::named("ext/standard"),
+        "standard",
+    );
+    assert!(!declares(&template), "the template declares nothing");
+    assert!(declares(&format!(
+        "{template}\n#[php_function]\npub fn strlen() {{}}\n"
+    )));
+    assert!(
+        !declares("/// `#[php_function]` heads a native.\nfn prose() {}\n"),
+        "the attribute heads an item; the word in prose is not a declaration"
+    );
 }
 
 /// A row is resolved when the port has reached as many extensions as the

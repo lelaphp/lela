@@ -12,11 +12,13 @@
 //!
 //! **Resolved.** A row's sites sat in `crates` of the 19 inherited
 //! extensions, and the row is resolved when the port has reached that
-//! many: `crates` extensions exist under `ext/` here. An engine with no
-//! extension ported resolves nothing, which is this engine today — 651
-//! rows, all unresolved (design §11, row 1–2) — and the count rises with
-//! the port, the rows one extension called first and the ones every
-//! extension called last.
+//! many: `crates` extensions under `ext/` here declare a native. A crate
+//! `new-ext` laid down is not a port — its `extension()` declares
+//! nothing and calls no `api` item — so it is not the evidence a row is
+//! resolved on. An engine with no extension ported resolves nothing,
+//! which is this engine today — 651 rows, all unresolved (design §11,
+//! row 1–2) — and the count rises with the port, the rows one extension
+//! called first and the ones every extension called last.
 //!
 //! It is a proxy, and a stated one: it counts how many extensions are
 //! ported and not whether the ported ones are the crates that called the
@@ -365,7 +367,8 @@ pub(crate) fn census(text: &str) -> Vec<Counted> {
 }
 
 /// The extensions ported here: the `ext/*` crates the manifest names
-/// that exist. How many there are is the evidence a row is resolved on.
+/// that declare a native. How many there are is the evidence a row is
+/// resolved on.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Ported {
     pub(crate) crates: Vec<String>,
@@ -379,6 +382,7 @@ impl Ported {
                 .crates
                 .iter()
                 .filter(|c| c.name.starts_with("ext/") && sources::exists(root, c))
+                .filter(|c| declares_a_native(root, c))
                 .map(|c| c.name.clone())
                 .collect(),
         }
@@ -389,6 +393,36 @@ impl Ported {
     pub(crate) fn reached(&self, crates: usize) -> bool {
         crates > 0 && self.crates.len() >= crates
     }
+}
+
+/// Whether a crate declares a native: an attribute of `php_ext::attr` on
+/// an item of its sources, `#[php_function]`, `#[php_class]`,
+/// `#[php_const]` or `#[tentative]` (design §7.1). This tells a ported
+/// extension from one `new-ext` laid down, whose `extension()` declares
+/// nothing and calls no `api` item; a crate whose sources cannot be
+/// listed or read declares none, since a port is evidence and an unread
+/// crate is not.
+fn declares_a_native(root: &Path, krate: &Crate) -> bool {
+    sources::rust(root, krate)
+        .unwrap_or_default()
+        .iter()
+        .any(|path| fs::read_to_string(root.join(path)).is_ok_and(|text| declares(&text)))
+}
+
+/// Whether one source declares a native, read line by line: the
+/// attribute heads an item, so it is the line's first word.
+pub(crate) fn declares(text: &str) -> bool {
+    const ATTRIBUTES: [&str; 4] = [
+        "#[php_function",
+        "#[php_class",
+        "#[php_const",
+        "#[tentative",
+    ];
+    text.lines().any(|line| {
+        ATTRIBUTES
+            .iter()
+            .any(|attr| line.trim_start().starts_with(attr))
+    })
 }
 
 /// Which census the run read.
