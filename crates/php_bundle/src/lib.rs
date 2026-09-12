@@ -63,3 +63,30 @@ pub fn enabled() -> &'static [fn() -> Extension] {
 /// The tier, named once (design §4.3 seam 8): the interpreter alone until
 /// the `jit` feature binds the compiled tier. Never in [`enabled()`].
 pub type Tier = php_ext::Nop;
+
+/// The in-process host (design §4.3 seam 4, §8; `CONTEXT.md`, Host): a fresh
+/// [`Engine`] of [`enabled()`] with [`Tier`] bound, served through the
+/// `Capture` sink. Behind the `test` feature, so the crate's own surface
+/// stays the enabled set and the tier's name; what turns the feature on is
+/// an extension's own tests and the harness's witness lane, which serves a
+/// snippet here where the binary is not built.
+#[cfg(feature = "test")]
+pub mod test {
+    pub use php_ext::test::{Capture, Engine};
+
+    /// A fresh engine of [`enabled()`](super::enabled), every extension in
+    /// startup order and [`Tier`](super::Tier) bound, with `ini` laid over
+    /// the engine's own defaults as a host's `-d` lays it: one `(name,
+    /// value)` pair each, the last of a name winning.
+    #[must_use]
+    pub fn engine(ini: &[(&str, &str)]) -> Engine {
+        let extensions: Vec<_> = super::enabled().iter().map(|start| start()).collect();
+        let mut builder = Engine::builder()
+            .extensions(&extensions)
+            .tier::<super::Tier>();
+        for (name, value) in ini {
+            builder = builder.ini(name, value);
+        }
+        builder.build()
+    }
+}
