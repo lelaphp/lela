@@ -3,9 +3,12 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use xtask::divergence::Registry;
 use xtask::manifest::{Manifest, OneOrMany, Rule};
+use xtask::oracle::Promise;
 use xtask::permit::{Call, Kind, judge, judged_at_the_call};
-use xtask::reading::{Status, Store};
+use xtask::reading::{Reading, Status, Store};
+use xtask::witness::{self, Ask};
 
 mod common;
 use common::scratch_workspace;
@@ -1714,4 +1717,189 @@ fn with_the_ticket_close_rules(mut manifest: Manifest) -> Manifest {
         manifest.rules.push(rule);
     }
     manifest
+}
+
+// ------------------------------------------------------- the `unless` sensor
+
+/// The rule `unless` qualifies, and the crate its fixture writes into.
+const EXIT_AUTHORED: &str = "witness.exit-authored";
+const CRATE: &str = "ext/ctype";
+const FILE: &str = "ext/ctype/src/lib.rs";
+
+/// The `Write` that would put `text` at `path`.
+fn write_call(path: &str, text: &str) -> Call {
+    Call::parse(
+        &serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": {"file_path": path, "content": text},
+        })
+        .to_string(),
+    )
+    .unwrap()
+}
+
+/// A rustdoc block whose snippet exits, its `expect` fence pinning
+/// `status`: `exit=3` as `--accept` captures it, `exit` as the opt-in
+/// stands before it.
+fn block(status: &str) -> String {
+    format!(
+        "/// ```php\n/// exit(3);\n/// ```\n/// ```expect {status}\n/// ```\npub fn native() {{}}\n"
+    )
+}
+
+/// The crate's sources: its `Cargo.toml`, which is what says the crate
+/// exists at all, and the rustdoc block under test.
+fn lay_down(root: &Path, text: &str) {
+    std::fs::create_dir_all(root.join(FILE).parent().unwrap()).unwrap();
+    std::fs::write(
+        root.join(CRATE).join("Cargo.toml"),
+        "[package]\nname = \"php_ext_ctype\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    std::fs::write(root.join(FILE), text).unwrap();
+}
+
+/// The reading `xtask witness` writes over the crate, stamped over its
+/// sources as they stand now.
+fn witness_reading(root: &Path) {
+    let mut reading = Reading::stamped_over("witness", CRATE, root, Path::new(CRATE)).unwrap();
+    reading.status = Status::Pass;
+    reading.message = format!("{CRATE}: measured");
+    Store::of_workspace(root).record(&[reading]).unwrap();
+}
+
+fn denial(root: &Path, manifest: &Manifest, call: &Call) -> Option<String> {
+    judge(manifest, root, call)
+        .unwrap()
+        .denial()
+        .map(xtask::permit::Finding::reason)
+}
+
+/// The `unless` qualifier's sensor (#105): an `exit=` the named
+/// instrument's fresh reading covers is permitted, and one no reading
+/// accounts for is denied with the rule id, which is where the row stood
+/// for every hit before.
+#[test]
+fn an_exit_a_fresh_witness_reading_covers_is_permitted_and_one_without_is_denied() {
+    let root = scratch("unless");
+    let manifest = Manifest::load(&root).unwrap();
+    let captured = block("exit=3");
+    lay_down(&root, &captured);
+    let write = write_call(FILE, &captured);
+
+    let denied = denial(&root, &manifest, &write).expect("no reading covers the line yet");
+    assert!(denied.contains(EXIT_AUTHORED), "{denied}");
+
+    witness_reading(&root);
+    assert_eq!(
+        denial(&root, &manifest, &write),
+        None,
+        "the instrument measured the tree the line stands in"
+    );
+
+    // The call the rule is for: a status this tree does not carry, which
+    // no reading covers however fresh it is.
+    let authored = block("exit=7");
+    let denied = denial(&root, &manifest, &write_call(FILE, &authored))
+        .expect("an authored status is not in the tree");
+    assert!(denied.contains(EXIT_AUTHORED), "{denied}");
+
+    // The same line in the tree with the reading taken before it: the
+    // stamp is not the crate's hash now, so the line is no measurement's.
+    lay_down(&root, &authored);
+    let denied = denial(&root, &manifest, &write_call(FILE, &authored))
+        .expect("the reading predates the line");
+    assert!(denied.contains(EXIT_AUTHORED), "{denied}");
+
+    // And a reading over the crate as it now stands permits it again: the
+    // sensor reads the stamp and never the words of the line.
+    witness_reading(&root);
+    assert_eq!(denial(&root, &manifest, &write_call(FILE, &authored)), None);
+}
+
+/// The evidence this cannot read is no evidence: a crate the manifest does
+/// not name has no reading to stand on, however the tree looks.
+#[test]
+fn an_exit_in_a_file_no_crate_row_names_is_denied() {
+    let root = scratch("unless-uncrated");
+    let manifest = Manifest::load(&root).unwrap();
+    let text = block("exit=3");
+    let file = "vendor/other/src/lib.rs";
+    std::fs::create_dir_all(root.join(file).parent().unwrap()).unwrap();
+    std::fs::write(root.join(file), &text).unwrap();
+    let denied = denial(&root, &manifest, &write_call(file, &text)).expect("no crate, no reading");
+    assert!(denied.contains(EXIT_AUTHORED), "{denied}");
+}
+
+/// The tracked pin's binary, when it is on this machine; a failure where
+/// this machine promised the binary (#38).
+fn oracle_is_here() -> bool {
+    let pin = Manifest::load(workspace()).unwrap().pin;
+    Promise::Oracle
+        .or_skip(pin.oracle.file().map(Path::to_path_buf))
+        .unwrap()
+        .is_some()
+}
+
+/// End to end (#105): `xtask witness --accept` captures the oracle's
+/// status onto the fence line and writes its reading, and `xtask permit
+/// --diff` over that tree permits the line it wrote. Take the reading away
+/// and the same tree is denied with the rule id.
+#[test]
+fn what_accept_wrote_permit_diff_permits_over_the_same_tree() {
+    if !oracle_is_here() {
+        return;
+    }
+    let root = scratch("unless-accept");
+    lay_down(&root, &block("exit"));
+    let readings = witness::run(
+        &root,
+        &Manifest::load(&root).unwrap(),
+        &Registry::load(&root).unwrap(),
+        &Ask {
+            crates: vec![CRATE.to_owned()],
+            accept: true,
+            staged: false,
+        },
+    )
+    .unwrap();
+    Store::of_workspace(&root).record(&readings).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join(FILE)).unwrap(),
+        block("exit=3"),
+        "the oracle's status is on the fence line and nothing else moved"
+    );
+
+    let add = Command::new("git")
+        .args(["add", "--", CRATE])
+        .current_dir(&root)
+        .status()
+        .unwrap();
+    assert!(add.success());
+    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(!out.contains("deny "), "{out}");
+
+    std::fs::remove_file(Store::of_workspace(&root).path("witness", CRATE).unwrap()).unwrap();
+    let (code, out, err) = xtask(&root, &["permit", "--diff"]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(
+        out.contains("deny ") && out.contains(EXIT_AUTHORED) && out.contains(FILE),
+        "{out}"
+    );
+}
+
+/// The binary over the scratch root, with no stdin.
+fn xtask(root: &Path, args: &[&str]) -> (i32, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("--root")
+        .arg(root)
+        .args(args)
+        .output()
+        .unwrap();
+    (
+        out.status.code().unwrap(),
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+    )
 }

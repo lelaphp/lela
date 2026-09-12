@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 
 use super::call::Call;
 use super::region::region_body;
+use super::unless;
 use crate::manifest::{Manifest, OneOrMany, Rule, scope_matches};
 use crate::rust;
 
@@ -170,10 +171,18 @@ fn evaluate(
         call.command()
             .is_some_and(|c| argv_missing(c, separator, &p.with))
     } else if let Some(pattern) = &p.deny_pattern {
-        let subject = call.command().or_else(|| call.written());
         let regex = Regex::new(pattern)
             .with_context(|| format!("rule \"{}\": deny_pattern is not a regex", rule.id))?;
-        subject.is_some_and(|s| regex.is_match(s))
+        // A hit the rule's `unless` accounts for is the named instrument's
+        // own and not this call's ([`unless::captured`]).
+        match call.command().or_else(|| call.written()) {
+            Some(subject) if regex.is_match(subject) => {
+                !p.unless.as_deref().is_some_and(|unless| {
+                    unless::captured(manifest, root, unless, &regex, subject, path)
+                })
+            }
+            _ => false,
+        }
     } else if p.deny == Some(true) {
         true
     } else if let Some(types) = &p.deny_types {

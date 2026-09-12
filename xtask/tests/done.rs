@@ -663,6 +663,46 @@ fn permit_over_the_diff_denies_a_lock_in_an_extension_and_notes_the_harness_file
     assert!(out.contains("notes:\n- seams.toml is in the diff"), "{out}");
 }
 
+/// The `unless` qualifier over the diff (#105): a crate whose only `exit=`
+/// is the one `xtask witness --accept` wrote is done, and the same tree
+/// with no witness reading behind it is denied with the rule id. The
+/// reading is written by hand, as every reading here is; that `--accept`
+/// writes the line and then stamps the reading over it is held beside
+/// `permit`.
+#[test]
+fn a_crate_whose_only_exit_is_one_accept_wrote_is_done() {
+    let root = scratch("captured-exit");
+    // The status stands in the line as `--accept` would have written it;
+    // it is built from the number here so that the row under test does not
+    // read this fixture as a witness of the harness's own.
+    let status = 3;
+    write(
+        &root,
+        "ext/pcre/src/lib.rs",
+        &format!(
+            "/// ```php\n/// exit({status});\n/// ```\n/// ```expect exit={status}\n/// ```\npub fn preg_match() {{}}\n"
+        ),
+    );
+    let store = Store::of_workspace(&root);
+    for instrument in FRESH {
+        store
+            .record(&[fresh(&root, instrument, "ext/pcre")])
+            .unwrap();
+    }
+    let verdict = judge(&root);
+    assert!(verdict.met(), "{verdict:#?}");
+
+    std::fs::remove_file(store.path("witness", "ext/pcre").unwrap()).unwrap();
+    let verdict = judge(&root);
+    let denied = verdict
+        .unmet
+        .iter()
+        .find(|l| l.starts_with("permit denies ext/pcre/src/lib.rs"))
+        .unwrap_or_else(|| panic!("{verdict:#?}"));
+    assert!(denied.contains("witness.exit-authored"), "{denied}");
+    assert!(denied.contains("never authored"), "{denied}");
+}
+
 // ---------------------------------------------------------------- the hook
 
 #[test]
