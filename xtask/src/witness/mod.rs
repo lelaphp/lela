@@ -15,7 +15,13 @@
 //! oracle stands in: the run measures the fences and the oracle, not the
 //! engine, so the reading is a skip that says so rather than passing. The
 //! oracle runs in either case, because the status a fence pins is the
-//! oracle's and `--accept` is where it is captured.
+//! oracle's and `--accept` is where it is captured. `done` holds that skip
+//! to its numbers rather than its status while the binary is missing
+//! (#106): every fence that ran agreed and every kernel and native carries
+//! one, `failed == 0` and `missing == 0`, which is what condition 1 can ask
+//! for until `crates/php` exists. The skip itself stays, since the reading
+//! must go on saying which of the two ran; a skip with nothing judged,
+//! `run == 0`, is the run the oracle was absent for and is unmet as before.
 //!
 //! **What `--accept` writes.** The `expect` fence line, and nothing else:
 //! the oracle's status in place of a bare `exit` or a stale one, so the
