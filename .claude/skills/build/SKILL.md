@@ -1,6 +1,6 @@
 ---
-name: implement
-description: Build one ticket to its acceptance criteria and close it at the tracker. `/implement <n>`; with no number, the branch's ticket.
+name: build
+description: Build one ticket to its acceptance criteria and close it at the tracker. `/build <n>`; with no number, the branch's ticket.
 disable-model-invocation: true
 ---
 

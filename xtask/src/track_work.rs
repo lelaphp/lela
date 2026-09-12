@@ -10,7 +10,7 @@
 //! worktree on the model the clone records, with a prompt that names
 //! the ticket and runs the skill its label chooses (#81): `/research
 //! <n>` for a ticket labelled `frontier:research`, `/grill-design <n>`
-//! for `frontier:decision`, and `/implement <n>` for any other, as
+//! for `frontier:decision`, and `/build <n>` for any other, as
 //! [`Skill::of`] says; a ticket carrying both `frontier:` labels names
 //! no one skill and is refused before any worktree is laid down, named.
 //! The skill's line is the one thing the label changes: under it every
@@ -172,8 +172,8 @@ const DECISION: &str = "decision";
 /// any other is built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skill {
-    /// `/implement <n>`: a ticket with no `frontier:` label.
-    Implement,
+    /// `/build <n>`: a ticket with no `frontier:` label.
+    Build,
     /// `/research <n>`: a ticket labelled `frontier:research`.
     Research,
     /// `/grill-design <n>`: a ticket labelled `frontier:decision`.
@@ -192,7 +192,7 @@ impl Skill {
             .filter_map(|label| label.strip_prefix(FRONTIER_LABEL))
             .collect::<Vec<_>>();
         match sides.as_slice() {
-            [] => Ok(Skill::Implement),
+            [] => Ok(Skill::Build),
             [side] if *side == RESEARCH => Ok(Skill::Research),
             [side] if *side == DECISION => Ok(Skill::GrillDesign),
             [side] => bail!(
@@ -211,7 +211,7 @@ impl Skill {
     /// The skill's name as the prompt invokes it.
     pub fn name(self) -> &'static str {
         match self {
-            Skill::Implement => "implement",
+            Skill::Build => "build",
             Skill::Research => "research",
             Skill::GrillDesign => "grill-design",
         }
@@ -883,7 +883,7 @@ mod tests {
         let ticket = Ticket::new(20);
         assert_eq!(
             Skill::of(ticket, ["ready-for-agent", "track:main"]).unwrap(),
-            Skill::Implement
+            Skill::Build
         );
         assert_eq!(
             Skill::of(ticket, ["ready-for-agent", "frontier:research"]).unwrap(),
@@ -915,7 +915,7 @@ mod tests {
     fn the_prompt_names_the_skill_the_ticket_and_the_close() {
         let ticket = Ticket::new(20);
         for (skill, line) in [
-            (Skill::Implement, "/implement 20"),
+            (Skill::Build, "/build 20"),
             (Skill::Research, "/research 20"),
             (Skill::GrillDesign, "/grill-design 20"),
         ] {

@@ -430,7 +430,7 @@ fn listed(issues: &[(u64, &[&str])]) -> String {
 /// The whole path, `--one`: the next ticket, its worktree on `<track>/t<n>`, the
 /// session started as `claude -p --model <session>` with the subagents'
 /// model in its environment and the constants for the mode and the
-/// effort, in the worktree, with the prompt running `/implement <n>`;
+/// effort, in the worktree, with the prompt running `/build <n>`;
 /// the ticket closed, so the track's branch is fast-forwarded to the
 /// tip, pushed to `origin`, the worktree retired, the branch and its
 /// record kept, HEAD following the track; one line naming the ticket,
@@ -469,7 +469,7 @@ fn a_closed_ticket_is_fast_forwarded_pushed_and_retired() {
     // The session was started as decided (#75), in the worktree.
     assert_eq!(
         scratch.wrote("session.args"),
-        "-p --model claude-opus-5 --permission-mode auto --effort high /implement 20"
+        "-p --model claude-opus-5 --permission-mode auto --effort high /build 20"
     );
     // The prompt names the exit condition the run reads back (#115).
     let prompt = scratch.wrote("session.prompt");
@@ -540,7 +540,7 @@ fn a_ticket_left_open_leaves_the_worktree_standing() {
     );
     assert_eq!(
         scratch.wrote("session.args"),
-        "-p --model claude-opus-5 --permission-mode acceptEdits --effort max /implement 20"
+        "-p --model claude-opus-5 --permission-mode acceptEdits --effort max /build 20"
     );
     assert!(!out.contains("computed trust"), "{out}");
     let _ = fs::remove_dir_all(&scratch.dir);
@@ -653,7 +653,7 @@ fn the_frontier_is_worked_until_it_empties_past_a_ticket_left_open() {
     // Both sessions started, each in its own worktree.
     assert_eq!(
         scratch.wrote("session.args"),
-        "-p --model claude-opus-5 --permission-mode auto --effort high /implement 20\n-p --model claude-opus-5 --permission-mode auto --effort high /implement 21"
+        "-p --model claude-opus-5 --permission-mode auto --effort high /build 20\n-p --model claude-opus-5 --permission-mode auto --effort high /build 21"
     );
     assert_eq!(
         scratch.wrote("session.cwd"),
@@ -925,7 +925,7 @@ fn an_empty_frontier_is_filled_by_a_frontier_session_until_it_stays_empty() {
     assert_eq!(
         scratch.wrote("session.args"),
         format!(
-            "{session} /implement 20\n{session} /frontier\n{session} /implement 21\n{session} /frontier"
+            "{session} /build 20\n{session} /frontier\n{session} /build 21\n{session} /frontier"
         )
     );
     assert_eq!(
