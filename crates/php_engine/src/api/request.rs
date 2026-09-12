@@ -131,10 +131,14 @@ impl Resources {
     }
 }
 
-/// How the request is ending, when it is: a fatal or an `exit`.
+/// How the request is ending, when it is: a fatal, a source that did
+/// not compile, or an `exit`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Ending {
     Fatal(String),
+    /// `E_PARSE`: the text is already on the stream `php_error_cb` put it
+    /// on, and what is left is php's status, 255.
+    Parse,
     Exit(i32),
 }
 
@@ -362,9 +366,16 @@ impl Request {
     /// and `html_errors` are the rest of that branch and are not read
     /// yet.
     pub(crate) fn note_error(&mut self, level: Level, message: &str) {
+        let line = self.current_line();
+        self.note_error_at(level, message, line);
+    }
+
+    /// The same diagnostic at a line no frame stands on: what a
+    /// compile-time error carries, since php's `zend_error_cb` is given
+    /// the compiler's line while `zend_get_executed_lineno` has none.
+    pub(crate) fn note_error_at(&mut self, level: Level, message: &str, line: u32) {
         let file = self.current_file().cloned().unwrap_or_default();
         let named = String::from_utf8_lossy(file.as_bytes()).into_owned();
-        let line = self.current_line();
         if self.error_reporting() & level.bit() != 0 {
             if self.log_errors() {
                 let text = format!(
@@ -415,6 +426,14 @@ impl Request {
     pub(crate) fn end_in_fatal(&mut self, message: &str) {
         if self.ending.is_none() {
             self.ending = Some(Ending::Fatal(message.to_owned()));
+        }
+    }
+
+    /// `E_PARSE`: the request ends with php's status and no second
+    /// rendering, the text having gone out with the diagnostic.
+    pub(crate) fn end_in_parse(&mut self) {
+        if self.ending.is_none() {
+            self.ending = Some(Ending::Parse);
         }
     }
 

@@ -16,11 +16,13 @@ use std::any::Any;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use php_compile::CompileError;
 use php_heap::{Fatal, FrameRef};
 use php_unit::Unit;
 use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, Name};
 
 use crate::api::abi::{Entry, Extension, StartupIni};
+use crate::api::raising::Level;
 use crate::api::request::{Ending, Request};
 use crate::api::values::{PhpString, Value};
 use crate::tier::{Nop, Tier, execute};
@@ -250,13 +252,7 @@ impl Engine {
     /// The compiled unit for `source`, as the cache would hold it.
     #[must_use]
     pub fn unit(&self, source: &[u8], filename: &[u8]) -> Option<Arc<Unit>> {
-        let options = php_compile::Options {
-            filename: Name(filename.into()),
-            strict_types: false,
-        };
-        php_compile::compile_source(source, &options)
-            .ok()
-            .map(Arc::new)
+        compile(source, filename).ok()
     }
 
     /// The one request transaction (design §5.14): compile, seed, serve,
@@ -271,6 +267,20 @@ impl Engine {
     /// ```
     /// ```expect
     /// 1bool(true)
+    /// ```
+    ///
+    /// A source the compiler refuses ends the request the way php ends
+    /// one: `E_PARSE` through `php_error_cb`, at the line the compiler
+    /// stopped on, and php's status. What stands under the first `%s` is
+    /// the compiler's own sentence, which names the construct it cannot
+    /// read yet where php's names the token it did not want; the wording
+    /// around it is php's, and the oracle is what holds it.
+    ///
+    /// ```php
+    /// echo 1 +;
+    /// ```
+    /// ```expect exit=255
+    /// Parse error: %s in %s on line 2
     /// ```
     pub fn serve(&self, description: RequestDescription, sink: &mut dyn OutputSink) -> Observables {
         let source = description.source.clone().or_else(|| {
@@ -289,9 +299,15 @@ impl Engine {
                 let _ = rinit(&mut req);
             }
         }
-        let unit = source.and_then(|s| self.unit(&s, script.as_bytes()));
-        if let Some(unit) = unit {
-            serve_unit(&mut req, &unit, self.shared.entry);
+        match source.map(|s| compile(&s, script.as_bytes())) {
+            Some(Ok(unit)) => serve_unit(&mut req, &unit, self.shared.entry),
+            // `php_error_cb` renders it where it renders every
+            // diagnostic, and the request ends before a frame is pushed.
+            Some(Err(refused)) => {
+                req.note_error_at(Level::Parse, &refused.message, refused.line);
+                req.end_in_parse();
+            }
+            None => {}
         }
         for extension in self.shared.extensions.iter().rev() {
             if let Some(rshutdown) = extension.rshutdown {
@@ -316,7 +332,7 @@ impl Engine {
             _ => None,
         };
         let exit_code = match req.ending() {
-            Some(Ending::Fatal(_)) => 255,
+            Some(Ending::Fatal(_) | Ending::Parse) => 255,
             Some(Ending::Exit(code)) => *code,
             None => 0,
         };
@@ -338,6 +354,17 @@ impl Engine {
             fatal,
         }
     }
+}
+
+/// One source compiled, with what the compiler refused kept instead of
+/// dropped: what `serve` needs to render php's parse error, and what
+/// [`Engine::unit`] is the lossy face over.
+fn compile(source: &[u8], filename: &[u8]) -> Result<Arc<Unit>, CompileError> {
+    let options = php_compile::Options {
+        filename: Name(filename.into()),
+        strict_types: false,
+    };
+    php_compile::compile_source(source, &options).map(Arc::new)
 }
 
 /// The unit's main op array served on a fresh entry frame; the loop's
@@ -400,6 +427,51 @@ mod tests {
         assert_eq!(body, "1");
         assert_eq!(observables.exit_code, 0);
         assert_eq!(observables.fatal, None);
+    }
+
+    /// What the witness's `%s` stands over: the compiler's own sentence,
+    /// which says which construct it could not read and where php's says
+    /// which token it did not want. The frame around it is php's, and
+    /// the witness beside `serve` is what holds that to the oracle.
+    #[test]
+    fn a_source_the_compiler_refuses_names_the_construct_it_could_not_read() {
+        let engine = Engine::builder().build();
+        let (body, observables) = served(&engine, "<?php\necho 1 +;");
+        assert_eq!(
+            body,
+            "\nParse error: an expression this compiler cannot read yet in witness.php on line 2\n"
+        );
+        assert_eq!(observables.exit_code, 255);
+        assert_eq!(
+            observables.fatal, None,
+            "a parse error is not the fatal `serve` renders a second time"
+        );
+    }
+
+    /// A parse error is `error_reporting`'s and `log_errors`' to render,
+    /// as every other diagnostic is; the status is php's either way.
+    #[test]
+    fn a_parse_error_is_logged_and_masked_the_way_php_masks_one() {
+        let mut logged = Kept::default();
+        let observables = Engine::builder()
+            .ini("display_errors", "0")
+            .ini("log_errors", "1")
+            .build()
+            .serve(description("<?php\necho 1 +;"), &mut logged);
+        assert!(logged.body.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&logged.log),
+            "PHP Parse error:  an expression this compiler cannot read yet in witness.php on line 2\n"
+        );
+        assert_eq!(observables.exit_code, 255);
+
+        let mut masked = Kept::default();
+        let observables = Engine::builder()
+            .ini("error_reporting", "0")
+            .build()
+            .serve(description("<?php\necho 1 +;"), &mut masked);
+        assert!(masked.body.is_empty(), "E_PARSE is masked out");
+        assert_eq!(observables.exit_code, 255, "the status is php's regardless");
     }
 
     /// `php_error_cb`'s two renderings of one diagnostic, which the two
