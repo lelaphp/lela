@@ -353,18 +353,63 @@ impl Request {
         self.ending.as_ref()
     }
 
+    /// `php_error_cb`: one diagnostic, rendered twice. What
+    /// `error_reporting` masks is neither logged nor displayed; what is
+    /// left goes to the log while `log_errors` is on, in php's log form,
+    /// and to the body while `display_errors` is, in php's display
+    /// form, whose leading and trailing newline php writes and this
+    /// engine's fences pin. `error_prepend_string`, `error_append_string`
+    /// and `html_errors` are the rest of that branch and are not read
+    /// yet.
     pub(crate) fn note_error(&mut self, level: Level, message: &str) {
         let file = self.current_file().cloned().unwrap_or_default();
+        let named = String::from_utf8_lossy(file.as_bytes()).into_owned();
         let line = self.current_line();
         if self.error_reporting() & level.bit() != 0 {
-            let text = format!(
-                "PHP {}:  {message} in {} on line {line}\n",
-                level_name(level),
-                String::from_utf8_lossy(file.as_bytes())
-            );
-            self.log.extend_from_slice(text.as_bytes());
+            if self.log_errors() {
+                let text = format!(
+                    "PHP {}:  {message} in {named} on line {line}\n",
+                    level_name(level)
+                );
+                self.log.extend_from_slice(text.as_bytes());
+            }
+            match self.display_errors() {
+                Display::Off => {}
+                Display::Body => {
+                    let text = format!(
+                        "\n{}: {message} in {named} on line {line}\n",
+                        level_name(level)
+                    );
+                    self.write(text.as_bytes());
+                }
+                Display::Stderr => {
+                    let text = format!(
+                        "{}: {message} in {named} on line {line}\n",
+                        level_name(level)
+                    );
+                    self.write_stderr(text.as_bytes());
+                }
+            }
         }
         self.last_error = Some((level, message.to_owned(), file, line));
+    }
+
+    /// `log_errors`, whether a diagnostic reaches the host's log.
+    fn log_errors(&self) -> bool {
+        ini_truth(self.ini_get(b"log_errors").as_ref())
+    }
+
+    /// `display_errors`, php's three values: off, the body, and the
+    /// host's error stream, which the CLI and CGI hosts write a
+    /// diagnostic to without php's leading newline.
+    fn display_errors(&self) -> Display {
+        let value = self.ini_get(b"display_errors");
+        let text = value.as_ref().map(|v| v.as_bytes().to_ascii_lowercase());
+        match text.as_deref() {
+            Some(b"stderr") => Display::Stderr,
+            _ if ini_truth(value.as_ref()) => Display::Body,
+            _ => Display::Off,
+        }
     }
 
     pub(crate) fn end_in_fatal(&mut self, message: &str) {
@@ -690,10 +735,11 @@ impl Request {
         self.description.script_name.as_ref()
     }
 
-    /// The line of the frame that called the native.
+    /// `zend_get_executed_lineno`: the line the innermost frame stands
+    /// on, which is the line a diagnostic and a backtrace name.
     #[must_use]
     pub fn current_line(&self) -> u32 {
-        0
+        self.vm.executing_line()
     }
 
     /// The arguments of the frame `depth` levels up, `func_get_args` from
@@ -1247,6 +1293,22 @@ impl HeapHooks for Request {
         let _ = &self.map;
         Fatal::OutOfMemory(bytes)
     }
+}
+
+/// Where `display_errors` sends a diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Display {
+    Off,
+    Body,
+    Stderr,
+}
+
+/// `zend_ini_parse_bool`: an ini entry read as on or off, where "off",
+/// "no", "false" and "" are off beside "0" and everything else is on.
+fn ini_truth(value: Option<&PhpString>) -> bool {
+    let Some(value) = value else { return false };
+    let text = value.as_bytes().to_ascii_lowercase();
+    !matches!(text.as_slice(), b"" | b"0" | b"off" | b"no" | b"false")
 }
 
 fn level_name(level: Level) -> &'static str {

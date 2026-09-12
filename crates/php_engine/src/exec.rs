@@ -97,6 +97,16 @@ impl Vm {
         self.at(frame).map_or(0, |state| state.opline)
     }
 
+    /// `zend_get_executed_lineno`: the line of the opline the innermost
+    /// frame stands at, which is the line a diagnostic names, and zero
+    /// while no frame is being served.
+    pub(crate) fn executing_line(&self) -> u32 {
+        self.frames
+            .last()
+            .and_then(|state| opline_at(code_of(&state.unit), state.opline))
+            .map_or(0, |op| op.lineno)
+    }
+
     /// `ZEND_VM_NEXT_OPCODE`: on to the opline after this one.
     pub(crate) fn advance(&mut self, frame: FrameRef) {
         if let Some(state) = self.at_mut(frame) {

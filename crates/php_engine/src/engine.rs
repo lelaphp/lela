@@ -402,6 +402,38 @@ mod tests {
         assert_eq!(observables.fatal, None);
     }
 
+    /// `php_error_cb`'s two renderings of one diagnostic, which the two
+    /// ini entries decide, each naming the line the opline stands on.
+    /// The oracle writes the same bytes for `<?php echo NAN;` at
+    /// `display_errors=1, log_errors=0` and at the two swapped.
+    #[test]
+    fn a_diagnostic_is_displayed_or_logged_as_the_ini_entries_say() {
+        let mut displayed = Kept::default();
+        Engine::builder()
+            .build()
+            .serve(description("<?php echo NAN;"), &mut displayed);
+        assert_eq!(
+            String::from_utf8_lossy(&displayed.body),
+            "\nWarning: unexpected NAN value was coerced to string in witness.php on line 1\nNAN"
+        );
+        assert!(
+            displayed.log.is_empty(),
+            "log_errors is off, so nothing is logged"
+        );
+
+        let mut logged = Kept::default();
+        Engine::builder()
+            .ini("display_errors", "0")
+            .ini("log_errors", "1")
+            .build()
+            .serve(description("<?php echo NAN;"), &mut logged);
+        assert_eq!(String::from_utf8_lossy(&logged.body), "NAN");
+        assert_eq!(
+            String::from_utf8_lossy(&logged.log),
+            "PHP Warning:  unexpected NAN value was coerced to string in witness.php on line 1\n"
+        );
+    }
+
     /// The same request through the `Capture` sink, which is the shape
     /// every extension's own test reads (design §4.3 seam 4, §4.10).
     #[test]
