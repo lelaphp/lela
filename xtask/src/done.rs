@@ -14,8 +14,9 @@
 //!    the crate's sources now (§13 D.18), the hash every instrument stamps;
 //!    an instrument that does not exist yet has written no reading, so its
 //!    condition is unmet and the list is honest from day one. The two
-//!    readings not held to their status are the `witness` and `phpt` skips
-//!    the missing engine binary causes, [`no_binary_yet`] (#106, #132).
+//!    reading not held to its status is the `phpt` skip the missing engine
+//!    binary causes, [`no_binary_yet`] (#132); a `witness` reading is held
+//!    to its status, the linked engine having served it (#119).
 //! 2. Every kernel or native added has a witness: the `witness` reading's
 //!    `missing` is zero for the crate.
 //! 3. A lock that differs from its regenerated form is in the diff, read
@@ -300,34 +301,28 @@ fn boxes(root: &Path, store: &Store, ticket: Ticket, unmet: &mut Vec<String>) ->
 }
 
 /// Whether a reading that is not a pass is met all the same because the
-/// engine has no binary yet (#106, #132).
+/// engine has no binary yet (#132).
 ///
-/// `xtask witness` and `xtask phpt` both run what they measure through the
-/// engine's own binary. There is none until `crates/php` reaches `serve`,
-/// so each falls back and writes the skip that says so, and holding those
-/// skips to their status stops every crate that carries a witness or owns a
-/// subset: #96 was the first, #100's twenty `ext/*` crates the next, and
-/// every kernel, native and extension port after them. Neither skip is
-/// wrong, and neither is reachable from the ticket that meets it.
+/// `xtask phpt` runs the corpus it measures through the engine's own
+/// binary. There is none until `crates/php` reaches `serve`, so the lane
+/// writes the skip that says so, and holding that skip to its status stops
+/// every crate that owns a subset.
 ///
-/// The two are excused on different grounds, because they are not the same
-/// reading.
+/// The skip cannot be held to numbers, because nothing ran at all — there
+/// is no oracle standing in for the corpus the way there is for a fence,
+/// and no second adapter of the `ScriptExec` seam that serves a `.phpt`
+/// with its sections and its own directory the way `witness` has one for a
+/// snippet (#119). A person decided (#132) that such a skip is met anyway,
+/// and so that a crate is done with no corpus test run, which is the cost.
+/// It is held to the cause instead: `engine_absent` says the lane found no
+/// binary, which the lane alone can tell from a subset of a crate not yet
+/// created or one whose every test skipped, and nothing counted against
+/// what it did read. The rung goes away by itself when the binary exists.
 ///
-/// A **witness** skip is held to its numbers: the oracle ran every fence in
-/// the engine's place, so `run > 0` says a measurement happened, `failed ==
-/// 0` that every fence agreed, and `missing == 0` that no kernel or native
-/// is uncovered. A witness skip with nothing judged, `run == 0`, is the run
-/// the oracle itself was absent for, and stays unmet: a green line without
-/// the pinned oracle is a claim.
-///
-/// A **phpt** skip cannot be held to numbers, because nothing ran at all —
-/// there is no oracle standing in for the corpus the way there is for a
-/// fence. A person decided (#132) that such a skip is met anyway, and so
-/// that a crate is done with no corpus test run, which is the cost. It is
-/// held to the cause instead: `engine_absent` says the lane found no binary,
-/// which the lane alone can tell from a subset of a crate not yet created or
-/// one whose every test skipped, and nothing counted against what it did
-/// read. Both rungs go away by themselves when the binary exists.
+/// A **witness** had a rung of its own here while the missing binary was
+/// why its reading was a skip (#106). It is not any more: the linked
+/// engine serves every snippet in this process, so the reading is a pass
+/// or a fail on its own merits and the crate is held to it (#119).
 fn no_binary_yet(instrument: &str, reading: &Reading) -> bool {
     if reading.status != Status::Skip {
         return false;
@@ -337,11 +332,6 @@ fn no_binary_yet(instrument: &str, reading: &Reading) -> bool {
         _ => None,
     };
     match instrument {
-        "witness" => {
-            count("run").is_some_and(|run| run > 0)
-                && count("failed") == Some(0)
-                && count("missing") == Some(0)
-        }
         "phpt" => {
             count("engine_absent") == Some(1)
                 && count("failed") == Some(0)
@@ -687,14 +677,13 @@ mod tests {
         assert!(!no_binary_yet("phpt", &bare));
     }
 
-    /// A witness skip the missing engine binary caused is met by its
-    /// numbers (#106): the oracle ran every fence, all of them agreed and
-    /// no kernel is uncovered. The skip with nothing judged is the run the
-    /// oracle itself was absent for and stays unmet, since a green line
-    /// without the pinned oracle is a claim. Every other instrument is
-    /// held to its status whatever its numbers say.
+    /// A witness skip is held to its status, whatever its numbers say
+    /// (#119). The rung #106 gave it was the missing engine binary, and
+    /// the binary is no longer why a witness reading is a skip: the linked
+    /// engine serves every snippet in this process, so a skip that is left
+    /// is the pinned oracle's absence or a control, and neither is met.
     #[test]
-    fn a_witness_skip_the_missing_binary_caused_is_held_to_its_numbers() {
+    fn a_witness_skip_is_held_to_its_status() {
         let skip = |run: u64, failed: u64, missing: u64| {
             let mut reading = Reading::new("witness", "php_engine");
             reading.status = Status::Skip;
@@ -703,18 +692,11 @@ mod tests {
             reading.count("missing", missing).unwrap();
             reading
         };
-        // The oracle stood in for the engine and every fence agreed.
-        assert!(no_binary_yet("witness", &skip(5, 0, 0)));
-        // Nothing was judged: the oracle was not there to judge it.
+        // The numbers a clean run has, and the skip is unmet all the same.
+        assert!(!no_binary_yet("witness", &skip(5, 0, 0)));
         assert!(!no_binary_yet("witness", &skip(0, 0, 0)));
-        // A fence missed what it pins, and a kernel without a witness.
         assert!(!no_binary_yet("witness", &skip(5, 1, 0)));
-        assert!(!no_binary_yet("witness", &skip(5, 0, 2)));
-        // Another instrument's skip is its status, numbers or not.
+        // The numbers are the phpt rung's own and are not read here.
         assert!(!no_binary_yet("phpt", &skip(5, 0, 0)));
-        // A witness reading that is not a skip is not this rung at all.
-        let mut failed = skip(5, 0, 0);
-        failed.status = Status::Fail;
-        assert!(!no_binary_yet("witness", &failed));
     }
 }

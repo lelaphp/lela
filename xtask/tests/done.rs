@@ -1391,18 +1391,19 @@ fn a_refused_close_with_every_box_ticked_is_met_and_a_ticket_with_no_box_is_not(
     );
 }
 
-/// The two skips the missing engine binary causes are met, and `done`
-/// reaches green for a crate that owns a phpt subset on a checkout with no
-/// engine built (#106, #132). Both would be unmet under the rule they
-/// replace, which held every reading to its status: the assertions that
-/// each verdict is empty are what fails on that behaviour.
+/// The phpt skip the missing engine binary causes is met, and `done`
+/// reaches green for a crate that owns a subset on a checkout with no
+/// engine built (#132). It would be unmet under the rule it replaces,
+/// which held every reading to its status: the assertion that the verdict
+/// is empty is what fails on that behaviour.
 ///
 /// The causes the decision did not excuse are held as before, so the
 /// excuse does not spread: a phpt skip of a crate not yet created or one
 /// whose every test skipped writes `engine_absent` zero, and a witness
-/// skip with nothing judged is the run the pinned oracle was absent for.
+/// skip is held to its status whatever its numbers say, the linked engine
+/// having served every snippet there was one for (#119).
 #[test]
-fn the_skips_the_missing_engine_binary_causes_are_met_and_the_others_are_not() {
+fn the_phpt_skip_the_missing_engine_binary_causes_is_met_and_the_others_are_not() {
     let root = scratch("no-binary");
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
     let store = Store::of_workspace(&root);
@@ -1421,21 +1422,18 @@ fn the_skips_the_missing_engine_binary_causes_are_met_and_the_others_are_not() {
             .unwrap();
     }
 
-    // The oracle ran every fence in the engine's place, and the corpus
-    // could not run at all: both are met, so the crate is done.
+    // The corpus could not run at all, and nothing else is unmet: the
+    // crate is done.
     store
-        .record(&[
-            skip("witness", &[("run", 6), ("failed", 0), ("missing", 0)]),
-            skip(
-                "phpt",
-                &[
-                    ("engine_absent", 1),
-                    ("failed", 0),
-                    ("diverged", 0),
-                    ("borked", 0),
-                ],
-            ),
-        ])
+        .record(&[skip(
+            "phpt",
+            &[
+                ("engine_absent", 1),
+                ("failed", 0),
+                ("diverged", 0),
+                ("borked", 0),
+            ],
+        )])
         .unwrap();
     let verdict = judge(&root);
     assert!(verdict.met(), "{verdict:#?}");
@@ -1460,8 +1458,9 @@ fn the_skips_the_missing_engine_binary_causes_are_met_and_the_others_are_not() {
         "{verdict:#?}"
     );
 
-    // A witness skip with nothing judged is the run the pinned oracle was
-    // absent for, and a green line without the oracle is a claim.
+    // A witness skip is unmet on the numbers that once excused it: the
+    // binary is no longer why a witness reading is a skip, so what is left
+    // is the pinned oracle's absence or a control, and neither is met.
     store
         .record(&[
             skip(
@@ -1473,7 +1472,7 @@ fn the_skips_the_missing_engine_binary_causes_are_met_and_the_others_are_not() {
                     ("borked", 0),
                 ],
             ),
-            skip("witness", &[("run", 0), ("failed", 0), ("missing", 0)]),
+            skip("witness", &[("run", 6), ("failed", 0), ("missing", 0)]),
         ])
         .unwrap();
     let verdict = judge(&root);
