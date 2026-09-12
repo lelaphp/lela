@@ -11,7 +11,9 @@
 //! `<?=` as the `echo` php reads it as, an `echo` of one or more
 //! expressions, the empty statement, an expression statement, and inside
 //! an expression a number, a single- or double-quoted string with no
-//! interpolation, `true`, `false`, `null`, and a call of a named function.
+//! interpolation, `true`, `false`, `null`, a constant by name, a call of
+//! a named function, a parenthesised expression, unary `-` and `+`, and
+//! `+`, `-`, `*` and `/` at php's two precedence levels, left to right.
 //! Anything else is a [`crate::CompileError`], so what this cannot read is
 //! refused rather than silently compiled to something else.
 
@@ -34,7 +36,38 @@ pub(crate) enum Expr {
     Int(i64),
     Float(f64),
     Str(Vec<u8>),
-    Call { name: Vec<u8>, arguments: Vec<Expr> },
+    /// A constant named as written, php's `ZEND_AST_CONST`.
+    Constant(Vec<u8>),
+    /// `-$a` and `+$a`, php's `ZEND_AST_UNARY_MINUS` and
+    /// `ZEND_AST_UNARY_PLUS`.
+    Unary {
+        minus: bool,
+        operand: Box<Expr>,
+    },
+    /// `$a + $b`, php's `ZEND_AST_BINARY_OP`.
+    Binary {
+        op: BinaryOp,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Call {
+        name: Vec<u8>,
+        arguments: Vec<Expr>,
+    },
+}
+
+/// The arithmetic operators this reads, each the opcode php's
+/// `zend_compile_binary_op` gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BinaryOp {
+    /// `ZEND_ADD`
+    Add,
+    /// `ZEND_SUB`
+    Sub,
+    /// `ZEND_MUL`
+    Mul,
+    /// `ZEND_DIV`
+    Div,
 }
 
 /// The line each statement stands on, beside it.
@@ -209,25 +242,95 @@ impl Reader<'_> {
         Err(self.trouble("a statement this compiler cannot read yet"))
     }
 
+    /// One expression: php's precedence, the additive level over the
+    /// multiplicative one, each left to right.
     fn expr(&mut self) -> Result<Expr, Trouble> {
+        self.additive()
+    }
+
+    /// `+` and `-`, php's lower arithmetic level.
+    fn additive(&mut self) -> Result<Expr, Trouble> {
+        let mut left = self.multiplicative()?;
+        loop {
+            self.skip_trivia();
+            let op = match (self.byte(0), self.byte(1)) {
+                (Some(b'+'), next) if !matches!(next, Some(b'+' | b'=')) => BinaryOp::Add,
+                (Some(b'-'), next) if !matches!(next, Some(b'-' | b'=' | b'>')) => BinaryOp::Sub,
+                _ => return Ok(left),
+            };
+            self.bump(1);
+            let right = self.multiplicative()?;
+            left = Expr::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
+    }
+
+    /// `*` and `/`, php's higher arithmetic level. `**` is php's own
+    /// level above them and is not read, so it is refused rather than
+    /// taken for a `*`.
+    fn multiplicative(&mut self) -> Result<Expr, Trouble> {
+        let mut left = self.unary()?;
+        loop {
+            self.skip_trivia();
+            let op = match (self.byte(0), self.byte(1)) {
+                (Some(b'*'), next) if !matches!(next, Some(b'*' | b'=')) => BinaryOp::Mul,
+                // A `/` that opens a comment is trivia, already stepped over.
+                (Some(b'/'), next) if next != Some(b'=') => BinaryOp::Div,
+                _ => return Ok(left),
+            };
+            self.bump(1);
+            let right = self.unary()?;
+            left = Expr::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
+    }
+
+    /// `-$a` and `+$a`, which bind tighter than either level and nest.
+    fn unary(&mut self) -> Result<Expr, Trouble> {
+        self.skip_trivia();
+        let minus = match (self.byte(0), self.byte(1)) {
+            (Some(b'-'), next) if !matches!(next, Some(b'-' | b'=')) => true,
+            (Some(b'+'), next) if !matches!(next, Some(b'+' | b'=')) => false,
+            _ => return self.operand(),
+        };
+        self.bump(1);
+        Ok(Expr::Unary {
+            minus,
+            operand: Box::new(self.unary()?),
+        })
+    }
+
+    /// What an operator stands between: a number or a string as written, a name, or a
+    /// parenthesised expression.
+    fn operand(&mut self) -> Result<Expr, Trouble> {
         self.skip_trivia();
         match self.byte(0) {
             Some(b'\'') => self.single_quoted(),
             Some(b'"') => self.double_quoted(),
             Some(b) if b.is_ascii_digit() || (b == b'.' && self.digit_ahead(1)) => self.number(),
-            Some(b'-') if self.digit_ahead(1) => {
+            Some(b'(') => {
                 self.bump(1);
-                match self.number()? {
-                    Expr::Int(n) => Ok(Expr::Int(n.wrapping_neg())),
-                    Expr::Float(f) => Ok(Expr::Float(-f)),
-                    other => Ok(other),
+                let inner = self.expr()?;
+                self.skip_trivia();
+                if self.byte(0) != Some(b')') {
+                    return Err(self.trouble("a parenthesis no close parenthesis matches"));
                 }
+                self.bump(1);
+                Ok(inner)
             }
             Some(b) if b.is_ascii_alphabetic() || b == b'_' || b == b'\\' => self.named(),
             _ => Err(self.trouble("an expression this compiler cannot read yet")),
         }
     }
 
+    /// A name: `true`, `false` and `null`, which php reads whatever their
+    /// case, another constant by name, or a call.
     fn named(&mut self) -> Result<Expr, Trouble> {
         let name = self.name();
         self.skip_trivia();
@@ -236,7 +339,7 @@ impl Reader<'_> {
                 b"true" => Ok(Expr::Bool(true)),
                 b"false" => Ok(Expr::Bool(false)),
                 b"null" => Ok(Expr::Null),
-                _ => Err(self.trouble("a constant this compiler cannot read yet")),
+                _ => Ok(Expr::Constant(name)),
             };
         }
         self.bump(1);
@@ -297,6 +400,24 @@ impl Reader<'_> {
                 self.bump(1);
             } else {
                 break;
+            }
+        }
+        // php's `EXPONENT_DNUM`: an exponent makes the number a float
+        // however its mantissa was written.
+        if matches!(self.byte(0), Some(b'e' | b'E'))
+            && (self.digit_ahead(1)
+                || (matches!(self.byte(1), Some(b'+' | b'-')) && self.digit_ahead(2)))
+        {
+            float = true;
+            self.bump(1);
+            if matches!(self.byte(0), Some(b'+' | b'-')) {
+                self.bump(1);
+            }
+            while self
+                .byte(0)
+                .is_some_and(|b| b.is_ascii_digit() || b == b'_')
+            {
+                self.bump(1);
             }
         }
         let digits: String = self
@@ -465,6 +586,121 @@ mod tests {
             )
         );
         assert_eq!(read[2], (Stmt::Inline(b"c".to_vec()), 3));
+    }
+
+    #[test]
+    fn arithmetic_is_read_at_php_s_two_precedence_levels() {
+        let read = read(b"<?php echo 1 + 2 * 3;").unwrap_or_default();
+        assert_eq!(
+            read,
+            vec![(
+                Stmt::Echo(vec![Expr::Binary {
+                    op: BinaryOp::Add,
+                    left: Box::new(Expr::Int(1)),
+                    right: Box::new(Expr::Binary {
+                        op: BinaryOp::Mul,
+                        left: Box::new(Expr::Int(2)),
+                        right: Box::new(Expr::Int(3)),
+                    }),
+                }]),
+                1
+            )],
+            "`*` binds tighter than `+`"
+        );
+    }
+
+    #[test]
+    fn a_level_reads_left_to_right_and_a_parenthesis_regroups() {
+        let left_to_right = read(b"<?php echo 1 - 2 - 3;").unwrap_or_default();
+        assert_eq!(
+            left_to_right,
+            vec![(
+                Stmt::Echo(vec![Expr::Binary {
+                    op: BinaryOp::Sub,
+                    left: Box::new(Expr::Binary {
+                        op: BinaryOp::Sub,
+                        left: Box::new(Expr::Int(1)),
+                        right: Box::new(Expr::Int(2)),
+                    }),
+                    right: Box::new(Expr::Int(3)),
+                }]),
+                1
+            )]
+        );
+        let grouped = read(b"<?php echo (1 + 2) * 3;").unwrap_or_default();
+        assert_eq!(
+            grouped,
+            vec![(
+                Stmt::Echo(vec![Expr::Binary {
+                    op: BinaryOp::Mul,
+                    left: Box::new(Expr::Binary {
+                        op: BinaryOp::Add,
+                        left: Box::new(Expr::Int(1)),
+                        right: Box::new(Expr::Int(2)),
+                    }),
+                    right: Box::new(Expr::Int(3)),
+                }]),
+                1
+            )]
+        );
+    }
+
+    #[test]
+    fn a_minus_is_the_unary_operator_php_reads_it_as() {
+        let read = read(b"<?php echo -2.5, -INF;").unwrap_or_default();
+        assert_eq!(
+            read,
+            vec![(
+                Stmt::Echo(vec![
+                    Expr::Unary {
+                        minus: true,
+                        operand: Box::new(Expr::Float(2.5)),
+                    },
+                    Expr::Unary {
+                        minus: true,
+                        operand: Box::new(Expr::Constant(b"INF".to_vec())),
+                    },
+                ]),
+                1
+            )],
+            "php's scanner has no negative literal; the operator is the tree node"
+        );
+    }
+
+    #[test]
+    fn a_name_that_opens_no_call_is_a_constant() {
+        let read = read(b"<?php echo NAN;").unwrap_or_default();
+        assert_eq!(
+            read,
+            vec![(Stmt::Echo(vec![Expr::Constant(b"NAN".to_vec())]), 1)]
+        );
+    }
+
+    #[test]
+    fn an_exponent_makes_a_number_a_float_however_it_is_written() {
+        let read = read(b"<?php echo 1e25, 5e-324, 1.5E+3;").unwrap_or_default();
+        assert_eq!(
+            read,
+            vec![(
+                Stmt::Echo(vec![
+                    Expr::Float(1e25),
+                    Expr::Float(5e-324),
+                    Expr::Float(1.5e3)
+                ]),
+                1
+            )]
+        );
+    }
+
+    #[test]
+    fn an_operator_this_does_not_read_is_refused_rather_than_taken_for_another() {
+        for source in [
+            b"<?php echo 2 ** 3;".as_slice(),
+            b"<?php echo 7 % 2;".as_slice(),
+            b"<?php echo 'a' . 'b';".as_slice(),
+        ] {
+            assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
+        }
     }
 
     #[test]

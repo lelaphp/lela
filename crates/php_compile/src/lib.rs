@@ -56,7 +56,7 @@ pub fn compile(parsed: &Parsed, options: &Options) -> Result<Unit, CompileError>
     })?;
     let lines = u32::try_from(parsed.source.split(|b| *b == b'\n').count()).unwrap_or(u32::MAX);
     Ok(Unit {
-        main: emit::main_op_array(&read, &options.filename, lines),
+        main: emit::main_op_array(&read, &options.filename, lines)?,
         ..Unit::default()
     })
 }
@@ -129,6 +129,94 @@ mod tests {
             unit.main.oplines[1].out, 1,
             "a site opcode carries its safepoint number in the field ops.toml names"
         );
+    }
+
+    /// The one constant a single-expression `echo` leaves in the table.
+    fn echoed_literal(source: &[u8]) -> php_heap::Zval {
+        let unit = unit_of(source);
+        unit.main
+            .literals
+            .first()
+            .copied()
+            .unwrap_or(php_heap::Zval::UNDEF)
+    }
+
+    #[test]
+    fn arithmetic_over_two_constants_is_folded_the_way_php_folds_it() {
+        let unit = unit_of(b"<?php echo 1 + 2;");
+        assert_eq!(
+            unit.dump(),
+            "$_main:\n     ; (lines=2, args=0, vars=0, tmps=0)\n\
+             0000 ECHO CONST[0]\n0001 RETURN CONST[1]\n",
+            "the sum is one literal and no ZEND_ADD"
+        );
+        assert_eq!(echoed_literal(b"<?php echo 1 + 2;").as_long(), Some(3));
+        // `div_function`: a long where the division comes out whole, a
+        // double where it does not.
+        assert_eq!(echoed_literal(b"<?php echo 4/2;").as_long(), Some(2));
+        assert_eq!(
+            echoed_literal(b"<?php echo 1/3;").as_double(),
+            Some(1.0 / 3.0)
+        );
+        assert_eq!(
+            echoed_literal(b"<?php echo 0.1 + 0.2;").as_double(),
+            Some(0.1 + 0.2)
+        );
+        // `fast_long_add_function`: the sum that overflows the long is
+        // the double php leaves.
+        assert_eq!(
+            echoed_literal(b"<?php echo 9223372036854775807 + 1;").as_double(),
+            Some(9_223_372_036_854_775_807_f64 + 1.0)
+        );
+        // `zend_try_ct_eval_unary_pm`: a multiplication by -1, which
+        // keeps the sign of a zero.
+        assert_eq!(echoed_literal(b"<?php echo -2;").as_long(), Some(-2));
+        assert_eq!(
+            echoed_literal(b"<?php echo -0.0;")
+                .as_double()
+                .map(f64::is_sign_negative),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn a_persistent_constant_stands_for_its_value_where_it_is_written() {
+        assert_eq!(
+            echoed_literal(b"<?php echo INF;").as_double(),
+            Some(f64::INFINITY)
+        );
+        assert_eq!(
+            echoed_literal(b"<?php echo -INF;").as_double(),
+            Some(f64::NEG_INFINITY)
+        );
+        assert_eq!(
+            echoed_literal(b"<?php echo \\NAN;")
+                .as_double()
+                .map(f64::is_nan),
+            Some(true),
+            "a leading separator names the same global constant"
+        );
+    }
+
+    #[test]
+    fn what_php_leaves_to_an_opcode_is_refused_rather_than_folded() {
+        for source in [
+            // `zend_binary_op_produces_error`: the division that throws.
+            b"<?php echo 1/0;".as_slice(),
+            b"<?php echo 1/0.0;".as_slice(),
+            // A constant no table here holds.
+            b"<?php echo FOO;".as_slice(),
+            // An operand php converts and this does not.
+            b"<?php echo \"1\" + 1;".as_slice(),
+            // What a call returned is known to no compiler.
+            b"<?php echo 1 + extension_loaded('demo');".as_slice(),
+        ] {
+            assert!(
+                compile(&php_syntax::parse(source), &Options::default()).is_err(),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
     }
 
     #[test]
