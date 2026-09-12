@@ -114,16 +114,21 @@ pub(crate) const HARNESS: &str = "xtask";
 
 /// The instruments condition 1 asks of one crate: all of [`FRESH`], less
 /// `witness` for the harness, which has no kernel and no native, and less
-/// `phpt` for a crate the manifest gives no subset. Which crate owns which
-/// of the corpus is the `[[crate]]` row's sentence, so a crate that owns
-/// none is not asked here rather than asked and answered by the runner's
-/// error (harness §4.1, §4.5 condition 1).
+/// `phpt` for a crate the per-commit lane writes no reading for. Which
+/// crate owns which of the corpus is the `[[crate]]` row's sentence, so a
+/// crate that owns none is not asked here rather than asked and answered
+/// by the runner's error. A crate the row marks `feature =` is outside the
+/// default build, whose subsets are the ones the lane runs, so its corpus
+/// is the nightly lane's, and `done`, which runs per commit, does not ask
+/// for a reading only a run by name could write (design §8's `ext/<name>` row,
+/// per commit for the default extensions and nightly for the rest; harness
+/// §4.1, §4.5 condition 1, §7).
 pub(crate) fn instruments_of(krate: &Crate) -> impl Iterator<Item = &'static str> {
     let harness = krate.name == HARNESS;
-    let measured_by_the_corpus = !krate.subsets().is_empty();
+    let measured_by_the_lane = !krate.subsets().is_empty() && !krate.optional();
     FRESH.into_iter().filter(move |i| match *i {
         "witness" => !harness,
-        "phpt" => measured_by_the_corpus,
+        "phpt" => measured_by_the_lane,
         _ => true,
     })
 }
@@ -646,6 +651,23 @@ mod tests {
         );
         let row = Crate::named("php_heap").with_phpt(&["Zend/tests"]);
         let asked: Vec<&str> = instruments_of(&row).collect();
+        assert_eq!(asked, FRESH);
+    }
+
+    /// A crate the manifest marks `feature =` is outside the default
+    /// build, and the per-commit lane runs the default build's subsets
+    /// alone, so `done` does not ask it for a reading no lane run writes
+    /// (#133); its corpus is the nightly lane's. The same row without the
+    /// feature is asked.
+    #[test]
+    fn an_optional_crate_is_not_asked_for_a_phpt_reading_the_lane_never_writes() {
+        let row = Crate::named("ext/mbstring").with_feature("mbstring");
+        let asked: Vec<&str> = instruments_of(&row).collect();
+        assert_eq!(
+            asked,
+            ["clippy", "witness", "api-check", "budget", "unsafe-audit"]
+        );
+        let asked: Vec<&str> = instruments_of(&Crate::named("ext/mbstring")).collect();
         assert_eq!(asked, FRESH);
     }
 
