@@ -137,6 +137,7 @@ Commands:
   phpt               Run the pinned `.phpt` corpus through the engine and hold each test to its `--EXPECT*--` section; one reading per subset, scoped to the crate whose subset it is
   unsafe-audit       Allow `unsafe` only in the homes the manifest's unsafe.homes rule names
   generate           Write the files the manifest's `generated` rules render (ext/clippy.toml)
+  steer              Apply a proposal to one of the harness's own files, the ones `permit` denies the agent, and only where it adds: every table, key, value and array-of-tables row the tracked file carries must stand unchanged in the proposal. One changed ceiling, one widened edge, one dropped rule and nothing is written
   divergence-reason  Hold the divergence registry to the manifest rule whose `check` names this instrument: an accepted row has a reason a person wrote
   new-ext            Lay one extension crate down at ext/<name> in the template topology, its line in `php_bundle`, ext/clippy.toml and its row in ext/AGENTS.md; refuses an existing one
   witness            Extract every `php` fence and its `expect` fence from a crate's rustdoc, run each under the oracle's recipe and hold it to what the fence pins. One reading per crate
@@ -146,7 +147,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=36a41ab08b4a8b613e3a70028209d5c6dc71ecbce517b97674c4defd140a7f15 out=2c83c38f0bbbfc24371817243dd8ef0cff6feca79f703e116f4319e85df26a06 -->
+<!-- /computed in=6ae20250540d7219365cb799b841d32441e914318aa047bc3acb4f131710bcad out=23717249572c1efba7e5a19ccbc943236121d674aab0a0bd35979eb7f30f0256 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
