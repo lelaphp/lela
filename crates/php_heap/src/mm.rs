@@ -2,7 +2,10 @@
 //! accountant of PHP-visible memory. 2 MiB chunks carved into 4 KiB
 //! pages, the thirty small-size bins of `Zend/zend_alloc_sizes.h`, large
 //! `runs` of whole pages, huge allocations of their own, per-request
-//! ownership and mass release when the request's heap drops.
+//! ownership and mass release when the request's heap drops. A huge
+//! allocation is rounded to the page the machine reports, which is php's
+//! `REAL_PAGE_SIZE` and on this machine is not the 4 KiB page a chunk is
+//! carved into.
 //!
 //! The numbers php reports come from here and from nowhere else:
 //! `memory_get_usage(false)` is [`Mm::size`], the bin accounting, and
@@ -35,6 +38,7 @@
 use std::alloc::{Layout, alloc, dealloc};
 use std::num::NonZeroUsize;
 use std::ptr::NonNull;
+use std::sync::OnceLock;
 
 use crate::hooks::Fatal;
 
@@ -58,6 +62,52 @@ const MAX_LARGE_SIZE: usize = CHUNK_SIZE - PAGE_SIZE * FIRST_PAGE as usize;
 /// php's default `memory_limit` before any ini is read
 /// (`Z/Zend/zend_alloc.c:2085`).
 pub(crate) const NO_LIMIT: usize = usize::MAX >> 1;
+
+/// `REAL_PAGE_SIZE` (`Z/Zend/zend_alloc.c:104`): the page the machine
+/// reports, which is what php rounds a huge allocation to
+/// (`Z/Zend/zend_alloc.c:1925`) and is not [`PAGE_SIZE`], its own chunk
+/// page. php reads it once, at startup
+/// (`Z/Zend/zend_alloc.c:3334`); this reads it once too, on the first
+/// huge allocation of the process, there being no startup here and the
+/// number not moving under a running machine. On macOS on Apple Silicon
+/// it is 16 KiB, so a 3 MB string moves `memory_get_usage(true)` by
+/// 3,014,656 bytes where a 4 KiB rounding would move it by 3,002,368.
+pub(crate) fn real_page_size() -> usize {
+    static ASKED: OnceLock<usize> = OnceLock::new();
+    *ASKED.get_or_init(machine_page_size)
+}
+
+/// What the machine answers. php asks `sysconf(_SC_PAGESIZE)`, naming a
+/// constant of the platform's headers whose value differs per platform,
+/// which a crate with no dependency cannot name; `getpagesize` is the
+/// same number by another door, specified as `sysconf(_SC_PAGESIZE)`
+/// before POSIX withdrew it and carried still by macOS and by both Linux
+/// libcs. A machine that answers nothing usable leaves php's own default
+/// standing, the `#ifndef REAL_PAGE_SIZE` arm of
+/// `Z/Zend/zend_alloc.c:112`.
+#[cfg(unix)]
+fn machine_page_size() -> usize {
+    // SAFETY: `getpagesize` takes no argument, reads and writes nothing
+    // of ours and answers a plain number.
+    let answered = unsafe { getpagesize() };
+    match usize::try_from(answered) {
+        Ok(size) if size.is_power_of_two() => size,
+        _ => PAGE_SIZE,
+    }
+}
+
+/// A platform without `getpagesize` keeps php's default, as php keeps it
+/// where `_SC_PAGESIZE` is not defined (`Z/Zend/zend_alloc.c:112`).
+#[cfg(not(unix))]
+fn machine_page_size() -> usize {
+    PAGE_SIZE
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    /// `getpagesize(2)`.
+    fn getpagesize() -> std::ffi::c_int;
+}
 
 /// `bin_data_size`, the usable bytes of each bin
 /// (`Z/Zend/zend_alloc_sizes.h:32-62`).
@@ -612,10 +662,11 @@ impl Mm {
     }
 
     /// `zend_mm_alloc_huge` (`Z/Zend/zend_alloc.c:1916`): a mapping of its
-    /// own, rounded up to a page, counted in both the bin accounting and
-    /// the real size.
+    /// own, rounded up to the page the machine reports and not to the
+    /// chunk's own page, counted in both the bin accounting and the real
+    /// size.
     fn alloc_huge(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
-        let new_size = size.next_multiple_of(PAGE_SIZE);
+        let new_size = size.next_multiple_of(real_page_size());
         if new_size > self.limit - self.real_size.min(self.limit)
             && (self.gc() == 0 || new_size > self.limit - self.real_size.min(self.limit))
         {

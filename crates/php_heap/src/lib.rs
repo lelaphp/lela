@@ -210,11 +210,65 @@ mod tests {
         assert_eq!(heap.memory_usage(true), real);
         assert!(heap.memory_peak() > start);
         // The real peak held the huge block beside the chunk, rounded up
-        // to a page as php rounds one.
+        // to the page the machine reports as php rounds one.
         assert_eq!(
             heap.memory_real_peak(),
-            real + 3_000_000usize.next_multiple_of(4096)
+            real + 3_000_000usize.next_multiple_of(mm::real_page_size())
         );
+    }
+
+    /// A string past 2 MiB is a huge block, and php rounds one to the
+    /// page the machine reports, `REAL_PAGE_SIZE`
+    /// (`Z/Zend/zend_alloc.c:1925`), not to the 4 KiB page its chunks are
+    /// carved into. What php answers on the machine the oracle is pinned
+    /// on, whose page is 16 KiB:
+    ///
+    /// ```text
+    /// $ php -n -d memory_limit=128M -r '$b = memory_get_usage(); $rb = memory_get_usage(true);
+    ///   $s = str_repeat("x", 3000000); echo memory_get_usage() - $b, " ", memory_get_usage(true) - $rb;'
+    /// 3014680 3014656
+    /// ```
+    ///
+    /// 3,000,000 bytes of string is 3,000,032 allocated, the header, the
+    /// NUL and the alignment, and 3,014,656 is that rounded to 16 KiB;
+    /// rounded to 4 KiB it would be 3,002,368, twelve KiB short. The 24
+    /// bytes over it in php's first number are the variable php's symbol
+    /// table took, which no allocation here makes.
+    #[test]
+    fn a_huge_block_rounds_to_the_page_the_machine_reports() {
+        let _alone = alone();
+        let page = mm::real_page_size();
+        // The same page through a second door, so that what this crate
+        // asks the machine is held to what the machine says and not to
+        // itself: `getconf PAGESIZE` is POSIX's own reader of
+        // `_SC_PAGESIZE`, which is the number php reads.
+        if let Ok(said) = std::process::Command::new("getconf")
+            .arg("PAGESIZE")
+            .output()
+        {
+            let said = String::from_utf8_lossy(&said.stdout)
+                .trim()
+                .parse::<usize>();
+            if let Ok(said) = said {
+                assert_eq!(page, said, "the machine reports a page of {said}");
+            }
+        }
+        let mut heap = Heap::new();
+        let real = heap.memory_usage(true);
+        let allocated = heap.string(&vec![b'x'; 3_000_000]);
+        assert!(allocated.is_ok(), "the heap would not allocate 3 MB");
+        let Ok(s) = allocated else { return };
+        let rounded = 3_000_032usize.next_multiple_of(page);
+        assert_eq!(heap.memory_usage(false), rounded);
+        assert_eq!(heap.memory_usage(true), real + rounded);
+        // php's own numbers, where the machine's page is the oracle's.
+        if page == 16 * 1024 {
+            assert_eq!(heap.memory_usage(false), 3_014_656);
+            assert_eq!(heap.memory_usage(true) - real, 3_014_656);
+        }
+        heap.release_string(s);
+        assert_eq!(heap.memory_usage(false), 0);
+        assert_eq!(heap.memory_usage(true), real);
     }
 
     /// The bin accounting is php's: a string of four bytes takes the
