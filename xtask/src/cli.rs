@@ -204,6 +204,19 @@ pub(crate) enum Command {
         #[arg(long, value_name = "PATH")]
         engine: Option<PathBuf>,
     },
+    /// Join the Mahout census to `api.lock`: every item `same`, `renamed`
+    /// or `gone`, the rows the port has not taken as the number. One
+    /// reading, at the crate the lock lives with.
+    ///
+    /// Without `--tree`, the committed census `data/port-map.v0.toml`.
+    PortMap {
+        /// Regenerate the census against the inherited Mahout tree, which
+        /// lives outside this repository, and join that instead; a tree
+        /// the census cannot read is a skip of the regeneration and never
+        /// a pass.
+        #[arg(long, value_name = "PATH")]
+        tree: Option<PathBuf>,
+    },
     /// Allow `unsafe` only in the homes the manifest's unsafe.homes rule names.
     UnsafeAudit,
     /// Write the files the manifest's `generated` rules render (ext/clippy.toml).
@@ -305,8 +318,9 @@ pub(crate) enum TrackCommand {
     /// the run goes on with what it filed; a frontier still empty after
     /// it ends the run listing the track's open `for-a-person` tickets.
     /// Prints one line per ticket naming the ticket, the
-    /// commit and the outcome, then a closing line once any was worked;
-    /// writes no reading.
+    /// commit and the outcome, then a closing line once any was worked.
+    /// Writes one reading per step, scoped to the ticket, and one for the
+    /// run; `xtask status --section track` renders the last run.
     Work {
         /// One step alone, a `/frontier` session before it when the clone
         /// records `track.frontier=auto` and the frontier is empty: the
@@ -393,9 +407,16 @@ pub enum Section {
     Witness,
     /// The mutants readings, one row per crate.
     Mutants,
+    /// The port-map reading: the census joined to `api.lock`, with the
+    /// rows the port has not taken.
+    PortMap,
     /// The ticket readings, one row per ticket: its criteria, what closed
     /// it and the session.
     Ticket,
+    /// The last run of `xtask track work`: one row per ticket it worked,
+    /// with the outcome and the commit its branch is at, and the run's
+    /// own row last.
+    Track,
     /// Each rule permit judges: its last finding, denial or note, and the
     /// denials the log holds per session and in total; then the log per
     /// instrument, with the candidates for silent (the CI section of §7).

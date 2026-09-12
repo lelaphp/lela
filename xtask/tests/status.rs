@@ -648,33 +648,70 @@ fn permits_counts_denials_per_session_and_in_total() {
     );
 }
 
-/// permit judges by two rules of its own beside the manifest's, the
-/// region body and its own build, and the section carries a row for each:
-/// through the outage of #16 nothing under `permits` said the judge was
-/// down, and a rule with no row is a rule nothing renders.
+/// permit judges by three rules of its own beside the manifest's, the
+/// region body, a build apart from the tree and a call no candidate
+/// judged, and the section carries a row for each: through the outage of
+/// #16 nothing under `permits` said the judge was down, and a rule with no
+/// row is a rule nothing renders.
+///
+/// The two refusals are counted in two columns (#118). A build that hands
+/// the call to the candidate that rebuilds is a skip under `handed on`,
+/// since the call was judged; a call that reached the end of the walk
+/// unjudged is a failure under `denials`, since it was not. Counting both
+/// as denials is what buried the 23 real ones under 5687 walks.
 #[test]
-fn permits_carries_a_row_for_the_rules_permit_judges_by_that_are_its_own() {
+fn permits_separates_the_calls_denied_from_the_calls_handed_to_the_next_candidate() {
     let root = scratch("permit-own-rules");
     let store = Store::of_workspace(&root);
-    let mut refusal = Reading::new("permit", "permit.stale-build");
-    refusal.rule = "permit.stale-build".into();
-    refusal.status = Status::Fail;
-    refusal.message = "Edit seams.toml: this call was not judged.".into();
-    refusal.session = "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11".into();
-    store.record(std::slice::from_ref(&refusal)).unwrap();
+    let session = "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11";
+
+    let mut handed_on = Reading::new("permit", "permit.stale-build");
+    handed_on.rule = "permit.stale-build".into();
+    handed_on.status = Status::Skip;
+    handed_on.message =
+        "Edit seams.toml: this build did not judge this call and handed it to the next candidate."
+            .into();
+    handed_on.session = session.into();
+    store.record(std::slice::from_ref(&handed_on)).unwrap();
+
+    let mut unjudged = Reading::new("permit", "permit.unjudged-call");
+    unjudged.rule = "permit.unjudged-call".into();
+    unjudged.status = Status::Fail;
+    unjudged.message = "Edit seams.toml: this call was not judged.".into();
+    unjudged.session = session.into();
+    store.record(std::slice::from_ref(&unjudged)).unwrap();
+
+    let (ok, json, err) = status(&root, &["--section", "permits", "--format", "json"]);
+    assert!(ok, "{err}");
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let row = |id: &str| {
+        value["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["rule"] == id)
+            .unwrap_or_else(|| panic!("no row for {id}:\n{json}"))
+            .clone()
+    };
+    let stale = row("permit.stale-build");
+    assert_eq!(stale["denials"], 0, "a walk is not a denial: {stale}");
+    assert_eq!(stale["handed_on"], 1, "it is a hand-on: {stale}");
+    let walked_past = row("permit.unjudged-call");
+    assert_eq!(walked_past["denials"], 1, "{walked_past}");
+    assert_eq!(walked_past["handed_on"], 0, "{walked_past}");
+    row("computed.region-body");
 
     let (ok, md, err) = status(&root, &["--section", "permits"]);
     assert!(ok, "{err}");
-    let row = md
+    assert!(
+        md.contains("| denials | handed on |"),
+        "the two are two columns:\n{md}"
+    );
+    let line = md
         .lines()
         .find(|l| l.contains("permit.stale-build"))
         .unwrap_or_else(|| panic!("no row for the refusal:\n{md}"));
-    assert!(row.contains("| 1 |"), "the refusal is counted: {row}");
-    assert!(row.contains("not judged"), "and says so: {row}");
-    assert!(
-        md.contains("computed.region-body"),
-        "permit's other rule of its own has a row too:\n{md}"
-    );
+    assert!(line.contains("next candidate"), "and says so: {line}");
 }
 
 /// The row #33 proposes, `git.pathspec`, appended to the scratch
@@ -965,13 +1002,16 @@ fn permits_marks_this_session_and_the_session_block_carries_it() {
     let (ok, md, err) = status(&root, &["--section", "permits", "--session-id", this]);
     assert!(ok, "{err}");
     let row = md.lines().find(|l| l.contains("harness.self")).unwrap();
-    assert!(row.contains("| 3 | 1 |"), "total, then this session: {row}");
+    assert!(
+        row.contains("| 3 | 0 | 1 |"),
+        "total, the calls handed on, then this session: {row}"
+    );
     let row = md.lines().find(|l| l.contains("ext.no-locks")).unwrap();
-    assert!(row.contains("| 0 | 0 |"), "{row}");
+    assert!(row.contains("| 0 | 0 | 0 |"), "{row}");
     let (_, md, _) = status(&root, &["--section", "permits"]);
     let row = md.lines().find(|l| l.contains("harness.self")).unwrap();
     assert!(
-        row.contains("| 3 |  |"),
+        row.contains("| 3 | 0 |  |"),
         "no session named, no count: {row}"
     );
 
@@ -1005,7 +1045,7 @@ fn permits_marks_this_session_and_the_session_block_carries_it() {
     assert!(text.starts_with("# The map\n"), "{text}");
     assert!(text.contains("## permits this session"), "{text}");
     let row = text.lines().find(|l| l.contains("harness.self")).unwrap();
-    assert!(row.contains("| 3 | 1 |"), "{row}");
+    assert!(row.contains("| 3 | 0 | 1 |"), "{row}");
     assert!(
         !text.lines().any(|l| l.contains("ext.no-locks")),
         "only the rules this session fired: {text}"

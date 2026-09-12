@@ -135,6 +135,7 @@ Commands:
   budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code and a stale generated file
   clippy             `cargo clippy` with every warning denied, on every target of each crate, as the reading `done` reads; one reading per crate
   phpt               Run the pinned `.phpt` corpus through the engine and hold each test to its `--EXPECT*--` section; one reading per subset, scoped to the crate whose subset it is
+  port-map           Join the Mahout census to `api.lock`: every item `same`, `renamed` or `gone`, the rows the port has not taken as the number. One reading, at the crate the lock lives with
   unsafe-audit       Allow `unsafe` only in the homes the manifest's unsafe.homes rule names
   generate           Write the files the manifest's `generated` rules render (ext/clippy.toml)
   divergence-reason  Hold the divergence registry to the manifest rule whose `check` names this instrument: an accepted row has a reason a person wrote
@@ -146,7 +147,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=0949d90d9422e0735a6b6728ac5e3f67ebde2bc8a105b4669a1e4609bfa88c3c out=2c83c38f0bbbfc24371817243dd8ef0cff6feca79f703e116f4319e85df26a06 -->
+<!-- /computed in=3271e5b8d2dda68133152f8a36e4f81e8ffd8fd8ad9ab3e839c6d35fd7d7b140 out=94dae5e6b2ec4295d9fc1adfe25ac8ee7d6436036798f4a1591c69bcd9c6eca6 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
@@ -156,10 +157,11 @@ Options:
 ├── php_ext
 ├── php_heap
 ├── php_macros
+├── php_proto
 ├── php_syntax
 └── php_unit
 ```
-<!-- /computed in=5367b71544e0c166a5149f140d58a07c422081ef9e6118cd2d499beaa7531484 out=f7a4ce94d06c883b4763abda90521324fbf102e2ab5ff774ce5c52a13ef8c047 -->
+<!-- /computed in=62c8d4eb7e0d891921f7853bfacb567cbfa43bcf8d335dd47f18e0f65fb0e7f7 out=22b7791847b5363075cddae77c8635dcae17777b01394a46cf72d03054abdcd9 -->
 <!-- computed tree src=ext depth=1 name=layout-ext | do not edit; run computed -->
 ```
 .

@@ -1,0 +1,28 @@
+# The negative control of `xtask port-map` (harness-design.md §4.1: a
+# fixture that must fail): a row naming an `api` item `api.lock` does not
+# carry, beside two that are in order. The design's unmatched row, which is
+# a CI failure from day 3 (third-engine-design.md §4.4).
+
+# ---- mahout_value methods called from ext crates
+[[item]]
+mahout = "mahout_value::{PhpArray,PhpString}::len"
+sites = 748
+crates = 18
+status = "same"
+api = "values::PhpArray::len"
+
+# ---- RequestCtx methods called from ext crates
+[[item]]
+mahout = "RequestCtx::note_alloc"
+sites = 327
+crates = 19
+status = "gone"
+rule = "nothing; the allocator accounts"
+
+# ---- semantics:: items used from ext crates
+[[item]]
+mahout = "semantics::raise_engine_limitation"
+sites = 15
+crates = 7
+status = "renamed"
+api = "raising::engine_limitation"

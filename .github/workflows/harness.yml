@@ -139,6 +139,12 @@ jobs:
       - run: cargo xtask budget
       - run: cargo xtask unsafe-audit
       - run: cargo xtask vocab
+      # The census joined to `api.lock`, per commit (§7): the inherited
+      # tree is outside this repository and outside CI, so the run joins
+      # the committed census and the regeneration is a maintainer's, under
+      # `--tree`. The unmatched rows are the failure; the unresolved rows
+      # are the number the weekly bars read.
+      - run: cargo xtask port-map
       # The witness reading `done`'s condition 1 asks every touched crate
       # for (§4.5, §7: witnesses run per commit over all crates). A kernel
       # or native without a witness fails here and names the coverage

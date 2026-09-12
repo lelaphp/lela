@@ -156,6 +156,10 @@ permit::run
 phpt::Ask
 phpt::Lane
 phpt::run
+port_map::CENSUS
+port_map::INSTRUMENT
+port_map::SEED
+port_map::command
 reading::DIR
 reading::LOG
 reading::Log
@@ -242,6 +246,7 @@ track_sync::Synced
 track_sync::Synced::render
 track_sync::command
 track_sync::sync
+track_work::Landed
 track_work::Session
 track_work::Session::arguments
 track_work::Session::of
@@ -249,9 +254,12 @@ track_work::Session::prompt
 track_work::Skill
 track_work::Skill::name
 track_work::Skill::of
+track_work::Swept
+track_work::Swept::render
 track_work::Worked
 track_work::Worked::render
 track_work::command
+track_work::sweep
 track_work::work
 unsafe_audit::run
 vocab::hold

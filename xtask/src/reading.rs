@@ -511,6 +511,12 @@ impl Outcome {
     }
 }
 
+/// The `s` a count of one does not carry: every instrument's message
+/// counts something, so the word lives beside the shape they all write.
+pub(crate) fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
 /// The current time in UTC as a TOML datetime, to the second: what a
 /// reading's `at` is, in one format, so its text orders as its instant
 /// does.

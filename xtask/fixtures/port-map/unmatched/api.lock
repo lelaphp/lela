@@ -1,0 +1,4 @@
+# The lock the fixture joins to: it carries the two items in order and not
+# the third, so the join has one unmatched row.
+raising::throw_internal
+values::PhpArray::len
