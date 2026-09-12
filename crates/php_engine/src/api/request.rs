@@ -1156,11 +1156,16 @@ impl Request {
         self.heap.memory_usage(real)
     }
 
-    /// `memory_get_peak_usage()`.
+    /// `memory_get_peak_usage()`: the chunks' high-water mark for
+    /// `real == true`, the bin accounting's for `real == false`, the two
+    /// the heap keeps apart (design §5.13).
     #[must_use]
     pub fn memory_peak(&self, real: bool) -> usize {
-        let _ = real;
-        self.heap.memory_peak()
+        if real {
+            self.heap.memory_real_peak()
+        } else {
+            self.heap.memory_peak()
+        }
     }
 
     /// `memory_reset_peak_usage()`.
