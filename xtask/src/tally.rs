@@ -13,7 +13,10 @@
 //! [`Runner::Control`] is the pinned oracle standing where the engine
 //! belongs: its reading is a skip whatever the items say, a control of the
 //! lane and never a reading of the engine. A [`Runner::Absent`] is a skip
-//! that says why. The engine alone is pass or fail.
+//! that says why. The engine alone is pass or fail, and it is the engine
+//! whether the binary served the program in a process of its own or the
+//! linked engine served it in this one ([`Runner::Linked`]): the two are
+//! the adapters of one seam over one executor (design §8).
 //!
 //! **Nothing ran is not green.** Under the engine, a tally where nothing
 //! met its expectation is a skip and not a pass: an empty subset, or one
@@ -217,9 +220,9 @@ impl<J: Judgement> Tally<J> {
         match runner {
             Runner::Absent(why) => Outcome::Absent(why),
             Runner::Control(binary) => Outcome::Control(binary),
-            Runner::Engine(_) if !self.against().is_empty() => Outcome::Failed,
-            Runner::Engine(_) if self.met() == 0 => Outcome::NothingRan,
-            Runner::Engine(_) => Outcome::Passed,
+            Runner::Engine(_) | Runner::Linked if !self.against().is_empty() => Outcome::Failed,
+            Runner::Engine(_) | Runner::Linked if self.met() == 0 => Outcome::NothingRan,
+            Runner::Engine(_) | Runner::Linked => Outcome::Passed,
         }
     }
 

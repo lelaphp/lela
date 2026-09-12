@@ -14,6 +14,12 @@ workspace = true
 sha1_smol.workspace = true          # the digest of seams.toml this build is compiled against (src/built.rs)
 
 [dependencies]
+# The in-process adapter of design §8's `ScriptExec` seam (§4.2: the harness
+# reaches the engine through the bundle): the enabled set, the tier's name and
+# a fresh engine of them over the `Capture` sink, which `witness` serves a
+# snippet through where no binary is built.
+php_bundle = { path = "../crates/php_bundle", features = ["test"] }
+
 anyhow.workspace = true
 clap.workspace = true
 regex-lite.workspace = true

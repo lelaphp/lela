@@ -5,11 +5,13 @@
 //! the instrument's `run` and reads what it wrote; how one witness is
 //! judged, the notes and the digest, is held beside the judge.
 //!
-//! The tests that run a snippet run the pinned oracle behind a shell file
-//! standing where the engine's binary would, since the engine that will be
-//! measured does not exist yet. They say so on stderr and return when the
-//! pinned binary is not on this machine, unless the machine promised it
-//! (#38); the rest, the coverage half and the readings of a run with
+//! The tests that run a snippet through the engine's own binary run the
+//! pinned oracle behind a shell file standing where that binary would,
+//! since the binary that will be measured does not exist yet; the tests of
+//! the rung below it build no binary at all and are served by the engine
+//! linked into the harness (#119). They say so on stderr and return when
+//! the pinned binary is not on this machine, unless the machine promised
+//! it (#38); the rest, the coverage half and the readings of a run with
 //! nothing to run, run anywhere.
 
 use std::fs;
@@ -381,21 +383,53 @@ fn the_reading_carries_run_failed_and_missing_and_is_scoped_to_the_crate() {
     assert!(!reading.tree().is_empty(), "the reading is stamped");
 }
 
+/// A checkout with no binary on either target path is still a reading of
+/// the engine: the linked engine serves the snippet in this process, the
+/// other adapter of design §8's `ScriptExec` seam, so the reading is a
+/// pass on its own merits and not the skip that said the engine ran none
+/// (#119).
 #[test]
-fn without_an_engine_the_reading_is_a_skip_that_says_so() {
+fn with_no_binary_built_the_linked_engine_serves_the_witness() {
     if oracle().is_none() {
         return;
     }
-    let root = scratch("absent", &block("/// ```expect\n/// 1\n/// ```\n"), false);
+    let root = scratch("linked", &block("/// ```expect\n/// 1\n/// ```\n"), false);
+    for profile in ["release", "debug"] {
+        let binary = root.join("target").join(profile).join("php");
+        assert!(!binary.is_file(), "{} stands", binary.display());
+    }
     let reading = run(&root, &registry(""), false);
-    assert_eq!(reading.status, Status::Skip, "{reading:#?}");
-    assert_eq!(count(&reading, "run"), 1, "the oracle ran the witness");
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    assert_eq!(count(&reading, "run"), 1);
+    assert_eq!(count(&reading, "passed"), 1);
+    assert_eq!(count(&reading, "failed"), 0);
     assert!(
-        reading.message.contains("the engine ran none"),
+        !reading.message.contains("the engine ran none"),
         "{}",
         reading.message
     );
-    assert!(reading.message.contains("not built"), "{}", reading.message);
+}
+
+/// And a fail is a fail there: what the linked engine wrote is held to
+/// what the fences pin, with no binary standing anywhere (#119).
+#[test]
+fn with_no_binary_built_a_witness_the_linked_engine_misses_fails() {
+    if oracle().is_none() {
+        return;
+    }
+    let root = scratch(
+        "linked-differs",
+        &block("/// ```expect\n/// 2\n/// ```\n"),
+        false,
+    );
+    let reading = run(&root, &registry(""), false);
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert_eq!(count(&reading, "failed"), 1);
+    assert!(
+        reading.message.contains("1 of 1 witnesses missed"),
+        "{}",
+        reading.message
+    );
 }
 
 /// Nothing to run is complete only with the pinned oracle here to have

@@ -24,6 +24,7 @@
 //! no source file (§10 rule 5).
 
 pub(crate) mod expect;
+pub(crate) mod linked;
 
 use std::cell::OnceCell;
 use std::collections::BTreeMap;
@@ -611,6 +612,11 @@ pub const ENGINE: &str = "php";
 pub enum Runner {
     /// The engine's own binary, one process per program.
     Engine(PathBuf),
+    /// The engine linked into the harness, served in this process through
+    /// [`linked::serve`]: the other adapter of design §8's `ScriptExec`
+    /// seam, and the engine as much as the binary is, so its reading is a
+    /// pass or a fail. What a lane stands on where no binary is built.
+    Linked,
     /// The pinned oracle standing in for the engine: a control of the
     /// lane itself and never a reading of the engine, so its reading is
     /// a skip whatever the programs say.
@@ -647,11 +653,24 @@ impl Runner {
         )))
     }
 
+    /// The rung below the binary, for a lane the linked engine can serve:
+    /// [`Runner::Linked`] where [`resolve`](Runner::resolve) found no
+    /// binary, and what it found otherwise. A lane whose programs the
+    /// in-process adapter does not serve, a `.phpt` with its sections and
+    /// its own directory, does not take this rung and keeps the absence.
+    #[must_use]
+    pub fn or_linked(self) -> Runner {
+        match self {
+            Runner::Absent(_) => Runner::Linked,
+            found => found,
+        }
+    }
+
     /// The binary, when there is one.
     pub fn binary(&self) -> Option<&Path> {
         match self {
             Runner::Engine(path) | Runner::Control(path) => Some(path),
-            Runner::Absent(_) => None,
+            Runner::Linked | Runner::Absent(_) => None,
         }
     }
 }

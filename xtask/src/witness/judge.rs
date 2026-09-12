@@ -1,7 +1,8 @@
 //! How one witness is judged: the per-item judge `witness` contributes to
 //! the tally. The snippet runs under the oracle, whose status is what
-//! `--accept` captures onto a bare `exit`; then under the engine when there
-//! is one, the oracle's run standing in otherwise; and the two streams and
+//! `--accept` captures onto a bare `exit`; then under the engine, its own
+//! binary where one is built and the linked engine in this process where
+//! none is, the oracle's run standing in only where neither can; and the two streams and
 //! the status are held to what the fences pin through [`oracle::verdict`],
 //! so the registry decides what a difference means (harness §4.3).
 
@@ -12,7 +13,7 @@ use super::{Ask, Captured, Judged, Judgement, fence};
 use crate::divergence::Registry;
 use crate::oracle::expect::Expectation;
 use crate::oracle::{
-    self, Invocation, Observation, Oracle, Pin, Program, Runner, Verdict as Compared,
+    self, Invocation, Observation, Oracle, Pin, Program, Runner, Verdict as Compared, linked,
 };
 
 /// A verdict on one witness, placed where it stands and at the item it
@@ -84,6 +85,19 @@ pub(super) fn one(
         Runner::Engine(binary) => oracle
             .run_under(&Invocation::new(binary, Program::Snippet(&witness.snippet)))
             .with_context(|| format!("running {} through {}", witness.at(), binary.display()))?,
+        // The engine linked into the harness, which needs no binary and is
+        // the run of record all the same (design §8; #119). A panic inside
+        // is trouble the witness borks on, never the lane's end.
+        Runner::Linked => match linked::serve(&oracle.pin().recipe, &witness.snippet) {
+            Ok(out) => out,
+            Err(trouble) => {
+                return Ok(judged(
+                    witness,
+                    Judgement::Bork,
+                    format!("the linked engine did not serve it: {trouble:#}"),
+                ));
+            }
+        },
         _ => oracle_out,
     };
     let met = match met(oracle.pin(), witness, exit, &ran) {

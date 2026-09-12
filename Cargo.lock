@@ -564,6 +564,7 @@ dependencies = [
  "anyhow",
  "clap",
  "md5",
+ "php_bundle",
  "regex-lite",
  "serde",
  "serde_json",

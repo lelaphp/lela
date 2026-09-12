@@ -8,21 +8,23 @@
 //! `witness`, with `run`, `failed` and `missing` in `numbers`, which is
 //! what `done` reads as its conditions 1 and 2.
 //!
-//! **What runs the snippet.** The same seam `phpt` names (design §8's
-//! `ScriptExec`): the engine's own binary through [`oracle::Runner`], one
-//! process per witness under the recipe the oracle runs under. Until
-//! `crates/php` reaches `serve` there is no binary, and then the pinned
-//! oracle stands in: the run measures the fences and the oracle, not the
-//! engine, so the reading is a skip that says so rather than passing. The
-//! oracle runs in either case, because the status a fence pins is the
-//! oracle's and `--accept` is where it is captured. `done` holds that skip
-//! to its numbers rather than its status while the binary is missing
-//! (#106): every fence that ran agreed and every kernel and native carries
-//! one, `failed == 0` and `missing == 0`, which is what condition 1 can ask
-//! for until `crates/php` exists. `phpt` is excused the same rung on other
-//! grounds, since nothing stands in for a corpus (#132). The skip itself stays, since the reading
-//! must go on saying which of the two ran; a skip with nothing judged,
-//! `run == 0`, is the run the oracle was absent for and is unmet as before.
+//! **What runs the snippet.** The seam `phpt` names (design §8's
+//! `ScriptExec`) has two adapters, and a witness stands on either. The
+//! engine's own binary through [`oracle::Runner`] is one, a process per
+//! witness under the recipe the oracle runs under; the engine linked into
+//! the harness is the other, [`oracle::linked`], one fresh engine per
+//! snippet over the `Capture` sink and no binary needed. Until
+//! `crates/php` reaches `serve` there is none, and the linked engine is
+//! what the lane stands on: it is the engine either way, so the reading is
+//! a pass or a fail on its own merits and `done` holds the crate to it
+//! (#119). The oracle runs beside whichever served the snippet, because
+//! the status a fence pins is the oracle's and `--accept` is where it is
+//! captured; the pinned oracle standing in *for* the engine, which a named
+//! binary whose digest is the pin's is, is a control and reads as a skip
+//! whatever the fences say. `phpt` has no second adapter yet and keeps its
+//! own rung in `done`, since nothing stands in for a corpus (#132). A
+//! reading with nothing judged, `run == 0`, is the run the pinned oracle
+//! was absent for, and is a skip that says so.
 //!
 //! **What `--accept` writes.** The `expect` fence line, and nothing else:
 //! the oracle's status in place of a bare `exit` or a stale one, so the
@@ -329,9 +331,11 @@ pub fn run(
         ask.crates.clone()
     };
     let rule = coverage_rule(manifest);
-    let runner = Runner::resolve(root, &manifest.pin, None)?;
-    if let Runner::Absent(why) = &runner {
-        println!("witness: {why}");
+    // The ladder's rung below the binary is the linked engine, which a
+    // snippet needs no binary for (#119).
+    let runner = Runner::resolve(root, &manifest.pin, None)?.or_linked();
+    if runner == Runner::Linked {
+        println!("witness: no engine binary is built; the linked engine serves each snippet");
     }
     // One oracle for the run: the digest is asserted before the first
     // snippet and never per witness or per crate (harness §4.3).
