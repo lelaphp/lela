@@ -39,6 +39,14 @@ fn rev(root: &Path, name: &str) -> String {
     sh(root, &["git", "rev-parse", name]).trim().to_owned()
 }
 
+/// Whether `commit` is in the history of `tip`: what a merge back and a
+/// catch-up both leave behind, where neither ref is the other's tip.
+fn holds(root: &Path, tip: &str, commit: &str) -> bool {
+    sh(root, &["git", "rev-list", tip])
+        .lines()
+        .any(|line| line == commit)
+}
+
 fn has_ref(root: &Path, name: &str) -> bool {
     Command::new("git")
         .args([
@@ -147,14 +155,18 @@ impl Scratch {
     /// ticket: `commit` commits a file named for the ticket on the branch, `close` flips the
     /// ticket's recorded state to closed, and either or both. Started on
     /// `/frontier` (#85) it runs the shell file `act.frontier` instead,
-    /// where the test writes what the planning session files.
+    /// where the test writes what the planning session files. The prompt
+    /// is the last argument and runs to several lines (#115), so
+    /// `session.args` records its first line, `/<skill> <n>`, which is
+    /// also where the ticket is read from, and `session.prompt` keeps the
+    /// whole of it for a test that reads the rest.
     fn stand_ins(&self) {
         let dir = self.dir.display();
         let gh = format!(
             "#!/bin/sh\nif [ \"$1\" = issue ] && [ \"$2\" = list ]; then cat '{dir}/list.json'; exit $?; fi\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then f='{dir}/view.'$3'.json'; [ -f \"$f\" ] || f='{dir}/view.json'; cat \"$f\"; exit $?; fi\nprintf '%s\\n' \"$*\" >> '{dir}/calls'\nexit 0\n"
         );
         let claude = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{dir}/session.args'\npwd -P >> '{dir}/session.cwd'\nprintf '%s\\n' \"${{CLAUDE_CODE_SUBAGENT_MODEL-unset}}\" >> '{dir}/session.subagent'\n# the ticket: the last argument is the prompt, `/<skill> <n>`\nfor a; do last=$a; done; n=${{last##* }}\nif [ \"$last\" = /frontier ]; then sh '{dir}/act.frontier'; exit $?; fi\nact=$(cat '{dir}/act.'$n 2>/dev/null || cat '{dir}/act')\nview='{dir}/view.'$n'.json'; [ -f \"$view\" ] || view='{dir}/view.json'\ncase \"$act\" in *commit*) echo worked > worked.$n.txt && git add -- worked.$n.txt && git -c commit.gpgsign=false -c core.hooksPath=/var/empty -c user.name=x -c user.email=x@x commit -q -m 'the work' -- worked.$n.txt || exit 3;; esac\ncase \"$act\" in *close*) sed 's/\"OPEN\"/\"CLOSED\"/' \"$view\" > '{dir}/view.tmp' && mv '{dir}/view.tmp' \"$view\";; esac\nexit 0\n"
+            "#!/bin/sh\n# the last argument is the prompt; its first line is `/<skill> <n>`\nrest=''; i=0\nfor a; do i=$((i+1)); [ $i -lt $# ] && rest=\"$rest $a\"; prompt=$a; done\nline=$(printf '%s\\n' \"$prompt\" | sed -n 1p); n=${{line##* }}\nprintf '%s\\n' \"${{rest# }} $line\" >> '{dir}/session.args'\nprintf '%s\\n' \"$prompt\" >> '{dir}/session.prompt'\npwd -P >> '{dir}/session.cwd'\nprintf '%s\\n' \"${{CLAUDE_CODE_SUBAGENT_MODEL-unset}}\" >> '{dir}/session.subagent'\nif [ \"$line\" = /frontier ]; then sh '{dir}/act.frontier'; exit $?; fi\nact=$(cat '{dir}/act.'$n 2>/dev/null || cat '{dir}/act')\nview='{dir}/view.'$n'.json'; [ -f \"$view\" ] || view='{dir}/view.json'\ncase \"$act\" in *commit*) echo worked > worked.$n.txt && git add -- worked.$n.txt && git -c commit.gpgsign=false -c core.hooksPath=/var/empty -c user.name=x -c user.email=x@x commit -q -m 'the work' -- worked.$n.txt || exit 3;; esac\ncase \"$act\" in *close*) sed 's/\"OPEN\"/\"CLOSED\"/' \"$view\" > '{dir}/view.tmp' && mv '{dir}/view.tmp' \"$view\";; esac\nexit 0\n"
         );
         for (name, text) in [("gh", gh), ("claude", claude)] {
             let file = self.dir.join("bin").join(name);
@@ -226,6 +238,17 @@ impl Scratch {
             .to_string(),
         )
         .unwrap();
+    }
+
+    /// The ticket `issue view <n>` answers with for `number`, closed:
+    /// what the tracker has once a person closed a ticket whose session
+    /// had ended with it open (#116).
+    fn closes(&self, number: u64) {
+        let file = self.dir.join(format!("view.{number}.json"));
+        let text = fs::read_to_string(&file)
+            .unwrap()
+            .replace("\"OPEN\"", "\"CLOSED\"");
+        fs::write(&file, text).unwrap();
     }
 
     /// What the session does when started, for every ticket.
@@ -347,6 +370,26 @@ impl Scratch {
         landed
     }
 
+    /// One section of `xtask status` over the clone's store, as Markdown:
+    /// what a person reads the run back from (#117).
+    fn section(&self, name: &str) -> String {
+        let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .arg("--root")
+            .arg(&self.root)
+            .args(["status", "--section", name])
+            .current_dir(&self.root)
+            .env_remove("CARGO")
+            .env_remove("CARGO_MANIFEST_DIR")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "status --section {name}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    }
+
     fn wrote(&self, name: &str) -> String {
         fs::read_to_string(self.dir.join(name))
             .unwrap_or_default()
@@ -387,7 +430,7 @@ fn listed(issues: &[(u64, &[&str])]) -> String {
 /// The whole path, `--one`: the next ticket, its worktree on `<track>/t<n>`, the
 /// session started as `claude -p --model <session>` with the subagents'
 /// model in its environment and the constants for the mode and the
-/// effort, in the worktree, with the prompt running `/implement <n>`;
+/// effort, in the worktree, with the prompt running `/build <n>`;
 /// the ticket closed, so the track's branch is fast-forwarded to the
 /// tip, pushed to `origin`, the worktree retired, the branch and its
 /// record kept, HEAD following the track; one line naming the ticket,
@@ -426,7 +469,17 @@ fn a_closed_ticket_is_fast_forwarded_pushed_and_retired() {
     // The session was started as decided (#75), in the worktree.
     assert_eq!(
         scratch.wrote("session.args"),
-        "-p --model claude-opus-5 --permission-mode bypassPermissions --effort high /implement 20"
+        "-p --model claude-opus-5 --permission-mode auto --effort high /build 20"
+    );
+    // The prompt names the exit condition the run reads back (#115).
+    let prompt = scratch.wrote("session.prompt");
+    assert!(
+        prompt.contains("cargo xtask ticket close 20"),
+        "the prompt names no close: {prompt}"
+    );
+    assert!(
+        prompt.contains("gh issue create"),
+        "the prompt says nothing of a blocker: {prompt}"
     );
     assert_eq!(scratch.wrote("session.subagent"), "claude-sonnet-5");
     assert_eq!(
@@ -487,7 +540,7 @@ fn a_ticket_left_open_leaves_the_worktree_standing() {
     );
     assert_eq!(
         scratch.wrote("session.args"),
-        "-p --model claude-opus-5 --permission-mode acceptEdits --effort max /implement 20"
+        "-p --model claude-opus-5 --permission-mode acceptEdits --effort max /build 20"
     );
     assert!(!out.contains("computed trust"), "{out}");
     let _ = fs::remove_dir_all(&scratch.dir);
@@ -563,7 +616,10 @@ fn no_model_refuses_before_a_worktree_and_an_empty_frontier_is_none() {
 /// person and does not stop the run, since its branch records the
 /// ticket and `track next` names it no more; the run ends at "none",
 /// exit 0, one line per ticket and a closing line naming each with its
-/// outcome.
+/// outcome. A run that lands one ticket and strands another is also what
+/// the readings say (#117): one per step scoped to the ticket, a pass and
+/// a fail, each with its commit and its reason, and the run's own closing
+/// one, which is what `status --section track` renders the run from.
 #[test]
 fn the_frontier_is_worked_until_it_empties_past_a_ticket_left_open() {
     let scratch = Scratch::lay("frontier");
@@ -597,7 +653,7 @@ fn the_frontier_is_worked_until_it_empties_past_a_ticket_left_open() {
     // Both sessions started, each in its own worktree.
     assert_eq!(
         scratch.wrote("session.args"),
-        "-p --model claude-opus-5 --permission-mode bypassPermissions --effort high /implement 20\n-p --model claude-opus-5 --permission-mode bypassPermissions --effort high /implement 21"
+        "-p --model claude-opus-5 --permission-mode auto --effort high /build 20\n-p --model claude-opus-5 --permission-mode auto --effort high /build 21"
     );
     assert_eq!(
         scratch.wrote("session.cwd"),
@@ -630,6 +686,33 @@ fn the_frontier_is_worked_until_it_empties_past_a_ticket_left_open() {
             &"track work: the frontier of t-x is empty after 2 tickets: #20 closed, #21 standing"
         ),
         "{out}"
+    );
+
+    // One reading per step and one for the run, which is what the section
+    // renders, in the order the run took them (#117).
+    let section = scratch.section("track");
+    let rows: Vec<&str> = section.lines().skip(2).collect();
+    assert_eq!(rows.len(), 3, "{section}");
+    assert!(rows[0].starts_with("| 20 | pass |  | "), "{section}");
+    assert!(rows[0].contains(&first[..7]), "{section}");
+    assert!(
+        rows[0].contains("#20 closed at") && rows[0].contains("t-x/t20 retired"),
+        "{section}"
+    );
+    assert!(rows[1].starts_with("| 21 | fail |  | "), "{section}");
+    assert!(rows[1].contains(&second[..7]), "{section}");
+    assert!(
+        rows[1].contains("#21 is open after the session") && rows[1].contains("stands at"),
+        "{section}"
+    );
+    assert!(rows[2].starts_with("| run | fail | "), "{section}");
+    assert!(
+        rows[2].contains("landed=1 run=2 standing=1"),
+        "how many it worked and how many landed: {section}"
+    );
+    assert!(
+        rows[2].contains("the frontier of t-x is empty after 2 tickets: #20 closed, #21 standing"),
+        "how it ended: {section}"
     );
     let _ = fs::remove_dir_all(&scratch.dir);
 }
@@ -739,9 +822,9 @@ fn a_sync_that_refuses_stops_the_run_named() {
 }
 
 /// A ticket labelled `frontier:research` starts the session on
-/// `/research <n>` (#81): the prompt is the one thing that changes, the
-/// model, the mode and the effort as #75 set them, and the path from the
-/// close to the retire is the same.
+/// `/research <n>` (#81): the skill's line is the one thing that
+/// changes, the model, the mode and the effort as #75 set them, and the
+/// path from the close to the retire is the same.
 #[test]
 fn a_research_ticket_starts_the_session_on_research() {
     let scratch = Scratch::lay("research");
@@ -752,7 +835,7 @@ fn a_research_ticket_starts_the_session_on_research() {
     assert_eq!(code, 0, "{out}");
     assert_eq!(
         scratch.wrote("session.args"),
-        "-p --model claude-opus-5 --permission-mode bypassPermissions --effort high /research 20"
+        "-p --model claude-opus-5 --permission-mode auto --effort high /research 20"
     );
     assert_eq!(scratch.wrote("session.subagent"), "claude-sonnet-5");
     assert!(out.contains("#20 closed at"), "{out}");
@@ -772,7 +855,7 @@ fn a_decision_ticket_starts_the_session_on_grill_design() {
     assert_eq!(code, 0, "{out}");
     assert_eq!(
         scratch.wrote("session.args"),
-        "-p --model claude-opus-5 --permission-mode bypassPermissions --effort high /grill-design 20"
+        "-p --model claude-opus-5 --permission-mode auto --effort high /grill-design 20"
     );
     assert!(out.contains("#20 closed at"), "{out}");
     let _ = fs::remove_dir_all(&scratch.dir);
@@ -838,11 +921,11 @@ fn an_empty_frontier_is_filled_by_a_frontier_session_until_it_stays_empty() {
 
     // Four sessions: the ticket, the planner in the clone, the ticket it
     // filed, the planner again.
-    let session = "-p --model claude-opus-5 --permission-mode bypassPermissions --effort high";
+    let session = "-p --model claude-opus-5 --permission-mode auto --effort high";
     assert_eq!(
         scratch.wrote("session.args"),
         format!(
-            "{session} /implement 20\n{session} /frontier\n{session} /implement 21\n{session} /frontier"
+            "{session} /build 20\n{session} /frontier\n{session} /build 21\n{session} /frontier"
         )
     );
     assert_eq!(
@@ -893,7 +976,7 @@ fn a_frontier_that_stays_empty_ends_the_run_and_a_record_not_auto_refuses() {
     assert_eq!(code, 0, "{out}");
     assert_eq!(
         scratch.wrote("session.args"),
-        "-p --model claude-opus-5 --permission-mode bypassPermissions --effort high /frontier"
+        "-p --model claude-opus-5 --permission-mode auto --effort high /frontier"
     );
     assert!(
         out.contains(
@@ -912,5 +995,209 @@ fn a_frontier_that_stays_empty_ends_the_run_and_a_record_not_auto_refuses() {
         1,
         "no second session: {out}"
     );
+    let _ = fs::remove_dir_all(&scratch.dir);
+}
+
+/// A worktree left standing by an earlier run, whose ticket a person
+/// closed afterwards and whose branch is ahead, is swept before the
+/// frontier is consulted (#116): the track is fast-forwarded to its tip,
+/// pushed to `origin` and the worktree retired, one line naming the
+/// ticket and the commit. The sweep is idempotent: the run that left it
+/// standing said nothing of a sweep, and the run after the sweep says
+/// nothing either and moves no ref.
+#[test]
+fn a_standing_worktree_whose_ticket_closed_is_swept_before_the_frontier() {
+    let scratch = Scratch::lay("sweep-ahead");
+    scratch.tracker(&[20], 20);
+    scratch.viewed(20);
+    scratch.act_on(20, "commit");
+    let before = rev(&scratch.root, "origin/t-x");
+
+    // The first run leaves #20 standing, and sweeps nothing.
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(!out.contains("swept"), "nothing to sweep: {out}");
+    assert!(scratch.worktree("t-x/t20").is_dir(), "{out}");
+    let tip = rev(&scratch.root, "t-x/t20");
+    assert_ne!(tip, before, "the session committed: {out}");
+    assert_eq!(rev(&scratch.origin, "t-x"), before, "{out}");
+
+    // A person closes it, and main moved under the track meanwhile. The
+    // sweep is the run's first act, before the catch-up, so the branch
+    // is still a fast-forward of the track when it is judged; catch the
+    // track up first and the merge would make it none, forever.
+    scratch.closes(20);
+    let main = scratch.land("main", "landed.txt", "on main\n");
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.lines().any(|line| line
+            == format!(
+                "track work: swept #20, closed since its session at {}; t-x fast-forwarded to it and pushed to origin, t-x/t20 retired",
+                &tip[..7]
+            )),
+        "{out}"
+    );
+    let lines: Vec<&str> = out.lines().collect();
+    let swept = lines
+        .iter()
+        .position(|line| line.starts_with("track work: swept #20"))
+        .unwrap_or_else(|| panic!("{out}"));
+    let synced = lines
+        .iter()
+        .position(|line| line.starts_with("track sync: t-x caught up with main"))
+        .unwrap_or_else(|| panic!("{out}"));
+    assert!(swept < synced, "the sweep is the run's first act: {out}");
+    let now = rev(&scratch.root, "origin/t-x");
+    assert!(holds(&scratch.root, &now, &tip), "the work landed: {out}");
+    assert!(holds(&scratch.root, &now, &main), "main landed: {out}");
+    assert!(!scratch.worktree("t-x/t20").exists(), "retired: {out}");
+    assert_eq!(scratch.worktrees().len(), 1, "{out}");
+    assert_eq!(
+        sh(&scratch.root, &["git", "config", "branch.t-x/t20.ticket"]).trim(),
+        "20",
+        "the branch and its record are kept: {out}"
+    );
+    assert!(out.contains("none: the frontier of t-x is empty"), "{out}");
+
+    // Nothing left to sweep: no line about it, and no ref moves.
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("swept"), "{out}");
+    assert!(!out.contains("#20"), "{out}");
+    assert_eq!(rev(&scratch.origin, "t-x"), now, "{out}");
+    assert_eq!(rev(&scratch.root, "HEAD"), now, "{out}");
+    let _ = fs::remove_dir_all(&scratch.dir);
+}
+
+/// A worktree of another track is none of this track's business: the
+/// sweep leaves it standing whatever its ticket says, and moves no ref
+/// of it (#116).
+#[test]
+fn a_worktree_of_another_track_is_not_swept() {
+    let scratch = Scratch::lay("sweep-other");
+    scratch.tracker(&[], 30);
+    scratch.viewed(30);
+    scratch.closes(30);
+    let before = rev(&scratch.root, "origin/t-x");
+    sh(
+        &scratch.root,
+        &["git", "push", "-q", "origin", "HEAD:refs/heads/t-y"],
+    );
+    let dir = scratch.root.join(".claude/worktrees/t-y/t30");
+    sh(
+        &scratch.root,
+        &[
+            "git",
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "t-y/t30",
+            dir.to_str().unwrap(),
+            "origin/t-y",
+        ],
+    );
+    sh(
+        &scratch.root,
+        &["git", "config", "branch.t-y/t30.ticket", "30"],
+    );
+    fs::write(dir.join("other.txt"), "the other track's\n").unwrap();
+    sh(&dir, &["git", "add", "--", "other.txt"]);
+    sh(
+        &dir,
+        &[
+            "git",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/var/empty",
+            "commit",
+            "-q",
+            "-m",
+            "the other track's work",
+        ],
+    );
+    let other = rev(&scratch.root, "t-y/t30");
+
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("#30"), "another track's: {out}");
+    assert!(!out.contains("swept"), "{out}");
+    assert!(dir.is_dir(), "stands: {out}");
+    assert_eq!(rev(&scratch.root, "t-y/t30"), other, "{out}");
+    assert_eq!(rev(&scratch.origin, "t-y"), before, "no ref moved: {out}");
+    assert_eq!(rev(&scratch.origin, "t-x"), before, "{out}");
+    let _ = fs::remove_dir_all(&scratch.dir);
+}
+
+/// A standing worktree whose ticket closed with the branch not ahead of
+/// the track is left standing and named, and the run goes on to the
+/// frontier (#116): the session committed nothing, so its branch is the
+/// track's own commit, and no ref moves.
+#[test]
+fn a_standing_worktree_closed_but_not_ahead_is_named_and_stands() {
+    let scratch = Scratch::lay("sweep-behind");
+    scratch.tracker(&[20], 20);
+    scratch.viewed(20);
+    scratch.act_on(20, "");
+    let before = rev(&scratch.root, "origin/t-x");
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 1, "{out}");
+    assert_eq!(rev(&scratch.root, "t-x/t20"), before, "{out}");
+
+    scratch.closes(20);
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.lines().any(|line| line
+            == format!(
+                "track work: #20 closed, but the branch is not ahead of the track: the branch is the track's own commit, {}, the branch at {}; the worktree stands at {} for a person, nothing retired",
+                &before[..7],
+                &before[..7],
+                scratch.worktree("t-x/t20").display()
+            )),
+        "{out}"
+    );
+    assert!(!out.contains("swept"), "nothing merged back: {out}");
+    assert!(scratch.worktree("t-x/t20").is_dir(), "stands: {out}");
+    assert_eq!(scratch.worktrees().len(), 2, "{out}");
+    assert_eq!(rev(&scratch.origin, "t-x"), before, "no ref moved: {out}");
+    assert!(out.contains("none: the frontier of t-x is empty"), "{out}");
+    let _ = fs::remove_dir_all(&scratch.dir);
+}
+
+/// A standing worktree whose ticket is still open is left standing and
+/// named, and the run goes on (#116): the work is the session's to
+/// finish, so nothing is merged back and no ref moves, however far ahead
+/// the branch is.
+#[test]
+fn a_standing_worktree_whose_ticket_is_open_is_named_and_stands() {
+    let scratch = Scratch::lay("sweep-open");
+    scratch.tracker(&[20], 20);
+    scratch.viewed(20);
+    scratch.act_on(20, "commit");
+    let before = rev(&scratch.root, "origin/t-x");
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 1, "{out}");
+
+    let tip = rev(&scratch.root, "t-x/t20");
+    let (code, out) = scratch.work(&["--one"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.lines().any(|line| line
+            == format!(
+                "track work: #20 is still open at the tracker, the branch at {}; the worktree stands at {} for a person, nothing retired",
+                &tip[..7],
+                scratch.worktree("t-x/t20").display()
+            )),
+        "{out}"
+    );
+    assert!(!out.contains("swept"), "nothing merged back: {out}");
+    assert!(scratch.worktree("t-x/t20").is_dir(), "stands: {out}");
+    assert_eq!(scratch.worktrees().len(), 2, "{out}");
+    assert_eq!(rev(&scratch.origin, "t-x"), before, "no ref moved: {out}");
+    assert_eq!(rev(&scratch.root, "t-x/t20"), tip, "{out}");
+    assert!(out.contains("none: the frontier of t-x is empty"), "{out}");
     let _ = fs::remove_dir_all(&scratch.dir);
 }

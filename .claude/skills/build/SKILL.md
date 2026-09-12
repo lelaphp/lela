@@ -1,0 +1,19 @@
+---
+name: build
+description: Build one ticket to its acceptance criteria and close it at the tracker. `/build <n>`; with no number, the branch's ticket.
+disable-model-invocation: true
+---
+
+A ticket is finished when the tracker says so. `xtask track work` reads one signal back from a session, the ticket closed at the tracker, and a session that ends any other way leaves its worktree standing for a person however green the work is. So the close is the last act, and everything below is what earns it.
+
+**Where you stand.** `cargo xtask ticket read <n>` prints the ticket's acceptance criteria and holds the work to them; without a number it reads the branch's. `gh issue view <n>` is the body and the blocking edges. `AGENTS.md` is the map and binds: read it and `CONTEXT.md` before the first edit, and read the ADR before touching what it names. `cargo xtask track` says which track you are on and what `done` measures since.
+
+**The work.** The witness is the test: write the `php` fence beside the kernel or native before the body where you can, pin it with `cargo xtask witness --accept`, and read what it pinned rather than authoring an `exit=`. Copy php's algorithm where the behaviour is observable; where it is not, pick the smallest model. The smallest proof is the instrument for the crate you touched, and the harness itself is `cargo test -p xtask`. A difference from the oracle the engine is right about is a row proposed in the commit message, never written into `docs/divergence.toml`.
+
+**Landing.** Land through `.claude/skills/stage-commit`, which is the order and the message shape: one concern, the instruments green, and staging by pathspec, `git add -- <paths>` and `git commit -F <file> -- <paths>`. The index is shared with every session in the checkout, so `git add -A`, `git add .` and a commit naming no path take what another session staged. `--no-verify` is not available to you.
+
+**What you found and did not do is filed.** A thing worth doing that this ticket is not is `gh issue create`: `ready-for-agent` when an agent may take it, `for-a-person` when the act is a person's alone (harness-design.md §11), carrying the ticket's `track:` label when it has one, in the house shape — `## What to build`, `## Acceptance criteria` as boxes, `## Blocked by`. A rule you want, or a divergence you found, is a paragraph in the commit message proposing it, with the fixture that would fail. Naming it in your reply alone does not file it.
+
+**The close.** Walk `cargo xtask done` and say which entries applied. Tick every acceptance box the work meets, `gh issue edit <n> --body-file`, the box text unchanged; a box the work does not meet is work still to do, so go back. Then `cargo xtask ticket close <n>`, with `--opens <m>` once per ticket this work filed, or `--opens-nothing` when it filed none. That instrument reads the ticket again, sets the blocking edges and closes it at the tracker. `gh issue close` and `gh api ... state=closed` are denied to you, and that denial is the rule, not an obstacle: the close is the instrument that read the criteria, and nothing else closes a ticket.
+
+**When `done` will not go green.** Do not force it and do not narrow the ticket to fit. If what blocks you is outside this ticket — a red reading you inherited, a manifest row or an oracle pin only a person may write, a decision the design of record does not make — file that blocker as a ticket, wire it on with `gh issue edit <blocker> --add-blocking <n>`, name its number in your reply, and leave this ticket open. The Stop hook holds the turn once for the unticked boxes and the second Stop passes; `track work` then leaves the worktree standing for a person, and the run goes on. That is the ending, not a defect to route around.

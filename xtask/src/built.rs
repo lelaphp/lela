@@ -28,10 +28,19 @@
 //! compared against the workspace this binary was built in, since that is
 //! the code it was built from, and one binary cannot run another
 //! checkout's.
+//!
+//! A refusal says which of the two it is, since only one of them is a
+//! judgement the harness is missing. A build apart from the tree is passed
+//! over by one that rebuilds from it, so the call is judged and the
+//! refusal is a step of the walk; a manifest no build can read ends the
+//! walk with the call unjudged, which is the outage of #16. `permit`
+//! records the first as a skip that names where the call went and the
+//! second as a failure (#118).
 
+use std::fmt;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, anyhow};
 
 use crate::inputs::{manifest_digest, sources_digest};
 
@@ -42,44 +51,106 @@ pub const MANIFEST: &str = env!("XTASK_MANIFEST_DIGEST");
 /// The digest of `xtask/src` as it stood when this binary was compiled.
 pub const SOURCES: &str = env!("XTASK_SOURCES_DIGEST");
 
+/// Why a build will not judge one call, and whether the candidate after it
+/// will. The hook walks its candidates and stops at the first that exits 0
+/// (§4.4), so the two refusals are not one thing, and #118 is what came of
+/// spelling them as one.
+#[derive(Debug)]
+pub enum Refusal {
+    /// This build is not the tree's: another manifest, other sources, or
+    /// neither beside it when it was compiled. The candidate that closes
+    /// the hook's list rebuilds from the tree, so the call goes on to a
+    /// build that judges it, and this refusal decided nothing either way.
+    Stale(anyhow::Error),
+    /// What any build judges by cannot be read at all: the manifest is
+    /// absent, or it is bytes no build of this harness parses. A rebuild
+    /// reads the same bytes and refuses the same way, so the call reaches
+    /// the end of the walk unjudged.
+    Unreadable(anyhow::Error),
+}
+
+impl Refusal {
+    /// Whether the candidate after this one judges the call. A stale build
+    /// hands it on; a manifest no build reads ends the walk.
+    pub fn hands_the_call_on(&self) -> bool {
+        matches!(self, Refusal::Stale(_))
+    }
+
+    /// Why the build refused, in the words the exit carries.
+    pub fn why(&self) -> &anyhow::Error {
+        match self {
+            Refusal::Stale(why) | Refusal::Unreadable(why) => why,
+        }
+    }
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:#}", self.why())
+    }
+}
+
+impl From<Refusal> for anyhow::Error {
+    fn from(refusal: Refusal) -> anyhow::Error {
+        match refusal {
+            Refusal::Stale(why) | Refusal::Unreadable(why) => why,
+        }
+    }
+}
+
 /// This build against what it judges by: the manifest of `checkout`, the
 /// one the call belongs to, and its own sources in `built_root`, the
 /// workspace it was compiled in.
-/// `Ok` when both are what it was compiled against, and an error naming the
-/// one that is not when either has moved. The caller refuses to judge on
-/// that error rather than deciding by rules or with code it was not built
-/// from, whichever way the decision would fall: a stale build that happens
-/// to agree is still a build whose agreement means nothing.
+/// `Ok` when both are what it was compiled against, and a [`Refusal`]
+/// naming the one that is not when either has moved. The caller refuses to
+/// judge on that rather than deciding by rules or with code it was not
+/// built from, whichever way the decision would fall: a stale build that
+/// happens to agree is still a build whose agreement means nothing.
 ///
 /// Any byte apart is apart, a comment included. A build cannot say which
 /// differences change a judgement without reading rules it may be too old
 /// to understand, which is the whole of what went wrong in #16; the cost of
 /// the blunt answer is a rebuild, which the candidate that closes the
-/// hook's list does anyway.
-pub fn judges(checkout: &Path, built_root: &Path) -> Result<()> {
+/// hook's list does anyway. That is why a digest apart is
+/// [`Refusal::Stale`] and hands the call on, while a digest that cannot be
+/// taken at all is [`Refusal::Unreadable`]: no rebuild repairs a manifest
+/// that is not there.
+pub fn judges(checkout: &Path, built_root: &Path) -> Result<(), Refusal> {
     let manifest = manifest_digest(checkout)
-        .with_context(|| format!("reading the manifest of {}", checkout.display()))?;
+        .with_context(|| {
+            format!(
+                "reading the manifest {}",
+                checkout.join(crate::inputs::MANIFEST_FILE).display()
+            )
+        })
+        .map_err(Refusal::Unreadable)?;
     let sources = sources_digest(built_root)
-        .with_context(|| format!("reading the sources of {}", built_root.display()))?;
+        .with_context(|| {
+            format!(
+                "reading the sources {}",
+                built_root.join(crate::inputs::SOURCES_DIR).display()
+            )
+        })
+        .map_err(Refusal::Unreadable)?;
     if MANIFEST.is_empty() || SOURCES.is_empty() {
-        bail!(
+        return Err(Refusal::Stale(anyhow!(
             "this build carries no digest of what it judges by: it was compiled without \
              seams.toml or xtask/src beside it and cannot say what its rules are. {REBUILD}"
-        );
+        )));
     }
     if manifest != MANIFEST {
-        bail!(
+        return Err(Refusal::Stale(anyhow!(
             "this build was compiled against seams.toml {MANIFEST} and {} is {manifest}: it \
              would judge by rules it was not built against. {REBUILD}",
             checkout.join(crate::inputs::MANIFEST_FILE).display()
-        );
+        )));
     }
     if sources != SOURCES {
-        bail!(
+        return Err(Refusal::Stale(anyhow!(
             "this build was compiled from xtask/src {SOURCES} and {} is {sources}: it would \
              judge with code the harness has since changed. {REBUILD}",
             built_root.join(crate::inputs::SOURCES_DIR).display()
-        );
+        )));
     }
     Ok(())
 }
@@ -92,7 +163,7 @@ const REBUILD: &str = "Rebuild it: `cargo build -p xtask`, or run it through `ca
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{MANIFEST, SOURCES, judges};
+    use super::{MANIFEST, Refusal, SOURCES, judges};
     use crate::built_root;
     use crate::inputs::{SOURCES_DIR, manifest_digest, source_files, sources_digest};
 
@@ -151,7 +222,12 @@ mod tests {
             "// a matcher of an earlier revision\n",
         )
         .unwrap();
-        let err = judges(&workspace, &root).unwrap_err().to_string();
+        let refusal = judges(&workspace, &root).unwrap_err();
+        assert!(
+            refusal.hands_the_call_on(),
+            "a rebuild judges the call: {refusal}"
+        );
+        let err = refusal.to_string();
         assert!(err.contains("xtask/src"), "{err}");
         assert!(err.contains(SOURCES), "the digest compiled in: {err}");
         assert!(err.contains("cargo build -p xtask"), "the repair: {err}");
@@ -209,5 +285,30 @@ mod tests {
             "and is in the list build.rs watches"
         );
         judges(&workspace, &root).unwrap_err();
+    }
+
+    /// The two refusals are told apart by whether a rebuild repairs them
+    /// (#118). A digest apart from the tree is [`Refusal::Stale`]: the
+    /// candidate that closes the hook's list rebuilds and judges the call.
+    /// A manifest that is not there at all is [`Refusal::Unreadable`]:
+    /// every candidate reads the same absence, so the walk ends with the
+    /// call unjudged.
+    #[test]
+    fn a_digest_apart_hands_the_call_on_and_a_manifest_that_is_not_there_ends_the_walk() {
+        let workspace = built_root();
+        let root = scratch("refusal-kinds");
+        std::fs::write(root.join("seams.toml"), "[oracle]\npin = \"oracle.toml\"\n").unwrap();
+        let apart = judges(&root, &workspace).unwrap_err();
+        assert!(matches!(apart, Refusal::Stale(_)), "{apart}");
+        assert!(apart.hands_the_call_on(), "{apart}");
+
+        let empty = scratch("refusal-no-manifest");
+        let absent = judges(&empty, &workspace).unwrap_err();
+        assert!(matches!(absent, Refusal::Unreadable(_)), "{absent}");
+        assert!(
+            !absent.hands_the_call_on(),
+            "no rebuild writes the manifest: {absent}"
+        );
+        assert!(absent.to_string().contains("seams.toml"), "{absent}");
     }
 }

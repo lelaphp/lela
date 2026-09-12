@@ -7,7 +7,9 @@
 //! in the JSON; the one non-zero exit is the refusal to decide at all, a
 //! build meeting a manifest it was not compiled against (`built`, #16),
 //! which is what each adapter walks its next candidate on. Every denial,
-//! every note and every refusal is a reading with `instrument = "permit"`.
+//! every note and every refusal is a reading with `instrument = "permit"`,
+//! and a refusal that hands the call on is a skip, since the candidate
+//! that rebuilds judges it (#118).
 //!
 //! What permit judges: `deny`, `deny_argv`, `deny_pattern`, `deny_types`,
 //! `allow` and `on`. The other four predicates (`check`, `deny_lints`,
@@ -48,5 +50,10 @@ pub(crate) const INSTRUMENT: &str = "permit";
 pub(crate) const REGION_RULE: &str = "computed.region-body";
 /// A build refusing to judge by a manifest it was not compiled against is
 /// permit's own, not a manifest rule either; this is the id its readings
-/// carry (#16).
+/// carry (#16). The reading is a skip: the call went to the candidate that
+/// rebuilds, so nothing was judged here and nothing went unjudged (#118).
 pub(crate) const STALE_RULE: &str = "permit.stale-build";
+/// The refusal that no rebuild repairs, a manifest no build of this
+/// harness reads: the call reaches the end of the walk unjudged, which is
+/// the outage of #16, and the reading fails under this id (#118).
+pub(crate) const UNJUDGED_RULE: &str = "permit.unjudged-call";

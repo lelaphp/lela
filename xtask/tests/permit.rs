@@ -1443,10 +1443,15 @@ fn a_build_the_manifest_moved_under_refuses_to_judge_rather_than_judging_stale()
     );
 }
 
-/// The refusal is a reading, so the store says the judge was down where the
-/// facts already are; through the outage of #16 nothing said it.
+/// The refusal is a reading, so the store says what the judge did with the
+/// call where the facts already are; through the outage of #16 nothing
+/// said it. A build apart from the tree hands the call to the candidate
+/// that rebuilds, which judges it, so the reading is a skip that names
+/// where the call went and not a failure (#118): the store of the main
+/// checkout held 5687 such failures against 23 denials, and the one number
+/// a person wants was under them.
 #[test]
-fn the_refusal_is_a_reading_with_the_session_of_the_call_it_did_not_judge() {
+fn the_refusal_that_hands_the_call_on_is_a_skip_that_names_the_next_candidate() {
     let root = scratch_with_a_stale_manifest("stale-reading");
     let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
     let (code, _, err) = permit(&root, &stdin, &[]);
@@ -1457,40 +1462,96 @@ fn the_refusal_is_a_reading_with_the_session_of_the_call_it_did_not_judge() {
         .expect("the refusal was recorded");
     assert_eq!(reading.instrument, "permit");
     assert_eq!(reading.rule, "permit.stale-build");
-    assert_eq!(reading.status, Status::Fail);
+    assert_eq!(
+        reading.status,
+        Status::Skip,
+        "a call that went on was judged: {}",
+        reading.message
+    );
     assert_eq!(reading.session, "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11");
+    assert!(
+        reading.message.contains("next candidate"),
+        "and the reading says where it went: {}",
+        reading.message
+    );
     assert!(
         reading.message.contains("seams.toml"),
         "{}",
         reading.message
     );
     assert_eq!(reading.tree().len(), 40);
+    assert!(
+        Store::of_workspace(&root)
+            .read("permit", "permit.unjudged-call")
+            .unwrap()
+            .is_none(),
+        "nothing reached the end of the walk unjudged"
+    );
 }
 
-/// The outage of #16 was the loud staleness: a build that could not read
-/// the manifest in front of it at all. It exited without judging, which the
-/// fallback walks, and recorded nothing, so `status --section permits` said
-/// the judge was up for the hour it was down. The judge reads the manifest
-/// itself, so a manifest it cannot read is a refusal it records like any
-/// other.
+/// The outage of #16 was the loud staleness: a manifest no build reads at
+/// all. It exited without judging, which the fallback walks, and every
+/// candidate walked to did the same, so the call proceeded unjudged and
+/// `status --section permits` said the judge was up for the hour it was
+/// down. That one stays a failure, since no rebuild repairs it (#118). The
+/// manifest here is a fixture workspace's, the one place a build standing
+/// over the checkout it was compiled against still meets rules it cannot
+/// read (#57).
 #[test]
-fn a_manifest_the_build_cannot_read_is_a_refusal_it_records() {
-    let root = scratch("unreadable");
+fn a_manifest_no_candidate_can_read_is_a_failure_the_build_records() {
+    let root = scratch("unjudged");
+    let nested = root.join("xtask/fixtures/unreadable");
+    std::fs::create_dir_all(&nested).unwrap();
     std::fs::write(
-        root.join("seams.toml"),
+        nested.join("seams.toml"),
         "[oracle]\npin = \"oracle.toml\"\n\n[a_table_of_a_later_revision]\ndays = 14\n",
     )
     .unwrap();
-    let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
+    let stdin = serde_json::json!({
+        "session_id": "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": "xtask/fixtures/unreadable/one.rs",
+            "content": "fn one() {}\n"
+        }
+    })
+    .to_string();
     let (code, out, err) = permit(&root, &stdin, &[]);
     assert_ne!(code, 0, "the build that cannot judge exits non-zero: {out}");
     assert!(out.trim().is_empty(), "and decides nothing: {out}");
     assert!(err.contains("seams.toml"), "{err}");
     let reading = Store::of_workspace(&root)
-        .read("permit", "permit.stale-build")
+        .read("permit", "permit.unjudged-call")
         .unwrap()
         .expect("the refusal was recorded");
+    assert_eq!(reading.rule, "permit.unjudged-call");
     assert_eq!(reading.status, Status::Fail);
+    assert_eq!(reading.session, "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11");
+    assert!(
+        Store::of_workspace(&root)
+            .read("permit", "permit.stale-build")
+            .unwrap()
+            .is_none(),
+        "this build stands over the manifest it was compiled against"
+    );
+}
+
+/// A denial is the other half of #118 and it does not move: a call a rule
+/// refuses is a failing reading under that rule, with the call and the
+/// rule's text on it, whatever the refusals beside it read as.
+#[test]
+fn a_denial_is_still_a_failing_reading_under_the_rule_that_denied_it() {
+    let root = scratch("denial-reading");
+    let stdin = std::fs::read_to_string(fixtures().join("hooks/pretooluse-deny.json")).unwrap();
+    let (code, out, err) = permit(&root, &stdin, &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("harness.self"), "{out}");
+    let reading = Store::of_workspace(&root)
+        .read("permit", "harness.self")
+        .unwrap()
+        .expect("the denial was recorded");
+    assert_eq!(reading.status, Status::Fail);
+    assert_eq!(reading.rule, "harness.self");
     assert_eq!(reading.session, "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11");
 }
 
@@ -1503,13 +1564,15 @@ fn a_build_over_the_manifest_it_was_compiled_against_judges_as_it_did() {
     let (code, out, err) = permit(&root, &stdin, &[]);
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("harness.self"), "{out}");
-    assert!(
-        Store::of_workspace(&root)
-            .read("permit", "permit.stale-build")
-            .unwrap()
-            .is_none(),
-        "nothing was refused"
-    );
+    for rule in ["permit.stale-build", "permit.unjudged-call"] {
+        assert!(
+            Store::of_workspace(&root)
+                .read("permit", rule)
+                .unwrap()
+                .is_none(),
+            "nothing was refused: {rule}"
+        );
+    }
 }
 
 /// `unsafe.homes` judges code, and the harness's own sensors carry the
