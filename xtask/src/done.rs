@@ -318,6 +318,8 @@ fn boxes(root: &Path, store: &Store, ticket: Ticket, unmet: &mut Vec<String>) ->
 /// binary, which the lane alone can tell from a subset of a crate not yet
 /// created or one whose every test skipped, and nothing counted against
 /// what it did read. The rung goes away by itself when the binary exists.
+/// harness-design.md §4.5 condition 1 is where that decision is written
+/// down, with the two ways it was taken over.
 ///
 /// A **witness** had a rung of its own here while the missing binary was
 /// why its reading was a skip (#106). It is not any more: the linked
