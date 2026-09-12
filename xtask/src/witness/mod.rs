@@ -19,7 +19,8 @@
 //! to its numbers rather than its status while the binary is missing
 //! (#106): every fence that ran agreed and every kernel and native carries
 //! one, `failed == 0` and `missing == 0`, which is what condition 1 can ask
-//! for until `crates/php` exists. The skip itself stays, since the reading
+//! for until `crates/php` exists. `phpt` is excused the same rung on other
+//! grounds, since nothing stands in for a corpus (#132). The skip itself stays, since the reading
 //! must go on saying which of the two ran; a skip with nothing judged,
 //! `run == 0`, is the run the oracle was absent for and is unmet as before.
 //!
