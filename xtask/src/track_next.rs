@@ -32,7 +32,9 @@ const READY: &str = "ready-for-agent";
 /// The label a ticket that is a person's alone carries (harness §11).
 const PERSON: &str = "for-a-person";
 /// The prefix of the label that names the one track working a ticket.
-const TRACK_LABEL: &str = "track:";
+/// The frontier reads it here and `ticket` holds a close's successors to
+/// it; one statement, two readers.
+pub(crate) const TRACK_LABEL: &str = "track:";
 
 /// The ticket a track works next: its number, title and url, and its
 /// labels as the tracker spells them, which `track work` reads the
