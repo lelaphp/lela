@@ -80,11 +80,22 @@ impl Zval {
         Zval::scalar(ZvalType::Double, d.to_bits())
     }
 
-    /// An interned string, php's `ZVAL_INTERNED_STR`: not refcounted,
-    /// which is what a compiled program's strings are.
+    /// `ZVAL_STR`: the string, refcounted unless it is one of the
+    /// process's interned strings, which is the one test php makes here
+    /// (`Z/Zend/zend_types.h:1093-1100`).
     #[must_use]
-    pub const fn string(s: Str) -> Zval {
-        Zval::scalar(ZvalType::String, s.payload())
+    pub fn string(s: Str) -> Zval {
+        Zval {
+            value: s.payload(),
+            kind: ZvalType::String,
+            type_flags: if s.is_interned() {
+                0
+            } else {
+                Zval::TYPE_REFCOUNTED
+            },
+            _pad: 0,
+            u2: 0,
+        }
     }
 
     /// The type byte.
@@ -111,11 +122,15 @@ impl Zval {
         }
     }
 
-    /// The interned string of a `String`, else `None`.
+    /// The string of a `String`, else `None`. Naming it does not take an
+    /// owner, as php's `Z_STR` does not.
     #[must_use]
     pub fn as_str(self) -> Option<Str> {
         match self.kind {
-            ZvalType::String => Some(Str::from_payload(self.value)),
+            // SAFETY: the payload of a `String` was written by
+            // `Zval::string` from a live string, and a zval that names a
+            // freed string is the same mistake in php.
+            ZvalType::String => unsafe { Str::from_payload(self.value) },
             _ => None,
         }
     }
@@ -158,10 +173,12 @@ mod tests {
         assert_eq!(Zval::long(-3).as_long(), Some(-3));
         assert_eq!(Zval::double(0.5).as_double(), Some(0.5));
         assert_eq!(Zval::bool(true).as_bool(), Some(true));
+        let interned = Zval::string(Str::intern(b"php"));
         assert_eq!(
-            Zval::string(Str::intern(b"php")).as_str().map(Str::bytes),
-            Some(&b"php"[..])
+            interned.as_str().map(|s| s.bytes().to_vec()),
+            Some(b"php".to_vec())
         );
+        assert!(!interned.is_refcounted());
         assert_eq!(Zval::long(1).as_str(), None);
         assert!(!Zval::null().is_refcounted());
     }
