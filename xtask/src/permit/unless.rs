@@ -32,6 +32,14 @@
 //! reading's own status is not read here: a failing `witness` is condition
 //! 1's to print, in the instrument's own words, and saying it twice in the
 //! row's words would name the wrong problem.
+//!
+//! The negative control is `xtask/fixtures/rules/witness.exit-authored/`:
+//! three `Edit` calls that author a status, denied here as they were
+//! before, and `whole-file.json`, the file whole as a `Write` with a
+//! captured status in it, which is judged twice — denied over a workspace
+//! whose store holds no reading of it, permitted over the tree `witness`
+//! measured. No case of this row can be one that never fires, since what
+//! decides is the evidence and not the shape of the call (#134).
 
 use std::fs;
 use std::path::Path;

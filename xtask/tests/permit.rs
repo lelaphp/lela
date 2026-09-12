@@ -1831,6 +1831,46 @@ fn an_exit_in_a_file_no_crate_row_names_is_denied() {
     assert!(denied.contains(EXIT_AUTHORED), "{denied}");
 }
 
+/// The whole-file case (#134): the shape the ticket named, a `Write` of a
+/// whole file with a status `--accept` captured in it, as one fixture
+/// beside the three `Edit` calls the directory already carries. Under
+/// #105's reading the shape is not what decides, the evidence is, so the
+/// one fixture is judged twice: over this workspace, where the line stands
+/// in no file and no `witness` reading covers it, it is denied with the
+/// rule id; over a tree where the same file stands and `witness` measured
+/// it, it is permitted. A case that must never fire whatever the store
+/// holds cannot exist for this row, and these two answers are what stands
+/// in its place.
+#[test]
+fn the_whole_file_fixture_is_denied_here_and_permitted_where_a_reading_covers_it() {
+    let written = call(&fixtures().join("rules/witness.exit-authored/whole-file.json"));
+    assert_eq!(
+        written.tool_input.file_path.as_deref(),
+        Some(FILE),
+        "the case is over the crate the scratch half lays down"
+    );
+    let text = written
+        .tool_input
+        .content
+        .clone()
+        .expect("a Write carries the whole file");
+    assert!(text.contains("exit=255"), "a captured status: {text}");
+
+    let manifest = Manifest::load(workspace()).unwrap();
+    let denied = denial(workspace(), &manifest, &written)
+        .expect("no reading of this workspace covers that line");
+    assert!(denied.contains(EXIT_AUTHORED), "{denied}");
+
+    let root = scratch("unless-whole-file");
+    lay_down(&root, &text);
+    witness_reading(&root);
+    assert_eq!(
+        denial(&root, &Manifest::load(&root).unwrap(), &written),
+        None,
+        "the instrument measured the tree the whole file stands in"
+    );
+}
+
 /// The tracked pin's binary, when it is on this machine; a failure where
 /// this machine promised the binary (#38).
 fn oracle_is_here() -> bool {
