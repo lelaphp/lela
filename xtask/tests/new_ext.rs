@@ -150,14 +150,15 @@ fn the_crate_laid_down_has_the_template_topology() {
         "the witness asks the oracle whether the extension is there: {lib}"
     );
     assert!(
-        lib.contains("/// ```expect exit\n"),
-        "the bare exit opt-in, for --accept to fill: {lib}"
+        lib.contains("/// ```expect\n"),
+        "an expect fence with no exit asserts zero, the status the snippet has: {lib}"
     );
     assert!(
         lib.lines()
             .filter(|l| l.contains("```expect"))
-            .all(|l| !l.contains("exit=")),
-        "exit= is captured, never authored: {lib}"
+            .all(|l| !l.contains("exit")),
+        "the crate is laid down with nothing for --accept to write, so permit over \
+         the diff reads no exit= in it (witness.exit-authored): {lib}"
     );
     assert!(
         lib.contains("php-src/ext/demo/tests"),

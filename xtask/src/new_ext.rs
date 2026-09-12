@@ -2,9 +2,11 @@
 //! ADR-0005): one extension crate laid down in the template topology, so
 //! the shape is made by the harness and not copied by hand. The crate has
 //! one dependency, the facade; one entry, `extension()`; its state on the
-//! value; a test through the `Capture` sink; a witness in rustdoc with the
-//! bare `exit` opt-in for `xtask witness --accept` to fill (design §8); the
-//! lints the manifest denies under `ext/*` at its root. The
+//! value; a test through the `Capture` sink; a witness in rustdoc whose
+//! `expect` fence names no `exit`, which asserts zero, the status the
+//! snippet has, so `--accept` has nothing to write and the crate carries
+//! no `exit=` (design §8); the lints the manifest denies under `ext/*` at
+//! its root. The
 //! generated `ext/clippy.toml` is rewritten so it covers the new crate, the
 //! crate joins the workspace members, the bundle gains the crate as an
 //! optional dependency behind a feature of its name and one line in
@@ -162,7 +164,7 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str) -> Result<Laid> {
         ));
     }
     laid.notes
-        .push("left: the witness's verdict through `xtask witness --accept`".to_owned());
+        .push("left: nothing of the witness; `xtask witness` holds it to the oracle".to_owned());
     Ok(laid)
 }
 
@@ -196,9 +198,9 @@ fn cargo_toml(name: &str) -> String {
 
 /// The crate root: `extension()` with its request state declared on it,
 /// and one witness asking the oracle whether the extension is loaded.
-fn lib_rs(manifest: &Manifest, name: &str) -> String {
+pub(crate) fn lib_rs(manifest: &Manifest, name: &str) -> String {
     let mut out = format!(
-        "//! The {name} extension: `php-src/ext/{name}` as one crate under `ext/`\n\
+        "//! The `{name}` extension: `php-src/ext/{name}` as one crate under `ext/`\n\
          //! (ADR-0004). One dependency, the facade; one entry, `extension()`; its\n\
          //! state on the value (ADR-0005). The phpt subset is\n\
          //! `php-src/ext/{name}/tests`, through `xtask phpt --subset`.\n\
@@ -206,11 +208,17 @@ fn lib_rs(manifest: &Manifest, name: &str) -> String {
     );
     for rule in denied_lints(manifest, name) {
         let _ = writeln!(out, "// seams.toml rule {}: {}", rule.id, rule.text);
-        let lints = rule.predicate.deny_lints.iter().flatten().cloned();
-        let _ = writeln!(out, "#![deny({})]", lints.collect::<Vec<_>>().join(", "));
+        let lints: Vec<String> = rule
+            .predicate
+            .deny_lints
+            .iter()
+            .flatten()
+            .cloned()
+            .collect();
+        out.push_str(&deny(&lints));
     }
     out.push_str(
-        "// The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).\n\
+        "// The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).\n\
          #![allow(rustdoc::invalid_codeblock_attributes)]\n\
          \n\
          use php_ext::abi::{Extension, ExtensionBuilder};\n\
@@ -228,7 +236,7 @@ fn lib_rs(manifest: &Manifest, name: &str) -> String {
     let _ = writeln!(out, "/// var_dump(extension_loaded('{name}'));");
     out.push_str(
         "/// ```\n\
-         /// ```expect exit\n\
+         /// ```expect\n\
          /// bool(true)\n\
          /// ```\n\
          pub fn extension() -> Extension {\n\
@@ -237,6 +245,27 @@ fn lib_rs(manifest: &Manifest, name: &str) -> String {
     );
     let _ = writeln!(out, "        .build(\"{name}\")");
     out.push_str("}\n");
+    out
+}
+
+/// One `#![deny(..)]` attribute in the shape `cargo fmt --check` holds
+/// the file to: one line while it fits the workspace's width, and one
+/// lint a line, the last without its comma, when it does not. The crate
+/// is laid down formatted, since pre-commit runs `cargo fmt --check`
+/// over it and the template is written and not formatted.
+fn deny(lints: &[String]) -> String {
+    /// rustfmt's `max_width`, the workspace's default.
+    const WIDTH: usize = 100;
+    let line = format!("#![deny({})]\n", lints.join(", "));
+    if line.len() - 1 <= WIDTH {
+        return line;
+    }
+    let mut out = String::from("#![deny(\n");
+    for (at, lint) in lints.iter().enumerate() {
+        let comma = if at + 1 == lints.len() { "" } else { "," };
+        let _ = writeln!(out, "    {lint}{comma}");
+    }
+    out.push_str(")]\n");
     out
 }
 
@@ -574,7 +603,59 @@ fn relative(root: &Path, path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::add_member;
+    use super::{add_member, deny, lib_rs};
+    use crate::manifest::Manifest;
+
+    /// The crate is laid down formatted: pre-commit runs `cargo fmt
+    /// --check` over what is staged, and the six lints the manifest
+    /// denies do not fit one line.
+    #[test]
+    fn the_denied_lints_are_wrapped_when_one_line_is_too_wide() {
+        let short = ["clippy::todo".to_owned()];
+        assert_eq!(deny(&short), "#![deny(clippy::todo)]\n");
+        let six: Vec<String> = [
+            "clippy::unwrap_used",
+            "clippy::expect_used",
+            "clippy::panic",
+            "clippy::unreachable",
+            "clippy::todo",
+            "clippy::unimplemented",
+        ]
+        .iter()
+        .map(|lint| (*lint).to_owned())
+        .collect();
+        assert_eq!(
+            deny(&six),
+            "#![deny(\n    clippy::unwrap_used,\n    clippy::expect_used,\n    clippy::panic,\n    \
+             clippy::unreachable,\n    clippy::todo,\n    clippy::unimplemented\n)]\n"
+        );
+    }
+
+    /// The verdict of a witness is captured and never authored
+    /// (`witness.exit-authored`), and an `expect` fence with no `exit`
+    /// asserts zero, which is the status of the template's snippet: so
+    /// the crate is laid down with nothing for `--accept` to write, and
+    /// `permit` over the diff reads no `exit=` in it.
+    #[test]
+    fn the_template_witness_pins_no_exit_for_accept_to_write() {
+        let root = lib_rs(&Manifest::named("ext/standard"), "standard");
+        let fence = root
+            .lines()
+            .find(|line| line.trim_start().starts_with("/// ```expect"))
+            .unwrap();
+        assert_eq!(fence, "/// ```expect", "{root}");
+    }
+
+    #[test]
+    fn the_crate_root_names_the_extension_in_backticks() {
+        let root = lib_rs(&Manifest::named("ext/pdo_mysql"), "pdo_mysql");
+        let first = root.lines().next().unwrap();
+        assert!(
+            first.contains("`pdo_mysql`"),
+            "clippy::doc_markdown reads a name with an `_` as an item unless the prose \
+             backticks it, and the crate is laid down clippy-clean: {first}"
+        );
+    }
 
     fn root(name: &str, text: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
