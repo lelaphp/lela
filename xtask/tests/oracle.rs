@@ -125,6 +125,41 @@ fn a_regime_adds_its_ini_after_the_recipe() {
     );
 }
 
+/// The flag before the program (harness-design.md §4.3): `-l` compiles a
+/// program and does not run it, which is how the compile-identity lane
+/// measures a compiler over a corpus every file of which was written to
+/// be run. The flag stands before the program's path and the recipe's
+/// `-d` entries before that, so a lane names a mode of php without the
+/// pin moving; an invocation that names none runs what it is given. php
+/// names the program as it was given it, the recipe's own name in the
+/// scratch directory the run happens in.
+#[test]
+fn a_flag_stands_before_the_program_and_the_default_names_none() {
+    let Some(pin) = pin() else { return };
+    let oracle = pin.oracle();
+    let snippet = r#"echo "ran\n";"#;
+
+    let lint = [String::from("-l")];
+    let linted = oracle
+        .run_under(&oracle::Invocation {
+            flags: &lint,
+            ..oracle::Invocation::new(pin.oracle.path.as_path(), Program::Snippet(snippet))
+        })
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&linted.stdout),
+        "No syntax errors detected in witness.php"
+    );
+
+    let ran = oracle
+        .run_under(&oracle::Invocation::new(
+            pin.oracle.path.as_path(),
+            Program::Snippet(snippet),
+        ))
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&ran.stdout), "ran");
+}
+
 #[test]
 fn a_file_runs_in_its_own_directory() {
     let Some(pin) = pin() else { return };

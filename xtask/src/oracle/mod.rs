@@ -453,6 +453,12 @@ pub struct Invocation<'a> {
     pub regime: Option<&'a str>,
     /// Ini after the recipe's and the regime's: a test's `--INI--`.
     pub ini: &'a [String],
+    /// Flags before the program's path, where php takes a mode of its own:
+    /// `-l`, which compiles a file and does not run it, is the
+    /// compile-identity lane's, and both binaries get it from here so that
+    /// one recipe stands behind both. Empty for a phpt test and a witness,
+    /// which run what they are given.
+    pub flags: &'a [String],
     /// Arguments after the program's path: a test's `--ARGS--`.
     pub args: &'a [String],
     /// Environment entries added to the recipe's: a test's `--ENV--`.
@@ -474,6 +480,7 @@ impl<'a> Invocation<'a> {
             program,
             regime: None,
             ini: &[],
+            flags: &[],
             args: &[],
             env: &[],
             stdin: None,
@@ -534,7 +541,8 @@ impl<'a> Oracle<'a> {
         {
             cmd.arg("-d").arg(ini);
         }
-        cmd.arg(&scratch.script)
+        cmd.args(call.flags)
+            .arg(&scratch.script)
             .args(call.args)
             .current_dir(&scratch.dir);
         if recipe.env_clear {
