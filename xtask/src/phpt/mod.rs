@@ -475,6 +475,14 @@ pub(crate) fn reading(
     reading.count("borked", tally.count(Judgement::Bork))?;
     reading.count("xfailed", tally.count(Judgement::XFail))?;
     reading.count("diverged", tally.count(Judgement::Diverged))?;
+    // Why nothing ran, where nothing did: the engine has no binary yet,
+    // which is the one cause `done` excuses (#132). A subset of a crate
+    // not yet created, and a subset whose every test skipped, are the
+    // other two ways this lane skips and are not this number.
+    reading.count(
+        "engine_absent",
+        u64::from(!uncreated && matches!(runner, Runner::Absent(_))),
+    )?;
     // The burndown's number: what met its expectation, over the tests the
     // subset holds, so a `[[week]]` bar can read one figure.
     reading.numbers.insert(
