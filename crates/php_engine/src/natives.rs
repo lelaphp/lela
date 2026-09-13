@@ -479,15 +479,17 @@ mod tests {
     /// `nTableSize` `zend_interned_strings_activate` sets
     /// (`Z/Zend/zend_string.c:78-84`, `:346-349`).
     ///
-    /// The oracle's number for the same source, under the recipe as
-    /// `witness.php`, is 463400, and the two are still not comparable:
-    /// what php's request heap holds beside the interned strings and
-    /// their table is here on the system allocator, the op array, the
-    /// compiler and the tree, which design §5.13 states as an
-    /// approximation. What replaces this pin with a number both answer is
-    /// #174's witness, where a variable in `php_compile` and a
-    /// `str_repeat()` native let a snippet measure what one huge block
-    /// moves `memory_get_usage()` by.
+    /// The oracle's number for the same source, under the recipe and the
+    /// harness's own scratch tree, is 463336, and the two are still not
+    /// comparable: what php's request heap holds beside the interned
+    /// strings and their table is here on the system allocator, the op
+    /// array, the compiler and the tree, which design §5.13 states as an
+    /// approximation. The witness on `php_heap::string::Buckets` holds the
+    /// two numbers to each other under the divergence row that says so
+    /// (#178). What replaces this pin with a number both answer is #174's
+    /// witness, where a variable in `php_compile` and a `str_repeat()`
+    /// native let a snippet measure what one huge block moves
+    /// `memory_get_usage()` by.
     #[test]
     fn the_real_usage_flag_is_optional_and_coerced_as_php_coerces_a_bool() {
         let (unflagged, _) = served("<?php var_dump(memory_get_usage());");
