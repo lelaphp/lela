@@ -114,7 +114,12 @@
 //! --section track` renders the last of them. The worktree's own
 //! readings still come in by the retire, as they did; these are the
 //! run's, and their status is never the run's exit, which says whether
-//! the harness stood and not whether a session landed its ticket.
+//! the harness stood and not whether a session landed its ticket. What
+//! the session spent joins the step's reading (#210): the plugin records
+//! a `usage` reading once a turn, under the ticket, and `hold` puts the
+//! last one's `usd`, `tokens` and `turn` beside the commit, the run's
+//! reading summing the `usd`; a ticket whose session recorded none, a
+//! stand-in in a test, carries none and renders blank.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -128,6 +133,7 @@ use crate::ticket::{self, Gh, STAMPED_OVER, State};
 use crate::track::{self, Model, Ticket, Track, fast_forward, not_ahead, rev, short};
 use crate::track_next::{self, Next};
 use crate::track_sync;
+use crate::usage::{Spent, Total};
 use crate::worktree::{self, say};
 
 /// The prefix of every line printed, so a person reads whose line it is.
@@ -401,19 +407,36 @@ impl Worked {
         }
     }
 
-    /// The step's verdict, which the tally holds and the step's reading is
-    /// written from; an empty frontier worked no ticket and has none.
-    fn judged(&self) -> Option<Judged<Landed>> {
+    /// The step as `hold` reads it: its verdict, which the tally holds and
+    /// the step's reading is written from, and where its worktree stands
+    /// when it does; an empty frontier worked no ticket and has none.
+    fn step(&self) -> Option<Step> {
         match self {
             Worked::Nothing { .. } | Worked::StillEmpty { .. } => None,
-            Worked::Closed { ticket, commit, .. } => {
-                Some(verdict(*ticket, commit, Landed::Closed, self.said()))
-            }
-            Worked::Standing { ticket, commit, .. } => {
-                Some(verdict(*ticket, commit, Landed::Standing, self.said()))
-            }
+            Worked::Closed { ticket, commit, .. } => Some(Step {
+                judged: verdict(*ticket, commit, Landed::Closed, self.said()),
+                standing_at: None,
+            }),
+            Worked::Standing {
+                ticket,
+                commit,
+                dir,
+                ..
+            } => Some(Step {
+                judged: verdict(*ticket, commit, Landed::Standing, self.said()),
+                standing_at: Some(dir.clone()),
+            }),
         }
     }
+}
+
+/// One step as [`hold`] reads it: the verdict, and the worktree that
+/// stands when the ticket was left standing, whose own store still holds
+/// what its session spent (#210); a retired worktree's readings are in
+/// the track's log already.
+struct Step {
+    judged: Judged<Landed>,
+    standing_at: Option<PathBuf>,
 }
 
 /// What one step of a run came to, the two outcomes a ticket has: the
@@ -515,16 +538,23 @@ impl Swept {
         }
     }
 
-    /// The step's verdict: what the sweep did to one worktree is what a
-    /// step does to one, so it is judged and read back the same way.
-    fn judged(&self) -> Judged<Landed> {
+    /// The step: what the sweep did to one worktree is what a step does
+    /// to one, so it is judged and read back the same way.
+    fn step(&self) -> Step {
         match self {
-            Swept::MergedBack { ticket, commit, .. } => {
-                verdict(*ticket, commit, Landed::Closed, self.said())
-            }
-            Swept::Stands { ticket, commit, .. } => {
-                verdict(*ticket, commit, Landed::Standing, self.said())
-            }
+            Swept::MergedBack { ticket, commit, .. } => Step {
+                judged: verdict(*ticket, commit, Landed::Closed, self.said()),
+                standing_at: None,
+            },
+            Swept::Stands {
+                ticket,
+                commit,
+                dir,
+                ..
+            } => Step {
+                judged: verdict(*ticket, commit, Landed::Standing, self.said()),
+                standing_at: Some(dir.clone()),
+            },
         }
     }
 }
@@ -547,19 +577,28 @@ fn outcomes(tally: &Tally<Landed>, how: &str) -> String {
 /// One step held (#117): its verdict kept for the run's closing reading,
 /// and its own reading written under the ticket's number, a pass on a
 /// ticket landed on the track and a fail on a worktree left standing,
-/// carrying the commit its branch is at and the reason. The reading is
-/// stamped over the workspace, which is what a ticket's is stamped over,
-/// since a step has no tree of its own. The status written is never the
-/// run's exit: a ticket left standing is the session's failure and does
-/// not stop the run. A step that worked no ticket has no verdict and
-/// writes nothing.
+/// carrying the commit its branch is at, the reason, and what the
+/// session spent (#210): the `usd`, `tokens` and `turn` of the last
+/// `usage` reading under the ticket's scope, read from the standing
+/// worktree's store where one stands and from the track's log otherwise,
+/// which is where a retire put it; a ticket with none carries none. The
+/// reading is stamped over the workspace, which is what a ticket's is
+/// stamped over, since a step has no tree of its own. The status written
+/// is never the run's exit: a ticket left standing is the session's
+/// failure and does not stop the run. A step that worked no ticket has no
+/// verdict and writes nothing.
 fn hold(
     root: &Path,
     store: &Store,
     tally: &mut Tally<Landed>,
-    judged: Option<Judged<Landed>>,
+    total: &mut Total,
+    step: Option<Step>,
 ) -> Result<()> {
-    let Some(judged) = judged else {
+    let Some(Step {
+        judged,
+        standing_at,
+    }) = step
+    else {
         return Ok(());
     };
     let mut reading = Reading::stamped_over(INSTRUMENT, &judged.id, root, Path::new(STAMPED_OVER))?;
@@ -569,19 +608,33 @@ fn hold(
     };
     judged.place.clone_into(&mut reading.commit);
     reading.message.clone_from(&judged.note);
+    let own = standing_at.as_deref().map(Store::of_workspace);
+    let stores: Vec<&Store> = own.iter().chain(std::iter::once(store)).collect();
+    let spent = Spent::last(&stores, &judged.id)?;
+    if let Some(spent) = spent {
+        spent.carry(&mut reading);
+    }
+    total.add(spent);
     store.record(std::slice::from_ref(&reading))?;
     tally.found += 1;
     tally.judged.push(judged);
     Ok(())
 }
 
-/// The run's own reading, scoped to [`RUN`]: how many tickets it worked
-/// and how many landed in its numbers, `how` it ended and each ticket's
-/// outcome in its message. A run that landed nothing is a skip and not a
-/// pass, the tally's rung for a run that measured nothing; a run that
-/// left a worktree standing fails. Written whatever the run came to, so a
-/// run the harness stopped leaves the record of what it worked.
-fn record_run(root: &Path, store: &Store, tally: &Tally<Landed>, how: &str) -> Result<()> {
+/// The run's own reading, scoped to [`RUN`]: how many tickets it worked,
+/// how many landed and the `usd` its sessions spent together in its
+/// numbers, `how` it ended and each ticket's outcome in its message. A
+/// run that landed nothing is a skip and not a pass, the tally's rung for
+/// a run that measured nothing; a run that left a worktree standing
+/// fails. Written whatever the run came to, so a run the harness stopped
+/// leaves the record of what it worked.
+fn record_run(
+    root: &Path,
+    store: &Store,
+    tally: &Tally<Landed>,
+    total: Total,
+    how: &str,
+) -> Result<()> {
     let standing = tally.against().len() as u64;
     let outcome = match (standing, tally.met()) {
         (0, 0) => Outcome::NothingRan,
@@ -595,6 +648,7 @@ fn record_run(root: &Path, store: &Store, tally: &Tally<Landed>, how: &str) -> R
     )?;
     reading.count("landed", tally.met())?;
     reading.count("standing", standing)?;
+    total.carry(&mut reading);
     store.record(std::slice::from_ref(&reading))?;
     Ok(())
 }
@@ -813,12 +867,13 @@ struct Ended {
 pub fn command(root: &Path, one: bool) -> Result<()> {
     let store = Store::of_workspace(root);
     let mut tally = Tally::default();
-    let ended = run(root, &store, &mut tally, one);
+    let mut total = Total::default();
+    let ended = run(root, &store, &mut tally, &mut total, one);
     let how = match &ended {
         Ok(ended) => ended.how.clone(),
         Err(_) => STOPPED.to_owned(),
     };
-    let written = record_run(root, &store, &tally, &how);
+    let written = record_run(root, &store, &tally, total, &how);
     let ended = ended?;
     written?;
     match ended.refused {
@@ -830,17 +885,23 @@ pub fn command(root: &Path, one: bool) -> Result<()> {
 /// The run itself: the sweep, then one step or the frontier until it
 /// empties, each held by [`hold`] as it is reached, so a run the harness
 /// stops keeps the steps it took.
-fn run(root: &Path, store: &Store, tally: &mut Tally<Landed>, one: bool) -> Result<Ended> {
+fn run(
+    root: &Path,
+    store: &Store,
+    tally: &mut Tally<Landed>,
+    total: &mut Total,
+    one: bool,
+) -> Result<Ended> {
     let gh = Gh::on_path();
     for outcome in sweep(root, &gh)
         .context("the track's standing worktrees were not swept, so nothing is laid down")?
     {
         print!("{}", outcome.render());
-        hold(root, store, tally, Some(outcome.judged()))?;
+        hold(root, store, tally, total, Some(outcome.step()))?;
     }
     if one {
         let outcome = work(root, &gh)?;
-        hold(root, store, tally, outcome.judged())?;
+        hold(root, store, tally, total, outcome.step())?;
         let refused = if let Worked::Standing { .. } = outcome {
             Some(outcome.render().trim_end().to_owned())
         } else {
@@ -862,7 +923,7 @@ fn run(root: &Path, store: &Store, tally: &mut Tally<Landed>, one: bool) -> Resu
             }
             _ => None,
         };
-        hold(root, store, tally, outcome.judged())?;
+        hold(root, store, tally, total, outcome.step())?;
         if let Some(how) = empty {
             if !tally.judged.is_empty() {
                 say(WORK, &outcomes(tally, &how));

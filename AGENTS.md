@@ -65,7 +65,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=a1229c06d5230699920ccb84b27219a9756f2de25417d18cdad24076fc231a06 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=2045537680f30e5a86b16f377f909c82db455e1108100f4ee5e6b8215e6b572f out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -131,6 +131,7 @@ Commands:
   track              Say which track the branch is on, the commit `done` measures since, the track's store root, the branch's ticket and the track's model; as text or as one object. Writes no reading
   worktree           A track's worktrees: `add` lays one down under .claude/worktrees/<branch>, `retire` appends its log into the track's store and removes it. Writes no reading
   ticket             A ticket, one GitHub issue: `read <n>` holds it to its acceptance criteria and writes the reading; `close <n>` does the same and then closes it, naming what the work opened
+  usage              What a session spent, per turn from the plugin: `record` reads the `SessionUsage` object on stdin and writes one `usage` reading under the branch's ticket, or the session id
   regions            Render the named files' regions with `computed run` and say what it did, one line per file, for pre-commit to re-stage. Writes no reading
   bench              Measure one bar under the measurement protocol: paired reps with the A/A control, the load average recorded, one reading per bar, and the exit 0 whatever the reading says
   budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code and a stale generated file
@@ -151,7 +152,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=acf182a2611ad7d97aff0d172b82ede8270e57d707b45da2a93552c7d406a6ca out=0d4c9c5bc66e2cfa0fb54c57c2c79ccd20b5363086ea03228cd0c4c4627113a0 -->
+<!-- /computed in=c9606df86cbaddbd9117c43d4137f74d4682ac8e13ea43baca53f13e2b1e8c4f out=6e970f91a24d994ab80d2f44d6e5be3d143369ba9deb072e4dde81463ececadb -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

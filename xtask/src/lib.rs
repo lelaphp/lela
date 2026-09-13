@@ -59,6 +59,7 @@ pub mod track_next;
 pub mod track_sync;
 pub mod track_work;
 pub mod unsafe_audit;
+pub mod usage;
 pub mod vocab;
 pub mod witness;
 pub mod worktree;
@@ -70,7 +71,7 @@ use std::process::ExitCode;
 use anyhow::{Result, bail};
 use clap::Parser;
 
-use cli::{Cli, Command, TicketCommand, TrackCommand, WorktreeCommand};
+use cli::{Cli, Command, TicketCommand, TrackCommand, UsageCommand, WorktreeCommand};
 use divergence::Registry;
 use manifest::Manifest;
 use reading::{Outcome, Reading, Store};
@@ -197,6 +198,9 @@ fn command_line() -> Result<()> {
             }
         },
         Command::Ticket { command } => ticket_command(&root, &manifest, &store, command),
+        Command::Usage {
+            command: UsageCommand::Record { session, turn },
+        } => usage::record(&root, &store, &session, turn),
         Command::Track { .. } => bail!("track: answered above"),
         Command::Regions { .. } => bail!("regions: answered above"),
         Command::Worktree { .. } => bail!("worktree: answered above"),

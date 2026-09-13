@@ -26,6 +26,7 @@ use crate::port_map;
 use crate::reading::{self, Log, Reading, Store};
 use crate::sources::NOT_YET_CREATED;
 use crate::track_work;
+use crate::usage;
 
 /// What a section says when no instrument has measured a row.
 pub(crate) const NO_READING: &str = "no reading";
@@ -100,6 +101,7 @@ pub fn render(
         Section::PortMap => (instrument(&readings, port_map::INSTRUMENT), INSTRUMENT),
         Section::Ticket => (instrument(&readings, "ticket"), TICKET),
         Section::Track => (last_run(&store.log()?), TRACK),
+        Section::Usage => (last_per_scope(&store.log()?, usage::INSTRUMENT), USAGE),
         Section::Permits => {
             return permits(manifest, &readings, &store.log()?, format, session_id);
         }
@@ -270,11 +272,18 @@ impl Row {
 
     /// Every number of the reading as `key=value`, space-separated.
     fn numbers(&self) -> String {
+        self.numbers_but(&[])
+    }
+
+    /// Every number of the reading but the keys named, which a section
+    /// renders in columns of their own, as `key=value`, space-separated.
+    fn numbers_but(&self, shown: &[&str]) -> String {
         self.reading
             .as_ref()
             .map(|x| {
                 x.numbers
                     .iter()
+                    .filter(|(k, _)| !shown.contains(&k.as_str()))
                     .map(|(k, v)| format!("{k}={v}"))
                     .collect::<Vec<_>>()
                     .join(" ")
@@ -533,6 +542,21 @@ fn last_run(log: &Log) -> Vec<Row> {
     of_the_instrument[start..end]
         .iter()
         .map(|r| Row::new(&[("ticket", json!(r.scope))], Some((*r).clone())))
+        .collect()
+}
+
+/// The `usage` section (#210): the last reading of `instrument` under each
+/// scope, read off the append-only log as the `track` section is, since a
+/// retired worktree's readings reach the track's store through its log
+/// alone; one row per scope, a ticket's number or a session's id, in
+/// scope order.
+fn last_per_scope(log: &Log, instrument: &str) -> Vec<Row> {
+    let mut last: BTreeMap<&str, &Reading> = BTreeMap::new();
+    for reading in log.readings.iter().filter(|r| r.instrument == instrument) {
+        last.insert(reading.scope.as_str(), reading);
+    }
+    last.into_iter()
+        .map(|(scope, r)| Row::new(&[("scope", json!(scope))], Some(r.clone())))
         .collect()
 }
 
@@ -1155,19 +1179,53 @@ const TICKET: Columns = (
     },
 );
 
+/// The numbers the `track` section shows in columns of their own: what
+/// the ticket's session spent (#210), blank where no usage reading said.
+const SPENT: [&str; 3] = ["usd", "tokens", "turn"];
+
 /// The `track` section: one row per step of the last run, the ticket it
-/// worked, its outcome, the commit its branch is at and the reason; the
-/// run's own row says `run` and carries its counts.
+/// worked, its outcome, what its session spent, the commit its branch is
+/// at and the reason; the run's own row says `run`, carries its counts
+/// and the `usd` total.
 const TRACK: Columns = (
-    &["ticket", "reading", "numbers", "commit", "message"],
+    &[
+        "ticket", "reading", "usd", "tokens", "turn", "numbers", "commit", "message",
+    ],
     |r| {
         vec![
             r.fact("ticket"),
             r.status(),
-            r.numbers(),
+            r.number("usd"),
+            r.number("tokens"),
+            r.number("turn"),
+            r.numbers_but(&SPENT),
             r.reading
                 .as_ref()
                 .map(|x| x.commit.clone())
+                .unwrap_or_default(),
+            r.message(),
+        ]
+    },
+);
+
+/// The `usage` section: the last reading per scope, the session it was
+/// taken in, the turn it reached, its tokens and its usd, when, and the
+/// window's fill as the message.
+const USAGE: Columns = (
+    &["scope", "session", "turn", "tokens", "usd", "at", "message"],
+    |r| {
+        vec![
+            r.fact("scope"),
+            r.reading
+                .as_ref()
+                .map(|x| short(&x.session).to_owned())
+                .unwrap_or_default(),
+            r.number("turn"),
+            r.number("tokens"),
+            r.number("usd"),
+            r.reading
+                .as_ref()
+                .map(|x| x.at.to_string())
                 .unwrap_or_default(),
             r.message(),
         ]

@@ -30,11 +30,11 @@ pub const LOG: &str = "log.jsonl";
 #[serde(deny_unknown_fields)]
 pub struct Reading {
     /// The subcommands that write one, in the order `cli::Command` has
-    /// them: `api-check | permit | done | track-work | ticket | budget |
-    /// clippy | test | phpt | port-map | compile-identity | unsafe-audit |
-    /// steer | divergence-reason | witness | vocab`; `bench | crosscheck |
-    /// fuzz | mutants` are named by harness-design.md §4.2 and not built
-    /// yet.
+    /// them: `api-check | permit | done | track-work | ticket | usage |
+    /// budget | clippy | test | phpt | port-map | compile-identity |
+    /// unsafe-audit | steer | divergence-reason | witness | vocab`; `bench
+    /// | crosscheck | fuzz | mutants` are named by harness-design.md §4.2
+    /// and not built yet.
     pub instrument: String,
     /// A crate, a corpus subset, a bar's id such as `G1`, a ticket's
     /// number, or `"workspace"`.
@@ -57,9 +57,10 @@ pub struct Reading {
     pub commit: String,
     pub at: Datetime,
     /// The session of the call a `permit` reading judged, from the
-    /// hook's `session_id`; the session a `ticket` close named, and the
-    /// one a `done --hook` verdict was taken in; empty for every other
-    /// instrument, and for a call that carried none.
+    /// hook's `session_id`; the session a `ticket` close named, the one a
+    /// `done --hook` verdict was taken in, and the one a `usage` reading
+    /// measured; empty for every other instrument, and for a call that
+    /// carried none.
     #[serde(default)]
     pub session: String,
 }

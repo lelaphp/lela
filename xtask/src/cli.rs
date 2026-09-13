@@ -157,6 +157,21 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: TicketCommand,
     },
+    /// What a session spent, per turn from the plugin: `record` reads the
+    /// `SessionUsage` object on stdin and writes one `usage` reading under
+    /// the branch's ticket, or the session id
+    ///
+    /// The object is what `$.session.usage()` answered, and the plugin's
+    /// `turn.complete` pipes it here once a turn, so the last reading
+    /// under a scope is the session's final figure; `track work` joins it
+    /// to the ticket's own reading. The scope is the ticket recorded on
+    /// the branch where there is one and the session id otherwise, so an
+    /// interactive session on `main` still shows up. Usage is measured,
+    /// never judged: the reading passes whatever the numbers say.
+    Usage {
+        #[command(subcommand)]
+        command: UsageCommand,
+    },
     /// Render the named files' regions with `computed run` and say what it
     /// did, one line per file, for pre-commit to re-stage. Writes no reading.
     ///
@@ -484,6 +499,22 @@ pub(crate) enum TicketCommand {
     },
 }
 
+/// Record what one turn spent.
+#[derive(Debug, Subcommand)]
+pub(crate) enum UsageCommand {
+    /// Read the `SessionUsage` object on stdin and write the turn's
+    /// reading under the branch's ticket, or under the session id.
+    Record {
+        /// The session's id, the reading's scope on a branch that records
+        /// no ticket and its `session` on every reading.
+        #[arg(long, value_name = "ID")]
+        session: String,
+        /// The turn's number in the session, counted by the plugin.
+        #[arg(long, value_name = "N")]
+        turn: u64,
+    },
+}
+
 /// The sections of harness-design.md §4.6 that have a renderer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Section {
@@ -512,9 +543,12 @@ pub enum Section {
     /// it and the session.
     Ticket,
     /// The last run of `xtask track work`: one row per ticket it worked,
-    /// with the outcome and the commit its branch is at, and the run's
-    /// own row last.
+    /// with the outcome, what its session spent and the commit its branch
+    /// is at, and the run's own row last with the usd total.
     Track,
+    /// The usage readings, the last per scope: the session, the turn it
+    /// reached, its tokens and its usd.
+    Usage,
     /// Each rule permit judges: its last finding, denial or note, and the
     /// denials the log holds per session and in total; then the log per
     /// instrument, with the candidates for silent (the CI section of §7).

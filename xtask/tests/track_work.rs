@@ -150,7 +150,10 @@ impl Scratch {
     /// and the subagents' model to what earlier sessions wrote, then does
     /// what `act.<n>` says, or `act` where the test wrote none for the
     /// ticket: `commit` commits a file named for the ticket on the branch, `close` flips the
-    /// ticket's recorded state to closed, and either or both. Started on
+    /// ticket's recorded state to closed, `spend <usd>` records what the
+    /// plugin would once a turn, a `usage` reading of turn 3 at that price
+    /// through this crate's own binary in the worktree (#210), and any of
+    /// them together. Started on
     /// `/frontier` (#85) it runs the shell file `act.frontier` instead,
     /// where the test writes what the planning session files. The prompt
     /// is the last argument and runs to several lines (#115), so
@@ -159,11 +162,12 @@ impl Scratch {
     /// whole of it for a test that reads the rest.
     fn stand_ins(&self) {
         let dir = self.dir.display();
+        let xtask = env!("CARGO_BIN_EXE_xtask");
         let gh = format!(
             "#!/bin/sh\nif [ \"$1\" = issue ] && [ \"$2\" = list ]; then cat '{dir}/list.json'; exit $?; fi\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then f='{dir}/view.'$3'.json'; [ -f \"$f\" ] || f='{dir}/view.json'; cat \"$f\"; exit $?; fi\nprintf '%s\\n' \"$*\" >> '{dir}/calls'\nexit 0\n"
         );
         let claude = format!(
-            "#!/bin/sh\n# the last argument is the prompt; its first line is `/<skill> <n>`\nrest=''; i=0\nfor a; do i=$((i+1)); [ $i -lt $# ] && rest=\"$rest $a\"; prompt=$a; done\nline=$(printf '%s\\n' \"$prompt\" | sed -n 1p); n=${{line##* }}\nprintf '%s\\n' \"${{rest# }} $line\" >> '{dir}/session.args'\nprintf '%s\\n' \"$prompt\" >> '{dir}/session.prompt'\npwd -P >> '{dir}/session.cwd'\nprintf '%s\\n' \"${{CLAUDE_CODE_SUBAGENT_MODEL-unset}}\" >> '{dir}/session.subagent'\nif [ \"$line\" = /frontier ]; then sh '{dir}/act.frontier'; exit $?; fi\nact=$(cat '{dir}/act.'$n 2>/dev/null || cat '{dir}/act')\nview='{dir}/view.'$n'.json'; [ -f \"$view\" ] || view='{dir}/view.json'\ncase \"$act\" in *commit*) echo worked > worked.$n.txt && git add -- worked.$n.txt && git -c commit.gpgsign=false -c core.hooksPath=/var/empty -c user.name=x -c user.email=x@x commit -q -m 'the work' -- worked.$n.txt || exit 3;; esac\ncase \"$act\" in *close*) sed 's/\"OPEN\"/\"CLOSED\"/' \"$view\" > '{dir}/view.tmp' && mv '{dir}/view.tmp' \"$view\";; esac\nexit 0\n"
+            "#!/bin/sh\n# the last argument is the prompt; its first line is `/<skill> <n>`\nrest=''; i=0\nfor a; do i=$((i+1)); [ $i -lt $# ] && rest=\"$rest $a\"; prompt=$a; done\nline=$(printf '%s\\n' \"$prompt\" | sed -n 1p); n=${{line##* }}\nprintf '%s\\n' \"${{rest# }} $line\" >> '{dir}/session.args'\nprintf '%s\\n' \"$prompt\" >> '{dir}/session.prompt'\npwd -P >> '{dir}/session.cwd'\nprintf '%s\\n' \"${{CLAUDE_CODE_SUBAGENT_MODEL-unset}}\" >> '{dir}/session.subagent'\nif [ \"$line\" = /frontier ]; then sh '{dir}/act.frontier'; exit $?; fi\nact=$(cat '{dir}/act.'$n 2>/dev/null || cat '{dir}/act')\nview='{dir}/view.'$n'.json'; [ -f \"$view\" ] || view='{dir}/view.json'\ncase \"$act\" in *commit*) echo worked > worked.$n.txt && git add -- worked.$n.txt && git -c commit.gpgsign=false -c core.hooksPath=/var/empty -c user.name=x -c user.email=x@x commit -q -m 'the work' -- worked.$n.txt || exit 3;; esac\ncase \"$act\" in *close*) sed 's/\"OPEN\"/\"CLOSED\"/' \"$view\" > '{dir}/view.tmp' && mv '{dir}/view.tmp' \"$view\";; esac\ncase \"$act\" in *spend*) usd=${{act##*spend }}; printf '{{\"context\":{{\"tokens\":152000,\"window\":200000,\"percent\":76}},\"rateLimits\":[],\"cost\":{{\"usd\":%s}}}}' \"$usd\" | '{xtask}' --root \"$(pwd -P)\" usage record --session stand-in --turn 3 >/dev/null || exit 4;; esac\nexit 0\n"
         );
         for (name, text) in [("gh", gh), ("claude", claude)] {
             let file = self.dir.join("bin").join(name);
@@ -612,14 +616,18 @@ fn no_model_refuses_before_a_worktree_and_an_empty_frontier_is_none() {
 /// the readings say (#117): one per step scoped to the ticket, a pass and
 /// a fail, each with its commit and its reason, and the run's own closing
 /// one, which is what `status --section track` renders the run from.
+/// What each session spent rides on its step (#210): the first's usage
+/// reading reached the track's store by the retire, the second's is
+/// still the standing worktree's, and each step carries its own, the run
+/// the total.
 #[test]
 fn the_frontier_is_worked_until_it_empties_past_a_ticket_left_open() {
     let scratch = Scratch::lay("frontier");
     scratch.tracker(&[20, 21], 20);
     scratch.viewed(20);
     scratch.viewed(21);
-    scratch.act_on(20, "commit close");
-    scratch.act_on(21, "commit");
+    scratch.act_on(20, "commit close spend 1.25");
+    scratch.act_on(21, "commit spend 2.5");
     let before = rev(&scratch.root, "origin/t-x");
     let (code, out) = scratch.work(&[]);
     assert_eq!(code, 0, "{out}");
@@ -685,19 +693,32 @@ fn the_frontier_is_worked_until_it_empties_past_a_ticket_left_open() {
     let section = scratch.section("track");
     let rows: Vec<&str> = section.lines().skip(2).collect();
     assert_eq!(rows.len(), 3, "{section}");
-    assert!(rows[0].starts_with("| 20 | pass |  | "), "{section}");
-    assert!(rows[0].contains(&first[..7]), "{section}");
+    assert!(
+        rows[0].starts_with(&format!(
+            "| 20 | pass | 1.25 | 152000 | 3 |  | {} | ",
+            &first[..7]
+        )),
+        "the retired worktree's usage, read from the track's log: {section}"
+    );
     assert!(
         rows[0].contains("#20 closed at") && rows[0].contains("t-x/t20 retired"),
         "{section}"
     );
-    assert!(rows[1].starts_with("| 21 | fail |  | "), "{section}");
-    assert!(rows[1].contains(&second[..7]), "{section}");
+    assert!(
+        rows[1].starts_with(&format!(
+            "| 21 | fail | 2.5 | 152000 | 3 |  | {} | ",
+            &second[..7]
+        )),
+        "the standing worktree's usage, read from its own store: {section}"
+    );
     assert!(
         rows[1].contains("#21 is open after the session") && rows[1].contains("stands at"),
         "{section}"
     );
-    assert!(rows[2].starts_with("| run | fail | "), "{section}");
+    assert!(
+        rows[2].starts_with("| run | fail | 3.75 |  |  | "),
+        "{section}"
+    );
     assert!(
         rows[2].contains("landed=1 run=2 standing=1"),
         "how many it worked and how many landed: {section}"

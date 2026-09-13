@@ -2,8 +2,9 @@
 // enabled by .claude/settings.json as harness@dax-php from the repository's
 // own marketplace (.claude-plugin/marketplace.json).
 //
-// Two hooks, and nothing the shipped command hooks do not also do except
-// the refresh and in-process latency. `tool.call` on Edit, Write and Bash
+// Three hooks, and nothing the shipped command hooks do not also do
+// except the refresh, in-process latency and the one figure only this
+// layer has. `tool.call` on Edit, Write and Bash
 // hands the call to `xtask permit` on stdin, the shape the command hook
 // reads, and returns its deny, or the tool's result with the notes as
 // context; after a Bash call that ran an instrument it invalidates
@@ -15,7 +16,14 @@
 // skips a hook whose block is over it, so each stands on its own and one
 // over the cap is cut with a note rather than the session losing both
 // (#64). The SessionStart command hook prints no map, so a session
-// without this module has none (§5).
+// without this module has none (§5). `turn.complete` records what the
+// session has spent (#210): `$.session.usage()` is the one live figure of
+// the `/cost` ledger and the context window's fill, and it is piped once
+// a turn to `xtask usage record`, which writes the reading under the
+// branch's ticket, so `track work` can join it to the ticket it landed or
+// left standing. Usage is a reading, not a judgement: a `usage()` that
+// rejects or an `xtask` that does not run is one `$.ui.log` line and the
+// turn proceeds.
 //
 // The command hook in hooks.json beside this file judges the same call
 // beneath this one. A denial here ends the call and is recorded here; an
@@ -120,6 +128,12 @@ function decisionOf(stdout: string): Decision {
   return { notes: head?.additionalContext };
 }
 
+/// The turn `usage record` is told, counted here from the module's load:
+/// a reload of the plugin starts it over, and the last reading under a
+/// scope is still the session's final figure, since the ledger it carries
+/// is the session's whole.
+let turns = 0;
+
 export const register: Register = (on, options) => {
   if (options.functionHook === false) return;
 
@@ -156,6 +170,41 @@ export const register: Register = (on, options) => {
     }
     if (decision.notes === undefined || result.deny !== undefined) return result;
     return { ...result, context: [...(result.context ?? []), decision.notes] };
+  });
+
+  on('turn.complete', async ($, e, next) => {
+    const out = await next(e);
+    turns += 1;
+    const turn = turns;
+    try {
+      const [cwd, id, bins, usage] = await Promise.all([
+        $.session.cwd(),
+        $.session.id(),
+        xtask($),
+        $.session.usage(),
+      ]);
+      const stdin = JSON.stringify(usage);
+      // The candidates as permit walks them, the built binaries and then
+      // cargo; a build that does not know `usage` exits without writing,
+      // and the next one records the turn.
+      let recorded = false;
+      for (const bin of bins) {
+        const run = await $.process.run(
+          [...bin, 'usage', 'record', '--session', id, '--turn', String(turn)],
+          { cwd, stdin, timeoutMs: 120_000 },
+        );
+        if (run.exitCode === 0) {
+          recorded = true;
+          break;
+        }
+      }
+      if (!recorded) {
+        $.ui.log(`harness: turn ${turn}'s usage was not recorded; no xtask ran \`usage record\``);
+      }
+    } catch (err) {
+      $.ui.log(`harness: turn ${turn}'s usage was not recorded: ${String(err)}`);
+    }
+    return out;
   });
 
   on('prompt.context', async ($, e, next) => {
