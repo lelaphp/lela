@@ -1,6 +1,7 @@
-//! The schema held to its reader and its emitter: `php.ungram` parses,
+//! The schema held to its reader and its emitters: `php.ungram` parses,
 //! validates, declares the 19 token classes and no other, and emits the
-//! kinds `lib.rs` includes. The floors sit just below the counts read at
+//! kinds `lib.rs` includes and the typed nodes `tree.rs` includes, one
+//! struct per node kind and no accessor that unwraps. The floors sit just below the counts read at
 //! the pin (139 struct nodes, 72 keywords, 66 puncts including the implied
 //! `COMMA`, 19 token classes), so they catch a reader that drops half the
 //! schema without churning on a legitimate addition. The generator is
@@ -152,4 +153,88 @@ fn the_included_enum_answers_for_the_schema() {
         Some(SyntaxKind::HALT_COMPILER_KW)
     );
     assert_eq!(SyntaxKind::from_keyword("foo"), None);
+}
+
+/// The typed nodes `build.rs` wrote and `tree.rs` includes, read back as
+/// text: one struct per struct node of the schema, a `!` child a plain
+/// field, no `expect(` or `unwrap(` behind any read, and no `Visitor`
+/// (ADR-0003, design §4.9).
+#[test]
+fn the_emitted_tree_is_one_struct_per_node_kind_and_unwraps_nothing() {
+    let emitted = include_str!(concat!(env!("OUT_DIR"), "/tree.rs"));
+    let grammar = ungram::parse(&real_grammar_text()).expect("php.ungram parses");
+    let structs = emitted.matches("\npub struct ").count();
+    assert_eq!(
+        structs,
+        grammar.struct_nodes().len(),
+        "one struct per struct node"
+    );
+    for absent in ["expect(", "unwrap(", "Visitor", "fn visit", "SyntaxNode"] {
+        assert!(
+            !emitted.contains(absent),
+            "emitted tree.rs holds {absent:?}"
+        );
+    }
+    // `!` children are the bare type; everything else is `Option` or a slice.
+    for needle in [
+        "    pub lhs: Expr,\n",
+        "    pub op: Option<TokenId>,\n",
+        "    pub body: NodeId<ClassBody>,\n",
+        "    pub name: TokenId,\n",
+        "    pub params: NodeId<ParamList>,\n",
+        "    pub stmts: Box<[Stmt]>,\n",
+        "    pub modifiers: Box<[Modifier]>,\n",
+        "    pub doc_comment: Option<TokenId>,\n",
+        "pub enum Expr {\n",
+        "    NameRef(TokenId),\n",
+        "    ClassKw(TokenId),\n",
+        "pub trait HasAttributes {\n",
+        "pub fn is_binary_op(self) -> bool",
+    ] {
+        assert!(
+            emitted.contains(needle),
+            "emitted tree.rs missing {needle:?}"
+        );
+    }
+}
+
+/// The emitted nodes are what the crate exports: a node is built from
+/// its fields, its kind is its struct's, and an alternation says which
+/// node stands there without a cast.
+#[test]
+fn the_included_nodes_are_built_from_fields() {
+    use php_syntax::tree::{
+        BinaryExpr, Expr, HasModifiers, Modifier, Node, NodeId, Param, TokenId,
+    };
+    use php_syntax::{SyntaxKind, TextRange};
+
+    let sum = BinaryExpr {
+        range: TextRange::new(6, 12),
+        lhs: Expr::SimpleVarExpr(NodeId::new(0)),
+        op: Some(TokenId(3)),
+        rhs: Some(Expr::LiteralExpr(NodeId::new(1))),
+    };
+    assert_eq!(BinaryExpr::KIND, SyntaxKind::BINARY_EXPR);
+    assert_eq!(sum.range().end(), 12);
+    assert!(matches!(sum.lhs, Expr::SimpleVarExpr(id) if id.index() == 0));
+
+    let param = Param {
+        range: TextRange::new(0, 10),
+        attrs: Box::new([]),
+        modifiers: Box::new([
+            Modifier::PublicKw(TokenId(0)),
+            Modifier::ReadonlyKw(TokenId(1)),
+        ]),
+        ty: None,
+        byref: None,
+        variadic: None,
+        var: TokenId(2),
+        default: None,
+        hooks: None,
+    };
+    assert_eq!(param.modifiers().len(), 2);
+    assert!(SyntaxKind::PLUS.is_binary_op());
+    assert!(!SyntaxKind::PLUS.is_name_ref());
+    assert_eq!(SyntaxKind::PLUS.display_name(), Some("`+`"));
+    assert_eq!(SyntaxKind::BINARY_EXPR.display_name(), None);
 }

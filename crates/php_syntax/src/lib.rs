@@ -2,7 +2,9 @@
 //! token stream, the typed tree in a safe arena and the parser with php's
 //! error text. What stands today is the schema, `php.ungram` beside this
 //! crate, and [`SyntaxKind`], the kind of every token and node, which
-//! `build.rs` emits from it; the lexer, [`lex`], whose state stack mirrors
+//! `build.rs` emits from it, with the typed nodes of [`tree`], one struct
+//! per node kind with named child fields, emitted from the same schema;
+//! the lexer, [`lex`], whose state stack mirrors
 //! Zend's scanner and whose tokens concatenate to the input; the source
 //! model under it, [`Span`], [`LineIndex`] and [`Diagnostic`]; php's names
 //! for the lexer's kinds, [`operator_name`] and the four tables beside it,
@@ -14,13 +16,15 @@
 #![forbid(unsafe_code)]
 
 mod kind {
-    //! The generated enum (`build.rs`).
+    //! The generated enum and its display names (`build.rs`).
     include!(concat!(env!("OUT_DIR"), "/syntax_kind.rs"));
+    include!(concat!(env!("OUT_DIR"), "/display.rs"));
 }
 mod lexer;
 mod line_index;
 mod php_names;
 mod source;
+pub mod tree;
 
 pub use kind::SyntaxKind;
 pub use lexer::{LexOptions, Lexed, Token, lex};

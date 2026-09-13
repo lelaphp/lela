@@ -1,8 +1,9 @@
 // php.ungram — Mahout syntax-tree schema for PHP 8.5
 // =====================================================================
-// This file is the single source of truth for the shape of Mahout's
-// syntax tree. `xtask codegen` generates from it: the SyntaxKind enum,
-// typed AST accessor structs/enums, mixin traits, and visitor scaffolding.
+// This file is the single source of truth for the shape of the
+// syntax tree. `build.rs` generates from it: the SyntaxKind enum, one
+// struct per node with named child fields, the alternation enums, and
+// the mixin traits (ADR-0003; design §4.9).
 // It is the change-controlled artifact named in the M0 plan (§8): freely
 // churned until gate G8, ADR-per-change after. The normative grammar of
 // PHP remains php-src's zend_language_parser.y + the differential gates;
@@ -11,7 +12,7 @@
 //
 // ---------------------------------------------------------------------
 // DSL SYNTAX
-//   Node = Rule                  struct node: SyntaxKind + typed accessors
+//   Node = Rule                  struct node: SyntaxKind + a struct of fields
 //   Node = A | B | C             alternation-only: generates a typed enum
 //   trait Name = Rule            mixin (see A5)
 //   Node : TraitA TraitB = Rule  node opts into mixins
@@ -32,45 +33,44 @@
 //   (e.g. `BinaryOp`) generate a token accessor + kind predicate.
 //
 // A2 — Arity honesty (the recovery contract). DEFAULT IS OPTIONAL:
-//   every child accessor returns Option<T> unless marked `!`, because
-//   under error recovery any child can be absent. `Rule!` is a promise
-//   ENFORCED ON THE PARSER (debug-asserted by the tree builder): the
-//   node is never constructed without that child. Use `!` only where
-//   construction is anchored on the child itself (a BinaryExpr is built
-//   *around* an existing lhs; a PostfixIncDec around its operand) or on
-//   a token that cannot appear without it. Repetition (`*`, `,*`, `,+`)
-//   generates an AstChildren<T> iterator — possibly empty even for `,+`;
-//   the `+` records grammar intent and seeds a validation diagnostic.
+//   every child field is Option<T> unless marked `!`, because under
+//   error recovery any child can be absent. `Rule!` is a promise
+//   ENFORCED ON THE PARSER, and the field is the bare type, so the tree
+//   builder cannot construct the node without that child. Use `!` only
+//   where construction is anchored on the child itself (a BinaryExpr is
+//   built *around* an existing lhs; a PostfixIncDec around its operand)
+//   or on a token that cannot appear without it. Repetition (`*`, `,*`,
+//   `,+`) generates a boxed slice — possibly empty even for `,+`; the
+//   `+` records grammar intent and seeds a validation diagnostic.
 //   (M0.3 refinement: `!` markers were audited against the real parser's
 //   recovery paths and removed wherever construction is NOT anchored on
 //   the child — e.g. a do-while is built from `do`, so its body can be
 //   absent under recovery. The survivors are hard guarantees.)
 //
-// A3 — Tokens. Literal tokens appear in the tree (lossless) but get
-//   accessors only when labeled or when the node is token-only. Multiple
-//   alternative tokens in one position (e.g. op:('+'|'-')) generate a
-//   single token accessor whose kind the caller inspects.
+// A3 — Tokens. Literal tokens stay in the token stream (lossless) and
+//   become fields only when labeled or when the node is token-only.
+//   Multiple alternative tokens in one position (e.g. op:('+'|'-'))
+//   generate a single token field whose kind the caller inspects.
 //
 // A4 — Same-typed siblings. When a node has several children of one
-//   type, labeled accessors resolve POSITIONALLY RELATIVE TO ANCHOR
-//   TOKENS in the rule (e.g. TernaryExpr's `then` is the Expr between
+//   type, the builder resolves the labeled fields POSITIONALLY RELATIVE
+//   TO ANCHOR TOKENS in the rule (e.g. TernaryExpr's `then` is the Expr between
 //   '?' and ':'; `else_branch` follows ':'). Where optionality would
 //   make anchored positions ambiguous, a wrapper node is introduced
 //   instead (ForInit/ForCond/ForStep, ForeachKey, ArrayKey, YieldKey).
 //   Wrappers are deliberate API, not noise: they give lowering a stable
 //   place to hang spans.
 //
-// A5 — Mixins. `trait` definitions inject their children into every
-//   opted-in node and generate a Rust trait with blanket accessor impls,
-//   so item-tree extraction and HIR lowering generalize over
-//   HasAttributes/HasModifiers/etc. instead of matching node-by-node.
-//   HasDocComment is the one trivia-backed trait: it declares no
-//   children; codegen emits an accessor that scans the node's leading
-//   trivia for the nearest <doc_comment>.
+// A5 — Mixins. `trait` definitions inject their children as fields of
+//   every opted-in node and generate a Rust trait that reads them, so
+//   the compiler generalizes over HasAttributes/HasModifiers/etc.
+//   instead of matching node-by-node. HasDocComment is the one
+//   trivia-backed trait: it declares no children; the field it injects
+//   is the token index of the doc comment the builder attached.
 //
 // A6 — Trivia. Whitespace and comments are trivia tokens: present in
-//   the green tree (G2 losslessness), invisible to this schema and to
-//   typed accessors. Inline HTML is NOT trivia — it has echo semantics —
+//   the token stream (losslessness), invisible to this schema and to
+//   the typed nodes. Inline HTML is NOT trivia — it has echo semantics —
 //   and is modeled as InlineHtmlStmt below. Open/close tags ('<?php',
 //   '?>') are structural tokens owned by the nodes they delimit; the
 //   `?>`-as-semicolon rule is a parser token-glue rule, not a schema
