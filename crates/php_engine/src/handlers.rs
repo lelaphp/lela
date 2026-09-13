@@ -7,8 +7,9 @@
 //! makes the safepoint a folded branch under `Nop`.
 //!
 //! The set is the one procedural PHP needs to reach a native: `ECHO`, the
-//! call sequence `INIT_FCALL`, `SEND_VAL`, `SEND_VAR`, `DO_ICALL`, and
-//! `RETURN`, which raises the return safepoint.
+//! call sequence `INIT_FCALL`, `SEND_VAL`, `SEND_VAR`, `DO_ICALL`,
+//! `RETURN`, which raises the return safepoint, and `JMP`, which raises
+//! the loop safepoint when it jumps backward.
 
 // Every handler is generic over the tier and hands back the same edge, so
 // the generated dispatch calls them all the same way; the ones that raise a
@@ -129,6 +130,23 @@ pub(crate) fn do_icall<T: Tier>(
     }
 }
 
+/// `ZEND_JMP`: the unconditional jump `pass_two` leaves, its target
+/// opline in `op1`. A jump to an earlier opline is a loop's back-edge
+/// and is a safepoint site (design §5.7): the frame is positioned at the
+/// target, as a tier is asked with the jump target as the frame's opline
+/// (`jit-design.md` §2.2), then the interrupt check, then the site with
+/// the number the compiler wrote in `result`. A forward jump is neither
+/// and costs one comparison.
+pub(crate) fn jmp<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, op: &Opline) -> Edge {
+    let back = op.op1 <= req.vm().opline(frame);
+    req.vm_mut().jump(frame, op.op1);
+    if back {
+        crate::interrupt::check(req)?;
+        continued(T::safepoint(req, frame, Site::Loop(SafepointIdx(op.out))))?;
+    }
+    Ok(Stepped::Same(frame))
+}
+
 /// `ZEND_RETURN`: the operand read, then the return safepoint, then the
 /// frame popped (design §4.3 seam 8, §5.8). The safepoint carries the
 /// number the compiler wrote in `result`, and is raised for every frame
@@ -202,6 +220,87 @@ mod tests {
     use crate::engine::{Engine, RequestDescription};
     use crate::probe::{Asked, Probe};
 
+    /// A unit whose main op array is one `JMP` to `target`, its
+    /// safepoint number `number`.
+    fn jumping(target: u32, number: u32) -> Arc<Unit> {
+        Arc::new(Unit {
+            main: OpArray {
+                oplines: vec![
+                    Opline::default(),
+                    Opline {
+                        opcode: Opcode::Jmp,
+                        op1: target,
+                        out: number,
+                        ..Opline::default()
+                    },
+                ]
+                .into_boxed_slice(),
+                ..OpArray::default()
+            },
+            ..Unit::default()
+        })
+    }
+
+    /// Design §5.7, §5.8: a `JMP` to an earlier opline is a back-edge and
+    /// raises the loop safepoint with the number the compiler wrote; one
+    /// to a later opline raises nothing. Both leave the frame at the
+    /// target, which is the opline a tier is asked with.
+    #[test]
+    fn a_backward_jump_raises_the_loop_safepoint_and_a_forward_one_does_not() {
+        let engine = Engine::builder().tier::<Probe>().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let unit = jumping(0, 1);
+        let frame = req.push_frame(Arc::clone(&unit));
+        let code = crate::exec::code_of(&unit);
+        let back = code.oplines.get(1).copied().unwrap_or_default();
+        req.vm_mut().jump(frame, 1);
+
+        assert_eq!(
+            jmp::<Probe>(&mut req, frame, code, &back),
+            Ok(Stepped::Same(frame))
+        );
+        assert_eq!(req.vm().opline(frame), 0);
+        assert_eq!(
+            req.state::<Asked>().sites,
+            vec![(Site::Loop(SafepointIdx(1)), frame)]
+        );
+
+        let forward = Opline {
+            opcode: Opcode::Jmp,
+            op1: 1,
+            ..Opline::default()
+        };
+        assert_eq!(
+            jmp::<Probe>(&mut req, frame, code, &forward),
+            Ok(Stepped::Same(frame))
+        );
+        assert_eq!(req.vm().opline(frame), 1);
+        assert_eq!(req.state::<Asked>().sites.len(), 1);
+    }
+
+    /// Design §5.8: the interrupt check at the back-edge, before the
+    /// site, so a request whose time is up stops within one iteration
+    /// and the tier is not asked.
+    #[test]
+    fn the_interrupt_is_tested_at_a_back_edge() {
+        let engine = Engine::builder().tier::<Probe>().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let unit = jumping(0, 1);
+        let frame = req.push_frame(Arc::clone(&unit));
+        let code = crate::exec::code_of(&unit);
+        let back = code.oplines.get(1).copied().unwrap_or_default();
+        req.vm_mut().jump(frame, 1);
+        req.interrupt().elapsed(1);
+
+        assert_eq!(
+            jmp::<Probe>(&mut req, frame, code, &back),
+            Err(Fatal::Error(String::from(
+                "Maximum execution time of 1 second exceeded"
+            )))
+        );
+        assert_eq!(req.state::<Asked>().sites, vec![]);
+    }
+
     /// A unit whose main op array is one `RETURN null`, its safepoint
     /// number `number`, as the compiler writes it into `result`.
     fn returning(number: u32) -> Arc<Unit> {
@@ -241,7 +340,7 @@ mod tests {
             Ok(Stepped::Popped(outer))
         );
         assert_eq!(
-            req.state::<Asked>().0,
+            req.state::<Asked>().sites,
             vec![(Site::Return(SafepointIdx(1)), inner)]
         );
 
@@ -250,7 +349,7 @@ mod tests {
             r#return::<Probe>(&mut req, outer, code, &op),
             Ok(Stepped::Done)
         );
-        assert_eq!(req.state::<Asked>().0.len(), 1);
+        assert_eq!(req.state::<Asked>().sites.len(), 1);
         req.stack_mut().pop_entry(guard);
     }
 }

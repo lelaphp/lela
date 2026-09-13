@@ -596,7 +596,7 @@ mod tests {
         let frame = req.push_frame(Arc::new(unit));
         assert_eq!(crate::tier::execute::<Probe>(&mut req, frame), Ok(()));
         assert_eq!(
-            req.state::<Asked>().0,
+            req.state::<Asked>().sites,
             vec![(Site::Entry, frame)],
             "the entry frame is activated, and its own return raises no site"
         );

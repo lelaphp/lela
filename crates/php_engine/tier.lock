@@ -1,1 +1,4 @@
-# tier.lock: what php_jit imports from php_engine (design §4.5, jit-design.md §2; ADR-0006), in two sections, face and kernels. Diffed per section by api-check once it measures sectioned locks; php_jit does not exist yet, so both sections are empty.
+# tier.lock: what php_jit imports from php_engine (design §4.5, jit-design.md §2; ADR-0006), in two sections, face and kernels. Diffed per section by api-check once it measures sectioned locks; php_jit does not exist yet, so the face holds the items month one has laid down and the kernels section is empty.
+api::request::Interrupt
+api::request::Interrupt::raised
+api::request::Request::interrupt

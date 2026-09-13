@@ -107,6 +107,14 @@ impl Vm {
             .map_or(0, |op| op.lineno)
     }
 
+    /// `ZEND_VM_SET_OPCODE`: the frame stands at `at`, which is where a
+    /// jump leaves it.
+    pub(crate) fn jump(&mut self, frame: FrameRef, at: u32) {
+        if let Some(state) = self.at_mut(frame) {
+            state.opline = at;
+        }
+    }
+
     /// `ZEND_VM_NEXT_OPCODE`: on to the opline after this one.
     pub(crate) fn advance(&mut self, frame: FrameRef) {
         if let Some(state) = self.at_mut(frame) {

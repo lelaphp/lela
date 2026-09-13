@@ -9,6 +9,7 @@
 use std::any::{Any, TypeId};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use php_heap::{Fatal, FrameRef, Heap, HeapHooks, MapTable, ObjectId, VmStack, Zval};
 use php_unit::Unit;
@@ -131,6 +132,71 @@ impl Resources {
     }
 }
 
+/// One request's interrupt (design §5.8; `CONTEXT.md`, Interrupt), as
+/// the thread that raises it sees it: `Send` and `Sync`, and cloned so
+/// that the engine's execution timer and the thread serving the request
+/// share one. Raising is all a setter does; acting on it is the loop's,
+/// at a back-edge, at a frame's activation and after every
+/// `Flow::Resume`, and nothing else touches it.
+#[derive(Debug, Clone, Default)]
+pub struct Interrupt(Arc<State>);
+
+impl Interrupt {
+    /// What signal delivery raises it with: the loop dispatches what was
+    /// delivered to its PHP handlers at its next check, which is php's
+    /// `zend_interrupt_function`.
+    pub fn raise(&self) {
+        self.0.raised.store(true, Ordering::Release);
+    }
+
+    /// Whether it is raised: what the loop tests at its three safepoints
+    /// and what compiled code tests once per loop iteration through the
+    /// tier's `ExitCtx` (`jit-design.md` §4.3).
+    #[must_use]
+    pub fn raised(&self) -> &AtomicBool {
+        &self.0.raised
+    }
+
+    /// What the engine's execution timer raises it with,
+    /// `max_execution_time` having elapsed: the seconds it was armed
+    /// with, then the two words `zend_timeout_handler` stores
+    /// (`Z/Zend/zend_execute_API.c:1516`). The seconds go down first and
+    /// the store that raises it releases them, because php's handler
+    /// runs on the interrupted thread and this timer does not.
+    pub(crate) fn elapsed(&self, seconds: i64) {
+        self.0.seconds.store(seconds, Ordering::Relaxed);
+        self.0.timed_out.store(true, Ordering::Relaxed);
+        self.0.raised.store(true, Ordering::Release);
+    }
+
+    /// What a check that found it raised reads: it is cleared, and the
+    /// seconds come back when the execution timer was what raised it,
+    /// both as php clears them (`Z/Zend/zend_vm_def.h:10526`, `:10537`).
+    /// Clearing it acquires what the setter released, so the seconds the
+    /// text names are the ones the timer was armed with; the loop's own
+    /// test stays a relaxed load, because this is where the two threads
+    /// meet.
+    pub(crate) fn taken(&self) -> Option<i64> {
+        self.0.raised.swap(false, Ordering::Acquire);
+        self.0
+            .timed_out
+            .swap(false, Ordering::Relaxed)
+            .then(|| self.0.seconds.load(Ordering::Relaxed))
+    }
+}
+
+/// What an [`Interrupt`] holds, one per request: the atomic the loop
+/// tests, which of the two setters raised it, and the seconds php's
+/// timeout text names.
+#[derive(Debug, Default)]
+struct State {
+    raised: AtomicBool,
+    /// php's `EG(timed_out)`.
+    timed_out: AtomicBool,
+    /// php's `EG(timeout_seconds)`.
+    seconds: AtomicI64,
+}
+
 /// How the request is ending, when it is: a fatal, a source that did
 /// not compile, or an `exit`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,6 +253,11 @@ pub struct Request {
     pending: Option<PhpObject>,
     /// What the entry frame of the innermost serving returned.
     returned: Value,
+    /// The interrupt, shared with whatever thread sets it (design §5.8).
+    interrupt: Interrupt,
+    /// The execution timer, armed while `max_execution_time` is not
+    /// zero; dropping the request unsets it.
+    timer: Option<crate::interrupt::Timer>,
 }
 
 impl Request {
@@ -229,6 +300,8 @@ impl Request {
             strict_types: false,
             pending: None,
             returned: Value::null(),
+            interrupt: Interrupt::default(),
+            timer: None,
         };
         // Request state in bundle order (ADR-0005).
         for extension in &req.shared.extensions {
@@ -236,6 +309,9 @@ impl Request {
                 req.states.push((*type_id, build()));
             }
         }
+        // The execution timer, as `zend_set_timeout` arms one at the
+        // start of a request (design §5.8).
+        req.timer = crate::interrupt::Timer::arm(&req.interrupt, req.max_execution_time());
         req
     }
 
@@ -488,6 +564,19 @@ impl Request {
     /// shortest text that reads back as the same double.
     pub(crate) fn serialize_precision(&self) -> i32 {
         self.ini_number(b"serialize_precision", -1)
+    }
+
+    /// `max_execution_time`, the seconds the engine's execution timer is
+    /// armed for; zero, php's CLI default, arms none.
+    pub(crate) fn max_execution_time(&self) -> i64 {
+        i64::from(self.ini_number(b"max_execution_time", 0))
+    }
+
+    /// Whether a handler left a throwable pending, php's `EG(exception)`:
+    /// the test the loop performs after a `throw`-effect op and after a
+    /// `Flow::Resume` (`jit-design.md` §2.2).
+    pub(crate) fn is_pending(&self) -> bool {
+        self.pending.is_some()
     }
 
     fn ini_number(&self, name: &[u8], default: i32) -> i32 {
@@ -936,6 +1025,17 @@ impl Request {
     /// The request's resource table.
     pub fn resources(&mut self) -> &mut Resources {
         &mut self.resources
+    }
+
+    /// This request's interrupt (design §5.8): what the loop tests at a
+    /// back-edge, at a frame's activation and after every
+    /// `Flow::Resume`, and what the engine's execution timer and signal
+    /// delivery raise. A `tier.lock` item, because compiled code tests
+    /// the same atomic once per loop iteration through the tier's
+    /// `ExitCtx` (`jit-design.md` §4.3).
+    #[must_use]
+    pub fn interrupt(&self) -> &Interrupt {
+        &self.interrupt
     }
 
     // -------------------------------------------------- ini

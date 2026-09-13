@@ -20,7 +20,7 @@ use php_unit::Unit;
 
 use crate::api::abi::Extension;
 use crate::api::request::Request;
-use crate::exec;
+use crate::{exec, interrupt};
 
 /// The number of a safepoint within its op array; zero is the entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -138,8 +138,10 @@ mod dispatch {
 }
 
 /// What a handler does with the flow a safepoint answered. `Continue` is
-/// the whole of it while `Nop` is the only adapter; a tier that served
-/// code is `php_jit`'s and lands with it (ADR-0006).
+/// the whole of it while `Nop` is the only adapter; a handler cannot
+/// dispatch from another frame, so a tier that served code at a
+/// handler's site lands with `php_jit` (ADR-0006). The loop's own sites
+/// take a `Resume` through [`answered`].
 pub(crate) fn continued(flow: Flow) -> Result<(), Fatal> {
     match flow {
         Flow::Continue => Ok(()),
@@ -148,6 +150,35 @@ pub(crate) fn continued(flow: Flow) -> Result<(), Fatal> {
             "InternalError: a tier served code and this loop has no resumption for it yet",
         ))),
     }
+}
+
+/// What the loop does with the flow a safepoint answered
+/// (`jit-design.md` §2.2), as an edge it already knows: `Continue` goes
+/// on in the same frame, and a `Resume` is the frame the tier left the
+/// loop in, after the interrupt check the loop performs at a back-edge
+/// and the pending test it performs after a `throw`-effect op. The two
+/// are in that order, and an interrupt the tier found raised is raised
+/// still, because consuming it is the loop's.
+fn answered(req: &mut Request, flow: Flow, frame: FrameRef) -> Result<Stepped, Fatal> {
+    let at = match flow {
+        Flow::Continue => return Ok(Stepped::Same(frame)),
+        Flow::Bail(fatal) => return Err(fatal),
+        Flow::Resume(at) => at,
+    };
+    interrupt::check(req)?;
+    if req.is_pending() {
+        return Ok(Stepped::Threw(at));
+    }
+    Ok(Stepped::Same(at))
+}
+
+/// The activation of a frame, its prologue having raised nothing
+/// (design §5.6, §4.3 seam 8): the interrupt check, then `Site::Entry`,
+/// then the frame the loop goes on in.
+fn activated<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
+    interrupt::check(req)?;
+    let flow = T::safepoint(req, frame, Site::Entry);
+    answered(req, flow, frame)
 }
 
 /// The dispatch loop over `frame` until the entry frame returns, asking
@@ -160,26 +191,27 @@ pub fn execute<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal>
     outcome
 }
 
-/// The loop itself, with the entry slot standing.
+/// The loop itself, with the entry slot standing. `execute` activates
+/// its own entry frame whatever the caller is, where php installs its
+/// own site (design §4.3 seam 8).
 fn serve<T: Tier>(req: &mut Request, entry: FrameRef) -> Result<(), Fatal> {
     let mut frame = entry;
-    // The activation of a frame, after its prologue has run without
-    // raising; `execute` raises it for its own entry frame whatever the
-    // caller is, as php's own counter fires (design §4.3 seam 8).
-    continued(T::safepoint(req, frame, Site::Entry))?;
+    let mut stepped = activated::<T>(req, frame)?;
     loop {
-        let unit = standing(req, frame)?;
-        let code = exec::code_of(&unit);
-        let op = *at_opline(req, frame, code)?;
-        match dispatch::dispatch::<T>(req, frame, code, &op)? {
+        match stepped {
             Stepped::Same(at) | Stepped::Moved(at) | Stepped::Popped(at) => frame = at,
             Stepped::Pushed(at) => {
                 frame = at;
-                continued(T::safepoint(req, frame, Site::Entry))?;
+                stepped = activated::<T>(req, frame)?;
+                continue;
             }
             Stepped::Threw(_) => return req.uncaught(),
             Stepped::Done => return Ok(()),
         }
+        let unit = standing(req, frame)?;
+        let code = exec::code_of(&unit);
+        let op = *at_opline(req, frame, code)?;
+        stepped = dispatch::dispatch::<T>(req, frame, code, &op)?;
     }
 }
 
