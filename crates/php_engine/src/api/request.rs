@@ -257,8 +257,10 @@ pub struct Request {
     next_object: u32,
     streams: u32,
     flushed: bool,
-    /// The native whose body is being served, for the raisers' text.
-    active_native: Option<String>,
+    /// php's `zend_active_function()` while a native's body is being
+    /// served: the raisers render its declared name and its parameters'
+    /// names off the declaration, never off the caller's spelling.
+    active_native: Option<Function>,
     /// The caller file's `declare(strict_types=1)`.
     strict_types: bool,
     /// php's `EG(exception)`: the throwable a handler left pending, which
@@ -494,12 +496,13 @@ impl Request {
     /// with an argument in hand.
     fn trace_as_string(&self) -> String {
         let mut frames: Vec<String> = Vec::new();
-        if let Some(native) = &self.active_native {
+        if self.active_native.is_some() {
             let file = self.current_file().cloned().unwrap_or_default();
             frames.push(format!(
-                "#0 {}({}): {native}()",
+                "#0 {}({}): {}()",
                 String::from_utf8_lossy(file.as_bytes()),
-                self.current_line()
+                self.current_line(),
+                self.active_native()
             ));
         }
         let main = frames.len();
@@ -507,8 +510,10 @@ impl Request {
         frames.join("\n")
     }
 
-    /// Serve one native: its entry with the arguments as passed, with the
-    /// name the raisers render in their text (ADR-0002).
+    /// Serve one native: its entry with the arguments as passed, and the
+    /// function held as the active one for the raisers' text (ADR-0002).
+    /// The name is the caller's spelling, for the `Error` a function
+    /// nothing is linked under raises.
     pub(crate) fn serve_native(
         &mut self,
         function: Function,
@@ -530,9 +535,7 @@ impl Request {
                 ),
             ));
         };
-        let outer = self
-            .active_native
-            .replace(String::from_utf8_lossy(name.as_bytes()).into_owned());
+        let outer = self.active_native.replace(function);
         let served = entry(self, arguments);
         self.active_native = outer;
         served
@@ -815,16 +818,57 @@ impl Request {
         self.new_object(class)
     }
 
+    /// `get_active_function_name`: the declared name of the native being
+    /// served, `func->common.function_name`, whatever case the call
+    /// spelled it in.
     pub(crate) fn active_native(&self) -> String {
         self.active_native
-            .clone()
-            .unwrap_or_else(|| String::from("native"))
+            .and_then(|function| self.function_decl(function))
+            .map_or_else(
+                || String::from("native"),
+                |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
+            )
     }
 
+    /// `get_active_function_arg_name`: the declared name of the active
+    /// native's parameter at `position`, one-based, and none past the
+    /// declared count, where php's variadic slot sits
+    /// (`Z/Zend/zend_execute_API.c:643-654`).
+    fn active_native_arg_name(&self, position: u32) -> Option<String> {
+        let decl = self.function_decl(self.active_native?)?;
+        let parameter = decl
+            .parameters
+            .get(usize::try_from(position.checked_sub(1)?).ok()?)?;
+        (!parameter.variadic).then(|| String::from_utf8_lossy(&parameter.name.0).into_owned())
+    }
+
+    /// The `($name)` `zend_argument_error_variadic` and
+    /// `zend_param_must_be_nullable` write after `#N`, with its leading
+    /// space, and nothing where the parameter has no name.
+    fn argument_name_suffix(&self, position: u32) -> String {
+        self.active_native_arg_name(position)
+            .map(|name| format!(" (${name})"))
+            .unwrap_or_default()
+    }
+
+    /// `zend_argument_error_variadic`'s message:
+    /// `{fn}(): Argument #N ($name) must {tail}`.
     pub(crate) fn argument_message(&self, position: u32, tail: &str) -> String {
         format!(
-            "{}(): Argument #{position} must {tail}",
-            self.active_native()
+            "{}(): Argument #{position}{} must {tail}",
+            self.active_native(),
+            self.argument_name_suffix(position)
+        )
+    }
+
+    /// `zend_param_must_be_nullable`'s message:
+    /// `{fn}(): Passing null to parameter #N ($name) of type {type} is
+    /// deprecated`, one sentence, built as php builds it.
+    pub(crate) fn null_parameter_message(&self, position: u32, type_name: &str) -> String {
+        format!(
+            "{}(): Passing null to parameter #{position}{} of type {type_name} is deprecated",
+            self.active_native(),
+            self.argument_name_suffix(position)
         )
     }
 

@@ -216,8 +216,7 @@ fn memory_reset_peak_usage(req: &mut Request, arguments: &[Value]) -> Result<Val
 /// `ArgumentCountError`, and what is there is coerced as php coerces a
 /// bool parameter of a native, `null` included, which is the
 /// 8.1 deprecation and then `false`. The two shared helpers this reaches
-/// for write no parameter name, so their text is not yet php's (#175);
-/// what is php's here is the arity, the optional and the coercion.
+/// for read `$real_usage` off the declaration, so their text is php's.
 fn real_usage(req: &mut Request, arguments: &[Value]) -> Result<bool, Thrown> {
     if arguments.len() > 1 {
         return Err(wrong_argument_count(req, 0, 1, arguments.len()));
