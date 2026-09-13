@@ -194,7 +194,7 @@ fn command_line() -> Result<()> {
                 bail!("vocab: an avoided word is in use; the findings are above")
             }
         },
-        Command::Ticket { command } => ticket_command(&root, &store, command),
+        Command::Ticket { command } => ticket_command(&root, &manifest, &store, command),
         Command::Track { .. } => bail!("track: answered above"),
         Command::Regions { .. } => bail!("regions: answered above"),
         Command::Worktree { .. } => bail!("worktree: answered above"),
@@ -227,7 +227,12 @@ pub(crate) fn record(store: &Store, readings: &[Reading]) -> Result<()> {
 /// through the `gh` on `PATH`, one reading recorded; a close names what it
 /// opened before anything is fetched, and the branch's track, read once
 /// here, says which label its successors carry.
-fn ticket_command(root: &Path, store: &Store, command: TicketCommand) -> Result<()> {
+fn ticket_command(
+    root: &Path,
+    manifest: &Manifest,
+    store: &Store,
+    command: TicketCommand,
+) -> Result<()> {
     let (act, ticket, session_id) = match command {
         TicketCommand::Read { number, session_id } => (
             ticket::Act::Read,
@@ -247,6 +252,7 @@ fn ticket_command(root: &Path, store: &Store, command: TicketCommand) -> Result<
     };
     let reading = ticket::run(
         root,
+        manifest,
         &ticket::Gh::on_path(),
         act,
         ticket,

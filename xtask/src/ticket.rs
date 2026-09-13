@@ -17,6 +17,53 @@
 //! is ticked, `fail` while one is not, and `fail` for a ticket with no
 //! criteria at all, since a ticket with no box cannot be shown done.
 //!
+//! A ticket an agent may take is held to its label beside its boxes
+//! (#153): `ready-for-agent` says an agent works it, and a criterion
+//! asking for a write into a path the manifest denies an agent
+//! contradicts that label before the work starts, the way #111's first
+//! criterion, "`oracle.toml` carries a `[regime.dump]`", did. The paths
+//! are the manifest's own, every rule carrying `deny = true` over `Edit`
+//! or `Write` read through [`Rule::covers`], so a rule added to
+//! `seams.toml` is held here without an edit; the reading fails naming
+//! the path and the rule, and the ticket is a person's to relabel
+//! (CONTEXT.md, Ticket; harness-design.md §11). A ticket carrying
+//! `for-a-person` is not read this way at all: its label already says
+//! whose the act is.
+//!
+//! What `permit` denies is the `Edit` and the `Write`, and for three of
+//! those paths that is no longer the whole of it: `xtask steer`
+//! ([`crate::steer::STEERABLE`]) is the sanctioned writer of `seams.toml`,
+//! `oracle.toml` and the divergence registry, and an agent may run it for
+//! an addition a person has settled. #152 is the measurement: the
+//! maintainer settled the `[regime.dump]` block on the ticket, labelled it
+//! `ready-for-agent`, and an agent landed it, so a criterion whose object
+//! is `oracle.toml` stood beside a label that was right. A criterion
+//! naming a steerable path is therefore not a mislabel and does not fail
+//! the reading; the message names it and the instrument that writes it,
+//! since a heuristic that says what it matched is worth more than one
+//! that stays silent. What still fails is a criterion naming a denied
+//! path no instrument writes, `.claude/**` and the two harness-plugin
+//! manifests, where an agent has no way through at all. Whether a
+//! steerable criterion asks for an addition or for a change to what
+//! already binds is `steer`'s own judgement at the write, and is not read
+//! from prose here.
+//!
+//! Which criterion asks for the write is a heuristic, and one that says
+//! what it matched rather than one that stays silent, the shape
+//! `ticket.reply-unfiled` has: a false positive costs one hold and the
+//! recovery is a person's word on the label. A criterion is read to its
+//! main clause, what stands before its first comma, colon or
+//! subordinating word, since
+//! a path named after one is a path the clause describes something else
+//! by: "a ticket whose criterion names `oracle.toml`" asks for no write
+//! into the pin. Inside that clause the path is the thing asked for when
+//! the clause is about it — it opens the clause, as #111's "`oracle.toml`
+//! carries a `[regime.dump]`" does — or when a verb of writing stands in
+//! the clause, "a `[regime.dump]` added to `oracle.toml`". A clause that
+//! names the file as where something is read stays clean, "the ceiling in
+//! `seams.toml`", which is what the open tickets this was measured over
+//! mostly say.
+//!
 //! Ticked boxes are not enough (#29): work that found a thing it did not
 //! do has three homes, a ticket of its own, a divergence row, or a rule
 //! proposed in a commit message, and a reply is not one of them. So a close
@@ -69,9 +116,11 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::manifest::{Manifest, Rule};
 use crate::reading::{Reading, Status};
+use crate::steer::STEERABLE;
 use crate::track::{MAIN, Ticket, Track};
-use crate::track_next::TRACK_LABEL;
+use crate::track_next::{READY, TRACK_LABEL};
 
 /// The instrument name every reading of ticket carries.
 pub(crate) const INSTRUMENT: &str = "ticket";
@@ -246,6 +295,17 @@ impl Criteria {
         self.ticked.len() + self.unticked.len()
     }
 
+    /// Every unticked box by name, numbered so a comma in one is not a gap
+    /// between two.
+    fn unticked_named(&self) -> String {
+        self.unticked
+            .iter()
+            .enumerate()
+            .map(|(i, text)| format!("({}) {text}", i + 1))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
     /// Every criterion is ticked and there is at least one.
     pub fn met(&self) -> bool {
         self.count() > 0 && self.unticked.is_empty()
@@ -288,6 +348,147 @@ fn checkbox(line: &str) -> Option<(bool, &str)> {
         return None;
     }
     Some((ticked, rest.trim()))
+}
+
+/// One acceptance criterion asking for a write into a path a rule denies
+/// the agent: the criterion as the body writes it, the path its main
+/// clause names, the rule of the manifest whose scope covers that path,
+/// and the instrument sanctioned to write that file where one stands
+/// (#153).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Denied {
+    pub criterion: String,
+    pub path: String,
+    pub rule: String,
+    pub sanctioned: Option<String>,
+}
+
+impl Denied {
+    /// Whether this row says the label is wrong: it does while no
+    /// instrument may write the path, and a path `xtask steer` writes is
+    /// an act an agent takes, so the row is a note and not a refusal.
+    fn mislabelled(&self) -> bool {
+        self.sanctioned.is_none()
+    }
+}
+
+/// The criteria of a ticket carrying `ready-for-agent` that ask for a
+/// write into a denied path: one row per criterion, at the first path of
+/// its main clause a rule covers, carrying the `xtask steer` that writes
+/// it where the path is one of [`STEERABLE`]. A ticket without the label
+/// is not read, and neither is a path a rule exempts.
+pub fn denied(manifest: &Manifest, labels: &[Label], criteria: &Criteria) -> Vec<Denied> {
+    if !labels.iter().any(|label| label.name == READY) {
+        return Vec::new();
+    }
+    // The rules that deny an agent the write: `deny = true` over `Edit`
+    // or `Write`, the predicate `permit` refuses such a call by.
+    let rules: Vec<&Rule> = manifest
+        .rules
+        .iter()
+        .filter(|rule| rule.predicate.deny == Some(true))
+        .filter(|rule| rule.tool.iter().any(|t| t == "Edit" || t == "Write"))
+        .collect();
+    let mut found = Vec::new();
+    // Ticked or not: what a criterion asks for it asks for either way.
+    for criterion in criteria.ticked.iter().chain(&criteria.unticked) {
+        let clause = object(criterion);
+        let writing = words(clause).any(|word| WRITING.contains(&word.as_str()));
+        // The path is the thing asked for while the clause is about it.
+        let asked = paths(clause)
+            .into_iter()
+            .filter(|(at, _)| writing || subject(clause, *at));
+        for (_, named) in asked {
+            let path = Path::new(named);
+            if let Some(rule) = rules
+                .iter()
+                .find(|rule| rule.covers(path) && !rule.exempts(path))
+            {
+                found.push(Denied {
+                    criterion: criterion.clone(),
+                    path: named.to_owned(),
+                    rule: rule.id.clone(),
+                    sanctioned: STEERABLE
+                        .contains(&named)
+                        .then(|| format!("cargo xtask steer {named} --from <proposal>")),
+                });
+                break;
+            }
+        }
+    }
+    found
+}
+
+/// The words a clause about something other than the criterion's object
+/// opens with; what follows one describes a thing named.
+const SUBORDINATING: [&str; 12] = [
+    "that", "which", "whose", "when", "where", "while", "if", "so", "because", "unless", "until",
+    "rather",
+];
+
+/// A criterion's main clause: its text up to the first comma, colon,
+/// semicolon or subordinating word, which is what the criterion is about.
+fn object(criterion: &str) -> &str {
+    let mut at = 0;
+    for word in criterion.split_inclusive(char::is_whitespace) {
+        if let Some(offset) = word.find([',', ':', ';']) {
+            return criterion[..at + offset].trim_end();
+        }
+        let bare = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+        if SUBORDINATING.contains(&bare.to_ascii_lowercase().as_str()) {
+            return criterion[..at].trim_end();
+        }
+        at += word.len();
+    }
+    criterion.trim_end()
+}
+
+/// The verbs that say the file changes rather than that it is read: a
+/// clause carrying one asks for the write wherever the path stands in it.
+const WRITING: [&str; 15] = [
+    "add", "adds", "added", "gain", "gains", "gained", "write", "writes", "written", "edit",
+    "edits", "edited", "bump", "bumps", "bumped",
+];
+
+/// Whether a path is a path character: what a token naming one is made of.
+fn of_a_path(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "._-/*".contains(c)
+}
+
+/// The words of a clause, lowercased, the punctuation and the backticks
+/// around each left off.
+fn words(clause: &str) -> impl Iterator<Item = String> {
+    clause
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
+/// Whether the path at `at` is the clause's subject: nothing but an
+/// article stands before it, so the criterion is about that file.
+fn subject(clause: &str, at: usize) -> bool {
+    let before: Vec<String> = words(&clause[..at]).collect();
+    before.is_empty() || (before.len() == 1 && ["the", "a", "an"].contains(&before[0].as_str()))
+}
+
+/// The paths a clause names, each with where it stands: every run of path
+/// characters carrying a `.` or a `/` beside a letter or a digit, with the
+/// backticks, quotes and sentence ends around it left off.
+fn paths(clause: &str) -> Vec<(usize, &str)> {
+    let mut found = Vec::new();
+    let mut at = 0;
+    for piece in clause.split_inclusive(|c: char| !of_a_path(c)) {
+        let token = piece
+            .trim_end_matches(|c: char| !of_a_path(c))
+            .trim_end_matches('.');
+        if (token.contains('.') || token.contains('/'))
+            && token.chars().any(|c| c.is_ascii_alphanumeric())
+        {
+            found.push((at, token));
+        }
+        at += piece.len();
+    }
+    found
 }
 
 /// One issue as the tracker answers it.
@@ -496,6 +697,54 @@ fn gh(program: &Path, root: &Path, args: &[&str]) -> Result<String> {
     String::from_utf8(out.stdout).context("gh wrote something that is not UTF-8")
 }
 
+/// Every criterion of `rows` as the reading cites it: the criterion, the
+/// path its main clause names and the rule whose scope covers it.
+fn asked(rows: &[&Denied]) -> String {
+    rows.iter()
+        .map(|row| {
+            format!(
+                "{:?} asks for {}, which {} denies an agent",
+                row.criterion, row.path, row.rule
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// What a reading says of a ticket an agent may take whose criteria ask
+/// for a write no instrument makes: every criterion that does, the path
+/// and the rule, and what a person does with the ticket; `nothing` is what
+/// a close this refuses left at the tracker.
+fn mislabel(ticket: Ticket, rows: &[&Denied], nothing: &str) -> String {
+    format!(
+        "{ticket} carries `{READY}` and {} of its criteria ask{} for a write an agent may not make: {}; an edit there is a person's alone (harness §11), so a person relabels the ticket, `gh issue edit {} --add-label for-a-person --remove-label {READY}`, or writes the criterion as the act an agent takes{nothing}",
+        rows.len(),
+        if rows.len() == 1 { "s" } else { "" },
+        asked(rows),
+        ticket.number()
+    )
+}
+
+/// The note a reading carries for a criterion naming a path `permit`
+/// denies the agent but an instrument writes: what it matched and the
+/// call that makes the write, said beside whatever verdict stands, since
+/// the label is not wrong and the reading does not fail for it.
+fn steerable(rows: &[&Denied]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let calls = rows
+        .iter()
+        .filter_map(|row| row.sanctioned.as_deref())
+        .map(|call| format!("`{call}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "; {}; the write is an agent's through {calls}, which applies an addition a person has settled and refuses a change to what already binds",
+        asked(rows)
+    )
+}
+
 /// The scope a ticket's reading is written under: its number, the key
 /// `done` reads it back by.
 pub(crate) fn scope(ticket: Ticket) -> String {
@@ -531,6 +780,7 @@ pub fn ticket_of(root: &Path, number: Option<u64>) -> Result<Ticket> {
 /// answers for.
 pub fn run(
     root: &Path,
+    manifest: &Manifest,
     gh: &Gh,
     act: Act,
     ticket: Ticket,
@@ -539,31 +789,39 @@ pub fn run(
 ) -> Result<Reading> {
     let issue = gh.view(root, ticket)?;
     let criteria = Criteria::parse(&issue.body);
+    let rows = denied(manifest, &issue.labels, &criteria);
+    // The rows that say the label is wrong, and the rows an instrument
+    // writes, which are a note and not a refusal.
+    let (denied, steered): (Vec<&Denied>, Vec<&Denied>) =
+        rows.iter().partition(|row| row.mislabelled());
     let mut reading =
         Reading::stamped_over(INSTRUMENT, &scope(ticket), root, Path::new(STAMPED_OVER))?;
     reading.count("criteria", criteria.count() as u64)?;
     reading.count("ticked", criteria.ticked.len() as u64)?;
     reading.count("unticked", criteria.unticked.len() as u64)?;
+    reading.count("denied", denied.len() as u64)?;
+    reading.count("steerable", steered.len() as u64)?;
+    reading.rule = denied
+        .first()
+        .map_or_else(String::new, |first| first.rule.clone());
     if let Act::Close(successors) = &act {
         reading.count("opens", successors.tickets().len() as u64)?;
     }
     session_id
         .unwrap_or_default()
         .clone_into(&mut reading.session);
-    // Every unticked box by name, numbered so a comma in one is not a gap
-    // between two.
-    let names = criteria
-        .unticked
-        .iter()
-        .enumerate()
-        .map(|(i, text)| format!("({}) {text}", i + 1))
-        .collect::<Vec<_>>()
-        .join("; ");
+    let names = criteria.unticked_named();
     let boxes = format!(
         "{} of {} criteria ticked",
         criteria.ticked.len(),
         criteria.count()
     );
+    // What a close a condition refuses left at the tracker, which is
+    // nothing, said once for every condition that refuses one.
+    let nothing = match act {
+        Act::Read => "",
+        Act::Close(_) => "; not closed, nothing changed at the tracker",
+    };
     let (status, message) = match act {
         _ if !criteria.found => (
             Status::Fail,
@@ -573,15 +831,10 @@ pub fn run(
             Status::Fail,
             format!("{ticket} has no box under `## Acceptance criteria`; nothing to hold it to"),
         ),
+        _ if !denied.is_empty() => (Status::Fail, mislabel(ticket, &denied, nothing)),
         _ if !criteria.met() => (
             Status::Fail,
-            format!(
-                "{ticket}: {boxes}; unticked: {names}{}",
-                match act {
-                    Act::Read => "",
-                    Act::Close(_) => "; not closed, nothing changed at the tracker",
-                }
-            ),
+            format!("{ticket}: {boxes}; unticked: {names}{nothing}"),
         ),
         Act::Read => (
             Status::Pass,
@@ -636,14 +889,105 @@ pub fn run(
         }
     };
     reading.status = status;
-    reading.message = message;
+    // A criterion an instrument writes is said beside whatever verdict
+    // stands, since it is what the heuristic matched and not a refusal.
+    reading.message = message + &steerable(&steered);
     Ok(reading)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Criteria, Successors};
+    use super::{Criteria, Denied, Label, Successors, denied};
+    use crate::manifest::{Manifest, OneOrMany, Rule};
     use crate::track::Ticket;
+
+    /// The manifest such a ticket is held to: one rule denying `Edit` and
+    /// `Write` over the pin, the manifest and the harness's own tree, with
+    /// the skills under it exempt, so both keys are read here.
+    fn manifest() -> Manifest {
+        let mut manifest = Manifest::named("xtask");
+        let mut rule = Rule::named("harness.self", "oracle.toml");
+        rule.scope = OneOrMany::Many(vec![
+            "oracle.toml".to_owned(),
+            "seams.toml".to_owned(),
+            ".claude/**".to_owned(),
+        ]);
+        rule.tool = OneOrMany::Many(vec!["Edit".to_owned(), "Write".to_owned()]);
+        rule.exempt = vec![".claude/skills/**".to_owned()];
+        manifest.rules.push(rule);
+        manifest
+    }
+
+    /// One criterion of a ticket carrying `label`, as the judgement reads
+    /// it.
+    fn read(label: &str, criterion: &str) -> Vec<Denied> {
+        let labels = [Label {
+            name: label.to_owned(),
+        }];
+        let criteria = Criteria::parse(&format!("## Acceptance criteria\n\n- [ ] {criterion}\n"));
+        denied(&manifest(), &labels, &criteria)
+    }
+
+    /// What a criterion asks for is its main clause's: the path the clause
+    /// opens with, or the path a verb of writing stands beside (#153).
+    #[test]
+    fn a_criterion_whose_object_is_a_denied_path_asks_for_the_write_and_one_naming_it_does_not() {
+        let subject = read(
+            "ready-for-agent",
+            "`oracle.toml` carries a `[regime.dump]` with the ini above",
+        );
+        assert_eq!(subject.len(), 1, "{subject:?}");
+        assert_eq!(subject[0].path, "oracle.toml");
+        assert_eq!(subject[0].rule, "harness.self");
+        assert_eq!(
+            read(
+                "ready-for-agent",
+                "A `[regime.dump]` block is added to `oracle.toml`"
+            )
+            .len(),
+            1,
+            "a verb of writing names the path it writes"
+        );
+        // The path `permit` denies but `xtask steer` writes, so the row is
+        // a note and not a refusal, and a path no instrument writes is the
+        // refusal (#152).
+        assert!(subject[0].sanctioned.is_some(), "{subject:?}");
+        let hook = read("ready-for-agent", "`.claude/settings.json` gains a hook");
+        assert_eq!(hook.len(), 1, "{hook:?}");
+        assert_eq!(hook[0].sanctioned, None, "{hook:?}");
+        // The clause the path stands in is about the fixture and the
+        // ticket, not about the pin.
+        assert!(
+            read(
+                "ready-for-agent",
+                "One fixture under `xtask/fixtures/` that must fail: a ticket whose criterion names `oracle.toml`"
+            )
+            .is_empty()
+        );
+        // The file is where a number is read, not a file that changes.
+        assert!(
+            read(
+                "ready-for-agent",
+                "It totals what the copy would spend against the crate's 26000-line ceiling in `seams.toml`, and names what the design drops"
+            )
+            .is_empty()
+        );
+    }
+
+    /// The label says whose the act is, and the rule's `exempt` says which
+    /// paths under its scope it does not deny.
+    #[test]
+    fn a_for_a_person_ticket_is_not_read_this_way_and_an_exempt_path_is_not_denied() {
+        assert!(read("for-a-person", "`oracle.toml` carries a `[regime.dump]`").is_empty());
+        assert!(read("ready-for-agent", "`.claude/settings.json` gains a hook").len() == 1);
+        assert!(
+            read(
+                "ready-for-agent",
+                "`.claude/skills/build/SKILL.md` gains the sentence"
+            )
+            .is_empty()
+        );
+    }
 
     /// The grammar of the flags (#29): one of the two, not neither, not
     /// both, not the ticket itself, each successor once.

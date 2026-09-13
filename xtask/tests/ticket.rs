@@ -9,12 +9,19 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use xtask::manifest::Manifest;
 use xtask::reading::Status;
 use xtask::ticket::{Act, Gh, Successors, run};
 use xtask::track::Ticket;
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+}
+
+/// The manifest of this workspace, whose `deny = true` rules a ticket an
+/// agent may take is held to (#153).
+fn manifest() -> Manifest {
+    Manifest::load(workspace()).unwrap()
 }
 
 /// A recorded `gh`: a shell file in a directory of this test's own that
@@ -97,6 +104,126 @@ impl Recorded {
     }
 }
 
+/// The negative control of `harness.self` at the read (#153): the ticket
+/// laid down under `xtask/fixtures/rules/harness.self/`, which carries
+/// `ready-for-agent` and asks in two criteria for a write into the rule's
+/// scope, one the pin that `xtask steer` writes for an agent and one the
+/// hook settings that nothing writes for one. The manifest is this
+/// workspace's, so the scope the reading names is the one `permit` denies
+/// the write by.
+#[test]
+fn a_ready_for_agent_ticket_asking_for_a_write_the_manifest_denies_fails_naming_path_and_rule() {
+    let body = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/rules/harness.self/ticket.md"),
+    )
+    .unwrap();
+    let recorded = Recorded::lay("denied");
+    recorded.labelled(111, "OPEN", &body, &["ready-for-agent", "track:main"]);
+    let reading = run(
+        workspace(),
+        &manifest(),
+        &recorded.gh(),
+        Act::Read,
+        Ticket::new(111),
+        None,
+        "main",
+    )
+    .unwrap();
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert_eq!(reading.rule, "harness.self");
+    assert_eq!(reading.numbers["denied"], 1.into(), "{reading:#?}");
+    assert_eq!(reading.numbers["steerable"], 1.into(), "{reading:#?}");
+    assert!(
+        reading
+            .message
+            .contains("`.claude/settings.json` gains the hook")
+            && reading.message.contains("asks for .claude/settings.json"),
+        "the criterion and the path: {}",
+        reading.message
+    );
+    assert!(
+        reading.message.contains("harness.self denies an agent"),
+        "the rule: {}",
+        reading.message
+    );
+    assert!(
+        reading
+            .message
+            .contains("gh issue edit 111 --add-label for-a-person"),
+        "what a person does with it: {}",
+        reading.message
+    );
+    // The criterion whose object is the pin is said and not refused: the
+    // write is an agent's through the instrument sanctioned to make it
+    // (#152).
+    assert!(
+        reading
+            .message
+            .contains("`cargo xtask steer oracle.toml --from <proposal>`"),
+        "the instrument that writes it: {}",
+        reading.message
+    );
+    // The same criteria under the label that says the act is a person's
+    // are held to the boxes and to nothing else.
+    recorded.labelled(111, "OPEN", &body, &["for-a-person", "track:main"]);
+    let person = run(
+        workspace(),
+        &manifest(),
+        &recorded.gh(),
+        Act::Read,
+        Ticket::new(111),
+        None,
+        "main",
+    )
+    .unwrap();
+    assert_eq!(person.numbers["denied"], 0.into(), "{person:#?}");
+    assert_eq!(person.numbers["steerable"], 0.into(), "{person:#?}");
+    assert!(person.rule.is_empty(), "{person:#?}");
+    assert!(
+        person.message.contains("0 of 4 criteria ticked"),
+        "{}",
+        person.message
+    );
+}
+
+/// The narrowing #152 measured (#153): a ticket the maintainer handed to
+/// an agent, every box ticked, whose first criterion's object is the pin.
+/// `xtask steer` is the sanctioned writer of that file, so the label is
+/// not wrong; the read passes and the message still says what it matched.
+#[test]
+fn a_criterion_whose_object_is_a_file_xtask_steer_writes_is_said_and_not_refused() {
+    let body = "## Acceptance criteria\n\n- [x] `oracle.toml` carries a `[regime.dump]` with the two ini entries above, with a comment that says what the regime is\n";
+    let recorded = Recorded::lay("steerable");
+    recorded.labelled(152, "OPEN", body, &["ready-for-agent", "track:t-opus-5"]);
+    let reading = run(
+        workspace(),
+        &manifest(),
+        &recorded.gh(),
+        Act::Read,
+        Ticket::new(152),
+        None,
+        "t-opus-5",
+    )
+    .unwrap();
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    assert_eq!(reading.numbers["denied"], 0.into(), "{reading:#?}");
+    assert_eq!(reading.numbers["steerable"], 1.into(), "{reading:#?}");
+    assert!(reading.rule.is_empty(), "{reading:#?}");
+    assert!(
+        reading.message.contains("asks for oracle.toml")
+            && reading
+                .message
+                .contains("`cargo xtask steer oracle.toml --from <proposal>`"),
+        "what it matched, and the call that writes it: {}",
+        reading.message
+    );
+    assert!(
+        !reading.message.contains("--add-label for-a-person"),
+        "the label is not wrong: {}",
+        reading.message
+    );
+}
+
 const UNTICKED: &str =
     "## What to build\n\nthings\n\n## Acceptance criteria\n\n- [x] one\n- [ ] two\n- [ ] three\n";
 const TICKED: &str = "## Acceptance criteria\n\n- [x] one\n- [X] two\n";
@@ -107,6 +234,7 @@ fn read_counts_the_boxes_and_names_the_unticked() {
     recorded.issue(7, "OPEN", UNTICKED);
     let reading = run(
         workspace(),
+        &manifest(),
         &recorded.gh(),
         Act::Read,
         Ticket::new(7),
@@ -134,6 +262,7 @@ fn read_counts_the_boxes_and_names_the_unticked() {
     recorded.issue(8, "OPEN", TICKED);
     let reading = run(
         workspace(),
+        &manifest(),
         &recorded.gh(),
         Act::Read,
         Ticket::new(8),
@@ -152,6 +281,7 @@ fn close_refuses_while_a_box_is_unticked_and_changes_nothing_at_the_tracker() {
     recorded.issue(7, "OPEN", UNTICKED);
     let reading = run(
         workspace(),
+        &manifest(),
         &recorded.gh(),
         Act::Close(Successors::Nothing),
         Ticket::new(7),
@@ -171,6 +301,7 @@ fn close_refuses_while_a_box_is_unticked_and_changes_nothing_at_the_tracker() {
     recorded.issue(9, "OPEN", "## Acceptance criteria\n\nnone yet\n");
     let reading = run(
         workspace(),
+        &manifest(),
         &recorded.gh(),
         Act::Close(Successors::Nothing),
         Ticket::new(9),
@@ -188,6 +319,7 @@ fn close_refuses_while_a_box_is_unticked_and_changes_nothing_at_the_tracker() {
     recorded.issue(10, "CLOSED", TICKED);
     let reading = run(
         workspace(),
+        &manifest(),
         &recorded.gh(),
         Act::Close(Successors::Nothing),
         Ticket::new(10),
@@ -213,6 +345,7 @@ fn close_with_every_box_ticked_closes_and_records_what_closed_it_and_the_session
     recorded.issue(8, "OPEN", TICKED);
     let reading = run(
         workspace(),
+        &manifest(),
         &recorded.gh(),
         Act::Close(Successors::Nothing),
         Ticket::new(8),
@@ -254,6 +387,7 @@ fn close_names_what_it_opened_through_the_tracker_s_blocking_relation() {
     recorded.labelled(10, "OPEN", "no criteria yet", &["ready-for-agent"]);
     let reading = run(
         workspace(),
+        &manifest(),
         &recorded.gh(),
         Act::Close(Successors::Tickets(vec![Ticket::new(9), Ticket::new(10)])),
         Ticket::new(8),
@@ -289,6 +423,7 @@ fn close_sets_only_the_edges_the_tracker_does_not_have_yet() {
     recorded.issue(10, "OPEN", "no criteria yet");
     let reading = run(
         workspace(),
+        &manifest(),
         &recorded.gh(),
         Act::Close(Successors::Tickets(vec![Ticket::new(9), Ticket::new(10)])),
         Ticket::new(8),
@@ -307,6 +442,7 @@ fn close_sets_only_the_edges_the_tracker_does_not_have_yet() {
     recorded.issue(9, "OPEN", "no criteria yet");
     let reading = run(
         workspace(),
+        &manifest(),
         &recorded.gh(),
         Act::Close(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
@@ -330,6 +466,7 @@ fn close_on_a_track_refuses_a_successor_that_carries_no_track_label() {
     recorded.labelled(9, "OPEN", "no criteria yet", &["ready-for-agent"]);
     let reading = run(
         workspace(),
+        &manifest(),
         &recorded.gh(),
         Act::Close(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
@@ -361,6 +498,7 @@ fn close_on_a_track_refuses_a_successor_that_carries_no_track_label() {
     recorded.labelled(9, "OPEN", "no criteria yet", &["track:main"]);
     let reading = run(
         workspace(),
+        &manifest(),
         &recorded.gh(),
         Act::Close(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
@@ -382,6 +520,7 @@ fn a_successor_carrying_the_track_label_closes_and_main_asks_nothing() {
     recorded.labelled(9, "OPEN", "no criteria yet", &["track:t-opus-5"]);
     let reading = run(
         workspace(),
+        &manifest(),
         &recorded.gh(),
         Act::Close(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
@@ -400,6 +539,7 @@ fn a_successor_carrying_the_track_label_closes_and_main_asks_nothing() {
     recorded.issue(9, "OPEN", "no criteria yet");
     let reading = run(
         workspace(),
+        &manifest(),
         &recorded.gh(),
         Act::Close(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
@@ -419,6 +559,7 @@ fn opens_nothing_is_an_assertion_the_reading_carries_with_its_session() {
     recorded.issue(8, "OPEN", TICKED);
     let reading = run(
         workspace(),
+        &manifest(),
         &recorded.gh(),
         Act::Close(Successors::Nothing),
         Ticket::new(8),
@@ -445,6 +586,7 @@ fn opens_nothing_is_an_assertion_the_reading_carries_with_its_session() {
 
     let unnamed = run(
         workspace(),
+        &manifest(),
         &recorded.gh(),
         Act::Close(Successors::Nothing),
         Ticket::new(8),
@@ -476,6 +618,7 @@ fn close_refuses_a_successor_that_is_closed_missing_or_unreadable_and_changes_no
     ] {
         let reading = run(
             workspace(),
+            &manifest(),
             &recorded.gh(),
             Act::Close(Successors::Tickets(vec![Ticket::new(successor)])),
             Ticket::new(8),
@@ -511,6 +654,7 @@ fn a_tracker_that_refuses_the_edge_leaves_the_ticket_open() {
     recorded.answering(Some("edit"));
     let reading = run(
         workspace(),
+        &manifest(),
         &recorded.gh(),
         Act::Close(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
@@ -537,6 +681,7 @@ fn a_tracker_that_refuses_the_edge_leaves_the_ticket_open() {
     // same way, before the tracker is asked.
     let empty = run(
         workspace(),
+        &manifest(),
         &recorded.gh(),
         Act::Close(Successors::Tickets(vec![])),
         Ticket::new(8),
@@ -563,6 +708,7 @@ fn a_tracker_that_refuses_the_close_after_the_edge_says_the_edge_stands() {
     recorded.answering(Some("close"));
     let reading = run(
         workspace(),
+        &manifest(),
         &recorded.gh(),
         Act::Close(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
@@ -592,6 +738,7 @@ fn a_tracker_that_refuses_the_close_is_a_failed_reading_carrying_its_text() {
     recorded.answering(Some("close"));
     let reading = run(
         workspace(),
+        &manifest(),
         &recorded.gh(),
         Act::Close(Successors::Nothing),
         Ticket::new(8),
@@ -608,6 +755,7 @@ fn a_tracker_that_refuses_the_close_is_a_failed_reading_carrying_its_text() {
 
     let missing = run(
         workspace(),
+        &manifest(),
         &recorded.gh(),
         Act::Read,
         Ticket::new(404),

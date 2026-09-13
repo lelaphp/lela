@@ -210,6 +210,7 @@ ticket::Criteria
 ticket::Criteria::count
 ticket::Criteria::met
 ticket::Criteria::parse
+ticket::Denied
 ticket::Gh
 ticket::Gh::at
 ticket::Gh::blocking
@@ -225,6 +226,7 @@ ticket::Open::label_names
 ticket::State
 ticket::Successors
 ticket::Successors::named
+ticket::denied
 ticket::run
 ticket::ticket_of
 track::Base

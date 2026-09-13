@@ -1225,6 +1225,7 @@ fn ticket_read(root: &Path, number: u64, body: &str) {
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
     let reading = xtask::ticket::run(
         root,
+        &xtask::manifest::Manifest::load(root).unwrap(),
         &xtask::ticket::Gh::at(&gh),
         xtask::ticket::Act::Read,
         xtask::track::Ticket::new(number),

@@ -27,8 +27,10 @@ use serde_json::{Value, json};
 use crate::ticket::{Gh, Open};
 use crate::track::{self, Ticket, Track};
 
-/// The label a ticket an agent may take carries.
-const READY: &str = "ready-for-agent";
+/// The label a ticket an agent may take carries. The frontier reads it
+/// here and `ticket` holds such a ticket's criteria to what an agent may
+/// write; one statement, two readers.
+pub(crate) const READY: &str = "ready-for-agent";
 /// The label a ticket that is a person's alone carries (harness §11).
 const PERSON: &str = "for-a-person";
 /// The prefix of the label that names the one track working a ticket.
