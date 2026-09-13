@@ -139,8 +139,10 @@ fn bench(root: &Path, runs: usize) -> Result<Bench> {
 /// where `--bench` provokes denials, so the readings land in its store and
 /// not the workspace's. The tests build the same repository through
 /// `tests/common`, which cannot be reached from here; the recipe is four
-/// files and one commit, stated in both.
-fn scratch_workspace(root: &Path, dir: &Path) -> Result<()> {
+/// files and one commit, stated in both. `bench`'s A/A control over the
+/// judge takes its scratch workspace from here too, at a directory of its
+/// own, so the one recipe stands in one place.
+pub(crate) fn scratch_workspace(root: &Path, dir: &Path) -> Result<()> {
     let _ = fs::remove_dir_all(dir);
     fs::create_dir_all(dir.join("docs")).with_context(|| format!("creating {}", dir.display()))?;
     let manifest = Manifest::load(root)?;

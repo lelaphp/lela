@@ -39,7 +39,7 @@ mod rules;
 mod unless;
 
 pub use adapters::{Adapter, run};
-pub(crate) use bench::{BAR_MS, run_bench};
+pub(crate) use bench::{BAR_MS, run_bench, scratch_workspace};
 pub use call::{Arguments, Call};
 pub(crate) use diff::judge_files;
 pub(crate) use diff::{run_diff, working_files};

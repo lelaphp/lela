@@ -1,5 +1,8 @@
 api_check::hold
 api_check::run
+bench::Label
+bench::REPS
+bench::run
 budget::run
 cli::Format
 cli::Section

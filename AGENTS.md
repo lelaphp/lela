@@ -132,6 +132,7 @@ Commands:
   worktree           A track's worktrees: `add` lays one down under .claude/worktrees/<branch>, `retire` appends its log into the track's store and removes it. Writes no reading
   ticket             A ticket, one GitHub issue: `read <n>` holds it to its acceptance criteria and writes the reading; `close <n>` does the same and then closes it, naming what the work opened
   regions            Render the named files' regions with `computed run` and say what it did, one line per file, for pre-commit to re-stage. Writes no reading
+  bench              Measure one bar under the measurement protocol: paired reps with the A/A control, the load average recorded, one reading per bar, and the exit 0 whatever the reading says
   budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code and a stale generated file
   clippy             `cargo clippy` with every warning denied, on every target of each crate, as the reading `done` reads; one reading per crate
   phpt               Run the pinned `.phpt` corpus through the engine and hold each test to its `--EXPECT*--` section; one reading per subset, scoped to the crate whose subset it is
@@ -149,7 +150,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=cfd994ec0899541ee2eaddfe7fc85059fb1dbe74927a58cf4bb40846e232b95f out=1f4ec9ca4936334215791fc3d0e439ba1600317f53e4073e4439c1ac09758af5 -->
+<!-- /computed in=df79a71dc328fe6c61c849d4e12a9f7d94c8fb61e73b11d6e06bbd40e84b521f out=57e52fc9fe3cf572c10768a1c8fc92fa2d2563694fd3bea46fa5ec9771d68fbb -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

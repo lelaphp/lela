@@ -92,6 +92,7 @@ pub fn render(
             fold_uncreated(instrument(&readings, "mutants"), "scope")?,
             INSTRUMENT,
         ),
+        Section::Bench => (instrument(&readings, crate::bench::INSTRUMENT), INSTRUMENT),
         Section::PortMap => (instrument(&readings, port_map::INSTRUMENT), INSTRUMENT),
         Section::Ticket => (instrument(&readings, "ticket"), TICKET),
         Section::Track => (last_run(&store.log()?), TRACK),

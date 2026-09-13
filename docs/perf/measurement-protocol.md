@@ -1,0 +1,168 @@
+# The measurement protocol
+
+Every perf number this engine states is taken under this document
+(`third-engine-design.md` §9, §14; `harness-design.md` §3, §4.2). It is
+inherited from the second engine, whose own protocol stands at
+`mahout_base/docs/perf/measurement-protocol.md` at 726 lines; what is copied
+here is the part that binds a run, and §10 says what was left behind and why.
+`xtask bench` is the one instrument that runs it.
+
+Version `1`, the ancestor's. A change to §3, §4 or §5 bumps it; adding a
+statement or a recorded field does not.
+
+## 1. What it refuses
+
+1. **No number without a content pin.** A commit is not a binary. Each arm's
+   program is digested at both ends of the run, and a disagreement refuses
+   rather than reports (§6).
+2. **No signed number whose sign is not established.** When the paired
+   delta's inter-quartile range straddles zero the row is `NOISE-SWAMPED`
+   and is reported unsigned, whatever the medians say (§4.3).
+3. **No timing before correctness.** The two arms' bytes are compared inside
+   every rep, and a disagreement stops the run before a timing is read (§5).
+
+## 2. The unit is a paired A/B run
+
+One measurement is two arms, each run once per rep, close together in time.
+The paired per-rep delta is the statistic that survives a loaded machine;
+absolute medians are reported beside it and never carry the verdict. The
+second engine established this by running it: deltas forty times the noise
+floor kept their sign through a load average of thirteen on a twelve-core
+box, where the medians did not.
+
+**The A/A control.** A bar whose two arms are the same call. Its bar is the
+protocol's own verdict: the rig must be unable to tell the arm from itself,
+so the row must come back `NOISE-SWAMPED`. A resolved row is a systematic
+order effect the run failed to cancel, which is a defect of the instrument
+and not a finding about the arm.
+
+This is the amended sentence and not the original one. §4.3 is a quartile
+rule with no confidence level, so it resolves some unmeasured fraction of
+the time on a null effect; the second engine measured one resolved row in
+seventeen. **A single resolved A/A row is evidence; a pattern of them is the
+defect.** An instrument that refused on the first resolved row would be red
+for no reason about once a run in seventeen, which is why `bench` records
+the verdict and exits 0 (`harness-design.md` §4.2).
+
+## 3. The knobs
+
+| knob | value |
+|---|---|
+| warm-up reps, discarded | 2 |
+| measured reps per arm | 12 |
+| order within a rep | alternated: even reps run arm A first, odd reps arm B first |
+| processes per rep | one per arm, back to back |
+
+Twelve paired deltas give a stable interpolated inter-quartile range. The
+response to `NOISE-SWAMPED` is more reps, a quieter machine or a larger
+workload, in that order; re-labelling the verdict is not a response.
+Alternating the order is what keeps a penalty on whichever process runs
+second from being charged to one arm.
+
+## 4. The statistics
+
+### 4.1 Quantiles
+
+Median, Q1 and Q3 by linear interpolation on nearest ranks over the sorted
+samples `a`, one-indexed:
+
+```
+idx = p * (n - 1) + 1        p in { 0.25, 0.5, 0.75 }
+lo  = floor(idx)             fr = idx - lo
+q   = (lo >= n) ? a[n] : a[lo] + fr * (a[lo + 1] - a[lo])
+```
+
+`IQR = Q3 - Q1`. Median rather than mean and IQR rather than standard
+deviation, because the failure mode on a shared machine is a few very slow
+reps. No trimmed mean, no confidence interval, no bootstrap, and no
+percentile: a percentile is a per-arm description and is never signed.
+
+### 4.2 The paired delta
+
+`delta[r] = a_ms[r] - b_ms[r]` for each measured rep. Reported: the median,
+Q1, Q3 and IQR of the delta sample, and `paired_pct = median(delta) /
+median(b) * 100`, which is the number to quote.
+
+### 4.3 The verdict
+
+```
+NOISE-SWAMPED  when  n < 4  or  (Q1(delta) <= 0 and Q3(delta) >= 0)
+resolved       otherwise
+```
+
+The `n < 4` term is a repair, not a taste: at one rep Q1 and Q3 are the
+sample itself, so any nonzero delta cleared zero and a binary compared with
+a copy of itself came back signed. `<=` and `>=` and not `<` and `>`: a
+quartile exactly at zero still straddles it. `NOISE-SWAMPED` is reported and
+not signalled, and it is not a claim that the two arms are equal.
+
+## 5. Correctness before timing
+
+Per rep, never once at the end. The two arms' standard streams are compared
+byte for byte inside the rep that produced them, and a disagreement stops
+the run. How the two streams compared is named in the reading, in three values:
+
+| value | meaning |
+|---|---|
+| `stdout-bytes` | both arms wrote the same non-empty bytes |
+| `vacuous` | both arms wrote nothing, so nothing was compared |
+| `differ` | the arms disagreed; the run stopped |
+
+A vacuous row is named out loud. Its timings stand; its agreement proves
+nothing. The second engine added this value after running the instrument
+found it: its startup rows printed nothing, both sides hashed the empty
+string, and it was reported as agreement.
+
+## 6. The content pin
+
+Each arm's program is read once at the start of the run and once at the end,
+and the digest and byte count of that one read are compared. A program that
+moved underneath the run refuses the numbers rather than reporting them,
+and the refusal takes precedence over a correctness disagreement, which it
+explains. There is no override.
+
+## 7. Hardware and load
+
+Every run records the 1-, 5- and 15-minute load average at its start, and
+every rendering of a number prints the load beside it. A number taken under
+load is not void and not automatically valid; the load is recorded, not
+controlled.
+
+## 8. Status labels
+
+What standing the numbers are offered with, carried by the reading:
+
+| label | what it says |
+|---|---|
+| `UNLABELLED` | the default; a number with no standing claimed |
+| `SMOKE` | a run made to see the instrument work |
+| `PROVISIONAL` | a number offered with a written reservation |
+| `BASELINE-OF-RECORD` | the number later runs are held against |
+
+`PROVISIONAL` and `BASELINE-OF-RECORD` owe a note, and a run that gives one
+without a note refuses: a standing with no written reservation is a word,
+not a label. Which label a run deserves is part of the sign-off, and the
+sign-off is a person's (`harness-design.md` §4.2, §11).
+
+## 9. Honest limitations
+
+Wall time only: no cycles, no instructions, no cache misses, no resident
+size. A code-layout confound of the kind Mytkowicz described would not be
+caught here. The `NOISE-SWAMPED` rule is a quartile rule and not a
+hypothesis test: it has no confidence level, no *p* and no power analysis.
+That two arms are comparable at all is asserted by whoever declared the bar
+and is held by nothing here except §5.
+
+## 10. What this engine's copy leaves out
+
+The ancestor carries, and this engine has no use for yet: a corpus manifest
+and its twenty-three workloads, a group selection over them and the
+self-timed `TOTAL`/`CHECKSUM` contract their PHP prints; an on-disk unit
+cache switch and a second executor, neither of which this engine has; a
+binary-vintage tripwire over build products under the repository root; a
+regression gate holding one run against a baseline of record, with its
+quiet, shared and hosted hardware tiers; and a request-shaped kind whose
+per-arm latency percentiles are descriptive and never signed. Each returns
+here when the engine has the thing it measures, and a geomean over
+workloads, which inherits the floor — one `NOISE-SWAMPED` constituent and
+the aggregate is published unsigned — returns with the corpus.

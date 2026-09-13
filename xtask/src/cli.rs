@@ -168,6 +168,12 @@ pub(crate) enum Command {
         #[arg(required = true, value_name = "FILE")]
         files: Vec<String>,
     },
+    /// Measure one bar under the measurement protocol: paired reps with
+    /// the A/A control, the load average recorded, one reading per bar,
+    /// and the exit 0 whatever the reading says.
+    ///
+    /// Without an argument, every bar the harness declares.
+    Bench(Bench),
     /// Hold every crate to its line ceiling and the workspace to [budget];
     /// refuse committed generated code and a stale generated file.
     Budget,
@@ -286,6 +292,29 @@ pub(crate) enum Command {
         #[arg(long = "crate", value_name = "NAME")]
         crates: Vec<String>,
     },
+}
+
+/// What one `bench` run is asked for, flattened onto the command so the
+/// dispatch has one line for the instrument as it has for every other.
+#[derive(Debug, Args)]
+pub(crate) struct Bench {
+    /// Only this bar, by name; default every declared one.
+    #[arg(long, value_name = "NAME")]
+    pub bar: Option<String>,
+    /// A bar read from a TOML file instead of the declared ones: the
+    /// negative control under xtask/fixtures/bench is run this way.
+    #[arg(long, value_name = "PATH", conflicts_with = "bar")]
+    pub from: Option<PathBuf>,
+    /// Measured reps per arm, after the protocol's discarded warm-up.
+    #[arg(long, default_value_t = crate::bench::REPS, value_name = "N")]
+    pub reps: usize,
+    /// The standing the numbers are offered with (protocol §8).
+    #[arg(long, value_enum, default_value = "unlabelled")]
+    pub label: crate::bench::Label,
+    /// The written reservation a provisional or baseline-of-record label
+    /// owes.
+    #[arg(long, value_name = "TEXT")]
+    pub note: Option<String>,
 }
 
 /// What one `compile-identity` run is asked for, flattened onto the
@@ -453,6 +482,8 @@ pub enum Section {
     Witness,
     /// The mutants readings, one row per crate.
     Mutants,
+    /// The bench readings, one row per bar.
+    Bench,
     /// The port-map reading: the census joined to `api.lock`, with the
     /// rows the port has not taken.
     PortMap,

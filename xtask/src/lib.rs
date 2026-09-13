@@ -17,6 +17,7 @@
 #![forbid(unsafe_code)]
 
 pub mod api_check;
+pub mod bench;
 pub mod budget;
 mod built;
 pub mod cli;
@@ -150,6 +151,7 @@ fn command_line() -> Result<()> {
                 done::run(&root, &manifest, &registry, &store, base.as_deref())
             }
         }
+        Command::Bench(ask) => bench_command(&root, &store, &ask),
         Command::Budget => record(&store, &budget::run(&root, &manifest)?),
         Command::Clippy { crates, staged } => {
             let readings = if staged {
@@ -168,12 +170,7 @@ fn command_line() -> Result<()> {
         Command::PortMap { tree } => port_map::command(&root, &manifest, &store, tree.as_deref()),
         Command::CompileIdentity(ask) => identity_command(&root, &manifest, &store, ask),
         Command::UnsafeAudit => record(&store, &unsafe_audit::run(&root, &manifest)?),
-        Command::Generate => {
-            for path in generated::write_all(&root, &manifest)? {
-                println!("wrote {}", path.display());
-            }
-            Ok(())
-        }
+        Command::Generate => generate_command(&root, &manifest),
         Command::ApiCheck { write } => api_check::run(&manifest, &root, &store, write),
         Command::DivergenceReason => divergence_command(&root, &manifest, &store),
         Command::NewExt { name } => {
@@ -283,6 +280,31 @@ fn phpt_command(
         engine,
     };
     record(store, &phpt::run(root, manifest, &registry, &ask)?)
+}
+
+/// `xtask generate`: the files the manifest's `generated` rules render,
+/// each written and each named. A function of the shape `bench` and
+/// `divergence-reason` have, so the dispatch stays a list of one arm per
+/// instrument as its ceiling tightens.
+fn generate_command(root: &Path, manifest: &Manifest) -> Result<()> {
+    for path in generated::write_all(root, manifest)? {
+        println!("wrote {}", path.display());
+    }
+    Ok(())
+}
+
+/// `xtask bench`: the bars asked for, each measured under the protocol and
+/// each written; the exit is 0 whatever a reading says.
+fn bench_command(root: &Path, store: &Store, ask: &cli::Bench) -> Result<()> {
+    bench::run(
+        root,
+        store,
+        ask.bar.as_deref(),
+        ask.from.as_deref(),
+        ask.reps,
+        ask.label,
+        ask.note.as_deref().unwrap_or_default(),
+    )
 }
 
 /// `xtask compile-identity`: the corpus asked for, dumped twice and
