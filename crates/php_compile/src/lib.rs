@@ -368,10 +368,11 @@ mod tests {
         let unit = compiled.unwrap_or_default();
         assert_eq!(
             unit.dump(),
-            "$_main:\n     ; (lines=3, args=0, vars=0, tmps=0)\n\
-             0000 ECHO CONST[0]\n\
-             0001 ECHO CONST[1]\n\
-             0002 RETURN CONST[2]\n"
+            "\n$_main:\n     ; (lines=3, args=0, vars=0, tmps=0)\n\
+             \x20    ; (before optimizer)\n     ; :1-1\n     ; return  [] RANGE[0..0]\n\
+             0000 ECHO int(259)\n\
+             0001 ECHO string(\"Darwin\")\n\
+             0002 RETURN int(1)\n"
         );
         assert_eq!(unit.main.literals[0].as_long(), Some(259));
         assert_eq!(
