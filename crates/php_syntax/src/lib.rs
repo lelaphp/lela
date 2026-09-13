@@ -2,19 +2,27 @@
 //! token stream, the typed tree in a safe arena and the parser with php's
 //! error text. What stands today is the schema, `php.ungram` beside this
 //! crate, and [`SyntaxKind`], the kind of every token and node, which
-//! `build.rs` emits from it; and the stub that gives `php_compile` its edge
-//! and its input type: [`parse`] keeps the source and produces no tokens,
-//! no tree and no diagnostics, and the four merged Mahout crates land
-//! behind this signature as work of their own. `Options` joins `parse`
-//! with them.
+//! `build.rs` emits from it; the lexer, [`lex`], whose state stack mirrors
+//! Zend's scanner and whose tokens concatenate to the input; the source
+//! model under it, [`Span`], [`LineIndex`] and [`Diagnostic`]; and the stub
+//! that gives `php_compile` its edge and its input type: [`parse`] keeps
+//! the source and produces no tokens, no tree and no diagnostics, and the
+//! rest of the copy from Mahout lands behind this signature as work of its
+//! own. `Options` joins `parse` with them.
 #![forbid(unsafe_code)]
 
 mod kind {
     //! The generated enum (`build.rs`).
     include!(concat!(env!("OUT_DIR"), "/syntax_kind.rs"));
 }
+mod lexer;
+mod line_index;
+mod source;
 
 pub use kind::SyntaxKind;
+pub use lexer::{LexOptions, Lexed, Token, lex};
+pub use line_index::{LineCol, LineIndex};
+pub use source::{Diagnostic, FileId, MAX_FILE_LEN, Span, TextRange, load_bytes};
 
 /// What one parse produced (design §4.1): the retained source, and, once
 /// the copy from Mahout lands, the token stream, the line table, the tree and the
