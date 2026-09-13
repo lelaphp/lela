@@ -11,8 +11,8 @@
 //! `RETURN`, which raises the return safepoint, `JMP` and `JMPNZ`, which
 //! raise the loop safepoint when they jump backward, `ASSIGN`, which
 //! writes a CV, and the arithmetic `ZEND_ADD`, `ZEND_SUB`, `ZEND_MUL`,
-//! `ZEND_DIV`, `ZEND_MOD`, `ZEND_POW`, `ZEND_SL` and `ZEND_SR` that php
-//! emits for what its compiler does not fold.
+//! `ZEND_DIV`, `ZEND_MOD`, `ZEND_POW`, `ZEND_SL` and `ZEND_SR` and the
+//! `ZEND_CONCAT` that php emits for what its compiler does not fold.
 
 // Every handler is generic over the tier and hands back the same edge, so
 // the generated dispatch calls them all the same way; the ones that raise a
@@ -172,7 +172,7 @@ pub(crate) fn add<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    arithmetic(req, frame, code, op, crate::ops::add)
+    binary(req, frame, code, op, crate::ops::add)
 }
 
 /// `ZEND_SUB`: [`crate::ops::sub`], the same way.
@@ -182,7 +182,7 @@ pub(crate) fn sub<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    arithmetic(req, frame, code, op, crate::ops::sub)
+    binary(req, frame, code, op, crate::ops::sub)
 }
 
 /// `ZEND_MUL`: [`crate::ops::mul`], the same way.
@@ -192,7 +192,7 @@ pub(crate) fn mul<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    arithmetic(req, frame, code, op, crate::ops::mul)
+    binary(req, frame, code, op, crate::ops::mul)
 }
 
 /// `ZEND_DIV`: [`crate::ops::div`], the same way; a divisor of zero
@@ -203,7 +203,7 @@ pub(crate) fn div<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    arithmetic(req, frame, code, op, crate::ops::div)
+    binary(req, frame, code, op, crate::ops::div)
 }
 
 /// `ZEND_MOD`: [`crate::ops::mod`], the same way; a divisor of zero
@@ -214,7 +214,7 @@ pub(crate) fn r#mod<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    arithmetic(req, frame, code, op, crate::ops::r#mod)
+    binary(req, frame, code, op, crate::ops::r#mod)
 }
 
 /// `ZEND_POW`: [`crate::ops::pow`], the same way.
@@ -224,18 +224,28 @@ pub(crate) fn pow<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    arithmetic(req, frame, code, op, crate::ops::pow)
+    binary(req, frame, code, op, crate::ops::pow)
 }
 
 /// `ZEND_SL`: [`crate::ops::shift_left`], the same way; a negative count
 /// leaves php's `ArithmeticError` pending where the opline stands.
 pub(crate) fn sl<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
-    arithmetic(req, frame, code, op, crate::ops::shift_left)
+    binary(req, frame, code, op, crate::ops::shift_left)
 }
 
 /// `ZEND_SR`: [`crate::ops::shift_right`], the same way.
 pub(crate) fn sr<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
-    arithmetic(req, frame, code, op, crate::ops::shift_right)
+    binary(req, frame, code, op, crate::ops::shift_right)
+}
+
+/// `ZEND_CONCAT`: [`crate::ops::concat`], the same way.
+pub(crate) fn concat<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    binary(req, frame, code, op, crate::ops::concat)
 }
 
 /// `ZEND_JMP`: the unconditional jump `pass_two` leaves, its target
@@ -310,11 +320,11 @@ pub(crate) fn r#return<T: Tier>(
     Ok(Stepped::Popped(caller))
 }
 
-/// The body the four arithmetic handlers share: both operands addressed,
+/// The body the binary operators' handlers share: both operands addressed,
 /// the kernel called, and what it returned written into the temporary
 /// the opline's `result` field names. A kernel that threw leaves the
 /// throwable pending, which is the `Threw` edge the loop reads.
-fn arithmetic(
+fn binary(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,

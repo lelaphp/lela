@@ -15,10 +15,10 @@
 //! interpolation, `true`, `false`, `null`, a constant by name, a call of
 //! a named function, a parenthesised expression, a variable `$a` that is
 //! a CV, an assignment `$a = expr` to one, unary `-` and `+`, and
-//! `<<`, `>>`, `+`, `-`, `*`, `/`, `%` and `**` at php's precedence
-//! levels: the shifts under the additive level under the multiplicative
-//! one, each left to right, and `**` right to left above unary `-`, with
-//! `=` below them all and read right to left.
+//! `.`, `<<`, `>>`, `+`, `-`, `*`, `/`, `%` and `**` at php's precedence
+//! levels: `.` under the shifts under the additive level under the
+//! multiplicative one, each left to right, and `**` right to left above
+//! unary `-`, with `=` below them all and read right to left.
 //! Anything else is a [`crate::CompileError`], so what this cannot read is
 //! refused rather than silently compiled to something else.
 
@@ -83,7 +83,7 @@ pub(crate) enum Expr {
     },
 }
 
-/// The arithmetic operators this reads, each the opcode php's
+/// The binary operators this reads, each the opcode php's
 /// `zend_compile_binary_op` gives it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BinaryOp {
@@ -103,6 +103,8 @@ pub(crate) enum BinaryOp {
     Sl,
     /// `ZEND_SR`
     Sr,
+    /// `ZEND_CONCAT`
+    Concat,
 }
 
 /// The line each statement stands on, beside it.
@@ -385,7 +387,7 @@ impl Reader<'_> {
     /// `1 + $a = 2` is php's `1 + ($a = 2)`; that is refused here rather
     /// than read as the other grouping.
     fn expr(&mut self) -> Result<Expr, Trouble> {
-        let left = self.shift()?;
+        let left = self.concat()?;
         self.skip_trivia();
         if !(self.byte(0) == Some(b'=') && self.byte(1) != Some(b'=')) {
             return Ok(left);
@@ -400,6 +402,30 @@ impl Reader<'_> {
             var,
             value: Box::new(self.expr()?),
         })
+    }
+
+    /// `.`, php's own level since 8.0, below the shifts. A `.=` assigns
+    /// and a `...` unpacks, neither of which this reads; a `.` before a
+    /// digit opens a number, which php's scanner takes first, so `'a' .5`
+    /// is php's parse error and is refused here.
+    fn concat(&mut self) -> Result<Expr, Trouble> {
+        let mut left = self.shift()?;
+        loop {
+            self.skip_trivia();
+            if !(self.byte(0) == Some(b'.')
+                && !matches!(self.byte(1), Some(b'.' | b'='))
+                && !self.digit_ahead(1))
+            {
+                return Ok(left);
+            }
+            self.bump(1);
+            let right = self.shift()?;
+            left = Expr::Binary {
+                op: BinaryOp::Concat,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
     }
 
     /// `<<` and `>>`, php's level below the arithmetic. A `<<<` opens a
@@ -615,10 +641,12 @@ impl Reader<'_> {
     fn number(&mut self) -> Result<Expr, Trouble> {
         let start = self.at;
         let mut float = false;
+        // php's `DNUM` takes a point with digits on either side of it,
+        // so `1.` is the float 1.0 and `1.'a'` is a parse error, not `1 . 'a'`.
         while let Some(b) = self.byte(0) {
             if b.is_ascii_digit() || b == b'_' {
                 self.bump(1);
-            } else if b == b'.' && !float && self.digit_ahead(1) {
+            } else if b == b'.' && !float && (self.at > start || self.digit_ahead(1)) {
                 float = true;
                 self.bump(1);
             } else {
@@ -934,8 +962,9 @@ mod tests {
     #[test]
     fn an_operator_this_does_not_read_is_refused_rather_than_taken_for_another() {
         for source in [
-            b"<?php echo 'a' . 'b';".as_slice(),
+            b"<?php echo 'a' .= 'b';".as_slice(),
             b"<?php echo 1 <=> 2;".as_slice(),
+            b"<?php echo 1 | 2;".as_slice(),
         ] {
             assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
         }
@@ -961,6 +990,59 @@ mod tests {
             shape(b"<?php echo (2 * 3) % 4;"),
             "`%` and `*` are one level, read left to right"
         );
+    }
+
+    #[test]
+    fn a_concatenation_stands_below_the_shifts_and_reads_left_to_right() {
+        assert_eq!(
+            shape(b"<?php echo 1 . 2 + 3;"),
+            shape(b"<?php echo 1 . (2 + 3);"),
+            "`+` binds tighter than `.`"
+        );
+        assert_eq!(
+            shape(b"<?php echo 1 + 2 . 3;"),
+            shape(b"<?php echo (1 + 2) . 3;"),
+            "`+` binds tighter than `.` on its left too"
+        );
+        assert_eq!(
+            shape(b"<?php echo 1 . 2 << 3;"),
+            shape(b"<?php echo 1 . (2 << 3);"),
+            "`<<` binds tighter than `.`"
+        );
+        assert_eq!(
+            shape(b"<?php echo 1 << 2 . 3;"),
+            shape(b"<?php echo (1 << 2) . 3;"),
+            "`<<` binds tighter than `.` on its left too"
+        );
+        assert_eq!(
+            shape(b"<?php echo 1 . 2 . 3;"),
+            shape(b"<?php echo (1 . 2) . 3;"),
+            "`.` reads left to right"
+        );
+        assert_eq!(
+            read(b"<?php echo 'a' . 'b';").unwrap_or_default(),
+            vec![(
+                Stmt::Echo(vec![Expr::Binary {
+                    op: BinaryOp::Concat,
+                    left: Box::new(Expr::Str(b"a".to_vec())),
+                    right: Box::new(Expr::Str(b"b".to_vec())),
+                }]),
+                1
+            )]
+        );
+        // php's scanner takes `1.` and `.5` as numbers before the
+        // parser sees a `.`, so these are php's parse errors.
+        assert_eq!(
+            read(b"<?php echo 1.;").unwrap_or_default(),
+            vec![(Stmt::Echo(vec![Expr::Float(1.0)]), 1)]
+        );
+        for source in [
+            b"<?php echo 1.'a';".as_slice(),
+            b"<?php echo 'a'.5;".as_slice(),
+            b"<?php echo 'a' ... 'b';".as_slice(),
+        ] {
+            assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
+        }
     }
 
     #[test]

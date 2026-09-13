@@ -14,8 +14,12 @@ use crate::api::raising::{Thrown, deprecated, throw, warning};
 use crate::api::request::Request;
 use crate::api::values::{PhpArray, PhpString, TypeTag, Value, ValueRef};
 
-/// `zval_get_string`: a value as the string php converts it to, which is
-/// what `ECHO`, `print` and string interpolation write.
+/// `zval_get_string` (`Z/Zend/zend_operators.c:1066`): a value as the
+/// string php converts it to, which is what `ECHO`, `print`, `.` and
+/// string interpolation write. An array is php's warning and the word
+/// `Array`; a resource its `Resource id #` and number; an object is the
+/// `Error` php throws for one with no `__toString`, and no class here
+/// has one yet, so that arm waits with the classes.
 ///
 /// ```php
 /// echo 1, "|", true, "|", false, "|", null, "|", "as written", "|", 2.5, "|", NAN;
@@ -26,26 +30,31 @@ use crate::api::values::{PhpArray, PhpString, TypeTag, Value, ValueRef};
 /// NAN
 /// ```
 pub(crate) fn to_string(req: &mut Request, value: &Value) -> PhpString {
-    let value = value.deref();
-    if let Some(s) = value.as_php_string() {
-        return s.clone();
-    }
-    if let Some(n) = value.as_int() {
-        return PhpString::from_bytes(n.to_string().as_bytes());
-    }
-    if let Some(f) = value.as_float() {
-        // `zend_double_to_str`: the text, then the warning php raises
-        // when the value it converted was NAN.
-        let text = PhpString::from_bytes(double_to_string(f, req.precision()).as_bytes());
-        if f.is_nan() {
-            warning(req, "unexpected NAN value was coerced to string");
+    match value.deref().as_ref() {
+        ValueRef::Str(s) => s.clone(),
+        ValueRef::Int(n) => PhpString::from_bytes(n.to_string().as_bytes()),
+        ValueRef::Float(f) => {
+            // `zend_double_to_str`: the text, then the warning php raises
+            // when the value it converted was NAN.
+            let text = PhpString::from_bytes(double_to_string(f, req.precision()).as_bytes());
+            if f.is_nan() {
+                warning(req, "unexpected NAN value was coerced to string");
+            }
+            text
         }
-        return text;
-    }
-    match value.as_bool() {
-        Some(true) => PhpString::from_bytes(b"1"),
-        // `false` and `null` are both the empty string.
-        _ => PhpString::default(),
+        ValueRef::Bool(true) => PhpString::from_bytes(b"1"),
+        ValueRef::Array(_) => {
+            warning(req, "Array to string conversion");
+            PhpString::from_bytes(b"Array")
+        }
+        ValueRef::Resource(r) => PhpString::from_bytes(format!("Resource id #{}", r.id).as_bytes()),
+        // `false` and `null` are both the empty string, and so is an
+        // object until its arm lands.
+        ValueRef::Undef
+        | ValueRef::Null
+        | ValueRef::Bool(false)
+        | ValueRef::Object(_)
+        | ValueRef::Reference(_) => PhpString::default(),
     }
 }
 
@@ -419,6 +428,67 @@ pub(crate) fn shift_right(req: &mut Request, left: &Value, right: &Value) -> Res
         )),
     }
 }
+
+/// `concat_function` (`Zend/zend_operators.c:2017`): both sides as the
+/// strings [`to_string`] makes of them, the left one first, and the
+/// bytes of one after the other; the side that is empty leaves the other
+/// as the value. A length past `ZSTR_MAX_LEN` is php's `Error`, `String
+/// size overflow`, which no request under a memory limit reaches.
+///
+/// Each fence calls a native so that php's compiler leaves the opcode
+/// standing: `zend_compile_binary_op` folds `.` over two constants and
+/// converts a constant operand to a string where it stands, so a number
+/// or a bool reaches the kernel only from a call, a CV or a temporary.
+///
+/// ```php
+/// $n = 2; $t = true; $f = false; $d = 2.5;
+/// echo 'a' . 'b', "|", 'n=' . $n, "|", $n . $n, "|", $t . '|' . $f . '|', $d . 'x', "|", '' . $n, "|", $n . '', "|", extension_loaded('Core') . '';
+/// ```
+/// ```expect
+/// ab|n=2|22|1||2.5x|2|2|1
+/// ```
+///
+/// Two constants fold where they stand, so #162's fourth program is
+/// three `ECHO`s of a constant in both engines.
+///
+/// ```php
+/// echo 7 % 2, 2 ** 3, 'a' . 'b';
+/// ```
+/// ```expect
+/// 18ab
+/// ```
+///
+/// A NAN is the warning `zval_get_string` raises, where the operand is
+/// not a constant php's compiler converted first (#218).
+///
+/// ```php
+/// $nan = NAN;
+/// echo $nan . 'z';
+/// ```
+/// ```expect
+///
+/// Warning: unexpected NAN value was coerced to string in %s on line 3
+/// NANz
+/// ```
+pub(crate) fn concat(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    let a = to_string(req, left);
+    let b = to_string(req, right);
+    if a.is_empty() {
+        return Ok(Value::string(b));
+    }
+    if b.is_empty() {
+        return Ok(Value::string(a));
+    }
+    if a.len() > ZSTR_MAX_LEN - b.len() {
+        return Err(throw(req, "Error", "String size overflow"));
+    }
+    Ok(Value::string(a.concat(&b)))
+}
+
+/// `ZSTR_MAX_LEN` (`Z/Zend/zend_string.h:108`): `SIZE_MAX` less the
+/// aligned header and terminator of a `zend_string`, 32 bytes on the
+/// oracle's platform.
+const ZSTR_MAX_LEN: usize = usize::MAX - 32;
 
 /// php's `(double) lval`, whose rounding is the behaviour being copied.
 #[expect(

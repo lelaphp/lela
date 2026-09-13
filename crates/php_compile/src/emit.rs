@@ -9,12 +9,15 @@
 //! `get_temporary_variable` numbers them, and a temporary's slot on the
 //! frame is its number past the last CV.
 //!
-//! Arithmetic over values known here is folded as php folds it
-//! (`zend_try_ct_eval_binary_op`), so `1/3` is one constant and no opline.
-//! What it cannot fold becomes the opcode php emits, into a temporary as
-//! `zend_emit_op_tmp` leaves it: `ZEND_ADD`, `ZEND_SUB`, `ZEND_MUL` and
-//! `ZEND_DIV`, `ZEND_MOD`, `ZEND_POW`, `ZEND_SL` and `ZEND_SR`, whose
-//! kernels the engine serves.
+//! An operator over values known here is folded as php folds it
+//! (`zend_try_ct_eval_binary_op`), so `1/3` and `'a' . 'b'` are each one
+//! constant and no opline. What it cannot fold becomes the opcode php
+//! emits, into a temporary as `zend_emit_op_tmp` leaves it: `ZEND_ADD`,
+//! `ZEND_SUB`, `ZEND_MUL` and `ZEND_DIV`, `ZEND_MOD`, `ZEND_POW`,
+//! `ZEND_SL`, `ZEND_SR` and `ZEND_CONCAT`, whose kernels the engine
+//! serves. A constant operand of a `.` is converted to a string where it
+//! stands whether or not the other side folds, as `zend_compile_binary_op`
+//! converts it, so `2 . $a` is a `CONCAT` over the constant `"2"`.
 //!
 //! A variable read is a `CV` operand and no opline (`zend_try_compile_cv`),
 //! and an assignment to one is `ASSIGN` with the CV in `op1` and the value
@@ -28,12 +31,12 @@
 //! here, so `for (;;)` is a `JMPNZ` over the constant `true` and not a
 //! `JMP`, which is the shape the compile-identity lane holds this to.
 
-use php_heap::{Fatal, Intern, Number, Zval, ZvalType, numeric_prefix};
+use php_heap::{Fatal, Intern, Number, Zval, ZvalType, double_to_string, numeric_prefix};
 use php_unit::decl::Name;
 use php_unit::{OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
-use crate::CompileError;
 use crate::read::{BinaryOp, Expr, Read, Stmt};
+use crate::{CompileError, Options};
 
 /// One op array under construction, and the home its constant strings
 /// are interned into (design §5.2): the engine's table when the unit is
@@ -43,6 +46,8 @@ use crate::read::{BinaryOp, Expr, Read, Stmt};
 /// through whichever handler is installed).
 pub(crate) struct Emit<'a> {
     strings: &'a mut dyn Intern,
+    /// php's `precision` while the file compiles, [`Options::precision`].
+    precision: i32,
     oplines: Vec<Opline>,
     constants: Vec<Zval>,
     vars: Vec<Name>,
@@ -70,12 +75,13 @@ enum Where {
 /// `extended_value` at -1).
 pub(crate) fn main_op_array(
     read: &Read,
-    filename: &Name,
+    options: &Options,
     lines: u32,
     strings: &mut dyn Intern,
 ) -> Result<OpArray, CompileError> {
     let mut emit = Emit {
         strings,
+        precision: options.precision,
         oplines: Vec::new(),
         constants: Vec::new(),
         vars: Vec::new(),
@@ -96,7 +102,7 @@ pub(crate) fn main_op_array(
         try_catch: Box::new([]),
         live_ranges: Box::new([]),
         safepoints: emit.safepoints.into_boxed_slice(),
-        filename: filename.clone(),
+        filename: options.filename.clone(),
         line_start: 1,
         line_end: lines.max(1),
         cache_size: emit.cache_slots,
@@ -366,6 +372,9 @@ impl Emit<'_> {
     /// and the opcode into a temporary where it does not
     /// (`zend_emit_op_tmp`).
     fn binary(&mut self, op: BinaryOp, left: &Expr, right: &Expr) -> Result<Where, CompileError> {
+        if op == BinaryOp::Concat {
+            return self.concat(left, right);
+        }
         if let (Ok(a), Ok(b)) = (self.constant_expr(left), self.constant_expr(right))
             && let Some(folded) = fold(op, a, b)
         {
@@ -375,6 +384,74 @@ impl Emit<'_> {
         let left = self.expr(left)?;
         let right = self.expr(right)?;
         Ok(self.emit_binary(opcode, left, right))
+    }
+
+    /// `zend_compile_binary_op`'s `ZEND_CONCAT` arm: both sides
+    /// compiled, the fold over two constants, and otherwise each constant
+    /// side converted to a string where it stands and `CONCAT` into a
+    /// temporary. php converts before it emits, so what the opline reads
+    /// is the string and never the number it was written as.
+    fn concat(&mut self, left: &Expr, right: &Expr) -> Result<Where, CompileError> {
+        let left = self.expr(left)?;
+        let right = self.expr(right)?;
+        if let (Where::Constant(a), Where::Constant(b)) = (left, right)
+            && let Some(folded) = self.concat_fold(a, b)?
+        {
+            return Ok(Where::Constant(folded));
+        }
+        let left = self.string_operand(left)?;
+        let right = self.string_operand(right)?;
+        Ok(self.emit_binary(Opcode::Concat, left, right))
+    }
+
+    /// `zend_try_ct_eval_binary_op` over `concat_function`: the one
+    /// string the two constants join into, or nothing where either is
+    /// left to the opcode.
+    fn concat_fold(&mut self, left: Zval, right: Zval) -> Result<Option<Zval>, CompileError> {
+        let (Some(a), Some(b)) = (self.stringified(left)?, self.stringified(right)?) else {
+            return Ok(None);
+        };
+        let (Some(a), Some(b)) = (a.as_str(), b.as_str()) else {
+            return Ok(None);
+        };
+        let joined = [a.bytes(), b.bytes()].concat();
+        Ok(Some(self.string(&joined)?))
+    }
+
+    /// A constant operand of a `.` as the string `zend_compile_binary_op`
+    /// converts it to; any other operand as it is.
+    fn string_operand(&mut self, value: Where) -> Result<Where, CompileError> {
+        match value {
+            Where::Constant(v) => Ok(Where::Constant(self.stringified(v)?.unwrap_or(v))),
+            other => Ok(other),
+        }
+    }
+
+    /// `_convert_to_string` over a constant: null and false the empty
+    /// string, true `"1"`, a long its digits, a double the text
+    /// `zend_double_to_str` renders at the compile-time precision, a
+    /// string itself. A NAN is left as written: php converts it here
+    /// and raises the coercion warning while compiling, and this
+    /// compiler has no way to raise a diagnostic yet (#218), so the
+    /// opcode is left to raise it, which prints the same text at the
+    /// same line.
+    fn stringified(&mut self, value: Zval) -> Result<Option<Zval>, CompileError> {
+        if let Some(n) = value.as_long() {
+            return Ok(Some(self.string(n.to_string().as_bytes())?));
+        }
+        if let Some(d) = value.as_double() {
+            if d.is_nan() {
+                return Ok(None);
+            }
+            let text = double_to_string(d, self.precision);
+            return Ok(Some(self.string(text.as_bytes())?));
+        }
+        match value.kind() {
+            ZvalType::String => Ok(Some(value)),
+            ZvalType::True => Ok(Some(self.string(b"1")?)),
+            ZvalType::Null | ZvalType::False => Ok(Some(self.string(b"")?)),
+            _ => Ok(None),
+        }
     }
 
     /// `zend_compile_unary_pm`: php folds unary `-` and `+` as the
@@ -420,6 +497,7 @@ impl Emit<'_> {
             BinaryOp::Pow => Opcode::Pow,
             BinaryOp::Sl => Opcode::Sl,
             BinaryOp::Sr => Opcode::Sr,
+            BinaryOp::Concat => Opcode::Concat,
         }
     }
 
@@ -446,6 +524,16 @@ impl Emit<'_> {
                     Zval::long(if *minus { -1 } else { 1 }),
                 )
                 .ok_or_else(|| self.fatal("arithmetic this compiler cannot fold yet"))
+            }
+            Expr::Binary {
+                op: BinaryOp::Concat,
+                left,
+                right,
+            } => {
+                let left = self.constant_expr(left)?;
+                let right = self.constant_expr(right)?;
+                self.concat_fold(left, right)?
+                    .ok_or_else(|| self.fatal("a concatenation this compiler cannot fold yet"))
             }
             Expr::Binary { op, left, right } => {
                 let left = self.constant_expr(left)?;
@@ -624,6 +712,8 @@ fn produces_error(op: BinaryOp, a: Number, b: Number) -> bool {
             (long_compatible(a), long_compatible(b)),
             (Some(_), Some(by)) if by >= 0
         ),
+        // A `.` is [`Emit::concat_fold`]'s and never reaches here.
+        BinaryOp::Concat => true,
     }
 }
 
@@ -674,6 +764,8 @@ fn longs(op: BinaryOp, a: i64, b: i64) -> Zval {
         BinaryOp::Pow => power(a, b),
         BinaryOp::Sl => Zval::long(php_heap::shift_left(a, b.unsigned_abs())),
         BinaryOp::Sr => Zval::long(php_heap::shift_right(a, b.unsigned_abs())),
+        // A `.` is [`Emit::concat_fold`]'s; [`produces_error`] held it.
+        BinaryOp::Concat => Zval::null(),
     }
 }
 
@@ -706,7 +798,7 @@ fn doubles(op: BinaryOp, a: f64, b: f64) -> Option<Zval> {
         BinaryOp::Div => Some(Zval::double(a / b)),
         // A modulo and a shift are [`longs`]'s: two long-compatible
         // doubles go there, and the guard refused every other pair.
-        BinaryOp::Mod | BinaryOp::Sl | BinaryOp::Sr => None,
+        BinaryOp::Mod | BinaryOp::Sl | BinaryOp::Sr | BinaryOp::Concat => None,
         BinaryOp::Pow => Some(Zval::double(a.powf(b))),
     }
 }

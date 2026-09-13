@@ -27,12 +27,27 @@ use php_unit::Unit;
 use php_unit::decl::Name;
 
 /// What the compiler is told beside the source (design §4.1).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
     /// The file name the unit and its errors carry.
     pub filename: Name,
     /// Whether the caller's `declare(strict_types=1)` is in force.
     pub strict_types: bool,
+    /// php's `precision` ini entry as it stands while the file compiles,
+    /// which `_convert_to_string` renders a double constant at when the
+    /// compiler folds a `.` over it (`zend_double_to_str`, which reads
+    /// `EG(precision)`); php's default is 14.
+    pub precision: i32,
+}
+
+impl Default for Options {
+    fn default() -> Options {
+        Options {
+            filename: Name::default(),
+            strict_types: false,
+            precision: 14,
+        }
+    }
 }
 
 /// A compile-time fatal: php's message, at php's line.
@@ -73,7 +88,7 @@ pub fn compile(
     })?;
     let lines = u32::try_from(parsed.source.split(|b| *b == b'\n').count()).unwrap_or(u32::MAX);
     Ok(Unit {
-        main: emit::main_op_array(&read, &options.filename, lines, strings)?,
+        main: emit::main_op_array(&read, options, lines, strings)?,
         ..Unit::default()
     })
 }
@@ -501,6 +516,115 @@ mod tests {
              0003 SL CONST[2] V0\n\
              0004 ECHO T1\n\
              0005 RETURN CONST[2]\n"
+        );
+    }
+
+    /// The text of the one constant a single-expression `echo` leaves,
+    /// read while the table it was interned into still stands.
+    fn echoed_string(source: &[u8]) -> Vec<u8> {
+        let (unit, _strings) = unit_and_strings(source);
+        literal_text(&unit, 0).unwrap_or_default()
+    }
+
+    /// The text of the constant at `at`, for a string; nothing otherwise.
+    fn literal_text(unit: &Unit, at: usize) -> Option<Vec<u8>> {
+        unit.main
+            .literals
+            .get(at)
+            .and_then(|z| z.as_str())
+            .map(|s| s.bytes().to_vec())
+    }
+
+    /// `zend_compile_binary_op`'s `ZEND_CONCAT` arm: the fold over two
+    /// constants through `concat_function`, each constant converted as
+    /// `_convert_to_string` converts it, so the op array is php's single
+    /// `ECHO` of the folded string; and a constant beside what does not
+    /// fold converted where it stands, so the `CONCAT` reads a string.
+    #[test]
+    fn a_concatenation_over_constants_folds_to_php_s_one_string_and_the_rest_is_concat() {
+        for source in [&b"<?php echo 'a' . 'b';"[..], b"<?php echo \"1\" . 2;"] {
+            assert_eq!(
+                unit_of(source).dump(),
+                "$_main:\n     ; (lines=2, args=0, vars=0, tmps=0)\n\
+                 0000 ECHO CONST[0]\n0001 RETURN CONST[1]\n",
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+        assert_eq!(echoed_string(b"<?php echo 'a' . 'b';"), b"ab");
+        assert_eq!(echoed_string(b"<?php echo \"1\" . 2;"), b"12");
+        assert_eq!(echoed_string(b"<?php echo 2.5 . 'x';"), b"2.5x");
+        assert_eq!(echoed_string(b"<?php echo 1.0 . 'y';"), b"1y");
+        assert_eq!(
+            echoed_string(b"<?php echo 1 / 3 . '';"),
+            b"0.33333333333333"
+        );
+        assert_eq!(echoed_string(b"<?php echo true . false . null;"), b"1");
+        assert_eq!(echoed_string(b"<?php echo 'a' . 'b' . 'c';"), b"abc");
+        assert_eq!(
+            echoed_string(b"<?php echo 1 . 2 << 3;"),
+            b"116",
+            "`<<` binds tighter than `.`"
+        );
+        assert_eq!(
+            echoed_literal(b"<?php echo (1 . 2) + 3;").as_long(),
+            Some(15),
+            "a folded `.` is a constant to the arithmetic around it"
+        );
+        // The precision the double is rendered at is the compile-time
+        // ini entry, as `zend_double_to_str` reads `EG(precision)`.
+        let mut strings = php_heap::Strings::new();
+        let unit = compile(
+            &php_syntax::parse(b"<?php echo 1 / 3 . '';"),
+            &Options {
+                precision: 3,
+                ..Options::default()
+            },
+            &mut strings,
+        )
+        .unwrap_or_default();
+        assert_eq!(literal_text(&unit, 0), Some(b"0.333".to_vec()));
+        // A constant beside a CV is converted and the `CONCAT` stands.
+        let (unit, _strings) = unit_and_strings(
+            b"<?php $a = 1; echo 2 . $a; echo $a . 2.5; echo 'a' . 'b' . $a; echo NAN . $a;",
+        );
+        assert_eq!(
+            unit.dump(),
+            "$_main:\n     ; (lines=10, args=0, vars=1, tmps=5)\n\
+             0000 ASSIGN CV0 CONST[0]\n\
+             0001 CONCAT CONST[1] CV0\n\
+             0002 ECHO T1\n\
+             0003 CONCAT CV0 CONST[2]\n\
+             0004 ECHO T2\n\
+             0005 CONCAT CONST[3] CV0\n\
+             0006 ECHO T3\n\
+             0007 CONCAT CONST[4] CV0\n\
+             0008 ECHO T4\n\
+             0009 RETURN CONST[0]\n"
+        );
+        assert_eq!(
+            literal_text(&unit, 1),
+            Some(b"2".to_vec()),
+            "the long is the string `2`"
+        );
+        assert_eq!(
+            literal_text(&unit, 2),
+            Some(b"2.5".to_vec()),
+            "the double is the string `2.5`"
+        );
+        assert_eq!(
+            literal_text(&unit, 3),
+            Some(b"ab".to_vec()),
+            "the left fold is one string"
+        );
+        assert_eq!(
+            unit.main
+                .literals
+                .get(4)
+                .and_then(|z| z.as_double())
+                .map(f64::is_nan),
+            Some(true),
+            "a NAN is left as written until the compiler can warn (#218)"
         );
     }
 

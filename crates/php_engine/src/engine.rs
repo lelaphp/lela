@@ -137,7 +137,16 @@ impl Shared {
             // ended holding the lock left is consistent.
             Err(poisoned) => poisoned.into_inner(),
         };
-        compile(source, filename, &mut *strings)
+        compile(source, filename, self.precision(), &mut *strings)
+    }
+
+    /// php's `precision` as the startup ini has it, which a unit bound
+    /// for the cache is compiled under; a request compiles its own
+    /// source under its own.
+    fn precision(&self) -> i32 {
+        self.ini_default(b"precision")
+            .and_then(|value| String::from_utf8_lossy(value.as_bytes()).parse().ok())
+            .unwrap_or(14)
     }
 
     /// The unit for the file `path` names: compiled and published once,
@@ -397,7 +406,15 @@ impl Engine {
         // interned into this request's own memory and gone with it, as
         // php holds what it compiles for `-r` and for `eval`.
         let compiled = match source {
-            Some(source) => Some(compile(&source, script.as_bytes(), req.heap_mut())),
+            Some(source) => {
+                let precision = req.precision();
+                Some(compile(
+                    &source,
+                    script.as_bytes(),
+                    precision,
+                    req.heap_mut(),
+                ))
+            }
             None => self.shared.cached(script.as_bytes()),
         };
         match compiled {
@@ -447,15 +464,18 @@ impl Engine {
 /// One source compiled, with what the compiler refused kept instead of
 /// dropped: what `serve` needs to render php's parse error, and what
 /// [`Engine::unit`] is the lossy face over. `strings` is the home the
-/// unit's constant strings are interned into (design §5.2).
+/// unit's constant strings are interned into (design §5.2), and
+/// `precision` the ini entry php's compiler renders a double constant at.
 fn compile(
     source: &[u8],
     filename: &[u8],
+    precision: i32,
     strings: &mut dyn Intern,
 ) -> Result<Arc<Unit>, CompileError> {
     let options = php_compile::Options {
         filename: Name(filename.into()),
         strict_types: false,
+        precision,
     };
     php_compile::compile_source(source, &options, strings).map(Arc::new)
 }
@@ -837,7 +857,7 @@ mod tests {
         for _ in 0..2 {
             let mut req = Request::new(Arc::clone(&engine.shared), description(""));
             started_at.push(req.memory_usage(false));
-            let compiled = compile(source, b"witness.php", req.heap_mut());
+            let compiled = compile(source, b"witness.php", 14, req.heap_mut());
             assert!(compiled.is_ok(), "the source compiles");
             assert!(
                 req.memory_usage(false) > 0,
