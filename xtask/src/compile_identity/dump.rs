@@ -1,11 +1,18 @@
-//! How one file of the corpus is judged: its program written where both
-//! binaries compile it from, dumped once under the pinned oracle and once
-//! under the engine, and the two held to byte-identity through
+//! How one file of the corpus is judged: its program written where the
+//! pinned oracle compiles it from, dumped once by php and once by the
+//! compiler under measurement, and the two held to byte-identity through
 //! [`oracle::compare`], so the registry decides what a difference means
 //! (harness §4.3). The tally, the corpus and the reading are the lane's;
 //! this is the per-file judge it contributes.
 //!
-//! **Why both sides compile one file.** php prints the name it was given
+//! **Which compiler dumps.** Design §6.1: the lane compiles in this
+//! process, through `php_bundle`, and [`Compiler::Linked`] is that
+//! adapter; [`Compiler::Binary`] is the rung above it, a binary standing
+//! where the engine's will once it honours php's dump flags, one process
+//! per program under the same recipe. Both answer one [`Dumped`], so the
+//! verdict never learns which of the two printed it.
+//!
+//! **Why one program under one name.** php prints the name it was given
 //! into each block of the dump, so two programs under two names would
 //! differ there before an opline was compared. One program, under one
 //! name, in one directory, under one recipe: what is left between the two
@@ -17,18 +24,30 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 
-use super::{Corpus, Judged, Judgement, LINT, REGIME};
+use super::{Corpus, Judged, Judgement, LINT, REGIME, linked};
 use crate::divergence::Registry;
 use crate::oracle::{self, Invocation, Oracle, Program, Verdict as Compared};
 use crate::phpt::file::Phpt;
 
-/// The two dumps of one run: the oracle and the registry, the binary
+/// What takes the engine's side of one dump.
+pub(super) enum Compiler<'a> {
+    /// The compiler linked into this process, reached through
+    /// `php_bundle` (design §6.1): what the lane stands on from day 1,
+    /// with no binary built.
+    Linked(php_bundle::test::Engine),
+    /// A binary of its own, one process per program under the pin's
+    /// recipe: the pinned oracle standing in as the lane's control, and
+    /// the engine's own binary once it honours php's dump flags.
+    Binary(&'a Path),
+}
+
+/// The two dumps of one run: the oracle and the registry, the compiler
 /// whose dump is held to the oracle's, and the directory the programs are
 /// written in, which is taken away when the run ends.
 pub(super) struct Dumps<'a> {
     oracle: &'a Oracle<'a>,
     registry: &'a Registry,
-    engine: &'a Path,
+    compiler: Compiler<'a>,
     dir: Programs,
     /// `-l`, the one flag before the program, held as the invocation takes
     /// it.
@@ -39,12 +58,12 @@ impl<'a> Dumps<'a> {
     pub(super) fn new(
         oracle: &'a Oracle<'a>,
         registry: &'a Registry,
-        engine: &'a Path,
+        compiler: Compiler<'a>,
     ) -> Result<Dumps<'a>> {
         Ok(Dumps {
             oracle,
             registry,
-            engine,
+            compiler,
             dir: Programs::new()?,
             flags: [LINT.to_owned()],
         })
@@ -61,9 +80,39 @@ impl<'a> Dumps<'a> {
         };
         let program = self.dir.write(file, &body)?;
         let expected = self.dump(&self.oracle.pin().oracle.path, &program)?;
-        let actual = self.dump(self.engine, &program)?;
+        let actual = self.engine_dump(&program, &body);
         let _ = fs::remove_file(&program);
+        // Trouble on the engine's side is one file's and never the
+        // lane's, whichever compiler it was: a panic inside the linked
+        // one (design §8) as much as a binary that would not start. The
+        // rest of the corpus is still measured and this file is counted
+        // against the reading.
+        let actual = match actual {
+            Ok(dumped) => dumped,
+            Err(trouble) => {
+                let why = format!("the engine's side did not dump it: {trouble:#}");
+                return Ok(Judged::new(&id, &name, Judgement::Bork, why));
+            }
+        };
         Ok(verdict(self.registry, &id, &name, &expected, &actual))
+    }
+
+    /// The engine's side of one dump: the linked compiler over the
+    /// program's own bytes, under the name php was given for them, or the
+    /// binary compiling the file php compiled.
+    fn engine_dump(&self, program: &Path, body: &[u8]) -> Result<Dumped> {
+        match &self.compiler {
+            Compiler::Linked(engine) => linked::dump(
+                engine,
+                &self.oracle.pin().recipe.normalise,
+                body,
+                program
+                    .file_name()
+                    .unwrap_or(program.as_os_str())
+                    .as_encoded_bytes(),
+            ),
+            Compiler::Binary(binary) => self.dump(binary, program),
+        }
     }
 
     /// What one binary prints compiling the program: the pin's recipe, its

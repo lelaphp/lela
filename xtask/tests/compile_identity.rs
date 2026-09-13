@@ -1,17 +1,20 @@
 //! `xtask compile-identity`, op-array identity (design §6.1; harness-design.md
 //! §4.3, §7): a corpus compiled under the pinned oracle's dump recipe and
-//! under a binary standing where the engine will, every file held to
-//! byte-identity, and one reading of the corpus. Every test here goes
-//! through the instrument's `run` and reads what it wrote; the corpus, the
-//! per-file judge and the verdict on two dumps are held beside them, in
-//! the lane's own tests.
+//! under the compiler being measured, every file held to byte-identity,
+//! and one reading of the corpus. Every test here goes through the
+//! instrument's `run` and reads what it wrote; the corpus, the per-file
+//! judge and the verdict on two dumps are held beside them, in the lane's
+//! own tests.
 //!
-//! The tests that spawn php run the pinned oracle behind a shell file
-//! standing where the engine's binary would, since the engine that will be
-//! measured does not exist yet: the runner reads the file as an engine,
-//! its bytes not being the oracle's. They say so on stderr and return when
-//! the pinned binary is not on this machine, unless the machine promised
-//! it (#38); the rest run anywhere.
+//! The engine's side is the compiler linked into this process, reached
+//! through `php_bundle` (design §6.1), which is what a run with no
+//! `--engine` takes and what the tracked corpus is measured by. The tests
+//! that name a binary run the pinned oracle behind a shell file standing
+//! where the engine's own binary would: the runner reads the file as an
+//! engine, its bytes not being the oracle's, which is how a dump on disk
+//! is made measurable. They say so on stderr and return when the pinned
+//! binary is not on this machine, unless the machine promised it (#38);
+//! the rest run anywhere.
 //!
 //! **The dump regime.** The recipe both binaries dump under is the pin's
 //! `[regime.dump]`, which `oracle.toml` does not carry yet: a person adds
@@ -216,6 +219,41 @@ fn a_compiler_that_emits_nothing_is_red_on_every_file_with_the_denominator() {
         reading.message.contains("2 of 4 files differ")
             && reading.message.contains("identity.phpt")
             && reading.message.contains("plain.php"),
+        "{}",
+        reading.message
+    );
+}
+
+/// Design §6.1: the lane compiles in this process, through `php_bundle`,
+/// so it waits on no engine binary. With none named and none built, the
+/// rung below the binary is the linked compiler, and the reading is the
+/// engine's own: red on every file php dumped an op array for, with the
+/// denominator stated. A skip for want of a binary would say nothing
+/// about how far the compiler has to come.
+#[test]
+fn the_linked_compiler_dumps_where_no_engine_binary_is_built() {
+    if oracle().is_none() {
+        return;
+    }
+    let scratch = Scratch::new("linked");
+    let reading = scratch.ask(
+        &registry(""),
+        &Ask {
+            corpus: Some(scratch.corpus.clone()),
+            ..Ask::default()
+        },
+    );
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert_eq!(reading.scope, "corpus");
+    // The same four files the binary of a compiler that emits nothing is
+    // held to: two php dumps an op array for, which the compiler must
+    // come to byte for byte, and two it dumps nothing for.
+    assert_eq!(count(&reading, "files"), 4);
+    assert_eq!(count(&reading, "identical"), 0);
+    assert_eq!(count(&reading, "differ"), 2);
+    assert_eq!(count(&reading, "skipped"), 2);
+    assert!(
+        reading.message.contains("2 of 4 files differ"),
         "{}",
         reading.message
     );

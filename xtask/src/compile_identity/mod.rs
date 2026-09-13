@@ -11,16 +11,17 @@
 //! a row of kind `compile`, whose id is `compile:php-src/<path in the
 //! corpus>`, and the target is zero rows.
 //!
-//! **What takes the dump.** Both sides run under the pin's recipe and its
-//! `dump` regime, which is php's own recipe from §6.1, with `-l` before
-//! the program so that a file compiles and does not run: a corpus file's
-//! own bytes never reach the dump, and nothing of the corpus is executed
-//! to measure the compiler. The engine's side is [`oracle::Runner`], the
-//! same fresh-process adapter `phpt` and `witness` measure the engine
-//! with, so one recipe stands behind both dumps and the two are
-//! comparable. Until `crates/php` is built there is no binary and the
-//! reading is a skip that says so over the corpus it did not dump; the
-//! pinned oracle named there is the lane's control, which must be
+//! **What takes the dump.** php's side runs under the pin's recipe and
+//! its `dump` regime, which is php's own recipe from §6.1, with `-l`
+//! before the program so that a file compiles and does not run: a corpus
+//! file's own bytes never reach the dump, and nothing of the corpus is
+//! executed to measure the compiler. The engine's side is the ladder of
+//! [`oracle::Runner`]: a binary where one is named or built, and below it
+//! [`Runner::Linked`], the compiler linked into this process and reached
+//! through `php_bundle` as `witness` reaches the engine (design §6.1,
+//! §4.2). So the lane needs no engine binary and no crate on the `xtask`
+//! edge, and it reads red rather than absent from design §11's day 1. The
+//! pinned oracle named as the binary is the lane's control, which must be
 //! identical on every file, and whose reading is a skip and not a reading
 //! of the engine.
 //!
@@ -37,6 +38,7 @@
 //! [`dump`] and the words of the corpus's message.
 
 mod dump;
+mod linked;
 #[cfg(test)]
 mod tests;
 
@@ -339,9 +341,11 @@ pub fn run(
             manifest.oracle.pin
         )
     })?;
-    let runner = Runner::resolve(root, &manifest.pin, ask.engine.as_deref())?;
-    if let Runner::Absent(why) = &runner {
-        println!("{INSTRUMENT}: {why}");
+    // The rung below the binary is the compiler linked into this process,
+    // which the lane needs no binary for (design §6.1).
+    let runner = Runner::resolve(root, &manifest.pin, ask.engine.as_deref())?.or_linked();
+    if runner == Runner::Linked {
+        println!("{INSTRUMENT}: no engine binary is built; the linked compiler dumps each file");
     }
     // One oracle for the run: the digest is asserted before the first file
     // and never per file (harness §4.3). A binary that is not at the pin's
@@ -398,11 +402,33 @@ pub(crate) fn judge(
     corpus: &Corpus,
 ) -> Result<Tally> {
     let files = corpus.files()?;
-    let (Some(binary), None) = (runner.binary(), oracle_absent) else {
+    let (Some(compiler), None) = (compiler(oracle, runner), oracle_absent) else {
         return Ok(Tally::found(files.len()));
     };
-    let dumps = dump::Dumps::new(oracle, registry, binary)?;
+    let dumps = dump::Dumps::new(oracle, registry, compiler)?;
     Tally::judge(&files, |file| dumps.judge(corpus, file))
+}
+
+/// Which compiler takes the engine's side of the dump, and none where
+/// the runner found nothing to measure. The linked one is built once for
+/// the run, under the recipe's ini and the `dump` regime's, so one recipe
+/// stands behind both sides.
+fn compiler<'a>(oracle: &Oracle<'_>, runner: &'a Runner) -> Option<dump::Compiler<'a>> {
+    match runner {
+        Runner::Engine(binary) | Runner::Control(binary) => Some(dump::Compiler::Binary(binary)),
+        Runner::Linked => {
+            let pin = oracle.pin();
+            let ini: Vec<String> = pin
+                .recipe
+                .ini
+                .iter()
+                .chain(pin.regime.get(REGIME).into_iter().flat_map(|r| &r.ini))
+                .cloned()
+                .collect();
+            Some(dump::Compiler::Linked(linked::engine(&ini)))
+        }
+        Runner::Absent(_) => None,
+    }
 }
 
 /// The corpus one file on request is named inside: the pinned tree's,
@@ -436,11 +462,10 @@ fn one(
     if let Some(why) = oracle_absent {
         bail!("{INSTRUMENT}: {why}");
     }
-    let binary = match runner {
-        Runner::Engine(binary) | Runner::Control(binary) => binary,
-        Runner::Absent(why) => bail!("{INSTRUMENT}: {why}"),
+    let Some(compiler) = compiler(oracle, runner) else {
+        bail!("{INSTRUMENT}: there is nothing to dump the file with");
     };
-    let dumps = dump::Dumps::new(oracle, registry, binary)?;
+    let dumps = dump::Dumps::new(oracle, registry, compiler)?;
     let judged = dumps.judge(corpus, file)?;
     println!(
         "{} {}: {}",

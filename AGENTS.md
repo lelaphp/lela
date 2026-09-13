@@ -136,6 +136,7 @@ Commands:
   clippy             `cargo clippy` with every warning denied, on every target of each crate, as the reading `done` reads; one reading per crate
   phpt               Run the pinned `.phpt` corpus through the engine and hold each test to its `--EXPECT*--` section; one reading per subset, scoped to the crate whose subset it is
   port-map           Join the Mahout census to `api.lock`: every item `same`, `renamed` or `gone`, the rows the port has not taken as the number. One reading, at the crate the lock lives with
+  compile-identity   Compile a corpus under the oracle's dump recipe and under the engine, and hold every file to byte-identity; one reading per corpus, scoped to the corpus
   unsafe-audit       Allow `unsafe` only in the homes the manifest's unsafe.homes rule names
   generate           Write the files the manifest's `generated` rules render (ext/clippy.toml)
   steer              Apply a proposal to one of the harness's own files, and only where it adds: one changed value writes nothing
@@ -148,7 +149,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=18ac3c116c92b4bfaac1ccc217c6dea77fe3cd98d8d5dd591e43c09e9732e5cc out=e1537d5cb245b2432f9a4829cef415b16a19dda874ec7e94962ff180643ed718 -->
+<!-- /computed in=cfd994ec0899541ee2eaddfe7fc85059fb1dbe74927a58cf4bb40846e232b95f out=1f4ec9ca4936334215791fc3d0e439ba1600317f53e4073e4439c1ac09758af5 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
