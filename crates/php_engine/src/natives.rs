@@ -311,12 +311,42 @@ mod tests {
     /// $ php -n -r 'var_dump(memory_get_usage(true) === memory_get_usage(1));'
     /// bool(true)
     /// ```
+    ///
+    /// **The flagged number is the oracle's; the unflagged one is this
+    /// engine's own accounting.** 2097152 is php's one 2 MiB chunk,
+    /// `ZEND_MM_CHUNK_SIZE` (`Z/Zend/zend_alloc_sizes.h:22`), which
+    /// `zend_mm_init` maps into `real_size` before a request runs a line
+    /// (`Z/Zend/zend_alloc.c:2047-2081`), and the oracle answers it too.
+    ///
+    /// 88 is what the two constant strings this source compiles cost.
+    /// php interns a request's constant operands into
+    /// `CG(interned_strings)` out of the request heap
+    /// (`zend_insert_literal` through `zend_new_interned_string_request`,
+    /// `Z/Zend/zend_compile.c:563-582`, `Z/Zend/zend_string.c:227-265`),
+    /// so its `memory_get_usage()` counts them and this engine's counts
+    /// them the same way (design §5.2, §5.13): `var_dump` takes 40 bytes
+    /// and `memory_get_usage` 48, php's
+    /// `ZEND_MM_ALIGNED_SIZE(_ZSTR_STRUCT_SIZE(len))` over a 24-byte
+    /// header, the bytes and the NUL.
+    ///
+    /// The oracle's number for the same source, under the recipe as
+    /// `witness.php`, is 463400, and the two are not comparable: what
+    /// php's request heap holds beside the
+    /// interned strings is here on the system allocator, the table's own
+    /// buckets (#178) with the op array, the compiler and the tree,
+    /// which design §5.13 states as an approximation. What replaces this
+    /// pin with a number both answer is #174's witness, where a variable
+    /// in `php_compile` and a `str_repeat()` native let a snippet measure
+    /// what one huge block moves `memory_get_usage()` by.
     #[test]
     fn the_real_usage_flag_is_optional_and_coerced_as_php_coerces_a_bool() {
         let (unflagged, _) = served("<?php var_dump(memory_get_usage());");
         let (flagged, _) = served("<?php var_dump(memory_get_usage(true));");
         let (coerced, _) = served("<?php var_dump(memory_get_usage(1));");
-        assert_eq!(unflagged, "int(0)\n");
+        assert_eq!(
+            unflagged, "int(88)\n",
+            "the two constant strings this source interns, 40 and 48"
+        );
         assert_eq!(flagged, "int(2097152)\n");
         assert_eq!(coerced, flagged, "php's Z_PARAM_BOOL coerces 1 to true");
     }
@@ -356,16 +386,30 @@ mod tests {
         }
     }
 
-    /// `memory_reset_peak_usage()` leaves the peak at what is in use,
-    /// which for a fresh request is php's one 2 MiB chunk. The witness
-    /// beside `memory_get_usage` pins the same three numbers against the
-    /// oracle; this holds the reset when no oracle is on the machine.
+    /// `memory_reset_peak_usage()` leaves both peaks at what the request
+    /// has out. The witness beside `memory_get_usage` pins the flagged
+    /// number against the oracle; this holds the reset when no oracle is
+    /// on the machine, and holds the unflagged number beside it.
+    ///
+    /// **The second number is the oracle's; the first is this engine's
+    /// own accounting**, for the reason the pin above states at length.
+    /// 2097152 is php's one 2 MiB chunk. 136 is what this source's three
+    /// constant strings cost the request that interned them:
+    /// `memory_reset_peak_usage` 48 bytes, `var_dump` 40 and
+    /// `memory_get_peak_usage` 48. php counts its own interning the same
+    /// way and then counts a request heap this engine does not have yet,
+    /// so its number for this source, under the recipe as `witness.php`,
+    /// is 463752 and not this one; #174's witness is where a number both
+    /// answer comes back.
     #[test]
     fn a_reset_leaves_the_peak_at_what_the_request_has_out() {
         let (body, fatal) = served(
             "<?php memory_reset_peak_usage(); var_dump(memory_get_peak_usage(), memory_get_peak_usage(true));",
         );
         assert_eq!(fatal, None);
-        assert_eq!(body, "int(0)\nint(2097152)\n");
+        assert_eq!(
+            body, "int(136)\nint(2097152)\n",
+            "the three constant strings this source interns, 48, 40 and 48"
+        );
     }
 }
