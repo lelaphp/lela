@@ -379,13 +379,14 @@ fn a_tree_without_crates_is_refused_and_nothing_is_joined() {
     assert!(why.contains("no crates/"), "{why}");
 }
 
-/// The evidence is which extensions are ported here, and none is yet, so
-/// no row of the committed census is resolved. The twenty crates
-/// `new-ext` laid down are not the evidence: each stands on disk with an
-/// `extension()` that registers no native, and a crate that registers
-/// none has ported nothing.
+/// The evidence is which extensions are ported here, and `ext/standard`
+/// is the one that is, since `str_repeat` (#174): the committed census
+/// names no extension on any row, so no row is resolved by it yet. The
+/// other nineteen crates `new-ext` laid down are not evidence: each
+/// stands on disk with an `extension()` that registers no native, and a
+/// crate that registers none has ported nothing.
 #[test]
-fn no_extension_registers_a_native_yet_so_no_row_is_off_the_checklist() {
+fn one_extension_registers_a_native_and_the_nineteen_laid_down_register_none() {
     let manifest = crate::manifest::Manifest::load(workspace()).unwrap();
     let laid: Vec<&str> = manifest
         .crates
@@ -394,10 +395,11 @@ fn no_extension_registers_a_native_yet_so_no_row_is_off_the_checklist() {
         .filter(|name| name.starts_with("ext/"))
         .filter(|name| workspace().join(name).join("Cargo.toml").is_file())
         .collect();
-    assert!(!laid.is_empty(), "the crates are laid down");
+    assert_eq!(laid.len(), 20, "the crates are laid down: {laid:?}");
     let here = Ported::read(workspace(), &manifest);
-    assert!(here.crates.is_empty(), "{:?}", here.crates);
-    assert!(!here.carries("standard"));
+    assert_eq!(here.crates, ["ext/standard"], "{:?}", here.crates);
+    assert!(here.carries("standard"));
+    assert!(!here.carries("spl"));
     assert!(ported(&["standard"]).carries("standard"));
     assert!(!ported(&["standard"]).carries("spl"));
 }
