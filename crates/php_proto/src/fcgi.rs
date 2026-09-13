@@ -29,7 +29,7 @@ pub mod rtype {
     /// `FCGI_GET_VALUES` — the server asks what the app supports.
     pub const GET_VALUES: u8 = 9;
     /// `FCGI_GET_VALUES_RESULT` — the app's answer to `FCGI_GET_VALUES`.
-    pub const GET_VALUES_REPLY: u8 = 10;
+    pub const GET_VALUES_RESULT: u8 = 10;
     /// `FCGI_UNKNOWN_TYPE` — the app rejects an unknown management record.
     pub const UNKNOWN_TYPE: u8 = 11;
 }
@@ -183,7 +183,7 @@ pub fn parse_name_value_pairs(mut data: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
 /// and does not multiplex, so the answer is one connection, one request and
 /// no multiplexing.
 #[must_use]
-pub fn get_values_reply(query: &[u8]) -> Vec<u8> {
+pub fn get_values_result(query: &[u8]) -> Vec<u8> {
     let asked = parse_name_value_pairs(query);
     let mut out = Vec::new();
     for &(name, value) in ANSWERS {
@@ -312,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn get_values_reply_answers_only_the_variables_asked_for() {
+    fn get_values_result_answers_only_the_variables_asked_for() {
         // The query asks for two of the three variables, each with an empty
         // value (as a server does).
         let mut query = Vec::new();
@@ -321,7 +321,7 @@ mod tests {
             query.push(0u8);
             query.extend_from_slice(name);
         }
-        let pairs = parse_name_value_pairs(&get_values_reply(&query));
+        let pairs = parse_name_value_pairs(&get_values_result(&query));
         assert_eq!(pairs.len(), 2);
         assert!(
             pairs
@@ -337,8 +337,8 @@ mod tests {
     }
 
     #[test]
-    fn get_values_reply_empty_query_answers_all_three() {
-        let pairs = parse_name_value_pairs(&get_values_reply(&[]));
+    fn get_values_result_empty_query_answers_all_three() {
+        let pairs = parse_name_value_pairs(&get_values_result(&[]));
         assert_eq!(pairs.len(), 3);
     }
 
