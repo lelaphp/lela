@@ -25,10 +25,10 @@ mod special;
 use php_heap::Intern;
 use php_syntax::Parsed;
 use php_unit::Unit;
-use php_unit::decl::Name;
+use php_unit::decl::{ConstDecl, Name};
 
 /// What the compiler is told beside the source (design §4.1).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Options {
     /// The file name the unit and its errors carry.
     pub filename: Name,
@@ -39,6 +39,10 @@ pub struct Options {
     /// compiler folds a `.` over it (`zend_double_to_str`, which reads
     /// `EG(precision)`); php's default is 14.
     pub precision: i32,
+    /// The persistent constants the engine's extensions declared
+    /// (`CONST_PERSISTENT`), which `zend_try_ct_eval_const` substitutes
+    /// where they are written; a name not here is fetched as the program serves.
+    pub persistent: Vec<ConstDecl>,
 }
 
 impl Default for Options {
@@ -47,6 +51,7 @@ impl Default for Options {
             filename: Name::default(),
             strict_types: false,
             precision: 14,
+            persistent: Vec::new(),
         }
     }
 }
@@ -322,6 +327,53 @@ mod tests {
                 .map(f64::is_nan),
             Some(true),
             "a leading separator names the same global constant"
+        );
+    }
+
+    #[test]
+    fn the_engine_s_persistent_constants_stand_for_their_values_where_they_are_written() {
+        use php_unit::decl::ConstExpr;
+        let mut strings = php_heap::Strings::new();
+        let options = Options {
+            persistent: vec![
+                ConstDecl {
+                    name: Name(b"T_LNUMBER".to_vec().into_boxed_slice()),
+                    value: ConstExpr::Long(260),
+                },
+                ConstDecl {
+                    name: Name(b"PHP_OS".to_vec().into_boxed_slice()),
+                    value: ConstExpr::Str(b"Darwin".to_vec().into_boxed_slice()),
+                },
+            ],
+            ..Options::default()
+        };
+        let compiled = compile(
+            &php_syntax::parse(b"<?php echo T_LNUMBER - 1, \\PHP_OS;"),
+            &options,
+            &mut strings,
+        );
+        assert!(compiled.is_ok(), "{compiled:?}");
+        let unit = compiled.unwrap_or_default();
+        assert_eq!(
+            unit.dump(),
+            "$_main:\n     ; (lines=3, args=0, vars=0, tmps=0)\n\
+             0000 ECHO CONST[0]\n\
+             0001 ECHO CONST[1]\n\
+             0002 RETURN CONST[2]\n"
+        );
+        assert_eq!(unit.main.literals[0].as_long(), Some(259));
+        assert_eq!(
+            unit.main.literals[1].as_str().map(|s| s.bytes().to_vec()),
+            Some(b"Darwin".to_vec())
+        );
+        assert!(
+            compile(
+                &php_syntax::parse(b"<?php echo t_lnumber;"),
+                &options,
+                &mut strings
+            )
+            .is_err(),
+            "a constant's name is case-sensitive"
         );
     }
 

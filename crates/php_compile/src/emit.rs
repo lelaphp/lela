@@ -32,7 +32,7 @@
 //! `JMP`, which is the shape the compile-identity lane holds this to.
 
 use php_heap::{Fatal, Intern, Number, Zval, ZvalType, double_to_string, numeric_prefix};
-use php_unit::decl::Name;
+use php_unit::decl::{ConstDecl, ConstExpr, Name};
 use php_unit::{OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use crate::read::{BinaryOp, Expr, Read, Stmt};
@@ -48,6 +48,8 @@ pub(crate) struct Emit<'a> {
     strings: &'a mut dyn Intern,
     /// php's `precision` while the file compiles, [`Options::precision`].
     precision: i32,
+    /// The engine's persistent constants, [`Options::persistent`].
+    persistent: &'a [ConstDecl],
     oplines: Vec<Opline>,
     constants: Vec<Zval>,
     vars: Vec<Name>,
@@ -82,6 +84,7 @@ pub(crate) fn main_op_array(
     let mut emit = Emit {
         strings,
         precision: options.precision,
+        persistent: &options.persistent,
         oplines: Vec::new(),
         constants: Vec::new(),
         vars: Vec::new(),
@@ -518,7 +521,8 @@ impl Emit<'_> {
             Expr::Int(n) => Ok(Zval::long(*n)),
             Expr::Float(f) => Ok(Zval::double(*f)),
             Expr::Str(bytes) => self.string(bytes),
-            Expr::Constant(name) => persistent(name)
+            Expr::Constant(name) => self
+                .persistent(name)?
                 .ok_or_else(|| self.fatal("a constant this compiler cannot read yet")),
             // `zend_try_ct_eval_unary_pm`: php folds unary `-` and `+` as
             // the multiplication by -1 and by 1 it would otherwise emit.
@@ -649,23 +653,40 @@ fn used_stack(arguments: u32) -> u32 {
         .saturating_mul(zval)
 }
 
-/// `zend_try_ct_eval_const`: php substitutes a persistent constant's
-/// value where it stands, so `INF` and `NAN` reach no opline. php reads
-/// them from the table `ext/standard` registers
-/// (`REGISTER_DOUBLE_CONSTANT("INF", ZEND_INFINITY, CONST_PERSISTENT)`,
-/// `Z/ext/standard/basic_functions_arginfo.h:3580`); the engine's table
-/// does not reach the compiler yet, so the two a float needs are here. A
-/// constant's name is case-sensitive, and a leading `\` names the same
-/// global constant as none.
-pub(crate) fn persistent(name: &[u8]) -> Option<Zval> {
-    let mut at = 0;
-    while name.get(at) == Some(&b'\\') {
-        at += 1;
-    }
-    match name.get(at..)? {
-        b"INF" => Some(Zval::double(f64::INFINITY)),
-        b"NAN" => Some(Zval::double(f64::NAN)),
-        _ => None,
+impl Emit<'_> {
+    /// `zend_try_ct_eval_const`: php substitutes a persistent constant's
+    /// value where it stands, so a `T_*` of the tokenizer reaches no
+    /// opline. The table is the engine's, what its extensions declared
+    /// ([`Options::persistent`]); `INF` and `NAN`, which php reads from
+    /// the table `ext/standard` registers
+    /// (`REGISTER_DOUBLE_CONSTANT("INF", ZEND_INFINITY, CONST_PERSISTENT)`,
+    /// `Z/ext/standard/basic_functions_arginfo.h:3580`), stand here until
+    /// that extension declares them. A constant's name is case-sensitive,
+    /// and a leading `\` names the same global constant as none. A
+    /// declared value that is no scalar is not folded, as php folds none
+    /// whose value is not yet evaluated.
+    pub(crate) fn persistent(&mut self, name: &[u8]) -> Result<Option<Zval>, CompileError> {
+        let mut at = 0;
+        while name.get(at) == Some(&b'\\') {
+            at += 1;
+        }
+        let name = name.get(at..).unwrap_or(&[]);
+        match name {
+            b"INF" => return Ok(Some(Zval::double(f64::INFINITY))),
+            b"NAN" => return Ok(Some(Zval::double(f64::NAN))),
+            _ => {}
+        }
+        let Some(declared) = self.persistent.iter().find(|c| c.name.0.as_ref() == name) else {
+            return Ok(None);
+        };
+        Ok(match &declared.value {
+            ConstExpr::Null => Some(Zval::null()),
+            ConstExpr::Bool(b) => Some(Zval::bool(*b)),
+            ConstExpr::Long(n) => Some(Zval::long(*n)),
+            ConstExpr::Double(d) => Some(Zval::double(*d)),
+            ConstExpr::Str(bytes) => Some(self.string(bytes)?),
+            _ => None,
+        })
     }
 }
 

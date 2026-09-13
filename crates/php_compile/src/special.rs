@@ -24,7 +24,7 @@
 use php_heap::Zval;
 
 use crate::CompileError;
-use crate::emit::{Emit, persistent};
+use crate::emit::Emit;
 use crate::read::{BinaryOp, Expr};
 
 /// What php's compiler makes of one name in the table.
@@ -104,19 +104,19 @@ pub(crate) fn row(lowered: &[u8]) -> Option<Special> {
         .map(|(_, shape)| *shape)
 }
 
-/// `zend_try_ct_eval_const` for a name with no namespace in it: php's
-/// special constants, `true`, `false` and `null` in any case
-/// (`zend_get_special_const`), then the persistent table.
-fn ct_eval_const(name: &[u8]) -> Option<Zval> {
-    match name.to_ascii_lowercase().as_slice() {
-        b"true" => Some(Zval::bool(true)),
-        b"false" => Some(Zval::bool(false)),
-        b"null" => Some(Zval::null()),
-        _ => persistent(name),
-    }
-}
-
 impl Emit<'_> {
+    /// `zend_try_ct_eval_const` for a name with no namespace in it: php's
+    /// special constants, `true`, `false` and `null` in any case
+    /// (`zend_get_special_const`), then the persistent table.
+    fn ct_eval_const(&mut self, name: &[u8]) -> Result<Option<Zval>, CompileError> {
+        Ok(match name.to_ascii_lowercase().as_slice() {
+            b"true" => Some(Zval::bool(true)),
+            b"false" => Some(Zval::bool(false)),
+            b"null" => Some(Zval::null()),
+            _ => self.persistent(name)?,
+        })
+    }
+
     /// `zend_try_compile_special_func`: the constant a call in the table
     /// folds to, and nothing where the name is not in the table or php
     /// would emit an opcode, which is the ordinary call here.
@@ -196,7 +196,7 @@ impl Emit<'_> {
     /// `zend_compile_func_defined`: one argument written as a value, read
     /// as a string (`zval_get_string`). A name with a `\` or a `:` in it
     /// is the call; a name the compiler substitutes where it is written
-    /// ([`ct_eval_const`]) is `true`; and php emits `ZEND_DEFINED` over
+    /// ([`Emit::ct_eval_const`]) is `true`; and php emits `ZEND_DEFINED` over
     /// the rest, which has no kernel here yet, so that is the call too.
     fn defined(&mut self, arguments: &[Expr]) -> Result<Option<Zval>, CompileError> {
         let [argument] = arguments else {
@@ -212,7 +212,7 @@ impl Emit<'_> {
         if name.contains(&b'\\') || name.contains(&b':') {
             return Ok(None);
         }
-        Ok(ct_eval_const(name).map(|_| Zval::bool(true)))
+        Ok(self.ct_eval_const(name)?.map(|_| Zval::bool(true)))
     }
 
     /// Whether an argument stands in php's tree as a value,

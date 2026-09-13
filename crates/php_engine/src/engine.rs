@@ -137,7 +137,13 @@ impl Shared {
             // ended holding the lock left is consistent.
             Err(poisoned) => poisoned.into_inner(),
         };
-        compile(source, filename, self.precision(), &mut *strings)
+        compile(
+            source,
+            filename,
+            self.precision(),
+            &self.constants,
+            &mut *strings,
+        )
     }
 
     /// php's `precision` as the startup ini has it, which a unit bound
@@ -410,10 +416,12 @@ impl Engine {
         let compiled = match source {
             Some(source) => {
                 let precision = req.precision();
+                let shared = Arc::clone(&self.shared);
                 Some(compile(
                     &source,
                     script.as_bytes(),
                     precision,
+                    &shared.constants,
                     req.heap_mut(),
                 ))
             }
@@ -466,18 +474,22 @@ impl Engine {
 /// One source compiled, with what the compiler refused kept instead of
 /// dropped: what `serve` needs to render php's parse error, and what
 /// [`Engine::unit`] is the lossy face over. `strings` is the home the
-/// unit's constant strings are interned into (design §5.2), and
-/// `precision` the ini entry php's compiler renders a double constant at.
+/// unit's constant strings are interned into (design §5.2), `precision`
+/// the ini entry php's compiler renders a double constant at, and
+/// `persistent` the constants the bundle declared, which the compiler
+/// substitutes where they are written.
 fn compile(
     source: &[u8],
     filename: &[u8],
     precision: i32,
+    persistent: &[ConstDecl],
     strings: &mut dyn Intern,
 ) -> Result<Arc<Unit>, CompileError> {
     let options = php_compile::Options {
         filename: Name(filename.into()),
         strict_types: false,
         precision,
+        persistent: persistent.to_vec(),
     };
     php_compile::compile_source(source, &options, strings).map(Arc::new)
 }
@@ -933,7 +945,7 @@ mod tests {
         for _ in 0..2 {
             let mut req = Request::new(Arc::clone(&engine.shared), description(""));
             started_at.push(req.memory_usage(false));
-            let compiled = compile(source, b"witness.php", 14, req.heap_mut());
+            let compiled = compile(source, b"witness.php", 14, &[], req.heap_mut());
             assert!(compiled.is_ok(), "the source compiles");
             assert!(
                 req.memory_usage(false) > 0,
