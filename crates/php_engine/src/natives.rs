@@ -3,21 +3,25 @@
 //! keeps in `ext/standard` and this engine keeps here, so an engine with
 //! no extensions serves a program that uses Zend alone (design §4.10).
 //!
-//! Five of them are here: the two the first witness of a loop needs, and
-//! the three that read what `php_heap::mm` accounts, so the allocator's
+//! Six of them are here: the two the first witness of a loop needs, the
+//! three that read what `php_heap::mm` accounts, so the allocator's
 //! numbers are php's numbers under a witness and not under a terminal
-//! session a person typed once. Each is declared and paired with its entry exactly as an
-//! extension's are, so there is one shape for a native and not two.
+//! session a person typed once, and `ini_set`, which moves the engine's
+//! own ini table so a witness can reach what an entry decides. Each is
+//! declared and paired with its entry exactly as an extension's are, so
+//! there is one shape for a native and not two.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use php_unit::decl::{ConstExpr, FunctionDecl, Name, Parameter, Type};
 
 use crate::api::abi::Entry;
-use crate::api::coerce::coerce_param;
-use crate::api::raising::{Thrown, arg_count_error, arg_null_deprecated, too_few_arguments};
+use crate::api::coerce::{coerce_param, to_string};
+use crate::api::raising::{
+    Thrown, arg_count_error, arg_null_deprecated, arg_type_error, too_few_arguments,
+};
 use crate::api::request::Request;
-use crate::api::values::{PhpString, Value};
+use crate::api::values::{PhpString, Value, ValueRef};
 
 /// The engine's own natives, in the order php declares them, each
 /// declaration beside its entry.
@@ -58,6 +62,27 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 Some(Type::Bool),
             ),
             extension_loaded as Entry,
+        ),
+        (
+            declared(
+                b"ini_set",
+                &[
+                    parameter(b"option", Some(Type::String), false),
+                    parameter(
+                        b"value",
+                        Some(Type::Union(vec![
+                            Type::String,
+                            Type::Int,
+                            Type::Float,
+                            Type::Bool,
+                            Type::Null,
+                        ])),
+                        false,
+                    ),
+                ],
+                Some(Type::Union(vec![Type::String, Type::False])),
+            ),
+            ini_set as Entry,
         ),
     ]
 }
@@ -171,7 +196,7 @@ fn memory_get_peak_usage(req: &mut Request, arguments: &[Value]) -> Result<Value
 /// php's `ArgumentCountError` and not an ignored extra.
 fn memory_reset_peak_usage(req: &mut Request, arguments: &[Value]) -> Result<Value, Thrown> {
     if !arguments.is_empty() {
-        return Err(wrong_argument_count(req, 0, arguments.len()));
+        return Err(wrong_argument_count(req, 0, 0, arguments.len()));
     }
     req.reset_memory_peak();
     Ok(Value::null())
@@ -186,15 +211,12 @@ fn memory_reset_peak_usage(req: &mut Request, arguments: &[Value]) -> Result<Val
 /// what is php's here is the arity, the optional and the coercion.
 fn real_usage(req: &mut Request, arguments: &[Value]) -> Result<bool, Thrown> {
     if arguments.len() > 1 {
-        return Err(wrong_argument_count(req, 1, arguments.len()));
+        return Err(wrong_argument_count(req, 0, 1, arguments.len()));
     }
     let Some(given) = arguments.first() else {
         return Ok(false);
     };
-    if matches!(
-        given.deref().as_ref(),
-        crate::api::values::ValueRef::Null | crate::api::values::ValueRef::Undef
-    ) {
+    if matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
         arg_null_deprecated(req, 1, "bool");
         return Ok(false);
     }
@@ -202,13 +224,21 @@ fn real_usage(req: &mut Request, arguments: &[Value]) -> Result<bool, Thrown> {
     Ok(coerced.as_bool().unwrap_or(false))
 }
 
-/// `zend_wrong_parameters_count_error` for a call past a native's
-/// maximum: `exactly` where the maximum is also the minimum, `at most`
-/// where it is not, and the count's own plural.
-fn wrong_argument_count(req: &mut Request, most: usize, given: usize) -> Thrown {
-    let how = if most == 0 { "exactly" } else { "at most" };
-    let word = if most == 1 { "argument" } else { "arguments" };
-    arg_count_error(req, &format!("{how} {most} {word}, {given} given"))
+/// `zend_wrong_parameters_count_error` for a call outside a native's
+/// arity: `exactly` where the maximum is also the minimum, else `at
+/// least` under it and `at most` over it, the bound the call missed, and
+/// that bound's own plural.
+fn wrong_argument_count(req: &mut Request, least: usize, most: usize, given: usize) -> Thrown {
+    let how = if least == most {
+        "exactly"
+    } else if given < least {
+        "at least"
+    } else {
+        "at most"
+    };
+    let bound = if given < least { least } else { most };
+    let word = if bound == 1 { "argument" } else { "arguments" };
+    arg_count_error(req, &format!("{how} {bound} {word}, {given} given"))
 }
 
 /// A byte count as php's `RETURN_LONG` returns one.
@@ -247,6 +277,73 @@ fn extension_loaded(req: &mut Request, arguments: &[Value]) -> Result<Value, Thr
     Ok(Value::bool(req.loaded_extensions().iter().any(|name| {
         name.as_bytes().to_ascii_lowercase() == wanted
     })))
+}
+
+/// `ini_set(string $option, string|int|float|bool|null $value):
+/// string|false`, php's `PHP_FUNCTION(ini_set)`: the entry's value
+/// before the call, or `false` for a name the table has no entry under,
+/// and the new value as `zval_get_string` reads the argument, so `10`
+/// and `'10'` set the same bytes, `true` is `1` and `null` is empty. An
+/// array, an object or a resource is php's `TypeError` before the table
+/// is read. What a set entry moves is read where the entry is: here
+/// `precision`, at the next float echoed.
+///
+/// ```php
+/// var_dump(ini_set('precision', '10'), ini_set('precision', 10), ini_set('nope', '1'));
+/// echo 1/3;
+/// ```
+/// ```expect
+/// string(2) "14"
+/// string(2) "10"
+/// bool(false)
+/// 0.3333333333
+/// ```
+///
+/// `ZEND_PARSE_PARAMETERS_START(2, 2)`: fewer and more are one
+/// `ArgumentCountError`, and the option is coerced as a string parameter
+/// of a native is, `null` being the 8.1 deprecation and then no entry.
+///
+/// ```php
+/// var_dump(ini_set('precision', null), ini_set('precision', true), ini_set('precision', 1.5));
+/// ```
+/// ```expect
+/// string(2) "14"
+/// string(0) ""
+/// string(1) "1"
+/// ```
+fn ini_set(req: &mut Request, arguments: &[Value]) -> Result<Value, Thrown> {
+    if arguments.len() != 2 {
+        return Err(wrong_argument_count(req, 2, 2, arguments.len()));
+    }
+    let option = string_argument(req, &arguments[0], 1)?;
+    let value = arguments[1].deref();
+    if matches!(
+        value.as_ref(),
+        ValueRef::Array(_) | ValueRef::Object(_) | ValueRef::Resource(_)
+    ) {
+        return Err(arg_type_error(
+            req,
+            2,
+            "be of type string|int|float|bool|null",
+        ));
+    }
+    let value = to_string(req, value)?;
+    Ok(match req.ini_set(option.as_bytes(), value.as_bytes())? {
+        Some(previous) => Value::string(previous),
+        None => Value::bool(false),
+    })
+}
+
+/// One `Z_PARAM_STR` of a native: `null` is the 8.1 deprecation and then
+/// the empty string, and what is there is coerced as php coerces a
+/// string parameter.
+fn string_argument(req: &mut Request, given: &Value, position: u32) -> Result<PhpString, Thrown> {
+    if matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
+        arg_null_deprecated(req, position, "string");
+        return Ok(PhpString::default());
+    }
+    let coerced = coerce_param(req, given, &Type::String, position)?;
+    Ok(coerced.as_php_string().cloned().unwrap_or_default())
 }
 
 /// One declared parameter.
@@ -357,19 +454,29 @@ mod tests {
         assert_eq!(coerced, flagged, "php's Z_PARAM_BOOL coerces 1 to true");
     }
 
-    /// `zend_wrong_parameters_count_error` for a call past the maximum,
-    /// which a witness cannot pin while the engine's fatal carries no
-    /// stack trace and no line (#174 names what the witnesses here wait
-    /// on). php's own text, from the pinned oracle:
+    /// `zend_wrong_parameters_count_error` for a call outside the arity,
+    /// which a witness cannot pin while the engine's trace carries no
+    /// arguments (#174 names what the witnesses here wait on). php's
+    /// own text, from the pinned oracle:
     ///
     /// ```text
     /// ArgumentCountError: memory_get_usage() expects at most 1 argument, 2 given
     /// ArgumentCountError: memory_get_peak_usage() expects at most 1 argument, 2 given
     /// ArgumentCountError: memory_reset_peak_usage() expects exactly 0 arguments, 1 given
+    /// ArgumentCountError: ini_set() expects exactly 2 arguments, 1 given
+    /// ArgumentCountError: ini_set() expects exactly 2 arguments, 3 given
     /// ```
     #[test]
     fn a_call_past_the_maximum_is_php_s_argument_count_error() {
         for (source, text) in [
+            (
+                "<?php ini_set('precision');",
+                "ini_set() expects exactly 2 arguments, 1 given",
+            ),
+            (
+                "<?php ini_set('precision', 1, 2);",
+                "ini_set() expects exactly 2 arguments, 3 given",
+            ),
             (
                 "<?php memory_get_usage(true, true);",
                 "memory_get_usage() expects at most 1 argument, 2 given",
