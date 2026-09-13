@@ -46,7 +46,7 @@ _Avoid_: arg (php's `arg_type_error`, `arg_value_error`, `arg_count_error`, `arg
 
 **Return**:
 The value a native hands back to the engine.
-_Avoid_: ret, result (which means `Result` in Rust)
+_Avoid_: ret, result (which means `Result` in Rust; the FastCGI 1.0 specification names `GET_VALUES_RESULT` and `get_values_result`)
 
 **Tentative return type**:
 A native method's declared return type that php enforces on the native itself but not yet on user overrides: a subclass method that omits it or narrows it incompatibly gets a deprecation, not a fatal, and `#[\ReturnTypeWillChange]` on the override silences that. One bit on the return type in the declaration model, set only by natives, read by the linker and Reflection and nothing else.

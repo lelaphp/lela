@@ -463,8 +463,12 @@ mod tests {
             .unwrap();
         assert_eq!(registry.terms, ["Linked table", "Bundle"]);
 
-        // The glossary's own carve-out: `result (which means `Result` in Rust)`.
+        // The glossary's own carve-out, and the two names the FastCGI 1.0
+        // specification spells, written in the same parenthetical.
         let result = phrases.iter().find(|a| a.phrase.text == "result").unwrap();
-        assert_eq!(result.phrase.code, ["Result"]);
+        assert_eq!(
+            result.phrase.code,
+            ["Result", "GET_VALUES_RESULT", "get_values_result"]
+        );
     }
 }
