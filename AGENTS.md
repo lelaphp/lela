@@ -138,7 +138,7 @@ Commands:
   port-map           Join the Mahout census to `api.lock`: every item `same`, `renamed` or `gone`, the rows the port has not taken as the number. One reading, at the crate the lock lives with
   unsafe-audit       Allow `unsafe` only in the homes the manifest's unsafe.homes rule names
   generate           Write the files the manifest's `generated` rules render (ext/clippy.toml)
-  steer              Apply a proposal to one of the harness's own files, the ones `permit` denies the agent, and only where it adds: every table, key, value and array-of-tables row the tracked file carries must stand unchanged in the proposal. One changed ceiling, one widened edge, one dropped rule and nothing is written
+  steer              Apply a proposal to one of the harness's own files, and only where it adds: one changed value writes nothing
   divergence-reason  Hold the divergence registry to the manifest rule whose `check` names this instrument: an accepted row has a reason a person wrote
   new-ext            Lay one extension crate down at ext/<name> in the template topology, its line in `php_bundle`, ext/clippy.toml and its row in ext/AGENTS.md; refuses an existing one
   witness            Extract every `php` fence and its `expect` fence from a crate's rustdoc, run each under the oracle's recipe and hold it to what the fence pins. One reading per crate
@@ -148,7 +148,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=d7c81eb9960746a6dab2dace3402283aa97283f058e564e8e75e27a0c90e5660 out=7d86638ab11d33ab458377f70eb8cdc04fe9c3c2847b84a1065ff93884fb6c91 -->
+<!-- /computed in=18ac3c116c92b4bfaac1ccc217c6dea77fe3cd98d8d5dd591e43c09e9732e5cc out=e1537d5cb245b2432f9a4829cef415b16a19dda874ec7e94962ff180643ed718 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

@@ -221,14 +221,15 @@ pub(crate) enum Command {
     UnsafeAudit,
     /// Write the files the manifest's `generated` rules render (ext/clippy.toml).
     Generate,
-    /// Apply a proposal to one of the harness's own files, the ones `permit`
-    /// denies the agent, and only where it adds: every table, key, value and
-    /// array-of-tables row the tracked file carries must stand unchanged in
-    /// the proposal. One changed ceiling, one widened edge, one dropped rule
-    /// and nothing is written.
+    /// Apply a proposal to one of the harness's own files, and only where it
+    /// adds: one changed value writes nothing.
     ///
-    /// What a new row should say is a person's, settled on a ticket; this is
-    /// how a settled row reaches the file.
+    /// The files are the ones `permit` denies the agent, and the judgement is
+    /// that every table, key, value and array-of-tables row the tracked file
+    /// carries stands unchanged in the proposal; one changed ceiling, one
+    /// widened edge, one dropped rule and nothing is written. What a new row
+    /// should say is a person's, settled on a ticket; this is how a settled
+    /// row reaches the file.
     Steer {
         /// The file to write, relative to the workspace root: seams.toml,
         /// oracle.toml or docs/divergence.toml.
