@@ -15,6 +15,16 @@
 //! `budget`'s, `unsafe-audit`'s and `api-check`'s, which the crate passes
 //! untouched, and `api-check` holds the bundle's order.
 //!
+//! What the template is exercised on is the fixture at
+//! `xtask/fixtures/new-ext`, whose own `seams.toml` carries the `[[crate]]`
+//! rows for `ext/demo` and `ext/other`: `cargo test -p xtask --test new_ext`
+//! lays `ext/demo` down there and holds it to those three instruments, the
+//! shipped manifest carrying no row for a name nobody ships. The generated
+//! `tests/capture.rs` is held there as text, the fixture's facade being
+//! empty by its own line; it is run where a real extension stands instead,
+//! `cargo test -p php_ext_<name> --test capture` over the twenty ported
+//! crates (harness-design.md §5).
+//!
 //! Four refusals, each before anything is written: a name with no
 //! `[[crate]]` row (the ceiling is the manifest's, and the row is a
 //! person's), a workspace without `crates/php_ext` (the one dependency
