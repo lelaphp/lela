@@ -543,8 +543,8 @@ pub enum ValueRef<'a> {
     Reference(&'a PhpRef),
 }
 
-/// The states a value has; the skeleton constructs `Undef` and
-/// `Reference` in tests alone, since no frame slot or `&$x` exists yet.
+/// The states a value has; the skeleton constructs `Reference` in tests
+/// alone, since no `&$x` exists yet, and `Undef` for a frame's slots.
 #[derive(Debug, Clone, PartialEq, Default)]
 #[allow(dead_code)]
 enum Inner {
@@ -583,6 +583,14 @@ impl Value {
     #[must_use]
     pub const fn null() -> Value {
         Value::of(Inner::Null)
+    }
+
+    /// `IS_UNDEF`: a frame slot nothing has written yet, which a CV read
+    /// warns of and reads as `null` (`zval_undefined_cv`). The engine's
+    /// alone; a native is never handed one.
+    #[must_use]
+    pub(crate) const fn undef() -> Value {
+        Value::of(Inner::Undef)
     }
 
     /// `true` or `false`.

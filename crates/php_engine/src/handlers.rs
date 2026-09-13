@@ -9,9 +9,9 @@
 //! The set is the one procedural PHP needs to reach a native: `ECHO`, the
 //! call sequence `INIT_FCALL`, `SEND_VAL`, `SEND_VAR`, `DO_ICALL`,
 //! `RETURN`, which raises the return safepoint, `JMP` and `JMPNZ`, which
-//! raise the loop safepoint when they jump backward, and the arithmetic
-//! `ZEND_ADD`, `ZEND_SUB`, `ZEND_MUL` and `ZEND_DIV` that php emits for
-//! what its compiler does not fold.
+//! raise the loop safepoint when they jump backward, `ASSIGN`, which
+//! writes a CV, and the arithmetic `ZEND_ADD`, `ZEND_SUB`, `ZEND_MUL` and
+//! `ZEND_DIV` that php emits for what its compiler does not fold.
 
 // Every handler is generic over the tier and hands back the same edge, so
 // the generated dispatch calls them all the same way; the ones that raise a
@@ -44,7 +44,7 @@ pub(crate) fn echo<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let value = exec::operand(req.vm(), frame, code, op.op1_type, op.op1);
+    let value = exec::operand(req, frame, code, op.op1_type, op.op1);
     let text = crate::ops::to_string(req, &value);
     req.write(text.as_bytes());
     Ok(advance(req, frame))
@@ -133,6 +133,28 @@ pub(crate) fn do_icall<T: Tier>(
     }
 }
 
+/// `ZEND_ASSIGN`: the value in `op2` written to the CV `op1` names, and
+/// to the temporary `result` names. php writes the temporary only under
+/// `RETURN_VALUE_USED` and the compiler marks the mark in `result_type`,
+/// which an [`Opline`] has no field for (design §5.7), so the temporary
+/// is written whether an opline reads it or not; the compiler numbered
+/// it either way, as php's does. `zend_assign_to_variable`'s other work,
+/// the reference the CV may hold and the release of what it held, comes
+/// with the memory model (design §11, Lane A); a `Value` here is owned
+/// and dropped.
+pub(crate) fn assign<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let value = exec::operand(req, frame, code, op.op2_type, op.op2);
+    req.vm_mut().set_slot(frame, op.op1, value.clone());
+    let slot = exec::temporary_slot(code, op.out);
+    req.vm_mut().set_slot(frame, slot, value);
+    Ok(advance(req, frame))
+}
+
 /// `ZEND_ADD`: [`crate::ops::add`] over the two operands, into the
 /// temporary the opline's `result` field names.
 pub(crate) fn add<T: Tier>(
@@ -205,7 +227,7 @@ pub(crate) fn jmpnz<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let value = exec::operand(req.vm(), frame, code, op.op1_type, op.op1);
+    let value = exec::operand(req, frame, code, op.op1_type, op.op1);
     if !crate::ops::is_true(req, &value) {
         return Ok(advance(req, frame));
     }
@@ -229,7 +251,7 @@ pub(crate) fn r#return<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let returned = exec::operand(req.vm(), frame, code, op.op1_type, op.op1);
+    let returned = exec::operand(req, frame, code, op.op1_type, op.op1);
     if req.stack_mut().entry() == frame {
         req.set_returned(returned);
         return Ok(Stepped::Done);
@@ -258,8 +280,8 @@ fn arithmetic(
     op: &Opline,
     kernel: fn(&mut Request, &Value, &Value) -> Result<Value, Thrown>,
 ) -> Edge {
-    let left = exec::operand(req.vm(), frame, code, op.op1_type, op.op1);
-    let right = exec::operand(req.vm(), frame, code, op.op2_type, op.op2);
+    let left = exec::operand(req, frame, code, op.op1_type, op.op1);
+    let right = exec::operand(req, frame, code, op.op2_type, op.op2);
     match kernel(req, &left, &right) {
         Ok(value) => {
             let slot = exec::temporary_slot(code, op.out);
@@ -282,7 +304,7 @@ fn advance(req: &mut Request, frame: FrameRef) -> Stepped {
 /// The body the two `SEND_*` handlers share: the operand placed in the
 /// call frame being built, at the argument number `op2` names.
 fn send(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
-    let value = exec::operand(req.vm(), frame, code, op.op1_type, op.op1);
+    let value = exec::operand(req, frame, code, op.op1_type, op.op1);
     let at = usize::try_from(op.op2.saturating_sub(1)).unwrap_or(usize::MAX);
     let Some(call) = req.vm_mut().building_call() else {
         return Err(Fatal::Error(String::from(

@@ -16,7 +16,9 @@ use php_heap::{FrameRef, Zval};
 use php_unit::{ConstIdx, OpArray, OperandKind, Opline, Unit};
 
 use crate::api::call::Function;
-use crate::api::values::{PhpString, Value};
+use crate::api::raising::warning;
+use crate::api::request::Request;
+use crate::api::values::{PhpString, TypeTag, Value};
 
 /// One frame's engine state.
 pub(crate) struct FrameState {
@@ -60,10 +62,12 @@ impl Vm {
     pub(crate) fn push(&mut self, unit: Arc<Unit>) {
         let code = code_of(&unit);
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
+        // `i_init_func_execute_data`: every CV is `IS_UNDEF` until an
+        // opline writes it, which is what a read of one warns of.
         self.frames.push(FrameState {
             unit,
             opline: 0,
-            slots: vec![Value::null(); slots],
+            slots: vec![Value::undef(); slots],
             returns_to: None,
         });
     }
@@ -170,8 +174,26 @@ pub(crate) fn temporary_slot(code: &OpArray, number: u32) -> u32 {
 /// array's table, a CV or a temporary from the frame. An `UNUSED` operand
 /// has no value and reads as `null`, which is what a handler that reads
 /// one would have been doing wrong.
+///
+/// A CV nothing has written is php's `BP_VAR_R` read of an undefined
+/// variable, `zval_undefined_cv` (`Z/Zend/zend_execute.c:242`): the
+/// warning naming the variable, and `null` in its place. php makes the
+/// CV no less undefined for having been read, so a second read warns
+/// again.
+///
+/// ```php
+/// echo $a; $a = 1; echo $a, $a = 2, $a;
+/// echo $b, $b;
+/// ```
+/// ```expect
+/// Warning: Undefined variable $a in %s on line 2
+/// 122
+/// Warning: Undefined variable $b in %s on line 3
+///
+/// Warning: Undefined variable $b in %s on line 3
+/// ```
 pub(crate) fn operand(
-    vm: &Vm,
+    req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     kind: OperandKind,
@@ -179,8 +201,20 @@ pub(crate) fn operand(
 ) -> Value {
     match kind {
         OperandKind::Const => constant(code, ConstIdx(field)),
-        OperandKind::Cv => vm.slot(frame, field),
-        OperandKind::Tmp | OperandKind::Var => vm.slot(frame, temporary_slot(code, field)),
+        OperandKind::Cv => {
+            let value = req.vm().slot(frame, field);
+            if value.tag() != TypeTag::Undef {
+                return value;
+            }
+            let name = code
+                .vars
+                .get(field as usize)
+                .map(|name| String::from_utf8_lossy(&name.0).into_owned())
+                .unwrap_or_default();
+            warning(req, &format!("Undefined variable ${name}"));
+            Value::null()
+        }
+        OperandKind::Tmp | OperandKind::Var => req.vm().slot(frame, temporary_slot(code, field)),
         OperandKind::Unused => Value::null(),
     }
 }
