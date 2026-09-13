@@ -3,13 +3,13 @@
 //! keeps in `ext/standard` and this engine keeps here, so an engine with
 //! no extensions serves a program that uses Zend alone (design §4.10).
 //!
-//! Seven of them are here: the two the first witness of a loop needs, the
+//! Eight of them are here: the two the first witness of a loop needs, the
 //! three that read what `php_heap::mm` accounts, so the allocator's
 //! numbers are php's numbers under a witness and not under a terminal
-//! session a person typed once, `ini_set`, which moves the engine's own
-//! ini table so a witness can reach what an entry decides, and
-//! `set_time_limit`, which moves the one entry the execution timer is
-//! armed from. Each is declared and paired with its entry exactly as an
+//! session a person typed once, `ini_get` and `ini_set`, which read and
+//! move the engine's own ini table so a witness can reach what an entry
+//! decides and what it kept, and `set_time_limit`, which moves the one
+//! entry the execution timer is armed from. Each is declared and paired with its entry exactly as an
 //! extension's are, so there is one shape for a native and not two.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
@@ -63,6 +63,14 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 Some(Type::Bool),
             ),
             extension_loaded as Entry,
+        ),
+        (
+            declared(
+                b"ini_get",
+                &[parameter(b"option", Some(Type::String), false)],
+                Some(Type::Union(vec![Type::String, Type::False])),
+            ),
+            ini_get as Entry,
         ),
         (
             declared(
@@ -334,6 +342,37 @@ fn extension_loaded(req: &mut Request) -> Result<Value, Thrown> {
     Ok(Value::bool(req.loaded_extensions().iter().any(|name| {
         name.as_bytes().to_ascii_lowercase() == lowered
     })))
+}
+
+/// `ini_get(string $option): string|false`, php's `PHP_FUNCTION(ini_get)`
+/// (`Z/ext/standard/basic_functions.c:1894`): the entry's current bytes
+/// as a string of the request's, `zend_ini_get_value`, or `false` for a
+/// name the table has no entry under. The option is coerced as a string
+/// parameter of a native is, `null` being the 8.1 deprecation and then
+/// no entry.
+///
+/// ```php
+/// var_dump(ini_get('precision'), ini_get('nope'), ini_set('precision', '10'), ini_get('precision'), ini_get(null));
+/// ```
+/// ```expect
+/// Deprecated: ini_get(): Passing null to parameter #1 ($option) of type string is deprecated in %s on line 2
+/// string(2) "14"
+/// bool(false)
+/// string(2) "14"
+/// string(2) "10"
+/// bool(false)
+/// ```
+fn ini_get(req: &mut Request) -> Result<Value, Thrown> {
+    let count = req.argument_count();
+    if count != 1 {
+        return Err(wrong_argument_count(req, 1, 1, count));
+    }
+    let option = string_argument(req, 1)?;
+    let value = req.ini_get(option.as_bytes()).map(<[u8]>::to_vec);
+    Ok(match value {
+        Some(value) => Value::string(PhpString::new(req, &value)?),
+        None => Value::bool(false),
+    })
 }
 
 /// `ini_set(string $option, string|int|float|bool|null $value):
