@@ -754,10 +754,7 @@ impl Request {
     /// `html_errors` is the other form, `<br />\n<b>Warning</b>:  …`,
     /// with the file and the line in `<b>` and two spaces after the
     /// colon. The message of an `E_ERROR` or an `E_PARSE` is escaped
-    /// under it and a warning's stands as it is; the escape is held by
-    /// `escape_html`'s test against the oracle's bytes, since a parse
-    /// error is raised before `ini_set()` runs and no fatal this engine
-    /// raises at runtime carries a byte the escape moves (#186).
+    /// under it and a warning's stands as it is.
     ///
     /// ```php
     /// ini_set('html_errors', '1');
@@ -767,6 +764,25 @@ impl Request {
     /// <br />
     /// <b>Warning</b>:  unexpected NAN value was coerced to string in <b>%s</b> on line <b>3</b><br />
     /// NAN
+    /// ```
+    ///
+    /// The `E_ERROR` an uncaught throwable becomes carries its trace in
+    /// its message, and a string argument in the trace is where the
+    /// four bytes `escape_html` moves reach a fatal: the argument is
+    /// escaped, and the `<b>` around the file and the line are written
+    /// after the message and stand.
+    ///
+    /// ```php
+    /// ini_set('html_errors', '1');
+    /// ini_set('<&">');
+    /// ```
+    /// ```expect exit=255
+    /// <br />
+    /// <b>Fatal error</b>:  Uncaught ArgumentCountError: ini_set() expects exactly 2 arguments, 1 given in %s:3
+    /// Stack trace:
+    /// #0 %s(3): ini_set('&lt;&amp;&quot;&gt;')
+    /// #1 {main}
+    ///   thrown in <b>%s</b> on line <b>3</b><br />
     /// ```
     ///
     /// `ignore_repeated_errors` drops a repeat of the last diagnostic
@@ -1963,6 +1979,16 @@ fn string_prop(object: &PhpObject, name: &[u8]) -> String {
 /// whose word is not its family's, and `E_STRICT` is the one level php
 /// 8.5 has no case for, so it falls to the `default:` every level php
 /// dropped falls to.
+///
+/// No fence reaches either word, so the two arms are held by the test
+/// below and not by a witness. php 8.5 raises `E_RECOVERABLE_ERROR` at
+/// one site, `zend_object_is_true` (`Z/Zend/zend_operators.c:2918`),
+/// when an object's `cast_object` handler refuses `_IS_BOOL`; the
+/// standard handler answers `true` for every user class, and no class
+/// in the bundle brings a handler that refuses, so no PHP source raises
+/// it, and `trigger_error()` takes the four `E_USER_*` levels alone.
+/// `E_STRICT` has no raise anywhere: its constant stands `#[Deprecated]`
+/// since 8.4 with the message that the level was removed.
 fn level_name(level: Level) -> &'static str {
     match level {
         Level::Error | Level::CoreError | Level::CompileError | Level::UserError => "Fatal error",
@@ -2039,10 +2065,10 @@ mod tests {
     }
 
     /// php's `error_type_str` for every level `Level` names, the switch
-    /// at `Z/main/main.c:1414-1448` read case by case. Nothing in this
-    /// engine raises `E_RECOVERABLE_ERROR` or `E_STRICT` yet, so no
-    /// witness reaches either word; #186 is where the two come back as
-    /// fences.
+    /// at `Z/main/main.c:1414-1448` read case by case. No PHP source
+    /// raises `E_RECOVERABLE_ERROR` or `E_STRICT` under php 8.5, as the
+    /// rustdoc beside `level_name` says, so this is the one place the
+    /// two words are held.
     #[test]
     fn every_level_is_named_as_php_names_it() {
         for (level, name) in [
