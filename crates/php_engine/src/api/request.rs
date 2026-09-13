@@ -541,14 +541,15 @@ impl Request {
         self.ending.as_ref()
     }
 
-    /// `php_error_cb`: one diagnostic, rendered twice. What
+    /// `php_error_cb`: one diagnostic, rendered twice. A repeat
+    /// `ignore_repeated_errors` drops is dropped whole; what
     /// `error_reporting` masks is neither logged nor displayed; what is
     /// left goes to the log while `log_errors` is on, in php's log form,
-    /// and to the body while `display_errors` is, in php's display
-    /// form, whose leading and trailing newline php writes and this
-    /// engine's fences pin. `error_prepend_string`, `error_append_string`
-    /// and `html_errors` are the rest of that branch and are not read
-    /// yet.
+    /// and to the body while `display_errors` is, in whichever of php's
+    /// two display forms `html_errors` names, with
+    /// `error_prepend_string` and `error_append_string` standing around
+    /// it. The message-id table, the user handler, `EH_THROW` and the
+    /// `@` scope are the rest of that branch and are not read yet.
     pub(crate) fn note_error(&mut self, level: Level, message: &str) {
         let line = self.current_line();
         self.note_error_at(level, message, line);
@@ -573,40 +574,97 @@ impl Request {
         file: &PhpString,
         line: u32,
     ) {
+        if !self.displayed(message, file, line) {
+            return;
+        }
         let file = file.clone();
         let named = String::from_utf8_lossy(file.as_bytes()).into_owned();
-        if self.error_reporting() & level.bit() != 0 {
-            if self.log_errors() {
-                let text = format!(
-                    "PHP {}:  {message} in {named} on line {line}\n",
-                    level_name(level)
-                );
-                self.log.extend_from_slice(text.as_bytes());
-            }
-            match self.display_errors() {
-                Display::Off => {}
-                Display::Body => {
-                    let text = format!(
-                        "\n{}: {message} in {named} on line {line}\n",
-                        level_name(level)
-                    );
-                    self.write(text.as_bytes());
-                }
-                Display::Stderr => {
-                    let text = format!(
-                        "{}: {message} in {named} on line {line}\n",
-                        level_name(level)
-                    );
-                    self.write_stderr(text.as_bytes());
-                }
-            }
-        }
+        // php stores the diagnostic before it masks it, which is why
+        // `error_get_last()` answers one `error_reporting` hid.
         self.last_error = Some((level, message.to_owned(), file, line));
+        if self.error_reporting() & level.bit() == 0 {
+            return;
+        }
+        let name = level_name(level);
+        if self.log_errors() {
+            let text = format!("PHP {name}:  {message} in {named} on line {line}\n");
+            self.log.extend_from_slice(text.as_bytes());
+        }
+        let display = self.display_errors();
+        if display == Display::Off {
+            return;
+        }
+        if self.html_errors() {
+            // php escapes the message of an `E_ERROR` or an `E_PARSE`
+            // and no other level's, and writes the same bytes around
+            // both; the backtrace that parts php's two html formats is
+            // `fatal_error_backtraces`, which this engine does not keep.
+            let body = match level {
+                Level::Error | Level::Parse => escape_html(message),
+                _ => message.to_owned(),
+            };
+            let text = format!(
+                "{}<br />\n<b>{name}</b>:  {body} in <b>{named}</b> on line <b>{line}</b><br />\n{}",
+                self.ini_text(b"error_prepend_string"),
+                self.ini_text(b"error_append_string"),
+            );
+            self.write(text.as_bytes());
+        } else if display == Display::Stderr {
+            // php's stderr form stands inside the same `else` as the
+            // plain one, so `html_errors` takes a CLI diagnostic off the
+            // error stream and onto the body; and it carries neither
+            // string around it.
+            let text = format!("{name}: {message} in {named} on line {line}\n");
+            self.write_stderr(text.as_bytes());
+        } else {
+            let text = format!(
+                "{}\n{name}: {message} in {named} on line {line}\n{}",
+                self.ini_text(b"error_prepend_string"),
+                self.ini_text(b"error_append_string"),
+            );
+            self.write(text.as_bytes());
+        }
+    }
+
+    /// php's `display`, the first branch of `php_error_cb`: a diagnostic
+    /// stands unless `ignore_repeated_errors` is on and it repeats the
+    /// last one stored. It repeats when the message is the same and
+    /// either `ignore_repeated_source` is on or the site is the same
+    /// too. A repeat is dropped whole — not stored, not logged, not
+    /// displayed — so the one it repeats stays the last error.
+    fn displayed(&self, message: &str, file: &PhpString, line: u32) -> bool {
+        if !ini_truth(self.ini_get(b"ignore_repeated_errors").as_ref()) {
+            return true;
+        }
+        let Some((_, last, last_file, last_line)) = self.last_error.as_ref() else {
+            return true;
+        };
+        if last != message {
+            return true;
+        }
+        if ini_truth(self.ini_get(b"ignore_repeated_source").as_ref()) {
+            return false;
+        }
+        *last_line != line || last_file.as_bytes() != file.as_bytes()
     }
 
     /// `log_errors`, whether a diagnostic reaches the host's log.
     fn log_errors(&self) -> bool {
         ini_truth(self.ini_get(b"log_errors").as_ref())
+    }
+
+    /// `html_errors`, which of php's two display forms a diagnostic
+    /// takes: the plain one, or `<br />\n<b>Warning</b>:  …`.
+    fn html_errors(&self) -> bool {
+        ini_truth(self.ini_get(b"html_errors").as_ref())
+    }
+
+    /// One ini entry as php's `STR_PRINT(INI_STR(name))` reads it: its
+    /// bytes, and nothing at all where php left the entry `NULL`.
+    fn ini_text(&self, name: &[u8]) -> String {
+        self.ini_get(name)
+            .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
+            .unwrap_or_default()
     }
 
     /// `display_errors`, php's three values: off, the body, and the
@@ -1593,19 +1651,97 @@ fn string_prop(object: &PhpObject, name: &[u8]) -> String {
         .unwrap_or_default()
 }
 
+/// php's `error_type_str` (`Z/main/main.c:1414-1448`), the word both
+/// renderings name the level by. `E_RECOVERABLE_ERROR` is the one level
+/// whose word is not its family's, and `E_STRICT` is the one level php
+/// 8.5 has no case for, so it falls to the `default:` every level php
+/// dropped falls to.
 fn level_name(level: Level) -> &'static str {
     match level {
-        Level::Error
-        | Level::CoreError
-        | Level::CompileError
-        | Level::UserError
-        | Level::RecoverableError => "Fatal error",
+        Level::Error | Level::CoreError | Level::CompileError | Level::UserError => "Fatal error",
+        Level::RecoverableError => "Recoverable fatal error",
         Level::Warning | Level::CoreWarning | Level::CompileWarning | Level::UserWarning => {
             "Warning"
         }
         Level::Parse => "Parse error",
         Level::Notice | Level::UserNotice => "Notice",
-        Level::Strict => "Strict Standards",
         Level::Deprecated | Level::UserDeprecated => "Deprecated",
+        Level::Strict => "Unknown error",
+    }
+}
+
+/// php's `escape_html` (`Z/main/main.c:1038-1050`): the message of an
+/// `E_ERROR` or an `E_PARSE` through `php_escape_html_entities_ex` at
+/// `ENT_COMPAT` with `double_encode`, which is `htmlspecialchars`'s four
+/// — `&`, `<`, `>` and `"`, an already-written entity escaped again —
+/// and leaves `'` alone. php's retry with the invalid bytes substituted
+/// is for a message that is not its charset, and a message this engine
+/// renders is a `&str`.
+fn escape_html(message: &str) -> String {
+    let mut escaped = String::with_capacity(message.len());
+    for letter in message.chars() {
+        match letter {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            _ => escaped.push(letter),
+        }
+    }
+    escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Level, escape_html, level_name};
+
+    /// php's `error_type_str` for every level `Level` names, the switch
+    /// at `Z/main/main.c:1414-1448` read case by case. Nothing in this
+    /// engine raises `E_RECOVERABLE_ERROR` or `E_STRICT` yet, so no
+    /// witness reaches either word; #186 is where the two come back as
+    /// fences.
+    #[test]
+    fn every_level_is_named_as_php_names_it() {
+        for (level, name) in [
+            (Level::Error, "Fatal error"),
+            (Level::CoreError, "Fatal error"),
+            (Level::CompileError, "Fatal error"),
+            (Level::UserError, "Fatal error"),
+            (Level::RecoverableError, "Recoverable fatal error"),
+            (Level::Warning, "Warning"),
+            (Level::CoreWarning, "Warning"),
+            (Level::CompileWarning, "Warning"),
+            (Level::UserWarning, "Warning"),
+            (Level::Parse, "Parse error"),
+            (Level::Notice, "Notice"),
+            (Level::UserNotice, "Notice"),
+            (Level::Deprecated, "Deprecated"),
+            (Level::UserDeprecated, "Deprecated"),
+            (Level::Strict, "Unknown error"),
+        ] {
+            assert_eq!(level_name(level), name, "{level:?}");
+        }
+    }
+
+    /// What php's `escape_html` writes, from the pinned oracle under the
+    /// witness recipe with `-d html_errors=1`: `<?php\necho <;` is a
+    /// parse error whose message names the token it did not want, and
+    /// php writes `syntax error, unexpected token &quot;&lt;&quot;`.
+    /// `htmlspecialchars($s, ENT_COMPAT)` over `<a&b'c"d` under the same
+    /// oracle is `&lt;a&amp;b'c&quot;d`, which is the whole set: the
+    /// apostrophe `ENT_QUOTES` would take stands as it is.
+    #[test]
+    fn the_message_of_a_fatal_is_escaped_as_php_escapes_it() {
+        assert_eq!(
+            escape_html("syntax error, unexpected token \"<\""),
+            "syntax error, unexpected token &quot;&lt;&quot;"
+        );
+        assert_eq!(escape_html("<a&b'c\"d"), "&lt;a&amp;b'c&quot;d");
+        assert_eq!(
+            escape_html("&amp; &gt;"),
+            "&amp;amp; &amp;gt;",
+            "php passes double_encode, so a written entity is written again"
+        );
+        assert_eq!(escape_html("nothing to escape"), "nothing to escape");
     }
 }

@@ -193,13 +193,24 @@ impl Shared {
     }
 }
 
-/// The core ini entries and their defaults, php's `main.c` table.
-const CORE_INI: [(&str, &str); 8] = [
+/// The core ini entries and their defaults: php's `main.c` table under
+/// the CLI's hardcoded overrides (`Z/sapi/cli/php_cli.c:116-121`), which
+/// is what the oracle answers with no `php.ini`. `max_execution_time`
+/// and `html_errors` are the two the CLI moves, from `30` and `1`.
+/// `error_prepend_string` and `error_append_string` are `NULL` in php's
+/// table and empty here, since an entry with no value at all is one
+/// `ini_set()` refuses to set.
+const CORE_INI: [(&str, &str); 13] = [
     ("precision", "14"),
     ("serialize_precision", "-1"),
     ("error_reporting", "32767"),
     ("display_errors", "1"),
     ("log_errors", "0"),
+    ("html_errors", "0"),
+    ("error_prepend_string", ""),
+    ("error_append_string", ""),
+    ("ignore_repeated_errors", "0"),
+    ("ignore_repeated_source", "0"),
     ("memory_limit", "128M"),
     ("max_execution_time", "0"),
     ("default_charset", "UTF-8"),
@@ -578,6 +589,137 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&logged.log),
             "PHP Warning:  unexpected NAN value was coerced to string in witness.php on line 1\n"
+        );
+    }
+
+    /// The warning php writes for `echo NAN;` on line 2 of the witness
+    /// regime's file, which the display-branch tests below stand on.
+    const NAN_WARNING: &str = "unexpected NAN value was coerced to string";
+
+    /// `error_prepend_string` and `error_append_string` stand around
+    /// php's plain display form and around nothing else: the log form
+    /// carries neither. What the pinned oracle writes for
+    /// `-d error_prepend_string='<PRE>' -d error_append_string='</PRE>'`
+    /// over `<?php\necho NAN;` is
+    /// `<PRE>\nWarning: … on line 2\n</PRE>NAN`.
+    #[test]
+    fn the_two_error_strings_stand_around_the_display_form() {
+        let mut around = Kept::default();
+        Engine::builder()
+            .ini("error_prepend_string", "<PRE>")
+            .ini("error_append_string", "</PRE>")
+            .ini("log_errors", "1")
+            .build()
+            .serve(description("<?php\necho NAN;"), &mut around);
+        assert_eq!(
+            String::from_utf8_lossy(&around.body),
+            format!("<PRE>\nWarning: {NAN_WARNING} in witness.php on line 2\n</PRE>NAN")
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&around.log),
+            format!("PHP Warning:  {NAN_WARNING} in witness.php on line 2\n"),
+            "php's log form is the one rendering neither string reaches"
+        );
+    }
+
+    /// `html_errors` is php's other display form, and the two strings
+    /// stand around it as they stand around the plain one. What the
+    /// pinned oracle writes for `-d html_errors=1` over
+    /// `<?php\necho NAN;` is
+    /// `<br />\n<b>Warning</b>:  … in <b>%s</b> on line <b>2</b><br />\n`.
+    #[test]
+    fn html_errors_is_phps_other_display_form() {
+        let mut html = Kept::default();
+        Engine::builder()
+            .ini("html_errors", "1")
+            .build()
+            .serve(description("<?php\necho NAN;"), &mut html);
+        assert_eq!(
+            String::from_utf8_lossy(&html.body),
+            format!(
+                "<br />\n<b>Warning</b>:  {NAN_WARNING} in <b>witness.php</b> on line <b>2</b><br />\nNAN"
+            )
+        );
+
+        let mut around = Kept::default();
+        Engine::builder()
+            .ini("html_errors", "1")
+            .ini("error_prepend_string", "<PRE>")
+            .ini("error_append_string", "</PRE>")
+            .build()
+            .serve(description("<?php\necho NAN;"), &mut around);
+        assert_eq!(
+            String::from_utf8_lossy(&around.body),
+            format!(
+                "<PRE><br />\n<b>Warning</b>:  {NAN_WARNING} in <b>witness.php</b> on line <b>2</b><br />\n</PRE>NAN"
+            )
+        );
+    }
+
+    /// `ignore_repeated_errors` drops a repeat of the last diagnostic,
+    /// and `ignore_repeated_source` says whether a repeat at another
+    /// line is one. What the pinned oracle writes for
+    /// `<?php\necho NAN, NAN;\necho NAN;` is three warnings with both
+    /// entries off, two with `ignore_repeated_errors=1` — the second on
+    /// line 2 dropped, the one on line 3 kept — and one with
+    /// `ignore_repeated_source=1` beside it.
+    #[test]
+    fn a_repeat_is_dropped_the_way_php_drops_one() {
+        let source = "<?php\necho NAN, NAN;\necho NAN;";
+        let warning =
+            |line: u32| format!("\nWarning: {NAN_WARNING} in witness.php on line {line}\n");
+
+        let mut every = Kept::default();
+        Engine::builder()
+            .build()
+            .serve(description(source), &mut every);
+        assert_eq!(
+            String::from_utf8_lossy(&every.body),
+            format!("{}NAN{}NAN{}NAN", warning(2), warning(2), warning(3))
+        );
+
+        let mut once_a_site = Kept::default();
+        Engine::builder()
+            .ini("ignore_repeated_errors", "1")
+            .build()
+            .serve(description(source), &mut once_a_site);
+        assert_eq!(
+            String::from_utf8_lossy(&once_a_site.body),
+            format!("{}NANNAN{}NAN", warning(2), warning(3)),
+            "the repeat on line 2 is dropped and the one on line 3 stands"
+        );
+
+        let mut once = Kept::default();
+        Engine::builder()
+            .ini("ignore_repeated_errors", "1")
+            .ini("ignore_repeated_source", "1")
+            .build()
+            .serve(description(source), &mut once);
+        assert_eq!(
+            String::from_utf8_lossy(&once.body),
+            format!("{}NANNANNAN", warning(2)),
+            "the site no longer parts them, so one warning stands for all three"
+        );
+    }
+
+    /// A dropped repeat is dropped whole, php's `if (display)` around
+    /// the store as well as the two renderings: it is not logged, and
+    /// the diagnostic it repeats stays the one `error_get_last()`
+    /// answers.
+    #[test]
+    fn a_dropped_repeat_is_neither_logged_nor_stored() {
+        let mut logged = Kept::default();
+        Engine::builder()
+            .ini("ignore_repeated_errors", "1")
+            .ini("ignore_repeated_source", "1")
+            .ini("display_errors", "0")
+            .ini("log_errors", "1")
+            .build()
+            .serve(description("<?php\necho NAN, NAN;"), &mut logged);
+        assert_eq!(
+            String::from_utf8_lossy(&logged.log),
+            format!("PHP Warning:  {NAN_WARNING} in witness.php on line 2\n"),
+            "one log line for the two warnings"
         );
     }
 
