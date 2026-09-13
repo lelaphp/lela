@@ -57,19 +57,43 @@ sites = 181
 crates = 17
 status = "renamed"
 api = "raising::throw_internal"
+
+# ---- mahout_value free functions called from ext crates
+[[item]]
+mahout = "mahout_value::convert::float_to_repr"
+sites = 3
+crates = 2
+status = "renamed"
+api = "values::float_to_repr"
+
+# ---- mahout_native_abi items used from ext crates
+[[item]]
+mahout = "mahout_native_abi::InOut::into_parts"
+sites = 14
+crates = 1
+status = "gone"
+rule = "an out parameter is a Ref"
+
+# ---- mahout_native_macros attributes and their arguments
+[[item]]
+mahout = "mahout_native_macros::php_method(sig)"
+sites = 428
+crates = 7
+status = "renamed"
+api = "macros::php_method"
 "#;
 
 #[test]
 fn a_row_carries_the_census_table_it_came_from_and_joins_on_the_name_the_census_prints() {
     let map = PortMap::parse(ROWS).unwrap();
-    assert_eq!(map.rows.len(), 3);
+    assert_eq!(map.rows.len(), 6);
     assert_eq!(
         map.rows[0].table,
         "mahout_value methods called from ext crates"
     );
     // The value methods are printed by name alone, so the qualifier the
-    // map adds is not part of the key; every other table's prefix is
-    // taken off.
+    // map adds is not part of the key; a table printed by qualified name
+    // has its prefix taken off.
     assert_eq!(map.rows[0].key(), "len");
     assert_eq!(map.rows[1].key(), "note_alloc");
     assert_eq!(map.rows[2].key(), "throw_internal");
@@ -101,6 +125,47 @@ fn the_census_marks_the_ext_state_impl_and_neither_mark_is_the_key() {
         key(table, "RequestCtx::ext_state_mut"),
         "RequestCtx::ext_state_mut"
     );
+}
+
+/// Three tables print a name the seed's qualifier does not reach by a
+/// prefix alone (#209): the free functions bare where the seed keeps the
+/// `convert::` path, the abi methods bare where the seed keeps the type,
+/// the macros as an attribute where the seed keeps the crate. Each row's
+/// key is what the census prints, and the census's own spelling keys to
+/// itself, so a regenerated census at the pin joins all 651.
+#[test]
+fn the_three_tables_the_seed_spells_apart_join_on_the_name_the_census_prints() {
+    let map = PortMap::parse(ROWS).unwrap();
+    let printed = census(PRINTED);
+    for (row, item) in [
+        (&map.rows[3], "float_to_repr"),
+        (&map.rows[4], "into_parts"),
+        (&map.rows[5], "#[php_method(sig)]"),
+    ] {
+        assert_eq!(row.key(), item, "{}", row.mahout);
+        assert_eq!(
+            key(&row.table, item),
+            item,
+            "the census's spelling is the key"
+        );
+        let counted = printed
+            .iter()
+            .find(|c| c.table == row.table)
+            .unwrap_or_else(|| panic!("PRINTED carries no row under {}", row.table));
+        assert_eq!(counted.item, item);
+        assert!(
+            map.row(&counted.table, &key(&counted.table, &counted.item))
+                .is_some()
+        );
+    }
+    let macros = "mahout_native_macros attributes and their arguments";
+    assert_eq!(
+        key(macros, "mahout_native_macros::php_class"),
+        "#[php_class]"
+    );
+    let abi = "mahout_native_abi items used from ext crates";
+    assert_eq!(key(abi, "mahout_native_abi::Str"), "Str");
+    assert_eq!(key(abi, "mahout_native_abi::NativeError::new"), "new");
 }
 
 #[test]
@@ -182,6 +247,21 @@ const PRINTED: &str = "\
      3      1  sort_end
                ext: standard
 
+## mahout_value free functions called from ext crates: 1 distinct items
+ sites crates  item
+     3      2  float_to_repr
+               ext: json standard
+
+## mahout_native_abi items used from ext crates: 1 distinct items
+ sites crates  item
+    14      1  into_parts
+               ext: pcre
+
+## mahout_native_macros attributes and their arguments: 1 distinct items
+ sites crates  item
+   428      7  #[php_method(sig)]
+               ext: date dom pdo pdo_sqlite reflection session spl
+
 ## mahout_linker: Cargo dependents 2, crates referencing it in source 2
 ## mahout_linker items imported or path-qualified by ext crates: 1 distinct items
  sites crates  item
@@ -198,7 +278,7 @@ const PRINTED: &str = "\
 #[test]
 fn a_census_run_reads_as_its_tables_rows_and_nothing_beside_them() {
     let rows = census(PRINTED);
-    assert_eq!(rows.len(), 4, "{rows:#?}");
+    assert_eq!(rows.len(), 7, "{rows:#?}");
     assert_eq!(
         rows[0],
         Counted {
@@ -231,16 +311,19 @@ fn a_census_run_reads_as_its_tables_rows_and_nothing_beside_them() {
         }
     );
     assert_eq!(rows[1].ext, ["standard"]);
-    assert_eq!(rows[2].item, "ClassDescriptor");
+    assert_eq!(rows[2].item, "float_to_repr");
+    assert_eq!(rows[3].item, "into_parts");
+    assert_eq!(rows[4].item, "#[php_method(sig)]");
+    assert_eq!(rows[5].item, "ClassDescriptor");
     assert_eq!(
-        rows[2].table,
+        rows[5].table,
         "mahout_linker items imported or path-qualified by ext crates"
     );
-    assert_eq!(rows[2].ext, ["date", "reflection", "spl"]);
+    assert_eq!(rows[5].ext, ["date", "reflection", "spl"]);
     // The names go under the row whose item carries spaces as under any
     // other, since they are the line beneath it and not a column of it.
-    assert_eq!(rows[3].item, "ExtState::ext_teardown (impl)");
-    assert_eq!(rows[3].ext, ["session", "spl"]);
+    assert_eq!(rows[6].item, "ExtState::ext_teardown (impl)");
+    assert_eq!(rows[6].ext, ["session", "spl"]);
     assert!(census("nothing here").is_empty());
 }
 
@@ -255,7 +338,7 @@ fn a_census_run_without_the_ext_lines_names_no_extension() {
         .collect::<Vec<_>>()
         .join("\n");
     let rows = census(&unnamed);
-    assert_eq!(rows.len(), 4);
+    assert_eq!(rows.len(), 7);
     assert!(rows.iter().all(|row| row.ext.is_empty()), "{rows:#?}");
 }
 
@@ -271,7 +354,11 @@ fn a_census_item_the_map_has_no_row_for_is_uncovered_and_a_row_it_no_longer_find
         Source::Tree("/tmp/mahout".into()),
         &counted,
     );
-    assert_eq!(joined.rows.len(), 1, "len is the one row the map covers");
+    assert_eq!(
+        joined.rows.len(),
+        4,
+        "len and the three rows the seed spells apart are what the map covers"
+    );
     assert_eq!(
         joined.uncovered,
         [
@@ -280,7 +367,7 @@ fn a_census_item_the_map_has_no_row_for_is_uncovered_and_a_row_it_no_longer_find
             "ExtState::ext_teardown (impl)"
         ]
     );
-    assert_eq!(joined.stale, 2);
+    assert_eq!(joined.stale, 2, "note_alloc and throw_internal");
     assert_eq!(
         joined.rows[0].sites, 748,
         "the census's count, not the map's"

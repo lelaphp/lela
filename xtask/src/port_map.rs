@@ -148,73 +148,103 @@ impl Row {
     }
 }
 
-/// The tables `scripts/census.sh` prints, in its order, and the prefix a
-/// row's `mahout` name carries for each. The first table's items are
-/// printed by method name alone, since a name is matched on any receiver,
-/// so the census joined to the lock qualifies them by the value type or
-/// types that define them and the join reads the last segment.
-const TABLES: [(&str, &str); 12] = [
+/// How the census spells the items of one table, against the qualified
+/// name the seed carries for the row. Three tables print a name the
+/// seed's qualifier does not reach by a prefix alone, and the seed keeps
+/// its spelling, which is the one `data/api-lock-v0.md` was joined by
+/// hand to; the join takes each table's shape to the name the census
+/// prints (#209).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Spelling {
+    /// The name with this prefix taken off: `semantics::throw_internal`
+    /// is printed `throw_internal`.
+    After(&'static str),
+    /// The last segment alone: a value method is matched on any receiver,
+    /// so the seed qualifies it by the type or types defining it; a free
+    /// function of `mahout_value` is printed bare where the seed keeps
+    /// its `convert::` path; an abi method is printed bare where the seed
+    /// keeps its type, `InOut::into_parts`.
+    Leaf,
+    /// An attribute, `#[php_method(sig)]`, the crate prefix taken off the
+    /// seed's `mahout_native_macros::php_method(sig)` and the brackets
+    /// put on.
+    Attribute(&'static str),
+}
+
+/// The tables `scripts/census.sh` prints, in its order, and how each
+/// spells its items.
+const TABLES: [(&str, Spelling); 12] = [
     (
         "mahout_value methods called from ext crates",
-        "mahout_value::",
+        Spelling::Leaf,
     ),
     (
         "mahout_value free functions called from ext crates",
-        "mahout_value::",
+        Spelling::Leaf,
     ),
     (
         "mahout_value associated functions and variants named from ext crates",
-        "mahout_value::",
+        Spelling::After("mahout_value::"),
     ),
-    ("RequestCtx methods called from ext crates", "RequestCtx::"),
+    (
+        "RequestCtx methods called from ext crates",
+        Spelling::After("RequestCtx::"),
+    ),
     (
         "RequestCtx public-field members reached from ext crates",
-        "RequestCtx::",
+        Spelling::After("RequestCtx::"),
     ),
-    ("semantics:: items used from ext crates", "semantics::"),
+    (
+        "semantics:: items used from ext crates",
+        Spelling::After("semantics::"),
+    ),
     (
         "mahout_native_abi items used from ext crates",
-        "mahout_native_abi::",
+        Spelling::Leaf,
     ),
     (
         "mahout_native_macros attributes and their arguments",
-        "mahout_native_macros::",
+        Spelling::Attribute("mahout_native_macros::"),
     ),
     (
         "mahout_linker items imported or path-qualified by ext crates",
-        "mahout_linker::",
+        Spelling::After("mahout_linker::"),
     ),
     (
         "mahout_code_meta items imported or path-qualified by ext crates",
-        "mahout_code_meta::",
+        Spelling::After("mahout_code_meta::"),
     ),
     (
         "mahout_native items imported or path-qualified by ext crates",
-        "mahout_native::",
+        Spelling::After("mahout_native::"),
     ),
     (
         "other mahout_runtime items imported or called from ext crates",
-        "mahout_runtime::",
+        Spelling::After("mahout_runtime::"),
     ),
 ];
 
-/// The one table whose items the census prints by method name alone.
-const METHODS: &str = TABLES[0].0;
-
-/// The name the census prints for an item of `table`: the value methods
-/// join on the last segment, every other table on the name with the
-/// table's prefix taken off. The census marks the `ExtState` row it finds
-/// as an impl; the suffix is not part of the name.
+/// The name the census prints for an item of `table`, from either
+/// spelling: the seed's qualified name or the census's own, which the
+/// same rule leaves as it is. The census marks the `ExtState` row it
+/// finds as an impl; the suffix is not part of the name.
 fn key(table: &str, name: &str) -> String {
     let name = name.strip_suffix(" (impl)").unwrap_or(name);
-    if table == METHODS {
-        return leaf(name).to_owned();
-    }
-    let prefix = TABLES
+    let spelling = TABLES
         .iter()
         .find(|(title, _)| *title == table)
-        .map_or("", |(_, prefix)| *prefix);
-    name.strip_prefix(prefix).unwrap_or(name).to_owned()
+        .map_or(Spelling::After(""), |(_, spelling)| *spelling);
+    match spelling {
+        Spelling::Leaf => leaf(name).to_owned(),
+        Spelling::After(prefix) => name.strip_prefix(prefix).unwrap_or(name).to_owned(),
+        Spelling::Attribute(prefix) => {
+            let name = name.strip_prefix(prefix).unwrap_or(name);
+            match name.strip_prefix("#[").and_then(|n| n.strip_suffix(']')) {
+                Some(_) => name.to_owned(),
+                None => format!("#[{name}]"),
+            }
+        }
+    }
 }
 
 /// The last segment of a qualified name.
