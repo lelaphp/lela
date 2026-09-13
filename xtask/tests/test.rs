@@ -59,19 +59,18 @@ fn the_failing_reading(readings: &[Reading]) -> &Reading {
 
 #[test]
 fn a_crate_with_a_failing_test_reads_fail_with_the_passed_and_the_failed_counted() {
-    let root = fixture();
+    let root = repository("test-library");
     let manifest = Manifest::load(&root).unwrap();
     let readings = test::run(&root, &manifest, &[]).unwrap();
     the_failing_reading(&readings);
-    let _ = std::fs::remove_dir_all(root.join("target"));
 }
 
 #[test]
 fn the_binary_writes_the_reading_and_exits_nonzero_on_a_failure() {
-    let root = fixture();
+    let root = repository("test-binary");
     let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
         .arg("--root")
-        .arg(&root)
+        .arg(root.path())
         .args(["test", "--crate", "php_heap"])
         .output()
         .unwrap();
@@ -81,10 +80,9 @@ fn the_binary_writes_the_reading_and_exits_nonzero_on_a_failure() {
         stdout.starts_with("fail test php_heap: php_heap: 1 test failed"),
         "{stdout}"
     );
-    let store = Store::of_workspace(&root);
+    let store = Store::of_workspace(root.path());
     let reading = store.read("test", "php_heap").unwrap().unwrap();
     the_failing_reading(std::slice::from_ref(&reading));
-    let _ = std::fs::remove_dir_all(root.join("target"));
 }
 
 /// A crate the manifest does not name is refused before anything runs.
@@ -116,11 +114,14 @@ fn sh(root: &Path, args: &[&str]) {
     );
 }
 
-/// The fixture as a scratch repository with the tracked pin and registry
-/// beside its own manifest, committed once, so an edit of the crate after
-/// is the diff `done` judges with `--base HEAD`.
-fn repository() -> Tree {
-    let root = Tree::new("test-done").unwrap();
+/// The fixture copied into a scratch tree of its own, with the tracked
+/// pin and registry beside its manifest, so two tests running at once
+/// build in two `target/` directories and neither removes the other's
+/// mid-run; the tree takes itself away (#194). The instrument reads a
+/// crate's files through `git ls-files`, so a test runs it over
+/// [`repository`], never over the tracked fixture.
+fn scratch(name: &str) -> Tree {
+    let root = Tree::new(name).unwrap();
     std::fs::create_dir_all(root.join("docs")).unwrap();
     std::fs::create_dir_all(root.join("crates/php_heap/src")).unwrap();
     std::fs::copy(workspace().join("oracle.toml"), root.join("oracle.toml")).unwrap();
@@ -147,6 +148,13 @@ fn repository() -> Tree {
         manifest.replace("../../../../oracle.toml", "oracle.toml"),
     )
     .unwrap();
+    root
+}
+
+/// The scratch tree as a repository, committed once, so an edit of the
+/// crate after is the diff `done` judges with `--base HEAD`.
+fn repository(name: &str) -> Tree {
+    let root = scratch(name);
     std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
     sh(&root, &["git", "init", "-q", "-b", "main"]);
     sh(&root, &["git", "add", "-A"]);
@@ -171,7 +179,7 @@ fn repository() -> Tree {
 /// Fixing the test and measuring again clears it.
 #[test]
 fn done_is_red_for_a_crate_with_a_failing_test_and_green_once_it_passes() {
-    let root = repository();
+    let root = repository("test-done");
     let lib = root.join("crates/php_heap/src/lib.rs");
     let text = std::fs::read_to_string(&lib).unwrap();
     // A change, so the crate is in the diff.
