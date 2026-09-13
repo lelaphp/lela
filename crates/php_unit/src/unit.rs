@@ -19,11 +19,9 @@ impl Unit {
     /// prints under `opcache.opt_debug_level=0x10000` and what
     /// `compile-identity` compares with the oracle's (design §6.1):
     /// one block per op array, the header's four lines, one line per
-    /// opline with its constants, variables and jump targets printed as
-    /// php prints them, and the `try`/`catch` table. The operand php's
-    /// `result_type` names, which opens a line as `T1 = `, is not
-    /// printed: an [`Opline`](crate::Opline) carries no field for it
-    /// (design §5.7, which #226 decides).
+    /// opline with the operand `result` names opening it, `T1 = `, when its
+    /// kind is `TMP`, `VAR` or `CV`, its constants, variables and jump
+    /// targets printed as php prints them, and the `try`/`catch` table.
     #[must_use]
     pub fn dump(&self) -> String {
         crate::dump::unit(self)

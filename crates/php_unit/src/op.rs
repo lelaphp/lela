@@ -69,14 +69,14 @@ impl Opcode {
 
     /// The opcode with php's number, or `None` for a number no opcode has.
     #[must_use]
-    pub fn from_u16(n: u16) -> Option<Opcode> {
+    pub fn from_u8(n: u8) -> Option<Opcode> {
         opcode::BY_NUM.get(usize::from(n)).copied().flatten()
     }
 
-    /// php's number.
+    /// php's number, the byte `zend_op.opcode` holds.
     #[must_use]
-    pub fn num(self) -> u16 {
-        self as u16
+    pub fn num(self) -> u8 {
+        self as u8
     }
 
     /// The effects `ops.toml` states.
@@ -113,15 +113,22 @@ impl Opcode {
     pub const COUNT: usize = opcode::COUNT;
 }
 
-/// One instruction, php's 24-byte `zend_op` field for field; `out` is
-/// php's `result`, spelled so because the glossary keeps that word for
-/// `Result`.
+/// One instruction, php's 24-byte `zend_op` field for field (design
+/// §5.7); `out` is php's `result` and `out_type` its `result_type`,
+/// spelled so because the glossary keeps that word for `Result`. The
+/// four bytes before the fields of four are what php's are: the opcode
+/// and the kind of each operand, `result`'s last. A site opcode's
+/// `out` is its safepoint number and its `out_type` stays `Unused`, as
+/// php leaves it; on every other opcode `out_type` is
+/// `RETURN_VALUE_USED`, what the compiler wrote where `zend_do_free`
+/// found nothing reading the value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct Opline {
     pub opcode: Opcode,
     pub op1_type: OperandKind,
     pub op2_type: OperandKind,
+    pub out_type: OperandKind,
     pub op1: u32,
     pub op2: u32,
     pub out: u32,
@@ -135,6 +142,7 @@ impl Default for Opline {
             opcode: Opcode::Nop,
             op1_type: OperandKind::Unused,
             op2_type: OperandKind::Unused,
+            out_type: OperandKind::Unused,
             op1: 0,
             op2: 0,
             out: 0,
@@ -188,12 +196,18 @@ mod tests {
     #[test]
     fn an_opline_is_twenty_four_bytes_and_the_enum_keeps_php_numbers() {
         assert_eq!(std::mem::size_of::<Opline>(), 24);
+        assert_eq!(
+            std::mem::size_of::<Opcode>(),
+            1,
+            "php's `zend_op.opcode` is one byte"
+        );
+        assert_eq!(std::mem::size_of::<OperandKind>(), 1);
         assert_eq!(Opcode::Nop.num(), 0);
         assert_eq!(Opcode::Add.num(), 1);
         assert_eq!(Opcode::Add.name(), "ZEND_ADD");
-        assert_eq!(Opcode::from_u16(1), Some(Opcode::Add));
+        assert_eq!(Opcode::from_u8(1), Some(Opcode::Add));
         assert_eq!(
-            Opcode::from_u16(45),
+            Opcode::from_u8(45),
             None,
             "45 is one of php's unused numbers"
         );

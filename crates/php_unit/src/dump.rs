@@ -3,19 +3,17 @@
 //! `opcache.opt_debug_level=0x10000`, before the optimizer runs, and
 //! what `compile-identity` holds the compiler to byte for byte. The
 //! header is `zend_dump_op_array`'s four lines; an opline is
-//! `zend_dump_op_line` and `zend_dump_op`, the opcode's name, its
-//! `extended_value` by the shape `ops.toml` gives the field, and its two
-//! operands: a constant as `zend_dump_const` prints one, a variable as
-//! `zend_dump_var` numbers it, and an unused field as
-//! `zend_dump_unused_op` reads it, a jump target, a number, `THIS`,
-//! `NEXT` or how a class is fetched. The `try`/`catch` table follows the
-//! oplines as php's does.
+//! `zend_dump_op_line` and `zend_dump_op`: the operand `result` names
+//! and ` = ` first, `T1 = ADD ...`, when its kind is `TMP`, `VAR` or
+//! `CV`, then
+//! the opcode's name, its `extended_value` by the shape `ops.toml` gives
+//! the field, and its two operands: a constant as `zend_dump_const`
+//! prints one, a variable as `zend_dump_var` numbers it, and an unused
+//! field as `zend_dump_unused_op` reads it, a jump target, a number,
+//! `THIS`, `NEXT` or how a class is fetched. The `try`/`catch` table
+//! follows the oplines as php's does.
 //!
-//! **What is not printed.** php's dump opens an opline with the operand
-//! its `result_type` names, `T22 = ADD ...`, when the compiler left one;
-//! the [`Opline`] carries no field for it (design §5.7, which #226
-//! decides), so nothing opens a line here and an op array whose oplines
-//! write one is not the oracle's. php prints the jump table of a
+//! **What is not printed.** php prints the jump table of a
 //! `SWITCH_LONG`, `SWITCH_STRING` or `MATCH`, the name of a
 //! `FRAMELESS_ICALL_*` and the live-range table; each waits on the unit
 //! holding the thing, and is printed as it lands (#228).
@@ -152,12 +150,20 @@ fn op_array(out: &mut String, name: &str, args: usize, body: &OpArray) {
     }
 }
 
-/// `zend_dump_op` with no CFG and no SSA: the name, the
+/// `zend_dump_op` with no CFG and no SSA: the operand `result` names
+/// and ` = ` when its kind is `TMP`, `VAR` or `CV`, the name, the
 /// `extended_value` by its shape, `op1`, `op2`, and the target an
-/// `extended_value` of the `JMP_ADDR` shape holds.
+/// `extended_value` of the `JMP_ADDR` shape holds. A `result` of kind
+/// `UNUSED` opens nothing, whatever the number the field holds: a
+/// site's safepoint number, or the temporary php still numbered where
+/// `zend_do_free` set the mark.
 fn opline(out: &mut String, body: &OpArray, op: &Opline) {
     let flags = op.opcode.flags();
     let name = op.opcode.name();
+    if op.out_type != OperandKind::Unused && op.out_type != OperandKind::Const {
+        var(out, body, op.out_type, op.out);
+        out.push_str(" = ");
+    }
     if name.is_empty() {
         let _ = write!(out, "OP_{}", op.opcode.num());
     } else {
@@ -176,6 +182,11 @@ fn opline(out: &mut String, body: &OpArray, op: &Opline) {
     );
     if flags & ext::MASK == ext::JMP_ADDR {
         let _ = write!(out, " {:04}", op.extended_value);
+    }
+    // A constant `result`, which no opline of `zend_compile.c` has, is
+    // printed last where php prints it.
+    if op.out_type == OperandKind::Const {
+        constant(out, body.literals.get(op.out as usize).copied());
     }
 }
 
@@ -328,9 +339,9 @@ fn extended_value(out: &mut String, op: &Opline, flags: u32) {
             let _ = write!(out, " {value}");
         }
         ext::OP => {
-            let name = u16::try_from(value)
+            let name = u8::try_from(value)
                 .ok()
-                .and_then(Opcode::from_u16)
+                .and_then(Opcode::from_u8)
                 .map_or("", Opcode::name);
             let _ = write!(out, " ({})", name.trim_start_matches("ZEND_"));
         }
@@ -703,6 +714,88 @@ mod tests {
         assert_eq!(line(&body, 0), "ADD CV0($a) T2");
         assert_eq!(line(&body, 1), "ECHO V3");
         assert_eq!(line(&body, 2), "ECHO X5");
+    }
+
+    /// The oracle over `function f($x) { $x++; return $x; } $a = f(1);
+    /// 1 + $a;` prints `CV0($x) = RECV 1`, `V1 = DO_UCALL` and
+    /// `T3 = ADD int(1) CV0($a)`: the operand `result` names opens the line, a
+    /// temporary numbered past the CVs as `zend_dump_var` numbers it.
+    #[test]
+    fn an_out_of_kind_tmp_var_or_cv_opens_the_line() {
+        let writing = |op: Opline, out_type, out| Opline {
+            out_type,
+            out,
+            ..op
+        };
+        let mut body = body(
+            vec![
+                writing(
+                    with(
+                        op(Opcode::Recv),
+                        OperandKind::Unused,
+                        1,
+                        OperandKind::Unused,
+                        0,
+                    ),
+                    OperandKind::Cv,
+                    0,
+                ),
+                writing(op(Opcode::DoUcall), OperandKind::Var, 0),
+                writing(
+                    with(op(Opcode::Add), OperandKind::Const, 0, OperandKind::Cv, 0),
+                    OperandKind::Tmp,
+                    2,
+                ),
+            ],
+            vec![Zval::long(1)],
+        );
+        body.vars = vec![Name::from("x")].into_boxed_slice();
+        body.num_cvs = 1;
+        body.num_tmps = 3;
+        assert_eq!(line(&body, 0), "CV0($x) = RECV 1");
+        assert_eq!(line(&body, 1), "V1 = DO_UCALL");
+        assert_eq!(line(&body, 2), "T3 = ADD int(1) CV0($x)");
+    }
+
+    /// The same oracle prints `ASSIGN CV0($a) V1` and `PRE_INC CV0($x)`
+    /// bare, the temporaries `zend_do_free` marked `UNUSED` and still
+    /// numbered, and `JMP 0004` bare, a site whose `result` is its
+    /// safepoint number: a `result` of kind `UNUSED` opens nothing,
+    /// whatever the number in the field.
+    #[test]
+    fn an_out_of_kind_unused_prints_nothing_whatever_its_number() {
+        let mut body = body(
+            vec![
+                with(op(Opcode::Assign), OperandKind::Cv, 0, OperandKind::Var, 1),
+                Opline {
+                    out: 2,
+                    ..with(
+                        op(Opcode::PreInc),
+                        OperandKind::Cv,
+                        0,
+                        OperandKind::Unused,
+                        0,
+                    )
+                },
+                Opline {
+                    out: 1,
+                    ..with(
+                        op(Opcode::Jmp),
+                        OperandKind::Unused,
+                        4,
+                        OperandKind::Unused,
+                        0,
+                    )
+                },
+            ],
+            vec![],
+        );
+        body.vars = vec![Name::from("a")].into_boxed_slice();
+        body.num_cvs = 1;
+        body.num_tmps = 3;
+        assert_eq!(line(&body, 0), "ASSIGN CV0($a) V2");
+        assert_eq!(line(&body, 1), "PRE_INC CV0($a)");
+        assert_eq!(line(&body, 2), "JMP 0004");
     }
 
     /// The oracle over `set_time_limit(1); for (;;) {}` prints

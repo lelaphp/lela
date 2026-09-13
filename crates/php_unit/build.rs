@@ -2,8 +2,9 @@
 //! workspace root (design §4.7, §5.7, seam 7): one enum, so the compiler,
 //! the dump and the dispatch cannot disagree on a number. Written to
 //! `OUT_DIR/opcode.rs` and included by `opcode`, never committed (design
-//! §10). The enum keeps php's numbers as discriminants, including the two
-//! `unused_numbers`; its variants are php's names in camel case.
+//! §10). The enum keeps php's numbers as discriminants in the one byte
+//! `zend_op.opcode` is, including the two `unused_numbers`; its variants
+//! are php's names in camel case.
 
 use std::env;
 use std::fmt::Write as _;
@@ -29,7 +30,7 @@ fn main() {
 }
 
 struct Op {
-    num: u16,
+    num: u8,
     name: String,
     variant: String,
     effects: Vec<String>,
@@ -57,8 +58,8 @@ fn read(path: &Path) -> Result<Vec<Op>, String> {
         let num = row
             .get("num")
             .and_then(toml::Value::as_integer)
-            .and_then(|n| u16::try_from(n).ok())
-            .ok_or("an [[op]] row without a u16 num")?;
+            .and_then(|n| u8::try_from(n).ok())
+            .ok_or("an [[op]] row without a num that fits php's byte")?;
         let name = row
             .get("name")
             .and_then(toml::Value::as_str)
@@ -111,7 +112,7 @@ fn render(ops: &[Op]) -> Result<String, String> {
     );
     let _ = writeln!(
         out,
-        "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]\n#[repr(u16)]\npub enum Opcode {{"
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]\n#[repr(u8)]\npub enum Opcode {{"
     );
     for op in ops {
         let _ = writeln!(out, "    /// `ZEND_{}`", op.name);
