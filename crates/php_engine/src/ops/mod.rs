@@ -10,7 +10,7 @@
 
 use crate::api::raising::{Thrown, throw, warning};
 use crate::api::request::Request;
-use crate::api::values::{PhpArray, PhpString, TypeTag, Value};
+use crate::api::values::{PhpArray, PhpString, TypeTag, Value, ValueRef};
 
 /// `zval_get_string`: a value as the string php converts it to, which is
 /// what `ECHO`, `print` and string interpolation write.
@@ -44,6 +44,57 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> PhpString {
         Some(true) => PhpString::from_bytes(b"1"),
         // `false` and `null` are both the empty string.
         _ => PhpString::default(),
+    }
+}
+
+/// `zend_is_true` (`Z/Zend/zend_operators.h:409`, `i_zend_is_true`): a
+/// value as a condition reads it, which is what `JMPNZ` and its kin
+/// test and what a bool parameter coerces to. `null`, `false`, `0`,
+/// `0.0`, the empty string, `"0"` and the empty array are false and
+/// everything else is true; `"00"` and `" "` among the strings, and
+/// `NAN` among the doubles, with the warning 8.5 raises for a NAN
+/// coerced to bool. An object is true unless its handlers say
+/// otherwise, and no class here has handlers of its own yet.
+///
+/// Each false value ends a loop before its body runs, and a `while`
+/// tests it where php's compiler leaves it, at the `JMPNZ`; a true one
+/// would go on until the execution timer, which is the witness beside
+/// [`crate::interrupt::interrupted`].
+///
+/// ```php
+/// while (0) echo 'a'; while (0.0) echo 'b'; while ('') echo 'c'; while ('0') echo 'd'; while (null) echo 'e'; while (false) echo 'f'; while (extension_loaded('nope')) echo 'g'; for (; 1, 0;) echo 'h';
+/// echo 'none ran';
+/// ```
+/// ```expect
+/// none ran
+/// ```
+///
+/// A NAN is true, so `memory_get_usage(NAN)` reads the same number as
+/// `memory_get_usage(true)`, and it warns on the way.
+///
+/// ```php
+/// var_dump(memory_get_usage(NAN) - memory_get_usage(true));
+/// ```
+/// ```expect
+/// Warning: unexpected NAN value was coerced to bool in %s on line 2
+/// int(0)
+/// ```
+pub(crate) fn is_true(req: &mut Request, value: &Value) -> bool {
+    match value.deref().as_ref() {
+        ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) => false,
+        ValueRef::Bool(true) | ValueRef::Object(_) => true,
+        ValueRef::Int(n) => n != 0,
+        ValueRef::Float(f) => {
+            if f.is_nan() {
+                warning(req, "unexpected NAN value was coerced to bool");
+            }
+            f != 0.0
+        }
+        ValueRef::Str(s) => !(s.is_empty() || s.as_bytes() == b"0"),
+        ValueRef::Array(a) => !a.is_empty(),
+        ValueRef::Resource(r) => r.id != 0,
+        // `deref` followed the reference already.
+        ValueRef::Reference(r) => is_true(req, r.get()),
     }
 }
 

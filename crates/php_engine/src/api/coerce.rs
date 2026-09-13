@@ -35,19 +35,10 @@ pub enum BinaryOp {
     ShiftRight,
 }
 
-/// `zend_is_true`.
-#[must_use]
-pub fn truthy(value: &Value) -> bool {
-    match value.as_ref() {
-        ValueRef::Undef | ValueRef::Null => false,
-        ValueRef::Bool(b) => b,
-        ValueRef::Int(n) => n != 0,
-        ValueRef::Float(f) => f != 0.0,
-        ValueRef::Str(s) => !(s.is_empty() || s.as_bytes() == b"0"),
-        ValueRef::Array(a) => !a.is_empty(),
-        ValueRef::Object(_) | ValueRef::Resource(_) => true,
-        ValueRef::Reference(r) => truthy(r.get()),
-    }
+/// `zend_is_true`, the kernel [`crate::ops::is_true`] through the face:
+/// a NAN warns as it is coerced, which is why the request is here.
+pub fn truthy(req: &mut Request, value: &Value) -> bool {
+    crate::ops::is_true(req, value)
 }
 
 /// `is_numeric_string_ex`: the `int` or `float` a string denotes, with
@@ -295,7 +286,7 @@ pub fn compare(req: &mut Request, a: &Value, b: &Value) -> Result<Ordering, Thro
         }
         (ValueRef::Null | ValueRef::Undef, ValueRef::Null | ValueRef::Undef) => Ok(Ordering::Equal),
         (ValueRef::Bool(_) | ValueRef::Null, _) | (_, ValueRef::Bool(_) | ValueRef::Null) => {
-            Ok(truthy(a).cmp(&truthy(b)))
+            Ok(truthy(req, a).cmp(&truthy(req, b)))
         }
         (ValueRef::Array(x), ValueRef::Array(y)) => Ok(x.len().cmp(&y.len())),
         _ => {
@@ -389,7 +380,7 @@ pub fn coerce_param(
         Type::Bool => match value.as_ref() {
             ValueRef::Bool(b) => Ok(Value::bool(b)),
             ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Str(_) if !strict => {
-                Ok(Value::bool(truthy(value)))
+                Ok(Value::bool(truthy(req, value)))
             }
             _ => want(req, "bool"),
         },

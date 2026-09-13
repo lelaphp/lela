@@ -8,8 +8,8 @@
 //!
 //! The set is the one procedural PHP needs to reach a native: `ECHO`, the
 //! call sequence `INIT_FCALL`, `SEND_VAL`, `SEND_VAR`, `DO_ICALL`,
-//! `RETURN`, which raises the return safepoint, `JMP`, which raises
-//! the loop safepoint when it jumps backward, and the arithmetic
+//! `RETURN`, which raises the return safepoint, `JMP` and `JMPNZ`, which
+//! raise the loop safepoint when they jump backward, and the arithmetic
 //! `ZEND_ADD`, `ZEND_SUB`, `ZEND_MUL` and `ZEND_DIV` that php emits for
 //! what its compiler does not fold.
 
@@ -185,6 +185,32 @@ pub(crate) fn div<T: Tier>(
 pub(crate) fn jmp<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, op: &Opline) -> Edge {
     let back = op.op1 <= req.vm().opline(frame);
     req.vm_mut().jump(frame, op.op1);
+    if back {
+        crate::interrupt::check(req)?;
+        continued(T::safepoint(req, frame, Site::Loop(SafepointIdx(op.out))))?;
+    }
+    Ok(Stepped::Same(frame))
+}
+
+/// `ZEND_JMPNZ`: the jump `zend_emit_cond_jump` leaves at the end of a
+/// `for`, a `while` and a `do`, its target opline in `op2`, taken when
+/// the operand is true as [`crate::ops::is_true`] reads it. Taken to an
+/// earlier opline it is the loop's back-edge and does what [`jmp`] does
+/// there: the frame at the target, the interrupt check, the site with
+/// the number the compiler wrote in `result`. Not taken, it is
+/// `ZEND_VM_NEXT_OPCODE`.
+pub(crate) fn jmpnz<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let value = exec::operand(req.vm(), frame, code, op.op1_type, op.op1);
+    if !crate::ops::is_true(req, &value) {
+        return Ok(advance(req, frame));
+    }
+    let back = op.op2 <= req.vm().opline(frame);
+    req.vm_mut().jump(frame, op.op2);
     if back {
         crate::interrupt::check(req)?;
         continued(T::safepoint(req, frame, Site::Loop(SafepointIdx(op.out))))?;
@@ -370,6 +396,70 @@ mod tests {
             )))
         );
         assert_eq!(req.state::<Asked>().sites, vec![]);
+    }
+
+    /// A unit whose main op array is `NOP` then a `JMPNZ` over the
+    /// constant at slot zero, aimed at the `NOP`, with safepoint number
+    /// one: the shape of `for (;;)` after a body of one opline.
+    fn conditional(literal: php_heap::Zval) -> Arc<Unit> {
+        Arc::new(Unit {
+            main: OpArray {
+                oplines: vec![
+                    Opline::default(),
+                    Opline {
+                        opcode: Opcode::Jmpnz,
+                        op1_type: OperandKind::Const,
+                        op1: 0,
+                        op2: 0,
+                        out: 1,
+                        ..Opline::default()
+                    },
+                ]
+                .into_boxed_slice(),
+                literals: vec![literal].into_boxed_slice(),
+                ..OpArray::default()
+            },
+            ..Unit::default()
+        })
+    }
+
+    /// Design §5.7, §5.8: a `JMPNZ` taken to an earlier opline is the
+    /// back-edge and raises the loop safepoint as `JMP` does; one not
+    /// taken goes on to the next opline and raises nothing.
+    #[test]
+    fn a_conditional_jump_is_the_back_edge_only_when_it_is_taken() {
+        let engine = Engine::builder().tier::<Probe>().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let taken = conditional(php_heap::Zval::bool(true));
+        let frame = req.push_frame(Arc::clone(&taken));
+        let code = crate::exec::code_of(&taken);
+        let op = code.oplines.get(1).copied().unwrap_or_default();
+        req.vm_mut().jump(frame, 1);
+
+        assert_eq!(
+            jmpnz::<Probe>(&mut req, frame, code, &op),
+            Ok(Stepped::Same(frame))
+        );
+        assert_eq!(req.vm().opline(frame), 0);
+        assert_eq!(
+            req.state::<Asked>().sites,
+            vec![(Site::Loop(SafepointIdx(1)), frame)]
+        );
+
+        let not_taken = conditional(php_heap::Zval::long(0));
+        let frame = req.push_frame(Arc::clone(&not_taken));
+        let code = crate::exec::code_of(&not_taken);
+        req.vm_mut().jump(frame, 1);
+        assert_eq!(
+            jmpnz::<Probe>(&mut req, frame, code, &op),
+            Ok(Stepped::Same(frame))
+        );
+        assert_eq!(req.vm().opline(frame), 2, "on to the opline after it");
+        assert_eq!(
+            req.state::<Asked>().sites.len(),
+            1,
+            "nothing more was asked"
+        );
     }
 
     /// A unit whose main op array is one `RETURN null`, its safepoint
