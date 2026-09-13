@@ -6,8 +6,10 @@
 # and the one negative-control fixture per rule. A rule stated anywhere else is
 # a copy. Edited by a person, in the same commit as the design change.
 #
-# Numbers are design §4.1 (crates), §4.5 (locks), §10 (lints, profiles) and the
-# harness's §12 item 6; the design cites this file and restates none of them.
+# The numbers are this file's alone: design §4.1 names the crates, §4.5 the
+# locks, §10 the lints and profiles, and the harness's §12 item 6 the harness's
+# own prose; each cites this file and none of the three design documents
+# restates a number (design ledger 14, jit ledger 6, harness ledger 35).
 # `xtask` refuses a manifest with a key outside this grammar:
 #   [oracle] [budget] [telemetry] [[crate]] [[seam]] [[edge]] [[rule]] [[week]]
 # Keys beyond the harness's §4.1 example, added here because §10 states a rule
@@ -76,7 +78,7 @@ name = "php"
 budget = 1000
 [[crate]]
 name = "xtask"
-budget = 18000                             # design §8, revised: 14k was the inherited-pieces estimate, written before the instruments §4.2 names landed here
+budget = 18000                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here
 lock = "xtask.lock"                        # harness §4.1, revision 16: the harness holds its own interface
 
 # ---------------------------------------------------------------- ext/
@@ -283,7 +285,7 @@ text = "Every unsafe block is one operation with a SAFETY comment."
 
 [[rule]]
 id = "lints.no-panic"
-scope = ["crates/php_heap", "crates/php_unit", "crates/php_compile", "crates/php_engine", "crates/php_jit", "crates/php_sapi", "ext/*"]
+scope = ["crates/php_syntax", "crates/php_heap", "crates/php_unit", "crates/php_compile", "crates/php_engine", "crates/php_jit", "crates/php_sapi", "ext/*"]  # php_syntax: the parser runs inside every request, so its panic reaches one (#236)
 exempt = ["tests", "xtask"]
 deny_lints = ["clippy::unwrap_used", "clippy::expect_used", "clippy::panic", "clippy::unreachable", "clippy::todo", "clippy::unimplemented"]
 text = "Internal invariant failures are InternalError fatals with a message, not panics (design §10)."
