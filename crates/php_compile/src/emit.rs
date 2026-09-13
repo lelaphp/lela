@@ -13,9 +13,8 @@
 //! (`zend_try_ct_eval_binary_op`), so `1/3` is one constant and no opline.
 //! What it cannot fold becomes the opcode php emits, into a temporary as
 //! `zend_emit_op_tmp` leaves it: `ZEND_ADD`, `ZEND_SUB`, `ZEND_MUL` and
-//! `ZEND_DIV`, whose kernels the engine serves. `%` and `**` fold here
-//! and no handler serves their opcodes, so what does not fold is a
-//! [`CompileError`] rather than an opline that would fatal under the loop.
+//! `ZEND_DIV`, `ZEND_MOD`, `ZEND_POW`, `ZEND_SL` and `ZEND_SR`, whose
+//! kernels the engine serves.
 //!
 //! A variable read is a `CV` operand and no opline (`zend_try_compile_cv`),
 //! and an assignment to one is `ASSIGN` with the CV in `op1` and the value
@@ -419,6 +418,8 @@ impl Emit<'_> {
             BinaryOp::Div => Opcode::Div,
             BinaryOp::Mod => Opcode::Mod,
             BinaryOp::Pow => Opcode::Pow,
+            BinaryOp::Sl => Opcode::Sl,
+            BinaryOp::Sr => Opcode::Sr,
         }
     }
 
@@ -605,8 +606,9 @@ fn long_compatible(number: Number) -> Option<i64> {
 /// `zend_binary_op_produces_error` past the operands' own reading, over
 /// the numbers they are worth: a division by zero, which `zval_get_double`
 /// reads `"0"`, `false` and `null` as too; a modulo over an operand that
-/// is not long-compatible or by zero; and `0 ** (<0)`, each of which
-/// throws where the opcode stands.
+/// is not long-compatible or by zero; `0 ** (<0)`; and a shift over an
+/// operand that is not long-compatible or by a negative number, each of
+/// which throws where the opcode stands.
 fn produces_error(op: BinaryOp, a: Number, b: Number) -> bool {
     match op {
         BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => false,
@@ -618,6 +620,10 @@ fn produces_error(op: BinaryOp, a: Number, b: Number) -> bool {
             (Some(_), Some(divisor)) if divisor != 0
         ),
         BinaryOp::Pow => a.double() == 0.0 && b.double() < 0.0,
+        BinaryOp::Sl | BinaryOp::Sr => !matches!(
+            (long_compatible(a), long_compatible(b)),
+            (Some(_), Some(by)) if by >= 0
+        ),
     }
 }
 
@@ -633,18 +639,21 @@ fn fold(op: BinaryOp, left: Zval, right: Zval) -> Option<Zval> {
     }
     match (op, a, b) {
         (_, Number::Long(a), Number::Long(b)) => Some(longs(op, a, b)),
-        // `mod_function` reads both sides as the longs `zval_get_long`
-        // makes of them, which the guard held to be exact.
-        (BinaryOp::Mod, a, b) => Some(longs(op, long_compatible(a)?, long_compatible(b)?)),
+        // `mod_function` and the two shifts read both sides as the longs
+        // `zval_get_long` makes of them, which the guard held to be exact.
+        (BinaryOp::Mod | BinaryOp::Sl | BinaryOp::Sr, a, b) => {
+            Some(longs(op, long_compatible(a)?, long_compatible(b)?))
+        }
         (_, a, b) => doubles(op, a.double(), b.double()),
     }
 }
 
 /// The long arms of `add_function`, `sub_function`, `mul_function`,
-/// `div_function`, `mod_function` and `pow_function`: the value php's
-/// `fast_long_*` macros leave, a double where the operation overflowed
-/// and, for a division, where it did not come out whole. The divisor is
-/// not zero; [`produces_error`] held that.
+/// `div_function`, `mod_function`, `pow_function`, `shift_left_function`
+/// and `shift_right_function`: the value php's `fast_long_*` macros
+/// leave, a double where the operation overflowed and, for a division,
+/// where it did not come out whole. The divisor is not zero and no shift
+/// is by a negative number; [`produces_error`] held both.
 #[expect(
     clippy::cast_precision_loss,
     reason = "php's `(double) lval`, whose rounding is the behaviour being copied"
@@ -663,6 +672,8 @@ fn longs(op: BinaryOp, a: i64, b: i64) -> Zval {
         BinaryOp::Mod if b == -1 => Zval::long(0),
         BinaryOp::Mod => Zval::long(a % b),
         BinaryOp::Pow => power(a, b),
+        BinaryOp::Sl => Zval::long(php_heap::shift_left(a, b.unsigned_abs())),
+        BinaryOp::Sr => Zval::long(php_heap::shift_right(a, b.unsigned_abs())),
     }
 }
 
@@ -693,9 +704,9 @@ fn doubles(op: BinaryOp, a: f64, b: f64) -> Option<Zval> {
         BinaryOp::Sub => Some(Zval::double(a - b)),
         BinaryOp::Mul => Some(Zval::double(a * b)),
         BinaryOp::Div => Some(Zval::double(a / b)),
-        // A modulo is [`longs`]'s: two long-compatible doubles go there,
-        // and the guard refused every other pair.
-        BinaryOp::Mod => None,
+        // A modulo and a shift are [`longs`]'s: two long-compatible
+        // doubles go there, and the guard refused every other pair.
+        BinaryOp::Mod | BinaryOp::Sl | BinaryOp::Sr => None,
         BinaryOp::Pow => Some(Zval::double(a.powf(b))),
     }
 }

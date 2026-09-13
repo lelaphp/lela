@@ -11,8 +11,8 @@
 //! `RETURN`, which raises the return safepoint, `JMP` and `JMPNZ`, which
 //! raise the loop safepoint when they jump backward, `ASSIGN`, which
 //! writes a CV, and the arithmetic `ZEND_ADD`, `ZEND_SUB`, `ZEND_MUL`,
-//! `ZEND_DIV`, `ZEND_MOD` and `ZEND_POW` that php emits for what its
-//! compiler does not fold.
+//! `ZEND_DIV`, `ZEND_MOD`, `ZEND_POW`, `ZEND_SL` and `ZEND_SR` that php
+//! emits for what its compiler does not fold.
 
 // Every handler is generic over the tier and hands back the same edge, so
 // the generated dispatch calls them all the same way; the ones that raise a
@@ -225,6 +225,17 @@ pub(crate) fn pow<T: Tier>(
     op: &Opline,
 ) -> Edge {
     arithmetic(req, frame, code, op, crate::ops::pow)
+}
+
+/// `ZEND_SL`: [`crate::ops::shift_left`], the same way; a negative count
+/// leaves php's `ArithmeticError` pending where the opline stands.
+pub(crate) fn sl<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
+    arithmetic(req, frame, code, op, crate::ops::shift_left)
+}
+
+/// `ZEND_SR`: [`crate::ops::shift_right`], the same way.
+pub(crate) fn sr<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
+    arithmetic(req, frame, code, op, crate::ops::shift_right)
 }
 
 /// `ZEND_JMP`: the unconditional jump `pass_two` leaves, its target

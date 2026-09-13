@@ -15,10 +15,10 @@
 //! interpolation, `true`, `false`, `null`, a constant by name, a call of
 //! a named function, a parenthesised expression, a variable `$a` that is
 //! a CV, an assignment `$a = expr` to one, unary `-` and `+`, and
-//! `+`, `-`, `*`, `/`, `%` and `**` at php's precedence levels: the
-//! additive level under the multiplicative one, both left to right, and
-//! `**` right to left above unary `-`, with `=` below them all and read
-//! right to left.
+//! `<<`, `>>`, `+`, `-`, `*`, `/`, `%` and `**` at php's precedence
+//! levels: the shifts under the additive level under the multiplicative
+//! one, each left to right, and `**` right to left above unary `-`, with
+//! `=` below them all and read right to left.
 //! Anything else is a [`crate::CompileError`], so what this cannot read is
 //! refused rather than silently compiled to something else.
 
@@ -99,6 +99,10 @@ pub(crate) enum BinaryOp {
     Mod,
     /// `ZEND_POW`
     Pow,
+    /// `ZEND_SL`
+    Sl,
+    /// `ZEND_SR`
+    Sr,
 }
 
 /// The line each statement stands on, beside it.
@@ -376,12 +380,12 @@ impl Reader<'_> {
 
     /// One expression: an assignment, which php's grammar puts below
     /// every operator here and reads right to left, `$a = $b = 1` being
-    /// `$a = ($b = 1)`; else php's precedence, the additive level over
-    /// the multiplicative one, each left to right. php's rule is
-    /// `variable '=' expr`, so `1 + $a = 2` is php's `1 + ($a = 2)`; that
-    /// is refused here rather than read as the other grouping.
+    /// `$a = ($b = 1)`; else php's precedence, one level per function
+    /// below, each left to right. php's rule is `variable '=' expr`, so
+    /// `1 + $a = 2` is php's `1 + ($a = 2)`; that is refused here rather
+    /// than read as the other grouping.
     fn expr(&mut self) -> Result<Expr, Trouble> {
-        let left = self.additive()?;
+        let left = self.shift()?;
         self.skip_trivia();
         if !(self.byte(0) == Some(b'=') && self.byte(1) != Some(b'=')) {
             return Ok(left);
@@ -396,6 +400,29 @@ impl Reader<'_> {
             var,
             value: Box::new(self.expr()?),
         })
+    }
+
+    /// `<<` and `>>`, php's level below the arithmetic. A `<<<` opens a
+    /// heredoc and a `<<=` or `>>=` assigns, none of which this reads.
+    fn shift(&mut self) -> Result<Expr, Trouble> {
+        let mut left = self.additive()?;
+        loop {
+            self.skip_trivia();
+            let op = match (self.byte(0), self.byte(1), self.byte(2)) {
+                (Some(b'<'), Some(b'<'), next) if !matches!(next, Some(b'<' | b'=')) => {
+                    BinaryOp::Sl
+                }
+                (Some(b'>'), Some(b'>'), next) if next != Some(b'=') => BinaryOp::Sr,
+                _ => return Ok(left),
+            };
+            self.bump(2);
+            let right = self.additive()?;
+            left = Expr::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
     }
 
     /// `+` and `-`, php's lower arithmetic level.
@@ -934,6 +961,43 @@ mod tests {
             shape(b"<?php echo (2 * 3) % 4;"),
             "`%` and `*` are one level, read left to right"
         );
+    }
+
+    #[test]
+    fn a_shift_stands_below_php_s_arithmetic_and_reads_left_to_right() {
+        assert_eq!(
+            shape(b"<?php echo 1 << 2 + 3;"),
+            shape(b"<?php echo 1 << (2 + 3);"),
+            "`+` binds tighter than `<<`"
+        );
+        assert_eq!(
+            shape(b"<?php echo 1 + 2 >> 3;"),
+            shape(b"<?php echo (1 + 2) >> 3;"),
+            "`+` binds tighter than `>>`"
+        );
+        assert_eq!(
+            shape(b"<?php echo 1 << 2 >> 3;"),
+            shape(b"<?php echo (1 << 2) >> 3;"),
+            "`<<` and `>>` are one level, read left to right"
+        );
+        assert_eq!(
+            read(b"<?php echo 8 >> 1;").unwrap_or_default(),
+            vec![(
+                Stmt::Echo(vec![Expr::Binary {
+                    op: BinaryOp::Sr,
+                    left: Box::new(Expr::Int(8)),
+                    right: Box::new(Expr::Int(1)),
+                }]),
+                1
+            )]
+        );
+        for source in [
+            b"<?php echo 1 <<= 2;".as_slice(),
+            b"<?php echo 1 >>= 2;".as_slice(),
+            b"<?php echo <<<EOT\nx\nEOT;".as_slice(),
+        ] {
+            assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
+        }
     }
 
     #[test]

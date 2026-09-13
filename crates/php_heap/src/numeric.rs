@@ -281,6 +281,48 @@ pub fn power(base: i64, exponent: u64) -> Number {
     Number::Long(l1)
 }
 
+/// `shift_left_function`'s long arm for a count that is not negative
+/// (`Z/Zend/zend_operators.c:1944`): the shift over the unsigned value,
+/// "to get well-defined wrap behavior", and zero for a count at or past
+/// the long's width, php's guard against "wrapping quirkiness on some
+/// processors where << 64 + x == << x". A negative count is php's
+/// `ArithmeticError` and stays with the caller. Read by the compiler's
+/// fold and by the kernel, as [`power`] is.
+///
+/// ```php
+/// echo 1 << 3, "|", 1 << 63, "|", 1 << 64, "|", -1 << 1, "|", 3 << 62;
+/// ```
+/// ```expect
+/// 8|-9223372036854775808|0|-2|-4611686018427387904
+/// ```
+#[must_use]
+pub fn shift_left(value: i64, by: u64) -> i64 {
+    match u32::try_from(by) {
+        Ok(by) if by < i64::BITS => value.wrapping_shl(by),
+        _ => 0,
+    }
+}
+
+/// `shift_right_function`'s long arm for a count that is not negative
+/// (`Z/Zend/zend_operators.c:1981`): C's arithmetic shift, and for a
+/// count at or past the long's width the sign the shift would have
+/// filled with, -1 for a negative value and zero for the rest.
+///
+/// ```php
+/// echo 8 >> 1, "|", -8 >> 1, "|", 1 >> 64, "|", -1 >> 64, "|", -1 >> 63;
+/// ```
+/// ```expect
+/// 4|-4|0|-1|-1
+/// ```
+#[must_use]
+pub fn shift_right(value: i64, by: u64) -> i64 {
+    match u32::try_from(by) {
+        Ok(by) if by < i64::BITS => value >> by,
+        _ if value < 0 => -1,
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

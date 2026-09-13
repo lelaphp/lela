@@ -351,6 +351,75 @@ pub(crate) fn pow(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
     Ok(Value::float(base.powf(exponent)))
 }
 
+/// `shift_left_function` (`Zend/zend_operators.c:1944`):
+/// [`php_heap::shift_left`] over the longs `convert_op1_op2_long` makes
+/// of both sides, and `ArithmeticError` thrown where the opcode stands
+/// for a negative count.
+///
+/// ```php
+/// echo 1 << (3 * extension_loaded('Core')), "|", 1 << (64 * extension_loaded('Core')), "|", -1 << (1 * extension_loaded('Core')), "|", "2" << (1 * extension_loaded('Core')), "|", 1 << (2.0 * extension_loaded('Core')), "|", 1.5 << (1 * extension_loaded('Core'));
+/// ```
+/// ```expect
+/// 8|0|-2|4|4|
+/// Deprecated: Implicit conversion from float 1.5 to int loses precision in %s on line 2
+/// 2
+/// ```
+///
+/// The negative count is the one pair php's compiler will not fold, so
+/// two constants exercise the opcode in both engines.
+///
+/// ```php
+/// echo 1 << -1;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArithmeticError: Bit shift by negative number in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn shift_left(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    let (a, b) = longs(req, "<<", left, right)?;
+    match u64::try_from(b) {
+        Ok(by) => Ok(Value::int(php_heap::shift_left(a, by))),
+        Err(_) => Err(throw(
+            req,
+            "ArithmeticError",
+            "Bit shift by negative number",
+        )),
+    }
+}
+
+/// `shift_right_function` (`Zend/zend_operators.c:1981`):
+/// [`php_heap::shift_right`], the same way.
+///
+/// ```php
+/// echo 8 >> (1 * extension_loaded('Core')), "|", -8 >> (1 * extension_loaded('Core')), "|", -1 >> (64 * extension_loaded('Core')), "|", 1 >> (64 * extension_loaded('Core')), "|", "8" >> (2 * extension_loaded('Core'));
+/// ```
+/// ```expect
+/// 4|-4|-1|0|2
+/// ```
+///
+/// ```php
+/// echo 1 >> -1;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArithmeticError: Bit shift by negative number in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn shift_right(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    let (a, b) = longs(req, ">>", left, right)?;
+    match u64::try_from(b) {
+        Ok(by) => Ok(Value::int(php_heap::shift_right(a, by))),
+        Err(_) => Err(throw(
+            req,
+            "ArithmeticError",
+            "Bit shift by negative number",
+        )),
+    }
+}
+
 /// php's `(double) lval`, whose rounding is the behaviour being copied.
 #[expect(
     clippy::cast_precision_loss,

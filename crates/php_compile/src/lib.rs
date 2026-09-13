@@ -458,6 +458,52 @@ mod tests {
         }
     }
 
+    /// `shift_left_function` and `shift_right_function` over two
+    /// constants, as php folds them: the shift over the longs both sides
+    /// are worth, zero or the sign past the long's width, and the opcode
+    /// left standing for a negative count, an operand
+    /// `zend_is_op_long_compatible` refuses, or a call.
+    #[test]
+    fn a_shift_over_constants_folds_the_way_php_folds_it_and_the_rest_is_sl_or_sr() {
+        assert_eq!(echoed_literal(b"<?php echo 1 << 3;").as_long(), Some(8));
+        assert_eq!(echoed_literal(b"<?php echo 1 << 64;").as_long(), Some(0));
+        assert_eq!(echoed_literal(b"<?php echo -1 >> 64;").as_long(), Some(-1));
+        assert_eq!(echoed_literal(b"<?php echo 8 >> 1;").as_long(), Some(4));
+        assert_eq!(echoed_literal(b"<?php echo \"2\" << 1;").as_long(), Some(4));
+        assert_eq!(echoed_literal(b"<?php echo 1 << 2.0;").as_long(), Some(4));
+        assert_eq!(
+            echoed_literal(b"<?php echo 1 + 2 << 3;").as_long(),
+            Some(24),
+            "`+` binds tighter than `<<`"
+        );
+        for (source, opcode, returned) in [
+            (&b"<?php echo 1 << -1;"[..], "SL", "CONST[0]"),
+            (b"<?php echo 1 >> -1;", "SR", "CONST[0]"),
+            (b"<?php echo 1.5 << 1;", "SL", "CONST[1]"),
+            (b"<?php echo 1 << \"1x\";", "SL", "CONST[0]"),
+        ] {
+            assert_eq!(
+                unit_of(source).dump(),
+                format!(
+                    "$_main:\n     ; (lines=3, args=0, vars=0, tmps=1)\n\
+                     0000 {opcode} CONST[0] CONST[1]\n0001 ECHO T0\n0002 RETURN {returned}\n"
+                ),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+        assert_eq!(
+            unit_of(b"<?php echo 1 << extension_loaded('Core');").dump(),
+            "$_main:\n     ; (lines=6, args=0, vars=0, tmps=2)\n\
+             0000 INIT_FCALL CONST[0]\n\
+             0001 SEND_VAL CONST[1]\n\
+             0002 DO_ICALL\n\
+             0003 SL CONST[2] V0\n\
+             0004 ECHO T1\n\
+             0005 RETURN CONST[2]\n"
+        );
+    }
+
     /// `zend_compile_for` over `for (;;) {}`, php's own oplines under
     /// the dump recipe: the `JMP` forward to the condition, and the
     /// condition, the constant `true` for an empty one, as the `JMPNZ`

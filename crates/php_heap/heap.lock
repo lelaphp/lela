@@ -81,3 +81,5 @@ ZvalType
 double_to_string
 numeric_prefix
 power
+shift_left
+shift_right
