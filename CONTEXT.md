@@ -145,11 +145,11 @@ _Avoid_: transition, continuation, `Next` (the handler's return inside the loop)
 ### Harness
 
 **Instrument**:
-One `xtask` subcommand that measures or judges something and ends by writing a reading: `witness`, `phpt`, `compile-identity`, `crosscheck`, `port-map`, `api-check`, `budget`, `unsafe-audit`, `bench`, `fuzz`, `mutants`, `permit`, `done`, `vocab`. What an instrument does to a crate or a rule is to *hold* it. The design of record for the harness is `harness-design.md`.
+One `xtask` subcommand that measures or judges something and ends by writing a reading, in the order `cli::Command` has them: `api-check`, `permit`, `done`, `track-work`, `ticket`, `budget`, `clippy`, `phpt`, `port-map`, `compile-identity`, `unsafe-audit`, `steer`, `divergence-reason`, `witness`, `vocab`; `bench`, `crosscheck`, `fuzz` and `mutants` are named by `harness-design.md` §4.2 and not built yet. What an instrument does to a crate or a rule is to *hold* it. The design of record for the harness is `harness-design.md`.
 _Avoid_: check (the manifest's `check` predicate and `api_check`, its module), gate (that is a numbered pass/fail bar such as G1), tool (a rule's `tool`, and the hook's `tool_name` and `tool_input`, Claude Code's words), script (php's `script_name`)
 
 **Command**:
-One `xtask` subcommand that acts or answers and writes no reading: `track`, `worktree`, `regions`, `new-ext`, `generate`, `status`. A command is not an instrument, so `done` and `status` never look for its reading; what it answers is asked again each time.
+One `xtask` subcommand that acts or answers and writes no reading: `track` and its `new`, `next` and `sync`, `worktree`, `regions`, `new-ext`, `generate`, `status`. What decides which of the two a subcommand is, is the reading and never the name it hangs under, so `track work` is the one subcommand of a command that is an instrument: it judges what it lands and writes a `track-work` reading. A command is not an instrument, so `done` and `status` never look for its reading; what it answers is asked again each time.
 _Avoid_: helper, utility, subtool
 
 **Tally**:
