@@ -428,6 +428,91 @@ mod tests {
         }
     }
 
+    /// The oracle's dump under the pin's `dump` regime of
+    /// `$a = 1; echo $a, -$a, $A; $c = $b = $a + 1;`, `vars=4, tmps=5`:
+    ///
+    /// ```text
+    /// 0000 ASSIGN CV0($a) int(1)
+    /// 0001 ECHO CV0($a)
+    /// 0002 T5 = MUL CV0($a) int(-1)
+    /// 0003 ECHO T5
+    /// 0004 ECHO CV1($A)
+    /// 0005 T6 = ADD CV0($a) int(1)
+    /// 0006 T7 = ASSIGN CV3($b) T6
+    /// 0007 ASSIGN CV2($c) T7
+    /// 0008 RETURN int(1)
+    /// ```
+    ///
+    /// `lookup_cv` numbers a name when it is first met, `$a` and `$A`
+    /// apart, and `zend_compile_assign` looks the variable up before it
+    /// compiles the value, so `$c` is met before `$b`. Each `ASSIGN`
+    /// takes a temporary, read or not, which is the five php counts.
+    #[test]
+    fn a_variable_is_its_cv_and_an_assignment_is_php_s_assign_in_php_s_order() {
+        use OperandKind::{Const, Cv, Tmp, Unused};
+        let unit = unit_of(b"<?php $a = 1; echo $a, -$a, $A; $c = $b = $a + 1;");
+        assert_eq!(
+            unit.main.vars.iter().map(|v| &*v.0).collect::<Vec<_>>(),
+            [b"a".as_slice(), b"A", b"c", b"b"]
+        );
+        assert_eq!(unit.main.num_cvs, 4);
+        assert_eq!(unit.main.num_tmps, 5);
+        let shape: Vec<_> = unit
+            .main
+            .oplines
+            .iter()
+            .map(|op| (op.opcode, op.op1_type, op.op1, op.op2_type, op.op2, op.out))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (Opcode::Assign, Cv, 0, Const, 0, 0),
+                (Opcode::Echo, Cv, 0, Unused, 0, 0),
+                (Opcode::Mul, Cv, 0, Const, 1, 1),
+                (Opcode::Echo, Tmp, 1, Unused, 0, 0),
+                (Opcode::Echo, Cv, 1, Unused, 0, 0),
+                (Opcode::Add, Cv, 0, Const, 0, 2),
+                (Opcode::Assign, Cv, 3, Tmp, 2, 3),
+                (Opcode::Assign, Cv, 2, Tmp, 3, 4),
+                (Opcode::Return, Const, 0, Unused, 0, 1),
+            ]
+        );
+    }
+
+    /// A CV is sent by `SEND_VAR` as a call's `VAR` is
+    /// (`zend_compile_args`), and the value a native returned is
+    /// assigned from its `VAR`, which is the shape #174's witness
+    /// compiles to.
+    #[test]
+    fn a_cv_is_sent_by_send_var_and_assigned_from_a_call_s_var() {
+        use OperandKind::{Const, Cv, Unused, Var};
+        let unit = unit_of(b"<?php $b = memory_get_usage(); var_dump(memory_get_usage() - $b);");
+        let shape: Vec<_> = unit
+            .main
+            .oplines
+            .iter()
+            .map(|op| (op.opcode, op.op1_type, op.op2_type))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (Opcode::InitFcall, Unused, Const),
+                (Opcode::DoIcall, Unused, Unused),
+                (Opcode::Assign, Cv, Var),
+                (Opcode::InitFcall, Unused, Const),
+                (Opcode::InitFcall, Unused, Const),
+                (Opcode::DoIcall, Unused, Unused),
+                (Opcode::Sub, Var, Cv),
+                (Opcode::SendVal, OperandKind::Tmp, Unused),
+                (Opcode::DoIcall, Unused, Unused),
+                (Opcode::Return, Const, Unused),
+            ]
+        );
+        let sent = unit_of(b"<?php $a = 1; var_dump($a);");
+        assert_eq!(sent.main.oplines[2].opcode, Opcode::SendVar);
+        assert_eq!(sent.main.oplines[2].op1_type, Cv);
+    }
+
     /// Two units compiled into one engine's table share the one string
     /// for a constant both carry, and a constant carried twice in one
     /// unit is interned once: that is what interning is for, and it is
@@ -469,7 +554,7 @@ mod tests {
     fn what_the_reader_cannot_read_is_a_compile_error_at_its_line() {
         let mut strings = php_heap::Strings::new();
         let trouble = compile(
-            &php_syntax::parse(b"<?php\n$x = 1;"),
+            &php_syntax::parse(b"<?php\n$x == 1;"),
             &Options::default(),
             &mut strings,
         )

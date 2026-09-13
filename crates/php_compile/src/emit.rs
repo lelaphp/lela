@@ -4,8 +4,10 @@
 //!
 //! One op array is built at a time. Constants are added as
 //! `zend_add_literal` adds them, the same value twice keeping one slot;
-//! temporaries are numbered as `get_temporary_variable` numbers them, and
-//! a temporary's slot on the frame is its number past the last CV.
+//! CVs are numbered as `lookup_cv` numbers them, one per name in the
+//! order the names are met; temporaries are numbered as
+//! `get_temporary_variable` numbers them, and a temporary's slot on the
+//! frame is its number past the last CV.
 //!
 //! Arithmetic over values known here is folded as php folds it
 //! (`zend_try_ct_eval_binary_op`), so `1/3` is one constant and no opline.
@@ -14,6 +16,11 @@
 //! `ZEND_DIV`, whose kernels the engine serves. `%` and `**` fold here
 //! and no handler serves their opcodes, so what does not fold is a
 //! [`CompileError`] rather than an opline that would fatal under the loop.
+//!
+//! A variable read is a `CV` operand and no opline (`zend_try_compile_cv`),
+//! and an assignment to one is `ASSIGN` with the CV in `op1` and the value
+//! in `op2` (`zend_compile_assign`), the CV looked up before the value is
+//! compiled, which is what puts `$a` before `$b` in `$a = f($b)`.
 //!
 //! A loop is emitted as `zend_compile_for` and `zend_compile_while` emit
 //! one: a `JMP` forward over the body to the condition, and the condition
@@ -39,6 +46,7 @@ pub(crate) struct Emit<'a> {
     strings: &'a mut dyn Intern,
     oplines: Vec<Opline>,
     constants: Vec<Zval>,
+    vars: Vec<Name>,
     safepoints: Vec<OplineIdx>,
     temporaries: u32,
     cache_slots: u32,
@@ -48,13 +56,14 @@ pub(crate) struct Emit<'a> {
 /// Where an expression left its value, php's `znode`: the value itself
 /// for a constant, which reaches the table only when the opline that
 /// names it is emitted (`zend_add_literal`); a temporary holding what a
-/// call returned (php's `IS_VAR`); or a temporary an operator wrote
-/// (php's `IS_TMP_VAR`).
+/// call returned (php's `IS_VAR`); a temporary an operator wrote
+/// (php's `IS_TMP_VAR`); or a CV, the variable itself (php's `IS_CV`).
 #[derive(Debug, Clone, Copy)]
 enum Where {
     Constant(Zval),
     Returned(u32),
     Temporary(u32),
+    Cv(u32),
 }
 
 /// The main op array of one source file: its statements, then php's
@@ -70,6 +79,7 @@ pub(crate) fn main_op_array(
         strings,
         oplines: Vec::new(),
         constants: Vec::new(),
+        vars: Vec::new(),
         safepoints: vec![OplineIdx(0)],
         temporaries: 0,
         cache_slots: 0,
@@ -77,11 +87,12 @@ pub(crate) fn main_op_array(
     };
     emit.statements(read)?;
     emit.final_return();
+    let num_cvs = u32::try_from(emit.vars.len()).unwrap_or(u32::MAX);
     Ok(OpArray {
         oplines: emit.oplines.into_boxed_slice(),
         literals: emit.constants.into_boxed_slice(),
-        vars: Box::new([]),
-        num_cvs: 0,
+        vars: emit.vars.into_boxed_slice(),
+        num_cvs,
         num_tmps: emit.temporaries,
         try_catch: Box::new([]),
         live_ranges: Box::new([]),
@@ -116,6 +127,18 @@ impl Emit<'_> {
     fn temporary(&mut self) -> u32 {
         let at = self.temporaries;
         self.temporaries = self.temporaries.saturating_add(1);
+        at
+    }
+
+    /// `lookup_cv`: the CV holding the variable of this name, which is
+    /// the next one when no opline has named it yet. php compares the
+    /// name's bytes, so `$a` and `$A` are two CVs.
+    fn lookup_cv(&mut self, name: &[u8]) -> u32 {
+        if let Some(at) = self.vars.iter().position(|held| &*held.0 == name) {
+            return u32::try_from(at).unwrap_or(u32::MAX);
+        }
+        let at = u32::try_from(self.vars.len()).unwrap_or(u32::MAX);
+        self.vars.push(Name(name.into()));
         at
     }
 
@@ -298,6 +321,7 @@ impl Emit<'_> {
             Where::Constant(value) => (OperandKind::Const, self.constant(value)),
             Where::Returned(at) => (OperandKind::Var, at),
             Where::Temporary(at) => (OperandKind::Tmp, at),
+            Where::Cv(at) => (OperandKind::Cv, at),
         }
     }
 
@@ -307,8 +331,35 @@ impl Emit<'_> {
             Expr::Call { name, arguments } => self.call(name, arguments),
             Expr::Unary { minus, operand } => self.unary(*minus, operand),
             Expr::Binary { op, left, right } => self.binary(*op, left, right),
+            // `zend_compile_simple_var` through `zend_try_compile_cv`: the
+            // variable is its CV, and no opline reads it into anything.
+            Expr::Var(name) => Ok(Where::Cv(self.lookup_cv(name))),
+            Expr::Assign { var, value } => self.assign(var, value),
             known => Ok(Where::Constant(self.constant_expr(known)?)),
         }
+    }
+
+    /// `zend_compile_assign`, the `ZEND_AST_VAR` arm: the variable's CV
+    /// looked up first (`zend_delayed_compile_var`, which delays nothing
+    /// for a plain CV), then the value, then `ASSIGN` into a temporary
+    /// (`zend_emit_op_tmp`). php marks the temporary unused when nothing
+    /// reads it (`zend_do_free`) and still numbers it; the [`Opline`] has
+    /// no field for the mark (design §5.7), so the engine writes it always.
+    fn assign(&mut self, var: &[u8], value: &Expr) -> Result<Where, CompileError> {
+        let cv = self.lookup_cv(var);
+        let value = self.expr(value)?;
+        let (op2_type, op2) = self.operand(value);
+        let out = self.temporary();
+        self.push(Opline {
+            opcode: Opcode::Assign,
+            op1_type: OperandKind::Cv,
+            op1: cv,
+            op2_type,
+            op2,
+            out,
+            ..Opline::default()
+        });
+        Ok(Where::Temporary(out))
     }
 
     /// `zend_compile_binary_op`: the value where
@@ -408,6 +459,9 @@ impl Emit<'_> {
             Expr::Call { .. } => {
                 Err(self.fatal("arithmetic over a call this compiler cannot fold yet"))
             }
+            Expr::Var(_) | Expr::Assign { .. } => {
+                Err(self.fatal("a variable is no constant expression"))
+            }
         }
     }
 
@@ -439,10 +493,11 @@ impl Emit<'_> {
             let number = u32::try_from(at).unwrap_or(0) + 1;
             let (op1_type, op1) = self.operand(value);
             self.push(Opline {
-                // php sends a VAR by `SEND_VAR` and anything else by
-                // `SEND_VAL` (`zend_compile_args`, the not-by-reference arms).
+                // php sends a VAR or a CV by `SEND_VAR` and anything else
+                // by `SEND_VAL` (`zend_compile_args`, the not-by-reference
+                // arms).
                 opcode: match op1_type {
-                    OperandKind::Var => Opcode::SendVar,
+                    OperandKind::Var | OperandKind::Cv => Opcode::SendVar,
                     _ => Opcode::SendVal,
                 },
                 op1_type,

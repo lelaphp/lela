@@ -13,10 +13,12 @@
 //! a `for` and a `while` whose body is a block or one statement, and
 //! inside an expression a number, a single- or double-quoted string with no
 //! interpolation, `true`, `false`, `null`, a constant by name, a call of
-//! a named function, a parenthesised expression, unary `-` and `+`, and
+//! a named function, a parenthesised expression, a variable `$a` that is
+//! a CV, an assignment `$a = expr` to one, unary `-` and `+`, and
 //! `+`, `-`, `*`, `/`, `%` and `**` at php's precedence levels: the
 //! additive level under the multiplicative one, both left to right, and
-//! `**` right to left above unary `-`.
+//! `**` right to left above unary `-`, with `=` below them all and read
+//! right to left.
 //! Anything else is a [`crate::CompileError`], so what this cannot read is
 //! refused rather than silently compiled to something else.
 
@@ -69,6 +71,15 @@ pub(crate) enum Expr {
     Call {
         name: Vec<u8>,
         arguments: Vec<Expr>,
+    },
+    /// `$a`, php's `ZEND_AST_VAR` over a name written as is, which
+    /// `zend_try_compile_cv` makes a CV: not `$this` and not `$_GET` or
+    /// its kin, which php fetches by other oplines and this refuses.
+    Var(Vec<u8>),
+    /// `$a = expr`, php's `ZEND_AST_ASSIGN` to a variable.
+    Assign {
+        var: Vec<u8>,
+        value: Box<Expr>,
     },
 }
 
@@ -363,10 +374,28 @@ impl Reader<'_> {
         Err(self.trouble("a statement this compiler cannot read yet"))
     }
 
-    /// One expression: php's precedence, the additive level over the
-    /// multiplicative one, each left to right.
+    /// One expression: an assignment, which php's grammar puts below
+    /// every operator here and reads right to left, `$a = $b = 1` being
+    /// `$a = ($b = 1)`; else php's precedence, the additive level over
+    /// the multiplicative one, each left to right. php's rule is
+    /// `variable '=' expr`, so `1 + $a = 2` is php's `1 + ($a = 2)`; that
+    /// is refused here rather than read as the other grouping.
     fn expr(&mut self) -> Result<Expr, Trouble> {
-        self.additive()
+        let left = self.additive()?;
+        self.skip_trivia();
+        if !(self.byte(0) == Some(b'=') && self.byte(1) != Some(b'=')) {
+            return Ok(left);
+        }
+        let Expr::Var(var) = left else {
+            return Err(
+                self.trouble("an assignment to what is no variable this compiler cannot read yet")
+            );
+        };
+        self.bump(1);
+        Ok(Expr::Assign {
+            var,
+            value: Box::new(self.expr()?),
+        })
     }
 
     /// `+` and `-`, php's lower arithmetic level.
@@ -445,13 +474,14 @@ impl Reader<'_> {
         })
     }
 
-    /// What an operator stands between: a number or a string as written, a name, or a
-    /// parenthesised expression.
+    /// What an operator stands between: a number or a string as written, a name, a
+    /// variable, or a parenthesised expression.
     fn operand(&mut self) -> Result<Expr, Trouble> {
         self.skip_trivia();
         match self.byte(0) {
             Some(b'\'') => self.single_quoted(),
             Some(b'"') => self.double_quoted(),
+            Some(b'$') => self.variable(),
             Some(b) if b.is_ascii_digit() || (b == b'.' && self.digit_ahead(1)) => self.number(),
             Some(b'(') => {
                 self.bump(1);
@@ -497,6 +527,33 @@ impl Reader<'_> {
             }
             arguments.push(self.expr()?);
         }
+    }
+
+    /// `$` and php's `LABEL`: a letter, `_` or a byte past ASCII, then
+    /// those and digits. What `zend_try_compile_cv` refuses is refused
+    /// here too: `$this`, which php fetches by `FETCH_THIS`, and `$_GET`
+    /// and its kin, which it fetches by `FETCH_R`; and `$$a` and `${`,
+    /// which name a variable at runtime.
+    fn variable(&mut self) -> Result<Expr, Trouble> {
+        let start = self.at + 1;
+        if !self
+            .byte(1)
+            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_' || b >= 0x80)
+        {
+            return Err(self.trouble("a variable this compiler cannot read yet"));
+        }
+        self.bump(2);
+        while self
+            .byte(0)
+            .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80)
+        {
+            self.bump(1);
+        }
+        let name = self.taken(start);
+        if name == b"this" || is_auto_global(&name) {
+            return Err(self.trouble("a variable this compiler cannot read yet"));
+        }
+        Ok(Expr::Var(name))
     }
 
     /// A name, namespace separators and all, as written.
@@ -678,6 +735,22 @@ impl Reader<'_> {
             self.bump(1);
         }
     }
+}
+
+/// `zend_is_auto_global`: the names `php_startup_auto_globals` and
+/// `zend_startup` register, which no CV holds.
+fn is_auto_global(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"GLOBALS"
+            | b"_GET"
+            | b"_POST"
+            | b"_COOKIE"
+            | b"_SERVER"
+            | b"_ENV"
+            | b"_REQUEST"
+            | b"_FILES"
+    )
 }
 
 #[cfg(test)]
@@ -981,8 +1054,65 @@ mod tests {
 
     #[test]
     fn what_it_cannot_read_is_refused_at_its_line() {
-        let trouble = read(b"<?php\n$x = 1;").err();
+        let trouble = read(b"<?php\n$x == 1;").err();
         assert_eq!(trouble.map(|t| t.line), Some(2));
+    }
+
+    #[test]
+    fn a_variable_is_read_where_an_operand_stands_and_an_assignment_below_every_operator() {
+        let read = read(b"<?php $a = 1 + $b; echo $a, $b = $c = f($a);").unwrap_or_default();
+        assert_eq!(
+            read[0],
+            (
+                Stmt::Effect(Expr::Assign {
+                    var: b"a".to_vec(),
+                    value: Box::new(Expr::Binary {
+                        op: BinaryOp::Add,
+                        left: Box::new(Expr::Int(1)),
+                        right: Box::new(Expr::Var(b"b".to_vec())),
+                    }),
+                }),
+                1
+            ),
+            "`=` binds below `+`"
+        );
+        assert_eq!(
+            read[1],
+            (
+                Stmt::Echo(vec![
+                    Expr::Var(b"a".to_vec()),
+                    Expr::Assign {
+                        var: b"b".to_vec(),
+                        value: Box::new(Expr::Assign {
+                            var: b"c".to_vec(),
+                            value: Box::new(Expr::Call {
+                                name: b"f".to_vec(),
+                                arguments: vec![Expr::Var(b"a".to_vec())],
+                            }),
+                        }),
+                    },
+                ]),
+                1
+            ),
+            "`=` reads right to left"
+        );
+    }
+
+    #[test]
+    fn a_variable_php_makes_no_cv_of_is_refused_rather_than_read_as_one() {
+        for source in [
+            b"<?php echo $this;".as_slice(),
+            b"<?php echo $GLOBALS;".as_slice(),
+            b"<?php echo $_SERVER;".as_slice(),
+            b"<?php echo $$a;".as_slice(),
+            b"<?php echo ${'a'};".as_slice(),
+            b"<?php echo $1;".as_slice(),
+            b"<?php 1 = 2;".as_slice(),
+            b"<?php 1 + $a = 2;".as_slice(),
+            b"<?php $a == 2;".as_slice(),
+        ] {
+            assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
+        }
     }
 
     #[test]
