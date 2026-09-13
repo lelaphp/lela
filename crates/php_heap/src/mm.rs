@@ -384,10 +384,13 @@ impl Mm {
     }
 
     /// `zend_mm_alloc_large` (`Z/Zend/zend_alloc.c:1114`): whole pages,
-    /// and the accounting is the pages and not the bytes asked for.
+    /// and the accounting is the pages and not the bytes asked for. So is
+    /// the number a message names: outside `ZEND_DEBUG` php hands
+    /// `zend_mm_alloc_pages` the page count alone, so both messages it
+    /// raises name `ZEND_MM_PAGE_SIZE * pages_count`.
     fn alloc_large(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
         let pages_count = size.div_ceil(PAGE_SIZE) as u32;
-        let at = self.alloc_pages(pages_count, size)?;
+        let at = self.alloc_pages(pages_count, PAGE_SIZE * pages_count as usize)?;
         self.size += pages_count as usize * PAGE_SIZE;
         self.peak = self.peak.max(self.size);
         Ok(at)

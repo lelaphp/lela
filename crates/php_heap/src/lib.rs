@@ -318,6 +318,34 @@ mod tests {
         );
     }
 
+    /// An allocation of the large range names the pages php names and
+    /// not the bytes asked for: outside `ZEND_DEBUG` php hands
+    /// `zend_mm_alloc_pages` the page count alone, so a string of 5000
+    /// bytes, 5032 with its header, meets the limit naming the two pages
+    /// it was about to take and not the 5032.
+    #[test]
+    fn the_limit_on_a_large_allocation_names_the_pages_php_names() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        heap.set_memory_limit(mm::CHUNK_SIZE);
+        let mut held = Vec::new();
+        let fatal = loop {
+            match heap.string(&[b'x'; 5000]) {
+                Ok(s) => held.push(s),
+                Err(f) => break f,
+            }
+        };
+        // 511 free pages to a chunk, two to an allocation.
+        assert_eq!(held.len(), 255);
+        assert_eq!(
+            fatal,
+            Fatal::Error(
+                "Allowed memory size of 2097152 bytes exhausted (tried to allocate 8192 bytes)"
+                    .to_string()
+            )
+        );
+    }
+
     /// php sweeps the wholly free bin `runs` before it declares the
     /// limit reached (`zend_mm_gc`), so the limit is met where php's is
     /// met and not before: a request holding every slot it took is
