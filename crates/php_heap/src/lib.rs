@@ -57,9 +57,14 @@ pub struct Heap {
     mm: mm::Mm,
     /// php's `CG(interned_strings)`: the strings this request interned,
     /// live until the request ends (`Z/Zend/zend_string.c:346-353`).
-    /// The strings are the request's own memory and are counted as such;
-    /// the table's own storage is not, where php's is (#178).
+    /// The strings are the request's own memory and are counted as such,
+    /// and so is the table's own storage in [`string::Buckets`] beside
+    /// it.
     interned: string::Table,
+    /// The storage that table takes, php's bucket array for the same
+    /// `HashTable`: 40960 bytes of the request's own memory on the first
+    /// string it interns, and doubling where php's doubles.
+    buckets: string::Buckets,
 }
 
 impl Default for Heap {
@@ -75,6 +80,7 @@ impl Heap {
         Heap {
             mm: mm::Mm::new(),
             interned: string::Table::default(),
+            buckets: string::Buckets::new(),
         }
     }
 
@@ -188,6 +194,12 @@ impl Intern for Heap {
     /// request's memory, which the request's end takes with everything
     /// else. It is flagged interned and never persistent, so no release
     /// frees it and no thread but this one can name it.
+    ///
+    /// The string is allocated before the table takes room for it, php's
+    /// order: `zend_string_init` and then `zend_add_interned_string` over
+    /// `zend_hash_add_new`, whose first call is what lays the bucket
+    /// array down. So the first string a request interns costs its own
+    /// bytes and the table's 40960 beside them, exactly as php's does.
     fn intern(&mut self, bytes: &[u8]) -> Result<Str, Fatal> {
         if let Some(frozen) = string::frozen_string(bytes) {
             return Ok(frozen);
@@ -200,6 +212,7 @@ impl Intern for Heap {
         // SAFETY: the allocation is exactly the size `init` asks for and
         // nothing else holds it.
         let s = unsafe { Str::init(at, bytes, string::INTERNED) };
+        self.buckets.add_one(&mut self.mm)?;
         self.interned.add(hash, s);
         Ok(s)
     }
@@ -263,6 +276,10 @@ mod tests {
     /// counts them as php counts `CG(interned_strings)`'s, and the second
     /// request reads what the first read before it, because the first
     /// request's end took every one of them.
+    ///
+    /// **Every number here is php's own**, the bin arithmetic of design
+    /// §5.13 over php's sizes: 40 bytes for a string of eight, 32 for one
+    /// of four, and 40960 for the table the first intern lays down.
     #[test]
     fn what_a_request_interned_is_its_own_and_the_next_request_starts_where_it_did() {
         use std::sync::atomic::Ordering::Relaxed;
@@ -286,8 +303,10 @@ mod tests {
             };
             assert_eq!(first.address(), again.address());
             assert_eq!(heap.interned(), 1);
-            // Eight bytes, the header and the NUL: php's forty-byte bin.
-            assert_eq!(heap.memory_usage(false), 40);
+            // Eight bytes, the header and the NUL: php's forty-byte bin,
+            // and the table's own 40960 beside it, laid down by this
+            // first intern and by no earlier act.
+            assert_eq!(heap.memory_usage(false), 40 + 40960);
             assert!(first.is_interned());
             assert!(
                 !first.is_persistent(),
@@ -296,15 +315,15 @@ mod tests {
             // A release never frees an interned string, as php's does not;
             // the request's end is what takes it.
             heap.release_string(first);
-            assert_eq!(heap.memory_usage(false), 40);
+            assert_eq!(heap.memory_usage(false), 41000);
             // A string the request made and gave up goes back at once.
             let made = heap.string(b"made");
             assert!(made.is_ok());
             if let Ok(made) = made {
-                assert_eq!(heap.memory_usage(false), 72);
+                assert_eq!(heap.memory_usage(false), 41032);
                 heap.release_string(made);
             }
-            assert_eq!(heap.memory_usage(false), 40);
+            assert_eq!(heap.memory_usage(false), 41000);
         }
         assert_eq!(started_at, vec![0, 0], "every request starts at zero");
         assert_eq!(
@@ -312,6 +331,47 @@ mod tests {
             mappings,
             "and leaves no mapping behind"
         );
+    }
+
+    /// The table's own storage is accounted where php accounts it
+    /// (design §5.13): nothing at request start, because
+    /// `zend_interned_strings_activate` inits `CG(interned_strings)` with
+    /// `persistent` 0 and no eager real-init, and one allocation of
+    /// `HT_SIZE_EX(1024, HT_SIZE_TO_MASK(1024))` on the first string the
+    /// request interns — 1024 buckets of 32 bytes and 2048 hash slots of
+    /// 4, 40960 bytes, ten whole pages of the request's heap.
+    ///
+    /// **Every number here is php's own.** The table doubles where php's
+    /// doubles, on the add that fills it, and php allocates the larger
+    /// array before it frees the smaller, which is what the peak reads.
+    #[test]
+    fn the_interned_table_s_storage_is_php_s_and_doubles_where_php_s_doubles() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        // The frozen table answers before this one and lays nothing down,
+        // so a request that interns only what the process froze pays
+        // nothing at all.
+        assert!(matches!(heap.intern(b""), Ok(s) if s.is_empty()));
+        assert!(matches!(heap.intern(b"a"), Ok(s) if s.len() == 1));
+        assert_eq!(heap.memory_usage(false), 0);
+        // The first string that is this table's brings the whole array
+        // with it, beside the 32-byte bin the string itself takes.
+        assert!(heap.intern(b"s0").is_ok(), "the heap would not intern");
+        assert_eq!(heap.memory_usage(false), 40960 + 32);
+        for i in 1..1024u32 {
+            let interned = heap.intern(format!("s{i}").as_bytes());
+            assert!(interned.is_ok(), "the heap would not intern s{i}");
+        }
+        assert_eq!(heap.interned(), 1024);
+        // 1024 strings of the 32-byte bin, and the array they fill.
+        assert_eq!(heap.memory_usage(false), 40960 + 1024 * 32);
+        assert_eq!(heap.memory_peak(), 40960 + 1024 * 32);
+        // The one that fills it doubles it: the 2048-bucket array is
+        // allocated, what the smaller held is copied over, and the
+        // smaller goes back, so the peak holds both for that long.
+        assert!(heap.intern(b"s1024").is_ok(), "the heap would not grow");
+        assert_eq!(heap.memory_usage(false), 81920 + 1025 * 32);
+        assert_eq!(heap.memory_peak(), 81920 + 40960 + 1025 * 32);
     }
 
     /// A string past 2 MiB is a huge block, and php rounds one to the

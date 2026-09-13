@@ -42,6 +42,7 @@ use std::sync::OnceLock;
 use crate::ZvalType;
 use crate::gc::{self, Refcounted};
 use crate::hooks::Fatal;
+use crate::mm::Mm;
 
 /// `zend_string` without its bytes: twenty-four bytes, php's own layout,
 /// with `len + 1` bytes following it in the same allocation. The last is
@@ -447,6 +448,114 @@ impl Table {
     /// Every string here, for the table that frees what it laid down.
     fn strings(&self) -> impl Iterator<Item = Str> {
         self.slots.values().flatten().map(|held| held.0)
+    }
+}
+
+/// `sizeof(Bucket)` (`Z/Zend/zend_types.h:400-404`): a zval, the hash and
+/// the key pointer, thirty-two bytes.
+const BUCKET: usize = 32;
+
+/// One `HT_HASH` slot, `sizeof(uint32_t)`. php lays down twice as many of
+/// them as there are buckets, which is what `HT_SIZE_TO_MASK` says
+/// (`Z/Zend/zend_types.h:486-489`).
+const HASH_SLOT: usize = 4;
+
+/// `zend_init_interned_strings_ht(&CG(interned_strings), 0)`'s `nSize`
+/// (`Z/Zend/zend_string.c:78-84`, `:346-349`), which
+/// `zend_hash_check_size` leaves at 1024 because it is already a power of
+/// two.
+const REQUEST_TABLE_SIZE: u32 = 1024;
+
+/// The storage one request's interned-string table takes out of that
+/// request's own memory (design §5.13): php's bucket array for
+/// `CG(interned_strings)`, and not the strings in it.
+///
+/// php's table is inited with `persistent` 0 and no eager real-init, so
+/// the array is `emalloc`ed by the first string the request interns and
+/// every byte of it is in `memory_get_usage()`
+/// (`zend_hash_real_init_mixed_ex`'s `emalloc` branch,
+/// `Z/Zend/zend_hash.c:166-231`, reached from
+/// `_zend_hash_add_or_update_i`'s `HASH_FLAG_UNINITIALIZED` arm). One
+/// allocation holds the buckets and the hash slots together,
+/// `HT_SIZE_EX(nTableSize, HT_SIZE_TO_MASK(nTableSize))`
+/// (`Z/Zend/zend_types.h:486-493`): forty bytes to a bucket, so 40960 for
+/// php's 1024, ten whole pages of the request's heap.
+///
+/// It doubles where php's doubles, `ZEND_HASH_IF_FULL_DO_RESIZE` over
+/// `zend_hash_do_resize` (`Z/Zend/zend_hash.c:84-87`, `:1147-1173`):
+/// nothing is ever taken out of this table, so `nNumUsed` is the count of
+/// strings and the rehash-in-place arm is never the one taken. php
+/// allocates the larger array before it frees the smaller, which is what
+/// the peak reads.
+///
+/// What is here is that allocation and php's `nTableSize`. The lookup
+/// itself is still [`Table`]'s `HashMap` on the system allocator, the
+/// stand-in for `zend_hash` until the array of design §5.3 lands; what
+/// this type holds is the bytes php's number reports.
+pub(crate) struct Buckets {
+    /// `nTableSize`: php's 1024 until the table doubles.
+    size: u32,
+    /// `nNumUsed`, which for this table is the count of strings.
+    used: u32,
+    /// The allocation `HT_GET_DATA_ADDR` names, once there is one.
+    /// `None` is php's `HASH_FLAG_UNINITIALIZED`.
+    data: Option<NonNull<u8>>,
+}
+
+impl Buckets {
+    /// An uninitialised table at php's `nTableSize`, holding nothing:
+    /// what `zend_interned_strings_activate` leaves behind at request
+    /// start, before any string has been interned.
+    pub(crate) const fn new() -> Buckets {
+        Buckets {
+            size: REQUEST_TABLE_SIZE,
+            used: 0,
+            data: None,
+        }
+    }
+
+    /// `HT_SIZE_EX(size, HT_SIZE_TO_MASK(size))`: the buckets and twice
+    /// as many hash slots, in one allocation.
+    const fn bytes(size: u32) -> usize {
+        size as usize * BUCKET + 2 * size as usize * HASH_SLOT
+    }
+
+    /// Room for one more string, out of `mm`: php's lazy
+    /// `zend_hash_real_init_mixed` on the first add and its doubling
+    /// resize on the add that fills the table. The allocation is the
+    /// request's own, so `memory_get_usage()` carries it as php's does,
+    /// and the request's end takes it with everything else.
+    pub(crate) fn add_one(&mut self, mm: &mut Mm) -> Result<(), Fatal> {
+        match self.data {
+            None => self.data = Some(mm.alloc(Self::bytes(self.size))?),
+            Some(old) if self.used >= self.size => {
+                let grown = self.size.saturating_mul(2);
+                let at = mm.alloc(Self::bytes(grown))?;
+                // SAFETY: `old` is this table's storage, handed out by
+                // this same heap and not freed since; php frees it here
+                // too, once the larger array stands beside it.
+                unsafe { mm.free(old) };
+                self.size = grown;
+                self.data = Some(at);
+            }
+            Some(_) => {}
+        }
+        self.used = self.used.saturating_add(1);
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for Buckets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let bytes = match self.data {
+            Some(_) => Self::bytes(self.size),
+            None => 0,
+        };
+        write!(
+            f,
+            "Buckets({} of {} used, {bytes} bytes)",
+            self.used, self.size
+        )
     }
 }
 
