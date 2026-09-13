@@ -396,21 +396,12 @@ impl Engine {
                 rshutdown(&mut req);
             }
         }
+        // `php_error_cb` rendered the fatal where it was raised, on
+        // whichever of the two streams the ini entries name; what is left
+        // for the host is the log form of it, whether or not `log_errors`
+        // put that form on the log.
         let fatal = match req.ending() {
-            Some(Ending::Fatal(message)) => {
-                let text = format!(
-                    "PHP Fatal error:  {message} in {} on line 0\n",
-                    String::from_utf8_lossy(script.as_bytes())
-                );
-                req.write(
-                    format!(
-                        "\nFatal error: {message} in {} on line 0\n",
-                        String::from_utf8_lossy(script.as_bytes())
-                    )
-                    .as_bytes(),
-                );
-                Some(text)
-            }
+            Some(Ending::Fatal(logged)) => Some(logged.clone()),
             _ => None,
         };
         let exit_code = match req.ending() {
@@ -423,9 +414,6 @@ impl Engine {
         let log = req.take_log();
         for line in log.split_inclusive(|b| *b == b'\n') {
             sink.log(line);
-        }
-        if let Some(text) = &fatal {
-            sink.log(text.as_bytes());
         }
         sink.send_headers(&headers);
         sink.write(&body);
@@ -740,20 +728,68 @@ mod tests {
         assert_eq!(body, "1|1||2.5");
     }
 
+    /// `zend_exception_error` through `php_error_cb`: the four lines the
+    /// witness beside [`Request::uncaught`] pins against the oracle, with
+    /// the throw site in php's two spellings.
     #[test]
     fn a_call_of_a_name_nothing_declares_ends_the_request_as_php_names_it() {
         let engine = Engine::builder().build();
-        let (_, observables) = served(&engine, "<?php nope();");
+        let (body, observables) = served(&engine, "<?php\nnope();");
         assert_eq!(
-            observables
-                .fatal
-                .as_deref()
-                .map(|text| text.contains("Uncaught Error: Call to undefined function nope()")),
-            Some(true),
-            "{:?}",
-            observables.fatal
+            body,
+            "\nFatal error: Uncaught Error: Call to undefined function nope() \
+             in witness.php:2\nStack trace:\n#0 {main}\n  thrown in witness.php on line 2\n"
+        );
+        assert_eq!(
+            observables.fatal.as_deref(),
+            Some(
+                "PHP Fatal error:  Uncaught Error: Call to undefined function nope() \
+                 in witness.php:2\nStack trace:\n#0 {main}\n  thrown in witness.php on line 2\n"
+            )
         );
         assert_eq!(observables.exit_code, 255);
+    }
+
+    /// A throwable a native left pending names the native's call as its
+    /// site, and the native's own frame stands above `{main}`.
+    #[test]
+    fn a_throwable_a_native_left_pending_names_the_natives_call() {
+        let engine = Engine::builder().build();
+        let (body, observables) = served(&engine, "<?php\nvar_dump();");
+        assert_eq!(
+            body,
+            "\nFatal error: Uncaught ArgumentCountError: var_dump() expects at least 1 argument, \
+             0 given in witness.php:2\nStack trace:\n#0 witness.php(2): var_dump()\n#1 {main}\n  \
+             thrown in witness.php on line 2\n"
+        );
+        assert_eq!(observables.exit_code, 255);
+    }
+
+    /// The fatal is `php_error_cb`'s to render, once, on the streams the
+    /// two ini entries name; `serve` reports its log form and writes
+    /// nothing of its own.
+    #[test]
+    fn a_fatal_is_displayed_or_logged_as_the_ini_entries_say() {
+        let mut logged = Kept::default();
+        let observables = Engine::builder()
+            .ini("display_errors", "0")
+            .ini("log_errors", "1")
+            .build()
+            .serve(description("<?php\nnope();"), &mut logged);
+        assert!(logged.body.is_empty(), "display_errors is off");
+        assert_eq!(
+            String::from_utf8_lossy(&logged.log).into_owned(),
+            observables.fatal.unwrap_or_default(),
+            "what the log holds is the fatal, once"
+        );
+
+        let mut masked = Kept::default();
+        Engine::builder()
+            .ini("error_reporting", "0")
+            .build()
+            .serve(description("<?php\nnope();"), &mut masked);
+        assert!(masked.body.is_empty(), "E_ERROR is masked out");
+        assert!(masked.log.is_empty(), "log_errors is off");
     }
 
     #[test]

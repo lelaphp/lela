@@ -79,6 +79,22 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 /// string(4) "demo"
 /// bool(true)
 /// ```
+///
+/// A throwable a native leaves pending takes the native's call as its
+/// throw site, which php reads off the caller's opline; uncaught, it
+/// names that site twice and carries the native's own frame above
+/// `{main}`.
+///
+/// ```php
+/// var_dump();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: var_dump() expects at least 1 argument, 0 given in %s:2
+/// Stack trace:
+/// #0 %s(2): var_dump()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
 fn var_dump(req: &mut Request, arguments: &[Value]) -> Result<Value, Thrown> {
     if arguments.is_empty() {
         return Err(too_few_arguments(req, 1, 0));
@@ -209,6 +225,18 @@ fn as_long(bytes: usize) -> i64 {
 /// ```expect
 /// bool(true)
 /// bool(true)
+/// bool(false)
+/// ```
+///
+/// A diagnostic raised while a native's body runs stands where the call
+/// does, since `zend_get_executed_lineno` answers off the caller's
+/// opline and a native pushes no opline of its own.
+///
+/// ```php
+/// var_dump(extension_loaded(NAN));
+/// ```
+/// ```expect
+/// Warning: unexpected NAN value was coerced to string in %s on line 2
 /// bool(false)
 /// ```
 fn extension_loaded(req: &mut Request, arguments: &[Value]) -> Result<Value, Thrown> {

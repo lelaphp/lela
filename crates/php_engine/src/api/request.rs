@@ -5,6 +5,8 @@
 //! request holds; the body bytes and the header block are kept on the
 //! request and handed to the sink by `serve`, which owns the commit
 //! moment; `serve` says what the request came to.
+// The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
+#![allow(rustdoc::invalid_codeblock_attributes)]
 
 use std::any::{Any, TypeId};
 use std::path::PathBuf;
@@ -201,6 +203,9 @@ struct State {
 /// not compile, or an `exit`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Ending {
+    /// `E_ERROR`: the fatal as `php_error_cb` wrote it to the host's log,
+    /// which is the text `serve` reports and not a second rendering; the
+    /// streams already have theirs.
     Fatal(String),
     /// `E_PARSE`: the text is already on the stream `php_error_cb` put it
     /// on, and what is left is php's status, 255.
@@ -361,24 +366,127 @@ impl Request {
         }
     }
 
-    /// The pending throwable at the end of a serving, as php renders an
-    /// uncaught one at the request boundary (design §5.9). Nothing
-    /// pending means the request is ending in the fatal or the `exit` the
-    /// raiser recorded, and the loop has nothing to add.
+    /// The pending throwable at the end of a serving, php's
+    /// `zend_exception_error` (design §5.9): the throwable's own
+    /// `__toString` behind `Uncaught `, with `\n  thrown` after it, given
+    /// to `php_error_cb` as `E_ERROR` at the site the throwable recorded
+    /// rather than the site the loop has reached. The `in ... on line ...`
+    /// that closes php's last line is that call's own tail, which is why
+    /// the site appears twice and in two spellings.
+    ///
+    /// Nothing pending means the request is ending in the fatal or the
+    /// `exit` the raiser recorded, and the loop has nothing to add.
+    ///
+    /// ```php
+    /// nope();
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught Error: Call to undefined function nope() in %s:2
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 2
+    /// ```
     pub(crate) fn uncaught(&mut self) -> Result<(), Fatal> {
         let Some(throwable) = self.pending.take() else {
             return Ok(());
         };
+        let (file, line) = Request::throw_site(&throwable);
+        let message = format!(
+            "Uncaught {}\n  thrown",
+            self.throwable_to_string(&throwable)
+        );
+        self.end_in_fatal_at(&message, &file, line);
+        Err(Fatal::Error(message))
+    }
+
+    /// `Exception::__toString`: the class, the message where there is one,
+    /// the site behind a colon and the trace under `Stack trace:`. The
+    /// chain of `previous` throwables php walks after the first, and the
+    /// ` and defined` a `TypeError` whose message names a call site takes,
+    /// arrive with the user-function frames that make either reachable.
+    fn throwable_to_string(&self, throwable: &PhpObject) -> String {
         let class = self.class_decl(throwable.class()).map_or_else(
             || String::from("Error"),
             |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
         );
-        let message = throwable
-            .prop(b"message")
-            .and_then(|value| value.as_str_bytes().map(String::from_utf8_lossy))
-            .unwrap_or_default()
-            .into_owned();
-        Err(Fatal::Error(format!("Uncaught {class}: {message}")))
+        let message = string_prop(throwable, b"message");
+        let (file, line) = Request::throw_site(throwable);
+        let file = String::from_utf8_lossy(file.as_bytes());
+        // `zend_trace_to_string` over an empty trace is `#0 {main}`, which
+        // is what a throwable made before this engine recorded one has.
+        let trace = throwable
+            .prop(b"trace")
+            .and_then(|value| value.as_str_bytes())
+            .map_or_else(
+                || String::from("#0 {main}"),
+                |bytes| String::from_utf8_lossy(bytes).into_owned(),
+            );
+        if message.is_empty() {
+            format!("{class} in {file}:{line}\nStack trace:\n{trace}")
+        } else {
+            format!("{class}: {message} in {file}:{line}\nStack trace:\n{trace}")
+        }
+    }
+
+    /// The `file` and `line` a throwable recorded where it was made.
+    fn throw_site(throwable: &PhpObject) -> (PhpString, u32) {
+        let file = throwable
+            .prop(b"file")
+            .and_then(|value| value.as_php_string().cloned())
+            .unwrap_or_default();
+        let line = throwable
+            .prop(b"line")
+            .and_then(Value::as_int)
+            .and_then(|line| u32::try_from(line).ok())
+            .unwrap_or(0);
+        (file, line)
+    }
+
+    /// `zend_default_exception_new`: a throwable records where it was
+    /// made, `zend_get_executed_filename` and `zend_get_executed_lineno`,
+    /// and the backtrace `zend_fetch_debug_backtrace` builds there.
+    ///
+    /// php holds the trace as the array `getTrace` answers and renders it
+    /// on demand; this engine holds what `getTraceAsString` renders, which
+    /// is all that `__toString` and the uncaught fatal read, until a frame
+    /// chain with user functions in it gives the array something to say.
+    pub(crate) fn note_throw_site(&self, throwable: &mut PhpObject) {
+        throwable.set_prop(
+            b"file",
+            Value::string(self.current_file().cloned().unwrap_or_default()),
+        );
+        throwable.set_prop(b"line", Value::int(i64::from(self.current_line())));
+        throwable.set_prop(
+            b"trace",
+            Value::string(PhpString::from_bytes(self.trace_as_string().as_bytes())),
+        );
+    }
+
+    /// `zend_fetch_debug_backtrace` rendered by `zend_trace_to_string`
+    /// with `include_main`: one `#N file(line): name()` per call below the
+    /// top, then `#N {main}`. php walks `EG(current_execute_data)`; the
+    /// only call this engine pushes below the op array being served is the
+    /// native it is serving, whose file and line are the caller's, as
+    /// php's frame for a native takes them.
+    ///
+    /// The arguments php prints inside the parentheses are the ones the
+    /// call frame holds on the VM stack. This engine's native ABI hands
+    /// them to the entry as a slice and keeps none, so the frame renders
+    /// with empty parentheses; no native this engine declares can throw
+    /// with an argument in hand.
+    fn trace_as_string(&self) -> String {
+        let mut frames: Vec<String> = Vec::new();
+        if let Some(native) = &self.active_native {
+            let file = self.current_file().cloned().unwrap_or_default();
+            frames.push(format!(
+                "#0 {}({}): {native}()",
+                String::from_utf8_lossy(file.as_bytes()),
+                self.current_line()
+            ));
+        }
+        let main = frames.len();
+        frames.push(format!("#{main} {{main}}"));
+        frames.join("\n")
     }
 
     /// Serve one native: its entry with the arguments as passed, with the
@@ -451,6 +559,21 @@ impl Request {
     /// the compiler's line while `zend_get_executed_lineno` has none.
     pub(crate) fn note_error_at(&mut self, level: Level, message: &str, line: u32) {
         let file = self.current_file().cloned().unwrap_or_default();
+        self.note_error_in(level, message, &file, line);
+    }
+
+    /// The same diagnostic at a file and line of its own, which is what
+    /// `zend_exception_error` gives `zend_error_va` for an uncaught
+    /// throwable: the site the throwable recorded, not the site the
+    /// request has reached.
+    pub(crate) fn note_error_in(
+        &mut self,
+        level: Level,
+        message: &str,
+        file: &PhpString,
+        line: u32,
+    ) {
+        let file = file.clone();
         let named = String::from_utf8_lossy(file.as_bytes()).into_owned();
         if self.error_reporting() & level.bit() != 0 {
             if self.log_errors() {
@@ -499,10 +622,28 @@ impl Request {
         }
     }
 
+    /// `zend_error_noreturn(E_ERROR, ...)`: `php_error_cb` renders the
+    /// fatal where the request stands, on the streams the two ini entries
+    /// say, and the request ends in it. It is rendered once, here, and
+    /// `serve` writes nothing of its own.
     pub(crate) fn end_in_fatal(&mut self, message: &str) {
-        if self.ending.is_none() {
-            self.ending = Some(Ending::Fatal(message.to_owned()));
+        let file = self.current_file().cloned().unwrap_or_default();
+        let line = self.current_line();
+        self.end_in_fatal_at(message, &file, line);
+    }
+
+    /// The same fatal at a site of its own, which an uncaught throwable
+    /// carries. The first fatal is the one that ends the request, since
+    /// php leaves the request from the first and renders no second.
+    pub(crate) fn end_in_fatal_at(&mut self, message: &str, file: &PhpString, line: u32) {
+        if self.ending.is_some() {
+            return;
         }
+        self.note_error_in(Level::Error, message, file, line);
+        self.ending = Some(Ending::Fatal(format!(
+            "PHP Fatal error:  {message} in {} on line {line}\n",
+            String::from_utf8_lossy(file.as_bytes())
+        )));
     }
 
     /// `E_PARSE`: the request ends with php's status and no second
@@ -1441,6 +1582,15 @@ fn ini_truth(value: Option<&PhpString>) -> bool {
     let Some(value) = value else { return false };
     let text = value.as_bytes().to_ascii_lowercase();
     !matches!(text.as_slice(), b"" | b"0" | b"off" | b"no" | b"false")
+}
+
+/// One string property of a throwable, empty where there is none.
+fn string_prop(object: &PhpObject, name: &[u8]) -> String {
+    object
+        .prop(name)
+        .and_then(|value| value.as_str_bytes())
+        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        .unwrap_or_default()
 }
 
 fn level_name(level: Level) -> &'static str {

@@ -96,9 +96,9 @@ pub fn deprecated(req: &mut Request, message: &str) {
     raise(req, Level::Deprecated, message);
 }
 
-/// `E_ERROR`: the request ends after this; the `Thrown` says so.
+/// `E_ERROR`: `php_error_cb` renders it where the request stands and the
+/// request ends after this; the `Thrown` says so.
 pub fn fatal(req: &mut Request, message: &str) -> Thrown {
-    raise(req, Level::Error, message);
     req.end_in_fatal(message);
     Thrown::of(None)
 }
@@ -124,13 +124,15 @@ pub fn throw_value(req: &mut Request, throwable: &Value) -> Thrown {
 }
 
 /// A new instance of the throwable class `class` with `message`, not yet
-/// pending.
+/// pending. `zend_default_exception_new` records where it was made, and
+/// that is the site an uncaught one names.
 pub fn new_throwable(req: &mut Request, class: &str, message: &str) -> Value {
     let mut object = req.new_object_of(class);
     object.set_prop(
         b"message",
         Value::string(PhpString::from_bytes(message.as_bytes())),
     );
+    req.note_throw_site(&mut object);
     object.as_value()
 }
 
