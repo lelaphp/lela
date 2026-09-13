@@ -776,7 +776,7 @@ pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Throw
                 Some((Number::Long(i64::MAX), false)) => Ok(Value::float(wide(i64::MAX) + 1.0)),
                 Some((Number::Long(n), false)) => Ok(Value::int(n + 1)),
                 Some((Number::Double(d), false)) => Ok(Value::float(d + 1.0)),
-                _ => Ok(Value::string(increment_string(req, s.as_bytes()))),
+                _ => Ok(Value::string(increment_string(req, s.as_bytes())?)),
             }
         }
         ValueRef::Bool(_) => {
@@ -803,13 +803,13 @@ pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Throw
 /// a byte that is none of the three stops the carry where it stands; and
 /// a carry off the front prepends the first of the last kind stepped. The
 /// empty string is `"1"`.
-fn increment_string(req: &mut Request, bytes: &[u8]) -> PhpString {
+fn increment_string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
     deprecated(
         req,
         "Increment on non-numeric string is deprecated, use str_increment() instead",
     );
     if bytes.is_empty() {
-        return PhpString::from_bytes(b"1");
+        return PhpString::new(req, b"1");
     }
     let mut out = bytes.to_vec();
     let mut last = None;
@@ -839,7 +839,7 @@ fn increment_string(req: &mut Request, bytes: &[u8]) -> PhpString {
         // has run off its front.
         out.insert(0, if first == b'0' { b'1' } else { first });
     }
-    PhpString::from_bytes(&out)
+    PhpString::new(req, &out)
 }
 
 /// `zend_zval_value_name` (`Z/Zend/zend_API.c:157`): what a `TypeError`
