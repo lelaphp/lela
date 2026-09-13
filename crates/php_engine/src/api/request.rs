@@ -804,6 +804,31 @@ impl Request {
     /// Warning: unexpected NAN value was coerced to string in %s on line 4
     /// NANNAN
     /// ```
+    ///
+    /// The rest of php's display branch (`Z/main/main.c:1409-1489`),
+    /// condition by condition. `E_CORE` stands past `error_reporting`,
+    /// `(EG(error_reporting) & type) || (type & E_CORE)`, and the mask
+    /// here reads it; nothing in this engine raises `E_CORE_ERROR` or
+    /// `E_CORE_WARNING` yet, since php's own raisers of the two are its
+    /// own startup and the ini loader, so the mask is held by a test
+    /// on this function and no witness reaches it. `xmlrpc_errors` is
+    /// the form ahead of the two `html_errors` names, read below;
+    /// `PHP_INI_SYSTEM`, so a host's startup ini sets it and no
+    /// `ini_set()` does, and it is held by an engine test rather than a
+    /// witness, whose recipe passes the entry nothing. The stderr form
+    /// is the CLI's, the CGI's and phpdbg's, `sapi_module.name` read at
+    /// `Z/main/main.c:1484`; under another host `display_errors=stderr`
+    /// falls to the plain form on the body, which [`Request::display_errors`]
+    /// answers off the host's name. `display_startup_errors` and
+    /// `during_request_startup` are not read: php's display and log
+    /// branches both ask `module_initialized && !during_request_startup`
+    /// before them, and a diagnostic of php's startup window is one
+    /// `php_request_startup` raises between `sapi_activate` and the
+    /// file's compile, in the GPC seeding or a per-directory ini. This
+    /// engine raises nothing before the file's first opline, so the two
+    /// entries decide nothing a request can see, and the recipe's
+    /// `display_startup_errors=1` shows no difference from php's default
+    /// of the same.
     pub(crate) fn note_error_in(
         &mut self,
         level: Level,
@@ -819,7 +844,10 @@ impl Request {
         // php stores the diagnostic before it masks it, which is why
         // `error_get_last()` answers one `error_reporting` hid.
         self.last_error = Some((level, message.to_owned(), file, line));
-        if self.error_reporting() & level.bit() == 0 {
+        // `(EG(error_reporting) & type) || (type & E_CORE)`: a core
+        // level is rendered whatever `error_reporting` says.
+        let core = matches!(level, Level::CoreError | Level::CoreWarning);
+        if self.error_reporting() & level.bit() == 0 && !core {
             return;
         }
         let name = level_name(level);
@@ -831,7 +859,17 @@ impl Request {
         if display == Display::Off {
             return;
         }
-        if self.html_errors() {
+        if self.xmlrpc_errors() {
+            // php's first display form, one `methodResponse` fault with
+            // `xmlrpc_error_number` as its code and the diagnostic as
+            // its string, the message unescaped and no space after the
+            // colon; neither string stands around it.
+            let text = format!(
+                "<?xml version=\"1.0\"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><int>{}</int></value></member><member><name>faultString</name><value><string>{name}:{message} in {named} on line {line}</string></value></member></struct></value></fault></methodResponse>",
+                self.xmlrpc_error_number()
+            );
+            self.write(text.as_bytes());
+        } else if self.html_errors() {
             // php escapes the message of an `E_ERROR` or an `E_PARSE`
             // and no other level's, and writes the same bytes around
             // both; the backtrace that parts php's two html formats is
@@ -897,6 +935,19 @@ impl Request {
         ini_truth(self.ini_get(b"html_errors").as_ref())
     }
 
+    /// `xmlrpc_errors`, whether a diagnostic takes php's xml fault form
+    /// ahead of both of the others.
+    fn xmlrpc_errors(&self) -> bool {
+        ini_truth(self.ini_get(b"xmlrpc_errors").as_ref())
+    }
+
+    /// `xmlrpc_error_number`, the fault's code, `OnUpdateLong`.
+    fn xmlrpc_error_number(&self) -> i64 {
+        self.ini_get(b"xmlrpc_error_number")
+            .and_then(|value| String::from_utf8_lossy(value.as_bytes()).parse().ok())
+            .unwrap_or(0)
+    }
+
     /// One ini entry as php's `STR_PRINT(INI_STR(name))` reads it: its
     /// bytes, and nothing at all where php left the entry `NULL`.
     fn ini_text(&self, name: &[u8]) -> String {
@@ -906,16 +957,28 @@ impl Request {
     }
 
     /// `display_errors`, php's three values: off, the body, and the
-    /// host's error stream, which the CLI and CGI hosts write a
-    /// diagnostic to without php's leading newline.
+    /// host's error stream, which the hosts php names at
+    /// `Z/main/main.c:1484`, `cli`, `cgi` and `phpdbg`, write a
+    /// diagnostic to without php's leading newline. Under any other
+    /// host `stderr` is the body, since php's test is on
+    /// `sapi_module.name` and the plain form is its `else`.
     fn display_errors(&self) -> Display {
         let value = self.ini_get(b"display_errors");
         let text = value.as_ref().map(|v| v.as_bytes().to_ascii_lowercase());
         match text.as_deref() {
-            Some(b"stderr") => Display::Stderr,
+            Some(b"stderr") if self.host_writes_stderr() => Display::Stderr,
             _ if ini_truth(value.as_ref()) => Display::Body,
             _ => Display::Off,
         }
+    }
+
+    /// Whether the host is one php writes `display_errors=stderr` to
+    /// the error stream under.
+    fn host_writes_stderr(&self) -> bool {
+        matches!(
+            self.description.sapi_name.as_str(),
+            "cli" | "cgi" | "phpdbg"
+        )
     }
 
     /// `zend_error_noreturn(E_ERROR, ...)`: `php_error_cb` renders the
@@ -1573,9 +1636,25 @@ impl Request {
     /// not exist or may not change at runtime. An entry with an
     /// on-modify handler runs it here: `max_execution_time` re-arms the
     /// execution timer (`OnUpdateTimeout`, `Z/main/main.c:467`).
+    ///
+    /// The one `PHP_INI_SYSTEM` entry of the table is `xmlrpc_errors`,
+    /// which `zend_alter_ini_entry_ex` refuses at `PHP_INI_STAGE_RUNTIME`
+    /// as it refuses every entry whose `modifiable` lacks the stage; the
+    /// rest of the table is `PHP_INI_ALL`.
+    ///
+    /// ```php
+    /// var_dump(ini_set('xmlrpc_errors', '1'));
+    /// echo NAN;
+    /// ```
+    /// ```expect
+    /// bool(false)
+    ///
+    /// Warning: unexpected NAN value was coerced to string in %s on line 3
+    /// NAN
+    /// ```
     pub fn ini_set(&mut self, name: &[u8], value: &[u8]) -> Result<Option<PhpString>, Thrown> {
         let previous = self.ini_get(name);
-        if previous.is_none() {
+        if previous.is_none() || !Request::ini_modifiable(name) {
             return Ok(None);
         }
         self.ini.retain(|(n, _)| n.as_bytes() != name);
@@ -1585,6 +1664,13 @@ impl Request {
             self.arm_timer();
         }
         Ok(previous)
+    }
+
+    /// Whether an entry's `modifiable` carries `PHP_INI_USER`, what
+    /// `ini_set()` asks: every entry of the table is `PHP_INI_ALL` but
+    /// `xmlrpc_errors`, `PHP_INI_SYSTEM` (`Z/main/main.c:806`).
+    fn ini_modifiable(name: &[u8]) -> bool {
+        name != b"xmlrpc_errors"
     }
 
     /// `ini_get_all()`: every entry with its current value.
@@ -2052,7 +2138,40 @@ fn append_escaped(out: &mut String, bytes: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Level, append_escaped, escape_html, level_name};
+    use super::{Level, PhpString, Request, append_escaped, escape_html, level_name};
+    use crate::engine::{Engine, RequestDescription};
+
+    /// A request on a fresh engine's shared state, for a test that gives
+    /// `note_error_in` a level no raiser reaches yet.
+    fn request(engine: &Engine) -> Request {
+        Request::new(
+            engine.shared.clone(),
+            RequestDescription {
+                sapi_name: String::from("cli"),
+                ..RequestDescription::default()
+            },
+        )
+    }
+
+    /// `(EG(error_reporting) & type) || (type & E_CORE)`: a core level
+    /// is rendered under `error_reporting=0`, in the same word its
+    /// family takes, and every other level is masked. No raiser reaches
+    /// `E_CORE_ERROR` or `E_CORE_WARNING` in this engine, so the mask is
+    /// held here and not by a witness.
+    #[test]
+    fn a_core_level_is_rendered_past_error_reporting() {
+        let engine = Engine::builder().ini("error_reporting", "0").build();
+        let file = PhpString::from_bytes(b"witness.php");
+        let mut request = request(&engine);
+        request.note_error_in(Level::CoreWarning, "core", &file, 2);
+        request.note_error_in(Level::CoreError, "core", &file, 3);
+        request.note_error_in(Level::Warning, "masked", &file, 4);
+        request.note_error_in(Level::Error, "masked", &file, 5);
+        assert_eq!(
+            String::from_utf8_lossy(&request.take_body()),
+            "\nWarning: core in witness.php on line 2\n\nFatal error: core in witness.php on line 3\n"
+        );
+    }
 
     /// `smart_str_append_escaped`'s table, one byte per arm: the seven
     /// named escapes, the hex form for the rest of the control range and

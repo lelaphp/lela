@@ -215,7 +215,7 @@ impl Shared {
 /// `error_prepend_string` and `error_append_string` are `NULL` in php's
 /// table and empty here, since an entry with no value at all is one
 /// `ini_set()` refuses to set.
-const CORE_INI: [(&str, &str); 15] = [
+const CORE_INI: [(&str, &str); 17] = [
     ("precision", "14"),
     ("serialize_precision", "-1"),
     ("error_reporting", "32767"),
@@ -226,6 +226,8 @@ const CORE_INI: [(&str, &str); 15] = [
     ("error_append_string", ""),
     ("ignore_repeated_errors", "0"),
     ("ignore_repeated_source", "0"),
+    ("xmlrpc_errors", "0"),
+    ("xmlrpc_error_number", "0"),
     ("memory_limit", "128M"),
     ("max_execution_time", "0"),
     ("default_charset", "UTF-8"),
@@ -739,6 +741,80 @@ mod tests {
             String::from_utf8_lossy(&once.body),
             format!("{}NANNANNAN", warning(2)),
             "the site no longer parts them, so one warning stands for all three"
+        );
+    }
+
+    /// `xmlrpc_errors` is php's first display form, ahead of both the
+    /// plain and the html one, and the two strings stand around neither
+    /// it nor the log form. What the pinned oracle writes for
+    /// `-d xmlrpc_errors=1 -d xmlrpc_error_number=42
+    /// -d error_prepend_string='<PRE>'` over `<?php\necho NAN;` is one
+    /// `methodResponse` fault, the code `42`, the message after
+    /// `Warning:` with no space, and `NAN` straight after it.
+    #[test]
+    fn xmlrpc_errors_is_phps_first_display_form() {
+        let mut fault = Kept::default();
+        Engine::builder()
+            .ini("xmlrpc_errors", "1")
+            .ini("xmlrpc_error_number", "42")
+            .ini("error_prepend_string", "<PRE>")
+            .ini("log_errors", "1")
+            .build()
+            .serve(description("<?php\necho NAN;"), &mut fault);
+        assert_eq!(
+            String::from_utf8_lossy(&fault.body),
+            format!(
+                "<?xml version=\"1.0\"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><int>42</int></value></member><member><name>faultString</name><value><string>Warning:{NAN_WARNING} in witness.php on line 2</string></value></member></struct></value></fault></methodResponse>NAN"
+            )
+        );
+        assert_eq!(
+            fault.logged(),
+            format!("PHP Warning:  {NAN_WARNING} in witness.php on line 2\n"),
+            "the log form is the same whichever display form is on"
+        );
+    }
+
+    /// `display_errors=stderr` is the error stream under the hosts php
+    /// names at `Z/main/main.c:1484`, `cli`, `cgi` and `phpdbg`, and
+    /// the plain form on the body under every other. What the pinned
+    /// oracle writes for `-d display_errors=stderr` over `<?php\necho
+    /// NAN;` is `NAN` on stdout and `Warning: … on line 2` on stderr,
+    /// with no leading newline; under `fpm-fcgi` php's test on
+    /// `sapi_module.name` fails and the `else` is the plain form.
+    #[test]
+    fn stderr_is_the_error_stream_only_under_the_hosts_php_names() {
+        let engine = Engine::builder().ini("display_errors", "stderr").build();
+        let under = |host: &str| {
+            let mut kept = Kept::default();
+            engine.serve(
+                RequestDescription {
+                    sapi_name: String::from(host),
+                    ..description("<?php\necho NAN;")
+                },
+                &mut kept,
+            );
+            (
+                String::from_utf8_lossy(&kept.body).into_owned(),
+                kept.logged(),
+            )
+        };
+        for host in ["cli", "cgi", "phpdbg"] {
+            assert_eq!(
+                under(host),
+                (
+                    String::from("NAN"),
+                    format!("Warning: {NAN_WARNING} in witness.php on line 2\n")
+                ),
+                "{host}"
+            );
+        }
+        assert_eq!(
+            under("fpm-fcgi"),
+            (
+                format!("\nWarning: {NAN_WARNING} in witness.php on line 2\nNAN"),
+                String::new()
+            ),
+            "another host falls to the plain form on the body"
         );
     }
 
