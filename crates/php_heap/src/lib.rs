@@ -423,14 +423,14 @@ mod tests {
     /// A string past 2 MiB is a huge block, and php rounds one to the
     /// page the machine reports, `REAL_PAGE_SIZE`
     /// (`Z/Zend/zend_alloc.c:1925`), not to the 4 KiB page its chunks are
-    /// carved into. What php answers on the machine the oracle is pinned
-    /// on, whose page is 16 KiB:
-    ///
-    /// ```text
-    /// $ php -n -d memory_limit=128M -r '$b = memory_get_usage(); $rb = memory_get_usage(true);
-    ///   $s = str_repeat("x", 3000000); echo memory_get_usage() - $b, " ", memory_get_usage(true) - $rb;'
-    /// 3014680 3014656
-    /// ```
+    /// carved into. What php answers is pinned by the second witness
+    /// beside `memory_get_usage` in `crates/php_engine/src/natives.rs`,
+    /// which builds a 3 MB string with `str_repeat` and reads what
+    /// `memory_get_usage()` and `memory_get_usage(true)` moved by, per
+    /// commit, against the oracle: 3,014,680 and 3,014,656 on the
+    /// machine the oracle is pinned on, whose page is 16 KiB. This test
+    /// holds the same two numbers at the heap's own face, with the page
+    /// asked of the machine rather than assumed.
     ///
     /// 3,000,000 bytes of string is 3,000,032 allocated, the header, the
     /// NUL and the alignment, and 3,014,656 is that rounded to 16 KiB;
@@ -442,15 +442,6 @@ mod tests {
     /// variables are on the frame before its first line runs and move
     /// nothing. The peak is the node and then the block, so it reads the
     /// same sum, and freeing the block gives the node back with it.
-    ///
-    /// The session above is still one a person typed. `memory_get_usage` is a
-    /// native of `php_engine` now, and the witness beside it pins the
-    /// other half of this accounting per commit: a fresh request's real
-    /// usage is php's one 2 MiB chunk, and the oracle says the same.
-    /// A huge block is past what a witness can reach while `php_compile`
-    /// reads no variable and nothing declares `str_repeat()`, so no
-    /// snippet can hold a 3 MB string alive across two calls; #174 is
-    /// where this session becomes a witness too.
     #[test]
     fn a_huge_block_rounds_to_the_page_the_machine_reports() {
         let _alone = alone();
