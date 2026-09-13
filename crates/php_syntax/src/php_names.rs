@@ -14,13 +14,99 @@
 //! interception is. `T_BAD_CHARACTER` stays with `ext/tokenizer` for the
 //! same reason: the differential never sees a rejected file.
 //!
-//! The tables are held to the oracle's names by `php_names` in the lexer's
-//! tests: one row per table lexed here and spelled through the table its
-//! kind selects, against the five lines `token_get_all` prints for the same
-//! rows under the pinned php. The witness that holds them to the same
-//! lines under the instrument waits on `token_get_all` and `token_name`
-//! as natives of `ext/tokenizer` (#224), since `xtask witness` serves a
-//! snippet through the engine, and lands beside these tables when they are.
+//! The tables are held to the oracle's names twice. Every row of every
+//! table is held by `php_names` in the lexer's tests: one row per table
+//! lexed here and spelled through the table its kind selects, against the
+//! five lines `token_get_all` prints for the same rows under the pinned
+//! php, read once. One token per table is held by the witness below each
+//! time the instrument reads it, through `token_get_all` itself, which is `ext/tokenizer`'s
+//! native over the lexer and these tables: `&&` through `operator_name`,
+//! `__LINE__` through `magic_const_name`, `(int)` through `cast_name`,
+//! the integer past `ZEND_LONG_MAX` through `int_overflows` and the two
+//! `&` through `amp_name`. The row is written without blanks so the
+//! answer is the tokens the tables name and nothing between them, and
+//! `var_dump` is how the answer is read while the compiler reads no
+//! `foreach`.
+//!
+//! ```php
+//! var_dump(token_get_all('<?php &&__LINE__(int)9223372036854775808&$x&'));
+//! ```
+//! ```expect
+//! array(8) {
+//!   [0]=>
+//!   array(3) {
+//!     [0]=>
+//!     int(394)
+//!     [1]=>
+//!     string(6) "<?php "
+//!     [2]=>
+//!     int(1)
+//!   }
+//!   [1]=>
+//!   array(3) {
+//!     [0]=>
+//!     int(369)
+//!     [1]=>
+//!     string(2) "&&"
+//!     [2]=>
+//!     int(1)
+//!   }
+//!   [2]=>
+//!   array(3) {
+//!     [0]=>
+//!     int(346)
+//!     [1]=>
+//!     string(8) "__LINE__"
+//!     [2]=>
+//!     int(1)
+//!   }
+//!   [3]=>
+//!   array(3) {
+//!     [0]=>
+//!     int(381)
+//!     [1]=>
+//!     string(5) "(int)"
+//!     [2]=>
+//!     int(1)
+//!   }
+//!   [4]=>
+//!   array(3) {
+//!     [0]=>
+//!     int(261)
+//!     [1]=>
+//!     string(19) "9223372036854775808"
+//!     [2]=>
+//!     int(1)
+//!   }
+//!   [5]=>
+//!   array(3) {
+//!     [0]=>
+//!     int(409)
+//!     [1]=>
+//!     string(1) "&"
+//!     [2]=>
+//!     int(1)
+//!   }
+//!   [6]=>
+//!   array(3) {
+//!     [0]=>
+//!     int(266)
+//!     [1]=>
+//!     string(2) "$x"
+//!     [2]=>
+//!     int(1)
+//!   }
+//!   [7]=>
+//!   array(3) {
+//!     [0]=>
+//!     int(410)
+//!     [1]=>
+//!     string(1) "&"
+//!     [2]=>
+//!     int(1)
+//!   }
+//! }
+//! ```
 
 use crate::SyntaxKind;
 

@@ -1,10 +1,11 @@
 //! The five tables of `php_names`, held to the five lines the oracle's
 //! `token_get_all` prints for five rows, one per table: the same rows lexed
-//! here, each token spelled through the table its kind selects. The snippet
-//! that printed them is #224's, the witness these tables wait on; the lines
+//! here, each token spelled through the table its kind selects. The lines
 //! were read from the pinned php at 8.5.9 once and are carried here as
-//! `PINNED`. `#[` stands first in the operators row because `-> #[` is a
-//! comment to php: `ST_LOOKING_FOR_PROPERTY` reads the `#`.
+//! `PINNED`; the witness in `php_names` holds one token per table each
+//! time the instrument reads it, through `ext/tokenizer`'s `token_get_all` (#224). `#[`
+//! stands first in the operators row because `-> #[` is a comment to php:
+//! `ST_LOOKING_FOR_PROPERTY` reads the `#`.
 
 use super::*;
 use crate::{amp_name, cast_name, int_overflows, magic_const_name, operator_name};
