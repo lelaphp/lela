@@ -17,7 +17,7 @@ use php_heap::{Fatal, FrameRef, Heap, HeapHooks, Intern, MapTable, ObjectId, VmS
 use php_unit::Unit;
 use php_unit::decl::{ClassDecl, ClassKind, FunctionDecl};
 
-use crate::api::abi::Callable;
+use crate::api::abi::{Callable, IniVerdict};
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
@@ -672,9 +672,26 @@ impl Request {
     }
 
     /// `zend.exception_string_param_max_len`: the bytes of a string
-    /// argument a trace prints before `...`, `EG(exception_string_param_max_len)`.
+    /// argument a trace prints before `...`, `EG(exception_string_param_max_len)`,
+    /// which `OnSetExceptionStringParamMaxLen` set from the text with
+    /// `ZEND_ATOL` (`Z/Zend/zend.c:177`), so `' +4x'` cuts at four.
+    ///
+    /// ```php
+    /// var_dump(ini_set('zend.exception_string_param_max_len', ' +4x'));
+    /// set_time_limit('seconds', 2);
+    /// ```
+    /// ```expect exit=255
+    /// string(2) "15"
+    ///
+    /// Fatal error: Uncaught ArgumentCountError: set_time_limit() expects exactly 1 argument, 2 given in %s:3
+    /// Stack trace:
+    /// #0 %s(3): set_time_limit('seco...', 2)
+    /// #1 {main}
+    ///   thrown in %s on line 3
+    /// ```
     fn exception_string_param_max_len(&self) -> usize {
-        usize::try_from(self.ini_number(b"zend.exception_string_param_max_len", 15)).unwrap_or(0)
+        self.ini_get(b"zend.exception_string_param_max_len")
+            .map_or(15, |value| usize::try_from(ini_atol(value)).unwrap_or(0))
     }
 
     /// Serve the native the call frame on top of [`Vm`] names: its entry
@@ -1684,9 +1701,10 @@ impl Request {
     }
 
     /// `ini_set()`: the previous value, or `None` for an entry that does
-    /// not exist or may not change at runtime. An entry with an
-    /// on-modify handler runs it here: `max_execution_time` re-arms the
-    /// execution timer (`OnUpdateTimeout`, `Z/main/main.c:467`).
+    /// not exist, may not change at runtime, or whose `on_modify` refuses
+    /// the value ([`Request::ini_verdict`]). An entry with an on-modify
+    /// handler runs it here: `max_execution_time` re-arms the execution
+    /// timer (`OnUpdateTimeout`, `Z/main/main.c:467`).
     ///
     /// The two entries of the table without `PHP_INI_USER` are
     /// `xmlrpc_errors`, `PHP_INI_SYSTEM`, and `short_open_tag`,
@@ -1710,6 +1728,9 @@ impl Request {
         if previous.is_none() || !Request::ini_modifiable(name) {
             return Ok(None);
         }
+        if Request::ini_verdict(name, value) == IniVerdict::Rejected {
+            return Ok(None);
+        }
         self.ini.retain(|(n, _)| n.as_slice() != name);
         self.ini.push((name.to_vec(), value.to_vec()));
         match name {
@@ -1726,6 +1747,46 @@ impl Request {
     /// `short_open_tag`, `PHP_INI_SYSTEM|PHP_INI_PERDIR` (`Z/main/main.c:820`).
     fn ini_modifiable(name: &[u8]) -> bool {
         !matches!(name, b"xmlrpc_errors" | b"short_open_tag")
+    }
+
+    /// What a core entry's `on_modify` says of a new value before
+    /// anything is written, `zend_alter_ini_entry_ex` asking it first
+    /// (`Z/Zend/zend_ini.c:342`): `zend.exception_string_param_max_len`
+    /// is `OnSetExceptionStringParamMaxLen` (`Z/Zend/zend.c:175-184`),
+    /// which reads the text with `ZEND_ATOL` and refuses a number outside
+    /// `0..=1000000`; the rest of the table accepts anything. A refusal
+    /// keeps the entry as it was and `ini_set()` answers `false`.
+    ///
+    /// ```php
+    /// var_dump(ini_set("zend.exception_string_param_max_len", "-1"), ini_set("zend.exception_string_param_max_len", "1000001"), ini_set("zend.exception_string_param_max_len", "3"), ini_get("zend.exception_string_param_max_len"));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(false)
+    /// string(2) "15"
+    /// string(1) "3"
+    /// ```
+    ///
+    /// `ZEND_ATOL` is `atoll`, so text that is not a number is zero and
+    /// accepted, and the entry keeps the text it was given.
+    ///
+    /// ```php
+    /// var_dump(ini_set("zend.exception_string_param_max_len", "abc"), ini_get("zend.exception_string_param_max_len"), ini_set("zend.exception_string_param_max_len", "99999999999999999999"));
+    /// ```
+    /// ```expect
+    /// string(2) "15"
+    /// string(3) "abc"
+    /// bool(false)
+    /// ```
+    fn ini_verdict(name: &[u8], value: &[u8]) -> IniVerdict {
+        match name {
+            b"zend.exception_string_param_max_len"
+                if !(0..=1_000_000).contains(&ini_atol(value)) =>
+            {
+                IniVerdict::Rejected
+            }
+            _ => IniVerdict::Accepted,
+        }
     }
 
     /// `ini_get_all()`: every entry with its current value, as strings
@@ -2186,6 +2247,42 @@ fn ini_truth(value: Option<&[u8]>) -> bool {
     let Some(value) = value else { return false };
     let text = value.to_ascii_lowercase();
     !matches!(text.as_slice(), b"" | b"0" | b"off" | b"no" | b"false")
+}
+
+/// `ZEND_ATOL`, which is `atoll` (`Z/Zend/zend_long.h:77`): leading
+/// whitespace skipped, one sign, the digits up to the first byte that is
+/// not one, and zero where there are none; a number past `i64` saturates
+/// as `strtoll` does.
+fn ini_atol(value: &[u8]) -> i64 {
+    let mut bytes = value
+        .iter()
+        .skip_while(|b| b.is_ascii_whitespace())
+        .peekable();
+    let negative = match bytes.peek() {
+        Some(b'-') => {
+            bytes.next();
+            true
+        }
+        Some(b'+') => {
+            bytes.next();
+            false
+        }
+        _ => false,
+    };
+    let mut n: i64 = 0;
+    for digit in bytes.take_while(|b| b.is_ascii_digit()) {
+        let digit = i64::from(digit - b'0');
+        n = if negative {
+            n.checked_mul(10)
+                .and_then(|n| n.checked_sub(digit))
+                .unwrap_or(i64::MIN)
+        } else {
+            n.checked_mul(10)
+                .and_then(|n| n.checked_add(digit))
+                .unwrap_or(i64::MAX)
+        };
+    }
+    n
 }
 
 /// One string property of a throwable, empty where there is none.
