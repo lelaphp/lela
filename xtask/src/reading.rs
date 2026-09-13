@@ -31,9 +31,10 @@ pub const LOG: &str = "log.jsonl";
 pub struct Reading {
     /// The subcommands that write one, in the order `cli::Command` has
     /// them: `api-check | permit | done | track-work | ticket | budget |
-    /// clippy | phpt | port-map | compile-identity | unsafe-audit | steer |
-    /// divergence-reason | witness | vocab`; `bench | crosscheck | fuzz |
-    /// mutants` are named by harness-design.md §4.2 and not built yet.
+    /// clippy | test | phpt | port-map | compile-identity | unsafe-audit |
+    /// steer | divergence-reason | witness | vocab`; `bench | crosscheck |
+    /// fuzz | mutants` are named by harness-design.md §4.2 and not built
+    /// yet.
     pub instrument: String,
     /// A crate, a corpus subset, a bar's id such as `G1`, a ticket's
     /// number, or `"workspace"`.

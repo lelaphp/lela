@@ -11,7 +11,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use crate::manifest::{Crate, Manifest};
-use crate::reading::{Reading, Status};
+use crate::reading::{Reading, Status, Store};
 use crate::sources;
 
 /// The instrument name the reading carries.
@@ -56,6 +56,23 @@ pub fn run_staged(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
         return Ok(Vec::new());
     }
     run(root, manifest, &touched)
+}
+
+/// The command line's entry: the crates named, or with `--staged` the
+/// ones with a staged change, and every reading written.
+pub(crate) fn command(
+    root: &Path,
+    manifest: &Manifest,
+    store: &Store,
+    crates: &[String],
+    staged: bool,
+) -> Result<()> {
+    let readings = if staged {
+        run_staged(root, manifest)?
+    } else {
+        run(root, manifest, crates)?
+    };
+    crate::record(store, &readings)
 }
 
 /// One crate's reading: pass when cargo exits 0, fail with the tail of

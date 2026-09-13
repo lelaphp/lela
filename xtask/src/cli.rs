@@ -187,6 +187,17 @@ pub(crate) enum Command {
         #[arg(long)]
         staged: bool,
     },
+    /// `cargo test` on each crate, as the reading `done` reads; one
+    /// reading per crate, with what passed, failed, was ignored and was
+    /// filtered out in its numbers.
+    Test {
+        /// Only these crates, by manifest name; default every crate that exists.
+        #[arg(long = "crate", value_name = "NAME", conflicts_with = "staged")]
+        crates: Vec<String>,
+        /// Only the crates with a staged change (pre-commit's touched crates).
+        #[arg(long)]
+        staged: bool,
+    },
     /// Run the pinned `.phpt` corpus through the engine and hold each test
     /// to its `--EXPECT*--` section; one reading per subset, scoped to the
     /// crate whose subset it is.
@@ -488,6 +499,8 @@ pub enum Section {
     Phpt,
     /// The witness readings, one row per crate.
     Witness,
+    /// The test readings, one row per crate.
+    Test,
     /// The mutants readings, one row per crate.
     Mutants,
     /// The bench readings, one row per bar.

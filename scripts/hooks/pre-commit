@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # pre-commit: the instruments that exist, wired as harness-design.md §6
-# lists them, over what this commit would take. fmt, then clippy on the
-# crates with a staged change, api-check, budget, unsafe-audit, vocab and
-# witness on the crates with a staged change, each a reading, so `done`
-# has the witness reading its condition 1 asks a touched crate for;
+# lists them, over what this commit would take. fmt, then clippy and test
+# on the crates with a staged change, api-check, budget, unsafe-audit,
+# vocab and witness on the crates with a staged change, each a reading,
+# so `done` has the readings its condition 1 asks a touched crate for;
 # `permit --diff` judges every staged file as the Write of
 # its staged content and refuses the commit with the rule id on a denial
 # (the harness's own files are a note: a person commits those). Last,
@@ -84,6 +84,7 @@ if ! git diff --cached --quiet -- harness-plugins; then
 fi
 step cargo fmt --check
 step $X clippy --staged
+step $X test --staged
 step $X api-check
 step $X budget
 step $X unsafe-audit

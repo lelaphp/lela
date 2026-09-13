@@ -9,7 +9,9 @@
 //! The conditions, one sentence each, are §4.5's seven:
 //!
 //! 1. Every crate with a changed file has a fresh passing reading from each
-//!    instrument [`instruments_of`] asks it for: [`FRESH`], less `witness`
+//!    instrument [`instruments_of`] asks it for: [`FRESH`], `test` among
+//!    them and asked of every crate, since every crate has tests and one
+//!    whose tests do not run is not done (#191), less `witness`
 //!    for the harness, less `phpt` for a crate the per-commit lane writes
 //!    no reading for, one that owns no subset or that the manifest marks
 //!    `feature =` and so stands outside the default build (#133), and less
@@ -104,13 +106,16 @@ pub(crate) const INSTRUMENT: &str = "done";
 /// The scope of the verdict's reading: the whole tree.
 pub(crate) const WORKSPACE: &str = "workspace";
 /// The instruments condition 1 knows. Which of them one crate is asked
-/// for is [`instruments_of`], since three of the six are a narrower crate's
-/// than "every touched one": `phpt`'s is the reading over the subsets the
-/// crate's `[[crate]]` row owns, written under the crate's name, `witness`
-/// is no crate's without a kernel or a native, and `port-map` is the one
-/// crate `api.lock` lives with alone.
-pub const FRESH: [&str; 7] = [
+/// for is [`instruments_of`], since three of the eight are a narrower
+/// crate's than "every touched one": `phpt`'s is the reading over the
+/// subsets the crate's `[[crate]]` row owns, written under the crate's
+/// name, `witness` is no crate's without a kernel or a native, and
+/// `port-map` is the one crate `api.lock` lives with alone. `test` is
+/// narrowed for nobody: the harness has tests as every crate has, and it
+/// is asked the way `clippy` is (#191).
+pub const FRESH: [&str; 8] = [
     "clippy",
+    "test",
     "witness",
     "api-check",
     "budget",
@@ -672,8 +677,9 @@ mod tests {
     /// [`FRESH`] less `port-map`: what a crate that is not the lock's
     /// home is asked, before the two narrowings of its own. That it is
     /// [`FRESH`] less the one row is asserted below and not trusted here.
-    const ASKED_OF_EVERY_OTHER_CRATE: [&str; 6] = [
+    const ASKED_OF_EVERY_OTHER_CRATE: [&str; 7] = [
         "clippy",
+        "test",
         "witness",
         "api-check",
         "budget",
@@ -682,9 +688,12 @@ mod tests {
     ];
 
     #[test]
-    fn the_harness_crate_is_asked_for_clippy_api_check_budget_and_unsafe_audit_only() {
+    fn the_harness_crate_is_asked_for_clippy_test_api_check_budget_and_unsafe_audit_only() {
         let asked: Vec<&str> = instruments_of(&Crate::named("xtask"), HOME).collect();
-        assert_eq!(asked, ["clippy", "api-check", "budget", "unsafe-audit"]);
+        assert_eq!(
+            asked,
+            ["clippy", "test", "api-check", "budget", "unsafe-audit"]
+        );
         let asked: Vec<&str> = instruments_of(&Crate::named("ext/pcre"), HOME).collect();
         assert_eq!(asked, ASKED_OF_EVERY_OTHER_CRATE);
     }
@@ -698,7 +707,14 @@ mod tests {
         let asked: Vec<&str> = instruments_of(&Crate::named("php_heap"), HOME).collect();
         assert_eq!(
             asked,
-            ["clippy", "witness", "api-check", "budget", "unsafe-audit"]
+            [
+                "clippy",
+                "test",
+                "witness",
+                "api-check",
+                "budget",
+                "unsafe-audit"
+            ]
         );
         let row = Crate::named("php_heap").with_phpt(&["Zend/tests"]);
         let asked: Vec<&str> = instruments_of(&row, HOME).collect();
@@ -716,7 +732,14 @@ mod tests {
         let asked: Vec<&str> = instruments_of(&row, HOME).collect();
         assert_eq!(
             asked,
-            ["clippy", "witness", "api-check", "budget", "unsafe-audit"]
+            [
+                "clippy",
+                "test",
+                "witness",
+                "api-check",
+                "budget",
+                "unsafe-audit"
+            ]
         );
         let asked: Vec<&str> = instruments_of(&Crate::named("ext/mbstring"), HOME).collect();
         assert_eq!(asked, ASKED_OF_EVERY_OTHER_CRATE);
@@ -736,6 +759,7 @@ mod tests {
             asked,
             [
                 "clippy",
+                "test",
                 "witness",
                 "api-check",
                 "budget",

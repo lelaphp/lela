@@ -1,0 +1,9 @@
+# The fixture workspace: one crate whose tests do not all pass.
+[workspace]
+resolver = "3"
+members = ["crates/php_heap"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+rust-version = "1.95"

@@ -22,8 +22,9 @@ use xtask::track::Base;
 /// `api.lock` lives with and of no other (§4.5 condition 1, #148). That
 /// this is [`FRESH`] less that one row is asserted in
 /// `the_crate_the_lock_lives_with_is_asked_for_a_port_map_reading_and_no_other_crate_is`.
-const ASKED: [&str; 6] = [
+const ASKED: [&str; 7] = [
     "clippy",
+    "test",
     "witness",
     "api-check",
     "budget",
@@ -179,10 +180,11 @@ fn xtask(root: &Path, args: &[&str], stdin: Option<&str>) -> (i32, String, Strin
 // ---------------------------------------------------------------- 1, 2
 
 /// Over a diff in xtask, the harness's own sources, witness and phpt are
-/// not on the list, and the four that are pass when fresh; which four is
-/// `done`'s own unit test.
+/// not on the list, and the five that are pass when fresh; which five is
+/// `done`'s own unit test. `test` is among them: the harness has tests
+/// as every crate has (#191).
 #[test]
-fn the_harness_crate_is_asked_for_clippy_api_check_budget_and_unsafe_audit_only() {
+fn the_harness_crate_is_asked_for_clippy_test_api_check_budget_and_unsafe_audit_only() {
     let root = scratch("harness");
     write(
         &root,
@@ -198,9 +200,9 @@ fn the_harness_crate_is_asked_for_clippy_api_check_budget_and_unsafe_audit_only(
             .all(|u| !u.starts_with("witness") && !u.starts_with("phpt")),
         "{verdict:#?}"
     );
-    assert_eq!(verdict.unmet.len(), 4, "{verdict:#?}");
+    assert_eq!(verdict.unmet.len(), 5, "{verdict:#?}");
     let store = Store::of_workspace(&root);
-    for instrument in ["clippy", "api-check", "budget", "unsafe-audit"] {
+    for instrument in ["clippy", "test", "api-check", "budget", "unsafe-audit"] {
         store.record(&[fresh(&root, instrument, "xtask")]).unwrap();
     }
     assert!(judge(&root).unmet.is_empty(), "{:#?}", judge(&root));
@@ -224,7 +226,7 @@ fn with_no_readings_every_instrument_of_the_touched_crate_is_unmet_and_the_exit_
     assert_eq!(code, 1, "{out}{err}");
     assert!(out.contains("unmet:"), "{out}");
     assert!(out.contains("- phpt: no reading for ext/pcre"), "{out}");
-    assert!(err.contains("6 conditions of done unmet"), "{err}");
+    assert!(err.contains("7 conditions of done unmet"), "{err}");
 }
 
 /// `port-map` writes exactly one reading, at the crate `api.lock` lives
@@ -841,11 +843,11 @@ fn every_verdict_is_one_reading_of_done_over_the_workspace() {
     let store = Store::of_workspace(&root);
     let reading = store.read("done", "workspace").unwrap().unwrap();
     assert_eq!(reading.status, Status::Fail);
-    assert_eq!(reading.numbers["unmet"], 6.into());
+    assert_eq!(reading.numbers["unmet"], 7.into());
     assert_eq!(reading.numbers["crates"], 1.into());
     assert_eq!(reading.numbers["changed"], 1.into());
     assert!(
-        reading.message.starts_with("6 unmet since "),
+        reading.message.starts_with("7 unmet since "),
         "{}",
         reading.message
     );
@@ -933,6 +935,7 @@ fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
     for step in [
         "cargo fmt --check",
         "xtask clippy",
+        "xtask test",
         "xtask api-check",
         "xtask budget",
         "xtask unsafe-audit",

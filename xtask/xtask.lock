@@ -213,6 +213,8 @@ steer::Verdict
 steer::Verdict::additions
 steer::judge
 steer::run
+test::run
+test::run_staged
 ticket::Act
 ticket::BlockedBy
 ticket::Blocker

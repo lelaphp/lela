@@ -88,6 +88,10 @@ pub fn render(
             fold_uncreated(instrument(&readings, "witness"), "scope")?,
             INSTRUMENT,
         ),
+        Section::Test => (
+            fold_uncreated(instrument(&readings, crate::test::INSTRUMENT), "scope")?,
+            INSTRUMENT,
+        ),
         Section::Mutants => (
             fold_uncreated(instrument(&readings, "mutants"), "scope")?,
             INSTRUMENT,

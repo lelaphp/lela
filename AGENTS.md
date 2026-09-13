@@ -65,7 +65,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=12a88fd50bb04e06c16178c5910f7df89045b6f9c331808f8349a276a6be82a9 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=a1229c06d5230699920ccb84b27219a9756f2de25417d18cdad24076fc231a06 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -135,6 +135,7 @@ Commands:
   bench              Measure one bar under the measurement protocol: paired reps with the A/A control, the load average recorded, one reading per bar, and the exit 0 whatever the reading says
   budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code and a stale generated file
   clippy             `cargo clippy` with every warning denied, on every target of each crate, as the reading `done` reads; one reading per crate
+  test               `cargo test` on each crate, as the reading `done` reads; one reading per crate, with what passed, failed, was ignored and was filtered out in its numbers
   phpt               Run the pinned `.phpt` corpus through the engine and hold each test to its `--EXPECT*--` section; one reading per subset, scoped to the crate whose subset it is
   port-map           Join the Mahout census to `api.lock`: every item `same`, `renamed` or `gone`, the rows the port has not taken as the number. One reading, at the crate the lock lives with
   compile-identity   Compile a corpus under the oracle's dump recipe and under the engine, and hold every file to byte-identity; one reading per corpus, scoped to the corpus
@@ -150,7 +151,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=84e439ea595fa92e421b82ef2bd1a538c9b9436c1330deac2b9d189018aeb650 out=57e52fc9fe3cf572c10768a1c8fc92fa2d2563694fd3bea46fa5ec9771d68fbb -->
+<!-- /computed in=acf182a2611ad7d97aff0d172b82ede8270e57d707b45da2a93552c7d406a6ca out=0d4c9c5bc66e2cfa0fb54c57c2c79ccd20b5363086ea03228cd0c4c4627113a0 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

@@ -51,6 +51,7 @@ mod sources;
 pub mod status;
 pub mod steer;
 mod tally;
+pub mod test;
 pub mod ticket;
 pub mod track;
 pub mod track_new;
@@ -157,12 +158,10 @@ fn command_line() -> Result<()> {
         Command::Bench(ask) => bench_command(&root, &store, &ask),
         Command::Budget => record(&store, &budget::run(&root, &manifest)?),
         Command::Clippy { crates, staged } => {
-            let readings = if staged {
-                clippy::run_staged(&root, &manifest)?
-            } else {
-                clippy::run(&root, &manifest, &crates)?
-            };
-            record(&store, &readings)
+            clippy::command(&root, &manifest, &store, &crates, staged)
+        }
+        Command::Test { crates, staged } => {
+            test::command(&root, &manifest, &store, &crates, staged)
         }
         Command::Phpt {
             subset,

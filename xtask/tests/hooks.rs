@@ -275,6 +275,7 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
         [
             "fmt --check".to_owned(),
             "xtask clippy --staged".to_owned(),
+            "xtask test --staged".to_owned(),
             "xtask api-check".to_owned(),
             "xtask budget".to_owned(),
             "xtask unsafe-audit".to_owned(),

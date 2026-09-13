@@ -1,0 +1,236 @@
+//! `xtask test` (harness-design.md §4.5 condition 1, #191): the crate's
+//! own tests as a reading. The negative control is the fixture at
+//! `xtask/fixtures/test/failing`, one crate with two tests of which one
+//! fails; it is run through the instrument's library entry, through the
+//! binary, and then through `done` over a scratch repository, which is
+//! the reading the ticket is for: a crate with a failing test is not done.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use xtask::divergence::Registry;
+use xtask::done;
+use xtask::manifest::Manifest;
+use xtask::reading::{Number, Reading, Status, Store};
+use xtask::scratch::Tree;
+use xtask::test;
+
+fn workspace() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+}
+
+fn fixture() -> PathBuf {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/test/failing");
+    assert!(dir.is_dir(), "no fixture at {}", dir.display());
+    dir
+}
+
+fn int(reading: &Reading, key: &str) -> i64 {
+    match reading.numbers.get(key) {
+        Some(Number::Int(n)) => *n,
+        other => panic!("{key}: {other:?}"),
+    }
+}
+
+/// The fixture's one reading: `fail`, with the passed test and the failed
+/// one counted and the failed one named.
+fn the_failing_reading(readings: &[Reading]) -> &Reading {
+    assert_eq!(readings.len(), 1, "{readings:#?}");
+    let reading = &readings[0];
+    assert_eq!(reading.instrument, "test");
+    assert_eq!(reading.scope, "php_heap");
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert_eq!(int(reading, "passed"), 1, "{reading:#?}");
+    assert_eq!(int(reading, "failed"), 1, "{reading:#?}");
+    assert_eq!(int(reading, "ignored"), 0, "{reading:#?}");
+    assert_eq!(int(reading, "filtered"), 0, "{reading:#?}");
+    assert!(
+        reading.message.starts_with("php_heap: 1 test failed\n"),
+        "{}",
+        reading.message
+    );
+    assert!(
+        reading.message.contains("tests::one_is_two"),
+        "the failing test is named: {}",
+        reading.message
+    );
+    reading
+}
+
+#[test]
+fn a_crate_with_a_failing_test_reads_fail_with_the_passed_and_the_failed_counted() {
+    let root = fixture();
+    let manifest = Manifest::load(&root).unwrap();
+    let readings = test::run(&root, &manifest, &[]).unwrap();
+    the_failing_reading(&readings);
+    let _ = std::fs::remove_dir_all(root.join("target"));
+}
+
+#[test]
+fn the_binary_writes_the_reading_and_exits_nonzero_on_a_failure() {
+    let root = fixture();
+    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("--root")
+        .arg(&root)
+        .args(["test", "--crate", "php_heap"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "{stdout}");
+    assert!(
+        stdout.starts_with("fail test php_heap: php_heap: 1 test failed"),
+        "{stdout}"
+    );
+    let store = Store::of_workspace(&root);
+    let reading = store.read("test", "php_heap").unwrap().unwrap();
+    the_failing_reading(std::slice::from_ref(&reading));
+    let _ = std::fs::remove_dir_all(root.join("target"));
+}
+
+/// A crate the manifest does not name is refused before anything runs.
+#[test]
+fn a_crate_the_manifest_does_not_name_is_refused() {
+    let root = fixture();
+    let manifest = Manifest::load(&root).unwrap();
+    let err = test::run(&root, &manifest, &["php_engine".to_owned()]).unwrap_err();
+    assert!(
+        err.to_string().contains("no crate named \"php_engine\""),
+        "{err}"
+    );
+}
+
+fn sh(root: &Path, args: &[&str]) {
+    let out = Command::new(args[0])
+        .args(&args[1..])
+        .current_dir(root)
+        .env("GIT_AUTHOR_NAME", "x")
+        .env("GIT_AUTHOR_EMAIL", "x@x")
+        .env("GIT_COMMITTER_NAME", "x")
+        .env("GIT_COMMITTER_EMAIL", "x@x")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The fixture as a scratch repository with the tracked pin and registry
+/// beside its own manifest, committed once, so an edit of the crate after
+/// is the diff `done` judges with `--base HEAD`.
+fn repository() -> Tree {
+    let root = Tree::new("test-done").unwrap();
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    std::fs::create_dir_all(root.join("crates/php_heap/src")).unwrap();
+    std::fs::copy(workspace().join("oracle.toml"), root.join("oracle.toml")).unwrap();
+    std::fs::copy(
+        workspace().join("docs/divergence.toml"),
+        root.join("docs/divergence.toml"),
+    )
+    .unwrap();
+    let fixture = fixture();
+    for file in [
+        "seams.toml",
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/php_heap/Cargo.toml",
+        "crates/php_heap/src/lib.rs",
+    ] {
+        std::fs::copy(fixture.join(file), root.join(file)).unwrap();
+    }
+    // The fixture's pin is by a path relative to the fixture; here the
+    // pin stands beside the manifest.
+    let manifest = std::fs::read_to_string(root.join("seams.toml")).unwrap();
+    std::fs::write(
+        root.join("seams.toml"),
+        manifest.replace("../../../../oracle.toml", "oracle.toml"),
+    )
+    .unwrap();
+    std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
+    sh(&root, &["git", "init", "-q", "-b", "main"]);
+    sh(&root, &["git", "add", "-A"]);
+    sh(
+        &root,
+        &[
+            "git",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "scratch",
+        ],
+    );
+    root
+}
+
+/// The reading `done` reads: over a crate whose tests do not all pass,
+/// with every other reading condition 1 asks fresh and passing, the one
+/// unmet condition is the `test` reading, with the instrument's message.
+/// Fixing the test and measuring again clears it.
+#[test]
+fn done_is_red_for_a_crate_with_a_failing_test_and_green_once_it_passes() {
+    let root = repository();
+    let lib = root.join("crates/php_heap/src/lib.rs");
+    let text = std::fs::read_to_string(&lib).unwrap();
+    // A change, so the crate is in the diff.
+    std::fs::write(
+        &lib,
+        format!("{text}\n/// Changed.\npub fn two() -> u8 {{ 2 }}\n"),
+    )
+    .unwrap();
+
+    let manifest = Manifest::load(&root).unwrap();
+    let registry = Registry::load(&root).unwrap();
+    let store = Store::of_workspace(&root);
+    let judge = || done::judge(&root, &manifest, &registry, &store, Some("HEAD")).unwrap();
+    let fresh_rest = || {
+        for instrument in done::FRESH {
+            if instrument == "test" || instrument == "phpt" || instrument == "port-map" {
+                continue;
+            }
+            let mut reading = Reading::for_scope(instrument, "php_heap", &manifest, &root).unwrap();
+            reading.status = Status::Pass;
+            reading.message = "php_heap: measured".to_owned();
+            store.record(&[reading]).unwrap();
+        }
+    };
+
+    fresh_rest();
+    let readings = test::run(&root, &manifest, &[]).unwrap();
+    the_failing_reading(&readings);
+    store.record(&readings).unwrap();
+    let verdict = judge();
+    assert_eq!(verdict.crates, ["php_heap"], "{verdict:#?}");
+    assert_eq!(verdict.unmet.len(), 1, "{verdict:#?}");
+    assert!(
+        verdict.unmet[0].starts_with("test: php_heap fail: php_heap: 1 test failed"),
+        "{verdict:#?}"
+    );
+
+    // The test is fixed; the readings are stale until measured again, and
+    // measured again the crate is done.
+    let text = std::fs::read_to_string(&lib).unwrap();
+    std::fs::write(
+        &lib,
+        text.replace("assert_eq!(super::one(), 2", "assert_eq!(super::one(), 1"),
+    )
+    .unwrap();
+    let verdict = judge();
+    assert!(
+        verdict.unmet.contains(
+            &"test: the reading for php_heap is stale; php_heap changed since it was taken"
+                .to_owned()
+        ),
+        "{verdict:#?}"
+    );
+    fresh_rest();
+    let readings = test::run(&root, &manifest, &[]).unwrap();
+    assert_eq!(readings[0].status, Status::Pass, "{readings:#?}");
+    assert_eq!(int(&readings[0], "passed"), 2, "{readings:#?}");
+    assert_eq!(readings[0].message, "php_heap: 2 tests passed");
+    store.record(&readings).unwrap();
+    let verdict = judge();
+    assert!(verdict.met(), "{verdict:#?}");
+}
