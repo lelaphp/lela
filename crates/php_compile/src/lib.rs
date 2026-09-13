@@ -171,8 +171,8 @@ mod tests {
                 7,
                 0,
                 2,
-                "0000 INIT_FCALL 1 0 string(\"var_dump\")\n\
-                 0001 INIT_FCALL 1 0 string(\"extension_loaded\")\n\
+                "0000 INIT_FCALL 1 96 string(\"var_dump\")\n\
+                 0001 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
                  0002 SEND_VAL string(\"demo\") 1\n\
                  0003 DO_ICALL\n\
                  0004 SEND_VAR V0 1\n\
@@ -182,6 +182,11 @@ mod tests {
             "php's, but for the `V0 = ` php opens the inner call with (design §5.7)"
         );
         assert_eq!(unit.main.oplines[0].extended_value, 1, "one argument");
+        assert_eq!(
+            unit.main.oplines[0].op1, 96,
+            "zend_vm_calc_used_stack: five header slots and one argument, sixteen bytes each"
+        );
+        assert_eq!(unit.main.oplines[1].op1, 96);
         assert_eq!(unit.main.cache_size, 2, "one cache slot per INIT_FCALL");
         assert_eq!(
             unit.main.num_tmps, 2,
@@ -367,7 +372,7 @@ mod tests {
                 6,
                 0,
                 2,
-                "0000 INIT_FCALL 1 0 string(\"extension_loaded\")\n\
+                "0000 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
                  0001 SEND_VAL string(\"Core\") 1\n\
                  0002 DO_ICALL\n\
                  0003 ADD int(1) V0\n\
@@ -462,7 +467,7 @@ mod tests {
                 6,
                 0,
                 2,
-                "0000 INIT_FCALL 1 0 string(\"extension_loaded\")\n\
+                "0000 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
                  0001 SEND_VAL string(\"Core\") 1\n\
                  0002 DO_ICALL\n\
                  0003 MUL V0 int(-1)\n\
@@ -542,7 +547,7 @@ mod tests {
                     0,
                     2,
                     &format!(
-                        "0000 INIT_FCALL 1 0 string(\"extension_loaded\")\n\
+                        "0000 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
                          0001 SEND_VAL string(\"Core\") 1\n\
                          0002 DO_ICALL\n\
                          0003 {opcode} {left} V0\n\
@@ -598,7 +603,7 @@ mod tests {
                 6,
                 0,
                 2,
-                "0000 INIT_FCALL 1 0 string(\"extension_loaded\")\n\
+                "0000 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
                  0001 SEND_VAL string(\"Core\") 1\n\
                  0002 DO_ICALL\n\
                  0003 SL int(1) V0\n\
@@ -743,7 +748,7 @@ mod tests {
                 6,
                 0,
                 1,
-                "0000 INIT_FCALL 1 0 string(\"set_time_limit\")\n\
+                "0000 INIT_FCALL 1 96 string(\"set_time_limit\")\n\
                  0001 SEND_VAL int(1) 1\n\
                  0002 DO_ICALL\n\
                  0003 JMP 0004\n\
@@ -794,18 +799,18 @@ mod tests {
                 16,
                 0,
                 4,
-                "0000 INIT_FCALL 1 0 string(\"extension_loaded\")\n\
+                "0000 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
                  0001 SEND_VAL string(\"i\") 1\n\
                  0002 DO_ICALL\n\
                  0003 JMP 0008\n\
                  0004 ECHO string(\"body\")\n\
-                 0005 INIT_FCALL 1 0 string(\"extension_loaded\")\n\
+                 0005 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
                  0006 SEND_VAL string(\"s\") 1\n\
                  0007 DO_ICALL\n\
-                 0008 INIT_FCALL 1 0 string(\"extension_loaded\")\n\
+                 0008 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
                  0009 SEND_VAL string(\"a\") 1\n\
                  0010 DO_ICALL\n\
-                 0011 INIT_FCALL 1 0 string(\"extension_loaded\")\n\
+                 0011 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
                  0012 SEND_VAL string(\"b\") 1\n\
                  0013 DO_ICALL\n\
                  0014 JMPNZ V3 0004\n\
@@ -834,7 +839,7 @@ mod tests {
              \x20    ; (before optimizer)\n     ; :1-4\n     ; return  [] RANGE[0..0]\n\
              0000 JMP 0002\n\
              0001 ECHO int(1)\n\
-             0002 INIT_FCALL 1 0 string(\"extension_loaded\")\n\
+             0002 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
              0003 SEND_VAL string(\"a\") 1\n\
              0004 DO_ICALL\n\
              0005 JMPNZ V0 0001\n\

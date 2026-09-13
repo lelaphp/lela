@@ -580,6 +580,7 @@ impl Emit<'_> {
         let slot = self.cache_slot();
         self.push(Opline {
             opcode: Opcode::InitFcall,
+            op1: used_stack(count),
             op2_type: OperandKind::Const,
             op2: lowered,
             out: slot,
@@ -629,6 +630,23 @@ impl Emit<'_> {
             ..Opline::default()
         });
     }
+}
+
+/// `zend_vm_calc_used_stack` for a native callee, the number
+/// `zend_compile_call_common` writes into an `INIT_FCALL`'s `op1`
+/// (`Z/Zend/zend_compile.c:3983`): the frame header's slots
+/// (`ZEND_CALL_FRAME_SLOT`, five zvals on a 64-bit build), one slot per
+/// argument, and the callee's temporaries, of which a native has none
+/// while nothing observes it (`Z/Zend/zend_API.c:2988-2995`), in bytes.
+/// php's own VM sizes its stack by this number; here it is what the
+/// dump prints, `INIT_FCALL 1 96 string("set_time_limit")`, and the
+/// engine's stack is sized by the engine.
+fn used_stack(arguments: u32) -> u32 {
+    const CALL_FRAME_SLOT: u32 = 5;
+    let zval = u32::try_from(std::mem::size_of::<Zval>()).unwrap_or(16);
+    CALL_FRAME_SLOT
+        .saturating_add(arguments)
+        .saturating_mul(zval)
 }
 
 /// `zend_try_ct_eval_const`: php substitutes a persistent constant's
