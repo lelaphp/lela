@@ -191,12 +191,12 @@ mod tests {
                 "0000 INIT_FCALL 1 96 string(\"var_dump\")\n\
                  0001 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
                  0002 SEND_VAL string(\"demo\") 1\n\
-                 0003 DO_ICALL\n\
+                 0003 V0 = DO_ICALL\n\
                  0004 SEND_VAR V0 1\n\
                  0005 DO_ICALL\n\
                  0006 RETURN int(1)\n"
             ),
-            "php's, but for the `V0 = ` php opens the inner call with (design §5.7)"
+            "php's, the inner call's `V0 = ` and the outer's bare"
         );
         assert_eq!(unit.main.oplines[0].extended_value, 1, "one argument");
         assert_eq!(
@@ -439,8 +439,8 @@ mod tests {
                 2,
                 "0000 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
                  0001 SEND_VAL string(\"Core\") 1\n\
-                 0002 DO_ICALL\n\
-                 0003 ADD int(1) V0\n\
+                 0002 V0 = DO_ICALL\n\
+                 0003 T1 = ADD int(1) V0\n\
                  0004 ECHO T1\n\
                  0005 RETURN int(1)\n"
             ),
@@ -470,7 +470,7 @@ mod tests {
                     3,
                     0,
                     1,
-                    &format!("0000 ADD {left} {right}\n0001 ECHO T0\n0002 RETURN int(1)\n")
+                    &format!("0000 T0 = ADD {left} {right}\n0001 ECHO T0\n0002 RETURN int(1)\n")
                 ),
                 "{}",
                 String::from_utf8_lossy(source)
@@ -496,7 +496,7 @@ mod tests {
                     3,
                     0,
                     1,
-                    &format!("0000 DIV int(2) {divisor}\n0001 ECHO T0\n0002 RETURN int(1)\n")
+                    &format!("0000 T0 = DIV int(2) {divisor}\n0001 ECHO T0\n0002 RETURN int(1)\n")
                 ),
                 "{}",
                 String::from_utf8_lossy(source)
@@ -510,7 +510,7 @@ mod tests {
                 3,
                 0,
                 1,
-                "0000 MUL string(\"1abc\") int(-1)\n0001 ECHO T0\n0002 RETURN int(1)\n"
+                "0000 T0 = MUL string(\"1abc\") int(-1)\n0001 ECHO T0\n0002 RETURN int(1)\n"
             )
         );
         // `zend_binary_op_produces_error`: the division php refuses to
@@ -521,7 +521,7 @@ mod tests {
                 3,
                 0,
                 1,
-                "0000 DIV int(1) int(0)\n0001 ECHO T0\n0002 RETURN int(1)\n"
+                "0000 T0 = DIV int(1) int(0)\n0001 ECHO T0\n0002 RETURN int(1)\n"
             )
         );
         // `zend_compile_unary_pm`: the multiplication by -1 php emits
@@ -534,8 +534,8 @@ mod tests {
                 2,
                 "0000 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
                  0001 SEND_VAL string(\"Core\") 1\n\
-                 0002 DO_ICALL\n\
-                 0003 MUL V0 int(-1)\n\
+                 0002 V0 = DO_ICALL\n\
+                 0003 T1 = MUL V0 int(-1)\n\
                  0004 ECHO T1\n\
                  0005 RETURN int(1)\n"
             )
@@ -568,7 +568,7 @@ mod tests {
                     3,
                     0,
                     1,
-                    &format!("0000 MOD {left} {right}\n0001 ECHO T0\n0002 RETURN int(1)\n")
+                    &format!("0000 T0 = MOD {left} {right}\n0001 ECHO T0\n0002 RETURN int(1)\n")
                 ),
                 "{}",
                 String::from_utf8_lossy(source)
@@ -585,7 +585,7 @@ mod tests {
                     3,
                     0,
                     1,
-                    &format!("0000 POW {base} int(-1)\n0001 ECHO T0\n0002 RETURN int(1)\n")
+                    &format!("0000 T0 = POW {base} int(-1)\n0001 ECHO T0\n0002 RETURN int(1)\n")
                 ),
                 "{}",
                 String::from_utf8_lossy(source)
@@ -614,8 +614,8 @@ mod tests {
                     &format!(
                         "0000 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
                          0001 SEND_VAL string(\"Core\") 1\n\
-                         0002 DO_ICALL\n\
-                         0003 {opcode} {left} V0\n\
+                         0002 V0 = DO_ICALL\n\
+                         0003 T1 = {opcode} {left} V0\n\
                          0004 ECHO T1\n\
                          0005 RETURN int(1)\n"
                     )
@@ -656,7 +656,9 @@ mod tests {
                     3,
                     0,
                     1,
-                    &format!("0000 {opcode} {left} {right}\n0001 ECHO T0\n0002 RETURN int(1)\n")
+                    &format!(
+                        "0000 T0 = {opcode} {left} {right}\n0001 ECHO T0\n0002 RETURN int(1)\n"
+                    )
                 ),
                 "{}",
                 String::from_utf8_lossy(source)
@@ -670,8 +672,8 @@ mod tests {
                 2,
                 "0000 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
                  0001 SEND_VAL string(\"Core\") 1\n\
-                 0002 DO_ICALL\n\
-                 0003 SL int(1) V0\n\
+                 0002 V0 = DO_ICALL\n\
+                 0003 T1 = SL int(1) V0\n\
                  0004 ECHO T1\n\
                  0005 RETURN int(1)\n"
             )
@@ -761,13 +763,13 @@ mod tests {
                 1,
                 5,
                 "0000 ASSIGN CV0($a) int(1)\n\
-                 0001 CONCAT string(\"2\") CV0($a)\n\
+                 0001 T2 = CONCAT string(\"2\") CV0($a)\n\
                  0002 ECHO T2\n\
-                 0003 CONCAT CV0($a) string(\"2.5\")\n\
+                 0003 T3 = CONCAT CV0($a) string(\"2.5\")\n\
                  0004 ECHO T3\n\
-                 0005 CONCAT string(\"ab\") CV0($a)\n\
+                 0005 T4 = CONCAT string(\"ab\") CV0($a)\n\
                  0006 ECHO T4\n\
-                 0007 CONCAT float(nan) CV0($a)\n\
+                 0007 T5 = CONCAT float(nan) CV0($a)\n\
                  0008 ECHO T5\n\
                  0009 RETURN int(1)\n"
             ),
@@ -877,7 +879,7 @@ mod tests {
                  0010 DO_ICALL\n\
                  0011 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
                  0012 SEND_VAL string(\"b\") 1\n\
-                 0013 DO_ICALL\n\
+                 0013 V3 = DO_ICALL\n\
                  0014 JMPNZ V3 0004\n\
                  0015 RETURN int(1)\n"
             )
@@ -893,8 +895,7 @@ mod tests {
     /// `php_heap::Str::bytes` is, under the dump recipe: the `$i++` in
     /// the step is `PRE_INC` with its temporary unread, which is
     /// `zend_do_free`'s conversion, and the condition is `IS_SMALLER`
-    /// into the temporary the `JMPNZ` tests. The oracle prints `T3 = `
-    /// before the `IS_SMALLER`, the `result_type` #227 brings.
+    /// into the temporary the `JMPNZ` tests, `T3 = ` before it.
     #[test]
     fn php_s_own_for_loop_is_an_is_smaller_and_a_pre_inc() {
         let (unit, _strings) =
@@ -909,7 +910,7 @@ mod tests {
                  0001 JMP 0004\n\
                  0002 ECHO string(\"dax\")\n\
                  0003 PRE_INC CV0($i)\n\
-                 0004 IS_SMALLER CV0($i) int(1000)\n\
+                 0004 T3 = IS_SMALLER CV0($i) int(1000)\n\
                  0005 JMPNZ T3 0002\n\
                  0006 RETURN int(1)\n"
             )
@@ -937,13 +938,13 @@ mod tests {
                 16,
                 1,
                 4,
-                "0000 IS_SMALLER CV0($a) int(2)\n\
+                "0000 T1 = IS_SMALLER CV0($a) int(2)\n\
                  0001 ECHO T1\n\
-                 0002 IS_SMALLER int(1) CV0($a)\n\
+                 0002 T2 = IS_SMALLER int(1) CV0($a)\n\
                  0003 ECHO T2\n\
-                 0004 POST_INC CV0($a)\n\
+                 0004 T3 = POST_INC CV0($a)\n\
                  0005 ECHO T3\n\
-                 0006 PRE_INC CV0($a)\n\
+                 0006 T4 = PRE_INC CV0($a)\n\
                  0007 ECHO T4\n\
                  0008 ECHO bool(true)\n\
                  0009 ECHO bool(true)\n\
@@ -973,7 +974,7 @@ mod tests {
                 10,
                 "0000 PRE_INC CV0($a)\n\
                  0001 PRE_INC CV0($a)\n\
-                 0002 POST_INC CV0($a)\n\
+                 0002 T4 = POST_INC CV0($a)\n\
                  0003 ASSIGN CV1($b) T4\n\
                  0004 PRE_INC CV0($a)\n\
                  0005 PRE_INC CV1($b)\n\
@@ -981,7 +982,7 @@ mod tests {
                  0007 PRE_INC CV0($a)\n\
                  0008 PRE_INC CV0($a)\n\
                  0009 PRE_INC CV0($a)\n\
-                 0010 IS_SMALLER CV0($a) int(1)\n\
+                 0010 T11 = IS_SMALLER CV0($a) int(1)\n\
                  0011 JMPNZ T11 0007\n\
                  0012 RETURN int(1)\n"
             )
@@ -1005,7 +1006,7 @@ mod tests {
              0001 ECHO int(1)\n\
              0002 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
              0003 SEND_VAL string(\"a\") 1\n\
-             0004 DO_ICALL\n\
+             0004 V0 = DO_ICALL\n\
              0005 JMPNZ V0 0001\n\
              0006 RETURN int(1)\n"
         );
@@ -1077,6 +1078,79 @@ mod tests {
                 (Opcode::Assign, Cv, 2, Tmp, 3, 4),
                 (Opcode::Return, Const, 0, Unused, 0, 1),
             ]
+        );
+    }
+
+    /// `zend_do_free` over the oracle's dump of `$a = 1; $a + 1;
+    /// str_repeat("a", 3) . "b"; extension_loaded('Core'); $a++;`,
+    /// `vars=1, tmps=6`:
+    ///
+    /// ```text
+    /// 0000 ASSIGN CV0($a) int(1)
+    /// 0001 T2 = ADD CV0($a) int(1)
+    /// 0002 FREE T2
+    /// 0003 INIT_FCALL 2 112 string("str_repeat")
+    /// 0004 SEND_VAL string("a") 1
+    /// 0005 SEND_VAL int(3) 2
+    /// 0006 V3 = DO_ICALL
+    /// 0007 T4 = CONCAT V3 string("b")
+    /// 0008 FREE T4
+    /// 0009 INIT_FCALL 1 96 string("extension_loaded")
+    /// 0010 SEND_VAL string("Core") 1
+    /// 0011 DO_ICALL
+    /// 0012 PRE_INC CV0($a)
+    /// 0013 RETURN int(1)
+    /// ```
+    ///
+    /// The `ASSIGN`, the call and the `PRE_INC` are marked `UNUSED` in
+    /// `out_type` and keep their numbers; the `ADD` and the `CONCAT`,
+    /// which php does not mark, are followed by a `FREE` of their
+    /// temporary.
+    #[test]
+    fn zend_do_free_marks_an_assign_a_call_and_a_pre_inc_and_frees_the_rest() {
+        use OperandKind::{Tmp, Unused, Var};
+        let (unit, _strings) = unit_and_strings(
+            b"<?php $a = 1; $a + 1; str_repeat(\"a\", 3) . \"b\"; extension_loaded('Core'); $a++;",
+        );
+        assert_eq!(
+            unit.dump(),
+            main_dump(
+                14,
+                1,
+                6,
+                "0000 ASSIGN CV0($a) int(1)\n\
+                 0001 T2 = ADD CV0($a) int(1)\n\
+                 0002 FREE T2\n\
+                 0003 INIT_FCALL 2 112 string(\"str_repeat\")\n\
+                 0004 SEND_VAL string(\"a\") 1\n\
+                 0005 SEND_VAL int(3) 2\n\
+                 0006 V3 = DO_ICALL\n\
+                 0007 T4 = CONCAT V3 string(\"b\")\n\
+                 0008 FREE T4\n\
+                 0009 INIT_FCALL 1 96 string(\"extension_loaded\")\n\
+                 0010 SEND_VAL string(\"Core\") 1\n\
+                 0011 DO_ICALL\n\
+                 0012 PRE_INC CV0($a)\n\
+                 0013 RETURN int(1)\n"
+            )
+        );
+        let marks: Vec<_> = unit
+            .main
+            .oplines
+            .iter()
+            .map(|op| (op.opcode, op.out_type, op.out))
+            .collect();
+        assert_eq!(marks[0], (Opcode::Assign, Unused, 0), "numbered, unread");
+        assert_eq!(marks[1], (Opcode::Add, Tmp, 1));
+        assert_eq!(marks[2], (Opcode::Free, Unused, 0));
+        assert_eq!(unit.main.oplines[2].op1_type, Tmp);
+        assert_eq!(unit.main.oplines[2].op1, 1, "the ADD's temporary");
+        assert_eq!(marks[6], (Opcode::DoIcall, Var, 2));
+        assert_eq!(marks[11], (Opcode::DoIcall, Unused, 4), "numbered, unread");
+        assert_eq!(marks[12], (Opcode::PreInc, Unused, 5), "numbered, unread");
+        assert_eq!(
+            unit.main.oplines[13].out_type, Unused,
+            "a site keeps its number bare"
         );
     }
 

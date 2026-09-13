@@ -13,8 +13,9 @@
 //! writes a CV, the arithmetic `ZEND_ADD`, `ZEND_SUB`, `ZEND_MUL`,
 //! `ZEND_DIV`, `ZEND_MOD`, `ZEND_POW`, `ZEND_SL` and `ZEND_SR` and the
 //! `ZEND_CONCAT` that php emits for what its compiler does not fold,
-//! `ZEND_IS_SMALLER`, which a loop's condition is, and `ZEND_PRE_INC` and
-//! `ZEND_POST_INC`, which step a CV in place.
+//! `ZEND_IS_SMALLER`, which a loop's condition is, `ZEND_PRE_INC` and
+//! `ZEND_POST_INC`, which step a CV in place, and `ZEND_FREE`, which
+//! gives up a temporary nothing reads.
 
 // Every handler is generic over the tier and hands back the same edge, so
 // the generated dispatch calls them all the same way; the ones that raise a
@@ -36,6 +37,28 @@ pub(crate) type Edge = Result<Stepped, Fatal>;
 
 /// `ZEND_NOP`: nothing, and on to the opline after it.
 pub(crate) fn nop<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, _: &Opline) -> Edge {
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_FREE`: a temporary nothing reads, given up where it stands
+/// (`FREE_OP1`). `zend_do_free` emits one after an opline it cannot
+/// mark `UNUSED`, so `$a + 1;` as a statement is an `ADD` and a `FREE`
+/// of its temporary, and what an operator built is given back to the
+/// heap on the opline after it, as php gives it back.
+///
+/// ```php
+/// $b = memory_get_usage(); str_repeat("a", 3000) . "b"; var_dump(memory_get_usage() - $b);
+/// ```
+/// ```expect
+/// int(0)
+/// ```
+pub(crate) fn free<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
     Ok(advance(req, frame))
 }
 

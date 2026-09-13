@@ -29,7 +29,12 @@
 //! (`zend_compile_pre_incdec`, `zend_compile_post_incdec`), and a
 //! `POST_INC` whose value nothing reads becomes the `PRE_INC` php's
 //! `zend_do_free` turns it into, so `$i++` as a loop's step is php's
-//! `PRE_INC CV0($i)`.
+//! `PRE_INC CV0($i)`. What an opline leaves is written in its
+//! `out_type` as `zend_emit_op` and `zend_emit_op_tmp` write
+//! `result_type`, `VAR` for what a call returns and `TMP` for what an
+//! operator or an assignment leaves; a value nothing reads is
+//! `zend_do_free`'s: the mark `UNUSED` on the opline that left it where
+//! php sets one, and a `FREE` otherwise.
 //!
 //! A loop is emitted as `zend_compile_for` and `zend_compile_while` emit
 //! one: a `JMP` forward over the body to the condition, and the condition
@@ -302,23 +307,124 @@ impl Emit<'_> {
         Ok(last)
     }
 
-    /// `zend_do_free` over a value nothing reads: a `POST_INC` that left
-    /// it becomes the `PRE_INC` php converts it to, "convert $i++ to
-    /// ++$i", which is the opline php's dump prints for `$i++` as a
-    /// statement or a loop's step. The mark php sets on the temporary of
-    /// that and of an `ASSIGN`, and the `FREE` it emits for any other
-    /// temporary, wait on the `result_type` the [`Opline`] has no field
-    /// for (design §5.7, #227).
+    /// `zend_do_free` over a value nothing reads (`Z/Zend/zend_compile.c:755`).
+    /// A temporary: when the last opline is the one that left it, a
+    /// `BOOL` or `BOOL_NOT` needs no freeing; a `POST_INC` or `POST_DEC`
+    /// becomes the `PRE_*` php converts it to, "convert $i++ to ++$i",
+    /// with its `result` marked `UNUSED`, which is the opline php's dump
+    /// prints for `$i++` as a statement or a loop's step; an `ASSIGN*`
+    /// or a `PRE_*` has its `result` marked `UNUSED`; any other
+    /// temporary is freed by a `FREE`. What a call returned, a `VAR`:
+    /// when the last opline is the call that left it, its `result` is
+    /// marked `UNUSED`, and a `FETCH_THIS` becomes a `NOP`; a frameless
+    /// call is freed by a `FREE` always. Otherwise the oplines are walked
+    /// back to the one that left it, and only a `NEW`'s value, or one a
+    /// `FETCH_LIST_*` read, is freed. A constant and a CV are nobody's to
+    /// free. `SET_UNUSED` is the kind alone here: the number php
+    /// overwrites with -1 is read by nothing once the kind is `UNUSED`.
+    ///
+    /// php steps back over `END_SILENCE`, `EXT_FCALL_END` and `OP_DATA`
+    /// to reach the opline that left the value; none of the three is
+    /// emitted here, so the last opline is the one.
     fn do_free(&mut self, value: Where) {
-        let Where::Temporary(at) = value else {
-            return;
-        };
-        if let Some(last) = self.oplines.last_mut()
-            && last.opcode == Opcode::PostInc
-            && last.out == at
-        {
-            last.opcode = Opcode::PreInc;
+        match value {
+            Where::Temporary(at) => {
+                if let Some(last) = self.oplines.last_mut()
+                    && last.out_type == OperandKind::Tmp
+                    && last.out == at
+                {
+                    match last.opcode {
+                        Opcode::Bool | Opcode::BoolNot => return,
+                        Opcode::PostInc | Opcode::PostDec => {
+                            last.opcode = if last.opcode == Opcode::PostInc {
+                                Opcode::PreInc
+                            } else {
+                                Opcode::PreDec
+                            };
+                            last.out_type = OperandKind::Unused;
+                            return;
+                        }
+                        Opcode::PostIncStaticProp
+                        | Opcode::PostDecStaticProp
+                        | Opcode::PostIncObj
+                        | Opcode::PostDecObj => {
+                            last.opcode = match last.opcode {
+                                Opcode::PostIncStaticProp => Opcode::PreIncStaticProp,
+                                Opcode::PostDecStaticProp => Opcode::PreDecStaticProp,
+                                Opcode::PostIncObj => Opcode::PreIncObj,
+                                _ => Opcode::PreDecObj,
+                            };
+                            last.out_type = OperandKind::Unused;
+                            return;
+                        }
+                        Opcode::Assign
+                        | Opcode::AssignDim
+                        | Opcode::AssignObj
+                        | Opcode::AssignStaticProp
+                        | Opcode::AssignOp
+                        | Opcode::AssignDimOp
+                        | Opcode::AssignObjOp
+                        | Opcode::AssignStaticPropOp
+                        | Opcode::PreIncStaticProp
+                        | Opcode::PreDecStaticProp
+                        | Opcode::PreIncObj
+                        | Opcode::PreDecObj
+                        | Opcode::PreInc
+                        | Opcode::PreDec => {
+                            last.out_type = OperandKind::Unused;
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+                self.free(OperandKind::Tmp, at);
+            }
+            Where::Returned(at) => {
+                let Some(last) = self.oplines.last_mut() else {
+                    return;
+                };
+                if last.out_type == OperandKind::Var && last.out == at {
+                    if last.opcode == Opcode::FetchThis {
+                        last.opcode = Opcode::Nop;
+                    }
+                    if frameless_icall(last.opcode) {
+                        self.free(OperandKind::Var, at);
+                    } else {
+                        last.out_type = OperandKind::Unused;
+                    }
+                    return;
+                }
+                for opline in self.oplines.iter().rev() {
+                    if matches!(
+                        opline.opcode,
+                        Opcode::FetchListR | Opcode::FetchListW | Opcode::ExtStmt
+                    ) && opline.op1_type == OperandKind::Var
+                        && opline.op1 == at
+                    {
+                        self.free(OperandKind::Var, at);
+                        return;
+                    }
+                    if opline.out_type == OperandKind::Var && opline.out == at {
+                        if opline.opcode == Opcode::New {
+                            self.free(OperandKind::Var, at);
+                        }
+                        return;
+                    }
+                }
+            }
+            Where::Constant(_) | Where::Cv(_) => {}
         }
+    }
+
+    /// `zend_emit_op(NULL, ZEND_FREE, op1, NULL)`: the temporary or the
+    /// `VAR` freed where it stands.
+    fn free(&mut self, kind: OperandKind, at: u32) {
+        self.push(Opline {
+            opcode: Opcode::Free,
+            op1_type: kind,
+            op1: at,
+            ..Opline::default()
+        });
     }
 
     /// `zend_emit_cond_jump(ZEND_JMPNZ, ...)`: the condition tested and
@@ -393,6 +499,7 @@ impl Emit<'_> {
             opcode,
             op1_type: OperandKind::Cv,
             op1: cv,
+            out_type: OperandKind::Tmp,
             out,
             ..Opline::default()
         });
@@ -402,9 +509,10 @@ impl Emit<'_> {
     /// `zend_compile_assign`, the `ZEND_AST_VAR` arm: the variable's CV
     /// looked up first (`zend_delayed_compile_var`, which delays nothing
     /// for a plain CV), then the value, then `ASSIGN` into a temporary
-    /// (`zend_emit_op_tmp`). php marks the temporary unused when nothing
-    /// reads it (`zend_do_free`) and still numbers it; the [`Opline`] has
-    /// no field for the mark (design §5.7), so the engine writes it always.
+    /// (`zend_emit_op_tmp`). The temporary is numbered whether or not
+    /// anything reads it; [`Self::do_free`] marks it `UNUSED` when
+    /// nothing does, which is what the engine's `ASSIGN` reads as
+    /// `RETURN_VALUE_USED`.
     fn assign(&mut self, var: &[u8], value: &Expr) -> Result<Where, CompileError> {
         let cv = self.lookup_cv(var);
         let value = self.expr(value)?;
@@ -416,6 +524,7 @@ impl Emit<'_> {
             op1: cv,
             op2_type,
             op2,
+            out_type: OperandKind::Tmp,
             out,
             ..Opline::default()
         });
@@ -569,6 +678,7 @@ impl Emit<'_> {
             op1,
             op2_type,
             op2,
+            out_type: OperandKind::Tmp,
             out,
             ..Opline::default()
         });
@@ -661,10 +771,11 @@ impl Emit<'_> {
     /// `INIT_FCALL_BY_NAME` and `DO_UCALL` comes with the engine's
     /// declarations.
     ///
-    /// Every call is given a temporary for what it returns. php leaves
-    /// the field unused on a call nothing reads, and an [`Opline`] has
-    /// nowhere to say so: the design's twenty-four bytes carry
-    /// `op1_type` and `op2_type` and no third (design §5.7).
+    /// Every call is given a `VAR` for what it returns (`zend_emit_op`
+    /// with a `result`, `zend_make_var_result`), numbered whether or not
+    /// anything reads it; [`Self::do_free`] marks it `UNUSED` when
+    /// nothing does, which is what the engine's `DO_ICALL` reads as
+    /// `RETURN_VALUE_USED`.
     fn call(&mut self, name: &[u8], arguments: &[Expr]) -> Result<Where, CompileError> {
         let lowered = unqualified(name);
         if let Some(folded) = self.special(&lowered, arguments)? {
@@ -705,6 +816,7 @@ impl Emit<'_> {
         let out = self.temporary();
         self.push(Opline {
             opcode: Opcode::DoIcall,
+            out_type: OperandKind::Var,
             out,
             ..Opline::default()
         });
@@ -743,6 +855,18 @@ fn used_stack(arguments: u32) -> u32 {
     CALL_FRAME_SLOT
         .saturating_add(arguments)
         .saturating_mul(zval)
+}
+
+/// `ZEND_OP_IS_FRAMELESS_ICALL`: the four opcodes `zend_compile_frameless_icall`
+/// emits, whose value `zend_do_free` frees by a `FREE` always.
+fn frameless_icall(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::FramelessIcall0
+            | Opcode::FramelessIcall1
+            | Opcode::FramelessIcall2
+            | Opcode::FramelessIcall3
+    )
 }
 
 impl Emit<'_> {
