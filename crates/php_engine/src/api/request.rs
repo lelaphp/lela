@@ -1250,6 +1250,14 @@ impl Request {
 
     // -------------------------------------------------- memory and gc
 
+    /// The request's own memory, for the compilation whose unit is this
+    /// request's alone (design §5.2): what a host handed the source for,
+    /// an `eval` and an uncached include, whose constant strings are
+    /// interned here and are gone when the request ends.
+    pub(crate) fn heap_mut(&mut self) -> &mut Heap {
+        &mut self.heap
+    }
+
     /// `memory_get_usage()`.
     #[must_use]
     pub fn memory_usage(&self, real: bool) -> usize {

@@ -13,15 +13,21 @@
 //! arithmetic opcode yet, so what php would leave to one is a
 //! [`CompileError`] rather than something else compiled in its place.
 
-use php_heap::{Str, Zval};
+use php_heap::{Fatal, Intern, Zval};
 use php_unit::decl::Name;
 use php_unit::{OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use crate::CompileError;
 use crate::read::{BinaryOp, Expr, Read, Stmt};
 
-/// One op array under construction.
-pub(crate) struct Emit {
+/// One op array under construction, and the home its constant strings
+/// are interned into (design §5.2): the engine's table when the unit is
+/// bound for the unit cache, the request's own otherwise, and the
+/// compiler never learns which (`Z/Zend/zend_compile.c`'s
+/// `zend_add_literal_string`, which calls `zend_new_interned_string`
+/// through whichever handler is installed).
+pub(crate) struct Emit<'a> {
+    strings: &'a mut dyn Intern,
     oplines: Vec<Opline>,
     constants: Vec<Zval>,
     safepoints: Vec<OplineIdx>,
@@ -60,8 +66,10 @@ pub(crate) fn main_op_array(
     read: &Read,
     filename: &Name,
     lines: u32,
+    strings: &mut dyn Intern,
 ) -> Result<OpArray, CompileError> {
     let mut emit = Emit {
+        strings,
         oplines: Vec::new(),
         constants: Vec::new(),
         safepoints: vec![OplineIdx(0)],
@@ -90,7 +98,7 @@ pub(crate) fn main_op_array(
     })
 }
 
-impl Emit {
+impl Emit<'_> {
     fn push(&mut self, opline: Opline) -> u32 {
         let at = u32::try_from(self.oplines.len()).unwrap_or(u32::MAX);
         self.oplines.push(Opline {
@@ -138,10 +146,24 @@ impl Emit {
         }
     }
 
+    /// The constant string for these bytes, interned into whichever home
+    /// this compilation was given: php's `zend_new_interned_string` over
+    /// the string a `CONST` operand holds. A home with no memory left
+    /// refuses, and the refusal is the compile-time fatal php raises
+    /// where it runs out (`Z/Zend/zend_alloc.c:1059`).
+    fn string(&mut self, bytes: &[u8]) -> Result<Zval, CompileError> {
+        match self.strings.intern(bytes) {
+            Ok(s) => Ok(Zval::string(s)),
+            Err(Fatal::Error(message)) => Err(self.fatal(message)),
+            Err(Fatal::OutOfMemory(_)) => Err(self.fatal("Out of memory")),
+        }
+    }
+
     fn statement(&mut self, statement: &Stmt) -> Result<(), CompileError> {
         match statement {
             Stmt::Inline(text) => {
-                let at = self.constant(Zval::string(Str::intern(text)));
+                let text = self.string(text)?;
+                let at = self.constant(text);
                 self.push(Opline {
                     opcode: Opcode::Echo,
                     op1_type: OperandKind::Const,
@@ -184,13 +206,13 @@ impl Emit {
     /// an `IS_CONST` operand, folding a number as written, a persistent constant
     /// (`zend_try_ct_eval_const`) and arithmetic over two of them
     /// (`zend_try_ct_eval_binary_op`).
-    fn constant_expr(&self, expr: &Expr) -> Result<Zval, CompileError> {
+    fn constant_expr(&mut self, expr: &Expr) -> Result<Zval, CompileError> {
         match expr {
             Expr::Null => Ok(Zval::null()),
             Expr::Bool(b) => Ok(Zval::bool(*b)),
             Expr::Int(n) => Ok(Zval::long(*n)),
             Expr::Float(f) => Ok(Zval::double(*f)),
-            Expr::Str(bytes) => Ok(Zval::string(Str::intern(bytes))),
+            Expr::Str(bytes) => self.string(bytes),
             Expr::Constant(name) => persistent(name)
                 .ok_or_else(|| self.fatal("a constant this compiler cannot read yet")),
             // `zend_try_ct_eval_unary_pm`: php folds unary `-` and `+` as
@@ -227,7 +249,8 @@ impl Emit {
     /// nowhere to say so: the design's twenty-four bytes carry
     /// `op1_type` and `op2_type` and no third (design §5.7).
     fn call(&mut self, name: &[u8], arguments: &[Expr]) -> Result<Where, CompileError> {
-        let lowered = self.constant(Zval::string(Str::intern(&unqualified(name))));
+        let lowered = self.string(&unqualified(name))?;
+        let lowered = self.constant(lowered);
         let count = u32::try_from(arguments.len()).unwrap_or(0);
         let slot = self.cache_slot();
         self.push(Opline {

@@ -39,7 +39,7 @@ mod zval;
 pub use hooks::{Fatal, HeapHooks};
 pub use map::{MapPtr, MapTable};
 pub use stack::{EntryGuard, Frame, FrameRef, Slot, VmStack};
-pub use string::Str;
+pub use string::{Intern, Str, Strings};
 pub use zval::{ObjectId, Zval, ZvalType};
 
 /// The per-request heap (design §5.13): the allocator every string,
@@ -49,10 +49,17 @@ pub use zval::{ObjectId, Zval, ZvalType};
 ///
 /// The heap owns what it handed out. Dropping it is php's mass release
 /// at request end: every chunk and every huge block goes back, so
-/// nothing a request allocated outlives the request.
+/// nothing a request allocated outlives the request. What the request
+/// interned is here for the same reason (design §5.2): those strings are
+/// allocated out of this heap and go back with everything else.
 #[derive(Debug)]
 pub struct Heap {
     mm: mm::Mm,
+    /// php's `CG(interned_strings)`: the strings this request interned,
+    /// live until the request ends (`Z/Zend/zend_string.c:346-353`).
+    /// The strings are the request's own memory and are counted as such;
+    /// the table's own storage is not, where php's is (#178).
+    interned: string::Table,
 }
 
 impl Default for Heap {
@@ -65,7 +72,10 @@ impl Heap {
     /// A heap with php's main chunk mapped and nothing allocated in it.
     #[must_use]
     pub fn new() -> Heap {
-        Heap { mm: mm::Mm::new() }
+        Heap {
+            mm: mm::Mm::new(),
+            interned: string::Table::default(),
+        }
     }
 
     /// Bytes in use: the bin accounting for `real == false`, the bytes
@@ -124,6 +134,13 @@ impl Heap {
         Ok(unsafe { Str::init(at, bytes, 0) })
     }
 
+    /// How many strings this request has interned, php's
+    /// `zend_hash_num_elements(&CG(interned_strings))`.
+    #[must_use]
+    pub fn interned(&self) -> usize {
+        self.interned.count()
+    }
+
     /// `zend_string_release`: one owner fewer, and the string is freed
     /// when the last gives it up. An interned string is never freed.
     pub fn release_string(&mut self, s: Str) {
@@ -161,6 +178,30 @@ impl Heap {
         if let Some(s) = z.as_str() {
             self.release_string(s);
         }
+    }
+}
+
+impl Intern for Heap {
+    /// php's `zend_string_init_interned_request`
+    /// (`Z/Zend/zend_string.c:297-327`): the frozen table, then this
+    /// request's own, then a short-living interned string out of this
+    /// request's memory, which the request's end takes with everything
+    /// else. It is flagged interned and never persistent, so no release
+    /// frees it and no thread but this one can name it.
+    fn intern(&mut self, bytes: &[u8]) -> Result<Str, Fatal> {
+        if let Some(frozen) = string::frozen_string(bytes) {
+            return Ok(frozen);
+        }
+        let hash = string::hash_func(bytes);
+        if let Some(held) = self.interned.find(hash, bytes) {
+            return Ok(held);
+        }
+        let at = self.mm.alloc(Str::allocation_size(bytes.len()))?;
+        // SAFETY: the allocation is exactly the size `init` asks for and
+        // nothing else holds it.
+        let s = unsafe { Str::init(at, bytes, string::INTERNED) };
+        self.interned.add(hash, s);
+        Ok(s)
     }
 }
 
@@ -214,6 +255,62 @@ mod tests {
         assert_eq!(
             heap.memory_real_peak(),
             real + 3_000_000usize.next_multiple_of(mm::real_page_size())
+        );
+    }
+
+    /// What a request interns is the request's own memory (design §5.2):
+    /// the strings are allocated out of this heap, so `memory_get_usage()`
+    /// counts them as php counts `CG(interned_strings)`'s, and the second
+    /// request reads what the first read before it, because the first
+    /// request's end took every one of them.
+    #[test]
+    fn what_a_request_interned_is_its_own_and_the_next_request_starts_where_it_did() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let _alone = alone();
+        let mappings = mm::MAPPINGS.load(Relaxed);
+        let mut started_at = Vec::new();
+        for _ in 0..2 {
+            let mut heap = Heap::new();
+            started_at.push(heap.memory_usage(false));
+            // The frozen table answers first and allocates nothing.
+            let frozen = heap.intern(b"");
+            assert!(matches!(frozen, Ok(s) if s.is_empty()));
+            assert_eq!(heap.memory_usage(false), 0);
+            assert_eq!(heap.interned(), 0);
+            // Every other string is one allocation, once.
+            let first = heap.intern(b"var_dump");
+            let again = heap.intern(b"var_dump");
+            assert!(first.is_ok() && again.is_ok());
+            let (Ok(first), Ok(again)) = (first, again) else {
+                return;
+            };
+            assert_eq!(first.address(), again.address());
+            assert_eq!(heap.interned(), 1);
+            // Eight bytes, the header and the NUL: php's forty-byte bin.
+            assert_eq!(heap.memory_usage(false), 40);
+            assert!(first.is_interned());
+            assert!(
+                !first.is_persistent(),
+                "a request's interned string is out of the request's heap"
+            );
+            // A release never frees an interned string, as php's does not;
+            // the request's end is what takes it.
+            heap.release_string(first);
+            assert_eq!(heap.memory_usage(false), 40);
+            // A string the request made and gave up goes back at once.
+            let made = heap.string(b"made");
+            assert!(made.is_ok());
+            if let Ok(made) = made {
+                assert_eq!(heap.memory_usage(false), 72);
+                heap.release_string(made);
+            }
+            assert_eq!(heap.memory_usage(false), 40);
+        }
+        assert_eq!(started_at, vec![0, 0], "every request starts at zero");
+        assert_eq!(
+            mm::MAPPINGS.load(Relaxed),
+            mappings,
+            "and leaves no mapping behind"
         );
     }
 

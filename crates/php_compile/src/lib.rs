@@ -21,6 +21,7 @@
 mod emit;
 mod read;
 
+use php_heap::Intern;
 use php_syntax::Parsed;
 use php_unit::Unit;
 use php_unit::decl::Name;
@@ -44,19 +45,35 @@ pub struct CompileError {
 /// Parse and compile one source file: what the engine calls for the
 /// file it serves, an `include` or an `eval`, since its edges reach the compiler
 /// and not the syntax crate (design §4.2).
-pub fn compile_source(source: &[u8], options: &Options) -> Result<Unit, CompileError> {
-    compile(&php_syntax::parse(source), options)
+///
+/// `strings` is where the unit's constant strings are interned (design
+/// §5.2): the engine's table for a unit bound for the unit cache, whose
+/// strings every request serving it then shares, and the request's own
+/// heap for a unit that is one request's alone. php decides the same
+/// thing by which handler is installed when `zend_compile_file` runs
+/// (`Z/Zend/zend_string.c:363-373`).
+pub fn compile_source(
+    source: &[u8],
+    options: &Options,
+    strings: &mut dyn Intern,
+) -> Result<Unit, CompileError> {
+    compile(&php_syntax::parse(source), options, strings)
 }
 
-/// Compile one parsed file into a unit.
-pub fn compile(parsed: &Parsed, options: &Options) -> Result<Unit, CompileError> {
+/// Compile one parsed file into a unit, interning its constant strings
+/// into `strings`.
+pub fn compile(
+    parsed: &Parsed,
+    options: &Options,
+    strings: &mut dyn Intern,
+) -> Result<Unit, CompileError> {
     let read = read::read(&parsed.source).map_err(|trouble| CompileError {
         message: trouble.what,
         line: trouble.line,
     })?;
     let lines = u32::try_from(parsed.source.split(|b| *b == b'\n').count()).unwrap_or(u32::MAX);
     Ok(Unit {
-        main: emit::main_op_array(&read, &options.filename, lines)?,
+        main: emit::main_op_array(&read, &options.filename, lines, strings)?,
         ..Unit::default()
     })
 }
@@ -66,8 +83,21 @@ mod tests {
     use super::*;
     use php_unit::{Opcode, OperandKind, OplineIdx};
 
+    /// A unit whose constant strings are one engine's, which is what the
+    /// unit cache holds (design §6.3).
     fn unit_of(source: &[u8]) -> Unit {
-        compile(&php_syntax::parse(source), &Options::default()).unwrap_or_default()
+        unit_and_strings(source).0
+    }
+
+    fn unit_and_strings(source: &[u8]) -> (Unit, php_heap::Strings) {
+        let mut strings = php_heap::Strings::new();
+        let unit = compile(
+            &php_syntax::parse(source),
+            &Options::default(),
+            &mut strings,
+        )
+        .unwrap_or_default();
+        (unit, strings)
     }
 
     #[test]
@@ -211,17 +241,66 @@ mod tests {
             // What a call returned is known to no compiler.
             b"<?php echo 1 + extension_loaded('demo');".as_slice(),
         ] {
+            let mut strings = php_heap::Strings::new();
             assert!(
-                compile(&php_syntax::parse(source), &Options::default()).is_err(),
+                compile(
+                    &php_syntax::parse(source),
+                    &Options::default(),
+                    &mut strings
+                )
+                .is_err(),
                 "{}",
                 String::from_utf8_lossy(source)
             );
         }
     }
 
+    /// Two units compiled into one engine's table share the one string
+    /// for a constant both carry, and a constant carried twice in one
+    /// unit is interned once: that is what interning is for, and it is
+    /// what a published unit hands every request serving it (design
+    /// §5.2, §6.3).
+    #[test]
+    fn two_units_interned_into_one_table_share_their_constant_string() {
+        let mut strings = php_heap::Strings::new();
+        let compiled = [
+            compile_source(b"<?php echo 'shared';", &Options::default(), &mut strings),
+            compile_source(
+                b"<?php echo 'shared', 'shared';",
+                &Options::default(),
+                &mut strings,
+            ),
+        ];
+        assert_eq!(strings.count(), 1, "one string, carried by two units");
+        let named: Vec<Option<php_heap::Str>> = compiled
+            .iter()
+            .map(|unit| {
+                unit.as_ref()
+                    .ok()
+                    .and_then(|unit| unit.main.literals.first().copied())
+                    .and_then(php_heap::Zval::as_str)
+            })
+            .collect();
+        assert!(named.iter().all(Option::is_some), "{named:?}");
+        assert_eq!(
+            named[0].map(|s| s.bytes().to_vec()),
+            Some(b"shared".to_vec())
+        );
+        let [Some(one), Some(other)] = [named[0], named[1]] else {
+            return;
+        };
+        assert!(one.is_same(other), "one `zend_string`, named by both units");
+    }
+
     #[test]
     fn what_the_reader_cannot_read_is_a_compile_error_at_its_line() {
-        let trouble = compile(&php_syntax::parse(b"<?php\n$x = 1;"), &Options::default()).err();
+        let mut strings = php_heap::Strings::new();
+        let trouble = compile(
+            &php_syntax::parse(b"<?php\n$x = 1;"),
+            &Options::default(),
+            &mut strings,
+        )
+        .err();
         assert_eq!(trouble.map(|e| e.line), Some(2));
     }
 }

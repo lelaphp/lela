@@ -8,6 +8,7 @@ Frame::slot
 FrameRef
 Heap
 Heap::addref
+Heap::interned
 Heap::memory_limit
 Heap::memory_peak
 Heap::memory_real_peak
@@ -24,6 +25,8 @@ HeapHooks::free_native
 HeapHooks::free_resource
 HeapHooks::gc_children
 HeapHooks::out_of_memory
+Intern
+Intern::intern
 MapPtr
 MapPtr::new
 MapPtr::offset
@@ -38,14 +41,17 @@ Str::addref
 Str::bytes
 Str::forget_hash
 Str::hash
-Str::intern
 Str::is_empty
 Str::is_interned
 Str::is_persistent
+Str::is_same
 Str::is_valid_utf8
 Str::len
 Str::mark_valid_utf8
 Str::refcount
+Strings
+Strings::count
+Strings::new
 VmStack
 VmStack::current
 VmStack::entry

@@ -173,12 +173,21 @@ mod tests {
         assert_eq!(Zval::long(-3).as_long(), Some(-3));
         assert_eq!(Zval::double(0.5).as_double(), Some(0.5));
         assert_eq!(Zval::bool(true).as_bool(), Some(true));
-        let interned = Zval::string(Str::intern(b"php"));
+        let mut strings = crate::Strings::new();
+        let php = crate::Intern::intern(&mut strings, b"php");
+        assert!(php.is_ok(), "the engine's table would not intern");
+        let Ok(php) = php else {
+            return;
+        };
+        let interned = Zval::string(php);
         assert_eq!(
             interned.as_str().map(|s| s.bytes().to_vec()),
             Some(b"php".to_vec())
         );
-        assert!(!interned.is_refcounted());
+        assert!(
+            !interned.is_refcounted(),
+            "a zval naming an interned string carries no refcount"
+        );
         assert_eq!(Zval::long(1).as_str(), None);
         assert!(!Zval::null().is_refcounted());
     }
