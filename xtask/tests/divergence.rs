@@ -114,10 +114,12 @@ fn the_tracked_registry_loads_with_its_rows() {
     assert!(registry.rows.iter().all(|r| !r.reason.is_empty()));
     let counts = registry.counts();
     assert_eq!(
-        counts.by_kind[&Kind::Trace],
+        counts.by_kind.values().sum::<u64>(),
         u64::try_from(registry.rows.len()).unwrap()
     );
     assert!(counts.by_kind[&Kind::Trace] >= 3);
+    // The row #178 settled, the registry's first witness row.
+    assert!(counts.by_kind[&Kind::Witness] >= 1);
     assert_eq!(counts.by_status.get(&Status::Open), None);
 }
 
@@ -301,7 +303,12 @@ fn status_divergence_renders_the_rows_with_counts_by_kind_and_status() {
     assert!(ok, "{err}");
     for row in &registry.rows {
         assert!(md.contains(&row.id), "{md}");
-        assert!(md.contains(&row.reason), "the reason is rendered: {md}");
+        // A multi-line reason renders on one line of the table, so the
+        // newline TOML leaves at its end is a space here.
+        assert!(
+            md.contains(&row.reason.replace('\n', " ")),
+            "the reason is rendered: {md}"
+        );
     }
     assert!(md.contains("trace:nested-entry-return"), "{md}");
     assert!(
