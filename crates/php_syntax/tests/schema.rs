@@ -176,7 +176,17 @@ fn the_emitted_tree_is_one_struct_per_node_kind_and_unwraps_nothing() {
         "one resolver per struct node"
     );
     assert!(emitted.contains("\npub struct Nodes {\n"));
-    for absent in ["expect(", "unwrap(", "Visitor", "fn visit", "SyntaxNode"] {
+    // A list the schema writes head-and-tail is one field, not a head
+    // beside a tail (#225).
+    for absent in [
+        "expect(",
+        "unwrap(",
+        "Visitor",
+        "fn visit",
+        "SyntaxNode",
+        "pub type_expr",
+        "pub name_ref",
+    ] {
         assert!(
             !emitted.contains(absent),
             "emitted tree.rs holds {absent:?}"
@@ -192,6 +202,9 @@ fn the_emitted_tree_is_one_struct_per_node_kind_and_unwraps_nothing() {
         "    pub stmts: Box<[Stmt]>,\n",
         "    pub modifiers: Box<[Modifier]>,\n",
         "    pub doc_comment: Option<TokenId>,\n",
+        "    pub types: Box<[TypeExpr]>,\n",
+        "    pub types: Box<[TokenId]>,\n",
+        "    pub neg: Option<TokenId>,\n",
         "pub enum Expr {\n",
         "    NameRef(TokenId),\n",
         "    ClassKw(TokenId),\n",

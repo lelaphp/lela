@@ -21,7 +21,9 @@
 //   'kw'          literal token (keywords written lowercase; the lexer is
 //                 case-insensitive, so 'function' matches FUNCTION etc.)
 //   <class>       token class (see TOKEN CLASSES)
-//   label:Rule    names the generated accessor
+//   label:Rule    names the generated field
+//   l:R (sep l:R)*  one label at a list's head and in its tail is one
+//                 list field (a head-and-tail list is not two fields)
 //   Rule!         REQUIRED child (see A2)
 //
 // ---------------------------------------------------------------------
@@ -150,8 +152,8 @@ TypeExpr = NamedType | NullableType | UnionType | IntersectionType | ParenType
 
 NamedType        = name:NameRef!
 NullableType     = '?' ty:TypeExpr
-UnionType        = TypeExpr ('|' TypeExpr)*        // accessor: types()
-IntersectionType = TypeExpr ('&' TypeExpr)*        // LEVEL: 8.1
+UnionType        = types:TypeExpr ('|' types:TypeExpr)*
+IntersectionType = types:TypeExpr ('&' types:TypeExpr)*   // LEVEL: 8.1
 ParenType        = '(' ty:TypeExpr ')'             // LEVEL: 8.2 (DNF)
 // VALIDATE: DNF shape rules (no nested unions in parens, no duplicate
 // members); nullable cannot wrap union/intersection.
@@ -233,7 +235,7 @@ LabelStmt  = name:<ident>! ':'
 
 TryStmt       = 'try' body:Block! CatchClause* FinallyClause?
 CatchClause   = 'catch' '(' types:CatchTypeList var:<variable>? ')' body:Block
-CatchTypeList = NameRef ('|' NameRef)*
+CatchTypeList = types:NameRef ('|' types:NameRef)*
 FinallyClause = 'finally' body:Block
 // VALIDATE: try requires ≥1 catch or finally. NOTE: capture-less catch is 8.0.
 
@@ -513,7 +515,11 @@ StringPart = LiteralStringPart | SimpleInterpolation | BracedInterpolation
            | DollarBraceInterpolation
 LiteralStringPart    = text:<string_text>
 SimpleInterpolation  = var:<variable>! suffix:( SimpleDim | SimpleProp )?
-SimpleDim  = '[' index:( <ident> | <variable> | <encaps_int> | <int> | '-' <encaps_int> | '-' <int> ) ']'
+SimpleDim  = '[' neg:'-'? index:( <ident> | <variable> | <encaps_int> | <int> ) ']'
+// NOTE: `neg` is php's `'-' T_NUM_STRING` branch of encaps_var_offset
+// (zend_negate_num_string): "$a[-1]" and "$a[1]" compile differently, so
+// the sign is a field beside the digits. The parser admits '-' before
+// <encaps_int> and <int> only, as php's grammar does.
 SimpleProp = op:('->' | '?->') name:<ident>!
 // NOTE: the deliberately restricted in-string grammar — bare-word keys,
 // no expressions, single property hop ('->' or '?->': the nullsafe simple

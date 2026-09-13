@@ -484,6 +484,40 @@ impl<'a> Model<'a> {
     }
 }
 
+/// One slot per name: `SwitchArm*` in both syntax branches is one
+/// field, and a label written at a list's head and again in its tail,
+/// `types:TypeExpr ('|' types:TypeExpr)*`, is one list, so the kept slot
+/// is repeated once either occurrence is. A label written twice with two
+/// types is an error, not a field that reads one of them.
+fn dedupe(def: &Def, items: Vec<FlatItem>, errors: &mut Vec<Error>) -> Vec<FlatItem> {
+    let mut deduped: Vec<FlatItem> = Vec::new();
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    for item in items {
+        let FlatItem::Slot(slot) = item else {
+            deduped.push(item);
+            continue;
+        };
+        let Some(&at) = seen.get(&slot.name) else {
+            seen.insert(slot.name.clone(), deduped.len());
+            deduped.push(FlatItem::Slot(slot));
+            continue;
+        };
+        let FlatItem::Slot(kept) = &mut deduped[at] else {
+            continue;
+        };
+        if kept.ty != slot.ty {
+            errors.push(Error::global(format!(
+                "{}: field `{}` derived twice with different shapes",
+                def.name, slot.name
+            )));
+        } else if slot.repeated && !kept.repeated {
+            kept.repeated = true;
+            kept.required = false;
+        }
+    }
+    deduped
+}
+
 /// Computes the final slot list for a struct node or trait: flatten,
 /// dedupe, assign anchors per convention A4.
 fn slots_for(model: &Model<'_>, def: &Def, errors: &mut Vec<Error>) -> Vec<Slot> {
@@ -497,26 +531,7 @@ fn slots_for(model: &Model<'_>, def: &Def, errors: &mut Vec<Error>) -> Vec<Slot>
     }
     errors.append(&mut ctx.errors);
 
-    // Dedupe slots by name (e.g. `SwitchArm*` in both syntax branches).
-    let mut deduped: Vec<FlatItem> = Vec::new();
-    let mut seen: BTreeMap<String, (SlotTy, bool)> = BTreeMap::new();
-    for item in items {
-        let FlatItem::Slot(slot) = item else {
-            deduped.push(item);
-            continue;
-        };
-        if let Some((ty, repeated)) = seen.get(&slot.name) {
-            if *ty != slot.ty || *repeated != slot.repeated {
-                errors.push(Error::global(format!(
-                    "{}: field `{}` derived twice with different shapes",
-                    def.name, slot.name
-                )));
-            }
-        } else {
-            seen.insert(slot.name.clone(), (slot.ty.clone(), slot.repeated));
-            deduped.push(FlatItem::Slot(slot));
-        }
-    }
+    let deduped = dedupe(def, items, errors);
 
     // Anchor assignment (A4): a slot whose kind set collides with an
     // EARLIER slot's resolves relative to the nearest reliable preceding
@@ -1605,6 +1620,43 @@ mod tests {
         // With an anchor between them, the same rule emits.
         let text = emitted("Pair = first:Item? ':' second:Item\nItem = <ident>\n");
         assert!(text.contains("pub second: Option<NodeId<Item>>,"));
+    }
+
+    /// A list written head-and-tail, one label at the head and again in
+    /// the repetition, is one list field, a struct child or a token by
+    /// what the label names; the same label on two types is an error,
+    /// not a field that reads one of them.
+    #[test]
+    fn a_label_at_a_lists_head_and_in_its_tail_is_one_list() {
+        let text = emitted(
+            "Union = types:Ty ('|' types:Ty)*\n\
+             Ty = name:<ident>\n\
+             Catch = types:Name ('|' types:Name)*\n\
+             Name = <ident> | <name_qualified>\n",
+        );
+        for needle in [
+            "pub types: Box<[NodeId<Ty>]>,",
+            "let types = all::<NodeId<Ty>>(children);",
+            "pub types: Box<[TokenId]>,",
+            "let types = tokens(children, NAME_TOKENS);",
+        ] {
+            assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
+        }
+        let union = &text[text.find("pub struct Union {").unwrap_or(0)..];
+        let union = &union[..union.find("\n}\n").unwrap_or(union.len())];
+        assert_eq!(
+            union.matches("\n    pub ").count(),
+            2,
+            "the range and one list, no head beside the tail:\n{union}"
+        );
+        let errors =
+            errors_of("Mixed = first:Ty ('|' first:Name)*\nTy = name:<ident>\nName = <ident>\n");
+        assert!(
+            errors.iter().any(|e| e
+                .message
+                .contains("`first` derived twice with different shapes")),
+            "{errors:?}"
+        );
     }
 
     /// A name a mixin injects and the node's own rule derives too is an
