@@ -431,6 +431,12 @@ says why.
 
 ## 6. Where the source did not confirm the design
 
+Nine of the twelve findings below are settled, not open. #166 ruled that each takes the measured
+number, and design revision 12 carries them into §4.9, the `php_syntax` row of §4.1 and §13's first
+row: findings 2 through 9 and 11. Finding 1 says where this record was read and finding 10 moves 88
+lines between two of its own tables; neither is a design sentence, and both stand as written. Finding
+12 names what was not measured here and is the one that stays open.
+
 1. **The pinned commit is not in the clone the work points at.** `1b3104a8`, `d6460ef0` and `8f119938`
    are absent from `~/Projects/mahout`, whose HEAD `934e6507` (2026-07-02, 139 commits) is a different
    lineage: no `php_names.rs`, no `magic_method.rs`, no `builtin_attr.rs`, validate as one file rather
