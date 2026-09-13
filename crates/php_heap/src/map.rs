@@ -69,13 +69,12 @@ impl MapTable {
         if !slot.as_ref().is_some_and(|b| b.is::<T>()) {
             *slot = Some(Box::new(T::default()));
         }
-        // Written as a `T` on the line above when it was not one; the
-        // `or_insert` arm is the type system's, not a path a request takes.
-        let boxed = slot.get_or_insert_with(|| Box::new(T::default()));
-        if boxed.downcast_mut::<T>().is_none() {
-            *boxed = Box::new(T::default());
-        }
-        match boxed.downcast_mut::<T>() {
+        // Written as a `T` on the line above when it was not one, so the
+        // `None` arm is the type system's, not a path a request takes. With
+        // panics denied, a leak is the only safe terminal for a `&mut T`
+        // the arm cannot produce from nothing; whether it stays or becomes
+        // one `unsafe` block is #177's.
+        match slot.as_mut().and_then(|b| b.downcast_mut::<T>()) {
             Some(value) => value,
             None => Box::leak(Box::new(T::default())),
         }
