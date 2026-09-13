@@ -8,7 +8,10 @@ use crate::api::values::PhpString;
 pub use crate::engine::Engine;
 use crate::engine::{OutputSink, RequestDescription};
 
-/// An in-process sink: everything the request wrote, kept.
+/// An in-process sink: everything the request wrote, kept. The log is
+/// what php's CLI writes to stderr, each entry the sink was given and
+/// `\n` after it (`sapi_cli_log_message`), so an extension's test reads
+/// it against the oracle's stderr.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Capture {
     pub stdout: Vec<u8>,
@@ -27,8 +30,9 @@ impl OutputSink for Capture {
         self.headers.extend_from_slice(block);
     }
 
-    fn log(&mut self, line: &[u8]) {
-        self.log.extend_from_slice(line);
+    fn log(&mut self, entry: &[u8]) {
+        self.log.extend_from_slice(entry);
+        self.log.push(b'\n');
     }
 }
 

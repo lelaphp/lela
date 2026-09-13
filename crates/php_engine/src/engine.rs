@@ -56,8 +56,13 @@ pub trait OutputSink {
     fn flush(&mut self);
     /// The rendered header block, once, before the first body byte.
     fn send_headers(&mut self, block: &[u8]);
-    /// A line for the host's log.
-    fn log(&mut self, line: &[u8]);
+    /// One entry for the host's log, whole: what `php_log_err` was
+    /// given, a diagnostic in its log form with its stack trace under
+    /// it where it has one, or `error_log()`'s message as given, so it
+    /// may carry newlines inside it and ends in none. The host ends it:
+    /// php's CLI writes `"%s\n"` to stderr and a file log writes
+    /// `[date] ` before it and `PHP_EOL` after.
+    fn log(&mut self, entry: &[u8]);
 }
 
 /// What `serve` reports of one request.
@@ -425,9 +430,8 @@ impl Engine {
         };
         let headers = req.header_block();
         let body = req.take_body();
-        let log = req.take_log();
-        for line in log.split_inclusive(|b| *b == b'\n') {
-            sink.log(line);
+        for entry in req.take_log() {
+            sink.log(&entry);
         }
         sink.send_headers(&headers);
         sink.write(&body);
@@ -472,12 +476,25 @@ mod tests {
     use crate::probe::{Asked, Probe};
     use crate::tier::Site;
 
-    /// Everything the request wrote, kept, as `Capture` keeps it behind
-    /// the `test` feature.
+    /// Everything the request wrote, kept: the body as `Capture` keeps
+    /// it behind the `test` feature, and the log as the calls the sink
+    /// saw, one entry each.
     #[derive(Default)]
     struct Kept {
         body: Vec<u8>,
-        log: Vec<u8>,
+        log: Vec<Vec<u8>>,
+    }
+
+    impl Kept {
+        /// The log as php's CLI writes it to stderr, `"%s\n"` per entry.
+        fn logged(&self) -> String {
+            let mut text = String::new();
+            for entry in &self.log {
+                text.push_str(&String::from_utf8_lossy(entry));
+                text.push('\n');
+            }
+            text
+        }
     }
 
     impl OutputSink for Kept {
@@ -486,8 +503,8 @@ mod tests {
         }
         fn flush(&mut self) {}
         fn send_headers(&mut self, _: &[u8]) {}
-        fn log(&mut self, line: &[u8]) {
-            self.log.extend_from_slice(line);
+        fn log(&mut self, entry: &[u8]) {
+            self.log.push(entry.to_vec());
         }
     }
 
@@ -549,7 +566,7 @@ mod tests {
             .serve(description("<?php\necho 1 +;"), &mut logged);
         assert!(logged.body.is_empty());
         assert_eq!(
-            String::from_utf8_lossy(&logged.log),
+            logged.logged(),
             "PHP Parse error:  an expression this compiler cannot read yet in witness.php on line 2\n"
         );
         assert_eq!(observables.exit_code, 255);
@@ -590,7 +607,7 @@ mod tests {
             .serve(description("<?php echo NAN;"), &mut logged);
         assert_eq!(String::from_utf8_lossy(&logged.body), "NAN");
         assert_eq!(
-            String::from_utf8_lossy(&logged.log),
+            logged.logged(),
             "PHP Warning:  unexpected NAN value was coerced to string in witness.php on line 1\n"
         );
     }
@@ -619,7 +636,7 @@ mod tests {
             format!("<PRE>\nWarning: {NAN_WARNING} in witness.php on line 2\n</PRE>NAN")
         );
         assert_eq!(
-            String::from_utf8_lossy(&around.log),
+            around.logged(),
             format!("PHP Warning:  {NAN_WARNING} in witness.php on line 2\n"),
             "php's log form is the one rendering neither string reaches"
         );
@@ -720,7 +737,7 @@ mod tests {
             .build()
             .serve(description("<?php\necho NAN, NAN;"), &mut logged);
         assert_eq!(
-            String::from_utf8_lossy(&logged.log),
+            logged.logged(),
             format!("PHP Warning:  {NAN_WARNING} in witness.php on line 2\n"),
             "one log line for the two warnings"
         );
@@ -907,7 +924,7 @@ mod tests {
             observables.fatal.as_deref(),
             Some(
                 "PHP Fatal error:  Uncaught DivisionByZeroError: Division by zero \
-                 in witness.php:1\nStack trace:\n#0 {main}\n  thrown in witness.php on line 1\n"
+                 in witness.php:1\nStack trace:\n#0 {main}\n  thrown in witness.php on line 1"
             )
         );
         assert_eq!(observables.exit_code, 255);
@@ -972,7 +989,7 @@ mod tests {
             observables.fatal.as_deref(),
             Some(
                 "PHP Fatal error:  Uncaught Error: Call to undefined function nope() \
-                 in witness.php:2\nStack trace:\n#0 {main}\n  thrown in witness.php on line 2\n"
+                 in witness.php:2\nStack trace:\n#0 {main}\n  thrown in witness.php on line 2"
             )
         );
         assert_eq!(observables.exit_code, 255);
@@ -1006,10 +1023,14 @@ mod tests {
             .serve(description("<?php\nnope();"), &mut logged);
         assert!(logged.body.is_empty(), "display_errors is off");
         assert_eq!(
-            String::from_utf8_lossy(&logged.log).into_owned(),
-            observables.fatal.unwrap_or_default(),
+            logged
+                .log
+                .first()
+                .map(|entry| String::from_utf8_lossy(entry).into_owned()),
+            observables.fatal,
             "what the log holds is the fatal, once"
         );
+        assert_eq!(logged.log.len(), 1, "the four lines are one entry");
 
         let mut masked = Kept::default();
         Engine::builder()
@@ -1018,6 +1039,46 @@ mod tests {
             .serve(description("<?php\nnope();"), &mut masked);
         assert!(masked.body.is_empty(), "E_ERROR is masked out");
         assert!(masked.log.is_empty(), "log_errors is off");
+    }
+
+    /// `php_error_cb` builds one diagnostic with one `spprintf` and gives
+    /// it to `php_log_err` once, the backtrace inside it, and
+    /// `php_log_err_with_severity` stamps one date on it and writes it
+    /// as one message (`Z/main/main.c:1459`). So the sink sees one call
+    /// for the four-line fatal, and one call per warning for two
+    /// warnings, with no terminator on any of them.
+    #[test]
+    fn the_sink_is_given_one_call_per_diagnostic_whatever_its_lines() {
+        let mut fatal = Kept::default();
+        Engine::builder()
+            .ini("display_errors", "0")
+            .ini("log_errors", "1")
+            .build()
+            .serve(description("<?php\nnope();"), &mut fatal);
+        assert_eq!(
+            fatal.log,
+            vec![
+                b"PHP Fatal error:  Uncaught Error: Call to undefined function nope() \
+                   in witness.php:2\nStack trace:\n#0 {main}\n  thrown in witness.php on line 2"
+                    .to_vec()
+            ],
+            "four lines, one call"
+        );
+
+        let mut warned = Kept::default();
+        Engine::builder()
+            .ini("display_errors", "0")
+            .ini("log_errors", "1")
+            .build()
+            .serve(description("<?php\necho NAN;\necho NAN;"), &mut warned);
+        assert_eq!(
+            warned.log,
+            vec![
+                format!("PHP Warning:  {NAN_WARNING} in witness.php on line 2").into_bytes(),
+                format!("PHP Warning:  {NAN_WARNING} in witness.php on line 3").into_bytes(),
+            ],
+            "two lines, two calls"
+        );
     }
 
     #[test]
