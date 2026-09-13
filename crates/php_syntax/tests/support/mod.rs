@@ -13,12 +13,11 @@
 
 use std::fmt::Write as _;
 
-/// Parse `src` and render the dump, the broken promises and the
-/// diagnostics.
-pub fn parse_fixture(src: &str) -> String {
+/// Parse `src` through the real entry and hold the token stream
+/// lossless on the way: the token texts concatenate to the source, on
+/// every recovery path included.
+pub fn parse_lossless(src: &str) -> php_syntax::Parsed {
     let parsed = php_syntax::parse(src.as_bytes());
-
-    // Lossless on every path, every recovery path included.
     let mut text = Vec::new();
     for token in &parsed.tokens {
         text.extend_from_slice(
@@ -30,7 +29,13 @@ pub fn parse_fixture(src: &str) -> String {
         src.as_bytes(),
         "the token stream is lossless for fixture:\n{src}"
     );
+    parsed
+}
 
+/// Parse `src` and render the dump, the broken promises and the
+/// diagnostics.
+pub fn parse_fixture(src: &str) -> String {
+    let parsed = parse_lossless(src);
     let mut out = parsed.dump();
     // A required child the grammar did not supply is a parser defect;
     // rendered into the snapshot so a person reads it rather than a
