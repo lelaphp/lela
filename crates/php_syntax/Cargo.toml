@@ -1,9 +1,9 @@
 # php_syntax: lexer, lossless token stream, typed tree, parser (design §4.9,
 # ADR-0003). The schema and the kind enum stand, emitted by build.rs from
 # php.ungram, the lexer with the source model under it, the arena, the
-# tree builder and the dump, and the parser the grammar is written
-# against; `parse()` hands back one root over every token until the
-# grammar lands (#203 to #206).
+# tree builder and the dump, the parser and the grammar written against
+# it; `parse()` hands back the tree with the diagnostics in the inherited
+# wording until #206 settles both.
 [package]
 name = "php_syntax"
 version = "0.0.0"
@@ -11,9 +11,12 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
-description = "The syntax: the schema and its kind enum, the lexer, lossless tokens, a typed tree in a safe arena, its builder and the parser; parse hands back one root until the grammar lands"
+description = "The syntax: the schema and its kind enum, the lexer, lossless tokens, a typed tree in a safe arena, its builder, the parser and the grammar"
 
 [lints]
 workspace = true
 
 [dependencies]
+
+[dev-dependencies]
+expect-test.workspace = true

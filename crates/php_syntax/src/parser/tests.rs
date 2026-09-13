@@ -233,27 +233,6 @@ fn php_token_name_as_zend_yytnamerr() {
     );
 }
 
-/// A stand-in for the expression grammar's parenthesised path until #203:
-/// one level of recursion per `(`, refused at the cap and consumed flat
-/// from there.
-fn nested(p: &mut Parser<'_>) {
-    if !p.enter_depth() {
-        while !p.at_eof() {
-            p.bump_any();
-        }
-        return;
-    }
-    let m = p.start();
-    if p.eat(SyntaxKind::L_PAREN) {
-        nested(p);
-        p.eat(SyntaxKind::R_PAREN);
-    } else {
-        p.bump_any();
-    }
-    m.complete(p, SyntaxKind::PAREN_EXPR);
-    p.exit_depth();
-}
-
 fn parenthesised(depth: usize) -> Vec<u8> {
     let mut src = b"<?php $x = ".to_vec();
     src.extend(std::iter::repeat_n(b'(', depth));
@@ -263,17 +242,14 @@ fn parenthesised(depth: usize) -> Vec<u8> {
     src
 }
 
+/// The source through the grammar's parenthesised path, one level of
+/// recursion per `(`.
 fn parse_nested(src: &[u8]) -> tree::Built {
     let lexed = lex(FileId(0), src, &LexOptions::default());
     assert!(lexed.diagnostics.is_empty(), "the lexer has no depth");
     let input = Input::new(src, &lexed.tokens);
     let mut p = Parser::new(&input, FileId(0));
-    let root = p.start();
-    p.bump(SyntaxKind::OPEN_TAG);
-    p.bump(SyntaxKind::VARIABLE);
-    p.bump(SyntaxKind::EQ);
-    nested(&mut p);
-    root.complete(&mut p, SyntaxKind::SOURCE_FILE);
+    crate::grammar::source_file(&mut p);
     tree::build(&lexed.tokens, p.finish())
 }
 

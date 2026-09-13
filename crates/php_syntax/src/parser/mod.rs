@@ -98,6 +98,8 @@ pub const MAX_DEPTH: u32 = 512;
 /// thread at 2 MiB and the main thread at what the linker gave it, so a
 /// host that parses on a thread it did not size this way is the one
 /// thread the cap does not cover.
+// Read by the nesting test and by a host that sizes a parsing thread.
+#[allow(dead_code)]
 pub const MIN_THREAD_STACK: usize = 16 * 1024 * 1024;
 
 /// An open node, to be completed or abandoned.
@@ -152,6 +154,9 @@ impl<'t> Parser<'t> {
     }
 
     /// The file being parsed, for a diagnostic's span.
+    // The surface of record §3.5: kept whole; what the grammar does not
+    // call today, #206 reads or the next grammar site does.
+    #[allow(dead_code)]
     pub fn file(&self) -> FileId {
         self.file
     }
@@ -203,6 +208,7 @@ impl<'t> Parser<'t> {
     }
 
     /// Is the current token one of `kinds`?
+    #[allow(dead_code)]
     pub fn at_any(&mut self, kinds: &[SyntaxKind]) -> bool {
         self.expected.extend_from_slice(kinds);
         kinds.contains(&self.input.kind(self.pos))
@@ -221,6 +227,7 @@ impl<'t> Parser<'t> {
     }
 
     /// The number of significant tokens left.
+    #[allow(dead_code)]
     pub fn remaining(&self) -> usize {
         self.input.len().saturating_sub(self.pos)
     }
@@ -323,6 +330,7 @@ impl<'t> Parser<'t> {
 
     /// The expected set at the current position, each kind once, in the
     /// order first recorded.
+    #[allow(dead_code)]
     pub fn expected_set(&self) -> Vec<SyntaxKind> {
         let mut seen = Vec::new();
         for &kind in &self.expected {

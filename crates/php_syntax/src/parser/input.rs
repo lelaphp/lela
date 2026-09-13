@@ -43,6 +43,8 @@ impl<'t> Input<'t> {
 
     /// Whether there is no significant token.
     #[must_use]
+    // `len` has readers and clippy wants the pair.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.significant.is_empty()
     }
