@@ -14,6 +14,13 @@
 //! `ZEND_DIV`, whose kernels the engine serves. `%` and `**` fold here
 //! and no handler serves their opcodes, so what does not fold is a
 //! [`CompileError`] rather than an opline that would fatal under the loop.
+//!
+//! A loop is emitted as `zend_compile_for` and `zend_compile_while` emit
+//! one: a `JMP` forward over the body to the condition, and the condition
+//! as a `JMPNZ` back to the body's first opline, which is the back-edge
+//! and carries its safepoint number (design §5.7). php folds nothing
+//! here, so `for (;;)` is a `JMPNZ` over the constant `true` and not a
+//! `JMP`, which is the shape the compile-identity lane holds this to.
 
 use php_heap::{Fatal, Intern, Zval};
 use php_unit::decl::Name;
@@ -68,10 +75,7 @@ pub(crate) fn main_op_array(
         cache_slots: 0,
         line: 1,
     };
-    for (statement, line) in read {
-        emit.line = *line;
-        emit.statement(statement)?;
-    }
+    emit.statements(read)?;
     emit.final_return();
     Ok(OpArray {
         oplines: emit.oplines.into_boxed_slice(),
@@ -91,7 +95,7 @@ pub(crate) fn main_op_array(
 
 impl Emit<'_> {
     fn push(&mut self, opline: Opline) -> u32 {
-        let at = u32::try_from(self.oplines.len()).unwrap_or(u32::MAX);
+        let at = self.next();
         self.oplines.push(Opline {
             lineno: self.line,
             ..opline
@@ -177,8 +181,112 @@ impl Emit<'_> {
             Stmt::Effect(expr) => {
                 self.expr(expr)?;
             }
+            Stmt::Block(body) => self.statements(body)?,
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+            } => self.r#for(init, cond, step, body)?,
+            Stmt::While { cond, body } => self.r#while(cond, body)?,
         }
         Ok(())
+    }
+
+    /// `zend_compile_stmt_list`: each statement at its own line.
+    fn statements(&mut self, body: &Read) -> Result<(), CompileError> {
+        for (statement, line) in body {
+            self.line = *line;
+            self.statement(statement)?;
+        }
+        Ok(())
+    }
+
+    /// `zend_compile_for`: the initialisers, a `JMP` forward to the
+    /// condition, the body, the step expressions, then the condition
+    /// as a `JMPNZ` back to the body's first opline. The oplines of the
+    /// header carry the statement's line, as the body's carry theirs.
+    fn r#for(
+        &mut self,
+        init: &[Expr],
+        cond: &[Expr],
+        step: &[Expr],
+        body: &Read,
+    ) -> Result<(), CompileError> {
+        let line = self.line;
+        self.expr_list(init)?;
+        let jump = self.push(Opline {
+            opcode: Opcode::Jmp,
+            ..Opline::default()
+        });
+        let start = self.next();
+        self.statements(body)?;
+        self.line = line;
+        self.expr_list(step)?;
+        self.update_jump_target_to_next(jump);
+        let cond = self.expr_list(cond)?;
+        self.emit_cond_jump(cond, start);
+        Ok(())
+    }
+
+    /// `zend_compile_while`: a `JMP` forward to the condition, the body,
+    /// then the condition as a `JMPNZ` back to the body's first opline.
+    fn r#while(&mut self, cond: &Expr, body: &Read) -> Result<(), CompileError> {
+        let line = self.line;
+        let jump = self.push(Opline {
+            opcode: Opcode::Jmp,
+            ..Opline::default()
+        });
+        let start = self.next();
+        self.statements(body)?;
+        self.line = line;
+        self.update_jump_target_to_next(jump);
+        let cond = self.expr(cond)?;
+        self.emit_cond_jump(cond, start);
+        Ok(())
+    }
+
+    /// `zend_compile_for_expr_list`: every expression compiled in turn,
+    /// and where the last one left its value; the constant `true` for a
+    /// list with nothing in it, which is what `for (;;)` tests.
+    fn expr_list(&mut self, exprs: &[Expr]) -> Result<Where, CompileError> {
+        let mut last = Where::Constant(Zval::bool(true));
+        for expr in exprs {
+            last = self.expr(expr)?;
+        }
+        Ok(last)
+    }
+
+    /// `zend_emit_cond_jump(ZEND_JMPNZ, ...)`: the condition tested and
+    /// the jump to `target` taken when it holds, the target in `op2`. A
+    /// target at or before the opline is a back-edge, and carries its
+    /// safepoint number as [`Self::final_return`]'s carries its own.
+    fn emit_cond_jump(&mut self, cond: Where, target: u32) {
+        let (op1_type, op1) = self.operand(cond);
+        let at = self.next();
+        let out = if target <= at { self.safepoint(at) } else { 0 };
+        self.push(Opline {
+            opcode: Opcode::Jmpnz,
+            op1_type,
+            op1,
+            op2: target,
+            out,
+            ..Opline::default()
+        });
+    }
+
+    /// `zend_update_jump_target_to_next`: the `JMP` at `jump` aimed at
+    /// the opline about to be emitted.
+    fn update_jump_target_to_next(&mut self, jump: u32) {
+        let target = self.next();
+        if let Some(opline) = self.oplines.get_mut(jump as usize) {
+            opline.op1 = target;
+        }
+    }
+
+    /// `get_next_op_number`: the number the next opline will have.
+    fn next(&self) -> u32 {
+        u32::try_from(self.oplines.len()).unwrap_or(u32::MAX)
     }
 
     /// The operand fields one [`Where`] fills. A constant reaches the
@@ -357,7 +465,7 @@ impl Emit<'_> {
     /// constant `1`, and the return carries its safepoint number.
     fn final_return(&mut self) {
         let one = self.constant(Zval::long(1));
-        let at = u32::try_from(self.oplines.len()).unwrap_or(u32::MAX);
+        let at = self.next();
         let number = self.safepoint(at);
         self.push(Opline {
             opcode: Opcode::Return,

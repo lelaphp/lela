@@ -9,8 +9,9 @@
 //!
 //! What it reads: the open and close tags with the text around them,
 //! `<?=` as the `echo` php reads it as, an `echo` of one or more
-//! expressions, the empty statement, an expression statement, and inside
-//! an expression a number, a single- or double-quoted string with no
+//! expressions, the empty statement, an expression statement, a block,
+//! a `for` and a `while` whose body is a block or one statement, and
+//! inside an expression a number, a single- or double-quoted string with no
 //! interpolation, `true`, `false`, `null`, a constant by name, a call of
 //! a named function, a parenthesised expression, unary `-` and `+`, and
 //! `+`, `-`, `*`, `/`, `%` and `**` at php's precedence levels: the
@@ -28,6 +29,19 @@ pub(crate) enum Stmt {
     Echo(Vec<Expr>),
     /// An expression served for its effect; its value is discarded.
     Effect(Expr),
+    /// `{ ... }`, php's `ZEND_AST_STMT_LIST`.
+    Block(Read),
+    /// `for (init; cond; step) body`, php's `ZEND_AST_FOR`: three
+    /// expression lists, each empty where nothing is written between the
+    /// semicolons, and the body's statements.
+    For {
+        init: Vec<Expr>,
+        cond: Vec<Expr>,
+        step: Vec<Expr>,
+        body: Read,
+    },
+    /// `while (cond) body`, php's `ZEND_AST_WHILE`.
+    While { cond: Expr, body: Read },
 }
 
 /// One expression.
@@ -104,7 +118,7 @@ pub(crate) fn read(source: &[u8]) -> Result<Read, Trouble> {
             return Ok(out);
         }
         let short = reader.open_tag();
-        reader.statements(&mut out, short)?;
+        reader.statements(&mut out, short, false)?;
     }
 }
 
@@ -172,16 +186,31 @@ impl Reader<'_> {
         false
     }
 
-    /// Every statement up to the close tag or the end of the source.
-    /// `short` is `<?=`, whose first statement php reads as an `echo`.
-    fn statements(&mut self, out: &mut Read, short: bool) -> Result<(), Trouble> {
+    /// Every statement up to the close tag or the end of the source, or
+    /// inside a block up to its close brace. `short` is `<?=`, whose
+    /// first statement php reads as an `echo`.
+    fn statements(&mut self, out: &mut Read, short: bool, in_block: bool) -> Result<(), Trouble> {
         let mut short = short;
         loop {
             self.skip_trivia();
             if self.at >= self.source.len() {
+                if in_block {
+                    return Err(self.trouble("a block no brace closes"));
+                }
+                return Ok(());
+            }
+            if in_block && self.byte(0) == Some(b'}') {
+                self.bump(1);
                 return Ok(());
             }
             if self.starts_with(b"?>") {
+                // php reads text between the tags inside a block as an
+                // `echo`; this does not yet.
+                if in_block {
+                    return Err(
+                        self.trouble("a close tag inside a block this compiler cannot read yet")
+                    );
+                }
                 self.bump(2);
                 // php eats one newline directly after a close tag.
                 if self.starts_with(b"\r\n") {
@@ -210,13 +239,99 @@ impl Reader<'_> {
             self.bump(1);
             return Ok(None);
         }
+        if self.byte(0) == Some(b'{') {
+            self.bump(1);
+            let mut body = Read::new();
+            self.statements(&mut body, false, true)?;
+            return Ok(Some(Stmt::Block(body)));
+        }
         if self.word_ahead(b"echo") {
             self.bump(4);
             return Ok(Some(Stmt::Echo(self.echoed()?)));
         }
+        if self.word_ahead(b"for") {
+            self.bump(3);
+            return self.r#for().map(Some);
+        }
+        if self.word_ahead(b"while") {
+            self.bump(5);
+            return self.r#while().map(Some);
+        }
         let expr = self.expr()?;
         self.end_of_statement()?;
         Ok(Some(Stmt::Effect(expr)))
+    }
+
+    /// `for (init; cond; step) body`, the keyword read: three expression
+    /// lists between the parentheses, then the body.
+    fn r#for(&mut self) -> Result<Stmt, Trouble> {
+        self.punctuation(b'(', "a `for` with no parenthesis after it")?;
+        let init = self.expr_list(b';')?;
+        let cond = self.expr_list(b';')?;
+        let step = self.expr_list(b')')?;
+        let body = self.body()?;
+        Ok(Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        })
+    }
+
+    /// `while (cond) body`, the keyword read.
+    fn r#while(&mut self) -> Result<Stmt, Trouble> {
+        self.punctuation(b'(', "a `while` with no parenthesis after it")?;
+        let cond = self.expr()?;
+        self.punctuation(b')', "a `while` whose parenthesis nothing closes")?;
+        let body = self.body()?;
+        Ok(Stmt::While { cond, body })
+    }
+
+    /// One expected byte, or the trouble that names what was wanted.
+    fn punctuation(&mut self, wanted: u8, what: &str) -> Result<(), Trouble> {
+        self.skip_trivia();
+        if self.byte(0) != Some(wanted) {
+            return Err(self.trouble(what));
+        }
+        self.bump(1);
+        Ok(())
+    }
+
+    /// php's `for_exprs`: nothing, or expressions separated by commas,
+    /// up to `close`, which is taken.
+    fn expr_list(&mut self, close: u8) -> Result<Vec<Expr>, Trouble> {
+        let mut exprs = Vec::new();
+        loop {
+            self.skip_trivia();
+            if self.byte(0) == Some(close) {
+                self.bump(1);
+                return Ok(exprs);
+            }
+            if !exprs.is_empty() {
+                if self.byte(0) != Some(b',') {
+                    return Err(self.trouble("a `for` whose expressions this compiler cannot read"));
+                }
+                self.bump(1);
+            }
+            exprs.push(self.expr()?);
+        }
+    }
+
+    /// A loop's body: the statements of a block, one statement, or none
+    /// for the empty statement, each with its line.
+    fn body(&mut self) -> Result<Read, Trouble> {
+        self.skip_trivia();
+        let mut body = Read::new();
+        if self.byte(0) == Some(b'{') {
+            self.bump(1);
+            self.statements(&mut body, false, true)?;
+            return Ok(body);
+        }
+        let line = self.line;
+        if let Some(statement) = self.statement()? {
+            body.push((statement, line));
+        }
+        Ok(body)
     }
 
     /// The expressions of an `echo`, which `<?=` has too, up to the end
@@ -780,6 +895,88 @@ mod tests {
             )],
             "the right side of `**` is a unary expression"
         );
+    }
+
+    #[test]
+    fn a_for_reads_its_three_lists_and_a_body_of_either_shape() {
+        assert_eq!(
+            read(b"<?php for (;;) {}").unwrap_or_default(),
+            vec![(
+                Stmt::For {
+                    init: vec![],
+                    cond: vec![],
+                    step: vec![],
+                    body: vec![],
+                },
+                1
+            )]
+        );
+        assert_eq!(
+            read(b"<?php FOR (f(); 1, 2; g())\n  echo 3;").unwrap_or_default(),
+            vec![(
+                Stmt::For {
+                    init: vec![Expr::Call {
+                        name: b"f".to_vec(),
+                        arguments: vec![],
+                    }],
+                    cond: vec![Expr::Int(1), Expr::Int(2)],
+                    step: vec![Expr::Call {
+                        name: b"g".to_vec(),
+                        arguments: vec![],
+                    }],
+                    body: vec![(Stmt::Echo(vec![Expr::Int(3)]), 2)],
+                },
+                1
+            )],
+            "the keyword whatever its case, and one statement as the body at its own line"
+        );
+        assert_eq!(
+            read(b"<?php for (;;);").unwrap_or_default(),
+            vec![(
+                Stmt::For {
+                    init: vec![],
+                    cond: vec![],
+                    step: vec![],
+                    body: vec![],
+                },
+                1
+            )],
+            "the empty statement is a body with nothing in it"
+        );
+    }
+
+    #[test]
+    fn a_while_and_a_block_keep_their_statements_and_lines() {
+        assert_eq!(
+            read(b"<?php\nwhile (true) {\n  echo 1;\n  echo 2;\n}\n{ echo 3; }")
+                .unwrap_or_default(),
+            vec![
+                (
+                    Stmt::While {
+                        cond: Expr::Bool(true),
+                        body: vec![
+                            (Stmt::Echo(vec![Expr::Int(1)]), 3),
+                            (Stmt::Echo(vec![Expr::Int(2)]), 4),
+                        ],
+                    },
+                    2
+                ),
+                (Stmt::Block(vec![(Stmt::Echo(vec![Expr::Int(3)]), 6)]), 6),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_loop_this_cannot_read_is_refused_rather_than_mis_read() {
+        for source in [
+            b"<?php for (;;) { echo 1;".as_slice(),
+            b"<?php for (;;) { ?>x<?php }".as_slice(),
+            b"<?php for (1 2;;) {}".as_slice(),
+            b"<?php while 1 {}".as_slice(),
+            b"<?php while (1 {}".as_slice(),
+        ] {
+            assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
+        }
     }
 
     #[test]

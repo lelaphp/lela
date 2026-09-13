@@ -297,6 +297,112 @@ mod tests {
         );
     }
 
+    /// `zend_compile_for` over `for (;;) {}`, php's own oplines under
+    /// the dump recipe: the `JMP` forward to the condition, and the
+    /// condition, the constant `true` for an empty one, as the `JMPNZ`
+    /// back to the body's first opline, which is itself here. php folds
+    /// nothing, so the back-edge is a `JMPNZ` and not a `JMP`.
+    #[test]
+    fn an_empty_for_is_php_s_forward_jump_and_a_conditional_jump_to_itself() {
+        let unit = unit_of(b"<?php set_time_limit(1); for (;;) {}");
+        assert_eq!(
+            unit.dump(),
+            "$_main:\n     ; (lines=6, args=0, vars=0, tmps=1)\n\
+             0000 INIT_FCALL CONST[0]\n\
+             0001 SEND_VAL CONST[1]\n\
+             0002 DO_ICALL\n\
+             0003 JMP\n\
+             0004 JMPNZ CONST[2]\n\
+             0005 RETURN CONST[1]\n"
+        );
+        assert_eq!(
+            unit.main.oplines[3].op1, 4,
+            "the JMP lands on the condition"
+        );
+        assert_eq!(
+            unit.main.oplines[4].op2, 4,
+            "the JMPNZ lands on the body's first opline, which is itself"
+        );
+        assert_eq!(
+            unit.main.literals[2],
+            php_heap::Zval::bool(true),
+            "an empty condition is php's constant true"
+        );
+        assert_eq!(
+            unit.main.safepoints.as_ref(),
+            &[OplineIdx(0), OplineIdx(4), OplineIdx(5)],
+            "the entry, the back-edge, the return"
+        );
+        assert_eq!(
+            unit.main.oplines[4].out, 1,
+            "the back-edge's safepoint number"
+        );
+        assert_eq!(unit.main.oplines[5].out, 2, "the return's");
+    }
+
+    /// The three expression lists and the body, in the order php lays
+    /// them down: initialisers, the jump, the body, the step, then the
+    /// condition, whose last expression is what the `JMPNZ` tests. The
+    /// oracle's dump of this source, under the recipe, is the same
+    /// sixteen oplines with `V3 = DO_ICALL` at 13, the one call whose
+    /// value is read.
+    #[test]
+    fn a_for_lays_its_lists_down_in_php_s_order() {
+        let unit = unit_of(
+            b"<?php for (extension_loaded('i'); extension_loaded('a'), extension_loaded('b'); extension_loaded('s')) echo 'body';",
+        );
+        assert_eq!(
+            unit.dump(),
+            "$_main:\n     ; (lines=16, args=0, vars=0, tmps=4)\n\
+             0000 INIT_FCALL CONST[0]\n\
+             0001 SEND_VAL CONST[1]\n\
+             0002 DO_ICALL\n\
+             0003 JMP\n\
+             0004 ECHO CONST[2]\n\
+             0005 INIT_FCALL CONST[0]\n\
+             0006 SEND_VAL CONST[3]\n\
+             0007 DO_ICALL\n\
+             0008 INIT_FCALL CONST[0]\n\
+             0009 SEND_VAL CONST[4]\n\
+             0010 DO_ICALL\n\
+             0011 INIT_FCALL CONST[0]\n\
+             0012 SEND_VAL CONST[5]\n\
+             0013 DO_ICALL\n\
+             0014 JMPNZ V3\n\
+             0015 RETURN CONST[6]\n"
+        );
+        assert_eq!(
+            unit.main.oplines[3].op1, 8,
+            "the JMP lands on the condition"
+        );
+        assert_eq!(unit.main.oplines[14].op2, 4, "the JMPNZ lands on the body");
+    }
+
+    /// `zend_compile_while`, and a block whose statements keep their own
+    /// lines while the loop's own oplines keep the statement's, as php's
+    /// `CG(zend_lineno)` is the condition's again once the condition is
+    /// compiled; the final return takes the line the last opline left,
+    /// as `zend_emit_final_return` does.
+    #[test]
+    fn a_while_is_the_same_shape_and_the_body_keeps_its_lines() {
+        let unit = unit_of(b"<?php\nwhile (extension_loaded('a')) {\n  echo 1;\n}");
+        assert_eq!(
+            unit.dump(),
+            "$_main:\n     ; (lines=7, args=0, vars=0, tmps=1)\n\
+             0000 JMP\n\
+             0001 ECHO CONST[0]\n\
+             0002 INIT_FCALL CONST[1]\n\
+             0003 SEND_VAL CONST[2]\n\
+             0004 DO_ICALL\n\
+             0005 JMPNZ V0\n\
+             0006 RETURN CONST[0]\n"
+        );
+        assert_eq!(unit.main.oplines[0].op1, 2);
+        assert_eq!(unit.main.oplines[5].op2, 1);
+        let lines: Vec<u32> = unit.main.oplines.iter().map(|op| op.lineno).collect();
+        assert_eq!(lines, vec![2, 3, 2, 2, 2, 2, 2]);
+    }
+
     #[test]
     fn what_this_compiler_cannot_reach_is_refused_rather_than_mis_compiled() {
         for source in [
