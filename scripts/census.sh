@@ -4,8 +4,10 @@
 # Usage: scripts/census.sh <path-to-mahout-tree>
 #
 # Prints, for the 19 crates/mahout_ext_* crates, every distinct engine item they
-# call, with call-site counts and the number of extension crates using each item,
-# from six sources:
+# call, with call-site counts, the number of extension crates using each item and,
+# on the line under each row, which crates those are (`ext: date spl standard`,
+# by the name the crate has under ext/, which is the port map's `ext` column;
+# design §4.4), from six sources:
 #   1. mahout_value        inherent `pub fn`s on the public value types, matched by
 #                          method name on any receiver (see the rule below)
 #   2. RequestCtx          inherent `pub fn`s in `impl RequestCtx` blocks, matched on
@@ -83,11 +85,18 @@ def blocks(src, head_re):
 PUBFN = r"^\s*pub (?:const )?(?:unsafe )?fn ([a-z_0-9]+)"
 
 def print_table(title, rows, note=""):
-    """rows: [(name, sites, crates, flag)] sorted by sites desc"""
+    """rows: [(name, sites, crates, flag, exts)] sorted by sites desc.
+
+    An item may carry spaces (`ExtState::ext_teardown (impl)`), so the crates
+    are not a trailing column: they are the line under the row, indented past
+    the counts and marked `ext:`, which no row starts with and no per-crate
+    list under the linker tables does either.
+    """
     print(f"## {title}: {len(rows)} distinct items{note}")
     print(f"{'sites':>6} {'crates':>6}  item")
-    for name, sites, crates, flag in rows:
+    for name, sites, crates, flag, exts in rows:
         print(f"{sites:>6} {crates:>6}  {flag}{name}")
+        print(f"{'':>15}ext: {' '.join(exts)}")
     print()
 
 def tally(counter_by_crate):
@@ -95,7 +104,8 @@ def tally(counter_by_crate):
     rows = []
     for name, cc in counter_by_crate.items():
         s = sum(cc.values())
-        if s: rows.append((name, s, len([c for c, n in cc.items() if n]), ""))
+        exts = sorted(c.removeprefix("mahout_ext_") for c, n in cc.items() if n)
+        if s: rows.append((name, s, len(exts), "", exts))
     rows.sort(key=lambda r: (-r[1], r[0]))
     return rows
 
@@ -152,7 +162,7 @@ for c, files in ext_src.items():
                 val_dropped[n] += 1; continue
             val_calls[n][c] += 1
 rows = tally(val_calls)
-rows = [(n, s, k, "~" if n in STD_COLLIDING else "") for n, s, k, _ in rows]
+rows = [(n, s, k, "~" if n in STD_COLLIDING else "", e) for n, s, k, _, e in rows]
 print("# Mahout extension-seam census (scripts/census.sh) over", root)
 print(f"# ext crates: {len(EXT)}: {' '.join(c.removeprefix('mahout_ext_') for c in EXT)}")
 print()

@@ -33,12 +33,17 @@
 //! numbers are one: 651 rows, all unresolved, none named — design §11's
 //! row 1–2 reproduced by the measure and not asserted beside it.
 //!
-//! **When the column lands** (#170), a row carries `ext = [..]` naming as
-//! many extensions as it counts, `--tree` regenerates both together, and
-//! the row comes off the checklist on the day its last named extension
-//! registers a native: the rows one extension called go first and the
-//! ones every extension called go last, and the number reaches zero on
-//! the day the last inherited extension is ported.
+//! **The column.** The census prints, under each row, the extensions
+//! that called the item (`ext: date spl standard`, by the name each has
+//! under `ext/`), and a row of the map carries the same names as
+//! `ext = [..]`, as many as it counts. Under `--tree` a row resolves on
+//! the names the census just printed and not on the map's column, so
+//! the seed's column is never the stale number the instrument reads by
+//! construction; when the seed is regenerated with the first port, a row
+//! comes off the checklist on the day its last named extension registers
+//! a native: the rows one extension called go first and the ones every
+//! extension called go last, and the number reaches zero on the day the
+//! last inherited extension is ported.
 //!
 //! **The census.** `data/port-map.v0.toml` is the census as
 //! `scripts/census.sh` printed it at Mahout `1b3104a8`, joined by hand to
@@ -46,9 +51,7 @@
 //! against the inherited tree, which lives outside this repository, and
 //! joins that instead; a tree the census cannot read is a skip of the
 //! regeneration and never a pass, and the reading says which of the two
-//! it read. The census prints `sites crates item` and no crate names, so
-//! a regenerated run carries the counts and a row's `ext` column is still
-//! the map's until #170 lands the names in both.
+//! it read.
 
 use std::collections::BTreeSet;
 use std::fmt::Write;
@@ -354,14 +357,26 @@ fn tables_of(text: &str) -> Vec<String> {
     out
 }
 
-/// One line of a census table as `scripts/census.sh` printed it.
+/// One row of a census table as `scripts/census.sh` printed it: the
+/// counts on the row's line, and the extensions on the `ext:` line under
+/// it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Counted {
     pub(crate) table: String,
     pub(crate) item: String,
     pub(crate) sites: usize,
     pub(crate) crates: usize,
+    /// Which extensions called it, by the name each has under `ext/`, as
+    /// the census printed them: the names a row resolves on under
+    /// `--tree` (design §4.4).
+    pub(crate) ext: Vec<String>,
 }
+
+/// The line under a census row that names the extensions the row
+/// counted. An item may carry spaces, so the names are not a trailing
+/// column of the row's own line; and neither a row nor a per-crate list
+/// under the linker tables starts with this word.
+const EXT: &str = "ext:";
 
 /// The rows of a census run, its tables read in the order it prints them.
 /// A line under no table — the per-crate lists, the counts, the headers —
@@ -369,7 +384,7 @@ pub(crate) struct Counted {
 /// printed no table row yields none, which [`read`] refuses.
 pub(crate) fn census(text: &str) -> Vec<Counted> {
     let mut table = String::new();
-    let mut out = Vec::new();
+    let mut out: Vec<Counted> = Vec::new();
     for line in text.lines() {
         if let Some(heading) = line.strip_prefix("## ") {
             table = TABLES
@@ -379,6 +394,13 @@ pub(crate) fn census(text: &str) -> Vec<Counted> {
             continue;
         }
         if table.is_empty() {
+            continue;
+        }
+        // The names belong to the row printed just above them.
+        if let Some(names) = line.trim_start().strip_prefix(EXT) {
+            if let Some(last) = out.last_mut().filter(|last| last.table == table) {
+                last.ext = names.split_whitespace().map(str::to_owned).collect();
+            }
             continue;
         }
         let mut fields = line.split_whitespace();
@@ -403,6 +425,7 @@ pub(crate) fn census(text: &str) -> Vec<Counted> {
             item,
             sites,
             crates,
+            ext: Vec::new(),
         });
     }
     out
@@ -554,9 +577,12 @@ pub(crate) struct Joined<'a> {
     pub(crate) row: &'a Row,
     pub(crate) sites: usize,
     /// How many extensions called the item, as the census that was read
-    /// counts them; which ones they are is the row's `ext` column until
-    /// the census prints the names too (#170).
+    /// counts them.
     pub(crate) crates: usize,
+    /// Which ones they are, from the same census: the map row's column
+    /// for the committed one, the names the run just printed for a
+    /// tree's. What the row resolves on.
+    pub(crate) ext: Vec<String>,
     /// Whether the lock carries the row's `api` item; a `gone` row is
     /// matched by its rule.
     pub(crate) matched: bool,
@@ -597,8 +623,8 @@ impl Join<'_> {
     }
 
     /// Rows the census has named no extension for, which are unresolved
-    /// whatever the port has reached; they are all of them until the
-    /// column lands (#170).
+    /// whatever the port has reached; they are all of the committed
+    /// census's until it is regenerated with the first port.
     pub(crate) fn unnamed(&self) -> usize {
         self.rows.iter().filter(|j| !j.named).count()
     }
@@ -611,7 +637,7 @@ impl Join<'_> {
 
 /// Join the port map to the lock over the census that was read: every row
 /// when it is the committed one, and the rows the regenerated census still
-/// finds when it is a tree's, with that census's counts.
+/// finds when it is a tree's, with that census's counts and names.
 pub(crate) fn join<'a>(
     map: &'a PortMap,
     lock: &BTreeSet<String>,
@@ -625,13 +651,24 @@ pub(crate) fn join<'a>(
     match source {
         Source::Seed => {
             for row in &map.rows {
-                rows.push(joined(row, row.sites, row.crates, lock, ported));
+                rows.push(joined(row, row.sites, row.crates, &row.ext, lock, ported));
             }
         }
+        // The census just run is the evidence, its names included: a row
+        // resolves on the extensions it printed, however the map's
+        // column stands, so the seed's column is never the stale number
+        // the regeneration was asked to replace.
         Source::Tree(_) => {
             for found in counted {
                 match map.row(&found.table, &key(&found.table, &found.item)) {
-                    Some(row) => rows.push(joined(row, found.sites, found.crates, lock, ported)),
+                    Some(row) => rows.push(joined(
+                        row,
+                        found.sites,
+                        found.crates,
+                        &found.ext,
+                        lock,
+                        ported,
+                    )),
                     None => uncovered.push(found.item.clone()),
                 }
             }
@@ -651,11 +688,12 @@ pub(crate) fn join<'a>(
 
 /// One row against the lock and the extensions ported here: matched when
 /// its replacement exists, resolved when every extension the census
-/// counted for it is ported (design §4.4).
+/// counted for it, `ext`, is ported (design §4.4).
 fn joined<'a>(
     row: &'a Row,
     sites: usize,
     crates: usize,
+    ext: &[String],
     lock: &BTreeSet<String>,
     ported: &Ported,
 ) -> Joined<'a> {
@@ -663,7 +701,7 @@ fn joined<'a>(
         Some(api) => lock.contains(api),
         None => row.rule.is_some(),
     };
-    let (named, resolved) = match row.ext.as_slice() {
+    let (named, resolved) = match ext {
         // The census counted the extensions and did not name them, so
         // nothing here says which crates the port would have to reach:
         // the row stays on the checklist. This branch is written out
@@ -677,6 +715,7 @@ fn joined<'a>(
         row,
         sites,
         crates,
+        ext: ext.to_vec(),
         matched,
         resolved,
         named,
@@ -800,7 +839,7 @@ pub(crate) fn render(join: &Join) -> String {
             "  (not in the lock)"
         };
         let named = if joined.named {
-            format!(" ({})", joined.row.ext.join(", "))
+            format!(" ({})", joined.ext.join(", "))
         } else {
             String::new()
         };

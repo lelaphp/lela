@@ -169,26 +169,36 @@ fn a_row_naming_its_extensions_names_as_many_as_it_counts() {
 }
 
 /// The tables `scripts/census.sh` prints, as it prints them: the heading
-/// with its count, the column header, the rows, the `~` on a name std
-/// also defines, and the per-crate lists that are not table rows.
+/// with its count, the column header, the rows, each with the `ext:` line
+/// under it naming the extensions it counts, the `~` on a name std also
+/// defines, an item carrying spaces, and the per-crate lists that are
+/// not table rows.
 const PRINTED: &str = "\
 # Mahout extension-seam census (scripts/census.sh) over /tmp/mahout
 ## mahout_value methods called from ext crates: 2 distinct items  (~ = std-colliding name)
  sites crates  item
    748     18  ~len
+               ext: ctype curl date dom filter iconv json mbstring openssl pcre pdo pdo_mysql pdo_sqlite random reflection session spl standard
      3      1  sort_end
+               ext: standard
 
 ## mahout_linker: Cargo dependents 2, crates referencing it in source 2
 ## mahout_linker items imported or path-qualified by ext crates: 1 distinct items
  sites crates  item
     12      3  ClassDescriptor
+               ext: date reflection spl
   mahout_ext_spl: ClassDescriptor, ClassFlags
+
+## other mahout_runtime items imported or called from ext crates (Reentrant, ExtState, ...): 1 distinct items
+ sites crates  item
+     2      2  ExtState::ext_teardown (impl)
+               ext: session spl
 ";
 
 #[test]
 fn a_census_run_reads_as_its_tables_rows_and_nothing_beside_them() {
     let rows = census(PRINTED);
-    assert_eq!(rows.len(), 3, "{rows:#?}");
+    assert_eq!(rows.len(), 4, "{rows:#?}");
     assert_eq!(
         rows[0],
         Counted {
@@ -196,14 +206,57 @@ fn a_census_run_reads_as_its_tables_rows_and_nothing_beside_them() {
             item: "len".to_owned(),
             sites: 748,
             crates: 18,
+            ext: [
+                "ctype",
+                "curl",
+                "date",
+                "dom",
+                "filter",
+                "iconv",
+                "json",
+                "mbstring",
+                "openssl",
+                "pcre",
+                "pdo",
+                "pdo_mysql",
+                "pdo_sqlite",
+                "random",
+                "reflection",
+                "session",
+                "spl",
+                "standard",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
         }
     );
+    assert_eq!(rows[1].ext, ["standard"]);
     assert_eq!(rows[2].item, "ClassDescriptor");
     assert_eq!(
         rows[2].table,
         "mahout_linker items imported or path-qualified by ext crates"
     );
+    assert_eq!(rows[2].ext, ["date", "reflection", "spl"]);
+    // The names go under the row whose item carries spaces as under any
+    // other, since they are the line beneath it and not a column of it.
+    assert_eq!(rows[3].item, "ExtState::ext_teardown (impl)");
+    assert_eq!(rows[3].ext, ["session", "spl"]);
     assert!(census("nothing here").is_empty());
+}
+
+/// A census printed without the `ext:` lines, as the census printed
+/// before the column, reads as rows naming no extension: a run of the
+/// older shape is unresolved on every row and not resolved on the map's.
+#[test]
+fn a_census_run_without_the_ext_lines_names_no_extension() {
+    let unnamed = PRINTED
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("ext:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let rows = census(&unnamed);
+    assert_eq!(rows.len(), 4);
+    assert!(rows.iter().all(|row| row.ext.is_empty()), "{rows:#?}");
 }
 
 #[test]
@@ -219,12 +272,76 @@ fn a_census_item_the_map_has_no_row_for_is_uncovered_and_a_row_it_no_longer_find
         &counted,
     );
     assert_eq!(joined.rows.len(), 1, "len is the one row the map covers");
-    assert_eq!(joined.uncovered, ["sort_end", "ClassDescriptor"]);
+    assert_eq!(
+        joined.uncovered,
+        [
+            "sort_end",
+            "ClassDescriptor",
+            "ExtState::ext_teardown (impl)"
+        ]
+    );
     assert_eq!(joined.stale, 2);
     assert_eq!(
         joined.rows[0].sites, 748,
         "the census's count, not the map's"
     );
+}
+
+/// Under `--tree` a row resolves on the extensions the census just
+/// printed and not on the map row's column (design §4.4): the seed names
+/// none, and a regenerated census that names `standard` for a row takes
+/// it off the checklist once `standard` is ported, however the seed's
+/// column stands; and the map's column, when it disagrees, is not read.
+#[test]
+fn under_a_tree_a_row_resolves_on_the_census_names_and_not_the_map_rows() {
+    let map = PortMap::parse(ROWS).unwrap();
+    let lock = lock(&["values::PhpArray::len", "raising::throw_internal"]);
+    let counted = census(
+        "\
+## mahout_value methods called from ext crates: 1 distinct items
+ sites crates  item
+   748      1  ~len
+               ext: standard
+",
+    );
+    let tree = || Source::Tree("/tmp/mahout".into());
+
+    let reached = join(&map, &lock, &ported(&["standard"]), tree(), &counted);
+    assert_eq!(reached.rows.len(), 1);
+    assert!(reached.rows[0].named, "the census named it");
+    assert!(
+        reached.rows[0].resolved,
+        "the seed's row names none, and the census's name is the one read"
+    );
+    assert_eq!(reached.rows[0].ext, ["standard"]);
+    assert_eq!(
+        reached.rows[0].crates, 1,
+        "the census's count, not the map's"
+    );
+    assert_eq!(reached.unresolved(), 0);
+    assert_eq!(reached.unnamed(), 0);
+
+    let unreached = join(&map, &lock, &ported(&["spl"]), tree(), &counted);
+    assert!(!unreached.rows[0].resolved, "standard is not ported");
+
+    // A map row that names its extensions is not what the tree reads
+    // either: the seed says spl, the census says standard, and the row
+    // resolves on standard.
+    let named = PortMap::parse(&ROWS.replace(
+        "sites = 748\ncrates = 18",
+        "sites = 748\ncrates = 1\next = [\"spl\"]",
+    ))
+    .unwrap();
+    let on_the_census = join(&named, &lock, &ported(&["standard"]), tree(), &counted);
+    assert!(on_the_census.rows[0].resolved);
+    let on_the_map = join(&named, &lock, &ported(&["spl"]), tree(), &counted);
+    assert!(!on_the_map.rows[0].resolved);
+
+    // The committed census is read from the map's column, which is what
+    // it has.
+    let seed = join(&named, &lock, &ported(&["spl"]), Source::Seed, &[]);
+    assert!(seed.rows[0].resolved);
+    assert_eq!(seed.rows[0].ext, ["spl"]);
 }
 
 #[test]
