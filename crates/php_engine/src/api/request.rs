@@ -592,8 +592,7 @@ impl Request {
                     0 => 1,
                     precision => precision,
                 };
-                let text = crate::ops::double_to_string(f, precision);
-                let text = String::from_utf8_lossy(text.as_bytes());
+                let text = php_heap::double_to_string(f, precision);
                 out.push_str(&text);
                 if f.is_finite() && !text.contains('.') {
                     out.push_str(".0");

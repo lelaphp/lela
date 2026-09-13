@@ -153,10 +153,8 @@ fn dumped(req: &mut Request, value: &Value) -> PhpString {
     }
     if let Some(f) = value.as_float() {
         // `php_var_dump` prints a float with `%.*H` at `serialize_precision`.
-        let text = crate::ops::double_to_string(f, req.serialize_precision());
-        return PhpString::from_bytes(
-            format!("float({})\n", String::from_utf8_lossy(text.as_bytes())).as_bytes(),
-        );
+        let text = php_heap::double_to_string(f, req.serialize_precision());
+        return PhpString::from_bytes(format!("float({text})\n").as_bytes());
     }
     if let Some(s) = value.as_php_string() {
         let mut line = PhpString::from_bytes(format!("string({}) \"", s.len()).as_bytes());
