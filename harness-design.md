@@ -101,6 +101,8 @@ Check: the six are wrong if the manifest cannot express a rule the design has (�
 
 **37. Revision 37 (2026-09-13).** `track work` recorded what a session came to and nothing of what it spent (#210): the session is `claude -p …` with its streams the caller's, so tokens, cost and turns left with the process, and the one place a token-to-outcome delta existed was a person reading the run's stdout. The one live figure is the plugin's, `$.session.usage()`, the `/cost` ledger and the context window's fill, and `turn.complete` fires once a turn; so the module's third hook pipes what `usage()` answered to `xtask usage record --session <id> --turn <n>`, an instrument that writes one reading of instrument `usage`, `usd`, `tokens`, `window`, `percent` and `turn` in its numbers, scoped to the branch's ticket where one is recorded and to the session id otherwise, so an interactive session on `main` still shows up; the last reading under a scope is the session's final figure by construction. Usage is a reading and not a judgement: the reading passes whatever the numbers say, and a `usage()` that rejects or an `xtask` that does not run is one `$.ui.log` line and the turn proceeds. `track work` owns the join: `hold` reads the last `usage` reading under the ticket's scope, from the standing worktree's own store where one stands and from the track's log otherwise, which is where a retire put it, and puts `usd`, `tokens` and `turn` on the step's `track-work` reading beside the commit; the run's own reading carries the `usd` total. A ticket with no usage reading, a stand-in program in a test, carries none of the three and renders blank, not zero. §4.2's `instrument =` line, `CONTEXT.md`'s **Instrument** entry and `Reading::instrument`'s comment name `usage`, revision 34's three lists moving together; §4.6 has the `usage` section and the `track` section's three columns, and §5 says `usage` is rendered by name and not a ninth local section, by revision 35's test: what a session spent is an answer to a question a session chose to ask, not a fact about the tree it is about to change. Rejected: `--output-format json` on the `claude -p` call in `track work`, which yields the total once the session has ended, gives the same number a second path, and is not live; and a per-turn reading from the plugin joined nowhere, which would leave the figure beside the ticket it was spent on rather than with it. Check: `cargo test -p xtask --lib usage` reads a turn under the branch's ticket and under a session with none, and the join with and without a usage reading; `cargo test -p xtask --test track_work` runs `the_frontier_is_worked_until_it_empties_past_a_ticket_left_open` with stand-in sessions that each record one, and holds the `track` section to the retired ticket's usd read from the track's log, the standing one's read from its own store, and the run's total; a `track-work` reading whose session recorded usage and which carries no `usd` is this paragraph wrong.
 
+**38. Revision 38 (2026-09-13).** The ceilings this document restated go (#192). Design ledger 14 took the budget column out of `third-engine-design.md` §4.1 under the rule that a design document carries no number `cargo xtask budget` could disagree with, and this document carried the same numbers in three places: §3's **Budgets** row spelled out `[budget]`'s total, new-code, `docs/`, lock-package and release-build values in a cell whose own last column says the ceilings are declared in the manifest; §6's "No process weight" row read `.claude/**` at 300, which was wrong twice over, the row being 500 and covering `harness-plugins/**` since revision 20, whose own sentence had already left the number to the manifest; and §4.1's excerpt of the manifest carried the same `harness = 300` beside every other `[budget]` value and two `[[crate]]` ceilings, with `total`'s comment citing a design §4.1 that no longer carries it. Each now says what the row holds and not the number it holds it at: §3's row names the ceilings by kind, §6's row names the two trees and the two keys, and the excerpt keeps the grammar, the `[budget]` keys named in its comment and a `[[crate]]` row's `budget` named in the same way, with the values the file's alone. Revision 4's sentence that the example's budgets are the design's is a record of its revision and stands; what it asked for, one statement of each number, is now met by the example carrying none. Rejected: correcting 300 to 500, which leaves the trap armed for the next rise, and keeping any value with the manifest named beside it, which is two statements of one fact, the defect itself. Check: no number in this document is one `cargo xtask budget` reads from `seams.toml`, and `grep -n "272\|127\.5\|≤ 5k\|120 lock\|90 s\|300" harness-design.md` finds only ledger rows.
+
 ---
 
 ## 2. Vocabulary
@@ -126,7 +128,7 @@ The design never uses the word harness, but most of it is one. Each mechanism, i
 | **Interface locks** | guide and sensor | r2 §4.5; r3 §4.5; r4 §4.5; r7 §9.3 | Generated inventories of public items, diffed by `api-check`; `api.lock` ≤ 400 items; `tier.lock` doubles as `php_jit`'s import allowlist. | The lock set is declared once in the manifest (§4.1). |
 | **Dependency direction** | guide and sensor | r3 §4.2; r4 §4.2; ADR-0004 | Crate visibility first; `api-check` fails manifest edges outside the list, `use` paths across lines, non-topological bundle order. | Edges declared in the manifest. |
 | **Lock-free extensions** | guide and sensor | r5 §10; ADR-0005 | `Mutex`, `RwLock`, `Cell`, `RefCell`, atomics denied under `ext/*` via `clippy::disallowed-types` with reasons. | The list is generated from the manifest into `ext/clippy.toml`. |
-| **Budgets** | sensor | r1 §3, §4.1; r4 §4.1; r7 §4.1 | Line ceilings per crate, total 272.5k, new ≤ 127.5k, `docs/` ≤ 5k, ≤ 120 lock packages, clean release build ≤ 90 s. | Ceilings declared in the manifest. |
+| **Budgets** | sensor | r1 §3, §4.1; r4 §4.1; r7 §4.1 | Line ceilings per crate and for the workspace: the total, the new lines, `docs/`, the harness's own prose and the pooled bindings; the lock packages and the clean release build. | Ceilings declared in the manifest; no design document restates one. |
 | **`unsafe` audit** | sensor | r1 §10; r4 §10; r7 §4.1 | Four homes: `php_heap`, `ext/*/src/ffi/`, `php_jit::table::code`, `php_jit::enter`; a fifth fails. | Homes declared in the manifest; ADR-0004's two-home sentence is superseded (§14). |
 | **Lints** | sensor | r1 §10 | `clippy::pedantic`, `-D warnings`, panic family denied in engine crates. | Unchanged. |
 | **Re-entry lint** | sensor | r2 §10 | Any `php_engine` function calling `execute` or `release` must take `&mut Request`. | Unchanged. |
@@ -162,26 +164,18 @@ Five modules, each deep: a small interface, most of the harness's behaviour behi
 [oracle]
 pin = "oracle.toml"                        # the only statement of version, digest, recipe
 
-[budget]
-total = 272500                             # design §4.1: the [[crate]] rows plus bindings
-new = 127500
-docs = 5000
-harness = 300                              # .claude/** hand-written
-lock_packages = 120
-clean_build_release_s = 90
-api_items = 400
-bindings = 15000                           # ext/*/src/ffi/** pooled
+[budget]                                   # total, new, docs, harness, lock_packages,
+                                           # clean_build_release_s, api_items, bindings:
+                                           # one integer each, and the file carries them
 
 [[crate]]
-name = "php_engine"
-budget = 48000
+name = "php_engine"                        # budget = <lines>, the ceiling `xtask budget` holds
 lock = ["api.lock", "sapi.lock", "tier.lock"]
 lock_from = { "api.lock" = "php_ext" }
 [[crate]]
 name = "php_jit"
-budget = 17500
 feature = "jit"
-# ... one row per crate of design §4.1, ext/* rows with their own ceilings
+# ... one row per crate of design §4.1, ext/* rows with a ceiling each
 
 [[seam]]
 name = "tier"
@@ -414,7 +408,7 @@ The constraint table of revision 1 stands, with its column of where each rule no
 | No hand-authored exit status in a witness | `witness --accept` the only writer; `permit` | at the tool call, pre-commit | `witness.exit-authored` |
 | No second registry | bundle order checked against the crate graph | per commit | `[[edge]]` `php_bundle`, `order = "topological"` |
 | No committed generated code, except the generated config | `budget` path check; `ext/clippy.toml` regenerated and diffed | per commit | `[[crate]]` |
-| No process weight | `docs/` ≤ 5k; `.claude/**` hand-written ≤ 300 lines | per commit | `[budget]` |
+| No process weight | `docs/**` and the three living documents under `[budget] docs`; `.claude/**` and `harness-plugins/**` hand-written under `[budget] harness` | per commit | `[budget]` |
 | An agent does not touch the harness's own configuration | `permit` | at the tool call | `harness.self` |
 
 The strongest rows are still the ones with no path to take. Every row below them has a twin: a rule `permit` evaluates before the write has a lint or an `xtask` check after it, so no function hook is ever the only sensor for a constraint (revision 2 C.8 item 8), and the column says which.

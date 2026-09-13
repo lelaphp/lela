@@ -65,7 +65,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=2045537680f30e5a86b16f377f909c82db455e1108100f4ee5e6b8215e6b572f out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=02d891432046a3c147748f753937c2462630dfd52ef926561ffae71bb5653d9d out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -86,9 +86,9 @@ third-engine-design.md
 | api | api.lock | 325 | 400 | pass |
 | sapi | sapi.lock | 0 |  | pass |
 | tier | tier.lock |  |  | skip |
-| harness | xtask.lock | 292 |  | pass |
+| harness | xtask.lock | 307 |  | pass |
 
-<!-- /computed in=3dcffa5a0ea40568d6563a18b7f0589ed992a9729102f82d8b6e2944b12d41cf out=5260fd8606f3c249d6eaa0168d55cf8e1e009ebcb4b995a920422c8db61cbd92 -->
+<!-- /computed in=c3654f5cf27e6096dc855bf94e0973935cf2f095353f6b345e875d3ed61b89da out=14964855d0c58174d299318f95e60bfd5bb66abe869c27e6cecdd6d65d5bd5eb -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -103,7 +103,7 @@ third-engine-design.md
 | xtask.lock-line |  | on | pass | A new pub item in xtask needs its xtask.lock line in the same commit. |
 | ext.pub-beyond-extension |  | on | pass | api-check prints each ext crate's pub items beyond extension(); anything beyond the pdo driver trait and the random handle needs a line in the design (§12). |
 | witness.exit-authored |  | deny_pattern | no reading | exit= in a witness is captured by `xtask witness --accept`, never authored. |
-| witness.coverage |  | check | skip | A kernel or a native without a witness fails CI (design §8). |
+| witness.coverage |  | check | no reading | A kernel or a native without a witness fails CI (design §8). |
 | vocab.avoid |  | avoid_from | pass | The glossary's _Avoid_ words appear in no public item name or rustdoc prose; a lock line mirrors php's names and is not read. |
 | vocab.harness |  | avoid_from | pass | The Harness section's _Avoid_ words appear in no public item name or rustdoc prose of the harness; xtask/fixtures/** are other crates' sources and are not read. |
 | generated.committed |  | generated | pass | ext/clippy.toml is generated from the manifest and committed; a stale copy fails budget. |
@@ -116,7 +116,7 @@ third-engine-design.md
 | harness.self |  | deny | fail | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
 | divergence.reason |  | check | no reading | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
 
-<!-- /computed in=9f21773e0813e3c0d809c1497aef280f6ab793f728f249e1765cc7d14a45ecb5 out=96f34607bfc1ab7131ae42a29d1ebab6fa30cace9ea58585954978611ff7b7c7 -->
+<!-- /computed in=5079379761028b58e053b4808d75bcec876085f3bb80d1390ecceb20fe63076a out=d6cfa66b48e0d88b4fae122326e9f4668c3c2476e09c957a868ffd770a7cd767 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
