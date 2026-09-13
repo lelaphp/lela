@@ -3,8 +3,12 @@
 //! the tokens are contiguous and their lengths sum to the input length.
 
 mod diagnostics;
+mod halt;
+mod heredoc;
 mod numbers;
+mod php_names;
 mod scripting;
+mod strings;
 mod tags;
 
 pub(crate) use crate::SyntaxKind;

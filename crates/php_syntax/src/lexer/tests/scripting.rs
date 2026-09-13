@@ -302,8 +302,9 @@ fn comment_exits_property_mode_like_zend() {
 
 #[test]
 fn yield_from_is_two_tokens() {
-    // php-src fuses T_YIELD_FROM; the stream keeps two tokens, and the
-    // token names fuse them the way token_get_all does (#199).
+    // php-src fuses T_YIELD_FROM; the stream keeps two tokens, and
+    // `ext/tokenizer` fuses them the way token_get_all does (`php_names`
+    // says why the fuse is its and not the tables').
     check_php(
         "yield from",
         &[(YIELD_KW, "yield"), (WHITESPACE, " "), (FROM_KW, "from")],
