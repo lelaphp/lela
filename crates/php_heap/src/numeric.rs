@@ -73,14 +73,42 @@ impl Number {
 /// ```
 #[must_use]
 pub fn numeric_prefix(bytes: &[u8]) -> Option<(Number, bool)> {
+    let read = numeric_read(bytes)?;
+    Some((read.number, read.trailing))
+}
+
+/// What `_is_numeric_string_ex` reports about one string: the number, whether
+/// anything but whitespace follows it, and `oflow_info`, the sign of an
+/// integer too wide for a long, which [`crate::compare`]'s
+/// `zendi_smart_strcmp` reads to keep two such integers apart.
+pub(crate) struct NumericRead {
+    pub(crate) number: Number,
+    pub(crate) trailing: bool,
+    /// php's `oflow_info`: -1 or 1 for an integer that overflowed a long
+    /// on that side, and 0 for every other number, a written double
+    /// among them.
+    pub(crate) overflow: i8,
+}
+
+/// `_is_numeric_string_ex` itself, which [`numeric_prefix`] and the
+/// comparisons read through.
+pub(crate) fn numeric_read(bytes: &[u8]) -> Option<NumericRead> {
     let space = |b: &u8| matches!(*b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c);
     let from = bytes.iter().position(|b| !space(b))?;
     let rest = bytes.get(from..)?;
+    let negative = rest.first() == Some(&b'-');
     let mut at = usize::from(matches!(rest.first(), Some(b'-' | b'+')));
     let digits = at;
+    // php skips the leading zeros before it counts digits, so
+    // `MAX_LENGTH_OF_LONG` is a count of the significant ones.
+    while rest.get(at) == Some(&b'0') {
+        at += 1;
+    }
+    let significant = at;
     while rest.get(at).is_some_and(u8::is_ascii_digit) {
         at += 1;
     }
+    let counted = at - significant;
     let mut floating = false;
     // php's `process_double`, reached by a `.` after digits or before
     // them: `zend_strtod` then takes the whole number.
@@ -109,16 +137,36 @@ pub fn numeric_prefix(bytes: &[u8]) -> Option<(Number, bool)> {
     }
     let text = std::str::from_utf8(rest.get(..at)?).ok()?;
     let trailing = rest.get(at..).is_some_and(|tail| !tail.iter().all(space));
+    let sign = if negative { -1 } else { 1 };
     if floating {
-        return Some((Number::Double(text.parse().ok()?), trailing));
+        // php stops counting at `MAX_LENGTH_OF_LONG` digits and reports
+        // the overflow before it reads the point or the exponent.
+        let overflow = if counted >= MAX_LENGTH_OF_LONG {
+            sign
+        } else {
+            0
+        };
+        return Some(NumericRead {
+            number: Number::Double(text.parse().ok()?),
+            trailing,
+            overflow,
+        });
     }
     // php reads an integer too wide for a long as a double.
-    let number = match text.parse::<i64>() {
-        Ok(n) => Number::Long(n),
-        Err(_) => Number::Double(text.parse().ok()?),
+    let (number, overflow) = match text.parse::<i64>() {
+        Ok(n) => (Number::Long(n), 0),
+        Err(_) => (Number::Double(text.parse().ok()?), sign),
     };
-    Some((number, trailing))
+    Some(NumericRead {
+        number,
+        trailing,
+        overflow,
+    })
 }
+
+/// php's `MAX_LENGTH_OF_LONG` on a 64-bit long: the digit count at
+/// which an integer is a double before it is read to the end.
+const MAX_LENGTH_OF_LONG: usize = 20;
 
 /// `zend_gcvt` (`Zend/zend_strtod.c:4509`), which every float php prints
 /// goes through: `precision` significant digits when it is not negative,
@@ -364,6 +412,27 @@ mod tests {
                 text,
                 "{value} at serialize_precision -1"
             );
+        }
+    }
+
+    /// `oflow_info`: the sign of an integer that overflowed a long, set
+    /// where php sets it, at twenty significant digits before the point
+    /// is read and at nineteen past `long_min_digits`, and nowhere else.
+    #[test]
+    fn an_integer_too_wide_for_a_long_reports_the_side_it_overflowed_on() {
+        for (text, overflow) in [
+            ("9223372036854775807", 0),
+            ("9223372036854775808", 1),
+            ("-9223372036854775808", 0),
+            ("-9223372036854775809", -1),
+            ("00000000000000000000000001", 0),
+            ("12345678901234567890.5", 1),
+            ("-12345678901234567890e1", -1),
+            ("1234567890123456789.5", 0),
+            ("1e1000", 0),
+        ] {
+            let read = numeric_read(text.as_bytes());
+            assert_eq!(read.map(|r| r.overflow), Some(overflow), "{text:?}");
         }
     }
 

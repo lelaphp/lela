@@ -8,7 +8,9 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_heap::{Number, double_to_string, numeric_prefix};
+use std::cmp::Ordering;
+
+use php_heap::{Number, Scalar, double_to_string, numeric_prefix};
 
 use crate::api::raising::{Thrown, deprecated, throw, warning};
 use crate::api::request::Request;
@@ -483,6 +485,353 @@ pub(crate) fn concat(req: &mut Request, left: &Value, right: &Value) -> Result<V
         return Err(throw(req, "Error", "String size overflow"));
     }
     Ok(Value::string(a.concat(&b)))
+}
+
+/// `zend_compare` (`Z/Zend/zend_operators.c:2312`), the one ordering
+/// every comparison opcode reads: [`php_heap::compare`] over the scalar
+/// pairs, which the compiler folds `<` through as well, and here the
+/// pairs an array, an object or a resource makes. Two arrays compare as
+/// `zend_compare_arrays`, by count and then element by element on the
+/// left one's keys; a null or a bool against any of the three compares
+/// as the other side's truth; a resource against a number or a string
+/// is its id, converted silently as `_zendi_convert_scalar_to_number_silent`
+/// converts both; and an array against a number or a string is the
+/// greater, whichever side it is on. An object is equal to itself and
+/// greater than a null; against anything else it is the greater side,
+/// which is `zend_std_compare_objects`'s answer when the cast fails, and
+/// the property walk of two objects of one class and the warning of a
+/// cast to a number wait with the classes.
+///
+/// The long pair and the double pairs are the arms php's `ZEND_IS_SMALLER`
+/// handler takes before it calls `zend_compare`, and `zend_compare`'s own
+/// first arms, so the kernel is the whole of it.
+///
+/// ```php
+/// $one = extension_loaded('Core');
+/// var_dump(1 < $one + 1, 2 < $one, 1.5 < $one + 1, $one + 1 < 1.5, "10" < $one + 9, "abc" < $one, 9223372036854775807 < $one + 9223372036854775807);
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// ```
+///
+/// A NAN is after everything, so it is smaller than nothing and nothing
+/// is smaller than it, and the opcode warns of nothing on the way.
+///
+/// ```php
+/// $nan = NAN; $one = extension_loaded('Core');
+/// var_dump($nan < $one, $one < $nan, $nan < "1", "1" < $nan);
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// ```
+pub(crate) fn compare(req: &mut Request, left: &Value, right: &Value) -> Ordering {
+    let (left, right) = (left.deref(), right.deref());
+    if let (Some(a), Some(b)) = (scalar(left), scalar(right)) {
+        return php_heap::compare(a, b, req.precision());
+    }
+    match (left.as_ref(), right.as_ref()) {
+        (ValueRef::Array(a), ValueRef::Array(b)) => compare_arrays(req, a, b),
+        (ValueRef::Object(a), ValueRef::Object(b)) if a == b => Ordering::Equal,
+        // php's default arm: a null or a bool as the other side's truth,
+        // which is also what its own `IS_NULL` and `IS_OBJECT` pairs
+        // answer; then an object, then an array, then both sides as
+        // numbers.
+        (ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false), _) => {
+            if is_true(req, right) {
+                Ordering::Less
+            } else {
+                Ordering::Equal
+            }
+        }
+        (ValueRef::Bool(true), _) => {
+            if is_true(req, right) {
+                Ordering::Equal
+            } else {
+                Ordering::Greater
+            }
+        }
+        (_, ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false)) => {
+            if is_true(req, left) {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        }
+        (_, ValueRef::Bool(true)) => {
+            if is_true(req, left) {
+                Ordering::Equal
+            } else {
+                Ordering::Less
+            }
+        }
+        (ValueRef::Object(_), _) => Ordering::Greater,
+        (_, ValueRef::Object(_)) => Ordering::Less,
+        (ValueRef::Array(_), _) => Ordering::Greater,
+        (_, ValueRef::Array(_)) => Ordering::Less,
+        (a, b) => php_heap::compare(silent_number(a), silent_number(b), req.precision()),
+    }
+}
+
+/// `is_smaller_function` (`Z/Zend/zend_operators.c:2669`): whether
+/// [`compare`] orders the left side first, which is what `ZEND_IS_SMALLER`
+/// leaves in its temporary and what `<` reads.
+///
+/// ```php
+/// for ($i = 0; $i < 3; $i++) { echo $i; }
+/// ```
+/// ```expect
+/// 012
+/// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the shape every binary kernel has, so one handler body serves them all"
+)]
+pub(crate) fn is_smaller(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    Ok(Value::bool(compare(req, left, right) == Ordering::Less))
+}
+
+/// The scalar a value is, for [`php_heap::compare`]; nothing for an
+/// array, an object, a resource or a reference not yet followed.
+fn scalar(value: &Value) -> Option<Scalar<'_>> {
+    Some(match value.as_ref() {
+        // php's `IS_NULL` arm; an uninitialised zval reads as null here.
+        ValueRef::Undef | ValueRef::Null => Scalar::Null,
+        ValueRef::Bool(b) => Scalar::Bool(b),
+        ValueRef::Int(n) => Scalar::Long(n),
+        ValueRef::Float(f) => Scalar::Double(f),
+        ValueRef::Str(s) => Scalar::Str(s.as_bytes()),
+        ValueRef::Array(_)
+        | ValueRef::Object(_)
+        | ValueRef::Resource(_)
+        | ValueRef::Reference(_) => {
+            return None;
+        }
+    })
+}
+
+/// `_zendi_convert_scalar_to_number_silent` over what [`compare`]'s
+/// default arm has left: a resource is its id, and a string the number
+/// it opens with or zero, read with `allow_errors` and no warning. A
+/// number is itself; nothing else reaches here.
+fn silent_number(value: ValueRef<'_>) -> Scalar<'static> {
+    match value {
+        ValueRef::Int(n) => Scalar::Long(n),
+        ValueRef::Float(f) => Scalar::Double(f),
+        ValueRef::Resource(r) => Scalar::Long(i64::from(r.id)),
+        ValueRef::Str(s) => match numeric_prefix(s.as_bytes()) {
+            Some((Number::Long(n), _)) => Scalar::Long(n),
+            Some((Number::Double(d), _)) => Scalar::Double(d),
+            None => Scalar::Long(0),
+        },
+        _ => Scalar::Long(0),
+    }
+}
+
+/// `zend_compare_arrays`, which is `zend_hash_compare` with
+/// `hash_zval_compare_function` and `ordered` off
+/// (`Z/Zend/zend_hash.c:3155`): the counts first, then each key of the
+/// left array looked up in the right one, a key the right one lacks
+/// making the left the greater, and the two values compared by
+/// [`compare`] until one pair differs.
+fn compare_arrays(req: &mut Request, left: &PhpArray, right: &PhpArray) -> Ordering {
+    if left.len() != right.len() {
+        return left.len().cmp(&right.len());
+    }
+    for (key, value) in left.snapshot() {
+        let Some(other) = right.get(&key) else {
+            return Ordering::Greater;
+        };
+        let ordering = compare(req, &value, other);
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    Ordering::Equal
+}
+
+/// `increment_function` (`Z/Zend/zend_operators.c:2712`): the value
+/// `++` leaves in the variable. A long is one more, and the double past
+/// the long's edge where that overflowed (`fast_long_increment_function`);
+/// a double is one more; null is `1`; a numeric string is the number it
+/// holds, one more, the long's edge stepping to a double as the long's
+/// does; any other string steps as `increment_string` steps it, `'a'`
+/// to `'b'`, `'Az'` to `'Ba'`, `'z'` to `'aa'` and `'a9'` to `'b0'`, the
+/// empty string to `'1'`, behind the deprecation 8.3 raises for one; a
+/// bool is php's warning and no change; and an array, a resource or an
+/// object is `TypeError`, naming what it could not increment. The value
+/// is handed back rather than written in place: a reference the
+/// variable holds is followed with the memory model (design §11, Lane A).
+///
+/// ```php
+/// $i = 1; $i++; $d = 1.5; $d++; $m = 9223372036854775807; $m++; $n = null; $n++; $t = "9"; $t++; $f = "1.5"; $f++; $e = "9223372036854775807"; $e++;
+/// var_dump($i, $d, $m, $n, $t, $f, $e);
+/// ```
+/// ```expect
+/// int(2)
+/// float(2.5)
+/// float(9.223372036854776E+18)
+/// int(1)
+/// int(10)
+/// float(2.5)
+/// float(9.223372036854776E+18)
+/// ```
+///
+/// ```php
+/// $s = "a"; $s++; $z = "Az"; $z++; $w = "z"; $w++; $n = "a9"; $n++; $e = ""; $e++; $x = "a-"; $x++;
+/// var_dump($s, $z, $w, $n, $e, $x);
+/// ```
+/// ```expect
+///
+/// Deprecated: Increment on non-numeric string is deprecated, use str_increment() instead in %s on line 2
+///
+/// Deprecated: Increment on non-numeric string is deprecated, use str_increment() instead in %s on line 2
+///
+/// Deprecated: Increment on non-numeric string is deprecated, use str_increment() instead in %s on line 2
+///
+/// Deprecated: Increment on non-numeric string is deprecated, use str_increment() instead in %s on line 2
+///
+/// Deprecated: Increment on non-numeric string is deprecated, use str_increment() instead in %s on line 2
+///
+/// Deprecated: Increment on non-numeric string is deprecated, use str_increment() instead in %s on line 2
+/// string(1) "b"
+/// string(2) "Ba"
+/// string(2) "aa"
+/// string(2) "b0"
+/// string(1) "1"
+/// string(2) "a-"
+/// ```
+///
+/// ```php
+/// $b = true; $b++; var_dump($b);
+/// ```
+/// ```expect
+///
+/// Warning: Increment on type bool has no effect, this will change in the next major version of PHP in %s on line 2
+/// bool(true)
+/// ```
+///
+/// `$i++` leaves what the variable held and `++$i` what it holds now,
+/// and a variable nothing has written is php's warning and null, which
+/// steps to `1`.
+///
+/// ```php
+/// $u++; var_dump($u); echo ++$v, "|", $w++, "|", $w, "|", $x = 5, $x++, ++$x, $x;
+/// ```
+/// ```expect
+///
+/// Warning: Undefined variable $u in %s on line 2
+/// int(1)
+///
+/// Warning: Undefined variable $v in %s on line 2
+/// 1|
+/// Warning: Undefined variable $w in %s on line 2
+/// |1|5577
+/// ```
+pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Thrown> {
+    let value = value.deref();
+    match value.as_ref() {
+        ValueRef::Int(n) => Ok(match n.checked_add(1) {
+            Some(more) => Value::int(more),
+            None => Value::float(wide(i64::MAX) + 1.0),
+        }),
+        ValueRef::Float(f) => Ok(Value::float(f + 1.0)),
+        // php's `IS_NULL` arm; an uninitialised zval reads as null here.
+        ValueRef::Undef | ValueRef::Null => Ok(Value::int(1)),
+        ValueRef::Str(s) => {
+            // `is_numeric_str_function`, which is the reader with
+            // `allow_errors` off: a string with anything past its number
+            // is not a number here.
+            match numeric_prefix(s.as_bytes()) {
+                Some((Number::Long(i64::MAX), false)) => Ok(Value::float(wide(i64::MAX) + 1.0)),
+                Some((Number::Long(n), false)) => Ok(Value::int(n + 1)),
+                Some((Number::Double(d), false)) => Ok(Value::float(d + 1.0)),
+                _ => Ok(Value::string(increment_string(req, s.as_bytes()))),
+            }
+        }
+        ValueRef::Bool(_) => {
+            warning(
+                req,
+                "Increment on type bool has no effect, this will change in the next major version of PHP",
+            );
+            Ok(value.clone())
+        }
+        ValueRef::Array(_)
+        | ValueRef::Resource(_)
+        | ValueRef::Object(_)
+        | ValueRef::Reference(_) => {
+            let name = value_name(req, value);
+            Err(throw(req, "TypeError", &format!("Cannot increment {name}")))
+        }
+    }
+}
+
+/// `increment_string` (`Z/Zend/zend_operators.c:2613`), "Perl style
+/// string increment", behind its deprecation: from the last byte back, a
+/// letter or a digit steps to the next of its kind, with `z`, `Z` and
+/// `9` wrapping to `a`, `A` and `0` and carrying into the byte before;
+/// a byte that is none of the three stops the carry where it stands; and
+/// a carry off the front prepends the first of the last kind stepped. The
+/// empty string is `"1"`.
+fn increment_string(req: &mut Request, bytes: &[u8]) -> PhpString {
+    deprecated(
+        req,
+        "Increment on non-numeric string is deprecated, use str_increment() instead",
+    );
+    if bytes.is_empty() {
+        return PhpString::from_bytes(b"1");
+    }
+    let mut out = bytes.to_vec();
+    let mut last = None;
+    let mut carry = false;
+    for byte in out.iter_mut().rev() {
+        let (first, past) = match *byte {
+            b'a'..=b'z' => (b'a', b'z'),
+            b'A'..=b'Z' => (b'A', b'Z'),
+            b'0'..=b'9' => (b'0', b'9'),
+            _ => {
+                carry = false;
+                break;
+            }
+        };
+        last = Some(first);
+        if *byte == past {
+            *byte = first;
+            carry = true;
+        } else {
+            *byte += 1;
+            carry = false;
+            break;
+        }
+    }
+    if carry && let Some(first) = last {
+        // The `1`, `A` or `a` php writes before the string once the carry
+        // has run off its front.
+        out.insert(0, if first == b'0' { b'1' } else { first });
+    }
+    PhpString::from_bytes(&out)
+}
+
+/// `zend_zval_value_name` (`Z/Zend/zend_API.c:157`): what a `TypeError`
+/// names a value as, which is its class for an object, `true` or `false`
+/// for a bool, and its type for the rest.
+fn value_name(req: &Request, value: &Value) -> String {
+    match value.as_ref() {
+        ValueRef::Object(o) => req.class_decl(o.class()).map_or_else(
+            || String::from("object"),
+            |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
+        ),
+        ValueRef::Bool(b) => String::from(if b { "true" } else { "false" }),
+        _ => String::from(value.type_name()),
+    }
 }
 
 /// `ZSTR_MAX_LEN` (`Z/Zend/zend_string.h:108`): `SIZE_MAX` less the

@@ -143,14 +143,14 @@ impl Str {
     /// is what lets one op array's constants be read by every request
     /// thread at once. What the interpreter does with a constant string
     /// on every `ECHO`, the same op array's constant read on every pass of
-    /// a loop, counting down on the CV's truth until `<` and `++` are
-    /// read (#213):
+    /// php's own loop, the one the bench of #156 runs; the pattern admits
+    /// the one string of a thousand `dax` and nothing else:
     ///
     /// ```php
-    /// for ($i = 3; $i; $i = $i - 1) { echo 'dax'; }
+    /// for ($i = 0; $i < 1000; $i++) { echo 'dax'; }
     /// ```
     /// ```expect exit=0
-    /// daxdaxdax
+    /// %r(?:dax){1000}%r
     /// ```
     #[must_use]
     pub fn bytes(&self) -> &[u8] {

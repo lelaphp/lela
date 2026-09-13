@@ -14,10 +14,11 @@
 //! inside an expression a number, a single- or double-quoted string with no
 //! interpolation, `true`, `false`, `null`, a constant by name, a call of
 //! a named function, a parenthesised expression, a variable `$a` that is
-//! a CV, an assignment `$a = expr` to one, unary `-` and `+`, and
-//! `.`, `<<`, `>>`, `+`, `-`, `*`, `/`, `%` and `**` at php's precedence
-//! levels: `.` under the shifts under the additive level under the
-//! multiplicative one, each left to right, and `**` right to left above
+//! a CV, an assignment `$a = expr` to one, `$a++` and `++$a` on one,
+//! unary `-` and `+`, and `<`, `.`, `<<`, `>>`, `+`, `-`, `*`, `/`, `%`
+//! and `**` at php's precedence levels: `<` under `.` under the shifts
+//! under the additive level under the multiplicative one, `<` not
+//! associating and the rest left to right, and `**` right to left above
 //! unary `-`, with `=` below them all and read right to left.
 //! Anything else is a [`crate::CompileError`], so what this cannot read is
 //! refused rather than silently compiled to something else.
@@ -81,6 +82,11 @@ pub(crate) enum Expr {
         var: Vec<u8>,
         value: Box<Expr>,
     },
+    /// `++$a`, php's `ZEND_AST_PRE_INC`, whose grammar puts a variable
+    /// and nothing else after the `++`.
+    PreInc(Vec<u8>),
+    /// `$a++`, php's `ZEND_AST_POST_INC`.
+    PostInc(Vec<u8>),
 }
 
 /// The binary operators this reads, each the opcode php's
@@ -105,6 +111,8 @@ pub(crate) enum BinaryOp {
     Sr,
     /// `ZEND_CONCAT`
     Concat,
+    /// `ZEND_IS_SMALLER`
+    IsSmaller,
 }
 
 /// The line each statement stands on, beside it.
@@ -387,7 +395,7 @@ impl Reader<'_> {
     /// `1 + $a = 2` is php's `1 + ($a = 2)`; that is refused here rather
     /// than read as the other grouping.
     fn expr(&mut self) -> Result<Expr, Trouble> {
-        let left = self.concat()?;
+        let left = self.comparison()?;
         self.skip_trivia();
         if !(self.byte(0) == Some(b'=') && self.byte(1) != Some(b'=')) {
             return Ok(left);
@@ -402,6 +410,35 @@ impl Reader<'_> {
             var,
             value: Box::new(self.expr()?),
         })
+    }
+
+    /// `<`, php's non-associative level below `.`: one comparison, and a
+    /// second `<` after it is php's parse error, refused here. A `<=`,
+    /// `<>` and `<=>` are other operators, none of which this reads, and
+    /// `<<` is the shift.
+    fn comparison(&mut self) -> Result<Expr, Trouble> {
+        let left = self.concat()?;
+        if !self.smaller_ahead() {
+            return Ok(left);
+        }
+        self.bump(1);
+        let right = self.concat()?;
+        self.skip_trivia();
+        if self.smaller_ahead() {
+            return Err(self.trouble("a comparison of a comparison, which php does not read"));
+        }
+        Ok(Expr::Binary {
+            op: BinaryOp::IsSmaller,
+            left: Box::new(left),
+            right: Box::new(right),
+        })
+    }
+
+    /// Whether a `<` that is the comparison stands here: not `<<`, `<=`,
+    /// `<>` or `<=>`.
+    fn smaller_ahead(&mut self) -> bool {
+        self.skip_trivia();
+        self.byte(0) == Some(b'<') && !matches!(self.byte(1), Some(b'<' | b'=' | b'>'))
     }
 
     /// `.`, php's own level since 8.0, below the shifts. A `.=` assigns
@@ -528,13 +565,26 @@ impl Reader<'_> {
     }
 
     /// What an operator stands between: a number or a string as written, a name, a
-    /// variable, or a parenthesised expression.
+    /// variable, with `++` before or after it, or a parenthesised expression.
     fn operand(&mut self) -> Result<Expr, Trouble> {
         self.skip_trivia();
         match self.byte(0) {
             Some(b'\'') => self.single_quoted(),
             Some(b'"') => self.double_quoted(),
-            Some(b'$') => self.variable(),
+            Some(b'$') => self.incremented(),
+            // php's `T_INC variable`: the variable is the whole operand,
+            // so `++$a ** 2` is php's `(++$a) ** 2`.
+            Some(b'+') if self.byte(1) == Some(b'+') => {
+                self.bump(2);
+                self.skip_trivia();
+                if self.byte(0) != Some(b'$') {
+                    return Err(self.trouble("a `++` before what is no variable"));
+                }
+                let Expr::Var(name) = self.variable()? else {
+                    return Err(self.trouble("a `++` before what is no variable"));
+                };
+                Ok(Expr::PreInc(name))
+            }
             Some(b) if b.is_ascii_digit() || (b == b'.' && self.digit_ahead(1)) => self.number(),
             Some(b'(') => {
                 self.bump(1);
@@ -580,6 +630,22 @@ impl Reader<'_> {
             }
             arguments.push(self.expr()?);
         }
+    }
+
+    /// A variable, and php's `variable T_INC` after it: `$a++` is one
+    /// operand, so `-$a++` is php's `-($a++)`. A `++` after that is
+    /// php's parse error, and is refused by whatever reads on.
+    fn incremented(&mut self) -> Result<Expr, Trouble> {
+        let var = self.variable()?;
+        self.skip_trivia();
+        if !(self.byte(0) == Some(b'+') && self.byte(1) == Some(b'+')) {
+            return Ok(var);
+        }
+        let Expr::Var(name) = var else {
+            return Ok(var);
+        };
+        self.bump(2);
+        Ok(Expr::PostInc(name))
     }
 
     /// `$` and php's `LABEL`: a letter, `_` or a byte past ASCII, then
@@ -1114,6 +1180,85 @@ mod tests {
             )],
             "the right side of `**` is a unary expression"
         );
+    }
+
+    /// The one loop php's own shape has, the bench of #156 runs and
+    /// [`php_heap::Str::bytes`]'s witness is.
+    #[test]
+    fn a_comparison_and_an_increment_make_php_s_own_for_loop() {
+        assert_eq!(
+            read(b"<?php for ($i = 0; $i < 1000; $i++) { echo 'dax'; }").unwrap_or_default(),
+            vec![(
+                Stmt::For {
+                    init: vec![Expr::Assign {
+                        var: b"i".to_vec(),
+                        value: Box::new(Expr::Int(0)),
+                    }],
+                    cond: vec![Expr::Binary {
+                        op: BinaryOp::IsSmaller,
+                        left: Box::new(Expr::Var(b"i".to_vec())),
+                        right: Box::new(Expr::Int(1000)),
+                    }],
+                    step: vec![Expr::PostInc(b"i".to_vec())],
+                    body: vec![(Stmt::Echo(vec![Expr::Str(b"dax".to_vec())]), 1)],
+                },
+                1
+            )]
+        );
+    }
+
+    #[test]
+    fn a_comparison_stands_below_the_concatenation_and_does_not_associate() {
+        assert_eq!(
+            shape(b"<?php echo 1 + 2 < 3 . 4;"),
+            shape(b"<?php echo (1 + 2) < (3 . 4);"),
+            "`.` binds tighter than `<`, and so does `+`"
+        );
+        assert_eq!(
+            shape(b"<?php $a = 1 < 2;"),
+            shape(b"<?php $a = (1 < 2);"),
+            "`=` binds below `<`"
+        );
+        for source in [
+            b"<?php echo 1 < 2 < 3;".as_slice(),
+            b"<?php echo 1 <= 2;".as_slice(),
+            b"<?php echo 1 <> 2;".as_slice(),
+            b"<?php echo 1 > 2;".as_slice(),
+        ] {
+            assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
+        }
+    }
+
+    #[test]
+    fn an_increment_takes_a_variable_and_nothing_else() {
+        assert_eq!(
+            shape(b"<?php echo -$a++ + ++$b ** 2;"),
+            shape(b"<?php echo (-($a++)) + ((++$b) ** 2);"),
+            "the variable and its `++` are one operand"
+        );
+        assert_eq!(
+            read(b"<?php $a+++$b;").unwrap_or_default(),
+            vec![(
+                Stmt::Effect(Expr::Binary {
+                    op: BinaryOp::Add,
+                    left: Box::new(Expr::PostInc(b"a".to_vec())),
+                    right: Box::new(Expr::Var(b"b".to_vec())),
+                }),
+                1
+            )],
+            "php's scanner takes `++` before `+`"
+        );
+        for source in [
+            b"<?php echo 1++;".as_slice(),
+            b"<?php echo ++1;".as_slice(),
+            b"<?php echo $a++++;".as_slice(),
+            b"<?php echo ++$a++;".as_slice(),
+            b"<?php echo ++f();".as_slice(),
+            b"<?php echo $a--;".as_slice(),
+            b"<?php echo --$a;".as_slice(),
+        ] {
+            assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
+        }
     }
 
     #[test]

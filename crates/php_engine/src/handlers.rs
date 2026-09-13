@@ -10,9 +10,11 @@
 //! call sequence `INIT_FCALL`, `SEND_VAL`, `SEND_VAR`, `DO_ICALL`,
 //! `RETURN`, which raises the return safepoint, `JMP` and `JMPNZ`, which
 //! raise the loop safepoint when they jump backward, `ASSIGN`, which
-//! writes a CV, and the arithmetic `ZEND_ADD`, `ZEND_SUB`, `ZEND_MUL`,
+//! writes a CV, the arithmetic `ZEND_ADD`, `ZEND_SUB`, `ZEND_MUL`,
 //! `ZEND_DIV`, `ZEND_MOD`, `ZEND_POW`, `ZEND_SL` and `ZEND_SR` and the
-//! `ZEND_CONCAT` that php emits for what its compiler does not fold.
+//! `ZEND_CONCAT` that php emits for what its compiler does not fold,
+//! `ZEND_IS_SMALLER`, which a loop's condition is, and `ZEND_PRE_INC` and
+//! `ZEND_POST_INC`, which step a CV in place.
 
 // Every handler is generic over the tier and hands back the same edge, so
 // the generated dispatch calls them all the same way; the ones that raise a
@@ -20,7 +22,7 @@
 #![allow(clippy::extra_unused_type_parameters, clippy::unnecessary_wraps)]
 
 use php_heap::{Fatal, FrameRef};
-use php_unit::{ConstIdx, OpArray, Opline};
+use php_unit::{ConstIdx, OpArray, OperandKind, Opline};
 
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
@@ -248,6 +250,45 @@ pub(crate) fn concat<T: Tier>(
     binary(req, frame, code, op, crate::ops::concat)
 }
 
+/// `ZEND_IS_SMALLER`: [`crate::ops::is_smaller`] over the two operands,
+/// into the temporary the opline's `result` field names. php's handler
+/// takes the long pair and the double pairs before it calls
+/// `zend_compare`, and those are the kernel's first arms.
+pub(crate) fn is_smaller<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    binary(req, frame, code, op, crate::ops::is_smaller)
+}
+
+/// `ZEND_PRE_INC`: [`crate::ops::increment`] over the variable `op1`
+/// names, the stepped value written back to it and to the temporary
+/// `result` names, which php writes only under `RETURN_VALUE_USED`
+/// (design §5.7, the field #227 brings). A CV nothing has written is
+/// php's `ZVAL_UNDEFINED_OP1`, the warning and null in its place, which
+/// `++` then makes `1`.
+pub(crate) fn pre_inc<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    incdec(req, frame, code, op, false)
+}
+
+/// `ZEND_POST_INC`: the same step, with the value the variable held
+/// before it in the temporary.
+pub(crate) fn post_inc<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    incdec(req, frame, code, op, true)
+}
+
 /// `ZEND_JMP`: the unconditional jump `pass_two` leaves, its target
 /// opline in `op1`. A jump to an earlier opline is a loop's back-edge
 /// and is a safepoint site (design §5.7): the frame is positioned at the
@@ -337,6 +378,32 @@ fn binary(
         Ok(value) => {
             let slot = exec::temporary_slot(code, op.out);
             req.vm_mut().set_slot(frame, slot, value);
+            Ok(advance(req, frame))
+        }
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            Ok(Stepped::Threw(frame))
+        }
+    }
+}
+
+/// The body `PRE_INC` and `POST_INC` share: the variable's slot, a CV
+/// or a `VAR`, read as `GET_OP1_ZVAL_PTR_PTR_UNDEF(BP_VAR_RW)` reads it;
+/// the kernel over what it held; the slot and the temporary written. A
+/// kernel that threw leaves the throwable pending and the variable as it
+/// was, which is the `Threw` edge the loop reads.
+fn incdec(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, post: bool) -> Edge {
+    let slot = match op.op1_type {
+        OperandKind::Cv => op.op1,
+        _ => exec::temporary_slot(code, op.op1),
+    };
+    let held = exec::operand(req, frame, code, op.op1_type, op.op1);
+    match crate::ops::increment(req, &held) {
+        Ok(stepped) => {
+            let out = exec::temporary_slot(code, op.out);
+            req.vm_mut()
+                .set_slot(frame, out, if post { held } else { stepped.clone() });
+            req.vm_mut().set_slot(frame, slot, stepped);
             Ok(advance(req, frame))
         }
         Err(thrown) => {

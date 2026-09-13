@@ -37,6 +37,7 @@ MapTable::new
 Number
 Number::double
 ObjectId
+Scalar
 Slot
 Str
 Str::addref
@@ -78,6 +79,7 @@ Zval::long
 Zval::null
 Zval::string
 ZvalType
+compare
 double_to_string
 numeric_prefix
 power

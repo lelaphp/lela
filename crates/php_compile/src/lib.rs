@@ -889,6 +889,105 @@ mod tests {
         assert_eq!(unit.main.oplines[14].op2, 4, "the JMPNZ lands on the body");
     }
 
+    /// php's own loop, the shape #156's bench runs and the witness beside
+    /// `php_heap::Str::bytes` is, under the dump recipe: the `$i++` in
+    /// the step is `PRE_INC` with its temporary unread, which is
+    /// `zend_do_free`'s conversion, and the condition is `IS_SMALLER`
+    /// into the temporary the `JMPNZ` tests. The oracle prints `T3 = `
+    /// before the `IS_SMALLER`, the `result_type` #227 brings.
+    #[test]
+    fn php_s_own_for_loop_is_an_is_smaller_and_a_pre_inc() {
+        let (unit, _strings) =
+            unit_and_strings(b"<?php for ($i = 0; $i < 1000; $i++) { echo 'dax'; }");
+        assert_eq!(
+            unit.dump(),
+            main_dump(
+                7,
+                1,
+                3,
+                "0000 ASSIGN CV0($i) int(0)\n\
+                 0001 JMP 0004\n\
+                 0002 ECHO string(\"dax\")\n\
+                 0003 PRE_INC CV0($i)\n\
+                 0004 IS_SMALLER CV0($i) int(1000)\n\
+                 0005 JMPNZ T3 0002\n\
+                 0006 RETURN int(1)\n"
+            )
+        );
+        assert_eq!(unit.main.oplines[3].op2_type, OperandKind::Unused);
+        assert_eq!(unit.main.oplines[3].out, 1, "the increment's temporary");
+        assert_eq!(
+            unit.main.oplines[4].out, 2,
+            "the comparison's, which the JMPNZ tests"
+        );
+    }
+
+    /// The oracle's dump under the pin's `dump` regime, `vars=1, tmps=4`:
+    /// a `<` over a CV is `IS_SMALLER` into a temporary, `$a++` and
+    /// `++$a` whose values are read are `POST_INC` and `PRE_INC`, and a
+    /// `<` over two constants folds to the bool `zend_compare` orders
+    /// them to, a string pair and a double against a string included.
+    #[test]
+    fn a_comparison_is_is_smaller_where_it_does_not_fold_and_the_bool_where_it_does() {
+        assert_eq!(
+            dump_of(
+                b"<?php echo $a < 2, 1 < $a, $a++, ++$a, 1 < 2, 1.5 < 2, \"a\" < \"b\", 2 < 1, \"10\" < \"9\", 1.5 < \"abc\", null < true;"
+            ),
+            main_dump(
+                16,
+                1,
+                4,
+                "0000 IS_SMALLER CV0($a) int(2)\n\
+                 0001 ECHO T1\n\
+                 0002 IS_SMALLER int(1) CV0($a)\n\
+                 0003 ECHO T2\n\
+                 0004 POST_INC CV0($a)\n\
+                 0005 ECHO T3\n\
+                 0006 PRE_INC CV0($a)\n\
+                 0007 ECHO T4\n\
+                 0008 ECHO bool(true)\n\
+                 0009 ECHO bool(true)\n\
+                 0010 ECHO bool(true)\n\
+                 0011 ECHO bool(false)\n\
+                 0012 ECHO bool(false)\n\
+                 0013 ECHO bool(true)\n\
+                 0014 ECHO bool(true)\n\
+                 0015 RETURN int(1)\n"
+            )
+        );
+    }
+
+    /// `zend_do_free` over every place php frees a value: an expression
+    /// statement, each expression of a `for`'s three lists but the last
+    /// of the condition, and the last of the initialisers and the step.
+    /// Each `$a++` there is php's `PRE_INC`; the one an `ASSIGN` reads
+    /// stays `POST_INC`. The oracle's dump is the same thirteen oplines,
+    /// `vars=2, tmps=10`.
+    #[test]
+    fn a_post_inc_nothing_reads_is_the_pre_inc_zend_do_free_makes_it() {
+        assert_eq!(
+            dump_of(b"<?php $a++; ++$a; $b = $a++; for ($a++, $b++; $a++, $a < 1; $a++, ++$a) {}"),
+            main_dump(
+                13,
+                2,
+                10,
+                "0000 PRE_INC CV0($a)\n\
+                 0001 PRE_INC CV0($a)\n\
+                 0002 POST_INC CV0($a)\n\
+                 0003 ASSIGN CV1($b) T4\n\
+                 0004 PRE_INC CV0($a)\n\
+                 0005 PRE_INC CV1($b)\n\
+                 0006 JMP 0009\n\
+                 0007 PRE_INC CV0($a)\n\
+                 0008 PRE_INC CV0($a)\n\
+                 0009 PRE_INC CV0($a)\n\
+                 0010 IS_SMALLER CV0($a) int(1)\n\
+                 0011 JMPNZ T11 0007\n\
+                 0012 RETURN int(1)\n"
+            )
+        );
+    }
+
     /// `zend_compile_while`, and a block whose statements keep their own
     /// lines while the loop's own oplines keep the statement's, as php's
     /// `CG(zend_lineno)` is the condition's again once the condition is

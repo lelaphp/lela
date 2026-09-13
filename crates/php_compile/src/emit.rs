@@ -14,15 +14,22 @@
 //! constant and no opline. What it cannot fold becomes the opcode php
 //! emits, into a temporary as `zend_emit_op_tmp` leaves it: `ZEND_ADD`,
 //! `ZEND_SUB`, `ZEND_MUL` and `ZEND_DIV`, `ZEND_MOD`, `ZEND_POW`,
-//! `ZEND_SL`, `ZEND_SR` and `ZEND_CONCAT`, whose kernels the engine
-//! serves. A constant operand of a `.` is converted to a string where it
-//! stands whether or not the other side folds, as `zend_compile_binary_op`
-//! converts it, so `2 . $a` is a `CONCAT` over the constant `"2"`.
+//! `ZEND_SL`, `ZEND_SR`, `ZEND_CONCAT` and `ZEND_IS_SMALLER`, whose
+//! kernels the engine serves. A constant operand of a `.` is converted
+//! to a string where it stands whether or not the other side folds, as
+//! `zend_compile_binary_op` converts it, so `2 . $a` is a `CONCAT` over
+//! the constant `"2"`; a `<` over two constants folds always, through
+//! the same `zend_compare` the opcode reads.
 //!
 //! A variable read is a `CV` operand and no opline (`zend_try_compile_cv`),
 //! and an assignment to one is `ASSIGN` with the CV in `op1` and the value
 //! in `op2` (`zend_compile_assign`), the CV looked up before the value is
-//! compiled, which is what puts `$a` before `$b` in `$a = f($b)`.
+//! compiled, which is what puts `$a` before `$b` in `$a = f($b)`. `++$a`
+//! and `$a++` are `PRE_INC` and `POST_INC` over the CV
+//! (`zend_compile_pre_incdec`, `zend_compile_post_incdec`), and a
+//! `POST_INC` whose value nothing reads becomes the `PRE_INC` php's
+//! `zend_do_free` turns it into, so `$i++` as a loop's step is php's
+//! `PRE_INC CV0($i)`.
 //!
 //! A loop is emitted as `zend_compile_for` and `zend_compile_while` emit
 //! one: a `JMP` forward over the body to the condition, and the condition
@@ -31,7 +38,9 @@
 //! here, so `for (;;)` is a `JMPNZ` over the constant `true` and not a
 //! `JMP`, which is the shape the compile-identity lane holds this to.
 
-use php_heap::{Fatal, Intern, Number, Zval, ZvalType, double_to_string, numeric_prefix};
+use std::cmp::Ordering;
+
+use php_heap::{Fatal, Intern, Number, Scalar, Zval, ZvalType, double_to_string, numeric_prefix};
 use php_unit::decl::{ConstDecl, ConstExpr, Name};
 use php_unit::{OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
@@ -210,7 +219,8 @@ impl Emit<'_> {
                 }
             }
             Stmt::Effect(expr) => {
-                self.expr(expr)?;
+                let value = self.expr(expr)?;
+                self.do_free(value);
             }
             Stmt::Block(body) => self.statements(body)?,
             Stmt::For {
@@ -245,7 +255,8 @@ impl Emit<'_> {
         body: &Read,
     ) -> Result<(), CompileError> {
         let line = self.line;
-        self.expr_list(init)?;
+        let init = self.expr_list(init)?;
+        self.do_free(init);
         let jump = self.push(Opline {
             opcode: Opcode::Jmp,
             ..Opline::default()
@@ -253,7 +264,8 @@ impl Emit<'_> {
         let start = self.next();
         self.statements(body)?;
         self.line = line;
-        self.expr_list(step)?;
+        let step = self.expr_list(step)?;
+        self.do_free(step);
         self.update_jump_target_to_next(jump);
         let cond = self.expr_list(cond)?;
         self.emit_cond_jump(cond, start);
@@ -278,14 +290,35 @@ impl Emit<'_> {
     }
 
     /// `zend_compile_for_expr_list`: every expression compiled in turn,
-    /// and where the last one left its value; the constant `true` for a
-    /// list with nothing in it, which is what `for (;;)` tests.
+    /// each one's value freed before the next is compiled, and where the
+    /// last one left its value; the constant `true` for a list with
+    /// nothing in it, which is what `for (;;)` tests.
     fn expr_list(&mut self, exprs: &[Expr]) -> Result<Where, CompileError> {
         let mut last = Where::Constant(Zval::bool(true));
         for expr in exprs {
+            self.do_free(last);
             last = self.expr(expr)?;
         }
         Ok(last)
+    }
+
+    /// `zend_do_free` over a value nothing reads: a `POST_INC` that left
+    /// it becomes the `PRE_INC` php converts it to, "convert $i++ to
+    /// ++$i", which is the opline php's dump prints for `$i++` as a
+    /// statement or a loop's step. The mark php sets on the temporary of
+    /// that and of an `ASSIGN`, and the `FREE` it emits for any other
+    /// temporary, wait on the `result_type` the [`Opline`] has no field
+    /// for (design §5.7, #227).
+    fn do_free(&mut self, value: Where) {
+        let Where::Temporary(at) = value else {
+            return;
+        };
+        if let Some(last) = self.oplines.last_mut()
+            && last.opcode == Opcode::PostInc
+            && last.out == at
+        {
+            last.opcode = Opcode::PreInc;
+        }
     }
 
     /// `zend_emit_cond_jump(ZEND_JMPNZ, ...)`: the condition tested and
@@ -343,8 +376,27 @@ impl Emit<'_> {
             // variable is its CV, and no opline reads it into anything.
             Expr::Var(name) => Ok(Where::Cv(self.lookup_cv(name))),
             Expr::Assign { var, value } => self.assign(var, value),
+            Expr::PreInc(var) => Ok(self.incdec(var, Opcode::PreInc)),
+            Expr::PostInc(var) => Ok(self.incdec(var, Opcode::PostInc)),
             known => Ok(Where::Constant(self.constant_expr(known)?)),
         }
+    }
+
+    /// `zend_compile_pre_incdec` and `zend_compile_post_incdec`, the
+    /// `ZEND_AST_VAR` arm: the variable's CV (`zend_compile_var` under
+    /// `BP_VAR_RW`, which delays nothing for a plain CV), then the opcode
+    /// over it into a temporary (`zend_emit_op_tmp`), `op2` unused.
+    fn incdec(&mut self, var: &[u8], opcode: Opcode) -> Where {
+        let cv = self.lookup_cv(var);
+        let out = self.temporary();
+        self.push(Opline {
+            opcode,
+            op1_type: OperandKind::Cv,
+            op1: cv,
+            out,
+            ..Opline::default()
+        });
+        Where::Temporary(out)
     }
 
     /// `zend_compile_assign`, the `ZEND_AST_VAR` arm: the variable's CV
@@ -378,6 +430,9 @@ impl Emit<'_> {
         if op == BinaryOp::Concat {
             return self.concat(left, right);
         }
+        if op == BinaryOp::IsSmaller {
+            return self.smaller(left, right);
+        }
         if let (Ok(a), Ok(b)) = (self.constant_expr(left), self.constant_expr(right))
             && let Some(folded) = fold(op, a, b)
         {
@@ -405,6 +460,33 @@ impl Emit<'_> {
         let left = self.string_operand(left)?;
         let right = self.string_operand(right)?;
         Ok(self.emit_binary(Opcode::Concat, left, right))
+    }
+
+    /// `zend_compile_binary_op`'s `ZEND_IS_SMALLER` arm: both sides
+    /// compiled, the fold over two constants, which
+    /// `zend_binary_op_produces_error` never refuses for a comparison, and
+    /// otherwise `IS_SMALLER` into a temporary.
+    fn smaller(&mut self, left: &Expr, right: &Expr) -> Result<Where, CompileError> {
+        let left = self.expr(left)?;
+        let right = self.expr(right)?;
+        if let (Where::Constant(a), Where::Constant(b)) = (left, right) {
+            return Ok(Where::Constant(self.smaller_fold(a, b)));
+        }
+        Ok(self.emit_binary(Opcode::IsSmaller, left, right))
+    }
+
+    /// `zend_try_ct_eval_binary_op` over `is_smaller_function`: whether
+    /// [`php_heap::compare`] orders the left constant first, at the
+    /// compile-time `precision` a double is rendered at against a string
+    /// that is not numeric.
+    fn smaller_fold(&self, left: Zval, right: Zval) -> Zval {
+        let (a, b) = (left.as_str(), right.as_str());
+        let ordering = php_heap::compare(
+            scalar(left, a.as_ref()),
+            scalar(right, b.as_ref()),
+            self.precision,
+        );
+        Zval::bool(ordering == Ordering::Less)
     }
 
     /// `zend_try_ct_eval_binary_op` over `concat_function`: the one
@@ -505,6 +587,7 @@ impl Emit<'_> {
             BinaryOp::Sl => Opcode::Sl,
             BinaryOp::Sr => Opcode::Sr,
             BinaryOp::Concat => Opcode::Concat,
+            BinaryOp::IsSmaller => Opcode::IsSmaller,
         }
     }
 
@@ -545,6 +628,15 @@ impl Emit<'_> {
                 self.concat_fold(left, right)?
                     .ok_or_else(|| self.fatal("a concatenation this compiler cannot fold yet"))
             }
+            Expr::Binary {
+                op: BinaryOp::IsSmaller,
+                left,
+                right,
+            } => {
+                let left = self.constant_expr(left)?;
+                let right = self.constant_expr(right)?;
+                Ok(self.smaller_fold(left, right))
+            }
             Expr::Binary { op, left, right } => {
                 let left = self.constant_expr(left)?;
                 let right = self.constant_expr(right)?;
@@ -554,7 +646,7 @@ impl Emit<'_> {
             Expr::Call { name, arguments } => self
                 .special(&unqualified(name), arguments)?
                 .ok_or_else(|| self.fatal("a call this compiler cannot fold")),
-            Expr::Var(_) | Expr::Assign { .. } => {
+            Expr::Var(_) | Expr::Assign { .. } | Expr::PreInc(_) | Expr::PostInc(_) => {
                 Err(self.fatal("a variable is no constant expression"))
             }
         }
@@ -764,8 +856,9 @@ fn produces_error(op: BinaryOp, a: Number, b: Number) -> bool {
             (long_compatible(a), long_compatible(b)),
             (Some(_), Some(by)) if by >= 0
         ),
-        // A `.` is [`Emit::concat_fold`]'s and never reaches here.
-        BinaryOp::Concat => true,
+        // A `.` is [`Emit::concat_fold`]'s and a `<` [`Emit::smaller_fold`]'s;
+        // neither reaches here.
+        BinaryOp::Concat | BinaryOp::IsSmaller => true,
     }
 }
 
@@ -816,8 +909,9 @@ fn longs(op: BinaryOp, a: i64, b: i64) -> Zval {
         BinaryOp::Pow => power(a, b),
         BinaryOp::Sl => Zval::long(php_heap::shift_left(a, b.unsigned_abs())),
         BinaryOp::Sr => Zval::long(php_heap::shift_right(a, b.unsigned_abs())),
-        // A `.` is [`Emit::concat_fold`]'s; [`produces_error`] held it.
-        BinaryOp::Concat => Zval::null(),
+        // A `.` is [`Emit::concat_fold`]'s and a `<` [`Emit::smaller_fold`]'s;
+        // [`produces_error`] held both.
+        BinaryOp::Concat | BinaryOp::IsSmaller => Zval::null(),
     }
 }
 
@@ -850,8 +944,30 @@ fn doubles(op: BinaryOp, a: f64, b: f64) -> Option<Zval> {
         BinaryOp::Div => Some(Zval::double(a / b)),
         // A modulo and a shift are [`longs`]'s: two long-compatible
         // doubles go there, and the guard refused every other pair.
-        BinaryOp::Mod | BinaryOp::Sl | BinaryOp::Sr | BinaryOp::Concat => None,
+        BinaryOp::Mod | BinaryOp::Sl | BinaryOp::Sr | BinaryOp::Concat | BinaryOp::IsSmaller => {
+            None
+        }
         BinaryOp::Pow => Some(Zval::double(a.powf(b))),
+    }
+}
+
+/// A constant as [`php_heap::compare`] switches on it: the five kinds a
+/// constant table holds, the string's bytes borrowed from the [`php_heap::Str`]
+/// the caller took.
+fn scalar(value: Zval, string: Option<&php_heap::Str>) -> Scalar<'_> {
+    if let Some(n) = value.as_long() {
+        return Scalar::Long(n);
+    }
+    if let Some(d) = value.as_double() {
+        return Scalar::Double(d);
+    }
+    if let Some(s) = string {
+        return Scalar::Str(s.bytes());
+    }
+    match value.kind() {
+        ZvalType::True => Scalar::Bool(true),
+        ZvalType::False => Scalar::Bool(false),
+        _ => Scalar::Null,
     }
 }
 
