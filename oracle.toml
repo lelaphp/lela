@@ -118,3 +118,9 @@ ini = ["opcache.enable_cli=1", "opcache.jit=off"]
 # engine's `inline` mode is the synchronous compile so the dump is
 # deterministic; php compiles synchronously always.
 ini = ["opcache.enable_cli=1", "opcache.jit=tracing", "opcache.jit_buffer_size=64M", "opcache.jit_debug=258048"]
+
+[regime.dump]
+# design §6.1: php prints its op arrays before the optimizer runs. The
+# compile-identity lane passes `-l` beside these, which compiles a file
+# without running it, so a corpus file's own bytes never reach the dump.
+ini = ["opcache.enable_cli=1", "opcache.opt_debug_level=0x10000"]
