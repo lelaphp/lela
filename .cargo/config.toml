@@ -7,6 +7,8 @@ xtask = "run --quiet --package xtask --"
 # that has a Cargo.toml, which in a worktree under `.claude/worktrees/` is
 # the clone's root and not the worktree's; the variable names the root
 # cargo itself was invoked in (`relative = true`), so `UPDATE_EXPECT=1`
-# writes the fixture beside the test that failed.
+# writes the fixture beside the test that failed. A session `xtask track
+# work` spawns inherits the clone's value from the cargo that ran the
+# harness, so the config's wins (`force = true`).
 [env]
-CARGO_WORKSPACE_DIR = { value = "", relative = true }
+CARGO_WORKSPACE_DIR = { value = "", relative = true, force = true }
