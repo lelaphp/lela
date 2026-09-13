@@ -55,7 +55,7 @@ pub(crate) fn check_opts(input: &str, options: &LexOptions, expected: &[(SyntaxK
     let lexed = lex(F, input.as_bytes(), options);
     let actual: Vec<(SyntaxKind, &str)> = pairs(&lexed, input.as_bytes())
         .into_iter()
-        .map(|(k, t)| (k, std::str::from_utf8(t).expect("test input is utf-8")))
+        .map(|(k, t)| (k, std::str::from_utf8(t).unwrap_or("<not utf-8>")))
         .collect();
     let expected: Vec<(SyntaxKind, &str)> = expected.to_vec();
     assert_eq!(actual, expected, "token mismatch for {input:?}");

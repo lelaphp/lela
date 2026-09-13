@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn load_bytes_small_ok() {
-        let source = load_bytes(FileId(0), b"<?php\n".to_vec()).expect("loads");
-        assert_eq!(&*source, b"<?php\n");
+        let source = load_bytes(FileId(0), b"<?php\n".to_vec()).map(|s| s.to_vec());
+        assert_eq!(source, Ok(b"<?php\n".to_vec()));
     }
 }

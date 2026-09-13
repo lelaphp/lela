@@ -38,10 +38,17 @@ fn marker_precede_chains() {
 
     let events = p.finish();
     // The first event carries the forward link to its wrapper.
-    match &events[0] {
-        Event::Start { forward_parent, .. } => assert_eq!(*forward_parent, Some(3)),
-        other => panic!("expected Start, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            &events[0],
+            Event::Start {
+                forward_parent: Some(3),
+                ..
+            }
+        ),
+        "expected Start with forward_parent 3, got {:?}",
+        events[0]
+    );
     let built = tree::build(&raw, events);
     assert_eq!(
         tree::dump(&built.tree, &raw, text),
@@ -288,7 +295,10 @@ fn nesting_depth_cap() {
             // Under the cap: silent.
             let built = parse_nested(&parenthesised(100));
             assert!(built.diagnostics.is_empty(), "depth 100 parses clean");
-        })
-        .expect("a thread carrying MIN_THREAD_STACK");
-    handle.join().expect("the parse thread");
+        });
+    let joined = handle.map(std::thread::JoinHandle::join);
+    assert!(
+        matches!(joined, Ok(Ok(()))),
+        "the parse thread carrying MIN_THREAD_STACK ran to its end"
+    );
 }

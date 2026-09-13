@@ -21,6 +21,15 @@
 //! and shape are settled with the parse entry (#206). `Options` joins
 //! `parse` with them.
 #![forbid(unsafe_code)]
+// seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented
+)]
 
 mod kind {
     //! The generated enum and its display names (`build.rs`).

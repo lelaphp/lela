@@ -41,7 +41,7 @@ fn names(row: &str) -> String {
     let mut after_dollar_curly = false;
     for (kind, text) in pairs(&lexed, input.as_bytes()) {
         let end = (text.as_ptr() as usize - input.as_ptr() as usize) + text.len();
-        let text = std::str::from_utf8(text).expect("the rows are ascii");
+        let text = std::str::from_utf8(text).unwrap_or("<not ascii>");
         let name = match kind {
             OPEN_TAG | WHITESPACE | LINE_COMMENT | BLOCK_COMMENT => continue,
             VARIABLE => "T_VARIABLE",
