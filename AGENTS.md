@@ -75,7 +75,7 @@ third-engine-design.md
 - ADR-0005 (accepted, 2026-09-05): Extension state is request-scoped or immutable engine-scoped, and the engine owns the only cross-request cache
 - ADR-0006 (accepted, 2026-09-07): The compiled tier is a seam on `execute` with one engine-level word per safepoint, not a second executor with a per-request feedback table
 
-<!-- /computed in=20891f40b50e340bb71e529d7f78a532afdb0b6ccd0713046006fcc6f8099e29 out=1f3c18c06af7268751e776de5e0802d533ba51482ac1afe4d73c8a3cc7b350cf -->
+<!-- /computed in=4e3a808240679783db4844df8019a1e73b4733623d05e36c143d14a739cc74e7 out=1f3c18c06af7268751e776de5e0802d533ba51482ac1afe4d73c8a3cc7b350cf -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md" inputs=seams.toml,crates/**/*.lock name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |

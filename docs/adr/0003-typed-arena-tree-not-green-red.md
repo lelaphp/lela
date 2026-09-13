@@ -17,6 +17,6 @@ Mahout's hand-rolled green/red tree (its ADR-0001) buys position-independent nod
 ## Consequences
 
 - Required markers in `php.ungram` become non-`Option` fields; Mahout's ADR-0004 discipline (`!` only where construction anchors on the child) and its required-children soak carry over unchanged.
-- The 549 inherited snapshot tests survive with trivia lines removed in one regeneration; the dump format is kept.
+- 253 of the 549 inherited snapshot tests survive with trivia lines removed, the 296 of `fixtures_validation.rs` going to `php_compile` with the validator; the dump renders every fixture, so it lands with the arena and each grammar commit regenerates the fixture files it brings, once each. The dump format is kept. *Amended 2026-09-13 by #166 (design revision 12): the bullet read "the 549 inherited snapshot tests survive with trivia lines removed in one regeneration"; `data/syntax-extraction.md` §3.9 measured 549 as the `#[test]` count of `mahout_parser/tests/*.rs` at the pin, of which 296 follow the validator to `php_compile`, and §6.11 found the regeneration is per fixture file. The decision is untouched; a figure in Consequences follows the measurement.*
 - Upward navigation does not exist. A construct that needs its parent is a compiler-scope gap and is fixed there.
 - `token_get_all`, `highlight_string` and `__COMPILER_HALT_OFFSET__` read the token stream, which remains byte-lossless.
