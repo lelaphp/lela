@@ -91,6 +91,41 @@
 //! `--opens-nothing` is an assertion, written there with the session that
 //! made it, which is what a person holds someone to later.
 //!
+//! A ticket can also describe nothing that is in the tree (#185): #167
+//! was filed from a worktree behind the track, measured a defect that
+//! #135 had already answered on the tip, and had boxes no work could
+//! tick, one of them a person's decision on a question that was no
+//! longer open. Such a ticket is withdrawn rather than done, and the
+//! verdict is the same instrument's: `close <n> --withdrawn <reason>`,
+//! where the reason is the measurement that says there is nothing here,
+//! what was run and where, and a bare or empty flag is refused before the
+//! tracker is asked anything ([`Verdict::given`]). A withdrawal is held
+//! to the boxes the other way round: it is refused while any box is
+//! ticked, naming the ticked, since work half done is finished or has its
+//! box unticked by a person and is not withdrawn; a ticket with no box at
+//! all, which cannot be shown done, is withdrawn like any other, and a
+//! ticket carrying `for-a-person` is too, since the label says whose the
+//! work is and there is none. The reading counts `withdrawn`, 1 or 0 on
+//! every close, so `status --section ticket` tells the two closes apart
+//! from the store alone, and carries the reason in its message; the
+//! closing comment opens with `Withdrawn by` and carries it too, which is
+//! where a person reads it. A withdrawal names what it opened as a close
+//! of work does, `--opens` or `--opens-nothing`, since the measurement
+//! may have found the real defect elsewhere, as #167's found #169.
+//!
+//! Whose act a withdrawal is, the question #185 asked inside itself: an
+//! agent's, guarded by the measurement. The guard is that the reason is
+//! required and recorded with the session, that one ticked box refuses
+//! it, and that the act leaves a comment a person reads; the recovery
+//! from a false withdrawal is `gh issue reopen`, which an agent is denied
+//! by `ticket.close` and a person is not. A ticket filed against a stale
+//! branch is handed to a session by `track next` like any other, and that
+//! session's own branch is then the one the withdrawal comes from, so a
+//! verdict reserved for a person would stall the track on every such
+//! ticket. #167 is the instance: the maintainer said on it that it should
+//! close as answered by #135 and filed #185 `ready-for-agent` with the
+//! close as a criterion.
+//!
 //! A close that went through records what closed it: the commit and
 //! tree it was stamped at, the way every reading is, and the session the
 //! call named, the way a `permit` reading carries the hook's `session_id`
@@ -133,12 +168,44 @@ pub(crate) const STAMPED_OVER: &str = ".";
 /// regard to case at level two.
 const HEADING: &str = "acceptance criteria";
 
-/// What `xtask ticket` does: read the criteria, or read them and close,
-/// naming what the work opened.
+/// What `xtask ticket` does: read the criteria, or read them and close
+/// under a verdict, naming what the work opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Act {
     Read,
-    Close(Successors),
+    Close(Verdict, Successors),
+}
+
+/// What a close says of the ticket: done, every box ticked, or withdrawn,
+/// nothing in the tree to build, with the measurement that says so (#185).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    Done,
+    Withdrawn(String),
+}
+
+impl Verdict {
+    /// From the flag of `close`: `--withdrawn <reason>` is the withdrawal,
+    /// its absence the close of work done. A reason that is empty, or
+    /// whitespace, is refused: the withdrawal is the measurement, and a
+    /// bare flag measures nothing.
+    pub fn given(withdrawn: Option<&str>) -> Result<Verdict> {
+        match withdrawn {
+            None => Ok(Verdict::Done),
+            Some(reason) if reason.trim().is_empty() => bail!(
+                "`--withdrawn` carries the measurement that says there is nothing here, what was run and where; an empty reason withdraws nothing"
+            ),
+            Some(reason) => Ok(Verdict::Withdrawn(reason.trim().to_owned())),
+        }
+    }
+
+    /// The reason a withdrawal carries, none for a close of work done.
+    fn withdrawn(&self) -> Option<&str> {
+        match self {
+            Verdict::Done => None,
+            Verdict::Withdrawn(reason) => Some(reason),
+        }
+    }
 }
 
 /// What a close names as opened: the tickets filed for what the work
@@ -298,18 +365,29 @@ impl Criteria {
     /// Every unticked box by name, numbered so a comma in one is not a gap
     /// between two.
     fn unticked_named(&self) -> String {
-        self.unticked
-            .iter()
-            .enumerate()
-            .map(|(i, text)| format!("({}) {text}", i + 1))
-            .collect::<Vec<_>>()
-            .join("; ")
+        named(&self.unticked)
+    }
+
+    /// Every ticked box by name, the same way, for the withdrawal one
+    /// refuses.
+    fn ticked_named(&self) -> String {
+        named(&self.ticked)
     }
 
     /// Every criterion is ticked and there is at least one.
     pub fn met(&self) -> bool {
         self.count() > 0 && self.unticked.is_empty()
     }
+}
+
+/// Boxes by name, numbered so a comma in one is not a gap between two.
+fn named(boxes: &[String]) -> String {
+    boxes
+        .iter()
+        .enumerate()
+        .map(|(i, text)| format!("({}) {text}", i + 1))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// The title of a level one or two heading at the margin, indented by
@@ -725,6 +803,21 @@ fn mislabel(ticket: Ticket, rows: &[&Denied], nothing: &str) -> String {
     )
 }
 
+/// What a reading says of a withdrawal refused by a ticked box (#185):
+/// the boxes ticked by name, and what work half done is instead.
+fn half_done(criteria: &Criteria) -> String {
+    format!(
+        "a withdrawal is of a ticket with no box ticked, and {} {}: {}; work half done is not withdrawn, it is finished or its boxes are unticked by a person",
+        criteria.ticked.len(),
+        if criteria.ticked.len() == 1 {
+            "is"
+        } else {
+            "are"
+        },
+        criteria.ticked_named()
+    )
+}
+
 /// The note a reading carries for a criterion naming a path `permit`
 /// denies the agent but an instrument writes: what it matched and the
 /// call that makes the write, said beside whatever verdict stands, since
@@ -804,8 +897,9 @@ pub fn run(
     reading.rule = denied
         .first()
         .map_or_else(String::new, |first| first.rule.clone());
-    if let Act::Close(successors) = &act {
+    if let Act::Close(verdict, successors) = &act {
         reading.count("opens", successors.tickets().len() as u64)?;
+        reading.count("withdrawn", u64::from(verdict.withdrawn().is_some()))?;
     }
     session_id
         .unwrap_or_default()
@@ -820,9 +914,32 @@ pub fn run(
     // nothing, said once for every condition that refuses one.
     let nothing = match act {
         Act::Read => "",
-        Act::Close(_) => "; not closed, nothing changed at the tracker",
+        Act::Close(..) => "; not closed, nothing changed at the tracker",
     };
     let (status, message) = match act {
+        // A withdrawal is held to the boxes the other way round: one
+        // ticked is work half done, and half-done work is not withdrawn.
+        Act::Close(Verdict::Withdrawn(_), _) if !criteria.ticked.is_empty() => (
+            Status::Fail,
+            format!("{ticket}: {boxes}; {}{nothing}", half_done(&criteria)),
+        ),
+        Act::Close(Verdict::Withdrawn(_), _) if issue.state == State::Closed => (
+            Status::Fail,
+            format!("{ticket}: {boxes}; closed already, nothing changed at the tracker"),
+        ),
+        Act::Close(Verdict::Withdrawn(reason), successors) => {
+            let comment = format!(
+                "Withdrawn by `xtask ticket close` at {}: {reason}; {boxes}",
+                reading.commit
+            );
+            match close(gh, root, track, &issue, &reading, &successors, &comment) {
+                Ok((opened, closed)) => (
+                    Status::Pass,
+                    format!("{ticket}: {boxes}; withdrawn: {reason}; {opened}; {closed}"),
+                ),
+                Err(text) => (Status::Fail, format!("{ticket}: {boxes}; {text}")),
+            }
+        }
         _ if !criteria.found => (
             Status::Fail,
             format!("{ticket} has no `## Acceptance criteria` heading; nothing to hold it to"),
@@ -840,49 +957,19 @@ pub fn run(
             Status::Pass,
             format!("{ticket}: {boxes}; {}", issue.state.as_str()),
         ),
-        Act::Close(_) if issue.state == State::Closed => (
+        Act::Close(Verdict::Done, _) if issue.state == State::Closed => (
             Status::Fail,
             format!("{ticket}: {boxes}; closed already, nothing changed at the tracker"),
         ),
-        Act::Close(successors) => {
-            let opened = successors.describe(session_id);
+        Act::Close(Verdict::Done, successors) => {
             let comment = format!(
-                "Closed by `xtask ticket close` at {}: {boxes}; {opened}.",
+                "Closed by `xtask ticket close` at {}: {boxes}",
                 reading.commit
             );
-            // The edges the tracker has already stand; only the rest are set,
-            // so a close retried after one that failed past this point lands.
-            let missing = successors
-                .tickets()
-                .iter()
-                .copied()
-                .filter(|t| !issue.blocking.nodes.iter().any(|n| n.number == t.number()))
-                .collect::<Vec<_>>();
-            let closed = successors
-                .held(gh, root, track)
-                .and_then(|()| gh.blocking(root, ticket, &missing))
-                .map_err(|err| format!("{err:#}; not closed, nothing changed at the tracker"))
-                .and_then(|()| {
-                    // The edge is set by now; a close the tracker refuses
-                    // leaves it standing, and the message says so.
-                    gh.close(root, ticket, &comment).map_err(|err| {
-                        let edge = match successors {
-                            Successors::Tickets(_) => "; the edge to what it opened stands",
-                            Successors::Nothing => "",
-                        };
-                        format!("{opened}{edge}; {err:#}")
-                    })
-                });
-            match closed {
-                Ok(()) => (
+            match close(gh, root, track, &issue, &reading, &successors, &comment) {
+                Ok((opened, closed)) => (
                     Status::Pass,
-                    format!(
-                        "{ticket}: {boxes}; {opened}; closed by xtask ticket close at {}{}",
-                        reading.commit,
-                        session_id
-                            .map(|id| format!(" in session {id}"))
-                            .unwrap_or_default()
-                    ),
+                    format!("{ticket}: {boxes}; {opened}; {closed}"),
                 ),
                 Err(text) => (Status::Fail, format!("{ticket}: {boxes}; {text}")),
             }
@@ -895,9 +982,58 @@ pub fn run(
     Ok(reading)
 }
 
+/// The act at the tracker, the same for a close of work done and a
+/// withdrawal: every successor held, the edges the tracker lacks set, and
+/// the issue closed with `comment` and what it opened appended. What comes
+/// back is what the reading says of the successors and of the close, or
+/// the text of the refusal, which says what stands at the tracker.
+fn close(
+    gh: &Gh,
+    root: &Path,
+    track: &str,
+    issue: &Issue,
+    reading: &Reading,
+    successors: &Successors,
+    comment: &str,
+) -> std::result::Result<(String, String), String> {
+    let ticket = Ticket::new(issue.number);
+    let session_id = (!reading.session.is_empty()).then_some(reading.session.as_str());
+    let opened = successors.describe(session_id);
+    let comment = format!("{comment}; {opened}.");
+    // The edges the tracker has already stand; only the rest are set,
+    // so a close retried after one that failed past this point lands.
+    let missing = successors
+        .tickets()
+        .iter()
+        .copied()
+        .filter(|t| !issue.blocking.nodes.iter().any(|n| n.number == t.number()))
+        .collect::<Vec<_>>();
+    successors
+        .held(gh, root, track)
+        .and_then(|()| gh.blocking(root, ticket, &missing))
+        .map_err(|err| format!("{err:#}; not closed, nothing changed at the tracker"))?;
+    // The edge is set by now; a close the tracker refuses leaves it
+    // standing, and the message says so.
+    gh.close(root, ticket, &comment).map_err(|err| {
+        let edge = match successors {
+            Successors::Tickets(_) => "; the edge to what it opened stands",
+            Successors::Nothing => "",
+        };
+        format!("{opened}{edge}; {err:#}")
+    })?;
+    let closed = format!(
+        "closed by xtask ticket close at {}{}",
+        reading.commit,
+        session_id
+            .map(|id| format!(" in session {id}"))
+            .unwrap_or_default()
+    );
+    Ok((opened, closed))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Criteria, Denied, Label, Successors, denied};
+    use super::{Criteria, Denied, Label, Successors, Verdict, denied};
     use crate::manifest::{Manifest, OneOrMany, Rule};
     use crate::track::Ticket;
 
@@ -1062,5 +1198,21 @@ mod tests {
         assert!(!none.found && none.count() == 0 && !none.met());
         let empty = Criteria::parse("## Acceptance criteria\n\nnone yet\n");
         assert!(empty.found && empty.count() == 0 && !empty.met());
+    }
+
+    /// A withdrawal is its reason (#185): the flag absent is the close of
+    /// work done, the flag with a reason is the withdrawal with it trimmed,
+    /// and the flag with nothing or with whitespace withdraws nothing.
+    #[test]
+    fn a_withdrawal_carries_its_measurement_and_a_bare_flag_is_refused() {
+        assert_eq!(Verdict::given(None).unwrap(), Verdict::Done);
+        assert_eq!(
+            Verdict::given(Some("  measured on 7d6f1e8: nothing here \n")).unwrap(),
+            Verdict::Withdrawn("measured on 7d6f1e8: nothing here".to_owned())
+        );
+        for bare in ["", "   ", "\n"] {
+            let err = Verdict::given(Some(bare)).unwrap_err().to_string();
+            assert!(err.contains("an empty reason withdraws nothing"), "{err}");
+        }
     }
 }

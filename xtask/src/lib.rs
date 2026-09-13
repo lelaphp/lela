@@ -247,10 +247,12 @@ fn ticket_command(
             session_id,
             opens,
             opens_nothing,
+            withdrawn,
         } => {
             let ticket = ticket::ticket_of(root, number)?;
+            let verdict = ticket::Verdict::given(withdrawn.as_deref())?;
             let successors = ticket::Successors::named(ticket, &opens, opens_nothing)?;
-            (ticket::Act::Close(successors), ticket, session_id)
+            (ticket::Act::Close(verdict, successors), ticket, session_id)
         }
     };
     let reading = ticket::run(

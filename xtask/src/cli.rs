@@ -445,7 +445,8 @@ pub(crate) enum TicketCommand {
     /// work opened and close the issue at the tracker with a comment naming
     /// the commit and the successors; refuse while a box is unticked, while
     /// a successor is closed or missing, and without `--opens` or
-    /// `--opens-nothing`.
+    /// `--opens-nothing`. With `--withdrawn <reason>` the ticket is closed
+    /// as withdrawn rather than done, refused while any box is ticked.
     Close {
         /// The issue number; without it, the branch's recorded ticket.
         number: Option<u64>,
@@ -462,6 +463,13 @@ pub(crate) enum TicketCommand {
         /// the reading with the session that made it.
         #[arg(long = "opens-nothing")]
         opens_nothing: bool,
+        /// The ticket is withdrawn rather than done: it describes nothing
+        /// in the tree, and the reason is the measurement that says so,
+        /// what was run and where, which the reading and the closing
+        /// comment carry. Refused while any box is ticked, since work half
+        /// done is not a withdrawal.
+        #[arg(long = "withdrawn", value_name = "REASON")]
+        withdrawn: Option<String>,
     },
 }
 

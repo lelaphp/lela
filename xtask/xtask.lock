@@ -236,6 +236,8 @@ ticket::Open::label_names
 ticket::State
 ticket::Successors
 ticket::Successors::named
+ticket::Verdict
+ticket::Verdict::given
 ticket::denied
 ticket::run
 ticket::ticket_of
