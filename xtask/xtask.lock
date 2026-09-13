@@ -198,6 +198,11 @@ reading::now
 run
 status::render
 status::session
+steer::STEERABLE
+steer::Verdict
+steer::Verdict::additions
+steer::judge
+steer::run
 ticket::Act
 ticket::BlockedBy
 ticket::Blocker

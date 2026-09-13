@@ -221,6 +221,25 @@ pub(crate) enum Command {
     UnsafeAudit,
     /// Write the files the manifest's `generated` rules render (ext/clippy.toml).
     Generate,
+    /// Apply a proposal to one of the harness's own files, the ones `permit`
+    /// denies the agent, and only where it adds: every table, key, value and
+    /// array-of-tables row the tracked file carries must stand unchanged in
+    /// the proposal. One changed ceiling, one widened edge, one dropped rule
+    /// and nothing is written.
+    ///
+    /// What a new row should say is a person's, settled on a ticket; this is
+    /// how a settled row reaches the file.
+    Steer {
+        /// The file to write, relative to the workspace root: seams.toml,
+        /// oracle.toml or docs/divergence.toml.
+        file: String,
+        /// The proposed whole file, judged against the tracked one.
+        #[arg(long, value_name = "PATH")]
+        from: PathBuf,
+        /// Judge and write the reading, but leave the file as it is.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Hold the divergence registry to the manifest rule whose `check` names
     /// this instrument: an accepted row has a reason a person wrote.
     DivergenceReason,

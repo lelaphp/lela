@@ -1,0 +1,321 @@
+//! `xtask steer`, the sanctioned writer of the harness's own files
+//! (harness-design.md §4.4, §11). `permit` denies an agent the `Edit` and
+//! the `Write` on `seams.toml`, `oracle.toml` and the divergence registry,
+//! because an agent that edits them can lower the bar it is measured
+//! against: an `exempt` on the rule that denies it, a ceiling over the
+//! lines it just wrote, an edge that admits the crate it wants, a
+//! divergence flipped to `accepted` so a disagreement with the oracle
+//! stops being one.
+//!
+//! What that reasoning forbids is a *change to what already binds*, and
+//! not every write to the file. A `[[crate]]` row for a crate that does
+//! not exist yet brings one under a ceiling; a `[regime.dump]` block the
+//! pin has never carried adds a recipe beside the ones it has. Neither can
+//! loosen anything, because nothing stands on them. So this instrument
+//! applies a proposed file only when it is **additive**: every table, key,
+//! value and array-of-tables row the tracked file carries stands unchanged
+//! in the proposal, and what the proposal adds beside them is new. One
+//! changed ceiling, one widened `to`, one deleted rule, one edited `ini`
+//! and the whole proposal is refused, named at the path that changed.
+//!
+//! The judge is the whole of the safety, since nothing else stands between
+//! an agent and these files: `permit` judges tool calls, and an instrument
+//! writing from Rust makes none, exactly as `computed run`, `new-ext` and
+//! `witness --accept` do. It is deliberately blunt. It refuses a tightening
+//! as readily as a loosening, since a lowered ceiling is still a person's
+//! call on what the harness holds; the agent's half is the row that was
+//! never there.
+//!
+//! An addition is not a decision. What a new row should say is a person's,
+//! settled on a ticket (`AGENTS.md`, *Documentation and where code lives*);
+//! this instrument is how a settled row reaches the file, and the reading
+//! it writes is what says so afterwards.
+
+use std::fmt::Write as _;
+use std::fs;
+use std::path::Path;
+
+use anyhow::{Context, Result, bail};
+use toml::Value;
+
+use crate::reading::{Reading, Status};
+
+/// The instrument name every reading of steer carries.
+pub(crate) const INSTRUMENT: &str = "steer";
+
+/// The files this instrument may write: the harness's own, the ones
+/// `permit` denies the agent under `harness.self`. A path outside this
+/// list is refused before anything is read, since steering is for the
+/// files no other hand may touch and every other file is an `Edit` away.
+pub const STEERABLE: [&str; 3] = ["seams.toml", "oracle.toml", "docs/divergence.toml"];
+
+/// The keys an array-of-tables row is identified by, in order: a proposal
+/// that adds a row whose identity an existing row already carries is
+/// refused, since two rows of one name is how a row is shadowed rather
+/// than added.
+const IDENTITY: [&str; 3] = ["id", "name", "from"];
+
+/// What a proposal does to the tracked file, as the judge reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    /// Nothing that stands was touched; the additions, by their path in
+    /// the file, in the order the walk found them.
+    Additive(Vec<String>),
+    /// Something that stands was changed or removed; each one named.
+    Refused(Vec<String>),
+}
+
+impl Verdict {
+    /// The additions of an additive verdict, none for a refused one.
+    pub fn additions(&self) -> &[String] {
+        match self {
+            Verdict::Additive(added) => added,
+            Verdict::Refused(_) => &[],
+        }
+    }
+}
+
+/// Judge one proposal against the file it would replace: additive when
+/// every value the tracked file carries stands unchanged in the proposal.
+pub fn judge(tracked: &str, proposed: &str) -> Result<Verdict> {
+    let old: toml::Table = toml::from_str(tracked).context("the tracked file is not TOML")?;
+    let new: toml::Table = toml::from_str(proposed).context("the proposed file is not TOML")?;
+    let mut walk = Walk::default();
+    walk.table("", &old, &new);
+    if walk.refused.is_empty() {
+        Ok(Verdict::Additive(walk.added))
+    } else {
+        Ok(Verdict::Refused(walk.refused))
+    }
+}
+
+/// Apply a proposal to one of the harness's own files, writing it only
+/// when the judge finds it additive; the reading either way.
+pub fn run(root: &Path, file: &str, proposal: &Path, dry_run: bool) -> Result<Reading> {
+    if !STEERABLE.contains(&file) {
+        bail!(
+            "steer writes the harness's own files and no others: {file} is not one of {}; \
+             every other file is an Edit away",
+            STEERABLE.join(", ")
+        );
+    }
+    let path = root.join(file);
+    let tracked = fs::read_to_string(&path)
+        .with_context(|| format!("reading the tracked {}", path.display()))?;
+    let proposed = fs::read_to_string(proposal)
+        .with_context(|| format!("reading the proposal at {}", proposal.display()))?;
+    let verdict = judge(&tracked, &proposed)?;
+    let mut reading = Reading::stamped_over(INSTRUMENT, file, root, Path::new(file))?;
+    match &verdict {
+        Verdict::Refused(changed) => {
+            reading.status = Status::Fail;
+            reading.count("changed", changed.len() as u64)?;
+            reading.message = format!(
+                "{file}: {} of what the file already carries would change, and a change to what \
+                 binds is a person's (harness §11): {}. Nothing was written.",
+                changed.len(),
+                changed.join(", ")
+            );
+        }
+        Verdict::Additive(added) if added.is_empty() => {
+            reading.status = Status::Skip;
+            reading.message = format!("{file}: the proposal is the tracked file; nothing to write");
+        }
+        Verdict::Additive(added) => {
+            if !dry_run {
+                fs::write(&path, &proposed)
+                    .with_context(|| format!("writing {}", path.display()))?;
+            }
+            reading.status = Status::Pass;
+            reading.count("added", added.len() as u64)?;
+            reading.message = format!(
+                "{file}: {} added{}, and nothing the file already carried changed: {}",
+                added.len(),
+                if dry_run {
+                    " (dry run, not written)"
+                } else {
+                    ""
+                },
+                added.join(", ")
+            );
+        }
+    }
+    Ok(reading)
+}
+
+/// The walk of the tracked file against the proposal: what was added,
+/// and what was changed or removed, each by its path in the file.
+#[derive(Debug, Default)]
+struct Walk {
+    added: Vec<String>,
+    refused: Vec<String>,
+}
+
+impl Walk {
+    /// One value of the tracked file against the proposal's at the same
+    /// path. A table recurses key by key, an array of tables holds every
+    /// row it carries and admits new ones beside them, and every other
+    /// value must be what it was.
+    fn value(&mut self, at: &str, old: &Value, new: &Value) {
+        match (old, new) {
+            (Value::Table(old), Value::Table(new)) => self.table(at, old, new),
+            (Value::Array(old), Value::Array(new)) if rows(old) => self.rows(at, old, new),
+            _ if old == new => {}
+            _ => self.refused.push(path_of(at, "")),
+        }
+    }
+
+    fn table(&mut self, at: &str, old: &toml::Table, new: &toml::Table) {
+        for (key, old_value) in old {
+            match new.get(key) {
+                Some(new_value) => self.value(&path_of(at, key), old_value, new_value),
+                None => self.refused.push(path_of(at, key)),
+            }
+        }
+        for key in new.keys().filter(|k| !old.contains_key(*k)) {
+            self.added.push(path_of(at, key));
+        }
+    }
+
+    /// An array of tables: every row the tracked file carries must stand
+    /// in the proposal unchanged, named by its identity, and a row the
+    /// proposal adds must not carry the identity of one already there,
+    /// two rows of one name being how a row is shadowed rather than added.
+    fn rows(&mut self, at: &str, old: &[Value], new: &[Value]) {
+        let named = |rows: &[Value], name: &str| rows.iter().any(|r| identity(r) == name);
+        for (n, row) in new.iter().enumerate() {
+            let name = identity(row);
+            if named(&new[..n], &name) {
+                self.refused.push(format!("{at}[{name}] twice"));
+            }
+        }
+        for row in old {
+            let name = identity(row);
+            match new.iter().find(|r| identity(r) == name) {
+                Some(proposed) if proposed == row => {}
+                Some(_) => self.refused.push(format!("{at}[{name}]")),
+                None => self.refused.push(format!("{at}[{name}] dropped")),
+            }
+        }
+        for (n, row) in new.iter().enumerate() {
+            let name = identity(row);
+            if !named(old, &name) && !named(&new[..n], &name) {
+                self.added.push(format!("{at}[{name}]"));
+            }
+        }
+    }
+}
+
+/// Whether an array is an array of tables, the one shape a proposal may
+/// append to; every other array is a value and must be what it was, so
+/// that an `ini` line, an `unsafe` home or an edge's `to` list cannot
+/// grow by one under an additive verdict.
+fn rows(array: &[Value]) -> bool {
+    !array.is_empty() && array.iter().all(Value::is_table)
+}
+
+/// What names one row of an array of tables: its `id`, else its `name`,
+/// else the row itself rendered, which no two rows share unless they are
+/// the same row.
+fn identity(row: &Value) -> String {
+    for key in IDENTITY {
+        if let Some(Value::String(value)) = row.get(key) {
+            return value.clone();
+        }
+    }
+    let mut out = String::new();
+    let _ = write!(out, "{row}");
+    out
+}
+
+fn path_of(at: &str, key: &str) -> String {
+    match (at.is_empty(), key.is_empty()) {
+        (_, true) => at.to_owned(),
+        (true, false) => key.to_owned(),
+        (false, false) => format!("{at}.{key}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Verdict, judge};
+
+    fn verdict(old: &str, new: &str) -> Verdict {
+        judge(old, new).expect("both parse")
+    }
+
+    #[test]
+    fn a_new_table_is_additive_and_an_edited_one_is_not() {
+        let pin = "[regime.jit-off]\nini = [\"opcache.enable=0\"]\n";
+        let added = format!("{pin}[regime.dump]\nini = [\"opcache.enable_cli=1\"]\n");
+        assert_eq!(
+            verdict(pin, &added),
+            Verdict::Additive(vec!["regime.dump".to_owned()])
+        );
+        let edited = "[regime.jit-off]\nini = [\"opcache.enable=1\"]\n";
+        assert_eq!(
+            verdict(pin, edited),
+            Verdict::Refused(vec!["regime.jit-off.ini".to_owned()])
+        );
+    }
+
+    #[test]
+    fn an_array_that_is_not_rows_must_be_what_it_was() {
+        let old = "[[edge]]\nfrom = \"xtask\"\nto = [\"php_bundle\"]\n";
+        let widened = "[[edge]]\nfrom = \"xtask\"\nto = [\"php_bundle\", \"php_unit\"]\n";
+        assert_eq!(
+            verdict(old, widened),
+            Verdict::Refused(vec!["edge[xtask]".to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_row_may_be_appended_but_not_shadowed_or_removed() {
+        let old = "[[crate]]\nname = \"xtask\"\nbudget = 14000\n";
+        let appended = format!("{old}[[crate]]\nname = \"ext/demo\"\nbudget = 2000\n");
+        assert_eq!(
+            verdict(old, &appended),
+            Verdict::Additive(vec!["crate[ext/demo]".to_owned()])
+        );
+        let shadowed = format!("{old}[[crate]]\nname = \"xtask\"\nbudget = 99000\n");
+        assert_eq!(
+            verdict(old, &shadowed),
+            Verdict::Refused(vec!["crate[xtask] twice".to_owned()])
+        );
+        assert_eq!(
+            verdict(old, "[[crate]]\nname = \"ext/demo\"\nbudget = 2000\n"),
+            Verdict::Refused(vec!["crate[xtask] dropped".to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_raised_ceiling_and_a_dropped_rule_are_both_refused() {
+        let old = "[budget]\nworkspace = 272500\n\n[[rule]]\nid = \"harness.self\"\ndeny = true\n";
+        let raised = old.replace("272500", "999999");
+        let raised = raised.as_str();
+        assert_eq!(
+            verdict(old, raised),
+            Verdict::Refused(vec!["budget.workspace".to_owned()])
+        );
+        let dropped = "[budget]\nworkspace = 272500\n";
+        assert_eq!(
+            verdict(old, dropped),
+            Verdict::Refused(vec!["rule".to_owned()])
+        );
+        let two = format!("{old}\n[[rule]]\nid = \"lanes.nightly\"\ndeny = true\n");
+        assert_eq!(
+            verdict(&two, old),
+            Verdict::Refused(vec!["rule[lanes.nightly] dropped".to_owned()])
+        );
+    }
+
+    #[test]
+    fn an_exempt_added_to_a_rule_that_binds_is_refused() {
+        let old = "[[rule]]\nid = \"witness.exit-authored\"\ndeny_pattern = \"exit=\"\n";
+        let exempted = format!("{old}exempt = [\"crates/php_engine/**\"]\n");
+        assert_eq!(
+            verdict(old, &exempted),
+            Verdict::Refused(vec!["rule[witness.exit-authored]".to_owned()])
+        );
+    }
+}

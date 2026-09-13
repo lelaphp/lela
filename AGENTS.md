@@ -41,11 +41,11 @@ I want Zend's design with better tooling, and nothing beside it. No second execu
 
 - `cargo xtask <instrument>` runs one instrument; `cargo xtask --help` lists the ones built so far. The smallest proof is the instrument for the crate you touched. The harness itself is tested by `cargo test -p xtask`, and every manifest rule has a fixture under `xtask/fixtures/` that must fail.
 - A change to behaviour comes with a witness beside the kernel or native, pinned by `--accept`. The witness is the test; write it before the body when you can. The phpt subset for an extension is `php-src/ext/<name>/tests`. A bench number is a claim a person signs off, with the A/A control read by a person: state the measurement, never the conclusion.
-- Stage and commit by pathspec, `git add -- <paths>` and `git commit -F <file> -- <paths>`: the index is shared with every session in the checkout, and `git add -A`, `git add .` or a commit that names no path takes what another session staged. Commits are plain language, one concern, the change in one sentence: `xtask vocab: the glossary as a sensor`. If the message says "also", split it. The lock line, the witness and the regenerated `ext/clippy.toml` travel with the code that needs them. A rule you want, or a divergence you found, is a paragraph in the message proposing it, with the fixture that would fail. A thing found and not done is a ticket, filed: `ready-for-agent` when an agent may take it, `for-a-person` when the act is a person's alone (harness §11).
+- Stage and commit by pathspec, `git add -- <paths>` and `git commit -F <file> -- <paths>`: the index is shared with every session in the checkout, and `git add -A`, `git add .` or a commit that names no path takes what another session staged. Commits are plain language, one concern, the change in one sentence: `xtask vocab: the glossary as a sensor`. If the message says "also", split it. The lock line, the witness and the regenerated `ext/clippy.toml` travel with the code that needs them. A rule you want, or a divergence you found, is a paragraph in the message proposing it, with the fixture that would fail. A thing found and not done is a ticket, filed: `ready-for-agent` when an agent may take it, `for-a-person` when the act is a person's alone (harness §11). A ticket's acceptance criteria are boxes its own label can tick. Where the work waits on a decision, the decision is a `for-a-person` ticket of its own and the work is wired to wait on it; a box inside an agent's ticket that reads *a person decides* is one box that is both, and it closes nothing however finished the code is.
 
 ## Documentation and where code lives
 
-- `third-engine-design.md` is the design of record, `jit-design.md` the compiled tier, `harness-design.md` the harness: living documents with a ledger on top, revised by a person, cited by section. `research/` holds the earlier revisions and the research behind them, read for history only. `docs/adr/` is the list of reversals; read the ADR before touching what it names.
+- `third-engine-design.md` is the design of record, `jit-design.md` the compiled tier, `harness-design.md` the harness: living documents with a ledger on top, cited by section. What a revision says is a person's; typing it is not. Where a ticket carries the sentence a person has settled, landing it with its ledger row is yours, and the commit names the ticket that settled it. A revision nobody has settled stays a question you file. `research/` holds the earlier revisions and the research behind them, read for history only. `docs/adr/` is the list of reversals; read the ADR before touching what it names.
 - Design documents carry no numbers of their own; budgets and interfaces live in `seams.toml`, the oracle in `oracle.toml`. A fact that changes is a region, rendered by `computed run` and held by `computed check`. No tickets, plans or agent scratch files in the repository; keep working material in your scratchpad.
 - `crates/php_syntax`, `php_compile` and `php_unit` take source to a unit; `php_heap` is the memory model and the only `unsafe`; `php_engine` holds the kernels, dispatch, `execute`, the linker, `serve` and `api`, with `php_jit` the compiled tier behind a feature; `php_ext` is the facade every extension depends on and `php_bundle` the enabled set; `php_proto`, `php_sapi` and `php` are the codecs, the hosts and the binary.
 - `ext/<name>` is one crate per extension, laid down by `cargo xtask new-ext`; read `ext/AGENTS.md` before touching one. `xtask` is the harness and `xtask/fixtures/` its negative controls. `data/` holds the censuses and extraction records the design cites. Most of `crates/` is not created yet; the layout regions below say what exists.
@@ -65,7 +65,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=f5933d76394e5d04980661b08de20c92cd3e38643ad61e554fb001b850a8aa1b out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=565fd6e40ae2501142cb1fe812fe318a62602f5ab922f752372532c34d82d117 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -86,9 +86,9 @@ third-engine-design.md
 | api | api.lock | 308 | 400 | pass |
 | sapi | sapi.lock | 0 |  | pass |
 | tier | tier.lock |  |  | skip |
-| harness | xtask.lock | 271 |  | pass |
+| harness | xtask.lock | 276 |  | pass |
 
-<!-- /computed in=9cb9085a79daef03a9b50c628966231a75f106ade2597070ecee312cf3f5d01b out=745ac3a47047836dd8219160c6d3b90741da2fae7d1e2b115604b9934fe67cf5 -->
+<!-- /computed in=9cb9085a79daef03a9b50c628966231a75f106ade2597070ecee312cf3f5d01b out=2b470dbb442f9b88df31f87ee48ecb88d561d42de1a08a289a3e727d8dea2616 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -138,6 +138,7 @@ Commands:
   port-map           Join the Mahout census to `api.lock`: every item `same`, `renamed` or `gone`, the rows the port has not taken as the number. One reading, at the crate the lock lives with
   unsafe-audit       Allow `unsafe` only in the homes the manifest's unsafe.homes rule names
   generate           Write the files the manifest's `generated` rules render (ext/clippy.toml)
+  steer              Apply a proposal to one of the harness's own files, the ones `permit` denies the agent, and only where it adds: every table, key, value and array-of-tables row the tracked file carries must stand unchanged in the proposal. One changed ceiling, one widened edge, one dropped rule and nothing is written
   divergence-reason  Hold the divergence registry to the manifest rule whose `check` names this instrument: an accepted row has a reason a person wrote
   new-ext            Lay one extension crate down at ext/<name> in the template topology, its line in `php_bundle`, ext/clippy.toml and its row in ext/AGENTS.md; refuses an existing one
   witness            Extract every `php` fence and its `expect` fence from a crate's rustdoc, run each under the oracle's recipe and hold it to what the fence pins. One reading per crate
@@ -147,7 +148,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=3271e5b8d2dda68133152f8a36e4f81e8ffd8fd8ad9ab3e839c6d35fd7d7b140 out=94dae5e6b2ec4295d9fc1adfe25ac8ee7d6436036798f4a1591c69bcd9c6eca6 -->
+<!-- /computed in=d7c81eb9960746a6dab2dace3402283aa97283f058e564e8e75e27a0c90e5660 out=7d86638ab11d33ab458377f70eb8cdc04fe9c3c2847b84a1065ff93884fb6c91 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

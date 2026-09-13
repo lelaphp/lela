@@ -43,6 +43,7 @@ mod reply;
 mod rust;
 mod sources;
 pub mod status;
+pub mod steer;
 mod tally;
 pub mod ticket;
 pub mod track;
@@ -197,7 +198,14 @@ fn command_line() -> Result<()> {
         Command::Track { .. } => bail!("track: answered above"),
         Command::Regions { .. } => bail!("regions: answered above"),
         Command::Worktree { .. } => bail!("worktree: answered above"),
+        Command::Steer { .. } => bail!("steer: answered above"),
     }
+}
+
+/// `steer`: one proposal judged against the harness's own file and
+/// applied where it only adds, as one reading.
+fn steer(root: &Path, store: &Store, file: &str, from: &Path, dry: bool) -> Result<()> {
+    record(store, &[steer::run(root, file, from, dry)?])
 }
 
 /// What every instrument ends with: each reading printed as one line and
@@ -318,6 +326,17 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
         } => Some(track_work::command(root, *one)),
         Command::Track { branch, json, .. } => Some(track_command(root, branch.as_deref(), *json)),
         Command::Regions { files } => Some(computed::command(root, files)),
+        Command::Steer {
+            file,
+            from,
+            dry_run,
+        } => Some(steer(
+            root,
+            &Store::of_workspace(root),
+            file,
+            from,
+            *dry_run,
+        )),
         Command::Worktree {
             command: WorktreeCommand::Add { branch, ticket },
         } => Some(worktree::add(root, branch, ticket.map(track::Ticket::new)).map(|_| ())),
