@@ -452,13 +452,16 @@ fn item_of(line: &str) -> Option<Item> {
     })
 }
 
-/// The identifier at the start of `text`, if there is one.
+/// The identifier at the start of `text`, if there is one; a raw one,
+/// `r#mod`, as it is written, since php's name for the kernel is a
+/// keyword here.
 fn identifier(text: &str) -> Option<String> {
     let text = text.trim_start();
-    let end = text
+    let raw = text.strip_prefix("r#").map_or(0, |_| 2);
+    let end = text[raw..]
         .find(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .unwrap_or(text.len());
-    (end > 0).then(|| text[..end].to_owned())
+        .map_or(text.len(), |at| raw + at);
+    (end > raw).then(|| text[..end].to_owned())
 }
 
 /// The `expect` fence line with `status` pinned on it: the one thing
@@ -517,6 +520,17 @@ mod tests {
         };
         assert!(subject.witnessed);
         assert_eq!(subject.name, "pub fn ctype_digit");
+    }
+
+    #[test]
+    fn a_raw_identifier_names_the_kernel_as_it_is_written() {
+        let found = php(concat!(
+            "/// ```php\n/// echo 1 % 0;\n/// ```\n",
+            "/// ```expect\n/// x\n/// ```\n",
+            "pub(crate) fn r#mod() {}\n"
+        ));
+        assert_eq!(found.witnesses[0].subject, "pub fn r#mod");
+        assert_eq!(found.subjects[0].name, "pub fn r#mod");
     }
 
     #[test]
