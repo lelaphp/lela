@@ -234,6 +234,15 @@ mod tests {
     /// rounded to 4 KiB it would be 3,002,368, twelve KiB short. The 24
     /// bytes over it in php's first number are the variable php's symbol
     /// table took, which no allocation here makes.
+    ///
+    /// The session above is still one a person typed. `memory_get_usage` is a
+    /// native of `php_engine` now, and the witness beside it pins the
+    /// other half of this accounting per commit: a fresh request's real
+    /// usage is php's one 2 MiB chunk, and the oracle says the same.
+    /// A huge block is past what a witness can reach while `php_compile`
+    /// reads no variable and nothing declares `str_repeat()`, so no
+    /// snippet can hold a 3 MB string alive across two calls; #174 is
+    /// where this session becomes a witness too.
     #[test]
     fn a_huge_block_rounds_to_the_page_the_machine_reports() {
         let _alone = alone();
