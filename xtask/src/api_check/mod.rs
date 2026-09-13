@@ -9,7 +9,9 @@
 //!   with, `lock_from` deciding which for the facade; an import lock
 //!   (`sapi.lock`, `tier.lock`, the ones an `[[edge]]` cites by `lock` or
 //!   `allowlist`, or a seam with `allowlist = true`) is what the consumers
-//!   `use` from the producer. `api.lock` is held under `[budget] api_items`.
+//!   `use` from the producer; a rendered lock (`ops.lock`, the seam whose
+//!   producer is a file rather than a crate) is that file's rows, one line
+//!   an opcode. `api.lock` is held under `[budget] api_items`.
 //! - A crate's workspace dependencies are held to the `[[edge]]` rows whose
 //!   `from` matches it: every row is exclusive, so `only = true` restates
 //!   what the instrument does for each crate. A `use` path across a `deny = true`
@@ -23,6 +25,7 @@
 
 mod inventory;
 pub(crate) mod lock;
+mod ops;
 mod workspace;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -79,15 +82,32 @@ pub fn hold(manifest: &Manifest, root: &Path, write: bool) -> Result<Vec<Reading
 
 // ---------------------------------------------------------------- seams
 
-/// Which inventory a lock is: the items of the crate it lives with, or the
-/// consumers' imports from the producer.
+/// Which inventory a lock is: the items of the crate it lives with, the
+/// consumers' imports from the producer, or the rows of the file the seam
+/// is generated from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LockKind {
     Items,
     Imports,
+    Rendered,
+}
+
+impl LockKind {
+    /// What one line of such a lock names, for the message a stale line
+    /// carries.
+    fn line(self) -> &'static str {
+        match self {
+            LockKind::Items => "public item",
+            LockKind::Imports => "import",
+            LockKind::Rendered => "opcode",
+        }
+    }
 }
 
 fn lock_kind(manifest: &Manifest, seam: &Seam) -> LockKind {
+    if seam.generated {
+        return LockKind::Rendered;
+    }
     let cited = manifest.edges.iter().any(|e| {
         e.lock.as_deref() == Some(seam.lock.as_str())
             || e.allowlist.as_deref() == Some(seam.lock.as_str())
@@ -126,17 +146,21 @@ fn seam_reading(
         reading.message = message;
         Ok(reading)
     };
-    if seam.generated {
+    let kind = lock_kind(manifest, seam);
+    if kind == LockKind::Rendered && seam.producer != ops::PRODUCER {
         return skip(
             reading,
             format!(
-                "{} is generated from {}; its generator holds it",
+                "{} is generated from {}, which the harness renders no lock from",
                 seam.lock, seam.producer
             ),
         );
     }
     let Some(home) = home else {
-        return skip(reading, format!("no [[crate]] row names {}", seam.lock));
+        return skip(
+            reading,
+            format!("no [[crate]] row or [lock_home] entry names {}", seam.lock),
+        );
     };
     let Some(krate) = crates.named(&home) else {
         return skip(reading, format!("{home} does not exist yet"));
@@ -151,10 +175,10 @@ fn seam_reading(
             ),
         );
     }
-    let kind = lock_kind(manifest, seam);
     let generated = match kind {
         LockKind::Items => inventory.public_items(krate)?,
         LockKind::Imports => imports(crates, seam)?,
+        LockKind::Rendered => ops::lines(&crates.root().join(&seam.producer))?,
     };
     reading
         .numbers
@@ -164,6 +188,7 @@ fn seam_reading(
     let subject = match kind {
         LockKind::Items => format!("public items of {home}"),
         LockKind::Imports => format!("imports from {}", seam.producer),
+        LockKind::Rendered => format!("{} of {}", ops::SUBJECT, seam.producer),
     };
 
     let mut problems = hold_lock(seam, kind, &path, &shown, &subject, &generated, write)?;
@@ -235,10 +260,7 @@ fn hold_lock(
         problems.push(format!(
             "{} lines of {shown} name no {}: {}",
             diff.stale.len(),
-            match kind {
-                LockKind::Items => "public item",
-                LockKind::Imports => "import",
-            },
+            kind.line(),
             list(&diff.stale, 8)
         ));
     }

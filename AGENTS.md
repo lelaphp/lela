@@ -82,13 +82,13 @@ third-engine-design.md
 |---|---|---|---|---|
 | heap | heap.lock | 77 |  | pass |
 | unit | unit.lock | 35 |  | pass |
-| ops | ops.lock |  |  | skip |
-| api | api.lock | 308 | 400 | pass |
+| ops | ops.lock | 209 |  | pass |
+| api | api.lock | 312 | 400 | pass |
 | sapi | sapi.lock | 0 |  | pass |
 | tier | tier.lock |  |  | skip |
-| harness | xtask.lock | 276 |  | pass |
+| harness | xtask.lock | 278 |  | pass |
 
-<!-- /computed in=b6f9eaa35f9acfe9b640d57acccd0b3a287bf998364afe764261c69baa4e9b55 out=c4a512b6017cf8480f9d28c47d30acb0dd6ce8760d4044cea790906a7810c889 -->
+<!-- /computed in=78bd40cc32116391d8f25c4b5057f66baf120f6cb8c0abe5f868a3dee44949fe out=0652b6eb8134bd27213e14c03392313cbcdc59a1d11fa366b38ba69a3877ee14 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -103,7 +103,7 @@ third-engine-design.md
 | xtask.lock-line |  | on | pass | A new pub item in xtask needs its xtask.lock line in the same commit. |
 | ext.pub-beyond-extension |  | on | pass | api-check prints each ext crate's pub items beyond extension(); anything beyond the pdo driver trait and the random handle needs a line in the design (§12). |
 | witness.exit-authored |  | deny_pattern | no reading | exit= in a witness is captured by `xtask witness --accept`, never authored. |
-| witness.coverage |  | check | skip | A kernel or a native without a witness fails CI (design §8). |
+| witness.coverage |  | check | pass | A kernel or a native without a witness fails CI (design §8). |
 | vocab.avoid |  | avoid_from | pass | The glossary's _Avoid_ words appear in no public item name or rustdoc prose; a lock line mirrors php's names and is not read. |
 | vocab.harness |  | avoid_from | pass | The Harness section's _Avoid_ words appear in no public item name or rustdoc prose of the harness; xtask/fixtures/** are other crates' sources and are not read. |
 | generated.committed |  | generated | pass | ext/clippy.toml is generated from the manifest and committed; a stale copy fails budget. |
@@ -113,10 +113,10 @@ third-engine-design.md
 | ticket.reply-unfiled |  | deny_pattern | no reading | A session that closed a ticket names what it found and did not do in a ticket, a divergence row or a rule proposed in a commit message, never in its reply alone (CONTEXT.md, Ticket): a reply that hands work to a person, leaves a decision open or calls a thing worth filing is held once. A heuristic beside the close's own conditions; the second Stop passes. |
 | lanes.nightly |  | deny_pattern | no reading | Nightly lanes run in CI only; run the per-crate subset. |
 | computed.force |  | deny_pattern | no reading | `computed run --force` discards a hand edit; a person decides that. |
-| harness.self |  | deny | fail | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
+| harness.self |  | deny | no reading | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
 | divergence.reason |  | check | no reading | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
 
-<!-- /computed in=1e9e1fb73813cb19d9bdfdea62a36da68d0aba7ea70bf5840fafccaf21bbc0a5 out=96f34607bfc1ab7131ae42a29d1ebab6fa30cace9ea58585954978611ff7b7c7 -->
+<!-- /computed in=864b723ffc7b82341a1c7dfca2b9357130a23ecccda813a969b578519ebe710d out=96faec7312d394080c426c71be3dcab3d983caffdcce2a863d708aea928b69f7 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

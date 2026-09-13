@@ -195,6 +195,15 @@ producer = "xtask"
 consumers = []
 lock = "xtask.lock"
 
+# ---------------------------------------------------------- lock homes
+# The crate a lock's file lives with, for a lock no [[crate]] row names. Every
+# other lock is named by the row of the crate that produces it; the `ops` seam's
+# producer is ops.toml, a file, so no row carries it. php_unit owns the opcode
+# enum (ADR-0001) and its build.rs already reads ops.toml, so the record of that
+# interface sits beside unit.lock, and api-check holds it as it holds the rest.
+[lock_home]
+"ops.lock" = "php_unit"
+
 # ---------------------------------------------------------------- edges
 # Design §4.2. A manifest edge outside this list fails `api-check`; so does a
 # `use` path that crosses a seam without going through its lock.

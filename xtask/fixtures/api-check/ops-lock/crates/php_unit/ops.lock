@@ -1,0 +1,4 @@
+# ops.lock: the fixture's instruction set, with ADD hand-edited: its throw effect is gone from the line, so the rendered line has no line and the line names no opcode.
+ADD                              1 CONST|TMP|VAR|CV        CONST|TMP|VAR|CV        used   alloc                     -
+JMP                             42 UNUSED                  UNUSED                  unused -                         result
+NOP                              0 UNUSED                  UNUSED                  unused -                         -

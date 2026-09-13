@@ -15,4 +15,5 @@ built; the instrument reads manifests and sources.
 | `deny-edge` | a `use` path across a `deny = true` module edge | fail |
 | `bundle`    | a bundle order that is not topological          | fail |
 | `harness-lock` | a public item of the harness with no line in `xtask.lock`, under the rows #55 proposes | fail |
+| `ops-lock`  | a hand-edited line of `ops.lock`, the lock rendered from `ops.toml` | fail |
 | `same-name` | two `pub` types of one name in two modules, each listing its own methods alone (#79); read by the unit test beside `Inventory::assoc`, not by `hold` | pass |

@@ -143,8 +143,9 @@ fn a_bundle_order_that_is_not_topological_fails() {
 }
 
 /// The tracked workspace: every seam whose lock has no home present yet,
-/// that is generated, or that is diffed per section, is a skip, and the
-/// harness itself is within its edges.
+/// that is generated from a file the harness renders no lock from, or
+/// that is diffed per section, is a skip, and the harness itself is
+/// within its edges.
 #[test]
 fn the_workspace_today_has_no_failing_reading() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -159,7 +160,7 @@ fn the_workspace_today_has_no_failing_reading() {
         .seams
         .iter()
         .filter(|seam| {
-            seam.generated
+            (seam.generated && seam.producer != "ops.toml")
                 || !seam.sections.is_empty()
                 || manifest
                     .lock_home(&seam.lock)
@@ -171,6 +172,57 @@ fn the_workspace_today_has_no_failing_reading() {
         readings.iter().filter(|r| r.status == Status::Skip).count(),
         unmeasured,
         "one skip per seam without a home present or measured: {readings:#?}"
+    );
+}
+
+/// A hand-edited line of `ops.lock`: the one lock rendered from a file
+/// rather than from a crate's sources, held by the same instrument as
+/// the other six (#95). The fixture's `ADD` line has lost its `throw`
+/// effect, so the rendered line has no line in the lock and the line
+/// names no opcode.
+#[test]
+fn a_hand_edited_line_of_ops_lock_fails() {
+    let readings = readings("ops-lock");
+    let ops = of(&readings, "ops");
+    assert_eq!(ops.status, Status::Fail, "{}", ops.message);
+    assert_eq!(ops.numbers["items"], 3.into());
+    assert!(
+        ops.message.contains("crates/php_unit/ops.lock"),
+        "the lock is named: {}",
+        ops.message
+    );
+    assert!(
+        ops.message.contains("alloc,throw"),
+        "the rendered line is named: {}",
+        ops.message
+    );
+    assert!(
+        ops.message.contains("name no opcode"),
+        "the hand edit is named as stale: {}",
+        ops.message
+    );
+    assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
+}
+
+/// The `ops` seam's lock lives with `php_unit`, which produces no part of
+/// it: the `[lock_home]` table names the home, since the seam's producer
+/// is a file and no `[[crate]]` row carries the lock.
+#[test]
+fn the_ops_lock_is_at_home_with_php_unit() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    assert_eq!(
+        manifest.lock_home("ops.lock").as_deref(),
+        Some("php_unit"),
+        "the manifest names the lock's home"
+    );
+    let readings = api_check::hold(&manifest, workspace(), false).unwrap();
+    let ops = of(&readings, "ops");
+    assert_eq!(ops.status, Status::Pass, "{}", ops.message);
+    assert_eq!(ops.numbers["items"], 209.into());
+    assert!(
+        ops.message.contains("crates/php_unit/ops.lock"),
+        "{}",
+        ops.message
     );
 }
 

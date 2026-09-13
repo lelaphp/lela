@@ -1,0 +1,27 @@
+# The ops-lock fixture's instruction set: three rows of the shape ops.toml
+# carries, enough for a column of each kind (an effect list, an absent
+# safepoint, a present one).
+[[op]]
+num = 0
+name = "NOP"
+op1 = ["UNUSED"]
+op2 = ["UNUSED"]
+result = "unused"
+effects = []
+
+[[op]]
+num = 1
+name = "ADD"
+op1 = ["CONST", "TMP", "VAR", "CV"]
+op2 = ["CONST", "TMP", "VAR", "CV"]
+result = "used"
+effects = ["alloc", "throw"]
+
+[[op]]
+num = 42
+name = "JMP"
+op1 = ["UNUSED"]
+op2 = ["UNUSED"]
+result = "unused"
+effects = []
+safepoint = "result"
