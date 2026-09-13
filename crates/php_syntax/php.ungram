@@ -1,0 +1,542 @@
+// php.ungram — Mahout syntax-tree schema for PHP 8.5
+// =====================================================================
+// This file is the single source of truth for the shape of Mahout's
+// syntax tree. `xtask codegen` generates from it: the SyntaxKind enum,
+// typed AST accessor structs/enums, mixin traits, and visitor scaffolding.
+// It is the change-controlled artifact named in the M0 plan (§8): freely
+// churned until gate G8, ADR-per-change after. The normative grammar of
+// PHP remains php-src's zend_language_parser.y + the differential gates;
+// this file records the *tree we build*, which may be more permissive
+// than PHP (see the VALIDATE marker convention below).
+//
+// ---------------------------------------------------------------------
+// DSL SYNTAX
+//   Node = Rule                  struct node: SyntaxKind + typed accessors
+//   Node = A | B | C             alternation-only: generates a typed enum
+//   trait Name = Rule            mixin (see A5)
+//   Node : TraitA TraitB = Rule  node opts into mixins
+//   juxtaposition = sequence;  (…) grouping;  ?  optional;  *  zero-or-more
+//   R,*  /  R,+   comma-separated list, zero-/one-or-more, trailing comma ok
+//   'kw'          literal token (keywords written lowercase; the lexer is
+//                 case-insensitive, so 'function' matches FUNCTION etc.)
+//   <class>       token class (see TOKEN CLASSES)
+//   label:Rule    names the generated accessor
+//   Rule!         REQUIRED child (see A2)
+//
+// ---------------------------------------------------------------------
+// CONVENTIONS
+//
+// A1 — Nodes and enums. Every struct node maps 1:1 to a SyntaxKind.
+//   Alternation-only definitions generate enums (e.g. `Expr`, `Stmt`)
+//   whose variants are the listed nodes; token-only alternations
+//   (e.g. `BinaryOp`) generate a token accessor + kind predicate.
+//
+// A2 — Arity honesty (the recovery contract). DEFAULT IS OPTIONAL:
+//   every child accessor returns Option<T> unless marked `!`, because
+//   under error recovery any child can be absent. `Rule!` is a promise
+//   ENFORCED ON THE PARSER (debug-asserted by the tree builder): the
+//   node is never constructed without that child. Use `!` only where
+//   construction is anchored on the child itself (a BinaryExpr is built
+//   *around* an existing lhs; a PostfixIncDec around its operand) or on
+//   a token that cannot appear without it. Repetition (`*`, `,*`, `,+`)
+//   generates an AstChildren<T> iterator — possibly empty even for `,+`;
+//   the `+` records grammar intent and seeds a validation diagnostic.
+//   (M0.3 refinement: `!` markers were audited against the real parser's
+//   recovery paths and removed wherever construction is NOT anchored on
+//   the child — e.g. a do-while is built from `do`, so its body can be
+//   absent under recovery. The survivors are hard guarantees.)
+//
+// A3 — Tokens. Literal tokens appear in the tree (lossless) but get
+//   accessors only when labeled or when the node is token-only. Multiple
+//   alternative tokens in one position (e.g. op:('+'|'-')) generate a
+//   single token accessor whose kind the caller inspects.
+//
+// A4 — Same-typed siblings. When a node has several children of one
+//   type, labeled accessors resolve POSITIONALLY RELATIVE TO ANCHOR
+//   TOKENS in the rule (e.g. TernaryExpr's `then` is the Expr between
+//   '?' and ':'; `else_branch` follows ':'). Where optionality would
+//   make anchored positions ambiguous, a wrapper node is introduced
+//   instead (ForInit/ForCond/ForStep, ForeachKey, ArrayKey, YieldKey).
+//   Wrappers are deliberate API, not noise: they give lowering a stable
+//   place to hang spans.
+//
+// A5 — Mixins. `trait` definitions inject their children into every
+//   opted-in node and generate a Rust trait with blanket accessor impls,
+//   so item-tree extraction and HIR lowering generalize over
+//   HasAttributes/HasModifiers/etc. instead of matching node-by-node.
+//   HasDocComment is the one trivia-backed trait: it declares no
+//   children; codegen emits an accessor that scans the node's leading
+//   trivia for the nearest <doc_comment>.
+//
+// A6 — Trivia. Whitespace and comments are trivia tokens: present in
+//   the green tree (G2 losslessness), invisible to this schema and to
+//   typed accessors. Inline HTML is NOT trivia — it has echo semantics —
+//   and is modeled as InlineHtmlStmt below. Open/close tags ('<?php',
+//   '?>') are structural tokens owned by the nodes they delimit; the
+//   `?>`-as-semicolon rule is a parser token-glue rule, not a schema
+//   concern. (NOTE: design doc §5.1 loosely called HTML segments trivia;
+//   this file is the precise statement and the doc will be amended.)
+//
+// A7 — Markers used in comments below:
+//   DESUGAR:  this node is an HIR lowering input with a known desugar
+//   VALIDATE: the tree is more permissive than PHP here; the named
+//             rejection lives in the validation pass (M0 plan §4.4.4)
+//   LEVEL:    construct gated on LanguageLevel (min PHP version)
+//   NOTE:     rationale / conformance trap worth knowing at the schema
+//
+// A8 — Naming. Nodes CamelCase with suffix conventions: *Expr, *Stmt,
+//   *Decl, *Type, *Clause, *List. SyntaxKind names are the SCREAMING
+//   form, generated.
+//
+// ---------------------------------------------------------------------
+// TOKEN CLASSES (full token set is generated; see conformance/token_map.md)
+//   <ident>          identifier (not a variable)
+//   <member_ident>   <ident> ∪ semi-reserved keywords — legal in member-
+//                    name position (methods, class consts, enum cases,
+//                    property names after ->, named-arg labels).
+//                    NOTE: 'class' is excluded as a const name; the
+//                    contextual-keyword module is the runtime authority.
+//   <variable>       '$' + name token ($x)
+//   <name_qualified> <name_fully_qualified> <name_relative>
+//                    A\B   \A\B   namespace\A   (php 8.0 single tokens)
+//   <int> <float>    numeric literals (underscores, 0x/0b/0o/legacy octal)
+//   <single_quoted>  complete single-quoted string (incl. b'…')
+//   <string_text>    literal run inside "…", heredoc, nowdoc, `…`
+//   <heredoc_start> <heredoc_end>   <<<LABEL / closing label (both
+//                    heredoc and nowdoc variants; flexible-indent strip
+//                    records are trivia attached here)
+//   <encaps_int>     integer in the restricted in-string dim grammar
+//   <magic_const>    __LINE__ __FILE__ __DIR__ __FUNCTION__ __CLASS__
+//                    __TRAIT__ __METHOD__ __NAMESPACE__ __PROPERTY__?
+//                    (set is generated; case-insensitive)
+//   <cast>           '(int)' … '(object)' incl. interior whitespace
+//   <cast_removed>   '(real)' / '(unset)'  → targeted MHT diagnostic
+//   <inline_html>    verbatim HTML segment
+//   <halt_data>      everything after __halt_compiler();
+//   <open_tag_echo>  '<?='
+//
+// =====================================================================
+
+// ----- mixins ---------------------------------------------------------
+
+trait HasAttributes = attrs:AttributeGroup*
+trait HasModifiers  = modifiers:Modifier*
+trait HasDocComment =            // trivia-backed; see A5
+
+// ----- source structure ----------------------------------------------
+
+SourceFile = Stmt*
+// NOTE: a file may begin/end mid-HTML; leading <inline_html> before the
+// first '<?php' is an InlineHtmlStmt like any other.
+
+InlineHtmlStmt = body:<inline_html>     // DESUGAR: echo of a constant
+
+HaltCompilerStmt = '__halt_compiler' '(' ')' ';' data:<halt_data>?
+// NOTE: Composer/phar stubs; data participates in G2 losslessness.
+
+StmtList = Stmt*    // body of alternative-syntax constructs
+
+// ----- names and references ------------------------------------------
+
+NameRef = <ident> | <name_qualified> | <name_fully_qualified> | <name_relative>
+// NOTE: resolution is M1; 'true','false','null','self','parent','static',
+// 'never','mixed', class names — all arrive here undifferentiated.
+
+MemberName = name:<member_ident>
+
+// ----- types ----------------------------------------------------------
+
+TypeExpr = NamedType | NullableType | UnionType | IntersectionType | ParenType
+
+NamedType        = name:NameRef!
+NullableType     = '?' ty:TypeExpr
+UnionType        = TypeExpr ('|' TypeExpr)*        // accessor: types()
+IntersectionType = TypeExpr ('&' TypeExpr)*        // LEVEL: 8.1
+ParenType        = '(' ty:TypeExpr ')'             // LEVEL: 8.2 (DNF)
+// VALIDATE: DNF shape rules (no nested unions in parens, no duplicate
+// members); nullable cannot wrap union/intersection.
+// NOTE: '(A&B)|C' vs parenthesized expression in parameter position is
+// a parser disambiguation; the 8.1 ampersand token split (M0 §4.2)
+// resolves 'A&B $x' vs 'A &$x' before the parser sees it.
+
+// ----- attributes ------------------------------------------------------
+
+AttributeGroup = '#[' Attribute,+ ']'
+Attribute      = name:NameRef! args:ArgList?
+// NOTE: argument expressions stored as-is; item tree keeps spans only.
+
+// ----- modifiers --------------------------------------------------------
+
+Modifier = 'public' | 'protected' | 'private'
+         | SetVisibility
+         | 'static' | 'abstract' | 'final' | 'readonly' | 'var'
+// VALIDATE: duplicate/conflicting modifiers; 'var' legacy property-only.
+
+SetVisibility = vis:('public' | 'protected' | 'private') '(' 'set' ')'
+// LEVEL: 8.4. NOTE: four tokens glued in modifier position only;
+// 'private(set)' elsewhere is a call — contextual-keyword module owns this.
+
+// ----- statements -------------------------------------------------------
+
+Stmt = Block | ExprStmt | EmptyStmt | InlineHtmlStmt | HaltCompilerStmt
+     | IfStmt | WhileStmt | DoWhileStmt | ForStmt | ForeachStmt | SwitchStmt
+     | BreakStmt | ContinueStmt | ReturnStmt | GotoStmt | LabelStmt
+     | TryStmt | EchoStmt | GlobalStmt | StaticVarStmt | UnsetStmt
+     | ConstStmt | UseStmt | NamespaceDef | DeclareStmt
+     | FunctionDecl | ClassDecl | InterfaceDecl | TraitDecl | EnumDecl
+// NOTE: declarations are statements in PHP (conditional declaration is
+// the language model — design doc §6.1); the item tree extracts the
+// declaration subset and marks conditionality by nesting.
+
+Block     = '{' Stmt* '}'
+ExprStmt  = expr:Expr! ';'        // ';' may be supplied by '?>' glue
+EmptyStmt = ';'
+
+IfStmt = 'if' '(' cond:Expr ')'
+         ( then:Stmt ElseifClause* ElseClause?
+         | ':' StmtList AltElseifClause* AltElseClause? 'endif' ';' )
+ElseifClause    = 'elseif' '(' cond:Expr ')' body:Stmt
+ElseClause      = 'else' body:Stmt
+AltElseifClause = 'elseif' '(' cond:Expr ')' ':' StmtList
+AltElseClause   = 'else' ':' StmtList
+// NOTE: 'else if' (two words) parses as ElseClause{ IfStmt } — by design,
+// matching php-src. VALIDATE: 'else if' illegal in alternative syntax.
+
+WhileStmt   = 'while' '(' cond:Expr ')' ( body:Stmt | ':' StmtList 'endwhile' ';' )
+DoWhileStmt = 'do' body:Stmt 'while' '(' cond:Expr ')' ';'
+
+ForStmt = 'for' '(' init:ForInit ';' cond:ForCond ';' step:ForStep ')'
+          ( body:Stmt | ':' StmtList 'endfor' ';' )
+ForInit = Expr,*        // wrappers per A4; each may be empty
+ForCond = Expr,*        // NOTE: comma lists — last cond decides (DESUGAR)
+ForStep = Expr,*
+
+ForeachStmt = 'foreach' '(' iterable:Expr 'as' key:ForeachKey? target:ForeachTarget? ')'
+              ( body:Stmt | ':' StmtList 'endforeach' ';' )
+ForeachKey    = key:Expr! '=>'
+ForeachTarget = byref:'&'? target:Expr
+// DESUGAR: iterator protocol (design doc §7.1). VALIDATE: target must be
+// writable / destructurable; by-ref target excludes key-less list forms.
+
+SwitchStmt = 'switch' '(' subject:Expr ')'
+             ( '{' SwitchArm* '}' | ':' SwitchArm* 'endswitch' ';' )
+SwitchArm  = ('case' value:Expr | 'default') (':' | ';') StmtList
+// NOTE: ';' after case/default is legal, archaic, and in the corpus.
+
+BreakStmt    = 'break' level:Expr? ';'
+ContinueStmt = 'continue' level:Expr? ';'
+// VALIDATE: level must be a positive integer literal (since PHP 5.4).
+
+ReturnStmt = 'return' value:Expr? ';'
+GotoStmt   = 'goto' label:<ident> ';'
+LabelStmt  = name:<ident>! ':'
+
+TryStmt       = 'try' body:Block! CatchClause* FinallyClause?
+CatchClause   = 'catch' '(' types:CatchTypeList var:<variable>? ')' body:Block
+CatchTypeList = NameRef ('|' NameRef)*
+FinallyClause = 'finally' body:Block
+// VALIDATE: try requires ≥1 catch or finally. NOTE: capture-less catch is 8.0.
+
+EchoStmt = ('echo' | <open_tag_echo>) exprs:Expr,+ ';'
+// NOTE: '<?= $x ?>' — the ';' is supplied by '?>' glue; echo of several
+// comma-separated values is one statement. DESUGAR: output op per value.
+
+// NOTE: vars are the simple-variable family only ($x, $$x, ${expr} —
+// Zend's simple_variable); the parser enforces it (burn-down 2026-06-11).
+GlobalStmt    = 'global' vars:Expr,+ ';'
+StaticVarStmt = 'static' StaticVarDeclarator,+ ';'
+StaticVarDeclarator = var:<variable>! ('=' init:Expr)?
+// NOTE: 'static' here vs 'static::' vs static closures/fns vs the
+// modifier — four contextual readings; the decision procedure is
+// centralized (M0 §4.4.3) and this node is only built for the declarator
+// form. DESUGAR: per-function static slot.
+
+UnsetStmt = 'unset' '(' targets:Expr,+ ')' ';'
+
+ConstStmt       = 'const' ConstDeclarator,+ ';'
+// NOTE: top-level const — untyped; typed constants are class-level (8.3).
+
+UseStmt      = 'use' kind:('function' | 'const')? ( UseGroup | UseClause,+ ) ';'
+UseClause    = name:NameRef! alias:UseAlias?
+UseAlias     = 'as' name:<ident>!
+UseGroup     = prefix:NameRef! '\\' '{' UseGroupItem,+ '}'
+UseGroupItem = kind:('function' | 'const')? name:NameRef! alias:UseAlias?
+// VALIDATE: kind-on-statement and kind-on-item are mutually exclusive.
+
+NamespaceDef = 'namespace' name:NameRef? ( body:Block | ';' )
+// VALIDATE: braced and unbraced forms cannot mix in one file; unnamed
+// namespace requires braced form.
+
+DeclareStmt      = 'declare' '(' DeclareDirective,+ ')' ( body:Stmt | ':' StmtList 'enddeclare' ';' | ';' )
+DeclareDirective = name:<ident>! '=' value:Expr
+// VALIDATE: strict_types value/placement (first statement, no block form).
+
+// ----- declarations -----------------------------------------------------
+
+FunctionDecl : HasAttributes HasDocComment =
+    'function' byref:'&'? name:<ident>! params:ParamList! ret:RetType? body:Block
+
+RetType   = ':' ty:TypeExpr
+ParamList = '(' Param,* ')'
+
+Param : HasAttributes HasModifiers =
+    ty:TypeExpr? byref:'&'? variadic:'...'? var:<variable>!
+    ('=' default:Expr)? hooks:PropertyHookList?
+// NOTE: modifiers present ⇒ constructor promotion (8.0); hooks on a
+// param are legal only when promoted (8.4) — VALIDATE both, plus:
+// variadic excludes default, by-ref-variadic ordering, required-after-
+// optional deprecation, readonly promoted needs visibility.
+
+ClassDecl : HasAttributes HasModifiers HasDocComment =
+    'class' name:<ident>? extends:ExtendsClause? implements:ImplementsClause?
+    body:ClassBody!
+// VALIDATE: legal modifier set {abstract, final, readonly}; abstract+final
+// conflict; readonly class member rules (8.2/8.3).
+
+InterfaceDecl : HasAttributes HasDocComment =
+    'interface' name:<ident>? extends:ExtendsClause? body:ClassBody!
+TraitDecl : HasAttributes HasDocComment =
+    'trait' name:<ident>? body:ClassBody!
+EnumDecl : HasAttributes HasDocComment =
+    'enum' name:<ident>? backing:EnumBacking? implements:ImplementsClause?
+    body:ClassBody!                                  // LEVEL: 8.1
+EnumBacking = ':' ty:TypeExpr
+// NOTE: 'enum' is NOT reserved — this node exists only when the
+// contextual lookahead fires (M0 §4.4.3). VALIDATE: backing type must be
+// int|string; enums take no extends.
+
+ExtendsClause    = 'extends' types:NameRef,+
+// NOTE: shared by classes (exactly one — VALIDATE) and interfaces (many).
+ImplementsClause = 'implements' types:NameRef,+
+
+ClassBody   = '{' ClassMember* '}'
+ClassMember = ClassConstDecl | PropertyDecl | MethodDecl | TraitUseDecl
+            | EnumCaseDecl
+
+ClassConstDecl : HasAttributes HasModifiers HasDocComment =
+    'const' ty:TypeExpr? ConstDeclarator,+ ';'       // typed: LEVEL 8.3
+ConstDeclarator = name:MemberName! '=' value:Expr
+// NOTE: semi-reserved names legal ('const FOR = 1'); 'class' excluded.
+// Initializers stay unevaluated expressions through M0 (item tree keeps
+// spans; const-expr evaluation is M1).
+
+PropertyDecl : HasAttributes HasModifiers HasDocComment =
+    ty:TypeExpr? PropertyDeclarator,+ ( ';' | hooks:PropertyHookList )
+PropertyDeclarator = var:<variable>! ('=' init:Expr)?
+// VALIDATE: hooks ⇒ exactly one declarator and no 'readonly'; typed
+// property rules; 'var' excludes other visibility.
+
+MethodDecl : HasAttributes HasModifiers HasDocComment =
+    'function' byref:'&'? name:MemberName? params:ParamList! ret:RetType?
+    ( body:Block | ';' )
+// VALIDATE: abstract/interface methods take ';', others a body;
+// __construct return type; magic-method signatures.
+
+TraitUseDecl        = 'use' traits:NameRef,+ ( ';' | adaptations:TraitAdaptationList )
+TraitAdaptationList = '{' TraitAdaptation* '}'
+TraitAdaptation     = InsteadofAdaptation | AsAdaptation
+InsteadofAdaptation = ref:TraitMethodRef! 'insteadof' excluded:NameRef,+ ';'
+AsAdaptation        = ref:TraitMethodRef! 'as'
+                      vis:('public' | 'protected' | 'private' | 'static'
+                           | 'abstract' | 'final' | 'readonly')?
+                      alias:MemberName? ';'
+// NOTE: php-src member_modifier — `m as final;` changes the modifier, no
+// alias (adjudicated via Reflection, M0.4 fixture round).
+TraitMethodRef      = (trait:NameRef '::')? method:MemberName
+// VALIDATE: AsAdaptation needs vis or alias (or both); insteadof needs
+// the qualified ref form.
+
+EnumCaseDecl : HasAttributes HasDocComment =
+    'case' name:MemberName ('=' value:Expr)? ';'    // LEVEL: 8.1
+
+PropertyHookList = '{' PropertyHook* '}'              // LEVEL: 8.4
+PropertyHook : HasAttributes HasModifiers =
+    byref:'&'? name:<ident>! params:ParamList?
+    ( body:Block | arrow:HookArrowBody | ';' )
+HookArrowBody = '=>' value:Expr ';'
+// VALIDATE: name ∈ {get,set} (contextual idents); 'final' is the only
+// legal modifier; '&' on get only; set's optional ParamList is exactly
+// one param, no default (typing must MATCH the property: an untyped
+// property requires an untyped set param — upstream manual, adjudicated
+// M0.4; the type-match half is M1's, the arity/default half is MHT3211);
+// ';' bodies only in interfaces/abstract hooks.
+
+// ----- expressions -------------------------------------------------------
+
+Expr = LiteralExpr | MagicConstExpr | InterpolatedStringExpr | HeredocExpr
+     | NowdocExpr | ShellExecExpr
+     | SimpleVarExpr | VarVarExpr | DynamicVarExpr | NameRef
+     | ArrayExpr | ListExpr | ParenExpr
+     | UnaryExpr | BinaryExpr | AssignExpr | TernaryExpr
+     | PrefixIncDecExpr | PostfixIncDecExpr | CastExpr | ErrorSuppressExpr
+     | InstanceofExpr | MatchExpr | CloneExpr | NewExpr | ExitExpr
+     | PrintExpr | ThrowExpr | YieldExpr | YieldFromExpr | IncludeExpr
+     | IssetExpr | EmptyExpr | EvalExpr
+     | CallExpr | MemberAccessExpr | ScopedAccessExpr
+     | SubscriptExpr | LegacyCurlySubscriptExpr
+     | ClosureExpr | ArrowFnExpr
+// NOTE: bare NameRef as Expr = constant fetch / fn name; 'true','false',
+// 'null' live here, not in LiteralExpr — they are constants (M1 resolves).
+
+LiteralExpr    = value:( <int> | <float> | <single_quoted> )
+MagicConstExpr = token:<magic_const>
+
+SimpleVarExpr  = var:<variable>
+VarVarExpr     = '$' inner:Expr
+// VALIDATE: inner restricted to variable forms ($$x, $$$x).
+DynamicVarExpr = '$' '{' inner:Expr '}'
+// NOTE: ${…} as a variable-variable outside strings — legal, distinct
+// from the deprecated in-string form below.
+
+ParenExpr = '(' inner:Expr ')'
+
+UnaryExpr         = op:('+' | '-' | '!' | '~') operand:Expr
+PrefixIncDecExpr  = op:('++' | '--') operand:Expr
+PostfixIncDecExpr = operand:Expr! op:('++' | '--')
+CastExpr          = op:( <cast> | <cast_removed> ) operand:Expr
+ErrorSuppressExpr = '@' operand:Expr      // DESUGAR: severity-mask region
+// 8.5 call-form: `clone($o)`, `clone($o, ['p' => v])`, named args,
+// `clone(...)` FCC — a full argument list, exactly like CallExpr's
+// (pinned PHP 8.5.6, burn-down 2026-06-11). LEVEL: call-form 8.5.
+CloneExpr         = 'clone' ( args:ArgList | operand:Expr )
+PrintExpr         = 'print' operand:Expr
+ThrowExpr         = 'throw' operand:Expr  // expression since 8.0
+
+BinaryExpr = lhs:Expr! op:BinaryOp rhs:Expr
+BinaryOp = '**' | '*' | '/' | '%' | '+' | '-' | '<<' | '>>' | '.'
+         | '<' | '<=' | '>' | '>=' | '==' | '!=' | '<>' | '===' | '!==' | '<=>'
+         | '&' | '^' | '|' | '&&' | '||' | '??' | '|>'
+         | 'and' | 'or' | 'xor'
+// NOTE: precedence/associativity live in the Pratt table (M0 App. B),
+// not the tree; '|>' LEVEL: 8.5. The tree is shape-faithful to whatever
+// the table builds — the differential tests guard the table.
+
+InstanceofExpr = lhs:Expr! 'instanceof' rhs:Expr
+// VALIDATE: rhs restricted to class-reference forms.
+
+AssignExpr = lhs:Expr! op:AssignOp byref:'&'? rhs:Expr
+AssignOp = '=' | '+=' | '-=' | '*=' | '**=' | '/=' | '.=' | '%='
+         | '&=' | '|=' | '^=' | '<<=' | '>>=' | '??='
+// VALIDATE: '&' only with '='; lhs writability (incl. list/array
+// destructuring on lhs — DESUGAR: indexed extraction, design doc §7.1).
+
+TernaryExpr = cond:Expr! '?' then:Expr? ':' else_branch:Expr
+// NOTE: 'then' absent = short ternary '?:'; anchors per A4 keep then/else
+// unambiguous. VALIDATE: unparenthesized nesting (8.0 error, with the
+// associativity explanation in the message).
+
+MatchExpr  = 'match' '(' subject:Expr ')' '{' MatchArm,* '}'   // LEVEL: 8.0
+MatchArm   = ( conds:MatchConds | 'default' ) '=>' body:Expr
+MatchConds = Expr,+
+// DESUGAR: decision tree with strict comparison.
+
+NewExpr = 'new' ( anon:AnonClassDecl | ctor:Expr args:ArgList? )
+// NOTE: 'new Foo()->bar()' (8.4) — postfix chains on NewExpr require
+// the arg parens; the parser owns that rule, the tree just nests.
+// VALIDATE: ctor restricted to class-reference forms.
+AnonClassDecl : HasAttributes HasModifiers =
+    'class' args:ArgList? extends:ExtendsClause? implements:ImplementsClause?
+    body:ClassBody!
+// NOTE: readonly anonymous classes LEVEL: 8.3.
+
+ExitExpr = kw:('exit' | 'die') args:ArgList?
+// NOTE: bare 'exit;' remains legal alongside the 8.4 function-like form.
+
+YieldExpr     = 'yield' key:YieldKey? value:Expr?
+YieldKey      = key:Expr! '=>'
+YieldFromExpr = 'yield' 'from' source:Expr
+IncludeExpr   = op:('include' | 'include_once' | 'require' | 'require_once') operand:Expr
+
+IssetExpr = 'isset' '(' targets:Expr,+ ')'
+EmptyExpr = 'empty' '(' target:Expr ')'
+EvalExpr  = 'eval' '(' code:Expr ')'
+
+CallExpr = callee:Expr! args:ArgList!
+ArgList  = '(' Arg,* ')'
+Arg      = NamedArg | SpreadArg | VariadicPlaceholder | Expr
+NamedArg = name:<member_ident>! ':' value:Expr       // LEVEL: 8.0
+SpreadArg = '...' value:Expr
+VariadicPlaceholder = '...'                          // LEVEL: 8.1
+// NOTE: f(...) first-class callable = ArgList whose sole Arg is a
+// VariadicPlaceholder — VALIDATE sole-ness. NamedArg name uses
+// <member_ident> as a parse superset; VALIDATE plain-ident rule.
+
+MemberAccessExpr = obj:Expr! op:('->' | '?->') member:MemberSelector?
+// NOTE: nullsafe folded as an op token; DESUGAR: guarded block (§7.1).
+// VALIDATE: '?->' in write context.
+ScopedAccessExpr = scope:Expr! '::' member:ScopedSelector?
+MemberSelector   = MemberName | SimpleVarExpr | VarVarExpr | DynamicVarExpr | BracedMember
+ScopedSelector   = MemberName | SimpleVarExpr | VarVarExpr | DynamicVarExpr | BracedMember | 'class'
+BracedMember     = '{' inner:Expr '}'
+// NOTE: '::class' on arbitrary objects LEVEL: 8.0; scope:Expr admits
+// 'self'/'parent'/'static' as NameRef.
+
+SubscriptExpr = base:Expr! '[' index:Expr? ']'
+// NOTE: absent index = push form '$a[] = …' — legal only as write
+// target (VALIDATE).
+LegacyCurlySubscriptExpr = base:Expr! '{' index:Expr '}'
+// NOTE: removed 8.0; parsed solely to issue the targeted MHT diagnostic
+// (M0 §3 language-level policy).
+
+ArrayExpr = ( 'array' '(' ArrayElement,* ')' | '[' ArrayElement,* ']' )
+ListExpr  = 'list' '(' ArrayElement,* ')'
+ArrayElement = spread:'...'? key:ArrayKey? byref:'&'? value:Expr?
+ArrayKey     = key:Expr! '=>'
+// NOTE: fully-empty element (elision) is legal only in destructuring
+// position — VALIDATE; spread excludes key/byref — VALIDATE.
+// DESUGAR: ListExpr/ArrayExpr-as-lvalue → indexed extraction.
+
+ClosureExpr : HasAttributes =
+    'static'? 'function' byref:'&'? params:ParamList! uses:ClosureUseClause?
+    ret:RetType? body:Block
+ClosureUseClause = 'use' '(' ClosureUseVar,+ ')'
+ClosureUseVar    = byref:'&'? var:<variable>!
+ArrowFnExpr : HasAttributes =
+    'static'? 'fn' byref:'&'? params:ParamList! ret:RetType? '=>' body:Expr
+// NOTE: arrow-fn auto-capture made explicit in HIR, not here (DESUGAR);
+// body extent vs ',' in arg lists is a Pratt binding-power case with
+// dedicated fixtures.
+
+// ----- string interpolation ---------------------------------------------
+
+InterpolatedStringExpr = '"' parts:StringPart* '"'
+HeredocExpr            = start:<heredoc_start> parts:StringPart* end:<heredoc_end>
+NowdocExpr             = start:<heredoc_start> text:<string_text>* end:<heredoc_end>
+ShellExecExpr          = '`' parts:StringPart* '`'
+// DESUGAR: concatenation chain (design doc §7.1); ShellExec → shell_exec
+// call. NOTE: flexible-indent strip records ride as trivia on the parts
+// so reprint is byte-exact (G2) while lowering sees stripped text; an
+// INDENTED nowdoc therefore carries one <string_text> per body line
+// (hence `*` — adjudicated on the Symfony corpus, M0.4 burn-down).
+
+StringPart = LiteralStringPart | SimpleInterpolation | BracedInterpolation
+           | DollarBraceInterpolation
+LiteralStringPart    = text:<string_text>
+SimpleInterpolation  = var:<variable>! suffix:( SimpleDim | SimpleProp )?
+SimpleDim  = '[' index:( <ident> | <variable> | <encaps_int> | <int> | '-' <encaps_int> | '-' <int> ) ']'
+SimpleProp = op:('->' | '?->') name:<ident>!
+// NOTE: the deliberately restricted in-string grammar — bare-word keys,
+// no expressions, single property hop ('->' or '?->': the nullsafe simple
+// form interpolates on the 8.3 reference — G3 adjudication). Richer needs:
+BracedInterpolation     = '{' inner:Expr '}'           // lexer guarantees '{$'
+DollarBraceInterpolation = '${' ( name:<ident> dim:SimpleDim? | inner:Expr ) '}'
+// VALIDATE: deprecation diagnostic (8.2) on every use, both forms.
+
+// ----- shared small lists -------------------------------------------------
+// (Expr,* / Expr,+ inline per A2; no standalone ExprList node — sites that
+// need stable span homes define wrappers, per A4.)
+
+// =====================================================================
+// COVERAGE LEDGER (tracked against M0 Appendix C; checked by xtask):
+//   8.0  match · named args · attributes · promotion · throw-expr ·
+//        nullsafe · ::class-on-object · catch-no-var · union types
+//   8.1  enums · readonly props · never · FCC '(...)' · intersection ·
+//        new-in-initializers (no schema impact) · 0o octal
+//   8.2  readonly classes · DNF · ${} deprecation · 'true/false/null' types
+//   8.3  typed class constants · readonly anon classes
+//   8.4  property hooks · asymmetric visibility · new-without-parens chains
+//   8.5  pipe '|>'
+// Constructs verified against zend_language_parser.y at the pinned 8.5
+// reference build; additions to the 8.5 surface land here first, with a
+// LEVEL marker, then in the parser.
+// =====================================================================
