@@ -160,7 +160,18 @@ pub(crate) fn send_var<T: Tier>(
 /// them onto the request. It is popped whether the native returned or
 /// threw, as php frees it on both paths, and its arguments are given up
 /// with it (`zend_vm_stack_free_args`). What the native returned is the
-/// engine's from here: the temporary owns it.
+/// engine's from here: the temporary owns it under `RETURN_VALUE_USED`,
+/// and where the compiler marked the temporary `UNUSED`, nothing reads
+/// the value and it is given up at the call, after the arguments, as
+/// php's `i_zval_ptr_dtor(ret)` gives it up; that is when its
+/// destructor runs (design §5.10).
+///
+/// ```php
+/// $b = memory_get_usage(); str_repeat("a", 3000); var_dump(memory_get_usage() - $b);
+/// ```
+/// ```expect
+/// int(0)
+/// ```
 pub(crate) fn do_icall<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -176,9 +187,13 @@ pub(crate) fn do_icall<T: Tier>(
     req.pop_call();
     match served {
         Ok(value) => {
-            let slot = exec::temporary_slot(code, op.out);
-            let previous = req.vm_mut().set_slot(frame, slot, value);
-            req.release(previous);
+            if op.out_type == OperandKind::Unused {
+                req.release(value);
+            } else {
+                let slot = exec::temporary_slot(code, op.out);
+                let previous = req.vm_mut().set_slot(frame, slot, value);
+                req.release(previous);
+            }
             Ok(advance(req, frame))
         }
         Err(thrown) => {
@@ -191,30 +206,22 @@ pub(crate) fn do_icall<T: Tier>(
 /// `ZEND_ASSIGN`, `zend_assign_to_variable` (`Z/Zend/zend_execute.h`):
 /// the value in `op2` becomes the CV's, a temporary moved into it and a
 /// CV or a constant copied with one more owner; the temporary `result`
-/// names is one more owner again (`ZVAL_COPY`); and what the CV held is
-/// given up last, after the write, which is where a destructor is served
-/// once objects stand on the heap (`i_zval_ptr_dtor(garbage)`).
-///
-/// php writes the temporary only under `RETURN_VALUE_USED` and the
-/// compiler marks the mark in `result_type`, which an [`Opline`] has no
-/// field for until #227 lands it, so the temporary is written whether an
-/// opline reads it or not; the compiler numbered it either way, as
-/// php's does. The owner that temporary takes is given up when the
-/// frame pops, so until #227 a string a CV alone held in php is held
-/// longer here: for as long as the `ASSIGN`'s own temporary stands
-/// unread. The reference a CV may hold comes with references.
+/// names is one more owner again (`ZVAL_COPY`) under `RETURN_VALUE_USED`
+/// and is not written where the compiler marked it `UNUSED`, which is
+/// every assignment that is a statement; and what the CV held is given
+/// up last, after the write, which is where a destructor is served once
+/// objects stand on the heap (`i_zval_ptr_dtor(garbage)`). The reference
+/// a CV may hold comes with references.
 ///
 /// A CV given a new string gives its old one back to the heap, so what
-/// `memory_get_usage()` reads falls by what the old string took. The
-/// assignment's value is passed on so that its temporary is consumed,
-/// which is the shape both engines free the string in today; the
-/// deltas are read before anything is printed, because php's first
-/// write lays its `php_output` layer down and holds thirty-two bytes
-/// for it.
+/// `memory_get_usage()` reads falls by what the old string took, and
+/// the string a CV alone held is held by the CV alone: the deltas are
+/// read before anything is printed, because php's first write lays its
+/// `php_output` layer down and holds thirty-two bytes for it.
 ///
 /// ```php
 /// $b = memory_get_usage();
-/// memory_get_usage($s = str_repeat("ab", 3000)); $held = memory_get_usage() - $b;
+/// $s = str_repeat("ab", 3000); $held = memory_get_usage() - $b;
 /// $s = "x"; var_dump($held, memory_get_usage() - $b);
 /// ```
 /// ```expect
@@ -228,11 +235,16 @@ pub(crate) fn assign<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let value = exec::take_operand(req, frame, code, op.op2_type, op.op2);
-    req.addref(&value);
-    let garbage = req.vm_mut().set_slot(frame, op.op1, value.clone());
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.vm_mut().set_slot(frame, slot, value);
-    req.release(previous);
+    let garbage = if op.out_type == OperandKind::Unused {
+        req.vm_mut().set_slot(frame, op.op1, value)
+    } else {
+        req.addref(&value);
+        let garbage = req.vm_mut().set_slot(frame, op.op1, value.clone());
+        let slot = exec::temporary_slot(code, op.out);
+        let previous = req.vm_mut().set_slot(frame, slot, value);
+        req.release(previous);
+        garbage
+    };
     req.release(garbage);
     Ok(advance(req, frame))
 }
@@ -335,11 +347,22 @@ pub(crate) fn is_smaller<T: Tier>(
 }
 
 /// `ZEND_PRE_INC`: [`crate::ops::increment`] over the variable `op1`
-/// names, the stepped value written back to it and to the temporary
-/// `result` names, which php writes only under `RETURN_VALUE_USED`
-/// (design §5.7, the field #227 brings). A CV nothing has written is
-/// php's `ZVAL_UNDEFINED_OP1`, the warning and null in its place, which
-/// `++` then makes `1`.
+/// names, the stepped value written back to it and, under
+/// `RETURN_VALUE_USED`, to the temporary `result` names with one more
+/// owner (`ZVAL_COPY`), so a string stepped and read is held by the
+/// variable and by the temporary until each gives it up. A CV nothing
+/// has written is php's `ZVAL_UNDEFINED_OP1`, the warning and null in
+/// its place, which `++` then makes `1`.
+///
+/// ```php
+/// $s = "a"; echo ++$s, $s; $t = "y"; echo $t++, $t;
+/// ```
+/// ```expect
+/// Deprecated: Increment on non-numeric string is deprecated, use str_increment() instead in %s on line 2
+/// bb
+/// Deprecated: Increment on non-numeric string is deprecated, use str_increment() instead in %s on line 2
+/// yz
+/// ```
 pub(crate) fn pre_inc<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -472,9 +495,11 @@ fn binary(
 
 /// The body `PRE_INC` and `POST_INC` share: the variable's slot, a CV
 /// or a `VAR`, read as `GET_OP1_ZVAL_PTR_PTR_UNDEF(BP_VAR_RW)` reads it;
-/// the kernel over what it held; the slot and the temporary written. A
-/// kernel that threw leaves the throwable pending and the variable as it
-/// was, which is the `Threw` edge the loop reads.
+/// the kernel over what it held; the slot written, and the temporary
+/// under `RETURN_VALUE_USED`, which a `POST_INC` always is, since
+/// `zend_do_free` turns one nothing reads into a `PRE_INC`. A kernel
+/// that threw leaves the throwable pending and the variable as it was,
+/// which is the `Threw` edge the loop reads.
 fn incdec(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, post: bool) -> Edge {
     let slot = match op.op1_type {
         OperandKind::Cv => op.op1,
@@ -483,9 +508,16 @@ fn incdec(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, post:
     let held = exec::operand(req, frame, code, op.op1_type, op.op1);
     match crate::ops::increment(req, &held) {
         Ok(stepped) => {
-            let out = exec::temporary_slot(code, op.out);
-            req.vm_mut()
-                .set_slot(frame, out, if post { held } else { stepped.clone() });
+            if op.out_type != OperandKind::Unused {
+                let out = exec::temporary_slot(code, op.out);
+                let value = if post {
+                    held
+                } else {
+                    req.addref(&stepped);
+                    stepped.clone()
+                };
+                req.vm_mut().set_slot(frame, out, value);
+            }
             req.vm_mut().set_slot(frame, slot, stepped);
             Ok(advance(req, frame))
         }
