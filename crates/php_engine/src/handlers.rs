@@ -24,7 +24,7 @@ use php_unit::{ConstIdx, OpArray, Opline};
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::api::values::Value;
-use crate::exec::{self, CallState};
+use crate::exec::{self, CallStage, CallState};
 use crate::tier::{SafepointIdx, Site, Stepped, Tier, continued};
 
 /// What one handler did to the frame chain, and the fatal that ends the
@@ -79,6 +79,7 @@ pub(crate) fn init_fcall<T: Tier>(
         name,
         arguments: Vec::new(),
         count,
+        stage: CallStage::Building,
     });
     Ok(advance(req, frame))
 }
@@ -106,21 +107,28 @@ pub(crate) fn send_var<T: Tier>(
     send(req, frame, code, op)
 }
 
-/// `ZEND_DO_ICALL`: serve the native the call frame names with the
-/// arguments placed in it, and write what it returned into the temporary
-/// `result` names.
+/// `ZEND_DO_ICALL`: serve the native the call frame names, and write
+/// what it returned into the temporary `result` names. The frame stays
+/// on the stack with its arguments while the native runs, as php's does
+/// (`EG(current_execute_data) = call` before `fbc->internal_function.handler`,
+/// `zend_vm_stack_free_call_frame` after), so the native reads them off
+/// it and a backtrace taken inside the native prints them; nothing copies
+/// them onto the request. It is popped whether the native returned or
+/// threw, as php frees it on both paths.
 pub(crate) fn do_icall<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some(call) = req.vm_mut().take_call() else {
+    let Some(function) = req.vm_mut().activate_call() else {
         return Err(Fatal::Error(String::from(
             "InternalError: ZEND_DO_ICALL with no call frame under it",
         )));
     };
-    match req.serve_native(call.function, &call.name, &call.arguments) {
+    let served = req.serve_native(function);
+    req.vm_mut().pop_call();
+    match served {
         Ok(value) => {
             let slot = exec::temporary_slot(code, op.out);
             req.vm_mut().set_slot(frame, slot, value);

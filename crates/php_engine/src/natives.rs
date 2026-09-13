@@ -129,12 +129,14 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
-fn var_dump(req: &mut Request, arguments: &[Value]) -> Result<Value, Thrown> {
-    if arguments.is_empty() {
+fn var_dump(req: &mut Request) -> Result<Value, Thrown> {
+    let count = req.argument_count();
+    if count == 0 {
         return Err(too_few_arguments(req, 1, 0));
     }
-    for value in arguments {
-        let line = dumped(req, value);
+    for position in 1..=u32::try_from(count).unwrap_or(u32::MAX) {
+        let value = req.argument(position).unwrap_or_default();
+        let line = dumped(req, &value);
         req.write(line.as_bytes());
     }
     Ok(Value::null())
@@ -186,16 +188,16 @@ fn dumped(req: &mut Request, value: &Value) -> PhpString {
 /// int(2097152)
 /// int(2097152)
 /// ```
-fn memory_get_usage(req: &mut Request, arguments: &[Value]) -> Result<Value, Thrown> {
-    let real = real_usage(req, arguments)?;
+fn memory_get_usage(req: &mut Request) -> Result<Value, Thrown> {
+    let real = real_usage(req)?;
     Ok(Value::int(as_long(req.memory_usage(real))))
 }
 
 /// `memory_get_peak_usage(bool $real_usage = false): int`, php's
 /// `zend_memory_peak_usage`: the high-water mark of the same two
 /// numbers since the request began or the peak was last reset.
-fn memory_get_peak_usage(req: &mut Request, arguments: &[Value]) -> Result<Value, Thrown> {
-    let real = real_usage(req, arguments)?;
+fn memory_get_peak_usage(req: &mut Request) -> Result<Value, Thrown> {
+    let real = real_usage(req)?;
     Ok(Value::int(as_long(req.memory_peak(real))))
 }
 
@@ -203,9 +205,10 @@ fn memory_get_peak_usage(req: &mut Request, arguments: &[Value]) -> Result<Value
 /// `zend_memory_reset_peak_usage`: both peaks become what is in use now.
 /// `ZEND_PARSE_PARAMETERS_NONE` takes no argument at all, so one is
 /// php's `ArgumentCountError` and not an ignored extra.
-fn memory_reset_peak_usage(req: &mut Request, arguments: &[Value]) -> Result<Value, Thrown> {
-    if !arguments.is_empty() {
-        return Err(wrong_argument_count(req, 0, 0, arguments.len()));
+fn memory_reset_peak_usage(req: &mut Request) -> Result<Value, Thrown> {
+    let count = req.argument_count();
+    if count != 0 {
+        return Err(wrong_argument_count(req, 0, 0, count));
     }
     req.reset_memory_peak();
     Ok(Value::null())
@@ -217,18 +220,19 @@ fn memory_reset_peak_usage(req: &mut Request, arguments: &[Value]) -> Result<Val
 /// bool parameter of a native, `null` included, which is the
 /// 8.1 deprecation and then `false`. The two shared helpers this reaches
 /// for read `$real_usage` off the declaration, so their text is php's.
-fn real_usage(req: &mut Request, arguments: &[Value]) -> Result<bool, Thrown> {
-    if arguments.len() > 1 {
-        return Err(wrong_argument_count(req, 0, 1, arguments.len()));
+fn real_usage(req: &mut Request) -> Result<bool, Thrown> {
+    let count = req.argument_count();
+    if count > 1 {
+        return Err(wrong_argument_count(req, 0, 1, count));
     }
-    let Some(given) = arguments.first() else {
+    let Some(given) = req.argument(1) else {
         return Ok(false);
     };
     if matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
         arg_null_deprecated(req, 1, "bool");
         return Ok(false);
     }
-    let coerced = coerce_param(req, given, &Type::Bool, 1)?;
+    let coerced = coerce_param(req, &given, &Type::Bool, 1)?;
     Ok(coerced.as_bool().unwrap_or(false))
 }
 
@@ -277,10 +281,11 @@ fn as_long(bytes: usize) -> i64 {
 /// Warning: unexpected NAN value was coerced to string in %s on line 2
 /// bool(false)
 /// ```
-fn extension_loaded(req: &mut Request, arguments: &[Value]) -> Result<Value, Thrown> {
-    let Some(wanted) = arguments.first().map(|v| crate::ops::to_string(req, v)) else {
+fn extension_loaded(req: &mut Request) -> Result<Value, Thrown> {
+    let Some(given) = req.argument(1) else {
         return Err(too_few_arguments(req, 1, 0));
     };
+    let wanted = crate::ops::to_string(req, &given);
     let wanted = wanted.as_bytes().to_ascii_lowercase();
     Ok(Value::bool(req.loaded_extensions().iter().any(|name| {
         name.as_bytes().to_ascii_lowercase() == wanted
@@ -319,12 +324,14 @@ fn extension_loaded(req: &mut Request, arguments: &[Value]) -> Result<Value, Thr
 /// string(0) ""
 /// string(1) "1"
 /// ```
-fn ini_set(req: &mut Request, arguments: &[Value]) -> Result<Value, Thrown> {
-    if arguments.len() != 2 {
-        return Err(wrong_argument_count(req, 2, 2, arguments.len()));
+fn ini_set(req: &mut Request) -> Result<Value, Thrown> {
+    let count = req.argument_count();
+    if count != 2 {
+        return Err(wrong_argument_count(req, 2, 2, count));
     }
-    let option = string_argument(req, &arguments[0], 1)?;
-    let value = arguments[1].deref();
+    let option = string_argument(req, 1)?;
+    let value = req.argument(2).unwrap_or_default();
+    let value = value.deref();
     if matches!(
         value.as_ref(),
         ValueRef::Array(_) | ValueRef::Object(_) | ValueRef::Resource(_)
@@ -361,35 +368,39 @@ fn ini_set(req: &mut Request, arguments: &[Value]) -> Result<Value, Thrown> {
 ///
 /// What the seconds do once armed is the witness beside
 /// [`crate::interrupt::interrupted`].
-fn set_time_limit(req: &mut Request, arguments: &[Value]) -> Result<Value, Thrown> {
-    if arguments.len() != 1 {
-        return Err(wrong_argument_count(req, 1, 1, arguments.len()));
+fn set_time_limit(req: &mut Request) -> Result<Value, Thrown> {
+    let count = req.argument_count();
+    if count != 1 {
+        return Err(wrong_argument_count(req, 1, 1, count));
     }
-    let seconds = long_argument(req, &arguments[0], 1)?;
+    let seconds = long_argument(req, 1)?;
     Ok(Value::bool(req.set_time_limit(seconds)))
 }
 
-/// One `Z_PARAM_LONG` of a native: `null` is the 8.1 deprecation and
-/// then zero, and what is there is coerced as php coerces an int
-/// parameter.
-fn long_argument(req: &mut Request, given: &Value, position: u32) -> Result<i64, Thrown> {
+/// One `Z_PARAM_LONG` of a native, the argument at `position` read off
+/// the call frame: `null` is the 8.1 deprecation and then zero, and what
+/// is there is coerced as php coerces an int parameter.
+fn long_argument(req: &mut Request, position: u32) -> Result<i64, Thrown> {
+    let given = req.argument(position).unwrap_or_default();
     if matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
         arg_null_deprecated(req, position, "int");
         return Ok(0);
     }
-    let coerced = coerce_param(req, given, &Type::Int, position)?;
+    let coerced = coerce_param(req, &given, &Type::Int, position)?;
     Ok(coerced.as_int().unwrap_or(0))
 }
 
-/// One `Z_PARAM_STR` of a native: `null` is the 8.1 deprecation and then
-/// the empty string, and what is there is coerced as php coerces a
-/// string parameter.
-fn string_argument(req: &mut Request, given: &Value, position: u32) -> Result<PhpString, Thrown> {
+/// One `Z_PARAM_STR` of a native, the argument at `position` read off
+/// the call frame: `null` is the 8.1 deprecation and then the empty
+/// string, and what is there is coerced as php coerces a string
+/// parameter.
+fn string_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown> {
+    let given = req.argument(position).unwrap_or_default();
     if matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
         arg_null_deprecated(req, position, "string");
         return Ok(PhpString::default());
     }
-    let coerced = coerce_param(req, given, &Type::String, position)?;
+    let coerced = coerce_param(req, &given, &Type::String, position)?;
     Ok(coerced.as_php_string().cloned().unwrap_or_default())
 }
 
@@ -504,9 +515,9 @@ mod tests {
     }
 
     /// `zend_wrong_parameters_count_error` for a call outside the arity,
-    /// which a witness cannot pin while the engine's trace carries no
-    /// arguments (#174 names what the witnesses here wait on). php's
-    /// own text, from the pinned oracle:
+    /// held here without the oracle; the trace such a call prints, with
+    /// its arguments, is the witness beside `Request::trace_arguments`.
+    /// php's own text, from the pinned oracle:
     ///
     /// ```text
     /// ArgumentCountError: memory_get_usage() expects at most 1 argument, 2 given

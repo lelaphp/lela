@@ -193,14 +193,15 @@ impl Shared {
     }
 }
 
-/// The core ini entries and their defaults: php's `main.c` table under
-/// the CLI's hardcoded overrides (`Z/sapi/cli/php_cli.c:116-121`), which
-/// is what the oracle answers with no `php.ini`. `max_execution_time`
+/// The core ini entries and their defaults: php's `main.c` table and
+/// the two `zend.` entries of `Zend/zend.c`'s a throwable's trace reads,
+/// under the CLI's hardcoded overrides (`Z/sapi/cli/php_cli.c:116-121`),
+/// which is what the oracle answers with no `php.ini`. `max_execution_time`
 /// and `html_errors` are the two the CLI moves, from `30` and `1`.
 /// `error_prepend_string` and `error_append_string` are `NULL` in php's
 /// table and empty here, since an entry with no value at all is one
 /// `ini_set()` refuses to set.
-const CORE_INI: [(&str, &str); 13] = [
+const CORE_INI: [(&str, &str); 15] = [
     ("precision", "14"),
     ("serialize_precision", "-1"),
     ("error_reporting", "32767"),
@@ -214,6 +215,8 @@ const CORE_INI: [(&str, &str); 13] = [
     ("memory_limit", "128M"),
     ("max_execution_time", "0"),
     ("default_charset", "UTF-8"),
+    ("zend.exception_ignore_args", "0"),
+    ("zend.exception_string_param_max_len", "15"),
 ];
 
 /// Builds an [`Engine`]: the bundle, the tier and the startup ini.

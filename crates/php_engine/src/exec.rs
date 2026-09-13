@@ -36,17 +36,33 @@ pub(crate) struct FrameState {
     pub(crate) returns_to: Option<(FrameRef, u32)>,
 }
 
-/// One call between its `INIT_FCALL` and the `DO_*CALL` that serves it:
-/// what php pushes on the VM stack as a call frame.
+/// One call from its `INIT_FCALL` until the `DO_*CALL` that serves it
+/// returns: what php pushes on the VM stack as a call frame, and keeps
+/// there while the callee runs.
 pub(crate) struct CallState {
     /// The callee, resolved at the `INIT_FCALL`.
     pub(crate) function: Function,
     /// The callee's name, for what a raise says.
     pub(crate) name: PhpString,
-    /// The arguments the `SEND_*` oplines have placed.
+    /// The arguments the `SEND_*` oplines have placed, read off this
+    /// frame by the callee and by a backtrace taken while it runs, as
+    /// `ZEND_CALL_ARG` reads them off php's; nothing copies them.
     pub(crate) arguments: Vec<Value>,
     /// How many the `INIT_FCALL` said there are, which bounds them.
     pub(crate) count: usize,
+    /// Where the call stands.
+    pub(crate) stage: CallStage,
+}
+
+/// Where a call stands: its `SEND_*` oplines placing arguments after the
+/// `INIT_FCALL`, or its `DO_*CALL` serving it. A backtrace sees the
+/// second and not the first, as `zend_fetch_debug_backtrace` walks
+/// `EG(current_execute_data)`, a chain a frame `INIT_FCALL` has pushed
+/// and nothing has activated is not on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallStage {
+    Building,
+    Serving,
 }
 
 /// Every frame's engine state, and the calls being built.
@@ -153,9 +169,40 @@ impl Vm {
         self.calls.last_mut()
     }
 
-    /// The call a `DO_*CALL` serves, taken off the stack.
-    pub(crate) fn take_call(&mut self) -> Option<CallState> {
-        self.calls.pop()
+    /// `DO_*CALL` making the call it serves the current frame,
+    /// `EG(current_execute_data) = call`: the callee, and the frame left
+    /// on the stack for the callee to read its arguments off. Nothing
+    /// under a `DO_*CALL` is none.
+    pub(crate) fn activate_call(&mut self) -> Option<Function> {
+        let call = self.calls.last_mut()?;
+        call.stage = CallStage::Serving;
+        Some(call.function)
+    }
+
+    /// `zend_vm_stack_free_call_frame`: the served call off the stack,
+    /// its arguments dropped with it.
+    pub(crate) fn pop_call(&mut self) {
+        self.calls.pop();
+    }
+
+    /// The call being served, php's `execute_data` inside a native: the
+    /// one the innermost `DO_*CALL` activated, and none while the loop is
+    /// between calls or a call is still being built.
+    pub(crate) fn serving_call(&self) -> Option<&CallState> {
+        self.calls
+            .last()
+            .filter(|call| call.stage == CallStage::Serving)
+    }
+
+    /// The calls being served, innermost first: what a backtrace walks
+    /// below the op array being served, `EG(current_execute_data)` and
+    /// its `prev_execute_data` chain with the frames being built left
+    /// out.
+    pub(crate) fn serving_calls(&self) -> impl Iterator<Item = &CallState> {
+        self.calls
+            .iter()
+            .rev()
+            .filter(|call| call.stage == CallStage::Serving)
     }
 }
 

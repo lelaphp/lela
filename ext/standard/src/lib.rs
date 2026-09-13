@@ -78,11 +78,23 @@ pub fn extension() -> Extension {
 /// ```
 ///
 /// A count below zero is php's `ValueError`, `Argument #2 ($times) must
-/// be greater than or equal to 0`, and a call outside the arity of two
-/// is its `ArgumentCountError`; `the_count_below_zero_and_the_arity_are_php_s`
-/// in `tests/capture.rs` holds both, since the trace a witness would
-/// print carries the call's arguments and this engine's does not yet
-/// (#179).
+/// be greater than or equal to 0`, thrown with both arguments in hand,
+/// which the trace prints as php prints them: the string in `'`, cut at
+/// `zend.exception_string_param_max_len` with `...` after it, and the
+/// count as its digits. A call outside the arity of two is its
+/// `ArgumentCountError`; `the_count_below_zero_and_the_arity_are_php_s`
+/// in `tests/capture.rs` holds that without the oracle.
+///
+/// ```php
+/// str_repeat('a longer string than fifteen', -1);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ValueError: str_repeat(): Argument #2 ($times) must be greater than or equal to 0 in %s:2
+/// Stack trace:
+/// #0 %s(2): str_repeat('a longer string...', -1)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
 ///
 /// The return's bytes are `zend_string_safe_alloc(len, times, 0)`: a
 /// product that overflows is php's compile-time-shaped fatal, `Possible
@@ -92,12 +104,13 @@ pub fn extension() -> Extension {
 /// refuses is the allocator's to say, and the string's bytes are on the
 /// system allocator until the memory model backs a `Value` (design §11,
 /// Lane A), so that fatal is not raised here yet; #174 names it.
-fn str_repeat(req: &mut Request, arguments: &[Value]) -> Result<Value, Thrown> {
-    if arguments.len() != 2 {
-        return Err(wrong_argument_count(req, 2, arguments.len()));
+fn str_repeat(req: &mut Request) -> Result<Value, Thrown> {
+    let count = req.argument_count();
+    if count != 2 {
+        return Err(wrong_argument_count(req, 2, count));
     }
-    let string = string_argument(req, &arguments[0], 1)?;
-    let times = long_argument(req, &arguments[1], 2)?;
+    let string = string_argument(req, 1)?;
+    let times = long_argument(req, 2)?;
     if times < 0 {
         return Err(arg_value_error(req, 2, "be greater than or equal to 0"));
     }
@@ -144,27 +157,30 @@ fn wrong_argument_count(req: &mut Request, exactly: usize, given: usize) -> Thro
     arg_count_error(req, &format!("exactly {exactly} {word}, {given} given"))
 }
 
-/// One `Z_PARAM_STR` of a native: `null` is the 8.1 deprecation and then
-/// the empty string, and what is there is coerced as php coerces a
-/// string parameter.
-fn string_argument(req: &mut Request, given: &Value, position: u32) -> Result<PhpString, Thrown> {
+/// One `Z_PARAM_STR` of a native, the argument at `position` read off
+/// the call frame: `null` is the 8.1 deprecation and then the empty
+/// string, and what is there is coerced as php coerces a string
+/// parameter.
+fn string_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown> {
+    let given = req.argument(position).unwrap_or_default();
     if matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
         arg_null_deprecated(req, position, "string");
         return Ok(PhpString::default());
     }
-    let coerced = coerce_param(req, given, &Type::String, position)?;
+    let coerced = coerce_param(req, &given, &Type::String, position)?;
     Ok(coerced.as_php_string().cloned().unwrap_or_default())
 }
 
-/// One `Z_PARAM_LONG` of a native: `null` is the 8.1 deprecation and
-/// then zero, and what is there is coerced as php coerces an int
-/// parameter.
-fn long_argument(req: &mut Request, given: &Value, position: u32) -> Result<i64, Thrown> {
+/// One `Z_PARAM_LONG` of a native, the argument at `position` read off
+/// the call frame: `null` is the 8.1 deprecation and then zero, and what
+/// is there is coerced as php coerces an int parameter.
+fn long_argument(req: &mut Request, position: u32) -> Result<i64, Thrown> {
+    let given = req.argument(position).unwrap_or_default();
     if matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
         arg_null_deprecated(req, position, "int");
         return Ok(0);
     }
-    let coerced = coerce_param(req, given, &Type::Int, position)?;
+    let coerced = coerce_param(req, &given, &Type::Int, position)?;
     Ok(coerced.as_int().unwrap_or(0))
 }
 

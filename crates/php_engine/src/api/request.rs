@@ -15,12 +15,12 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use php_heap::{Fatal, FrameRef, Heap, HeapHooks, MapTable, ObjectId, VmStack, Zval};
 use php_unit::Unit;
-use php_unit::decl::{ClassDecl, FunctionDecl};
+use php_unit::decl::{ClassDecl, ClassKind, FunctionDecl};
 
 use crate::api::abi::Callable;
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Resource, Value};
+use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 use crate::engine::{RequestDescription, Shared};
 use crate::exec::{self, Vm};
 
@@ -257,10 +257,6 @@ pub struct Request {
     next_object: u32,
     streams: u32,
     flushed: bool,
-    /// php's `zend_active_function()` while a native's body is being
-    /// served: the raisers render its declared name and its parameters'
-    /// names off the declaration, never off the caller's spelling.
-    active_native: Option<Function>,
     /// The caller file's `declare(strict_types=1)`.
     strict_types: bool,
     /// php's `EG(exception)`: the throwable a handler left pending, which
@@ -311,7 +307,6 @@ impl Request {
             next_object: 1,
             streams: 0,
             flushed: false,
-            active_native: None,
             strict_types: false,
             pending: None,
             returned: Value::null(),
@@ -483,62 +478,201 @@ impl Request {
     }
 
     /// `zend_fetch_debug_backtrace` rendered by `zend_trace_to_string`
-    /// with `include_main`: one `#N file(line): name()` per call below the
-    /// top, then `#N {main}`. php walks `EG(current_execute_data)`; the
-    /// only call this engine pushes below the op array being served is the
-    /// native it is serving, whose file and line are the caller's, as
-    /// php's frame for a native takes them.
+    /// with `include_main`: one `#N file(line): name(arguments)` per call
+    /// below the top, then `#N {main}`. php walks `EG(current_execute_data)`;
+    /// the calls this engine has below the op array being served are the
+    /// natives it is serving, read off the call frames still standing on
+    /// [`Vm`], whose file and line are the caller's, as php's frame for a
+    /// native takes them.
     ///
-    /// The arguments php prints inside the parentheses are the ones the
-    /// call frame holds on the VM stack. This engine's native ABI hands
-    /// them to the entry as a slice and keeps none, so the frame renders
-    /// with empty parentheses; no native this engine declares can throw
-    /// with an argument in hand.
+    /// The arguments are the frame's, rendered by [`Request::trace_arguments`];
+    /// under `zend.exception_ignore_args` the frame is built without them,
+    /// `DEBUG_BACKTRACE_IGNORE_ARGS`, and the parentheses are empty.
     fn trace_as_string(&self) -> String {
-        let mut frames: Vec<String> = Vec::new();
-        if self.active_native.is_some() {
-            let file = self.current_file().cloned().unwrap_or_default();
-            frames.push(format!(
-                "#0 {}({}): {}()",
-                String::from_utf8_lossy(file.as_bytes()),
-                self.current_line(),
-                self.active_native()
-            ));
-        }
+        let file = self.current_file().cloned().unwrap_or_default();
+        let file = String::from_utf8_lossy(file.as_bytes());
+        let line = self.current_line();
+        let ignore_arguments = self.exception_ignore_args();
+        let mut frames: Vec<String> = self
+            .vm
+            .serving_calls()
+            .enumerate()
+            .map(|(depth, call)| {
+                let arguments = if ignore_arguments {
+                    String::new()
+                } else {
+                    self.trace_arguments(&call.arguments)
+                };
+                format!(
+                    "#{depth} {file}({line}): {}({arguments})",
+                    self.declared_name(call.function)
+                )
+            })
+            .collect();
         let main = frames.len();
         frames.push(format!("#{main} {{main}}"));
         frames.join("\n")
     }
 
-    /// Serve one native: its entry with the arguments as passed, and the
-    /// function held as the active one for the raisers' text (ADR-0002).
-    /// The name is the caller's spelling, for the `Error` a function
-    /// nothing is linked under raises.
-    pub(crate) fn serve_native(
-        &mut self,
-        function: Function,
-        name: &PhpString,
-        arguments: &[Value],
-    ) -> Result<Value, Thrown> {
+    /// `_build_trace_args` (`Z/Zend/zend_exceptions.c:539`) over one
+    /// frame's arguments, `, ` between them: `smart_str_append_zval` for a
+    /// scalar and an enum case, and php's three words for the rest.
+    /// `NULL`, `true`, `false` and a long's digits; a double through
+    /// `smart_str_append_double` at `precision` with `zero_fraction` set,
+    /// which is `zend_gcvt` and then `.0` on a finite text with no `.` in
+    /// it, so `1.0`, `-0.0` and `1.0E+20` where `echo` writes `1`, `-0`
+    /// and `1.0E+20`; a string in `'`, escaped by `smart_str_append_escaped`
+    /// and cut at `zend.exception_string_param_max_len` bytes with `...`
+    /// after the cut; `Array`, `Object(ClassName)`, `Resource id #N`, and
+    /// an enum case as `Enum::Case`. A reference is followed first,
+    /// `ZVAL_DEREF`.
+    ///
+    /// ```php
+    /// memory_get_usage(null, true, false, -7, 1.0, -0.0, 1e20, 0.1, INF, NAN, "a\nb\\c\te\$\e", "exactly fifteen", "sixteen chars!!!", "é");
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught ArgumentCountError: memory_get_usage() expects at most 1 argument, 14 given in %s:2
+    /// Stack trace:
+    /// #0 %s(2): memory_get_usage(NULL, true, false, -7, 1.0, -0.0, 1.0E+20, 0.1, INF, NAN, 'a\nb\\c\te$\e', 'exactly fifteen', 'sixteen chars!!...', '\xC3\xA9')
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    ///
+    /// `zend.exception_ignore_args` leaves the frame without its
+    /// arguments, and `zend.exception_string_param_max_len` moves the cut.
+    ///
+    /// ```php
+    /// ini_set('zend.exception_string_param_max_len', '3'); ini_set('zend.exception_ignore_args', '0');
+    /// set_time_limit('seconds', 2);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught ArgumentCountError: set_time_limit() expects exactly 1 argument, 2 given in %s:3
+    /// Stack trace:
+    /// #0 %s(3): set_time_limit('sec...', 2)
+    /// #1 {main}
+    ///   thrown in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// ini_set('zend.exception_ignore_args', '1');
+    /// set_time_limit('seconds', 2);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught ArgumentCountError: set_time_limit() expects exactly 1 argument, 2 given in %s:3
+    /// Stack trace:
+    /// #0 %s(3): set_time_limit()
+    /// #1 {main}
+    ///   thrown in %s on line 3
+    /// ```
+    fn trace_arguments(&self, arguments: &[Value]) -> String {
+        let mut out = String::new();
+        for (i, argument) in arguments.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            self.trace_argument(&mut out, argument.deref());
+        }
+        out
+    }
+
+    /// One argument as [`Request::trace_arguments`] renders it.
+    fn trace_argument(&self, out: &mut String, argument: &Value) {
+        match argument.as_ref() {
+            ValueRef::Undef | ValueRef::Null => out.push_str("NULL"),
+            ValueRef::Bool(b) => out.push_str(if b { "true" } else { "false" }),
+            ValueRef::Int(n) => out.push_str(&n.to_string()),
+            ValueRef::Float(f) => {
+                // `smart_str_append_double`: `precision ? precision : 1`,
+                // then `.0` on a finite text that carries no `.`.
+                let precision = match self.precision() {
+                    0 => 1,
+                    precision => precision,
+                };
+                let text = crate::ops::double_to_string(f, precision);
+                let text = String::from_utf8_lossy(text.as_bytes());
+                out.push_str(&text);
+                if f.is_finite() && !text.contains('.') {
+                    out.push_str(".0");
+                }
+            }
+            ValueRef::Str(s) => {
+                out.push('\'');
+                let cut = self.exception_string_param_max_len();
+                append_escaped(out, &s.as_bytes()[..cut.min(s.len())]);
+                if s.len() > cut {
+                    out.push_str("...");
+                }
+                out.push('\'');
+            }
+            ValueRef::Array(_) => out.push_str("Array"),
+            ValueRef::Object(object) => {
+                let decl = self.class_decl(object.class());
+                let class = decl.map_or_else(String::new, |decl| {
+                    String::from_utf8_lossy(&decl.name.0).into_owned()
+                });
+                let case = decl
+                    .filter(|decl| decl.kind == ClassKind::Enum)
+                    .and_then(|_| object.prop(b"name"))
+                    .and_then(Value::as_php_string);
+                // `zend_enum_fetch_case_name`: the case's `name`.
+                if let Some(case) = case {
+                    out.push_str(&class);
+                    out.push_str("::");
+                    out.push_str(&String::from_utf8_lossy(case.as_bytes()));
+                } else {
+                    out.push_str("Object(");
+                    out.push_str(&class);
+                    out.push(')');
+                }
+            }
+            ValueRef::Resource(resource) => {
+                out.push_str("Resource id #");
+                out.push_str(&resource.id.to_string());
+            }
+            // `deref` followed the reference already.
+            ValueRef::Reference(r) => self.trace_argument(out, r.get().deref()),
+        }
+    }
+
+    /// `zend.exception_ignore_args`: whether a throwable's trace is
+    /// built without the frames' arguments.
+    fn exception_ignore_args(&self) -> bool {
+        self.ini_get(b"zend.exception_ignore_args")
+            .is_some_and(|value| Request::ini_parse_bool(value.as_bytes()))
+    }
+
+    /// `zend.exception_string_param_max_len`: the bytes of a string
+    /// argument a trace prints before `...`, `EG(exception_string_param_max_len)`.
+    fn exception_string_param_max_len(&self) -> usize {
+        usize::try_from(self.ini_number(b"zend.exception_string_param_max_len", 15)).unwrap_or(0)
+    }
+
+    /// Serve the native the call frame on top of [`Vm`] names: its entry
+    /// with the request, off which it reads its arguments (ADR-0002); the
+    /// frame is the active function for the raisers' text while the entry
+    /// runs, and stays on the stack until `DO_ICALL` pops it. `function`
+    /// is the callee the `INIT_FCALL` resolved; one with no entry is the
+    /// `Error` a function nothing is linked under raises, in the caller's
+    /// spelling.
+    pub(crate) fn serve_native(&mut self, function: Function) -> Result<Value, Thrown> {
         let Some(entry) = self
             .shared
             .functions
             .get(usize::try_from(function.0).unwrap_or(usize::MAX))
             .map(|(_, entry)| *entry)
         else {
+            let name = self
+                .vm
+                .serving_call()
+                .map(|call| String::from_utf8_lossy(call.name.as_bytes()).into_owned())
+                .unwrap_or_default();
             return Err(crate::api::raising::throw(
                 self,
                 "Error",
-                &format!(
-                    "Call to undefined function {}()",
-                    String::from_utf8_lossy(name.as_bytes())
-                ),
+                &format!("Call to undefined function {name}()"),
             ));
         };
-        let outer = self.active_native.replace(function);
-        let served = entry(self, arguments);
-        self.active_native = outer;
-        served
+        entry(self)
     }
 
     pub(crate) fn take_body(&mut self) -> Vec<u8> {
@@ -818,16 +952,32 @@ impl Request {
         self.new_object(class)
     }
 
+    /// `zend_active_function()`: the native being served, which is the
+    /// call frame on top of [`Vm`] while an entry runs, and none while
+    /// the loop is between calls. The raisers render its declared name
+    /// and its parameters' names off the declaration, never off the
+    /// caller's spelling.
+    fn active_native_function(&self) -> Option<Function> {
+        self.vm.serving_call().map(|call| call.function)
+    }
+
     /// `get_active_function_name`: the declared name of the native being
     /// served, `func->common.function_name`, whatever case the call
     /// spelled it in.
     pub(crate) fn active_native(&self) -> String {
-        self.active_native
-            .and_then(|function| self.function_decl(function))
-            .map_or_else(
-                || String::from("native"),
-                |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
-            )
+        self.active_native_function().map_or_else(
+            || String::from("native"),
+            |function| self.declared_name(function),
+        )
+    }
+
+    /// `func->common.function_name`: the name a function was declared
+    /// under, and `native` for one the table has no declaration for.
+    fn declared_name(&self, function: Function) -> String {
+        self.function_decl(function).map_or_else(
+            || String::from("native"),
+            |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
+        )
     }
 
     /// `get_active_function_arg_name`: the declared name of the active
@@ -835,7 +985,7 @@ impl Request {
     /// declared count, where php's variadic slot sits
     /// (`Z/Zend/zend_execute_API.c:643-654`).
     fn active_native_arg_name(&self, position: u32) -> Option<String> {
-        let decl = self.function_decl(self.active_native?)?;
+        let decl = self.function_decl(self.active_native_function()?)?;
         let parameter = decl
             .parameters
             .get(usize::try_from(position.checked_sub(1)?).ok()?)?;
@@ -1165,6 +1315,28 @@ impl Request {
     #[must_use]
     pub fn current_line(&self) -> u32 {
         self.vm.executing_line()
+    }
+
+    /// `ZEND_NUM_ARGS()`: how many arguments the call being served was
+    /// given, and zero outside a native's body.
+    #[must_use]
+    pub fn argument_count(&self) -> usize {
+        self.vm
+            .serving_call()
+            .map_or(0, |call| call.arguments.len())
+    }
+
+    /// `ZEND_CALL_ARG(execute_data, position)`: the argument at
+    /// `position`, one-based as php counts them and as `Argument #N`
+    /// names them, read off the call frame the native is being served
+    /// from; none past what the call was given. What is read is the
+    /// value as passed, a reference not followed, as `Z_PARAM_*` reads
+    /// its slot before coercing it.
+    #[must_use]
+    pub fn argument(&self, position: u32) -> Option<Value> {
+        let call = self.vm.serving_call()?;
+        let index = usize::try_from(position.checked_sub(1)?).ok()?;
+        call.arguments.get(index).cloned()
     }
 
     /// The arguments of the frame `depth` levels up, `func_get_args` from
@@ -1812,9 +1984,45 @@ fn escape_html(message: &str) -> String {
     escaped
 }
 
+/// `smart_str_append_escaped` (`Z/Zend/zend_smart_str.c:77`): a byte
+/// under 32, over 126 or a backslash written as `\n`, `\r`, `\t`, `\f`,
+/// `\v`, `\\`, `\e` or `\xNN` with the digits in upper case, and every
+/// other byte as itself. What a string argument in a trace and
+/// `zend_print_zval_r`'s cousins write.
+fn append_escaped(out: &mut String, bytes: &[u8]) {
+    for &byte in bytes {
+        match byte {
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            0x0c => out.push_str("\\f"),
+            0x0b => out.push_str("\\v"),
+            b'\\' => out.push_str("\\\\"),
+            0x1b => out.push_str("\\e"),
+            byte if !(32..=126).contains(&byte) => {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                out.push_str("\\x");
+                out.push(char::from(HEX[usize::from(byte >> 4)]));
+                out.push(char::from(HEX[usize::from(byte & 0xf)]));
+            }
+            byte => out.push(char::from(byte)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Level, escape_html, level_name};
+    use super::{Level, append_escaped, escape_html, level_name};
+
+    /// `smart_str_append_escaped`'s table, one byte per arm: the seven
+    /// named escapes, the hex form for the rest of the control range and
+    /// everything past ASCII, and a printable byte untouched.
+    #[test]
+    fn a_trace_escapes_a_string_as_smart_str_does() {
+        let mut out = String::new();
+        append_escaped(&mut out, b"a\n\r\t\x0c\x0b\\\x1b\x01\x7f\xff'z");
+        assert_eq!(out, "a\\n\\r\\t\\f\\v\\\\\\e\\x01\\x7F\\xFF'z");
+    }
 
     /// php's `error_type_str` for every level `Level` names, the switch
     /// at `Z/main/main.c:1414-1448` read case by case. Nothing in this

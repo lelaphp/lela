@@ -6,6 +6,8 @@
 //! this skeleton nothing is rendered or dispatched to a user handler: a
 //! diagnostic is kept on the request as its last error, and a `Thrown`
 //! carries the throwable it would have made pending.
+// The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
+#![allow(rustdoc::invalid_codeblock_attributes)]
 
 use crate::api::request::Request;
 use crate::api::values::{PhpObject, PhpString, Value};
@@ -141,11 +143,19 @@ pub fn new_throwable(req: &mut Request, class: &str, message: &str) -> Value {
 /// name and the parameter's are the active native's declaration, as
 /// `get_active_function_arg_name` reads them off `arg_info`, so the
 /// caller's spelling of the call is not what the message says and a
-/// native never repeats a name it declared. The text is pinned by
-/// `a_type_error_names_the_parameter_off_the_declaration` below: a
-/// witness would carry the uncaught rendering's trace, whose frame for
-/// a native prints the argument php holds and this engine does not
-/// (#179).
+/// native never repeats a name it declared. The trace under it prints
+/// the argument off the call frame, as php prints what the frame holds.
+///
+/// ```php
+/// Set_Time_Limit('x');
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: set_time_limit(): Argument #1 ($seconds) must be of type int, string given in %s:2
+/// Stack trace:
+/// #0 %s(2): set_time_limit('x')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
 pub fn arg_type_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
     let message = req.argument_message(position, tail);
     throw(req, "TypeError", &message)
@@ -153,7 +163,8 @@ pub fn arg_type_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
 
 /// `zend_argument_value_error`: `ValueError` for the argument at
 /// `position`, the same sentence under the other class. No native this
-/// engine declares raises one yet; the text is pinned by
+/// engine declares raises one; `ext/standard`'s `str_repeat` does, and
+/// its witness pins the rendering. The text is held here by
 /// `a_value_error_names_the_parameter` below.
 pub fn arg_value_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
     let message = req.argument_message(position, tail);
@@ -253,12 +264,12 @@ mod tests {
 
     /// `str_repeat(string $string, int $times)` as far as its one
     /// `ValueError` goes.
-    fn str_repeat(req: &mut Request, _: &[Value]) -> Result<Value, Thrown> {
+    fn str_repeat(req: &mut Request) -> Result<Value, Thrown> {
         Err(arg_value_error(req, 2, "be greater than or equal to 0"))
     }
 
     /// `array_merge(array ...$arrays)` as far as its `TypeError` goes.
-    fn array_merge(req: &mut Request, _: &[Value]) -> Result<Value, Thrown> {
+    fn array_merge(req: &mut Request) -> Result<Value, Thrown> {
         Err(arg_type_error(req, 1, "be of type array, int given"))
     }
 

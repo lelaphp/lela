@@ -72,9 +72,13 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
     }
 }
 
-/// A native function's entry: the concrete request, the arguments as
-/// passed, and the value or the pending throwable (ADR-0002).
-pub(crate) type Entry = fn(&mut Request, &[Value]) -> Result<Value, Thrown>;
+/// A native function's entry: the concrete request, off which it reads
+/// its arguments with [`Request::argument_count`] and [`Request::argument`]
+/// as `ZEND_FUNCTION` reads them off `execute_data`, and the value or the
+/// pending throwable (ADR-0002). The call frame holding the arguments
+/// stays on the VM stack while the entry runs, which is what lets a
+/// backtrace taken inside it print them.
+pub(crate) type Entry = fn(&mut Request) -> Result<Value, Thrown>;
 /// Builds one extension's request state at request start.
 pub(crate) type StateBuilder = (TypeId, fn() -> Box<dyn Any + Send>);
 /// Builds one extension's engine state from the startup ini, once.

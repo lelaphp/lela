@@ -32,8 +32,9 @@ fn str_repeat_is_declared_and_builds_a_string_past_two_mebibytes() {
     assert_eq!(stdout.len(), 4 + 3_000_000);
 }
 
-/// php's own text, from the pinned oracle, which a witness cannot pin
-/// while the trace this engine prints carries no arguments (#179):
+/// php's own text, from the pinned oracle, held here without it; the
+/// trace the first of these prints, arguments and all, is the witness
+/// beside `str_repeat`:
 ///
 /// ```text
 /// ValueError: str_repeat(): Argument #2 ($times) must be greater than or equal to 0
