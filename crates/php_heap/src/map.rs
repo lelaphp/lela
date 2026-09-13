@@ -4,7 +4,9 @@
 //! touch. This is `ZEND_MAP_PTR`, and it is what makes a published unit
 //! `Sync` by construction.
 
+use std::any::Any;
 use std::marker::PhantomData;
+use std::ptr;
 
 /// An offset into a request's map table, typed by what lives there.
 #[derive(Debug)]
@@ -65,19 +67,15 @@ impl MapTable {
         if self.entries.len() <= at {
             self.entries.resize_with(at + 1, || None);
         }
-        let slot = &mut self.entries[at];
-        if !slot.as_ref().is_some_and(|b| b.is::<T>()) {
-            *slot = Some(Box::new(T::default()));
-        }
-        // Written as a `T` on the line above when it was not one, so the
-        // `None` arm is the type system's, not a path a request takes. With
-        // panics denied, a leak is the only safe terminal for a `&mut T`
-        // the arm cannot produce from nothing; whether it stays or becomes
-        // one `unsafe` block is #177's.
-        match slot.as_mut().and_then(|b| b.downcast_mut::<T>()) {
-            Some(value) => value,
-            None => Box::leak(Box::new(T::default())),
-        }
+        let boxed = match &mut self.entries[at] {
+            Some(boxed) if boxed.is::<T>() => boxed,
+            slot => slot.insert(Box::new(T::default())),
+        };
+        let raw = ptr::from_mut::<dyn Any + Send>(boxed.as_mut()).cast::<T>();
+        // SAFETY: the box holds a `T`: the first arm checked it and the
+        // second wrote one, so the cast names the `T` the box owns and the
+        // borrow lives as long as the table's.
+        unsafe { &mut *raw }
     }
 }
 
