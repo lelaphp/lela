@@ -3,13 +3,14 @@
 //! keeps in `ext/standard` and this engine keeps here, so an engine with
 //! no extensions serves a program that uses Zend alone (design §4.10).
 //!
-//! Six of them are here: the two the first witness of a loop needs, the
+//! Seven of them are here: the two the first witness of a loop needs, the
 //! three that read what `php_heap::mm` accounts, so the allocator's
 //! numbers are php's numbers under a witness and not under a terminal
-//! session a person typed once, and `ini_set`, which moves the engine's
-//! own ini table so a witness can reach what an entry decides. Each is
-//! declared and paired with its entry exactly as an extension's are, so
-//! there is one shape for a native and not two.
+//! session a person typed once, `ini_set`, which moves the engine's own
+//! ini table so a witness can reach what an entry decides, and
+//! `set_time_limit`, which moves the one entry the execution timer is
+//! armed from. Each is declared and paired with its entry exactly as an
+//! extension's are, so there is one shape for a native and not two.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -83,6 +84,14 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 Some(Type::Union(vec![Type::String, Type::False])),
             ),
             ini_set as Entry,
+        ),
+        (
+            declared(
+                b"set_time_limit",
+                &[parameter(b"seconds", Some(Type::Int), false)],
+                Some(Type::Bool),
+            ),
+            set_time_limit as Entry,
         ),
     ]
 }
@@ -334,6 +343,45 @@ fn ini_set(req: &mut Request, arguments: &[Value]) -> Result<Value, Thrown> {
     })
 }
 
+/// `set_time_limit(int $seconds): bool`, php's `PHP_FUNCTION(set_time_limit)`
+/// (`Z/main/main.c:1631`): `max_execution_time` moved to the seconds at
+/// runtime, which unsets the execution timer and arms it again from
+/// here, and `true` for the entry having taken the value. The seconds
+/// are read as php's `"l"` reads them, so `'5'` and `5.0` are `5`, and
+/// `null` is the 8.1 deprecation and then zero, which arms no timer.
+///
+/// ```php
+/// var_dump(set_time_limit(5), ini_set('max_execution_time', '0'), set_time_limit('7'), ini_set('max_execution_time', 0));
+/// ```
+/// ```expect
+/// bool(true)
+/// string(1) "5"
+/// bool(true)
+/// string(1) "7"
+/// ```
+///
+/// What the seconds do once armed is the witness beside
+/// [`crate::interrupt::interrupted`].
+fn set_time_limit(req: &mut Request, arguments: &[Value]) -> Result<Value, Thrown> {
+    if arguments.len() != 1 {
+        return Err(wrong_argument_count(req, 1, 1, arguments.len()));
+    }
+    let seconds = long_argument(req, &arguments[0], 1)?;
+    Ok(Value::bool(req.set_time_limit(seconds)))
+}
+
+/// One `Z_PARAM_LONG` of a native: `null` is the 8.1 deprecation and
+/// then zero, and what is there is coerced as php coerces an int
+/// parameter.
+fn long_argument(req: &mut Request, given: &Value, position: u32) -> Result<i64, Thrown> {
+    if matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
+        arg_null_deprecated(req, position, "int");
+        return Ok(0);
+    }
+    let coerced = coerce_param(req, given, &Type::Int, position)?;
+    Ok(coerced.as_int().unwrap_or(0))
+}
+
 /// One `Z_PARAM_STR` of a native: `null` is the 8.1 deprecation and then
 /// the empty string, and what is there is coerced as php coerces a
 /// string parameter.
@@ -465,6 +513,7 @@ mod tests {
     /// ArgumentCountError: memory_reset_peak_usage() expects exactly 0 arguments, 1 given
     /// ArgumentCountError: ini_set() expects exactly 2 arguments, 1 given
     /// ArgumentCountError: ini_set() expects exactly 2 arguments, 3 given
+    /// ArgumentCountError: set_time_limit() expects exactly 1 argument, 0 given
     /// ```
     #[test]
     fn a_call_past_the_maximum_is_php_s_argument_count_error() {
@@ -476,6 +525,10 @@ mod tests {
             (
                 "<?php ini_set('precision', 1, 2);",
                 "ini_set() expects exactly 2 arguments, 3 given",
+            ),
+            (
+                "<?php set_time_limit();",
+                "set_time_limit() expects exactly 1 argument, 0 given",
             ),
             (
                 "<?php memory_get_usage(true, true);",

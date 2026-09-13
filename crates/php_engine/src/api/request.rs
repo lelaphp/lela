@@ -171,6 +171,14 @@ impl Interrupt {
         self.0.raised.store(true, Ordering::Release);
     }
 
+    /// What unsetting the execution timer does beside stopping it
+    /// (`zend_unset_timeout`, `Z/Zend/zend_execute_API.c:1657-1685`): the
+    /// timer's word is cleared, so a deadline the old timer reached as
+    /// it was being unset is not the fatal the new one raises.
+    pub(crate) fn timer_unset(&self) {
+        self.0.timed_out.store(false, Ordering::Relaxed);
+    }
+
     /// What a check that found it raised reads: it is cleared, and the
     /// seconds come back when the execution timer was what raised it,
     /// both as php clears them (`Z/Zend/zend_vm_def.h:10526`, `:10537`).
@@ -316,8 +324,18 @@ impl Request {
         }
         // The execution timer, as `zend_set_timeout` arms one at the
         // start of a request (design §5.8).
-        req.timer = crate::interrupt::Timer::arm(&req.interrupt, req.max_execution_time());
+        req.arm_timer();
         req
+    }
+
+    /// `zend_unset_timeout` then `zend_set_timeout` over
+    /// `max_execution_time` as the ini table has it now: at request
+    /// start, and again whenever the entry moves, which is php's
+    /// `OnUpdateTimeout` at runtime. Whatever was armed is unset first,
+    /// so the seconds count from here.
+    fn arm_timer(&mut self) {
+        self.timer = None;
+        self.timer = crate::interrupt::Timer::arm(&self.interrupt, self.max_execution_time());
     }
 
     // -------------------------------------------------- crate-internal
@@ -1306,7 +1324,9 @@ impl Request {
     }
 
     /// `ini_set()`: the previous value, or `None` for an entry that does
-    /// not exist or may not change at runtime.
+    /// not exist or may not change at runtime. An entry with an
+    /// on-modify handler runs it here: `max_execution_time` re-arms the
+    /// execution timer (`OnUpdateTimeout`, `Z/main/main.c:467`).
     pub fn ini_set(&mut self, name: &[u8], value: &[u8]) -> Result<Option<PhpString>, Thrown> {
         let previous = self.ini_get(name);
         if previous.is_none() {
@@ -1315,6 +1335,9 @@ impl Request {
         self.ini.retain(|(n, _)| n.as_bytes() != name);
         self.ini
             .push((PhpString::from_bytes(name), PhpString::from_bytes(value)));
+        if name == b"max_execution_time" {
+            self.arm_timer();
+        }
         Ok(previous)
     }
 
@@ -1474,15 +1497,13 @@ impl Request {
         array
     }
 
-    /// `set_time_limit()`.
+    /// `set_time_limit()`, which is `zend_alter_ini_entry_ex` over
+    /// `max_execution_time` at runtime (`Z/main/main.c:1631`): the
+    /// entry moved through [`Self::ini_set`], so the timer is re-armed
+    /// as it is there, and `true` when the entry took the value.
     pub fn set_time_limit(&mut self, seconds: i64) -> bool {
-        self.ini
-            .retain(|(n, _)| n.as_bytes() != b"max_execution_time");
-        self.ini.push((
-            PhpString::from_bytes(b"max_execution_time"),
-            PhpString::from_bytes(seconds.to_string().as_bytes()),
-        ));
-        true
+        self.ini_set(b"max_execution_time", seconds.to_string().as_bytes())
+            .is_ok_and(|previous| previous.is_some())
     }
 
     /// `register_shutdown_function()`.

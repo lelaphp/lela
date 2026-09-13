@@ -10,6 +10,8 @@
 //! `JMP*`, at a frame's activation and after every `Flow::Resume` and
 //! nowhere else, [`interrupted`], what a check that finds it raised
 //! does, and [`Timer`], the execution timer `max_execution_time` arms.
+// The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
+#![allow(rustdoc::invalid_codeblock_attributes)]
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -41,13 +43,18 @@ pub(crate) fn check(req: &mut Request) -> Result<(), Fatal> {
 ///
 /// The text and the plural are `zend_timeout`'s
 /// (`Z/Zend/zend_execute_API.c:1441`), over the seconds the timer was
-/// armed with, which is php's `EG(timeout_seconds)`.
+/// armed with, which is php's `EG(timeout_seconds)`. The line is the
+/// back-edge's target, since the frame stands there before the check
+/// (`ZEND_VM_JMP_EX`, which sets the opline and then
+/// `ZEND_VM_INTERRUPT_CHECK`), which for an empty body is the `JMPNZ`
+/// itself; the tests below pin the plural.
 ///
-/// The witness for that text waits on #169. `set_time_limit(1); for (;;)
-/// {}` is what pins it, and the linked engine reads neither the loop nor
-/// the native yet, so the witness would be a red reading that leaves
-/// every change to this crate unmet. The tests below pin the text and
-/// the plural until the snippet can reach this function.
+/// ```php
+/// set_time_limit(1); for (;;) {}
+/// ```
+/// ```expect exit=255 wall=1s
+/// Fatal error: Maximum execution time of 1 second exceeded in %s on line 2
+/// ```
 pub(crate) fn interrupted(req: &mut Request) -> Result<(), Fatal> {
     match req.interrupt().taken() {
         Some(seconds) => Err(Fatal::Error(format!(
@@ -60,13 +67,15 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<(), Fatal> {
 
 /// The engine's execution timer (design §5.8): what `zend_set_timeout`
 /// arms at the start of a request whose `max_execution_time` is not
-/// zero, and what its drop unsets, as `php_request_shutdown` unsets
-/// php's. One thread per armed request, which is the only timed wake the
+/// zero and again when `set_time_limit()` moves the entry, and what its
+/// drop unsets, as `php_request_shutdown` and `OnUpdateTimeout` unset
+/// php's. One thread per armed timer, which is the only timed wake the
 /// standard library has; a request that is served before the seconds
 /// elapse wakes it at once rather than leaving it to the deadline.
 #[derive(Debug)]
 pub(crate) struct Timer {
     unset: Arc<Unset>,
+    interrupt: Interrupt,
 }
 
 impl Timer {
@@ -77,18 +86,26 @@ impl Timer {
         let elapses = Duration::from_secs(u64::try_from(seconds).ok().filter(|s| *s > 0)?);
         let unset = Arc::new(Unset::default());
         let waited = Arc::clone(&unset);
-        let interrupt = interrupt.clone();
+        let raised = interrupt.clone();
         thread::Builder::new()
             .name(String::from("php-execution-timer"))
-            .spawn(move || waited.elapse(&interrupt, elapses, seconds))
+            .spawn(move || waited.elapse(&raised, elapses, seconds))
             .ok()?;
-        Some(Timer { unset })
+        Some(Timer {
+            unset,
+            interrupt: interrupt.clone(),
+        })
     }
 }
 
 impl Drop for Timer {
+    /// `zend_unset_timeout`: the thread told to raise nothing, and then
+    /// the timer's word cleared, in that order, since the thread holds
+    /// the mutex while it decides and raises, so what it raised before
+    /// the word is cleared is cleared with it.
     fn drop(&mut self) {
         self.unset.now();
+        self.interrupt.timer_unset();
     }
 }
 
@@ -240,6 +257,29 @@ mod tests {
         assert!(
             armed.elapsed() >= Duration::from_secs(1),
             "the loop ran until the timer fired, not before"
+        );
+    }
+
+    /// `zend_unset_timeout` clears `EG(timed_out)` beside stopping the
+    /// timer, so a deadline the old timer reached as `set_time_limit()`
+    /// replaced it raises no fatal at the next check.
+    #[test]
+    fn unsetting_a_timer_that_elapsed_clears_what_it_raised() {
+        let interrupt = Interrupt::default();
+        let timer = Timer::arm(&interrupt, 1);
+        let armed = Instant::now();
+        while !interrupt.raised().load(Ordering::Relaxed) {
+            assert!(
+                armed.elapsed() < Duration::from_secs(10),
+                "the timer never fired"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        drop(timer);
+        assert_eq!(
+            interrupt.taken(),
+            None,
+            "raised, and the timer's word cleared"
         );
     }
 
