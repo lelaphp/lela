@@ -156,7 +156,7 @@ pub fn eval_const_expr(
         ConstExpr::Bool(b) => Ok(Value::bool(*b)),
         ConstExpr::Long(n) => Ok(Value::int(*n)),
         ConstExpr::Double(f) => Ok(Value::float(*f)),
-        ConstExpr::Str(s) => Ok(Value::string(PhpString::from_bytes(s))),
+        ConstExpr::Str(s) => Ok(Value::string(PhpString::new(req, s)?)),
         ConstExpr::Constant(name) => match req.constant_named(&name.0) {
             Some(value) => Ok(value),
             None => Err(throw(
@@ -238,7 +238,7 @@ pub fn write_prop(
     name: &[u8],
     value: Value,
 ) -> Result<(), Thrown> {
-    let _ = req;
+    let name = PhpString::new(req, name)?;
     object.set_prop(name, value);
     Ok(())
 }

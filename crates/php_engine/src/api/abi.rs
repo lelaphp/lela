@@ -20,7 +20,7 @@ use crate::api::values::{PhpObject, PhpString, Value};
 /// the host set before the first request, immutable afterwards.
 #[derive(Debug, Clone, Default)]
 pub struct StartupIni {
-    pub entries: Vec<(PhpString, PhpString)>,
+    pub entries: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 /// What an ini entry's `on_modify` function says of a new value.

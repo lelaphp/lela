@@ -19,6 +19,8 @@ Heap::release_string
 Heap::reset_peak
 Heap::set_memory_limit
 Heap::string
+Heap::string_safe_alloc
+Heap::string_with
 HeapHooks
 HeapHooks::destruct
 HeapHooks::free_native

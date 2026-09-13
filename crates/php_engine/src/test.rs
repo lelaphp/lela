@@ -4,7 +4,6 @@
 //! what it wrote. Re-exported by `php_ext::test`; its items are `api.lock`
 //! lines in the `test` group.
 
-use crate::api::values::PhpString;
 pub use crate::engine::Engine;
 use crate::engine::{OutputSink, RequestDescription};
 
@@ -53,7 +52,7 @@ impl Engine {
     pub fn serve_capture(&self, source: &str, mut sink: Capture) -> Served {
         let description = RequestDescription {
             sapi_name: String::from("cli"),
-            script_name: Some(PhpString::from_bytes(b"Standard input code")),
+            script_name: Some(b"Standard input code".to_vec()),
             source: Some(source.as_bytes().to_vec()),
             cwd: std::env::current_dir().unwrap_or_default(),
             ..RequestDescription::default()

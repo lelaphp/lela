@@ -1,15 +1,35 @@
 //! The value group of the native face (design §4.4): Mahout's vocabulary
 //! over Zend's layouts. What a native holds is a [`Value`]; the layout
-//! knowledge stays in `php_heap`. This skeleton keeps values as owned Rust
-//! data behind the same names, so every signature compiles and behaves
-//! trivially; the heap-backed representation lands with Lane A of design
-//! §11 behind these signatures.
+//! knowledge stays in `php_heap`.
+//!
+//! **What stands on the heap, and what does not yet.** A string is
+//! `php_heap`'s (design §5.2): [`PhpString`] is the pointer php's
+//! `zend_string *` is, sixteen bytes of [`Value`] name it exactly as a
+//! zval does, and it is allocated out of the request's heap and nowhere
+//! else, so `memory_get_usage()` counts every string a native builds
+//! (design §5.13). An array, an object, a resource and a reference are
+//! still owned Rust data behind the same names, the stand-ins the rest
+//! of Lane A replaces (design §11, days 3–7); a `Value` holding one of
+//! those owns it as Rust owns a `Vec`.
+//!
+//! **Ownership, as design §5.1 decides it.** `PhpString` is `Copy` and
+//! has no `Drop`; cloning a `Value` that holds one is php's
+//! `ZVAL_COPY_VALUE`, a bitwise copy that touches no refcount. Owners are
+//! taken and given up explicitly, by the engine, where php's handlers
+//! do it: a value the engine hands a native is the frame's, a value a
+//! native hands back is the engine's from the moment it is returned, and
+//! a native releases nothing. What a native builds and drops without
+//! returning is freed with the request's memory at its end.
 
 use std::any::Any;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
+use php_heap::Str;
+
 use crate::api::call::Function;
+use crate::api::raising::Thrown;
+use crate::api::request::Request;
 
 /// The type of a value, php's `zend_zval_type_name` set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -30,50 +50,126 @@ pub enum TypeTag {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ClassId(pub u32);
 
-/// A byte string, refcounted and hash-cached in the heap; bytes, not UTF-8.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
-pub struct PhpString {
-    bytes: Vec<u8>,
-}
+/// A byte string: php's `zend_string *`, one allocation of the request's
+/// heap holding the refcounted header, the cached hash, the length and
+/// the bytes, which are bytes and never UTF-8 (design §5.2). Naming one
+/// takes no owner, as php's pointer does not; `Copy` is what makes it a
+/// pointer and not a `Vec`.
+///
+/// A string exists in one of two ways: interned, which is what a
+/// compiled program's constants and every native's name are, never
+/// refcounted and freed by its table; or the request's own, one owner per
+/// [`PhpString::new`], freed by the engine when the last owner gives it
+/// up and by the request's end otherwise.
+#[derive(Clone, Copy)]
+pub struct PhpString(Str);
 
 impl PhpString {
-    /// A string of these bytes.
-    #[must_use]
-    pub fn from_bytes(bytes: &[u8]) -> PhpString {
-        PhpString {
-            bytes: bytes.to_vec(),
-        }
+    /// A string of these bytes out of the request's heap, which is where
+    /// every string a native returns comes from (design §5.13). php's
+    /// `ZVAL_STRINGL_FAST`: the empty string and a string of one byte are
+    /// the process's interned ones and allocate nothing, and anything
+    /// longer is `zend_string_init`, one allocation counted against the
+    /// request. The `Err` is the memory limit, recorded on the request as
+    /// php's fatal and ending the native as `zend_mm` bails out.
+    pub fn new(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
+        req.string(bytes)
     }
 
-    /// The bytes.
+    /// A string of `len` bytes written in place by `fill`, php's
+    /// `zend_string_alloc` and the `memcpy` a native does into
+    /// `ZSTR_VAL` after it. The allocation is asked for, and the memory
+    /// limit met, before a byte is written anywhere, which is how
+    /// `str_repeat("x", 200000000)` is php's `Allowed memory size` fatal
+    /// and not two hundred megabytes built and then refused. `fill` is
+    /// given `len` zero bytes to write once.
+    pub fn filled(
+        req: &mut Request,
+        len: usize,
+        fill: impl FnOnce(&mut [u8]),
+    ) -> Result<PhpString, Thrown> {
+        req.string_with(len, fill)
+    }
+
+    /// A string of `n * m + l` bytes written in place by `fill`, php's
+    /// `zend_string_safe_alloc`: the product checked before anything is
+    /// asked for, and php's `Possible integer overflow in memory
+    /// allocation` fatal where it overflows. Its allocation is the
+    /// product plus the aligned header of a string of `l` bytes, which is
+    /// more than [`PhpString::filled`] takes for the same length and is
+    /// what `memory_get_usage()` moves by after `str_repeat`, `str_pad`
+    /// and `implode`, whose php bodies allocate this way.
+    pub fn product(
+        req: &mut Request,
+        n: usize,
+        m: usize,
+        l: usize,
+        fill: impl FnOnce(&mut [u8]),
+    ) -> Result<PhpString, Thrown> {
+        req.string_product(n, m, l, fill)
+    }
+
+    /// The face over a heap string the engine already holds: a constant
+    /// of an op array, or what a kernel allocated.
+    pub(crate) const fn of(s: Str) -> PhpString {
+        PhpString(s)
+    }
+
+    /// The heap string, for the engine's refcount traffic.
+    pub(crate) const fn heap(self) -> Str {
+        self.0
+    }
+
+    /// The bytes, `ZSTR_VAL` over `ZSTR_LEN`.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes
+        self.0.bytes()
     }
 
     /// The length in bytes, `strlen`.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.bytes.len()
+        self.0.len()
     }
 
     /// Whether the length is zero.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
+        self.0.is_empty()
     }
+}
 
-    /// Append bytes in place.
-    pub fn append(&mut self, bytes: &[u8]) {
-        self.bytes.extend_from_slice(bytes);
+/// Two strings are equal when their bytes are, `zend_string_equals`.
+impl PartialEq for PhpString {
+    fn eq(&self, other: &PhpString) -> bool {
+        self.0 == other.0
     }
+}
 
-    /// A new string of this one followed by `other`.
-    #[must_use]
-    pub fn concat(&self, other: &PhpString) -> PhpString {
-        let mut bytes = self.bytes.clone();
-        bytes.extend_from_slice(&other.bytes);
-        PhpString { bytes }
+impl Eq for PhpString {}
+
+impl std::hash::Hash for PhpString {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_bytes().hash(state);
+    }
+}
+
+impl PartialOrd for PhpString {
+    fn partial_cmp(&self, other: &PhpString) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Ordered by bytes, `zend_binary_strcmp`.
+impl Ord for PhpString {
+    fn cmp(&self, other: &PhpString) -> Ordering {
+        self.as_bytes().cmp(other.as_bytes())
+    }
+}
+
+impl std::fmt::Debug for PhpString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", String::from_utf8_lossy(self.as_bytes()))
     }
 }
 
@@ -86,23 +182,24 @@ pub enum Key {
 }
 
 impl Key {
-    /// The key for these bytes: `Int` when they are a canonical decimal
-    /// integer in range (`ZEND_HANDLE_NUMERIC_STR`), else `Str`.
+    /// The key a string makes: `Int` when its bytes are a canonical
+    /// decimal integer in range (`ZEND_HANDLE_NUMERIC_STR`), else the
+    /// string itself. The string is the caller's to have allocated, as
+    /// php's `zend_symtable_update` is handed a `zend_string *`.
     #[must_use]
-    pub fn from_bytes(bytes: &[u8]) -> Key {
-        if let Some(n) = canonical_int(bytes) {
-            Key::Int(n)
-        } else {
-            Key::Str(PhpString::from_bytes(bytes))
+    pub fn from_string(s: PhpString) -> Key {
+        match canonical_int(s.as_bytes()) {
+            Some(n) => Key::Int(n),
+            None => Key::Str(s),
         }
     }
 
-    /// The key as a property name: an integer key printed in decimal.
-    #[must_use]
-    pub fn to_prop_name(&self) -> PhpString {
+    /// The key as a property name: an integer key printed in decimal,
+    /// `zend_long_to_str`, a string key as it is.
+    pub fn to_prop_name(&self, req: &mut Request) -> Result<PhpString, Thrown> {
         match self {
-            Key::Int(n) => PhpString::from_bytes(n.to_string().as_bytes()),
-            Key::Str(s) => s.clone(),
+            Key::Int(n) => PhpString::new(req, n.to_string().as_bytes()),
+            Key::Str(s) => Ok(*s),
         }
     }
 }
@@ -435,7 +532,7 @@ impl PhpObject {
     pub fn entries(&self) -> Vec<(Key, Value)> {
         self.props
             .iter()
-            .map(|(name, value)| (Key::from_bytes(name.as_bytes()), value.clone()))
+            .map(|(name, value)| (Key::from_string(*name), value.clone()))
             .collect()
     }
 
@@ -448,11 +545,17 @@ impl PhpObject {
             .map(|(_, v)| v)
     }
 
-    /// Write one property by name, without a handler in the way.
-    pub fn set_prop(&mut self, name: &[u8], value: Value) {
-        match self.props.iter_mut().find(|(n, _)| n.as_bytes() == name) {
+    /// Write one property by name, without a handler in the way. The
+    /// name is a string the caller holds, as `zend_std_write_property`
+    /// is handed one; a property already there keeps the name it had.
+    pub fn set_prop(&mut self, name: PhpString, value: Value) {
+        match self
+            .props
+            .iter_mut()
+            .find(|(n, _)| n.as_bytes() == name.as_bytes())
+        {
             Some((_, slot)) => *slot = value,
-            None => self.props.push((PhpString::from_bytes(name), value)),
+            None => self.props.push((name, value)),
         }
     }
 
@@ -567,8 +670,12 @@ impl PartialEq for PhpObject {
     }
 }
 
-/// One PHP value. Copying a `Value` is cheap for a scalar and, once the
-/// heap backs it, a refcount for anything else.
+/// One PHP value. Cloning one is php's `ZVAL_COPY_VALUE`: sixteen bytes
+/// copied for a scalar and a string, no refcount touched, so the clone
+/// names what the original names and owns nothing the original did not
+/// give up; the engine takes and releases owners where php's handlers
+/// do. An array, an object, a resource and a reference are still owned
+/// Rust data and are cloned as such until their lane lands.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Value {
     inner: Inner,
@@ -794,18 +901,13 @@ mod tests {
 
     #[test]
     fn keys_normalise_as_php_does() {
-        assert_eq!(Key::from_bytes(b"12"), Key::Int(12));
-        assert_eq!(Key::from_bytes(b"-1"), Key::Int(-1));
-        assert_eq!(
-            Key::from_bytes(b"012"),
-            Key::Str(PhpString::from_bytes(b"012"))
-        );
-        assert_eq!(
-            Key::from_bytes(b"-0"),
-            Key::Str(PhpString::from_bytes(b"-0"))
-        );
-        assert_eq!(Key::from_bytes(b""), Key::Str(PhpString::from_bytes(b"")));
-        assert_eq!(Key::Int(7).to_prop_name().as_bytes(), b"7");
+        assert_eq!(canonical_int(b"12"), Some(12));
+        assert_eq!(canonical_int(b"-1"), Some(-1));
+        assert_eq!(canonical_int(b"012"), None);
+        assert_eq!(canonical_int(b"-0"), None);
+        assert_eq!(canonical_int(b""), None);
+        assert_eq!(canonical_int(b"9223372036854775807"), Some(i64::MAX));
+        assert_eq!(canonical_int(b"9223372036854775808"), None);
     }
 
     #[test]
@@ -813,7 +915,7 @@ mod tests {
         let mut a = PhpArray::new();
         a.set(Key::Int(5), Value::int(1));
         a.append(Value::int(2));
-        a.set(Key::from_bytes(b"x"), Value::null());
+        a.set(Key::Int(-4), Value::null());
         assert_eq!(a.len(), 3);
         assert_eq!(a.get(&Key::Int(6)), Some(&Value::int(2)));
         assert!(!a.is_list());

@@ -374,11 +374,11 @@ fn token_get_all(req: &mut Request) -> Result<Value, Thrown> {
     }
     let short_open_tag = req
         .ini_get(b"short_open_tag")
-        .is_none_or(|value| Request::ini_parse_bool(value.as_bytes()));
+        .is_none_or(Request::ini_parse_bool);
     let mut rows = PhpArray::new();
     for token in tokens::tokens(code.as_bytes(), short_open_tag) {
         let text = code.as_bytes().get(token.start..token.end).unwrap_or(&[]);
-        let text = Value::string(PhpString::from_bytes(text));
+        let text = Value::string(PhpString::new(req, text)?);
         match token.name.and_then(names::id_of) {
             Some(id) => {
                 let mut row = PhpArray::new();
@@ -419,7 +419,7 @@ fn token_name(req: &mut Request) -> Result<Value, Thrown> {
     }
     let id = long_argument(req, 1)?;
     let name = names::name_of(id).unwrap_or("UNKNOWN");
-    Ok(Value::string(PhpString::from_bytes(name.as_bytes())))
+    Ok(Value::string(PhpString::new(req, name.as_bytes())?))
 }
 
 /// `zend_wrong_parameters_count_error` for a call outside a native's
@@ -447,10 +447,13 @@ fn string_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown
     let given = req.argument(position).unwrap_or_default();
     if matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
         arg_null_deprecated(req, position, "string");
-        return Ok(PhpString::default());
+        return PhpString::new(req, b"");
     }
     let coerced = coerce_param(req, &given, &Type::String, position)?;
-    Ok(coerced.as_php_string().cloned().unwrap_or_default())
+    match coerced.as_php_string() {
+        Some(s) => Ok(*s),
+        None => PhpString::new(req, b""),
+    }
 }
 
 /// One `Z_PARAM_LONG` of a native, the argument at `position` read off

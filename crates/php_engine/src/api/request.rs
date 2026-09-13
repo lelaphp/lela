@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
-use php_heap::{Fatal, FrameRef, Heap, HeapHooks, MapTable, ObjectId, VmStack, Zval};
+use php_heap::{Fatal, FrameRef, Heap, HeapHooks, Intern, MapTable, ObjectId, VmStack, Zval};
 use php_unit::Unit;
 use php_unit::decl::{ClassDecl, ClassKind, FunctionDecl};
 
@@ -80,7 +80,8 @@ pub struct Stream {
 #[derive(Debug, Clone)]
 #[allow(clippy::type_complexity)] // Zend's ops struct: a table of function pointers
 pub struct StreamWrapper {
-    pub scheme: PhpString,
+    /// The protocol, as `php_register_url_stream_wrapper` is given it.
+    pub scheme: String,
     pub open: fn(&mut Request, &[u8], &[u8]) -> Result<Stream, Thrown>,
     pub open_dir: Option<fn(&mut Request, &[u8]) -> Result<Stream, Thrown>>,
     pub stat: Option<fn(&mut Request, &[u8]) -> Result<Option<PhpArray>, Thrown>>,
@@ -95,7 +96,9 @@ pub struct StreamWrapper {
 #[derive(Debug, Clone)]
 #[allow(clippy::type_complexity)] // as StreamWrapper
 pub struct StreamFilter {
-    pub name: PhpString,
+    /// The filter's name, as `php_stream_filter_register_factory` is
+    /// given it.
+    pub name: String,
     pub filter: fn(&mut Request, &[u8], &mut Vec<u8>, bool) -> Result<(), Thrown>,
 }
 
@@ -232,9 +235,9 @@ pub struct Request {
     vm: Vm,
     map: MapTable,
     states: Vec<(TypeId, Box<dyn Any + Send>)>,
-    ini: Vec<(PhpString, PhpString)>,
+    ini: Vec<(Vec<u8>, Vec<u8>)>,
     body: Vec<u8>,
-    headers: Vec<PhpString>,
+    headers: Vec<Vec<u8>>,
     header_callback: Option<Callable>,
     /// The host's log as `php_log_err` was given it: one entry per call,
     /// a diagnostic whole however many lines its backtrace adds, and no
@@ -242,11 +245,11 @@ pub struct Request {
     /// writes `"%s\n"`, a file log stamps `[date] ` and `PHP_EOL`).
     log: Vec<Vec<u8>>,
     response_code: i64,
-    last_error: Option<(Level, String, PhpString, u32)>,
+    last_error: Option<(Level, String, Vec<u8>, u32)>,
     ending: Option<Ending>,
     resources: Resources,
-    superglobals: Vec<(PhpString, PhpArray)>,
-    constants: Vec<(PhpString, Value)>,
+    superglobals: Vec<(Vec<u8>, PhpArray)>,
+    constants: Vec<(Vec<u8>, Value)>,
     wrappers: Vec<StreamWrapper>,
     filters: Vec<StreamFilter>,
     error_handlers: Vec<Option<Callable>>,
@@ -324,8 +327,10 @@ impl Request {
             }
         }
         // The execution timer, as `zend_set_timeout` arms one at the
-        // start of a request (design §5.8).
+        // start of a request (design §5.8), and the memory limit, as
+        // `php_request_startup` sets one from the ini.
         req.arm_timer();
+        req.set_memory_limit();
         req
     }
 
@@ -366,9 +371,25 @@ impl Request {
         frame
     }
 
+    /// The frame off both stacks, every owner its slots held given up:
+    /// `i_free_compiled_variables`, and `zend_vm_stack_free_call_frame`.
     pub(crate) fn pop_frame(&mut self) {
-        self.vm.pop();
+        for value in self.vm.pop() {
+            self.release(value);
+        }
         self.stack.pop_frame();
+    }
+
+    /// The served call off the stack, `zend_vm_stack_free_args` over what
+    /// the `SEND_*` oplines placed and `zend_vm_stack_free_call_frame`
+    /// after it.
+    pub(crate) fn pop_call(&mut self) {
+        if let Some(call) = self.vm.pop_call() {
+            for value in call.arguments {
+                self.release(value);
+            }
+            self.release(Value::string(call.name));
+        }
     }
 
     /// What the entry frame of the innermost serving returned.
@@ -430,7 +451,7 @@ impl Request {
         );
         let message = string_prop(throwable, b"message");
         let (file, line) = Request::throw_site(throwable);
-        let file = String::from_utf8_lossy(file.as_bytes());
+        let file = String::from_utf8_lossy(&file);
         // `zend_trace_to_string` over an empty trace is `#0 {main}`, which
         // is what a throwable made before this engine recorded one has.
         let trace = throwable
@@ -448,10 +469,11 @@ impl Request {
     }
 
     /// The `file` and `line` a throwable recorded where it was made.
-    fn throw_site(throwable: &PhpObject) -> (PhpString, u32) {
+    fn throw_site(throwable: &PhpObject) -> (Vec<u8>, u32) {
         let file = throwable
             .prop(b"file")
-            .and_then(|value| value.as_php_string().cloned())
+            .and_then(|value| value.as_str_bytes())
+            .map(<[u8]>::to_vec)
             .unwrap_or_default();
         let line = throwable
             .prop(b"line")
@@ -469,16 +491,22 @@ impl Request {
     /// on demand; this engine holds what `getTraceAsString` renders, which
     /// is all that `__toString` and the uncaught fatal read, until a frame
     /// chain with user functions in it gives the array something to say.
-    pub(crate) fn note_throw_site(&self, throwable: &mut PhpObject) {
-        throwable.set_prop(
-            b"file",
-            Value::string(self.current_file().cloned().unwrap_or_default()),
-        );
-        throwable.set_prop(b"line", Value::int(i64::from(self.current_line())));
-        throwable.set_prop(
-            b"trace",
-            Value::string(PhpString::from_bytes(self.trace_as_string().as_bytes())),
-        );
+    pub(crate) fn note_throw_site(&mut self, throwable: &mut PhpObject) -> Result<(), Thrown> {
+        let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+        let trace = self.trace_as_string();
+        let line = Value::int(i64::from(self.current_line()));
+        for (name, value) in [
+            (&b"file"[..], Value::string(PhpString::new(self, &file)?)),
+            (b"line", line),
+            (
+                b"trace",
+                Value::string(PhpString::new(self, trace.as_bytes())?),
+            ),
+        ] {
+            let name = PhpString::new(self, name)?;
+            throwable.set_prop(name, value);
+        }
+        Ok(())
     }
 
     /// `zend_fetch_debug_backtrace` rendered by `zend_trace_to_string`
@@ -493,8 +521,7 @@ impl Request {
     /// under `zend.exception_ignore_args` the frame is built without them,
     /// `DEBUG_BACKTRACE_IGNORE_ARGS`, and the parentheses are empty.
     fn trace_as_string(&self) -> String {
-        let file = self.current_file().cloned().unwrap_or_default();
-        let file = String::from_utf8_lossy(file.as_bytes());
+        let file = String::from_utf8_lossy(self.current_file().unwrap_or_default());
         let line = self.current_line();
         let ignore_arguments = self.exception_ignore_args();
         let mut frames: Vec<String> = self
@@ -641,7 +668,7 @@ impl Request {
     /// built without the frames' arguments.
     fn exception_ignore_args(&self) -> bool {
         self.ini_get(b"zend.exception_ignore_args")
-            .is_some_and(|value| Request::ini_parse_bool(value.as_bytes()))
+            .is_some_and(Request::ini_parse_bool)
     }
 
     /// `zend.exception_string_param_max_len`: the bytes of a string
@@ -696,7 +723,7 @@ impl Request {
     pub(crate) fn header_block(&self) -> Vec<u8> {
         let mut block = Vec::new();
         for header in &self.headers {
-            block.extend_from_slice(header.as_bytes());
+            block.extend_from_slice(header);
             block.extend_from_slice(b"\r\n");
         }
         block
@@ -724,7 +751,7 @@ impl Request {
     /// compile-time error carries, since php's `zend_error_cb` is given
     /// the compiler's line while `zend_get_executed_lineno` has none.
     pub(crate) fn note_error_at(&mut self, level: Level, message: &str, line: u32) {
-        let file = self.current_file().cloned().unwrap_or_default();
+        let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
         self.note_error_in(level, message, &file, line);
     }
 
@@ -829,18 +856,12 @@ impl Request {
     /// entries decide nothing a request can see, and the recipe's
     /// `display_startup_errors=1` shows no difference from php's default
     /// of the same.
-    pub(crate) fn note_error_in(
-        &mut self,
-        level: Level,
-        message: &str,
-        file: &PhpString,
-        line: u32,
-    ) {
+    pub(crate) fn note_error_in(&mut self, level: Level, message: &str, file: &[u8], line: u32) {
         if !self.displayed(message, file, line) {
             return;
         }
-        let file = file.clone();
-        let named = String::from_utf8_lossy(file.as_bytes()).into_owned();
+        let named = String::from_utf8_lossy(file).into_owned();
+        let file = file.to_vec();
         // php stores the diagnostic before it masks it, which is why
         // `error_get_last()` answers one `error_reporting` hid.
         self.last_error = Some((level, message.to_owned(), file, line));
@@ -908,8 +929,8 @@ impl Request {
     /// either `ignore_repeated_source` is on or the site is the same
     /// too. A repeat is dropped whole — not stored, not logged, not
     /// displayed — so the one it repeats stays the last error.
-    fn displayed(&self, message: &str, file: &PhpString, line: u32) -> bool {
-        if !ini_truth(self.ini_get(b"ignore_repeated_errors").as_ref()) {
+    fn displayed(&self, message: &str, file: &[u8], line: u32) -> bool {
+        if !ini_truth(self.ini_get(b"ignore_repeated_errors")) {
             return true;
         }
         let Some((_, last, last_file, last_line)) = self.last_error.as_ref() else {
@@ -918,33 +939,33 @@ impl Request {
         if last != message {
             return true;
         }
-        if ini_truth(self.ini_get(b"ignore_repeated_source").as_ref()) {
+        if ini_truth(self.ini_get(b"ignore_repeated_source")) {
             return false;
         }
-        *last_line != line || last_file.as_bytes() != file.as_bytes()
+        *last_line != line || last_file.as_slice() != file
     }
 
     /// `log_errors`, whether a diagnostic reaches the host's log.
     fn log_errors(&self) -> bool {
-        ini_truth(self.ini_get(b"log_errors").as_ref())
+        ini_truth(self.ini_get(b"log_errors"))
     }
 
     /// `html_errors`, which of php's two display forms a diagnostic
     /// takes: the plain one, or `<br />\n<b>Warning</b>:  …`.
     fn html_errors(&self) -> bool {
-        ini_truth(self.ini_get(b"html_errors").as_ref())
+        ini_truth(self.ini_get(b"html_errors"))
     }
 
     /// `xmlrpc_errors`, whether a diagnostic takes php's xml fault form
     /// ahead of both of the others.
     fn xmlrpc_errors(&self) -> bool {
-        ini_truth(self.ini_get(b"xmlrpc_errors").as_ref())
+        ini_truth(self.ini_get(b"xmlrpc_errors"))
     }
 
     /// `xmlrpc_error_number`, the fault's code, `OnUpdateLong`.
     fn xmlrpc_error_number(&self) -> i64 {
         self.ini_get(b"xmlrpc_error_number")
-            .and_then(|value| String::from_utf8_lossy(value.as_bytes()).parse().ok())
+            .and_then(|value| String::from_utf8_lossy(value).parse().ok())
             .unwrap_or(0)
     }
 
@@ -952,7 +973,7 @@ impl Request {
     /// bytes, and nothing at all where php left the entry `NULL`.
     fn ini_text(&self, name: &[u8]) -> String {
         self.ini_get(name)
-            .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
+            .map(|value| String::from_utf8_lossy(value).into_owned())
             .unwrap_or_default()
     }
 
@@ -964,10 +985,10 @@ impl Request {
     /// `sapi_module.name` and the plain form is its `else`.
     fn display_errors(&self) -> Display {
         let value = self.ini_get(b"display_errors");
-        let text = value.as_ref().map(|v| v.as_bytes().to_ascii_lowercase());
+        let text = value.map(<[u8]>::to_ascii_lowercase);
         match text.as_deref() {
             Some(b"stderr") if self.host_writes_stderr() => Display::Stderr,
-            _ if ini_truth(value.as_ref()) => Display::Body,
+            _ if ini_truth(value) => Display::Body,
             _ => Display::Off,
         }
     }
@@ -986,7 +1007,7 @@ impl Request {
     /// say, and the request ends in it. It is rendered once, here, and
     /// `serve` writes nothing of its own.
     pub(crate) fn end_in_fatal(&mut self, message: &str) {
-        let file = self.current_file().cloned().unwrap_or_default();
+        let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
         let line = self.current_line();
         self.end_in_fatal_at(message, &file, line);
     }
@@ -994,14 +1015,14 @@ impl Request {
     /// The same fatal at a site of its own, which an uncaught throwable
     /// carries. The first fatal is the one that ends the request, since
     /// php leaves the request from the first and renders no second.
-    pub(crate) fn end_in_fatal_at(&mut self, message: &str, file: &PhpString, line: u32) {
+    pub(crate) fn end_in_fatal_at(&mut self, message: &str, file: &[u8], line: u32) {
         if self.ending.is_some() {
             return;
         }
         self.note_error_in(Level::Error, message, file, line);
         self.ending = Some(Ending::Fatal(format!(
             "PHP Fatal error:  {message} in {} on line {line}",
-            String::from_utf8_lossy(file.as_bytes())
+            String::from_utf8_lossy(file)
         )));
     }
 
@@ -1138,7 +1159,7 @@ impl Request {
 
     fn ini_number(&self, name: &[u8], default: i32) -> i32 {
         self.ini_get(name)
-            .and_then(|value| String::from_utf8_lossy(value.as_bytes()).parse().ok())
+            .and_then(|value| String::from_utf8_lossy(value).parse().ok())
             .unwrap_or(default)
     }
 
@@ -1175,14 +1196,14 @@ impl Request {
     pub(crate) fn constant_named(&self, name: &[u8]) -> Option<Value> {
         self.constants
             .iter()
-            .find(|(n, _)| n.as_bytes() == name)
+            .find(|(n, _)| n.as_slice() == name)
             .map(|(_, v)| v.clone())
             .or_else(|| self.shared.constant(name))
     }
 
     fn ini_parse_bytes_of(&self, name: &str) -> i64 {
         self.ini_get(name.as_bytes())
-            .map_or(0, |v| Request::ini_parse_bytes(v.as_bytes()))
+            .map_or(0, Request::ini_parse_bytes)
     }
 
     // -------------------------------------------------- output and headers
@@ -1220,12 +1241,12 @@ impl Request {
     /// Where the first body byte was written, `headers_sent`'s file and
     /// line, once it has been.
     #[must_use]
-    pub fn output_started_at(&self) -> Option<(PhpString, u32)> {
+    pub fn output_started_at(&self) -> Option<(Vec<u8>, u32)> {
         if self.body.is_empty() {
             None
         } else {
             Some((
-                self.current_file().cloned().unwrap_or_default(),
+                self.current_file().map(<[u8]>::to_vec).unwrap_or_default(),
                 self.current_line(),
             ))
         }
@@ -1244,14 +1265,13 @@ impl Request {
             .to_ascii_lowercase();
         if replace {
             self.headers.retain(|h| {
-                h.as_bytes()
-                    .split(|b| *b == b':')
+                h.split(|b| *b == b':')
                     .next()
                     .map(<[u8]>::to_ascii_lowercase)
                     != Some(name.clone())
             });
         }
-        self.headers.push(PhpString::from_bytes(line));
+        self.headers.push(line.to_vec());
         true
     }
 
@@ -1262,8 +1282,7 @@ impl Request {
             Some(name) => {
                 let name = name.to_ascii_lowercase();
                 self.headers.retain(|h| {
-                    h.as_bytes()
-                        .split(|b| *b == b':')
+                    h.split(|b| *b == b':')
                         .next()
                         .map(<[u8]>::to_ascii_lowercase)
                         != Some(name.clone())
@@ -1274,13 +1293,13 @@ impl Request {
 
     /// `headers_list()`.
     #[must_use]
-    pub fn headers_list(&self) -> Vec<PhpString> {
+    pub fn headers_list(&self) -> Vec<Vec<u8>> {
         self.headers.clone()
     }
 
     /// `headers_sent()`: where the header block was committed, once it was.
     #[must_use]
-    pub fn headers_sent(&self) -> Option<(PhpString, u32)> {
+    pub fn headers_sent(&self) -> Option<(Vec<u8>, u32)> {
         if self.flushed {
             self.output_started_at()
         } else {
@@ -1304,34 +1323,40 @@ impl Request {
         self.response_code = code;
     }
 
-    /// The request headers the host received, `getallheaders()`.
-    #[must_use]
-    pub fn request_headers(&self) -> PhpArray {
+    /// The request headers the host received, `getallheaders()`, as
+    /// strings of the request's.
+    pub fn request_headers(&mut self) -> Result<PhpArray, Thrown> {
         let mut array = PhpArray::new();
-        for (name, value) in &self.description.headers {
-            array.set(
-                Key::Str(PhpString::from_bytes(name)),
-                Value::string(PhpString::from_bytes(value)),
-            );
+        let headers = self.description.headers.clone();
+        for (name, value) in &headers {
+            let key = Key::Str(PhpString::new(self, name)?);
+            array.set(key, Value::string(PhpString::new(self, value)?));
         }
-        array
+        Ok(array)
     }
 
     // -------------------------------------------------- diagnostics
 
-    /// `error_get_last()`.
-    #[must_use]
-    pub fn last_error(&self) -> Option<PhpArray> {
-        let (level, message, file, line) = self.last_error.as_ref()?;
+    /// `error_get_last()`: the last diagnostic as php's four-key array,
+    /// its strings the request's.
+    pub fn last_error(&mut self) -> Result<Option<PhpArray>, Thrown> {
+        let Some((level, message, file, line)) = self.last_error.clone() else {
+            return Ok(None);
+        };
         let mut array = PhpArray::new();
-        array.set(Key::from_bytes(b"type"), Value::int(level.bit()));
-        array.set(
-            Key::from_bytes(b"message"),
-            Value::string(PhpString::from_bytes(message.as_bytes())),
-        );
-        array.set(Key::from_bytes(b"file"), Value::string(file.clone()));
-        array.set(Key::from_bytes(b"line"), Value::int(i64::from(*line)));
-        Some(array)
+        for (name, value) in [
+            (&b"type"[..], Value::int(level.bit())),
+            (
+                b"message",
+                Value::string(PhpString::new(self, message.as_bytes())?),
+            ),
+            (b"file", Value::string(PhpString::new(self, &file)?)),
+            (b"line", Value::int(i64::from(line))),
+        ] {
+            let key = Key::Str(PhpString::new(self, name)?);
+            array.set(key, value);
+        }
+        Ok(Some(array))
     }
 
     /// `error_clear_last()`.
@@ -1349,7 +1374,7 @@ impl Request {
     #[must_use]
     pub fn error_reporting(&self) -> i64 {
         self.ini_get(b"error_reporting")
-            .and_then(|v| String::from_utf8_lossy(v.as_bytes()).parse().ok())
+            .and_then(|v| String::from_utf8_lossy(v).parse().ok())
             .unwrap_or(32767)
     }
 
@@ -1397,10 +1422,11 @@ impl Request {
         PhpArray::new()
     }
 
-    /// The file of the frame that called the native.
+    /// The file of the frame that called the native,
+    /// `zend_get_executed_filename`.
     #[must_use]
-    pub fn current_file(&self) -> Option<&PhpString> {
-        self.description.script_name.as_ref()
+    pub fn current_file(&self) -> Option<&[u8]> {
+        self.description.script_name.as_deref()
     }
 
     /// `zend_get_executed_lineno`: the line the innermost frame stands
@@ -1430,6 +1456,29 @@ impl Request {
         let call = self.vm.serving_call()?;
         let index = usize::try_from(position.checked_sub(1)?).ok()?;
         call.arguments.get(index).cloned()
+    }
+
+    /// `zend_parse_arg_*_weak` writing what it coerced back into the
+    /// argument's zval: the call frame gives up what it held at
+    /// `position` and owns `value` from here, so the native reads a view
+    /// and the frame frees the string with the call. A position past
+    /// what the call was given writes nothing.
+    pub(crate) fn replace_argument(&mut self, position: u32, value: Value) {
+        let Some(index) = position
+            .checked_sub(1)
+            .and_then(|at| usize::try_from(at).ok())
+        else {
+            return;
+        };
+        let Some(previous) = self
+            .vm
+            .serving_call_mut()
+            .and_then(|call| call.arguments.get_mut(index))
+            .map(|slot| std::mem::replace(slot, value))
+        else {
+            return;
+        };
+        self.release(previous);
     }
 
     /// The arguments of the frame `depth` levels up, `func_get_args` from
@@ -1484,17 +1533,20 @@ impl Request {
             .collect()
     }
 
-    /// `get_defined_functions()`: `internal` and `user` lists.
-    #[must_use]
-    pub fn defined_functions(&self) -> PhpArray {
+    /// `get_defined_functions()`: `internal` and `user` lists, the names
+    /// strings of the request's.
+    pub fn defined_functions(&mut self) -> Result<PhpArray, Thrown> {
         let mut internal = PhpArray::new();
-        for (decl, _) in &self.shared.functions {
-            internal.append(Value::string(PhpString::from_bytes(&decl.name.0)));
+        let shared = Arc::clone(&self.shared);
+        for (decl, _) in &shared.functions {
+            internal.append(Value::string(PhpString::new(self, &decl.name.0)?));
         }
         let mut array = PhpArray::new();
-        array.set(Key::from_bytes(b"internal"), Value::array(internal));
-        array.set(Key::from_bytes(b"user"), Value::array(PhpArray::new()));
-        array
+        let key = Key::Str(PhpString::new(self, b"internal")?);
+        array.set(key, Value::array(internal));
+        let key = Key::Str(PhpString::new(self, b"user")?);
+        array.set(key, Value::array(PhpArray::new()));
+        Ok(array)
     }
 
     /// `class_alias()`.
@@ -1503,14 +1555,16 @@ impl Request {
         Ok(())
     }
 
-    /// `get_defined_constants()`.
-    #[must_use]
-    pub fn constants(&self) -> PhpArray {
+    /// `get_defined_constants()`: what `define()` declared in this
+    /// request, each name a string of the request's.
+    pub fn constants(&mut self) -> Result<PhpArray, Thrown> {
         let mut array = PhpArray::new();
-        for (name, value) in &self.constants {
-            array.set(Key::Str(name.clone()), value.clone());
+        let constants = self.constants.clone();
+        for (name, value) in constants {
+            let key = Key::Str(PhpString::new(self, &name)?);
+            array.set(key, value);
         }
-        array
+        Ok(array)
     }
 
     /// `define()`: `false` when the constant exists.
@@ -1518,7 +1572,7 @@ impl Request {
         if self.constant_named(name).is_some() {
             return Ok(false);
         }
-        self.constants.push((PhpString::from_bytes(name), value));
+        self.constants.push((name.to_vec(), value));
         Ok(true)
     }
 
@@ -1549,22 +1603,19 @@ impl Request {
             .collect()
     }
 
-    /// `get_included_files()`.
+    /// `get_included_files()`: the paths, as `EG(included_files)` holds
+    /// them.
     #[must_use]
-    pub fn included_files(&self) -> Vec<PhpString> {
+    pub fn included_files(&self) -> Vec<Vec<u8>> {
         self.description.script_name.iter().cloned().collect()
     }
 
-    /// `get_loaded_extensions()`: the bundle in `MINIT` order, after `Core`.
+    /// `get_loaded_extensions()`: the bundle in `MINIT` order, after
+    /// `Core`, each the name its `zend_module_entry` carries.
     #[must_use]
-    pub fn loaded_extensions(&self) -> Vec<PhpString> {
-        std::iter::once(PhpString::from_bytes(b"Core"))
-            .chain(
-                self.shared
-                    .extensions
-                    .iter()
-                    .map(|e| PhpString::from_bytes(e.name.as_bytes())),
-            )
+    pub fn loaded_extensions(&self) -> Vec<String> {
+        std::iter::once(String::from("Core"))
+            .chain(self.shared.extensions.iter().map(|e| e.name.clone()))
             .collect()
     }
 
@@ -1624,11 +1675,11 @@ impl Request {
 
     /// `ini_get()`: the request's override, else the engine's default.
     #[must_use]
-    pub fn ini_get(&self, name: &[u8]) -> Option<PhpString> {
+    pub fn ini_get(&self, name: &[u8]) -> Option<&[u8]> {
         self.ini
             .iter()
-            .find(|(n, _)| n.as_bytes() == name)
-            .map(|(_, v)| v.clone())
+            .find(|(n, _)| n.as_slice() == name)
+            .map(|(_, v)| v.as_slice())
             .or_else(|| self.shared.ini_default(name))
     }
 
@@ -1654,16 +1705,17 @@ impl Request {
     /// Warning: unexpected NAN value was coerced to string in %s on line 3
     /// NAN
     /// ```
-    pub fn ini_set(&mut self, name: &[u8], value: &[u8]) -> Result<Option<PhpString>, Thrown> {
-        let previous = self.ini_get(name);
+    pub fn ini_set(&mut self, name: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
+        let previous = self.ini_get(name).map(<[u8]>::to_vec);
         if previous.is_none() || !Request::ini_modifiable(name) {
             return Ok(None);
         }
-        self.ini.retain(|(n, _)| n.as_bytes() != name);
-        self.ini
-            .push((PhpString::from_bytes(name), PhpString::from_bytes(value)));
-        if name == b"max_execution_time" {
-            self.arm_timer();
+        self.ini.retain(|(n, _)| n.as_slice() != name);
+        self.ini.push((name.to_vec(), value.to_vec()));
+        match name {
+            b"max_execution_time" => self.arm_timer(),
+            b"memory_limit" => self.set_memory_limit(),
+            _ => {}
         }
         Ok(previous)
     }
@@ -1676,15 +1728,17 @@ impl Request {
         !matches!(name, b"xmlrpc_errors" | b"short_open_tag")
     }
 
-    /// `ini_get_all()`: every entry with its current value.
-    #[must_use]
-    pub fn ini_entries(&self) -> PhpArray {
+    /// `ini_get_all()`: every entry with its current value, as strings
+    /// of the request's.
+    pub fn ini_entries(&mut self) -> Result<PhpArray, Thrown> {
         let mut array = PhpArray::new();
-        for (name, default) in self.shared.ini_defaults() {
-            let value = self.ini_get(name.as_bytes()).unwrap_or(default);
-            array.set(Key::Str(name), Value::string(value));
+        let shared = Arc::clone(&self.shared);
+        for (name, default) in shared.ini_defaults() {
+            let value = self.ini_get(name).unwrap_or(default).to_vec();
+            let key = Key::Str(PhpString::new(self, name)?);
+            array.set(key, Value::string(PhpString::new(self, &value)?));
         }
-        array
+        Ok(array)
     }
 
     /// `zend_ini_parse_bool`: `1`, `on`, `yes`, `true` are true.
@@ -1716,24 +1770,20 @@ impl Request {
 
     // -------------------------------------------------- environment
 
-    /// `getenv(name)`.
+    /// `getenv(name)`: the bytes the host's environment holds.
     #[must_use]
-    pub fn env(&self, name: &[u8]) -> Option<PhpString> {
+    pub fn env(&self, name: &[u8]) -> Option<&[u8]> {
         self.description
             .env
             .iter()
             .find(|(n, _)| n.as_slice() == name)
-            .map(|(_, v)| PhpString::from_bytes(v))
+            .map(|(_, v)| v.as_slice())
     }
 
     /// `getenv()` with no name: every pair.
     #[must_use]
-    pub fn env_pairs(&self) -> Vec<(PhpString, PhpString)> {
-        self.description
-            .env
-            .iter()
-            .map(|(n, v)| (PhpString::from_bytes(n), PhpString::from_bytes(v)))
-            .collect()
+    pub fn env_pairs(&self) -> &[(Vec<u8>, Vec<u8>)] {
+        &self.description.env
     }
 
     /// `putenv()`: set, or unset with `None`.
@@ -1750,26 +1800,26 @@ impl Request {
     pub fn superglobal(&self, name: &[u8]) -> Option<&PhpArray> {
         self.superglobals
             .iter()
-            .find(|(n, _)| n.as_bytes() == name)
+            .find(|(n, _)| n.as_slice() == name)
             .map(|(_, a)| a)
     }
 
     /// Replace a superglobal, what the GPC seeding and `session_start` do.
     pub fn set_superglobal(&mut self, name: &[u8], value: PhpArray) {
-        self.superglobals.retain(|(n, _)| n.as_bytes() != name);
-        self.superglobals.push((PhpString::from_bytes(name), value));
+        self.superglobals.retain(|(n, _)| n.as_slice() != name);
+        self.superglobals.push((name.to_vec(), value));
     }
 
-    /// `php_sapi_name()`.
+    /// `php_sapi_name()`: `sapi_module.name`.
     #[must_use]
-    pub fn sapi_name(&self) -> PhpString {
-        PhpString::from_bytes(self.description.sapi_name.as_bytes())
+    pub fn sapi_name(&self) -> &str {
+        &self.description.sapi_name
     }
 
     /// The file the request serves, `$_SERVER['SCRIPT_NAME']`.
     #[must_use]
-    pub fn script_name(&self) -> Option<&PhpString> {
-        self.description.script_name.as_ref()
+    pub fn script_name(&self) -> Option<&[u8]> {
+        self.description.script_name.as_deref()
     }
 
     /// The request body as a stream, `php://input` and `STDIN`.
@@ -1808,28 +1858,22 @@ impl Request {
 
     /// `strerror` text for an OS error code, as php's `%s` of it.
     #[must_use]
-    pub fn os_error_text(&self, code: i32) -> PhpString {
-        PhpString::from_bytes(
-            std::io::Error::from_raw_os_error(code)
-                .to_string()
-                .as_bytes(),
-        )
+    pub fn os_error_text(&self, code: i32) -> String {
+        std::io::Error::from_raw_os_error(code).to_string()
     }
 
-    /// `parse_str()`: a query string as an array.
-    #[must_use]
-    pub fn parse_query(&self, query: &[u8]) -> PhpArray {
+    /// `parse_str()`: a query string as an array, its strings the
+    /// request's.
+    pub fn parse_query(&mut self, query: &[u8]) -> Result<PhpArray, Thrown> {
         let mut array = PhpArray::new();
         for pair in query.split(|b| *b == b'&').filter(|p| !p.is_empty()) {
             let mut halves = pair.splitn(2, |b| *b == b'=');
             let name = halves.next().unwrap_or_default();
             let value = halves.next().unwrap_or_default();
-            array.set(
-                Key::from_bytes(name),
-                Value::string(PhpString::from_bytes(value)),
-            );
+            let key = Key::from_string(PhpString::new(self, name)?);
+            array.set(key, Value::string(PhpString::new(self, value)?));
         }
-        array
+        Ok(array)
     }
 
     /// `set_time_limit()`, which is `zend_alter_ini_entry_ex` over
@@ -1867,6 +1911,95 @@ impl Request {
     /// interned here and are gone when the request ends.
     pub(crate) fn heap_mut(&mut self) -> &mut Heap {
         &mut self.heap
+    }
+
+    /// A string of `bytes` out of this request's heap, what
+    /// [`PhpString::new`] is: php's `ZVAL_STRINGL_FAST`, the process's
+    /// interned string for the empty string and a string of one byte
+    /// (`ZSTR_EMPTY_ALLOC`, `ZSTR_CHAR`), `zend_string_init` otherwise.
+    /// The memory limit is the fatal that ends the request, recorded
+    /// here where `zend_mm` leaves the request, and the `Thrown` that
+    /// carries no throwable ends the native.
+    pub(crate) fn string(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
+        let allocated = if bytes.len() <= 1 {
+            self.heap.intern(bytes)
+        } else {
+            self.heap.string(bytes)
+        };
+        self.allocated(allocated)
+    }
+
+    /// A string of `len` bytes written in place, what
+    /// [`PhpString::filled`] is: `zend_string_alloc`, then the caller's
+    /// write into `ZSTR_VAL`.
+    pub(crate) fn string_with(
+        &mut self,
+        len: usize,
+        fill: impl FnOnce(&mut [u8]),
+    ) -> Result<PhpString, Thrown> {
+        let allocated = self.heap.string_with(len, fill);
+        self.allocated(allocated)
+    }
+
+    /// A string of `n * m + l` bytes written in place, what
+    /// [`PhpString::product`] is: `zend_string_safe_alloc`.
+    pub(crate) fn string_product(
+        &mut self,
+        n: usize,
+        m: usize,
+        l: usize,
+        fill: impl FnOnce(&mut [u8]),
+    ) -> Result<PhpString, Thrown> {
+        let allocated = self.heap.string_safe_alloc(n, m, l, fill);
+        self.allocated(allocated)
+    }
+
+    /// What the heap answered, as the native sees it: the string, or the
+    /// memory limit as php's fatal, which `zend_mm` raises where the
+    /// allocation was asked for and which ends the request from there.
+    fn allocated(&mut self, allocated: Result<php_heap::Str, Fatal>) -> Result<PhpString, Thrown> {
+        match allocated {
+            Ok(s) => Ok(PhpString::of(s)),
+            Err(fatal) => {
+                self.end_in(&fatal);
+                Err(Thrown::of(None))
+            }
+        }
+    }
+
+    /// One more owner of what `value` holds: `Z_TRY_ADDREF_P`, a refcount
+    /// for a string of the request's, nothing for a scalar or an interned
+    /// string. An array, an object, a resource and a reference are owned
+    /// Rust data until their lane lands, and a clone of one is a copy,
+    /// so there is nothing to count.
+    pub(crate) fn addref(&self, value: &Value) {
+        if let ValueRef::Str(s) = value.as_ref() {
+            self.heap.addref(Zval::string(s.heap()));
+        }
+    }
+
+    /// One owner fewer of what `value` holds, `zval_ptr_dtor`: the
+    /// string is freed when its last owner gives it up, and an interned
+    /// one never is. The owned kinds drop with the `Value`. An object's
+    /// destructor is served from here when objects stand on the heap,
+    /// through [`HeapHooks`]; nothing here can serve user code yet.
+    // Taking the value is the point: the owner is given up here, and a
+    // `Value` that is still in hand after this call names what may be
+    // freed.
+    #[allow(clippy::needless_pass_by_value)]
+    pub(crate) fn release(&mut self, value: Value) {
+        if let ValueRef::Str(s) = value.as_ref() {
+            self.heap.release_string(s.heap());
+        }
+    }
+
+    /// `zend_set_memory_limit` over the ini entry as the table has it:
+    /// at request start, and again when `ini_set()` moves the entry,
+    /// which is php's `OnChangeMemoryLimit`. `-1` is no limit.
+    fn set_memory_limit(&mut self) {
+        let limit = self.ini_parse_bytes_of("memory_limit");
+        self.heap
+            .set_memory_limit(usize::try_from(limit).unwrap_or(usize::MAX >> 1));
     }
 
     /// `memory_get_usage()`.
@@ -1908,9 +2041,9 @@ impl Request {
         self.gc_enabled
     }
 
-    /// `gc_status()` with php 8.5's fields.
-    #[must_use]
-    pub fn gc_status(&self) -> PhpArray {
+    /// `gc_status()` with php 8.5's fields, the keys strings of the
+    /// request's.
+    pub fn gc_status(&mut self) -> Result<PhpArray, Thrown> {
         let mut array = PhpArray::new();
         for (name, value) in [
             ("running", Value::bool(false)),
@@ -1926,9 +2059,10 @@ impl Request {
             ("destructor_time", Value::float(0.0)),
             ("free_time", Value::float(0.0)),
         ] {
-            array.set(Key::from_bytes(name.as_bytes()), value);
+            let key = Key::Str(PhpString::new(self, name.as_bytes())?);
+            array.set(key, value);
         }
-        array
+        Ok(array)
     }
 
     // -------------------------------------------------- paths and streams
@@ -2001,7 +2135,7 @@ impl Request {
 
     /// `stream_get_wrappers()`.
     #[must_use]
-    pub fn stream_wrappers(&self) -> Vec<PhpString> {
+    pub fn stream_wrappers(&self) -> Vec<String> {
         self.wrappers.iter().map(|w| w.scheme.clone()).collect()
     }
 
@@ -2048,9 +2182,9 @@ enum Display {
 
 /// `zend_ini_parse_bool`: an ini entry read as on or off, where "off",
 /// "no", "false" and "" are off beside "0" and everything else is on.
-fn ini_truth(value: Option<&PhpString>) -> bool {
+fn ini_truth(value: Option<&[u8]>) -> bool {
     let Some(value) = value else { return false };
-    let text = value.as_bytes().to_ascii_lowercase();
+    let text = value.to_ascii_lowercase();
     !matches!(text.as_slice(), b"" | b"0" | b"off" | b"no" | b"false")
 }
 
@@ -2141,7 +2275,7 @@ fn append_escaped(out: &mut String, bytes: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Level, PhpString, Request, append_escaped, escape_html, level_name};
+    use super::{Level, Request, append_escaped, escape_html, level_name};
     use crate::engine::{Engine, RequestDescription};
 
     /// A request on a fresh engine's shared state, for a test that gives
@@ -2164,12 +2298,12 @@ mod tests {
     #[test]
     fn a_core_level_is_rendered_past_error_reporting() {
         let engine = Engine::builder().ini("error_reporting", "0").build();
-        let file = PhpString::from_bytes(b"witness.php");
+        let file = b"witness.php";
         let mut request = request(&engine);
-        request.note_error_in(Level::CoreWarning, "core", &file, 2);
-        request.note_error_in(Level::CoreError, "core", &file, 3);
-        request.note_error_in(Level::Warning, "masked", &file, 4);
-        request.note_error_in(Level::Error, "masked", &file, 5);
+        request.note_error_in(Level::CoreWarning, "core", file, 2);
+        request.note_error_in(Level::CoreError, "core", file, 3);
+        request.note_error_in(Level::Warning, "masked", file, 4);
+        request.note_error_in(Level::Error, "masked", file, 5);
         assert_eq!(
             String::from_utf8_lossy(&request.take_body()),
             "\nWarning: core in witness.php on line 2\n\nFatal error: core in witness.php on line 3\n"

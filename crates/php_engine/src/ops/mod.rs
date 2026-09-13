@@ -21,7 +21,10 @@ use crate::api::values::{PhpArray, PhpString, TypeTag, Value, ValueRef};
 /// string interpolation write. An array is php's warning and the word
 /// `Array`; a resource its `Resource id #` and number; an object is the
 /// `Error` php throws for one with no `__toString`, and no class here
-/// has one yet, so that arm waits with the classes.
+/// has one yet, so that arm waits with the classes. The string is the
+/// caller's to own and release, as `zval_get_string`'s is: a string
+/// value's own with one more owner, a new one of the request's
+/// otherwise, and the `Err` is the memory limit ending the request.
 ///
 /// ```php
 /// echo 1, "|", true, "|", false, "|", null, "|", "as written", "|", 2.5, "|", NAN;
@@ -31,32 +34,36 @@ use crate::api::values::{PhpArray, PhpString, TypeTag, Value, ValueRef};
 /// Warning: unexpected NAN value was coerced to string in %s on line 2
 /// NAN
 /// ```
-pub(crate) fn to_string(req: &mut Request, value: &Value) -> PhpString {
-    match value.deref().as_ref() {
-        ValueRef::Str(s) => s.clone(),
-        ValueRef::Int(n) => PhpString::from_bytes(n.to_string().as_bytes()),
+pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, Thrown> {
+    let value = value.deref();
+    match value.as_ref() {
+        ValueRef::Str(s) => {
+            req.addref(value);
+            Ok(*s)
+        }
+        ValueRef::Int(n) => PhpString::new(req, n.to_string().as_bytes()),
         ValueRef::Float(f) => {
             // `zend_double_to_str`: the text, then the warning php raises
             // when the value it converted was NAN.
-            let text = PhpString::from_bytes(double_to_string(f, req.precision()).as_bytes());
+            let text = PhpString::new(req, double_to_string(f, req.precision()).as_bytes())?;
             if f.is_nan() {
                 warning(req, "unexpected NAN value was coerced to string");
             }
-            text
+            Ok(text)
         }
-        ValueRef::Bool(true) => PhpString::from_bytes(b"1"),
+        ValueRef::Bool(true) => PhpString::new(req, b"1"),
         ValueRef::Array(_) => {
             warning(req, "Array to string conversion");
-            PhpString::from_bytes(b"Array")
+            PhpString::new(req, b"Array")
         }
-        ValueRef::Resource(r) => PhpString::from_bytes(format!("Resource id #{}", r.id).as_bytes()),
+        ValueRef::Resource(r) => PhpString::new(req, format!("Resource id #{}", r.id).as_bytes()),
         // `false` and `null` are both the empty string, and so is an
         // object until its arm lands.
         ValueRef::Undef
         | ValueRef::Null
         | ValueRef::Bool(false)
         | ValueRef::Object(_)
-        | ValueRef::Reference(_) => PhpString::default(),
+        | ValueRef::Reference(_) => PhpString::new(req, b""),
     }
 }
 
@@ -473,18 +480,33 @@ pub(crate) fn shift_right(req: &mut Request, left: &Value, right: &Value) -> Res
 /// NANz
 /// ```
 pub(crate) fn concat(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
-    let a = to_string(req, left);
-    let b = to_string(req, right);
+    let a = to_string(req, left)?;
+    let b = to_string(req, right)?;
+    // An empty side hands the other side on as it is, with the owner
+    // `to_string` took, which is php's `ZVAL_COPY` of the other operand.
     if a.is_empty() {
+        req.release(Value::string(a));
         return Ok(Value::string(b));
     }
     if b.is_empty() {
+        req.release(Value::string(b));
         return Ok(Value::string(a));
     }
     if a.len() > ZSTR_MAX_LEN - b.len() {
+        req.release(Value::string(a));
+        req.release(Value::string(b));
         return Err(throw(req, "Error", "String size overflow"));
     }
-    Ok(Value::string(a.concat(&b)))
+    // `zend_string_alloc(ZSTR_LEN(op1) + ZSTR_LEN(op2))` and the two
+    // `memcpy` into it; then the two operands' strings are given up.
+    let joined = PhpString::filled(req, a.len() + b.len(), |bytes| {
+        let (head, tail) = bytes.split_at_mut(a.len());
+        head.copy_from_slice(a.as_bytes());
+        tail.copy_from_slice(b.as_bytes());
+    });
+    req.release(Value::string(a));
+    req.release(Value::string(b));
+    Ok(Value::string(joined?))
 }
 
 /// `zend_compare` (`Z/Zend/zend_operators.c:2312`), the one ordering

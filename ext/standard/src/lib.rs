@@ -22,7 +22,7 @@
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::coerce::coerce_param;
 use php_ext::decl::{FunctionDecl, Name, Parameter, Type};
-use php_ext::raising::{Thrown, arg_count_error, arg_null_deprecated, arg_value_error, fatal};
+use php_ext::raising::{Thrown, arg_count_error, arg_null_deprecated, arg_value_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpString, Value, ValueRef};
 
@@ -96,14 +96,28 @@ pub fn extension() -> Extension {
 ///   thrown in %s on line 2
 /// ```
 ///
-/// The return's bytes are `zend_string_safe_alloc(len, times, 0)`: a
-/// product that overflows is php's compile-time-shaped fatal, `Possible
-/// integer overflow in memory allocation (len * times + 32)`, the 32
-/// being the aligned header and NUL of an empty string. One the machine
-/// refuses is php's `Out of memory`. What the request's `memory_limit`
-/// refuses is the allocator's to say, and the string's bytes are on the
-/// system allocator until the memory model backs a `Value` (design §11,
-/// Lane A), so that fatal is not raised here yet; #174 names it.
+/// The return's bytes are `zend_string_safe_alloc(len, times, 0)`, and
+/// so is what they cost: the product plus the aligned header, so
+/// `str_repeat("ab", 3)` moves `memory_get_usage()` by the 40-byte bin
+/// and not the 32 a six-byte string takes, as php's does. A product that
+/// overflows is php's `Possible integer overflow in memory allocation
+/// (len * times + 32)` fatal, raised before a byte is asked for, and one
+/// the request's `memory_limit` refuses is the allocator's own fatal,
+/// raised where the allocation is asked for and not by this native.
+///
+/// ```php
+/// $b = memory_get_usage(); $s = str_repeat("ab", 3); var_dump(memory_get_usage() - $b);
+/// ```
+/// ```expect
+/// int(40)
+/// ```
+///
+/// ```php
+/// $s = str_repeat("x", 200000000);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate 200000032 bytes) in %s on line 2
+/// ```
 fn str_repeat(req: &mut Request) -> Result<Value, Thrown> {
     let count = req.argument_count();
     if count != 2 {
@@ -115,35 +129,28 @@ fn str_repeat(req: &mut Request) -> Result<Value, Thrown> {
         return Err(arg_value_error(req, 2, "be greater than or equal to 0"));
     }
     if string.is_empty() || times == 0 {
-        return Ok(Value::string(PhpString::default()));
+        return Ok(Value::string(PhpString::new(req, b"")?));
     }
     let times = usize::try_from(times).unwrap_or(usize::MAX);
-    let len = string.len();
-    // `zend_safe_address_guarded(len, times, 32)`: the product and the
-    // header checked before a byte is asked for.
-    let Some(size) = len
-        .checked_mul(times)
-        .and_then(|bytes| bytes.checked_add(32))
-    else {
-        return Err(fatal(
-            req,
-            &format!("Possible integer overflow in memory allocation ({len} * {times} + 32)"),
-        ));
-    };
-    let mut bytes = Vec::new();
-    if bytes.try_reserve_exact(size - 32).is_err() {
-        return Err(fatal(
-            req,
-            &format!(
-                "Out of memory (allocated {}) (tried to allocate {size} bytes)",
-                req.memory_usage(true)
-            ),
-        ));
-    }
-    for _ in 0..times {
-        bytes.extend_from_slice(string.as_bytes());
-    }
-    Ok(Value::string(PhpString::from_bytes(&bytes)))
+    let pattern = string.as_bytes();
+    // `zend_string_safe_alloc(ZSTR_LEN(input_str), mult, 0, 0)`, then
+    // php's two fills: one byte `memset`, else `memcpy` of the pattern
+    // and then of the result onto itself, doubling what is laid down.
+    let repeated = PhpString::product(req, pattern.len(), times, 0, |result| {
+        if pattern.len() == 1 {
+            result.fill(pattern[0]);
+            return;
+        }
+        result[..pattern.len()].copy_from_slice(pattern);
+        let mut laid = pattern.len();
+        while laid < result.len() {
+            let step = laid.min(result.len() - laid);
+            let (done, rest) = result.split_at_mut(laid);
+            rest[..step].copy_from_slice(&done[..step]);
+            laid += step;
+        }
+    })?;
+    Ok(Value::string(repeated))
 }
 
 /// `zend_wrong_parameters_count_error` for a native whose minimum is its
@@ -165,10 +172,13 @@ fn string_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown
     let given = req.argument(position).unwrap_or_default();
     if matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
         arg_null_deprecated(req, position, "string");
-        return Ok(PhpString::default());
+        return PhpString::new(req, b"");
     }
     let coerced = coerce_param(req, &given, &Type::String, position)?;
-    Ok(coerced.as_php_string().cloned().unwrap_or_default())
+    match coerced.as_php_string() {
+        Some(s) => Ok(*s),
+        None => PhpString::new(req, b""),
+    }
 }
 
 /// One `Z_PARAM_LONG` of a native, the argument at `position` read off

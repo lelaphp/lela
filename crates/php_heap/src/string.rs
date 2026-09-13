@@ -121,6 +121,44 @@ impl Str {
         Str(header)
     }
 
+    /// Lay a string of `len` bytes down at `at`, an allocation of
+    /// [`Str::allocation_size`] bytes, and hand its bytes to `fill` to
+    /// write once: php's `zend_string_alloc` with the `memcpy` or
+    /// `memset` the caller does into `ZSTR_VAL`. The bytes are zero
+    /// before `fill` sees them, so a filler that writes fewer leaves NULs.
+    ///
+    /// # Safety
+    ///
+    /// `at` is writable for [`Str::allocation_size`] of `len` bytes and
+    /// holds nothing else.
+    pub(crate) unsafe fn init_with(
+        at: NonNull<u8>,
+        len: usize,
+        flags: u32,
+        fill: impl FnOnce(&mut [u8]),
+    ) -> Str {
+        let header: NonNull<StrHeader> = at.cast();
+        // SAFETY: the caller's allocation is at least the header and the
+        // bytes, and nothing else holds it.
+        unsafe {
+            header.as_ptr().write(StrHeader {
+                gc: Refcounted::new(ZvalType::String, gc::NOT_COLLECTABLE | flags),
+                h: Cell::new(0),
+                len,
+            });
+        }
+        // SAFETY: the bytes and the NUL sit right after the header,
+        // inside the same allocation the caller gave.
+        let val = unsafe { at.as_ptr().add(HEADER) };
+        // SAFETY: `val` is writable for `len + 1` bytes, the bytes and
+        // php's NUL after them.
+        unsafe { val.write_bytes(0, len + 1) };
+        // SAFETY: the `len` bytes were just written, and nothing else
+        // names the allocation while `fill` writes them.
+        fill(unsafe { std::slice::from_raw_parts_mut(val, len) });
+        Str(header)
+    }
+
     /// Where the string sits, for the heap that frees it.
     pub(crate) const fn address(self) -> NonNull<u8> {
         self.0.cast()
@@ -286,6 +324,13 @@ impl Str {
         NonNull::new(at).map(Str)
     }
 }
+
+// SAFETY: a `Str` is the pointer php's `zend_string *` is: a request's
+// string moves with the request that owns it, whole, to the thread that
+// serves it (design §5.14), and an interned one is immutable and freed
+// by its table alone. What keeps it off `Sync` is the refcount `Cell`,
+// which two threads must never touch at once, and that stays.
+unsafe impl Send for Str {}
 
 /// Two strings are the one string when their bytes are, which is php's
 /// `zend_string_equals`; identity is what interning is for.

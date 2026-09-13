@@ -198,10 +198,11 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) {
 ///
 /// A fresh request holds php's one 2 MiB chunk and nothing more, so the
 /// second number is that chunk and the oracle says so. The first is each
-/// engine's own bookkeeping and is not pinned here; what
-/// a huge block moves it by is `php_heap`'s
-/// `a_huge_block_rounds_to_the_page_the_machine_reports`, which this
-/// witness cannot yet reach (#174).
+/// engine's own bookkeeping and is not pinned here: what php's request
+/// heap holds beside the interned strings is on the system allocator
+/// in this engine, the op array, the compiler and the tree, which
+/// design §5.13 states as the one approximation and the divergence row
+/// on the witness of `Buckets` records.
 ///
 /// ```php
 /// var_dump(memory_get_usage(true), memory_get_peak_usage(true));
@@ -212,6 +213,23 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) {
 /// int(2097152)
 /// int(2097152)
 /// int(2097152)
+/// ```
+///
+/// What one allocation moves both numbers by is a number both engines
+/// answer, since every string a native builds is the request's heap's
+/// (design §5.13, #174, #211). A string past 2 MiB is a huge block,
+/// rounded to the page the machine reports, sixteen KiB where the
+/// oracle is pinned, and `zend_mm_add_huge_block` takes the block's list
+/// node from the 24-byte bin of the same heap before the block is
+/// counted, so the bin accounting moves by the rounded block and the
+/// node, and the chunks' by the block alone:
+///
+/// ```php
+/// $b = memory_get_usage(); $rb = memory_get_usage(true); $s = str_repeat("x", 3000000); var_dump(memory_get_usage() - $b, memory_get_usage(true) - $rb);
+/// ```
+/// ```expect
+/// int(3014680)
+/// int(3014656)
 /// ```
 fn memory_get_usage(req: &mut Request) -> Result<Value, Thrown> {
     let real = real_usage(req)?;
@@ -310,10 +328,11 @@ fn extension_loaded(req: &mut Request) -> Result<Value, Thrown> {
     let Some(given) = req.argument(1) else {
         return Err(too_few_arguments(req, 1, 0));
     };
-    let wanted = crate::ops::to_string(req, &given);
-    let wanted = wanted.as_bytes().to_ascii_lowercase();
+    let wanted = crate::ops::to_string(req, &given)?;
+    let lowered = wanted.as_bytes().to_ascii_lowercase();
+    req.release(Value::string(wanted));
     Ok(Value::bool(req.loaded_extensions().iter().any(|name| {
-        name.as_bytes().to_ascii_lowercase() == wanted
+        name.as_bytes().to_ascii_lowercase() == lowered
     })))
 }
 
@@ -368,8 +387,10 @@ fn ini_set(req: &mut Request) -> Result<Value, Thrown> {
         ));
     }
     let value = to_string(req, value)?;
-    Ok(match req.ini_set(option.as_bytes(), value.as_bytes())? {
-        Some(previous) => Value::string(previous),
+    let set = req.ini_set(option.as_bytes(), value.as_bytes());
+    req.release(Value::string(value));
+    Ok(match set? {
+        Some(previous) => Value::string(PhpString::new(req, &previous)?),
         None => Value::bool(false),
     })
 }
@@ -418,15 +439,19 @@ fn long_argument(req: &mut Request, position: u32) -> Result<i64, Thrown> {
 /// One `Z_PARAM_STR` of a native, the argument at `position` read off
 /// the call frame: `null` is the 8.1 deprecation and then the empty
 /// string, and what is there is coerced as php coerces a string
-/// parameter.
+/// parameter. The string is the frame's, a view the native holds while
+/// the call stands.
 fn string_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown> {
     let given = req.argument(position).unwrap_or_default();
     if matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
         arg_null_deprecated(req, position, "string");
-        return Ok(PhpString::default());
+        return PhpString::new(req, b"");
     }
     let coerced = coerce_param(req, &given, &Type::String, position)?;
-    Ok(coerced.as_php_string().cloned().unwrap_or_default())
+    match coerced.as_php_string() {
+        Some(s) => Ok(*s),
+        None => PhpString::new(req, b""),
+    }
 }
 
 /// One declared parameter.

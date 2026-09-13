@@ -144,6 +144,48 @@ impl Heap {
         Ok(unsafe { Str::init(at, bytes, 0) })
     }
 
+    /// A request-scoped string of `len` bytes written by `fill`, php's
+    /// `zend_string_alloc` and the `memcpy` or `memset` a native does
+    /// into `ZSTR_VAL` after it: the allocation is asked for, and the
+    /// limit met, before a byte of the string exists anywhere, which is
+    /// what lets `str_repeat("x", 200000000)` be refused without two
+    /// hundred megabytes being built first. `fill` is given the `len`
+    /// bytes, zero, to write once.
+    pub fn string_with(&mut self, len: usize, fill: impl FnOnce(&mut [u8])) -> Result<Str, Fatal> {
+        let at = self.mm.alloc(Str::allocation_size(len))?;
+        // SAFETY: the allocation is exactly the size `init_with` asks for
+        // and nothing else holds it.
+        Ok(unsafe { Str::init_with(at, len, 0, fill) })
+    }
+
+    /// `zend_string_safe_alloc(n, m, l, 0)`: a string of `n * m + l`
+    /// bytes whose allocation is that product plus the aligned header of
+    /// a string of `l` bytes, which is not the allocation of
+    /// [`Heap::string_with`] for the same length: `str_repeat("ab", 3)`
+    /// takes 38 bytes and the 40-byte bin where a six-byte string takes
+    /// 31 and the 32-byte bin, and `memory_get_usage()` says so. A
+    /// product that overflows is php's `Possible integer overflow in
+    /// memory allocation` fatal (`safe_address_guarded`), raised before
+    /// anything is asked for.
+    pub fn string_safe_alloc(
+        &mut self,
+        n: usize,
+        m: usize,
+        l: usize,
+        fill: impl FnOnce(&mut [u8]),
+    ) -> Result<Str, Fatal> {
+        let header = Str::allocation_size(l);
+        let Some(size) = n.checked_mul(m).and_then(|bytes| bytes.checked_add(header)) else {
+            return Err(Fatal::Error(format!(
+                "Possible integer overflow in memory allocation ({n} * {m} + {header})"
+            )));
+        };
+        let at = self.mm.alloc(size)?;
+        // SAFETY: the allocation holds the header and `n * m + l` bytes
+        // with the NUL after them, and nothing else holds it.
+        Ok(unsafe { Str::init_with(at, size - header + l, 0, fill) })
+    }
+
     /// How many strings this request has interned, php's
     /// `zend_hash_num_elements(&CG(interned_strings))`.
     #[must_use]

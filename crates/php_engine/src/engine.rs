@@ -18,14 +18,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
 use php_compile::CompileError;
-use php_heap::{Fatal, FrameRef, Intern, Strings};
+use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
 use php_unit::Unit;
 use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, Name};
 
 use crate::api::abi::{Cache, Entry, Extension, StartupIni};
 use crate::api::raising::Level;
 use crate::api::request::{Ending, Request};
-use crate::api::values::{PhpString, Value};
+use crate::api::values::Value;
+use crate::exec;
 use crate::tier::{Nop, Tier, execute};
 
 /// Everything a host knows about one request before it starts (design
@@ -41,7 +42,7 @@ pub struct RequestDescription {
     pub sapi_name: String,
     pub is_web: bool,
     /// The served file's name, for `$_SERVER['SCRIPT_NAME']` and error text.
-    pub script_name: Option<PhpString>,
+    pub script_name: Option<Vec<u8>>,
     /// The source to serve, when the host has it in hand (`php -r`, the
     /// in-process tests); else the file is read by its name.
     pub source: Option<Vec<u8>>,
@@ -107,7 +108,11 @@ pub(crate) struct Shared {
     pub(crate) classes: Vec<ClassDecl>,
     constants: Vec<ConstDecl>,
     pub(crate) engine_states: Vec<Box<dyn Any + Send + Sync>>,
-    ini: Vec<(PhpString, PhpString)>,
+    ini: Vec<(Vec<u8>, Vec<u8>)>,
+    /// The constants' values, the string ones interned into the engine's
+    /// table as `REGISTER_STRING_CONSTANT` interns php's at `MINIT`, so
+    /// a request reading one allocates nothing and counts nothing.
+    constant_values: Vec<(Box<[u8]>, Zval)>,
     entry: Loop,
     /// The unit cache (design §6.3): what a file compiled to, held for
     /// every request that asks for the same file unchanged. A source the
@@ -122,6 +127,29 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
+    /// The engine's own constants, php's `zend_register_standard_constants`
+    /// and `main.c`'s `PHP_VERSION` and `PHP_EOL`: the ones a program
+    /// reaches with no extension loaded, their strings interned into
+    /// `strings` at build.
+    fn zend_constants(strings: &mut Strings) -> Vec<(&'static str, Zval)> {
+        let mut values = Vec::new();
+        for (name, text) in [
+            ("PHP_VERSION", crate::api::request::PHP_VERSION),
+            ("PHP_EOL", "\n"),
+        ] {
+            if let Ok(interned) = strings.intern(text.as_bytes()) {
+                values.push((name, Zval::string(interned)));
+            }
+        }
+        values.extend([
+            ("PHP_INT_MAX", Zval::long(i64::MAX)),
+            ("PHP_INT_MIN", Zval::long(i64::MIN)),
+            ("PHP_INT_SIZE", Zval::long(8)),
+            ("E_ALL", Zval::long(32767)),
+        ]);
+        values
+    }
+
     /// One source compiled with its constant strings interned into the
     /// engine's table, which is what publication is (design §5.2, §6.3):
     /// opcache's persist walks an op array's constants and re-interns
@@ -151,7 +179,7 @@ impl Shared {
     /// source under its own.
     fn precision(&self) -> i32 {
         self.ini_default(b"precision")
-            .and_then(|value| String::from_utf8_lossy(value.as_bytes()).parse().ok())
+            .and_then(|value| String::from_utf8_lossy(value).parse().ok())
             .unwrap_or(14)
     }
 
@@ -177,39 +205,25 @@ impl Shared {
         Cached::clone(&held)
     }
 
-    pub(crate) fn ini_default(&self, name: &[u8]) -> Option<PhpString> {
+    pub(crate) fn ini_default(&self, name: &[u8]) -> Option<&[u8]> {
         self.ini
             .iter()
-            .find(|(n, _)| n.as_bytes() == name)
-            .map(|(_, v)| v.clone())
+            .find(|(n, _)| n.as_slice() == name)
+            .map(|(_, v)| v.as_slice())
     }
 
-    pub(crate) fn ini_defaults(&self) -> Vec<(PhpString, PhpString)> {
-        self.ini.clone()
+    pub(crate) fn ini_defaults(&self) -> &[(Vec<u8>, Vec<u8>)] {
+        &self.ini
     }
 
+    /// The value of the constant `name` as the bundle declared it, or as
+    /// the engine's own table has it: a value nothing owns, since the
+    /// string ones are the engine's interned strings.
     pub(crate) fn constant(&self, name: &[u8]) -> Option<Value> {
-        if let Some(decl) = self.constants.iter().find(|c| c.name.0.as_ref() == name) {
-            return match &decl.value {
-                ConstExpr::Null => Some(Value::null()),
-                ConstExpr::Bool(b) => Some(Value::bool(*b)),
-                ConstExpr::Long(n) => Some(Value::int(*n)),
-                ConstExpr::Double(f) => Some(Value::float(*f)),
-                ConstExpr::Str(s) => Some(Value::string(PhpString::from_bytes(s))),
-                _ => None,
-            };
-        }
-        match name {
-            b"PHP_VERSION" => Some(Value::string(PhpString::from_bytes(
-                crate::api::request::PHP_VERSION.as_bytes(),
-            ))),
-            b"PHP_EOL" => Some(Value::string(PhpString::from_bytes(b"\n"))),
-            b"PHP_INT_MAX" => Some(Value::int(i64::MAX)),
-            b"PHP_INT_MIN" => Some(Value::int(i64::MIN)),
-            b"PHP_INT_SIZE" => Some(Value::int(8)),
-            b"E_ALL" => Some(Value::int(32767)),
-            _ => None,
-        }
+        self.constant_values
+            .iter()
+            .find(|(n, _)| n.as_ref() == name)
+            .map(|(_, z)| exec::value_of(*z))
     }
 }
 
@@ -246,7 +260,7 @@ const CORE_INI: [(&str, &str); 18] = [
 /// Builds an [`Engine`]: the bundle, the tier and the startup ini.
 pub struct EngineBuilder {
     extensions: Vec<Extension>,
-    ini: Vec<(PhpString, PhpString)>,
+    ini: Vec<(Vec<u8>, Vec<u8>)>,
     entry: Loop,
     tier_extension: Option<Extension>,
 }
@@ -262,10 +276,8 @@ impl EngineBuilder {
     /// One ini entry as the host's `-d` or `php.ini` sets it.
     #[must_use]
     pub fn ini(mut self, name: &str, value: &str) -> EngineBuilder {
-        self.ini.push((
-            PhpString::from_bytes(name.as_bytes()),
-            PhpString::from_bytes(value.as_bytes()),
-        ));
+        self.ini
+            .push((name.as_bytes().to_vec(), value.as_bytes().to_vec()));
         self
     }
 
@@ -282,14 +294,9 @@ impl EngineBuilder {
     /// bundle order (ADR-0005), the declarations linked.
     #[must_use]
     pub fn build(self) -> Engine {
-        let mut ini: Vec<(PhpString, PhpString)> = CORE_INI
+        let mut ini: Vec<(Vec<u8>, Vec<u8>)> = CORE_INI
             .iter()
-            .map(|(n, v)| {
-                (
-                    PhpString::from_bytes(n.as_bytes()),
-                    PhpString::from_bytes(v.as_bytes()),
-                )
-            })
+            .map(|(n, v)| (n.as_bytes().to_vec(), v.as_bytes().to_vec()))
             .collect();
         let mut extensions = self.extensions;
         if let Some(tier) = self.tier_extension {
@@ -297,10 +304,7 @@ impl EngineBuilder {
         }
         for extension in &extensions {
             for entry in &extension.ini {
-                ini.push((
-                    PhpString::from_bytes(&entry.name.0),
-                    PhpString::from_bytes(&entry.default),
-                ));
+                ini.push((entry.name.0.to_vec(), entry.default.to_vec()));
             }
         }
         for (name, value) in self.ini {
@@ -323,10 +327,32 @@ impl EngineBuilder {
             .into_iter()
             .chain(extensions.iter().flat_map(|e| e.classes.iter().cloned()))
             .collect();
-        let constants = extensions
+        let constants: Vec<ConstDecl> = extensions
             .iter()
             .flat_map(|e| e.constants.iter().cloned())
             .collect();
+        // `zend_register_constant` at `MINIT`: a string constant's value
+        // is interned into the engine's table once, before any request,
+        // so reading it later is a pointer and no allocation.
+        let mut strings = Strings::new();
+        let mut constant_values = Vec::new();
+        for decl in &constants {
+            let value = match &decl.value {
+                ConstExpr::Null => Zval::null(),
+                ConstExpr::Bool(b) => Zval::bool(*b),
+                ConstExpr::Long(n) => Zval::long(*n),
+                ConstExpr::Double(f) => Zval::double(*f),
+                ConstExpr::Str(s) => match strings.intern(s) {
+                    Ok(interned) => Zval::string(interned),
+                    Err(_) => continue,
+                },
+                _ => continue,
+            };
+            constant_values.push((decl.name.0.clone(), value));
+        }
+        for (name, value) in Shared::zend_constants(&mut strings) {
+            constant_values.push((Box::from(name.as_bytes()), value));
+        }
         Engine {
             shared: Arc::new(Shared {
                 extensions,
@@ -335,9 +361,10 @@ impl EngineBuilder {
                 constants,
                 engine_states,
                 ini,
+                constant_values,
                 entry: self.entry,
                 units: Cache::new(MAX_ACCELERATED_FILES),
-                strings: Mutex::new(Strings::new()),
+                strings: Mutex::new(strings),
             }),
         }
     }
@@ -402,7 +429,7 @@ impl Engine {
         let script = description
             .script_name
             .clone()
-            .unwrap_or_else(|| PhpString::from_bytes(b"Standard input code"));
+            .unwrap_or_else(|| b"Standard input code".to_vec());
         let mut req = Request::new(Arc::clone(&self.shared), description);
         for extension in &self.shared.extensions {
             if let Some(rinit) = extension.rinit {
@@ -421,13 +448,13 @@ impl Engine {
                 let shared = Arc::clone(&self.shared);
                 Some(compile(
                     &source,
-                    script.as_bytes(),
+                    &script,
                     precision,
                     &shared.constants,
                     req.heap_mut(),
                 ))
             }
-            None => self.shared.cached(script.as_bytes()),
+            None => self.shared.cached(&script),
         };
         match compiled {
             Some(Ok(unit)) => serve_unit(&mut req, &unit, self.shared.entry),
@@ -547,7 +574,7 @@ mod tests {
     fn description(source: &str) -> RequestDescription {
         RequestDescription {
             sapi_name: String::from("cli"),
-            script_name: Some(PhpString::from_bytes(b"witness.php")),
+            script_name: Some(b"witness.php".to_vec()),
             source: Some(source.as_bytes().to_vec()),
             ..RequestDescription::default()
         }
@@ -870,13 +897,45 @@ mod tests {
         assert_eq!(served.stdout, b"bool(true)\n");
     }
 
-    /// How many strings the engine has published, which is what says a
-    /// constant was interned once.
+    /// How many strings the engine has published past the ones its build
+    /// interned for the constants it declares, which is what says a
+    /// constant of a unit was interned once.
     fn interned(engine: &Engine) -> usize {
+        let at_build = strings_of(&Engine::builder().build());
+        strings_of(engine).saturating_sub(at_build)
+    }
+
+    /// How many strings the engine's table holds.
+    fn strings_of(engine: &Engine) -> usize {
         match engine.shared.strings.lock() {
             Ok(strings) => strings.count(),
             Err(poisoned) => poisoned.into_inner().count(),
         }
+    }
+
+    /// `Engine::builder().build()` interns a string constant's value into
+    /// its table at build, as php's `MINIT` does, and no request grows
+    /// the table for reading one: `PHP_VERSION` is the one string long
+    /// enough to be allocated among the engine's own, `PHP_EOL` being
+    /// the frozen one-byte string.
+    #[test]
+    fn a_string_constant_is_interned_into_the_engine_at_build() {
+        let engine = Engine::builder().build();
+        assert_eq!(strings_of(&engine), 1, "PHP_VERSION, and nothing else");
+        let version = engine.shared.constant(b"PHP_VERSION");
+        assert_eq!(
+            version.as_ref().and_then(Value::as_str_bytes),
+            Some(crate::api::request::PHP_VERSION.as_bytes())
+        );
+        assert_eq!(
+            engine
+                .shared
+                .constant(b"PHP_EOL")
+                .as_ref()
+                .and_then(Value::as_str_bytes),
+            Some(&b"\n"[..])
+        );
+        assert_eq!(interned(&engine), 0);
     }
 
     /// A unit published into the cache interns its constant strings once,
@@ -889,7 +948,7 @@ mod tests {
         let engine = Engine::builder().build();
         let path = std::env::temp_dir().join(format!("dax-{}-shared.php", std::process::id()));
         assert!(std::fs::write(&path, b"<?php echo 'shared';").is_ok());
-        let name = PhpString::from_bytes(path.to_string_lossy().as_bytes());
+        let name = path.to_string_lossy().as_bytes().to_vec();
         for _ in 0..2 {
             let mut sink = Kept::default();
             let observables = engine.serve(
@@ -910,10 +969,9 @@ mod tests {
         );
         // What the cache holds after both: one unit, and the constant
         // string its `ECHO` names is the one allocation.
-        let (Some(Ok(one)), Some(Ok(again))) = (
-            engine.shared.cached(name.as_bytes()),
-            engine.shared.cached(name.as_bytes()),
-        ) else {
+        let (Some(Ok(one)), Some(Ok(again))) =
+            (engine.shared.cached(&name), engine.shared.cached(&name))
+        else {
             return;
         };
         assert!(Arc::ptr_eq(&one, &again), "one published unit");

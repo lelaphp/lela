@@ -77,17 +77,18 @@ pub fn float_to_long(f: f64) -> i64 {
     }
 }
 
-/// `zend_long_to_str`.
-#[must_use]
-pub fn int_to_string(n: i64) -> PhpString {
-    PhpString::from_bytes(n.to_string().as_bytes())
+/// `zend_long_to_str`: the digits as a string of the request's, which
+/// for one digit is the process's interned one, as php's `ZSTR_CHAR` is.
+pub fn int_to_string(req: &mut Request, n: i64) -> Result<PhpString, Thrown> {
+    PhpString::new(req, n.to_string().as_bytes())
 }
 
 /// `smart_str_append_double` with `precision`: php's `%.*G` shape with
-/// `-1` meaning the shortest round-trip repr (`zend_gcvt`).
+/// `-1` meaning the shortest round-trip repr (`zend_gcvt`), as the text
+/// php appends to a `smart_str` and not yet a string of the request's.
 #[must_use]
-pub fn float_format(f: f64, precision: i32) -> PhpString {
-    let text = if f.is_nan() {
+pub fn float_format(f: f64, precision: i32) -> String {
+    if f.is_nan() {
         "NAN".to_owned()
     } else if f.is_infinite() {
         if f > 0.0 { "INF" } else { "-INF" }.to_owned()
@@ -96,14 +97,14 @@ pub fn float_format(f: f64, precision: i32) -> PhpString {
         s.strip_suffix(".0").map_or(s.clone(), str::to_owned)
     } else {
         format!("{f:.*}", usize::try_from(precision).unwrap_or(0))
-    };
-    PhpString::from_bytes(text.as_bytes())
+    }
 }
 
-/// A `float` as php prints it under the request's `precision` ini.
-#[must_use]
-pub fn float_to_string(req: &Request, f: f64) -> PhpString {
-    float_format(f, req.precision())
+/// A `float` as php prints it under the request's `precision` ini, as a
+/// string of the request's.
+pub fn float_to_string(req: &mut Request, f: f64) -> Result<PhpString, Thrown> {
+    let text = float_format(f, req.precision());
+    PhpString::new(req, text.as_bytes())
 }
 
 /// `zval_get_long` with php's warnings and errors.
@@ -141,20 +142,24 @@ pub fn to_double(req: &mut Request, value: &Value) -> Result<f64, Thrown> {
 
 /// `zval_get_string`: an object goes through `__toString`, which the
 /// skeleton cannot serve and reports as php's "could not be converted".
+/// The string handed back is the caller's to own, as `zval_get_string`'s
+/// is: a string value's own with one more owner (`zend_string_copy`),
+/// and a new string of the request's for everything else.
 pub fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, Thrown> {
     match value.as_ref() {
-        ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) => Ok(PhpString::default()),
-        ValueRef::Bool(true) => Ok(PhpString::from_bytes(b"1")),
-        ValueRef::Int(n) => Ok(int_to_string(n)),
-        ValueRef::Float(f) => Ok(float_to_string(req, f)),
-        ValueRef::Str(s) => Ok(s.clone()),
+        ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) => PhpString::new(req, b""),
+        ValueRef::Bool(true) => PhpString::new(req, b"1"),
+        ValueRef::Int(n) => int_to_string(req, n),
+        ValueRef::Float(f) => float_to_string(req, f),
+        ValueRef::Str(s) => {
+            req.addref(value);
+            Ok(*s)
+        }
         ValueRef::Array(_) => {
             crate::api::raising::warning(req, "Array to string conversion");
-            Ok(PhpString::from_bytes(b"Array"))
+            PhpString::new(req, b"Array")
         }
-        ValueRef::Resource(r) => Ok(PhpString::from_bytes(
-            format!("Resource id #{}", r.id).as_bytes(),
-        )),
+        ValueRef::Resource(r) => PhpString::new(req, format!("Resource id #{}", r.id).as_bytes()),
         ValueRef::Object(_) => Err(throw(
             req,
             "Error",
@@ -205,10 +210,12 @@ pub fn to_object(req: &mut Request, value: &Value) -> Result<PhpObject, Thrown> 
             let mut object = req.new_object_of("stdClass");
             if let Some(array) = value.as_array() {
                 for (key, entry) in array.snapshot() {
-                    object.set_prop(key.to_prop_name().as_bytes(), entry);
+                    let name = key.to_prop_name(req)?;
+                    object.set_prop(name, entry);
                 }
             } else if !matches!(value.as_ref(), ValueRef::Null | ValueRef::Undef) {
-                object.set_prop(b"scalar", value.deref().clone());
+                let name = PhpString::new(req, b"scalar")?;
+                object.set_prop(name, value.deref().clone());
             }
             Ok(object)
         }
@@ -234,11 +241,11 @@ pub fn to_callable(req: &mut Request, value: &Value) -> Result<Callable, Thrown>
 /// `TypeError` "Illegal offset type".
 pub fn key_of(req: &mut Request, value: &Value) -> Result<Key, Thrown> {
     match value.as_ref() {
-        ValueRef::Undef | ValueRef::Null => Ok(Key::Str(PhpString::default())),
+        ValueRef::Undef | ValueRef::Null => Ok(Key::Str(PhpString::new(req, b"")?)),
         ValueRef::Bool(b) => Ok(Key::Int(i64::from(b))),
         ValueRef::Int(n) => Ok(Key::Int(n)),
         ValueRef::Float(f) => Ok(Key::Int(float_to_long(f))),
-        ValueRef::Str(s) => Ok(Key::from_bytes(s.as_bytes())),
+        ValueRef::Str(s) => Ok(Key::from_string(*s)),
         ValueRef::Resource(r) => Ok(Key::Int(i64::from(r.id))),
         ValueRef::Reference(r) => key_of(req, r.get()),
         ValueRef::Array(_) | ValueRef::Object(_) => {
@@ -306,9 +313,7 @@ pub fn binary_op(
     rhs: &Value,
 ) -> Result<Value, Thrown> {
     if op == BinaryOp::Concat {
-        let mut s = to_string(req, lhs)?;
-        s.append(to_string(req, rhs)?.as_bytes());
-        return Ok(Value::string(s));
+        return crate::ops::concat(req, lhs, rhs);
     }
     if let (Some(left), Some(right)) = (lhs.as_int(), rhs.as_int()) {
         let folded = match op {
@@ -357,6 +362,25 @@ pub fn binary_op(
 /// Coerce the argument at `position` to `ty` as php's parameter parsing
 /// does, honouring the caller's `strict_types`: the scalar cases here,
 /// and a `TypeError` in php's wording for what does not coerce.
+///
+/// What comes back is the frame's, as what `Z_PARAM_STR` hands a native
+/// is: a string the coercion made replaces the argument in the call
+/// frame, as `zend_parse_arg_str_weak` writes the string it made back
+/// into the argument's zval, so the frame owns it and frees it with the
+/// call, and a trace taken after the coercion prints the string and not
+/// the number it was passed as, exactly as php's does. The native holds
+/// a view and releases nothing.
+///
+/// ```php
+/// str_repeat(12, -1);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ValueError: str_repeat(): Argument #2 ($times) must be greater than or equal to 0 in %s:2
+/// Stack trace:
+/// #0 %s(2): str_repeat('12', -1)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
 pub fn coerce_param(
     req: &mut Request,
     value: &Value,
@@ -409,7 +433,9 @@ pub fn coerce_param(
         Type::String => match value.as_ref() {
             ValueRef::Str(_) => Ok(value.clone()),
             ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) if !strict => {
-                to_string(req, value).map(Value::string)
+                let coerced = Value::string(to_string(req, value)?);
+                req.replace_argument(position, coerced.clone());
+                Ok(coerced)
             }
             _ => want(req, "string"),
         },

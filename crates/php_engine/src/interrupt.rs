@@ -160,7 +160,6 @@ mod tests {
     use php_unit::{OpArray, Opcode, Opline, OplineIdx, Unit};
 
     use super::*;
-    use crate::api::values::PhpString;
     use crate::engine::{Engine, RequestDescription};
     use crate::probe::{Asked, Probe};
     use crate::tier::{Nop, Site, execute};
@@ -191,7 +190,7 @@ mod tests {
 
     fn description() -> RequestDescription {
         RequestDescription {
-            script_name: Some(PhpString::from_bytes(b"witness.php")),
+            script_name: Some(b"witness.php".to_vec()),
             ..RequestDescription::default()
         }
     }

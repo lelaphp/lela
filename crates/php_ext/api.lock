@@ -246,7 +246,7 @@ values::ArrayIter::value
 values::ClassId
 values::ClosureInfo
 values::Key
-values::Key::from_bytes
+values::Key::from_string
 values::Key::to_prop_name
 values::PhpArray
 values::PhpArray::append
@@ -293,12 +293,12 @@ values::PhpRef::get
 values::PhpRef::new
 values::PhpRef::set
 values::PhpString
-values::PhpString::append
 values::PhpString::as_bytes
-values::PhpString::concat
-values::PhpString::from_bytes
+values::PhpString::filled
 values::PhpString::is_empty
 values::PhpString::len
+values::PhpString::new
+values::PhpString::product
 values::Resource
 values::TypeTag
 values::Value

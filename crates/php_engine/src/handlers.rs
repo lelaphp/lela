@@ -40,7 +40,8 @@ pub(crate) fn nop<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, _: &
 }
 
 /// `ZEND_ECHO`: the operand as a string (`zval_get_string`), written to
-/// the request's body.
+/// the request's body, the string given up after the write and the
+/// operand freed (`zend_string_release_ex`, `FREE_OP1`).
 pub(crate) fn echo<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -49,8 +50,18 @@ pub(crate) fn echo<T: Tier>(
 ) -> Edge {
     let value = exec::operand(req, frame, code, op.op1_type, op.op1);
     let text = crate::ops::to_string(req, &value);
-    req.write(text.as_bytes());
-    Ok(advance(req, frame))
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    match text {
+        Ok(text) => {
+            req.write(text.as_bytes());
+            req.release(Value::string(text));
+            Ok(advance(req, frame))
+        }
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            Ok(Stepped::Threw(frame))
+        }
+    }
 }
 
 /// `ZEND_INIT_FCALL`: the call frame for a callee named at compile time,
@@ -63,7 +74,13 @@ pub(crate) fn init_fcall<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let named = exec::constant(code, ConstIdx(op.op2));
-    let name = crate::ops::to_string(req, &named);
+    let name = match crate::ops::to_string(req, &named) {
+        Ok(name) => name,
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            return Ok(Stepped::Threw(frame));
+        }
+    };
     let Some(function) = req.function_named(name.as_bytes()) else {
         let thrown = crate::api::raising::throw(
             req,
@@ -73,6 +90,7 @@ pub(crate) fn init_fcall<T: Tier>(
                 String::from_utf8_lossy(name.as_bytes())
             ),
         );
+        req.release(Value::string(name));
         req.leave_pending(&thrown);
         return Ok(Stepped::Threw(frame));
     };
@@ -117,7 +135,9 @@ pub(crate) fn send_var<T: Tier>(
 /// `zend_vm_stack_free_call_frame` after), so the native reads them off
 /// it and a backtrace taken inside the native prints them; nothing copies
 /// them onto the request. It is popped whether the native returned or
-/// threw, as php frees it on both paths.
+/// threw, as php frees it on both paths, and its arguments are given up
+/// with it (`zend_vm_stack_free_args`). What the native returned is the
+/// engine's from here: the temporary owns it.
 pub(crate) fn do_icall<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -130,11 +150,12 @@ pub(crate) fn do_icall<T: Tier>(
         )));
     };
     let served = req.serve_native(function);
-    req.vm_mut().pop_call();
+    req.pop_call();
     match served {
         Ok(value) => {
             let slot = exec::temporary_slot(code, op.out);
-            req.vm_mut().set_slot(frame, slot, value);
+            let previous = req.vm_mut().set_slot(frame, slot, value);
+            req.release(previous);
             Ok(advance(req, frame))
         }
         Err(thrown) => {
@@ -144,25 +165,52 @@ pub(crate) fn do_icall<T: Tier>(
     }
 }
 
-/// `ZEND_ASSIGN`: the value in `op2` written to the CV `op1` names, and
-/// to the temporary `result` names. php writes the temporary only under
-/// `RETURN_VALUE_USED` and the compiler marks the mark in `result_type`,
-/// which an [`Opline`] has no field for (design §5.7), so the temporary
-/// is written whether an opline reads it or not; the compiler numbered
-/// it either way, as php's does. `zend_assign_to_variable`'s other work,
-/// the reference the CV may hold and the release of what it held, comes
-/// with the memory model (design §11, Lane A); a `Value` here is owned
-/// and dropped.
+/// `ZEND_ASSIGN`, `zend_assign_to_variable` (`Z/Zend/zend_execute.h`):
+/// the value in `op2` becomes the CV's, a temporary moved into it and a
+/// CV or a constant copied with one more owner; the temporary `result`
+/// names is one more owner again (`ZVAL_COPY`); and what the CV held is
+/// given up last, after the write, which is where a destructor is served
+/// once objects stand on the heap (`i_zval_ptr_dtor(garbage)`).
+///
+/// php writes the temporary only under `RETURN_VALUE_USED` and the
+/// compiler marks the mark in `result_type`, which an [`Opline`] has no
+/// field for until #227 lands it, so the temporary is written whether an
+/// opline reads it or not; the compiler numbered it either way, as
+/// php's does. The owner that temporary takes is given up when the
+/// frame pops, so until #227 a string a CV alone held in php is held
+/// longer here: for as long as the `ASSIGN`'s own temporary stands
+/// unread. The reference a CV may hold comes with references.
+///
+/// A CV given a new string gives its old one back to the heap, so what
+/// `memory_get_usage()` reads falls by what the old string took. The
+/// assignment's value is passed on so that its temporary is consumed,
+/// which is the shape both engines free the string in today; the
+/// deltas are read before anything is printed, because php's first
+/// write lays its `php_output` layer down and holds thirty-two bytes
+/// for it.
+///
+/// ```php
+/// $b = memory_get_usage();
+/// memory_get_usage($s = str_repeat("ab", 3000)); $held = memory_get_usage() - $b;
+/// $s = "x"; var_dump($held, memory_get_usage() - $b);
+/// ```
+/// ```expect
+/// int(8192)
+/// int(0)
+/// ```
 pub(crate) fn assign<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let value = exec::operand(req, frame, code, op.op2_type, op.op2);
-    req.vm_mut().set_slot(frame, op.op1, value.clone());
+    let value = exec::take_operand(req, frame, code, op.op2_type, op.op2);
+    req.addref(&value);
+    let garbage = req.vm_mut().set_slot(frame, op.op1, value.clone());
     let slot = exec::temporary_slot(code, op.out);
-    req.vm_mut().set_slot(frame, slot, value);
+    let previous = req.vm_mut().set_slot(frame, slot, value);
+    req.release(previous);
+    req.release(garbage);
     Ok(advance(req, frame))
 }
 
@@ -320,7 +368,9 @@ pub(crate) fn jmpnz<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let value = exec::operand(req, frame, code, op.op1_type, op.op1);
-    if !crate::ops::is_true(req, &value) {
+    let taken = crate::ops::is_true(req, &value);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    if !taken {
         return Ok(advance(req, frame));
     }
     let back = op.op2 <= req.vm().opline(frame);
@@ -332,18 +382,19 @@ pub(crate) fn jmpnz<T: Tier>(
     Ok(Stepped::Same(frame))
 }
 
-/// `ZEND_RETURN`: the operand read, then the return safepoint, then the
-/// frame popped (design §4.3 seam 8, §5.8). The safepoint carries the
-/// number the compiler wrote in `result`, and is raised for every frame
-/// but the entry frame of this serving, which the stack's entry slot
-/// says.
+/// `ZEND_RETURN`: the operand taken as the caller's (`ZVAL_COPY` of a
+/// CV or a constant, a temporary moved), then the return safepoint, then
+/// the frame popped (design §4.3 seam 8, §5.8). The safepoint carries
+/// the number the compiler wrote in `result`, and is raised for every
+/// frame but the entry frame of this serving, which the stack's entry
+/// slot says.
 pub(crate) fn r#return<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let returned = exec::operand(req, frame, code, op.op1_type, op.op1);
+    let returned = exec::take_operand(req, frame, code, op.op1_type, op.op1);
     if req.stack_mut().entry() == frame {
         req.set_returned(returned);
         return Ok(Stepped::Done);
@@ -352,8 +403,12 @@ pub(crate) fn r#return<T: Tier>(
     let returns_to = req.vm().returns_to(frame);
     req.pop_frame();
     let caller = req.stack_mut().current();
-    if let Some((at, slot)) = returns_to {
-        req.vm_mut().set_slot(at, slot, returned);
+    match returns_to {
+        Some((at, slot)) => {
+            let previous = req.vm_mut().set_slot(at, slot, returned);
+            req.release(previous);
+        }
+        None => req.release(returned),
     }
     // The caller stands at the call opline that pushed this frame, and
     // goes on from the one after it.
@@ -362,9 +417,10 @@ pub(crate) fn r#return<T: Tier>(
 }
 
 /// The body the binary operators' handlers share: both operands addressed,
-/// the kernel called, and what it returned written into the temporary
-/// the opline's `result` field names. A kernel that threw leaves the
-/// throwable pending, which is the `Threw` edge the loop reads.
+/// the kernel called, both operands freed (`FREE_OP1`, `FREE_OP2`), and
+/// what the kernel returned written into the temporary the opline's
+/// `result` field names. A kernel that threw leaves the throwable
+/// pending, which is the `Threw` edge the loop reads.
 fn binary(
     req: &mut Request,
     frame: FrameRef,
@@ -374,10 +430,14 @@ fn binary(
 ) -> Edge {
     let left = exec::operand(req, frame, code, op.op1_type, op.op1);
     let right = exec::operand(req, frame, code, op.op2_type, op.op2);
-    match kernel(req, &left, &right) {
+    let computed = kernel(req, &left, &right);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    match computed {
         Ok(value) => {
             let slot = exec::temporary_slot(code, op.out);
-            req.vm_mut().set_slot(frame, slot, value);
+            let previous = req.vm_mut().set_slot(frame, slot, value);
+            req.release(previous);
             Ok(advance(req, frame))
         }
         Err(thrown) => {
@@ -420,9 +480,12 @@ fn advance(req: &mut Request, frame: FrameRef) -> Stepped {
 }
 
 /// The body the two `SEND_*` handlers share: the operand placed in the
-/// call frame being built, at the argument number `op2` names.
+/// call frame being built, at the argument number `op2` names, the frame
+/// owning it from here: a CV or a constant with one more owner
+/// (`ZVAL_COPY`, `SEND_VAR`'s and `SEND_VAL`'s copy), a temporary moved
+/// (`ZVAL_COPY_VALUE`).
 fn send(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
-    let value = exec::operand(req, frame, code, op.op1_type, op.op1);
+    let value = exec::take_operand(req, frame, code, op.op1_type, op.op1);
     let at = usize::try_from(op.op2.saturating_sub(1)).unwrap_or(usize::MAX);
     let Some(call) = req.vm_mut().building_call() else {
         return Err(Fatal::Error(String::from(

@@ -311,8 +311,8 @@ api = "values::PhpObject::closure"
 mahout = "mahout_value::PhpString::concat"
 sites = 5
 crates = 2
-status = "same"
-api = "values::PhpString::concat"
+status = "renamed"
+api = "values::PhpString::filled"
 
 [[item]]
 mahout = "mahout_value::PhpObject::set_message"
@@ -586,7 +586,7 @@ mahout = "mahout_value::normalize_str_key"
 sites = 28
 crates = 4
 status = "renamed"
-api = "values::Key::from_bytes"
+api = "values::Key::from_string"
 
 [[item]]
 mahout = "mahout_value::normalize_key"
@@ -670,8 +670,8 @@ api = "values::PhpArray::new"
 mahout = "mahout_value::PhpString::from_bytes"
 sites = 265
 crates = 16
-status = "same"
-api = "values::PhpString::from_bytes"
+status = "renamed"
+api = "values::PhpString::new"
 
 [[item]]
 mahout = "mahout_value::Value::array"

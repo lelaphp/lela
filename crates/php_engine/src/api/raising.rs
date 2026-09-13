@@ -106,9 +106,13 @@ pub fn fatal(req: &mut Request, message: &str) -> Thrown {
 }
 
 /// Throw a new instance of `class` with `message`, `zend_throw_error`.
+/// A throwable the memory limit refuses to build is the fatal that ends
+/// the request, already recorded, and the `Thrown` says so.
 pub fn throw(req: &mut Request, class: &str, message: &str) -> Thrown {
-    let throwable = new_throwable(req, class, message);
-    throw_value(req, &throwable)
+    match new_throwable(req, class, message) {
+        Ok(throwable) => throw_value(req, &throwable),
+        Err(fatal) => fatal,
+    }
 }
 
 /// Make a throwable pending, `zend_throw_exception_object`; a value that
@@ -117,25 +121,24 @@ pub fn throw_value(req: &mut Request, throwable: &Value) -> Thrown {
     if let Some(object) = throwable.as_object() {
         return Thrown::of(Some(object.clone()));
     }
-    let error = new_throwable(
+    throw(
         req,
         "Error",
         "Cannot throw objects that do not implement Throwable",
-    );
-    Thrown::of(error.as_object().cloned())
+    )
 }
 
 /// A new instance of the throwable class `class` with `message`, not yet
 /// pending. `zend_default_exception_new` records where it was made, and
-/// that is the site an uncaught one names.
-pub fn new_throwable(req: &mut Request, class: &str, message: &str) -> Value {
+/// that is the site an uncaught one names. Its strings are the
+/// request's, and the `Err` is the memory limit refusing them.
+pub fn new_throwable(req: &mut Request, class: &str, message: &str) -> Result<Value, Thrown> {
     let mut object = req.new_object_of(class);
-    object.set_prop(
-        b"message",
-        Value::string(PhpString::from_bytes(message.as_bytes())),
-    );
-    req.note_throw_site(&mut object);
-    object.as_value()
+    let name = PhpString::new(req, b"message")?;
+    let message = PhpString::new(req, message.as_bytes())?;
+    object.set_prop(name, Value::string(message));
+    req.note_throw_site(&mut object)?;
+    Ok(object.as_value())
 }
 
 /// `zend_argument_type_error`: `TypeError` for the argument at

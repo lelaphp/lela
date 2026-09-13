@@ -6,9 +6,14 @@
 //! `DO_ICALL` serves, which are php's frames pushed on the VM stack
 //! before their arguments are known.
 //!
-//! The slots are [`Value`]s here, the same stand-in `api::values` is,
-//! and become the frame's zvals with the memory model (design §11, Lane
-//! A); the frame's shape on the VM stack is already its zval count.
+//! The slots are [`Value`]s: a scalar or a string in one is the heap's
+//! zval, sixteen bytes naming a `php_heap` string with no owner taken
+//! (design §5.1), and the engine takes and gives up owners here where
+//! php's handlers do, with `ZVAL_COPY`, `ZVAL_COPY_VALUE` and `FREE_OP`
+//! as [`take_operand`], [`operand`] and [`free_operand`]. An array, an
+//! object, a resource and a reference in a slot are still the owned
+//! stand-ins of `api::values`, and move to the heap's frame with the
+//! rest of Lane A (design §11, days 3–7).
 
 use std::sync::Arc;
 
@@ -88,8 +93,16 @@ impl Vm {
         });
     }
 
-    pub(crate) fn pop(&mut self) {
-        self.frames.pop();
+    /// The frame's state off the stack, its slots handed back for the
+    /// request to release: php's `i_free_compiled_variables` over the
+    /// CVs, and the temporaries with them, since a temporary the compiler
+    /// numbered for an opline's value and nothing read is still an owner
+    /// here.
+    pub(crate) fn pop(&mut self) -> Vec<Value> {
+        self.frames
+            .pop()
+            .map(|state| state.slots)
+            .unwrap_or_default()
     }
 
     pub(crate) fn at(&self, frame: FrameRef) -> Option<&FrameState> {
@@ -142,8 +155,9 @@ impl Vm {
         }
     }
 
-    /// The value in a slot; a slot past the end reads as `null`, as an
-    /// uninitialised zval reads.
+    /// The value in a slot, a view of it: `ZVAL_COPY_VALUE`, no owner
+    /// taken. A slot past the end reads as `null`, as an uninitialised
+    /// zval reads.
     pub(crate) fn slot(&self, frame: FrameRef, at: u32) -> Value {
         self.at(frame)
             .and_then(|state| state.slots.get(at as usize))
@@ -151,12 +165,24 @@ impl Vm {
             .unwrap_or_else(Value::null)
     }
 
-    pub(crate) fn set_slot(&mut self, frame: FrameRef, at: u32, value: Value) {
-        if let Some(slot) = self
+    /// The value out of a slot, the slot left `UNDEF`: what the slot
+    /// owned is the caller's now, which is how a temporary is consumed.
+    pub(crate) fn take_slot(&mut self, frame: FrameRef, at: u32) -> Value {
+        self.at_mut(frame)
+            .and_then(|state| state.slots.get_mut(at as usize))
+            .map_or_else(Value::null, |slot| std::mem::replace(slot, Value::undef()))
+    }
+
+    /// `value` into a slot, the slot owning it from here, and what the
+    /// slot held handed back for the caller to release; a slot past the
+    /// end takes nothing and hands `value` back.
+    pub(crate) fn set_slot(&mut self, frame: FrameRef, at: u32, value: Value) -> Value {
+        match self
             .at_mut(frame)
             .and_then(|state| state.slots.get_mut(at as usize))
         {
-            *slot = value;
+            Some(slot) => std::mem::replace(slot, value),
+            None => value,
         }
     }
 
@@ -167,6 +193,14 @@ impl Vm {
     /// The call the `SEND_*` oplines are placing arguments into.
     pub(crate) fn building_call(&mut self) -> Option<&mut CallState> {
         self.calls.last_mut()
+    }
+
+    /// The call being served, for a coercion that writes an argument
+    /// back into the frame as php's `Z_PARAM_*` do.
+    pub(crate) fn serving_call_mut(&mut self) -> Option<&mut CallState> {
+        self.calls
+            .last_mut()
+            .filter(|call| call.stage == CallStage::Serving)
     }
 
     /// `DO_*CALL` making the call it serves the current frame,
@@ -180,9 +214,10 @@ impl Vm {
     }
 
     /// `zend_vm_stack_free_call_frame`: the served call off the stack,
-    /// its arguments dropped with it.
-    pub(crate) fn pop_call(&mut self) {
-        self.calls.pop();
+    /// its arguments and its name handed back for the request to release
+    /// (`zend_vm_stack_free_args`).
+    pub(crate) fn pop_call(&mut self) -> Option<CallState> {
+        self.calls.pop()
     }
 
     /// The call being served, php's `execute_data` inside a native: the
@@ -266,6 +301,46 @@ pub(crate) fn operand(
     }
 }
 
+/// The operand's value as the handler's own: a `CV` or a `CONST` with
+/// one more owner taken (`ZVAL_COPY`, `Z_TRY_ADDREF`), a `TMP` or a `VAR`
+/// moved out of its slot, which is left `UNDEF` (`ZVAL_COPY_VALUE` and
+/// no `FREE_OP`). This is what `ASSIGN`, `SEND_*` and `RETURN` read,
+/// each of them a handler that keeps the value past the opline.
+pub(crate) fn take_operand(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    kind: OperandKind,
+    field: u32,
+) -> Value {
+    match kind {
+        OperandKind::Tmp | OperandKind::Var => {
+            req.vm_mut().take_slot(frame, temporary_slot(code, field))
+        }
+        OperandKind::Const | OperandKind::Cv | OperandKind::Unused => {
+            let value = operand(req, frame, code, kind, field);
+            req.addref(&value);
+            value
+        }
+    }
+}
+
+/// `FREE_OP`: a `TMP` or a `VAR` operand read by [`operand`] and done
+/// with, its slot's owner given up; a `CV` and a `CONST` are nobody's to
+/// free here and nothing happens.
+pub(crate) fn free_operand(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    kind: OperandKind,
+    field: u32,
+) {
+    if matches!(kind, OperandKind::Tmp | OperandKind::Var) {
+        let value = req.vm_mut().take_slot(frame, temporary_slot(code, field));
+        req.release(value);
+    }
+}
+
 /// The op array's constant at `at`, as a value.
 pub(crate) fn constant(code: &OpArray, at: ConstIdx) -> Value {
     code.literals
@@ -274,9 +349,10 @@ pub(crate) fn constant(code: &OpArray, at: ConstIdx) -> Value {
         .map_or_else(Value::null, value_of)
 }
 
-/// A zval as the value vocabulary holds it. Only the forms a compiled
-/// program's constant table holds are here; the rest are the memory
-/// model's and arrive with it (design §11, Lane A).
+/// A zval as the value vocabulary holds it, no owner taken: the string
+/// is named and not copied, as php's `ZVAL_COPY_VALUE` names it. Only
+/// the forms a compiled program's constant table holds are here; the
+/// rest are the memory model's and arrive with it (design §11, Lane A).
 pub(crate) fn value_of(zval: Zval) -> Value {
     if let Some(n) = zval.as_long() {
         return Value::int(n);
@@ -288,7 +364,7 @@ pub(crate) fn value_of(zval: Zval) -> Value {
         return Value::bool(b);
     }
     match zval.as_str() {
-        Some(s) => Value::string(PhpString::from_bytes(s.bytes())),
+        Some(s) => Value::string(PhpString::of(s)),
         None => Value::null(),
     }
 }
