@@ -891,9 +891,15 @@ mod tests {
     }
 
     /// `div_function`: the divisor of zero php refuses to fold, so the
-    /// opcode throws `DivisionByZeroError` where it stands. php renders
-    /// the uncaught throwable with its site and a stack trace, which is
-    /// #108 and not this; what is held here is the class and the text.
+    /// opcode throws `DivisionByZeroError` where it stands, on line 1 of
+    /// a source whose `<?php` and whose `echo` share it. The site and the
+    /// stack trace around it are [`Request::uncaught`]'s rendering, which
+    /// #108 landed; what the pin below holds is the class, the text and
+    /// the line the opcode stands on. What the pinned oracle writes for a
+    /// `witness.php` of those bytes, under the recipe with
+    /// `-d log_errors=1 -d display_errors=0`, is
+    /// `PHP Fatal error:  Uncaught DivisionByZeroError: Division by zero
+    /// in %s:1`, `Stack trace:`, `#0 {main}`, `  thrown in %s on line 1`.
     #[test]
     fn a_division_by_zero_throws_php_s_error_where_the_opcode_stands() {
         let engine = Engine::builder().build();
@@ -901,7 +907,8 @@ mod tests {
         assert_eq!(
             observables.fatal.as_deref(),
             Some(
-                "PHP Fatal error:  Uncaught DivisionByZeroError: Division by zero in witness.php on line 0\n"
+                "PHP Fatal error:  Uncaught DivisionByZeroError: Division by zero \
+                 in witness.php:1\nStack trace:\n#0 {main}\n  thrown in witness.php on line 1\n"
             )
         );
         assert_eq!(observables.exit_code, 255);
