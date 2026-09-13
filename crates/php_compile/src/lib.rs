@@ -209,6 +209,58 @@ mod tests {
         );
     }
 
+    /// `zend_try_ct_eval_binary_op` converts an operand as the opcode's
+    /// kernel converts it, through the one reader `php_heap` holds, so a
+    /// numeric string, a bool and null fold where they stand and the op
+    /// array is php's single `ECHO` of the folded constant.
+    #[test]
+    fn an_operand_php_converts_is_folded_where_it_stands() {
+        assert_eq!(
+            unit_of(b"<?php echo \"1\" + 1;").dump(),
+            "$_main:\n     ; (lines=2, args=0, vars=0, tmps=0)\n\
+             0000 ECHO CONST[0]\n0001 RETURN CONST[1]\n"
+        );
+        assert_eq!(echoed_literal(b"<?php echo \"1\" + 1;").as_long(), Some(2));
+        assert_eq!(
+            unit_of(b"<?php echo true + 1;").dump(),
+            "$_main:\n     ; (lines=2, args=0, vars=0, tmps=0)\n\
+             0000 ECHO CONST[0]\n0001 RETURN CONST[1]\n"
+        );
+        assert_eq!(echoed_literal(b"<?php echo true + 1;").as_long(), Some(2));
+        // The folded 1 and the return's 1 are one literal, as
+        // `zend_add_literal` keeps them.
+        assert_eq!(
+            unit_of(b"<?php echo null + 1;").dump(),
+            "$_main:\n     ; (lines=2, args=0, vars=0, tmps=0)\n\
+             0000 ECHO CONST[0]\n0001 RETURN CONST[0]\n"
+        );
+        assert_eq!(echoed_literal(b"<?php echo null + 1;").as_long(), Some(1));
+        assert_eq!(echoed_literal(b"<?php echo false + 1;").as_long(), Some(1));
+        // `_is_numeric_string_ex`: whitespace on either side, a sign, a
+        // fraction, an exponent, and a long's edge.
+        assert_eq!(
+            echoed_literal(b"<?php echo \" 1 \" + \"+2\";").as_long(),
+            Some(3)
+        );
+        assert_eq!(
+            echoed_literal(b"<?php echo \"1e3\" + \".5\";").as_double(),
+            Some(1000.5)
+        );
+        assert_eq!(
+            echoed_literal(b"<?php echo \"9223372036854775808\" + 0;").as_double(),
+            Some(9_223_372_036_854_775_808.0)
+        );
+        assert_eq!(
+            echoed_literal(b"<?php echo -\"1.5\";").as_double(),
+            Some(-1.5)
+        );
+        assert_eq!(echoed_literal(b"<?php echo -null;").as_long(), Some(0));
+        assert_eq!(
+            echoed_literal(b"<?php echo \"3\" ** \"2\";").as_long(),
+            Some(9)
+        );
+    }
+
     #[test]
     fn a_persistent_constant_stands_for_its_value_where_it_is_written() {
         assert_eq!(
@@ -233,6 +285,18 @@ mod tests {
         assert_eq!(echoed_literal(b"<?php echo 7 % 2;").as_long(), Some(1));
         assert_eq!(echoed_literal(b"<?php echo -7 % 2;").as_long(), Some(-1));
         assert_eq!(echoed_literal(b"<?php echo 7 % -2;").as_long(), Some(1));
+        // `zend_is_op_long_compatible`: a double or a numeric string
+        // that is a whole number in range casts to its long and folds.
+        assert_eq!(echoed_literal(b"<?php echo 2.0 % 1;").as_long(), Some(0));
+        assert_eq!(echoed_literal(b"<?php echo 7 % 2.0;").as_long(), Some(1));
+        assert_eq!(
+            echoed_literal(b"<?php echo \"1.0\" % 1;").as_long(),
+            Some(0)
+        );
+        assert_eq!(
+            echoed_literal(b"<?php echo \"1e3\" % 7;").as_long(),
+            Some(6)
+        );
         assert_eq!(echoed_literal(b"<?php echo 2 ** 3;").as_long(), Some(8));
         assert_eq!(
             echoed_literal(b"<?php echo 2 ** 3 ** 2;").as_long(),
@@ -268,13 +332,48 @@ mod tests {
              0005 RETURN CONST[2]\n",
             "php's own op array, its literals in the order the oplines name them"
         );
-        // An operand php converts and this compiler does not: php folds
-        // the sum where it stands, this leaves the conversion to the
-        // kernel and prints the same 2.
+        // `zend_binary_op_produces_error`: a string that opens with no
+        // number, or carries anything past the one it opens with, is left
+        // to the opcode, which throws or warns where it stands.
+        for (source, returned) in [
+            (&b"<?php echo \"abc\" + 1;"[..], "CONST[1]"),
+            (b"<?php echo \"1abc\" + 1;", "CONST[1]"),
+            (b"<?php echo \"0x1A\" + 1;", "CONST[1]"),
+            (b"<?php echo \"1e\" + 1;", "CONST[1]"),
+            (b"<?php echo 1 + \"\";", "CONST[0]"),
+        ] {
+            assert_eq!(
+                unit_of(source).dump(),
+                format!(
+                    "$_main:\n     ; (lines=3, args=0, vars=0, tmps=1)\n\
+                     0000 ADD CONST[0] CONST[1]\n0001 ECHO T0\n0002 RETURN {returned}\n"
+                ),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+        // The divisor php's `zval_get_double` reads as zero, whatever
+        // its type, and the negative power of a zero.
+        for source in [
+            &b"<?php echo 2 / \"0\";"[..],
+            b"<?php echo 2 / \"0.0\";",
+            b"<?php echo 2 / false;",
+            b"<?php echo 2 / null;",
+        ] {
+            assert_eq!(
+                unit_of(source).dump(),
+                "$_main:\n     ; (lines=3, args=0, vars=0, tmps=1)\n\
+                 0000 DIV CONST[0] CONST[1]\n0001 ECHO T0\n0002 RETURN CONST[2]\n",
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+        // `-"abc"` is the multiplication by -1 php emits for an operand
+        // it will not fold.
         assert_eq!(
-            unit_of(b"<?php echo \"1\" + 1;").dump(),
+            unit_of(b"<?php echo -\"1abc\";").dump(),
             "$_main:\n     ; (lines=3, args=0, vars=0, tmps=1)\n\
-             0000 ADD CONST[0] CONST[1]\n0001 ECHO T0\n0002 RETURN CONST[1]\n"
+             0000 MUL CONST[0] CONST[1]\n0001 ECHO T0\n0002 RETURN CONST[2]\n"
         );
         // `zend_binary_op_produces_error`: the division php refuses to
         // fold, so that `DivisionByZeroError` is thrown where it stands.
@@ -411,8 +510,21 @@ mod tests {
             // `%` and `**` fold and no handler serves their opcodes.
             b"<?php echo 7 % extension_loaded('demo');".as_slice(),
             b"<?php echo 2 ** extension_loaded('demo');".as_slice(),
-            // `zend_binary_op_produces_error` for a modulo by zero.
+            // `zend_binary_op_produces_error` for a modulo by zero, by
+            // whatever `zval_get_long` reads as zero, and over an operand
+            // that is not long-compatible.
             b"<?php echo 1 % 0;".as_slice(),
+            b"<?php echo 1 % \"0\";".as_slice(),
+            b"<?php echo 1 % null;".as_slice(),
+            b"<?php echo 1.5 % 1;".as_slice(),
+            b"<?php echo \"1.5\" % 1;".as_slice(),
+            b"<?php echo 1e19 % 1;".as_slice(),
+            b"<?php echo \"9223372036854775808\" % 1;".as_slice(),
+            b"<?php echo INF % 1;".as_slice(),
+            // `0 ** (<0)`, which php leaves to the opcode to throw.
+            b"<?php echo 0 ** -1;".as_slice(),
+            b"<?php echo \"0\" ** -1;".as_slice(),
+            b"<?php echo 0.0 ** -1;".as_slice(),
         ] {
             let mut strings = php_heap::Strings::new();
             assert!(

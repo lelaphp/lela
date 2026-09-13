@@ -8,6 +8,8 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use php_heap::{Number, numeric_prefix};
+
 use crate::api::raising::{Thrown, throw, warning};
 use crate::api::request::Request;
 use crate::api::values::{PhpArray, PhpString, TypeTag, Value, ValueRef};
@@ -336,24 +338,6 @@ pub(crate) fn div(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
     }
 }
 
-/// One operand of php's arithmetic: the two number types the
-/// `*_function_fast` type pairs switch on.
-#[derive(Clone, Copy)]
-enum Number {
-    Long(i64),
-    Double(f64),
-}
-
-impl Number {
-    /// The operand as the double php's mixed type pairs convert it to.
-    fn double(self) -> f64 {
-        match self {
-            Number::Long(n) => wide(n),
-            Number::Double(d) => d,
-        }
-    }
-}
-
 /// php's `(double) lval`, whose rounding is the behaviour being copied.
 #[expect(
     clippy::cast_precision_loss,
@@ -417,8 +401,9 @@ fn numbers(
 /// `zendi_try_convert_scalar_to_number`: the number php works in, or
 /// nothing for an array, an object or a resource, which is the failure
 /// `zend_binop_error` reports. A string is read by [`numeric_prefix`],
-/// and one with anything past the number it opens with raises php's
-/// warning and keeps the number.
+/// the one reader php's compiler folds through as well, and one with
+/// anything past the number it opens with raises php's warning and keeps
+/// the number.
 fn to_number(req: &mut Request, value: &Value) -> Option<Number> {
     if let Some(n) = value.as_int() {
         return Some(Number::Long(n));
@@ -441,60 +426,6 @@ fn to_number(req: &mut Request, value: &Value) -> Option<Number> {
         TypeTag::Null | TypeTag::Undef => Some(Number::Long(0)),
         _ => None,
     }
-}
-
-/// `_is_numeric_string_ex` with php's `allow_errors` on
-/// (`Zend/zend_operators.c:3620`): the number the string opens with after
-/// any leading whitespace, and whether anything but trailing whitespace
-/// follows it. Nothing at all for a string that opens with no number,
-/// which is what makes `"abc" + 1` php's `TypeError`. An integer too wide
-/// for a long is a double, as php's `MAX_LENGTH_OF_LONG` arm leaves it.
-fn numeric_prefix(bytes: &[u8]) -> Option<(Number, bool)> {
-    let space = |b: &u8| matches!(*b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c);
-    let from = bytes.iter().position(|b| !space(b))?;
-    let rest = bytes.get(from..)?;
-    let mut at = usize::from(matches!(rest.first(), Some(b'-' | b'+')));
-    let digits = at;
-    while rest.get(at).is_some_and(u8::is_ascii_digit) {
-        at += 1;
-    }
-    let mut floating = false;
-    // php's `process_double`, reached by a `.` after digits or before
-    // them: `zend_strtod` then takes the whole number.
-    if rest.get(at) == Some(&b'.')
-        && (at > digits || rest.get(at + 1).is_some_and(u8::is_ascii_digit))
-    {
-        floating = true;
-        at += 1;
-        while rest.get(at).is_some_and(u8::is_ascii_digit) {
-            at += 1;
-        }
-    }
-    if at == digits {
-        return None;
-    }
-    // An exponent counts only with a digit behind it, sign or no sign.
-    let exponent = usize::from(matches!(rest.get(at + 1), Some(b'-' | b'+')));
-    if matches!(rest.get(at), Some(b'e' | b'E'))
-        && rest.get(at + 1 + exponent).is_some_and(u8::is_ascii_digit)
-    {
-        floating = true;
-        at += 2 + exponent;
-        while rest.get(at).is_some_and(u8::is_ascii_digit) {
-            at += 1;
-        }
-    }
-    let text = std::str::from_utf8(rest.get(..at)?).ok()?;
-    let trailing = rest.get(at..).is_some_and(|tail| !tail.iter().all(space));
-    if floating {
-        return Some((Number::Double(text.parse().ok()?), trailing));
-    }
-    // php reads an integer too wide for a long as a double.
-    let number = match text.parse::<i64>() {
-        Ok(n) => Number::Long(n),
-        Err(_) => Number::Double(text.parse().ok()?),
-    };
-    Some((number, trailing))
 }
 
 #[cfg(test)]

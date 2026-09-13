@@ -29,7 +29,7 @@
 //! here, so `for (;;)` is a `JMPNZ` over the constant `true` and not a
 //! `JMP`, which is the shape the compile-identity lane holds this to.
 
-use php_heap::{Fatal, Intern, Zval};
+use php_heap::{Fatal, Intern, Number, Zval, ZvalType, numeric_prefix};
 use php_unit::decl::Name;
 use php_unit::{OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
@@ -553,77 +553,120 @@ fn persistent(name: &[u8]) -> Option<Zval> {
     }
 }
 
-/// One operand of php's arithmetic: the two number types `add_function`
-/// and its kin switch on.
-#[derive(Clone, Copy)]
-enum Number {
-    Long(i64),
-    Double(f64),
+/// `zendi_try_convert_scalar_to_number` for a constant, under the part
+/// of `zend_binary_op_produces_error` that reads the operand alone: the
+/// number a long, a double, null and a bool are worth, and the number a
+/// string opens with when nothing follows it. A string that opens with
+/// no number, or carries anything past the one it opens with, is what
+/// php's `is_numeric_string` without `allow_errors` refuses, and the
+/// opcode is left standing to throw or warn where it stands.
+fn number(value: Zval) -> Option<Number> {
+    if let Some(n) = value.as_long() {
+        return Some(Number::Long(n));
+    }
+    if let Some(d) = value.as_double() {
+        return Some(Number::Double(d));
+    }
+    if let Some(s) = value.as_str() {
+        return match numeric_prefix(s.bytes()) {
+            Some((number, false)) => Some(number),
+            _ => None,
+        };
+    }
+    match value.kind() {
+        ZvalType::Null | ZvalType::False => Some(Number::Long(0)),
+        ZvalType::True => Some(Number::Long(1)),
+        _ => None,
+    }
 }
 
-impl Number {
-    /// The operand as the double php's mixed arms convert it to.
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "php's `(double) lval`, whose rounding is the behaviour being copied"
-    )]
-    fn double(self) -> f64 {
-        match self {
-            Number::Long(n) => n as f64,
-            Number::Double(d) => d,
+/// `zend_is_op_long_compatible` over one converted operand: the long a
+/// double is worth when `zend_is_long_compatible` says the conversion
+/// loses nothing, which is what a modulo casts through; nothing for a
+/// double that is not whole, not finite or past the long's range.
+#[expect(
+    clippy::float_cmp,
+    reason = "php's `(double) l == d`, the exact equality being copied"
+)]
+fn long_compatible(number: Number) -> Option<i64> {
+    match number {
+        Number::Long(n) => Some(n),
+        Number::Double(d) => {
+            // `ZEND_DOUBLE_FITS_LONG`, which NAN and the infinities fail
+            // as they fail php's `zend_finite`, then php's `(zend_long) d`
+            // read back as a double.
+            let fits = (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&d);
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "php's `(zend_long) d` over a double that fits, whose truncation the equality below holds to nothing"
+            )]
+            let l = d as i64;
+            (fits && Number::Long(l).double() == d).then_some(l)
         }
     }
 }
 
-/// The number a constant holds, or `None` for a value php's arithmetic
-/// would convert: a string, a bool or null, whose conversion this
-/// compiler does not make yet.
-fn number(value: Zval) -> Option<Number> {
-    value
-        .as_long()
-        .map(Number::Long)
-        .or_else(|| value.as_double().map(Number::Double))
+/// `zend_binary_op_produces_error` past the operands' own reading, over
+/// the numbers they are worth: a division by zero, which `zval_get_double`
+/// reads `"0"`, `false` and `null` as too; a modulo over an operand that
+/// is not long-compatible or by zero; and `0 ** (<0)`, each of which
+/// throws where the opcode stands.
+fn produces_error(op: BinaryOp, a: Number, b: Number) -> bool {
+    match op {
+        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => false,
+        // php's guard is `zval_get_double(op2) == 0.0`, which -0.0
+        // meets as well.
+        BinaryOp::Div => b.double() == 0.0,
+        BinaryOp::Mod => !matches!(
+            (long_compatible(a), long_compatible(b)),
+            (Some(_), Some(divisor)) if divisor != 0
+        ),
+        BinaryOp::Pow => a.double() == 0.0 && b.double() < 0.0,
+    }
 }
 
 /// `zend_try_ct_eval_binary_op`: the value php folds an arithmetic
 /// operator over two constants to, or `None` where php leaves it to the
-/// opcode. php's guard is `zend_binary_op_produces_error`: a division or
-/// a modulo by zero, a modulo over a double, and `0 ** (<0)`, each of
-/// which throws where it stands. php folds an operand it would convert
-/// too, a numeric string, a bool or null; this folds two numbers and
-/// leaves the rest to the opcode, whose kernel makes php's conversion.
+/// opcode. php converts each operand as the opcode's kernel converts it,
+/// through the same `add_function` and its kin, and folds unless
+/// `zend_binary_op_produces_error` says the opcode would throw or warn.
 fn fold(op: BinaryOp, left: Zval, right: Zval) -> Option<Zval> {
-    match (number(left)?, number(right)?) {
-        (Number::Long(a), Number::Long(b)) => longs(op, a, b),
-        (a, b) => doubles(op, a.double(), b.double()),
+    let (a, b) = (number(left)?, number(right)?);
+    if produces_error(op, a, b) {
+        return None;
+    }
+    match (op, a, b) {
+        (_, Number::Long(a), Number::Long(b)) => Some(longs(op, a, b)),
+        // `mod_function` reads both sides as the longs `zval_get_long`
+        // makes of them, which the guard held to be exact.
+        (BinaryOp::Mod, a, b) => Some(longs(op, long_compatible(a)?, long_compatible(b)?)),
+        (_, a, b) => doubles(op, a.double(), b.double()),
     }
 }
 
 /// The long arms of `add_function`, `sub_function`, `mul_function`,
 /// `div_function`, `mod_function` and `pow_function`: the value php's
 /// `fast_long_*` macros leave, a double where the operation overflowed
-/// and, for a division, where it did not come out whole.
+/// and, for a division, where it did not come out whole. The divisor is
+/// not zero; [`produces_error`] held that.
 #[expect(
     clippy::cast_precision_loss,
     reason = "php's `(double) lval`, whose rounding is the behaviour being copied"
 )]
-fn longs(op: BinaryOp, a: i64, b: i64) -> Option<Zval> {
-    let overflowed = |n: Option<i64>, d: f64| Some(n.map_or_else(|| Zval::double(d), Zval::long));
+fn longs(op: BinaryOp, a: i64, b: i64) -> Zval {
+    let overflowed = |n: Option<i64>, d: f64| n.map_or_else(|| Zval::double(d), Zval::long);
     match op {
         BinaryOp::Add => overflowed(a.checked_add(b), a as f64 + b as f64),
         BinaryOp::Sub => overflowed(a.checked_sub(b), a as f64 - b as f64),
         BinaryOp::Mul => overflowed(a.checked_mul(b), a as f64 * b as f64),
-        // `zend_binary_op_produces_error`: a division or a modulo by
-        // zero throws, and both are left to the opcode.
-        BinaryOp::Div | BinaryOp::Mod if b == 0 => None,
         // php's own case, "prevent overflow error/crash".
-        BinaryOp::Div if a == i64::MIN && b == -1 => Some(Zval::double(a as f64 / -1.0)),
-        BinaryOp::Div if a % b == 0 => Some(Zval::long(a / b)),
-        BinaryOp::Div => Some(Zval::double(a as f64 / b as f64)),
+        BinaryOp::Div if a == i64::MIN && b == -1 => Zval::double(a as f64 / -1.0),
+        BinaryOp::Div if a % b == 0 => Zval::long(a / b),
+        BinaryOp::Div => Zval::double(a as f64 / b as f64),
         // php's own case, `% -1` being zero where the division overflows.
-        BinaryOp::Mod if b == -1 => Some(Zval::long(0)),
-        BinaryOp::Mod => Some(Zval::long(a % b)),
-        BinaryOp::Pow => Some(power(a, b)),
+        BinaryOp::Mod if b == -1 => Zval::long(0),
+        BinaryOp::Mod => Zval::long(a % b),
+        BinaryOp::Pow => power(a, b),
     }
 }
 
@@ -670,23 +713,18 @@ fn power(a: i64, b: i64) -> Zval {
     Zval::long(l1)
 }
 
-/// The double arms of the same four, where php converts both operands
-/// and works in doubles.
+/// The double arms of the same operators, where php converts both
+/// operands and works in doubles. The divisor is not zero and no zero is
+/// raised to a negative power; [`produces_error`] held both.
 fn doubles(op: BinaryOp, a: f64, b: f64) -> Option<Zval> {
     match op {
         BinaryOp::Add => Some(Zval::double(a + b)),
         BinaryOp::Sub => Some(Zval::double(a - b)),
         BinaryOp::Mul => Some(Zval::double(a * b)),
-        // php's guard is `zval_get_double(op2) == 0.0`, which -0.0
-        // meets as well.
-        BinaryOp::Div if b == 0.0 => None,
         BinaryOp::Div => Some(Zval::double(a / b)),
-        // A modulo casts both sides to a long, which php refuses to fold
-        // where either is a double that is not a whole number in range;
-        // this leaves every double modulo to the opcode.
+        // A modulo is [`longs`]'s: two long-compatible doubles go there,
+        // and the guard refused every other pair.
         BinaryOp::Mod => None,
-        // `0 ** (<0)` throws `DivisionByZeroError` where it stands.
-        BinaryOp::Pow if a == 0.0 && b < 0.0 => None,
         BinaryOp::Pow => Some(Zval::double(a.powf(b))),
     }
 }
