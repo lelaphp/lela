@@ -7,7 +7,10 @@ use std::path::Path;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use super::{Counted, PortMap, Ported, Source, Status, census, join, key, read, registers};
+use super::{
+    Counted, PortMap, Ported, Source, Status, census, join, key, read, registers,
+    registers_a_native,
+};
 use crate::api_check::lock::Lock;
 
 fn workspace() -> &'static Path {
@@ -466,34 +469,38 @@ fn a_tree_without_crates_is_refused_and_nothing_is_joined() {
     assert!(why.contains("no crates/"), "{why}");
 }
 
-/// The evidence is which extensions are ported here, and two are:
-/// `ext/standard` since `str_repeat` (#174) and `ext/tokenizer` since
-/// `token_get_all` (#224). The committed census names no extension on
-/// any row, so no row is resolved by them yet. The other eighteen crates
-/// `new-ext` laid down are not evidence: each stands on disk with an
-/// `extension()` that registers no native, and a crate that registers
-/// none has ported nothing.
+/// The evidence is which extensions are ported here, and the premise
+/// held is one no commit ends (#217): `Ported::read` names exactly the
+/// laid-down crates whose sources take a registering step of the
+/// builder, and a crate `new-ext` laid down, whose `extension()`
+/// declares its state and registers nothing, is not evidence however
+/// many stand beside the ported ones. `ext/standard` is among the ported
+/// since `str_repeat` (#174) and `ext/spl` is not; which others are is
+/// the workspace's to say, not this test's. The committed census names
+/// no extension on any row, so no row is resolved by any of them yet.
 #[test]
-fn two_extensions_register_a_native_and_the_eighteen_laid_down_register_none() {
+fn ported_names_exactly_the_laid_down_crates_that_register_a_native() {
     let manifest = crate::manifest::Manifest::load(workspace()).unwrap();
-    let laid: Vec<&str> = manifest
+    let laid: Vec<&crate::manifest::Crate> = manifest
         .crates
         .iter()
-        .map(|krate| krate.name.as_str())
-        .filter(|name| name.starts_with("ext/"))
-        .filter(|name| workspace().join(name).join("Cargo.toml").is_file())
+        .filter(|krate| krate.name.starts_with("ext/"))
+        .filter(|krate| workspace().join(&krate.name).join("Cargo.toml").is_file())
         .collect();
     assert_eq!(laid.len(), 20, "the crates are laid down: {laid:?}");
+    let registering: Vec<String> = laid
+        .iter()
+        .filter(|krate| registers_a_native(workspace(), krate))
+        .map(|krate| krate.name.clone())
+        .collect();
     let here = Ported::read(workspace(), &manifest);
-    assert_eq!(
-        here.crates,
-        ["ext/standard", "ext/tokenizer"],
-        "{:?}",
-        here.crates
+    assert_eq!(here.crates, registering, "{:?}", here.crates);
+    assert!(here.carries("standard"), "{:?}", here.crates);
+    assert!(!here.carries("spl"), "{:?}", here.crates);
+    assert!(
+        registering.len() < laid.len(),
+        "some laid-down crate registers nothing yet: {registering:?}"
     );
-    assert!(here.carries("standard"));
-    assert!(here.carries("tokenizer"));
-    assert!(!here.carries("spl"));
     assert!(ported(&["standard"]).carries("standard"));
     assert!(!ported(&["standard"]).carries("spl"));
 }
