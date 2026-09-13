@@ -142,11 +142,12 @@ impl Str {
     /// taken, whichever of the three tables the string came from, which
     /// is what lets one op array's constants be read by every request
     /// thread at once. What the interpreter does with a constant string
-    /// on every `ECHO`, straight-line because no loop statement compiles
-    /// yet (#176):
+    /// on every `ECHO`, the same op array's constant read on every pass of
+    /// a loop, counting down on the CV's truth until `<` and `++` are
+    /// read (#213):
     ///
     /// ```php
-    /// echo 'dax', 'dax', 'dax';
+    /// for ($i = 3; $i; $i = $i - 1) { echo 'dax'; }
     /// ```
     /// ```expect exit=0
     /// daxdaxdax
