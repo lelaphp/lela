@@ -16,6 +16,20 @@ use xtask::manifest::Manifest;
 use xtask::reading::{Reading, Status, Store};
 use xtask::track::Base;
 
+/// What condition 1 asks of `ext/pcre`, the crate most of these tests
+/// change: [`FRESH`] less `port-map`, which is asked of the crate
+/// `api.lock` lives with and of no other (§4.5 condition 1, #148). That
+/// this is [`FRESH`] less that one row is asserted in
+/// `the_crate_the_lock_lives_with_is_asked_for_a_port_map_reading_and_no_other_crate_is`.
+const ASKED: [&str; 6] = [
+    "clippy",
+    "witness",
+    "api-check",
+    "budget",
+    "unsafe-audit",
+    "phpt",
+];
+
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
 }
@@ -70,8 +84,9 @@ fn commit(root: &Path, message: &str) {
 }
 
 /// A scratch repository: the tracked manifest, pin and registry, and the
-/// fixture's `ext/pcre` crate, committed once. Every change the tests make
-/// after this is the diff `done` judges with `--base HEAD`.
+/// fixture's two crates, `ext/pcre` and `crates/php_ext`, committed once.
+/// Every change the tests make after this is the diff `done` judges with
+/// `--base HEAD`.
 fn scratch(name: &str) -> PathBuf {
     repository(name, &workspace().join("docs/divergence.toml"))
 }
@@ -100,6 +115,12 @@ fn repository(name: &str, registry: &Path) -> PathBuf {
     for file in ["Cargo.toml", "src/lib.rs"] {
         let text = std::fs::read_to_string(fixture.join("ext/pcre").join(file)).unwrap();
         write(&root, &format!("ext/pcre/{file}"), &text);
+    }
+    // The crate `api.lock` lives with, with the lock in its tree: the one
+    // crate condition 1 asks for a `port-map` reading (§4.5, #148).
+    for file in ["Cargo.toml", "src/lib.rs", "api.lock"] {
+        let text = std::fs::read_to_string(fixture.join("crates/php_ext").join(file)).unwrap();
+        write(&root, &format!("crates/php_ext/{file}"), &text);
     }
     write(&root, ".gitignore", "target/\n");
     sh(&root, &["git", "init", "-q", "-b", "main"]);
@@ -192,11 +213,11 @@ fn with_no_readings_every_instrument_of_the_touched_crate_is_unmet_and_the_exit_
     let verdict = judge(&root);
     assert_eq!(verdict.crates, ["ext/pcre"]);
     assert_eq!(verdict.changed.len(), 1, "{verdict:#?}");
-    for instrument in FRESH {
+    for instrument in ASKED {
         let line = format!("{instrument}: no reading for ext/pcre");
         assert!(verdict.unmet.contains(&line), "{line}\n{verdict:#?}");
     }
-    assert_eq!(verdict.unmet.len(), FRESH.len(), "{verdict:#?}");
+    assert_eq!(verdict.unmet.len(), ASKED.len(), "{verdict:#?}");
     assert!(verdict.notes.is_empty(), "{verdict:#?}");
 
     let (code, out, err) = xtask(&root, &["done", "--base", "HEAD"], None);
@@ -204,6 +225,63 @@ fn with_no_readings_every_instrument_of_the_touched_crate_is_unmet_and_the_exit_
     assert!(out.contains("unmet:"), "{out}");
     assert!(out.contains("- phpt: no reading for ext/pcre"), "{out}");
     assert!(err.contains("6 conditions of done unmet"), "{err}");
+}
+
+/// `port-map` writes exactly one reading, at the crate `api.lock` lives
+/// with, so condition 1 asks that crate for one and asks no other crate
+/// for a reading nothing would ever write (§4.5 condition 1, #148). The
+/// lock is in that crate's tree, which is what makes the ask sharp: an
+/// edit of `api.lock` alone stales the reading and the condition says so.
+#[test]
+fn the_crate_the_lock_lives_with_is_asked_for_a_port_map_reading_and_no_other_crate_is() {
+    let asked_of_every_other_crate: Vec<&str> =
+        FRESH.into_iter().filter(|i| *i != "port-map").collect();
+    assert_eq!(asked_of_every_other_crate, ASKED);
+
+    let root = scratch("port-map");
+    write(&root, "crates/php_ext/src/lib.rs", "pub fn state() {}\n");
+    let verdict = judge(&root);
+    assert_eq!(verdict.crates, ["php_ext"], "{verdict:#?}");
+    assert!(
+        verdict
+            .unmet
+            .contains(&"port-map: no reading for php_ext".to_owned()),
+        "{verdict:#?}"
+    );
+
+    // The crate the tests change is not asked, however much it changes.
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    let verdict = judge(&root);
+    assert!(
+        !verdict
+            .unmet
+            .iter()
+            .any(|u| u == "port-map: no reading for ext/pcre"),
+        "{verdict:#?}"
+    );
+
+    // Fresh readings of everything php_ext is asked, and it is done.
+    let store = Store::of_workspace(&root);
+    for instrument in ASKED.into_iter().chain(["port-map"]) {
+        store
+            .record(&[fresh(&root, instrument, "php_ext")])
+            .unwrap();
+        store
+            .record(&[fresh(&root, instrument, "ext/pcre")])
+            .unwrap();
+    }
+    let verdict = judge(&root);
+    assert!(verdict.met(), "{verdict:#?}");
+
+    // The lock is in the crate's tree, so an edit of it alone stales the
+    // reading the join is held by.
+    write(&root, "crates/php_ext/api.lock", "api::Value\napi::Zval\n");
+    let verdict = judge(&root);
+    assert!(
+        verdict.unmet.iter().any(|u| u
+            == "port-map: the reading for php_ext is stale; php_ext changed since it was taken"),
+        "{verdict:#?}"
+    );
 }
 
 /// A branch that is on no track is judged since `main`, and the commits
@@ -222,7 +300,7 @@ fn a_branch_on_no_track_is_judged_since_main_so_commits_on_it_count() {
         sh(&root, &["git", "rev-parse", "main"]).trim()
     );
     assert_eq!(verdict.crates, ["ext/pcre"], "{verdict:#?}");
-    assert_eq!(verdict.unmet.len(), FRESH.len(), "{verdict:#?}");
+    assert_eq!(verdict.unmet.len(), ASKED.len(), "{verdict:#?}");
     let (code, out, _) = xtask(&root, &["done"], None);
     assert_eq!(code, 1);
     assert!(out.contains("1 changed file since"), "{out}");
@@ -391,7 +469,7 @@ fn fresh_passing_readings_for_the_touched_crate_pass_and_an_edit_after_them_is_s
     let root = scratch("fresh");
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
     let store = Store::of_workspace(&root);
-    for instrument in FRESH {
+    for instrument in ASKED {
         store
             .record(&[fresh(&root, instrument, "ext/pcre")])
             .unwrap();
@@ -405,7 +483,7 @@ fn fresh_passing_readings_for_the_touched_crate_pass_and_an_edit_after_them_is_s
         "pub fn preg_match() -> bool { true }\n",
     );
     let verdict = judge(&root);
-    assert_eq!(verdict.unmet.len(), FRESH.len(), "{verdict:#?}");
+    assert_eq!(verdict.unmet.len(), ASKED.len(), "{verdict:#?}");
     for line in &verdict.unmet {
         assert!(
             line.contains("the reading for ext/pcre is stale"),
@@ -427,7 +505,7 @@ fn a_reading_through_the_constructor_is_fresh_for_its_scope_and_stale_after_one_
     let manifest = Manifest::load(&root).unwrap();
     let krate = manifest.crate_named("ext/pcre").unwrap();
     let store = Store::of_workspace(&root);
-    for instrument in FRESH {
+    for instrument in ASKED {
         let mut reading = if instrument == "phpt" {
             Reading::for_scope(instrument, "ext/pcre", &manifest, &root).unwrap()
         } else {
@@ -453,7 +531,7 @@ fn a_reading_through_the_constructor_is_fresh_for_its_scope_and_stale_after_one_
         })
         .map(|l| l.split(':').next().unwrap())
         .collect();
-    assert_eq!(stale, FRESH, "{verdict:#?}");
+    assert_eq!(stale, ASKED, "{verdict:#?}");
 }
 
 #[test]
@@ -461,7 +539,7 @@ fn a_failing_or_skipped_reading_is_unmet_with_its_message() {
     let root = scratch("failing");
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
     let store = Store::of_workspace(&root);
-    for instrument in FRESH {
+    for instrument in ASKED {
         let mut reading = fresh(&root, instrument, "ext/pcre");
         match instrument {
             "budget" => {
@@ -492,7 +570,7 @@ fn a_kernel_or_native_without_a_witness_is_unmet_from_the_witness_reading() {
     let root = scratch("missing");
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
     let store = Store::of_workspace(&root);
-    for instrument in FRESH {
+    for instrument in ASKED {
         let mut reading = fresh(&root, instrument, "ext/pcre");
         if instrument == "witness" {
             reading.count("missing", 2).unwrap();
@@ -684,7 +762,7 @@ fn a_crate_whose_only_exit_is_one_accept_wrote_is_done() {
         ),
     );
     let store = Store::of_workspace(&root);
-    for instrument in FRESH {
+    for instrument in ASKED {
         store
             .record(&[fresh(&root, instrument, "ext/pcre")])
             .unwrap();
@@ -1418,7 +1496,7 @@ fn the_phpt_skip_the_missing_engine_binary_causes_is_met_and_the_others_are_not(
         }
         reading
     };
-    for instrument in FRESH {
+    for instrument in ASKED {
         store
             .record(&[fresh(&root, instrument, "ext/pcre")])
             .unwrap();

@@ -10,9 +10,11 @@
 //!
 //! 1. Every crate with a changed file has a fresh passing reading from each
 //!    instrument [`instruments_of`] asks it for: [`FRESH`], less `witness`
-//!    for the harness and less `phpt` for a crate the per-commit lane writes
+//!    for the harness, less `phpt` for a crate the per-commit lane writes
 //!    no reading for, one that owns no subset or that the manifest marks
-//!    `feature =` and so stands outside the default build (#133). Fresh
+//!    `feature =` and so stands outside the default build (#133), and less
+//!    `port-map` for every crate but the one `api.lock` lives with, which
+//!    is the only scope that instrument writes a reading at (#148). Fresh
 //!    means the reading's `tree` is the content hash over the crate's
 //!    sources now (§13 D.18), the hash every instrument stamps; an
 //!    instrument that does not exist yet has written no reading, so its
@@ -91,6 +93,7 @@ use crate::divergence::{self, Registry};
 use crate::git::{self, Change};
 use crate::manifest::{Crate, Manifest};
 use crate::permit;
+use crate::port_map;
 use crate::reading::{Number, Outcome, Reading, Status, Store, plural};
 use crate::reply;
 use crate::ticket;
@@ -100,24 +103,30 @@ use crate::track::{self, Ticket};
 pub(crate) const INSTRUMENT: &str = "done";
 /// The scope of the verdict's reading: the whole tree.
 pub(crate) const WORKSPACE: &str = "workspace";
-/// The instruments a touched crate needs a fresh passing reading from
-/// (condition 1). `phpt`'s is the reading over the subsets the crate's
-/// `[[crate]]` row owns, written under the crate's name.
-pub const FRESH: [&str; 6] = [
+/// The instruments condition 1 knows. Which of them one crate is asked
+/// for is [`instruments_of`], since three of the six are a narrower crate's
+/// than "every touched one": `phpt`'s is the reading over the subsets the
+/// crate's `[[crate]]` row owns, written under the crate's name, `witness`
+/// is no crate's without a kernel or a native, and `port-map` is the one
+/// crate `api.lock` lives with alone.
+pub const FRESH: [&str; 7] = [
     "clippy",
     "witness",
     "api-check",
     "budget",
     "unsafe-audit",
     "phpt",
+    "port-map",
 ];
 
 /// The harness crate; it has no kernel and no native.
 pub(crate) const HARNESS: &str = "xtask";
 
 /// The instruments condition 1 asks of one crate: all of [`FRESH`], less
-/// `witness` for the harness, which has no kernel and no native, and less
-/// `phpt` for a crate the per-commit lane writes no reading for. Which
+/// `witness` for the harness, which has no kernel and no native, less
+/// `phpt` for a crate the per-commit lane writes no reading for, and less
+/// `port-map` for every crate but the one `api.lock` lives with, named by
+/// `home_of_the_lock` in the manifest's terms and passed in here. Which
 /// crate owns which of the corpus is the `[[crate]]` row's sentence, so a
 /// crate that owns none is not asked here rather than asked and answered
 /// by the runner's error. A crate the row marks `feature =` is outside the
@@ -125,15 +134,35 @@ pub(crate) const HARNESS: &str = "xtask";
 /// is the nightly lane's, and `done`, which runs per commit, does not ask
 /// for a reading only a run by name could write (design §8's `ext/<name>` row,
 /// per commit for the default extensions and nightly for the rest; harness
-/// §4.1, §4.5 condition 1, §7).
-pub(crate) fn instruments_of(krate: &Crate) -> impl Iterator<Item = &'static str> {
+/// §4.1, §4.5 condition 1, §7). `port-map` writes exactly one reading, at
+/// the crate the lock lives with, so every other crate would be held to a
+/// reading nothing ever writes; that crate is the one asked because the
+/// lock is in its tree, and a change to the lock is what makes a row of
+/// the join matched or unmatched (harness §4.5 condition 1, #148).
+pub(crate) fn instruments_of(
+    krate: &Crate,
+    lock_home: Option<&str>,
+) -> impl Iterator<Item = &'static str> {
     let harness = krate.name == HARNESS;
     let measured_by_the_lane = !krate.subsets().is_empty() && !krate.optional();
+    let home_of_the_lock = lock_home == Some(krate.name.as_str());
     FRESH.into_iter().filter(move |i| match *i {
         "witness" => !harness,
         "phpt" => measured_by_the_lane,
+        "port-map" => home_of_the_lock,
         _ => true,
     })
+}
+
+/// The name of the crate `api.lock` lives with, the one crate condition 1
+/// asks for a `port-map` reading, or `None` for a manifest that names no
+/// crate holding the lock, which is a manifest the instrument itself
+/// refuses; `done` is not the place that says so, and asks nobody for the
+/// reading instead.
+fn lock_home(manifest: &Manifest) -> Option<String> {
+    port_map::home_of_the_lock(manifest)
+        .ok()
+        .map(|krate| krate.name.clone())
 }
 
 pub(crate) use crate::track::Base;
@@ -252,8 +281,9 @@ pub fn judge(
     let mut unmet = Vec::new();
     let mut notes = Vec::new();
 
+    let lock_home = lock_home(manifest);
     for krate in &crates {
-        fresh_readings(root, store, krate, &mut unmet)?;
+        fresh_readings(root, store, krate, lock_home.as_deref(), &mut unmet)?;
     }
     locks(root, manifest, store, &changed, &mut unmet)?;
     open_rows(root, &base.commit, registry, &crates, &changed, &mut unmet)?;
@@ -357,11 +387,12 @@ fn fresh_readings(
     root: &Path,
     store: &Store,
     krate: &Crate,
+    lock_home: Option<&str>,
     unmet: &mut Vec<String>,
 ) -> Result<()> {
     let tree = git::tree_hash(root, &krate.path())?;
     let name = &krate.name;
-    for instrument in instruments_of(krate) {
+    for instrument in instruments_of(krate, lock_home) {
         let Some(reading) = store.read(instrument, name)? else {
             unmet.push(format!("{instrument}: no reading for {name}"));
             continue;
@@ -633,12 +664,29 @@ mod tests {
     use crate::manifest::Crate;
     use crate::reading::{Reading, Status};
 
+    /// The crate `api.lock` lives with in the shipped manifest, which is
+    /// what narrows `port-map`; every crate here but that one is asked
+    /// for `ASKED_OF_EVERY_OTHER_CRATE` at most.
+    const HOME: Option<&str> = Some("php_ext");
+
+    /// [`FRESH`] less `port-map`: what a crate that is not the lock's
+    /// home is asked, before the two narrowings of its own. That it is
+    /// [`FRESH`] less the one row is asserted below and not trusted here.
+    const ASKED_OF_EVERY_OTHER_CRATE: [&str; 6] = [
+        "clippy",
+        "witness",
+        "api-check",
+        "budget",
+        "unsafe-audit",
+        "phpt",
+    ];
+
     #[test]
     fn the_harness_crate_is_asked_for_clippy_api_check_budget_and_unsafe_audit_only() {
-        let asked: Vec<&str> = instruments_of(&Crate::named("xtask")).collect();
+        let asked: Vec<&str> = instruments_of(&Crate::named("xtask"), HOME).collect();
         assert_eq!(asked, ["clippy", "api-check", "budget", "unsafe-audit"]);
-        let asked: Vec<&str> = instruments_of(&Crate::named("ext/pcre")).collect();
-        assert_eq!(asked, FRESH);
+        let asked: Vec<&str> = instruments_of(&Crate::named("ext/pcre"), HOME).collect();
+        assert_eq!(asked, ASKED_OF_EVERY_OTHER_CRATE);
     }
 
     /// An engine crate the manifest gives no subset is not asked for a
@@ -647,14 +695,14 @@ mod tests {
     /// one is asked.
     #[test]
     fn a_crate_is_asked_for_a_phpt_reading_only_where_the_manifest_gives_it_one() {
-        let asked: Vec<&str> = instruments_of(&Crate::named("php_heap")).collect();
+        let asked: Vec<&str> = instruments_of(&Crate::named("php_heap"), HOME).collect();
         assert_eq!(
             asked,
             ["clippy", "witness", "api-check", "budget", "unsafe-audit"]
         );
         let row = Crate::named("php_heap").with_phpt(&["Zend/tests"]);
-        let asked: Vec<&str> = instruments_of(&row).collect();
-        assert_eq!(asked, FRESH);
+        let asked: Vec<&str> = instruments_of(&row, HOME).collect();
+        assert_eq!(asked, ASKED_OF_EVERY_OTHER_CRATE);
     }
 
     /// A crate the manifest marks `feature =` is outside the default
@@ -665,13 +713,42 @@ mod tests {
     #[test]
     fn an_optional_crate_is_not_asked_for_a_phpt_reading_the_lane_never_writes() {
         let row = Crate::named("ext/mbstring").with_feature("mbstring");
-        let asked: Vec<&str> = instruments_of(&row).collect();
+        let asked: Vec<&str> = instruments_of(&row, HOME).collect();
         assert_eq!(
             asked,
             ["clippy", "witness", "api-check", "budget", "unsafe-audit"]
         );
-        let asked: Vec<&str> = instruments_of(&Crate::named("ext/mbstring")).collect();
-        assert_eq!(asked, FRESH);
+        let asked: Vec<&str> = instruments_of(&Crate::named("ext/mbstring"), HOME).collect();
+        assert_eq!(asked, ASKED_OF_EVERY_OTHER_CRATE);
+    }
+
+    /// `port-map` writes exactly one reading, at the crate `api.lock`
+    /// lives with, so condition 1 asks that crate for it and no other
+    /// (harness §4.5 condition 1, #148). A manifest naming no home for
+    /// the lock asks nobody: the instrument is where that refusal is
+    /// said, not `done`.
+    #[test]
+    fn the_crate_the_lock_lives_with_is_the_one_asked_for_a_port_map_reading() {
+        let rest: Vec<&str> = FRESH.into_iter().filter(|i| *i != "port-map").collect();
+        assert_eq!(rest, ASKED_OF_EVERY_OTHER_CRATE);
+        let asked: Vec<&str> = instruments_of(&Crate::named("php_ext"), HOME).collect();
+        assert_eq!(
+            asked,
+            [
+                "clippy",
+                "witness",
+                "api-check",
+                "budget",
+                "unsafe-audit",
+                "port-map"
+            ]
+        );
+        for other in ["php_engine", "ext/pcre", "xtask"] {
+            let asked: Vec<&str> = instruments_of(&Crate::named(other), HOME).collect();
+            assert!(!asked.contains(&"port-map"), "{other}: {asked:?}");
+        }
+        let asked: Vec<&str> = instruments_of(&Crate::named("php_ext"), None).collect();
+        assert!(!asked.contains(&"port-map"), "{asked:?}");
     }
 
     /// A phpt skip is met only where the lane says the engine had no

@@ -1,0 +1,3 @@
+# The fixture's api.lock: one line, so the crate carries the lock the join
+# is held against and a change to it stales the `port-map` reading.
+api::Value

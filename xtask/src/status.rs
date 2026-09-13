@@ -33,12 +33,16 @@ pub(crate) const NO_READING: &str = "no reading";
 pub(crate) const MAP: &str = "AGENTS.md";
 /// The local region file, gitignored, rendered only by name (§5).
 pub(crate) const LOCAL: &str = ".claude/harness.local.md";
-/// The volatile sections of the local file, in the order it renders them.
-pub(crate) const LOCAL_SECTIONS: [&str; 7] = [
+/// The volatile sections of the local file, in the order it renders them:
+/// §5's eight, the instrument readings first and `port-map` with them
+/// since #148, a reading that moves with the store like the others and is
+/// otherwise renderable only by name.
+pub(crate) const LOCAL_SECTIONS: [&str; 8] = [
     "budget",
     "phpt",
     "witness",
     "mutants",
+    "port-map",
     "divergence",
     "permits",
     "git",
@@ -1229,8 +1233,9 @@ mod tests {
     }
 
     #[test]
-    fn the_local_template_is_the_seven_volatile_sections() {
+    fn the_local_template_is_the_eight_volatile_sections() {
         let template = local_template();
+        assert_eq!(LOCAL_SECTIONS.len(), 8, "harness-design.md §5 says eight");
         for name in LOCAL_SECTIONS {
             let line = opener(&template, name).unwrap();
             assert!(line.contains(" volatile "), "{line}");
