@@ -22,7 +22,7 @@ use crate::api::raising::{
     Thrown, arg_count_error, arg_null_deprecated, arg_type_error, too_few_arguments,
 };
 use crate::api::request::Request;
-use crate::api::values::{PhpString, Value, ValueRef};
+use crate::api::values::{Key, PhpString, Value, ValueRef};
 
 /// The engine's own natives, in the order php declares them, each
 /// declaration beside its entry.
@@ -97,7 +97,12 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 }
 
 /// `var_dump(mixed $value, mixed ...$values): void`, php's
-/// `php_var_dump`: each value's type and contents, one line each.
+/// `php_var_dump`: each value's type and contents, one line each, and an
+/// array as `php_array_element_dump` lays it out, each element's key on
+/// its own line and the value indented two more than the key, so a nested
+/// array steps in by two each level. No user code builds an array yet; a
+/// native's answer is one, and this is how a witness reads it
+/// (`ext/tokenizer`'s `token_get_all` is the first).
 ///
 /// ```php
 /// var_dump(true, false, null, 1, -2, 2.5, 0.1, "demo", extension_loaded('Core'));
@@ -136,33 +141,55 @@ fn var_dump(req: &mut Request) -> Result<Value, Thrown> {
     }
     for position in 1..=u32::try_from(count).unwrap_or(u32::MAX) {
         let value = req.argument(position).unwrap_or_default();
-        let line = dumped(req, &value);
-        req.write(line.as_bytes());
+        let mut out = Vec::new();
+        dump(req, &mut out, &value, 1);
+        req.write(&out);
     }
     Ok(Value::null())
 }
 
-/// One value as `php_var_dump` prints it, with its newline.
-fn dumped(req: &mut Request, value: &Value) -> PhpString {
+/// One value as `php_var_dump(zv, level)` prints it, with its newline:
+/// `level - 1` blanks before it past the first level, and an array's
+/// elements each through `php_array_element_dump`, the key at `level + 1`
+/// and the value at `level + 2`.
+fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) {
     let value = value.deref();
+    if level > 1 {
+        out.extend(std::iter::repeat_n(b' ', level - 1));
+    }
     if let Some(b) = value.as_bool() {
-        return PhpString::from_bytes(format!("bool({b})\n").as_bytes());
-    }
-    if let Some(n) = value.as_int() {
-        return PhpString::from_bytes(format!("int({n})\n").as_bytes());
-    }
-    if let Some(f) = value.as_float() {
+        out.extend_from_slice(format!("bool({b})\n").as_bytes());
+    } else if let Some(n) = value.as_int() {
+        out.extend_from_slice(format!("int({n})\n").as_bytes());
+    } else if let Some(f) = value.as_float() {
         // `php_var_dump` prints a float with `%.*H` at `serialize_precision`.
         let text = php_heap::double_to_string(f, req.serialize_precision());
-        return PhpString::from_bytes(format!("float({text})\n").as_bytes());
+        out.extend_from_slice(format!("float({text})\n").as_bytes());
+    } else if let Some(s) = value.as_php_string() {
+        out.extend_from_slice(format!("string({}) \"", s.len()).as_bytes());
+        out.extend_from_slice(s.as_bytes());
+        out.extend_from_slice(b"\"\n");
+    } else if let Some(array) = value.as_array() {
+        out.extend_from_slice(format!("array({}) {{\n", array.len()).as_bytes());
+        for (key, element) in array {
+            out.extend(std::iter::repeat_n(b' ', level + 1));
+            match key {
+                Key::Int(n) => out.extend_from_slice(format!("[{n}]=>\n").as_bytes()),
+                Key::Str(s) => {
+                    out.extend_from_slice(b"[\"");
+                    out.extend_from_slice(s.as_bytes());
+                    out.extend_from_slice(b"\"]=>\n");
+                }
+            }
+            dump(req, out, element, level + 2);
+        }
+        if level > 1 {
+            out.extend(std::iter::repeat_n(b' ', level - 1));
+        }
+        out.extend_from_slice(b"}\n");
+    } else {
+        out.extend_from_slice(b"NULL\n");
     }
-    if let Some(s) = value.as_php_string() {
-        let mut line = PhpString::from_bytes(format!("string({}) \"", s.len()).as_bytes());
-        line.append(s.as_bytes());
-        line.append(b"\"\n");
-        return line;
-    }
-    PhpString::from_bytes(b"NULL\n")
 }
 
 /// `memory_get_usage(bool $real_usage = false): int`, php's
