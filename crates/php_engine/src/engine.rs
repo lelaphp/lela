@@ -220,8 +220,10 @@ impl Shared {
 /// and `html_errors` are the two the CLI moves, from `30` and `1`.
 /// `error_prepend_string` and `error_append_string` are `NULL` in php's
 /// table and empty here, since an entry with no value at all is one
-/// `ini_set()` refuses to set.
-const CORE_INI: [(&str, &str); 17] = [
+/// `ini_set()` refuses to set. `short_open_tag` is the one entry the
+/// scanner reads, `CG(short_tags)`, and `token_get_all` with it.
+const CORE_INI: [(&str, &str); 18] = [
+    ("short_open_tag", "1"),
     ("precision", "14"),
     ("serialize_precision", "-1"),
     ("error_reporting", "32767"),

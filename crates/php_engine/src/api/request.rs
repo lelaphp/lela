@@ -1637,16 +1637,18 @@ impl Request {
     /// on-modify handler runs it here: `max_execution_time` re-arms the
     /// execution timer (`OnUpdateTimeout`, `Z/main/main.c:467`).
     ///
-    /// The one `PHP_INI_SYSTEM` entry of the table is `xmlrpc_errors`,
-    /// which `zend_alter_ini_entry_ex` refuses at `PHP_INI_STAGE_RUNTIME`
-    /// as it refuses every entry whose `modifiable` lacks the stage; the
-    /// rest of the table is `PHP_INI_ALL`.
+    /// The two entries of the table without `PHP_INI_USER` are
+    /// `xmlrpc_errors`, `PHP_INI_SYSTEM`, and `short_open_tag`,
+    /// `PHP_INI_SYSTEM|PHP_INI_PERDIR`, which `zend_alter_ini_entry_ex`
+    /// refuses at `PHP_INI_STAGE_RUNTIME` as it refuses every entry whose
+    /// `modifiable` lacks the stage; the rest of the table is `PHP_INI_ALL`.
     ///
     /// ```php
-    /// var_dump(ini_set('xmlrpc_errors', '1'));
+    /// var_dump(ini_set('xmlrpc_errors', '1'), ini_set('short_open_tag', '1'));
     /// echo NAN;
     /// ```
     /// ```expect
+    /// bool(false)
     /// bool(false)
     ///
     /// Warning: unexpected NAN value was coerced to string in %s on line 3
@@ -1668,9 +1670,10 @@ impl Request {
 
     /// Whether an entry's `modifiable` carries `PHP_INI_USER`, what
     /// `ini_set()` asks: every entry of the table is `PHP_INI_ALL` but
-    /// `xmlrpc_errors`, `PHP_INI_SYSTEM` (`Z/main/main.c:806`).
+    /// `xmlrpc_errors`, `PHP_INI_SYSTEM` (`Z/main/main.c:806`), and
+    /// `short_open_tag`, `PHP_INI_SYSTEM|PHP_INI_PERDIR` (`Z/main/main.c:820`).
     fn ini_modifiable(name: &[u8]) -> bool {
-        name != b"xmlrpc_errors"
+        !matches!(name, b"xmlrpc_errors" | b"short_open_tag")
     }
 
     /// `ini_get_all()`: every entry with its current value.
