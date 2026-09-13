@@ -8,8 +8,10 @@
 //!
 //! The set is the one procedural PHP needs to reach a native: `ECHO`, the
 //! call sequence `INIT_FCALL`, `SEND_VAL`, `SEND_VAR`, `DO_ICALL`,
-//! `RETURN`, which raises the return safepoint, and `JMP`, which raises
-//! the loop safepoint when it jumps backward.
+//! `RETURN`, which raises the return safepoint, `JMP`, which raises
+//! the loop safepoint when it jumps backward, and the arithmetic
+//! `ZEND_ADD`, `ZEND_SUB`, `ZEND_MUL` and `ZEND_DIV` that php emits for
+//! what its compiler does not fold.
 
 // Every handler is generic over the tier and hands back the same edge, so
 // the generated dispatch calls them all the same way; the ones that raise a
@@ -19,6 +21,7 @@
 use php_heap::{Fatal, FrameRef};
 use php_unit::{ConstIdx, OpArray, Opline};
 
+use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::api::values::Value;
 use crate::exec::{self, CallState};
@@ -130,6 +133,48 @@ pub(crate) fn do_icall<T: Tier>(
     }
 }
 
+/// `ZEND_ADD`: [`crate::ops::add`] over the two operands, into the
+/// temporary the opline's `result` field names.
+pub(crate) fn add<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    arithmetic(req, frame, code, op, crate::ops::add)
+}
+
+/// `ZEND_SUB`: [`crate::ops::sub`], the same way.
+pub(crate) fn sub<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    arithmetic(req, frame, code, op, crate::ops::sub)
+}
+
+/// `ZEND_MUL`: [`crate::ops::mul`], the same way.
+pub(crate) fn mul<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    arithmetic(req, frame, code, op, crate::ops::mul)
+}
+
+/// `ZEND_DIV`: [`crate::ops::div`], the same way; a divisor of zero
+/// leaves php's `DivisionByZeroError` pending where the opline stands.
+pub(crate) fn div<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    arithmetic(req, frame, code, op, crate::ops::div)
+}
+
 /// `ZEND_JMP`: the unconditional jump `pass_two` leaves, its target
 /// opline in `op1`. A jump to an earlier opline is a loop's back-edge
 /// and is a safepoint site (design §5.7): the frame is positioned at the
@@ -174,6 +219,32 @@ pub(crate) fn r#return<T: Tier>(
     // goes on from the one after it.
     req.vm_mut().advance(caller);
     Ok(Stepped::Popped(caller))
+}
+
+/// The body the four arithmetic handlers share: both operands addressed,
+/// the kernel called, and what it returned written into the temporary
+/// the opline's `result` field names. A kernel that threw leaves the
+/// throwable pending, which is the `Threw` edge the loop reads.
+fn arithmetic(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    kernel: fn(&mut Request, &Value, &Value) -> Result<Value, Thrown>,
+) -> Edge {
+    let left = exec::operand(req.vm(), frame, code, op.op1_type, op.op1);
+    let right = exec::operand(req.vm(), frame, code, op.op2_type, op.op2);
+    match kernel(req, &left, &right) {
+        Ok(value) => {
+            let slot = exec::temporary_slot(code, op.out);
+            req.vm_mut().set_slot(frame, slot, value);
+            Ok(advance(req, frame))
+        }
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            Ok(Stepped::Threw(frame))
+        }
+    }
 }
 
 /// `ZEND_VM_NEXT_OPCODE`: the same frame, at the opline after this one.

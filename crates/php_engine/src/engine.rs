@@ -718,6 +718,86 @@ mod tests {
         assert_eq!(body, "bool(false)\n");
     }
 
+    /// The four arithmetic opcodes end to end, each snippet the one its
+    /// kernel's witness pins, so that what the fences claim is what this
+    /// engine writes and not only what the oracle wrote.
+    #[test]
+    fn the_arithmetic_opcodes_write_what_their_witnesses_pin() {
+        let engine = Engine::builder().build();
+        for (source, pinned) in [
+            (
+                "<?php echo 1 + (2 + extension_loaded('Core')), \"|\", 1.5 + (2.5 + extension_loaded('Core')), \"|\", \"1\" + (1 + extension_loaded('Core')), \"|\", 9223372036854775807 + (1 + extension_loaded('Core'));",
+                "4|5|3|9.2233720368548E+18",
+            ),
+            (
+                "<?php echo 1 - (2 - extension_loaded('Core')), \"|\", 1.5 - (2.5 - extension_loaded('Core')), \"|\", \"3\" - (1 + extension_loaded('Core')), \"|\", -9223372036854775807 - (1 + extension_loaded('Core'));",
+                "0|0|1|-9.2233720368548E+18",
+            ),
+            (
+                "<?php echo 2 * (3 * extension_loaded('Core')), \"|\", 1.5 * (2.5 * extension_loaded('Core')), \"|\", \"3\" * (1 + extension_loaded('Core')), \"|\", 4611686018427387904 * (1 + extension_loaded('Core'));",
+                "6|3.75|6|9.2233720368548E+18",
+            ),
+            (
+                "<?php echo 6 / (1 + extension_loaded('Core')), \"|\", 7.5 / (1.5 * extension_loaded('Core')), \"|\", \"7\" / (1 + extension_loaded('Core')), \"|\", (-9223372036854775807 - extension_loaded('Core')) / (0 - extension_loaded('Core'));",
+                "3|5|3.5|9.2233720368548E+18",
+            ),
+        ] {
+            let (body, observables) = served(&engine, source);
+            assert_eq!(body, pinned, "{source}");
+            assert_eq!(observables.fatal, None, "{source}");
+        }
+    }
+
+    /// `div_function`: the divisor of zero php refuses to fold, so the
+    /// opcode throws `DivisionByZeroError` where it stands. php renders
+    /// the uncaught throwable with its site and a stack trace, which is
+    /// #108 and not this; what is held here is the class and the text.
+    #[test]
+    fn a_division_by_zero_throws_php_s_error_where_the_opcode_stands() {
+        let engine = Engine::builder().build();
+        let (_, observables) = served(&engine, "<?php echo 1/0;");
+        assert_eq!(
+            observables.fatal.as_deref(),
+            Some(
+                "PHP Fatal error:  Uncaught DivisionByZeroError: Division by zero in witness.php on line 0\n"
+            )
+        );
+        assert_eq!(observables.exit_code, 255);
+        let (_, observables) = served(&engine, "<?php echo 1/0.0;");
+        assert_eq!(
+            observables
+                .fatal
+                .as_deref()
+                .map(|text| text.contains("Uncaught DivisionByZeroError: Division by zero")),
+            Some(true)
+        );
+    }
+
+    /// `zend_binop_error`: an operand php will not read as a number is a
+    /// `TypeError` naming php's types around the operator as written, and
+    /// one with a number in front of it is the warning and the number.
+    #[test]
+    fn an_operand_php_refuses_to_read_as_a_number_is_php_s_type_error() {
+        let engine = Engine::builder().build();
+        let (_, observables) = served(&engine, "<?php echo \"abc\" + extension_loaded('Core');");
+        assert_eq!(
+            observables.fatal.as_deref().map(|text| text
+                .contains("Uncaught TypeError: Unsupported operand types: string + bool")),
+            Some(true),
+            "{:?}",
+            observables.fatal
+        );
+        let (body, observables) = served(
+            &engine,
+            "<?php echo \"1abc\" + (1 + extension_loaded('Core'));",
+        );
+        assert_eq!(
+            body,
+            "\nWarning: A non-numeric value encountered in witness.php on line 1\n3"
+        );
+        assert_eq!(observables.fatal, None);
+    }
+
     #[test]
     fn echo_writes_each_part_as_php_converts_it() {
         let engine = Engine::builder().build();
@@ -799,7 +879,7 @@ mod tests {
         let unit = Unit {
             main: php_unit::OpArray {
                 oplines: vec![php_unit::Opline {
-                    opcode: php_unit::Opcode::Add,
+                    opcode: php_unit::Opcode::Mod,
                     ..php_unit::Opline::default()
                 }]
                 .into_boxed_slice(),
@@ -811,7 +891,7 @@ mod tests {
         assert_eq!(
             crate::tier::execute::<Nop>(&mut req, frame),
             Err(Fatal::Error(String::from(
-                "InternalError: ZEND_ADD has no handler in this engine yet"
+                "InternalError: ZEND_MOD has no handler in this engine yet"
             )))
         );
     }

@@ -229,17 +229,84 @@ mod tests {
     }
 
     #[test]
-    fn what_php_leaves_to_an_opcode_is_refused_rather_than_folded() {
+    fn a_modulo_and_a_power_over_constants_fold_the_way_php_folds_them() {
+        assert_eq!(echoed_literal(b"<?php echo 7 % 2;").as_long(), Some(1));
+        assert_eq!(echoed_literal(b"<?php echo -7 % 2;").as_long(), Some(-1));
+        assert_eq!(echoed_literal(b"<?php echo 7 % -2;").as_long(), Some(1));
+        assert_eq!(echoed_literal(b"<?php echo 2 ** 3;").as_long(), Some(8));
+        assert_eq!(
+            echoed_literal(b"<?php echo 2 ** 3 ** 2;").as_long(),
+            Some(512),
+            "`**` reads right to left"
+        );
+        assert_eq!(
+            echoed_literal(b"<?php echo -2 ** 2;").as_long(),
+            Some(-4),
+            "`**` binds tighter than unary `-`"
+        );
+        assert_eq!(
+            echoed_literal(b"<?php echo 2 ** -1;").as_double(),
+            Some(0.5)
+        );
+        // `pow_function_base`: the step that overflows leaves php's double.
+        assert_eq!(
+            echoed_literal(b"<?php echo 2 ** 63;").as_double(),
+            Some(9_223_372_036_854_775_808_f64)
+        );
+    }
+
+    #[test]
+    fn arithmetic_php_does_not_fold_is_emitted_as_the_opcode_php_emits() {
+        assert_eq!(
+            unit_of(b"<?php echo 1 + extension_loaded('Core');").dump(),
+            "$_main:\n     ; (lines=6, args=0, vars=0, tmps=2)\n\
+             0000 INIT_FCALL CONST[0]\n\
+             0001 SEND_VAL CONST[1]\n\
+             0002 DO_ICALL\n\
+             0003 ADD CONST[2] V0\n\
+             0004 ECHO T1\n\
+             0005 RETURN CONST[2]\n",
+            "php's own op array, its literals in the order the oplines name them"
+        );
+        // An operand php converts and this compiler does not: php folds
+        // the sum where it stands, this leaves the conversion to the
+        // kernel and prints the same 2.
+        assert_eq!(
+            unit_of(b"<?php echo \"1\" + 1;").dump(),
+            "$_main:\n     ; (lines=3, args=0, vars=0, tmps=1)\n\
+             0000 ADD CONST[0] CONST[1]\n0001 ECHO T0\n0002 RETURN CONST[1]\n"
+        );
+        // `zend_binary_op_produces_error`: the division php refuses to
+        // fold, so that `DivisionByZeroError` is thrown where it stands.
+        assert_eq!(
+            unit_of(b"<?php echo 1/0;").dump(),
+            "$_main:\n     ; (lines=3, args=0, vars=0, tmps=1)\n\
+             0000 DIV CONST[0] CONST[1]\n0001 ECHO T0\n0002 RETURN CONST[0]\n"
+        );
+        // `zend_compile_unary_pm`: the multiplication by -1 php emits
+        // where the operand is not a constant.
+        assert_eq!(
+            unit_of(b"<?php echo -extension_loaded('Core');").dump(),
+            "$_main:\n     ; (lines=6, args=0, vars=0, tmps=2)\n\
+             0000 INIT_FCALL CONST[0]\n\
+             0001 SEND_VAL CONST[1]\n\
+             0002 DO_ICALL\n\
+             0003 MUL V0 CONST[2]\n\
+             0004 ECHO T1\n\
+             0005 RETURN CONST[3]\n"
+        );
+    }
+
+    #[test]
+    fn what_this_compiler_cannot_reach_is_refused_rather_than_mis_compiled() {
         for source in [
-            // `zend_binary_op_produces_error`: the division that throws.
-            b"<?php echo 1/0;".as_slice(),
-            b"<?php echo 1/0.0;".as_slice(),
             // A constant no table here holds.
             b"<?php echo FOO;".as_slice(),
-            // An operand php converts and this does not.
-            b"<?php echo \"1\" + 1;".as_slice(),
-            // What a call returned is known to no compiler.
-            b"<?php echo 1 + extension_loaded('demo');".as_slice(),
+            // `%` and `**` fold and no handler serves their opcodes.
+            b"<?php echo 7 % extension_loaded('demo');".as_slice(),
+            b"<?php echo 2 ** extension_loaded('demo');".as_slice(),
+            // `zend_binary_op_produces_error` for a modulo by zero.
+            b"<?php echo 1 % 0;".as_slice(),
         ] {
             let mut strings = php_heap::Strings::new();
             assert!(

@@ -13,7 +13,9 @@
 //! an expression a number, a single- or double-quoted string with no
 //! interpolation, `true`, `false`, `null`, a constant by name, a call of
 //! a named function, a parenthesised expression, unary `-` and `+`, and
-//! `+`, `-`, `*` and `/` at php's two precedence levels, left to right.
+//! `+`, `-`, `*`, `/`, `%` and `**` at php's precedence levels: the
+//! additive level under the multiplicative one, both left to right, and
+//! `**` right to left above unary `-`.
 //! Anything else is a [`crate::CompileError`], so what this cannot read is
 //! refused rather than silently compiled to something else.
 
@@ -68,6 +70,10 @@ pub(crate) enum BinaryOp {
     Mul,
     /// `ZEND_DIV`
     Div,
+    /// `ZEND_MOD`
+    Mod,
+    /// `ZEND_POW`
+    Pow,
 }
 
 /// The line each statement stands on, beside it.
@@ -268,9 +274,7 @@ impl Reader<'_> {
         }
     }
 
-    /// `*` and `/`, php's higher arithmetic level. `**` is php's own
-    /// level above them and is not read, so it is refused rather than
-    /// taken for a `*`.
+    /// `*`, `/` and `%`, php's higher arithmetic level.
     fn multiplicative(&mut self) -> Result<Expr, Trouble> {
         let mut left = self.unary()?;
         loop {
@@ -279,6 +283,7 @@ impl Reader<'_> {
                 (Some(b'*'), next) if !matches!(next, Some(b'*' | b'=')) => BinaryOp::Mul,
                 // A `/` that opens a comment is trivia, already stepped over.
                 (Some(b'/'), next) if next != Some(b'=') => BinaryOp::Div,
+                (Some(b'%'), next) if next != Some(b'=') => BinaryOp::Mod,
                 _ => return Ok(left),
             };
             self.bump(1);
@@ -292,17 +297,36 @@ impl Reader<'_> {
     }
 
     /// `-$a` and `+$a`, which bind tighter than either level and nest.
+    /// `**` binds tighter still, so `-2 ** 2` is php's `-(2 ** 2)`.
     fn unary(&mut self) -> Result<Expr, Trouble> {
         self.skip_trivia();
         let minus = match (self.byte(0), self.byte(1)) {
             (Some(b'-'), next) if !matches!(next, Some(b'-' | b'=')) => true,
             (Some(b'+'), next) if !matches!(next, Some(b'+' | b'=')) => false,
-            _ => return self.operand(),
+            _ => return self.power(),
         };
         self.bump(1);
         Ok(Expr::Unary {
             minus,
             operand: Box::new(self.unary()?),
+        })
+    }
+
+    /// `**`, php's own level above unary `-`, read right to left: its
+    /// right side is a unary expression, so `2 ** -1` and `2 ** 3 ** 2`
+    /// are php's.
+    fn power(&mut self) -> Result<Expr, Trouble> {
+        let left = self.operand()?;
+        self.skip_trivia();
+        if !(self.byte(0) == Some(b'*') && self.byte(1) == Some(b'*') && self.byte(2) != Some(b'='))
+        {
+            return Ok(left);
+        }
+        self.bump(2);
+        Ok(Expr::Binary {
+            op: BinaryOp::Pow,
+            left: Box::new(left),
+            right: Box::new(self.unary()?),
         })
     }
 
@@ -695,12 +719,67 @@ mod tests {
     #[test]
     fn an_operator_this_does_not_read_is_refused_rather_than_taken_for_another() {
         for source in [
-            b"<?php echo 2 ** 3;".as_slice(),
-            b"<?php echo 7 % 2;".as_slice(),
             b"<?php echo 'a' . 'b';".as_slice(),
+            b"<?php echo 1 <=> 2;".as_slice(),
         ] {
             assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
         }
+    }
+
+    /// The one expression each level of php's table produces, so that a
+    /// level that moved is a failing test and not a wrong answer.
+    fn shape(source: &[u8]) -> String {
+        format!("{:?}", read(source).unwrap_or_default())
+            .replace("Box::new", "")
+            .replace(' ', "")
+    }
+
+    #[test]
+    fn a_modulo_stands_at_php_s_multiplicative_level() {
+        assert_eq!(
+            shape(b"<?php echo 1 + 2 % 3;"),
+            shape(b"<?php echo 1 + (2 % 3);"),
+            "`%` binds tighter than `+`"
+        );
+        assert_eq!(
+            shape(b"<?php echo 2 * 3 % 4;"),
+            shape(b"<?php echo (2 * 3) % 4;"),
+            "`%` and `*` are one level, read left to right"
+        );
+    }
+
+    #[test]
+    fn a_power_stands_above_unary_minus_and_reads_right_to_left() {
+        assert_eq!(
+            shape(b"<?php echo -2 ** 2;"),
+            shape(b"<?php echo -(2 ** 2);"),
+            "`**` binds tighter than unary `-`"
+        );
+        assert_eq!(
+            shape(b"<?php echo 2 ** 3 ** 2;"),
+            shape(b"<?php echo 2 ** (3 ** 2);"),
+            "`**` reads right to left"
+        );
+        assert_eq!(
+            shape(b"<?php echo 2 ** 3 * 4;"),
+            shape(b"<?php echo (2 ** 3) * 4;"),
+            "`**` binds tighter than `*`"
+        );
+        assert_eq!(
+            read(b"<?php echo 2 ** -1;").unwrap_or_default(),
+            vec![(
+                Stmt::Echo(vec![Expr::Binary {
+                    op: BinaryOp::Pow,
+                    left: Box::new(Expr::Int(2)),
+                    right: Box::new(Expr::Unary {
+                        minus: true,
+                        operand: Box::new(Expr::Int(1)),
+                    }),
+                }]),
+                1
+            )],
+            "the right side of `**` is a unary expression"
+        );
     }
 
     #[test]

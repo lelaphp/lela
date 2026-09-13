@@ -9,9 +9,11 @@
 //!
 //! Arithmetic over values known here is folded as php folds it
 //! (`zend_try_ct_eval_binary_op`), so `1/3` is one constant and no opline.
-//! php emits `ZEND_ADD` for what it cannot fold; no handler serves an
-//! arithmetic opcode yet, so what php would leave to one is a
-//! [`CompileError`] rather than something else compiled in its place.
+//! What it cannot fold becomes the opcode php emits, into a temporary as
+//! `zend_emit_op_tmp` leaves it: `ZEND_ADD`, `ZEND_SUB`, `ZEND_MUL` and
+//! `ZEND_DIV`, whose kernels the engine serves. `%` and `**` fold here
+//! and no handler serves their opcodes, so what does not fold is a
+//! [`CompileError`] rather than an opline that would fatal under the loop.
 
 use php_heap::{Fatal, Intern, Zval};
 use php_unit::decl::Name;
@@ -36,27 +38,16 @@ pub(crate) struct Emit<'a> {
     line: u32,
 }
 
-/// Where an expression left its value: a constant's slot, or a temporary
-/// holding what a call returned (php's `IS_VAR`).
+/// Where an expression left its value, php's `znode`: the value itself
+/// for a constant, which reaches the table only when the opline that
+/// names it is emitted (`zend_add_literal`); a temporary holding what a
+/// call returned (php's `IS_VAR`); or a temporary an operator wrote
+/// (php's `IS_TMP_VAR`).
 #[derive(Debug, Clone, Copy)]
 enum Where {
-    Constant(u32),
+    Constant(Zval),
     Returned(u32),
-}
-
-impl Where {
-    fn kind(self) -> OperandKind {
-        match self {
-            Where::Constant(_) => OperandKind::Const,
-            Where::Returned(_) => OperandKind::Var,
-        }
-    }
-
-    fn field(self) -> u32 {
-        match self {
-            Where::Constant(at) | Where::Returned(at) => at,
-        }
-    }
+    Temporary(u32),
 }
 
 /// The main op array of one source file: its statements, then php's
@@ -174,10 +165,11 @@ impl Emit<'_> {
             Stmt::Echo(parts) => {
                 for part in parts {
                     let value = self.expr(part)?;
+                    let (op1_type, op1) = self.operand(value);
                     self.push(Opline {
                         opcode: Opcode::Echo,
-                        op1_type: value.kind(),
-                        op1: value.field(),
+                        op1_type,
+                        op1,
                         ..Opline::default()
                     });
                 }
@@ -189,15 +181,88 @@ impl Emit<'_> {
         Ok(())
     }
 
-    /// Compile `expr` and say where its value is. Everything but a call
-    /// is a constant expression here, and its slot in the constant table
-    /// is where it is.
+    /// The operand fields one [`Where`] fills. A constant reaches the
+    /// table here and not before, as `zend_add_literal` adds it when the
+    /// opline that names it is emitted, which is what puts the table's
+    /// slots in php's own order.
+    fn operand(&mut self, value: Where) -> (OperandKind, u32) {
+        match value {
+            Where::Constant(value) => (OperandKind::Const, self.constant(value)),
+            Where::Returned(at) => (OperandKind::Var, at),
+            Where::Temporary(at) => (OperandKind::Tmp, at),
+        }
+    }
+
+    /// `zend_compile_expr`: compile `expr` and say where its value is.
     fn expr(&mut self, expr: &Expr) -> Result<Where, CompileError> {
         match expr {
             Expr::Call { name, arguments } => self.call(name, arguments),
-            known => {
-                let value = self.constant_expr(known)?;
-                Ok(Where::Constant(self.constant(value)))
+            Expr::Unary { minus, operand } => self.unary(*minus, operand),
+            Expr::Binary { op, left, right } => self.binary(*op, left, right),
+            known => Ok(Where::Constant(self.constant_expr(known)?)),
+        }
+    }
+
+    /// `zend_compile_binary_op`: the value where
+    /// `zend_try_ct_eval_binary_op` folds the operator over two constants,
+    /// and the opcode into a temporary where it does not
+    /// (`zend_emit_op_tmp`).
+    fn binary(&mut self, op: BinaryOp, left: &Expr, right: &Expr) -> Result<Where, CompileError> {
+        if let (Ok(a), Ok(b)) = (self.constant_expr(left), self.constant_expr(right))
+            && let Some(folded) = fold(op, a, b)
+        {
+            return Ok(Where::Constant(folded));
+        }
+        let opcode = self.opcode_of(op)?;
+        let left = self.expr(left)?;
+        let right = self.expr(right)?;
+        Ok(self.emit_binary(opcode, left, right))
+    }
+
+    /// `zend_compile_unary_pm`: php folds unary `-` and `+` as the
+    /// multiplication by -1 and by 1 it would otherwise emit, and emits
+    /// that multiplication where the operand is not a constant.
+    fn unary(&mut self, minus: bool, operand: &Expr) -> Result<Where, CompileError> {
+        let sign = Zval::long(if minus { -1 } else { 1 });
+        if let Ok(value) = self.constant_expr(operand)
+            && let Some(folded) = fold(BinaryOp::Mul, value, sign)
+        {
+            return Ok(Where::Constant(folded));
+        }
+        let operand = self.expr(operand)?;
+        Ok(self.emit_binary(Opcode::Mul, operand, Where::Constant(sign)))
+    }
+
+    /// `zend_emit_op_tmp`: the opline with both operands and a temporary
+    /// for what it leaves, which is where the value is.
+    fn emit_binary(&mut self, opcode: Opcode, left: Where, right: Where) -> Where {
+        let (op1_type, op1) = self.operand(left);
+        let (op2_type, op2) = self.operand(right);
+        let out = self.temporary();
+        self.push(Opline {
+            opcode,
+            op1_type,
+            op1,
+            op2_type,
+            op2,
+            out,
+            ..Opline::default()
+        });
+        Where::Temporary(out)
+    }
+
+    /// The opcode `zend_compile_binary_op` gives each operator. php has
+    /// one for `%` and `**` too and this engine serves neither, so an
+    /// expression that did not fold is refused where it stands rather
+    /// than compiled into an opline the loop would fatal on.
+    fn opcode_of(&self, op: BinaryOp) -> Result<Opcode, CompileError> {
+        match op {
+            BinaryOp::Add => Ok(Opcode::Add),
+            BinaryOp::Sub => Ok(Opcode::Sub),
+            BinaryOp::Mul => Ok(Opcode::Mul),
+            BinaryOp::Div => Ok(Opcode::Div),
+            BinaryOp::Mod | BinaryOp::Pow => {
+                Err(self.fatal("arithmetic this engine serves no opcode for yet"))
             }
         }
     }
@@ -264,15 +329,16 @@ impl Emit<'_> {
         for (at, argument) in arguments.iter().enumerate() {
             let value = self.expr(argument)?;
             let number = u32::try_from(at).unwrap_or(0) + 1;
+            let (op1_type, op1) = self.operand(value);
             self.push(Opline {
                 // php sends a VAR by `SEND_VAR` and anything else by
                 // `SEND_VAL` (`zend_compile_args`, the not-by-reference arms).
-                opcode: match value.kind() {
+                opcode: match op1_type {
                     OperandKind::Var => Opcode::SendVar,
                     _ => Opcode::SendVal,
                 },
-                op1_type: value.kind(),
-                op1: value.field(),
+                op1_type,
+                op1,
                 op2: number,
                 out: number - 1,
                 ..Opline::default()
@@ -358,12 +424,11 @@ fn number(value: Zval) -> Option<Number> {
 
 /// `zend_try_ct_eval_binary_op`: the value php folds an arithmetic
 /// operator over two constants to, or `None` where php leaves it to the
-/// opcode. php's guard is `zend_binary_op_produces_error`, which for the
-/// four operators here is a division whose right side is zero as a
-/// double; that one throws `DivisionByZeroError` and is never folded.
-/// php folds an operand it would convert too, a numeric string or a
-/// bool; this folds two numbers and refuses the rest, since the
-/// conversion is not made yet.
+/// opcode. php's guard is `zend_binary_op_produces_error`: a division or
+/// a modulo by zero, a modulo over a double, and `0 ** (<0)`, each of
+/// which throws where it stands. php folds an operand it would convert
+/// too, a numeric string, a bool or null; this folds two numbers and
+/// leaves the rest to the opcode, whose kernel makes php's conversion.
 fn fold(op: BinaryOp, left: Zval, right: Zval) -> Option<Zval> {
     match (number(left)?, number(right)?) {
         (Number::Long(a), Number::Long(b)) => longs(op, a, b),
@@ -371,10 +436,10 @@ fn fold(op: BinaryOp, left: Zval, right: Zval) -> Option<Zval> {
     }
 }
 
-/// The long arms of `add_function`, `sub_function`, `mul_function` and
-/// `div_function`: the value php's `fast_long_*` macros leave, a double
-/// where the operation overflowed and, for a division, where it did not
-/// come out whole.
+/// The long arms of `add_function`, `sub_function`, `mul_function`,
+/// `div_function`, `mod_function` and `pow_function`: the value php's
+/// `fast_long_*` macros leave, a double where the operation overflowed
+/// and, for a division, where it did not come out whole.
 #[expect(
     clippy::cast_precision_loss,
     reason = "php's `(double) lval`, whose rounding is the behaviour being copied"
@@ -385,14 +450,61 @@ fn longs(op: BinaryOp, a: i64, b: i64) -> Option<Zval> {
         BinaryOp::Add => overflowed(a.checked_add(b), a as f64 + b as f64),
         BinaryOp::Sub => overflowed(a.checked_sub(b), a as f64 - b as f64),
         BinaryOp::Mul => overflowed(a.checked_mul(b), a as f64 * b as f64),
-        // `zend_binary_op_produces_error`: a division by zero throws,
-        // and is left to the opcode.
-        BinaryOp::Div if b == 0 => None,
+        // `zend_binary_op_produces_error`: a division or a modulo by
+        // zero throws, and both are left to the opcode.
+        BinaryOp::Div | BinaryOp::Mod if b == 0 => None,
         // php's own case, "prevent overflow error/crash".
         BinaryOp::Div if a == i64::MIN && b == -1 => Some(Zval::double(a as f64 / -1.0)),
         BinaryOp::Div if a % b == 0 => Some(Zval::long(a / b)),
         BinaryOp::Div => Some(Zval::double(a as f64 / b as f64)),
+        // php's own case, `% -1` being zero where the division overflows.
+        BinaryOp::Mod if b == -1 => Some(Zval::long(0)),
+        BinaryOp::Mod => Some(Zval::long(a % b)),
+        BinaryOp::Pow => Some(power(a, b)),
     }
+}
+
+/// `pow_function_base`'s long arm: php's square-and-multiply, a long
+/// while every step fits and the double php computes from `pow()` once
+/// one overflows. A negative exponent is php's `pow()` from the start.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "php's `(double) lval`, whose rounding is the behaviour being copied"
+)]
+fn power(a: i64, b: i64) -> Zval {
+    if b < 0 {
+        return Zval::double((a as f64).powf(b as f64));
+    }
+    if b == 0 {
+        return Zval::long(1);
+    }
+    if a == 0 {
+        return Zval::long(0);
+    }
+    let (mut l1, mut l2, mut i) = (1_i64, a, b);
+    while i >= 1 {
+        if i % 2 == 1 {
+            i -= 1;
+            let Some(product) = l1.checked_mul(l2) else {
+                // php's `dval * pow(l2, i)`, the multiply having overflowed.
+                return Zval::double(l1 as f64 * l2 as f64 * (l2 as f64).powf(i as f64));
+            };
+            l1 = product;
+        } else {
+            i /= 2;
+            let Some(square) = l2.checked_mul(l2) else {
+                // php's `(double) l1 * pow(dval, i)`, `dval` being the
+                // square that overflowed.
+                let squared = l2 as f64 * l2 as f64;
+                return Zval::double(l1 as f64 * squared.powf(i as f64));
+            };
+            l2 = square;
+        }
+        if i == 0 {
+            return Zval::long(l1);
+        }
+    }
+    Zval::long(l1)
 }
 
 /// The double arms of the same four, where php converts both operands
@@ -406,6 +518,13 @@ fn doubles(op: BinaryOp, a: f64, b: f64) -> Option<Zval> {
         // meets as well.
         BinaryOp::Div if b == 0.0 => None,
         BinaryOp::Div => Some(Zval::double(a / b)),
+        // A modulo casts both sides to a long, which php refuses to fold
+        // where either is a double that is not a whole number in range;
+        // this leaves every double modulo to the opcode.
+        BinaryOp::Mod => None,
+        // `0 ** (<0)` throws `DivisionByZeroError` where it stands.
+        BinaryOp::Pow if a == 0.0 && b < 0.0 => None,
+        BinaryOp::Pow => Some(Zval::double(a.powf(b))),
     }
 }
 
