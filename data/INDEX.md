@@ -11,6 +11,7 @@ The data files the design cites and the extraction records behind them; each is 
 ├── ops-extraction.md
 ├── port-map.v0.toml
 ├── pre-day-1.md
+├── special-funcs.md
 └── syntax-extraction.md
 ```
-<!-- /computed in=888a4c0ec890b7deabf03a865e4ecb618a087b96a79b062a321ec7791b2486ab out=b4fc7b8ea2bbe4d5c9466dfdc8f3cb79347c86436efb88dde651ebcc899c730f -->
+<!-- /computed in=eed7eeaf7c2084e746e452b1aa6d81d0a01f4e8784b70ae9ee5cefa2a7a1cea7 out=7a76ebb5ad351439fc4445096765933d2f7ebe5309e28773842971812343ada4 -->

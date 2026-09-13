@@ -20,6 +20,7 @@
 
 mod emit;
 mod read;
+mod special;
 
 use php_heap::Intern;
 use php_syntax::Parsed;
@@ -868,6 +869,163 @@ mod tests {
             return;
         };
         assert!(one.is_same(other), "one `zend_string`, named by both units");
+    }
+
+    /// The oracle's dump under the pin's `dump` regime of #162's third
+    /// program, `echo 1 + strlen('a');`:
+    ///
+    /// ```text
+    /// 0000 ECHO int(2)
+    /// 0001 RETURN int(1)
+    /// ```
+    ///
+    /// `zend_try_compile_special_func` reaches `zend_compile_func_strlen`,
+    /// which leaves the constant string's length where the call stood,
+    /// and `zend_try_ct_eval_binary_op` folds the sum over it.
+    #[test]
+    fn strlen_over_a_constant_string_is_its_length_and_the_sum_folds_over_it() {
+        let unit = unit_of(b"<?php echo 1 + strlen('a');");
+        assert_eq!(
+            unit.dump(),
+            "$_main:\n     ; (lines=2, args=0, vars=0, tmps=0)\n\
+             0000 ECHO CONST[0]\n0001 RETURN CONST[1]\n",
+            "one ECHO of a constant, no INIT_FCALL and no ADD"
+        );
+        assert_eq!(unit.main.literals[0].as_long(), Some(2));
+    }
+
+    /// The constant a single-expression `echo` leaves, where the whole
+    /// expression folded: the first slot, of two with the return's.
+    fn folded(source: &[u8]) -> Option<php_heap::Zval> {
+        let (unit, _strings) = unit_and_strings(source);
+        (unit.main.oplines.len() == 2 && unit.main.oplines[0].opcode == Opcode::Echo)
+            .then(|| unit.main.literals.first().copied())
+            .flatten()
+    }
+
+    /// Whether the source compiles to the ordinary call of `name`: an
+    /// `INIT_FCALL` first, over that lowered name, and a `DO_ICALL`.
+    fn ordinary_call(source: &[u8], name: &[u8]) -> bool {
+        let (unit, _strings) = unit_and_strings(source);
+        let oplines = &unit.main.oplines;
+        oplines.first().map(|op| op.opcode) == Some(Opcode::InitFcall)
+            && literal_text(&unit, 0).as_deref() == Some(name)
+            && oplines.iter().any(|op| op.opcode == Opcode::DoIcall)
+    }
+
+    /// The four rows of php's table that fold to a constant with no
+    /// opcode, each held to what the oracle dumps: `strlen` over a
+    /// constant string, `chr` over a long written 0 to 255, `ord` over a
+    /// one-byte string, `defined` over a name the compiler substitutes,
+    /// and `.` over two literals counting as written, since php's parser
+    /// folds it before the compiler looks (`zend_ast_create_concat_op`).
+    #[test]
+    fn the_four_special_names_fold_to_the_constant_php_dumps() {
+        for (source, long) in [
+            (&b"<?php echo strlen('a' . 'b');"[..], 2),
+            (b"<?php echo strlen('a' . 1);", 2),
+            (b"<?php echo strlen('');", 0),
+            (b"<?php echo \\strlen('ab');", 2),
+            (b"<?php echo STRLEN('ab');", 2),
+            (b"<?php echo strlen(chr(65));", 1),
+            (b"<?php echo ord('a');", 97),
+            (b"<?php echo ord('a' . '');", 97),
+        ] {
+            assert_eq!(
+                folded(source).and_then(php_heap::Zval::as_long),
+                Some(long),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+        for (source, text) in [
+            (&b"<?php echo chr(65);"[..], &b"A"[..]),
+            (b"<?php echo chr(0);", b"\0"),
+            (b"<?php echo chr(255);", b"\xff"),
+        ] {
+            assert_eq!(
+                echoed_string(source),
+                text,
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+        for source in [
+            &b"<?php echo defined('INF');"[..],
+            b"<?php echo defined('NAN');",
+            b"<?php echo defined('true');",
+            b"<?php echo defined('TRUE');",
+            b"<?php echo defined('null');",
+            b"<?php echo defined('IN' . 'F');",
+        ] {
+            assert_eq!(
+                folded(source).map(php_heap::Zval::kind),
+                Some(php_heap::ZvalType::True),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
+
+    /// What php leaves to an opcode (`ZEND_STRLEN`, `ZEND_DEFINED`,
+    /// `ZEND_COUNT`) or to the call itself is the ordinary call here,
+    /// and never a constant it is not: a `strlen` over anything but a
+    /// constant string, a `chr` whose long is not written as such or is
+    /// outside the byte, an `ord` over any other string, a `defined`
+    /// over a namespaced name, an unknown one or no string, a wrong
+    /// count of arguments, and a name whose row is an opcode.
+    #[test]
+    fn a_special_name_this_compiler_cannot_fold_is_the_ordinary_call() {
+        for (source, name) in [
+            (&b"<?php echo strlen(1);"[..], &b"strlen"[..]),
+            (b"<?php echo strlen(INF);", b"strlen"),
+            (b"<?php echo strlen(null);", b"strlen"),
+            (b"<?php echo strlen($a);", b"strlen"),
+            (b"<?php echo strlen();", b"strlen"),
+            (b"<?php echo strlen('a', 'b');", b"strlen"),
+            (b"<?php echo chr(1 + 64);", b"chr"),
+            (b"<?php echo chr(-0);", b"chr"),
+            (b"<?php echo chr(-1);", b"chr"),
+            (b"<?php echo chr(256);", b"chr"),
+            (b"<?php echo chr('65');", b"chr"),
+            (b"<?php echo ord('ab');", b"ord"),
+            (b"<?php echo ord('');", b"ord"),
+            (b"<?php echo ord(65);", b"ord"),
+            (b"<?php echo defined('A\\\\B');", b"defined"),
+            (b"<?php echo defined('A::B');", b"defined"),
+            (b"<?php echo defined('NOPE');", b"defined"),
+            (b"<?php echo defined('inf');", b"defined"),
+            (b"<?php echo defined(1.5);", b"defined"),
+            (b"<?php echo defined(null);", b"defined"),
+            (b"<?php echo count('x');", b"count"),
+            (b"<?php echo is_int(1);", b"is_int"),
+        ] {
+            assert!(
+                ordinary_call(source, name),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
+
+    /// The table is `zend_try_compile_special_func_ex`'s names in its
+    /// order, `strlen` first and `clone` last, and a name is found by the
+    /// row it stands in.
+    #[test]
+    fn the_special_table_is_php_s_names_in_php_s_order() {
+        use special::{Special, TABLE, row};
+        assert_eq!(TABLE.len(), 35);
+        assert_eq!(TABLE.first().map(|(n, _)| *n), Some(&b"strlen"[..]));
+        assert_eq!(TABLE.last().map(|(n, _)| *n), Some(&b"clone"[..]));
+        assert_eq!(row(b"defined"), Some(Special::Defined));
+        assert_eq!(row(b"is_integer"), Some(Special::Opcode));
+        assert_eq!(row(b"sizeof"), Some(Special::Opcode));
+        assert_eq!(row(b"var_dump"), None);
+        let names: Vec<&[u8]> = TABLE.iter().map(|(n, _)| *n).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len(), "each name once");
     }
 
     #[test]

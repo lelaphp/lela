@@ -174,7 +174,7 @@ impl Emit<'_> {
     /// the string a `CONST` operand holds. A home with no memory left
     /// refuses, and the refusal is the compile-time fatal php raises
     /// where it runs out (`Z/Zend/zend_alloc.c:1059`).
-    fn string(&mut self, bytes: &[u8]) -> Result<Zval, CompileError> {
+    pub(crate) fn string(&mut self, bytes: &[u8]) -> Result<Zval, CompileError> {
         match self.strings.intern(bytes) {
             Ok(s) => Ok(Zval::string(s)),
             Err(Fatal::Error(message)) => Err(self.fatal(message)),
@@ -407,7 +407,11 @@ impl Emit<'_> {
     /// `zend_try_ct_eval_binary_op` over `concat_function`: the one
     /// string the two constants join into, or nothing where either is
     /// left to the opcode.
-    fn concat_fold(&mut self, left: Zval, right: Zval) -> Result<Option<Zval>, CompileError> {
+    pub(crate) fn concat_fold(
+        &mut self,
+        left: Zval,
+        right: Zval,
+    ) -> Result<Option<Zval>, CompileError> {
         let (Some(a), Some(b)) = (self.stringified(left)?, self.stringified(right)?) else {
             return Ok(None);
         };
@@ -435,7 +439,7 @@ impl Emit<'_> {
     /// compiler has no way to raise a diagnostic yet (#218), so the
     /// opcode is left to raise it, which prints the same text at the
     /// same line.
-    fn stringified(&mut self, value: Zval) -> Result<Option<Zval>, CompileError> {
+    pub(crate) fn stringified(&mut self, value: Zval) -> Result<Option<Zval>, CompileError> {
         if let Some(n) = value.as_long() {
             return Ok(Some(self.string(n.to_string().as_bytes())?));
         }
@@ -503,9 +507,11 @@ impl Emit<'_> {
 
     /// php's constant expression: the value `zend_compile_expr` leaves as
     /// an `IS_CONST` operand, folding a number as written, a persistent constant
-    /// (`zend_try_ct_eval_const`) and arithmetic over two of them
-    /// (`zend_try_ct_eval_binary_op`).
-    fn constant_expr(&mut self, expr: &Expr) -> Result<Zval, CompileError> {
+    /// (`zend_try_ct_eval_const`), arithmetic over two of them
+    /// (`zend_try_ct_eval_binary_op`) and a call of a name in
+    /// [`crate::special`]'s table over constants
+    /// (`zend_try_compile_special_func`).
+    pub(crate) fn constant_expr(&mut self, expr: &Expr) -> Result<Zval, CompileError> {
         match expr {
             Expr::Null => Ok(Zval::null()),
             Expr::Bool(b) => Ok(Zval::bool(*b)),
@@ -541,27 +547,34 @@ impl Emit<'_> {
                 fold(*op, left, right)
                     .ok_or_else(|| self.fatal("arithmetic this compiler cannot fold yet"))
             }
-            Expr::Call { .. } => {
-                Err(self.fatal("arithmetic over a call this compiler cannot fold yet"))
-            }
+            Expr::Call { name, arguments } => self
+                .special(&unqualified(name), arguments)?
+                .ok_or_else(|| self.fatal("a call this compiler cannot fold")),
             Expr::Var(_) | Expr::Assign { .. } => {
                 Err(self.fatal("a variable is no constant expression"))
             }
         }
     }
 
-    /// `zend_compile_call` for a name known at compile time, and
-    /// `zend_compile_args` for its arguments. Every callable this engine
-    /// has is a native, so the call op is `DO_ICALL`; the compile-time
-    /// table that also answers `INIT_FCALL_BY_NAME` and `DO_UCALL` comes
-    /// with the engine's declarations.
+    /// `zend_compile_call` for a name known at compile time: the constant
+    /// `zend_try_compile_special_func` folds the call to where the name
+    /// is in [`crate::special`]'s table and its arguments fold, and the
+    /// call otherwise, with `zend_compile_args` for its arguments. Every
+    /// callable this engine has is a native, so the call op is
+    /// `DO_ICALL`; the compile-time table that also answers
+    /// `INIT_FCALL_BY_NAME` and `DO_UCALL` comes with the engine's
+    /// declarations.
     ///
     /// Every call is given a temporary for what it returns. php leaves
     /// the field unused on a call nothing reads, and an [`Opline`] has
     /// nowhere to say so: the design's twenty-four bytes carry
     /// `op1_type` and `op2_type` and no third (design §5.7).
     fn call(&mut self, name: &[u8], arguments: &[Expr]) -> Result<Where, CompileError> {
-        let lowered = self.string(&unqualified(name))?;
+        let lowered = unqualified(name);
+        if let Some(folded) = self.special(&lowered, arguments)? {
+            return Ok(Where::Constant(folded));
+        }
+        let lowered = self.string(&lowered)?;
         let lowered = self.constant(lowered);
         let count = u32::try_from(arguments.len()).unwrap_or(0);
         let slot = self.cache_slot();
@@ -626,7 +639,7 @@ impl Emit<'_> {
 /// does not reach the compiler yet, so the two a float needs are here. A
 /// constant's name is case-sensitive, and a leading `\` names the same
 /// global constant as none.
-fn persistent(name: &[u8]) -> Option<Zval> {
+pub(crate) fn persistent(name: &[u8]) -> Option<Zval> {
     let mut at = 0;
     while name.get(at) == Some(&b'\\') {
         at += 1;
