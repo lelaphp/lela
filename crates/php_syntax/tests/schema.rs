@@ -166,9 +166,16 @@ fn the_emitted_tree_is_one_struct_per_node_kind_and_unwraps_nothing() {
     let structs = emitted.matches("\npub struct ").count();
     assert_eq!(
         structs,
-        grammar.struct_nodes().len(),
-        "one struct per struct node"
+        grammar.struct_nodes().len() + 1,
+        "one struct per struct node, and the arena"
     );
+    let resolvers = emitted.matches("\n    fn resolve(\n").count();
+    assert_eq!(
+        resolvers,
+        grammar.struct_nodes().len(),
+        "one resolver per struct node"
+    );
+    assert!(emitted.contains("\npub struct Nodes {\n"));
     for absent in ["expect(", "unwrap(", "Visitor", "fn visit", "SyntaxNode"] {
         assert!(
             !emitted.contains(absent),

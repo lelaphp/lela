@@ -17,9 +17,14 @@
 //! A3 labeled tokens, A4 anchored resolution for same-typed siblings, A5
 //! mixins. Flattening decides which field each child becomes, and the
 //! anchor assignment holds A4's precondition, that a same-typed sibling
-//! sits behind a reliable anchor token, as a schema error at build time;
-//! the anchors themselves are what the builder resolves against, and it
-//! reads them when it lands.
+//! sits behind a reliable anchor token, as a schema error at build time.
+//! The anchors are what the resolution reads against: beside each struct
+//! is its `resolve`, one read per field over the node's children, the
+//! `Nodes` arena holds one vector per kind, the dispatcher `resolve`
+//! pushes a finished node into its vector by kind, and each alternation
+//! enum reads one child as its variant through `Child`. The reads
+//! themselves, `first`, `first_after`, `all`, `token`, `tokens` and
+//! `member`, are written by hand in `src/tree/mod.rs`.
 //!
 //! Two cross-cutting decisions:
 //!
@@ -704,6 +709,9 @@ struct Field {
     repeated: bool,
     /// The enum a labeled alternation of nodes needs, by name and variants.
     adhoc: Option<(String, Vec<String>)>,
+    /// The slot the field resolves from: its kind set, its anchors and its
+    /// stops (A4). `None` for the doc comment, which the builder hands in.
+    slot: Option<Slot>,
 }
 
 impl Field {
@@ -721,6 +729,7 @@ impl Field {
             mixin: mixin.map(str::to_owned),
             repeated: slot.repeated,
             adhoc,
+            slot: Some(slot.clone()),
         })
     }
 }
@@ -758,6 +767,7 @@ fn fields_of(model: &Model<'_>, def: &Def, errors: &mut Vec<Error>) -> Vec<Field
                     mixin: Some(trait_name.clone()),
                     repeated: false,
                     adhoc: None,
+                    slot: None,
                 },
                 errors,
             );
@@ -857,7 +867,13 @@ fn emit_token_sets(buf: &mut String, model: &Model<'_>) {
     buf.push_str("}\n\n");
 }
 
-fn emit_struct(buf: &mut String, model: &Model<'_>, def: &Def, fields: &[Field]) {
+fn emit_struct(
+    buf: &mut String,
+    model: &Model<'_>,
+    def: &Def,
+    fields: &[Field],
+    errors: &mut Vec<Error>,
+) {
     let name = &def.name;
     let kind = screaming_snake(name);
     let _ = write!(
@@ -889,9 +905,12 @@ fn emit_struct(buf: &mut String, model: &Model<'_>, def: &Def, fields: &[Field])
         buf,
         "impl Node for {name} {{\n    \
              const KIND: SyntaxKind = SyntaxKind::{kind};\n    \
-             fn range(&self) -> TextRange {{\n        self.range\n    }}\n\
-         }}\n"
+             fn range(&self) -> TextRange {{\n        self.range\n    }}\n    \
+             fn all(nodes: &Nodes) -> &[Self] {{\n        &nodes.{field}\n    }}\n\
+         }}\n",
+        field = snake_case(name)
     );
+    emit_resolver(buf, model, def, fields, errors);
     for trait_name in &def.traits {
         if model.class_of(trait_name) != Some(DefClass::Trait) {
             continue;
@@ -912,6 +931,238 @@ fn emit_struct(buf: &mut String, model: &Model<'_>, def: &Def, fields: &[Field])
         buf.push_str("}\n");
     }
     buf.push('\n');
+}
+
+/// `&[SyntaxKind::A, SyntaxKind::B]`: a kind set as the builder reads it.
+fn kinds_expr(kinds: &[String]) -> String {
+    let list: Vec<String> = kinds.iter().map(|k| format!("SyntaxKind::{k}")).collect();
+    format!("&[{}]", list.join(", "))
+}
+
+/// The read that fills one field from a node's children, Mahout's
+/// `accessor_body` done once at build time instead of on every call: the
+/// first child the slot's kind set admits, the first after an anchor
+/// token and before a stop token (A4), or every one, by the slot's shape.
+fn field_read(model: &Model<'_>, def: &Def, slot: &Slot) -> Result<String, Error> {
+    let anchors = kinds_expr(&slot.anchors);
+    let stops = kinds_expr(&slot.stops);
+    let token_read = |set: &str| {
+        if slot.repeated {
+            format!("tokens(children, {set})")
+        } else {
+            format!("token(children, {anchors}, {set})")
+        }
+    };
+    let node_read = |ty: &str| {
+        if slot.repeated {
+            format!("all::<{ty}>(children)")
+        } else if slot.anchors.is_empty() {
+            format!("first::<{ty}>(children)")
+        } else {
+            format!("first_after::<{ty}>(children, {anchors}, {stops})")
+        }
+    };
+    match &slot.ty {
+        SlotTy::Tokens(kinds) => Ok(token_read(&kinds_expr(kinds))),
+        SlotTy::MemberIdent => {
+            if slot.repeated {
+                return Err(Error::global(format!(
+                    "{}: field `{}` repeats `<member_ident>`, which the builder reads once \
+                     per node",
+                    def.name, slot.name
+                )));
+            }
+            Ok(format!("member(children, {anchors})"))
+        }
+        SlotTy::Ref(name) => match model.class_of(name) {
+            Some(DefClass::TokenAlt) => {
+                Ok(token_read(&format!("{}_TOKENS", screaming_snake(name))))
+            }
+            _ => Ok(node_read(&ref_type(model, name)?)),
+        },
+        SlotTy::AdHoc(_) => Ok(node_read(&adhoc_enum_name(def, slot))),
+    }
+}
+
+/// `impl Name { fn resolve(...) }`: the node from its children, every
+/// field read once, and the name of the required child that is absent
+/// where one is (A2: the parser promised it, so the builder reports the
+/// broken promise rather than building a node without it).
+fn emit_resolver(
+    buf: &mut String,
+    model: &Model<'_>,
+    def: &Def,
+    fields: &[Field],
+    errors: &mut Vec<Error>,
+) {
+    let name = &def.name;
+    let doc_param = if fields.iter().any(|f| f.slot.is_none()) {
+        "doc_comment"
+    } else {
+        "_doc_comment"
+    };
+    let children_param = if fields.iter().any(|f| f.slot.is_some()) {
+        "children"
+    } else {
+        "_children"
+    };
+    // A node with a required child can fail to resolve and says which
+    // child; one without cannot, and returns itself.
+    let fallible = has_required(fields);
+    let (doc, ret, ok) = if fallible {
+        (
+            "; `Err` names the\n    /// required child (`!`) that is absent",
+            "Result<Self, &'static str>",
+            "Ok(Self {",
+        )
+    } else {
+        ("", "Self", "Self {")
+    };
+    let _ = write!(
+        buf,
+        "impl {name} {{\n    \
+             /// The node from its children, resolved once (ADR-0003){doc}.\n    \
+             fn resolve(\n        \
+                 range: TextRange,\n        \
+                 {children_param}: &[Element],\n        \
+                 {doc_param}: Option<TokenId>,\n    \
+             ) -> {ret} {{\n"
+    );
+    for field in fields {
+        let label = rust_label(&field.name);
+        let Some(slot) = &field.slot else {
+            // The doc comment is the parameter itself.
+            continue;
+        };
+        let read = match field_read(model, def, slot) {
+            Ok(read) => read,
+            Err(e) => {
+                errors.push(e);
+                continue;
+            }
+        };
+        if slot.required && !slot.repeated {
+            let _ = writeln!(
+                buf,
+                "        let Some({label}) = {read} else {{\n            \
+                     return Err(\"{}.{}\");\n        \
+                 }};",
+                name, field.name
+            );
+        } else {
+            let _ = writeln!(buf, "        let {label} = {read};");
+        }
+    }
+    let _ = writeln!(buf, "        {ok}\n            range,");
+    for field in fields {
+        let _ = writeln!(buf, "            {},", rust_label(&field.name));
+    }
+    let close = if fallible { "})" } else { "}" };
+    let _ = write!(buf, "        {close}\n    }}\n}}\n");
+}
+
+/// Does one of `fields` hold a required child (`!`), so that resolving
+/// the node can fail?
+fn has_required(fields: &[Field]) -> bool {
+    fields
+        .iter()
+        .any(|f| f.slot.as_ref().is_some_and(|s| s.required && !s.repeated))
+}
+
+/// `Nodes`, the arena: one vector per struct node kind, so a
+/// `NodeId<ClassDecl>` indexes the class declarations and nothing else,
+/// and no node pays for the width of another kind's struct.
+fn emit_nodes(buf: &mut String, model: &Model<'_>) {
+    buf.push_str(
+        "/// The arena (design §4.9, ADR-0003): every node of the tree, one vector per kind,\n\
+         /// each addressed by its `NodeId`. Filled by the builder, read through `Tree`.\n\
+         #[derive(Clone, Debug, Default, PartialEq, Eq)]\n\
+         pub struct Nodes {\n",
+    );
+    for info in &model.defs {
+        if info.class != DefClass::StructNode {
+            continue;
+        }
+        let _ = writeln!(
+            buf,
+            "    {}: Vec<{}>,",
+            snake_case(&info.def.name),
+            info.def.name
+        );
+    }
+    buf.push_str("}\n\n");
+}
+
+/// `resolve`, the builder's one call per finished node: the struct of
+/// `kind` from its children, pushed into its vector, and its index back;
+/// the required child that is absent; or nothing for a kind with no
+/// struct, which `ERROR` is.
+fn emit_resolve(buf: &mut String, model: &Model<'_>) {
+    buf.push_str(
+        "/// The node of `kind` from its children, resolved once and pushed into the arena\n\
+         /// (ADR-0003): its index, the required child that is absent, or `Untyped` for a\n\
+         /// kind with no struct, which `ERROR` is.\n\
+         #[allow(clippy::too_many_lines)]\n\
+         pub(crate) fn resolve(\n    \
+             nodes: &mut Nodes,\n    \
+             kind: SyntaxKind,\n    \
+             range: TextRange,\n    \
+             children: &[Element],\n    \
+             doc_comment: Option<TokenId>,\n\
+         ) -> Resolved {\n    \
+             match kind {\n",
+    );
+    for info in &model.defs {
+        if info.class != DefClass::StructNode {
+            continue;
+        }
+        let name = &info.def.name;
+        // The fields were derived, and their errors reported, when the
+        // struct was emitted.
+        let fallible = has_required(&fields_of(model, info.def, &mut Vec::new()));
+        let (open, close) = if fallible { ("", "") } else { ("Ok(", ")") };
+        let _ = writeln!(
+            buf,
+            "        SyntaxKind::{} => push(&mut nodes.{}, {open}{name}::resolve(range, children, doc_comment){close}),",
+            screaming_snake(name),
+            snake_case(name)
+        );
+    }
+    buf.push_str("        _ => Resolved::Untyped,\n    }\n}\n\n");
+}
+
+/// `SyntaxKind::takes_doc_comment`: the kinds whose node opts into
+/// `HasDocComment`, so the builder knows where php's pending doc comment
+/// is taken (`backup_doc_comment` in `zend_language_parser.y`).
+fn emit_doc_comment_kinds(buf: &mut String, model: &Model<'_>) {
+    let owners: Vec<String> = model
+        .defs
+        .iter()
+        .filter(|info| {
+            info.class == DefClass::StructNode
+                && info.def.traits.iter().any(|t| {
+                    model
+                        .info(t)
+                        .is_some_and(|i| i.class == DefClass::Trait && i.def.rule.is_none())
+                })
+        })
+        .map(|info| format!("SyntaxKind::{}", screaming_snake(&info.def.name)))
+        .collect();
+    let body = if owners.is_empty() {
+        "false".to_owned()
+    } else {
+        format!("matches!(self, {})", owners.join(" | "))
+    };
+    let _ = write!(
+        buf,
+        "impl SyntaxKind {{\n    \
+             /// Does a node of this kind take the pending doc comment (`HasDocComment`)?\n    \
+             #[must_use]\n    \
+             pub fn takes_doc_comment(self) -> bool {{\n        \
+             {body}\n    \
+             }}\n\
+         }}\n\n"
+    );
 }
 
 /// One alternation as an enum: a variant per listed node carrying its
@@ -950,7 +1201,64 @@ fn emit_enum(
     for (variant, kind) in token_variants {
         let _ = writeln!(buf, "    /// The `{kind}` token.\n    {variant}(TokenId),");
     }
-    buf.push_str("}\n\n");
+    buf.push_str("}\n");
+
+    // The read the builder makes of one child against this alternation:
+    // the listed nodes first, in the schema's order, then the tokens, as
+    // Mahout's `cast` tried them.
+    let long = if node_refs.len() + token_variants.len() > 30 {
+        "    #[allow(clippy::too_many_lines)]\n"
+    } else {
+        ""
+    };
+    let _ = write!(
+        buf,
+        "impl Child for {name} {{\n\
+         {long}    \
+             fn of(element: &Element) -> Option<Self> {{\n"
+    );
+    for r in node_refs {
+        match model.class_of(r) {
+            Some(DefClass::StructNode) => {
+                let _ = writeln!(
+                    buf,
+                    "        if let Element::Node {{ kind: SyntaxKind::{}, index, .. }} = *element {{\n            \
+                         return Some(Self::{r}(NodeId::new(index)));\n        \
+                     }}",
+                    screaming_snake(r)
+                );
+            }
+            Some(DefClass::Enum) => {
+                let _ = writeln!(
+                    buf,
+                    "        if let Some(inner) = {r}::of(element) {{\n            \
+                         return Some(Self::{r}(inner));\n        \
+                     }}"
+                );
+            }
+            Some(DefClass::TokenAlt) => {
+                let _ = writeln!(
+                    buf,
+                    "        if let Element::Token {{ kind, id }} = *element\n            \
+                         && kind.is_{}()\n        \
+                     {{\n            \
+                         return Some(Self::{r}(id));\n        \
+                     }}",
+                    snake_case(r)
+                );
+            }
+            Some(DefClass::Trait) | None => {}
+        }
+    }
+    for (variant, kind) in token_variants {
+        let _ = writeln!(
+            buf,
+            "        if let Element::Token {{ kind: SyntaxKind::{kind}, id }} = *element {{\n            \
+                 return Some(Self::{variant}(id));\n        \
+             }}"
+        );
+    }
+    buf.push_str("        None\n    }\n}\n\n");
 }
 
 /// The mixin traits (A5): one method per injected field, over the nodes
@@ -1014,7 +1322,7 @@ pub fn generate(grammar: &Grammar) -> Result<String, Vec<Error>> {
         let def = info.def;
         let fields = fields_of(&model, def, &mut errors);
         adhoc_enums.extend(fields.iter().filter_map(|f| f.adhoc.clone()));
-        emit_struct(&mut buf, &model, def, &fields);
+        emit_struct(&mut buf, &model, def, &fields, &mut errors);
     }
 
     // --- ad-hoc labeled-alternation enums ---------------------------------
@@ -1070,6 +1378,9 @@ pub fn generate(grammar: &Grammar) -> Result<String, Vec<Error>> {
     }
 
     emit_traits(&mut buf, &model, &mut errors);
+    emit_nodes(&mut buf, &model);
+    emit_resolve(&mut buf, &model);
+    emit_doc_comment_kinds(&mut buf, &model);
 
     if errors.is_empty() {
         Ok(buf)
@@ -1308,6 +1619,52 @@ mod tests {
                 .any(|e| e.message.contains("both from a mixin")),
             "{errors:?}"
         );
+    }
+
+    /// The one-pass resolution, emitted per node: a read per field in the
+    /// shape `slots_for` decided, the required child's name where one is
+    /// absent, `Self` where none can be, and the arena, the dispatcher
+    /// and the alternation reads beside them.
+    #[test]
+    fn the_resolution_is_emitted_once_per_node() {
+        let text = emitted(
+            "trait HasDocComment =\n\
+             Root = Item*\n\
+             Item = Decl | Ternary | <ident>\n\
+             Decl : HasDocComment = 'class' name:<ident>! body:Block\n\
+             Block = '{' Item* '}'\n\
+             Ternary = cond:Item! '?' then:Item? ':' else_branch:Item?\n\
+             Ref = trait:<ident> '::' ref:<ident>\n\
+             Member = '->' name:<member_ident>\n",
+        );
+        for needle in [
+            "pub struct Nodes {\n    root: Vec<Root>,\n    decl: Vec<Decl>,",
+            "fn all(nodes: &Nodes) -> &[Self] {\n        &nodes.decl\n    }",
+            "impl Decl {",
+            "    ) -> Result<Self, &'static str> {",
+            "        let Some(name) = token(children, &[], &[SyntaxKind::IDENT]) else {\n            \
+                 return Err(\"Decl.name\");\n        };",
+            "        let body = first::<NodeId<Block>>(children);",
+            "        Ok(Self {\n            range,\n            doc_comment,\n            name,\n            body,\n        })",
+            "        let items = all::<Item>(children);",
+            "    ) -> Self {",
+            "        let then = first_after::<Item>(children, &[SyntaxKind::QUESTION], &[SyntaxKind::COLON]);",
+            "        let else_branch = first_after::<Item>(children, &[SyntaxKind::COLON], &[]);",
+            "        let r#ref = token(children, &[SyntaxKind::COLON_COLON], &[SyntaxKind::IDENT]);",
+            "        let name = member(children, &[]);",
+            "impl Child for Item {",
+            "        if let Element::Node { kind: SyntaxKind::DECL, index, .. } = *element {\n            \
+                 return Some(Self::Decl(NodeId::new(index)));",
+            "        if let Element::Token { kind: SyntaxKind::IDENT, id } = *element {\n            \
+                 return Some(Self::Ident(id));",
+            "pub(crate) fn resolve(",
+            "        SyntaxKind::DECL => push(&mut nodes.decl, Decl::resolve(range, children, doc_comment)),",
+            "        SyntaxKind::ROOT => push(&mut nodes.root, Ok(Root::resolve(range, children, doc_comment))),",
+            "        _ => Resolved::Untyped,",
+            "    pub fn takes_doc_comment(self) -> bool {\n        matches!(self, SyntaxKind::DECL)",
+        ] {
+            assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
+        }
     }
 
     #[test]

@@ -1,0 +1,586 @@
+//! The tree builder (design §4.9, ADR-0003): the parser's flat event
+//! stream into the arena and the shape, in one pass. The parser emits
+//! [`Event`]s and never sees a node; the builder opens a frame per `Start`,
+//! appends each consumed token to the innermost frame, and at `Finish`
+//! resolves the frame's children into the typed struct of its kind, once,
+//! through the emitted `resolve`. Nothing scans afterwards.
+//!
+//! **What the tree references.** Significant tokens only: whitespace,
+//! comments and heredoc indentation stay in the token stream, and a
+//! `Token` event consumes the next significant token, so the builder passes
+//! over what sits before it. Tokens the parser never consumed, which
+//! recovery can leave at the end, are appended to the root as its last
+//! children, so the shape shows every significant token once.
+//!
+//! **The doc comment.** php keeps one pending doc comment, `CG(doc_comment)`:
+//! the last `T_DOC_COMMENT` the scanner passed, cleared by every `}`
+//! (`zend_language_scanner.l`, the `<ST_IN_SCRIPTING>"}"` rule), and taken,
+//! then cleared, by the declaration that reaches a `backup_doc_comment` in
+//! `zend_language_parser.y`. So a blank line does not detach a doc comment,
+//! a statement between the comment and the declaration does not either,
+//! and a doc comment before a closure's `}` is gone by the next declaration.
+//! Measured under the pin at 8.5.9 with `ReflectionClass::getDocComment()`:
+//! `/** D1 */\n\nclass A {}` reads D1, `/** D2 */ $x = 1; class B {}` reads
+//! D2, `function f() {} /** D3 */\nclass C {}` reads D3, and
+//! `/** D7 */ if (1) { } class G {}` reads `false`. The builder walks the
+//! same state over the token stream and a node whose kind opts into
+//! `HasDocComment` takes it at its `Start`, which stands for the
+//! `backup_doc_comment` position of every declaration the schema names
+//! until the grammar places each (#229). Mahout's rule, the comment block
+//! directly above with no blank line, is not php's and is not kept.
+//!
+//! **A required child that is absent.** `!` is the parser's promise
+//! (convention A2), and the typed struct cannot be built without the
+//! field. The builder does not build it: the node stands in the shape as
+//! `ERROR`, with its children, and [`Built::missing`] names the field, so
+//! the fixture harness prints the broken promise beside the dump and no
+//! parent reads a node that was never resolved.
+
+use crate::SyntaxKind;
+use crate::lexer::Token;
+use crate::source::{Diagnostic, TextRange};
+
+use super::{Element, Nodes, Resolved, TokenId, Tree, resolve};
+
+/// One parser event. The parser emits a flat stream; the builder assembles
+/// the tree, so the parser is tested without trees and the builder without
+/// a grammar.
+#[derive(Debug)]
+pub enum Event {
+    /// Opens a node. `forward_parent` chains to a later `Start` that
+    /// becomes this node's parent: `Marker::precede`, which the Pratt core
+    /// uses to wrap a left operand after the fact.
+    Start {
+        /// The node's kind; [`TOMBSTONE`] for an abandoned marker.
+        kind: SyntaxKind,
+        /// The distance forward, in events, to the chained parent's `Start`.
+        forward_parent: Option<u32>,
+    },
+    /// Closes the most recently opened node.
+    Finish,
+    /// Consumes the next significant token; `remap` is the kind the tree
+    /// gives it (a keyword consumed as a name becomes `IDENT`).
+    Token {
+        /// The kind the tree reads.
+        remap: SyntaxKind,
+    },
+    /// A diagnostic raised at this point of the stream.
+    Error(Box<Diagnostic>),
+}
+
+/// The kind of an abandoned `Start`, which the builder skips. `EOF` is
+/// never a node, so it is free to mean this.
+pub const TOMBSTONE: SyntaxKind = SyntaxKind::EOF;
+
+/// A required child (convention A2) the parser did not supply.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Missing {
+    /// The field, as `Kind.field`: `ExprStmt.expr`.
+    pub field: &'static str,
+    /// Where the node that lacks it stands.
+    pub range: TextRange,
+}
+
+/// What one build produced.
+#[derive(Debug, Default)]
+pub struct Built {
+    /// The tree.
+    pub tree: Tree,
+    /// The diagnostics the parser raised, in stream order.
+    pub diagnostics: Vec<Diagnostic>,
+    /// Every required child the parser did not supply, in finish order.
+    pub missing: Vec<Missing>,
+}
+
+/// One open node.
+struct Frame {
+    kind: SyntaxKind,
+    /// The node's placeholder in the shape.
+    at: usize,
+    /// Where the node's direct children begin in `pending`.
+    children_from: usize,
+    /// The doc comment the node took at its `Start`.
+    doc_comment: Option<TokenId>,
+}
+
+struct Builder<'a> {
+    tokens: &'a [Token],
+    /// The next token not yet passed over.
+    raw: usize,
+    /// php's `CG(doc_comment)`: the pending doc comment (the docs above).
+    doc_comment: Option<TokenId>,
+    elements: Vec<Element>,
+    /// The direct children of every open frame, innermost last.
+    pending: Vec<Element>,
+    frames: Vec<Frame>,
+    nodes: Nodes,
+    missing: Vec<Missing>,
+}
+
+/// Build the tree of `events` over `tokens`, the lossless stream the
+/// parser read. Unbalanced events do not fail the build: a `Finish` with
+/// nothing open is dropped, and a frame still open at the end is finished.
+#[must_use]
+pub fn build(tokens: &[Token], mut events: Vec<Event>) -> Built {
+    let mut builder = Builder {
+        tokens,
+        raw: 0,
+        doc_comment: None,
+        elements: Vec::new(),
+        pending: Vec::new(),
+        frames: Vec::new(),
+        nodes: Nodes::default(),
+        missing: Vec::new(),
+    };
+    let mut diagnostics = Vec::new();
+    let tombstone = || Event::Start {
+        kind: TOMBSTONE,
+        forward_parent: None,
+    };
+    for i in 0..events.len() {
+        // A chain only reaches forward, so an event once passed is never
+        // read again and can be taken out.
+        match std::mem::replace(&mut events[i], tombstone()) {
+            Event::Start { kind, .. } if kind == TOMBSTONE => {}
+            Event::Start {
+                kind,
+                forward_parent,
+            } => {
+                // The forward-parent chain: the innermost first, so the
+                // chain is opened in reverse, and each later `Start` is
+                // tombstoned so it is not opened twice.
+                let mut chain = vec![kind];
+                let mut next = forward_parent;
+                let mut at = i;
+                while let Some(delta) = next {
+                    at += delta as usize;
+                    match events.get_mut(at) {
+                        Some(Event::Start {
+                            kind,
+                            forward_parent,
+                        }) if *kind != TOMBSTONE => {
+                            chain.push(*kind);
+                            next = *forward_parent;
+                            *kind = TOMBSTONE;
+                        }
+                        // A link into nothing, or into a tombstone, ends the
+                        // chain; the parser does not emit either.
+                        _ => next = None,
+                    }
+                }
+                builder.start(chain.into_iter().rev());
+            }
+            Event::Finish => builder.finish(),
+            Event::Token { remap } => builder.token(remap),
+            Event::Error(diagnostic) => diagnostics.push(*diagnostic),
+        }
+    }
+    while !builder.frames.is_empty() {
+        builder.finish();
+    }
+    Built {
+        tree: Tree {
+            elements: builder.elements.into_boxed_slice(),
+            nodes: builder.nodes,
+        },
+        diagnostics,
+        missing: builder.missing,
+    }
+}
+
+impl Builder<'_> {
+    /// Pass over the whitespace and comments before the next significant
+    /// token, tracking php's pending doc comment.
+    fn skip_insignificant(&mut self) {
+        while let Some(token) = self.tokens.get(self.raw)
+            && token.kind.is_trivia()
+        {
+            if token.kind == SyntaxKind::DOC_COMMENT {
+                self.doc_comment = Some(TokenId(index(self.raw)));
+            }
+            self.raw += 1;
+        }
+    }
+
+    /// The offset an empty node stands at: the next significant token's,
+    /// or the end of the source.
+    fn position(&mut self) -> u32 {
+        self.skip_insignificant();
+        match self.tokens.get(self.raw) {
+            Some(token) => token.offset,
+            None => self.tokens.last().map_or(0, |t| t.offset + t.len),
+        }
+    }
+
+    /// Open the nodes of one chain, outermost first.
+    fn start(&mut self, chain: impl Iterator<Item = SyntaxKind>) {
+        self.skip_insignificant();
+        for kind in chain {
+            let doc_comment = if kind.takes_doc_comment() {
+                self.doc_comment.take()
+            } else {
+                None
+            };
+            self.frames.push(Frame {
+                kind,
+                at: self.elements.len(),
+                children_from: self.pending.len(),
+                doc_comment,
+            });
+            self.elements.push(Element::Node {
+                kind,
+                range: TextRange::new(0, 0),
+                index: 0,
+                descendants: 0,
+            });
+        }
+    }
+
+    /// Consume the next significant token into the innermost open node.
+    fn token(&mut self, remap: SyntaxKind) {
+        self.skip_insignificant();
+        let Some(token) = self.tokens.get(self.raw) else {
+            // The parser consumed past the end; nothing to write.
+            return;
+        };
+        if token.kind == SyntaxKind::R_CURLY {
+            self.doc_comment = None;
+        }
+        let element = Element::Token {
+            kind: remap,
+            id: TokenId(index(self.raw)),
+        };
+        self.raw += 1;
+        self.elements.push(element);
+        self.pending.push(element);
+    }
+
+    /// Close the innermost open node: resolve it, place it in the shape,
+    /// and hand it to its parent as a child.
+    fn finish(&mut self) {
+        let Some(frame) = self.frames.pop() else {
+            return;
+        };
+        if self.frames.is_empty() {
+            // The root: what the parser left unconsumed is its last
+            // children, by the lexer's kinds.
+            loop {
+                self.skip_insignificant();
+                let Some(token) = self.tokens.get(self.raw) else {
+                    break;
+                };
+                self.token(token.kind);
+            }
+        }
+        let children = &self.pending[frame.children_from..];
+        let ends = children.first().copied().zip(children.last().copied());
+        let range = if let Some((first, last)) = ends {
+            TextRange::new(self.start_of(first), self.end_of(last))
+        } else {
+            let at = self.position();
+            TextRange::new(at, at)
+        };
+        let children = &self.pending[frame.children_from..];
+        let (kind, index) = match resolve(
+            &mut self.nodes,
+            frame.kind,
+            range,
+            children,
+            frame.doc_comment,
+        ) {
+            Resolved::Node(index) => (frame.kind, index),
+            Resolved::Missing(field) => {
+                self.missing.push(Missing { field, range });
+                (SyntaxKind::ERROR, 0)
+            }
+            Resolved::Untyped => (frame.kind, 0),
+        };
+        let element = Element::Node {
+            kind,
+            range,
+            index,
+            descendants: index_from(self.elements.len() - frame.at - 1),
+        };
+        self.elements[frame.at] = element;
+        self.pending.truncate(frame.children_from);
+        self.pending.push(element);
+    }
+
+    fn start_of(&self, element: Element) -> u32 {
+        match element {
+            Element::Node { range, .. } => range.start,
+            Element::Token { id, .. } => self.tokens.get(id.0 as usize).map_or(0, |t| t.offset),
+        }
+    }
+
+    fn end_of(&self, element: Element) -> u32 {
+        match element {
+            Element::Node { range, .. } => range.end(),
+            Element::Token { id, .. } => self
+                .tokens
+                .get(id.0 as usize)
+                .map_or(0, |t| t.offset + t.len),
+        }
+    }
+}
+
+/// A position in the token stream as a `TokenId` carries it. The stream
+/// is over a source of at most `u32::MAX` bytes and every token has at
+/// least one, so the conversion holds; it saturates rather than fails.
+fn index(raw: usize) -> u32 {
+    u32::try_from(raw).unwrap_or(u32::MAX)
+}
+
+/// A count of elements as the shape carries it; saturating, as [`index`].
+fn index_from(count: usize) -> u32 {
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::LexOptions;
+    use crate::source::FileId;
+    use crate::tree::{ClassDecl, FunctionDecl, HasDocComment, PropertyDecl, dump};
+
+    fn start(kind: SyntaxKind) -> Event {
+        Event::Start {
+            kind,
+            forward_parent: None,
+        }
+    }
+
+    fn token(kind: SyntaxKind) -> Event {
+        Event::Token { remap: kind }
+    }
+
+    fn lexed(source: &[u8]) -> Vec<Token> {
+        crate::lexer::lex(FileId(0), source, &LexOptions::default()).tokens
+    }
+
+    /// `class X {}` as events, under an open `SOURCE_FILE`.
+    fn class_decl() -> Vec<Event> {
+        use SyntaxKind::*;
+        vec![
+            start(CLASS_DECL),
+            token(CLASS_KW),
+            token(IDENT),
+            start(CLASS_BODY),
+            token(L_CURLY),
+            token(R_CURLY),
+            Event::Finish,
+            Event::Finish,
+        ]
+    }
+
+    fn file(body: impl IntoIterator<Item = Event>) -> Vec<Event> {
+        let mut events = vec![start(SyntaxKind::SOURCE_FILE), token(SyntaxKind::OPEN_TAG)];
+        events.extend(body);
+        events.push(Event::Finish);
+        events
+    }
+
+    fn text<'a>(source: &'a [u8], tokens: &[Token], id: Option<TokenId>) -> Option<&'a [u8]> {
+        let token = tokens[id?.0 as usize];
+        Some(&source[token.offset as usize..(token.offset + token.len) as usize])
+    }
+
+    /// php's rule, measured under the pin at 8.5.9 with
+    /// `ReflectionClass::getDocComment()` (the docs above): a blank line
+    /// does not detach the comment (D1), a statement between does not
+    /// either (D2), the `}` of a function body resets it (D3 is after
+    /// that `}`), and a `}` with no comment after leaves none (D7).
+    #[test]
+    fn the_doc_comment_is_the_last_one_not_followed_by_a_close_brace() {
+        use SyntaxKind::*;
+        let source = b"<?php\n/** D1 */\n\nclass A {}\n/** D2 */ $x = 1; class B {}\nfunction f() {} /** D3 */\nclass C {}\n/** D7 */ if (1) { } class G {}";
+        let tokens = lexed(source);
+        let built = build(
+            &tokens,
+            file(
+                [
+                    class_decl(),
+                    vec![
+                        start(EXPR_STMT),
+                        start(ASSIGN_EXPR),
+                        start(SIMPLE_VAR_EXPR),
+                        token(VARIABLE),
+                        Event::Finish,
+                        token(EQ),
+                        start(LITERAL_EXPR),
+                        token(INT),
+                        Event::Finish,
+                        Event::Finish,
+                        token(SEMICOLON),
+                        Event::Finish,
+                    ],
+                    class_decl(),
+                    vec![
+                        start(FUNCTION_DECL),
+                        token(FUNCTION_KW),
+                        token(IDENT),
+                        start(PARAM_LIST),
+                        token(L_PAREN),
+                        token(R_PAREN),
+                        Event::Finish,
+                        start(BLOCK),
+                        token(L_CURLY),
+                        token(R_CURLY),
+                        Event::Finish,
+                        Event::Finish,
+                    ],
+                    class_decl(),
+                    vec![
+                        start(IF_STMT),
+                        token(IF_KW),
+                        token(L_PAREN),
+                        start(LITERAL_EXPR),
+                        token(INT),
+                        Event::Finish,
+                        token(R_PAREN),
+                        start(BLOCK),
+                        token(L_CURLY),
+                        token(R_CURLY),
+                        Event::Finish,
+                        Event::Finish,
+                    ],
+                    class_decl(),
+                ]
+                .into_iter()
+                .flatten(),
+            ),
+        );
+        assert!(
+            built.missing.is_empty(),
+            "{}",
+            dump(&built.tree, &tokens, source)
+        );
+        let docs: Vec<Option<&[u8]>> = built
+            .tree
+            .nodes::<ClassDecl>()
+            .iter()
+            .map(|class| text(source, &tokens, class.doc_comment()))
+            .collect();
+        assert_eq!(
+            docs,
+            [
+                Some(&b"/** D1 */"[..]),
+                Some(b"/** D2 */"),
+                Some(b"/** D3 */"),
+                None
+            ]
+        );
+        let f = &built.tree.nodes::<FunctionDecl>()[0];
+        assert_eq!(f.doc_comment(), None, "D2 was taken by class B");
+    }
+
+    /// Taken, then cleared: one doc comment reaches one declaration, and a
+    /// member's doc comment is its own (the class body's `{` resets
+    /// nothing; php resets on `}` alone).
+    #[test]
+    fn a_doc_comment_is_taken_once() {
+        use SyntaxKind::*;
+        let source = b"<?php /** C */ class A { /** P */ public $x; public $y; }";
+        let tokens = lexed(source);
+        let property = |events: &mut Vec<Event>| {
+            events.extend([
+                start(PROPERTY_DECL),
+                token(PUBLIC_KW),
+                start(PROPERTY_DECLARATOR),
+                token(VARIABLE),
+                Event::Finish,
+                token(SEMICOLON),
+                Event::Finish,
+            ]);
+        };
+        let mut events = vec![
+            start(CLASS_DECL),
+            token(CLASS_KW),
+            token(IDENT),
+            start(CLASS_BODY),
+            token(L_CURLY),
+        ];
+        property(&mut events);
+        property(&mut events);
+        events.extend([token(R_CURLY), Event::Finish, Event::Finish]);
+        let built = build(&tokens, file(events));
+        assert!(
+            built.missing.is_empty(),
+            "{}",
+            dump(&built.tree, &tokens, source)
+        );
+        let class = &built.tree.nodes::<ClassDecl>()[0];
+        assert_eq!(
+            text(source, &tokens, class.doc_comment()),
+            Some(&b"/** C */"[..])
+        );
+        let docs: Vec<Option<&[u8]>> = built
+            .tree
+            .nodes::<PropertyDecl>()
+            .iter()
+            .map(|p| text(source, &tokens, p.doc_comment()))
+            .collect();
+        assert_eq!(docs, [Some(&b"/** P */"[..]), None]);
+    }
+
+    /// What the parser did not consume is the root's last children, an
+    /// empty node stands at the next significant token, and events out of
+    /// balance neither drop a node nor fail the build.
+    #[test]
+    fn unconsumed_tokens_empty_nodes_and_unbalanced_events() {
+        use SyntaxKind::*;
+        let source = b"<?php ; $x";
+        let tokens = lexed(source);
+        let built = build(
+            &tokens,
+            vec![
+                start(SOURCE_FILE),
+                token(OPEN_TAG),
+                start(EMPTY_STMT),
+                token(SEMICOLON),
+                Event::Finish,
+                start(ERROR),
+                Event::Finish,
+                Event::Finish,
+                Event::Finish,
+                start(EXPR_STMT),
+                token(VARIABLE),
+            ],
+        );
+        assert_eq!(
+            dump(&built.tree, &tokens, source),
+            "SOURCE_FILE@0..10\n\
+             \x20 OPEN_TAG@0..6 \"<?php \"\n\
+             \x20 EMPTY_STMT@6..7\n\
+             \x20   SEMICOLON@6..7 \";\"\n\
+             \x20 ERROR@8..8\n\
+             \x20 VARIABLE@8..10 \"$x\"\n\
+             ERROR@10..10\n"
+        );
+        assert_eq!(built.missing.len(), 1, "{:?}", built.missing);
+    }
+
+    /// `Error` events are the diagnostics, in stream order.
+    #[test]
+    fn error_events_are_the_diagnostics() {
+        use crate::source::Span;
+        let source = b"<?php";
+        let tokens = lexed(source);
+        let built = build(
+            &tokens,
+            vec![
+                start(SyntaxKind::SOURCE_FILE),
+                Event::Error(Box::new(Diagnostic::new(Span::new(FileId(0), 0, 5), "one"))),
+                token(SyntaxKind::OPEN_TAG),
+                Event::Error(Box::new(Diagnostic::new(Span::new(FileId(0), 5, 5), "two"))),
+                Event::Finish,
+            ],
+        );
+        let messages: Vec<&str> = built
+            .diagnostics
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect();
+        assert_eq!(messages, ["one", "two"]);
+    }
+}
