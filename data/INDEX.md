@@ -10,6 +10,7 @@ The data files the design cites and the extraction records behind them; each is 
 ├── extract.log
 ├── ops-extraction.md
 ├── port-map.v0.toml
-└── pre-day-1.md
+├── pre-day-1.md
+└── syntax-extraction.md
 ```
-<!-- /computed in=56bff38bc6b012574d39542e853814045832a313476a0f62bd01362a993ba9e0 out=0bbcaae08642cfac348fc8c391b23e987f3816bec5a5ce63d57f2679371f7d53 -->
+<!-- /computed in=888a4c0ec890b7deabf03a865e4ecb618a087b96a79b062a321ec7791b2486ab out=b4fc7b8ea2bbe4d5c9466dfdc8f3cb79347c86436efb88dde651ebcc899c730f -->
