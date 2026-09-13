@@ -35,6 +35,8 @@ struct Op {
     effects: Vec<String>,
     result_used: bool,
     safepoint: bool,
+    /// php's `zend_vm_opcodes_flags` word for the opcode.
+    flags: u32,
 }
 
 fn generate(path: &Path) -> Result<String, String> {
@@ -74,6 +76,10 @@ fn read(path: &Path) -> Result<Vec<Op>, String> {
             .unwrap_or_default();
         let result_used = row.get("result").and_then(toml::Value::as_str) == Some("used");
         let safepoint = row.get("safepoint").is_some();
+        let spec = |key: &str| row.get(key).and_then(toml::Value::as_str).unwrap_or("ANY");
+        let flags = operand_flags(&name, spec("op1_raw"))?
+            | (operand_flags(&name, spec("op2_raw"))? << 8)
+            | ext_flags(&name, row.get("ext").and_then(toml::Value::as_str))?;
         ops.push(Op {
             num,
             variant: camel(&name),
@@ -81,6 +87,7 @@ fn read(path: &Path) -> Result<Vec<Op>, String> {
             effects,
             result_used,
             safepoint,
+            flags,
         });
     }
     ops.sort_by_key(|op| op.num);
@@ -167,7 +174,86 @@ fn render(ops: &[Op]) -> Result<String, String> {
         "pub(crate) static SAFEPOINT: [bool; LAST + 1] = [{}];",
         by_num(&|op| op.safepoint.to_string(), "false")
     );
+    // php's `zend_vm_opcodes_flags` without its two top bits, which
+    // name a specialisation and not a field: every other bit agrees
+    // with the table in `Zend/zend_vm_opcodes.c` at the tag.
+    let _ = writeln!(
+        out,
+        "pub(crate) static FLAGS: [u32; LAST + 1] = [{}];",
+        by_num(
+            &|op| format!("0x{:04x}_{:04x}", op.flags >> 16, op.flags & 0xffff),
+            "0"
+        )
+    );
     Ok(out)
+}
+
+/// One operand's byte of `zend_vm_opcodes_flags`, decoded from the
+/// handler line's `op1_raw` or `op2_raw` as `zend_vm_gen.php`'s
+/// `$vm_op_decode` decodes it: the `SPEC` bit and the two zval-kind bits
+/// in the low nibble, and in the high nibble the one shape the field
+/// has when it is not a zval, `ZEND_VM_OP_NUM` through
+/// `ZEND_VM_OP_CACHE_SLOT`.
+fn operand_flags(op: &str, spec: &str) -> Result<u32, String> {
+    let mut flags = 0;
+    for word in spec.split('|') {
+        flags |= match word {
+            "ANY" => 0x00,
+            "CONST" => 0x03,
+            "TMP" | "VAR" | "UNUSED" | "CV" => 0x01,
+            "TMPVAR" => 0x05,
+            "TMPVARCV" => 0x09,
+            "NUM" => 0x10,
+            "JMP_ADDR" => 0x20,
+            "TRY_CATCH" => 0x30,
+            "LOOP_END" => 0x40,
+            "THIS" => 0x50,
+            "NEXT" => 0x60,
+            "CLASS_FETCH" => 0x70,
+            "CONSTRUCTOR" => 0x80,
+            "CONST_FETCH" => 0x90,
+            "CACHE_SLOT" => 0xa0,
+            other => {
+                return Err(format!(
+                    "{op}: operand shape {other} is not one zend_vm_gen.php knows"
+                ));
+            }
+        };
+    }
+    Ok(flags)
+}
+
+/// The `extended_value` bits of `zend_vm_opcodes_flags`, decoded from
+/// the handler line's `ext` as `$vm_ext_decode` decodes it: seven bits
+/// read one by one and, in `ZEND_VM_EXT_MASK`, the one shape the field
+/// has.
+fn ext_flags(op: &str, spec: Option<&str>) -> Result<u32, String> {
+    let mut flags = 0;
+    for word in spec.into_iter().flat_map(|s| s.split('|')) {
+        flags |= match word {
+            "VAR_FETCH" => 0x0001_0000,
+            "ISSET" => 0x0002_0000,
+            "CACHE_SLOT" => 0x0004_0000,
+            "ARRAY_INIT" => 0x0008_0000,
+            "REF" => 0x0010_0000,
+            "FETCH_REF" => 0x0020_0000,
+            "DIM_WRITE" => 0x0040_0000,
+            "NUM" => 0x0100_0000,
+            "LAST_CATCH" => 0x0200_0000,
+            "JMP_ADDR" => 0x0300_0000,
+            "OP" => 0x0400_0000,
+            "TYPE" => 0x0700_0000,
+            "EVAL" => 0x0800_0000,
+            "TYPE_MASK" => 0x0900_0000,
+            "SRC" => 0x0b00_0000,
+            other => {
+                return Err(format!(
+                    "{op}: extended_value shape {other} is not one zend_vm_gen.php knows"
+                ));
+            }
+        };
+    }
+    Ok(flags)
 }
 
 /// `ASSIGN_DIM_OP` as `AssignDimOp`.

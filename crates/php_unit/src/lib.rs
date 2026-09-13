@@ -16,6 +16,7 @@
 )]
 
 pub mod decl;
+mod dump;
 mod op;
 mod unit;
 

@@ -105,6 +105,23 @@ mod tests {
         unit_and_strings(source).0
     }
 
+    /// php's dump of a one-line file's main op array, the file unnamed
+    /// as `Options::default` leaves it: the header with these counts,
+    /// then the oplines.
+    fn main_dump(lines: usize, vars: u32, tmps: u32, oplines: &str) -> String {
+        format!(
+            "\n$_main:\n     ; (lines={lines}, args=0, vars={vars}, tmps={tmps})\n\
+             \x20    ; (before optimizer)\n     ; :1-1\n     ; return  [] RANGE[0..0]\n{oplines}"
+        )
+    }
+
+    /// The dump of one source, read while the table its strings were
+    /// interned into still stands.
+    fn dump_of(source: &[u8]) -> String {
+        let (unit, _strings) = unit_and_strings(source);
+        unit.dump()
+    }
+
     fn unit_and_strings(source: &[u8]) -> (Unit, php_heap::Strings) {
         let mut strings = php_heap::Strings::new();
         let unit = compile(
@@ -132,28 +149,37 @@ mod tests {
 
     #[test]
     fn echo_of_a_number_is_one_echo_and_the_final_return() {
-        let unit = unit_of(b"<?php echo 1;");
+        let (unit, _strings) = unit_and_strings(b"<?php echo 1;");
         assert_eq!(
             unit.dump(),
-            "$_main:\n     ; (lines=2, args=0, vars=0, tmps=0)\n\
-             0000 ECHO CONST[0]\n0001 RETURN CONST[0]\n",
-            "the constant 1 is echoed and returned, and php keeps one slot for it"
+            main_dump(2, 0, 0, "0000 ECHO int(1)\n0001 RETURN int(1)\n"),
+            "the constant 1 is echoed and returned"
+        );
+        assert_eq!(
+            (unit.main.oplines[0].op1, unit.main.oplines[1].op1),
+            (0, 0),
+            "php keeps one slot for it"
         );
     }
 
     #[test]
     fn a_nested_call_sends_what_the_inner_call_returned() {
-        let unit = unit_of(b"<?php var_dump(extension_loaded('demo'));");
+        let (unit, _strings) = unit_and_strings(b"<?php var_dump(extension_loaded('demo'));");
         assert_eq!(
             unit.dump(),
-            "$_main:\n     ; (lines=7, args=0, vars=0, tmps=2)\n\
-             0000 INIT_FCALL CONST[0]\n\
-             0001 INIT_FCALL CONST[1]\n\
-             0002 SEND_VAL CONST[2]\n\
-             0003 DO_ICALL\n\
-             0004 SEND_VAR V0\n\
-             0005 DO_ICALL\n\
-             0006 RETURN CONST[3]\n"
+            main_dump(
+                7,
+                0,
+                2,
+                "0000 INIT_FCALL 1 0 string(\"var_dump\")\n\
+                 0001 INIT_FCALL 1 0 string(\"extension_loaded\")\n\
+                 0002 SEND_VAL string(\"demo\") 1\n\
+                 0003 DO_ICALL\n\
+                 0004 SEND_VAR V0 1\n\
+                 0005 DO_ICALL\n\
+                 0006 RETURN int(1)\n"
+            ),
+            "php's, but for the `V0 = ` php opens the inner call with (design §5.7)"
         );
         assert_eq!(unit.main.oplines[0].extended_value, 1, "one argument");
         assert_eq!(unit.main.cache_size, 2, "one cache slot per INIT_FCALL");
@@ -165,7 +191,7 @@ mod tests {
 
     #[test]
     fn the_entry_is_safepoint_zero_and_the_return_carries_its_own_number() {
-        let unit = unit_of(b"<?php echo 1;");
+        let (unit, _strings) = unit_and_strings(b"<?php echo 1;");
         assert_eq!(
             unit.main.safepoints.as_ref(),
             &[OplineIdx(0), OplineIdx(1)],
@@ -179,7 +205,7 @@ mod tests {
 
     /// The one constant a single-expression `echo` leaves in the table.
     fn echoed_literal(source: &[u8]) -> php_heap::Zval {
-        let unit = unit_of(source);
+        let (unit, _strings) = unit_and_strings(source);
         unit.main
             .literals
             .first()
@@ -189,11 +215,10 @@ mod tests {
 
     #[test]
     fn arithmetic_over_two_constants_is_folded_the_way_php_folds_it() {
-        let unit = unit_of(b"<?php echo 1 + 2;");
+        let (unit, _strings) = unit_and_strings(b"<?php echo 1 + 2;");
         assert_eq!(
             unit.dump(),
-            "$_main:\n     ; (lines=2, args=0, vars=0, tmps=0)\n\
-             0000 ECHO CONST[0]\n0001 RETURN CONST[1]\n",
+            main_dump(2, 0, 0, "0000 ECHO int(3)\n0001 RETURN int(1)\n"),
             "the sum is one literal and no ZEND_ADD"
         );
         assert_eq!(echoed_literal(b"<?php echo 1 + 2;").as_long(), Some(3));
@@ -232,24 +257,23 @@ mod tests {
     #[test]
     fn an_operand_php_converts_is_folded_where_it_stands() {
         assert_eq!(
-            unit_of(b"<?php echo \"1\" + 1;").dump(),
-            "$_main:\n     ; (lines=2, args=0, vars=0, tmps=0)\n\
-             0000 ECHO CONST[0]\n0001 RETURN CONST[1]\n"
+            dump_of(b"<?php echo \"1\" + 1;"),
+            main_dump(2, 0, 0, "0000 ECHO int(2)\n0001 RETURN int(1)\n")
         );
         assert_eq!(echoed_literal(b"<?php echo \"1\" + 1;").as_long(), Some(2));
         assert_eq!(
-            unit_of(b"<?php echo true + 1;").dump(),
-            "$_main:\n     ; (lines=2, args=0, vars=0, tmps=0)\n\
-             0000 ECHO CONST[0]\n0001 RETURN CONST[1]\n"
+            dump_of(b"<?php echo true + 1;"),
+            main_dump(2, 0, 0, "0000 ECHO int(2)\n0001 RETURN int(1)\n")
         );
         assert_eq!(echoed_literal(b"<?php echo true + 1;").as_long(), Some(2));
         // The folded 1 and the return's 1 are one literal, as
         // `zend_add_literal` keeps them.
+        let (unit, _strings) = unit_and_strings(b"<?php echo null + 1;");
         assert_eq!(
-            unit_of(b"<?php echo null + 1;").dump(),
-            "$_main:\n     ; (lines=2, args=0, vars=0, tmps=0)\n\
-             0000 ECHO CONST[0]\n0001 RETURN CONST[0]\n"
+            unit.dump(),
+            main_dump(2, 0, 0, "0000 ECHO int(1)\n0001 RETURN int(1)\n")
         );
+        assert_eq!(unit.main.literals.len(), 1);
         assert_eq!(echoed_literal(b"<?php echo null + 1;").as_long(), Some(1));
         assert_eq!(echoed_literal(b"<?php echo false + 1;").as_long(), Some(1));
         // `_is_numeric_string_ex`: whitespace on either side, a sign, a
@@ -338,48 +362,72 @@ mod tests {
     #[test]
     fn arithmetic_php_does_not_fold_is_emitted_as_the_opcode_php_emits() {
         assert_eq!(
-            unit_of(b"<?php echo 1 + extension_loaded('Core');").dump(),
-            "$_main:\n     ; (lines=6, args=0, vars=0, tmps=2)\n\
-             0000 INIT_FCALL CONST[0]\n\
-             0001 SEND_VAL CONST[1]\n\
-             0002 DO_ICALL\n\
-             0003 ADD CONST[2] V0\n\
-             0004 ECHO T1\n\
-             0005 RETURN CONST[2]\n",
+            dump_of(b"<?php echo 1 + extension_loaded('Core');"),
+            main_dump(
+                6,
+                0,
+                2,
+                "0000 INIT_FCALL 1 0 string(\"extension_loaded\")\n\
+                 0001 SEND_VAL string(\"Core\") 1\n\
+                 0002 DO_ICALL\n\
+                 0003 ADD int(1) V0\n\
+                 0004 ECHO T1\n\
+                 0005 RETURN int(1)\n"
+            ),
             "php's own op array, its literals in the order the oplines name them"
         );
         // `zend_binary_op_produces_error`: a string that opens with no
         // number, or carries anything past the one it opens with, is left
         // to the opcode, which throws or warns where it stands.
-        for (source, returned) in [
-            (&b"<?php echo \"abc\" + 1;"[..], "CONST[1]"),
-            (b"<?php echo \"1abc\" + 1;", "CONST[1]"),
-            (b"<?php echo \"0x1A\" + 1;", "CONST[1]"),
-            (b"<?php echo \"1e\" + 1;", "CONST[1]"),
-            (b"<?php echo 1 + \"\";", "CONST[0]"),
+        // The return's `1` shares the slot of an operand that is the
+        // same `1`, as `zend_add_literal` keeps them.
+        for (source, left, right, returned) in [
+            (
+                &b"<?php echo \"abc\" + 1;"[..],
+                "string(\"abc\")",
+                "int(1)",
+                1,
+            ),
+            (b"<?php echo \"1abc\" + 1;", "string(\"1abc\")", "int(1)", 1),
+            (b"<?php echo \"0x1A\" + 1;", "string(\"0x1A\")", "int(1)", 1),
+            (b"<?php echo \"1e\" + 1;", "string(\"1e\")", "int(1)", 1),
+            (b"<?php echo 1 + \"\";", "int(1)", "string(\"\")", 0),
         ] {
+            let (unit, _strings) = unit_and_strings(source);
             assert_eq!(
-                unit_of(source).dump(),
-                format!(
-                    "$_main:\n     ; (lines=3, args=0, vars=0, tmps=1)\n\
-                     0000 ADD CONST[0] CONST[1]\n0001 ECHO T0\n0002 RETURN {returned}\n"
+                unit.dump(),
+                main_dump(
+                    3,
+                    0,
+                    1,
+                    &format!("0000 ADD {left} {right}\n0001 ECHO T0\n0002 RETURN int(1)\n")
                 ),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+            assert_eq!(
+                unit.main.oplines[2].op1,
+                returned,
                 "{}",
                 String::from_utf8_lossy(source)
             );
         }
         // The divisor php's `zval_get_double` reads as zero, whatever
         // its type, and the negative power of a zero.
-        for source in [
-            &b"<?php echo 2 / \"0\";"[..],
-            b"<?php echo 2 / \"0.0\";",
-            b"<?php echo 2 / false;",
-            b"<?php echo 2 / null;",
+        for (source, divisor) in [
+            (&b"<?php echo 2 / \"0\";"[..], "string(\"0\")"),
+            (b"<?php echo 2 / \"0.0\";", "string(\"0.0\")"),
+            (b"<?php echo 2 / false;", "bool(false)"),
+            (b"<?php echo 2 / null;", "null"),
         ] {
             assert_eq!(
-                unit_of(source).dump(),
-                "$_main:\n     ; (lines=3, args=0, vars=0, tmps=1)\n\
-                 0000 DIV CONST[0] CONST[1]\n0001 ECHO T0\n0002 RETURN CONST[2]\n",
+                dump_of(source),
+                main_dump(
+                    3,
+                    0,
+                    1,
+                    &format!("0000 DIV int(2) {divisor}\n0001 ECHO T0\n0002 RETURN int(1)\n")
+                ),
                 "{}",
                 String::from_utf8_lossy(source)
             );
@@ -387,28 +435,40 @@ mod tests {
         // `-"abc"` is the multiplication by -1 php emits for an operand
         // it will not fold.
         assert_eq!(
-            unit_of(b"<?php echo -\"1abc\";").dump(),
-            "$_main:\n     ; (lines=3, args=0, vars=0, tmps=1)\n\
-             0000 MUL CONST[0] CONST[1]\n0001 ECHO T0\n0002 RETURN CONST[2]\n"
+            dump_of(b"<?php echo -\"1abc\";"),
+            main_dump(
+                3,
+                0,
+                1,
+                "0000 MUL string(\"1abc\") int(-1)\n0001 ECHO T0\n0002 RETURN int(1)\n"
+            )
         );
         // `zend_binary_op_produces_error`: the division php refuses to
         // fold, so that `DivisionByZeroError` is thrown where it stands.
         assert_eq!(
-            unit_of(b"<?php echo 1/0;").dump(),
-            "$_main:\n     ; (lines=3, args=0, vars=0, tmps=1)\n\
-             0000 DIV CONST[0] CONST[1]\n0001 ECHO T0\n0002 RETURN CONST[0]\n"
+            dump_of(b"<?php echo 1/0;"),
+            main_dump(
+                3,
+                0,
+                1,
+                "0000 DIV int(1) int(0)\n0001 ECHO T0\n0002 RETURN int(1)\n"
+            )
         );
         // `zend_compile_unary_pm`: the multiplication by -1 php emits
         // where the operand is not a constant.
         assert_eq!(
-            unit_of(b"<?php echo -extension_loaded('Core');").dump(),
-            "$_main:\n     ; (lines=6, args=0, vars=0, tmps=2)\n\
-             0000 INIT_FCALL CONST[0]\n\
-             0001 SEND_VAL CONST[1]\n\
-             0002 DO_ICALL\n\
-             0003 MUL V0 CONST[2]\n\
-             0004 ECHO T1\n\
-             0005 RETURN CONST[3]\n"
+            dump_of(b"<?php echo -extension_loaded('Core');"),
+            main_dump(
+                6,
+                0,
+                2,
+                "0000 INIT_FCALL 1 0 string(\"extension_loaded\")\n\
+                 0001 SEND_VAL string(\"Core\") 1\n\
+                 0002 DO_ICALL\n\
+                 0003 MUL V0 int(-1)\n\
+                 0004 ECHO T1\n\
+                 0005 RETURN int(1)\n"
+            )
         );
     }
 
@@ -418,55 +478,77 @@ mod tests {
         // reads as zero and over an operand `zend_is_op_long_compatible`
         // refuses, and the negative power of a zero: each is the opcode,
         // to throw or deprecate where it stands.
-        for (source, returned) in [
-            (&b"<?php echo 1 % 0;"[..], "CONST[0]"),
-            (b"<?php echo 1 % \"0\";", "CONST[0]"),
-            (b"<?php echo 1 % null;", "CONST[0]"),
-            (b"<?php echo 1.5 % 1;", "CONST[1]"),
-            (b"<?php echo \"1.5\" % 1;", "CONST[1]"),
-            (b"<?php echo 1e19 % 1;", "CONST[1]"),
-            (b"<?php echo \"9223372036854775808\" % 1;", "CONST[1]"),
-            (b"<?php echo INF % 1;", "CONST[1]"),
+        for (source, left, right) in [
+            (&b"<?php echo 1 % 0;"[..], "int(1)", "int(0)"),
+            (b"<?php echo 1 % \"0\";", "int(1)", "string(\"0\")"),
+            (b"<?php echo 1 % null;", "int(1)", "null"),
+            (b"<?php echo 1.5 % 1;", "float(1.5)", "int(1)"),
+            (b"<?php echo \"1.5\" % 1;", "string(\"1.5\")", "int(1)"),
+            (b"<?php echo 1e19 % 1;", "float(1e+19)", "int(1)"),
+            (
+                b"<?php echo \"9223372036854775808\" % 1;",
+                "string(\"9223372036854775808\")",
+                "int(1)",
+            ),
+            (b"<?php echo INF % 1;", "float(inf)", "int(1)"),
         ] {
             assert_eq!(
-                unit_of(source).dump(),
-                format!(
-                    "$_main:\n     ; (lines=3, args=0, vars=0, tmps=1)\n\
-                     0000 MOD CONST[0] CONST[1]\n0001 ECHO T0\n0002 RETURN {returned}\n"
+                dump_of(source),
+                main_dump(
+                    3,
+                    0,
+                    1,
+                    &format!("0000 MOD {left} {right}\n0001 ECHO T0\n0002 RETURN int(1)\n")
                 ),
                 "{}",
                 String::from_utf8_lossy(source)
             );
         }
-        for source in [
-            &b"<?php echo 0 ** -1;"[..],
-            b"<?php echo \"0\" ** -1;",
-            b"<?php echo 0.0 ** -1;",
+        for (source, base) in [
+            (&b"<?php echo 0 ** -1;"[..], "int(0)"),
+            (b"<?php echo \"0\" ** -1;", "string(\"0\")"),
+            (b"<?php echo 0.0 ** -1;", "float(0)"),
         ] {
             assert_eq!(
-                unit_of(source).dump(),
-                "$_main:\n     ; (lines=3, args=0, vars=0, tmps=1)\n\
-                 0000 POW CONST[0] CONST[1]\n0001 ECHO T0\n0002 RETURN CONST[2]\n",
+                dump_of(source),
+                main_dump(
+                    3,
+                    0,
+                    1,
+                    &format!("0000 POW {base} int(-1)\n0001 ECHO T0\n0002 RETURN int(1)\n")
+                ),
                 "{}",
                 String::from_utf8_lossy(source)
             );
         }
         // `%` and `**` over a call, php's `MOD` and `POW` where `ADD`
         // stood above.
-        for (source, opcode) in [
-            (&b"<?php echo 7 % extension_loaded('Core');"[..], "MOD"),
-            (b"<?php echo 2 ** extension_loaded('Core');", "POW"),
+        for (source, opcode, left) in [
+            (
+                &b"<?php echo 7 % extension_loaded('Core');"[..],
+                "MOD",
+                "int(7)",
+            ),
+            (
+                b"<?php echo 2 ** extension_loaded('Core');",
+                "POW",
+                "int(2)",
+            ),
         ] {
             assert_eq!(
-                unit_of(source).dump(),
-                format!(
-                    "$_main:\n     ; (lines=6, args=0, vars=0, tmps=2)\n\
-                     0000 INIT_FCALL CONST[0]\n\
-                     0001 SEND_VAL CONST[1]\n\
-                     0002 DO_ICALL\n\
-                     0003 {opcode} CONST[2] V0\n\
-                     0004 ECHO T1\n\
-                     0005 RETURN CONST[3]\n"
+                dump_of(source),
+                main_dump(
+                    6,
+                    0,
+                    2,
+                    &format!(
+                        "0000 INIT_FCALL 1 0 string(\"extension_loaded\")\n\
+                         0001 SEND_VAL string(\"Core\") 1\n\
+                         0002 DO_ICALL\n\
+                         0003 {opcode} {left} V0\n\
+                         0004 ECHO T1\n\
+                         0005 RETURN int(1)\n"
+                    )
                 ),
                 "{}",
                 String::from_utf8_lossy(source)
@@ -492,31 +574,37 @@ mod tests {
             Some(24),
             "`+` binds tighter than `<<`"
         );
-        for (source, opcode, returned) in [
-            (&b"<?php echo 1 << -1;"[..], "SL", "CONST[0]"),
-            (b"<?php echo 1 >> -1;", "SR", "CONST[0]"),
-            (b"<?php echo 1.5 << 1;", "SL", "CONST[1]"),
-            (b"<?php echo 1 << \"1x\";", "SL", "CONST[0]"),
+        for (source, opcode, left, right) in [
+            (&b"<?php echo 1 << -1;"[..], "SL", "int(1)", "int(-1)"),
+            (b"<?php echo 1 >> -1;", "SR", "int(1)", "int(-1)"),
+            (b"<?php echo 1.5 << 1;", "SL", "float(1.5)", "int(1)"),
+            (b"<?php echo 1 << \"1x\";", "SL", "int(1)", "string(\"1x\")"),
         ] {
             assert_eq!(
-                unit_of(source).dump(),
-                format!(
-                    "$_main:\n     ; (lines=3, args=0, vars=0, tmps=1)\n\
-                     0000 {opcode} CONST[0] CONST[1]\n0001 ECHO T0\n0002 RETURN {returned}\n"
+                dump_of(source),
+                main_dump(
+                    3,
+                    0,
+                    1,
+                    &format!("0000 {opcode} {left} {right}\n0001 ECHO T0\n0002 RETURN int(1)\n")
                 ),
                 "{}",
                 String::from_utf8_lossy(source)
             );
         }
         assert_eq!(
-            unit_of(b"<?php echo 1 << extension_loaded('Core');").dump(),
-            "$_main:\n     ; (lines=6, args=0, vars=0, tmps=2)\n\
-             0000 INIT_FCALL CONST[0]\n\
-             0001 SEND_VAL CONST[1]\n\
-             0002 DO_ICALL\n\
-             0003 SL CONST[2] V0\n\
-             0004 ECHO T1\n\
-             0005 RETURN CONST[2]\n"
+            dump_of(b"<?php echo 1 << extension_loaded('Core');"),
+            main_dump(
+                6,
+                0,
+                2,
+                "0000 INIT_FCALL 1 0 string(\"extension_loaded\")\n\
+                 0001 SEND_VAL string(\"Core\") 1\n\
+                 0002 DO_ICALL\n\
+                 0003 SL int(1) V0\n\
+                 0004 ECHO T1\n\
+                 0005 RETURN int(1)\n"
+            )
         );
     }
 
@@ -543,11 +631,18 @@ mod tests {
     /// fold converted where it stands, so the `CONCAT` reads a string.
     #[test]
     fn a_concatenation_over_constants_folds_to_php_s_one_string_and_the_rest_is_concat() {
-        for source in [&b"<?php echo 'a' . 'b';"[..], b"<?php echo \"1\" . 2;"] {
+        for (source, joined) in [
+            (&b"<?php echo 'a' . 'b';"[..], "ab"),
+            (b"<?php echo \"1\" . 2;", "12"),
+        ] {
             assert_eq!(
-                unit_of(source).dump(),
-                "$_main:\n     ; (lines=2, args=0, vars=0, tmps=0)\n\
-                 0000 ECHO CONST[0]\n0001 RETURN CONST[1]\n",
+                dump_of(source),
+                main_dump(
+                    2,
+                    0,
+                    0,
+                    &format!("0000 ECHO string(\"{joined}\")\n0001 RETURN int(1)\n")
+                ),
                 "{}",
                 String::from_utf8_lossy(source)
             );
@@ -591,17 +686,22 @@ mod tests {
         );
         assert_eq!(
             unit.dump(),
-            "$_main:\n     ; (lines=10, args=0, vars=1, tmps=5)\n\
-             0000 ASSIGN CV0 CONST[0]\n\
-             0001 CONCAT CONST[1] CV0\n\
-             0002 ECHO T1\n\
-             0003 CONCAT CV0 CONST[2]\n\
-             0004 ECHO T2\n\
-             0005 CONCAT CONST[3] CV0\n\
-             0006 ECHO T3\n\
-             0007 CONCAT CONST[4] CV0\n\
-             0008 ECHO T4\n\
-             0009 RETURN CONST[0]\n"
+            main_dump(
+                10,
+                1,
+                5,
+                "0000 ASSIGN CV0($a) int(1)\n\
+                 0001 CONCAT string(\"2\") CV0($a)\n\
+                 0002 ECHO T2\n\
+                 0003 CONCAT CV0($a) string(\"2.5\")\n\
+                 0004 ECHO T3\n\
+                 0005 CONCAT string(\"ab\") CV0($a)\n\
+                 0006 ECHO T4\n\
+                 0007 CONCAT float(nan) CV0($a)\n\
+                 0008 ECHO T5\n\
+                 0009 RETURN int(1)\n"
+            ),
+            "php's, but for the `string(\"NAN\")` php converts the NAN to (#218)"
         );
         assert_eq!(
             literal_text(&unit, 1),
@@ -636,16 +736,21 @@ mod tests {
     /// nothing, so the back-edge is a `JMPNZ` and not a `JMP`.
     #[test]
     fn an_empty_for_is_php_s_forward_jump_and_a_conditional_jump_to_itself() {
-        let unit = unit_of(b"<?php set_time_limit(1); for (;;) {}");
+        let (unit, _strings) = unit_and_strings(b"<?php set_time_limit(1); for (;;) {}");
         assert_eq!(
             unit.dump(),
-            "$_main:\n     ; (lines=6, args=0, vars=0, tmps=1)\n\
-             0000 INIT_FCALL CONST[0]\n\
-             0001 SEND_VAL CONST[1]\n\
-             0002 DO_ICALL\n\
-             0003 JMP\n\
-             0004 JMPNZ CONST[2]\n\
-             0005 RETURN CONST[1]\n"
+            main_dump(
+                6,
+                0,
+                1,
+                "0000 INIT_FCALL 1 0 string(\"set_time_limit\")\n\
+                 0001 SEND_VAL int(1) 1\n\
+                 0002 DO_ICALL\n\
+                 0003 JMP 0004\n\
+                 0004 JMPNZ bool(true) 0004\n\
+                 0005 RETURN int(1)\n"
+            ),
+            "the oracle's dump, byte for byte"
         );
         assert_eq!(
             unit.main.oplines[3].op1, 4,
@@ -680,28 +785,32 @@ mod tests {
     /// value is read.
     #[test]
     fn a_for_lays_its_lists_down_in_php_s_order() {
-        let unit = unit_of(
+        let (unit, _strings) = unit_and_strings(
             b"<?php for (extension_loaded('i'); extension_loaded('a'), extension_loaded('b'); extension_loaded('s')) echo 'body';",
         );
         assert_eq!(
             unit.dump(),
-            "$_main:\n     ; (lines=16, args=0, vars=0, tmps=4)\n\
-             0000 INIT_FCALL CONST[0]\n\
-             0001 SEND_VAL CONST[1]\n\
-             0002 DO_ICALL\n\
-             0003 JMP\n\
-             0004 ECHO CONST[2]\n\
-             0005 INIT_FCALL CONST[0]\n\
-             0006 SEND_VAL CONST[3]\n\
-             0007 DO_ICALL\n\
-             0008 INIT_FCALL CONST[0]\n\
-             0009 SEND_VAL CONST[4]\n\
-             0010 DO_ICALL\n\
-             0011 INIT_FCALL CONST[0]\n\
-             0012 SEND_VAL CONST[5]\n\
-             0013 DO_ICALL\n\
-             0014 JMPNZ V3\n\
-             0015 RETURN CONST[6]\n"
+            main_dump(
+                16,
+                0,
+                4,
+                "0000 INIT_FCALL 1 0 string(\"extension_loaded\")\n\
+                 0001 SEND_VAL string(\"i\") 1\n\
+                 0002 DO_ICALL\n\
+                 0003 JMP 0008\n\
+                 0004 ECHO string(\"body\")\n\
+                 0005 INIT_FCALL 1 0 string(\"extension_loaded\")\n\
+                 0006 SEND_VAL string(\"s\") 1\n\
+                 0007 DO_ICALL\n\
+                 0008 INIT_FCALL 1 0 string(\"extension_loaded\")\n\
+                 0009 SEND_VAL string(\"a\") 1\n\
+                 0010 DO_ICALL\n\
+                 0011 INIT_FCALL 1 0 string(\"extension_loaded\")\n\
+                 0012 SEND_VAL string(\"b\") 1\n\
+                 0013 DO_ICALL\n\
+                 0014 JMPNZ V3 0004\n\
+                 0015 RETURN int(1)\n"
+            )
         );
         assert_eq!(
             unit.main.oplines[3].op1, 8,
@@ -717,17 +826,19 @@ mod tests {
     /// as `zend_emit_final_return` does.
     #[test]
     fn a_while_is_the_same_shape_and_the_body_keeps_its_lines() {
-        let unit = unit_of(b"<?php\nwhile (extension_loaded('a')) {\n  echo 1;\n}");
+        let (unit, _strings) =
+            unit_and_strings(b"<?php\nwhile (extension_loaded('a')) {\n  echo 1;\n}");
         assert_eq!(
             unit.dump(),
-            "$_main:\n     ; (lines=7, args=0, vars=0, tmps=1)\n\
-             0000 JMP\n\
-             0001 ECHO CONST[0]\n\
-             0002 INIT_FCALL CONST[1]\n\
-             0003 SEND_VAL CONST[2]\n\
+            "\n$_main:\n     ; (lines=7, args=0, vars=0, tmps=1)\n\
+             \x20    ; (before optimizer)\n     ; :1-4\n     ; return  [] RANGE[0..0]\n\
+             0000 JMP 0002\n\
+             0001 ECHO int(1)\n\
+             0002 INIT_FCALL 1 0 string(\"extension_loaded\")\n\
+             0003 SEND_VAL string(\"a\") 1\n\
              0004 DO_ICALL\n\
-             0005 JMPNZ V0\n\
-             0006 RETURN CONST[0]\n"
+             0005 JMPNZ V0 0001\n\
+             0006 RETURN int(1)\n"
         );
         assert_eq!(unit.main.oplines[0].op1, 2);
         assert_eq!(unit.main.oplines[5].op2, 1);
@@ -884,11 +995,10 @@ mod tests {
     /// and `zend_try_ct_eval_binary_op` folds the sum over it.
     #[test]
     fn strlen_over_a_constant_string_is_its_length_and_the_sum_folds_over_it() {
-        let unit = unit_of(b"<?php echo 1 + strlen('a');");
+        let (unit, _strings) = unit_and_strings(b"<?php echo 1 + strlen('a');");
         assert_eq!(
             unit.dump(),
-            "$_main:\n     ; (lines=2, args=0, vars=0, tmps=0)\n\
-             0000 ECHO CONST[0]\n0001 RETURN CONST[1]\n",
+            main_dump(2, 0, 0, "0000 ECHO int(2)\n0001 RETURN int(1)\n"),
             "one ECHO of a constant, no INIT_FCALL and no ADD"
         );
         assert_eq!(unit.main.literals[0].as_long(), Some(2));
