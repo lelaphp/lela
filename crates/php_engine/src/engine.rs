@@ -892,14 +892,10 @@ mod tests {
 
     /// `div_function`: the divisor of zero php refuses to fold, so the
     /// opcode throws `DivisionByZeroError` where it stands, on line 1 of
-    /// a source whose `<?php` and whose `echo` share it. The site and the
-    /// stack trace around it are [`Request::uncaught`]'s rendering, which
-    /// #108 landed; what the pin below holds is the class, the text and
-    /// the line the opcode stands on. What the pinned oracle writes for a
-    /// `witness.php` of those bytes, under the recipe with
-    /// `-d log_errors=1 -d display_errors=0`, is
-    /// `PHP Fatal error:  Uncaught DivisionByZeroError: Division by zero
-    /// in %s:1`, `Stack trace:`, `#0 {main}`, `  thrown in %s on line 1`.
+    /// a source whose `<?php` and whose `echo` share it. The witness on
+    /// [`crate::ops::div`] pins the oracle's rendering of the display branch;
+    /// what this holds is the log branch's spelling of the same fatal,
+    /// the status, and the double divisor the witness does not reach.
     #[test]
     fn a_division_by_zero_throws_php_s_error_where_the_opcode_stands() {
         let engine = Engine::builder().build();

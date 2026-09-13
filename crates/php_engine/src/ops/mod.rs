@@ -295,6 +295,20 @@ pub(crate) fn mul(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
 /// ```expect
 /// 3|5|3.5|9.2233720368548E+18
 /// ```
+///
+/// The divisor of zero is the one pair php's compiler will not fold, so
+/// two constants exercise the opcode in both engines; uncaught, the
+/// throwable names the opline's line as its site.
+///
+/// ```php
+/// echo 1/0;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught DivisionByZeroError: Division by zero in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
 pub(crate) fn div(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
     let (a, b) = numbers(req, "/", left, right)?;
     match (a, b) {
