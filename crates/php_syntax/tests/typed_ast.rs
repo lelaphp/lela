@@ -387,10 +387,19 @@ fn the_token_texts_concatenate_to_the_input() {
             );
         }
         assert_eq!(text, source, "{}", String::from_utf8_lossy(source));
+        // One root over every significant token until the grammar lands.
+        let significant = parsed.tokens.iter().filter(|t| !t.kind.is_trivia()).count();
+        let in_tree = parsed
+            .tree
+            .elements()
+            .iter()
+            .filter(|e| matches!(e, Element::Token { .. }))
+            .count();
+        assert_eq!(in_tree, significant, "{}", String::from_utf8_lossy(source));
         assert!(
-            parsed.tree.root().is_none(),
-            "the tree is empty until the parser lands"
+            parsed.dump().starts_with("SOURCE_FILE@"),
+            "{}",
+            parsed.dump()
         );
-        assert_eq!(parsed.dump(), "");
     }
 }

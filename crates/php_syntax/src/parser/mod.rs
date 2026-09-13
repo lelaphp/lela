@@ -1,0 +1,715 @@
+//! The parser (design §4.9, ADR-0003): a cursor over the significant
+//! tokens, markers that open and close nodes as [`Event`]s for the
+//! builder, the expected set recorded since the last consumed token, the
+//! forward-progress fuel, the nesting cap and the open-delimiter stack
+//! from which php's bracket-balance text is spelled. The grammar (#203 to
+//! #205) is written against this surface and nothing else sees it.
+//!
+//! **What is php's.** The text of a diagnostic is php's: the unexpected
+//! token is named as `zend_yytnamerr` names it
+//! (`Zend/zend_language_parser.y` at 8.5.9), a bracket imbalance is
+//! `Unclosed '(' on line 3 does not match ']'` as `zend_language_scanner.l`
+//! spells it, and the nesting cap answers `memory exhausted`, which is
+//! what bison's stack answers in php (`Zend/tests/bug64660.phpt`). Where a
+//! grammar position has a fixed `, expecting …` clause in php's tables,
+//! the site pins it through [`Parser::unexpected_expecting`] or
+//! [`Parser::unexpected_here_expecting`]; the recorded expected set is the
+//! parser's own and is not printed.
+//!
+//! **What is bounded.** Grammar recursion is capped at [`MAX_DEPTH`]
+//! levels through [`Parser::enter_depth`]; php's bison stack refuses on
+//! the same axis near 10,000 levels of `(`, so a source between the two
+//! parses under php and is refused here, a divergence to propose
+//! when #206 pins the text. Lookahead without consuming spends fuel, and
+//! a loop that looks without consuming trips [`Parser::is_stuck`], which
+//! the statement and expression loops answer by consuming into an `ERROR`
+//! node. The cap keeps the parser's own stack bounded only on a thread
+//! that can absorb `MAX_DEPTH` levels before the cap refuses, which is
+//! [`MIN_THREAD_STACK`].
+
+mod input;
+
+use crate::SyntaxKind;
+use crate::source::{Diagnostic, FileId, Span};
+use crate::tree::{Event, TOMBSTONE};
+
+pub use input::Input;
+
+/// The grammar's view of the parse.
+pub struct Parser<'t> {
+    input: &'t Input<'t>,
+    pos: usize,
+    file: FileId,
+    events: Vec<Event>,
+    /// The kinds recorded as expected at the current position since the
+    /// last consumed token, in the order the grammar asked.
+    expected: Vec<SyntaxKind>,
+    /// Forward-progress fuel: spent on every lookahead, refilled on every
+    /// consumed token. Exhaustion trips [`Parser::is_stuck`]. A legitimate
+    /// lookahead burst (an attribute scan) exceeds any small constant, so
+    /// the hard failure is the burst cap below.
+    fuel: u32,
+    /// Lookaheads since the last consumed token. A burst past `burst_cap`
+    /// cannot come from looking over the input, only from a loop that
+    /// looks without consuming: a debug build asserts, a release build
+    /// relies on `is_stuck`.
+    burst: u32,
+    burst_cap: u32,
+    /// Grammar recursion depth (statements, expressions, types), bounded
+    /// by [`MAX_DEPTH`]. It bounds the parser's own stack and nothing
+    /// else: the Pratt core wraps a left-nested chain iteratively, so
+    /// `1+1+…+1` is one level here and `n` levels of tree.
+    depth: u32,
+    /// The cap is reported once per file, at the first refusal.
+    depth_reported: bool,
+    /// The open delimiters, pushed and popped by every consumed token:
+    /// where php's `Unclosed '('` and `Unmatched ')'` read their opener.
+    delims: Vec<(SyntaxKind, Span)>,
+    /// A one-shot grant the next primary consumes: `list(...)` parsed
+    /// there needs no `=` after it (a `foreach` target, an array or list
+    /// element; Zend's `array_pair` contexts). Taken at the top of the
+    /// prefix parse so only the immediately next primary inherits it.
+    pub(crate) list_target_ok: bool,
+    /// The highest start offset of any diagnostic raised so far. php's
+    /// wording at a statement that has already gone wrong is the
+    /// unexpected-token one (`const return` is `unexpected token "return",
+    /// expecting identifier`, never a missing `;`), so a zero-width repair
+    /// anchored after the previous token yields to an error already
+    /// raised at or after its offset.
+    errors_high_water: Option<u32>,
+}
+
+const FUEL: u32 = 256;
+
+/// The grammar nesting cap: a bound on the parser's recursion, and on
+/// nothing else. Well clear of real code (Mahout's 193k-file corpus
+/// measured its deepest file far under it) and a few binary orders under
+/// php's bison stack, which refuses near 10,000 levels; the band between
+/// is the difference the crate docs name. The cap closes the
+/// stack-overflow class only on a thread that can absorb this many levels
+/// of native recursion before the cap refuses, which is what
+/// [`MIN_THREAD_STACK`] sizes.
+pub const MAX_DEPTH: u32 = 512;
+
+/// The native-stack budget of any thread that parses: 16 MiB, the
+/// measured debug-build worst case of [`MAX_DEPTH`] levels of grammar
+/// recursion (about 8 MiB, Mahout, 2026-06-12) with twice the headroom.
+/// A virtual reservation; pages commit on use. Rust sizes a spawned
+/// thread at 2 MiB and the main thread at what the linker gave it, so a
+/// host that parses on a thread it did not size this way is the one
+/// thread the cap does not cover.
+pub const MIN_THREAD_STACK: usize = 16 * 1024 * 1024;
+
+/// An open node, to be completed or abandoned.
+#[must_use = "a marker is completed or abandoned"]
+pub struct Marker {
+    event_index: u32,
+    settled: bool,
+}
+
+impl Drop for Marker {
+    fn drop(&mut self) {
+        // A marker that is neither completed nor abandoned is a grammar
+        // defect; a debug build says so, and not while unwinding from an
+        // earlier one, which would abort and hide the first message.
+        debug_assert!(
+            self.settled || std::thread::panicking(),
+            "marker dropped without complete() or abandon()"
+        );
+    }
+}
+
+/// A finished node, re-openable for wrapping by [`CompletedMarker::precede`].
+#[derive(Clone, Copy)]
+pub struct CompletedMarker {
+    start_event: u32,
+    /// The node's kind, which the Pratt core reads off its left operand.
+    pub kind: SyntaxKind,
+}
+
+impl<'t> Parser<'t> {
+    /// A parser at the start of `input`.
+    pub fn new(input: &'t Input<'t>, file: FileId) -> Parser<'t> {
+        let burst_cap = u32::try_from(input.len())
+            .unwrap_or(u32::MAX)
+            .saturating_mul(4)
+            .saturating_add(10_000);
+        Parser {
+            input,
+            pos: 0,
+            file,
+            events: Vec::new(),
+            expected: Vec::new(),
+            fuel: FUEL,
+            burst: 0,
+            burst_cap,
+            depth: 0,
+            depth_reported: false,
+            delims: Vec::new(),
+            list_target_ok: false,
+            errors_high_water: None,
+        }
+    }
+
+    /// The file being parsed, for a diagnostic's span.
+    pub fn file(&self) -> FileId {
+        self.file
+    }
+
+    /// The current token's kind; `EOF` at the end.
+    pub fn current(&mut self) -> SyntaxKind {
+        self.spend_fuel();
+        self.input.kind(self.pos)
+    }
+
+    /// The kind `n` tokens ahead.
+    pub fn nth(&mut self, n: usize) -> SyntaxKind {
+        self.spend_fuel();
+        self.input.kind(self.pos + n)
+    }
+
+    /// The current token's text.
+    pub fn current_text(&self) -> &'t [u8] {
+        self.input.text(self.pos)
+    }
+
+    /// The text of the token `n` ahead.
+    pub fn nth_text(&self, n: usize) -> &'t [u8] {
+        self.input.text(self.pos + n)
+    }
+
+    /// The current token's span.
+    pub fn current_span(&self) -> Span {
+        self.input.range(self.pos).in_file(self.file)
+    }
+
+    /// The span of the token `n` ahead.
+    pub fn nth_span(&self, n: usize) -> Span {
+        self.input.range(self.pos + n).in_file(self.file)
+    }
+
+    /// The span of the previous significant token, for a diagnostic
+    /// raised after consuming it.
+    pub fn prev_span(&self) -> Span {
+        let prev = self.pos.saturating_sub(1);
+        self.input.range(prev).in_file(self.file)
+    }
+
+    /// Is the current token `kind`? Records `kind` as expected; the order
+    /// the grammar asks is the order the set keeps.
+    pub fn at(&mut self, kind: SyntaxKind) -> bool {
+        self.expected.push(kind);
+        self.input.kind(self.pos) == kind
+    }
+
+    /// Is the current token one of `kinds`?
+    pub fn at_any(&mut self, kinds: &[SyntaxKind]) -> bool {
+        self.expected.extend_from_slice(kinds);
+        kinds.contains(&self.input.kind(self.pos))
+    }
+
+    /// [`at`](Self::at) without recording an expectation: a predicate or a
+    /// recovery scan.
+    pub fn peek_at(&self, kind: SyntaxKind) -> bool {
+        self.input.kind(self.pos) == kind
+    }
+
+    /// Was there a newline in the whitespace or comments before the
+    /// current token?
+    pub fn newline_before_current(&self) -> bool {
+        self.input.newline_before(self.pos)
+    }
+
+    /// The number of significant tokens left.
+    pub fn remaining(&self) -> usize {
+        self.input.len().saturating_sub(self.pos)
+    }
+
+    /// At the end of the input?
+    pub fn at_eof(&self) -> bool {
+        self.pos >= self.input.len()
+    }
+
+    /// Opens a node.
+    pub fn start(&mut self) -> Marker {
+        let index = u32::try_from(self.events.len()).unwrap_or(u32::MAX);
+        self.events.push(Event::Start {
+            kind: TOMBSTONE,
+            forward_parent: None,
+        });
+        Marker {
+            event_index: index,
+            settled: false,
+        }
+    }
+
+    /// Consumes the current token, which is `kind`, into the tree.
+    pub fn bump(&mut self, kind: SyntaxKind) {
+        debug_assert_eq!(self.input.kind(self.pos), kind, "bump kind mismatch");
+        self.do_bump(kind);
+    }
+
+    /// Consumes the current token under another kind: a contextual
+    /// keyword consumed as a name becomes `IDENT`.
+    pub fn bump_remap(&mut self, remap: SyntaxKind) {
+        self.do_bump(remap);
+    }
+
+    /// Consumes whatever the current token is; nothing at the end.
+    pub fn bump_any(&mut self) {
+        let kind = self.input.kind(self.pos);
+        if kind == SyntaxKind::EOF {
+            return;
+        }
+        self.do_bump(kind);
+    }
+
+    fn do_bump(&mut self, remap: SyntaxKind) {
+        debug_assert!(!self.at_eof(), "bump at EOF");
+        if Bracket::from_opener(remap).is_some() {
+            self.delims.push((remap, self.current_span()));
+        } else if let Some(closed) = Bracket::from_closer(remap) {
+            // The nearest matching opener; recovery may interleave.
+            if let Some(at) = self
+                .delims
+                .iter()
+                .rposition(|(k, _)| Bracket::from_opener(*k) == Some(closed))
+            {
+                self.delims.truncate(at);
+            }
+        }
+        self.events.push(Event::Token { remap });
+        self.pos += 1;
+        self.fuel = FUEL;
+        self.burst = 0;
+        self.expected.clear();
+    }
+
+    /// The span of the nearest open delimiter `closer` would close.
+    pub fn open_delim_span(&self, closer: SyntaxKind) -> Option<Span> {
+        let pair = Bracket::from_closer(closer)?;
+        self.delims
+            .iter()
+            .rev()
+            .find(|(k, _)| Bracket::from_opener(*k) == Some(pair))
+            .map(|(_, span)| *span)
+    }
+
+    /// At `kind`, consume it and answer true; otherwise record the
+    /// expectation and answer false, with no diagnostic: the caller
+    /// decides.
+    pub fn eat(&mut self, kind: SyntaxKind) -> bool {
+        if self.at(kind) {
+            self.bump(kind);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Raises a diagnostic.
+    pub fn error(&mut self, diagnostic: Diagnostic) {
+        let start = diagnostic.span.start;
+        self.errors_high_water = Some(self.errors_high_water.map_or(start, |hw| hw.max(start)));
+        self.events.push(Event::Error(Box::new(diagnostic)));
+    }
+
+    /// Has a diagnostic been raised at or after byte offset `pos`? What
+    /// the zero-width repairs ask before they anchor one (see
+    /// `errors_high_water`).
+    pub fn has_error_at_or_after(&self, pos: u32) -> bool {
+        self.errors_high_water.is_some_and(|hw| hw >= pos)
+    }
+
+    /// The expected set at the current position, each kind once, in the
+    /// order first recorded.
+    pub fn expected_set(&self) -> Vec<SyntaxKind> {
+        let mut seen = Vec::new();
+        for &kind in &self.expected {
+            if !seen.contains(&kind) {
+                seen.push(kind);
+            }
+        }
+        seen
+    }
+
+    /// php's `syntax error, unexpected …` for the current token, or its
+    /// bracket-balance text where that applies: `Unclosed '('` at the end
+    /// of the input inside an open delimiter, `Unmatched ')'` and
+    /// `Unclosed '(' … does not match ']'` at a closer that closes
+    /// nothing or the wrong thing. php prints the balance text alone,
+    /// and it is what `eval()`'s `ParseError` carries.
+    pub fn unexpected_here(&mut self) -> Diagnostic {
+        let span = self.current_span();
+        if self.at_eof() {
+            if let Some(m) = self.unclosed_eof_message() {
+                return Diagnostic::new(span, m);
+            }
+            return Diagnostic::new(span, "syntax error, unexpected end of file");
+        }
+        if let Some(m) = self.bracket_closer_message() {
+            return Diagnostic::new(span, m);
+        }
+        let kind = self.input.kind(self.pos);
+        let text = self.current_text();
+        Diagnostic::new(
+            span,
+            format!("syntax error, unexpected {}", php_token_name(kind, text)),
+        )
+    }
+
+    /// Builds and raises the [`unexpected_here`](Self::unexpected_here)
+    /// diagnostic in one step: what the grammar reaches for wherever the
+    /// current token is plainly out of place.
+    pub fn error_unexpected(&mut self) {
+        let d = self.unexpected_here();
+        self.error(d);
+    }
+
+    /// [`unexpected_here`](Self::unexpected_here) with php's `, expecting …`
+    /// clause pinned on by the site: the LALR expected set bison's tables
+    /// print at that position, which a hand-written parser cannot rebuild
+    /// from its own recorded set. For a position whose clause is a fixed,
+    /// position-specific list: a group `use` item list, the start of a
+    /// namespace declaration's name (php-src `ns_trailing_comma_error_*`,
+    /// `ns_096`, `namespace_name_namespace_start`). The current token is
+    /// not `EOF`: a site reaches for this with a concrete token in hand.
+    pub fn unexpected_expecting(&mut self, expecting: &str) -> Diagnostic {
+        let span = self.current_span();
+        let kind = self.input.kind(self.pos);
+        let text = self.current_text();
+        Diagnostic::new(
+            span,
+            format!(
+                "syntax error, unexpected {}, expecting {expecting}",
+                php_token_name(kind, text)
+            ),
+        )
+    }
+
+    /// [`unexpected_expecting`](Self::unexpected_expecting) at a position
+    /// whose current token may legitimately be a closer or the end of the
+    /// input: a declaration body, a parameter or argument list's closer.
+    /// php prints its balance text alone at a bracket imbalance, so those
+    /// defer to the balance-aware base; a plain end of file still carries
+    /// the clause (`unexpected end of file, expecting "{"`, probed 8.5.7).
+    pub fn unexpected_here_expecting(&mut self, expecting: &str) -> Diagnostic {
+        if self.at_eof() {
+            if self.unclosed_eof_message().is_some() {
+                return self.unexpected_here();
+            }
+            let span = self.current_span();
+            return Diagnostic::new(
+                span,
+                format!("syntax error, unexpected end of file, expecting {expecting}"),
+            );
+        }
+        if self.bracket_closer_message().is_some() {
+            return self.unexpected_here();
+        }
+        self.unexpected_expecting(expecting)
+    }
+
+    /// The 1-based line of a byte offset, for php's `on line N` in the
+    /// bracket-balance text; counts the `\n`s before it.
+    fn line_of(&self, offset: u32) -> u32 {
+        let src = self.input.source();
+        let end = (offset as usize).min(src.len());
+        // No extra dependency for a count that happens at an error site.
+        #[allow(clippy::naive_bytecount)]
+        let newlines = src[..end].iter().filter(|&&b| b == b'\n').count();
+        1 + u32::try_from(newlines).unwrap_or(u32::MAX)
+    }
+
+    /// php's bracket-balance text when the current token is a closer that
+    /// closes nothing (`Unmatched ')'`) or not the innermost open
+    /// delimiter (`Unclosed '(' [on line N ]does not match ']'`). `None`
+    /// when the current token is not a closer, or closes the innermost
+    /// opener: then the site's own flow reads it. The opener is read off
+    /// the same stack the secondaries trust.
+    pub fn bracket_closer_message(&self) -> Option<String> {
+        let cur = self.input.kind(self.pos);
+        let cur_bracket = Bracket::from_closer(cur)?;
+        let closer = cur_bracket.close_glyph();
+        match self.delims.last() {
+            None => Some(format!("Unmatched '{closer}'")),
+            Some(&(open_kind, open_span)) => {
+                let open = Bracket::from_opener(open_kind)?;
+                if open == cur_bracket {
+                    // A genuine match: not a balance error at this site.
+                    return None;
+                }
+                let open_c = open.open_glyph();
+                let open_line = self.line_of(open_span.start);
+                let cur_line = self.line_of(self.current_span().start);
+                Some(if open_line == cur_line {
+                    format!("Unclosed '{open_c}' does not match '{closer}'")
+                } else {
+                    format!("Unclosed '{open_c}' on line {open_line} does not match '{closer}'")
+                })
+            }
+        }
+    }
+
+    /// php's bracket-balance text at the end of the input inside an open
+    /// delimiter (`Unclosed '{' [on line N]`); `None` when nothing is
+    /// open, where a plain `unexpected end of file` stands
+    /// (`eval('abc')`).
+    pub fn unclosed_eof_message(&self) -> Option<String> {
+        let &(open_kind, open_span) = self.delims.last()?;
+        let open_c = Bracket::from_opener(open_kind)?.open_glyph();
+        let open_line = self.line_of(open_span.start);
+        let eof_line = self.line_of(u32::try_from(self.input.source().len()).unwrap_or(u32::MAX));
+        Some(if open_line == eof_line {
+            format!("Unclosed '{open_c}'")
+        } else {
+            format!("Unclosed '{open_c}' on line {open_line}")
+        })
+    }
+
+    /// Has the lookahead fuel gone without progress? A loop that sees this
+    /// consumes into an `ERROR` node rather than looking again.
+    pub fn is_stuck(&self) -> bool {
+        self.fuel == 0
+    }
+
+    /// Enters one level of grammar recursion; `false` at [`MAX_DEPTH`],
+    /// where the caller consumes its construct iteratively (Mahout's
+    /// `grammar::absorb_balanced`). The refusal is raised once per file,
+    /// as php's `memory exhausted`.
+    pub fn enter_depth(&mut self) -> bool {
+        if self.depth >= MAX_DEPTH {
+            if !self.depth_reported {
+                self.depth_reported = true;
+                let span = self.current_span();
+                self.error(Diagnostic::new(span, "memory exhausted"));
+            }
+            return false;
+        }
+        self.depth += 1;
+        true
+    }
+
+    /// Leaves one level of grammar recursion.
+    pub fn exit_depth(&mut self) {
+        debug_assert!(self.depth > 0, "exit_depth without enter_depth");
+        self.depth = self.depth.saturating_sub(1);
+    }
+
+    fn spend_fuel(&mut self) {
+        self.fuel = self.fuel.saturating_sub(1);
+        self.burst += 1;
+        debug_assert!(
+            self.burst <= self.burst_cap,
+            "parser spinning: {} lookaheads without consuming at token {}",
+            self.burst,
+            self.pos
+        );
+    }
+
+    /// Ends the parse: the event stream, for the builder.
+    pub fn finish(self) -> Vec<Event> {
+        self.events
+    }
+}
+
+impl Marker {
+    /// Completes the node as `kind`.
+    pub fn complete(mut self, p: &mut Parser<'_>, kind: SyntaxKind) -> CompletedMarker {
+        self.settled = true;
+        match p.events.get_mut(self.event_index as usize) {
+            Some(Event::Start { kind: slot, .. }) => *slot = kind,
+            _ => debug_assert!(false, "a marker points at a Start event"),
+        }
+        p.events.push(Event::Finish);
+        CompletedMarker {
+            start_event: self.event_index,
+            kind,
+        }
+    }
+
+    /// Abandons the node: its children attach to the surrounding node.
+    pub fn abandon(mut self, p: &mut Parser<'_>) {
+        self.settled = true;
+        if self.event_index as usize + 1 == p.events.len() {
+            // Nothing since: the placeholder goes.
+            p.events.pop();
+        }
+        // Otherwise the tombstone stays and the builder passes over it.
+    }
+}
+
+impl CompletedMarker {
+    /// Re-opens this node's position so a new node wraps it: the Pratt
+    /// core's left operand.
+    pub fn precede(self, p: &mut Parser<'_>) -> Marker {
+        let new = p.start();
+        match p.events.get_mut(self.start_event as usize) {
+            Some(Event::Start { forward_parent, .. }) => {
+                *forward_parent = Some(new.event_index - self.start_event);
+            }
+            _ => debug_assert!(false, "a completed marker points at a Start event"),
+        }
+        new
+    }
+}
+
+/// One of php's three bracket pairs. Every delimiter token classifies
+/// through this one type, so the opener glyph, the closer glyph and the
+/// matching are read from one place.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Bracket {
+    Paren,
+    Curly,
+    Brack,
+}
+
+impl Bracket {
+    /// The pair an opener opens, `#[` and `${` sharing `[` and `{`.
+    fn from_opener(opener: SyntaxKind) -> Option<Bracket> {
+        Some(match opener {
+            SyntaxKind::L_PAREN => Bracket::Paren,
+            SyntaxKind::L_CURLY | SyntaxKind::DOLLAR_L_CURLY => Bracket::Curly,
+            SyntaxKind::L_BRACK | SyntaxKind::ATTRIBUTE_OPEN => Bracket::Brack,
+            _ => return None,
+        })
+    }
+
+    /// The pair a closer closes.
+    fn from_closer(closer: SyntaxKind) -> Option<Bracket> {
+        Some(match closer {
+            SyntaxKind::R_PAREN => Bracket::Paren,
+            SyntaxKind::R_CURLY => Bracket::Curly,
+            SyntaxKind::R_BRACK => Bracket::Brack,
+            _ => return None,
+        })
+    }
+
+    /// The opener glyph php names in a balance message.
+    fn open_glyph(self) -> char {
+        match self {
+            Bracket::Paren => '(',
+            Bracket::Curly => '{',
+            Bracket::Brack => '[',
+        }
+    }
+
+    /// The closer glyph php names in a balance message.
+    fn close_glyph(self) -> char {
+        match self {
+            Bracket::Paren => ')',
+            Bracket::Curly => '}',
+            Bracket::Brack => ']',
+        }
+    }
+}
+
+/// How many bytes of a token's text php prints before `...`.
+const SHOWN: usize = 30;
+
+/// The unexpected token as php names it in `syntax error, unexpected …`:
+/// `zend_yytnamerr`'s unexpected-token half (`Zend/zend_language_parser.y`
+/// at 8.5.9), over the names its `%token` lines declare. A token bison
+/// names in single quotes, every keyword, cast and punctuation mark, is
+/// `token "<canonical>"` whatever the source spelled: `DIE` is `exit`,
+/// `( Int )` is `(int)`, `<>` is `!=`, `__class__` is `__CLASS__`. A token
+/// bison names with a class word carries its text: `identifier "foo"`,
+/// `variable "$x"`, `integer "0x1"`, `floating-point number ".5"`, the
+/// three namespaced-name kinds, `heredoc start "<<<EOT"`. The text is cut
+/// at its first newline, one layer of quotes is taken off it, and past
+/// thirty bytes it ends in `...`; a quoted string says which quote it
+/// opened with. A bare `"` is `double-quote mark`, and an invalid byte is
+/// `character 0x00`. The end of the input is the caller's `end of file`.
+///
+/// Measured under the pin at 8.5.9: `const die` reports `unexpected
+/// token "exit", expecting identifier`; `1 (   float  )` reports `token
+/// "(float)"`; `$'abc'` reports `single-quoted string "abc"`;
+/// `1 $abcdefghijklmnopqrstuvwxyz0123456` reports `variable
+/// "$abcdefghijklmnopqrstuvwxyz012..."`; `1 b'abc'` reports `quoted
+/// string "B'abc"`, the prefix keeping php from seeing the quote.
+pub fn php_token_name(kind: SyntaxKind, text: &[u8]) -> String {
+    if kind == SyntaxKind::DOUBLE_QUOTE {
+        return "double-quote mark".to_owned();
+    }
+    if let Some(canonical) = canonical_spelling(kind, text) {
+        return format!("token \"{canonical}\"");
+    }
+    if kind == SyntaxKind::ERROR
+        && let [byte] = text
+    {
+        return format!("character 0x{byte:02X}");
+    }
+    let mut class = match kind {
+        SyntaxKind::INT => "integer",
+        SyntaxKind::FLOAT => "floating-point number",
+        SyntaxKind::IDENT | SyntaxKind::MEMBER_IDENT => "identifier",
+        SyntaxKind::NAME_FULLY_QUALIFIED => "fully qualified name",
+        SyntaxKind::NAME_RELATIVE => "namespace-relative name",
+        SyntaxKind::NAME_QUALIFIED => "namespaced name",
+        SyntaxKind::VARIABLE => "variable",
+        SyntaxKind::STRING_TEXT => "string content",
+        SyntaxKind::SINGLE_QUOTED => "quoted string",
+        SyntaxKind::ENCAPS_INT => "number",
+        SyntaxKind::HEREDOC_START => "heredoc start",
+        SyntaxKind::HEREDOC_END => "heredoc end",
+        SyntaxKind::OPEN_TAG => "open tag",
+        // A `%token` line without a name prints bison's own.
+        SyntaxKind::INLINE_HTML => "T_INLINE_HTML",
+        _ => "token",
+    };
+    let mut content = text.split(|&b| b == b'\n').next().unwrap_or(&[]);
+    if class == "quoted string" {
+        match content.first() {
+            Some(b'"') => class = "double-quoted string",
+            Some(b'\'') => class = "single-quoted string",
+            _ => {}
+        }
+    }
+    if let Some((b'\'' | b'"', rest)) = content.split_first() {
+        content = rest;
+    }
+    if let Some((b'\'' | b'"', rest)) = content.split_last() {
+        content = rest;
+    }
+    if content.len() > SHOWN + 3 {
+        return format!(
+            "{class} \"{}...\"",
+            String::from_utf8_lossy(&content[..SHOWN])
+        );
+    }
+    format!("{class} \"{}\"", String::from_utf8_lossy(content))
+}
+
+/// The single-quoted name bison gives a token that has one form: the
+/// keyword lowercased, the cast in its canonical spelling, the mark as
+/// written; `None` for a token bison names by a class word.
+fn canonical_spelling(kind: SyntaxKind, text: &[u8]) -> Option<String> {
+    Some(match kind {
+        SyntaxKind::DIE_KW | SyntaxKind::EXIT_KW => "exit".to_owned(),
+        SyntaxKind::LT_GT => "!=".to_owned(),
+        SyntaxKind::CAST | SyntaxKind::CAST_REMOVED => {
+            let name = match crate::php_names::cast_name(text) {
+                "T_INT_CAST" => "int",
+                "T_BOOL_CAST" => "bool",
+                "T_DOUBLE_CAST" => "float",
+                "T_STRING_CAST" => "string",
+                "T_ARRAY_CAST" => "array",
+                "T_OBJECT_CAST" => "object",
+                "T_UNSET_CAST" => "unset",
+                _ => "void",
+            };
+            format!("({name})")
+        }
+        SyntaxKind::MAGIC_CONST => String::from_utf8_lossy(text).to_ascii_uppercase(),
+        _ if kind.is_keyword() => String::from_utf8_lossy(text).to_ascii_lowercase(),
+        // The scanner hands the parser `;` for `?>`.
+        SyntaxKind::CLOSE_TAG => ";".to_owned(),
+        _ if kind.is_punct() || kind == SyntaxKind::OPEN_TAG_ECHO => {
+            String::from_utf8_lossy(text).into_owned()
+        }
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests;

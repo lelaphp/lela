@@ -10,10 +10,13 @@
 //! for the lexer's kinds, [`operator_name`] and the four tables beside it,
 //! which `token_get_all` spells; the arena, [`tree::Tree`], the builder
 //! that fills it from the parser's events, [`tree::build`], and the dump
-//! that prints it, [`Parsed::dump`]; and the entry that gives `php_compile`
-//! its edge and its input type: [`parse`] keeps the source and lexes it,
-//! and the tree it hands back is empty until the parser lands behind this
-//! signature (#202 to #206). `Options` joins `parse` with them.
+//! that prints it, [`Parsed::dump`]; the parser, `parser::Parser`, the
+//! cursor over the significant tokens and the markers the grammar writes
+//! its nodes through; and the entry that gives `php_compile` its edge and
+//! its input type: [`parse`] keeps the source, lexes it and hands the
+//! stream through the parser to the builder, and the tree it hands back
+//! is one root over every token until the grammar lands behind this
+//! signature (#203 to #206). `Options` joins `parse` with them.
 #![forbid(unsafe_code)]
 
 mod kind {
@@ -23,6 +26,10 @@ mod kind {
 }
 mod lexer;
 mod line_index;
+// The grammar (#203 to #205) is the reader of most of the parser's
+// surface; what `parse` alone does not call is not dead.
+#[allow(dead_code)]
+mod parser;
 mod php_names;
 mod source;
 pub mod tree;
@@ -44,7 +51,8 @@ pub struct Parsed {
     /// Every token of the source in order, whitespace and comments
     /// included: the texts concatenate to `source`.
     pub tokens: Box<[Token]>,
-    /// The tree over the significant tokens; empty until the parser lands.
+    /// The tree over the significant tokens: one root over every token
+    /// until the grammar lands.
     pub tree: Tree,
 }
 
@@ -57,14 +65,23 @@ impl Parsed {
     }
 }
 
-/// Parse one source file. The entry lexes the source and retains both; the
-/// tree is empty until the parser lands (#202 to #206).
+/// Parse one source file. The entry lexes the source, hands the stream
+/// through the parser to the builder and retains all three. The root is
+/// opened and closed here until the grammar lands (#203 to #205), so the
+/// builder gives it every token as a flat child; the diagnostics join
+/// `Parsed` with #206.
 #[must_use]
 pub fn parse(source: &[u8]) -> Parsed {
-    let lexed = lex(FileId(0), source, &LexOptions::default());
+    let file = FileId(0);
+    let lexed = lex(file, source, &LexOptions::default());
+    let input = parser::Input::new(source, &lexed.tokens);
+    let mut p = parser::Parser::new(&input, file);
+    let root = p.start();
+    root.complete(&mut p, SyntaxKind::SOURCE_FILE);
+    let built = tree::build(&lexed.tokens, p.finish());
     Parsed {
         source: source.into(),
         tokens: lexed.tokens.into_boxed_slice(),
-        tree: Tree::default(),
+        tree: built.tree,
     }
 }
