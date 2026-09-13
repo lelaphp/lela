@@ -166,10 +166,19 @@ struct FreeSlot {
     next: *mut FreeSlot,
 }
 
-/// One huge allocation and the bytes it was rounded to.
+/// `sizeof(zend_mm_huge_list)` (`Z/Zend/zend_alloc.c:355`): `ptr`, `size`
+/// and `next`, three words, so the node falls in the 24-byte bin.
+const HUGE_LIST_SIZE: usize = 3 * size_of::<usize>();
+
+/// One huge allocation, the bytes it was rounded to, and the slot of the
+/// 24-byte bin that is its `zend_mm_huge_list` node. php threads the
+/// blocks through the nodes; here the `Vec` holds the blocks and the
+/// node is taken and given back for the bytes it counts, since a bin
+/// allocation of this heap is what `memory_get_usage()` reads.
 struct Huge {
     at: NonNull<u8>,
     size: usize,
+    node: NonNull<u8>,
 }
 
 /// The per-request heap: its chunks, its thirty free lists, its huge
@@ -184,7 +193,8 @@ pub(crate) struct Mm {
     cached: Vec<NonNull<Chunk>>,
     /// `free_slot`: the head of each bin's free list.
     free_slot: [*mut FreeSlot; BINS],
-    /// `huge_list`.
+    /// `huge_list`, as a `Vec` beside the nodes rather than a list
+    /// through them.
     huge: Vec<Huge>,
     /// `peak_chunks_count`, `avg_chunks_count`,
     /// `last_chunks_delete_boundary` and `last_chunks_delete_count`: what
@@ -667,7 +677,12 @@ impl Mm {
     /// `zend_mm_alloc_huge` (`Z/Zend/zend_alloc.c:1916`): a mapping of its
     /// own, rounded up to the page the machine reports and not to the
     /// chunk's own page, counted in both the bin accounting and the real
-    /// size.
+    /// size. Between the mapping and the count, `zend_mm_add_huge_block`
+    /// (`Z/Zend/zend_alloc.c:1839`) takes the block's list node from the
+    /// 24-byte bin of the same heap, so the bin accounting moves by 24
+    /// and then by the rounded block, and the peak is the sum. A node
+    /// the bin cannot give ends php's request there; here the mapping
+    /// goes back and the fatal is the bin's.
     fn alloc_huge(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
         let new_size = size.next_multiple_of(real_page_size());
         if new_size > self.limit - self.real_size.min(self.limit)
@@ -684,7 +699,18 @@ impl Mm {
             return Err(out_of_memory(self.real_size, size));
         };
         let at = at.cast::<u8>();
-        self.huge.push(Huge { at, size: new_size });
+        let node = match self.alloc_small(size_to_bin(HUGE_LIST_SIZE)) {
+            Ok(node) => node,
+            Err(fatal) => {
+                chunk_free(at.cast(), new_size);
+                return Err(fatal);
+            }
+        };
+        self.huge.push(Huge {
+            at,
+            size: new_size,
+            node,
+        });
         self.real_size += new_size;
         self.real_peak = self.real_peak.max(self.real_size);
         self.size += new_size;
@@ -692,12 +718,17 @@ impl Mm {
         Ok(at)
     }
 
-    /// `zend_mm_free_huge` (`Z/Zend/zend_alloc.c:1988`).
+    /// `zend_mm_free_huge` (`Z/Zend/zend_alloc.c:1988`): the node goes
+    /// back to its bin in `zend_mm_del_huge_block`
+    /// (`Z/Zend/zend_alloc.c:1856`), then the mapping and its bytes.
     fn free_huge(&mut self, at: NonNull<u8>) {
         let Some(index) = self.huge.iter().position(|block| block.at == at) else {
             return;
         };
         let block = self.huge.swap_remove(index);
+        // SAFETY: the node is a slot `alloc_huge` took from the 24-byte
+        // bin for this block and nothing else has freed it.
+        unsafe { self.free_small(block.node, size_to_bin(HUGE_LIST_SIZE)) };
         self.real_size = self.real_size.saturating_sub(block.size);
         self.size = self.size.saturating_sub(block.size);
         chunk_free(block.at.cast(), block.size);

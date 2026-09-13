@@ -391,8 +391,13 @@ mod tests {
     /// 3,000,000 bytes of string is 3,000,032 allocated, the header, the
     /// NUL and the alignment, and 3,014,656 is that rounded to 16 KiB;
     /// rounded to 4 KiB it would be 3,002,368, twelve KiB short. The 24
-    /// bytes over it in php's first number are the variable php's symbol
-    /// table took, which no allocation here makes.
+    /// bytes over it in php's first number are the block's
+    /// `zend_mm_huge_list` node, which `zend_mm_add_huge_block`
+    /// (`Z/Zend/zend_alloc.c:1839`) takes from the 24-byte bin of the
+    /// same heap before the block's own bytes are counted; the snippet's
+    /// variables are on the frame before its first line runs and move
+    /// nothing. The peak is the node and then the block, so it reads the
+    /// same sum, and freeing the block gives the node back with it.
     ///
     /// The session above is still one a person typed. `memory_get_usage` is a
     /// native of `php_engine` now, and the witness beside it pins the
@@ -427,11 +432,13 @@ mod tests {
         assert!(allocated.is_ok(), "the heap would not allocate 3 MB");
         let Ok(s) = allocated else { return };
         let rounded = 3_000_032usize.next_multiple_of(page);
-        assert_eq!(heap.memory_usage(false), rounded);
+        let node = 24;
+        assert_eq!(heap.memory_usage(false), rounded + node);
+        assert_eq!(heap.memory_peak(), rounded + node);
         assert_eq!(heap.memory_usage(true), real + rounded);
         // php's own numbers, where the machine's page is the oracle's.
         if page == 16 * 1024 {
-            assert_eq!(heap.memory_usage(false), 3_014_656);
+            assert_eq!(heap.memory_usage(false), 3_014_680);
             assert_eq!(heap.memory_usage(true) - real, 3_014_656);
         }
         heap.release_string(s);
