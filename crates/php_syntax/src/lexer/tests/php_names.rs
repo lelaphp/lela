@@ -83,7 +83,9 @@ fn int_overflows_reads_every_radix() {
             .collect::<Vec<_>>()
     ));
     assert!(!int_overflows(b"0"));
-    assert!(!int_overflows(b"08")); // a bad digit is the lexer's diagnostic, not a promotion
+    // The prefix before a bad octal digit is the literal php reads.
+    assert!(!int_overflows(b"08"));
+    assert!(int_overflows(b"0_10000000000000000000009"));
 }
 
 #[test]
