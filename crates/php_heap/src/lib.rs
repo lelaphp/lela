@@ -39,7 +39,7 @@ mod zval;
 
 pub use hooks::{Fatal, HeapHooks};
 pub use map::{MapPtr, MapTable};
-pub use numeric::{Number, numeric_prefix};
+pub use numeric::{Number, numeric_prefix, power};
 pub use stack::{EntryGuard, Frame, FrameRef, Slot, VmStack};
 pub use string::{Intern, Str, Strings};
 pub use zval::{ObjectId, Zval, ZvalType};

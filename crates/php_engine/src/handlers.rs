@@ -10,8 +10,9 @@
 //! call sequence `INIT_FCALL`, `SEND_VAL`, `SEND_VAR`, `DO_ICALL`,
 //! `RETURN`, which raises the return safepoint, `JMP` and `JMPNZ`, which
 //! raise the loop safepoint when they jump backward, `ASSIGN`, which
-//! writes a CV, and the arithmetic `ZEND_ADD`, `ZEND_SUB`, `ZEND_MUL` and
-//! `ZEND_DIV` that php emits for what its compiler does not fold.
+//! writes a CV, and the arithmetic `ZEND_ADD`, `ZEND_SUB`, `ZEND_MUL`,
+//! `ZEND_DIV`, `ZEND_MOD` and `ZEND_POW` that php emits for what its
+//! compiler does not fold.
 
 // Every handler is generic over the tier and hands back the same edge, so
 // the generated dispatch calls them all the same way; the ones that raise a
@@ -203,6 +204,27 @@ pub(crate) fn div<T: Tier>(
     op: &Opline,
 ) -> Edge {
     arithmetic(req, frame, code, op, crate::ops::div)
+}
+
+/// `ZEND_MOD`: [`crate::ops::mod`], the same way; a divisor of zero
+/// leaves php's `DivisionByZeroError` pending where the opline stands.
+pub(crate) fn r#mod<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    arithmetic(req, frame, code, op, crate::ops::r#mod)
+}
+
+/// `ZEND_POW`: [`crate::ops::pow`], the same way.
+pub(crate) fn pow<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    arithmetic(req, frame, code, op, crate::ops::pow)
 }
 
 /// `ZEND_JMP`: the unconditional jump `pass_two` leaves, its target

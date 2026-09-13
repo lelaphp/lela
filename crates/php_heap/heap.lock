@@ -79,3 +79,4 @@ Zval::null
 Zval::string
 ZvalType
 numeric_prefix
+power

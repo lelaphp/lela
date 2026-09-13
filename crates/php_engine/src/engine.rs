@@ -1088,7 +1088,7 @@ mod tests {
         let unit = Unit {
             main: php_unit::OpArray {
                 oplines: vec![php_unit::Opline {
-                    opcode: php_unit::Opcode::Mod,
+                    opcode: php_unit::Opcode::Sl,
                     ..php_unit::Opline::default()
                 }]
                 .into_boxed_slice(),
@@ -1100,7 +1100,7 @@ mod tests {
         assert_eq!(
             crate::tier::execute::<Nop>(&mut req, frame),
             Err(Fatal::Error(String::from(
-                "InternalError: ZEND_MOD has no handler in this engine yet"
+                "InternalError: ZEND_SL has no handler in this engine yet"
             )))
         );
     }

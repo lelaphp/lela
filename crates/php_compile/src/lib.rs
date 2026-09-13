@@ -396,6 +396,68 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_modulo_and_a_power_php_does_not_fold_are_mod_and_pow_where_they_stand() {
+        // The modulo php refuses to fold, by whatever `zval_get_long`
+        // reads as zero and over an operand `zend_is_op_long_compatible`
+        // refuses, and the negative power of a zero: each is the opcode,
+        // to throw or deprecate where it stands.
+        for (source, returned) in [
+            (&b"<?php echo 1 % 0;"[..], "CONST[0]"),
+            (b"<?php echo 1 % \"0\";", "CONST[0]"),
+            (b"<?php echo 1 % null;", "CONST[0]"),
+            (b"<?php echo 1.5 % 1;", "CONST[1]"),
+            (b"<?php echo \"1.5\" % 1;", "CONST[1]"),
+            (b"<?php echo 1e19 % 1;", "CONST[1]"),
+            (b"<?php echo \"9223372036854775808\" % 1;", "CONST[1]"),
+            (b"<?php echo INF % 1;", "CONST[1]"),
+        ] {
+            assert_eq!(
+                unit_of(source).dump(),
+                format!(
+                    "$_main:\n     ; (lines=3, args=0, vars=0, tmps=1)\n\
+                     0000 MOD CONST[0] CONST[1]\n0001 ECHO T0\n0002 RETURN {returned}\n"
+                ),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+        for source in [
+            &b"<?php echo 0 ** -1;"[..],
+            b"<?php echo \"0\" ** -1;",
+            b"<?php echo 0.0 ** -1;",
+        ] {
+            assert_eq!(
+                unit_of(source).dump(),
+                "$_main:\n     ; (lines=3, args=0, vars=0, tmps=1)\n\
+                 0000 POW CONST[0] CONST[1]\n0001 ECHO T0\n0002 RETURN CONST[2]\n",
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+        // `%` and `**` over a call, php's `MOD` and `POW` where `ADD`
+        // stood above.
+        for (source, opcode) in [
+            (&b"<?php echo 7 % extension_loaded('Core');"[..], "MOD"),
+            (b"<?php echo 2 ** extension_loaded('Core');", "POW"),
+        ] {
+            assert_eq!(
+                unit_of(source).dump(),
+                format!(
+                    "$_main:\n     ; (lines=6, args=0, vars=0, tmps=2)\n\
+                     0000 INIT_FCALL CONST[0]\n\
+                     0001 SEND_VAL CONST[1]\n\
+                     0002 DO_ICALL\n\
+                     0003 {opcode} CONST[2] V0\n\
+                     0004 ECHO T1\n\
+                     0005 RETURN CONST[3]\n"
+                ),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
+
     /// `zend_compile_for` over `for (;;) {}`, php's own oplines under
     /// the dump recipe: the `JMP` forward to the condition, and the
     /// condition, the constant `true` for an empty one, as the `JMPNZ`
@@ -504,40 +566,16 @@ mod tests {
 
     #[test]
     fn what_this_compiler_cannot_reach_is_refused_rather_than_mis_compiled() {
-        for source in [
-            // A constant no table here holds.
-            b"<?php echo FOO;".as_slice(),
-            // `%` and `**` fold and no handler serves their opcodes.
-            b"<?php echo 7 % extension_loaded('demo');".as_slice(),
-            b"<?php echo 2 ** extension_loaded('demo');".as_slice(),
-            // `zend_binary_op_produces_error` for a modulo by zero, by
-            // whatever `zval_get_long` reads as zero, and over an operand
-            // that is not long-compatible.
-            b"<?php echo 1 % 0;".as_slice(),
-            b"<?php echo 1 % \"0\";".as_slice(),
-            b"<?php echo 1 % null;".as_slice(),
-            b"<?php echo 1.5 % 1;".as_slice(),
-            b"<?php echo \"1.5\" % 1;".as_slice(),
-            b"<?php echo 1e19 % 1;".as_slice(),
-            b"<?php echo \"9223372036854775808\" % 1;".as_slice(),
-            b"<?php echo INF % 1;".as_slice(),
-            // `0 ** (<0)`, which php leaves to the opcode to throw.
-            b"<?php echo 0 ** -1;".as_slice(),
-            b"<?php echo \"0\" ** -1;".as_slice(),
-            b"<?php echo 0.0 ** -1;".as_slice(),
-        ] {
-            let mut strings = php_heap::Strings::new();
-            assert!(
-                compile(
-                    &php_syntax::parse(source),
-                    &Options::default(),
-                    &mut strings
-                )
-                .is_err(),
-                "{}",
-                String::from_utf8_lossy(source)
-            );
-        }
+        // A constant no table here holds.
+        let mut strings = php_heap::Strings::new();
+        assert!(
+            compile(
+                &php_syntax::parse(b"<?php echo FOO;"),
+                &Options::default(),
+                &mut strings
+            )
+            .is_err()
+        );
     }
 
     /// The oracle's dump under the pin's `dump` regime of

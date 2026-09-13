@@ -372,7 +372,7 @@ impl Emit<'_> {
         {
             return Ok(Where::Constant(folded));
         }
-        let opcode = self.opcode_of(op)?;
+        let opcode = Self::opcode_of(op);
         let left = self.expr(left)?;
         let right = self.expr(right)?;
         Ok(self.emit_binary(opcode, left, right))
@@ -410,19 +410,15 @@ impl Emit<'_> {
         Where::Temporary(out)
     }
 
-    /// The opcode `zend_compile_binary_op` gives each operator. php has
-    /// one for `%` and `**` too and this engine serves neither, so an
-    /// expression that did not fold is refused where it stands rather
-    /// than compiled into an opline the loop would fatal on.
-    fn opcode_of(&self, op: BinaryOp) -> Result<Opcode, CompileError> {
+    /// The opcode `zend_compile_binary_op` gives each operator.
+    fn opcode_of(op: BinaryOp) -> Opcode {
         match op {
-            BinaryOp::Add => Ok(Opcode::Add),
-            BinaryOp::Sub => Ok(Opcode::Sub),
-            BinaryOp::Mul => Ok(Opcode::Mul),
-            BinaryOp::Div => Ok(Opcode::Div),
-            BinaryOp::Mod | BinaryOp::Pow => {
-                Err(self.fatal("arithmetic this engine serves no opcode for yet"))
-            }
+            BinaryOp::Add => Opcode::Add,
+            BinaryOp::Sub => Opcode::Sub,
+            BinaryOp::Mul => Opcode::Mul,
+            BinaryOp::Div => Opcode::Div,
+            BinaryOp::Mod => Opcode::Mod,
+            BinaryOp::Pow => Opcode::Pow,
         }
     }
 
@@ -670,47 +666,22 @@ fn longs(op: BinaryOp, a: i64, b: i64) -> Zval {
     }
 }
 
-/// `pow_function_base`'s long arm: php's square-and-multiply, a long
-/// while every step fits and the double php computes from `pow()` once
-/// one overflows. A negative exponent is php's `pow()` from the start.
+/// `pow_function_base`'s long arm: [`php_heap::power`] for an exponent
+/// that is not negative, and php's `pow()` over two doubles for one that
+/// is. No zero base meets a negative exponent here; [`produces_error`]
+/// held that.
 #[expect(
     clippy::cast_precision_loss,
     reason = "php's `(double) lval`, whose rounding is the behaviour being copied"
 )]
 fn power(a: i64, b: i64) -> Zval {
-    if b < 0 {
-        return Zval::double((a as f64).powf(b as f64));
+    match u64::try_from(b) {
+        Ok(exponent) => match php_heap::power(a, exponent) {
+            Number::Long(n) => Zval::long(n),
+            Number::Double(d) => Zval::double(d),
+        },
+        Err(_) => Zval::double((a as f64).powf(b as f64)),
     }
-    if b == 0 {
-        return Zval::long(1);
-    }
-    if a == 0 {
-        return Zval::long(0);
-    }
-    let (mut l1, mut l2, mut i) = (1_i64, a, b);
-    while i >= 1 {
-        if i % 2 == 1 {
-            i -= 1;
-            let Some(product) = l1.checked_mul(l2) else {
-                // php's `dval * pow(l2, i)`, the multiply having overflowed.
-                return Zval::double(l1 as f64 * l2 as f64 * (l2 as f64).powf(i as f64));
-            };
-            l1 = product;
-        } else {
-            i /= 2;
-            let Some(square) = l2.checked_mul(l2) else {
-                // php's `(double) l1 * pow(dval, i)`, `dval` being the
-                // square that overflowed.
-                let squared = l2 as f64 * l2 as f64;
-                return Zval::double(l1 as f64 * squared.powf(i as f64));
-            };
-            l2 = square;
-        }
-        if i == 0 {
-            return Zval::long(l1);
-        }
-    }
-    Zval::long(l1)
 }
 
 /// The double arms of the same operators, where php converts both

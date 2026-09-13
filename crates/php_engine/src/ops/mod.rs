@@ -10,7 +10,7 @@
 
 use php_heap::{Number, numeric_prefix};
 
-use crate::api::raising::{Thrown, throw, warning};
+use crate::api::raising::{Thrown, deprecated, throw, warning};
 use crate::api::request::Request;
 use crate::api::values::{PhpArray, PhpString, TypeTag, Value, ValueRef};
 
@@ -338,6 +338,126 @@ pub(crate) fn div(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
     }
 }
 
+/// `mod_function` (`Zend/zend_operators.c:1541`): both operands as the
+/// longs `convert_op1_op2_long` makes of them, the left one first,
+/// `DivisionByZeroError` with php's own text for a divisor of zero, and
+/// php's `% -1` case, which is zero where the division would overflow.
+///
+/// ```php
+/// echo 7 % (2 * extension_loaded('Core')), '|', -7 % (2 * extension_loaded('Core')), '|', '7' % (2 * extension_loaded('Core')), '|', true % (2 * extension_loaded('Core')), '|', (-9223372036854775807 - extension_loaded('Core')) % (0 - extension_loaded('Core'));
+/// ```
+/// ```expect
+/// 1|-1|1|1|0
+/// ```
+///
+/// A double is what `zend_dval_to_lval_safe` makes of it: truncated,
+/// with the deprecation where the truncation loses something; past a
+/// long's range, php's warning and its modular reading
+/// (`zend_dval_to_lval_slow`); and for NAN, which `ZEND_DOUBLE_FITS_LONG`
+/// does not refuse, both.
+///
+/// ```php
+/// echo 7.5 % (2 * extension_loaded('Core')), '|', 8.0 % (3 * extension_loaded('Core')), '|', 1e19 % (7 * extension_loaded('Core')), '|', NAN % (2 * extension_loaded('Core'));
+/// ```
+/// ```expect
+///
+/// Deprecated: Implicit conversion from float 7.5 to int loses precision in %s on line 2
+/// 1|2|
+/// Warning: The float 1.0E+19 is not representable as an int, cast occurred in %s on line 2
+/// -6|
+/// Warning: The float NAN is not representable as an int, cast occurred in %s on line 2
+///
+/// Deprecated: Implicit conversion from float NAN to int loses precision in %s on line 2
+/// 0
+/// ```
+///
+/// A string is read by [`numeric_prefix`] with the warning for what
+/// follows the number, then a double among them is capped to the long's
+/// range (`zend_dval_to_lval_cap`) with the float-string deprecation
+/// where the cap or the truncation lost something.
+///
+/// ```php
+/// echo '7abc' % (2 * extension_loaded('Core')), '|', '1.5' % (2 * extension_loaded('Core')), '|', '1e19' % (2 * extension_loaded('Core'));
+/// ```
+/// ```expect
+///
+/// Warning: A non-numeric value encountered in %s on line 2
+/// 1|
+/// Deprecated: Implicit conversion from float-string "1.5" to int loses precision in %s on line 2
+/// 1|
+/// Deprecated: Implicit conversion from float-string "1e19" to int loses precision in %s on line 2
+/// 1
+/// ```
+///
+/// A divisor of zero is the one pair php's compiler will not fold, so
+/// two constants exercise the opcode in both engines.
+///
+/// ```php
+/// echo 1 % 0;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught DivisionByZeroError: Modulo by zero in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn r#mod(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    let (a, b) = longs(req, "%", left, right)?;
+    if b == 0 {
+        return Err(throw(req, "DivisionByZeroError", "Modulo by zero"));
+    }
+    // php's own case, "prevent overflow error/crash if op1==LONG_MIN".
+    if b == -1 {
+        return Ok(Value::int(0));
+    }
+    Ok(Value::int(a % b))
+}
+
+/// `pow_function` and `pow_function_base`
+/// (`Zend/zend_operators.c:1358`): [`php_heap::power`] over a long pair
+/// whose exponent is not negative, and `safe_pow` over two doubles for
+/// every other pair, which is C's `pow` behind the deprecation php
+/// raises for a zero base and a negative exponent.
+///
+/// ```php
+/// echo 2 ** (3 * extension_loaded('Core')), '|', 2 ** (0.5 * extension_loaded('Core')), '|', 2.5 ** (2 * extension_loaded('Core')), '|', 2 ** (-1 * extension_loaded('Core')), '|', '3' ** (2 * extension_loaded('Core')), '|', 2 ** (63 * extension_loaded('Core')), '|', 3 ** (40 * extension_loaded('Core'));
+/// ```
+/// ```expect
+/// 8|1.4142135623731|6.25|0.5|9|9.2233720368548E+18|1.2157665459057E+19
+/// ```
+///
+/// The zero base under a negative exponent is the one pair php's
+/// compiler will not fold, so two constants exercise the opcode in both
+/// engines; at the pin the deprecation is what php raises there, and
+/// `INF` is what `pow` computes.
+///
+/// ```php
+/// echo 0 ** -1, '|', 0.0 ** (-1 * extension_loaded('Core'));
+/// ```
+/// ```expect
+///
+/// Deprecated: Power of base 0 and negative exponent is deprecated in %s on line 2
+/// INF|
+/// Deprecated: Power of base 0 and negative exponent is deprecated in %s on line 2
+/// INF
+/// ```
+pub(crate) fn pow(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    let (a, b) = numbers(req, "**", left, right)?;
+    if let (Number::Long(a), Number::Long(b)) = (a, b)
+        && let Ok(exponent) = u64::try_from(b)
+    {
+        return Ok(match php_heap::power(a, exponent) {
+            Number::Long(n) => Value::int(n),
+            Number::Double(d) => Value::float(d),
+        });
+    }
+    let (base, exponent) = (a.double(), b.double());
+    if base == 0.0 && exponent < 0.0 {
+        deprecated(req, "Power of base 0 and negative exponent is deprecated");
+    }
+    Ok(Value::float(base.powf(exponent)))
+}
+
 /// php's `(double) lval`, whose rounding is the behaviour being copied.
 #[expect(
     clippy::cast_precision_loss,
@@ -396,6 +516,175 @@ fn numbers(
         return Err(unsupported(req));
     };
     Ok((a, b))
+}
+
+/// Both operands as `convert_op1_op2_long` converts them, which is
+/// [`to_long`] over the left one and then the right, or
+/// `zend_binop_error`'s `TypeError` for the one that failed, which names
+/// php's types around the operator as written.
+fn longs(
+    req: &mut Request,
+    operator: &str,
+    left: &Value,
+    right: &Value,
+) -> Result<(i64, i64), Thrown> {
+    let (left, right) = (left.deref(), right.deref());
+    let unsupported = |req: &mut Request| {
+        throw(
+            req,
+            "TypeError",
+            &format!(
+                "Unsupported operand types: {} {operator} {}",
+                left.type_name(),
+                right.type_name()
+            ),
+        )
+    };
+    let Some(a) = to_long(req, left) else {
+        return Err(unsupported(req));
+    };
+    let Some(b) = to_long(req, right) else {
+        return Err(unsupported(req));
+    };
+    Ok((a, b))
+}
+
+/// `zendi_try_get_long`: the long php works in, or nothing for an array,
+/// an object or a resource, which is the failure `zend_binop_error`
+/// reports. A double goes through [`double_to_long`]; a string is read
+/// by [`numeric_prefix`] with php's warning for what follows its number,
+/// and a double among them is `zend_dval_to_lval_cap`'s saturated long,
+/// with the float-string deprecation where that lost something.
+fn to_long(req: &mut Request, value: &Value) -> Option<i64> {
+    if let Some(n) = value.as_int() {
+        return Some(n);
+    }
+    if let Some(d) = value.as_float() {
+        return Some(double_to_long(req, d));
+    }
+    if let Some(s) = value.as_php_string() {
+        let (number, trailing) = numeric_prefix(s.as_bytes())?;
+        if trailing {
+            warning(req, "A non-numeric value encountered");
+        }
+        return Some(match number {
+            Number::Long(n) => n,
+            Number::Double(d) => {
+                // `zend_dval_to_lval_cap`: zero for what is not finite, and
+                // the long's own edge past its range.
+                let capped = if d.is_finite() { truncated(d) } else { 0 };
+                if !long_compatible(d, capped) {
+                    deprecated(
+                        req,
+                        &format!(
+                            "Implicit conversion from float-string \"{}\" to int loses precision",
+                            String::from_utf8_lossy(s.as_bytes())
+                        ),
+                    );
+                }
+                capped
+            }
+        });
+    }
+    if let Some(b) = value.as_bool() {
+        return Some(i64::from(b));
+    }
+    match value.tag() {
+        // php's `IS_NULL` arm; an uninitialised zval reads as null here.
+        TypeTag::Null | TypeTag::Undef => Some(0),
+        _ => None,
+    }
+}
+
+/// `zend_dval_to_lval_safe`: `zend_dval_to_lval`, which is the truncated
+/// long for a double in range and, with php's warning, zero for one that
+/// is not finite and the modular reading of `zend_dval_to_lval_slow` for
+/// one past the range; then the deprecation where the double fits and
+/// the long is not it. `ZEND_DOUBLE_FITS_LONG` is two comparisons NAN
+/// fails neither of, so NAN is warned on and then deprecated.
+fn double_to_long(req: &mut Request, d: f64) -> i64 {
+    let oob = |req: &mut Request| {
+        let text = rendered(d);
+        warning(
+            req,
+            &format!("The float {text} is not representable as an int, cast occurred"),
+        );
+    };
+    let l = if !d.is_finite() {
+        oob(req);
+        0
+    } else if !fits_long(d) {
+        oob(req);
+        modular(d)
+    } else {
+        truncated(d)
+    };
+    if !long_compatible(d, l) && fits_long(d) {
+        let text = rendered(d);
+        deprecated(
+            req,
+            &format!("Implicit conversion from float {text} to int loses precision"),
+        );
+    }
+    l
+}
+
+/// A double as php's `%H` renders it in a message: `zend_gcvt` at the
+/// shortest digits, which is [`double_to_string`] under
+/// `serialize_precision`'s -1.
+fn rendered(d: f64) -> String {
+    String::from_utf8_lossy(double_to_string(d, -1).as_bytes()).into_owned()
+}
+
+/// `ZEND_DOUBLE_FITS_LONG` on a 64-bit long: `(double) ZEND_LONG_MAX`
+/// rounds up out of the range, so the upper edge is exclusive. Written
+/// as php writes it, two comparisons NAN fails neither of, which a range
+/// test would turn into the one NAN fails.
+#[expect(
+    clippy::manual_range_contains,
+    reason = "php's own two comparisons, whose answer for NAN is the behaviour being copied"
+)]
+fn fits_long(d: f64) -> bool {
+    !(d >= 9_223_372_036_854_775_808.0 || d < -9_223_372_036_854_775_808.0)
+}
+
+/// `zend_is_long_compatible`: php's `(double) l == d`.
+#[expect(
+    clippy::float_cmp,
+    reason = "php's `(double) l == d`, the exact equality being copied"
+)]
+fn long_compatible(d: f64, l: i64) -> bool {
+    wide(l) == d
+}
+
+/// php's `(zend_long) d` over a double that fits, and past the range
+/// the long's own edge, which is `zend_dval_to_lval_cap`'s answer and
+/// the cast's.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "php's `(zend_long) d`, whose truncation is the behaviour being copied"
+)]
+fn truncated(d: f64) -> i64 {
+    d as i64
+}
+
+/// `zend_dval_to_lval_slow` on a 64-bit long: the double modulo 2^64,
+/// made positive, read as an unsigned long and then as the signed one
+/// with the same bits. The double is past the long's range, so it is
+/// whole and the remainder is too.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    reason = "php's `(zend_long)(zend_ulong) dmod`, the bit pattern being copied"
+)]
+fn modular(d: f64) -> i64 {
+    let two_pow_64 = 18_446_744_073_709_551_616.0_f64;
+    let mut dmod = d % two_pow_64;
+    if dmod < 0.0 {
+        dmod += two_pow_64;
+    }
+    (dmod as u64) as i64
 }
 
 /// `zendi_try_convert_scalar_to_number`: the number php works in, or

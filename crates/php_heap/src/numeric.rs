@@ -118,6 +118,59 @@ pub fn numeric_prefix(bytes: &[u8]) -> Option<(Number, bool)> {
     Some((number, trailing))
 }
 
+/// `pow_function_base`'s long arm for an exponent that is not negative
+/// (`Z/Zend/zend_operators.c:1358`): php's square-and-multiply, a long
+/// while every step fits and, once a step overflows, the double php
+/// computes from that step's `pow()`. A negative exponent is php's
+/// `pow()` over two doubles from the start, and stays with the caller,
+/// since the deprecation php raises for a zero base there is the
+/// engine's to raise. Read here by the compiler's fold and by the
+/// kernel, because php's compiler folds `**` over two constants through
+/// this very function (`zend_try_ct_eval_binary_op`), so one copy is
+/// what keeps the folded constant and the opcode's value in step.
+///
+/// ```php
+/// echo 2 ** 3, "|", 2 ** 3 ** 2, "|", 0 ** 0, "|", 0 ** 5, "|", (-2) ** 3, "|", 2 ** 62, "|", 2 ** 63, "|", 3 ** 40;
+/// ```
+/// ```expect
+/// 8|512|1|0|-8|4611686018427387904|9.2233720368548E+18|1.2157665459057E+19
+/// ```
+#[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "php's `(double) lval` and `pow()` over one, whose rounding is the behaviour being copied"
+)]
+pub fn power(base: i64, exponent: u64) -> Number {
+    if exponent == 0 {
+        return Number::Long(1);
+    }
+    if base == 0 {
+        return Number::Long(0);
+    }
+    let (mut l1, mut l2, mut i) = (1_i64, base, exponent);
+    while i >= 1 {
+        if i % 2 == 1 {
+            i -= 1;
+            let Some(product) = l1.checked_mul(l2) else {
+                // php's `dval * pow(l2, i)`, `dval` being the product
+                // that overflowed.
+                return Number::Double(l1 as f64 * l2 as f64 * (l2 as f64).powf(i as f64));
+            };
+            l1 = product;
+        } else {
+            i /= 2;
+            let Some(square) = l2.checked_mul(l2) else {
+                // php's `(double) l1 * pow(dval, i)`, `dval` being the
+                // square that overflowed.
+                let squared = l2 as f64 * l2 as f64;
+                return Number::Double(l1 as f64 * squared.powf(i as f64));
+            };
+            l2 = square;
+        }
+    }
+    Number::Long(l1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
