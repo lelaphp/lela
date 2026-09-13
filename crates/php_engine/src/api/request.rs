@@ -567,6 +567,62 @@ impl Request {
     /// `zend_exception_error` gives `zend_error_va` for an uncaught
     /// throwable: the site the throwable recorded, not the site the
     /// request has reached.
+    ///
+    /// The recipe passes both strings empty, `html_errors=0` and
+    /// `ignore_repeated_errors=0`, so each witness here sets its entry
+    /// with `ini_set()` first. `error_prepend_string` and
+    /// `error_append_string` stand around the plain form, with no
+    /// newline of their own: the form's own leading newline is what
+    /// parts `<PRE>` from `Warning`.
+    ///
+    /// ```php
+    /// ini_set('error_prepend_string', '<PRE>');
+    /// ini_set('error_append_string', '</PRE>');
+    /// echo NAN;
+    /// ```
+    /// ```expect
+    /// <PRE>
+    /// Warning: unexpected NAN value was coerced to string in %s on line 4
+    /// </PRE>NAN
+    /// ```
+    ///
+    /// `html_errors` is the other form, `<br />\n<b>Warning</b>:  …`,
+    /// with the file and the line in `<b>` and two spaces after the
+    /// colon. The message of an `E_ERROR` or an `E_PARSE` is escaped
+    /// under it and a warning's stands as it is; the escape is held by
+    /// `escape_html`'s test against the oracle's bytes, since a parse
+    /// error is raised before `ini_set()` runs and no fatal this engine
+    /// raises at runtime carries a byte the escape moves (#186).
+    ///
+    /// ```php
+    /// ini_set('html_errors', '1');
+    /// echo NAN;
+    /// ```
+    /// ```expect
+    /// <br />
+    /// <b>Warning</b>:  unexpected NAN value was coerced to string in <b>%s</b> on line <b>3</b><br />
+    /// NAN
+    /// ```
+    ///
+    /// `ignore_repeated_errors` drops a repeat of the last diagnostic
+    /// stored, and while `ignore_repeated_source` is off a repeat is one
+    /// at the same file and line: the second `NAN` on line 3 is dropped,
+    /// the one on line 4 stands. With `ignore_repeated_source` on the
+    /// site no longer parts them, and the one on line 6 is dropped too.
+    ///
+    /// ```php
+    /// ini_set('ignore_repeated_errors', '1');
+    /// echo NAN, NAN;
+    /// echo NAN;
+    /// ini_set('ignore_repeated_source', '1');
+    /// echo NAN;
+    /// ```
+    /// ```expect
+    /// Warning: unexpected NAN value was coerced to string in %s on line 3
+    /// NANNAN
+    /// Warning: unexpected NAN value was coerced to string in %s on line 4
+    /// NANNAN
+    /// ```
     pub(crate) fn note_error_in(
         &mut self,
         level: Level,
