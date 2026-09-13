@@ -1,20 +1,20 @@
 //! `xtask status`, the one renderer (harness-design.md §4.6): it reads the
 //! manifest and the store and computes nothing else.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use xtask::oracle::{PROMISE_VARIABLE, TREE_VARIABLE};
 use xtask::reading::{Reading, Status, Store};
+use xtask::scratch::Tree;
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
 }
 
 /// A scratch workspace: the tracked manifest, pin and registry, and no store.
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("xtask-status-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+fn scratch(name: &str) -> Tree {
+    let dir = Tree::new(&format!("status-{name}")).unwrap();
     std::fs::create_dir_all(dir.join("docs")).unwrap();
     for file in ["seams.toml", "oracle.toml", "docs/divergence.toml"] {
         std::fs::copy(workspace().join(file), dir.join(file)).unwrap();
@@ -241,7 +241,7 @@ fn status_with_pin(
 /// A scratch workspace whose pin's `[source].path` is `path`: the tracked
 /// `oracle.toml` with that one line rewritten in the copy, the tracked
 /// file untouched.
-fn scratch_with_pin_path(name: &str, path: &Path) -> PathBuf {
+fn scratch_with_pin_path(name: &str, path: &Path) -> Tree {
     let root = scratch(name);
     let pin = root.join("oracle.toml");
     let mut in_source = false;
@@ -264,11 +264,8 @@ fn scratch_with_pin_path(name: &str, path: &Path) -> PathBuf {
 }
 
 /// A directory standing where the pinned php-src would.
-fn fixture_tree(name: &str) -> PathBuf {
-    let tree =
-        std::env::temp_dir().join(format!("xtask-status-oracle-{name}-{}", std::process::id()));
-    std::fs::create_dir_all(&tree).unwrap();
-    tree
+fn fixture_tree(name: &str) -> Tree {
+    Tree::new(&format!("status-oracle-{name}")).unwrap()
 }
 
 /// The `oracle` section as JSON, under the two variables as given.

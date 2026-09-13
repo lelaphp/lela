@@ -202,6 +202,10 @@ reading::Store::root
 reading::epoch_seconds
 reading::now
 run
+scratch::KEEP
+scratch::Tree
+scratch::Tree::new
+scratch::Tree::path
 status::render
 status::session
 steer::STEERABLE

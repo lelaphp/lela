@@ -1,12 +1,13 @@
 //! `xtask budget` over the tracked workspace and the generated
 //! `ext/clippy.toml` (harness-design.md §4.1, §6).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use xtask::budget;
 use xtask::manifest::{Manifest, Scripts};
 use xtask::reading::{Number, Status, Store};
+use xtask::scratch::Tree;
 
 mod common;
 
@@ -21,11 +22,8 @@ fn int(n: &Number) -> i64 {
     }
 }
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("xtask-budget-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn scratch(name: &str) -> Tree {
+    Tree::new(&format!("budget-{name}")).unwrap()
 }
 
 /// A file that is not text has no lines. A `.DS_Store` Finder left under

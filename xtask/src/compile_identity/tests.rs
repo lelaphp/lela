@@ -15,6 +15,7 @@ use super::*;
 use crate::divergence::Registry;
 use crate::oracle::Runner;
 use crate::reading::Status;
+use crate::scratch::Tree;
 use crate::tally::Judged as OneJudged;
 
 fn fixtures() -> PathBuf {
@@ -25,16 +26,16 @@ fn registry(text: &str) -> Registry {
     Registry::parse(text).unwrap()
 }
 
-/// A corpus of this test's own, the files written into a directory named
-/// for the test.
-fn corpus(name: &str, files: &[(&str, &str)]) -> Corpus {
-    let dir = std::env::temp_dir().join(format!("xtask-identity-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+/// A corpus of this test's own, the files written into a scratch tree
+/// named for the test. The tree comes back with it: it is what holds the
+/// files there, and the caller binds it for as long as it reads them.
+fn corpus(name: &str, files: &[(&str, &str)]) -> (Tree, Corpus) {
+    let dir = Tree::new(&format!("identity-{name}")).unwrap();
     for (file, text) in files {
         fs::write(dir.join(file), text).unwrap();
     }
-    Corpus::at(&dir).unwrap()
+    let corpus = Corpus::at(&dir).unwrap();
+    (dir, corpus)
 }
 
 /// A tally of these judgements over a corpus of `found` files.
@@ -85,7 +86,7 @@ fn the_per_commit_corpus_is_the_three_directories_design_6_1_names() {
 
 #[test]
 fn a_corpus_holds_the_phpt_and_the_php_beside_them_and_nothing_else() {
-    let corpus = corpus(
+    let (_tree, corpus) = corpus(
         "files",
         &[
             ("b.phpt", "--TEST--\nb\n--FILE--\n<?php\n--EXPECT--\n"),
@@ -105,7 +106,7 @@ fn a_corpus_holds_the_phpt_and_the_php_beside_them_and_nothing_else() {
 
 #[test]
 fn what_one_file_holds_to_dump_is_the_file_section_or_the_program_itself() {
-    let dir = corpus(
+    let (_tree, held_in) = corpus(
         "held",
         &[
             (
@@ -119,8 +120,8 @@ fn what_one_file_holds_to_dump_is_the_file_section_or_the_program_itself() {
             ),
             ("broken.phpt", "no --TEST-- line at all\n"),
         ],
-    )
-    .root;
+    );
+    let dir = held_in.root;
     match held(&dir.join("test.phpt")) {
         Held::Program(body) => assert_eq!(body, b"<?php echo 1;\n"),
         other => panic!("{}", why(&other)),
@@ -217,7 +218,7 @@ since = "2026-09-11"
 #[test]
 fn every_reading_states_the_denominator() {
     let root = crate::built_root();
-    let corpus = corpus("reading", &[]);
+    let (_tree, corpus) = corpus("reading", &[]);
     let red = tally(3, &[Judgement::Fail, Judgement::Fail, Judgement::Fail]);
     let red = reading(&red, &root, &corpus, &engine(), None).unwrap();
     assert_eq!(red.instrument, INSTRUMENT);
@@ -251,7 +252,7 @@ fn every_reading_states_the_denominator() {
 #[test]
 fn the_control_is_scoped_apart_from_the_engines_reading() {
     let root = crate::built_root();
-    let corpus = corpus("control", &[]);
+    let (_tree, corpus) = corpus("control", &[]);
     let control = Runner::Control(PathBuf::from("/pinned/php"));
     let control = reading(
         &tally(1, &[Judgement::Pass]),

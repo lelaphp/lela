@@ -20,6 +20,7 @@ use super::*;
 use crate::divergence::Registry;
 use crate::manifest::{Crate, Manifest};
 use crate::oracle::{Promise, Runner};
+use crate::scratch::Tree;
 
 fn workspace() -> PathBuf {
     crate::built_root()
@@ -30,17 +31,23 @@ fn manifest() -> Manifest {
 }
 
 /// A manifest of these `[[crate]]` rows under the tracked pin, its tree
-/// the fixture's.
-fn manifest_of(rows: impl IntoIterator<Item = Crate>) -> Manifest {
+/// the one given, which the caller holds open for as long as it reads the
+/// manifest.
+fn manifest_of(rows: impl IntoIterator<Item = Crate>, tree: &Path) -> Manifest {
     let mut manifest = Manifest::of(rows);
-    manifest.pin = self::manifest().pin.on_this_machine(Some(fixture_tree()));
+    manifest.pin = self::manifest()
+        .pin
+        .on_this_machine(Some(tree.to_path_buf()));
     manifest
 }
 
-/// The tracked manifest with its tree the fixture's.
-fn tracked_over_fixture() -> Manifest {
+/// The tracked manifest with its tree the one given.
+fn tracked_over_fixture(tree: &Path) -> Manifest {
     let mut manifest = manifest();
-    manifest.pin = manifest.pin.clone().on_this_machine(Some(fixture_tree()));
+    manifest.pin = manifest
+        .pin
+        .clone()
+        .on_this_machine(Some(tree.to_path_buf()));
     manifest
 }
 
@@ -48,8 +55,8 @@ fn tracked_over_fixture() -> Manifest {
 /// the per-commit lane's rows name and no test in them: what a subset
 /// resolves to is held here, and what one runs to is held over the real
 /// corpus by the tests that skip without it.
-fn fixture_tree() -> PathBuf {
-    let tree = std::env::temp_dir().join(format!("xtask-phpt-tree-{}", std::process::id()));
+fn fixture_tree() -> Tree {
+    let tree = Tree::new("phpt-tree").unwrap();
     for under in ["Zend/tests", "tests", "sapi/cli/tests", "ext/pcre/tests"] {
         fs::create_dir_all(tree.join(under)).unwrap();
     }
@@ -78,20 +85,19 @@ fn source() -> Option<PathBuf> {
 
 /// A subset of one directory of this test's own, standing where
 /// `php-src/ext/fixture/tests` would.
-fn subset(name: &str, tests: &[(&str, &str)]) -> Subset {
-    let dir = std::env::temp_dir().join(format!("xtask-phpt-judge-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+fn subset(name: &str, tests: &[(&str, &str)]) -> (Tree, Subset) {
+    let dir = Tree::new(&format!("phpt-judge-{name}")).unwrap();
     for (file, text) in tests {
         fs::write(dir.join(file), text).unwrap();
     }
-    Subset {
+    let subset = Subset {
         scope: "ext/fixture".to_owned(),
         dirs: vec![Dir {
             under: PathBuf::from("ext/fixture/tests"),
-            dir,
+            dir: dir.path().to_path_buf(),
         }],
-    }
+    };
+    (dir, subset)
 }
 
 fn registry(text: &str) -> Registry {
@@ -123,7 +129,7 @@ fn a_test_that_meets_its_expect_section_passes() {
     if oracle().is_none() {
         return;
     }
-    let subset = subset(
+    let (_tree, subset) = subset(
         "pass",
         &[(
             "pass.phpt",
@@ -148,7 +154,7 @@ fn the_digest_is_asserted_once_over_a_run_of_three_tests() {
         )
     };
     let tests = [test(1), test(2), test(3)];
-    let subset = subset(
+    let (_tree, subset) = subset(
         "digest",
         &[
             ("one.phpt", &tests[0]),
@@ -181,7 +187,7 @@ fn the_wildcards_of_an_expectf_section_are_matched_and_the_streams_are_one() {
     if oracle().is_none() {
         return;
     }
-    let subset = subset(
+    let (_tree, subset) = subset(
         "expectf",
         &[(
             "warn.phpt",
@@ -197,7 +203,7 @@ fn a_missed_expectation_fails_with_the_difference() {
     if oracle().is_none() {
         return;
     }
-    let subset = subset(
+    let (_tree, subset) = subset(
         "missed",
         &[(
             "missed.phpt",
@@ -216,7 +222,7 @@ fn the_same_missed_expectation_is_diverged_under_an_accepted_row() {
     if oracle().is_none() {
         return;
     }
-    let subset = subset(
+    let (_tree, subset) = subset(
         "accepted",
         &[(
             "missed.phpt",
@@ -238,7 +244,7 @@ fn a_skipif_that_says_skip_skips_with_its_reason() {
     if oracle().is_none() {
         return;
     }
-    let subset = subset(
+    let (_tree, subset) = subset(
         "skipif",
         &[(
             "skipped.phpt",
@@ -258,7 +264,7 @@ fn an_extension_the_binary_does_not_load_skips_in_upstreams_words() {
     if oracle().is_none() {
         return;
     }
-    let subset = subset(
+    let (_tree, subset) = subset(
         "extensions",
         &[(
             "needs.phpt",
@@ -278,7 +284,7 @@ fn an_extension_the_binary_does_not_load_skips_in_upstreams_words() {
 
 #[test]
 fn a_file_that_is_not_a_test_borks_and_the_subset_fails_on_it() {
-    let subset = subset("borked", &[("borked.phpt", "--NOTATEST--\nnothing\n")]);
+    let (_tree, subset) = subset("borked", &[("borked.phpt", "--NOTATEST--\nnothing\n")]);
     if oracle().is_none() {
         return;
     }
@@ -294,7 +300,7 @@ fn a_cgi_test_is_skipped_because_this_runner_hosts_the_command_line() {
     if oracle().is_none() {
         return;
     }
-    let subset = subset(
+    let (_tree, subset) = subset(
         "cgi",
         &[(
             "cgi.phpt",
@@ -312,7 +318,7 @@ fn the_test_s_own_ini_reaches_the_run() {
     if oracle().is_none() {
         return;
     }
-    let subset = subset(
+    let (_tree, subset) = subset(
         "ini",
         &[(
             "ini.phpt",
@@ -325,7 +331,8 @@ fn the_test_s_own_ini_reaches_the_run() {
 
 #[test]
 fn the_subset_of_an_extension_is_its_tests_at_the_pinned_tag_and_the_scope_is_the_crate() {
-    let manifest = tracked_over_fixture();
+    let tree = fixture_tree();
+    let manifest = tracked_over_fixture(&tree);
     for name in ["pcre", "ext/pcre"] {
         let subset = resolve(&manifest, name).unwrap();
         assert_eq!(subset.scope, "ext/pcre");
@@ -333,7 +340,7 @@ fn the_subset_of_an_extension_is_its_tests_at_the_pinned_tag_and_the_scope_is_th
         assert_eq!(subset.dirs[0].under, Path::new("ext/pcre/tests"));
         assert_eq!(
             subset.dirs[0].dir,
-            fixture_tree().join("ext/pcre/tests"),
+            tree.join("ext/pcre/tests"),
             "the subset is the tree's the variable names"
         );
         assert_eq!(
@@ -365,9 +372,9 @@ fn a_corpus_directory_is_a_subset_and_an_unknown_name_names_both_forms_tried() {
 fn a_subset_resolves_under_the_tree_the_pin_was_handed_ahead_of_the_pins_path() {
     // The fixture is what the variable names; the pin's path, the
     // maintainer's tree or nothing, is not consulted while it is there.
-    let manifest = manifest_of([Crate::named("ext/pcre")]);
     let tree = fixture_tree();
-    assert_eq!(manifest.pin.source.tree().unwrap(), tree);
+    let manifest = manifest_of([Crate::named("ext/pcre")], &tree);
+    assert_eq!(manifest.pin.source.tree().unwrap(), *tree);
     let corpus = resolve(&manifest, "Zend/tests").unwrap();
     assert_eq!(corpus.scope, "Zend/tests");
     assert_eq!(corpus.dirs[0].dir, tree.join("Zend/tests"));
@@ -378,7 +385,8 @@ fn a_subset_resolves_under_the_tree_the_pin_was_handed_ahead_of_the_pins_path() 
 
 #[test]
 fn a_tier_lane_and_a_control_are_readings_of_their_own() {
-    let subset = resolve(&tracked_over_fixture(), "pcre").unwrap();
+    let tree = fixture_tree();
+    let subset = resolve(&tracked_over_fixture(&tree), "pcre").unwrap();
     let engine = Runner::Engine(PathBuf::from("target/debug/php"));
     assert_eq!(subset.scope(&engine, None), "ext/pcre");
     assert_eq!(subset.scope(&engine, Some(Lane::Force)), "ext/pcre@force");
@@ -394,7 +402,11 @@ fn a_tier_lane_and_a_control_are_readings_of_their_own() {
 
 #[test]
 fn a_crate_resolves_to_every_subset_its_row_names() {
-    let manifest = manifest_of([Crate::named("php_engine").with_phpt(&["Zend/tests", "tests"])]);
+    let tree = fixture_tree();
+    let manifest = manifest_of(
+        [Crate::named("php_engine").with_phpt(&["Zend/tests", "tests"])],
+        &tree,
+    );
     let subset = resolve(&manifest, "php_engine").unwrap();
     assert_eq!(subset.scope, "php_engine");
     let under: Vec<&Path> = subset.dirs.iter().map(|d| d.under.as_path()).collect();
@@ -408,7 +420,8 @@ fn a_crate_resolves_to_every_subset_its_row_names() {
 
 #[test]
 fn a_crate_whose_row_names_no_subset_says_so_rather_than_looking_for_a_directory() {
-    let manifest = manifest_of([Crate::named("php_heap")]);
+    let tree = fixture_tree();
+    let manifest = manifest_of([Crate::named("php_heap")], &tree);
     let error = resolve(&manifest, "php_heap").unwrap_err().to_string();
     assert!(
         error.contains("php_heap") && error.contains("no phpt subset"),
@@ -422,8 +435,11 @@ fn a_crate_whose_row_names_no_subset_says_so_rather_than_looking_for_a_directory
 
 #[test]
 fn a_directory_the_pinned_tree_has_not_is_kept_and_named_absent() {
-    let manifest =
-        manifest_of([Crate::named("php_engine").with_phpt(&["Zend/tests", "Zend/nope"])]);
+    let tree = fixture_tree();
+    let manifest = manifest_of(
+        [Crate::named("php_engine").with_phpt(&["Zend/tests", "Zend/nope"])],
+        &tree,
+    );
     let subset = resolve(&manifest, "php_engine").unwrap();
     assert_eq!(subset.dirs.len(), 2, "{subset:#?}");
     assert_eq!(subset.absent(), [Path::new("Zend/nope")]);
@@ -431,14 +447,18 @@ fn a_directory_the_pinned_tree_has_not_is_kept_and_named_absent() {
 
 #[test]
 fn the_per_commit_lane_is_composed_from_the_crate_rows() {
-    let manifest = manifest_of([
-        Crate::named("php_engine").with_phpt(&["Zend/tests", "tests"]),
-        Crate::named("php_heap"),
-        Crate::named("php_sapi").with_phpt(&["sapi/cli/tests"]),
-        Crate::named("ext/pcre"),
-        Crate::named("ext/curl").with_feature("curl"),
-    ]);
-    let lane: Vec<String> = Subset::lane(&manifest, &fixture_tree())
+    let tree = fixture_tree();
+    let manifest = manifest_of(
+        [
+            Crate::named("php_engine").with_phpt(&["Zend/tests", "tests"]),
+            Crate::named("php_heap"),
+            Crate::named("php_sapi").with_phpt(&["sapi/cli/tests"]),
+            Crate::named("ext/pcre"),
+            Crate::named("ext/curl").with_feature("curl"),
+        ],
+        &tree,
+    );
+    let lane: Vec<String> = Subset::lane(&manifest, &tree)
         .into_iter()
         .map(|subset| subset.scope)
         .collect();

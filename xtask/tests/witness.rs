@@ -23,6 +23,7 @@ use xtask::divergence::Registry;
 use xtask::manifest::Manifest;
 use xtask::oracle::Promise;
 use xtask::reading::{Number, Reading, Status};
+use xtask::scratch::Tree;
 use xtask::witness::{self, Ask};
 
 mod common;
@@ -69,8 +70,8 @@ fn block(fences: &str) -> String {
 /// to the pinned oracle stands where the engine's binary would, so the
 /// runner is an engine and not the oracle's own control; without it, no
 /// engine is built here.
-fn scratch(name: &str, text: &str, engine: bool) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("xtask-witness-{name}-{}", std::process::id()));
+fn scratch(name: &str, text: &str, engine: bool) -> Tree {
+    let root = Tree::new(&format!("witness-{name}")).unwrap();
     scratch_workspace(workspace(), &root).unwrap();
     fs::create_dir_all(root.join("ext/fixture/src")).unwrap();
     fs::write(
@@ -622,8 +623,7 @@ fn the_harness_crate_carries_no_witness_of_its_own() {
 /// say the crate was measured when it was not.
 #[test]
 fn a_crate_whose_sources_cannot_be_read_fails_and_names_the_crate() {
-    let root = std::env::temp_dir().join(format!("xtask-witness-unread-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let root = Tree::new("witness-unread").unwrap();
     fs::create_dir_all(root.join("ext/pcre/src")).unwrap();
     fs::write(
         root.join("ext/pcre/Cargo.toml"),

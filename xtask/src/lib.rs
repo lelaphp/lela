@@ -12,8 +12,10 @@
 //! nothing beside it (#55): [`run`], the binary's body; each instrument's
 //! run function with the arguments it takes and the value it returns; the
 //! data modules, [`manifest`], [`oracle`] with the pin, [`divergence`]
-//! with the registry, and [`reading`]. Everything else is crate-private,
-//! and a test that needs an internal is a unit test beside it.
+//! with the registry, and [`reading`]; and [`scratch`], the scratch tree
+//! both sides of the harness's own tests make one of. Everything else is
+//! crate-private, and a test that needs an internal is a unit test beside
+//! it.
 #![forbid(unsafe_code)]
 
 pub mod api_check;
@@ -44,6 +46,7 @@ pub mod port_map;
 pub mod reading;
 mod reply;
 mod rust;
+pub mod scratch;
 mod sources;
 pub mod status;
 pub mod steer;

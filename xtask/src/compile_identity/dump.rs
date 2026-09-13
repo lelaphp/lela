@@ -20,7 +20,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 
@@ -28,6 +27,7 @@ use super::{Corpus, Judged, Judgement, LINT, REGIME, linked};
 use crate::divergence::Registry;
 use crate::oracle::{self, Invocation, Oracle, Program, Verdict as Compared};
 use crate::phpt::file::Phpt;
+use crate::scratch::Tree;
 
 /// What takes the engine's side of one dump.
 pub(super) enum Compiler<'a> {
@@ -253,22 +253,15 @@ pub(super) fn held(file: &Path) -> Held {
 /// written to and no file of the corpus is compiled where it stands. The
 /// oracle module keeps a directory of its own for the streams of one
 /// program; this one holds the program both binaries compile.
-struct Programs(PathBuf);
+struct Programs(Tree);
 
 impl Programs {
     fn new() -> Result<Programs> {
         // One directory per run of the lane, never one per process: two
         // runs in one process, which is what the tests are, must not
-        // write over or take away each other's programs.
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "xtask-{}-{}-{}",
-            super::INSTRUMENT,
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-        Ok(Programs(dir))
+        // write over or take away each other's programs. The counter in
+        // a scratch tree's name is what keeps them apart.
+        Ok(Programs(Tree::new(super::INSTRUMENT)?))
     }
 
     /// The program of one file, written under the stem the file has in the
@@ -283,11 +276,5 @@ impl Programs {
         let path = self.0.join(name);
         fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
         Ok(path)
-    }
-}
-
-impl Drop for Programs {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
     }
 }

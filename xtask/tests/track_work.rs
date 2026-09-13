@@ -13,6 +13,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use xtask::scratch::Tree;
+
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
 }
@@ -67,7 +69,7 @@ fn has_ref(root: &Path, name: &str) -> bool {
 /// two stand-ins under `bin`, the tracker's transcripts and what the
 /// session wrote down.
 struct Scratch {
-    dir: PathBuf,
+    dir: Tree,
     root: PathBuf,
     origin: PathBuf,
 }
@@ -78,17 +80,12 @@ impl Scratch {
     /// detached at `origin/t-x` recording `track.name` and the model per
     /// role, and the session program recorded as the stand-in.
     fn lay(name: &str) -> Scratch {
-        let dir =
-            std::env::temp_dir().join(format!("xtask-track-work-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = Tree::new(&format!("track-work-{name}")).unwrap();
         let root = dir.join("repo");
         let origin = dir.join("origin.git");
         fs::create_dir_all(&root).unwrap();
         fs::create_dir_all(&origin).unwrap();
         fs::create_dir_all(dir.join("bin")).unwrap();
-        let root = fs::canonicalize(root).unwrap();
-        let origin = fs::canonicalize(origin).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
         let listed = sh(
             workspace(),
             &[
@@ -500,8 +497,6 @@ fn a_closed_ticket_is_fast_forwarded_pushed_and_retired() {
     assert!(!out.contains("computed trust"), "{out}");
     assert!(!out.contains("a person runs"), "{out}");
     assert_eq!(scratch.wrote("calls"), "", "{out}");
-
-    let _ = fs::remove_dir_all(&scratch.dir);
 }
 
 /// A session that ends with the ticket open, `--one`: the worktree stands, the
@@ -543,7 +538,6 @@ fn a_ticket_left_open_leaves_the_worktree_standing() {
         "-p --model claude-opus-5 --permission-mode acceptEdits --effort max /build 20"
     );
     assert!(!out.contains("computed trust"), "{out}");
-    let _ = fs::remove_dir_all(&scratch.dir);
 }
 
 /// A ticket closed with the branch at the track's own commit is not a
@@ -568,7 +562,6 @@ fn a_tip_not_ahead_of_the_track_stands() {
     );
     assert_eq!(rev(&scratch.origin, "t-x"), before, "{out}");
     assert!(scratch.worktree("t-x/t20").is_dir(), "{out}");
-    let _ = fs::remove_dir_all(&scratch.dir);
 }
 
 /// A clone with no model record refuses before any worktree is laid
@@ -607,7 +600,6 @@ fn no_model_refuses_before_a_worktree_and_an_empty_frontier_is_none() {
     assert_eq!(scratch.worktrees().len(), 1, "{out}");
     assert_eq!(scratch.wrote("session.args"), "", "no session started");
     assert!(!scratch.dir.join("planned").exists(), "no planner: {out}");
-    let _ = fs::remove_dir_all(&scratch.dir);
 }
 
 /// Without `--one`, the frontier until it empties: two tickets, the
@@ -714,7 +706,6 @@ fn the_frontier_is_worked_until_it_empties_past_a_ticket_left_open() {
         rows[2].contains("the frontier of t-x is empty after 2 tickets: #20 closed, #21 standing"),
         "how it ended: {section}"
     );
-    let _ = fs::remove_dir_all(&scratch.dir);
 }
 
 /// A failure of the harness stops the run and is named: the tracker
@@ -744,7 +735,6 @@ fn a_tracker_that_stops_answering_stops_the_run_named() {
         out.contains("stopped by the harness after 1 ticket: #20 closed"),
         "{out}"
     );
-    let _ = fs::remove_dir_all(&scratch.dir);
 }
 
 /// The track is caught up with main before the ticket (#80): main moved
@@ -791,7 +781,6 @@ fn the_track_is_caught_up_with_main_before_the_ticket() {
         ),
         "{out}"
     );
-    let _ = fs::remove_dir_all(&scratch.dir);
 }
 
 /// A sync that refuses stops the run as a failure of the harness, named:
@@ -818,7 +807,6 @@ fn a_sync_that_refuses_stops_the_run_named() {
     assert_eq!(scratch.worktrees().len(), 1, "no worktree laid down: {out}");
     assert!(!has_ref(&scratch.root, "refs/heads/t-x/t20"), "{out}");
     assert_eq!(scratch.wrote("session.args"), "", "no session started");
-    let _ = fs::remove_dir_all(&scratch.dir);
 }
 
 /// A ticket labelled `frontier:research` starts the session on
@@ -840,7 +828,6 @@ fn a_research_ticket_starts_the_session_on_research() {
     assert_eq!(scratch.wrote("session.subagent"), "claude-sonnet-5");
     assert!(out.contains("#20 closed at"), "{out}");
     assert!(!scratch.worktree("t-x/t20").exists(), "retired: {out}");
-    let _ = fs::remove_dir_all(&scratch.dir);
 }
 
 /// A ticket labelled `frontier:decision` starts the session on
@@ -858,7 +845,6 @@ fn a_decision_ticket_starts_the_session_on_grill_design() {
         "-p --model claude-opus-5 --permission-mode auto --effort high /grill-design 20"
     );
     assert!(out.contains("#20 closed at"), "{out}");
-    let _ = fs::remove_dir_all(&scratch.dir);
 }
 
 /// A ticket carrying both `frontier:` labels names no one skill: the
@@ -880,7 +866,6 @@ fn a_ticket_with_both_frontier_labels_refuses_before_a_worktree() {
     assert_eq!(scratch.worktrees().len(), 1, "{out}");
     assert!(!has_ref(&scratch.root, "refs/heads/t-x/t20"), "{out}");
     assert_eq!(scratch.wrote("session.args"), "", "no session started");
-    let _ = fs::remove_dir_all(&scratch.dir);
 }
 
 /// With `track.frontier=auto` the run fills its own frontier (#85): the
@@ -959,7 +944,6 @@ fn an_empty_frontier_is_filled_by_a_frontier_session_until_it_stays_empty() {
         ),
         "{out}"
     );
-    let _ = fs::remove_dir_all(&scratch.dir);
 }
 
 /// With the record, `--one` on an empty frontier starts the planner
@@ -995,7 +979,6 @@ fn a_frontier_that_stays_empty_ends_the_run_and_a_record_not_auto_refuses() {
         1,
         "no second session: {out}"
     );
-    let _ = fs::remove_dir_all(&scratch.dir);
 }
 
 /// A worktree left standing by an earlier run, whose ticket a person
@@ -1067,7 +1050,6 @@ fn a_standing_worktree_whose_ticket_closed_is_swept_before_the_frontier() {
     assert!(!out.contains("#20"), "{out}");
     assert_eq!(rev(&scratch.origin, "t-x"), now, "{out}");
     assert_eq!(rev(&scratch.root, "HEAD"), now, "{out}");
-    let _ = fs::remove_dir_all(&scratch.dir);
 }
 
 /// A worktree of another track is none of this track's business: the
@@ -1128,7 +1110,6 @@ fn a_worktree_of_another_track_is_not_swept() {
     assert_eq!(rev(&scratch.root, "t-y/t30"), other, "{out}");
     assert_eq!(rev(&scratch.origin, "t-y"), before, "no ref moved: {out}");
     assert_eq!(rev(&scratch.origin, "t-x"), before, "{out}");
-    let _ = fs::remove_dir_all(&scratch.dir);
 }
 
 /// A standing worktree whose ticket closed with the branch not ahead of
@@ -1164,7 +1145,6 @@ fn a_standing_worktree_closed_but_not_ahead_is_named_and_stands() {
     assert_eq!(scratch.worktrees().len(), 2, "{out}");
     assert_eq!(rev(&scratch.origin, "t-x"), before, "no ref moved: {out}");
     assert!(out.contains("none: the frontier of t-x is empty"), "{out}");
-    let _ = fs::remove_dir_all(&scratch.dir);
 }
 
 /// A standing worktree whose ticket is still open is left standing and
@@ -1199,5 +1179,4 @@ fn a_standing_worktree_whose_ticket_is_open_is_named_and_stands() {
     assert_eq!(rev(&scratch.origin, "t-x"), before, "no ref moved: {out}");
     assert_eq!(rev(&scratch.root, "t-x/t20"), tip, "{out}");
     assert!(out.contains("none: the frontier of t-x is empty"), "{out}");
-    let _ = fs::remove_dir_all(&scratch.dir);
 }

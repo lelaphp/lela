@@ -8,6 +8,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use xtask::scratch::Tree;
+
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
 }
@@ -36,7 +38,10 @@ fn rev(root: &Path, name: &str) -> String {
 
 /// The scratch: the track's clone at `root` and its bare `origin.git`.
 struct Scratch {
-    dir: PathBuf,
+    /// The tree both of them are under, held for as long as the test
+    /// reads them and dropped with it, which is what takes them away.
+    #[expect(dead_code, reason = "held to own the tree, never read")]
+    dir: Tree,
     root: PathBuf,
     origin: PathBuf,
 }
@@ -46,16 +51,11 @@ impl Scratch {
     /// `main`, pushed to `origin` as `main` and as `t-x`, the clone
     /// detached at `origin/t-x` recording `track.name`.
     fn lay(name: &str) -> Scratch {
-        let dir =
-            std::env::temp_dir().join(format!("xtask-track-sync-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = Tree::new(&format!("track-sync-{name}")).unwrap();
         let root = dir.join("repo");
         let origin = dir.join("origin.git");
         fs::create_dir_all(&root).unwrap();
         fs::create_dir_all(&origin).unwrap();
-        let root = fs::canonicalize(root).unwrap();
-        let origin = fs::canonicalize(origin).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
         let listed = sh(
             workspace(),
             &[
@@ -245,7 +245,6 @@ fn main_ahead_is_merged_pushed_redetached_and_built() {
             )),
         "{out}"
     );
-    let _ = fs::remove_dir_all(&scratch.dir);
 }
 
 /// A track that has main's tip already moves nothing and builds nothing.
@@ -279,7 +278,6 @@ fn a_track_with_mains_tip_already_moves_nothing() {
         !scratch.root.join("target/debug/xtask").exists(),
         "nothing built: {out}"
     );
-    let _ = fs::remove_dir_all(&scratch.dir);
 }
 
 /// A merge that conflicts refuses, names the conflict, and leaves the
@@ -305,7 +303,6 @@ fn a_conflict_refuses_and_changes_nothing() {
         !scratch.root.join("target/debug/xtask").exists(),
         "nothing built: {out}"
     );
-    let _ = fs::remove_dir_all(&scratch.dir);
 }
 
 /// A clone on `main`, which is no track's, has nothing to catch up with.
@@ -323,7 +320,6 @@ fn main_has_nothing_to_catch_up_with() {
         "{out}"
     );
     assert_eq!(rev(&scratch.root, "HEAD"), tip, "{out}");
-    let _ = fs::remove_dir_all(&scratch.dir);
 }
 
 /// A HEAD on a branch of the track is a worktree or a person's checkout,
@@ -361,5 +357,4 @@ fn a_head_on_a_branch_refuses_and_a_detached_head_elsewhere_follows() {
     );
     assert_eq!(rev(&scratch.root, "HEAD"), tip, "HEAD re-detached: {out}");
     assert!(out.contains("HEAD follows, xtask built"), "{out}");
-    let _ = fs::remove_dir_all(&scratch.dir);
 }

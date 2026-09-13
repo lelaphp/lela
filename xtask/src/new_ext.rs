@@ -667,12 +667,8 @@ mod tests {
         );
     }
 
-    fn root(name: &str, text: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "xtask-new-ext-member-{name}-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+    fn root(name: &str, text: &str) -> crate::scratch::Tree {
+        let dir = crate::scratch::Tree::new(&format!("new-ext-member-{name}")).unwrap();
         std::fs::write(dir.join("Cargo.toml"), text).unwrap();
         dir
     }

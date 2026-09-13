@@ -11,6 +11,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use xtask::scratch::Tree;
+
 mod common;
 use common::scratch_workspace;
 
@@ -25,7 +27,7 @@ const TICKED: &str = "## Acceptance criteria\n\n- [x] one\n- [X] two\n";
 
 /// The scratch repository and the two stand-ins beside it.
 struct Scratch {
-    dir: PathBuf,
+    dir: Tree,
     root: PathBuf,
 }
 
@@ -40,8 +42,7 @@ fn executable(path: &Path, body: &str) {
 
 impl Scratch {
     fn lay(name: &str) -> Scratch {
-        let dir = std::env::temp_dir().join(format!("xtask-close-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = Tree::new(&format!("close-{name}")).unwrap();
         let root = dir.join("root");
         scratch_workspace(workspace(), &root).unwrap();
         let bin = dir.join("bin");

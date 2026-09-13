@@ -9,6 +9,7 @@ use std::process::Command;
 
 use xtask::divergence::{self, Kind, Registry, Status};
 use xtask::manifest::Manifest;
+use xtask::scratch::Tree;
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -23,9 +24,8 @@ fn fixture(rule: &str) -> PathBuf {
 }
 
 /// A scratch workspace: the tracked manifest, pin and registry, no store.
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("xtask-divergence-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+fn scratch(name: &str) -> Tree {
+    let dir = Tree::new(&format!("divergence-{name}")).unwrap();
     std::fs::create_dir_all(dir.join("docs")).unwrap();
     for file in ["seams.toml", "oracle.toml", divergence::FILE] {
         std::fs::copy(workspace().join(file), dir.join(file)).unwrap();
@@ -35,7 +35,7 @@ fn scratch(name: &str) -> PathBuf {
 
 /// A scratch workspace that is a git repository with one commit, so a
 /// reading can be stamped.
-fn committed(name: &str) -> PathBuf {
+fn committed(name: &str) -> Tree {
     let root = scratch(name);
     for args in [
         &["init", "-q"][..],

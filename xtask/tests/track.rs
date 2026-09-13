@@ -7,9 +7,10 @@
 //! worktree's, a track's own clone, detached at the track it records
 //! (#76), and the model the clone records, one per role (#75).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
+use xtask::scratch::Tree;
 use xtask::track::{Base, Found, Model, Ticket, Track};
 
 fn sh(root: &Path, args: &[&str]) -> String {
@@ -51,22 +52,20 @@ fn rev(root: &Path, name: &str) -> String {
 }
 
 /// A scratch repository on `main` by name, one commit in, as the `done`
-/// tests lay theirs down. The path is canonical, since that is what git
-/// prints of it.
-fn scratch(name: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("xtask-track-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
+/// tests lay theirs down. A scratch tree's path is canonical, which is
+/// what git prints of it.
+fn scratch(name: &str) -> Tree {
+    let root = Tree::new(&format!("track-{name}")).unwrap();
     sh(&root, &["git", "init", "-q", "-b", "main"]);
     commit(&root, "scratch");
-    std::fs::canonicalize(root).unwrap()
+    root
 }
 
 /// The scratch repository on `t-opus-5/witness`, one commit past the track
 /// `t-opus-5`, itself one commit past `main` and `origin`'s branch alone,
 /// for the reason the `done` tests give: git's ref store refuses
 /// `refs/heads/t-opus-5` beside `refs/heads/t-opus-5/witness`.
-fn on_a_track(name: &str) -> PathBuf {
+fn on_a_track(name: &str) -> Tree {
     let root = scratch(name);
     sh(&root, &["git", "checkout", "-q", "-b", "the-track"]);
     commit(&root, "the track's own change");
@@ -116,7 +115,7 @@ fn a_branch_on_a_track_names_it_and_is_measured_since_its_tip() {
     assert_eq!(track.name, "t-opus-5");
     assert_eq!(track.at, "origin/t-opus-5", "the track is origin's branch");
     assert_eq!(track.base, rev(&root, "origin/t-opus-5"));
-    assert_eq!(track.store, root);
+    assert_eq!(track.store, root.path());
 
     let (code, out, err) = xtask(&root, &["track"]);
     assert_eq!(code, 0, "{err}");
@@ -204,11 +203,11 @@ fn a_branch_not_yet_made_has_its_track_and_the_tracks_tip_as_its_base() {
 #[test]
 fn a_linked_worktrees_store_is_the_main_worktrees() {
     let root = on_a_track("linked");
-    let dir = root.parent().unwrap().join(format!(
-        "{}-wt",
-        root.file_name().unwrap().to_string_lossy()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
+    // The linked worktree stands beside the repository, in a scratch tree
+    // of its own: `git worktree add` writes the directory itself, and one
+    // that is already there and not empty is refused.
+    let beside = Tree::new("track-linked-worktree").unwrap();
+    let dir = beside.join("wt");
     sh(
         &root,
         &[
@@ -225,11 +224,11 @@ fn a_linked_worktrees_store_is_the_main_worktrees() {
     let track = Track::of(&dir, None).unwrap();
     assert_eq!(track.name, "t-opus-5");
     assert_eq!(
-        track.store, root,
+        track.store,
+        root.path(),
         "the store is the track's root, not the worktree's"
     );
     assert_eq!(track.base, rev(&root, "origin/t-opus-5"));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -333,7 +332,7 @@ fn a_tracks_clone_reads_the_track_it_records_not_main() {
     assert_eq!(track.name, "t-opus-5");
     assert_eq!(track.at, "origin/t-opus-5");
     assert_eq!(track.base, rev(&root, "origin/t-opus-5"));
-    assert_eq!(track.store, root);
+    assert_eq!(track.store, root.path());
 
     let (code, out, err) = xtask(&root, &["track"]);
     assert_eq!(code, 0, "{err}");

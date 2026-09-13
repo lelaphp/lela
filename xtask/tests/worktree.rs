@@ -14,6 +14,7 @@ use xtask::divergence::Registry;
 use xtask::manifest::Manifest;
 use xtask::permit::{Call, judge};
 use xtask::reading::{Reading, Status, Store};
+use xtask::scratch::Tree;
 use xtask::status;
 
 fn workspace() -> &'static Path {
@@ -114,10 +115,8 @@ fn worktree_of(root: &Path, branch: &str) -> PathBuf {
 /// real ones; one commit on `main`; and `origin/t-x` as the track a
 /// worktree is taken off, which is where a track's branch lives in a
 /// repository that has worktrees on it (harness-design.md ledger 14).
-fn repository(name: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("xtask-worktree-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).unwrap();
+fn repository(name: &str) -> Tree {
+    let root = Tree::new(&format!("worktree-{name}")).unwrap();
     let listed = sh(
         workspace(),
         &[
@@ -142,7 +141,7 @@ fn repository(name: &str) -> PathBuf {
         &root,
         &["git", "update-ref", "refs/remotes/origin/t-x", "HEAD"],
     );
-    fs::canonicalize(root).unwrap()
+    root
 }
 
 /// One commit of what is staged, unsigned and unhooked: a person's
@@ -276,8 +275,6 @@ fn an_add_lays_a_worktree_down_ready_to_be_worked_in() {
     let (code, usage) = add(&root, &[]);
     assert_eq!(code, 2, "{usage}");
     assert_eq!(worktrees(&root), listed, "{usage}");
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 /// A worktree the instrument lays down is one `permit` resolves as a
@@ -317,8 +314,6 @@ fn an_edit_in_a_laid_worktree_is_judged_by_that_worktrees_manifest() {
         .expect("the pin is a person's in the worktree too");
     assert_eq!(denial.rule, "harness.self");
     assert!(denial.reason().contains(marker), "{}", denial.reason());
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 /// A branch whose prefixes name no branch is on no track, so it is taken
@@ -342,7 +337,6 @@ fn a_branch_on_no_track_is_taken_off_main_through_the_add_command() {
             .is_file(),
         "{out}"
     );
-    let _ = fs::remove_dir_all(&root);
 }
 
 /// The retire half: a worktree's readings live in its own `target/harness/`
@@ -450,8 +444,6 @@ fn retiring_appends_the_readings_to_the_tracks_store_and_removes_the_worktree() 
     assert_eq!(code, 1, "{gone}");
     let (code, usage) = retire(&root, &[]);
     assert_eq!(code, 2, "{usage}");
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 /// `scripts/worktree-retire.sh` is one `exec` of the instrument, so a
@@ -471,7 +463,6 @@ fn a_worktree_with_no_readings_is_retired_through_the_retire_command() {
     assert!(!dir.exists(), "{out}");
     assert!(!root.join("target/harness/log.jsonl").exists(), "{out}");
     assert!(out.contains("git branch -D t-x/quiet"), "{out}");
-    let _ = fs::remove_dir_all(&root);
 }
 
 /// The track's record names its ticket (#30): the add writes it on the
@@ -517,5 +508,4 @@ fn an_add_records_the_ticket_and_a_retire_keeps_it_with_the_branch() {
     );
     let (code, out) = worktree(&root, "add", &["t-x/thirty-again", "--ticket", "30"]);
     assert_eq!(code, 1, "the retired branch still holds the ticket: {out}");
-    let _ = fs::remove_dir_all(&root);
 }

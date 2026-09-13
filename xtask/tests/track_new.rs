@@ -8,6 +8,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use xtask::scratch::Tree;
+
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
 }
@@ -78,18 +80,16 @@ fn track_new(root: &Path, args: &[&str]) -> (i32, String) {
 
 /// A scratch repository of this working tree's files, one commit on
 /// `main`, with a bare `origin` beside it that `main` is pushed to: the
-/// repository and its remote, both scratch. The two paths.
-fn repository(name: &str) -> (PathBuf, PathBuf) {
-    let base = std::env::temp_dir().join(format!("xtask-track-new-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&base);
+/// repository and its remote, both under one scratch tree, which comes
+/// back with them and takes both away when the test ends. A scratch
+/// tree's path is canonical, so the clone's origin compares equal to the
+/// remote's URL on a system whose temporary directory is a symbolic link.
+fn repository(name: &str) -> (Tree, PathBuf, PathBuf) {
+    let base = Tree::new(&format!("track-new-{name}")).unwrap();
     let root = base.join("repo");
     let origin = base.join("origin.git");
     fs::create_dir_all(&root).unwrap();
     fs::create_dir_all(&origin).unwrap();
-    // Canonical before it is the remote's URL, so the clone's origin
-    // compares equal to it on a system whose temp dir is a symlink.
-    let root = fs::canonicalize(root).unwrap();
-    let origin = fs::canonicalize(origin).unwrap();
     let listed = sh(
         workspace(),
         &[
@@ -129,7 +129,7 @@ fn repository(name: &str) -> (PathBuf, PathBuf) {
         &["git", "remote", "add", "origin", origin.to_str().unwrap()],
     );
     sh(&root, &["git", "push", "-q", "origin", "main"]);
-    (root, origin)
+    (base, root, origin)
 }
 
 /// The one command: `origin/<name>` at `main`, a clone beside the
@@ -139,7 +139,7 @@ fn repository(name: &str) -> (PathBuf, PathBuf) {
 /// track as the clone's.
 #[test]
 fn a_track_is_laid_down_by_one_command() {
-    let (root, origin) = repository("lay");
+    let (_base, root, origin) = repository("lay");
     let (code, out) = track_new(
         &root,
         &[
@@ -243,15 +243,13 @@ fn a_track_is_laid_down_by_one_command() {
         "{out}"
     );
     assert!(out.contains("a person runs, once"), "{out}");
-
-    let _ = fs::remove_dir_all(root.parent().unwrap());
 }
 
 /// A branch the repository or `origin` has, and a directory that exists,
 /// refuse before anything is pushed, cloned or written.
 #[test]
 fn an_existing_branch_or_directory_refuses_and_changes_nothing() {
-    let (root, origin) = repository("refuse");
+    let (_base, root, origin) = repository("refuse");
     let list = fs::read_to_string(root.join("console/tracks.json")).unwrap();
     let unchanged = |name: &str, out: &str| {
         assert!(!has_ref(&origin, &format!("refs/heads/{name}")), "{out}");
@@ -320,6 +318,4 @@ fn an_existing_branch_or_directory_refuses_and_changes_nothing() {
     let (code, out) = track_new(&root, &["t-z"]);
     assert_eq!(code, 2, "{out}");
     unchanged("t-z", &out);
-
-    let _ = fs::remove_dir_all(root.parent().unwrap());
 }

@@ -9,6 +9,7 @@ use std::process::Command;
 
 use xtask::port_map;
 use xtask::reading::{Status, Store};
+use xtask::scratch::Tree;
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -22,9 +23,8 @@ fn fixture(name: &str) -> PathBuf {
 
 /// A scratch workspace with the tracked manifest, pin, census, lock and
 /// the census command, committed so a reading can be stamped.
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("xtask-port-map-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+fn scratch(name: &str) -> Tree {
+    let dir = Tree::new(&format!("port-map-{name}")).unwrap();
     for sub in ["data", "docs", "scripts", "crates/php_ext/src"] {
         std::fs::create_dir_all(dir.join(sub)).unwrap();
     }

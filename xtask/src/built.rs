@@ -161,17 +161,15 @@ const REBUILD: &str = "Rebuild it: `cargo build -p xtask`, or run it through `ca
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use super::{MANIFEST, Refusal, SOURCES, judges};
     use crate::built_root;
     use crate::inputs::{SOURCES_DIR, manifest_digest, source_files, sources_digest};
+    use crate::scratch::Tree;
 
-    fn scratch(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("xtask-built-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        root
+    fn scratch(name: &str) -> Tree {
+        Tree::new(&format!("built-{name}")).unwrap()
     }
 
     /// `from` copied under `to`, every file and directory.

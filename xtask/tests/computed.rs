@@ -6,15 +6,16 @@
 //! process, and pre-commit reads this subcommand's lines.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
+
+use xtask::scratch::Tree;
 
 /// A directory with one stand-in `computed` in it, which records the
 /// arguments and the directory it was called from, prints `said` on
 /// stderr, and exits with `code`.
-fn stand_in(name: &str, said: &str, code: i32) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("xtask-computed-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
+fn stand_in(name: &str, said: &str, code: i32) -> Tree {
+    let dir = Tree::new(&format!("computed-{name}")).unwrap();
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
     fs::create_dir_all(dir.join("root")).unwrap();
@@ -84,7 +85,6 @@ fn a_written_region_names_its_file_and_a_kept_one_does_not() {
         Path::new(cwd.trim()).canonicalize().unwrap(),
         dir.join("root").canonicalize().unwrap()
     );
-    let _ = fs::remove_dir_all(&dir);
 }
 
 /// Exit 0 is every region fresh: nothing written, nothing to re-stage.
@@ -94,7 +94,6 @@ fn every_region_fresh_is_unchanged() {
     let (code, out, _) = regions(&dir, &["AGENTS.md"]);
     assert_eq!(code, 0, "{out}");
     assert_eq!(out, "AGENTS.md: unchanged\n");
-    let _ = fs::remove_dir_all(&dir);
 }
 
 /// Exit 2 is a marker `computed` could not read: a refusal that names
@@ -111,7 +110,6 @@ fn a_broken_marker_is_a_refusal_naming_the_line() {
     assert_eq!(out, "");
     assert!(err.contains("a computed marker is broken"), "{err}");
     assert!(err.contains("AGENTS.md:79: unterminated"), "{err}");
-    let _ = fs::remove_dir_all(&dir);
 }
 
 /// No `computed` on `PATH` is a refusal that says how to install it.
@@ -124,7 +122,6 @@ fn no_computed_on_path_is_a_refusal_naming_the_install() {
     assert_eq!(out, "");
     assert!(err.contains("computed did not run"), "{err}");
     assert!(err.contains("cargo install computed"), "{err}");
-    let _ = fs::remove_dir_all(&dir);
 }
 
 /// An `untrusted` line is the root without a trust grant: the refusal
@@ -147,7 +144,6 @@ fn an_untrusted_region_is_a_refusal_carrying_the_trust_line() {
         err.contains(&format!("computed trust {}", dir.join("root").display())),
         "{err}"
     );
-    let _ = fs::remove_dir_all(&dir);
 }
 
 /// The subcommand is in `xtask --help`, and no file is a usage error.
@@ -162,5 +158,4 @@ fn regions_is_a_subcommand_and_needs_a_file() {
         .unwrap();
     let help = String::from_utf8(help.stdout).unwrap();
     assert!(help.contains("\n  regions "), "{help}");
-    let _ = fs::remove_dir_all(&dir);
 }

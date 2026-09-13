@@ -356,8 +356,7 @@ mod tests {
     #[test]
     fn a_test_instrument_writes_one_reading_end_to_end() {
         let workspace = built_root();
-        let root = std::env::temp_dir().join(format!("xtask-instrument-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = crate::scratch::Tree::new("instrument").unwrap();
         let manifest = Manifest::load(&workspace).unwrap();
         let mut reading = Reading::for_scope("test", "xtask", &manifest, &workspace).unwrap();
         reading.status = Status::Pass;
@@ -367,7 +366,7 @@ mod tests {
                 .unwrap()
                 .tree
         );
-        let store = Store::at(&root);
+        let store = Store::at(root.path());
         assert_eq!(
             store.record(std::slice::from_ref(&reading)).unwrap(),
             Outcome::Met

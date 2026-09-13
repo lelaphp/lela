@@ -8,17 +8,15 @@
 //! matters when the judge is wrong.
 
 use std::fs;
-use std::path::PathBuf;
 
 use xtask::reading::Status;
+use xtask::scratch::Tree;
 use xtask::steer;
 
 /// A scratch workspace carrying one of the harness's own files, a git
 /// repository with one commit so that a reading can be stamped.
-fn scratch(name: &str, pin: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("xtask-steer-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("the scratch workspace");
+fn scratch(name: &str, pin: &str) -> Tree {
+    let dir = Tree::new(&format!("steer-{name}")).expect("the scratch workspace");
     fs::write(dir.join("oracle.toml"), pin).expect("the pin");
     let who = ["-c", "user.name=x", "-c", "user.email=x@x"];
     for args in [

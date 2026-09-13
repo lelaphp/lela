@@ -8,6 +8,7 @@ use xtask::manifest::{Manifest, OneOrMany, Rule};
 use xtask::oracle::Promise;
 use xtask::permit::{Call, Kind, judge, judged_at_the_call};
 use xtask::reading::{Reading, Status, Store};
+use xtask::scratch::Tree;
 use xtask::witness::{self, Ask};
 
 mod common;
@@ -710,8 +711,8 @@ fn permit(root: &Path, stdin: &str, args: &[&str]) -> (i32, String, String) {
 /// A scratch workspace that is a git repository with the tracked manifest
 /// and pin, so a denial there is stamped and stored without touching this
 /// workspace's store.
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("xtask-permit-{name}-{}", std::process::id()));
+fn scratch(name: &str) -> Tree {
+    let dir = Tree::new(&format!("permit-{name}")).unwrap();
     scratch_workspace(workspace(), &dir).unwrap();
     dir
 }
@@ -847,7 +848,7 @@ fn a_large_write_on_stdin_is_judged_whole() {
     );
     assert!(content.len() > 3_000_000);
     let call = serde_json::json!({
-        "session_id": "s", "cwd": root, "hook_event_name": "PreToolUse",
+        "session_id": "s", "cwd": root.path(), "hook_event_name": "PreToolUse",
         "tool_name": "Write",
         "tool_input": {"file_path": "ext/pcre/src/cache.rs", "content": content},
     });
@@ -1378,7 +1379,7 @@ fn stale_manifest() -> String {
 
 /// A scratch workspace holding that manifest: a build meeting rules it was
 /// not compiled against.
-fn scratch_with_a_stale_manifest(name: &str) -> PathBuf {
+fn scratch_with_a_stale_manifest(name: &str) -> Tree {
     let root = scratch(name);
     std::fs::write(root.join("seams.toml"), stale_manifest()).unwrap();
     root

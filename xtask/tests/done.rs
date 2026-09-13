@@ -14,6 +14,7 @@ use xtask::divergence::Registry;
 use xtask::done::{self, FRESH, Verdict};
 use xtask::manifest::Manifest;
 use xtask::reading::{Reading, Status, Store};
+use xtask::scratch::Tree;
 use xtask::track::Base;
 
 /// What condition 1 asks of `ext/pcre`, the crate most of these tests
@@ -87,13 +88,13 @@ fn commit(root: &Path, message: &str) {
 /// fixture's two crates, `ext/pcre` and `crates/php_ext`, committed once.
 /// Every change the tests make after this is the diff `done` judges with
 /// `--base HEAD`.
-fn scratch(name: &str) -> PathBuf {
+fn scratch(name: &str) -> Tree {
     repository(name, &workspace().join("docs/divergence.toml"))
 }
 
 /// The same, with the fixture's registry: one open row on ext/pcre's phpt
 /// subset, committed in the base so the registry itself is not in the diff.
-fn scratch_with_an_open_row(name: &str) -> PathBuf {
+fn scratch_with_an_open_row(name: &str) -> Tree {
     repository(name, &fixtures().join("done/divergence.toml"))
 }
 
@@ -103,9 +104,8 @@ fn scratch_with_an_open_row(name: &str) -> PathBuf {
 /// `master` is on no track, falls back to `main`, and has no `main` to
 /// take a merge base with. The three tests that pass no `--base` read the
 /// branch this line pins.
-fn repository(name: &str, registry: &Path) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("xtask-done-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+fn repository(name: &str, registry: &Path) -> Tree {
+    let root = Tree::new(&format!("done-{name}")).unwrap();
     std::fs::create_dir_all(root.join("docs")).unwrap();
     for file in ["seams.toml", "oracle.toml"] {
         std::fs::copy(workspace().join(file), root.join(file)).unwrap();
@@ -318,7 +318,7 @@ fn a_branch_on_no_track_is_judged_since_main_so_commits_on_it_count() {
 /// store refuses `refs/heads/t-opus-5` beside `refs/heads/t-opus-5/witness`
 /// — one path cannot be a file and a directory at once — which is also why
 /// an agent's worktree has the track as the remote's branch and not its own.
-fn on_a_track(name: &str) -> (PathBuf, String) {
+fn on_a_track(name: &str) -> (Tree, String) {
     let root = scratch(name);
     sh(&root, &["git", "branch", "-M", "main"]);
     sh(&root, &["git", "checkout", "-q", "-b", "the-track"]);

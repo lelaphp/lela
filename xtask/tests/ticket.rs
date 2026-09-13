@@ -7,10 +7,11 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use xtask::manifest::Manifest;
 use xtask::reading::Status;
+use xtask::scratch::Tree;
 use xtask::ticket::{Act, Gh, Successors, run};
 use xtask::track::Ticket;
 
@@ -29,13 +30,12 @@ fn manifest() -> Manifest {
 /// call's arguments to `calls`, one line each. The instrument stamps its
 /// reading over the workspace, which it only reads.
 struct Recorded {
-    dir: PathBuf,
+    dir: Tree,
 }
 
 impl Recorded {
     fn lay(name: &str) -> Recorded {
-        let dir = std::env::temp_dir().join(format!("xtask-ticket-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = Tree::new(&format!("ticket-{name}")).unwrap();
         fs::create_dir_all(dir.join("issues")).unwrap();
         let recorded = Recorded { dir };
         recorded.answering(None);

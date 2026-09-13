@@ -30,6 +30,7 @@ use xtask::divergence::Registry;
 use xtask::manifest::Manifest;
 use xtask::oracle::{Promise, Regime};
 use xtask::reading::{Number, Reading, Status};
+use xtask::scratch::Tree;
 
 mod common;
 use common::scratch_workspace;
@@ -82,7 +83,7 @@ fn dump_regime() -> Regime {
 /// standing where the engine's binary would, one handing every call to
 /// the pinned oracle and one compiling nothing at all.
 struct Scratch {
-    root: PathBuf,
+    root: Tree,
     corpus: PathBuf,
     manifest: Manifest,
 }
@@ -104,8 +105,7 @@ impl Scratch {
     /// The files of the fixture corpus named, and an empty corpus for
     /// none: what a test that lays its own files down starts from.
     fn of(name: &str, only: &[&str]) -> Scratch {
-        let root =
-            std::env::temp_dir().join(format!("xtask-identity-{name}-{}", std::process::id()));
+        let root = Tree::new(&format!("identity-{name}")).unwrap();
         scratch_workspace(workspace(), &root).unwrap();
         let corpus = root.join("corpus");
         fs::create_dir_all(&corpus).unwrap();

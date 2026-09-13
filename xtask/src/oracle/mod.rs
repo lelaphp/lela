@@ -38,6 +38,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::divergence::{Divergence, Registry};
+use crate::scratch::Tree;
 
 /// The environment variable that names the pinned php-src tree on this
 /// machine, consulted ahead of the pin's `[source].path` (#36). The name
@@ -724,20 +725,18 @@ pub fn normalise(rules: &Normalise, bytes: Vec<u8>) -> Vec<u8> {
 struct Scratch {
     dir: PathBuf,
     script: PathBuf,
-    own: PathBuf,
+    own: Tree,
 }
 
 impl Scratch {
     fn for_program(recipe: &Recipe, program: Program<'_>) -> Result<Scratch> {
-        let own =
-            std::env::temp_dir().join(format!("xtask-oracle-{}-{}", std::process::id(), unique()));
-        fs::create_dir_all(&own).with_context(|| format!("creating {}", own.display()))?;
+        let own = Tree::new("oracle")?;
         let (dir, script) = match program {
             Program::Snippet(code) => {
                 let script = PathBuf::from(&recipe.script_name);
                 fs::write(own.join(&script), format!("{}{code}", recipe.preamble))
                     .with_context(|| format!("writing {}", recipe.script_name))?;
-                (own.clone(), script)
+                (own.path().to_path_buf(), script)
             }
             Program::File(path) => {
                 let dir = path
@@ -772,17 +771,6 @@ impl Scratch {
         }
         bytes
     }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.own);
-    }
-}
-
-fn unique() -> u64 {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 fn replace(haystack: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {

@@ -21,6 +21,7 @@ use xtask::manifest::{Crate, Manifest};
 use xtask::oracle::{Pin, Promise};
 use xtask::phpt::{self, Ask};
 use xtask::reading::{Number, Reading, Status};
+use xtask::scratch::Tree;
 
 mod common;
 use common::scratch_workspace;
@@ -34,19 +35,20 @@ fn manifest() -> Manifest {
 }
 
 /// A manifest of these `[[crate]]` rows under the tracked pin with its
-/// tree the fixture's: the rows a person writes in `seams.toml`, resolved
+/// tree the one given: the rows a person writes in `seams.toml`, resolved
 /// against a tree without the tracked manifest having to carry the crate
-/// they name or this machine the corpus.
-fn manifest_of(rows: impl IntoIterator<Item = Crate>) -> Manifest {
+/// they name or this machine the corpus. The caller holds the tree open
+/// for as long as it reads the manifest.
+fn manifest_of(rows: impl IntoIterator<Item = Crate>, tree: &Path) -> Manifest {
     let mut manifest = Manifest::of(rows);
-    manifest.pin = pin_over(&fixture_tree());
+    manifest.pin = pin_over(tree);
     manifest
 }
 
 /// A tree standing where the pinned php-src would, with the directories
 /// the per-commit lane's rows name and no test in them.
-fn fixture_tree() -> PathBuf {
-    let tree = std::env::temp_dir().join(format!("xtask-phpt-tree-{}", std::process::id()));
+fn fixture_tree() -> Tree {
+    let tree = Tree::new("phpt-tree").unwrap();
     for under in ["Zend/tests", "tests", "sapi/cli/tests", "ext/pcre/tests"] {
         fs::create_dir_all(tree.join(under)).unwrap();
     }
@@ -81,7 +83,7 @@ fn registry(text: &str) -> Registry {
 /// `ext/fixture/tests` holds `tests`, and a shell file at `engine/php`
 /// that hands every call to the pinned oracle.
 struct Scratch {
-    root: PathBuf,
+    root: Tree,
     /// The manifest a run reads: the `ext/fixture` row under the tracked
     /// pin with its source tree pointed at `corpus/`, so the crate's subset
     /// by the design, `ext/fixture/tests`, resolves there.
@@ -91,7 +93,7 @@ struct Scratch {
 
 impl Scratch {
     fn new(name: &str, tests: &[(&str, &str)]) -> Scratch {
-        let root = std::env::temp_dir().join(format!("xtask-phpt-{name}-{}", std::process::id()));
+        let root = Tree::new(&format!("phpt-{name}")).unwrap();
         scratch_workspace(workspace(), &root).unwrap();
         fs::create_dir_all(root.join("ext/fixture")).unwrap();
         fs::write(
@@ -303,7 +305,7 @@ fn with_no_engine_built_the_reading_is_a_skip_that_says_so_and_no_test_runs() {
     if source().is_none() {
         return;
     }
-    let root = std::env::temp_dir().join(format!("xtask-phpt-absent-{}", std::process::id()));
+    let root = Tree::new("phpt-absent").unwrap();
     scratch_workspace(workspace(), &root).unwrap();
     let manifest = manifest();
     let ask = Ask {
@@ -351,8 +353,11 @@ fn with_no_engine_built_the_reading_is_a_skip_that_says_so_and_no_test_runs() {
 
 #[test]
 fn a_subset_the_pinned_tree_has_not_is_a_reading_that_says_so_and_not_a_silent_drop() {
-    let manifest =
-        manifest_of([Crate::named("php_engine").with_phpt(&["Zend/tests", "Zend/nope"])]);
+    let tree = fixture_tree();
+    let manifest = manifest_of(
+        [Crate::named("php_engine").with_phpt(&["Zend/tests", "Zend/nope"])],
+        &tree,
+    );
     // `done` asks a crate for a phpt reading whenever its row names one,
     // and it never reads the tree; so a directory the tree has not must be
     // a reading a run can write, never a subset quietly dropped.
@@ -373,19 +378,23 @@ fn a_subset_the_pinned_tree_has_not_is_a_reading_that_says_so_and_not_a_silent_d
 
 #[test]
 fn a_bare_run_is_the_per_commit_lane_composed_from_the_crate_rows() {
-    let manifest = manifest_of([
-        Crate::named("php_engine").with_phpt(&["Zend/tests", "tests"]),
-        Crate::named("php_heap"),
-        Crate::named("php_sapi").with_phpt(&["sapi/cli/tests"]),
-        Crate::named("ext/pcre"),
-        Crate::named("ext/curl").with_feature("curl"),
-    ]);
+    let tree = fixture_tree();
+    let manifest = manifest_of(
+        [
+            Crate::named("php_engine").with_phpt(&["Zend/tests", "tests"]),
+            Crate::named("php_heap"),
+            Crate::named("php_sapi").with_phpt(&["sapi/cli/tests"]),
+            Crate::named("ext/pcre"),
+            Crate::named("ext/curl").with_feature("curl"),
+        ],
+        &tree,
+    );
     // No engine is built here, so every subset of the lane is a skip that
     // says so; what is under test is which subsets the lane is. §7's
     // per-commit row: Zend/tests and tests/ with php_engine, sapi/cli with
     // php_sapi, and the default extensions' own. A crate behind a feature
     // is not in the default build, and one with no subset owns none.
-    let root = std::env::temp_dir().join(format!("xtask-phpt-lane-{}", std::process::id()));
+    let root = Tree::new("phpt-lane").unwrap();
     scratch_workspace(workspace(), &root).unwrap();
     let readings = phpt::run(&root, &manifest, &registry(""), &Ask::default()).unwrap();
     let scopes: Vec<&str> = readings.iter().map(|r| r.scope.as_str()).collect();
@@ -398,7 +407,8 @@ fn a_bare_run_is_the_per_commit_lane_composed_from_the_crate_rows() {
 
 #[test]
 fn a_run_with_no_subset_runs_the_lane_rather_than_refusing() {
-    let manifest = manifest_of([Crate::named("ext/ctype")]);
+    let tree = fixture_tree();
+    let manifest = manifest_of([Crate::named("ext/ctype")], &tree);
     let readings = phpt::run(workspace(), &manifest, &registry(""), &Ask::default()).unwrap();
     let scopes: Vec<&str> = readings.iter().map(|r| r.scope.as_str()).collect();
     assert_eq!(scopes, ["ext/ctype"], "{readings:#?}");
@@ -406,13 +416,14 @@ fn a_run_with_no_subset_runs_the_lane_rather_than_refusing() {
 
 #[test]
 fn the_reading_of_an_extension_subset_is_stamped_over_the_crate_so_done_can_read_it() {
+    let tree = fixture_tree();
     let mut manifest = manifest();
-    manifest.pin = pin_over(&fixture_tree());
+    manifest.pin = pin_over(&tree);
     let ask = Ask {
         subset: Some("pcre".to_owned()),
         ..Ask::default()
     };
-    let root = std::env::temp_dir().join(format!("xtask-phpt-stamp-{}", std::process::id()));
+    let root = Tree::new("phpt-stamp").unwrap();
     scratch_workspace(workspace(), &root).unwrap();
     let readings = phpt::run(&root, &manifest, &registry(""), &ask).unwrap();
     let reading = &readings[0];
@@ -457,7 +468,7 @@ fn a_corpus_directory_no_crate_owns_is_stamped_over_the_workspace() {
 /// names, and with the variable naming no directory refuses naming both.
 #[test]
 fn the_variable_names_the_tree_to_a_run_of_the_binary() {
-    let root = std::env::temp_dir().join(format!("xtask-phpt-variable-{}", std::process::id()));
+    let root = Tree::new("phpt-variable").unwrap();
     scratch_workspace(workspace(), &root).unwrap();
     // The scratch clone's pin, its `[source].path` pointed nowhere, so the
     // fallback is absent whichever machine this runs on.

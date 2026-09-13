@@ -8,11 +8,12 @@
 //! The fixture is copied to a scratch directory first; nothing is generated
 //! in place, and the workspace's own `ext/` gains no crate.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use xtask::manifest::{Crate, Manifest};
 use xtask::reading::{Reading, Status};
+use xtask::scratch::Tree;
 use xtask::{api_check, budget, new_ext, unsafe_audit, vocab};
 
 fn workspace() -> &'static Path {
@@ -21,9 +22,8 @@ fn workspace() -> &'static Path {
 
 /// A scratch copy of the fixture with one commit, since a reading's stamp
 /// names `HEAD`.
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("xtask-new-ext-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+fn scratch(name: &str) -> Tree {
+    let dir = Tree::new(&format!("new-ext-{name}")).unwrap();
     copy(
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/new-ext"),
         &dir,
@@ -212,7 +212,6 @@ fn the_crate_laid_down_has_the_template_topology() {
     let demo = of(&readings, "ext/demo");
     assert_eq!(demo.status, Status::Pass, "{}", demo.message);
     assert!(laid.dir.is_dir());
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -296,8 +295,6 @@ fn the_bundle_gains_the_feature_and_the_enabled_line() {
         "{:#?}",
         laid.notes
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -338,7 +335,6 @@ fn the_crate_laid_down_passes_the_three_instruments_untouched() {
     let demo = of(&readings, "ext/demo");
     assert_eq!(demo.status, Status::Fail, "{}", demo.message);
     assert!(demo.message.contains("php_engine"), "{}", demo.message);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -367,7 +363,6 @@ fn a_second_run_for_the_same_name_refuses_and_changes_nothing() {
     // The refusal is before any edit: the bundle carries the line once.
     assert_eq!(read(&root, "crates/php_bundle/Cargo.toml"), bundle_before.0);
     assert_eq!(read(&root, "crates/php_bundle/src/lib.rs"), bundle_before.1);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -385,7 +380,6 @@ fn a_name_without_a_crate_row_refuses_naming_the_manifest() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("Demo"), "a name is lowercase: {err}");
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -438,7 +432,6 @@ fn a_second_crate_is_appended_last_and_a_hand_reordering_fails_api_check_naming_
         "{}",
         bundle.message
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -453,7 +446,6 @@ fn a_workspace_without_the_bundle_refuses_before_any_edit() {
     assert!(err.contains("crates/php_bundle"), "{err}");
     assert!(!root.join("ext/demo").exists());
     assert_eq!(read(&root, "Cargo.toml"), before);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -470,7 +462,6 @@ fn a_bundle_the_edit_cannot_read_refuses_before_any_edit() {
     assert!(err.contains("[features]"), "{err}");
     assert!(!root.join("ext/demo").exists(), "nothing written");
     assert_eq!(read(&root, "Cargo.toml"), before);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -483,7 +474,6 @@ fn a_workspace_without_the_facade_refuses() {
         .to_string();
     assert!(err.contains("crates/php_ext"), "{err}");
     assert!(!root.join("ext/demo").exists());
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -519,5 +509,4 @@ fn the_binary_prints_what_it_laid_down_and_exits_nonzero_on_a_refusal() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let _ = std::fs::remove_dir_all(&root);
 }

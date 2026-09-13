@@ -16,6 +16,7 @@ use super::{Ask, Judgement, Tally, capture, judge};
 use crate::divergence::Registry;
 use crate::manifest::Manifest;
 use crate::oracle::{Promise, Runner};
+use crate::scratch::Tree;
 
 fn workspace() -> PathBuf {
     crate::built_root()
@@ -34,14 +35,14 @@ fn oracle() -> Option<PathBuf> {
         .unwrap()
 }
 
-/// A source file of this test's own, in a directory of its own.
-fn source(name: &str, text: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("xtask-witness-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+/// A source file of this test's own, in a scratch tree of its own. The
+/// tree comes back with the file: it is what holds it there, and the
+/// caller binds it for as long as it reads or writes the file.
+fn source(name: &str, text: &str) -> (Tree, PathBuf) {
+    let dir = Tree::new(&format!("witness-{name}")).unwrap();
     let file = dir.join("lib.rs");
     fs::write(&file, text).unwrap();
-    file
+    (dir, file)
 }
 
 fn registry(text: &str) -> Registry {
@@ -249,7 +250,7 @@ fn a_bare_exit_is_unpinned_until_accept_captures_the_status() {
     }
     let text =
         "/// ```php\n/// exit(3);\n/// ```\n/// ```expect exit\n/// ```\npub fn native() {}\n";
-    let file = source("accept", text);
+    let (_tree, file) = source("accept", text);
 
     let (judgement, note) = only(&judged(&file, text, &registry(""), false));
     assert_eq!(judgement, Judgement::Unpinned, "{note}");

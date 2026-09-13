@@ -1,19 +1,18 @@
 //! The reading and its store (harness-design.md §4.2): one file per
 //! instrument and scope, overwritten each run, and an append-only log.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use xtask::manifest::Crate;
 use xtask::reading::{self, Log, Outcome, Reading, Status, Store};
+use xtask::scratch::Tree;
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
 }
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("xtask-store-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    dir
+fn scratch(name: &str) -> Tree {
+    Tree::new(&format!("store-{name}")).unwrap()
 }
 
 /// A reading of the shape §4.2 draws, stamped through the constructor
@@ -36,7 +35,8 @@ fn reading(status: Status, failed: i64) -> Reading {
 
 #[test]
 fn a_reading_is_one_file_in_the_store_and_one_line_in_the_log() {
-    let store = Store::at(scratch("one"));
+    let dir = scratch("one");
+    let store = Store::at(dir.path());
     store.record(&[reading(Status::Fail, 3)]).unwrap();
 
     let file = store.root().join("witness/ext/pcre.toml");
@@ -61,7 +61,8 @@ fn a_reading_is_one_file_in_the_store_and_one_line_in_the_log() {
 
 #[test]
 fn a_second_run_overwrites_the_file_and_appends_to_the_log() {
-    let store = Store::at(scratch("two"));
+    let dir = scratch("two");
+    let store = Store::at(dir.path());
     store.record(&[reading(Status::Fail, 3)]).unwrap();
     store.record(&[reading(Status::Pass, 0)]).unwrap();
 
@@ -84,7 +85,11 @@ fn a_second_run_overwrites_the_file_and_appends_to_the_log() {
 
 #[test]
 fn a_missing_reading_is_none_and_a_missing_store_has_no_readings() {
-    let store = Store::at(scratch("none"));
+    let dir = scratch("none");
+    // Under the scratch tree and not the tree itself: the store is a
+    // directory that was never written, which is what a workspace no
+    // instrument has run in has.
+    let store = Store::at(dir.join("store"));
     assert!(store.read("budget", "php_heap").unwrap().is_none());
     assert!(store.readings().unwrap().is_empty());
 }
@@ -121,7 +126,8 @@ fn a_failing_reading_is_exit_one_and_a_pass_or_a_skip_is_exit_zero() {
     assert_eq!(err.to_string(), "1 of 3 readings fail");
 
     // The exception: a measurement's exit is not its status.
-    let store = Store::at(scratch("measurement"));
+    let dir = scratch("measurement");
+    let store = Store::at(dir.path());
     let missed = reading(Status::Fail, 3);
     store
         .record_measurement(&[reading(Status::Pass, 0), missed.clone()])
@@ -137,7 +143,8 @@ fn a_failing_reading_is_exit_one_and_a_pass_or_a_skip_is_exit_zero() {
 /// One call records every reading, in order, and says what the exit is.
 #[test]
 fn a_set_of_readings_is_recorded_together_and_the_outcome_is_the_exit() {
-    let store = Store::at(scratch("set"));
+    let dir = scratch("set");
+    let store = Store::at(dir.path());
     let mut skipped = reading(Status::Skip, 0);
     skipped.scope = "ext/absent".into();
     let outcome = store
@@ -205,7 +212,8 @@ fn a_crate_not_yet_created_gets_a_reading_without_a_stamp() {
 /// and shows what the platform does in practice rather than proving it.
 #[test]
 fn two_writers_over_one_log_tear_no_line() {
-    let store = Store::at(scratch("two-writers"));
+    let dir = scratch("two-writers");
+    let store = Store::at(dir.path());
     let per_writer: usize = 200;
     let writers: Vec<_> = (0..2)
         .map(|w| {
@@ -256,7 +264,8 @@ fn two_writers_over_one_log_tear_no_line() {
 /// of one reading with another whole inside it, then the tail.
 #[test]
 fn a_torn_line_is_counted_and_named_and_the_rest_is_read() {
-    let store = Store::at(scratch("torn"));
+    let dir = scratch("torn");
+    let store = Store::at(dir.path());
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/store/torn.jsonl");
     std::fs::create_dir_all(store.root()).unwrap();
     std::fs::copy(&fixture, store.root().join("log.jsonl")).unwrap();
@@ -296,7 +305,8 @@ fn a_torn_line_is_counted_and_named_and_the_rest_is_read() {
 /// gets one, so the line written next does not join it.
 #[test]
 fn another_stores_log_is_appended_one_line_per_write() {
-    let store = Store::at(scratch("append"));
+    let dir = scratch("append");
+    let store = Store::at(dir.path());
     store.record(&[reading(Status::Pass, 0)]).unwrap();
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/store/torn.jsonl");
     let mut foreign = std::fs::read(&fixture).unwrap();

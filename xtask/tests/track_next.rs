@@ -9,20 +9,19 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use xtask::scratch::Tree;
 use xtask::ticket::Gh;
 use xtask::track_next::{Next, next};
 
 /// A recorded tracker beside a scratch repository: `gh issue list`
 /// answers with `list.json`, every other call is written to `calls`.
 struct Recorded {
-    dir: PathBuf,
+    dir: Tree,
 }
 
 impl Recorded {
     fn lay(name: &str) -> Recorded {
-        let dir =
-            std::env::temp_dir().join(format!("xtask-track-next-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = Tree::new(&format!("track-next-{name}")).unwrap();
         fs::create_dir_all(dir.join("repo")).unwrap();
         let script = format!(
             "#!/bin/sh\nif [ \"$1\" = issue ] && [ \"$2\" = list ]; then cat '{0}/list.json'; exit $?; fi\nprintf '%s\\n' \"$*\" >> '{0}/calls'\nexit 0\n",

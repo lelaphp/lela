@@ -12,6 +12,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use xtask::scratch::Tree;
+
 mod common;
 use common::scratch_workspace;
 
@@ -36,7 +38,7 @@ const LOCAL: &str = ".claude/harness.local.md";
 /// 1, when a test writes it. `claude_on_path` says whether `plugin-bin`
 /// is on the hook's `PATH`: off, the hook finds no `claude` at all.
 struct Scratch {
-    dir: PathBuf,
+    dir: Tree,
     root: PathBuf,
     claude_on_path: bool,
 }
@@ -87,30 +89,13 @@ fn executable(path: &Path, body: &str) {
 /// region files, one crate file, one commit, and the real hooks under
 /// `scripts/hooks` as its `core.hooksPath`.
 fn scratch(name: &str, computed: &Computed) -> Scratch {
-    let dir = std::env::temp_dir().join(format!("xtask-hooks-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
+    let dir = Tree::new(&format!("hooks-{name}")).unwrap();
     let root = dir.join("root");
     scratch_workspace(workspace(), &root).unwrap();
     for file in REGIONS {
         write(&root, file, "# a region file\n\n<!-- computed layout -->\n");
     }
     write(&root, "crates/php_heap/src/lib.rs", "pub fn alloc() {}\n");
-    let scratch = Scratch {
-        dir: dir.clone(),
-        root: fs::canonicalize(&root).unwrap(),
-        claude_on_path: true,
-    };
-    scratch.git(&["add", "."], false);
-    scratch.git(&["commit", "-q", "-m", "regions and a crate"], false);
-    scratch.git(
-        &[
-            "config",
-            "core.hooksPath",
-            workspace().join("scripts/hooks").to_str().unwrap(),
-        ],
-        false,
-    );
-
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
     executable(
@@ -157,6 +142,25 @@ fn scratch(name: &str, computed: &Computed) -> Scratch {
             "#!/bin/sh\nprintf 'npx %s\\n' \"$*\" >> '{log}'\nexit 0\n",
             log = log.display(),
         ),
+    );
+
+    // The repository's own history and hook path, last: the stand-ins
+    // above live beside the repository and not in it, so nothing of them
+    // is in the commit whichever order the two go in.
+    let scratch = Scratch {
+        dir,
+        root: fs::canonicalize(&root).unwrap(),
+        claude_on_path: true,
+    };
+    scratch.git(&["add", "."], false);
+    scratch.git(&["commit", "-q", "-m", "regions and a crate"], false);
+    scratch.git(
+        &[
+            "config",
+            "core.hooksPath",
+            workspace().join("scripts/hooks").to_str().unwrap(),
+        ],
+        false,
     );
     scratch
 }

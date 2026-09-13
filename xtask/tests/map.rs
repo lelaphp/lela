@@ -5,8 +5,10 @@
 //! the function hook hands the engine are each under its cap with room.
 
 use std::fmt::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
+
+use xtask::scratch::Tree;
 
 mod common;
 use common::scratch_workspace;
@@ -342,7 +344,7 @@ fn the_map_and_the_local_facts_are_each_under_the_engines_cap_with_room() {
         panic!("{why}");
     }
 
-    let root: PathBuf = std::env::temp_dir().join(format!("xtask-map-cap-{}", std::process::id()));
+    let root = Tree::new("map-cap").unwrap();
     scratch_workspace(workspace(), &root).unwrap();
     let padding = "a line a person wrote, one more of them\n".repeat(cap / 40 + 1);
     std::fs::write(root.join("AGENTS.md"), format!("{map}{padding}")).unwrap();

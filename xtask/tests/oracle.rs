@@ -14,6 +14,7 @@ use xtask::manifest::Manifest;
 use xtask::oracle::{
     self, PROMISE_VARIABLE, Pin, Program, Promise, Promised, TREE_VARIABLE, Verdict,
 };
+use xtask::scratch::Tree;
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -59,9 +60,7 @@ fn a_snippet_gives_the_bytes_php_gives_by_hand_under_the_recipe() {
 
     // By hand: the recipe's arguments and ini as `-d`, the environment
     // cleared and rebuilt, the snippet as witness.php in a directory of its own.
-    let dir = std::env::temp_dir().join(format!("xtask-oracle-by-hand-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Tree::new("oracle-by-hand").unwrap();
     std::fs::write(
         dir.join(&pin.recipe.script_name),
         format!("{}{snippet}", pin.recipe.preamble),
@@ -163,9 +162,7 @@ fn a_flag_stands_before_the_program_and_the_default_names_none() {
 #[test]
 fn a_file_runs_in_its_own_directory() {
     let Some(pin) = pin() else { return };
-    let dir = std::env::temp_dir().join(format!("xtask-oracle-file-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Tree::new("oracle-file").unwrap();
     let file = dir.join("case.php");
     std::fs::write(&file, "<?php\necho basename(__FILE__), ' ', getcwd();").unwrap();
     let out = pin.oracle().run(Program::File(&file), None).unwrap();
@@ -223,31 +220,30 @@ fn pin_with_path(path: &Path) -> Pin {
 }
 
 /// A directory standing where the pinned php-src would.
-fn fixture_tree(name: &str) -> PathBuf {
-    let tree = std::env::temp_dir().join(format!("xtask-oracle-{name}-{}", std::process::id()));
-    std::fs::create_dir_all(&tree).unwrap();
-    tree
+fn fixture_tree(name: &str) -> Tree {
+    Tree::new(&format!("oracle-{name}")).unwrap()
 }
 
 #[test]
 fn the_tree_is_what_the_variable_names_when_it_is_a_directory() {
     let named = fixture_tree("named");
-    let pin = pin_with_path(Path::new("/nowhere/php-src")).on_this_machine(Some(named.clone()));
-    assert_eq!(pin.source.tree().unwrap(), named);
+    let pin =
+        pin_with_path(Path::new("/nowhere/php-src")).on_this_machine(Some(named.to_path_buf()));
+    assert_eq!(pin.source.tree().unwrap(), named.path());
     // Ahead of the pin's path even where that is a directory too.
     let pinned = fixture_tree("pinned");
-    let pin = pin_with_path(&pinned).on_this_machine(Some(named.clone()));
-    assert_eq!(pin.source.tree().unwrap(), named);
+    let pin = pin_with_path(&pinned).on_this_machine(Some(named.to_path_buf()));
+    assert_eq!(pin.source.tree().unwrap(), named.path());
 }
 
 #[test]
 fn the_tree_is_the_pins_path_when_the_variable_is_unset() {
     let pinned = fixture_tree("fallback");
     let pin = pin_with_path(&pinned);
-    assert_eq!(pin.source.tree().unwrap(), pinned);
+    assert_eq!(pin.source.tree().unwrap(), pinned.path());
     // A variable naming no directory is not the tree either.
     let pin = pin_with_path(&pinned).on_this_machine(Some(PathBuf::from("/nowhere/php-src")));
-    assert_eq!(pin.source.tree().unwrap(), pinned);
+    assert_eq!(pin.source.tree().unwrap(), pinned.path());
 }
 
 #[test]
@@ -274,10 +270,8 @@ fn an_absent_tree_names_the_variable_and_the_pins_path_and_not_one_of_them() {
 
 /// A git checkout standing where the pinned php-src would, at one commit
 /// of its own, and that commit as `git rev-parse HEAD` prints it.
-fn fixture_checkout(name: &str) -> (PathBuf, String) {
+fn fixture_checkout(name: &str) -> (Tree, String) {
     let tree = fixture_tree(name);
-    let _ = std::fs::remove_dir_all(&tree);
-    std::fs::create_dir_all(&tree).unwrap();
     let git = |args: &[&str]| {
         let out = Command::new("git")
             .arg("-C")
@@ -313,12 +307,13 @@ fn a_checkout_at_the_pins_commit_is_the_tree() {
     let (tree, head) = fixture_checkout("held");
     let mut pin = pin_with_path(&tree);
     pin.source.commit = head[..8].to_owned();
-    assert_eq!(pin.source.tree().unwrap(), tree);
+    assert_eq!(pin.source.tree().unwrap(), tree.path());
     // Through the variable as through the pin's path.
-    let pin = pin_with_path(Path::new("/nowhere/php-src")).on_this_machine(Some(tree.clone()));
+    let pin =
+        pin_with_path(Path::new("/nowhere/php-src")).on_this_machine(Some(tree.to_path_buf()));
     let mut pin = pin;
     pin.source.commit = head[..8].to_owned();
-    assert_eq!(pin.source.tree().unwrap(), tree);
+    assert_eq!(pin.source.tree().unwrap(), tree.path());
 }
 
 #[test]
@@ -338,7 +333,7 @@ fn a_checkout_at_another_commit_is_refused_naming_both_revisions() {
     // The variable naming it is no different: a wrong tree is refused, not
     // passed over for the pin's path.
     let pinned_dir = fixture_tree("drifted-fallback");
-    let pin = pin_with_path(&pinned_dir).on_this_machine(Some(tree));
+    let pin = pin_with_path(&pinned_dir).on_this_machine(Some(tree.to_path_buf()));
     let err = pin.source.tree().unwrap_err().to_string();
     assert!(err.contains(&head) && err.contains(TREE_VARIABLE), "{err}");
 }
@@ -348,7 +343,7 @@ fn a_tree_that_is_no_checkout_states_no_commit_and_is_taken_at_its_word() {
     // The fixture trees above have no `.git`; a tarball at the tag is the
     // same, and the pin's commit cannot be read off it.
     let tree = fixture_tree("unpacked");
-    assert_eq!(pin_with_path(&tree).source.tree().unwrap(), tree);
+    assert_eq!(pin_with_path(&tree).source.tree().unwrap(), tree.path());
 }
 
 /// What a runner that sets the variable claims: the tree is there and at
@@ -506,7 +501,7 @@ fn where_the_tree_is_promised_an_absent_tree_is_a_failure_naming_what_it_looked_
             .or_skip(Promise::Tree, here.source.tree())
             .unwrap()
             .unwrap(),
-        named
+        named.path()
     );
 }
 

@@ -9,6 +9,7 @@ use std::process::Command;
 
 use xtask::manifest::{AvoidFrom, Manifest, Rule};
 use xtask::reading::{Number, Reading, Status, Store};
+use xtask::scratch::Tree;
 use xtask::vocab;
 
 fn workspace() -> &'static Path {
@@ -24,10 +25,8 @@ fn fixture(rule: &str) -> PathBuf {
 /// A scratch workspace: the tracked manifest, pin and glossary, the fixture
 /// at `from` as one of the manifest's crates, and one commit so a reading
 /// can be stamped.
-fn scratch(name: &str, krate: &str, from: &Path) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("xtask-vocab-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+fn scratch(name: &str, krate: &str, from: &Path) -> Tree {
+    let dir = Tree::new(&format!("vocab-{name}")).unwrap();
     for file in ["seams.toml", "oracle.toml", "CONTEXT.md"] {
         std::fs::copy(workspace().join(file), dir.join(file)).unwrap();
     }
@@ -42,7 +41,8 @@ fn scratch(name: &str, krate: &str, from: &Path) -> PathBuf {
         format!("[package]\nname = \"{package}\"\nedition = \"2024\"\n"),
     )
     .unwrap();
-    committed(dir)
+    committed(&dir);
+    dir
 }
 
 /// The one reading of `php_ext` over the `vocab.avoid` fixture standing as
@@ -204,7 +204,7 @@ fn a_crate_that_does_not_exist_yet_gets_no_reading() {
 
 /// `dir` as a repository with everything under it in one commit, so a
 /// reading can be stamped.
-fn committed(dir: PathBuf) -> PathBuf {
+fn committed(dir: &Path) {
     for args in [
         vec!["init", "-q"],
         vec!["add", "."],
@@ -221,27 +221,26 @@ fn committed(dir: PathBuf) -> PathBuf {
     ] {
         let ok = Command::new("git")
             .arg("-C")
-            .arg(&dir)
+            .arg(dir)
             .args(args)
             .status()
             .unwrap()
             .success();
         assert!(ok);
     }
-    dir
 }
 
 /// A copy of the fixture at `from` in a scratch directory, whole, with the
 /// tracked pin beside it where the fixture's manifest points, and one
 /// commit: a fixture that carries its own `seams.toml` is a workspace of
 /// its own (#57), and the pin it names by path is the real one.
-fn scratch_workspace(name: &str, from: &Path) -> PathBuf {
-    let base = std::env::temp_dir().join(format!("xtask-vocab-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
+fn scratch_workspace(name: &str, from: &Path) -> (Tree, PathBuf) {
+    let base = Tree::new(&format!("vocab-{name}")).unwrap();
     let dir = base.join("a/b/c/d");
     copy_tree(from, &dir);
     std::fs::copy(workspace().join("oracle.toml"), base.join("oracle.toml")).unwrap();
-    committed(dir)
+    committed(&dir);
+    (base, dir)
 }
 
 fn copy_tree(from: &Path, to: &Path) {
@@ -260,7 +259,7 @@ fn copy_tree(from: &Path, to: &Path) {
 /// The readings of `vocab` over the fixture at `dir` under the manifest
 /// the fixture carries.
 fn fixture_readings(name: &str, dir: &Path) -> Vec<Reading> {
-    let root = scratch_workspace(name, dir);
+    let (_base, root) = scratch_workspace(name, dir);
     let manifest = Manifest::load(&root).unwrap();
     vocab::hold(&root, &manifest, &[]).unwrap()
 }
@@ -351,7 +350,7 @@ fn a_section_holds_its_scope_to_that_sections_terms_and_a_fixture_under_the_crat
 #[test]
 fn two_rules_over_one_crate_are_refused() {
     let dir = fixture("vocab.harness");
-    let root = scratch_workspace("two", &dir);
+    let (_base, root) = scratch_workspace("two", &dir);
     let mut manifest = Manifest::load(&root).unwrap();
     let mut second = Rule::named("vocab.whole", "xtask");
     second.predicate.deny = None;
