@@ -227,9 +227,15 @@ fn a_compiler_that_emits_nothing_is_red_on_every_file_with_the_denominator() {
 /// Design §6.1: the lane compiles in this process, through `php_bundle`,
 /// so it waits on no engine binary. With none named and none built, the
 /// rung below the binary is the linked compiler, and the reading is the
-/// engine's own: red on every file php dumped an op array for, with the
-/// denominator stated. A skip for want of a binary would say nothing
-/// about how far the compiler has to come.
+/// engine's own, with the denominator stated: red while any file php
+/// dumped an op array for differs, and the count of the files the
+/// compiler has come to byte for byte. A skip for want of a binary would
+/// say nothing about how far the compiler has to come. The numbers here
+/// are the compiler's reach on the fixture corpus and move with it
+/// (#235): `plain.php`, one assignment and an `echo`, reached identity
+/// with `Unit::dump` in php's format (0c80b02) and `INIT_FCALL`'s op1
+/// (535cdd6); `identity.phpt` calls a user function and differs still,
+/// which is what keeps the lane's red branch exercised here.
 #[test]
 fn the_linked_compiler_dumps_where_no_engine_binary_is_built() {
     if oracle().is_none() {
@@ -246,14 +252,17 @@ fn the_linked_compiler_dumps_where_no_engine_binary_is_built() {
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
     assert_eq!(reading.scope, "corpus");
     // The same four files the binary of a compiler that emits nothing is
-    // held to: two php dumps an op array for, which the compiler must
-    // come to byte for byte, and two it dumps nothing for.
+    // held to: two php dumps an op array for, of which the linked
+    // compiler has come to one byte for byte, and two it dumps nothing
+    // for.
     assert_eq!(count(&reading, "files"), 4);
-    assert_eq!(count(&reading, "identical"), 0);
-    assert_eq!(count(&reading, "differ"), 2);
+    assert_eq!(count(&reading, "identical"), 1);
+    assert_eq!(count(&reading, "differ"), 1);
     assert_eq!(count(&reading, "skipped"), 2);
     assert!(
-        reading.message.contains("2 of 4 files differ"),
+        reading.message.contains("1 of 4 files differ")
+            && reading.message.contains("identity.phpt")
+            && !reading.message.contains("plain.php"),
         "{}",
         reading.message
     );
