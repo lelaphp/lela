@@ -6,14 +6,17 @@
 //! `track`, the one statement of the rule), or with `--base`; the changes are every file the working tree differs in from
 //! it, committed since or not, plus the untracked files.
 //!
-//! The conditions, one sentence each: the six of §4.5, and the seventh
-//! #31 proposes for it, a person's sentence still to land there:
+//! The conditions, one sentence each, are §4.5's seven:
 //!
 //! 1. Every crate with a changed file has a fresh passing reading from each
-//!    of [`FRESH`]. Fresh means the reading's `tree` is the content hash over
-//!    the crate's sources now (§13 D.18), the hash every instrument stamps;
-//!    an instrument that does not exist yet has written no reading, so its
-//!    condition is unmet and the list is honest from day one. The two
+//!    instrument [`instruments_of`] asks it for: [`FRESH`], less `witness`
+//!    for the harness and less `phpt` for a crate the per-commit lane writes
+//!    no reading for, one that owns no subset or that the manifest marks
+//!    `feature =` and so stands outside the default build (#133). Fresh
+//!    means the reading's `tree` is the content hash over the crate's
+//!    sources now (§13 D.18), the hash every instrument stamps; an
+//!    instrument that does not exist yet has written no reading, so its
+//!    condition is unmet and the list is honest from day one. The one
 //!    reading not held to its status is the `phpt` skip the missing engine
 //!    binary causes, [`no_binary_yet`] (#132); a `witness` reading is held
 //!    to its status, the linked engine having served it (#119).
