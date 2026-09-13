@@ -3,31 +3,42 @@
 //! call is one row: `same`, kept under its name; `renamed`, with the `api`
 //! item that replaces it; or `gone`, with the rule that replaces the need.
 //! The join holds each row's `api` item against the lock and counts the
-//! rows the port has not reached yet, which is the reading's number. A
-//! row is unmatched, the failure §4.4 calls a CI failure from day 3, in
-//! either of the two shapes the design's sentence has: a row naming an
+//! rows the port has not taken off the checklist, which is the reading's
+//! number. A row is unmatched, the failure §4.4 calls a CI failure from
+//! day 3, in either of the two shapes its sentence has: a row naming an
 //! `api` item the lock does not carry, and — under `--tree` — an item the
 //! census finds that no row names, since "every Mahout item is `same`,
 //! `renamed` or `gone`" and an item with no row is none of the three.
 //!
-//! **Resolved.** A row's sites sat in `crates` of the 19 inherited
-//! extensions, and the row is resolved when the port has reached that
-//! many: `crates` extensions under `ext/` here declare a native. A crate
-//! `new-ext` laid down is not a port — its `extension()` declares
-//! nothing and calls no `api` item — so it is not the evidence a row is
-//! resolved on. An engine with no extension ported resolves nothing,
-//! which is this engine today — 651 rows, all unresolved (design §11,
-//! row 1–2) — and the count rises with the port, the rows one extension
-//! called first and the ones every extension called last.
+//! **Matched, and resolved** (design §4.4). A row is *matched* when its
+//! replacement exists: a `same` or `renamed` row's `api` item is a line
+//! of the lock, a `gone` row's rule is written. That is the join above,
+//! and an unmatched row is the CI failure. *Resolved* is the port's own
+//! work, and the design says what it is: a row is resolved when every
+//! extension the census counted for it is ported. The census names them
+//! per row, the `ext` column beside the count, and *ported* is what the
+//! harness reads without a binary — the crate's `extension()` registers
+//! at least one native.
 //!
-//! It is a proxy, and a stated one: it counts how many extensions are
-//! ported and not whether the ported ones are the crates that called the
-//! item. §4.4 says the join is the porting checklist and never says what
-//! takes a row off it, while §11 holds the number to 150, 50 and 0, so
-//! what resolves a row is a decision the design of record owes and #104
-//! asks for; a sharper measure replaces this function and nothing else.
-//! What the harness can read without it — that a replacement exists — is
-//! the match, which is the other column and the one that fails.
+//! **A row that names no extension is unresolved.** The committed census
+//! carries the count alone and gains the names with the first port, so
+//! every row of it names none today. The join reads such a row as on the
+//! checklist, which is the branch [`joined`] takes by name: an empty list
+//! satisfies "every named extension is ported" for the engine that ports
+//! nothing as readily as for the one that ports everything, and a row
+//! resolved that way would be resolved by the absence of evidence. The
+//! reading counts those rows as `unnamed` beside `unresolved`, so the two
+//! shapes of unresolved are told apart in the number itself. The twenty
+//! crates `new-ext` laid down register no native, so on this tree the two
+//! numbers are one: 651 rows, all unresolved, none named — design §11's
+//! row 1–2 reproduced by the measure and not asserted beside it.
+//!
+//! **When the column lands** (#170), a row carries `ext = [..]` naming as
+//! many extensions as it counts, `--tree` regenerates both together, and
+//! the row comes off the checklist on the day its last named extension
+//! registers a native: the rows one extension called go first and the
+//! ones every extension called go last, and the number reaches zero on
+//! the day the last inherited extension is ported.
 //!
 //! **The census.** `data/port-map.v0.toml` is the census as
 //! `scripts/census.sh` printed it at Mahout `1b3104a8`, joined by hand to
@@ -35,7 +46,9 @@
 //! against the inherited tree, which lives outside this repository, and
 //! joins that instead; a tree the census cannot read is a skip of the
 //! regeneration and never a pass, and the reading says which of the two
-//! it read.
+//! it read. The census prints `sites crates item` and no crate names, so
+//! a regenerated run carries the counts and a row's `ext` column is still
+//! the map's until #170 lands the names in both.
 
 use std::collections::BTreeSet;
 use std::fmt::Write;
@@ -94,8 +107,16 @@ pub(crate) struct Row {
     pub(crate) mahout: String,
     /// Call sites in the ext crates, test modules left out.
     pub(crate) sites: usize,
-    /// How many ext crates call it.
+    /// How many extension crates call it.
     pub(crate) crates: usize,
+    /// Which of them do, by the name their crate has under `ext/`: the
+    /// column that resolves the row (design §4.4). It is regenerated with
+    /// `crates` and names as many, so a row carries both or the count
+    /// alone; the committed census carries the count alone and gains the
+    /// names with the first port, and a row that names none is unresolved
+    /// however the port stands.
+    #[serde(default)]
+    pub(crate) ext: Vec<String>,
     pub(crate) status: Status,
     /// The `api` item that replaces it; `same` and `renamed` carry one.
     #[serde(default)]
@@ -266,6 +287,27 @@ impl PortMap {
                 }
                 _ => {}
             }
+            // The names and the count are one column, regenerated
+            // together: a row that names its extensions names as many as
+            // it counts, each once. A row that names none is the seed's
+            // shape and is held to nothing here.
+            let named: BTreeSet<&str> = row.ext.iter().map(String::as_str).collect();
+            if named.len() != row.ext.len() {
+                bail!(
+                    "the row {:?} names an extension twice: {}",
+                    row.mahout,
+                    row.ext.join(", ")
+                );
+            }
+            if !row.ext.is_empty() && row.ext.len() != row.crates {
+                bail!(
+                    "the row {:?} counts {} crates and names {}: {}",
+                    row.mahout,
+                    row.crates,
+                    row.ext.len(),
+                    row.ext.join(", ")
+                );
+            }
             // A name the census counts in two tables is two rows: the
             // method `Value::string` and the associated function of that
             // name are counted apart, so a row's identity is its table's.
@@ -367,10 +409,12 @@ pub(crate) fn census(text: &str) -> Vec<Counted> {
 }
 
 /// The extensions ported here: the `ext/*` crates the manifest names
-/// that declare a native. How many there are is the evidence a row is
-/// resolved on.
+/// whose `extension()` registers a native. Which ones they are is the
+/// evidence a row is resolved on (design §4.4), so the set is the names
+/// and never their number.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Ported {
+    /// The crates, by the manifest's name for them, `ext/<name>`.
     pub(crate) crates: Vec<String>,
 }
 
@@ -382,47 +426,51 @@ impl Ported {
                 .crates
                 .iter()
                 .filter(|c| c.name.starts_with("ext/") && sources::exists(root, c))
-                .filter(|c| declares_a_native(root, c))
+                .filter(|c| registers_a_native(root, c))
                 .map(|c| c.name.clone())
                 .collect(),
         }
     }
 
-    /// Whether the port has reached `crates` extensions, the number one
-    /// row's sites sat in.
-    pub(crate) fn reached(&self, crates: usize) -> bool {
-        crates > 0 && self.crates.len() >= crates
+    /// Whether the extension the census calls `ext` is ported: its crate
+    /// is `ext/<ext>`, and the port has reached it.
+    pub(crate) fn carries(&self, ext: &str) -> bool {
+        self.crates
+            .iter()
+            .any(|c| c.strip_prefix("ext/").unwrap_or(c) == ext)
     }
 }
 
-/// Whether a crate declares a native: an attribute of `php_ext::attr` on
-/// an item of its sources, `#[php_function]`, `#[php_class]`,
-/// `#[php_const]` or `#[tentative]` (design §7.1). This tells a ported
-/// extension from one `new-ext` laid down, whose `extension()` declares
-/// nothing and calls no `api` item; a crate whose sources cannot be
-/// listed or read declares none, since a port is evidence and an unread
-/// crate is not.
-fn declares_a_native(root: &Path, krate: &Crate) -> bool {
+/// The builder steps that register a native on an extension:
+/// `abi::ExtensionBuilder::functions`, `::classes` and `::constants` of
+/// `api.lock`. The other steps declare state, ini or a lifecycle hook,
+/// none of which is a native, and none of which ports a crate.
+const REGISTERS: [&str; 3] = [".functions(", ".classes(", ".constants("];
+
+/// Whether a crate's `extension()` registers a native, which is what the
+/// design reads *ported* as without a binary (§4.4): one of the crate's
+/// sources takes a registering step of the builder. It is read over the
+/// sources and not over the body of `extension()` alone, since an
+/// extension may build its declarations in a function of its own and its
+/// entry is one per crate (ADR-0004), so a registration the crate carries
+/// is one `extension()` carries. This tells a ported extension from one
+/// `new-ext` laid down, whose `extension()` declares its state and
+/// registers nothing; a crate whose sources cannot be listed or read
+/// registers none, since a port is evidence and an unread crate is not.
+fn registers_a_native(root: &Path, krate: &Crate) -> bool {
     sources::rust(root, krate)
         .unwrap_or_default()
         .iter()
-        .any(|path| fs::read_to_string(root.join(path)).is_ok_and(|text| declares(&text)))
+        .any(|path| fs::read_to_string(root.join(path)).is_ok_and(|text| registers(&text)))
 }
 
-/// Whether one source declares a native, read line by line: the
-/// attribute heads an item, so it is the line's first word.
-pub(crate) fn declares(text: &str) -> bool {
-    const ATTRIBUTES: [&str; 4] = [
-        "#[php_function",
-        "#[php_class",
-        "#[php_const",
-        "#[tentative",
-    ];
-    text.lines().any(|line| {
-        ATTRIBUTES
-            .iter()
-            .any(|attr| line.trim_start().starts_with(attr))
-    })
+/// Whether one source registers a native, read line by line: the step is
+/// a call on the builder, so it is what a line of the chain carries after
+/// the receiver, and a line of prose that spells one is a comment.
+pub(crate) fn registers(text: &str) -> bool {
+    text.lines()
+        .map(str::trim_start)
+        .any(|line| !line.starts_with("//") && REGISTERS.iter().any(|step| line.contains(step)))
 }
 
 /// Which census the run read.
@@ -505,12 +553,19 @@ pub(crate) fn read(root: &Path, tree: Option<&Path>) -> Result<(Source, Vec<Coun
 pub(crate) struct Joined<'a> {
     pub(crate) row: &'a Row,
     pub(crate) sites: usize,
+    /// How many extensions called the item, as the census that was read
+    /// counts them; which ones they are is the row's `ext` column until
+    /// the census prints the names too (#170).
     pub(crate) crates: usize,
     /// Whether the lock carries the row's `api` item; a `gone` row is
     /// matched by its rule.
     pub(crate) matched: bool,
-    /// Whether the ported bodies show the port took the row.
+    /// Whether every extension the census counted for the row is ported
+    /// (design §4.4).
     pub(crate) resolved: bool,
+    /// Whether the census named them at all: a row that names none is
+    /// unresolved on that ground and on no other.
+    pub(crate) named: bool,
 }
 
 /// What one run joined.
@@ -535,9 +590,17 @@ impl Join<'_> {
             .collect()
     }
 
-    /// Rows the port has not taken yet: the reading's number.
+    /// Rows an unported extension is still left on: the reading's number
+    /// (design §4.4).
     pub(crate) fn unresolved(&self) -> usize {
         self.rows.iter().filter(|j| !j.resolved).count()
+    }
+
+    /// Rows the census has named no extension for, which are unresolved
+    /// whatever the port has reached; they are all of them until the
+    /// column lands (#170).
+    pub(crate) fn unnamed(&self) -> usize {
+        self.rows.iter().filter(|j| !j.named).count()
     }
 
     /// How many rows carry each status.
@@ -586,7 +649,9 @@ pub(crate) fn join<'a>(
     }
 }
 
-/// One row against the lock and the extensions ported here.
+/// One row against the lock and the extensions ported here: matched when
+/// its replacement exists, resolved when every extension the census
+/// counted for it is ported (design §4.4).
 fn joined<'a>(
     row: &'a Row,
     sites: usize,
@@ -598,13 +663,23 @@ fn joined<'a>(
         Some(api) => lock.contains(api),
         None => row.rule.is_some(),
     };
-    let resolved = ported.reached(crates);
+    let (named, resolved) = match row.ext.as_slice() {
+        // The census counted the extensions and did not name them, so
+        // nothing here says which crates the port would have to reach:
+        // the row stays on the checklist. This branch is written out
+        // rather than left to `all` over an empty list, which is true of
+        // the engine that ports nothing as readily as of the one that
+        // ports everything (#104).
+        [] => (false, false),
+        ext => (true, ext.iter().all(|name| ported.carries(name))),
+    };
     Joined {
         row,
         sites,
         crates,
         matched,
         resolved,
+        named,
     }
 }
 
@@ -632,6 +707,7 @@ pub(crate) fn reading(join: &Join, ported: &Ported, krate: &Crate, root: &Path) 
     reading.count("uncovered", join.uncovered.len() as u64)?;
     reading.count("stale", join.stale as u64)?;
     reading.count("unresolved", join.unresolved() as u64)?;
+    reading.count("unnamed", join.unnamed() as u64)?;
     let source = &join.source;
     if let Source::Refused { why, .. } = &join.source {
         reading.status = reading::Status::Skip;
@@ -685,22 +761,31 @@ pub(crate) fn reading(join: &Join, ported: &Ported, krate: &Crate, root: &Path) 
     Ok(reading)
 }
 
-/// What the ported bodies say about the unresolved count.
+/// Why the unresolved count is what it is: which extensions are ported,
+/// and how many rows name none of them to be measured against.
 fn ported_says(join: &Join, ported: &Ported) -> String {
-    if ported.crates.is_empty() {
-        "no extension is ported, so the port has reached no row".to_owned()
+    let ported = if ported.crates.is_empty() {
+        "no extension registers a native, so no row is off the checklist".to_owned()
     } else {
         format!(
-            "{} reached by the {} extension{} ported",
+            "{} resolved by the {} extension{} ported",
             join.rows.len() - join.unresolved(),
             ported.crates.len(),
             plural(ported.crates.len())
         )
+    };
+    match join.unnamed() {
+        0 => ported,
+        unnamed => format!(
+            "{ported}; {unnamed} row{} name no extension at all",
+            plural(unnamed)
+        ),
     }
 }
 
 /// One line per row: what became of the item, whether the port has taken
-/// it, the Mahout item and what replaces it.
+/// it off the checklist, the Mahout item, what replaces it, and the
+/// extensions that called it, named where the census names them.
 pub(crate) fn render(join: &Join) -> String {
     let mut out = String::new();
     for joined in &join.rows {
@@ -714,9 +799,14 @@ pub(crate) fn render(join: &Join) -> String {
         } else {
             "  (not in the lock)"
         };
+        let named = if joined.named {
+            format!(" ({})", joined.row.ext.join(", "))
+        } else {
+            String::new()
+        };
         let _ = writeln!(
             out,
-            "{:<8} {:<11} {} → {}  {} site{}, {} crate{}{unmatched}",
+            "{:<8} {:<11} {} → {}  {} site{}, {} crate{}{named}{unmatched}",
             joined.row.status.as_str(),
             resolution,
             joined.row.mahout,

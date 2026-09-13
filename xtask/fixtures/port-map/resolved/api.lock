@@ -1,0 +1,4 @@
+# The lock the fixture joins to: it carries both `api` items, so every
+# row is matched and the resolution is the only question the join asks.
+raising::throw_internal
+values::PhpArray::get

@@ -1,0 +1,37 @@
+# The measure of *resolved* (third-engine-design.md §4.4): a row the
+# design calls resolved and one it does not, against a port that has
+# reached `ext/standard` and `ext/random` and no other extension. Nothing
+# here is unmatched; the lock beside it carries both `api` items, so what
+# the fixture holds is the resolution and nothing else.
+
+# ---- mahout_value methods called from ext crates
+# Every extension the census counted for it is ported: resolved.
+[[item]]
+mahout = "mahout_value::PhpArray::get"
+sites = 527
+crates = 2
+ext = ["standard", "random"]
+status = "same"
+api = "values::PhpArray::get"
+
+# ---- semantics:: items used from ext crates
+# Two of its three are ported and `spl` is not: unresolved until it is,
+# whatever the other two have reached.
+[[item]]
+mahout = "semantics::throw_internal"
+sites = 181
+crates = 3
+ext = ["standard", "random", "spl"]
+status = "renamed"
+api = "raising::throw_internal"
+
+# ---- RequestCtx methods called from ext crates
+# The committed census's shape: the count alone, no names. Unresolved
+# whatever the port has reached, and never resolved by the empty list
+# satisfying "every named extension is ported".
+[[item]]
+mahout = "RequestCtx::note_alloc"
+sites = 327
+crates = 19
+status = "gone"
+rule = "nothing; the allocator accounts"

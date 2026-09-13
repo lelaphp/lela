@@ -7,7 +7,7 @@ use std::path::Path;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use super::{Counted, PortMap, Ported, Source, Status, census, declares, join, key, read};
+use super::{Counted, PortMap, Ported, Source, Status, census, join, key, read, registers};
 use crate::api_check::lock::Lock;
 
 fn workspace() -> &'static Path {
@@ -24,6 +24,13 @@ fn fixture(name: &str) -> PathBuf {
 /// A lock of these items.
 fn lock(items: &[&str]) -> BTreeSet<String> {
     items.iter().map(|i| (*i).to_owned()).collect()
+}
+
+/// A port that has reached these extensions and no others.
+fn ported(names: &[&str]) -> Ported {
+    Ported {
+        crates: names.iter().map(|n| format!("ext/{n}")).collect(),
+    }
 }
 
 const ROWS: &str = r#"
@@ -127,6 +134,40 @@ fn a_row_outside_the_shape_is_refused_by_name() {
     assert!(err.contains("no table"), "{err}");
 }
 
+/// The names and the count are one column: a row that names its
+/// extensions names as many as it counts, each once. A row that names
+/// none is the committed census's shape and is held to nothing.
+#[test]
+fn a_row_naming_its_extensions_names_as_many_as_it_counts() {
+    let named = ROWS.replace(
+        "mahout = \"semantics::throw_internal\"\nsites = 181\ncrates = 17",
+        "mahout = \"semantics::throw_internal\"\nsites = 181\ncrates = 2\next = [\"standard\", \"spl\"]",
+    );
+    assert_eq!(
+        PortMap::parse(&named).unwrap().rows[2].ext,
+        ["standard", "spl"]
+    );
+
+    let err = PortMap::parse(&named.replace("crates = 2", "crates = 3"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("counts 3 crates and names 2"), "{err}");
+
+    let err = PortMap::parse(&named.replace("\"standard\", \"spl\"", "\"spl\", \"spl\""))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("names an extension twice"), "{err}");
+
+    // The seed's rows carry the count alone, and that is in order.
+    assert!(
+        PortMap::parse(ROWS)
+            .unwrap()
+            .rows
+            .iter()
+            .all(|r| r.ext.is_empty())
+    );
+}
+
 /// The tables `scripts/census.sh` prints, as it prints them: the heading
 /// with its count, the column header, the rows, the `~` on a name std
 /// also defines, and the per-crate lists that are not table rows.
@@ -204,6 +245,11 @@ fn the_committed_census_is_651_rows_whose_every_api_item_the_lock_carries() {
         651,
         "no extension is ported, so no row has evidence"
     );
+    assert_eq!(
+        joined.unnamed(),
+        651,
+        "the committed census carries the count alone (design §4.4)"
+    );
 }
 
 #[test]
@@ -216,13 +262,13 @@ fn a_tree_without_crates_is_refused_and_nothing_is_joined() {
     assert!(why.contains("no crates/"), "{why}");
 }
 
-/// The evidence is the extensions ported here, and there are none yet,
-/// so no row of the committed census is resolved. The twenty crates
+/// The evidence is which extensions are ported here, and none is yet, so
+/// no row of the committed census is resolved. The twenty crates
 /// `new-ext` laid down are not the evidence: each stands on disk with an
-/// `extension()` that declares nothing, and a crate that declares no
-/// native has ported nothing.
+/// `extension()` that registers no native, and a crate that registers
+/// none has ported nothing.
 #[test]
-fn no_extension_is_ported_yet_so_the_port_has_reached_no_row() {
+fn no_extension_registers_a_native_yet_so_no_row_is_off_the_checklist() {
     let manifest = crate::manifest::Manifest::load(workspace()).unwrap();
     let laid: Vec<&str> = manifest
         .crates
@@ -232,55 +278,81 @@ fn no_extension_is_ported_yet_so_the_port_has_reached_no_row() {
         .filter(|name| workspace().join(name).join("Cargo.toml").is_file())
         .collect();
     assert!(!laid.is_empty(), "the crates are laid down");
-    let ported = Ported::read(workspace(), &manifest);
-    assert!(ported.crates.is_empty(), "{:?}", ported.crates);
-    assert!(!ported.reached(1));
+    let here = Ported::read(workspace(), &manifest);
+    assert!(here.crates.is_empty(), "{:?}", here.crates);
+    assert!(!here.carries("standard"));
+    assert!(ported(&["standard"]).carries("standard"));
+    assert!(!ported(&["standard"]).carries("spl"));
 }
 
-/// What tells a ported extension from one `new-ext` laid down: the crate
-/// root the template writes declares no native, and one line of an
-/// attribute makes it declare one.
+/// What tells a ported extension from one `new-ext` laid down (design
+/// §4.4): the crate root the template writes registers no native, and
+/// one registering step of the builder makes it register one.
 #[test]
-fn the_template_declares_no_native_and_one_attribute_declares_one() {
+fn the_template_registers_no_native_and_one_builder_step_registers_one() {
     let template = crate::new_ext::lib_rs(
         &crate::manifest::Manifest::named("ext/standard"),
         "standard",
     );
-    assert!(!declares(&template), "the template declares nothing");
-    assert!(declares(&format!(
-        "{template}\n#[php_function]\npub fn strlen() {{}}\n"
+    assert!(!registers(&template), "the template registers nothing");
+    assert!(registers(&template.replace(
+        ".request_state::<State>()",
+        ".request_state::<State>()\n        .functions(&[strlen::DECL])"
     )));
     assert!(
-        !declares("/// `#[php_function]` heads a native.\nfn prose() {}\n"),
-        "the attribute heads an item; the word in prose is not a declaration"
+        !registers("/// `.functions(..)` registers a native.\nfn prose() {}\n"),
+        "the step is a call on the builder; the word in prose is not one"
     );
 }
 
-/// A row is resolved when the port has reached as many extensions as the
-/// census counted for it, so the rows one extension called go first and
-/// the ones every extension called go last.
+/// The measure of *resolved* (design §4.4), against the fixture that
+/// holds it: a row every one of whose extensions is ported is off the
+/// checklist, a row one of whose is not stays on it, and a row that names
+/// none stays on it whatever the port has reached.
 #[test]
-fn the_port_reaching_one_extension_resolves_the_rows_one_extension_called() {
-    let map = PortMap::parse(ROWS).unwrap();
-    let lock = lock(&["values::PhpArray::len", "raising::throw_internal"]);
-    let ported = Ported {
-        crates: vec!["ext/standard".to_owned()],
-    };
-    let joined = join(&map, &lock, &ported, Source::Seed, &[]);
-    // The three rows sat in 18, 19 and 17 extensions; one is not 17.
-    assert_eq!(joined.unresolved(), 3);
-    assert!(!ported.reached(2), "one extension is not two");
-    assert!(ported.reached(1));
-    assert!(
-        !Ported::default().reached(0),
-        "a row nobody called is no row"
+fn a_row_is_resolved_when_every_extension_the_census_counted_for_it_is_ported() {
+    let map = PortMap::parse(&std::fs::read_to_string(fixture("resolved/port-map.toml")).unwrap())
+        .unwrap();
+    let lock = Lock::read(&fixture("resolved/api.lock")).unwrap().lines;
+
+    let reached_two = join(
+        &map,
+        &lock,
+        &ported(&["standard", "random"]),
+        Source::Seed,
+        &[],
+    );
+    assert!(reached_two.unmatched().is_empty(), "the fixture is matched");
+    assert!(reached_two.rows[0].resolved, "both of its two are ported");
+    assert!(!reached_two.rows[1].resolved, "spl is not ported");
+    assert!(!reached_two.rows[2].resolved, "it names no extension");
+    assert_eq!(reached_two.unresolved(), 2);
+    assert_eq!(reached_two.unnamed(), 1);
+
+    let reached_none = join(&map, &lock, &Ported::default(), Source::Seed, &[]);
+    assert_eq!(
+        reached_none.unresolved(),
+        3,
+        "an unported engine resolves nothing"
     );
 
-    let ported = Ported {
-        crates: (0..19).map(|n| format!("ext/{n}")).collect(),
-    };
-    let joined = join(&map, &lock, &ported, Source::Seed, &[]);
-    assert_eq!(joined.unresolved(), 0, "the port reached every row");
+    let reached_all = join(
+        &map,
+        &lock,
+        &ported(&["standard", "random", "spl"]),
+        Source::Seed,
+        &[],
+    );
+    assert_eq!(
+        reached_all.unresolved(),
+        1,
+        "the row that names no extension is not resolved by the empty list"
+    );
+    assert_eq!(reached_all.unnamed(), 1);
+
+    // The port reaching an extension no row names moves nothing.
+    let elsewhere = join(&map, &lock, &ported(&["json", "hash"]), Source::Seed, &[]);
+    assert_eq!(elsewhere.unresolved(), 3);
 }
 
 /// The negative control (harness-design.md §4.1): a row naming an `api`
