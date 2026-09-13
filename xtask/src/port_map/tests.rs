@@ -466,14 +466,15 @@ fn a_tree_without_crates_is_refused_and_nothing_is_joined() {
     assert!(why.contains("no crates/"), "{why}");
 }
 
-/// The evidence is which extensions are ported here, and `ext/standard`
-/// is the one that is, since `str_repeat` (#174): the committed census
-/// names no extension on any row, so no row is resolved by it yet. The
-/// other nineteen crates `new-ext` laid down are not evidence: each
-/// stands on disk with an `extension()` that registers no native, and a
-/// crate that registers none has ported nothing.
+/// The evidence is which extensions are ported here, and two are:
+/// `ext/standard` since `str_repeat` (#174) and `ext/tokenizer` since
+/// `token_get_all` (#224). The committed census names no extension on
+/// any row, so no row is resolved by them yet. The other eighteen crates
+/// `new-ext` laid down are not evidence: each stands on disk with an
+/// `extension()` that registers no native, and a crate that registers
+/// none has ported nothing.
 #[test]
-fn one_extension_registers_a_native_and_the_nineteen_laid_down_register_none() {
+fn two_extensions_register_a_native_and_the_eighteen_laid_down_register_none() {
     let manifest = crate::manifest::Manifest::load(workspace()).unwrap();
     let laid: Vec<&str> = manifest
         .crates
@@ -484,8 +485,14 @@ fn one_extension_registers_a_native_and_the_nineteen_laid_down_register_none() {
         .collect();
     assert_eq!(laid.len(), 20, "the crates are laid down: {laid:?}");
     let here = Ported::read(workspace(), &manifest);
-    assert_eq!(here.crates, ["ext/standard"], "{:?}", here.crates);
+    assert_eq!(
+        here.crates,
+        ["ext/standard", "ext/tokenizer"],
+        "{:?}",
+        here.crates
+    );
     assert!(here.carries("standard"));
+    assert!(here.carries("tokenizer"));
     assert!(!here.carries("spl"));
     assert!(ported(&["standard"]).carries("standard"));
     assert!(!ported(&["standard"]).carries("spl"));
