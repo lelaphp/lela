@@ -63,7 +63,7 @@ use php_heap::{Fatal, Intern, Number, Scalar, Zval, ZvalType, double_to_string, 
 use php_unit::decl::{ConstDecl, ConstExpr, FunctionDecl, Name};
 use php_unit::{Diagnostic, Level, OpArray, Opcode, OperandKind, Opline, OplineIdx, Unit};
 
-use crate::read::{BinaryOp, Expr, Read, Stmt};
+use crate::read::{BinaryOp, CastTo, Expr, Read, Stmt};
 use crate::{CompileError, Options, StackLimit};
 
 /// One op array under construction, and the home its constant strings
@@ -542,6 +542,7 @@ impl Emit<'_> {
         match expr {
             Expr::Call { name, arguments } => self.call(name, arguments),
             Expr::Unary { minus, operand } => self.unary(*minus, operand),
+            Expr::Cast { to, operand } => self.cast(*to, operand),
             Expr::Binary { op, left, right } => self.binary(*op, left, right),
             // `zend_compile_simple_var` through `zend_try_compile_cv`: the
             // variable is its CV, and no opline reads it into anything.
@@ -796,6 +797,19 @@ impl Emit<'_> {
         Ok(self.emit_binary(Opcode::Mul, operand, Where::Constant(sign)))
     }
 
+    /// `zend_compile_cast`: the operand compiled first, then `ZEND_BOOL`
+    /// over it for `(bool)` and `ZEND_CAST` with the type in
+    /// `extended_value` for the rest, into a temporary; nothing is folded,
+    /// as php folds a cast only inside a constant expression
+    /// (`zend_eval_const_expr`), so `(float)1` stands as an opline.
+    fn cast(&mut self, to: CastTo, operand: &Expr) -> Result<Where, CompileError> {
+        let operand = self.expr(operand)?;
+        Ok(match to {
+            CastTo::Bool => self.emit_unary(Opcode::Bool, operand, 0),
+            _ => self.emit_unary(Opcode::Cast, operand, to.type_code()),
+        })
+    }
+
     /// `zend_emit_op_tmp` over one operand: the opline with `op1`,
     /// `extended_value` as the caller sets it after the emission, and a
     /// temporary for what it leaves, which is where the value is.
@@ -918,6 +932,10 @@ impl Emit<'_> {
             | Expr::PostInc(_)
             | Expr::PreDec(_)
             | Expr::PostDec(_) => Err(self.fatal("a variable is no constant expression")),
+            // `zend_compile_expr` folds no cast; only a constant
+            // expression's walk does (`zend_eval_const_expr`), and none is
+            // read yet.
+            Expr::Cast { .. } => Err(self.fatal("a cast is no constant expression here")),
         }
     }
 

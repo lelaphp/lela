@@ -906,6 +906,35 @@ mod tests {
         );
     }
 
+    /// `zend_compile_cast` under the dump recipe: `CAST` with php's type
+    /// constant over the operand into a temporary, `BOOL` for `(bool)`,
+    /// nothing folded and the `FREE` after one nothing reads, which
+    /// `zend_do_free` leaves off a `BOOL`; and the scanner's escapes as
+    /// the bytes php reads.
+    #[test]
+    fn a_cast_is_php_s_opline_and_an_escape_is_php_s_byte() {
+        assert_eq!(
+            dump_of(
+                b"<?php\n$x = 1;\n(integer)$x;\n(float)1;\n$s = (string)$x;\n(boolean)$x;\necho (int)\"12abc\", \"\\777\", NAN . \"z\";\n",
+            ),
+            "\n$_main:\n     ; (lines=13, args=0, vars=2, tmps=7)\n\
+             \x20    ; (before optimizer)\n     ; :1-8\n     ; return  [] RANGE[0..0]\n\
+             0000 ASSIGN CV0($x) int(1)\n\
+             0001 T3 = CAST (long) CV0($x)\n\
+             0002 FREE T3\n\
+             0003 T4 = CAST (double) int(1)\n\
+             0004 FREE T4\n\
+             0005 T5 = CAST (string) CV0($x)\n\
+             0006 ASSIGN CV1($s) T5\n\
+             0007 T7 = BOOL CV0($x)\n\
+             0008 T8 = CAST (long) string(\"12abc\")\n\
+             0009 ECHO T8\n\
+             0010 ECHO string(\"\\xFF\")\n\
+             0011 ECHO string(\"NANz\")\n\
+             0012 RETURN int(1)\n"
+        );
+    }
+
     /// `zend_compile_for` over `for (;;) {}`, php's own oplines under
     /// the dump recipe: the `JMP` forward to the condition, and the
     /// condition, the constant `true` for an empty one, as the `JMPNZ`

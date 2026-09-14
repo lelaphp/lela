@@ -563,6 +563,49 @@ pub(crate) fn type_check<T: Tier>(
     })
 }
 
+/// `ZEND_CAST`: [`crate::ops::cast`] over the operand to the type
+/// `extended_value` names, into the temporary; the operand freed after
+/// it. A type this engine converts to nothing yet, `(array)` and
+/// `(object)`, is the internal-error fatal naming the opcode, as an
+/// opcode with no handler is.
+pub(crate) fn cast<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let Some(to) = crate::ops::CastTo::of(op.extended_value) else {
+        return Err(Fatal::Error(format!(
+            "InternalError: CAST to type {} has no conversion in this engine yet",
+            op.extended_value
+        )));
+    };
+    unary(req, frame, code, op, |req, value| {
+        crate::ops::cast(req, value, to)
+    })
+}
+
+/// `ZEND_BOOL`: [`crate::ops::is_true`] over the operand, into the
+/// temporary; the operand freed after it. What `(bool)` compiles to
+/// (`zend_compile_cast`), and a temporary `zend_do_free` never frees.
+///
+/// ```php
+/// $x = "0"; echo (bool)$x, "|", (bool)"", "|", (bool)"a", "|", (bool)0.0, "|", (bool)"0.0", "|", (bool)null;
+/// ```
+/// ```expect
+/// ||1||1|
+/// ```
+pub(crate) fn bool<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    unary(req, frame, code, op, |req, value| {
+        Ok(Value::bool(crate::ops::is_true(req, value)))
+    })
+}
+
 /// `ZEND_DEFINED`: [`crate::ops::defined`] over the constant string
 /// `op1` names, into the temporary. The cache slot in `extended_value`
 /// is not read: php keeps the answer in the per-request opline cache

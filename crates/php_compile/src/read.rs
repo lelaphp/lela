@@ -15,7 +15,8 @@
 //! interpolation, `true`, `false`, `null`, a constant by name, a call of
 //! a named function, a parenthesised expression, a variable `$a` that is
 //! a CV, an assignment `$a = expr` to one, `$a++` and `++$a` on one,
-//! unary `-` and `+`, and `<`, `.`, `<<`, `>>`, `+`, `-`, `*`, `/`, `%`
+//! unary `-` and `+`, a cast to a scalar type in any of the spellings
+//! php's scanner takes, and `<`, `.`, `<<`, `>>`, `+`, `-`, `*`, `/`, `%`
 //! and `**` at php's precedence levels: `<` under `.` under the shifts
 //! under the additive level under the multiplicative one, `<` not
 //! associating and the rest left to right, and `**` right to left above
@@ -68,6 +69,11 @@ pub(crate) enum Expr {
     /// `ZEND_AST_UNARY_PLUS`.
     Unary {
         minus: bool,
+        operand: Child,
+    },
+    /// `(int)$a`, php's `ZEND_AST_CAST` with the type in `attr`.
+    Cast {
+        to: CastTo,
         operand: Child,
     },
     /// `$a + $b`, php's `ZEND_AST_BINARY_OP`.
@@ -141,7 +147,7 @@ impl Drop for Child {
         let mut first = std::mem::replace(&mut *self.0, Expr::Null);
         loop {
             first = match first {
-                Expr::Unary { operand, .. } => operand.take(),
+                Expr::Unary { operand, .. } | Expr::Cast { operand, .. } => operand.take(),
                 Expr::Binary { left, right, .. } => {
                     drop(right);
                     left.take()
@@ -195,6 +201,39 @@ pub(crate) enum BinaryOp {
     IsNotIdentical,
     /// `ZEND_SPACESHIP`
     Spaceship,
+}
+
+/// The type a cast is to, php's `attr` on `ZEND_AST_CAST`: the scanner's
+/// `T_INT_CAST`, `T_DOUBLE_CAST`, `T_STRING_CAST` and `T_BOOL_CAST`,
+/// each with the canonical spelling and the one 8.5 deprecates
+/// (`zend_language_scanner.l` at the pin). `(array)` and `(object)` are
+/// refused as what this reader cannot read yet, and `(unset)` as the
+/// compile error `zend_compile_cast` raises for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CastTo {
+    /// `(int)` and `(integer)`: `IS_LONG`.
+    Long,
+    /// `(float)` and `(double)`: `IS_DOUBLE`.
+    Double,
+    /// `(string)` and `(binary)`: `IS_STRING`.
+    Str,
+    /// `(bool)` and `(boolean)`: `_IS_BOOL`, which php compiles to
+    /// `ZEND_BOOL` and never to `ZEND_CAST`.
+    Bool,
+}
+
+impl CastTo {
+    /// php's type constant, `ZEND_CAST`'s `extended_value`.
+    pub(crate) fn type_code(self) -> u32 {
+        match self {
+            CastTo::Long => 4,
+            CastTo::Double => 5,
+            CastTo::Str => 6,
+            // `_IS_BOOL` is 18 and reaches no opline: `ZEND_BOOL` carries
+            // nothing in `extended_value`.
+            CastTo::Bool => 0,
+        }
+    }
 }
 
 /// The line each statement stands on, beside it.
@@ -257,6 +296,13 @@ impl Reader<'_> {
     /// The bytes from `start` to where the reader stands.
     fn taken(&self, start: usize) -> Vec<u8> {
         self.source.get(start..self.at).unwrap_or_default().to_vec()
+    }
+
+    /// `len` bytes from `ahead` past where the reader stands, fewer at the end.
+    fn taken_ahead(&self, ahead: usize, len: usize) -> &[u8] {
+        let start = (self.at + ahead).min(self.source.len());
+        let end = (start + len).min(self.source.len());
+        self.source.get(start..end).unwrap_or_default()
     }
 
     fn bump(&mut self, by: usize) {
@@ -738,6 +784,7 @@ impl Reader<'_> {
                 })
             }
             Some(b) if b.is_ascii_digit() || (b == b'.' && self.digit_ahead(1)) => self.number(),
+            Some(b'(') if self.cast_ahead().is_some() => self.cast(),
             Some(b'(') => {
                 self.bump(1);
                 let inner = self.expr()?;
@@ -751,6 +798,68 @@ impl Reader<'_> {
             Some(b) if b.is_ascii_alphabetic() || b == b'_' || b == b'\\' => self.named(),
             _ => Err(self.trouble("an expression this compiler cannot read yet")),
         }
+    }
+
+    /// php's scanner's cast pattern, `"("{TABS_AND_SPACES}<word>{TABS_AND_SPACES}")"`
+    /// with the word matched whatever its case, at the reader's `(`: the
+    /// word and how far the `)` stands, or nothing where the parenthesis
+    /// opens an expression.
+    fn cast_ahead(&self) -> Option<(Vec<u8>, usize)> {
+        let mut i = 1;
+        while matches!(self.byte(i), Some(b' ' | b'\t')) {
+            i += 1;
+        }
+        let start = i;
+        while self.byte(i).is_some_and(|b| b.is_ascii_alphabetic()) {
+            i += 1;
+        }
+        let word = self
+            .source
+            .get(self.at + start..self.at + i)?
+            .to_ascii_lowercase();
+        while matches!(self.byte(i), Some(b' ' | b'\t')) {
+            i += 1;
+        }
+        if self.byte(i) != Some(b')') {
+            return None;
+        }
+        let known: &[&[u8]] = &[
+            b"int", b"integer", b"bool", b"boolean", b"float", b"double", b"real", b"string",
+            b"binary", b"array", b"object", b"unset",
+        ];
+        known.contains(&word.as_slice()).then_some((word, i + 1))
+    }
+
+    /// `T_INT_CAST expr` and its kin: the cast token, then the operand at
+    /// unary precedence, so `(int)$a ** 2` is php's `(int)($a ** 2)` as
+    /// `-$a ** 2` is. `(array)` and `(object)` wait on the tree; `(unset)`
+    /// is refused at the level `zend_compile_cast` refuses it,
+    /// `E_COMPILE_ERROR`, which php raises once the whole file has parsed
+    /// and `Parsed::diagnostics` carries there; and `(real)` is the
+    /// scanner's own parse error, carried there too.
+    fn cast(&mut self) -> Result<Expr, Trouble> {
+        let Some((word, len)) = self.cast_ahead() else {
+            return Err(self.trouble("an expression this compiler cannot read yet"));
+        };
+        let to = match word.as_slice() {
+            b"int" | b"integer" => CastTo::Long,
+            b"float" | b"double" => CastTo::Double,
+            b"string" | b"binary" => CastTo::Str,
+            b"bool" | b"boolean" => CastTo::Bool,
+            b"unset" => {
+                return Err(Trouble {
+                    level: Level::CompileError,
+                    what: "The (unset) cast is no longer supported".into(),
+                    line: self.line,
+                });
+            }
+            _ => return Err(self.trouble("a cast this compiler cannot read yet")),
+        };
+        self.bump(len);
+        Ok(Expr::Cast {
+            to,
+            operand: Child::new(self.unary()?),
+        })
     }
 
     /// A name: `true`, `false` and `null`, which php reads whatever their
@@ -960,10 +1069,43 @@ impl Reader<'_> {
                         Some(b'f') => 0x0c,
                         Some(b'e') => 0x1b,
                         Some(b @ (b'\\' | b'"' | b'$')) => b,
-                        // `\x41`, `\101` and `\u{1F600}` are php's other
-                        // escapes; refused rather than read as the
-                        // backslash php does not leave there.
-                        Some(b'x' | b'u' | b'0'..=b'7') => {
+                        // `\101`: up to three octal digits, read as php's
+                        // `(char) ZEND_STRTOL(octal_buf, NULL, 8)`, so the
+                        // byte is the low eight bits of what they spell, and
+                        // the scanner's warning for one past `\377` is the
+                        // lexer's, on `Parsed::diagnostics`.
+                        Some(b'0'..=b'7') => {
+                            let mut digits = 1;
+                            while digits < 3 && matches!(self.byte(1 + digits), Some(b'0'..=b'7')) {
+                                digits += 1;
+                            }
+                            let value = self
+                                .taken_ahead(1, digits)
+                                .iter()
+                                .fold(0u8, |n, d| n.wrapping_mul(8).wrapping_add(d - b'0'));
+                            bytes.push(value);
+                            self.bump(1 + digits);
+                            continue;
+                        }
+                        // `\x41`: one or two hex digits; `\x` before anything
+                        // else is left as written, as php's scanner leaves it.
+                        Some(b'x') if self.byte(2).is_some_and(|b| b.is_ascii_hexdigit()) => {
+                            let digits = if self.byte(3).is_some_and(|b| b.is_ascii_hexdigit()) {
+                                2
+                            } else {
+                                1
+                            };
+                            let value = self.taken_ahead(2, digits).iter().fold(0u32, |n, d| {
+                                n * 16 + char::from(*d).to_digit(16).unwrap_or(0)
+                            });
+                            bytes.push(u8::try_from(value).unwrap_or(u8::MAX));
+                            self.bump(2 + digits);
+                            continue;
+                        }
+                        // `\u{1F600}` is php's other escape; refused rather
+                        // than read as the backslash php does not leave
+                        // there.
+                        Some(b'u') => {
                             return Err(
                                 self.trouble("a string escape this compiler cannot read yet")
                             );
@@ -1031,7 +1173,7 @@ fn is_auto_global(name: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{BinaryOp, Child, Expr, Read, Stmt, Trouble};
+    use super::{BinaryOp, CastTo, Child, Expr, Level, Read, Stmt, Trouble};
 
     /// The reader on a thread nothing holds to a limit.
     fn read(source: &[u8]) -> Result<Read, Trouble> {
@@ -1677,13 +1819,102 @@ mod tests {
 
     #[test]
     fn a_string_escape_it_cannot_read_is_refused_rather_than_mis_read() {
-        for source in [
-            b"<?php echo \"\\x41\";".as_slice(),
-            b"<?php echo \"\\101\";".as_slice(),
-            b"<?php echo \"\\u{1F600}\";".as_slice(),
-        ] {
-            assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
-        }
+        assert!(read(b"<?php echo \"\\u{1F600}\";").is_err());
+    }
+
+    /// php's scanner over `"…"`: an octal escape of up to three digits
+    /// is the low eight bits of the number they spell, a hex escape of
+    /// one or two digits the byte, and `\x` before anything else stands
+    /// as written.
+    #[test]
+    fn octal_and_hex_escapes_are_the_bytes_php_reads() {
+        assert_eq!(
+            read(b"<?php echo \"\\101\\x41\\7\\777\\400\\xg\\x4\\1234\";").unwrap_or_default(),
+            vec![(
+                Stmt::Echo(vec![Expr::Str(b"AA\x07\xff\x00\\xg\x04S4".to_vec())]),
+                1
+            )]
+        );
+    }
+
+    /// The cast spellings php's scanner takes, whatever their case and
+    /// with blanks inside the parentheses, each to its type; `(array)`
+    /// and `(object)` are refused as unread, `(unset)` as php's compile
+    /// error, and a parenthesis that opens no cast opens an expression.
+    #[test]
+    fn a_cast_is_read_at_unary_precedence() {
+        let cast = |to: CastTo, operand: Expr| Expr::Cast {
+            to,
+            operand: Child::new(operand),
+        };
+        assert_eq!(
+            read(b"<?php (int)$a; ( Integer )$a; (FLOAT)$a; (double)$a; (string)$a; (binary)$a; (bool)$a; (boolean)$a;")
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(stmt, _)| stmt)
+                .collect::<Vec<_>>(),
+            [
+                CastTo::Long,
+                CastTo::Long,
+                CastTo::Double,
+                CastTo::Double,
+                CastTo::Str,
+                CastTo::Str,
+                CastTo::Bool,
+                CastTo::Bool
+            ]
+            .into_iter()
+            .map(|to| Stmt::Effect(cast(to, Expr::Var(b"a".to_vec()))))
+            .collect::<Vec<_>>()
+        );
+        // `(int)$a ** 2` is `(int)($a ** 2)`, as `-$a ** 2` is `-($a ** 2)`;
+        // `(int)$a + 1` casts `$a` alone.
+        assert_eq!(
+            read(b"<?php (int)$a ** 2; (int)$a + 1;").unwrap_or_default(),
+            vec![
+                (
+                    Stmt::Effect(cast(
+                        CastTo::Long,
+                        Expr::Binary {
+                            op: BinaryOp::Pow,
+                            left: Child::new(Expr::Var(b"a".to_vec())),
+                            right: Child::new(Expr::Int(2)),
+                        }
+                    )),
+                    1
+                ),
+                (
+                    Stmt::Effect(Expr::Binary {
+                        op: BinaryOp::Add,
+                        left: Child::new(cast(CastTo::Long, Expr::Var(b"a".to_vec()))),
+                        right: Child::new(Expr::Int(1)),
+                    }),
+                    1
+                ),
+            ]
+        );
+        assert_eq!(
+            read(b"<?php (1 + 2);").unwrap_or_default(),
+            vec![(
+                Stmt::Effect(Expr::Binary {
+                    op: BinaryOp::Add,
+                    left: Child::new(Expr::Int(1)),
+                    right: Child::new(Expr::Int(2)),
+                }),
+                1
+            )]
+        );
+        assert!(read(b"<?php (array)$a;").is_err());
+        assert!(read(b"<?php (object)$a;").is_err());
+        let unset = read(b"<?php\n(unset)$a;").err();
+        assert_eq!(
+            unset.as_ref().map(|t| (t.level, t.what.as_str(), t.line)),
+            Some((
+                Level::CompileError,
+                "The (unset) cast is no longer supported",
+                2
+            ))
+        );
     }
 
     #[test]

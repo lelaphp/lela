@@ -118,6 +118,125 @@ pub(crate) fn is_true(req: &mut Request, value: &Value) -> bool {
     }
 }
 
+/// What `ZEND_CAST` converts to, the three scalar arms of its handler
+/// (`Z/Zend/zend_vm_def.h:6495`), named by the type constant the
+/// opline's `extended_value` carries. `(bool)` is `ZEND_BOOL` and never
+/// reaches here; `(array)` and `(object)` wait on the tree and the
+/// object store's conversions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CastTo {
+    /// `IS_LONG`, `zval_get_long`.
+    Long,
+    /// `IS_DOUBLE`, `zval_get_double`.
+    Double,
+    /// `IS_STRING`, `zval_get_string`.
+    Str,
+}
+
+impl CastTo {
+    /// The arm for php's type constant, nothing for one this engine has
+    /// no conversion for.
+    pub(crate) fn of(code: u32) -> Option<CastTo> {
+        match code {
+            4 => Some(CastTo::Long),
+            5 => Some(CastTo::Double),
+            6 => Some(CastTo::Str),
+            _ => None,
+        }
+    }
+}
+
+/// `ZEND_CAST` (`Z/Zend/zend_vm_def.h:6495`): a value as `(int)`,
+/// `(float)` or `(string)` read it, which is `zval_get_long` with
+/// `is_strict` off, `zval_get_double` and [`to_string`]. The cast is the
+/// silent reading: a string is the number it opens with or zero with no
+/// word about what follows, and a float is truncated with no deprecation
+/// where it lost its fraction; what does speak is the warning
+/// `zend_dval_to_lval` raises for a float past the long's range or not
+/// finite, whose long is then the modular one, and the warning
+/// `convert_object_to_type` raises for an object, whose number is 1. A
+/// float-string past the range saturates instead (`zend_dval_to_lval_cap`),
+/// which is `strtol`'s edge kept. An array is 1 or 0 by whether it holds
+/// anything. Nothing is folded at compile time, so each cast below is
+/// the opcode.
+///
+/// ```php
+/// echo (int)"12abc", "|", (int)" 1e3 ", "|", (int)"9223372036854775808", "|", (int)"abc", "|", (int)1.9, "|", (int)-1.9, "|", (int)true, "|", (int)null, "|", (float)"1.5x", "|", (float)"abc", "|", (float)3, "|", (string)1.0, "|", (string)false, "|", (int)1e30, "|", (int)NAN;
+/// ```
+/// ```expect
+/// 12|1000|9223372036854775807|0|1|-1|1|0|1.5|0|3|1||
+/// Warning: The float 1.0E+30 is not representable as an int, cast occurred in %s on line 2
+/// 5076964154930102272|
+/// Warning: The float NAN is not representable as an int, cast occurred in %s on line 2
+/// 0
+/// ```
+pub(crate) fn cast(req: &mut Request, value: &Value, to: CastTo) -> Result<Value, Thrown> {
+    match to {
+        CastTo::Long => Ok(Value::int(get_long(req, value))),
+        CastTo::Double => Ok(Value::float(get_double(req, value))),
+        CastTo::Str => to_string(req, value).map(Value::string),
+    }
+}
+
+/// `zval_get_long_func` with `is_strict` off (`Z/Zend/zend_operators.c:957`).
+fn get_long(req: &mut Request, value: &Value) -> i64 {
+    match value.deref().as_ref() {
+        ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) => 0,
+        ValueRef::Bool(true) => 1,
+        ValueRef::Resource(r) => r.id(),
+        ValueRef::Int(n) => n,
+        ValueRef::Float(d) => dval_to_lval(req, d),
+        // `is_numeric_string` with `allow_errors`: the number the string
+        // opens with, a double among them capped, and zero for none.
+        ValueRef::Str(s) => match numeric_prefix(s.as_bytes()) {
+            Some((Number::Long(n), _)) => n,
+            Some((Number::Double(d), _)) => dval_to_lval_cap(d),
+            None => 0,
+        },
+        ValueRef::Array(a) => i64::from(!a.is_empty()),
+        ValueRef::Object(_) => {
+            not_converted(req, value, "int");
+            1
+        }
+        // `deref` followed the reference already.
+        ValueRef::Reference(r) => get_long(req, &r.get()),
+    }
+}
+
+/// `zval_get_double_func` (`Z/Zend/zend_operators.c:1027`).
+fn get_double(req: &mut Request, value: &Value) -> f64 {
+    match value.deref().as_ref() {
+        ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) => 0.0,
+        ValueRef::Bool(true) => 1.0,
+        ValueRef::Resource(r) => wide(r.id()),
+        ValueRef::Int(n) => wide(n),
+        ValueRef::Float(d) => d,
+        // `zend_strtod` over the string: the number it opens with after
+        // any leading whitespace, read to a double, and zero for none.
+        ValueRef::Str(s) => match numeric_prefix(s.as_bytes()) {
+            Some((Number::Long(n), _)) => wide(n),
+            Some((Number::Double(d), _)) => d,
+            None => 0.0,
+        },
+        ValueRef::Array(a) => f64::from(u8::from(!a.is_empty())),
+        ValueRef::Object(_) => {
+            not_converted(req, value, "float");
+            1.0
+        }
+        ValueRef::Reference(r) => get_double(req, &r.get()),
+    }
+}
+
+/// `convert_object_to_type`'s warning, for an object whose class has no
+/// conversion to the type named, which is every class here.
+fn not_converted(req: &mut Request, value: &Value, to: &str) {
+    let class = value_name(req, value);
+    warning(
+        req,
+        &format!("Object of class {class} could not be converted to {to}"),
+    );
+}
+
 /// `add_function` (`Zend/zend_operators.c:1200`), its fast type pairs and
 /// the slow path behind them: the sum of two longs, promoted to a double
 /// where it overflowed; a double where either side is one; two arrays
@@ -1564,9 +1683,7 @@ fn to_long(req: &mut Request, value: &Value) -> Option<i64> {
         return Some(match number {
             Number::Long(n) => n,
             Number::Double(d) => {
-                // `zend_dval_to_lval_cap`: zero for what is not finite, and
-                // the long's own edge past its range.
-                let capped = if d.is_finite() { truncated(d) } else { 0 };
+                let capped = dval_to_lval_cap(d);
                 if !long_compatible(d, capped) {
                     deprecated(
                         req,
@@ -1597,22 +1714,7 @@ fn to_long(req: &mut Request, value: &Value) -> Option<i64> {
 /// the long is not it. `ZEND_DOUBLE_FITS_LONG` is two comparisons NAN
 /// fails neither of, so NAN is warned on and then deprecated.
 fn double_to_long(req: &mut Request, d: f64) -> i64 {
-    let oob = |req: &mut Request| {
-        let text = rendered(d);
-        warning(
-            req,
-            &format!("The float {text} is not representable as an int, cast occurred"),
-        );
-    };
-    let l = if !d.is_finite() {
-        oob(req);
-        0
-    } else if !fits_long(d) {
-        oob(req);
-        modular(d)
-    } else {
-        truncated(d)
-    };
+    let l = dval_to_lval(req, d);
     if !long_compatible(d, l) && fits_long(d) {
         let text = rendered(d);
         deprecated(
@@ -1621,6 +1723,43 @@ fn double_to_long(req: &mut Request, d: f64) -> i64 {
         );
     }
     l
+}
+
+/// `zend_dval_to_lval`: the truncated long for a double in range and,
+/// with php's warning (`zend_oob_double_to_long_error`), zero for one
+/// that is not finite and the modular reading of `zend_dval_to_lval_slow`
+/// for one past the range. What `(int)` reads a float as, and the first
+/// half of [`double_to_long`].
+fn dval_to_lval(req: &mut Request, d: f64) -> i64 {
+    let oob = |req: &mut Request| {
+        let text = rendered(d);
+        warning(
+            req,
+            &format!("The float {text} is not representable as an int, cast occurred"),
+        );
+    };
+    if !d.is_finite() {
+        oob(req);
+        0
+    } else if !fits_long(d) {
+        oob(req);
+        modular(d)
+    } else {
+        truncated(d)
+    }
+}
+
+/// `zend_dval_to_lval_cap`: zero for what is not finite, and the long's
+/// own edge past its range, which is `strtol`'s answer kept for a
+/// float-string.
+fn dval_to_lval_cap(d: f64) -> i64 {
+    if !d.is_finite() {
+        0
+    } else if !fits_long(d) {
+        if d > 0.0 { i64::MAX } else { i64::MIN }
+    } else {
+        truncated(d)
+    }
 }
 
 /// A double as php's `%H` renders it in a message: `zend_gcvt` at the
