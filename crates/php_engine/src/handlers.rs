@@ -7,8 +7,11 @@
 //! makes the safepoint a folded branch under `Nop`.
 //!
 //! The set is the one procedural PHP needs to reach a native: `ECHO`, the
-//! call sequence `INIT_FCALL`, `SEND_VAL`, `SEND_VAR`, `DO_ICALL`,
-//! `RETURN`, which raises the return safepoint, `JMP` and `JMPNZ`, which
+//! call sequence `INIT_FCALL`, `SEND_VAL`, `SEND_VAR`, `DO_ICALL`, and
+//! the one php's compiler emits for a name its function table has not,
+//! `INIT_FCALL_BY_NAME`, `SEND_VAL_EX`, `SEND_VAR_EX`,
+//! `SEND_VAR_NO_REF_EX`, `DO_FCALL_BY_NAME` (#252), `RETURN`, which
+//! raises the return safepoint, `JMP` and `JMPNZ`, which
 //! raise the loop safepoint when they jump backward, `ASSIGN`, which
 //! writes a CV, the arithmetic `ZEND_ADD`, `ZEND_SUB`, `ZEND_MUL`,
 //! `ZEND_DIV`, `ZEND_MOD`, `ZEND_POW`, `ZEND_SL` and `ZEND_SR` and the
@@ -94,15 +97,76 @@ pub(crate) fn echo<T: Tier>(
 }
 
 /// `ZEND_INIT_FCALL`: the call frame for a callee named at compile time,
-/// its name in `op2` and the number of arguments in `extended_value`. A
-/// name nothing is declared under is php's `Error`.
+/// its lowered name in `op2` and the number of arguments in
+/// `extended_value`. A name nothing is declared under is php's `Error`,
+/// over the same constant.
 pub(crate) fn init_fcall<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let named = exec::constant(code, ConstIdx(op.op2));
+    let name = ConstIdx(op.op2);
+    init_call(req, frame, code, op, name, name)
+}
+
+/// `ZEND_INIT_FCALL_BY_NAME`: the call frame for a callee php's compiler
+/// found no function under, resolved here instead. `op2` names the
+/// constant pair `zend_add_func_name_literal` laid down, the name as
+/// written and then its lowered form: the lookup is by the second
+/// (`Z_STR_P(function_name+1)`) and the `Error` for a name nothing
+/// declares says the first (`zend_undefined_function_helper`), which is
+/// why `NoPe()` is named as written. The frame it pushes is the one
+/// `INIT_FCALL` pushes, so the `SEND_*_EX` and `DO_FCALL_BY_NAME` after
+/// it are served the same way.
+///
+/// ```php
+/// $a = 'x';
+/// echo NoPe($a);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Call to undefined function NoPe() in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+///
+/// The `Error` is raised at the `INIT`, before any argument is sent, so
+/// an argument's own diagnostic is never raised: no warning for `$u`.
+///
+/// ```php
+/// echo nope($u . 'y');
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Call to undefined function nope() in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn init_fcall_by_name<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let written = ConstIdx(op.op2);
+    let lowered = ConstIdx(op.op2.saturating_add(1));
+    init_call(req, frame, code, op, lowered, written)
+}
+
+/// The body the two `INIT_*` handlers share: the callee looked up under
+/// the constant at `lookup`, the `Error` for a name nothing declares
+/// naming the constant at `named`, and the call frame pushed with the
+/// number of arguments `extended_value` says.
+fn init_call(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    lookup: ConstIdx,
+    named: ConstIdx,
+) -> Edge {
+    let named = exec::constant(code, named);
     let name = match crate::ops::to_string(req, &named) {
         Ok(name) => name,
         Err(thrown) => {
@@ -110,7 +174,9 @@ pub(crate) fn init_fcall<T: Tier>(
             return Ok(Stepped::Threw(frame));
         }
     };
-    let Some(function) = req.function_named(name.as_bytes()) else {
+    let lookup = exec::constant(code, lookup);
+    let function = req.function_named(lookup.as_str_bytes().unwrap_or(name.as_bytes()));
+    let Some(function) = function else {
         let thrown = crate::api::raising::throw(
             req,
             "Error",
@@ -157,6 +223,82 @@ pub(crate) fn send_var<T: Tier>(
     send(req, frame, code, op)
 }
 
+/// `ZEND_SEND_VAL_EX`: `SEND_VAL` for a callee the compiler knew nothing
+/// of, which reads the parameter's by-reference bit off the callee the
+/// `INIT` resolved and raises `Cannot pass parameter %d by reference`
+/// where it is set. By value here, since nothing declares a by-reference
+/// parameter yet, so the body is `SEND_VAL`'s. The engine's compiler is
+/// handed the bundle's whole function table, so a program reaches this
+/// opline only through a table the program grows, which nothing does
+/// yet; the test beside the handlers holds it meanwhile, and the
+/// witness pins that the `INIT` before it has already raised.
+///
+/// ```php
+/// echo nope('x', 1);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Call to undefined function nope() in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn send_val_ex<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    send(req, frame, code, op)
+}
+
+/// `ZEND_SEND_VAR_EX`: `SEND_VAR` for a callee the compiler knew nothing
+/// of, which reads the parameter's by-reference bit off the callee the
+/// `INIT` resolved and sends a reference where it is set. By value here,
+/// since nothing declares a by-reference parameter yet, so the body is
+/// `SEND_VAR`'s; reached as [`send_val_ex`] is.
+///
+/// ```php
+/// $a = 'x';
+/// echo nope($a);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Call to undefined function nope() in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+pub(crate) fn send_var_ex<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    send(req, frame, code, op)
+}
+
+/// `ZEND_SEND_VAR_NO_REF_EX`: what a call returned, sent to a callee the
+/// compiler knew nothing of; `SEND_VAR` where the parameter is not by
+/// reference (`ZEND_VM_C_GOTO(send_var)`), which is every parameter
+/// here; reached as [`send_val_ex`] is.
+///
+/// ```php
+/// echo nope(strlen('ab'), nope2('y'));
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Call to undefined function nope() in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn send_var_no_ref_ex<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    send(req, frame, code, op)
+}
+
 /// `ZEND_DO_ICALL`: serve the native the call frame names, and write
 /// what it returned into the temporary `result` names. The frame stays
 /// on the stack with its arguments while the native runs, as php's does
@@ -184,9 +326,43 @@ pub(crate) fn do_icall<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    do_call(req, frame, code, op, "ZEND_DO_ICALL")
+}
+
+/// `ZEND_DO_FCALL_BY_NAME`: serve the callee an `INIT_FCALL_BY_NAME`
+/// resolved. Every callee this engine has is a native, so this is the
+/// handler's `ZEND_INTERNAL_FUNCTION` arm, which is `DO_ICALL`'s body:
+/// the frame stays on the stack while the native runs, is popped whether
+/// it returned or threw, and what it returned is the temporary's under
+/// `RETURN_VALUE_USED` and given up otherwise. The `ZEND_USER_FUNCTION`
+/// arm, which enters the callee's op array, comes with user functions.
+/// Reached as [`send_val_ex`] is, and held by the test beside the
+/// handlers; the witness pins the `INIT` raising before it.
+///
+/// ```php
+/// nope();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Call to undefined function nope() in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn do_fcall_by_name<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    do_call(req, frame, code, op, "ZEND_DO_FCALL_BY_NAME")
+}
+
+/// The body the two `DO_*CALL` handlers share, `opcode` naming the one
+/// that found no call frame under it.
+fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opcode: &str) -> Edge {
     let Some(function) = req.vm_mut().activate_call() else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_DO_ICALL with no call frame under it",
+        return Err(Fatal::Error(format!(
+            "InternalError: {opcode} with no call frame under it"
         )));
     };
     let served = req.serve_native(function);
@@ -861,6 +1037,7 @@ fn send(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge
 mod tests {
     use std::sync::Arc;
 
+    use php_heap::Intern as _;
     use php_unit::{Opcode, OperandKind, Unit};
 
     use super::*;
@@ -1063,6 +1240,145 @@ mod tests {
         );
         assert_eq!(req.state::<Asked>().sites.len(), 1);
         req.stack_mut().pop_entry(guard);
+    }
+
+    /// A unit whose main op array is `INIT_FCALL_BY_NAME` over the pair
+    /// `StrLen`, `strlen`, a `SEND_VAL_EX` of the constant `"abc"` and a
+    /// `DO_FCALL_BY_NAME` into `V0`: the shape php's compiler emits for
+    /// `StrLen("abc")` where its function table has not the name at
+    /// compile time and the program declares it before the call runs.
+    fn by_name(strings: &mut php_heap::Strings) -> Arc<Unit> {
+        let text = |strings: &mut php_heap::Strings, bytes: &[u8]| {
+            strings
+                .intern(bytes)
+                .map_or(php_heap::Zval::UNDEF, php_heap::Zval::string)
+        };
+        let written = text(strings, b"StrLen");
+        let lowered = text(strings, b"strlen");
+        let argument = text(strings, b"abc");
+        Arc::new(Unit {
+            main: OpArray {
+                oplines: vec![
+                    Opline {
+                        opcode: Opcode::InitFcallByName,
+                        op2_type: OperandKind::Const,
+                        op2: 0,
+                        out: 0,
+                        extended_value: 1,
+                        ..Opline::default()
+                    },
+                    Opline {
+                        opcode: Opcode::SendValEx,
+                        op1_type: OperandKind::Const,
+                        op1: 2,
+                        op2: 1,
+                        out: 0,
+                        ..Opline::default()
+                    },
+                    Opline {
+                        opcode: Opcode::DoFcallByName,
+                        out_type: OperandKind::Var,
+                        out: 0,
+                        ..Opline::default()
+                    },
+                ]
+                .into_boxed_slice(),
+                literals: vec![written, lowered, argument].into_boxed_slice(),
+                num_tmps: 1,
+                ..OpArray::default()
+            },
+            ..Unit::default()
+        })
+    }
+
+    /// `ZEND_INIT_FCALL_BY_NAME` resolves the pair's lowered name into
+    /// the frame `INIT_FCALL` builds, `SEND_VAL_EX` places the argument
+    /// on it as `SEND_VAL` does and `DO_FCALL_BY_NAME` serves the native
+    /// as `DO_ICALL` does, into the `VAR` the opline names. The
+    /// compiler is handed the bundle's whole table, so no program
+    /// reaches these three with a name the engine resolves until a
+    /// program can grow the table; this unit is that program.
+    #[test]
+    fn a_call_by_name_resolves_the_lowered_constant_and_serves_the_native() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let mut strings = php_heap::Strings::new();
+        let unit = by_name(&mut strings);
+        let frame = req.push_frame(Arc::clone(&unit));
+        let code = crate::exec::code_of(&unit);
+        let init = code.oplines.first().copied().unwrap_or_default();
+        let send = code.oplines.get(1).copied().unwrap_or_default();
+        let call = code.oplines.get(2).copied().unwrap_or_default();
+
+        assert_eq!(
+            init_fcall_by_name::<Nop>(&mut req, frame, code, &init),
+            Ok(Stepped::Same(frame))
+        );
+        assert!(!req.is_pending(), "the lowered constant is the table's key");
+        assert_eq!(
+            send_val_ex::<Nop>(&mut req, frame, code, &send),
+            Ok(Stepped::Same(frame))
+        );
+        assert_eq!(
+            do_fcall_by_name::<Nop>(&mut req, frame, code, &call),
+            Ok(Stepped::Same(frame))
+        );
+        assert_eq!(req.slot(frame, 0).as_int(), Some(3));
+        assert_eq!(req.vm().opline(frame), 3);
+    }
+
+    /// `zend_undefined_function_helper` names the constant as written
+    /// (`RT_CONSTANT(opline, opline->op2)`) where the lookup read the
+    /// lowered one after it, so the `Error` for `NoPe()` says `NoPe`;
+    /// the served witness beside [`init_fcall_by_name`] pins the whole
+    /// line against the oracle.
+    #[test]
+    fn a_call_by_name_of_no_function_raises_over_the_name_as_written() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let mut strings = php_heap::Strings::new();
+        let unit = by_name(&mut strings);
+        let mut oplines = unit.main.oplines.to_vec();
+        let written = strings
+            .intern(b"NoPe")
+            .map_or(php_heap::Zval::UNDEF, php_heap::Zval::string);
+        let lowered = strings
+            .intern(b"nope")
+            .map_or(php_heap::Zval::UNDEF, php_heap::Zval::string);
+        if let Some(init) = oplines.first_mut() {
+            init.op2 = 3;
+        }
+        let unit = Arc::new(Unit {
+            main: OpArray {
+                oplines: oplines.into_boxed_slice(),
+                literals: unit
+                    .main
+                    .literals
+                    .iter()
+                    .copied()
+                    .chain([written, lowered])
+                    .collect(),
+                ..unit.main.clone()
+            },
+            ..Unit::default()
+        });
+        let frame = req.push_frame(Arc::clone(&unit));
+        let code = crate::exec::code_of(&unit);
+        let init = code.oplines.first().copied().unwrap_or_default();
+
+        assert_eq!(
+            init_fcall_by_name::<Nop>(&mut req, frame, code, &init),
+            Ok(Stepped::Threw(frame))
+        );
+        assert!(req.is_pending());
+        let message = match req.uncaught() {
+            Err(Fatal::Error(message)) => message,
+            other => format!("{other:?}"),
+        };
+        assert!(
+            message.starts_with("Uncaught Error: Call to undefined function NoPe() in "),
+            "{message}"
+        );
     }
 
     /// A class declaring `__destruct`, as an extension declares one:

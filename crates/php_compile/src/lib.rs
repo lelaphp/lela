@@ -65,9 +65,11 @@ pub struct Options {
     /// The natives the engine's bundle declared, php's `CG(function_table)`
     /// as `zend_compile_call` reads it: what `zend_try_compile_special_func`
     /// requires a name to be one of before it serves the call itself
-    /// (`fbc->type == ZEND_INTERNAL_FUNCTION`), so a name the bundle has
-    /// not is the call. Every function here is a native; a user function
-    /// is declared by nothing this compiler reads yet.
+    /// (`fbc->type == ZEND_INTERNAL_FUNCTION`), and what a name must be
+    /// in for `INIT_FCALL`; a name the bundle has not is the call by name,
+    /// `INIT_FCALL_BY_NAME`, resolved as the program serves. Every
+    /// function here is a native; a user function is declared by nothing
+    /// this compiler reads yet.
     pub functions: Vec<FunctionDecl>,
     /// The stack limit of the thread the compiler runs on, php's
     /// `EG(stack_limit)`, which the engine works out once per request
@@ -240,16 +242,30 @@ mod tests {
         (unit, strings)
     }
 
+    /// The natives the tests below call that are in no row of
+    /// `special::TABLE`: php's `-n` has each, so its dump reads them off
+    /// `CG(function_table)` as `INIT_FCALL` and `DO_ICALL`.
+    const CALLED: [&[u8]; 5] = [
+        b"var_dump",
+        b"extension_loaded",
+        b"str_repeat",
+        b"set_time_limit",
+        b"memory_get_usage",
+    ];
+
     /// The options of an engine whose bundle declares every name of
-    /// `special::TABLE` as a native, which php's `-n` has: what the
-    /// fold reads as `CG(function_table)`, so the tests below compile
-    /// under the table php compiles under.
+    /// `special::TABLE` and every name of [`CALLED`] as a native, which
+    /// php's `-n` has: what `zend_compile_call` reads as
+    /// `CG(function_table)`, so the tests below compile under the table
+    /// php compiles under.
     fn bundled() -> Options {
         Options {
             functions: special::TABLE
                 .iter()
-                .map(|(name, _)| FunctionDecl {
-                    name: Name((*name).into()),
+                .map(|(name, _)| *name)
+                .chain(CALLED)
+                .map(|name| FunctionDecl {
+                    name: Name(name.into()),
                     parameters: Vec::new(),
                     return_type: None,
                     returns_by_ref: false,
@@ -1786,12 +1802,12 @@ mod tests {
         }
     }
 
-    /// `zend_try_compile_special_func` reads `fbc` off `CG(function_table)`
-    /// before the table, so under a bundle that declares none of the
-    /// names, which `Options::default` is, every one is the ordinary
-    /// call, the four constant shapes included.
+    /// `zend_compile_call` reads `fbc` off `CG(function_table)` before
+    /// `zend_try_compile_special_func` reads its table, so under a bundle
+    /// that declares none of the names, which `Options::default` is,
+    /// every one is the call by name, the four constant shapes included.
     #[test]
-    fn a_special_name_the_bundle_has_not_is_the_ordinary_call() {
+    fn a_special_name_the_bundle_has_not_is_the_call_by_name() {
         for (source, name) in [
             (&b"<?php echo strlen($a);"[..], &b"strlen"[..]),
             (b"<?php echo strlen('a');", b"strlen"),
@@ -1811,13 +1827,124 @@ mod tests {
             .unwrap_or_default();
             let oplines = &unit.main.oplines;
             assert!(
-                oplines.first().map(|op| op.opcode) == Some(Opcode::InitFcall)
+                oplines.first().map(|op| op.opcode) == Some(Opcode::InitFcallByName)
                     && literal_text(&unit, 0).as_deref() == Some(name)
-                    && oplines.iter().any(|op| op.opcode == Opcode::DoIcall),
+                    && oplines.iter().any(|op| op.opcode == Opcode::DoFcallByName),
                 "{}",
                 String::from_utf8_lossy(source)
             );
         }
+    }
+
+    /// The oracle's dump of `echo nope($a);` (#252), a name php's
+    /// function table has not: `zend_compile_dynamic_call`'s
+    /// `INIT_FCALL_BY_NAME` with the argument count and no used stack,
+    /// `SEND_VAR_EX` for the CV and `DO_FCALL_BY_NAME` into the `VAR`.
+    /// The constant pair is `zend_add_func_name_literal`'s, the name as
+    /// written and then its lowered form in the slot after it, two slots
+    /// even where the two are one string.
+    #[test]
+    fn a_name_the_bundle_has_not_is_init_fcall_by_name_over_the_constant_pair() {
+        let (unit, _strings) = unit_and_strings(b"<?php echo nope($a);");
+        assert_eq!(
+            unit.dump(&[]),
+            main_dump(
+                5,
+                1,
+                1,
+                "0000 INIT_FCALL_BY_NAME 1 string(\"nope\")\n\
+                 0001 SEND_VAR_EX CV0($a) 1\n\
+                 0002 V1 = DO_FCALL_BY_NAME\n\
+                 0003 ECHO V1\n\
+                 0004 RETURN int(1)\n"
+            )
+        );
+        let init = unit.main.oplines[0];
+        assert_eq!(
+            init.op1, 0,
+            "zend_compile_call_common writes used_stack for INIT_FCALL alone"
+        );
+        assert_eq!(init.op1_type, OperandKind::Unused);
+        assert_eq!((init.op2_type, init.op2), (OperandKind::Const, 0));
+        assert_eq!(init.out, 0, "one cache slot, zend_alloc_cache_slot");
+        assert_eq!(unit.main.cache_size, 1);
+        assert_eq!(literal_text(&unit, 0).as_deref(), Some(&b"nope"[..]));
+        assert_eq!(
+            literal_text(&unit, 1).as_deref(),
+            Some(&b"nope"[..]),
+            "the lowered name is the slot after the written one"
+        );
+        assert_eq!(
+            unit.main.literals.len(),
+            3,
+            "the pair and the final return's 1"
+        );
+    }
+
+    /// The oracle's dump of `echo NoPe(nope2($a), 1 + $a, 'x');`: the
+    /// pair keeps the case the name was written in and lowers it beside,
+    /// what the inner call returned is `SEND_VAR_NO_REF_EX`, a temporary
+    /// and a constant are `SEND_VAL_EX`, and the inner call is its own
+    /// by-name sequence inside the outer's.
+    #[test]
+    fn a_call_by_name_sends_each_argument_as_php_sends_it_for_an_unknown_callee() {
+        let (unit, _strings) = unit_and_strings(b"<?php echo NoPe(nope2($a), 1 + $a, 'x');");
+        assert_eq!(
+            unit.dump(&[]),
+            main_dump(
+                11,
+                1,
+                3,
+                "0000 INIT_FCALL_BY_NAME 3 string(\"NoPe\")\n\
+                 0001 INIT_FCALL_BY_NAME 1 string(\"nope2\")\n\
+                 0002 SEND_VAR_EX CV0($a) 1\n\
+                 0003 V1 = DO_FCALL_BY_NAME\n\
+                 0004 SEND_VAR_NO_REF_EX V1 1\n\
+                 0005 T2 = ADD int(1) CV0($a)\n\
+                 0006 SEND_VAL_EX T2 2\n\
+                 0007 SEND_VAL_EX string(\"x\") 3\n\
+                 0008 V3 = DO_FCALL_BY_NAME\n\
+                 0009 ECHO V3\n\
+                 0010 RETURN int(1)\n"
+            )
+        );
+        assert_eq!(literal_text(&unit, 0).as_deref(), Some(&b"NoPe"[..]));
+        assert_eq!(literal_text(&unit, 1).as_deref(), Some(&b"nope"[..]));
+        assert_eq!(literal_text(&unit, 2).as_deref(), Some(&b"nope2"[..]));
+        assert_eq!(literal_text(&unit, 3).as_deref(), Some(&b"nope2"[..]));
+        assert_eq!(
+            unit.main.cache_size, 2,
+            "one cache slot per INIT_FCALL_BY_NAME"
+        );
+    }
+
+    /// A name the bundle has keeps `INIT_FCALL` and `DO_ICALL` whatever
+    /// its arguments: `strlen('a', 'b')` is in `special::TABLE` and takes
+    /// two arguments, which the fold refuses, so it is the ordinary call
+    /// over the lowered name with php's used stack, as the oracle dumps
+    /// it: `INIT_FCALL 2 112 string("strlen")`.
+    #[test]
+    fn a_name_the_bundle_has_keeps_init_fcall_and_do_icall() {
+        let (unit, _strings) = unit_and_strings(b"<?php echo StrLen('a', 'b');");
+        assert_eq!(
+            unit.dump(&[]),
+            main_dump(
+                6,
+                0,
+                1,
+                "0000 INIT_FCALL 2 112 string(\"strlen\")\n\
+                 0001 SEND_VAL string(\"a\") 1\n\
+                 0002 SEND_VAL string(\"b\") 2\n\
+                 0003 V0 = DO_ICALL\n\
+                 0004 ECHO V0\n\
+                 0005 RETURN int(1)\n"
+            )
+        );
+        assert_eq!(
+            unit.main.literals.len(),
+            4,
+            "the lowered name once, no pair"
+        );
     }
 
     /// The oracle's dump under the pin's `dump` regime of #219's program

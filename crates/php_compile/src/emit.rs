@@ -33,7 +33,10 @@
 //! a constant or an opcode of its own (`ZEND_STRLEN`, `ZEND_TYPE_CHECK`,
 //! `ZEND_DEFINED`, `ZEND_COUNT`), where the engine's function table
 //! holds the name as a native ([`Options::functions`]); any other call
-//! is `INIT_FCALL`, `SEND_*` and `DO_ICALL`.
+//! of a name the table holds is `INIT_FCALL`, `SEND_*` and `DO_ICALL`,
+//! and a call of a name it has not is `zend_compile_dynamic_call`'s
+//! `INIT_FCALL_BY_NAME` over the name's constant pair, `SEND_*_EX` and
+//! `DO_FCALL_BY_NAME`, for the engine to resolve as the program serves.
 //!
 //! A variable read is a `CV` operand and no opline (`zend_try_compile_cv`),
 //! and an assignment to one is `ASSIGN` with the CV in `op1` and the value
@@ -175,6 +178,15 @@ impl Emit<'_> {
         if let Some(at) = self.constants.iter().position(|held| *held == value) {
             return u32::try_from(at).unwrap_or(0);
         }
+        let at = u32::try_from(self.constants.len()).unwrap_or(u32::MAX);
+        self.constants.push(value);
+        at
+    }
+
+    /// `zend_add_literal` as it stands: a slot of its own for `value`,
+    /// whether or not the table holds the value already, which a name's
+    /// constant pair needs where the name is its own lowered form.
+    fn literal(&mut self, value: Zval) -> u32 {
         let at = u32::try_from(self.constants.len()).unwrap_or(u32::MAX);
         self.constants.push(value);
         at
@@ -945,16 +957,15 @@ impl Emit<'_> {
         }
     }
 
-    /// `zend_compile_call` for a name known at compile time: what
-    /// `zend_try_compile_special_func` makes of the call where the name
-    /// is one of the engine's natives ([`Self::native`]) and in
-    /// [`crate::special`]'s table, a constant or an opcode of its own,
-    /// and the call otherwise, with `zend_compile_args` for its
-    /// arguments. Every callable this engine has is a native, so the
-    /// call op is `DO_ICALL`; a name the table has not is
-    /// `INIT_FCALL_BY_NAME` in php (`zend_compile_dynamic_call`) and the
-    /// same `INIT_FCALL` here until that opcode has a handler (#252), and
-    /// `DO_UCALL` comes with user functions.
+    /// `zend_compile_call`: `CG(function_table)` read first
+    /// ([`Self::native`]), and a name the table has not compiled as
+    /// `zend_compile_dynamic_call` compiles it, [`Self::dynamic_call`],
+    /// for the engine to resolve as the program serves. A name the table
+    /// has is what `zend_try_compile_special_func` makes of it where the
+    /// name is in [`crate::special`]'s table, a constant or an opcode of
+    /// its own, and `INIT_FCALL` over the lowered name otherwise. Every
+    /// callable this engine has is a native, so the call op after an
+    /// `INIT_FCALL` is `DO_ICALL`; `DO_UCALL` comes with user functions.
     ///
     /// Every call is given a `VAR` for what it returns (`zend_emit_op`
     /// with a `result`, `zend_make_var_result`), numbered whether or not
@@ -963,6 +974,9 @@ impl Emit<'_> {
     /// `RETURN_VALUE_USED`.
     fn call(&mut self, name: &[u8], arguments: &[Expr]) -> Result<Where, CompileError> {
         let lowered = unqualified(name);
+        if !self.native(&lowered) {
+            return self.dynamic_call(name, arguments);
+        }
         if let Some(served) = self.special(&lowered, arguments)? {
             return Ok(served);
         }
@@ -979,18 +993,70 @@ impl Emit<'_> {
             extended_value: count,
             ..Opline::default()
         });
+        self.args(arguments, true)?;
+        Ok(self.call_op(Opcode::DoIcall))
+    }
+
+    /// `zend_compile_dynamic_call` for a name written as a constant
+    /// string that `CG(function_table)` has not: `INIT_FCALL_BY_NAME`
+    /// over the name's constant pair, the arguments sent for a callee
+    /// nothing is known of, and `DO_FCALL_BY_NAME`
+    /// (`zend_compile_call_common` with `fbc` null, whose `used_stack`
+    /// is written for an `INIT_FCALL` alone, so `op1` stays unused).
+    /// The engine resolves the pair's lowered name at the `INIT` and
+    /// raises php's `Error` over the written one where nothing declares
+    /// it.
+    fn dynamic_call(&mut self, name: &[u8], arguments: &[Expr]) -> Result<Where, CompileError> {
+        let pair = self.func_name_literal(name)?;
+        let count = u32::try_from(arguments.len()).unwrap_or(0);
+        let slot = self.cache_slot();
+        self.push(Opline {
+            opcode: Opcode::InitFcallByName,
+            op2_type: OperandKind::Const,
+            op2: pair,
+            out: slot,
+            extended_value: count,
+            ..Opline::default()
+        });
+        self.args(arguments, false)?;
+        Ok(self.call_op(Opcode::DoFcallByName))
+    }
+
+    /// `zend_add_func_name_literal`: the name as written and its lowered
+    /// form, two slots in a row whatever the table already holds, since
+    /// the engine reads the second as the one after the first
+    /// (`Z_STR_P(function_name+1)`).
+    fn func_name_literal(&mut self, name: &[u8]) -> Result<u32, CompileError> {
+        let written = resolved(name);
+        let lowered = written.to_ascii_lowercase();
+        let written = self.string(written)?;
+        let lowered = self.string(&lowered)?;
+        let at = self.literal(written);
+        self.literal(lowered);
+        Ok(at)
+    }
+
+    /// `zend_compile_args` for arguments none of which is by reference,
+    /// unpacked or named: each compiled and sent at its number. A callee
+    /// the table has (`fbc`) takes a VAR or a CV by `SEND_VAR` and
+    /// anything else by `SEND_VAL`; one it has not takes a CV by
+    /// `SEND_VAR_EX`, what a call returned by `SEND_VAR_NO_REF_EX`, and a
+    /// constant or a temporary by `SEND_VAL_EX`, each of which reads the
+    /// parameter's by-reference bit off the callee as the program serves.
+    fn args(&mut self, arguments: &[Expr], known: bool) -> Result<(), CompileError> {
         for (at, argument) in arguments.iter().enumerate() {
             let value = self.expr(argument)?;
             let number = u32::try_from(at).unwrap_or(0) + 1;
             let (op1_type, op1) = self.operand(value);
+            let opcode = match (known, op1_type) {
+                (true, OperandKind::Var | OperandKind::Cv) => Opcode::SendVar,
+                (true, _) => Opcode::SendVal,
+                (false, OperandKind::Cv) => Opcode::SendVarEx,
+                (false, OperandKind::Var) => Opcode::SendVarNoRefEx,
+                (false, _) => Opcode::SendValEx,
+            };
             self.push(Opline {
-                // php sends a VAR or a CV by `SEND_VAR` and anything else
-                // by `SEND_VAL` (`zend_compile_args`, the not-by-reference
-                // arms).
-                opcode: match op1_type {
-                    OperandKind::Var | OperandKind::Cv => Opcode::SendVar,
-                    _ => Opcode::SendVal,
-                },
+                opcode,
                 op1_type,
                 op1,
                 op2: number,
@@ -998,14 +1064,20 @@ impl Emit<'_> {
                 ..Opline::default()
             });
         }
+        Ok(())
+    }
+
+    /// The call op `zend_get_call_op` picked, with the `VAR` for what
+    /// the call returns.
+    fn call_op(&mut self, opcode: Opcode) -> Where {
         let out = self.temporary();
         self.push(Opline {
-            opcode: Opcode::DoIcall,
+            opcode,
             out_type: OperandKind::Var,
             out,
             ..Opline::default()
         });
-        Ok(Where::Returned(out))
+        Where::Returned(out)
     }
 
     /// `zend_emit_final_return(true)`: the main op array returns the
@@ -1344,13 +1416,19 @@ fn scalar(value: Zval, string: Option<&php_heap::Str>) -> Scalar<'_> {
     }
 }
 
-/// `zend_resolve_function_name` for a name in no namespace, lowered as
-/// `zend_string_tolower` lowers it for `INIT_FCALL`'s operand: the
-/// leading separator of `\var_dump` dropped and the rest as written.
-fn unqualified(name: &[u8]) -> Vec<u8> {
+/// `zend_resolve_function_name` for a name in no namespace: the leading
+/// separator of `\var_dump` dropped and the rest as written, which is
+/// the name a constant pair keeps and an `Error` names.
+fn resolved(name: &[u8]) -> &[u8] {
     let mut at = 0;
     while name.get(at) == Some(&b'\\') {
         at += 1;
     }
-    name[at..].to_ascii_lowercase()
+    &name[at..]
+}
+
+/// [`resolved`] lowered as `zend_string_tolower` lowers it for the
+/// function table's key and `INIT_FCALL`'s operand.
+fn unqualified(name: &[u8]) -> Vec<u8> {
+    resolved(name).to_ascii_lowercase()
 }
