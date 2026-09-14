@@ -59,15 +59,32 @@ fn judge_text(text: &str, registry: &Registry) -> Tally {
 /// it is in the instrument. The root is the workspace, which leaves a file
 /// named by an absolute path where it stands.
 fn judged(file: &Path, text: &str, registry: &Registry, accept: bool) -> Tally {
+    judged_under(
+        &Runner::Engine(oracle().unwrap()),
+        file,
+        text,
+        registry,
+        accept,
+    )
+}
+
+/// The same judging with the run of record served by `runner`: the pinned
+/// oracle standing in for the engine, or the engine linked into the harness.
+fn judged_under(
+    runner: &Runner,
+    file: &Path,
+    text: &str,
+    registry: &Registry,
+    accept: bool,
+) -> Tally {
     let found = fence::extract(file, text);
-    let runner = Runner::Engine(oracle().unwrap());
     let ask = Ask {
         crates: Vec::new(),
         accept,
         staged: false,
     };
     let manifest = manifest();
-    let tally = judge(&manifest.pin.oracle(), registry, &runner, &ask, &found).unwrap();
+    let tally = judge(&manifest.pin.oracle(), registry, runner, &ask, &found).unwrap();
     if accept {
         capture(&workspace(), &tally.captured).unwrap();
     }
@@ -241,6 +258,33 @@ fn the_pinned_second_stream_and_the_status_are_held_apart_from_the_first() {
     let (judgement, note) = only(&judge_text(&without, &registry("")));
     assert_eq!(judgement, Judgement::Fail, "{note}");
     assert!(note.contains("to the second"), "{note}");
+}
+
+#[test]
+fn the_linked_engine_hands_over_its_second_stream_and_a_fence_is_held_to_it() {
+    if oracle().is_none() {
+        return;
+    }
+    // A snippet whose diagnostic goes to the error stream under the
+    // linked engine, which is `Capture`'s `stderr` handed over as the
+    // fresh-process adapter hands php's fd 2 over (#248): a fence pinning
+    // it passes, and one pinning nothing there fails on what was written.
+    let text = format!(
+        "/// ```php\n/// ini_set('display_errors', 'stderr');\n/// echo $u, 'to the first';\n/// ```\n{}pub fn native() {{}}\n",
+        "/// ```expect\n/// to the first\n/// ```\n/// ```stderr\n/// Warning: Undefined variable $u in %s on line 3\n/// ```\n"
+    );
+    let file = Path::new("ext/fixture/src/lib.rs");
+    let tally = judged_under(&Runner::Linked, file, &text, &registry(""), false);
+    let (judgement, note) = only(&tally);
+    assert_eq!(judgement, Judgement::Pass, "{note}");
+    let without = text.replace(
+        "/// ```stderr\n/// Warning: Undefined variable $u in %s on line 3\n/// ```\n",
+        "",
+    );
+    let tally = judged_under(&Runner::Linked, file, &without, &registry(""), false);
+    let (judgement, note) = only(&tally);
+    assert_eq!(judgement, Judgement::Fail, "{note}");
+    assert!(note.contains("Undefined variable $u"), "{note}");
 }
 
 #[test]

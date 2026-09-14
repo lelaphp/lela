@@ -13,12 +13,14 @@
 //! no name for is carried and read by nobody, which is what php does with
 //! `opcache.*` when opcache is not loaded.
 //!
-//! **The streams.** The recipe sets `display_errors=1` and `log_errors=0`,
-//! and under those php's CLI writes its diagnostics to the first stream
-//! and nothing at all to the second; the engine writes them to the sink
-//! the same way, so the first stream is the sink's bytes and the second is
-//! empty. What the engine hands the sink's log is the host's error log
-//! under `log_errors`, not a stream of this program, and is dropped here.
+//! **The streams.** The first stream is the sink's bytes; the second is
+//! `Capture`'s `stderr`, which is the CLI's second stream whole (#216):
+//! each log entry with `\n` after it, as `sapi_cli_log_message` writes,
+//! and what the error stream was given, in the order the request wrote
+//! them. That is the stream the fresh-process adapter reads from php's
+//! fd 2, and it goes through the recipe's normalisation the same way, so
+//! a `stderr` fence is held to what the engine wrote and a witness with
+//! no such fence asserts the engine wrote nothing there (#248).
 //!
 //! **A panic is a failure, not the harness's end** (design §8): the serve
 //! is caught, and a panic comes back as the trouble that makes the witness
@@ -55,7 +57,7 @@ pub(crate) fn serve(recipe: &Recipe, snippet: &str) -> Result<Observation> {
     };
     Ok(Observation {
         stdout: normalise(&recipe.normalise, served.stdout),
-        stderr: Vec::new(),
+        stderr: normalise(&recipe.normalise, served.stderr),
         exit: Some(served.exit_code),
         wall,
     })
