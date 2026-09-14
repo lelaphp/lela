@@ -89,3 +89,102 @@ fn the_arity_is_php_s() {
         "{out}"
     );
 }
+
+/// The token names a source comes back with, whitespace dropped, a
+/// single character as itself: the ids `var_dump` printed, named by
+/// `token_name` through the same engine.
+fn names(source: &str, flags: i64) -> String {
+    let escaped = source.replace('\\', "\\\\").replace('\'', "\\'");
+    let out = served(&format!(
+        "<?php var_dump(token_get_all('{escaped}', {flags}));"
+    ));
+    let mut ids = Vec::new();
+    let mut characters = Vec::new();
+    let lines: Vec<&str> = out.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].starts_with("  [") {
+            if lines[i + 1].starts_with("  array(3)") {
+                ids.push(lines[i + 3].trim().to_owned());
+                characters.push(None);
+                i += 4;
+            } else {
+                let text = lines[i + 1].trim();
+                characters.push(Some(
+                    text[text.find('"').unwrap_or(0) + 1..text.len() - 1].to_owned(),
+                ));
+                i += 2;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    let named = served(&format!(
+        "<?php var_dump({});",
+        ids.iter()
+            .map(|id| format!(
+                "token_name({})",
+                id.trim_start_matches("int(").trim_end_matches(')')
+            ))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    let mut named = named.lines().map(|l| {
+        l.trim_start_matches(|c: char| c != '"')
+            .trim_matches('"')
+            .to_owned()
+    });
+    characters
+        .into_iter()
+        .map(|character| character.unwrap_or_else(|| named.next().unwrap_or_default()))
+        .filter(|name| name != "T_WHITESPACE")
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The rest of the sites php's grammar takes a keyword as a name at,
+/// beside the two the witness pins: `static` fed back after `::` and as
+/// a method's or a constant's name but not as a class reference; the
+/// trait adaptations; a magic constant as a member and as a named
+/// argument; an enum case, a namespace's name, `readonly` as a
+/// function's name and as a call; and `callable` and `array` kept in
+/// type position. Each line is what the pinned php printed for the same
+/// source under `TOKEN_PARSE`, read once.
+#[test]
+fn the_parser_s_names_are_php_s() {
+    let held = [
+        (
+            "<?php new static; static::x; A::static; class C { function static(){} const static = 1; }",
+            "T_OPEN_TAG T_NEW T_STATIC ; T_STATIC T_DOUBLE_COLON T_STRING ; T_STRING T_DOUBLE_COLON T_STRING ; T_CLASS T_STRING { T_FUNCTION T_STRING ( ) { } T_CONST T_STRING = T_LNUMBER ; }",
+        ),
+        (
+            "<?php class C { use T { list as foo; T::list insteadof U; list as public bar; } }",
+            "T_OPEN_TAG T_CLASS T_STRING { T_USE T_STRING { T_STRING T_AS T_STRING ; T_STRING T_DOUBLE_COLON T_STRING T_INSTEADOF T_STRING ; T_STRING T_AS T_PUBLIC T_STRING ; } }",
+        ),
+        (
+            "<?php class C { function __CLASS__(){} const __LINE__ = 1; } A::__CLASS__; f(__LINE__: 1);",
+            "T_OPEN_TAG T_CLASS T_STRING { T_FUNCTION T_STRING ( ) { } T_CONST T_STRING = T_LNUMBER ; } T_STRING T_DOUBLE_COLON T_STRING ; T_STRING ( T_STRING : T_LNUMBER ) ;",
+        ),
+        (
+            "<?php enum E { case list; } namespace fn; function readonly(){} readonly();",
+            "T_OPEN_TAG T_ENUM T_STRING { T_CASE T_STRING ; } T_NAMESPACE T_STRING ; T_FUNCTION T_STRING ( ) { } T_STRING ( ) ;",
+        ),
+        (
+            "<?php function f(): callable { return fn(callable $c): array => [$c]; } $x instanceof A;",
+            "T_OPEN_TAG T_FUNCTION T_STRING ( ) : T_CALLABLE { T_RETURN T_FN ( T_CALLABLE T_VARIABLE ) : T_ARRAY T_DOUBLE_ARROW [ T_VARIABLE ] ; } T_VARIABLE T_INSTANCEOF T_STRING ;",
+        ),
+    ];
+    for (source, expected) in held {
+        assert_eq!(names(source, 1), expected, "{source}");
+    }
+}
+
+/// Without `TOKEN_PARSE` the same sources keep the scanner's names,
+/// which is the difference `TOKEN_PARSE` makes.
+#[test]
+fn without_the_flag_the_scanner_s_names_stand() {
+    assert_eq!(
+        names("<?php A::static; class C { const list = 1; } A::class;", 0),
+        "T_OPEN_TAG T_STRING T_DOUBLE_COLON T_STATIC ; T_CLASS T_STRING { T_CONST T_LIST = T_LNUMBER ; } T_STRING T_DOUBLE_COLON T_CLASS ;"
+    );
+}

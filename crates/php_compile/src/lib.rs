@@ -22,15 +22,19 @@ mod emit;
 mod read;
 mod special;
 
-/// The token stream (design §4.9), handed up for `php_engine::api::syntax`
-/// and nothing of the compiler's own: the lexer, its stream and php's
-/// names for its kinds, which `token_get_all` spells. It passes through
-/// here for the same reason [`compile_source`] does: the engine's edges
-/// reach this crate and not the syntax crate (design §4.2).
+/// The token stream and the tree (design §4.9), handed up for
+/// `php_engine::api::syntax` and nothing of the compiler's own: the
+/// lexer, its stream and php's names for its kinds, which
+/// `token_get_all` spells, and the parser with the tree's shape and its
+/// diagnostics, which `token_get_all` under `TOKEN_PARSE` reads as php's
+/// `tokenize_parse` reads the parser's events. It passes through here
+/// for the same reason [`compile_source`] does: the engine's edges reach
+/// this crate and not the syntax crate (design §4.2).
 pub mod syntax {
+    pub use php_syntax::tree::{Element, TokenId, Tree};
     pub use php_syntax::{
-        FileId, LexOptions, Lexed, SyntaxKind, Token, amp_name, cast_name, int_overflows, lex,
-        magic_const_name, operator_name,
+        Diagnostic, FileId, Level, LexOptions, Lexed, Options, Parsed, SyntaxKind, Token, amp_name,
+        cast_name, int_overflows, lex, magic_const_name, operator_name, parse,
     };
 }
 

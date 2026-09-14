@@ -44,6 +44,17 @@ pub fn raise(req: &mut Request, level: Level, message: &str) {
     req.note_error(level, message);
 }
 
+/// `zend_error_at`: the same diagnostic at a file and line of its own
+/// rather than the site the request has reached, which is what php's
+/// scanner and compiler raise with while a file is being compiled, the
+/// compiled name and `CG(zend_lineno)`. What `token_get_all()` under
+/// `TOKEN_PARSE` raises for an octal escape overflow is the witness, in
+/// `ext/tokenizer`: the file is the empty one `tokenize_parse` scans
+/// under, so php prints `in  on line 1`.
+pub fn raise_at(req: &mut Request, level: Level, message: &str, file: &[u8], line: u32) {
+    req.note_error_in(level, message, file, line);
+}
+
 /// `E_WARNING`.
 pub fn warning(req: &mut Request, message: &str) {
     raise(req, Level::Warning, message);
@@ -85,6 +96,41 @@ pub fn throw(req: &mut Request, class: &str, message: &str) -> Thrown {
         Ok(throwable) => throw_value(req, &throwable),
         Err(fatal) => fatal,
     }
+}
+
+/// A throwable of `class` made at a site of its own, the `file` and
+/// `line` `zend_default_exception_new` records for a `ParseError` or a
+/// `CompileError` while a file is being compiled: the compiled name and
+/// `CG(zend_lineno)`, never the executed site. The one thrower here is
+/// `token_get_all()` under `TOKEN_PARSE`, whose parse runs under the
+/// empty file name, and its witness in `ext/tokenizer` pins the
+/// rendering; `a_parse_error_is_rendered_as_its_level` below holds it
+/// without the extension.
+pub fn throw_at(req: &mut Request, class: &str, message: &str, file: &[u8], line: u32) -> Thrown {
+    match throwable_at(req, class, message, file, line) {
+        Ok(object) => Thrown::of(Some(object)),
+        Err(fatal) => fatal,
+    }
+}
+
+/// The instance behind [`throw_at`], its strings the request's; the
+/// `Err` is the memory limit refusing them.
+fn throwable_at(
+    req: &mut Request,
+    class: &str,
+    message: &str,
+    file: &[u8],
+    line: u32,
+) -> Result<PhpObject, Thrown> {
+    let mut object = req.new_object_of(class);
+    let message = Value::string(PhpString::new(req, message.as_bytes())?);
+    let file = Value::string(PhpString::new(req, file)?);
+    let line = Value::int(i64::from(line));
+    for (name, value) in [(&b"message"[..], message), (b"file", file), (b"line", line)] {
+        let name = PhpString::new(req, name)?;
+        object.set_prop(name, value);
+    }
+    Ok(object)
 }
 
 /// Make a throwable pending, `zend_throw_exception_object`; a value that
@@ -211,7 +257,7 @@ mod tests {
     use crate::engine::Engine;
     use crate::test::Capture;
 
-    use super::{Thrown, arg_type_error, arg_value_error};
+    use super::{Thrown, arg_type_error, arg_value_error, throw_at};
 
     fn parameter(name: &[u8], ty: Type, variadic: bool) -> Parameter {
         Parameter {
@@ -248,9 +294,20 @@ mod tests {
         Err(arg_type_error(req, 1, "be of type array, int given"))
     }
 
-    /// The fatal a source comes to under an engine with the two natives
+    /// What `token_get_all("<?php if (", TOKEN_PARSE)` throws: a
+    /// `ParseError` at the compiled site, the empty file name and the
+    /// scanner's line.
+    fn refuse(req: &mut Request) -> Result<Value, Thrown> {
+        Err(throw_at(req, "ParseError", "Unclosed '('", b"", 1))
+    }
+
+    /// The fatal a source comes to under an engine with the natives
     /// above declared beside the core's.
     fn fatal_of(source: &str) -> Option<String> {
+        served(source).fatal
+    }
+
+    fn served(source: &str) -> crate::test::Served {
         let extension = ExtensionBuilder::default()
             .functions(vec![
                 (
@@ -270,13 +327,13 @@ mod tests {
                     ),
                     array_merge as Entry,
                 ),
+                (declared(b"refuse", Vec::new()), refuse as Entry),
             ])
             .build("raising");
         Engine::builder()
             .extensions(&[extension])
             .build()
             .serve_capture(source, Capture::default())
-            .fatal
     }
 
     /// `zend_argument_type_error` under the pinned oracle, the name off
@@ -334,5 +391,25 @@ mod tests {
             Some(true),
             "{fatal:?}"
         );
+    }
+
+    /// `zend_exception_error` on an uncaught `ParseError`: the message as
+    /// `E_PARSE` at the throwable's own site, no `Uncaught` and no trace,
+    /// and the request ends at 255 with nothing after it. The pinned
+    /// oracle:
+    ///
+    /// ```text
+    /// $ php -n -r 'token_get_all("<?php if (", TOKEN_PARSE); echo "after";'
+    /// Parse error: Unclosed '(' in  on line 1
+    /// ```
+    #[test]
+    fn a_parse_error_is_rendered_as_its_level() {
+        let served = served("<?php refuse(); echo 'after';");
+        assert_eq!(
+            String::from_utf8_lossy(&served.stdout),
+            "\nParse error: Unclosed '(' in  on line 1\n"
+        );
+        assert_eq!(served.exit_code, 255);
+        assert_eq!(served.fatal, None);
     }
 }

@@ -24,6 +24,8 @@ pub(crate) fn zend_classes() -> Vec<ClassDecl> {
             Some(b"ArithmeticError"),
         ),
         declared(b"ArgumentCountError", ClassKind::Class, Some(b"TypeError")),
+        declared(b"CompileError", ClassKind::Class, Some(b"Error")),
+        declared(b"ParseError", ClassKind::Class, Some(b"CompileError")),
     ]
 }
 

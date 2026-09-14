@@ -441,11 +441,35 @@ impl Request {
     /// #0 {main}
     ///   thrown in %s on line 2
     /// ```
+    ///
+    /// A `ParseError` or a `CompileError`, the class itself and not a
+    /// child, is the branch before that one: its message alone, as
+    /// `E_PARSE` or `E_COMPILE_ERROR` at the site the throwable recorded,
+    /// with no `Uncaught` and no trace, and the request ends as the
+    /// diagnostic ends it. `token_get_all()` under `TOKEN_PARSE` is what
+    /// throws one here, and its witness in `ext/tokenizer` pins the
+    /// rendering; `a_parse_error_is_rendered_as_its_level` in
+    /// `api::raising` holds it without the extension.
     pub(crate) fn uncaught(&mut self) -> Result<(), Fatal> {
         let Some(throwable) = self.pending.take() else {
             return Ok(());
         };
         let (file, line) = Request::throw_site(&throwable);
+        let class = self.class_name_of(&throwable);
+        let compile_time = match class.as_str() {
+            "ParseError" => Some(Level::Parse),
+            "CompileError" => Some(Level::CompileError),
+            _ => None,
+        };
+        if let Some(level) = compile_time {
+            let message = string_prop(&throwable, b"message");
+            self.note_error_in(level, &message, &file, line);
+            match level {
+                Level::Parse => self.end_in_parse(),
+                _ => self.end_in_fatal_logged(&message, &file, line),
+            }
+            return Err(Fatal::Error(message));
+        }
         let message = format!(
             "Uncaught {}\n  thrown",
             self.throwable_to_string(&throwable)
@@ -454,16 +478,22 @@ impl Request {
         Err(Fatal::Error(message))
     }
 
+    /// The declared name of a throwable's class, `Error` for one the
+    /// tables do not know.
+    fn class_name_of(&self, throwable: &PhpObject) -> String {
+        self.class_decl(throwable.class()).map_or_else(
+            || String::from("Error"),
+            |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
+        )
+    }
+
     /// `Exception::__toString`: the class, the message where there is one,
     /// the site behind a colon and the trace under `Stack trace:`. The
     /// chain of `previous` throwables php walks after the first, and the
     /// ` and defined` a `TypeError` whose message names a call site takes,
     /// arrive with the user-function frames that make either reachable.
     fn throwable_to_string(&self, throwable: &PhpObject) -> String {
-        let class = self.class_decl(throwable.class()).map_or_else(
-            || String::from("Error"),
-            |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
-        );
+        let class = self.class_name_of(throwable);
         let message = string_prop(throwable, b"message");
         let (file, line) = Request::throw_site(throwable);
         let file = String::from_utf8_lossy(&file);
@@ -1066,10 +1096,18 @@ impl Request {
             return;
         }
         self.note_error_in(Level::Error, message, file, line);
-        self.ending = Some(Ending::Fatal(format!(
-            "PHP Fatal error:  {message} in {} on line {line}",
-            String::from_utf8_lossy(file)
-        )));
+        self.end_in_fatal_logged(message, file, line);
+    }
+
+    /// The ending alone, the diagnostic already rendered at its own
+    /// level: the log form the host is handed for a fatal.
+    fn end_in_fatal_logged(&mut self, message: &str, file: &[u8], line: u32) {
+        if self.ending.is_none() {
+            self.ending = Some(Ending::Fatal(format!(
+                "PHP Fatal error:  {message} in {} on line {line}",
+                String::from_utf8_lossy(file)
+            )));
+        }
     }
 
     /// `E_PARSE`: the request ends with php's status and no second

@@ -27,8 +27,7 @@
 //!   `\n` or a `\r` no `\n` follows.
 
 use php_ext::syntax::{
-    FileId, LexOptions, SyntaxKind, Token, amp_name, cast_name, int_overflows, lex,
-    magic_const_name, operator_name,
+    SyntaxKind, Token, amp_name, cast_name, int_overflows, magic_const_name, operator_name,
 };
 
 /// One token as `token_get_all` answers it: php's name where the token
@@ -41,13 +40,14 @@ pub(super) struct PhpToken {
     pub(super) line: u32,
 }
 
-/// `token_get_all($code)` without `TOKEN_PARSE`: php's tokens for
-/// `source`, `short_open_tag` being `CG(short_tags)`.
-pub(super) fn tokens(source: &[u8], short_open_tag: bool) -> Vec<PhpToken> {
-    let lexed = lex(FileId(0), source, &LexOptions { short_open_tag });
+/// php's tokens for `source` over the lexer's stream of it, which is
+/// the scanner's view whether `token_get_all` runs the parser or not:
+/// what `TOKEN_PARSE` changes is decided in [`super::feedback`] and put
+/// on these rows after.
+pub(super) fn tokens(source: &[u8], tokens: &[Token]) -> Vec<PhpToken> {
     let mut walk = Walk {
         source,
-        tokens: &lexed.tokens,
+        tokens,
         out: Vec::new(),
         contexts: vec![Context::Scripting],
         run: None,

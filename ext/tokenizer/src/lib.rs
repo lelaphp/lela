@@ -7,9 +7,10 @@
 //! (design §4.9) through `php_ext::syntax` and the `T_*` constants of
 //! [`names`]. What php's scanner cuts differently from the lexer is put
 //! back in [`tokens`]; the names the lexer's kinds carry come from
-//! `php_names` and are not repeated here. `TOKEN_PARSE` is accepted and
-//! served as the plain tokenize until a parser stands behind it (#230);
-//! `PhpToken` is not declared.
+//! `php_names` and are not repeated here. Under `TOKEN_PARSE` the one
+//! parser runs over the same stream and what it took as a name is read
+//! off the tree in [`feedback`]. `PhpToken` is not declared: a native
+//! class waits on the engine serving one.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -23,15 +24,22 @@
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+mod feedback;
 mod names;
 mod tokens;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::coerce::coerce_param;
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, Type};
-use php_ext::raising::{Thrown, arg_count_error, arg_null_deprecated};
+use php_ext::raising::{
+    Level, Thrown, arg_count_error, arg_null_deprecated, raise, raise_at, throw_at,
+};
 use php_ext::request::Request;
+use php_ext::syntax::{self, FileId, LexOptions};
 use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
+
+/// The one bit of `$flags` that `token_get_all` reads.
+const TOKEN_PARSE: i64 = 1;
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
@@ -53,7 +61,7 @@ struct State {}
 /// int(411)
 /// ```
 pub fn extension() -> Extension {
-    let mut constants = vec![constant(b"TOKEN_PARSE", 1)];
+    let mut constants = vec![constant(b"TOKEN_PARSE", TOKEN_PARSE)];
     for (name, id) in names::TOKENS {
         constants.push(constant(name.as_bytes(), id));
         if name == "T_DOUBLE_COLON" {
@@ -344,8 +352,8 @@ pub fn extension() -> Extension {
 /// an optional `Z_PARAM_LONG` over the flags, so `1` is the code `"1"`,
 /// and a call outside that arity is php's `ArgumentCountError`, which
 /// `the_arity_is_php_s` in `tests/capture.rs` holds without the oracle.
-/// `TOKEN_PARSE` is read and not yet served: the tokens come back as
-/// without it (#230).
+/// `flags & TOKEN_PARSE` chooses between [`tokenize`] and
+/// [`tokenize_parse`], as `tokenize_common` chooses.
 ///
 /// ```php
 /// var_dump(token_get_all(1));
@@ -369,14 +377,21 @@ fn token_get_all(req: &mut Request) -> Result<Value, Thrown> {
         return Err(wrong_argument_count(req, 1, 2, count));
     }
     let code = string_argument(req, 1)?;
-    if count == 2 {
-        long_argument(req, 2)?;
-    }
+    let flags = if count == 2 {
+        long_argument(req, 2)?
+    } else {
+        0
+    };
     let short_open_tag = req
         .ini_get(b"short_open_tag")
         .is_none_or(Request::ini_parse_bool);
+    let tokens = if flags & TOKEN_PARSE == 0 {
+        tokenize(req, code.as_bytes(), short_open_tag)
+    } else {
+        tokenize_parse(req, code.as_bytes(), short_open_tag)?
+    };
     let mut rows = PhpArray::new();
-    for token in tokens::tokens(code.as_bytes(), short_open_tag) {
+    for token in tokens {
         let text = code.as_bytes().get(token.start..token.end).unwrap_or(&[]);
         let text = Value::string(PhpString::new(req, text)?);
         match token.name.and_then(names::id_of) {
@@ -391,6 +406,376 @@ fn token_get_all(req: &mut Request) -> Result<Value, Thrown> {
         }
     }
     Ok(Value::array(rows))
+}
+
+/// php's `tokenize()` (`Z/ext/tokenizer/tokenizer.c:321`): the scanner
+/// alone, with no parser above it (`PARSER_MODE()` false), so what it
+/// throws is cleared (`zend_clear_exception` in `tokenize_common`) and
+/// nothing is deprecated, while the one warning its escape reader
+/// raises with no parser above it, the octal overflow, is raised at the
+/// executed site as `zend_error` places it with no file being compiled.
+///
+/// ```php
+/// var_dump(count(token_get_all('<?php "\777" "\u{xyz}"')));
+/// ```
+/// ```expect
+/// Warning: Octal escape sequence overflow \777 is greater than \377 in %s on line 2
+/// int(4)
+/// ```
+fn tokenize(req: &mut Request, code: &[u8], short_open_tag: bool) -> Vec<tokens::PhpToken> {
+    let lexed = syntax::lex(FileId(0), code, &LexOptions { short_open_tag });
+    for raised in &lexed.diagnostics {
+        if raised.level == syntax::Level::CompileWarning {
+            raise(req, Level::CompileWarning, &raised.message);
+        }
+    }
+    tokens::tokens(code, &lexed.tokens)
+}
+
+/// php's `tokenize_parse()` (`Z/ext/tokenizer/tokenizer.c:455`): the
+/// parser over the scanner, `CG(in_compilation)` set and the empty
+/// string as the compiled file name, so what the scanner and the parser
+/// raise stands `in  on line N`, the line the scanner had reached. A
+/// warning or a deprecation is raised and the parse goes on; a parse
+/// error is php's `ParseError` at the compiled site, thrown, and the
+/// tokens are not returned. The `(unset)` cast's fatal is the
+/// compiler's, which `tokenize_parse` never runs, so it is not raised.
+/// What the parser took as a name is put onto the tokens as
+/// [`feedback`] reads it; what stops at `__halt_compiler();` stops as
+/// the plain tokenize stops, php's `ON_STOP` and its three-token count
+/// agreeing there.
+///
+/// A keyword after `::`, as a method's name, a class constant's, an
+/// enum case's, a named argument's or a namespace's, and `readonly` as
+/// a function's, is `T_STRING`; `static` as a class reference, `array`
+/// and `callable` in a type, and a keyword the grammar reads as itself
+/// stay what the scanner said. The two fences pin the member after `::`
+/// and the members of a class; `the_parser_s_names_are_php_s` in
+/// `tests/capture.rs` holds the rest of the sites to what the pinned
+/// php printed.
+///
+/// ```php
+/// var_dump(token_get_all('<?php $x->class;A::list;A::class;', TOKEN_PARSE));
+/// ```
+/// ```expect
+/// array(13) {
+///   [0]=>
+///   array(3) {
+///     [0]=>
+///     int(394)
+///     [1]=>
+///     string(6) "<?php "
+///     [2]=>
+///     int(1)
+///   }
+///   [1]=>
+///   array(3) {
+///     [0]=>
+///     int(266)
+///     [1]=>
+///     string(2) "$x"
+///     [2]=>
+///     int(1)
+///   }
+///   [2]=>
+///   array(3) {
+///     [0]=>
+///     int(389)
+///     [1]=>
+///     string(2) "->"
+///     [2]=>
+///     int(1)
+///   }
+///   [3]=>
+///   array(3) {
+///     [0]=>
+///     int(262)
+///     [1]=>
+///     string(5) "class"
+///     [2]=>
+///     int(1)
+///   }
+///   [4]=>
+///   string(1) ";"
+///   [5]=>
+///   array(3) {
+///     [0]=>
+///     int(262)
+///     [1]=>
+///     string(1) "A"
+///     [2]=>
+///     int(1)
+///   }
+///   [6]=>
+///   array(3) {
+///     [0]=>
+///     int(402)
+///     [1]=>
+///     string(2) "::"
+///     [2]=>
+///     int(1)
+///   }
+///   [7]=>
+///   array(3) {
+///     [0]=>
+///     int(262)
+///     [1]=>
+///     string(4) "list"
+///     [2]=>
+///     int(1)
+///   }
+///   [8]=>
+///   string(1) ";"
+///   [9]=>
+///   array(3) {
+///     [0]=>
+///     int(262)
+///     [1]=>
+///     string(1) "A"
+///     [2]=>
+///     int(1)
+///   }
+///   [10]=>
+///   array(3) {
+///     [0]=>
+///     int(402)
+///     [1]=>
+///     string(2) "::"
+///     [2]=>
+///     int(1)
+///   }
+///   [11]=>
+///   array(3) {
+///     [0]=>
+///     int(262)
+///     [1]=>
+///     string(5) "class"
+///     [2]=>
+///     int(1)
+///   }
+///   [12]=>
+///   string(1) ";"
+/// }
+/// ```
+///
+/// ```php
+/// var_dump(token_get_all('<?php class C{const array=1;function callable(callable $c):static{}}', TOKEN_PARSE));
+/// ```
+/// ```expect
+/// array(24) {
+///   [0]=>
+///   array(3) {
+///     [0]=>
+///     int(394)
+///     [1]=>
+///     string(6) "<?php "
+///     [2]=>
+///     int(1)
+///   }
+///   [1]=>
+///   array(3) {
+///     [0]=>
+///     int(336)
+///     [1]=>
+///     string(5) "class"
+///     [2]=>
+///     int(1)
+///   }
+///   [2]=>
+///   array(3) {
+///     [0]=>
+///     int(397)
+///     [1]=>
+///     string(1) " "
+///     [2]=>
+///     int(1)
+///   }
+///   [3]=>
+///   array(3) {
+///     [0]=>
+///     int(262)
+///     [1]=>
+///     string(1) "C"
+///     [2]=>
+///     int(1)
+///   }
+///   [4]=>
+///   string(1) "{"
+///   [5]=>
+///   array(3) {
+///     [0]=>
+///     int(312)
+///     [1]=>
+///     string(5) "const"
+///     [2]=>
+///     int(1)
+///   }
+///   [6]=>
+///   array(3) {
+///     [0]=>
+///     int(397)
+///     [1]=>
+///     string(1) " "
+///     [2]=>
+///     int(1)
+///   }
+///   [7]=>
+///   array(3) {
+///     [0]=>
+///     int(262)
+///     [1]=>
+///     string(5) "array"
+///     [2]=>
+///     int(1)
+///   }
+///   [8]=>
+///   string(1) "="
+///   [9]=>
+///   array(3) {
+///     [0]=>
+///     int(260)
+///     [1]=>
+///     string(1) "1"
+///     [2]=>
+///     int(1)
+///   }
+///   [10]=>
+///   string(1) ";"
+///   [11]=>
+///   array(3) {
+///     [0]=>
+///     int(310)
+///     [1]=>
+///     string(8) "function"
+///     [2]=>
+///     int(1)
+///   }
+///   [12]=>
+///   array(3) {
+///     [0]=>
+///     int(397)
+///     [1]=>
+///     string(1) " "
+///     [2]=>
+///     int(1)
+///   }
+///   [13]=>
+///   array(3) {
+///     [0]=>
+///     int(262)
+///     [1]=>
+///     string(8) "callable"
+///     [2]=>
+///     int(1)
+///   }
+///   [14]=>
+///   string(1) "("
+///   [15]=>
+///   array(3) {
+///     [0]=>
+///     int(345)
+///     [1]=>
+///     string(8) "callable"
+///     [2]=>
+///     int(1)
+///   }
+///   [16]=>
+///   array(3) {
+///     [0]=>
+///     int(397)
+///     [1]=>
+///     string(1) " "
+///     [2]=>
+///     int(1)
+///   }
+///   [17]=>
+///   array(3) {
+///     [0]=>
+///     int(266)
+///     [1]=>
+///     string(2) "$c"
+///     [2]=>
+///     int(1)
+///   }
+///   [18]=>
+///   string(1) ")"
+///   [19]=>
+///   string(1) ":"
+///   [20]=>
+///   array(3) {
+///     [0]=>
+///     int(321)
+///     [1]=>
+///     string(6) "static"
+///     [2]=>
+///     int(1)
+///   }
+///   [21]=>
+///   string(1) "{"
+///   [22]=>
+///   string(1) "}"
+///   [23]=>
+///   string(1) "}"
+/// }
+/// ```
+///
+/// ```php
+/// var_dump(count(token_get_all('<?php (integer)$x; "\777";', TOKEN_PARSE)));
+/// token_get_all('<?php if (', TOKEN_PARSE);
+/// echo "never\n";
+/// ```
+/// ```expect exit=255
+/// Deprecated: Non-canonical cast (integer) is deprecated, use the (int) cast instead in  on line 1
+///
+/// Warning: Octal escape sequence overflow \777 is greater than \377 in  on line 1
+/// int(7)
+///
+/// Parse error: Unclosed '(' in  on line 1
+/// ```
+fn tokenize_parse(
+    req: &mut Request,
+    code: &[u8],
+    short_open_tag: bool,
+) -> Result<Vec<tokens::PhpToken>, Thrown> {
+    let options = syntax::Options {
+        file: FileId(0),
+        lex: LexOptions { short_open_tag },
+    };
+    let parsed = syntax::parse(code, &options);
+    for raised in &parsed.diagnostics {
+        match raised.level {
+            syntax::Level::Parse => {
+                return Err(throw_at(
+                    req,
+                    "ParseError",
+                    &raised.message,
+                    b"",
+                    raised.line,
+                ));
+            }
+            syntax::Level::CompileWarning => {
+                raise_at(
+                    req,
+                    Level::CompileWarning,
+                    &raised.message,
+                    b"",
+                    raised.line,
+                );
+            }
+            syntax::Level::Deprecated => {
+                raise_at(req, Level::Deprecated, &raised.message, b"", raised.line);
+            }
+            syntax::Level::CompileError => {}
+        }
+    }
+    let mut tokens = tokens::tokens(code, &parsed.tokens);
+    let fed = feedback::identifiers(&parsed);
+    for token in &mut tokens {
+        if fed.binary_search(&token.start).is_ok() {
+            token.name = Some("T_STRING");
+        }
+    }
+    Ok(tokens)
 }
 
 /// `token_name(int $id): string`, php's `PHP_FUNCTION(token_name)`
