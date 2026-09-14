@@ -1,6 +1,7 @@
 # php_heap: the memory model and the one home of `unsafe` in the engine
 # (design §4.1, §5; seams.toml crate row and unsafe.homes). Depends on
-# nothing in the workspace.
+# nothing in the workspace; `libc` is the platform's own headers, which
+# `zend_call_stack.c`'s probe of the thread's bounds names (design §4.1).
 [package]
 name = "php_heap"
 version = "0.0.0"
@@ -14,3 +15,4 @@ description = "The memory model: zval, refcounted header, VM stack, map table, t
 workspace = true
 
 [dependencies]
+libc = { workspace = true }

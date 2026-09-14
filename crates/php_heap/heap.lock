@@ -27,6 +27,7 @@ Block::bytes
 Block::bytes_mut
 Block::is_empty
 Block::len
+CallStack
 EntryGuard
 Fatal
 Frame
@@ -179,6 +180,8 @@ Zval::reference
 Zval::resource
 Zval::string
 ZvalType
+call_stack_bounds
+call_stack_default_size
 compare
 double_to_string
 identical

@@ -32,6 +32,7 @@
 
 mod array;
 mod block;
+mod call_stack;
 mod compare;
 mod gc;
 mod hooks;
@@ -48,6 +49,7 @@ mod zval;
 
 pub use array::{Arr, ArrIter, Key};
 pub use block::Block;
+pub use call_stack::{CallStack, call_stack_bounds, call_stack_default_size};
 pub use compare::{Scalar, compare, identical};
 pub use hooks::{Fatal, HeapHooks};
 pub use map::{MapPtr, MapTable};

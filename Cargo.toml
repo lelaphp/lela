@@ -29,4 +29,5 @@ serde_json = "1"
 toml = "0.9"
 syn = { version = "3", features = ["full", "visit"] }
 md5 = "0.8"
+libc = "0.2"                        # the platform's headers, for `php_heap`'s probe of the thread's bounds (design §4.1)
 expect-test = "1.5"                 # the parser's snapshot fixtures, regenerated once per file (record §4.9)

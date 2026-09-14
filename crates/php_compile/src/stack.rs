@@ -13,19 +13,23 @@
 //! request's thread, and hands it to the compiler in
 //! [`crate::Options`].
 //!
-//! Where the thread's own bounds come from is the one thing not copied.
-//! php asks the platform (`zend_call_stack_get`, which is
-//! `pthread_get_stackaddr_np`, `pthread_getattr_np` or `/proc/self/maps`),
-//! and this crate forbids `unsafe`, so what stands here is php's own
-//! fallback for a platform it could not ask: the address of a local at
-//! init as the base, which "is not the actual stack base", and a size
-//! php assumes for the platform less 32 KiB for the distance already
-//! walked (`zend_call_stack_init`, the `ZEND_MAX_ALLOWED_STACK_SIZE_DETECT`
-//! arm). The size assumed is [`default_size`]'s sentence. What
-//! `zend.max_allowed_stack_size=0` should detect on a thread this engine
-//! sizes is a person's (harness §11), asked in #291, which names the two
-//! readings that would replace this fallback.
+//! The thread's own bounds are php's reading too. `zend_call_stack_get`
+//! asks the platform for the calling thread's base and size, and this
+//! crate forbids `unsafe`, so the asking is `php_heap`'s,
+//! [`php_heap::call_stack_bounds`], read through `heap.lock`; the
+//! native stack is the host's thread's, whatever size the host gave it,
+//! and the engine sizes no thread of its own (design §5.6, §5.14). A
+//! thread the platform cannot describe gets php's own fallback, the
+//! `ZEND_MAX_ALLOWED_STACK_SIZE_DETECT` arm of `zend_call_stack_init`
+//! where `base` is null: the address of a local at init as the base,
+//! which "is not the actual stack base", and the size php assumes for
+//! the platform, [`php_heap::call_stack_default_size`], less 32 KiB for
+//! the distance already walked; the limit is then an estimate, as php's
+//! is there. A host thread smaller than a program needs is not refused
+//! at `serve`: the limit is what the thread has, and a nesting past it
+//! is the same fatal php raises on the same thread, earlier.
 
+use php_heap::{call_stack_bounds, call_stack_default_size};
 use php_unit::Level;
 
 use crate::CompileError;
@@ -62,18 +66,25 @@ impl StackLimit {
     /// `zend.reserved_stack_size`, `0` for php's minimum, which a smaller
     /// number is raised to as php's `OnUpdate` handler refuses it.
     ///
-    /// Detect is php's fallback arm, since nothing here can ask the
-    /// platform for the thread's bounds: the base is where this frame
-    /// stands, and the size is [`default_size`] less the 32 KiB php
-    /// allows for the frames already below the real base.
+    /// Detect reads the thread's bounds as the platform describes them,
+    /// `php_heap::call_stack_bounds`; on a thread it cannot describe,
+    /// the base is where this frame stands and the size is
+    /// `php_heap::call_stack_default_size` less the 32 KiB php allows
+    /// for the frames already below the real base. A positive number is
+    /// the size to allow below the base the platform read, or below
+    /// this frame where it read none.
     #[must_use]
     pub fn init(max_allowed: i64, reserved: u64) -> StackLimit {
         let reserved = reserved.max(RESERVED_MIN);
         let reserved = usize::try_from(reserved).unwrap_or(usize::MAX);
-        let base = position();
+        let read = call_stack_bounds();
+        let base = read.map_or_else(position, |stack| stack.base);
         match max_allowed {
             DETECT => {
-                let size = default_size().saturating_sub(32 * 1024);
+                let size = read.map_or_else(
+                    || call_stack_default_size().saturating_sub(32 * 1024),
+                    |stack| stack.max_size,
+                );
                 StackLimit {
                     base,
                     limit: limit(base, size, reserved),
@@ -100,10 +111,10 @@ impl StackLimit {
     /// for the parser, so php's grammar takes it whole and php's
     /// compiler refuses it here, at about fifty thousand links under an
     /// 8 MiB stack, where twenty thousand nested parentheses are the
-    /// parser's `memory exhausted`. The number is the thread's, php's
-    /// from the platform and this engine's from [`default_size`], so
-    /// the witness masks it; the sentence, the file and the line are
-    /// pinned. Two hundred thousand links is #246's measurement, room
+    /// parser's `memory exhausted`. The number is the thread's, read
+    /// from the platform by both engines and so the rlimit's under the
+    /// shell that runs them, so the witness masks it; the sentence, the
+    /// file and the line are pinned. Two hundred thousand links is #246's measurement, room
     /// for a stack four times the default.
     ///
     /// ```php
@@ -153,29 +164,6 @@ fn position() -> usize {
     std::ptr::addr_of!(here).addr()
 }
 
-/// The size assumed for the calling thread where nothing asked the
-/// platform. On the main thread it is `zend_call_stack_default_size`'s
-/// number for the platform, the rlimit's default: 8 MiB on Linux and
-/// macOS, 4 MiB on FreeBSD and NetBSD, 2 MiB elsewhere. Any other thread
-/// is one `std::thread` spawned, whose size is `RUST_MIN_STACK` when the
-/// environment sets it and 2 MiB when it does not, the library's own
-/// default; php's number for a pthread of the platform's default
-/// attributes, 512 KiB on macOS, describes no thread this engine runs on.
-fn default_size() -> usize {
-    const MIB: usize = 1024 * 1024;
-    if std::thread::current().name() == Some("main") {
-        return match std::env::consts::OS {
-            "linux" | "macos" => 8 * MIB,
-            "freebsd" | "netbsd" => 4 * MIB,
-            _ => 2 * MIB,
-        };
-    }
-    std::env::var("RUST_MIN_STACK")
-        .ok()
-        .and_then(|bytes| bytes.trim().parse().ok())
-        .unwrap_or(2 * MIB)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +208,36 @@ mod tests {
         let reserved = StackLimit::init(1024 * 1024, 100 * 1024);
         assert_eq!(reserved.base - reserved.limit, 924 * 1024);
         assert!(deeper(&StackLimit::init(0, 0)).is_ok());
+    }
+
+    /// Detect reads the thread the limit is built on: on a thread
+    /// spawned at one size, the number is that size less the
+    /// reservation, to the page, and the base is above every local of
+    /// the thread. On a platform this engine has no arm for, the
+    /// fallback's number is the assumed size less php's 32 KiB.
+    #[test]
+    fn detect_reads_the_calling_threads_bounds() {
+        let size = 1024 * 1024;
+        let Ok(spawned) = std::thread::Builder::new().stack_size(size).spawn(|| {
+            let stack = StackLimit::init(0, 0);
+            (stack, position())
+        }) else {
+            return;
+        };
+        let Ok((stack, local)) = spawned.join() else {
+            return;
+        };
+        let reserved = usize::try_from(RESERVED_MIN).unwrap_or(0);
+        let read = stack.base - stack.limit + reserved;
+        if php_heap::call_stack_bounds().is_none() {
+            assert_eq!(read, php_heap::call_stack_default_size() - 32 * 1024);
+            return;
+        }
+        assert!(
+            read >= size && read < 2 * size,
+            "a {size}-byte thread reads as {read}"
+        );
+        assert!(local < stack.base && local > stack.limit);
     }
 
     /// `limit`'s two clamps.
