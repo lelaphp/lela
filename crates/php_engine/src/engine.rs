@@ -24,7 +24,7 @@ use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, Name};
 
 use crate::api::abi::{Cache, Entry, Extension, StartupIni};
 use crate::api::raising::Level;
-use crate::api::request::{Ending, Request};
+use crate::api::request::{Aside, Ending, Request};
 use crate::api::values::Value;
 use crate::exec;
 use crate::tier::{Nop, Tier, execute};
@@ -64,6 +64,15 @@ pub trait OutputSink {
     /// php's CLI writes `"%s\n"` to stderr and a file log writes
     /// `[date] ` before it and `PHP_EOL` after.
     fn log(&mut self, entry: &[u8]);
+    /// Bytes for the host's error stream, as given: what php writes to
+    /// the process's `stderr` past the host, the `display_errors=stderr`
+    /// form of a diagnostic with its `\n` (`Z/main/main.c:1484`) and,
+    /// when streams exist, what the `STDERR` stream constant is given.
+    /// Where the log goes is the host's: php's CLI puts it on this same
+    /// stream, and a host with an `error_log` file parts the two, so a
+    /// diagnostic is logged and displayed in that order on one stream
+    /// and in no order across two (#216).
+    fn write_stderr(&mut self, bytes: &[u8]);
 }
 
 /// What `serve` reports of one request.
@@ -486,8 +495,11 @@ impl Engine {
         };
         let headers = req.header_block();
         let body = req.take_body();
-        for entry in req.take_log() {
-            sink.log(&entry);
+        for aside in req.take_aside() {
+            match aside {
+                Aside::Log(entry) => sink.log(&entry),
+                Aside::Stderr(bytes) => sink.write_stderr(&bytes),
+            }
         }
         sink.send_headers(&headers);
         sink.write(&body);
@@ -539,22 +551,52 @@ mod tests {
     use crate::probe::{Asked, Probe};
     use crate::tier::Site;
 
+    /// One call the sink saw on a channel beside the body.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Saw {
+        Log(Vec<u8>),
+        Stderr(Vec<u8>),
+    }
+
     /// Everything the request wrote, kept: the body as `Capture` keeps
-    /// it behind the `test` feature, and the log as the calls the sink
-    /// saw, one entry each.
+    /// it behind the `test` feature, and the log and the error stream
+    /// as the calls the sink saw, in the order it saw them.
     #[derive(Default)]
     struct Kept {
         body: Vec<u8>,
-        log: Vec<Vec<u8>>,
+        seen: Vec<Saw>,
     }
 
     impl Kept {
+        /// The log's entries alone, one per call.
+        fn log(&self) -> Vec<Vec<u8>> {
+            self.seen
+                .iter()
+                .filter_map(|saw| match saw {
+                    Saw::Log(entry) => Some(entry.clone()),
+                    Saw::Stderr(_) => None,
+                })
+                .collect()
+        }
+
         /// The log as php's CLI writes it to stderr, `"%s\n"` per entry.
         fn logged(&self) -> String {
             let mut text = String::new();
-            for entry in &self.log {
-                text.push_str(&String::from_utf8_lossy(entry));
+            for entry in self.log() {
+                text.push_str(&String::from_utf8_lossy(&entry));
                 text.push('\n');
+            }
+            text
+        }
+
+        /// The error stream alone, as a host with an `error_log` file
+        /// would have it, the log parted from it.
+        fn stderr(&self) -> String {
+            let mut text = String::new();
+            for saw in &self.seen {
+                if let Saw::Stderr(bytes) = saw {
+                    text.push_str(&String::from_utf8_lossy(bytes));
+                }
             }
             text
         }
@@ -567,7 +609,10 @@ mod tests {
         fn flush(&mut self) {}
         fn send_headers(&mut self, _: &[u8]) {}
         fn log(&mut self, entry: &[u8]) {
-            self.log.push(entry.to_vec());
+            self.seen.push(Saw::Log(entry.to_vec()));
+        }
+        fn write_stderr(&mut self, bytes: &[u8]) {
+            self.seen.push(Saw::Stderr(bytes.to_vec()));
         }
     }
 
@@ -658,7 +703,7 @@ mod tests {
             "\nWarning: unexpected NAN value was coerced to string in witness.php on line 1\nNAN"
         );
         assert!(
-            displayed.log.is_empty(),
+            displayed.log().is_empty(),
             "log_errors is off, so nothing is logged"
         );
 
@@ -836,7 +881,7 @@ mod tests {
             );
             (
                 String::from_utf8_lossy(&kept.body).into_owned(),
-                kept.logged(),
+                kept.stderr(),
             )
         };
         for host in ["cli", "cgi", "phpdbg"] {
@@ -856,6 +901,39 @@ mod tests {
                 String::new()
             ),
             "another host falls to the plain form on the body"
+        );
+    }
+
+    /// The error stream and the log are two channels on the sink, so a
+    /// host with an `error_log` file keeps the stderr form of a
+    /// diagnostic off the file, and one diagnostic at
+    /// `display_errors=stderr` and `log_errors=1` is two calls in
+    /// php's order: `php_error_cb` logs before it displays
+    /// (`Z/main/main.c:1459`, then `:1484`), and the stderr form ends in
+    /// `\n` where the log entry ends in nothing. Under the CLI the two
+    /// are one fd, and what it reads is
+    /// `PHP Warning:  … line 2\nWarning: … line 2\n`, which is what the
+    /// pinned oracle writes for `-d display_errors=stderr -d
+    /// log_errors=1` over `<?php\necho NAN;`.
+    #[test]
+    fn the_stderr_form_and_the_log_entry_are_two_calls_in_phps_order() {
+        let mut kept = Kept::default();
+        Engine::builder()
+            .ini("display_errors", "stderr")
+            .ini("log_errors", "1")
+            .build()
+            .serve(description("<?php\necho NAN;"), &mut kept);
+        assert_eq!(String::from_utf8_lossy(&kept.body), "NAN");
+        assert_eq!(
+            kept.seen,
+            vec![
+                Saw::Log(
+                    format!("PHP Warning:  {NAN_WARNING} in witness.php on line 2").into_bytes()
+                ),
+                Saw::Stderr(
+                    format!("Warning: {NAN_WARNING} in witness.php on line 2\n").into_bytes()
+                ),
+            ]
         );
     }
 
@@ -1192,13 +1270,13 @@ mod tests {
         assert!(logged.body.is_empty(), "display_errors is off");
         assert_eq!(
             logged
-                .log
+                .log()
                 .first()
                 .map(|entry| String::from_utf8_lossy(entry).into_owned()),
             observables.fatal,
             "what the log holds is the fatal, once"
         );
-        assert_eq!(logged.log.len(), 1, "the four lines are one entry");
+        assert_eq!(logged.log().len(), 1, "the four lines are one entry");
 
         let mut masked = Kept::default();
         Engine::builder()
@@ -1206,7 +1284,7 @@ mod tests {
             .build()
             .serve(description("<?php\nnope();"), &mut masked);
         assert!(masked.body.is_empty(), "E_ERROR is masked out");
-        assert!(masked.log.is_empty(), "log_errors is off");
+        assert!(masked.log().is_empty(), "log_errors is off");
     }
 
     /// `php_error_cb` builds one diagnostic with one `spprintf` and gives
@@ -1224,7 +1302,7 @@ mod tests {
             .build()
             .serve(description("<?php\nnope();"), &mut fatal);
         assert_eq!(
-            fatal.log,
+            fatal.log(),
             vec![
                 b"PHP Fatal error:  Uncaught Error: Call to undefined function nope() \
                    in witness.php:2\nStack trace:\n#0 {main}\n  thrown in witness.php on line 2"
@@ -1240,7 +1318,7 @@ mod tests {
             .build()
             .serve(description("<?php\necho NAN;\necho NAN;"), &mut warned);
         assert_eq!(
-            warned.log,
+            warned.log(),
             vec![
                 format!("PHP Warning:  {NAN_WARNING} in witness.php on line 2").into_bytes(),
                 format!("PHP Warning:  {NAN_WARNING} in witness.php on line 3").into_bytes(),

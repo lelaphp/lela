@@ -224,6 +224,19 @@ pub(crate) enum Ending {
     Exit(i32),
 }
 
+/// What a request wrote beside the body, one call the sink will see:
+/// an entry for the log or bytes for the error stream. Kept in the
+/// order they were written, since under php's CLI the two land on one
+/// fd, and there the log form of a diagnostic stands before its
+/// `display_errors=stderr` form (#216).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Aside {
+    /// `OutputSink::log`: one entry, whole, ended by the host.
+    Log(Vec<u8>),
+    /// `OutputSink::write_stderr`: bytes as given.
+    Stderr(Vec<u8>),
+}
+
 /// One request (design §5.14): `Send`, single-threaded, dropped at the
 /// end of `serve`. Everything a native may touch is a method here or on
 /// a value it hands out.
@@ -239,11 +252,13 @@ pub struct Request {
     body: Vec<u8>,
     headers: Vec<Vec<u8>>,
     header_callback: Option<Callable>,
-    /// The host's log as `php_log_err` was given it: one entry per call,
+    /// The host's log as `php_log_err` was given it, one entry per call,
     /// a diagnostic whole however many lines its backtrace adds, and no
     /// terminator, since that is the host's (`sapi_cli_log_message`
-    /// writes `"%s\n"`, a file log stamps `[date] ` and `PHP_EOL`).
-    log: Vec<Vec<u8>>,
+    /// writes `"%s\n"`, a file log stamps `[date] ` and `PHP_EOL`); and
+    /// the error stream's bytes as `fputs(stderr)` was given them; the
+    /// two in the order they were written.
+    aside: Vec<Aside>,
     response_code: i64,
     last_error: Option<(Level, String, Vec<u8>, u32)>,
     ending: Option<Ending>,
@@ -293,7 +308,7 @@ impl Request {
             body: Vec::new(),
             headers: Vec::new(),
             header_callback: None,
-            log: Vec::new(),
+            aside: Vec::new(),
             response_code: 200,
             last_error: None,
             ending: None,
@@ -726,15 +741,15 @@ impl Request {
         std::mem::take(&mut self.body)
     }
 
-    /// The log's entries, in the order `php_log_err` was given them, for
-    /// `serve` to hand the sink one call each.
-    pub(crate) fn take_log(&mut self) -> Vec<Vec<u8>> {
-        std::mem::take(&mut self.log)
+    /// The log's entries and the error stream's bytes, in the order the
+    /// request wrote them, for `serve` to hand the sink one call each.
+    pub(crate) fn take_aside(&mut self) -> Vec<Aside> {
+        std::mem::take(&mut self.aside)
     }
 
     /// `php_log_err`: one entry for the host's log, whole.
     fn log_err(&mut self, entry: &[u8]) {
-        self.log.push(entry.to_vec());
+        self.aside.push(Aside::Log(entry.to_vec()));
     }
 
     pub(crate) fn header_block(&self) -> Vec<u8> {
@@ -926,9 +941,8 @@ impl Request {
             // php's stderr form stands inside the same `else` as the
             // plain one, so `html_errors` takes a CLI diagnostic off the
             // error stream and onto the body; and it carries neither
-            // string around it. php's `fputs(stderr)` ends it with `\n`,
-            // which is the host's terminator here (#216).
-            let text = format!("{name}: {message} in {named} on line {line}");
+            // string around it.
+            let text = format!("{name}: {message} in {named} on line {line}\n");
             self.write_stderr(text.as_bytes());
         } else {
             let text = format!(
@@ -1230,12 +1244,13 @@ impl Request {
         self.body.extend_from_slice(bytes);
     }
 
-    /// Write to the host's error stream. The sink has one channel for
-    /// what php puts on stderr, its log, and a write here is one entry
-    /// on it, ended by the host as every entry is; an `error_log` file
-    /// that parts the two streams is the host's to add (#216).
+    /// Write to the host's error stream, bytes as given: php's
+    /// `fputs(stderr)`, which the `display_errors=stderr` form takes and
+    /// the `STDERR` stream constant will. The log is another channel,
+    /// [`Request::error_log`]'s; whether the host puts the two on one fd
+    /// is the host's, as it is php's CLI's (#216).
     pub fn write_stderr(&mut self, bytes: &[u8]) {
-        self.log_err(bytes);
+        self.aside.push(Aside::Stderr(bytes.to_vec()));
     }
 
     /// `flush()`: hand what is buffered to the host now.

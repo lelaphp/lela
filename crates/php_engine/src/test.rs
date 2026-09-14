@@ -7,13 +7,16 @@
 pub use crate::engine::Engine;
 use crate::engine::{OutputSink, RequestDescription};
 
-/// An in-process sink: everything the request wrote, kept. The log is
-/// what php's CLI writes to stderr, each entry the sink was given and
-/// `\n` after it (`sapi_cli_log_message`), so an extension's test reads
-/// it against the oracle's stderr.
+/// An in-process sink: everything the request wrote, kept, the way
+/// php's CLI has it. `stderr` is the CLI's second stream whole: each
+/// log entry with `\n` after it (`sapi_cli_log_message`) and what the
+/// error stream was given, in the order the request wrote them, so an
+/// extension's test reads it against the oracle's stderr; `log` is the
+/// log's part of that alone, the same rendering (#216).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Capture {
     pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
     pub headers: Vec<u8>,
     pub log: Vec<u8>,
 }
@@ -32,6 +35,12 @@ impl OutputSink for Capture {
     fn log(&mut self, entry: &[u8]) {
         self.log.extend_from_slice(entry);
         self.log.push(b'\n');
+        self.stderr.extend_from_slice(entry);
+        self.stderr.push(b'\n');
+    }
+
+    fn write_stderr(&mut self, bytes: &[u8]) {
+        self.stderr.extend_from_slice(bytes);
     }
 }
 
@@ -40,6 +49,7 @@ impl OutputSink for Capture {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Served {
     pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
     pub headers: Vec<u8>,
     pub log: Vec<u8>,
     pub exit_code: i32,
@@ -60,6 +70,7 @@ impl Engine {
         let observables = self.serve(description, &mut sink);
         Served {
             stdout: sink.stdout,
+            stderr: sink.stderr,
             headers: sink.headers,
             log: sink.log,
             exit_code: observables.exit_code,
