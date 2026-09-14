@@ -36,7 +36,11 @@ struct Op {
     effects: Vec<String>,
     result_used: bool,
     safepoint: bool,
-    /// php's `zend_vm_opcodes_flags` word for the opcode.
+    /// `COMMUTATIVE` in the handler line's `SPEC(...)`, the
+    /// `ZEND_VM_COMMUTATIVE` bit of `zend_vm_opcodes_flags`.
+    commutative: bool,
+    /// php's `zend_vm_opcodes_flags` word for the opcode, without its
+    /// two top bits.
     flags: u32,
 }
 
@@ -77,6 +81,10 @@ fn read(path: &Path) -> Result<Vec<Op>, String> {
             .unwrap_or_default();
         let result_used = row.get("result").and_then(toml::Value::as_str) == Some("used");
         let safepoint = row.get("safepoint").is_some();
+        let commutative = row
+            .get("spec")
+            .and_then(toml::Value::as_str)
+            .is_some_and(|spec| spec.split(',').any(|word| word == "COMMUTATIVE"));
         let spec = |key: &str| row.get(key).and_then(toml::Value::as_str).unwrap_or("ANY");
         let flags = operand_flags(&name, spec("op1_raw"))?
             | (operand_flags(&name, spec("op2_raw"))? << 8)
@@ -88,6 +96,7 @@ fn read(path: &Path) -> Result<Vec<Op>, String> {
             effects,
             result_used,
             safepoint,
+            commutative,
             flags,
         });
     }
@@ -174,6 +183,11 @@ fn render(ops: &[Op]) -> Result<String, String> {
         out,
         "pub(crate) static SAFEPOINT: [bool; LAST + 1] = [{}];",
         by_num(&|op| op.safepoint.to_string(), "false")
+    );
+    let _ = writeln!(
+        out,
+        "pub(crate) static COMMUTATIVE: [bool; LAST + 1] = [{}];",
+        by_num(&|op| op.commutative.to_string(), "false")
     );
     // php's `zend_vm_opcodes_flags` without its two top bits, which
     // name a specialisation and not a field: every other bit agrees

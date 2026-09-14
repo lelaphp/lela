@@ -1,12 +1,14 @@
 //! `zend_compare` over the scalars (design §5.2): the ordering every
 //! comparison operator reads, `Z/Zend/zend_operators.c:2312`, for the
 //! five types a constant table holds and an operand may be, ported
-//! once. The compiler folds `<` over two constants through this very
-//! ordering (`zend_try_ct_eval_binary_op` over `is_smaller_function`),
-//! and the kernel reads it for the same pairs while serving, so one copy
-//! is what keeps the folded constant and the opcode's value in step.
-//! The pairs an array, an object or a resource makes are the kernel's,
-//! since they need the request.
+//! once, and `zend_is_identical` over the same, which `===` reads
+//! instead. The compiler folds a comparison over two constants through
+//! this very ordering (`zend_try_ct_eval_binary_op` over
+//! `is_smaller_function` and its kin), and the kernel reads it for the
+//! same pairs while serving, so one copy is what keeps the folded
+//! constant and the opcode's value in step. The pairs an array, an
+//! object or a resource makes are the kernel's, since they need the
+//! request.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -275,9 +277,73 @@ fn double_to_string_cmp(d: f64, s: &[u8], precision: i32) -> Ordering {
     }
 }
 
+/// `zend_is_identical` (`Z/Zend/zend_operators.c:2479`) over two
+/// scalars: the same type, and then the same value, a string by its
+/// bytes (`zend_string_equals`) and a double by `==`, so a NAN is
+/// identical to nothing, itself included. A null, a false and a true
+/// are three types, so `null === false` is not. The compiler folds
+/// `===` and `!==` over two constants through this
+/// (`zend_try_ct_eval_binary_op` over `is_identical_function`) and the
+/// kernel reads it for the same pairs; an array, an object and a
+/// resource are the kernel's.
+///
+/// ```php
+/// $t = extension_loaded('Core'); $i = $t + 0; $s = "1"; $d = 1.0; $nan = NAN; $n = null;
+/// var_dump($i === 1, $t === 1, $i === $d, $s === "1", $s === "01", $d === 1.0, $d === $s, $nan === $nan, $n === false, $n === $n, "abc" === "abc");
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// ```
+#[must_use]
+#[expect(
+    clippy::float_cmp,
+    reason = "php's `Z_DVAL_P(op1) == Z_DVAL_P(op2)`, the exact equality being copied"
+)]
+pub fn identical(left: Scalar, right: Scalar) -> bool {
+    match (left, right) {
+        (Scalar::Null, Scalar::Null) => true,
+        (Scalar::Bool(a), Scalar::Bool(b)) => a == b,
+        (Scalar::Long(a), Scalar::Long(b)) => a == b,
+        (Scalar::Double(a), Scalar::Double(b)) => a == b,
+        (Scalar::Str(a), Scalar::Str(b)) => a == b,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_scalars_are_identical_by_type_and_then_by_value() {
+        let s = Scalar::Str;
+        for (a, b, same) in [
+            (Scalar::Long(1), Scalar::Long(1), true),
+            (Scalar::Long(1), Scalar::Double(1.0), false),
+            (Scalar::Double(1.0), Scalar::Double(1.0), true),
+            (Scalar::Double(0.0), Scalar::Double(-0.0), true),
+            (Scalar::Double(f64::NAN), Scalar::Double(f64::NAN), false),
+            (s(b"1"), s(b"1"), true),
+            (s(b"1"), s(b"01"), false),
+            (s(b"1"), Scalar::Long(1), false),
+            (Scalar::Null, Scalar::Null, true),
+            (Scalar::Null, Scalar::Bool(false), false),
+            (Scalar::Bool(true), Scalar::Bool(true), true),
+            (Scalar::Bool(true), Scalar::Bool(false), false),
+        ] {
+            assert_eq!(identical(a, b), same, "{a:?} === {b:?}");
+        }
+    }
 
     /// Every row is php's own: `var_dump($a <=> $b)` under the pin, read
     /// off the oracle when the rows were written.

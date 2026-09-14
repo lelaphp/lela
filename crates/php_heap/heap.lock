@@ -83,6 +83,7 @@ Zval::string
 ZvalType
 compare
 double_to_string
+identical
 numeric_prefix
 power
 shift_left

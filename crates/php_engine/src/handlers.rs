@@ -13,7 +13,10 @@
 //! writes a CV, the arithmetic `ZEND_ADD`, `ZEND_SUB`, `ZEND_MUL`,
 //! `ZEND_DIV`, `ZEND_MOD`, `ZEND_POW`, `ZEND_SL` and `ZEND_SR` and the
 //! `ZEND_CONCAT` that php emits for what its compiler does not fold,
-//! `ZEND_IS_SMALLER`, which a loop's condition is, `ZEND_PRE_INC` and
+//! `ZEND_IS_SMALLER`, which a loop's condition is, the rest of the
+//! comparison level, `ZEND_IS_SMALLER_OR_EQUAL`, `ZEND_IS_EQUAL`,
+//! `ZEND_IS_NOT_EQUAL`, `ZEND_IS_IDENTICAL`, `ZEND_IS_NOT_IDENTICAL` and
+//! `ZEND_SPACESHIP`, `ZEND_PRE_INC` and
 //! `ZEND_POST_INC`, which step a CV in place, `ZEND_FREE`, which
 //! gives up a temporary nothing reads, and the four opcodes php's
 //! compiler emits for a call in `zend_try_compile_special_func`'s table
@@ -347,6 +350,75 @@ pub(crate) fn is_smaller<T: Tier>(
     op: &Opline,
 ) -> Edge {
     binary(req, frame, code, op, crate::ops::is_smaller)
+}
+
+/// `ZEND_IS_SMALLER_OR_EQUAL`: [`crate::ops::is_smaller_or_equal`], the
+/// same way, and the opcode `>=` is with its operands swapped.
+pub(crate) fn is_smaller_or_equal<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    binary(req, frame, code, op, crate::ops::is_smaller_or_equal)
+}
+
+/// `ZEND_IS_EQUAL`: [`crate::ops::is_equal`], the same way. php's
+/// handler branches on the answer where a `JMPZ` or a `JMPNZ` follows
+/// (`ZEND_VM_SMART_BRANCH`); the compiler emits the two oplines and the
+/// jump reads the temporary, which is the same observable path one
+/// opline longer.
+pub(crate) fn is_equal<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    binary(req, frame, code, op, crate::ops::is_equal)
+}
+
+/// `ZEND_IS_NOT_EQUAL`: [`crate::ops::is_not_equal`], the same way.
+pub(crate) fn is_not_equal<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    binary(req, frame, code, op, crate::ops::is_not_equal)
+}
+
+/// `ZEND_IS_IDENTICAL`: [`crate::ops::is_identical`], the same way, both
+/// operands dereferenced (`GET_OP*_ZVAL_PTR_DEREF`), which the kernel
+/// does.
+pub(crate) fn is_identical<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    binary(req, frame, code, op, crate::ops::is_identical)
+}
+
+/// `ZEND_IS_NOT_IDENTICAL`: [`crate::ops::is_not_identical`], the same
+/// way.
+pub(crate) fn is_not_identical<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    binary(req, frame, code, op, crate::ops::is_not_identical)
+}
+
+/// `ZEND_SPACESHIP`: [`crate::ops::spaceship`], the same way, the long
+/// `compare_function` writes into the temporary.
+pub(crate) fn spaceship<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    binary(req, frame, code, op, crate::ops::spaceship)
 }
 
 /// `ZEND_PRE_INC`: [`crate::ops::increment`] over the variable `op1`

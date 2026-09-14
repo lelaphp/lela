@@ -1048,6 +1048,144 @@ mod tests {
         );
     }
 
+    /// The oracle's dump, `vars=1, tmps=19`: `<=` is `IS_SMALLER_OR_EQUAL`
+    /// as written, `>` and `>=` are `IS_SMALLER` and `IS_SMALLER_OR_EQUAL`
+    /// with the operands swapped (`zend_compile_greater`), and the
+    /// equality level is its own opcode each, `<>` being `IS_NOT_EQUAL`.
+    /// `2 == $a` dumps as `IS_EQUAL CV0($a) int(2)`, and so do `2 * $a`
+    /// and the other three equalities, since `pass_two` swaps the
+    /// operands of a `COMMUTATIVE` opcode whose first is the lesser
+    /// kind; `2 <=> $a` and `2 + $a` keep their order.
+    #[test]
+    fn the_rest_of_the_comparison_level_is_the_opcode_php_emits_with_php_s_operand_order() {
+        assert_eq!(
+            dump_of(
+                b"<?php echo $a <= 2, 2 <= $a, $a > 2, 2 > $a, $a >= 2, 2 >= $a, $a == 2, 2 == $a, $a != 2, 2 != $a, $a <> 2, $a === 2, 2 === $a, $a !== 2, 2 !== $a, $a <=> 2, 2 <=> $a, 2 * $a, 2 + $a;"
+            ),
+            main_dump(
+                39,
+                1,
+                19,
+                "0000 T1 = IS_SMALLER_OR_EQUAL CV0($a) int(2)\n\
+                 0001 ECHO T1\n\
+                 0002 T2 = IS_SMALLER_OR_EQUAL int(2) CV0($a)\n\
+                 0003 ECHO T2\n\
+                 0004 T3 = IS_SMALLER int(2) CV0($a)\n\
+                 0005 ECHO T3\n\
+                 0006 T4 = IS_SMALLER CV0($a) int(2)\n\
+                 0007 ECHO T4\n\
+                 0008 T5 = IS_SMALLER_OR_EQUAL int(2) CV0($a)\n\
+                 0009 ECHO T5\n\
+                 0010 T6 = IS_SMALLER_OR_EQUAL CV0($a) int(2)\n\
+                 0011 ECHO T6\n\
+                 0012 T7 = IS_EQUAL CV0($a) int(2)\n\
+                 0013 ECHO T7\n\
+                 0014 T8 = IS_EQUAL CV0($a) int(2)\n\
+                 0015 ECHO T8\n\
+                 0016 T9 = IS_NOT_EQUAL CV0($a) int(2)\n\
+                 0017 ECHO T9\n\
+                 0018 T10 = IS_NOT_EQUAL CV0($a) int(2)\n\
+                 0019 ECHO T10\n\
+                 0020 T11 = IS_NOT_EQUAL CV0($a) int(2)\n\
+                 0021 ECHO T11\n\
+                 0022 T12 = IS_IDENTICAL CV0($a) int(2)\n\
+                 0023 ECHO T12\n\
+                 0024 T13 = IS_IDENTICAL CV0($a) int(2)\n\
+                 0025 ECHO T13\n\
+                 0026 T14 = IS_NOT_IDENTICAL CV0($a) int(2)\n\
+                 0027 ECHO T14\n\
+                 0028 T15 = IS_NOT_IDENTICAL CV0($a) int(2)\n\
+                 0029 ECHO T15\n\
+                 0030 T16 = SPACESHIP CV0($a) int(2)\n\
+                 0031 ECHO T16\n\
+                 0032 T17 = SPACESHIP int(2) CV0($a)\n\
+                 0033 ECHO T17\n\
+                 0034 T18 = MUL CV0($a) int(2)\n\
+                 0035 ECHO T18\n\
+                 0036 T19 = ADD int(2) CV0($a)\n\
+                 0037 ECHO T19\n\
+                 0038 RETURN int(1)\n"
+            )
+        );
+    }
+
+    /// The oracle's dump, `vars=0, tmps=0`: every comparison over two
+    /// constants folds, to the bool `zend_compare` orders them to, the
+    /// long `compare_function` writes for `<=>`, and `zend_is_identical`
+    /// for `===` and `!==`, which reads the type before the value, so
+    /// `1 === "1"` and `null === false` are false where `==` says true.
+    #[test]
+    fn every_comparison_over_two_constants_folds_to_the_value_php_folds_it_to() {
+        assert_eq!(
+            dump_of(
+                b"<?php echo 1 <= 2, 2 <= 1, 1 > 2, 2 > 1, 1 >= 1, 1 == \"1\", 1 != \"1\", \"abc\" == \"ABC\", 1 === 1, 1 === \"1\", 1 !== 1.0, 1 <=> 2, 2 <=> 1, 1 <=> 1, \"10\" <=> \"9\", 1.5 <=> \"abc\", null == false, null === false, \"1e3\" == \"1000\", \"abc\" <= \"abd\", 1.5 >= \"1.5\", 2 > \"10\";"
+            ),
+            main_dump(
+                23,
+                0,
+                0,
+                "0000 ECHO bool(true)\n\
+                 0001 ECHO bool(false)\n\
+                 0002 ECHO bool(false)\n\
+                 0003 ECHO bool(true)\n\
+                 0004 ECHO bool(true)\n\
+                 0005 ECHO bool(true)\n\
+                 0006 ECHO bool(false)\n\
+                 0007 ECHO bool(false)\n\
+                 0008 ECHO bool(true)\n\
+                 0009 ECHO bool(false)\n\
+                 0010 ECHO bool(true)\n\
+                 0011 ECHO int(-1)\n\
+                 0012 ECHO int(1)\n\
+                 0013 ECHO int(0)\n\
+                 0014 ECHO int(1)\n\
+                 0015 ECHO int(-1)\n\
+                 0016 ECHO bool(true)\n\
+                 0017 ECHO bool(false)\n\
+                 0018 ECHO bool(true)\n\
+                 0019 ECHO bool(true)\n\
+                 0020 ECHO bool(true)\n\
+                 0021 ECHO bool(false)\n\
+                 0022 RETURN int(1)\n"
+            )
+        );
+    }
+
+    /// The oracle's dump, `vars=2, tmps=7`: a `===` or `!==` against a
+    /// constant null, false or true on either side is the `TYPE_CHECK`
+    /// `zend_compile_binary_op` emits in its place, the constant's
+    /// `1 << IS_*` in `extended_value` for `===` and `MAY_BE_ANY` less
+    /// that bit for `!==`; against any other constant, or a variable,
+    /// it is the opcode itself, and a `==` against null is `IS_EQUAL`.
+    #[test]
+    fn an_identity_against_null_or_a_bool_is_the_type_check_php_emits_in_its_place() {
+        assert_eq!(
+            dump_of(
+                b"<?php echo $a === null, null === $a, $a !== false, true !== $a, $a === 1, $a == null, $a !== $b;"
+            ),
+            main_dump(
+                15,
+                2,
+                7,
+                "0000 T2 = TYPE_CHECK (null) CV0($a)\n\
+                 0001 ECHO T2\n\
+                 0002 T3 = TYPE_CHECK (null) CV0($a)\n\
+                 0003 ECHO T3\n\
+                 0004 T4 = TYPE_CHECK TYPE [null, true, long, double, string, array, object, resource] CV0($a)\n\
+                 0005 ECHO T4\n\
+                 0006 T5 = TYPE_CHECK TYPE [null, false, long, double, string, array, object, resource] CV0($a)\n\
+                 0007 ECHO T5\n\
+                 0008 T6 = IS_IDENTICAL CV0($a) int(1)\n\
+                 0009 ECHO T6\n\
+                 0010 T7 = IS_EQUAL CV0($a) null\n\
+                 0011 ECHO T7\n\
+                 0012 T8 = IS_NOT_IDENTICAL CV0($a) CV1($b)\n\
+                 0013 ECHO T8\n\
+                 0014 RETURN int(1)\n"
+            )
+        );
+    }
+
     /// `zend_do_free` over every place php frees a value: an expression
     /// statement, each expression of a `for`'s three lists but the last
     /// of the condition, and the last of the initialisers and the step.
@@ -1668,7 +1806,7 @@ mod tests {
     fn what_the_reader_cannot_read_is_a_compile_error_at_its_line() {
         let mut strings = php_heap::Strings::new();
         let trouble = compile(
-            &php_syntax::parse(b"<?php\n$x == 1;", &php_syntax::Options::default()),
+            &php_syntax::parse(b"<?php\n$x | 1;", &php_syntax::Options::default()),
             &Options::default(),
             &mut strings,
         )

@@ -622,6 +622,231 @@ pub(crate) fn is_smaller(req: &mut Request, left: &Value, right: &Value) -> Resu
     Ok(Value::bool(compare(req, left, right) == Ordering::Less))
 }
 
+/// `is_smaller_or_equal_function` (`Z/Zend/zend_operators.c:2543`):
+/// whether [`compare`] does not order the right side first, which is
+/// what `ZEND_IS_SMALLER_OR_EQUAL` leaves and what `<=` reads, and `>=`
+/// with its operands swapped. A NAN orders after everything on either
+/// side, so it is `<=` nothing and nothing is `<=` it.
+///
+/// ```php
+/// $i = extension_loaded('Core') + 0; $nan = NAN;
+/// var_dump(1 <= $i, 2 <= $i, "abc" <= "ab" . $i, "10" <= "9" . $i, 1.5 <= "1.5" . $i, 2.5 <= "1.5" . $i, $nan <= $i, $i <= $nan, $i >= 1, $i >= 2);
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the shape every binary kernel has, so one handler body serves them all"
+)]
+pub(crate) fn is_smaller_or_equal(
+    req: &mut Request,
+    left: &Value,
+    right: &Value,
+) -> Result<Value, Thrown> {
+    Ok(Value::bool(compare(req, left, right) != Ordering::Greater))
+}
+
+/// `is_equal_function` (`Z/Zend/zend_operators.c:2522`): whether
+/// [`compare`] orders the two sides the same, which is what
+/// `ZEND_IS_EQUAL` leaves and what `==` reads: `1 == "1"`, `"1e3" ==
+/// "1000"` and `null == false` through the same conversions `<` makes,
+/// and a non-numeric string against a number by the number's text
+/// since 8.0.
+///
+/// ```php
+/// $i = extension_loaded('Core') + 0;
+/// var_dump($i == 1, $i == 2, "abc" == "ab" . $i, "1e3" == "100" . $i - 1, 1.5 == "1." . 5 * $i, 1.5 == "abc" . $i, null == $i - 1, "1" == "0" . $i);
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the shape every binary kernel has, so one handler body serves them all"
+)]
+pub(crate) fn is_equal(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    Ok(Value::bool(compare(req, left, right) == Ordering::Equal))
+}
+
+/// `is_not_equal_function` (`Z/Zend/zend_operators.c:2529`): the
+/// negation of [`is_equal`], which is what `ZEND_IS_NOT_EQUAL` leaves
+/// and what `!=` and `<>` read. A NAN is not equal to anything, itself
+/// included, since [`compare`] orders it after.
+///
+/// ```php
+/// $i = extension_loaded('Core') + 0; $nan = NAN;
+/// var_dump($i != 1, $i != 2, "abc" != "ab" . $i, "10" <> "1e" . $i, 1.5 != "1." . 5 * $i, 1.5 != "abc" . $i, $nan != $nan);
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the shape every binary kernel has, so one handler body serves them all"
+)]
+pub(crate) fn is_not_equal(
+    req: &mut Request,
+    left: &Value,
+    right: &Value,
+) -> Result<Value, Thrown> {
+    Ok(Value::bool(compare(req, left, right) != Ordering::Equal))
+}
+
+/// `compare_function` (`Z/Zend/zend_operators.c:2253`): [`compare`]'s
+/// ordering as the long `-1`, `0` or `1`, which is what `ZEND_SPACESHIP`
+/// leaves and what `<=>` reads. A NAN on either side is `1`, since
+/// `ZEND_THREEWAY_COMPARE` answers `1` for a pair that is neither equal
+/// nor ordered.
+///
+/// ```php
+/// $i = extension_loaded('Core') + 0; $nan = NAN;
+/// var_dump($i <=> 2, $i <=> 1, $i <=> 0, "abc" <=> "abd" . $i, "1" . $i - 1 <=> "9", 1.5 <=> "1." . 5 * $i, 1.5 <=> "abc" . $i, $nan <=> $i, $i <=> $nan);
+/// ```
+/// ```expect
+/// int(-1)
+/// int(0)
+/// int(1)
+/// int(-1)
+/// int(1)
+/// int(0)
+/// int(-1)
+/// int(1)
+/// int(1)
+/// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the shape every binary kernel has, so one handler body serves them all"
+)]
+pub(crate) fn spaceship(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    Ok(Value::int(match compare(req, left, right) {
+        Ordering::Less => -1,
+        Ordering::Equal => 0,
+        Ordering::Greater => 1,
+    }))
+}
+
+/// `zend_is_identical` (`Z/Zend/zend_operators.c:2479`): the same type,
+/// and then the same value. The scalars are [`php_heap::identical`]'s,
+/// a string by its bytes and a double by `==`, so `1 === "1"` and
+/// `null === false` are false and a NAN is identical to nothing. Two
+/// arrays are identical when `zend_hash_compare` with
+/// `hash_zval_identical_function` and `ordered` on finds no difference:
+/// the same count, and walked together the same key at each step, an
+/// integer key against a string key never the same, and identical
+/// values, each side's reference followed first. An object is identical
+/// to itself and a resource to itself, by id, so two resources of
+/// one kind are not. A reference is followed on both sides
+/// (`GET_OP*_ZVAL_PTR_DEREF`). The witness reaches the scalars; the
+/// array arm is held by the test beside it until the compiler reads an
+/// array.
+///
+/// ```php
+/// $i = extension_loaded('Core') + 0; $t = extension_loaded('Core'); $nan = NAN;
+/// var_dump($i === 1, $i === 1.0, $t === true, $t === 1, "abc" === "ab" . chr(99 * $i), "1" === "01" . $i - 1, 1.5 === "1." . 5 * $i, $nan === $nan, null === $t - 1);
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// ```
+pub(crate) fn identical(left: &Value, right: &Value) -> bool {
+    let (left, right) = (left.deref(), right.deref());
+    if let (Some(a), Some(b)) = (scalar(left), scalar(right)) {
+        return php_heap::identical(a, b);
+    }
+    match (left.as_ref(), right.as_ref()) {
+        (ValueRef::Array(a), ValueRef::Array(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|((k, v), (l, w))| k == l && identical(v, w))
+        }
+        (ValueRef::Object(a), ValueRef::Object(b)) => a == b,
+        (ValueRef::Resource(a), ValueRef::Resource(b)) => a.id == b.id,
+        _ => false,
+    }
+}
+
+/// `is_identical_function` (`Z/Zend/zend_operators.c:2508`):
+/// [`identical`] as the bool `ZEND_IS_IDENTICAL` leaves, which `===`
+/// reads where neither side is a constant null or bool; against one of
+/// those the compiler emits `ZEND_TYPE_CHECK` instead.
+///
+/// ```php
+/// $i = extension_loaded('Core') + 0;
+/// var_dump($i === 1, "a" === chr(96 + $i), 1.0 === "1" . $i - 1, 1.0 === $i * 1.0);
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the shape every binary kernel has, so one handler body serves them all"
+)]
+pub(crate) fn is_identical(_: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    Ok(Value::bool(identical(left, right)))
+}
+
+/// `is_not_identical_function` (`Z/Zend/zend_operators.c:2515`): the
+/// negation of [`identical`], which is what `ZEND_IS_NOT_IDENTICAL`
+/// leaves and what `!==` reads.
+///
+/// ```php
+/// $i = extension_loaded('Core') + 0; $nan = NAN;
+/// var_dump($i !== 1, $i !== "1", "abc" !== "ab" . chr(98 + $i), "1" !== "01" . $i - 1, 1.5 !== "1." . 5 * $i, $nan !== $nan);
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the shape every binary kernel has, so one handler body serves them all"
+)]
+pub(crate) fn is_not_identical(
+    _: &mut Request,
+    left: &Value,
+    right: &Value,
+) -> Result<Value, Thrown> {
+    Ok(Value::bool(!identical(left, right)))
+}
+
 /// The scalar a value is, for [`php_heap::compare`]; nothing for an
 /// array, an object, a resource or a reference not yet followed.
 fn scalar(value: &Value) -> Option<Scalar<'_>> {
@@ -1369,5 +1594,52 @@ fn to_number(req: &mut Request, value: &Value) -> Option<Number> {
         // php's `IS_NULL` arm; an uninitialised zval reads as null here.
         TypeTag::Null | TypeTag::Undef => Some(Number::Long(0)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::values::Key;
+
+    fn array(entries: Vec<(Key, Value)>) -> Value {
+        let mut a = PhpArray::new();
+        for (k, v) in entries {
+            a.set(k, v);
+        }
+        Value::array(a)
+    }
+
+    /// `zend_hash_compare` with `hash_zval_identical_function` and
+    /// `ordered` on: the same count, the same key at each step and
+    /// identical values; `[1, 2]` against `[1 => 2, 0 => 1]` is the
+    /// same map in another order and is not identical.
+    #[test]
+    fn two_arrays_are_identical_by_count_then_by_each_key_and_value_in_order() {
+        let list = || vec![(Key::Int(0), Value::int(1)), (Key::Int(1), Value::int(2))];
+        assert!(identical(&array(list()), &array(list())));
+        assert!(!identical(
+            &array(list()),
+            &array(vec![(Key::Int(0), Value::int(1))])
+        ));
+        assert!(!identical(
+            &array(list()),
+            &array(vec![
+                (Key::Int(1), Value::int(2)),
+                (Key::Int(0), Value::int(1))
+            ])
+        ));
+        assert!(!identical(
+            &array(list()),
+            &array(vec![
+                (Key::Int(0), Value::int(1)),
+                (Key::Int(1), Value::float(2.0))
+            ])
+        ));
+        assert!(identical(
+            &array(vec![(Key::Int(0), array(list()))]),
+            &array(vec![(Key::Int(0), array(list()))])
+        ));
+        assert!(!identical(&array(list()), &Value::int(1)));
     }
 }

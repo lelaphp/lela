@@ -38,7 +38,7 @@ mod stack;
 mod string;
 mod zval;
 
-pub use compare::{Scalar, compare};
+pub use compare::{Scalar, compare, identical};
 pub use hooks::{Fatal, HeapHooks};
 pub use map::{MapPtr, MapTable};
 pub use numeric::{Number, double_to_string, numeric_prefix, power, shift_left, shift_right};

@@ -113,6 +113,24 @@ pub(crate) enum BinaryOp {
     Concat,
     /// `ZEND_IS_SMALLER`
     IsSmaller,
+    /// `ZEND_IS_SMALLER_OR_EQUAL`
+    IsSmallerOrEqual,
+    /// `>`, php's `ZEND_AST_GREATER`, which `zend_compile_greater` emits
+    /// as `ZEND_IS_SMALLER` with the operands swapped.
+    Greater,
+    /// `>=`, php's `ZEND_AST_GREATER_EQUAL`, `ZEND_IS_SMALLER_OR_EQUAL`
+    /// the same way.
+    GreaterOrEqual,
+    /// `ZEND_IS_EQUAL`
+    IsEqual,
+    /// `ZEND_IS_NOT_EQUAL`, which `<>` is as well.
+    IsNotEqual,
+    /// `ZEND_IS_IDENTICAL`
+    IsIdentical,
+    /// `ZEND_IS_NOT_IDENTICAL`
+    IsNotIdentical,
+    /// `ZEND_SPACESHIP`
+    Spaceship,
 }
 
 /// The line each statement stands on, beside it.
@@ -395,7 +413,7 @@ impl Reader<'_> {
     /// `1 + $a = 2` is php's `1 + ($a = 2)`; that is refused here rather
     /// than read as the other grouping.
     fn expr(&mut self) -> Result<Expr, Trouble> {
-        let left = self.comparison()?;
+        let left = self.equality()?;
         self.skip_trivia();
         if !(self.byte(0) == Some(b'=') && self.byte(1) != Some(b'=')) {
             return Ok(left);
@@ -412,33 +430,78 @@ impl Reader<'_> {
         })
     }
 
-    /// `<`, php's non-associative level below `.`: one comparison, and a
-    /// second `<` after it is php's parse error, refused here. A `<=`,
-    /// `<>` and `<=>` are other operators, none of which this reads, and
-    /// `<<` is the shift.
-    fn comparison(&mut self) -> Result<Expr, Trouble> {
-        let left = self.concat()?;
-        if !self.smaller_ahead() {
+    /// `==`, `!=`, `<>`, `===`, `!==` and `<=>`, php's non-associative
+    /// level below the comparisons: one equality, and a second operator
+    /// of the level after it is php's parse error, refused here.
+    fn equality(&mut self) -> Result<Expr, Trouble> {
+        let left = self.comparison()?;
+        let Some((op, width)) = self.equality_ahead() else {
             return Ok(left);
-        }
-        self.bump(1);
-        let right = self.concat()?;
-        self.skip_trivia();
-        if self.smaller_ahead() {
-            return Err(self.trouble("a comparison of a comparison, which php does not read"));
+        };
+        self.bump(width);
+        let right = self.comparison()?;
+        if self.equality_ahead().is_some() {
+            return Err(self.trouble("an equality of an equality, which php does not read"));
         }
         Ok(Expr::Binary {
-            op: BinaryOp::IsSmaller,
+            op,
             left: Box::new(left),
             right: Box::new(right),
         })
     }
 
-    /// Whether a `<` that is the comparison stands here: not `<<`, `<=`,
-    /// `<>` or `<=>`.
-    fn smaller_ahead(&mut self) -> bool {
+    /// The operator of the equality level standing here, and its width
+    /// in bytes: the scanner takes the longest, so `!==` before `!=`
+    /// and `<=>` before `<=`. A `=` alone is the assignment.
+    fn equality_ahead(&mut self) -> Option<(BinaryOp, usize)> {
         self.skip_trivia();
-        self.byte(0) == Some(b'<') && !matches!(self.byte(1), Some(b'<' | b'=' | b'>'))
+        Some(match (self.byte(0), self.byte(1), self.byte(2)) {
+            (Some(b'='), Some(b'='), Some(b'=')) => (BinaryOp::IsIdentical, 3),
+            (Some(b'='), Some(b'='), _) => (BinaryOp::IsEqual, 2),
+            (Some(b'!'), Some(b'='), Some(b'=')) => (BinaryOp::IsNotIdentical, 3),
+            (Some(b'<'), Some(b'='), Some(b'>')) => (BinaryOp::Spaceship, 3),
+            (Some(b'!'), Some(b'='), _) | (Some(b'<'), Some(b'>'), _) => (BinaryOp::IsNotEqual, 2),
+            _ => return None,
+        })
+    }
+
+    /// `<`, `<=`, `>` and `>=`, php's non-associative level below `.`:
+    /// one comparison, and a second operator of the level after it is
+    /// php's parse error, refused here. `<<` and `>>` are the shifts,
+    /// which read `<<=` and `>>=` as theirs to refuse; `<>` and `<=>`
+    /// are the level below.
+    fn comparison(&mut self) -> Result<Expr, Trouble> {
+        let left = self.concat()?;
+        let Some((op, width)) = self.comparison_ahead() else {
+            return Ok(left);
+        };
+        self.bump(width);
+        let right = self.concat()?;
+        if self.comparison_ahead().is_some() {
+            return Err(self.trouble("a comparison of a comparison, which php does not read"));
+        }
+        Ok(Expr::Binary {
+            op,
+            left: Box::new(left),
+            right: Box::new(right),
+        })
+    }
+
+    /// The operator of the comparison level standing here, and its
+    /// width in bytes; nothing for a shift, an equality or a `<=>`.
+    fn comparison_ahead(&mut self) -> Option<(BinaryOp, usize)> {
+        self.skip_trivia();
+        Some(match (self.byte(0), self.byte(1), self.byte(2)) {
+            (Some(b'<'), Some(b'='), Some(b'>')) | (Some(b'<'), Some(b'<' | b'>'), _) => {
+                return None;
+            }
+            (Some(b'<'), Some(b'='), _) => (BinaryOp::IsSmallerOrEqual, 2),
+            (Some(b'<'), _, _) => (BinaryOp::IsSmaller, 1),
+            (Some(b'>'), Some(b'>'), _) => return None,
+            (Some(b'>'), Some(b'='), _) => (BinaryOp::GreaterOrEqual, 2),
+            (Some(b'>'), _, _) => (BinaryOp::Greater, 1),
+            _ => return None,
+        })
     }
 
     /// `.`, php's own level since 8.0, below the shifts. A `.=` assigns
@@ -1029,7 +1092,7 @@ mod tests {
     fn an_operator_this_does_not_read_is_refused_rather_than_taken_for_another() {
         for source in [
             b"<?php echo 'a' .= 'b';".as_slice(),
-            b"<?php echo 1 <=> 2;".as_slice(),
+            b"<?php echo 1 ?? 2;".as_slice(),
             b"<?php echo 1 | 2;".as_slice(),
         ] {
             assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
@@ -1219,11 +1282,62 @@ mod tests {
             shape(b"<?php $a = (1 < 2);"),
             "`=` binds below `<`"
         );
+        assert_eq!(
+            shape(b"<?php echo 1 <= 2 . 3, 1 > 2 . 3, 1 >= 2 . 3;"),
+            shape(b"<?php echo 1 <= (2 . 3), 1 > (2 . 3), 1 >= (2 . 3);"),
+            "the four of the level stand together"
+        );
         for source in [
             b"<?php echo 1 < 2 < 3;".as_slice(),
-            b"<?php echo 1 <= 2;".as_slice(),
-            b"<?php echo 1 <> 2;".as_slice(),
-            b"<?php echo 1 > 2;".as_slice(),
+            b"<?php echo 1 <= 2 > 3;".as_slice(),
+            b"<?php echo 1 > 2 >= 3;".as_slice(),
+        ] {
+            assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
+        }
+    }
+
+    /// php's equality level, `%nonassoc T_IS_EQUAL T_IS_NOT_EQUAL
+    /// T_IS_IDENTICAL T_IS_NOT_IDENTICAL T_SPACESHIP`, one line below
+    /// the comparisons in `zend_language_parser.y`.
+    #[test]
+    fn an_equality_stands_below_the_comparison_and_does_not_associate() {
+        assert_eq!(
+            shape(b"<?php echo 1 < 2 == 3 < 4, 1 . 2 != 3 <= 4, 1 <> 2;"),
+            shape(b"<?php echo (1 < 2) == (3 < 4), (1 . 2) != (3 <= 4), 1 != 2;"),
+            "`<` binds tighter than `==`, and `<>` is `!=`"
+        );
+        assert_eq!(
+            shape(b"<?php $a = 1 === 2; $b = 1 !== 2; $c = 1 <=> 2;"),
+            shape(b"<?php $a = (1 === 2); $b = (1 !== 2); $c = (1 <=> 2);"),
+            "`=` binds below each of them"
+        );
+        let echo =
+            read(b"<?php echo 1 === 2, 1 !== 2, 1 <=> 2, 1 == 2, 1 != 2;").unwrap_or_default();
+        let ops: Vec<BinaryOp> = match &echo[0].0 {
+            Stmt::Echo(exprs) => exprs
+                .iter()
+                .filter_map(|e| match e {
+                    Expr::Binary { op, .. } => Some(*op),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        assert_eq!(
+            ops,
+            vec![
+                BinaryOp::IsIdentical,
+                BinaryOp::IsNotIdentical,
+                BinaryOp::Spaceship,
+                BinaryOp::IsEqual,
+                BinaryOp::IsNotEqual
+            ],
+            "the longest operator is the one read, `!==` before `!=` and `<=>` before `<=`"
+        );
+        for source in [
+            b"<?php echo 1 == 2 == 3;".as_slice(),
+            b"<?php echo 1 === 2 != 3;".as_slice(),
+            b"<?php echo 1 <=> 2 <=> 3;".as_slice(),
         ] {
             assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
         }
@@ -1345,7 +1459,7 @@ mod tests {
 
     #[test]
     fn what_it_cannot_read_is_refused_at_its_line() {
-        let trouble = read(b"<?php\n$x == 1;").err();
+        let trouble = read(b"<?php\n$x | 1;").err();
         assert_eq!(trouble.map(|t| t.line), Some(2));
     }
 
@@ -1400,7 +1514,6 @@ mod tests {
             b"<?php echo $1;".as_slice(),
             b"<?php 1 = 2;".as_slice(),
             b"<?php 1 + $a = 2;".as_slice(),
-            b"<?php $a == 2;".as_slice(),
         ] {
             assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
         }

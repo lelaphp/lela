@@ -14,12 +14,21 @@
 //! constant and no opline. What it cannot fold becomes the opcode php
 //! emits, into a temporary as `zend_emit_op_tmp` leaves it: `ZEND_ADD`,
 //! `ZEND_SUB`, `ZEND_MUL` and `ZEND_DIV`, `ZEND_MOD`, `ZEND_POW`,
-//! `ZEND_SL`, `ZEND_SR`, `ZEND_CONCAT` and `ZEND_IS_SMALLER`, whose
-//! kernels the engine serves. A constant operand of a `.` is converted
-//! to a string where it stands whether or not the other side folds, as
+//! `ZEND_SL`, `ZEND_SR`, `ZEND_CONCAT`, the comparisons `ZEND_IS_SMALLER`
+//! and `ZEND_IS_SMALLER_OR_EQUAL`, which `>` and `>=` are with the
+//! operands swapped (`zend_compile_greater`), and the equalities
+//! `ZEND_IS_EQUAL`, `ZEND_IS_NOT_EQUAL`, `ZEND_IS_IDENTICAL`,
+//! `ZEND_IS_NOT_IDENTICAL` and `ZEND_SPACESHIP`, whose kernels the
+//! engine serves. A constant operand of a `.` is converted to a string
+//! where it stands whether or not the other side folds, as
 //! `zend_compile_binary_op` converts it, so `2 . $a` is a `CONCAT` over
-//! the constant `"2"`; a `<` over two constants folds always, through
-//! the same `zend_compare` the opcode reads. A call of a name in
+//! the constant `"2"`; a comparison over two constants folds always,
+//! through the same `zend_compare` and `zend_is_identical` the opcodes
+//! read; and a `===` or `!==` against a constant null, false or true is
+//! the `ZEND_TYPE_CHECK` php emits in its place. After the final return,
+//! `pass_two`'s one change to an operand order: a `COMMUTATIVE` opcode
+//! whose first operand is the lesser kind has its operands swapped, so
+//! `2 * $a` and `2 == $a` read the CV first. A call of a name in
 //! [`crate::special`]'s table is served as php's compiler serves it,
 //! a constant or an opcode of its own (`ZEND_STRLEN`, `ZEND_TYPE_CHECK`,
 //! `ZEND_DEFINED`, `ZEND_COUNT`), where the engine's function table
@@ -120,6 +129,7 @@ pub(crate) fn unit(
     };
     emit.statements(read)?;
     emit.final_return();
+    swap_commutative(&mut emit.oplines);
     let num_cvs = u32::try_from(emit.vars.len()).unwrap_or(u32::MAX);
     Ok(Unit {
         main: OpArray {
@@ -567,8 +577,8 @@ impl Emit<'_> {
         if op == BinaryOp::Concat {
             return self.concat(left, right);
         }
-        if op == BinaryOp::IsSmaller {
-            return self.smaller(left, right);
+        if compares(op) {
+            return self.comparison(op, left, right);
         }
         if let (Ok(a), Ok(b)) = (self.constant_expr(left), self.constant_expr(right))
             && let Some(folded) = fold(op, a, b)
@@ -599,31 +609,72 @@ impl Emit<'_> {
         Ok(self.emit_binary(Opcode::Concat, left, right))
     }
 
-    /// `zend_compile_binary_op`'s `ZEND_IS_SMALLER` arm: both sides
-    /// compiled, the fold over two constants, which
-    /// `zend_binary_op_produces_error` never refuses for a comparison, and
-    /// otherwise `IS_SMALLER` into a temporary.
-    fn smaller(&mut self, left: &Expr, right: &Expr) -> Result<Where, CompileError> {
+    /// `zend_compile_binary_op`'s comparison arms and `zend_compile_greater`:
+    /// both sides compiled, the fold over two constants, which
+    /// `zend_binary_op_produces_error` never refuses for a comparison; a
+    /// `===` or `!==` against a constant null, false or true as the
+    /// `TYPE_CHECK` php emits in its place, `$a === null` being
+    /// `is_null($a)`; and otherwise the opcode into a temporary, `>` and
+    /// `>=` as `IS_SMALLER` and `IS_SMALLER_OR_EQUAL` with the operands
+    /// swapped, which is the one shape php has for them.
+    fn comparison(
+        &mut self,
+        op: BinaryOp,
+        left: &Expr,
+        right: &Expr,
+    ) -> Result<Where, CompileError> {
         let left = self.expr(left)?;
         let right = self.expr(right)?;
         if let (Where::Constant(a), Where::Constant(b)) = (left, right) {
-            return Ok(Where::Constant(self.smaller_fold(a, b)));
+            return Ok(Where::Constant(self.compare_fold(op, a, b)));
         }
-        Ok(self.emit_binary(Opcode::IsSmaller, left, right))
+        if let Some((operand, mask)) = type_check(op, left, right) {
+            return Ok(self.emit_unary(Opcode::TypeCheck, operand, mask));
+        }
+        Ok(match op {
+            BinaryOp::Greater => self.emit_binary(Opcode::IsSmaller, right, left),
+            BinaryOp::GreaterOrEqual => self.emit_binary(Opcode::IsSmallerOrEqual, right, left),
+            _ => self.emit_binary(Self::opcode_of(op), left, right),
+        })
     }
 
-    /// `zend_try_ct_eval_binary_op` over `is_smaller_function`: whether
-    /// [`php_heap::compare`] orders the left constant first, at the
-    /// compile-time `precision` a double is rendered at against a string
-    /// that is not numeric.
-    fn smaller_fold(&self, left: Zval, right: Zval) -> Zval {
+    /// `zend_try_ct_eval_binary_op` over `is_smaller_function` and its
+    /// kin, and `zend_ct_eval_greater`, which calls the same two with
+    /// the constants swapped: the bool each comparison reads off
+    /// [`php_heap::compare`]'s ordering, the long `compare_function`
+    /// writes for `<=>`, and [`php_heap::identical`] for `===` and `!==`,
+    /// at the compile-time `precision` a double is rendered at against a
+    /// string that is not numeric.
+    fn compare_fold(&self, op: BinaryOp, left: Zval, right: Zval) -> Zval {
         let (a, b) = (left.as_str(), right.as_str());
-        let ordering = php_heap::compare(
-            scalar(left, a.as_ref()),
-            scalar(right, b.as_ref()),
-            self.precision,
-        );
-        Zval::bool(ordering == Ordering::Less)
+        let (left, right) = (scalar(left, a.as_ref()), scalar(right, b.as_ref()));
+        let compare = |l, r| php_heap::compare(l, r, self.precision);
+        match op {
+            BinaryOp::IsIdentical => Zval::bool(php_heap::identical(left, right)),
+            BinaryOp::IsNotIdentical => Zval::bool(!php_heap::identical(left, right)),
+            BinaryOp::Greater => Zval::bool(compare(right, left) == Ordering::Less),
+            BinaryOp::GreaterOrEqual => Zval::bool(compare(right, left) != Ordering::Greater),
+            BinaryOp::IsSmaller => Zval::bool(compare(left, right) == Ordering::Less),
+            BinaryOp::IsSmallerOrEqual => Zval::bool(compare(left, right) != Ordering::Greater),
+            BinaryOp::IsEqual => Zval::bool(compare(left, right) == Ordering::Equal),
+            BinaryOp::IsNotEqual => Zval::bool(compare(left, right) != Ordering::Equal),
+            BinaryOp::Spaceship => Zval::long(match compare(left, right) {
+                Ordering::Less => -1,
+                Ordering::Equal => 0,
+                Ordering::Greater => 1,
+            }),
+            // An arithmetic operator is [`fold`]'s and a `.` is
+            // [`Emit::concat_fold`]'s; neither reaches here.
+            BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Mod
+            | BinaryOp::Pow
+            | BinaryOp::Sl
+            | BinaryOp::Sr
+            | BinaryOp::Concat => Zval::null(),
+        }
     }
 
     /// `zend_try_ct_eval_binary_op` over `concat_function`: the one
@@ -770,7 +821,13 @@ impl Emit<'_> {
             BinaryOp::Sl => Opcode::Sl,
             BinaryOp::Sr => Opcode::Sr,
             BinaryOp::Concat => Opcode::Concat,
-            BinaryOp::IsSmaller => Opcode::IsSmaller,
+            BinaryOp::IsSmaller | BinaryOp::Greater => Opcode::IsSmaller,
+            BinaryOp::IsSmallerOrEqual | BinaryOp::GreaterOrEqual => Opcode::IsSmallerOrEqual,
+            BinaryOp::IsEqual => Opcode::IsEqual,
+            BinaryOp::IsNotEqual => Opcode::IsNotEqual,
+            BinaryOp::IsIdentical => Opcode::IsIdentical,
+            BinaryOp::IsNotIdentical => Opcode::IsNotIdentical,
+            BinaryOp::Spaceship => Opcode::Spaceship,
         }
     }
 
@@ -811,14 +868,10 @@ impl Emit<'_> {
                 self.concat_fold(left, right)?
                     .ok_or_else(|| self.fatal("a concatenation this compiler cannot fold yet"))
             }
-            Expr::Binary {
-                op: BinaryOp::IsSmaller,
-                left,
-                right,
-            } => {
+            Expr::Binary { op, left, right } if compares(*op) => {
                 let left = self.constant_expr(left)?;
                 let right = self.constant_expr(right)?;
-                Ok(self.smaller_fold(left, right))
+                Ok(self.compare_fold(*op, left, right))
             }
             Expr::Binary { op, left, right } => {
                 let left = self.constant_expr(left)?;
@@ -1055,9 +1108,10 @@ fn produces_error(op: BinaryOp, a: Number, b: Number) -> bool {
             (long_compatible(a), long_compatible(b)),
             (Some(_), Some(by)) if by >= 0
         ),
-        // A `.` is [`Emit::concat_fold`]'s and a `<` [`Emit::smaller_fold`]'s;
-        // neither reaches here.
-        BinaryOp::Concat | BinaryOp::IsSmaller => true,
+        // A `.` is [`Emit::concat_fold`]'s and a comparison
+        // [`Emit::compare_fold`]'s; neither reaches here.
+        BinaryOp::Concat => true,
+        _ => compares(op),
     }
 }
 
@@ -1108,9 +1162,9 @@ fn longs(op: BinaryOp, a: i64, b: i64) -> Zval {
         BinaryOp::Pow => power(a, b),
         BinaryOp::Sl => Zval::long(php_heap::shift_left(a, b.unsigned_abs())),
         BinaryOp::Sr => Zval::long(php_heap::shift_right(a, b.unsigned_abs())),
-        // A `.` is [`Emit::concat_fold`]'s and a `<` [`Emit::smaller_fold`]'s;
-        // [`produces_error`] held both.
-        BinaryOp::Concat | BinaryOp::IsSmaller => Zval::null(),
+        // A `.` is [`Emit::concat_fold`]'s and a comparison
+        // [`Emit::compare_fold`]'s; [`produces_error`] held both.
+        _ => Zval::null(),
     }
 }
 
@@ -1141,12 +1195,75 @@ fn doubles(op: BinaryOp, a: f64, b: f64) -> Option<Zval> {
         BinaryOp::Sub => Some(Zval::double(a - b)),
         BinaryOp::Mul => Some(Zval::double(a * b)),
         BinaryOp::Div => Some(Zval::double(a / b)),
-        // A modulo and a shift are [`longs`]'s: two long-compatible
-        // doubles go there, and the guard refused every other pair.
-        BinaryOp::Mod | BinaryOp::Sl | BinaryOp::Sr | BinaryOp::Concat | BinaryOp::IsSmaller => {
-            None
-        }
         BinaryOp::Pow => Some(Zval::double(a.powf(b))),
+        // A modulo and a shift are [`longs`]'s: two long-compatible
+        // doubles go there, and the guard refused every other pair; a
+        // `.` and a comparison never reach [`fold`].
+        _ => None,
+    }
+}
+
+/// Whether the operator is one of the comparison and equality levels,
+/// which `zend_compile_binary_op` folds through `zend_compare` or
+/// `zend_is_identical` and never refuses, and `zend_compile_greater`
+/// folds the same way with the sides swapped.
+fn compares(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::IsSmaller
+            | BinaryOp::IsSmallerOrEqual
+            | BinaryOp::Greater
+            | BinaryOp::GreaterOrEqual
+            | BinaryOp::IsEqual
+            | BinaryOp::IsNotEqual
+            | BinaryOp::IsIdentical
+            | BinaryOp::IsNotIdentical
+            | BinaryOp::Spaceship
+    )
+}
+
+/// `zend_compile_binary_op`'s `ZEND_IS_IDENTICAL` and
+/// `ZEND_IS_NOT_IDENTICAL` arm: a `===` or a `!==` whose one constant
+/// side is null, false or true is `TYPE_CHECK` over the other side, with
+/// `1 << IS_*` of the constant in `extended_value` for `===` and
+/// `MAY_BE_ANY` less that bit for `!==`. The operand to check and the
+/// mask, or nothing where the shape is not this one.
+fn type_check(op: BinaryOp, left: Where, right: Where) -> Option<(Where, u32)> {
+    /// `MAY_BE_ANY`: the nine bits `IS_NULL` through `IS_RESOURCE`.
+    const MAY_BE_ANY: u32 = 0x3FE;
+    if !matches!(op, BinaryOp::IsIdentical | BinaryOp::IsNotIdentical) {
+        return None;
+    }
+    let ((Where::Constant(constant), other) | (other, Where::Constant(constant))) = (left, right)
+    else {
+        return None;
+    };
+    let bit = match constant.kind() {
+        kind @ (ZvalType::Null | ZvalType::False | ZvalType::True) => 1 << (kind as u32),
+        _ => return None,
+    };
+    Some((
+        other,
+        if op == BinaryOp::IsIdentical {
+            bit
+        } else {
+            MAY_BE_ANY - bit
+        },
+    ))
+}
+
+/// `pass_two`'s one change to an operand order: `zend_vm_set_opcode_handler`
+/// swaps the operands of an opcode whose handler is specialised
+/// `COMMUTATIVE` when `op1_type < op2_type`, so a constant is never the
+/// first operand of a `MUL` or an `IS_EQUAL` and `2 * $a` is php's
+/// `MUL CV0($a) int(2)`. The order is observable: the `TypeError` of
+/// `2 * []` names `array * int`.
+fn swap_commutative(oplines: &mut [Opline]) {
+    for op in oplines {
+        if op.opcode.is_commutative() && (op.op1_type as u8) < (op.op2_type as u8) {
+            std::mem::swap(&mut op.op1_type, &mut op.op2_type);
+            std::mem::swap(&mut op.op1, &mut op.op2);
+        }
     }
 }
 

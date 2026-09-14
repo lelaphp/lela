@@ -109,6 +109,21 @@ impl Opcode {
             .unwrap_or(false)
     }
 
+    /// `ZEND_VM_COMMUTATIVE`: the opcode's handler line is specialised
+    /// `COMMUTATIVE`, so `pass_two`'s `zend_vm_set_opcode_handler` swaps
+    /// its operands when `op1_type < op2_type`, which is what puts the
+    /// CV first in `2 * $a` and `2 == $a` (`Z/Zend/zend_vm_execute.h`,
+    /// `zend_vm_set_opcode_handler`). `MUL`, the three bitwise operators,
+    /// `BOOL_XOR` and the four equalities; `ADD` is not one, since two
+    /// arrays add in order.
+    #[must_use]
+    pub fn is_commutative(self) -> bool {
+        opcode::COMMUTATIVE
+            .get(usize::from(self.num()))
+            .copied()
+            .unwrap_or(false)
+    }
+
     /// `ZEND_OP_IS_FRAMELESS_ICALL`: one of the four opcodes
     /// `zend_compile_frameless_icall` emits, whose `extended_value` is an
     /// index into `zend_flf_functions`.
@@ -257,5 +272,10 @@ mod tests {
         assert!(Opcode::Return.is_safepoint_site());
         assert!(Opcode::Jmpnz.is_safepoint_site());
         assert!(!Opcode::Add.is_safepoint_site());
+        assert!(Opcode::Mul.is_commutative());
+        assert!(Opcode::IsEqual.is_commutative());
+        assert!(Opcode::IsNotIdentical.is_commutative());
+        assert!(!Opcode::Add.is_commutative(), "two arrays add in order");
+        assert!(!Opcode::IsSmaller.is_commutative());
     }
 }
