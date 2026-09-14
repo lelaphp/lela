@@ -420,18 +420,17 @@ impl Engine {
     /// 1bool(true)
     /// ```
     ///
-    /// A source the compiler refuses ends the request the way php ends
-    /// one: `E_PARSE` through `php_error_cb`, at the line the compiler
-    /// stopped on, and php's status. What stands under the first `%s` is
-    /// the compiler's own sentence, which names the construct it cannot
-    /// read yet where php's names the token it did not want; the wording
-    /// around it is php's, and the oracle is what holds it.
+    /// A source php refuses ends the request the way php ends one:
+    /// `E_PARSE` through `php_error_cb`, the parser's first diagnostic in
+    /// php's words at php's line, and php's status. The message is the
+    /// parser's, held to the oracle byte for byte; only the file name is
+    /// the harness's.
     ///
     /// ```php
     /// echo 1 +;
     /// ```
     /// ```expect exit=255
-    /// Parse error: %s in %s on line 2
+    /// Parse error: syntax error, unexpected token ";" in %s on line 2
     /// ```
     pub fn serve(&self, description: RequestDescription, sink: &mut dyn OutputSink) -> Observables {
         let source = description.source.clone();
