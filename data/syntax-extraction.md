@@ -402,9 +402,9 @@ from the tables above. "Held by" names the instrument whose reading the ticket p
 is cut to two bounds: it moves at most ~1,200 ceiling lines of code, and it brings at most ~4,000
 off-ceiling lines of tests green in that same commit. Where a slice writes new code rather than copying
 (4, 5, 10), the ceiling figure is not the work — the work is the one design decision the slice settles,
-named in its row, and the bound is that it settles exactly one. The two grammar files that break the
-first bound together, `grammar/mod.rs` (1,110) beside `decl.rs` and `types.rs` (772), are two slices for
-that reason and no other; every other cut follows a file boundary the inherited tree already has.
+named in its row, and the bound is that it settles exactly one. The grammar's six files break the
+first bound together (3,014) and are one slice anyway, because the fixtures of any one reach the others
+(§6.13); every other cut follows a file boundary the inherited tree already has.
 
 | # | slice | moves | ceiling lines | off-ceiling | depends on | held by, beyond `budget` and `clippy` |
 |---|---|---|---|---|---|---|
@@ -414,12 +414,13 @@ that reason and no other; every other cut follows a file boundary the inherited 
 | 4 | **The typed-node generator.** `codegen_ast.rs` rewritten to emit arena structs with named index fields: the slot model (`:64-592`) and the display emitter (`:1196-1262`) survive; `accessor_body`, `emit_cast_impls` and the node emission are replaced; `Visitor` and `visit` are not emitted. Settles: what one emitted node looks like. | `xtask/src/codegen_ast.rs` | 1,102 | — | 1 | the emitted crate compiling; a test that the emitted file holds no `expect(` |
 | 5 | **The arena, the tree builder and the dump.** Node storage addressed by index, the lossless token stream, `Parsed`; `tree.rs` rewritten to resolve each node's fields from the event stream in one pass; `KIND@start..end "text"` reimplemented over the arena (`mahout_syntax/src/red.rs:287-324` as new code), since every later slice's fixtures render through it. Drops `green.rs`, `red.rs`, `builder.rs` and `ast.rs:1-194`. Settles: how a node is addressed and how a tree prints. | `mahout_parser/src/tree.rs`, replacing `mahout_syntax/src/{green,red,builder,ast}.rs` | 166 + new | 156 | 1, 4 | `tests/typed_ast.rs` rewritten; a losslessness test (token texts concatenate to the input) on every fixture |
 | 6 | **The parser driver and its events.** The 37 methods, `MAX_DEPTH = 512`, `MIN_THREAD_STACK`, the fuel and burst counters, the open-delimiter stack, the expected-set recorder, the trivia-hiding cursor. | `mahout_parser/src/{parser,event,input,lib}.rs` | 700 | — | 5 | the driver's own 4 `#[test]` (2 in `parser.rs`, 2 in `input.rs`); a recursion-cap test at 600 levels |
-| 7 | **The grammar: expressions and strings.** The Pratt core, interpolation, contextual keywords; the fixture harness, which every later grammar slice reads. | `mahout_parser/src/grammar/{expr,strings,ckw}.rs`, `tests/support/mod.rs` | 1,132 | 3,975 | 6 | 161 snapshot tests (`fixtures_expr` 78, `fixtures_variable_productions` 29, `contextual_keywords` 31, `fixtures_strings` 23), each regenerated once against the arena's dump |
-| 8 | **The grammar: statements.** Control flow, `switch`, `try`, namespaces and `use`, the alternative syntaxes, `__halt_compiler`, and the recovery paths. | `mahout_parser/src/grammar/mod.rs` (41 fns) | 1,110 | 1,638 | 7 | 57 snapshot tests (`fixtures_stmt` 35, `fixtures_recovery` 22), each regenerated once |
-| 9 | **The grammar: declarations and types.** Classes, interfaces, traits, enums, members, hooks, attributes, parameters, and the type grammar. | `mahout_parser/src/grammar/{decl,types}.rs` (33 fns) | 772 | 1,428 | 7 | 35 snapshot tests (`fixtures_decl`), each regenerated once |
+| 7 | **The grammar, its six files, and the fixture harness.** `mod`, `expr`, `decl`, `types`, `strings` and `ckw`, which land together because the fixtures of any one reach the others (§6.13): the Pratt core, interpolation, contextual keywords, statements, declarations and the type grammar; the fixture harness, which every later slice reads. | `mahout_parser/src/grammar/{mod,expr,decl,types,strings,ckw}.rs`, `tests/support/mod.rs` | 3,014 | 3,975 | 6 | 161 snapshot tests (`fixtures_expr` 78, `fixtures_variable_productions` 29, `contextual_keywords` 31, `fixtures_strings` 23), each regenerated once against the arena's dump |
+| 8 | **The statement and recovery fixtures.** The 57 snapshots of `fixtures_stmt` and `fixtures_recovery`; no grammar, which slice 7 brought. | `mahout_parser/tests/fixtures_{stmt,recovery}.rs` | — | 1,638 | 7 | 57 snapshot tests (`fixtures_stmt` 35, `fixtures_recovery` 22), each regenerated once |
+| 9 | **The declaration and type fixtures.** The 35 snapshots of `fixtures_decl`; no grammar, which slice 7 brought. | `mahout_parser/tests/fixtures_decl.rs` | — | 1,428 | 7 | 35 snapshot tests (`fixtures_decl`), each regenerated once |
 | 10 | **php's error text and the `parse` entry.** The 74 hand-placed sites re-worded to php's `syntax error, unexpected …, expecting …` with no code number (§6.1); `codes.rs` and `level.rs` dropped; `diag.rs` rewritten; `parse(&[u8], Options) -> Parsed` with the token stream, the line table, the tree and the diagnostics merged in php's phase order. Settles: the diagnostic's shape and what `parse` hands back. | `mahout_source/src/diag.rs`, `mahout_parser`'s diagnostic sites | 176 + new | — | 8, 9 | a witness per error family against the oracle's `php -l` text; the seven lexical fatals §6.1 names |
 
-Slices 2 and 3 can be worked in either order after 1; 8 and 9 are independent of each other after 7.
+Slices 2 and 3 can be worked in either order after 1; slices 8 and 9 bring fixture files only, and are
+independent of each other after 7.
 Slice 4 is the only one that can run in parallel with the lexer slices, since it touches the generator
 alone. Nothing outside slice 1 can start before it: every other slice names `SyntaxKind`. The dump is
 slice 5's and not a slice of its own because a fixture cannot assert what it cannot render: slices 7, 8
@@ -431,11 +432,12 @@ says why.
 
 ## 6. Where the source did not confirm the design
 
-Nine of the twelve findings below are settled, not open. #166 ruled that each takes the measured
+Ten of the thirteen findings below are settled, not open. #166 ruled that each takes the measured
 number, and design revision 12 carries them into §4.9, the `php_syntax` row of §4.1 and §13's first
 row: findings 2 through 9 and 11. Finding 1 says where this record was read and finding 10 moves 88
 lines between two of its own tables; neither is a design sentence, and both stand as written. Finding
-12 names what was not measured here and is the one that stays open.
+12 names what was not measured here and is the one that stays open. Finding 13 corrects §5's rows 7
+to 9, as #237 settled.
 
 1. **The pinned commit is not in the clone the work points at.** `1b3104a8`, `d6460ef0` and `8f119938`
    are absent from `~/Projects/mahout`, whose HEAD `934e6507` (2026-07-02, 139 commits) is a different
@@ -489,3 +491,10 @@ lines between two of its own tables; neither is a design sentence, and both stan
    measured; §4.1's "M0 token differential 193,377/193,377" and "validator verdicts 99.95% on 172k
    files" were read in the design and not re-run. The size of the arena node storage and of the
    rewritten generator's emission is unknown until slice 4 exists (§4).
+13. **Slice 7's fixtures reach the statement and declaration grammar.** Of the 161 snapshots the row
+   assigned to the expression grammar, 23 declare a function, a class, an enum or an arrow function,
+   13 are `echo`, `foreach`, `use Foo\{…}`, `static`, `const` and `unset` statements, and 54 are
+   calls, whose argument list is `decl::arg_list` (measured at Mahout `1b3104a8`). The six grammar
+   files therefore land in one commit and the fixture files in three: 161 with slice 7, 57 with 8, 35
+   with 9. Regenerating a snapshot against a placeholder would regenerate it twice, which ADR-0003's
+   Consequences and §6.11 rule out.
