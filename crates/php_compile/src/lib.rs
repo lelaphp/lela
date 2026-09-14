@@ -68,7 +68,10 @@ impl Default for Options {
     }
 }
 
-/// A compile-time fatal: php's message, at php's line.
+/// A compile-time fatal: php's message, at php's line. The parser's
+/// first `syntax error, …` where php's parser refused the file, and the
+/// compiler's own sentence where php's would have compiled it and this
+/// compiler cannot read it yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileError {
     pub message: String,
@@ -104,6 +107,21 @@ pub fn compile(
     options: &Options,
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
+    // php compiles nothing of a file its parser refused: the first parse
+    // error, which `Parsed::diagnostics` holds first, is the compile
+    // error, in php's words at php's line (design §6.1). What php raises
+    // at another level, a warning it scans past or the `(unset)` cast's
+    // compile error, is not rendered here yet (#163).
+    if let Some(refused) = parsed
+        .diagnostics
+        .iter()
+        .find(|d| d.level == php_syntax::Level::Parse)
+    {
+        return Err(CompileError {
+            message: refused.message.clone(),
+            line: refused.line,
+        });
+    }
     let read = read::read(&parsed.source).map_err(|trouble| CompileError {
         message: trouble.what,
         line: trouble.line,
@@ -1428,5 +1446,27 @@ mod tests {
         )
         .err();
         assert_eq!(trouble.map(|e| e.line), Some(2));
+    }
+
+    /// A file php's parser refuses is refused here in php's words, the
+    /// first diagnostic `parse` handed back, before the reader is asked
+    /// anything: `echo 1 +;` is php's `unexpected token ";"` and not the
+    /// reader's sentence about the expression.
+    #[test]
+    fn what_php_refuses_is_the_first_parse_error_in_phps_words() {
+        let mut strings = php_heap::Strings::new();
+        let trouble = compile(
+            &php_syntax::parse(b"<?php\necho 1 +;", &php_syntax::Options::default()),
+            &Options::default(),
+            &mut strings,
+        )
+        .err();
+        assert_eq!(
+            trouble,
+            Some(CompileError {
+                message: "syntax error, unexpected token \";\"".into(),
+                line: 2,
+            })
+        );
     }
 }
