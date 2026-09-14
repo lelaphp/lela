@@ -529,6 +529,41 @@ fn constant(name: &[u8], value: i64) -> ConstDecl {
 /// string(2) "11"
 /// ```
 ///
+/// A count with a fraction, as a float or as a float-string, is read as
+/// `zend_parse_arg_long_weak` reads it: truncated behind the 8.1
+/// deprecation, so `1.5` and `'1.5'` are one repeat each; a float that
+/// is NAN or past the long's range is the `TypeError` the parser refuses
+/// it with (#253).
+///
+/// ```php
+/// var_dump(str_repeat('x', 1.5), str_repeat('x', '1.5'));
+/// str_repeat('x', 1e19);
+/// ```
+/// ```expect exit=255
+/// Deprecated: Implicit conversion from float 1.5 to int loses precision in %s on line 2
+///
+/// Deprecated: Implicit conversion from float-string "1.5" to int loses precision in %s on line 2
+/// string(1) "x"
+/// string(1) "x"
+///
+/// Fatal error: Uncaught TypeError: str_repeat(): Argument #2 ($times) must be of type int, float given in %s:3
+/// Stack trace:
+/// #0 %s(3): str_repeat('x', 1.0E+19)
+/// #1 {main}
+///   thrown in %s on line 3
+/// ```
+///
+/// ```php
+/// str_repeat('x', NAN);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: str_repeat(): Argument #2 ($times) must be of type int, float given in %s:2
+/// Stack trace:
+/// #0 %s(2): str_repeat('x', NAN)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
 /// A count below zero is php's `ValueError`, `Argument #2 ($times) must
 /// be greater than or equal to 0`, thrown with both arguments in hand,
 /// which the trace prints as php prints them: the string in `'`, cut at

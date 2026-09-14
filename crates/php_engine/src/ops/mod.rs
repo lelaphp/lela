@@ -1707,6 +1707,71 @@ fn to_long(req: &mut Request, value: &Value) -> Option<i64> {
     }
 }
 
+/// `zend_parse_arg_long_weak` (`Z/Zend/zend_API.c:567`), the two arms a
+/// native's `Z_PARAM_LONG` reads a double and a string through when the
+/// caller is not strict; the long, or nothing for what the parser
+/// refuses, which is the `TypeError` the face raises in its own words. A
+/// double that is NAN or past the long's range is refused before it is
+/// read; one in range is `zend_dval_to_lval`'s truncation, with the 8.1
+/// deprecation (`zend_incompatible_double_to_long_error`) where the long
+/// is not the double. A string is read by [`numeric_prefix`] as
+/// `is_numeric_str_function` reads it, whole, so one with anything past
+/// its number is refused, and a double among them is held to the same
+/// range and truncated the same way, its deprecation
+/// `zend_incompatible_string_to_long_error`'s, which names the string as
+/// it was written.
+///
+/// ```php
+/// var_dump(str_repeat('x', 2.0), str_repeat('x', -0.5), str_repeat('x', ' 2.0'), str_repeat('x', '1e0'), str_repeat('x', " 2\n"));
+/// str_repeat('x', '2abc');
+/// ```
+/// ```expect exit=255
+/// Deprecated: Implicit conversion from float -0.5 to int loses precision in %s on line 2
+/// string(2) "xx"
+/// string(0) ""
+/// string(2) "xx"
+/// string(1) "x"
+/// string(2) "xx"
+///
+/// Fatal error: Uncaught TypeError: str_repeat(): Argument #2 ($times) must be of type int, string given in %s:3
+/// Stack trace:
+/// #0 %s(3): str_repeat('x', '2abc')
+/// #1 {main}
+///   thrown in %s on line 3
+/// ```
+pub(crate) fn arg_long_weak(req: &mut Request, value: &Value) -> Option<i64> {
+    if let Some(d) = value.as_float() {
+        if d.is_nan() || !fits_long(d) {
+            return None;
+        }
+        return Some(double_to_long(req, d));
+    }
+    let s = value.as_php_string()?;
+    let (number, trailing) = numeric_prefix(s.as_bytes())?;
+    if trailing {
+        return None;
+    }
+    match number {
+        Number::Long(n) => Some(n),
+        Number::Double(d) => {
+            if d.is_nan() || !fits_long(d) {
+                return None;
+            }
+            let l = truncated(d);
+            if !long_compatible(d, l) {
+                deprecated(
+                    req,
+                    &format!(
+                        "Implicit conversion from float-string \"{}\" to int loses precision",
+                        String::from_utf8_lossy(s.as_bytes())
+                    ),
+                );
+            }
+            Some(l)
+        }
+    }
+}
+
 /// `zend_dval_to_lval_safe`: `zend_dval_to_lval`, which is the truncated
 /// long for a double in range and, with php's warning, zero for one that
 /// is not finite and the modular reading of `zend_dval_to_lval_slow` for

@@ -390,7 +390,31 @@ pub fn binary_op(
 
 /// Coerce the argument at `position` to `ty` as php's parameter parsing
 /// does, honouring the caller's `strict_types`: the scalar cases here,
-/// and a `TypeError` in php's wording for what does not coerce.
+/// and a `TypeError` in php's wording for what does not coerce. An int
+/// parameter given a float or a string reads it through the kernel that
+/// copies `zend_parse_arg_long_weak`, [`crate::ops::arg_long_weak`]: a
+/// float in the long's range is truncated behind the 8.1 deprecation
+/// where that loses something, and one that is NAN or past the range is
+/// the `TypeError`; a numeric string with a fraction is the same
+/// deprecation in its float-string wording.
+///
+/// ```php
+/// var_dump(str_repeat('x', 1.5), str_repeat('x', '1.5'));
+/// str_repeat('x', 1e19);
+/// ```
+/// ```expect exit=255
+/// Deprecated: Implicit conversion from float 1.5 to int loses precision in %s on line 2
+///
+/// Deprecated: Implicit conversion from float-string "1.5" to int loses precision in %s on line 2
+/// string(1) "x"
+/// string(1) "x"
+///
+/// Fatal error: Uncaught TypeError: str_repeat(): Argument #2 ($times) must be of type int, float given in %s:3
+/// Stack trace:
+/// #0 %s(3): str_repeat('x', 1.0E+19)
+/// #1 {main}
+///   thrown in %s on line 3
+/// ```
 ///
 /// What comes back is the frame's, as what `Z_PARAM_STR` hands a native
 /// is: a string the coercion made replaces the argument in the call
@@ -439,14 +463,13 @@ pub fn coerce_param(
         },
         Type::Int => match value.as_ref() {
             ValueRef::Int(n) => Ok(Value::int(n)),
-            ValueRef::Float(f) if !strict && f.fract() == 0.0 && f.is_finite() => {
-                Ok(Value::int(float_to_long(f)))
-            }
             ValueRef::Bool(b) if !strict => Ok(Value::int(i64::from(b))),
-            ValueRef::Str(s) if !strict => match numeric_string(s.as_bytes()) {
-                Some(n) => Ok(n),
-                None => want(req, "int"),
-            },
+            ValueRef::Float(_) | ValueRef::Str(_) if !strict => {
+                match crate::ops::arg_long_weak(req, value) {
+                    Some(n) => Ok(Value::int(n)),
+                    None => want(req, "int"),
+                }
+            }
             _ => want(req, "int"),
         },
         Type::Float => match value.as_ref() {
