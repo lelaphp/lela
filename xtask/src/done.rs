@@ -41,9 +41,12 @@
 //!    unticked acceptance box: the `ticket` reading over its number, the
 //!    one `xtask ticket read` writes (#28), is fresh and passes, and its
 //!    message names the boxes when it does not; a ticket with no box at
-//!    all is held the same way, since it cannot be shown done, and a
-//!    close the tracker refused with every box ticked is met here, the
-//!    boxes being the condition and not the close. A branch that records
+//!    all and not withdrawn is held the same way, since it cannot be
+//!    shown done, and a close the tracker refused with every box ticked
+//!    is met here, the boxes being the condition and not the close. A
+//!    withdrawal that went through is met whatever its boxes say, the
+//!    instrument having settled the ticket, and one refused is held
+//!    (#221). A branch that records
 //!    no ticket, and a detached `HEAD`, are not asked and nothing here
 //!    says the word, the way `xtask` is not asked for a witness (#31).
 //!    In practice this is the Stop hook's and pre-push's condition: the
@@ -307,8 +310,9 @@ pub fn judge(
     })
 }
 
-/// Condition 7: the branch's ticket has no unticked box, read from the
-/// `ticket` reading over its number and never from the tracker. The
+/// Condition 7: the branch's ticket has no unticked box, or was withdrawn
+/// by the instrument, read from the `ticket` reading over its number and
+/// never from the tracker. The
 /// reading is fresh while the workspace's tree, [`ticket::STAMPED_OVER`],
 /// still matches (the rule at the top of this module); a
 /// missing or stale one says what to run, and a failing one carries the
@@ -328,13 +332,18 @@ fn boxes(root: &Path, store: &Store, ticket: Ticket, unmet: &mut Vec<String>) ->
     // The boxes are the condition, read from the numbers: a close the
     // tracker refused with every box ticked fails as a reading and is
     // met here, since the ticket has no unticked box; a reading that
-    // counts nothing is held to its status.
+    // counts nothing is held to its status. A withdrawal is read before
+    // the boxes (#221): its boxes are unticked by construction and the
+    // instrument settled the ticket, so the reading is held to its status
+    // alone, met when the close went through and held when it was
+    // refused.
     let count = |key: &str| match reading.numbers.get(key) {
         Some(Number::Int(n)) => Some(*n),
         _ => None,
     };
-    let held = match (count("criteria"), count("unticked")) {
-        (Some(criteria), Some(unticked)) => criteria == 0 || unticked > 0,
+    let held = match (count("withdrawn"), count("criteria"), count("unticked")) {
+        (Some(withdrawn), ..) if withdrawn > 0 => reading.status != Status::Pass,
+        (_, Some(criteria), Some(unticked)) => criteria == 0 || unticked > 0,
         _ => reading.status != Status::Pass,
     };
     if held {

@@ -1286,6 +1286,13 @@ fn a_rule_at_the_stop_is_not_judged_at_the_call() {
 /// <n>` with the fixture body named, so the `ticket` reading `done` reads
 /// is the one the instrument writes, and nothing reaches the tracker.
 fn ticket_read(root: &Path, number: u64, body: &str) {
+    ticket_act(root, number, body, xtask::ticket::Act::Read);
+}
+
+/// The same recorded `gh` under any act of the instrument: it answers
+/// every call with the issue and exits 0, so a close goes through the way
+/// the tracker would take it, and the reading recorded is the close's.
+fn ticket_act(root: &Path, number: u64, body: &str, act: xtask::ticket::Act) -> Reading {
     use std::os::unix::fs::PermissionsExt;
     let dir = root.join("target/gh");
     std::fs::create_dir_all(&dir).unwrap();
@@ -1308,13 +1315,16 @@ fn ticket_read(root: &Path, number: u64, body: &str) {
         root,
         &xtask::manifest::Manifest::load(root).unwrap(),
         &xtask::ticket::Gh::at(&gh),
-        xtask::ticket::Act::Read,
+        act,
         xtask::track::Ticket::new(number),
         None,
         "main",
     )
     .unwrap();
-    Store::of_workspace(root).record(&[reading]).unwrap();
+    Store::of_workspace(root)
+        .record(std::slice::from_ref(&reading))
+        .unwrap();
+    reading
 }
 
 fn about_the_ticket(verdict: &Verdict) -> Vec<String> {
@@ -1472,6 +1482,74 @@ fn a_refused_close_with_every_box_ticked_is_met_and_a_ticket_with_no_box_is_not(
         ["ticket: #31 has no box under `## Acceptance criteria`; nothing to hold it to"],
         "{verdict:#?}"
     );
+}
+
+/// A withdrawal of the branch's own ticket meets condition 7 (#221): the
+/// reading `xtask ticket close --withdrawn` writes passes with every box
+/// unticked and `withdrawn` set, the instrument having settled the ticket,
+/// and `done` reads `withdrawn` before the boxes. It would be held under
+/// the rule this replaces, which read the boxes alone and saw two
+/// unticked; the assertion that the verdict is met is what fails on that
+/// behaviour. The Stop hook ends the turn on it. A withdrawn ticket with
+/// no box at all is met the same way and not held for carrying none; a
+/// withdrawal the instrument refused, a box being ticked, is a failing
+/// reading and stays held, naming the box.
+#[test]
+fn a_withdrawn_branch_ticket_is_met_and_a_refused_withdrawal_is_not() {
+    use xtask::ticket::{Act, Successors, Verdict as Close};
+    let root = scratch("withdrawn");
+    sh(&root, &["git", "config", "branch.main.ticket", "31"]);
+    let withdrawn =
+        |reason: &str| Act::Close(Close::Withdrawn(reason.to_owned()), Successors::Nothing);
+
+    let reading = ticket_act(
+        &root,
+        31,
+        "withdrawn.md",
+        withdrawn("measured on HEAD: not in the tree"),
+    );
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    assert_eq!(reading.numbers["withdrawn"], 1.into(), "{reading:#?}");
+    assert_eq!(reading.numbers["unticked"], 2.into(), "{reading:#?}");
+    let verdict = judge(&root);
+    assert!(about_the_ticket(&verdict).is_empty(), "{verdict:#?}");
+    assert!(verdict.met(), "{verdict:#?}");
+    let (code, out, _) = xtask(&root, &["done", "--base", "HEAD"], None);
+    assert_eq!(code, 0, "{out}");
+    let stop = std::fs::read_to_string(fixtures().join("hooks/stop.json")).unwrap();
+    let (_, out, _) = xtask(&root, &["done", "--hook"], Some(&stop));
+    assert_eq!(out, "", "withdrawn: the turn ends");
+
+    // No box at all, withdrawn: the instrument settled it, so the
+    // ticket is not held for carrying no box.
+    let store = Store::of_workspace(&root);
+    let mut boxless = Reading::stamped_over("ticket", "31", &root, Path::new(".")).unwrap();
+    boxless.status = Status::Pass;
+    boxless.count("criteria", 0).unwrap();
+    boxless.count("ticked", 0).unwrap();
+    boxless.count("unticked", 0).unwrap();
+    boxless.count("withdrawn", 1).unwrap();
+    boxless.message =
+        "#31: 0 of 0 criteria ticked; withdrawn: landed by #135; opens nothing".into();
+    store.record(&[boxless]).unwrap();
+    let verdict = judge(&root);
+    assert!(about_the_ticket(&verdict).is_empty(), "{verdict:#?}");
+
+    // Refused: one box of `unticked.md` is ticked, and work half done is
+    // not withdrawn, so the reading fails and the condition holds.
+    let reading = ticket_act(&root, 31, "unticked.md", withdrawn("nothing here"));
+    assert_eq!(reading.status, Status::Fail, "{}", reading.message);
+    assert_eq!(reading.numbers["withdrawn"], 1.into(), "{reading:#?}");
+    let verdict = judge(&root);
+    let lines = about_the_ticket(&verdict);
+    assert_eq!(lines.len(), 1, "{verdict:#?}");
+    assert!(
+        lines[0].starts_with("ticket: #31: 1 of 3 criteria ticked;")
+            && lines[0].contains("the thing is built")
+            && lines[0].contains("not closed, nothing changed at the tracker"),
+        "{lines:?}"
+    );
+    assert!(!verdict.met(), "{verdict:#?}");
 }
 
 /// The phpt skip the missing engine binary causes is met, and `done`
