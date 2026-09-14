@@ -444,7 +444,7 @@ pub(crate) fn pre_inc<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    incdec(req, frame, code, op, false)
+    incdec(req, frame, code, op, false, crate::ops::increment)
 }
 
 /// `ZEND_POST_INC`: the same step, with the value the variable held
@@ -455,7 +455,61 @@ pub(crate) fn post_inc<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    incdec(req, frame, code, op, true)
+    incdec(req, frame, code, op, true, crate::ops::increment)
+}
+
+/// `ZEND_PRE_DEC`: [`crate::ops::decrement`] over the variable `op1`
+/// names, written back and, under `RETURN_VALUE_USED`, into the
+/// temporary, as `ZEND_PRE_INC` does with [`crate::ops::increment`]. A
+/// CV nothing has written is the warning and null, which `--` leaves
+/// null behind its own warning where `++` makes it `1`.
+///
+/// ```php
+/// $u--; var_dump($u); echo --$v, "|", $w--, "|", $w, "|", $x = 5, $x--, --$x, $x;
+/// ```
+/// ```expect
+///
+/// Warning: Undefined variable $u in %s on line 2
+///
+/// Warning: Decrement on type null has no effect, this will change in the next major version of PHP in %s on line 2
+/// NULL
+///
+/// Warning: Undefined variable $v in %s on line 2
+///
+/// Warning: Decrement on type null has no effect, this will change in the next major version of PHP in %s on line 2
+/// |
+/// Warning: Undefined variable $w in %s on line 2
+///
+/// Warning: Decrement on type null has no effect, this will change in the next major version of PHP in %s on line 2
+/// ||5533
+/// ```
+pub(crate) fn pre_dec<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    incdec(req, frame, code, op, false, crate::ops::decrement)
+}
+
+/// `ZEND_POST_DEC`: the same step, with the value the variable held
+/// before it in the temporary.
+///
+/// ```php
+/// $s = "9"; echo $s--, $s; $t = ""; echo $t--, "|", $t;
+/// ```
+/// ```expect
+/// 98
+/// Deprecated: Decrement on empty string is deprecated as non-numeric in %s on line 2
+/// |-1
+/// ```
+pub(crate) fn post_dec<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    incdec(req, frame, code, op, true, crate::ops::decrement)
 }
 
 /// `ZEND_STRLEN`: [`crate::ops::strlen`] over the operand, into the
@@ -659,20 +713,28 @@ fn unary(
     }
 }
 
-/// The body `PRE_INC` and `POST_INC` share: the variable's slot, a CV
-/// or a `VAR`, read as `GET_OP1_ZVAL_PTR_PTR_UNDEF(BP_VAR_RW)` reads it;
-/// the kernel over what it held; the slot written, and the temporary
-/// under `RETURN_VALUE_USED`, which a `POST_INC` always is, since
-/// `zend_do_free` turns one nothing reads into a `PRE_INC`. A kernel
+/// The body `PRE_INC`, `POST_INC`, `PRE_DEC` and `POST_DEC` share: the
+/// variable's slot, a CV or a `VAR`, read as
+/// `GET_OP1_ZVAL_PTR_PTR_UNDEF(BP_VAR_RW)` reads it; the kernel, the
+/// step, over what it held; the slot written, and the temporary under
+/// `RETURN_VALUE_USED`, which a `POST_*` always is, since
+/// `zend_do_free` turns one nothing reads into the `PRE_*`. A kernel
 /// that threw leaves the throwable pending and the variable as it was,
 /// which is the `Threw` edge the loop reads.
-fn incdec(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, post: bool) -> Edge {
+fn incdec(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    post: bool,
+    kernel: fn(&mut Request, &Value) -> Result<Value, Thrown>,
+) -> Edge {
     let slot = match op.op1_type {
         OperandKind::Cv => op.op1,
         _ => exec::temporary_slot(code, op.op1),
     };
     let held = exec::operand(req, frame, code, op.op1_type, op.op1);
-    match crate::ops::increment(req, &held) {
+    match kernel(req, &held) {
         Ok(stepped) => {
             if op.out_type != OperandKind::Unused {
                 let out = exec::temporary_slot(code, op.out);

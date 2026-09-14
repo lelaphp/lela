@@ -1217,6 +1217,38 @@ mod tests {
         );
     }
 
+    /// The same over `--`: `$a--;` as a statement is php's `PRE_DEC
+    /// CV0($a)`, `zend_do_free`'s conversion of the `POST_DEC` nothing
+    /// reads, and the ones an `ASSIGN`, an `ECHO` or a comparison reads
+    /// stay `POST_DEC`. The oracle's dump is the same fifteen oplines,
+    /// `vars=2, tmps=10`.
+    #[test]
+    fn a_post_dec_nothing_reads_is_the_pre_dec_zend_do_free_makes_it() {
+        assert_eq!(
+            dump_of(b"<?php $a--; --$a; $b = $a--; echo --$a, $a--; for ($a--; $a-- > 1; --$a) {}"),
+            main_dump(
+                15,
+                2,
+                10,
+                "0000 PRE_DEC CV0($a)\n\
+                 0001 PRE_DEC CV0($a)\n\
+                 0002 T4 = POST_DEC CV0($a)\n\
+                 0003 ASSIGN CV1($b) T4\n\
+                 0004 T6 = PRE_DEC CV0($a)\n\
+                 0005 ECHO T6\n\
+                 0006 T7 = POST_DEC CV0($a)\n\
+                 0007 ECHO T7\n\
+                 0008 PRE_DEC CV0($a)\n\
+                 0009 JMP 0011\n\
+                 0010 PRE_DEC CV0($a)\n\
+                 0011 T10 = POST_DEC CV0($a)\n\
+                 0012 T11 = IS_SMALLER int(1) T10\n\
+                 0013 JMPNZ T11 0010\n\
+                 0014 RETURN int(1)\n"
+            )
+        );
+    }
+
     /// `zend_compile_while`, and a block whose statements keep their own
     /// lines while the loop's own oplines keep the statement's, as php's
     /// `CG(zend_lineno)` is the condition's again once the condition is

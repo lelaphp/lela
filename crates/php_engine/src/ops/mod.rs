@@ -1022,6 +1022,118 @@ pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Throw
     }
 }
 
+/// `decrement_function` (`Z/Zend/zend_operators.c:2797`): the value
+/// `--` leaves in the variable, and not [`increment`] with the sign
+/// turned. A long is one less, and the double past the long's edge
+/// where that underflowed (`fast_long_decrement_function`); a double is
+/// one less; the empty string is `-1`, behind the deprecation 8.3
+/// raises for it, tested before the string is read as a number; a
+/// numeric string is the number it holds, one less, the long's edge
+/// stepping to a double as the long's does; any other string is left as
+/// it is, behind 8.3's other deprecation; null and a bool are php's
+/// warning and no change, null having no `-1` where `++` has its `1`;
+/// and an array, a resource or an object is `TypeError`, naming what it
+/// could not decrement. The value is handed back rather than written in
+/// place, as [`increment`]'s is.
+///
+/// ```php
+/// $i = 1; $i--; $d = 1.5; $d--; $m = -9223372036854775807-1; $m--; $n = null; $n--; $t = "9"; $t--; $f = "1.5"; $f--; $e = "-9223372036854775807-1"; $g = "-9223372036854775808"; $g--;
+/// var_dump($i, $d, $m, $n, $t, $f, $g);
+/// ```
+/// ```expect
+///
+/// Warning: Decrement on type null has no effect, this will change in the next major version of PHP in %s on line 2
+/// int(0)
+/// float(0.5)
+/// float(-9.223372036854776E+18)
+/// NULL
+/// int(8)
+/// float(0.5)
+/// float(-9.223372036854776E+18)
+/// ```
+///
+/// ```php
+/// $s = "a"; $s--; $z = "Az"; $z--; $e = ""; $e--; $x = "9x"; $x--;
+/// var_dump($s, $z, $e, $x);
+/// ```
+/// ```expect
+///
+/// Deprecated: Decrement on non-numeric string has no effect and is deprecated in %s on line 2
+///
+/// Deprecated: Decrement on non-numeric string has no effect and is deprecated in %s on line 2
+///
+/// Deprecated: Decrement on empty string is deprecated as non-numeric in %s on line 2
+///
+/// Deprecated: Decrement on non-numeric string has no effect and is deprecated in %s on line 2
+/// string(1) "a"
+/// string(2) "Az"
+/// int(-1)
+/// string(2) "9x"
+/// ```
+///
+/// ```php
+/// $b = true; $b--; $c = false; $c--; var_dump($b, $c);
+/// ```
+/// ```expect
+///
+/// Warning: Decrement on type bool has no effect, this will change in the next major version of PHP in %s on line 2
+///
+/// Warning: Decrement on type bool has no effect, this will change in the next major version of PHP in %s on line 2
+/// bool(true)
+/// bool(false)
+/// ```
+pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Thrown> {
+    let value = value.deref();
+    match value.as_ref() {
+        ValueRef::Int(n) => Ok(match n.checked_sub(1) {
+            Some(less) => Value::int(less),
+            None => Value::float(wide(i64::MIN) - 1.0),
+        }),
+        ValueRef::Float(f) => Ok(Value::float(f - 1.0)),
+        ValueRef::Str(s) if s.as_bytes().is_empty() => {
+            deprecated(
+                req,
+                "Decrement on empty string is deprecated as non-numeric",
+            );
+            Ok(Value::int(-1))
+        }
+        ValueRef::Str(s) => match numeric_prefix(s.as_bytes()) {
+            Some((Number::Long(i64::MIN), false)) => Ok(Value::float(wide(i64::MIN) - 1.0)),
+            Some((Number::Long(n), false)) => Ok(Value::int(n - 1)),
+            Some((Number::Double(d), false)) => Ok(Value::float(d - 1.0)),
+            _ => {
+                deprecated(
+                    req,
+                    "Decrement on non-numeric string has no effect and is deprecated",
+                );
+                Ok(value.clone())
+            }
+        },
+        // php's `IS_NULL` arm; an uninitialised zval reads as null here.
+        ValueRef::Undef | ValueRef::Null => {
+            warning(
+                req,
+                "Decrement on type null has no effect, this will change in the next major version of PHP",
+            );
+            Ok(Value::null())
+        }
+        ValueRef::Bool(_) => {
+            warning(
+                req,
+                "Decrement on type bool has no effect, this will change in the next major version of PHP",
+            );
+            Ok(value.clone())
+        }
+        ValueRef::Array(_)
+        | ValueRef::Resource(_)
+        | ValueRef::Object(_)
+        | ValueRef::Reference(_) => {
+            let name = value_name(req, value);
+            Err(throw(req, "TypeError", &format!("Cannot decrement {name}")))
+        }
+    }
+}
+
 /// `increment_string` (`Z/Zend/zend_operators.c:2613`), "Perl style
 /// string increment", behind its deprecation: from the last byte back, a
 /// letter or a digit steps to the next of its kind, with `z`, `Z` and

@@ -522,6 +522,8 @@ impl Emit<'_> {
             Expr::Assign { var, value } => self.assign(var, value),
             Expr::PreInc(var) => Ok(self.incdec(var, Opcode::PreInc)),
             Expr::PostInc(var) => Ok(self.incdec(var, Opcode::PostInc)),
+            Expr::PreDec(var) => Ok(self.incdec(var, Opcode::PreDec)),
+            Expr::PostDec(var) => Ok(self.incdec(var, Opcode::PostDec)),
             known => Ok(Where::Constant(self.constant_expr(known)?)),
         }
     }
@@ -882,9 +884,12 @@ impl Emit<'_> {
             Expr::Call { name, arguments } => self
                 .special_constant(&unqualified(name), arguments)?
                 .ok_or_else(|| self.fatal("a call this compiler cannot fold")),
-            Expr::Var(_) | Expr::Assign { .. } | Expr::PreInc(_) | Expr::PostInc(_) => {
-                Err(self.fatal("a variable is no constant expression"))
-            }
+            Expr::Var(_)
+            | Expr::Assign { .. }
+            | Expr::PreInc(_)
+            | Expr::PostInc(_)
+            | Expr::PreDec(_)
+            | Expr::PostDec(_) => Err(self.fatal("a variable is no constant expression")),
         }
     }
 

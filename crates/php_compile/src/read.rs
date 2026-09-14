@@ -87,6 +87,10 @@ pub(crate) enum Expr {
     PreInc(Vec<u8>),
     /// `$a++`, php's `ZEND_AST_POST_INC`.
     PostInc(Vec<u8>),
+    /// `--$a`, php's `ZEND_AST_PRE_DEC`, the same grammar as `++$a`.
+    PreDec(Vec<u8>),
+    /// `$a--`, php's `ZEND_AST_POST_DEC`.
+    PostDec(Vec<u8>),
 }
 
 /// The binary operators this reads, each the opcode php's
@@ -628,25 +632,30 @@ impl Reader<'_> {
     }
 
     /// What an operator stands between: a number or a string as written, a name, a
-    /// variable, with `++` before or after it, or a parenthesised expression.
+    /// variable, with `++` or `--` before or after it, or a parenthesised expression.
     fn operand(&mut self) -> Result<Expr, Trouble> {
         self.skip_trivia();
         match self.byte(0) {
             Some(b'\'') => self.single_quoted(),
             Some(b'"') => self.double_quoted(),
             Some(b'$') => self.incremented(),
-            // php's `T_INC variable`: the variable is the whole operand,
-            // so `++$a ** 2` is php's `(++$a) ** 2`.
-            Some(b'+') if self.byte(1) == Some(b'+') => {
+            // php's `T_INC variable` and `T_DEC variable`: the variable is
+            // the whole operand, so `++$a ** 2` is php's `(++$a) ** 2`.
+            Some(step @ (b'+' | b'-')) if self.byte(1) == Some(step) => {
                 self.bump(2);
                 self.skip_trivia();
+                let sign = if step == b'+' { "++" } else { "--" };
                 if self.byte(0) != Some(b'$') {
-                    return Err(self.trouble("a `++` before what is no variable"));
+                    return Err(self.trouble(format!("a `{sign}` before what is no variable")));
                 }
                 let Expr::Var(name) = self.variable()? else {
-                    return Err(self.trouble("a `++` before what is no variable"));
+                    return Err(self.trouble(format!("a `{sign}` before what is no variable")));
                 };
-                Ok(Expr::PreInc(name))
+                Ok(if step == b'+' {
+                    Expr::PreInc(name)
+                } else {
+                    Expr::PreDec(name)
+                })
             }
             Some(b) if b.is_ascii_digit() || (b == b'.' && self.digit_ahead(1)) => self.number(),
             Some(b'(') => {
@@ -695,20 +704,23 @@ impl Reader<'_> {
         }
     }
 
-    /// A variable, and php's `variable T_INC` after it: `$a++` is one
-    /// operand, so `-$a++` is php's `-($a++)`. A `++` after that is
-    /// php's parse error, and is refused by whatever reads on.
+    /// A variable, and php's `variable T_INC` or `variable T_DEC` after
+    /// it: `$a++` is one operand, so `-$a++` is php's `-($a++)`. A `++`
+    /// or `--` after that is php's parse error, and is refused by
+    /// whatever reads on.
     fn incremented(&mut self) -> Result<Expr, Trouble> {
         let var = self.variable()?;
         self.skip_trivia();
-        if !(self.byte(0) == Some(b'+') && self.byte(1) == Some(b'+')) {
-            return Ok(var);
-        }
+        let step = match (self.byte(0), self.byte(1)) {
+            (Some(b'+'), Some(b'+')) => Expr::PostInc,
+            (Some(b'-'), Some(b'-')) => Expr::PostDec,
+            _ => return Ok(var),
+        };
         let Expr::Var(name) = var else {
             return Ok(var);
         };
         self.bump(2);
-        Ok(Expr::PostInc(name))
+        Ok(step(name))
     }
 
     /// `$` and php's `LABEL`: a letter, `_` or a byte past ASCII, then
@@ -1368,8 +1380,50 @@ mod tests {
             b"<?php echo $a++++;".as_slice(),
             b"<?php echo ++$a++;".as_slice(),
             b"<?php echo ++f();".as_slice(),
-            b"<?php echo $a--;".as_slice(),
-            b"<?php echo --$a;".as_slice(),
+        ] {
+            assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
+        }
+    }
+
+    /// `--` at the level `++` is read: the variable and its `--` are one
+    /// operand, and php's scanner takes `--` before `-`, so `$a---$b` is
+    /// `($a--) - $b` and `---$a` is `T_DEC - $a`, a parse error.
+    #[test]
+    fn a_decrement_takes_a_variable_and_nothing_else() {
+        assert_eq!(
+            shape(b"<?php echo -$a-- - --$b ** 2;"),
+            shape(b"<?php echo (-($a--)) - ((--$b) ** 2);"),
+            "the variable and its `--` are one operand"
+        );
+        assert_eq!(
+            read(b"<?php $a---$b;").unwrap_or_default(),
+            vec![(
+                Stmt::Effect(Expr::Binary {
+                    op: BinaryOp::Sub,
+                    left: Box::new(Expr::PostDec(b"a".to_vec())),
+                    right: Box::new(Expr::Var(b"b".to_vec())),
+                }),
+                1
+            )],
+            "php's scanner takes `--` before `-`"
+        );
+        assert_eq!(
+            read(b"<?php $a = --$b;").unwrap_or_default(),
+            vec![(
+                Stmt::Effect(Expr::Assign {
+                    var: b"a".to_vec(),
+                    value: Box::new(Expr::PreDec(b"b".to_vec())),
+                }),
+                1
+            )],
+        );
+        for source in [
+            b"<?php echo 1--;".as_slice(),
+            b"<?php echo --1;".as_slice(),
+            b"<?php echo $a----;".as_slice(),
+            b"<?php echo --$a--;".as_slice(),
+            b"<?php echo --f();".as_slice(),
+            b"<?php echo ---$a;".as_slice(),
         ] {
             assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
         }
