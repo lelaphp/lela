@@ -415,7 +415,7 @@ impl Emit<'_> {
                     if last.opcode == Opcode::FetchThis {
                         last.opcode = Opcode::Nop;
                     }
-                    if frameless_icall(last.opcode) {
+                    if last.opcode.is_frameless_icall() {
                         self.free(OperandKind::Var, at);
                     } else {
                         last.out_type = OperandKind::Unused;
@@ -930,18 +930,6 @@ fn used_stack(arguments: u32) -> u32 {
     CALL_FRAME_SLOT
         .saturating_add(arguments)
         .saturating_mul(zval)
-}
-
-/// `ZEND_OP_IS_FRAMELESS_ICALL`: the four opcodes `zend_compile_frameless_icall`
-/// emits, whose value `zend_do_free` frees by a `FREE` always.
-fn frameless_icall(opcode: Opcode) -> bool {
-    matches!(
-        opcode,
-        Opcode::FramelessIcall0
-            | Opcode::FramelessIcall1
-            | Opcode::FramelessIcall2
-            | Opcode::FramelessIcall3
-    )
 }
 
 impl Emit<'_> {

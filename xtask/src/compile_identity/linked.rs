@@ -45,7 +45,9 @@ pub(super) fn engine(ini: &[String]) -> Engine {
 /// in php's format, trimmed by the recipe's rules as the oracle's own
 /// stream is trimmed, so a trailing newline is no difference. A source
 /// the compiler refuses is no dump at all, which is what php's empty
-/// second stream is, and the verdict is what reads the pair.
+/// second stream is, and the verdict is what reads the pair. The
+/// frameless table the dump names a `FRAMELESS_ICALL_*` from is empty
+/// while the engine builds none and the compiler emits none.
 pub(super) fn dump(
     engine: &Engine,
     rules: &Normalise,
@@ -53,7 +55,7 @@ pub(super) fn dump(
     filename: &[u8],
 ) -> Result<Dumped> {
     let Ok(compiled) = panic::catch_unwind(AssertUnwindSafe(|| {
-        engine.unit(source, filename).map(|unit| unit.dump())
+        engine.unit(source, filename).map(|unit| unit.dump(&[]))
     })) else {
         bail!("the linked compiler panicked; the panic itself is on the harness's second stream");
     };

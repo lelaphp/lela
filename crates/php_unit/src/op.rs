@@ -109,6 +109,20 @@ impl Opcode {
             .unwrap_or(false)
     }
 
+    /// `ZEND_OP_IS_FRAMELESS_ICALL`: one of the four opcodes
+    /// `zend_compile_frameless_icall` emits, whose `extended_value` is an
+    /// index into `zend_flf_functions`.
+    #[must_use]
+    pub fn is_frameless_icall(self) -> bool {
+        matches!(
+            self,
+            Opcode::FramelessIcall0
+                | Opcode::FramelessIcall1
+                | Opcode::FramelessIcall2
+                | Opcode::FramelessIcall3
+        )
+    }
+
     /// How many opcodes php has.
     pub const COUNT: usize = opcode::COUNT;
 }
@@ -161,11 +175,35 @@ pub struct TryCatch {
     pub finally_end: OplineIdx,
 }
 
+/// What a live range holds open, php's `ZEND_LIVE_*` with php's
+/// numbers (`Z/Zend/zend_compile.h:180-184`): what the unwinder frees
+/// when a throw leaves the range, and what the dump prints after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u8)]
+pub enum LiveKind {
+    /// `ZEND_LIVE_TMPVAR`: a temporary whose value is released.
+    #[default]
+    TmpVar = 0,
+    /// `ZEND_LIVE_LOOP`: a `foreach` iterator, freed as `FE_FREE` frees it.
+    Loop = 1,
+    /// `ZEND_LIVE_SILENCE`: the `error_reporting` a `@` saved, restored.
+    Silence = 2,
+    /// `ZEND_LIVE_ROPE`: the strings an interpolation has collected.
+    Rope = 3,
+    /// `ZEND_LIVE_NEW`: the object `NEW` made before its constructor ran.
+    New = 4,
+}
+
 /// The oplines over which a temporary is live (`zend_live_range`), for
-/// the unwinder to free it.
+/// the unwinder to free it. `var` is the temporary's own number, as an
+/// opline's operand holds it, and `kind` is what php packs into the low
+/// bits of its `var` (`ZEND_LIVE_MASK`); php stores
+/// `EX_NUM_TO_VAR(last_var + var_num) | kind` and reads both back, so
+/// two fields hold what one field held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LiveRange {
     pub var: u32,
+    pub kind: LiveKind,
     pub start: OplineIdx,
     pub end: OplineIdx,
 }

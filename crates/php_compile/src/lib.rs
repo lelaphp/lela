@@ -163,7 +163,7 @@ mod tests {
     /// interned into still stands.
     fn dump_of(source: &[u8]) -> String {
         let (unit, _strings) = unit_and_strings(source);
-        unit.dump()
+        unit.dump(&[])
     }
 
     fn unit_and_strings(source: &[u8]) -> (Unit, php_heap::Strings) {
@@ -218,7 +218,7 @@ mod tests {
     fn echo_of_a_number_is_one_echo_and_the_final_return() {
         let (unit, _strings) = unit_and_strings(b"<?php echo 1;");
         assert_eq!(
-            unit.dump(),
+            unit.dump(&[]),
             main_dump(2, 0, 0, "0000 ECHO int(1)\n0001 RETURN int(1)\n"),
             "the constant 1 is echoed and returned"
         );
@@ -233,7 +233,7 @@ mod tests {
     fn a_nested_call_sends_what_the_inner_call_returned() {
         let (unit, _strings) = unit_and_strings(b"<?php var_dump(extension_loaded('demo'));");
         assert_eq!(
-            unit.dump(),
+            unit.dump(&[]),
             main_dump(
                 7,
                 0,
@@ -289,7 +289,7 @@ mod tests {
     fn arithmetic_over_two_constants_is_folded_the_way_php_folds_it() {
         let (unit, _strings) = unit_and_strings(b"<?php echo 1 + 2;");
         assert_eq!(
-            unit.dump(),
+            unit.dump(&[]),
             main_dump(2, 0, 0, "0000 ECHO int(3)\n0001 RETURN int(1)\n"),
             "the sum is one literal and no ZEND_ADD"
         );
@@ -342,7 +342,7 @@ mod tests {
         // `zend_add_literal` keeps them.
         let (unit, _strings) = unit_and_strings(b"<?php echo null + 1;");
         assert_eq!(
-            unit.dump(),
+            unit.dump(&[]),
             main_dump(2, 0, 0, "0000 ECHO int(1)\n0001 RETURN int(1)\n")
         );
         assert_eq!(unit.main.literals.len(), 1);
@@ -420,7 +420,7 @@ mod tests {
         assert!(compiled.is_ok(), "{compiled:?}");
         let unit = compiled.unwrap_or_default();
         assert_eq!(
-            unit.dump(),
+            unit.dump(&[]),
             "\n$_main:\n     ; (lines=3, args=0, vars=0, tmps=0)\n\
              \x20    ; (before optimizer)\n     ; :1-1\n     ; return  [] RANGE[0..0]\n\
              0000 ECHO int(259)\n\
@@ -518,7 +518,7 @@ mod tests {
         ] {
             let (unit, _strings) = unit_and_strings(source);
             assert_eq!(
-                unit.dump(),
+                unit.dump(&[]),
                 main_dump(
                     3,
                     0,
@@ -810,7 +810,7 @@ mod tests {
             b"<?php $a = 1; echo 2 . $a; echo $a . 2.5; echo 'a' . 'b' . $a; echo NAN . $a;",
         );
         assert_eq!(
-            unit.dump(),
+            unit.dump(&[]),
             main_dump(
                 10,
                 1,
@@ -862,7 +862,7 @@ mod tests {
         let (unit, _strings) =
             unit_and_strings(b"<?php\necho 'a';\necho NAN . 'z';\necho 1 . NAN . NAN;");
         assert_eq!(
-            unit.dump(),
+            unit.dump(&[]),
             "\n$_main:\n     ; (lines=4, args=0, vars=0, tmps=0)\n\
              \x20    ; (before optimizer)\n     ; :1-4\n     ; return  [] RANGE[0..0]\n\
              0000 ECHO string(\"a\")\n\
@@ -896,7 +896,7 @@ mod tests {
     fn an_empty_for_is_php_s_forward_jump_and_a_conditional_jump_to_itself() {
         let (unit, _strings) = unit_and_strings(b"<?php set_time_limit(1); for (;;) {}");
         assert_eq!(
-            unit.dump(),
+            unit.dump(&[]),
             main_dump(
                 6,
                 0,
@@ -947,7 +947,7 @@ mod tests {
             b"<?php for (extension_loaded('i'); extension_loaded('a'), extension_loaded('b'); extension_loaded('s')) echo 'body';",
         );
         assert_eq!(
-            unit.dump(),
+            unit.dump(&[]),
             main_dump(
                 16,
                 0,
@@ -987,7 +987,7 @@ mod tests {
         let (unit, _strings) =
             unit_and_strings(b"<?php for ($i = 0; $i < 1000; $i++) { echo 'dax'; }");
         assert_eq!(
-            unit.dump(),
+            unit.dump(&[]),
             main_dump(
                 7,
                 1,
@@ -1085,7 +1085,7 @@ mod tests {
         let (unit, _strings) =
             unit_and_strings(b"<?php\nwhile (extension_loaded('a')) {\n  echo 1;\n}");
         assert_eq!(
-            unit.dump(),
+            unit.dump(&[]),
             "\n$_main:\n     ; (lines=7, args=0, vars=0, tmps=1)\n\
              \x20    ; (before optimizer)\n     ; :1-4\n     ; return  [] RANGE[0..0]\n\
              0000 JMP 0002\n\
@@ -1199,7 +1199,7 @@ mod tests {
             b"<?php $a = 1; $a + 1; str_repeat(\"a\", 3) . \"b\"; extension_loaded('Core'); $a++;",
         );
         assert_eq!(
-            unit.dump(),
+            unit.dump(&[]),
             main_dump(
                 14,
                 1,
@@ -1326,7 +1326,7 @@ mod tests {
     fn strlen_over_a_constant_string_is_its_length_and_the_sum_folds_over_it() {
         let (unit, _strings) = unit_and_strings(b"<?php echo 1 + strlen('a');");
         assert_eq!(
-            unit.dump(),
+            unit.dump(&[]),
             main_dump(2, 0, 0, "0000 ECHO int(2)\n0001 RETURN int(1)\n"),
             "one ECHO of a constant, no INIT_FCALL and no ADD"
         );

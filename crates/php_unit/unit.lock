@@ -11,6 +11,7 @@ Effects::THROW
 Effects::contains
 Level
 Level::bit
+LiveKind
 LiveRange
 OpArray
 Opcode

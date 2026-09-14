@@ -1,7 +1,7 @@
 //! A unit (design §4.7): one compiled file, immutable once published, its
 //! declarations beside their op arrays.
 
-use crate::decl::{ClassDecl, ConstDecl, FunctionDecl};
+use crate::decl::{ClassDecl, ConstDecl, FunctionDecl, Name};
 use crate::op::OpArray;
 
 /// A compiled PHP program: the main op array, the functions with their
@@ -88,9 +88,14 @@ impl Unit {
     /// one block per op array, the header's four lines, one line per
     /// opline with the operand `result` names opening it, `T1 = `, when its
     /// kind is `TMP`, `VAR` or `CV`, its constants, variables and jump
-    /// targets printed as php prints them, and the `try`/`catch` table.
+    /// targets printed as php prints them, then the live-range table and
+    /// the `try`/`catch` table. `frameless` is `zend_flf_functions` by
+    /// name, in the order the bundle's natives registered their
+    /// frameless entries: a `FRAMELESS_ICALL_*` prints the name its
+    /// `extended_value` indexes, `FRAMELESS_ICALL_2(str_contains)`, and
+    /// a unit that calls none is dumped over an empty table.
     #[must_use]
-    pub fn dump(&self) -> String {
-        crate::dump::unit(self)
+    pub fn dump(&self, frameless: &[Name]) -> String {
+        crate::dump::unit(self, frameless)
     }
 }

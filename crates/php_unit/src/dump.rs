@@ -10,13 +10,18 @@
 //! the field, and its two operands: a constant as `zend_dump_const`
 //! prints one, a variable as `zend_dump_var` numbers it, and an unused
 //! field as `zend_dump_unused_op` reads it, a jump target, a number,
-//! `THIS`, `NEXT` or how a class is fetched. The `try`/`catch` table
-//! follows the oplines as php's does.
+//! `THIS`, `NEXT` or how a class is fetched. A `FRAMELESS_ICALL_*`
+//! carries its function's name in parentheses after the opcode, read
+//! from the table the caller hands in, `zend_flf_functions` by name.
+//! The live-range table follows the oplines under
+//! `ZEND_DUMP_LIVE_RANGES`, which the `before optimizer` dump passes,
+//! and the `try`/`catch` table follows it, as php's do.
 //!
 //! **What is not printed.** php prints the jump table of a
-//! `SWITCH_LONG`, `SWITCH_STRING` or `MATCH`, the name of a
-//! `FRAMELESS_ICALL_*` and the live-range table; each waits on the unit
-//! holding the thing, and is printed as it lands (#228).
+//! `SWITCH_LONG`, `SWITCH_STRING` or `MATCH` from `op2`'s array, one
+//! ` key: target,` per bucket and ` default:` before the
+//! `extended_value` target; that waits on `php_heap` holding an array a
+//! constant can be (#241), and is printed as it lands (#228).
 //!
 //! **Numbers.** php prints a temporary by its frame slot, counted past
 //! the CVs (`EX_VAR_TO_NUM`); an opline holds the temporary's own
@@ -29,8 +34,8 @@ use std::fmt::Write as _;
 
 use php_heap::{Zval, ZvalType};
 
-use crate::decl::FunctionDecl;
-use crate::op::{OpArray, OperandKind, Opline};
+use crate::decl::{FunctionDecl, Name};
+use crate::op::{LiveKind, OpArray, OperandKind, Opline};
 use crate::unit::Unit;
 use crate::{Opcode, opcode};
 
@@ -87,16 +92,19 @@ const FREE_ON_RETURN: u32 = 1;
 const UNQUALIFIED_IN_NAMESPACE: u32 = 0x800;
 
 /// Every op array of the unit, one block each, in php's order: the main
-/// op array, then the functions as declared.
-pub(crate) fn unit(unit: &Unit) -> String {
+/// op array, then the functions as declared. `frameless` is
+/// `zend_flf_functions` by name, what a `FRAMELESS_ICALL_*`'s
+/// `extended_value` indexes.
+pub(crate) fn unit(unit: &Unit, frameless: &[Name]) -> String {
     let mut out = String::new();
-    op_array(&mut out, "$_main", 0, &unit.main);
+    op_array(&mut out, "$_main", 0, &unit.main, frameless);
     for (decl, body) in &unit.functions {
         op_array(
             &mut out,
             &String::from_utf8_lossy(&decl.name.0),
             num_args(decl),
             body,
+            frameless,
         );
     }
     out
@@ -111,8 +119,9 @@ fn num_args(decl: &FunctionDecl) -> usize {
 /// `before optimizer`: a blank line, the name, the counts, the message,
 /// the file with the line range, and the return line the zeroed
 /// `zend_func_info` of every op array prints before the optimizer has
-/// inferred anything; then the oplines and the `try`/`catch` table.
-fn op_array(out: &mut String, name: &str, args: usize, body: &OpArray) {
+/// inferred anything; then the oplines, the live-range table and the
+/// `try`/`catch` table.
+fn op_array(out: &mut String, name: &str, args: usize, body: &OpArray, frameless: &[Name]) {
     let _ = writeln!(
         out,
         "\n{name}:\n     ; (lines={}, args={args}, vars={}, tmps={})",
@@ -131,8 +140,21 @@ fn op_array(out: &mut String, name: &str, args: usize, body: &OpArray) {
     let _ = writeln!(out, "     ; return  [] RANGE[0..0]");
     for (at, op) in body.oplines.iter().enumerate() {
         let _ = write!(out, "{at:04} ");
-        opline(out, body, op);
+        opline(out, body, op, frameless);
         out.push('\n');
+    }
+    if !body.live_ranges.is_empty() {
+        let _ = writeln!(out, "LIVE RANGES:");
+        for range in &body.live_ranges {
+            let _ = writeln!(
+                out,
+                "     {}: {:04} - {:04} ({})",
+                body.num_cvs.saturating_add(range.var),
+                range.start.0,
+                range.end.0,
+                live_kind(range.kind)
+            );
+        }
     }
     if !body.try_catch.is_empty() {
         let _ = writeln!(out, "EXCEPTION TABLE:");
@@ -151,13 +173,13 @@ fn op_array(out: &mut String, name: &str, args: usize, body: &OpArray) {
 }
 
 /// `zend_dump_op` with no CFG and no SSA: the operand `result` names
-/// and ` = ` when its kind is `TMP`, `VAR` or `CV`, the name, the
-/// `extended_value` by its shape, `op1`, `op2`, and the target an
-/// `extended_value` of the `JMP_ADDR` shape holds. A `result` of kind
-/// `UNUSED` opens nothing, whatever the number the field holds: a
-/// site's safepoint number, or the temporary php still numbered where
-/// `zend_do_free` set the mark.
-fn opline(out: &mut String, body: &OpArray, op: &Opline) {
+/// and ` = ` when its kind is `TMP`, `VAR` or `CV`, the name, a
+/// frameless call's function in parentheses, the `extended_value` by
+/// its shape, `op1`, `op2`, and the target an `extended_value` of the
+/// `JMP_ADDR` shape holds. A `result` of kind `UNUSED` opens nothing,
+/// whatever the number the field holds: a site's safepoint number, or
+/// the temporary php still numbered where `zend_do_free` set the mark.
+fn opline(out: &mut String, body: &OpArray, op: &Opline, frameless: &[Name]) {
     let flags = op.opcode.flags();
     let name = op.opcode.name();
     if op.out_type != OperandKind::Unused && op.out_type != OperandKind::Const {
@@ -168,6 +190,9 @@ fn opline(out: &mut String, body: &OpArray, op: &Opline) {
         let _ = write!(out, "OP_{}", op.opcode.num());
     } else {
         out.push_str(name.trim_start_matches("ZEND_"));
+    }
+    if op.opcode.is_frameless_icall() {
+        frameless_name(out, op, frameless);
     }
     extended_value(out, op, flags);
     operand(out, body, op, op.op1_type, op.op1, flags & 0xff, true);
@@ -187,6 +212,30 @@ fn opline(out: &mut String, body: &OpArray, op: &Opline) {
     // printed last where php prints it.
     if op.out_type == OperandKind::Const {
         constant(out, body.literals.get(op.out as usize).copied());
+    }
+}
+
+/// `ZEND_FLF_FUNC(opline)->common.function_name` in parentheses, as
+/// `zend_dump_op` prints it right after the opcode, `(str_contains)`.
+/// An index the table has no name for prints `(?)`, where php would read
+/// past its table.
+fn frameless_name(out: &mut String, op: &Opline, frameless: &[Name]) {
+    out.push('(');
+    match frameless.get(op.extended_value as usize) {
+        Some(name) => out.push_str(&String::from_utf8_lossy(&name.0)),
+        None => out.push('?'),
+    }
+    out.push(')');
+}
+
+/// The word `zend_dump_op_array` prints after a live range, by its kind.
+fn live_kind(kind: LiveKind) -> &'static str {
+    match kind {
+        LiveKind::TmpVar => "tmp/var",
+        LiveKind::Loop => "loop",
+        LiveKind::Silence => "silence",
+        LiveKind::Rope => "rope",
+        LiveKind::New => "new",
     }
 }
 
@@ -528,7 +577,7 @@ mod tests {
 
     use super::*;
     use crate::decl::{Name, Parameter};
-    use crate::op::{OplineIdx, TryCatch};
+    use crate::op::{LiveRange, OplineIdx, TryCatch};
 
     /// A constant string interned into a fresh table.
     fn text(strings: &mut php_heap::Strings, bytes: &[u8]) -> Zval {
@@ -563,11 +612,12 @@ mod tests {
         }
     }
 
-    /// One opline printed on its own, without the header.
+    /// One opline printed on its own, without the header, with no
+    /// frameless table.
     fn line(body: &OpArray, at: usize) -> String {
         let mut out = String::new();
         if let Some(op) = body.oplines.get(at) {
-            opline(&mut out, body, op);
+            opline(&mut out, body, op, &[]);
         }
         out
     }
@@ -588,7 +638,7 @@ mod tests {
             ..Unit::default()
         };
         assert_eq!(
-            unit.dump(),
+            unit.dump(&[]),
             "\n$_main:\n     ; (lines=1, args=0, vars=0, tmps=0)\n     ; (before optimizer)\n     ; a.php:1-1\n     ; return  [] RANGE[0..0]\n0000 RETURN int(1)\n"
         );
     }
@@ -623,7 +673,7 @@ mod tests {
             functions: vec![(decl, function)],
             ..Unit::default()
         };
-        assert!(unit.dump().ends_with(
+        assert!(unit.dump(&[]).ends_with(
             "\nf:\n     ; (lines=0, args=2, vars=0, tmps=0)\n     ; (before optimizer)\n     ; a.php:4-6\n     ; return  [] RANGE[0..0]\n"
         ));
     }
@@ -1071,6 +1121,114 @@ mod tests {
         }
     }
 
+    /// The oracle over `$a = "x"; $b = str_contains($a, "y"); $t =
+    /// trim($a);` prints `0001 T4 = FRAMELESS_ICALL_2(str_contains)
+    /// CV0($a) string("y")` and `0003 T6 = FRAMELESS_ICALL_1(trim)
+    /// CV0($a)`: the name in parentheses right after the opcode and
+    /// before the operands, and no number for the index itself, since
+    /// the four opcodes carry no `ZEND_VM_EXT_MASK` shape. Which index
+    /// a name sits at is the order the natives registered their
+    /// frameless entries in, so the table here is one of its own; an
+    /// index the table has no name for prints `(?)`.
+    #[test]
+    fn a_frameless_call_prints_its_function_s_name_after_the_opcode() {
+        let mut strings = php_heap::Strings::new();
+        let needle = text(&mut strings, b"y");
+        let call = |opcode, extended_value, out, second, other| Opline {
+            extended_value,
+            out_type: OperandKind::Tmp,
+            out,
+            ..with(op(opcode), OperandKind::Cv, 0, second, other)
+        };
+        let body = OpArray {
+            vars: Box::new([Name::from("a"), Name::from("b"), Name::from("t")]),
+            num_cvs: 3,
+            ..body(
+                vec![
+                    call(Opcode::FramelessIcall2, 1, 1, OperandKind::Const, 0),
+                    call(Opcode::FramelessIcall1, 0, 3, OperandKind::Unused, 0),
+                    call(Opcode::FramelessIcall1, 2, 3, OperandKind::Unused, 0),
+                ],
+                vec![needle],
+            )
+        };
+        let table = [Name::from("trim"), Name::from("str_contains")];
+        let line = |at: usize| {
+            let mut out = String::new();
+            if let Some(op) = body.oplines.get(at) {
+                opline(&mut out, &body, op, &table);
+            }
+            out
+        };
+        assert_eq!(
+            line(0),
+            "T4 = FRAMELESS_ICALL_2(str_contains) CV0($a) string(\"y\")"
+        );
+        assert_eq!(line(1), "T6 = FRAMELESS_ICALL_1(trim) CV0($a)");
+        assert_eq!(line(2), "T6 = FRAMELESS_ICALL_1(?) CV0($a)");
+    }
+
+    /// The oracle over eight CVs and the five kinds in one program,
+    /// a `foreach`, a `@`, an interpolation, a `new` with an argument
+    /// and a three-argument `strstr`, whose `OP_DATA` puts a temporary
+    /// past its definition:
+    ///
+    /// ```text
+    /// $a = "a"; $b = "b"; $c = false;
+    /// foreach ([1] as $v) { @f($v); }
+    /// $s = "$a$b$v";
+    /// $o = new Foo(f(1));
+    /// $r = strstr("needles", "needle", $c);
+    /// try { f(2); } catch (Exception $e) {}
+    /// ```
+    ///
+    /// prints `LIVE RANGES:` after the oplines and one line per range,
+    /// the temporary's slot past the CVs, the range, and the kind's
+    /// word, the ranges in the order of their starts; the
+    /// `try`/`catch` table follows it.
+    ///
+    /// ```text
+    /// LIVE RANGES:
+    ///      11: 0004 - 0011 (loop)
+    ///      12: 0006 - 0009 (silence)
+    ///      15: 0012 - 0014 (rope)
+    ///      18: 0017 - 0022 (new)
+    ///      22: 0024 - 0025 (tmp/var)
+    /// EXCEPTION TABLE:
+    ///      0026, 0030, -, -
+    /// ```
+    #[test]
+    fn the_live_range_table_follows_the_oplines_with_php_s_five_kinds() {
+        let range = |var, kind, start, end| LiveRange {
+            var,
+            kind,
+            start: OplineIdx(start),
+            end: OplineIdx(end),
+        };
+        let unit = Unit {
+            main: OpArray {
+                num_cvs: 8,
+                live_ranges: Box::new([
+                    range(3, LiveKind::Loop, 4, 11),
+                    range(4, LiveKind::Silence, 6, 9),
+                    range(7, LiveKind::Rope, 12, 14),
+                    range(10, LiveKind::New, 17, 22),
+                    range(14, LiveKind::TmpVar, 24, 25),
+                ]),
+                try_catch: Box::new([TryCatch {
+                    try_op: OplineIdx(26),
+                    catch_op: OplineIdx(30),
+                    ..TryCatch::default()
+                }]),
+                ..body(vec![], vec![])
+            },
+            ..Unit::default()
+        };
+        assert!(unit.dump(&[]).ends_with(
+            "     ; return  [] RANGE[0..0]\nLIVE RANGES:\n     11: 0004 - 0011 (loop)\n     12: 0006 - 0009 (silence)\n     15: 0012 - 0014 (rope)\n     18: 0017 - 0022 (new)\n     22: 0024 - 0025 (tmp/var)\nEXCEPTION TABLE:\n     0026, 0030, -, -\n"
+        ));
+    }
+
     /// The oracle prints `EXCEPTION TABLE:` and `     0033, 0037, 0040,
     /// 0041` after the oplines, a `-` for an index php left zero.
     #[test]
@@ -1097,7 +1255,7 @@ mod tests {
             ..Unit::default()
         };
         assert!(
-            unit.dump()
+            unit.dump(&[])
                 .ends_with("EXCEPTION TABLE:\n     0033, 0037, 0040, 0041\n     0002, -, -, -\n")
         );
     }
