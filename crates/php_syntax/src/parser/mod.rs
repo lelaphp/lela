@@ -380,6 +380,14 @@ impl<'t> Parser<'t> {
     /// line. The one case apart is php's: an unclosed single-quoted string
     /// is handed back without its newlines counted, so it reports the
     /// line it opened on.
+    ///
+    /// ```php
+    /// echo 1 'a
+    /// b';
+    /// ```
+    /// ```expect exit=255
+    /// Parse error: syntax error, unexpected single-quoted string "a", expecting "," or ";" in %s on line 3
+    /// ```
     pub fn line_here(&self) -> u32 {
         let range = self.input.range(self.pos);
         let text = self.input.text(self.pos);
@@ -434,6 +442,13 @@ impl<'t> Parser<'t> {
     /// `Unclosed '(' … does not match ']'` at a closer that closes
     /// nothing or the wrong thing. php prints the balance text alone,
     /// and it is what `eval()`'s `ParseError` carries.
+    ///
+    /// ```php
+    /// echo 1 +;
+    /// ```
+    /// ```expect exit=255
+    /// Parse error: syntax error, unexpected token ";" in %s on line 2
+    /// ```
     pub fn unexpected_here(&mut self) -> Diagnostic {
         let span = self.current_span();
         let line = self.line_here();
@@ -469,6 +484,13 @@ impl<'t> Parser<'t> {
     /// namespace declaration's name (php-src `ns_trailing_comma_error_*`,
     /// `ns_096`, `namespace_name_namespace_start`). The current token is
     /// not `EOF`: a site reaches for this with a concrete token in hand.
+    ///
+    /// ```php
+    /// foo(1 2);
+    /// ```
+    /// ```expect exit=255
+    /// Parse error: syntax error, unexpected integer "2", expecting ")" in %s on line 2
+    /// ```
     pub fn unexpected_expecting(&mut self, expecting: &str) -> Diagnostic {
         let span = self.current_span();
         let line = self.line_here();
@@ -488,6 +510,13 @@ impl<'t> Parser<'t> {
     /// php prints its balance text alone at a bracket imbalance, so those
     /// defer to the balance-aware base; a plain end of file still carries
     /// the clause (`unexpected end of file, expecting "{"`, probed 8.5.7).
+    ///
+    /// ```php
+    /// echo 1
+    /// ```
+    /// ```expect exit=255
+    /// Parse error: syntax error, unexpected end of file, expecting "," or ";" in %s on line 2
+    /// ```
     pub fn unexpected_here_expecting(&mut self, expecting: &str) -> Diagnostic {
         if self.at_eof() {
             if self.unclosed_eof_message().is_some() {
@@ -523,6 +552,13 @@ impl<'t> Parser<'t> {
     /// the input the clause is gone: a statement php required and did
     /// not get is its bare `unexpected end of file` (`declare(ticks=1)`,
     /// probed 8.5.9).
+    ///
+    /// ```php
+    /// =
+    /// ```
+    /// ```expect exit=255
+    /// Parse error: syntax error, unexpected token "=", expecting end of file in %s on line 2
+    /// ```
     pub fn unexpected_at_stmt(&mut self) -> Diagnostic {
         let clause = if self.at_eof() {
             None
@@ -544,6 +580,20 @@ impl<'t> Parser<'t> {
     /// when the current token is not a closer, or closes the innermost
     /// opener: then the site's own flow reads it. The opener is read off
     /// the same stack the secondaries trust.
+    ///
+    /// ```php
+    /// foo(];
+    /// ```
+    /// ```expect exit=255
+    /// Parse error: Unclosed '(' does not match ']' in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// }
+    /// ```
+    /// ```expect exit=255
+    /// Parse error: Unmatched '}' in %s on line 2
+    /// ```
     pub fn bracket_closer_message(&self) -> Option<String> {
         let cur = self.input.kind(self.pos);
         let cur_bracket = Bracket::from_closer(cur)?;
@@ -572,6 +622,13 @@ impl<'t> Parser<'t> {
     /// delimiter (`Unclosed '{' [on line N]`); `None` when nothing is
     /// open, where a plain `unexpected end of file` stands
     /// (`eval('abc')`).
+    ///
+    /// ```php
+    /// foo(
+    /// ```
+    /// ```expect exit=255
+    /// Parse error: Unclosed '(' in %s on line 2
+    /// ```
     pub fn unclosed_eof_message(&self) -> Option<String> {
         let &(open_kind, open_span) = self.delims.last()?;
         let open_c = Bracket::from_opener(open_kind)?.open_glyph();
@@ -747,6 +804,13 @@ const SHOWN: usize = 30;
 /// `1 $abcdefghijklmnopqrstuvwxyz0123456` reports `variable
 /// "$abcdefghijklmnopqrstuvwxyz012..."`; `1 b'abc'` reports `quoted
 /// string "B'abc"`, the prefix keeping php from seeing the quote.
+///
+/// ```php
+/// echo 1 "abc";
+/// ```
+/// ```expect exit=255
+/// Parse error: syntax error, unexpected double-quoted string "abc", expecting "," or ";" in %s on line 2
+/// ```
 pub fn php_token_name(kind: SyntaxKind, text: &[u8]) -> String {
     if kind == SyntaxKind::DOUBLE_QUOTE {
         return "double-quote mark".to_owned();

@@ -14,6 +14,13 @@ use super::expr;
 /// interpolation (`expecting variable or "${" or "{$"`), after nothing
 /// with text too, after an interpolation with too much to spell; a
 /// backtick expects its closer alone (probed 8.5.9).
+///
+/// ```php
+/// echo "abc
+/// ```
+/// ```expect exit=255
+/// Parse error: syntax error, unexpected end of file, expecting variable or "${" or "{$" in %s on line 2
+/// ```
 pub(crate) fn interpolated(p: &mut Parser<'_>, delim: K, node: K) -> CompletedMarker {
     let m = p.start();
     p.bump(delim);

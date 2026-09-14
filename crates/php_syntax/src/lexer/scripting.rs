@@ -286,6 +286,13 @@ impl Lexer<'_> {
     /// `/**x*/` are plain comments. Unterminated at EOF is php's
     /// `Unterminated comment starting line <n>`, the 1-based line of the
     /// opening `/*`.
+    ///
+    /// ```php
+    /// $x = /* a
+    /// ```
+    /// ```expect exit=255
+    /// Parse error: Unterminated comment starting line 2 in %s on line 2
+    /// ```
     fn lex_block_comment(&mut self) {
         let start = self.pos;
         let is_doc = self.byte(start + 2) == b'*'
@@ -323,7 +330,15 @@ impl Lexer<'_> {
 
     /// Zend applies the cast rule lexically everywhere in `ST_IN_SCRIPTING`:
     /// `"("{TABS_AND_SPACES}("int"|…){TABS_AND_SPACES}")"` is one token,
-    /// interior whitespace included.
+    /// interior whitespace included. The `(real)` cast is the one the
+    /// scanner itself throws on, in the sentence 8.0 gave it:
+    ///
+    /// ```php
+    /// ( Real )$x;
+    /// ```
+    /// ```expect exit=255
+    /// Parse error: The (real) cast has been removed, use (float) instead in %s on line 2
+    /// ```
     fn lex_paren_or_cast(&mut self) {
         let start = self.pos;
         let mut i = start + 1;

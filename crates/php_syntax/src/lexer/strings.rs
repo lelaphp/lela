@@ -103,6 +103,13 @@ impl Lexer<'_> {
     /// Consumes `\X` (two bytes), with `\u{…}` held to php's rule: a
     /// malformed or out-of-range escape raises php's `Invalid UTF-8
     /// codepoint escape sequence` and the text goes on.
+    ///
+    /// ```php
+    /// echo "\u{zz}";
+    /// ```
+    /// ```expect exit=255
+    /// Parse error: Invalid UTF-8 codepoint escape sequence in %s on line 2
+    /// ```
     pub(crate) fn eat_escape(&mut self) {
         let start = self.pos;
         if self.byte(start + 1) == b'u' && self.byte(start + 2) == b'{' {

@@ -36,6 +36,8 @@
     clippy::todo,
     clippy::unimplemented
 )]
+// The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
+#![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod kind {
     //! The generated enum and its display names (`build.rs`).
@@ -141,6 +143,17 @@ pub fn parse(source: &[u8], options: &Options) -> Parsed {
 /// recovery layers that reach one site emit the same span and text, and
 /// the pair is one; the sort is stable, so which was emitted first
 /// stays first.
+///
+/// php's scanner throws on `(real)` while its parser still holds the
+/// `1` it will not want it after, so the scanner's sentence is the one
+/// php reports, and the first here:
+///
+/// ```php
+/// echo 1 (real)$x;
+/// ```
+/// ```expect exit=255
+/// Parse error: The (real) cast has been removed, use (float) instead in %s on line 2
+/// ```
 fn in_php_order(
     tokens: &[Token],
     lexed: Vec<Diagnostic>,

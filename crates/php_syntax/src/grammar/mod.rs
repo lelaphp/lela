@@ -142,6 +142,15 @@ pub(crate) fn absorb_balanced(p: &mut Parser<'_>) -> CompletedMarker {
     m.complete(p, K::ERROR)
 }
 
+/// One statement, `top_level` saying whether php's `top_statement`s
+/// (`const`, `use`, `namespace`) may stand here.
+///
+/// ```php
+/// function f() { const D = 2; }
+/// ```
+/// ```expect exit=255
+/// Parse error: syntax error, unexpected token "const" in %s on line 2
+/// ```
 fn statement_inner(p: &mut Parser<'_>, top_level: bool) {
     // `const`, `use` and `namespace` are php's `top_statement`s: inside
     // a function, a block or a control-flow body they are the unexpected
@@ -402,6 +411,13 @@ fn after_previous(p: &Parser<'_>) -> Span {
 /// complete argument, none after a parenthesised expression, whose
 /// operator set is too large to spell). A site whose list already
 /// reported the token at this offset says nothing more.
+///
+/// ```php
+/// foo(1;
+/// ```
+/// ```expect exit=255
+/// Parse error: syntax error, unexpected token ";", expecting ")" in %s on line 2
+/// ```
 pub(crate) fn expect_closer(p: &mut Parser<'_>, closer: K, expecting: Option<&str>) {
     if p.eat(closer) {
         return;
@@ -437,6 +453,14 @@ pub(crate) fn semicolon(p: &mut Parser<'_>) {
 /// statement start or a newline follows) is untouched, and the end of the
 /// input and a bracket imbalance defer to the balance wording through
 /// [`Parser::unexpected_here_expecting`].
+///
+/// ```php
+/// $x = 1
+/// $y = 2;
+/// ```
+/// ```expect exit=255
+/// Parse error: syntax error, unexpected variable "$y" in %s on line 3
+/// ```
 pub(crate) fn semicolon_expecting(p: &mut Parser<'_>, expecting: Option<&str>) {
     if p.eat(K::SEMICOLON) {
         return;
@@ -479,6 +503,13 @@ pub(crate) fn semicolon_expecting(p: &mut Parser<'_>, expecting: Option<&str>) {
 /// as php spells it: after a complete element php's expected set
 /// collapses to the closer alone (`[1 2]` is `unexpected integer "2",
 /// expecting "]"`, `foo(1 2)` `expecting ")"`, probed 8.5.7).
+///
+/// ```php
+/// [1 2];
+/// ```
+/// ```expect exit=255
+/// Parse error: syntax error, unexpected integer "2", expecting "]" in %s on line 2
+/// ```
 pub(crate) fn missing_comma(p: &mut Parser<'_>, php_closer: &str) {
     let d = p.unexpected_here_expecting(php_closer);
     p.error(d);
@@ -838,6 +869,13 @@ const ALT_ENDERS: &[K] = &[
 /// `unexpected token "endwhile", expecting "elseif" or "else" or
 /// "endif"`, `while (1): echo 1;` at the end is `unexpected end of
 /// file`; probed 8.5.9); after the keyword only `;` can follow.
+///
+/// ```php
+/// if (1): endwhile;
+/// ```
+/// ```expect exit=255
+/// Parse error: syntax error, unexpected token "endwhile", expecting "elseif" or "else" or "endif" in %s on line 2
+/// ```
 fn alt_terminator(p: &mut Parser<'_>, ender: K, clause: Option<&str>) {
     if p.eat(ender) {
         semicolon_expecting(p, Some("\";\""));

@@ -18,6 +18,13 @@ use crate::SyntaxKind;
 
 impl Lexer<'_> {
     /// Entry; `self.pos` sits on a digit, or on `.` with a digit next.
+    ///
+    /// ```php
+    /// echo 08;
+    /// ```
+    /// ```expect exit=255
+    /// Parse error: Invalid numeric literal in %s on line 2
+    /// ```
     pub(crate) fn lex_number(&mut self) {
         let start = self.pos;
         // Radix-prefixed forms: HNUM, BNUM, ONUM. Without a digit after

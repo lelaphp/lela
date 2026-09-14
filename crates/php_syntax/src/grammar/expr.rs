@@ -388,6 +388,16 @@ fn static_closure_or_arrow(p: &mut Parser<'_>, m: Marker) -> CompletedMarker {
     }
 }
 
+/// The primary at the current token, or `None` when no expression can
+/// start here, which the enclosing site then names. `(void)` is a primary
+/// only where a grant says so (a statement's start, a `for` header):
+///
+/// ```php
+/// $y = (void)$x;
+/// ```
+/// ```expect exit=255
+/// Parse error: syntax error, unexpected token "(void)" in %s on line 2
+/// ```
 #[allow(clippy::too_many_lines)] // one arm per primary form: a dispatch table in match shape
 fn prefix(p: &mut Parser<'_>) -> Option<Lhs> {
     // One-shot: only the immediately next primary may be an unassigned
@@ -1251,6 +1261,14 @@ enum Trailer {
 }
 
 /// The postfix trailer the current token begins for this operand, if any.
+/// The curly offset 8.0 removed begins none:
+///
+/// ```php
+/// $s{0};
+/// ```
+/// ```expect exit=255
+/// Parse error: syntax error, unexpected token "{" in %s on line 2
+/// ```
 fn at_trailer(p: &mut Parser<'_>, lhs: &Lhs) -> Option<Trailer> {
     // The 8.4 new-dereference rule: `new A()->p` and an anonymous class
     // chain, but a bare `new A` takes no trailer; the dangling `->`, `[`

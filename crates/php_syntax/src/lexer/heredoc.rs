@@ -250,6 +250,16 @@ impl Lexer<'_> {
     /// newline (an empty line, or whitespace then a newline, is exempt).
     /// One defect per line, and the wrong-class byte always precedes the
     /// content byte, so the mix wins when both apply, Zend's order.
+    ///
+    /// ```php
+    /// echo <<<EOT
+    ///   a
+    ///  b
+    ///   EOT;
+    /// ```
+    /// ```expect exit=255
+    /// Parse error: Invalid body indentation level (expecting an indentation level of at least 2) in %s on line 4
+    /// ```
     fn hold_body_indent(&mut self, line_start: usize, strip_end: usize, info: &HeredocInfo) {
         // php finds the closing marker before it judges a body line, and
         // a marker that mixes tabs and spaces is where it throws: no
