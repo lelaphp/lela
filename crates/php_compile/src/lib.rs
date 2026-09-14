@@ -21,6 +21,9 @@
 mod emit;
 mod read;
 mod special;
+mod stack;
+
+pub use stack::StackLimit;
 
 /// The token stream and the tree (design §4.9), handed up for
 /// `php_engine::api::syntax` and nothing of the compiler's own: the
@@ -40,8 +43,8 @@ pub mod syntax {
 
 use php_heap::Intern;
 use php_syntax::Parsed;
-use php_unit::Unit;
 use php_unit::decl::{ConstDecl, FunctionDecl, Name};
+use php_unit::{Level, Unit};
 
 /// What the compiler is told beside the source (design §4.1).
 #[derive(Debug, Clone, PartialEq)]
@@ -66,6 +69,11 @@ pub struct Options {
     /// not is the call. Every function here is a native; a user function
     /// is declared by nothing this compiler reads yet.
     pub functions: Vec<FunctionDecl>,
+    /// The stack limit of the thread the compiler runs on, php's
+    /// `EG(stack_limit)`, which the engine works out once per request
+    /// (`zend_call_stack_init`) and the compiler's recursion is held to
+    /// (`zend_check_stack_limit`); unchecked where a caller says nothing.
+    pub stack: StackLimit,
 }
 
 impl Default for Options {
@@ -76,16 +84,21 @@ impl Default for Options {
             precision: 14,
             persistent: Vec::new(),
             functions: Vec::new(),
+            stack: StackLimit::UNCHECKED,
         }
     }
 }
 
-/// A compile-time fatal: php's message, at php's line. The parser's
-/// first `syntax error, …` where php's parser refused the file, and the
-/// compiler's own sentence where php's would have compiled it and this
-/// compiler cannot read it yet.
+/// A compile-time fatal: php's message, at php's line, at the level
+/// php raises it, which is how the request ends. `E_PARSE` for the
+/// parser's first `syntax error, …` where php's parser refused the file,
+/// and for the compiler's own sentence where php's would have compiled it
+/// and this compiler cannot read it yet; `E_COMPILE_ERROR` for what
+/// php's compiler refuses after parsing, the stack limit
+/// ([`StackLimit::check`]) first among them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileError {
+    pub level: Level,
     pub message: String,
     pub line: u32,
 }
@@ -130,11 +143,13 @@ pub fn compile(
         .find(|d| d.level == php_syntax::Level::Parse)
     {
         return Err(CompileError {
+            level: Level::Parse,
             message: refused.message.clone(),
             line: refused.line,
         });
     }
-    let read = read::read(&parsed.source).map_err(|trouble| CompileError {
+    let read = read::read(&parsed.source, options.stack).map_err(|trouble| CompileError {
+        level: trouble.level,
         message: trouble.what,
         line: trouble.line,
     })?;
@@ -1862,6 +1877,7 @@ mod tests {
         assert_eq!(
             trouble,
             Some(CompileError {
+                level: Level::Parse,
                 message: "syntax error, unexpected token \";\"".into(),
                 line: 2,
             })

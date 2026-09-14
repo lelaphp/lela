@@ -64,7 +64,7 @@ use php_unit::decl::{ConstDecl, ConstExpr, FunctionDecl, Name};
 use php_unit::{Diagnostic, Level, OpArray, Opcode, OperandKind, Opline, OplineIdx, Unit};
 
 use crate::read::{BinaryOp, Expr, Read, Stmt};
-use crate::{CompileError, Options};
+use crate::{CompileError, Options, StackLimit};
 
 /// One op array under construction, and the home its constant strings
 /// are interned into (design §5.2): the engine's table when the unit is
@@ -80,6 +80,9 @@ pub(crate) struct Emit<'a> {
     persistent: &'a [ConstDecl],
     /// The engine's natives, [`Options::functions`].
     functions: &'a [FunctionDecl],
+    /// The thread's stack limit, [`Options::stack`], held to where the
+    /// emitter recurses.
+    stack: StackLimit,
     oplines: Vec<Opline>,
     constants: Vec<Zval>,
     vars: Vec<Name>,
@@ -118,6 +121,7 @@ pub(crate) fn unit(
         precision: options.precision,
         persistent: &options.persistent,
         functions: &options.functions,
+        stack: options.stack,
         oplines: Vec::new(),
         constants: Vec::new(),
         vars: Vec::new(),
@@ -203,11 +207,33 @@ impl Emit<'_> {
         number
     }
 
-    /// The compile-time fatal for what stands on the statement's line.
+    /// The compile-time fatal for what stands on the statement's line:
+    /// this compiler's sentence for what it cannot read yet, which the
+    /// engine renders as the parse error #163 framed it as.
     fn fatal(&self, message: impl Into<String>) -> CompileError {
         CompileError {
+            level: Level::Parse,
             message: message.into(),
             line: self.line,
+        }
+    }
+
+    /// `zend_check_stack_limit`, at the top of `zend_compile_expr` and
+    /// `zend_eval_const_expr`: php's `E_COMPILE_ERROR` once the frame
+    /// stands past the thread's limit.
+    fn check_stack(&self) -> Result<(), CompileError> {
+        self.stack.check(self.line)
+    }
+
+    /// [`Self::constant_expr`] asked for a fold: the value where the
+    /// expression is a constant one, nothing where it is not, and the
+    /// fatal through, since php's compiler leaves the file at
+    /// `E_COMPILE_ERROR` and folds nothing after it.
+    pub(crate) fn constant_of(&mut self, expr: &Expr) -> Result<Option<Zval>, CompileError> {
+        match self.constant_expr(expr) {
+            Ok(value) => Ok(Some(value)),
+            Err(refused) if refused.level == Level::CompileError => Err(refused),
+            Err(_) => Ok(None),
         }
     }
 
@@ -512,6 +538,7 @@ impl Emit<'_> {
 
     /// `zend_compile_expr`: compile `expr` and say where its value is.
     pub(crate) fn expr(&mut self, expr: &Expr) -> Result<Where, CompileError> {
+        self.check_stack()?;
         match expr {
             Expr::Call { name, arguments } => self.call(name, arguments),
             Expr::Unary { minus, operand } => self.unary(*minus, operand),
@@ -582,7 +609,7 @@ impl Emit<'_> {
         if compares(op) {
             return self.comparison(op, left, right);
         }
-        if let (Ok(a), Ok(b)) = (self.constant_expr(left), self.constant_expr(right))
+        if let (Some(a), Some(b)) = (self.constant_of(left)?, self.constant_of(right)?)
             && let Some(folded) = fold(op, a, b)
         {
             return Ok(Where::Constant(folded));
@@ -760,7 +787,7 @@ impl Emit<'_> {
     /// that multiplication where the operand is not a constant.
     fn unary(&mut self, minus: bool, operand: &Expr) -> Result<Where, CompileError> {
         let sign = Zval::long(if minus { -1 } else { 1 });
-        if let Ok(value) = self.constant_expr(operand)
+        if let Some(value) = self.constant_of(operand)?
             && let Some(folded) = fold(BinaryOp::Mul, value, sign)
         {
             return Ok(Where::Constant(folded));
@@ -840,6 +867,7 @@ impl Emit<'_> {
     /// [`crate::special`]'s table over constants
     /// (`zend_try_compile_special_func`).
     pub(crate) fn constant_expr(&mut self, expr: &Expr) -> Result<Zval, CompileError> {
+        self.check_stack()?;
         match expr {
             Expr::Null => Ok(Zval::null()),
             Expr::Bool(b) => Ok(Zval::bool(*b)),

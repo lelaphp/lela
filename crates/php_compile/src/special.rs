@@ -204,7 +204,7 @@ impl Emit<'_> {
             return Ok(None);
         }
         match row(lowered) {
-            Some(Special::Strlen) => Ok(self.strlen_constant(arguments)),
+            Some(Special::Strlen) => self.strlen_constant(arguments),
             Some(Special::Chr) => self.chr(arguments),
             Some(Special::Ord) => self.ord(arguments),
             Some(Special::Defined) => self.defined_constant(arguments),
@@ -232,12 +232,14 @@ impl Emit<'_> {
 
     /// [`Self::strlen`]'s constant arm alone: the length of a constant
     /// string, and nothing for anything else.
-    fn strlen_constant(&mut self, arguments: &[Expr]) -> Option<Zval> {
+    fn strlen_constant(&mut self, arguments: &[Expr]) -> Result<Option<Zval>, CompileError> {
         let [argument] = arguments else {
-            return None;
+            return Ok(None);
         };
-        let value = self.constant_expr(argument).ok()?;
-        value.as_str().map(|s| length(s.len()))
+        let Some(value) = self.constant_of(argument)? else {
+            return Ok(None);
+        };
+        Ok(value.as_str().map(|s| length(s.len())))
     }
 
     /// `zend_compile_func_typecheck`, `zend_compile_func_is_scalar` and

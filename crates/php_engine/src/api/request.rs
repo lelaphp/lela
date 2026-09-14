@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
+use php_compile::StackLimit;
 use php_heap::{
     Arr, Fatal, FrameRef, Heap, HeapHooks, Intern, MapTable, Obj, Ref, Res, ResourceType, Slot,
     VmStack, Zval,
@@ -306,6 +307,11 @@ pub struct Request {
     /// The execution timer, armed while `max_execution_time` is not
     /// zero; dropping the request unsets it.
     timer: Option<crate::interrupt::Timer>,
+    /// The thread's stack limit, php's `EG(stack_limit)`, worked out
+    /// once at request start on the thread the request runs on
+    /// (`zend_call_stack_init`) from the two `zend.*_stack_size`
+    /// entries; what the compiler is held to (design §5.6).
+    stack_limit: StackLimit,
 }
 
 impl Request {
@@ -348,6 +354,7 @@ impl Request {
             returned: Value::null(),
             interrupt: Interrupt::default(),
             timer: None,
+            stack_limit: StackLimit::UNCHECKED,
         };
         // Request state in bundle order (ADR-0005).
         for extension in &req.shared.extensions {
@@ -360,7 +367,14 @@ impl Request {
         // `php_request_startup` sets one from the ini.
         req.arm_timer();
         req.set_memory_limit();
+        req.stack_limit = req.shared.stack_limit();
         req
+    }
+
+    /// The thread's stack limit as request start read it, for the
+    /// compiler of whatever this request compiles.
+    pub(crate) fn stack_limit(&self) -> StackLimit {
+        self.stack_limit
     }
 
     /// `zend_unset_timeout` then `zend_set_timeout` over
@@ -529,11 +543,7 @@ impl Request {
         };
         let fatal = if let Some(level) = compile_time {
             let message = string_prop(self, throwable, b"message");
-            self.note_error_in(level, &message, &file, line);
-            match level {
-                Level::Parse => self.end_in_parse(),
-                _ => self.end_in_fatal_logged(&message, &file, line),
-            }
+            self.end_in_compile_time(level, &message, &file, line);
             Fatal::Error(message)
         } else {
             let message = format!("Uncaught {}\n  thrown", self.throwable_to_string(throwable));
@@ -1174,6 +1184,27 @@ impl Request {
                 "PHP Fatal error:  {message} in {} on line {line}",
                 String::from_utf8_lossy(file)
             )));
+        }
+    }
+
+    /// `E_PARSE` or `E_COMPILE_ERROR` at a site of its own, which is what
+    /// the compiler's refusal carries and what a `ParseError` or
+    /// `CompileError` left uncaught recorded: rendered once through
+    /// `php_error_cb` at its level, and the request ended as that level
+    /// ends it, php's status alone for the parse error and the log form
+    /// beside it for the compile error, which `php_error_cb` bails out
+    /// of as it does from `E_ERROR`.
+    pub(crate) fn end_in_compile_time(
+        &mut self,
+        level: Level,
+        message: &str,
+        file: &[u8],
+        line: u32,
+    ) {
+        self.note_error_in(level, message, file, line);
+        match level {
+            Level::Parse => self.end_in_parse(),
+            _ => self.end_in_fatal_logged(message, file, line),
         }
     }
 

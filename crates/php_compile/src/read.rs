@@ -23,8 +23,15 @@
 //! Anything else is a [`crate::CompileError`], so what this cannot read is
 //! refused rather than silently compiled to something else.
 
+use std::fmt;
+use std::ops::Deref;
+
+use php_unit::Level;
+
+use crate::StackLimit;
+
 /// One statement.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum Stmt {
     /// Text outside the tags, which php echoes as it stands.
     Inline(Vec<u8>),
@@ -48,7 +55,7 @@ pub(crate) enum Stmt {
 }
 
 /// One expression.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum Expr {
     Null,
     Bool(bool),
@@ -61,13 +68,13 @@ pub(crate) enum Expr {
     /// `ZEND_AST_UNARY_PLUS`.
     Unary {
         minus: bool,
-        operand: Box<Expr>,
+        operand: Child,
     },
     /// `$a + $b`, php's `ZEND_AST_BINARY_OP`.
     Binary {
         op: BinaryOp,
-        left: Box<Expr>,
-        right: Box<Expr>,
+        left: Child,
+        right: Child,
     },
     Call {
         name: Vec<u8>,
@@ -80,7 +87,7 @@ pub(crate) enum Expr {
     /// `$a = expr`, php's `ZEND_AST_ASSIGN` to a variable.
     Assign {
         var: Vec<u8>,
-        value: Box<Expr>,
+        value: Child,
     },
     /// `++$a`, php's `ZEND_AST_PRE_INC`, whose grammar puts a variable
     /// and nothing else after the `++`.
@@ -91,6 +98,59 @@ pub(crate) enum Expr {
     PreDec(Vec<u8>),
     /// `$a--`, php's `ZEND_AST_POST_DEC`.
     PostDec(Vec<u8>),
+}
+
+/// One child of an expression, php's `zend_ast.child[i]`: the expression
+/// itself behind a pointer, dropped as `zend_ast_destroy` frees it. That
+/// walk recurses on every child but the first, and takes the first in a
+/// loop (`tail_call`, `Z/Zend/zend_ast.c:1367-1379`), so a left-nested
+/// chain, `1+1+1+…` as the grammar groups it, is freed in constant stack
+/// however long it is. A derived drop would recurse on both, and the
+/// chain the compiler refuses at its stack limit ([`StackLimit`]) would
+/// then take the thread down on the way out instead.
+#[derive(PartialEq)]
+pub(crate) struct Child(Box<Expr>);
+
+impl Child {
+    pub(crate) fn new(expr: Expr) -> Child {
+        Child(Box::new(expr))
+    }
+
+    /// The expression out, `Null` left in its place for the drop to find.
+    fn take(mut self) -> Expr {
+        std::mem::replace(&mut self.0, Expr::Null)
+    }
+}
+
+impl Deref for Child {
+    type Target = Expr;
+
+    fn deref(&self) -> &Expr {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Child {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl Drop for Child {
+    fn drop(&mut self) {
+        let mut first = std::mem::replace(&mut *self.0, Expr::Null);
+        loop {
+            first = match first {
+                Expr::Unary { operand, .. } => operand.take(),
+                Expr::Binary { left, right, .. } => {
+                    drop(right);
+                    left.take()
+                }
+                Expr::Assign { value, .. } => value.take(),
+                _ => return,
+            };
+        }
+    }
 }
 
 /// The binary operators this reads, each the opcode php's
@@ -145,14 +205,19 @@ struct Reader<'a> {
     source: &'a [u8],
     at: usize,
     line: u32,
+    /// The thread's stack limit, held to where the reader recurses: this
+    /// walk stands in for the compiler's over the tree (design §4.9), so
+    /// the check `zend_compile_expr` makes is made here.
+    stack: StackLimit,
 }
 
 /// What one source file holds, or the first thing in it this cannot read.
-pub(crate) fn read(source: &[u8]) -> Result<Read, Trouble> {
+pub(crate) fn read(source: &[u8], stack: StackLimit) -> Result<Read, Trouble> {
     let mut reader = Reader {
         source,
         at: 0,
         line: 1,
+        stack,
     };
     let mut out = Read::new();
     loop {
@@ -169,8 +234,11 @@ pub(crate) fn read(source: &[u8]) -> Result<Read, Trouble> {
     }
 }
 
-/// What the reader could not read: php's line, and what stood there.
+/// What the reader could not read: php's line, what stood there, and
+/// the level it refuses at, `E_PARSE` for what this reader cannot read
+/// yet and `E_COMPILE_ERROR` for what php's compiler refuses.
 pub(crate) struct Trouble {
+    pub(crate) level: Level,
     pub(crate) what: String,
     pub(crate) line: u32,
 }
@@ -202,9 +270,19 @@ impl Reader<'_> {
 
     fn trouble(&self, what: impl Into<String>) -> Trouble {
         Trouble {
+            level: Level::Parse,
             what: what.into(),
             line: self.line,
         }
+    }
+
+    /// `zend_check_stack_limit` where the reader recurses.
+    fn check_stack(&self) -> Result<(), Trouble> {
+        self.stack.check(self.line).map_err(|refused| Trouble {
+            level: refused.level,
+            what: refused.message,
+            line: refused.line,
+        })
     }
 
     /// The text up to the next open tag, or to the end.
@@ -417,6 +495,7 @@ impl Reader<'_> {
     /// `1 + $a = 2` is php's `1 + ($a = 2)`; that is refused here rather
     /// than read as the other grouping.
     fn expr(&mut self) -> Result<Expr, Trouble> {
+        self.check_stack()?;
         let left = self.equality()?;
         self.skip_trivia();
         if !(self.byte(0) == Some(b'=') && self.byte(1) != Some(b'=')) {
@@ -430,7 +509,7 @@ impl Reader<'_> {
         self.bump(1);
         Ok(Expr::Assign {
             var,
-            value: Box::new(self.expr()?),
+            value: Child::new(self.expr()?),
         })
     }
 
@@ -449,8 +528,8 @@ impl Reader<'_> {
         }
         Ok(Expr::Binary {
             op,
-            left: Box::new(left),
-            right: Box::new(right),
+            left: Child::new(left),
+            right: Child::new(right),
         })
     }
 
@@ -486,8 +565,8 @@ impl Reader<'_> {
         }
         Ok(Expr::Binary {
             op,
-            left: Box::new(left),
-            right: Box::new(right),
+            left: Child::new(left),
+            right: Child::new(right),
         })
     }
 
@@ -526,8 +605,8 @@ impl Reader<'_> {
             let right = self.shift()?;
             left = Expr::Binary {
                 op: BinaryOp::Concat,
-                left: Box::new(left),
-                right: Box::new(right),
+                left: Child::new(left),
+                right: Child::new(right),
             };
         }
     }
@@ -549,8 +628,8 @@ impl Reader<'_> {
             let right = self.additive()?;
             left = Expr::Binary {
                 op,
-                left: Box::new(left),
-                right: Box::new(right),
+                left: Child::new(left),
+                right: Child::new(right),
             };
         }
     }
@@ -569,8 +648,8 @@ impl Reader<'_> {
             let right = self.multiplicative()?;
             left = Expr::Binary {
                 op,
-                left: Box::new(left),
-                right: Box::new(right),
+                left: Child::new(left),
+                right: Child::new(right),
             };
         }
     }
@@ -591,8 +670,8 @@ impl Reader<'_> {
             let right = self.unary()?;
             left = Expr::Binary {
                 op,
-                left: Box::new(left),
-                right: Box::new(right),
+                left: Child::new(left),
+                right: Child::new(right),
             };
         }
     }
@@ -600,6 +679,7 @@ impl Reader<'_> {
     /// `-$a` and `+$a`, which bind tighter than either level and nest.
     /// `**` binds tighter still, so `-2 ** 2` is php's `-(2 ** 2)`.
     fn unary(&mut self) -> Result<Expr, Trouble> {
+        self.check_stack()?;
         self.skip_trivia();
         let minus = match (self.byte(0), self.byte(1)) {
             (Some(b'-'), next) if !matches!(next, Some(b'-' | b'=')) => true,
@@ -609,7 +689,7 @@ impl Reader<'_> {
         self.bump(1);
         Ok(Expr::Unary {
             minus,
-            operand: Box::new(self.unary()?),
+            operand: Child::new(self.unary()?),
         })
     }
 
@@ -626,8 +706,8 @@ impl Reader<'_> {
         self.bump(2);
         Ok(Expr::Binary {
             op: BinaryOp::Pow,
-            left: Box::new(left),
-            right: Box::new(self.unary()?),
+            left: Child::new(left),
+            right: Child::new(self.unary()?),
         })
     }
 
@@ -951,7 +1031,12 @@ fn is_auto_global(name: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{BinaryOp, Child, Expr, Read, Stmt, Trouble};
+
+    /// The reader on a thread nothing holds to a limit.
+    fn read(source: &[u8]) -> Result<Read, Trouble> {
+        super::read(source, crate::StackLimit::UNCHECKED)
+    }
 
     #[test]
     fn an_echo_of_one_number_is_one_statement() {
@@ -1004,11 +1089,11 @@ mod tests {
             vec![(
                 Stmt::Echo(vec![Expr::Binary {
                     op: BinaryOp::Add,
-                    left: Box::new(Expr::Int(1)),
-                    right: Box::new(Expr::Binary {
+                    left: Child::new(Expr::Int(1)),
+                    right: Child::new(Expr::Binary {
                         op: BinaryOp::Mul,
-                        left: Box::new(Expr::Int(2)),
-                        right: Box::new(Expr::Int(3)),
+                        left: Child::new(Expr::Int(2)),
+                        right: Child::new(Expr::Int(3)),
                     }),
                 }]),
                 1
@@ -1025,12 +1110,12 @@ mod tests {
             vec![(
                 Stmt::Echo(vec![Expr::Binary {
                     op: BinaryOp::Sub,
-                    left: Box::new(Expr::Binary {
+                    left: Child::new(Expr::Binary {
                         op: BinaryOp::Sub,
-                        left: Box::new(Expr::Int(1)),
-                        right: Box::new(Expr::Int(2)),
+                        left: Child::new(Expr::Int(1)),
+                        right: Child::new(Expr::Int(2)),
                     }),
-                    right: Box::new(Expr::Int(3)),
+                    right: Child::new(Expr::Int(3)),
                 }]),
                 1
             )]
@@ -1041,12 +1126,12 @@ mod tests {
             vec![(
                 Stmt::Echo(vec![Expr::Binary {
                     op: BinaryOp::Mul,
-                    left: Box::new(Expr::Binary {
+                    left: Child::new(Expr::Binary {
                         op: BinaryOp::Add,
-                        left: Box::new(Expr::Int(1)),
-                        right: Box::new(Expr::Int(2)),
+                        left: Child::new(Expr::Int(1)),
+                        right: Child::new(Expr::Int(2)),
                     }),
-                    right: Box::new(Expr::Int(3)),
+                    right: Child::new(Expr::Int(3)),
                 }]),
                 1
             )]
@@ -1062,11 +1147,11 @@ mod tests {
                 Stmt::Echo(vec![
                     Expr::Unary {
                         minus: true,
-                        operand: Box::new(Expr::Float(2.5)),
+                        operand: Child::new(Expr::Float(2.5)),
                     },
                     Expr::Unary {
                         minus: true,
-                        operand: Box::new(Expr::Constant(b"INF".to_vec())),
+                        operand: Child::new(Expr::Constant(b"INF".to_vec())),
                     },
                 ]),
                 1
@@ -1165,8 +1250,8 @@ mod tests {
             vec![(
                 Stmt::Echo(vec![Expr::Binary {
                     op: BinaryOp::Concat,
-                    left: Box::new(Expr::Str(b"a".to_vec())),
-                    right: Box::new(Expr::Str(b"b".to_vec())),
+                    left: Child::new(Expr::Str(b"a".to_vec())),
+                    right: Child::new(Expr::Str(b"b".to_vec())),
                 }]),
                 1
             )]
@@ -1208,8 +1293,8 @@ mod tests {
             vec![(
                 Stmt::Echo(vec![Expr::Binary {
                     op: BinaryOp::Sr,
-                    left: Box::new(Expr::Int(8)),
-                    right: Box::new(Expr::Int(1)),
+                    left: Child::new(Expr::Int(8)),
+                    right: Child::new(Expr::Int(1)),
                 }]),
                 1
             )]
@@ -1245,10 +1330,10 @@ mod tests {
             vec![(
                 Stmt::Echo(vec![Expr::Binary {
                     op: BinaryOp::Pow,
-                    left: Box::new(Expr::Int(2)),
-                    right: Box::new(Expr::Unary {
+                    left: Child::new(Expr::Int(2)),
+                    right: Child::new(Expr::Unary {
                         minus: true,
-                        operand: Box::new(Expr::Int(1)),
+                        operand: Child::new(Expr::Int(1)),
                     }),
                 }]),
                 1
@@ -1267,12 +1352,12 @@ mod tests {
                 Stmt::For {
                     init: vec![Expr::Assign {
                         var: b"i".to_vec(),
-                        value: Box::new(Expr::Int(0)),
+                        value: Child::new(Expr::Int(0)),
                     }],
                     cond: vec![Expr::Binary {
                         op: BinaryOp::IsSmaller,
-                        left: Box::new(Expr::Var(b"i".to_vec())),
-                        right: Box::new(Expr::Int(1000)),
+                        left: Child::new(Expr::Var(b"i".to_vec())),
+                        right: Child::new(Expr::Int(1000)),
                     }],
                     step: vec![Expr::PostInc(b"i".to_vec())],
                     body: vec![(Stmt::Echo(vec![Expr::Str(b"dax".to_vec())]), 1)],
@@ -1367,8 +1452,8 @@ mod tests {
             vec![(
                 Stmt::Effect(Expr::Binary {
                     op: BinaryOp::Add,
-                    left: Box::new(Expr::PostInc(b"a".to_vec())),
-                    right: Box::new(Expr::Var(b"b".to_vec())),
+                    left: Child::new(Expr::PostInc(b"a".to_vec())),
+                    right: Child::new(Expr::Var(b"b".to_vec())),
                 }),
                 1
             )],
@@ -1400,8 +1485,8 @@ mod tests {
             vec![(
                 Stmt::Effect(Expr::Binary {
                     op: BinaryOp::Sub,
-                    left: Box::new(Expr::PostDec(b"a".to_vec())),
-                    right: Box::new(Expr::Var(b"b".to_vec())),
+                    left: Child::new(Expr::PostDec(b"a".to_vec())),
+                    right: Child::new(Expr::Var(b"b".to_vec())),
                 }),
                 1
             )],
@@ -1412,7 +1497,7 @@ mod tests {
             vec![(
                 Stmt::Effect(Expr::Assign {
                     var: b"a".to_vec(),
-                    value: Box::new(Expr::PreDec(b"b".to_vec())),
+                    value: Child::new(Expr::PreDec(b"b".to_vec())),
                 }),
                 1
             )],
@@ -1525,10 +1610,10 @@ mod tests {
             (
                 Stmt::Effect(Expr::Assign {
                     var: b"a".to_vec(),
-                    value: Box::new(Expr::Binary {
+                    value: Child::new(Expr::Binary {
                         op: BinaryOp::Add,
-                        left: Box::new(Expr::Int(1)),
-                        right: Box::new(Expr::Var(b"b".to_vec())),
+                        left: Child::new(Expr::Int(1)),
+                        right: Child::new(Expr::Var(b"b".to_vec())),
                     }),
                 }),
                 1
@@ -1542,9 +1627,9 @@ mod tests {
                     Expr::Var(b"a".to_vec()),
                     Expr::Assign {
                         var: b"b".to_vec(),
-                        value: Box::new(Expr::Assign {
+                        value: Child::new(Expr::Assign {
                             var: b"c".to_vec(),
-                            value: Box::new(Expr::Call {
+                            value: Child::new(Expr::Call {
                                 name: b"f".to_vec(),
                                 arguments: vec![Expr::Var(b"a".to_vec())],
                             }),
@@ -1609,10 +1694,7 @@ mod tests {
             "the echo and the text after it, with the newline eaten"
         );
         assert_eq!(
-            read(b"<?php echo 1; ?>\r\nafter")
-                .unwrap_or_default()
-                .last()
-                .cloned(),
+            read(b"<?php echo 1; ?>\r\nafter").unwrap_or_default().pop(),
             Some((Stmt::Inline(b"after".to_vec()), 2))
         );
     }

@@ -17,13 +17,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
-use php_compile::CompileError;
+use php_compile::{CompileError, StackLimit};
 use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
 use php_unit::Unit;
 use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, Name};
 
 use crate::api::abi::{Cache, Entry, Extension, StartupIni};
-use crate::api::raising::Level;
 use crate::api::request::{Aside, Ending, Request};
 use crate::api::values::Value;
 use crate::exec;
@@ -188,7 +187,12 @@ impl Shared {
     /// over `Z/ext/opcache/ZendAccelerator.c:515-575`), and compiling
     /// into that table reaches the same published unit with one
     /// allocation instead of two.
-    fn publish(&self, source: &[u8], filename: &[u8]) -> Result<Arc<Unit>, CompileError> {
+    fn publish(
+        &self,
+        source: &[u8],
+        filename: &[u8],
+        stack: StackLimit,
+    ) -> Result<Arc<Unit>, CompileError> {
         let mut strings = match self.strings.lock() {
             Ok(strings) => strings,
             // The table is append-only and every string in it was
@@ -202,7 +206,22 @@ impl Shared {
             self.precision(),
             &self.constants,
             &self.functions,
+            stack,
             &mut *strings,
+        )
+    }
+
+    /// `zend_call_stack_init` on the calling thread, from the startup
+    /// ini's `zend.max_allowed_stack_size` and `zend.reserved_stack_size`
+    /// (`Z/Zend/zend.c:277-279`), as php runs it once per thread at
+    /// `zend_post_startup` and at each new thread's start: what a request
+    /// reads at its start, and what a unit compiled outside one is held
+    /// to on the thread that asked for it.
+    pub(crate) fn stack_limit(&self) -> StackLimit {
+        let bytes = |name: &[u8]| self.ini_default(name).map_or(0, Request::ini_parse_bytes);
+        StackLimit::init(
+            bytes(b"zend.max_allowed_stack_size"),
+            u64::try_from(bytes(b"zend.reserved_stack_size")).unwrap_or(0),
         )
     }
 
@@ -219,7 +238,7 @@ impl Shared {
     /// and shared by every request that asks for it afterwards (design
     /// §6.3). A file the engine cannot stat is no unit at all, which is
     /// the `None` `serve` serves nothing for.
-    fn cached(&self, path: &[u8]) -> Cached {
+    fn cached(&self, path: &[u8], stack: StackLimit) -> Cached {
         let name = String::from_utf8_lossy(path).into_owned();
         let described = std::fs::metadata(&name).ok()?;
         let key = UnitKey {
@@ -232,7 +251,7 @@ impl Shared {
         };
         let held = self.units.get_or_build(key, |_| {
             let source = std::fs::read(&name).ok()?;
-            Some(self.publish(&source, path))
+            Some(self.publish(&source, path, stack))
         });
         Cached::clone(&held)
     }
@@ -260,7 +279,8 @@ impl Shared {
 }
 
 /// The core ini entries and their defaults: php's `main.c` table and
-/// the two `zend.` entries of `Zend/zend.c`'s a throwable's trace reads,
+/// four `zend.` entries of `Zend/zend.c`'s, the two a throwable's trace
+/// reads and the two the stack limit reads (`Shared::stack_limit`),
 /// under the CLI's hardcoded overrides (`Z/sapi/cli/php_cli.c:116-121`),
 /// which is what the oracle answers with no `php.ini`. `max_execution_time`
 /// and `html_errors` are the two the CLI moves, from `30` and `1`.
@@ -268,7 +288,7 @@ impl Shared {
 /// table and empty here, since an entry with no value at all is one
 /// `ini_set()` refuses to set. `short_open_tag` is the one entry the
 /// scanner reads, `CG(short_tags)`, and `token_get_all` with it.
-const CORE_INI: [(&str, &str); 18] = [
+const CORE_INI: [(&str, &str); 20] = [
     ("short_open_tag", "1"),
     ("precision", "14"),
     ("serialize_precision", "-1"),
@@ -287,6 +307,8 @@ const CORE_INI: [(&str, &str); 18] = [
     ("default_charset", "UTF-8"),
     ("zend.exception_ignore_args", "0"),
     ("zend.exception_string_param_max_len", "15"),
+    ("zend.max_allowed_stack_size", "0"),
+    ("zend.reserved_stack_size", "0"),
 ];
 
 /// Builds an [`Engine`]: the bundle, the tier and the startup ini.
@@ -426,7 +448,8 @@ impl Engine {
     /// carrying one constant carry the one `zend_string` (design §5.2).
     #[must_use]
     pub fn unit(&self, source: &[u8], filename: &[u8]) -> Option<Arc<Unit>> {
-        self.shared.publish(source, filename).ok()
+        let stack = self.shared.stack_limit();
+        self.shared.publish(source, filename, stack).ok()
     }
 
     /// The one request transaction (design §5.14): compile, seed, serve,
@@ -477,24 +500,27 @@ impl Engine {
             Some(source) => {
                 let precision = req.precision();
                 let shared = Arc::clone(&self.shared);
+                let stack = req.stack_limit();
                 Some(compile(
                     &source,
                     &script,
                     precision,
                     &shared.constants,
                     &shared.functions,
+                    stack,
                     req.heap_mut(),
                 ))
             }
-            None => self.shared.cached(&script),
+            None => self.shared.cached(&script, req.stack_limit()),
         };
         match compiled {
             Some(Ok(unit)) => serve_unit(&mut req, &unit, self.shared.entry),
             // `php_error_cb` renders it where it renders every
-            // diagnostic, and the request ends before a frame is pushed.
+            // diagnostic, at the level the compiler refused at, and the
+            // request ends before a frame is pushed.
             Some(Err(refused)) => {
-                req.note_error_at(Level::Parse, &refused.message, refused.line);
-                req.end_in_parse();
+                let file = req.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+                req.end_in_compile_time(refused.level, &refused.message, &file, refused.line);
             }
             None => {}
         }
@@ -556,13 +582,16 @@ impl Engine {
 /// `persistent` the constants the bundle declared, which the compiler
 /// substitutes where they are written, and `functions` the natives it
 /// declared, which the compiler reads as `CG(function_table)` before it
-/// serves a call of `zend_try_compile_special_func`'s table itself.
+/// serves a call of `zend_try_compile_special_func`'s table itself, and
+/// `stack` the calling thread's limit, which the compiler's recursion is
+/// held to.
 fn compile(
     source: &[u8],
     filename: &[u8],
     precision: i32,
     persistent: &[ConstDecl],
     functions: &[(FunctionDecl, Entry)],
+    stack: StackLimit,
     strings: &mut dyn Intern,
 ) -> Result<Arc<Unit>, CompileError> {
     let options = php_compile::Options {
@@ -571,6 +600,7 @@ fn compile(
         precision,
         persistent: persistent.to_vec(),
         functions: functions.iter().map(|(decl, _)| decl.clone()).collect(),
+        stack,
     };
     php_compile::compile_source(source, &options, strings).map(Arc::new)
 }
@@ -754,6 +784,63 @@ mod tests {
             .serve(description("<?php\necho !1;"), &mut masked);
         assert!(masked.body.is_empty(), "E_PARSE is masked out");
         assert_eq!(observables.exit_code, 255, "the status is php's regardless");
+    }
+
+    /// What php's compiler refuses after parsing is `E_COMPILE_ERROR`,
+    /// rendered as a fatal and ending the request as one, with the log
+    /// form beside it: the compiler's stack limit (design §5.6), which
+    /// `zend.max_allowed_stack_size` bounds from where the request
+    /// started, on the thread the request runs on. A chain of 200,000
+    /// links is a tree that deep, and the frame that trips the limit
+    /// is refused in php's sentence, with the number php prints, and
+    /// nothing of the tree left to a native overflow, on the way down
+    /// or on the way out. The witness beside `php_compile::StackLimit`
+    /// holds the sentence to the oracle; what is held here is the
+    /// frame the engine puts around it, on a thread of the test
+    /// harness's own size.
+    #[test]
+    fn what_the_compiler_refuses_past_its_stack_limit_is_a_fatal() {
+        let source = format!("<?php\n$y = 1{};\necho 'never';", "+1".repeat(200_000));
+        let engine = Engine::builder()
+            .ini("zend.max_allowed_stack_size", "512K")
+            .build();
+        let (body, observables) = served(&engine, &source);
+        assert_eq!(
+            body,
+            format!(
+                "\nFatal error: Maximum call stack size of {} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached during compilation. Try splitting expression in witness.php on line 2\n",
+                512 * 1024 - 48 * 1024
+            )
+        );
+        assert_eq!(observables.exit_code, 255);
+        assert_eq!(
+            observables.fatal.as_deref(),
+            Some(
+                "PHP Fatal error:  Maximum call stack size of 475136 bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached during compilation. Try splitting expression in witness.php on line 2"
+            ),
+            "the log form the host is handed, as for every fatal"
+        );
+
+        let mut masked = Kept::default();
+        let observables = Engine::builder()
+            .ini("zend.max_allowed_stack_size", "512K")
+            .ini("error_reporting", "0")
+            .build()
+            .serve(description(&source), &mut masked);
+        assert!(masked.body.is_empty(), "E_COMPILE_ERROR is masked out");
+        assert_eq!(observables.exit_code, 255, "the status is php's regardless");
+
+        let (body, observables) = served(
+            &Engine::builder()
+                .ini("zend.max_allowed_stack_size", "-1")
+                .build(),
+            "<?php echo 1;",
+        );
+        assert_eq!(
+            (body.as_str(), observables.exit_code),
+            ("1", 0),
+            "-1 checks nothing"
+        );
     }
 
     /// `php_error_cb`'s two renderings of one diagnostic, which the two
@@ -1156,9 +1243,10 @@ mod tests {
         );
         // What the cache holds after both: one unit, and the constant
         // string its `ECHO` names is the one allocation.
-        let (Some(Ok(one)), Some(Ok(again))) =
-            (engine.shared.cached(&name), engine.shared.cached(&name))
-        else {
+        let (Some(Ok(one)), Some(Ok(again))) = (
+            engine.shared.cached(&name, StackLimit::UNCHECKED),
+            engine.shared.cached(&name, StackLimit::UNCHECKED),
+        ) else {
             return;
         };
         assert!(Arc::ptr_eq(&one, &again), "one published unit");
@@ -1230,7 +1318,15 @@ mod tests {
         for _ in 0..2 {
             let mut req = Request::new(Arc::clone(&engine.shared), description(""));
             started_at.push(req.memory_usage(false));
-            let compiled = compile(source, b"witness.php", 14, &[], &[], req.heap_mut());
+            let compiled = compile(
+                source,
+                b"witness.php",
+                14,
+                &[],
+                &[],
+                StackLimit::UNCHECKED,
+                req.heap_mut(),
+            );
             assert!(compiled.is_ok(), "the source compiles");
             assert!(
                 req.memory_usage(false) > 0,
