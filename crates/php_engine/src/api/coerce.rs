@@ -119,13 +119,13 @@ pub fn to_long(req: &mut Request, value: &Value) -> Result<i64, Thrown> {
             .and_then(|n| n.as_int().or_else(|| n.as_float().map(float_to_long)))
             .unwrap_or(0)),
         ValueRef::Array(a) => Ok(i64::from(!a.is_empty())),
-        ValueRef::Resource(r) => Ok(i64::from(r.id)),
+        ValueRef::Resource(r) => Ok(r.id()),
         ValueRef::Object(_) => Err(throw(
             req,
             "TypeError",
             &format!("Cannot convert {} to int", value.type_name()),
         )),
-        ValueRef::Reference(r) => to_long(req, r.get()),
+        ValueRef::Reference(r) => to_long(req, &r.get()),
     }
 }
 
@@ -136,7 +136,7 @@ pub fn to_double(req: &mut Request, value: &Value) -> Result<f64, Thrown> {
         ValueRef::Str(s) => Ok(numeric_string(s.as_bytes())
             .and_then(|n| n.as_float().or_else(|| n.as_int().map(|i| i as f64)))
             .unwrap_or(0.0)),
-        ValueRef::Reference(r) => to_double(req, r.get()),
+        ValueRef::Reference(r) => to_double(req, &r.get()),
         _ => to_long(req, value).map(|n| n as f64),
     }
 }
@@ -160,13 +160,13 @@ pub fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, Thrown> 
             crate::api::raising::warning(req, "Array to string conversion");
             PhpString::new(req, b"Array")
         }
-        ValueRef::Resource(r) => PhpString::new(req, format!("Resource id #{}", r.id).as_bytes()),
+        ValueRef::Resource(r) => PhpString::new(req, format!("Resource id #{}", r.id()).as_bytes()),
         ValueRef::Object(_) => Err(throw(
             req,
             "Error",
             "Object of class could not be converted to string",
         )),
-        ValueRef::Reference(r) => to_string(req, r.get()),
+        ValueRef::Reference(r) => to_string(req, &r.get()),
     }
 }
 
@@ -175,7 +175,7 @@ pub fn to_number(req: &mut Request, value: &Value) -> Result<Value, Thrown> {
     match value.as_ref() {
         ValueRef::Float(f) => Ok(Value::float(f)),
         ValueRef::Str(s) => Ok(numeric_string(s.as_bytes()).unwrap_or(Value::int(0))),
-        ValueRef::Reference(r) => to_number(req, r.get()),
+        ValueRef::Reference(r) => to_number(req, &r.get()),
         _ => to_long(req, value).map(Value::int),
     }
 }
@@ -199,7 +199,7 @@ pub fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thrown> {
             }
             Ok(array)
         }
-        ValueRef::Reference(r) => to_array(req, r.get()),
+        ValueRef::Reference(r) => to_array(req, &r.get()),
         _ => {
             let mut array = PhpArray::new(req)?;
             let element = value.deref().clone();
@@ -214,7 +214,7 @@ pub fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thrown> {
 pub fn to_object(req: &mut Request, value: &Value) -> Result<PhpObject, Thrown> {
     match value.as_ref() {
         ValueRef::Object(o) => Ok(*o),
-        ValueRef::Reference(r) => to_object(req, r.get()),
+        ValueRef::Reference(r) => to_object(req, &r.get()),
         _ => {
             let object = req.new_object_of("stdClass")?;
             if let Some(array) = value.as_array() {
@@ -258,8 +258,8 @@ pub fn key_of(req: &mut Request, value: &Value) -> Result<Key, Thrown> {
         ValueRef::Int(n) => Ok(Key::Int(n)),
         ValueRef::Float(f) => Ok(Key::Int(float_to_long(f))),
         ValueRef::Str(s) => Ok(Key::from_string(*s)),
-        ValueRef::Resource(r) => Ok(Key::Int(i64::from(r.id))),
-        ValueRef::Reference(r) => key_of(req, r.get()),
+        ValueRef::Resource(r) => Ok(Key::Int(r.id())),
+        ValueRef::Reference(r) => key_of(req, &r.get()),
         ValueRef::Array(_) | ValueRef::Object(_) => {
             Err(throw(req, "TypeError", "Illegal offset type"))
         }
@@ -417,7 +417,7 @@ pub fn coerce_param(
     position: u32,
 ) -> Result<Value, Thrown> {
     let strict = req.caller_strict_types();
-    let value = value.deref();
+    let value = &value.deref();
     let want = |req: &mut Request, name: &str| {
         Err(arg_type_error(
             req,

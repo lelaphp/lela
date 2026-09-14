@@ -1,0 +1,260 @@
+//! References (design §5.5): php's `zend_reference`
+//! (`Z/Zend/zend_types.h:608-612`), the one cell several holders share
+//! when `&$x` binds them: the refcounted header, the zval held and the
+//! typed-property sources list, thirty-two bytes out of the request's
+//! heap, which is what `ZVAL_NEW_REF` (`Z/Zend/zend_types.h:1230`)
+//! `emalloc`s and what `memory_get_usage()` moves by for one.
+//!
+//! A [`Ref`] is the pointer php's `zend_reference *` is, `Copy`, no
+//! `Drop`, its owners counted by [`crate::Heap::addref`] and
+//! [`crate::Heap::release`]; the release that reaches zero is
+//! `zend_reference_destroy` (`Z/Zend/zend_variables.c:71`), the value
+//! held released first, through the hooks since it may be an object,
+//! and the cell given back after it. A write through a reference is
+//! [`crate::Heap::reference_set`], the middle of `zend_assign_to_variable`
+//! (`Z/Zend/zend_execute.h:171-183`): the value held is replaced first
+//! and what it held released last, which is where a destructor is
+//! served.
+
+use std::cell::Cell;
+use std::ptr::NonNull;
+
+use crate::gc::{self, Refcounted};
+use crate::hooks::{Fatal, HeapHooks};
+use crate::{Heap, Zval, ZvalType};
+
+/// `zend_reference`: thirty-two bytes, php's own order.
+#[repr(C)]
+pub(crate) struct RefHeader {
+    /// `zend_refcounted_h gc`, `GC_REFERENCE`: not collectable on the
+    /// header, as php marks it.
+    gc: Refcounted,
+    /// `val`: the zval held.
+    val: Cell<Zval>,
+    /// `sources`: php's typed-property sources list, a pointer-sized
+    /// word; none until a typed property can be referenced, when
+    /// `zend_assign_to_typed_ref` reads it. Kept for the size.
+    _sources: usize,
+}
+
+/// One reference: php's `zend_reference *`. Naming one does not keep it
+/// alive, exactly as php's pointer does not; the engine's kernels take
+/// and give up owners through [`crate::Heap::addref`] and
+/// [`crate::Heap::release`].
+#[derive(Clone, Copy)]
+pub struct Ref(NonNull<RefHeader>);
+
+// SAFETY: a `Ref` is the pointer php's `zend_reference *` is: a
+// request's reference moves with the request that owns it, whole, to the
+// thread that serves it (design §5.14). The refcount `Cell` is what
+// keeps it off `Sync`.
+unsafe impl Send for Ref {}
+
+impl Ref {
+    fn header(&self) -> &RefHeader {
+        // SAFETY: a `Ref` names a reference `init` laid down, live while
+        // its owner holds it, which is php's `zend_reference *` contract.
+        unsafe { self.0.as_ref() }
+    }
+
+    /// Where the header sits, which is where the allocation starts, for
+    /// the heap that frees it.
+    pub(crate) const fn address(self) -> NonNull<u8> {
+        self.0.cast()
+    }
+
+    /// The payload word of a zval naming this reference.
+    pub(crate) fn payload(self) -> u64 {
+        self.0.as_ptr().expose_provenance() as u64
+    }
+
+    /// The reference a zval's payload word names.
+    ///
+    /// # Safety
+    ///
+    /// The word came from [`Ref::payload`] for a reference still live.
+    pub(crate) unsafe fn from_payload(payload: u64) -> Option<Ref> {
+        let at: *mut RefHeader =
+            std::ptr::with_exposed_provenance_mut(usize::try_from(payload).unwrap_or(0));
+        NonNull::new(at).map(Ref)
+    }
+
+    /// `ZVAL_NEW_REF` over a fresh allocation: one owner, `z` the
+    /// reference's own from here, no sources.
+    ///
+    /// # Safety
+    ///
+    /// `at` is writable for `size_of::<RefHeader>()` bytes and holds
+    /// nothing else.
+    unsafe fn init(at: NonNull<u8>, z: Zval) -> Ref {
+        let header: NonNull<RefHeader> = at.cast();
+        // SAFETY: the caller's allocation is the header and nothing else
+        // holds it.
+        unsafe {
+            header.as_ptr().write(RefHeader {
+                gc: Refcounted::new(ZvalType::Reference, gc::NOT_COLLECTABLE),
+                val: Cell::new(z),
+                _sources: 0,
+            });
+        }
+        Ref(header)
+    }
+
+    /// `Z_REFVAL`: the zval held, copied, no owner taken.
+    #[must_use]
+    pub fn val(&self) -> Zval {
+        self.header().val.get()
+    }
+
+    /// Write the zval held as it stands, no owner touched.
+    pub(crate) fn write_val(self, z: Zval) {
+        self.header().val.set(z);
+    }
+
+    /// `GC_REFCOUNT`.
+    #[must_use]
+    pub fn refcount(&self) -> u32 {
+        self.header().gc.refcount()
+    }
+
+    /// `GC_ADDREF`.
+    pub fn addref(&self) {
+        self.header().gc.addref();
+    }
+
+    /// `GC_DELREF`, and what is left.
+    pub(crate) fn delref(self) -> u32 {
+        self.header().gc.delref()
+    }
+
+    /// Whether two names name one reference, php's pointer equality.
+    #[must_use]
+    pub fn is_same(&self, other: Ref) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl std::fmt::Debug for Ref {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "reference({:?})", self.val().kind())
+    }
+}
+
+impl Heap {
+    /// `ZVAL_NEW_REF` (`Z/Zend/zend_types.h:1230`): a reference holding
+    /// `z`, one owner, `z` the reference's own from here, as
+    /// `ZVAL_COPY_VALUE` into `_ref->val` takes no owner of its own; the
+    /// caller that keeps a second name of what `z` names takes it.
+    pub fn reference(&mut self, z: Zval) -> Result<Ref, Fatal> {
+        let at = self.mm.alloc(size_of::<RefHeader>())?;
+        // SAFETY: the allocation is exactly the header's size and nothing
+        // else holds it.
+        Ok(unsafe { Ref::init(at, z) })
+    }
+
+    /// The reference's half of `zend_assign_to_variable`
+    /// (`Z/Zend/zend_execute.h:171-183`): `z` is what the reference
+    /// holds from here, and what it held is released last, after the
+    /// write, which is where a destructor is served. The typed-property
+    /// sources, which `zend_assign_to_typed_ref` reads first, come with
+    /// typed properties.
+    pub fn reference_set(hooks: &mut dyn HeapHooks, r: Ref, z: Zval) {
+        let old = r.val();
+        r.write_val(z);
+        Heap::release(hooks, old);
+    }
+
+    /// `zend_reference_destroy` (`Z/Zend/zend_variables.c:71`): the
+    /// value held released, through the hooks since it may be the last
+    /// owner of an object, and the cell's bytes given back after it.
+    pub(crate) fn reference_destroy(hooks: &mut dyn HeapHooks, r: Ref) {
+        let held = r.val();
+        r.write_val(Zval::UNDEF);
+        Heap::release(hooks, held);
+        // SAFETY: the reference came from `reference`, its last owner has
+        // given it up and what it held is released, so nothing names it.
+        unsafe { hooks.heap().mm.free(r.address()) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::object::Obj;
+
+    use crate::serial::alone;
+
+    /// The heap's tests pass this where a request would serve a
+    /// destructor: the heap itself, and what would have been served.
+    struct Recorder {
+        heap: Heap,
+        served: Vec<u32>,
+    }
+
+    impl HeapHooks for Recorder {
+        fn heap(&mut self) -> &mut Heap {
+            &mut self.heap
+        }
+        fn destruct(&mut self, obj: Obj) {
+            self.served.push(obj.id().0);
+        }
+        fn free_native(&mut self, _: Obj) {}
+        fn gc_children(&mut self, _: Obj, _: &mut dyn FnMut(Zval)) {}
+        fn free_resource(&mut self, _: crate::Res, _: crate::ResourceType) {}
+        fn out_of_memory(&mut self, bytes: usize) -> Fatal {
+            Fatal::OutOfMemory(bytes)
+        }
+    }
+
+    /// A reference is php's thirty-two bytes, the zval naming it is
+    /// refcounted and collectable as `IS_REFERENCE_EX` is, a write
+    /// through it releases what it held after the write, and the last
+    /// release gives the value held back and then the cell.
+    #[test]
+    fn a_reference_is_thirty_two_bytes_and_writes_through() {
+        let _alone = alone();
+        assert_eq!(size_of::<RefHeader>(), 32);
+        let mut rec = Recorder {
+            heap: Heap::new(),
+            served: Vec::new(),
+        };
+        let start = rec.heap.memory_usage(false);
+        let Ok(s) = rec.heap.string(b"held by a ref") else {
+            return;
+        };
+        let Ok(r) = rec.heap.reference(Zval::string(s)) else {
+            return;
+        };
+        assert_eq!(rec.heap.memory_usage(false) - start, 32 + 40);
+        let z = Zval::reference(r);
+        assert!(z.is_refcounted());
+        assert_eq!(z.kind(), ZvalType::Reference);
+        assert_eq!(z.as_reference().map(|r| r.val()), Some(Zval::string(s)));
+        assert_eq!(r.refcount(), 1);
+        rec.heap.addref(z);
+        assert_eq!(
+            r.refcount(),
+            2,
+            "one more owner of the cell, not of the string"
+        );
+        assert_eq!(s.refcount(), 1);
+        // A write through the reference: the string is released after
+        // the write and the heap reads the cell and the long alone.
+        let Ok(o) = rec.heap.object(7, 0) else {
+            return;
+        };
+        Heap::reference_set(&mut rec, r, Zval::object(o));
+        assert_eq!(rec.heap.memory_usage(false) - start, 32 + 40);
+        assert_eq!(r.val().as_obj().map(|o| o.id().0), Some(1));
+        assert!(rec.served.is_empty());
+        // The last release of the reference releases what it holds,
+        // which serves the object's destructor, and gives the cell back.
+        Heap::release(&mut rec, z);
+        assert_eq!(r.refcount(), 1);
+        assert!(rec.served.is_empty());
+        Heap::release(&mut rec, z);
+        assert_eq!(rec.served, vec![1]);
+        assert_eq!(rec.heap.memory_usage(false), start);
+        assert_eq!(rec.heap.objects(), 0);
+    }
+}

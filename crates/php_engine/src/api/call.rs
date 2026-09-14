@@ -262,14 +262,18 @@ pub fn read_static_prop(req: &mut Request, class: ClassId, name: &[u8]) -> Resul
     ))
 }
 
-/// Write a `static` property of `class`.
+/// Write a `static` property of `class`. The value is the property's
+/// from here; the skeleton has no property to keep it, so it is given
+/// up once the read has raised what it raises.
 pub fn write_static_prop(
     req: &mut Request,
     class: ClassId,
     name: &[u8],
     value: Value,
 ) -> Result<(), Thrown> {
-    read_static_prop(req, class, name).map(|_| drop(value))
+    read_static_prop(req, class, name)?;
+    req.release(value);
+    Ok(())
 }
 
 /// `ReflectionClass::newLazyGhost`.

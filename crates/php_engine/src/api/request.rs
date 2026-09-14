@@ -13,7 +13,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
-use php_heap::{Arr, Fatal, FrameRef, Heap, HeapHooks, Intern, MapTable, Obj, VmStack, Zval};
+use php_heap::{
+    Arr, Fatal, FrameRef, Heap, HeapHooks, Intern, MapTable, Obj, Ref, Res, ResourceType, Slot,
+    VmStack, Zval,
+};
 use php_unit::Unit;
 use php_unit::decl::{ClassDecl, ClassKind, FunctionDecl};
 
@@ -21,7 +24,7 @@ use crate::api::abi::{Callable, IniVerdict};
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{
-    ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef,
+    ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpRef, PhpString, Resource, Value, ValueRef,
 };
 use crate::engine::{RequestDescription, Shared};
 use crate::exec::{self, Vm};
@@ -104,38 +107,41 @@ pub struct StreamFilter {
     pub filter: fn(&mut Request, &[u8], &mut Vec<u8>, bool) -> Result<(), Thrown>,
 }
 
-/// The request's resource table, `EG(regular_list)`: ids are handed out
-/// once and never reused within a request.
-#[derive(Debug, Default)]
+/// A resource's per-type destructor, php's `list_dtor_ex`: served once,
+/// by [`Resource::close`] or by the release that reaches zero, with the
+/// resource already closed and its payload still readable.
+pub type ResourceDtor = fn(&mut Request, Resource);
+
+/// The resource types this request knows, php's `list_destructors`
+/// (`zend_register_list_destructors_ex`): a name and a destructor per
+/// type, numbered in registration order. The list itself,
+/// `EG(regular_list)`, is the heap's, reached through
+/// [`Request::resource`].
+#[derive(Default)]
 pub struct Resources {
-    entries: Vec<Option<Resource>>,
+    types: Vec<(Vec<u8>, Option<ResourceDtor>)>,
 }
 
 impl Resources {
-    /// Register a resource; its id is written into it and returned.
-    pub fn insert(&mut self, mut resource: Resource) -> u32 {
-        let id = u32::try_from(self.entries.len())
-            .unwrap_or(u32::MAX)
-            .saturating_add(1);
-        resource.id = id;
-        self.entries.push(Some(resource));
-        id
+    /// `zend_register_list_destructors_ex`: the type's name, which
+    /// `get_resource_type()` prints, and its destructor, which seam 1
+    /// serves when the resource closes. The number is the type's.
+    pub fn register_type(&mut self, name: &[u8], dtor: Option<ResourceDtor>) -> ResourceType {
+        let kind = ResourceType(u32::try_from(self.types.len()).unwrap_or(u32::MAX));
+        self.types.push((name.to_vec(), dtor));
+        kind
     }
 
-    /// The resource with `id`, if it is live.
-    #[must_use]
-    pub fn get(&self, id: u32) -> Option<&Resource> {
-        self.entries
-            .get(usize::try_from(id.checked_sub(1)?).ok()?)?
-            .as_ref()
+    /// The type's name, `zend_rsrc_list_get_rsrc_type` over the table.
+    fn type_name(&self, kind: ResourceType) -> Option<&[u8]> {
+        self.types
+            .get(kind.0 as usize)
+            .map(|(name, _)| name.as_slice())
     }
 
-    /// Remove the resource with `id`, running its destructor.
-    pub fn remove(&mut self, id: u32) -> Option<Resource> {
-        let slot = self
-            .entries
-            .get_mut(usize::try_from(id.checked_sub(1)?).ok()?)?;
-        slot.take()
+    /// The type's destructor, if it registered one.
+    fn dtor(&self, kind: ResourceType) -> Option<ResourceDtor> {
+        self.types.get(kind.0 as usize).and_then(|(_, dtor)| *dtor)
     }
 }
 
@@ -389,13 +395,56 @@ impl Request {
         frame
     }
 
-    /// The frame off both stacks, every owner its slots held given up:
-    /// `i_free_compiled_variables`, and `zend_vm_stack_free_call_frame`.
+    /// The frame off both stacks, every owner its slots held given up
+    /// while the frame still stands, `i_free_compiled_variables` over
+    /// the CVs and the temporaries with them, since a temporary the
+    /// compiler numbered for an opline's value and nothing read is
+    /// still an owner here; then `zend_vm_stack_free_call_frame`.
     pub(crate) fn pop_frame(&mut self) {
-        for value in self.vm.pop() {
+        let frame = self.stack.current();
+        let slots = self.stack.frame(frame).map_or(0, php_heap::Frame::len);
+        for at in 0..slots {
+            let value = self.take_slot(frame, u32::try_from(at).unwrap_or(u32::MAX));
             self.release(value);
         }
+        self.vm.pop();
         self.stack.pop_frame();
+    }
+
+    /// The value in a slot of `frame`, a view of it: `ZVAL_COPY_VALUE`,
+    /// no owner taken, off the heap's frame (design §5.6). A slot past
+    /// the end reads as `UNDEF`, as an uninitialised zval reads.
+    pub(crate) fn slot(&self, frame: FrameRef, at: u32) -> Value {
+        self.stack
+            .frame(frame)
+            .map_or(Value::undef(), |f| Value::of_zval(f.slot(Slot(at))))
+    }
+
+    /// The value out of a slot, the slot left `UNDEF`: what the slot
+    /// owned is the caller's now, which is how a temporary is consumed.
+    pub(crate) fn take_slot(&mut self, frame: FrameRef, at: u32) -> Value {
+        let Some(f) = self.stack.frame_mut(frame) else {
+            return Value::undef();
+        };
+        let z = f.slot(Slot(at));
+        f.set(Slot(at), Zval::UNDEF);
+        Value::of_zval(z)
+    }
+
+    /// `value` into a slot, the slot owning it from here, and what the
+    /// slot held handed back for the caller to release; a slot past the
+    /// end takes nothing and hands `value` back.
+    pub(crate) fn set_slot(&mut self, frame: FrameRef, at: u32, value: Value) -> Value {
+        let Some(f) = self
+            .stack
+            .frame_mut(frame)
+            .filter(|f| (at as usize) < f.len())
+        else {
+            return value;
+        };
+        let old = f.slot(Slot(at));
+        f.set(Slot(at), value.to_zval());
+        Value::of_zval(old)
     }
 
     /// The served call off the stack, `zend_vm_stack_free_args` over what
@@ -659,7 +708,7 @@ impl Request {
             if i > 0 {
                 out.push_str(", ");
             }
-            self.trace_argument(&mut out, argument.deref());
+            self.trace_argument(&mut out, &argument.deref());
         }
         out
     }
@@ -715,10 +764,10 @@ impl Request {
             }
             ValueRef::Resource(resource) => {
                 out.push_str("Resource id #");
-                out.push_str(&resource.id.to_string());
+                out.push_str(&resource.id().to_string());
             }
             // `deref` followed the reference already.
-            ValueRef::Reference(r) => self.trace_argument(out, r.get().deref()),
+            ValueRef::Reference(r) => self.trace_argument(out, &r.get()),
         }
     }
 
@@ -1215,7 +1264,7 @@ impl Request {
         value: Value,
     ) -> Result<(), Thrown> {
         if let Some(i) = self.prop_slot(ClassId(o.class()), name.as_bytes()) {
-            let z = value.into_zval(self);
+            let z = value.into_zval();
             Heap::object_set_slot(&mut Hooks(self), o, i, z);
         } else {
             let table = self.heap.object_properties(o);
@@ -1946,9 +1995,16 @@ impl Request {
             .find_map(|state| state.downcast_ref::<E>())
     }
 
-    /// The request's resource table.
+    /// The request's resource types, for an extension registering one.
     pub fn resources(&mut self) -> &mut Resources {
         &mut self.resources
+    }
+
+    /// `zend_hash_index_find(&EG(regular_list), id)`: the resource with
+    /// `id`, while its entry stands, closed or not.
+    #[must_use]
+    pub fn resource(&self, id: i64) -> Option<Resource> {
+        self.heap.resource_at(id).map(Resource::of)
     }
 
     /// This request's interrupt (design §5.8): what the loop tests at a
@@ -2306,38 +2362,92 @@ impl Request {
     }
 
     /// One more owner of what `value` holds: `Z_TRY_ADDREF_P`, a refcount
-    /// for a string, an array or an object of the request's, nothing for
-    /// a scalar, an interned string or an immutable array. A resource
-    /// and a reference are owned Rust data until their lane lands, and a
-    /// clone of one is a copy, so there is nothing to count.
+    /// for a string, an array, an object, a resource or a reference of
+    /// the request's, nothing for a scalar, an interned string or an
+    /// immutable array.
     pub(crate) fn addref(&self, value: &Value) {
-        match value.as_ref() {
-            ValueRef::Str(s) => self.heap.addref(Zval::string(s.heap())),
-            ValueRef::Array(a) => self.heap.addref(Zval::array(a.heap())),
-            ValueRef::Object(o) => self.heap.addref(Zval::object(o.heap())),
-            _ => {}
-        }
+        self.heap.addref(value.to_zval());
     }
 
     /// One owner fewer of what `value` holds, `zval_ptr_dtor`: the
-    /// string, the array or the object is freed when its last owner
-    /// gives it up, an array's elements released with it, an object's
-    /// destructor served first through seam 1, and an interned string or
-    /// an immutable array never is. The owned kinds drop with the
-    /// `Value`. The request is the hooks over itself, so the heap the
-    /// destructor allocates from is this one, handed back for the
-    /// duration ([`Hooks`]).
+    /// string, the array, the object, the resource or the reference is
+    /// freed when its last owner gives it up, an array's elements and a
+    /// reference's value released with it, an object's destructor and a
+    /// resource's per-type destructor served first through seam 1, and
+    /// an interned string or an immutable array never is. The request
+    /// is the hooks over itself, so the heap a destructor allocates from
+    /// is this one, handed back for the duration ([`Hooks`]).
     // Taking the value is the point: the owner is given up here, and a
     // `Value` that is still in hand after this call names what may be
     // freed.
     #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn release(&mut self, value: Value) {
-        match value.as_ref() {
-            ValueRef::Str(s) => self.heap.release_string(s.heap()),
-            ValueRef::Array(a) => Heap::release(&mut Hooks(self), Zval::array(a.heap())),
-            ValueRef::Object(o) => Heap::release(&mut Hooks(self), Zval::object(o.heap())),
-            _ => {}
-        }
+        Heap::release(&mut Hooks(self), value.to_zval());
+    }
+
+    // ------------------------------------------ references, resources
+
+    /// `ZVAL_NEW_REF`, what [`PhpRef::new`] is: a cell of the request's
+    /// heap holding `value`, one owner of the cell, `value` the cell's
+    /// from here, and the memory limit as the fatal that ends the
+    /// request.
+    pub(crate) fn reference(&mut self, value: Value) -> Result<PhpRef, Thrown> {
+        let allocated = self.heap.reference(value.into_zval());
+        self.fatal_of(allocated).map(PhpRef::of)
+    }
+
+    /// The reference's half of `zend_assign_to_variable`, what
+    /// [`PhpRef::set`] and `ASSIGN` over a CV holding a reference are:
+    /// `value` is the cell's from here, and what the cell held is
+    /// released last, after the write.
+    pub(crate) fn reference_set(&mut self, r: Ref, value: Value) {
+        Heap::reference_set(&mut Hooks(self), r, value.into_zval());
+    }
+
+    /// `zend_register_resource`, what [`Resource::new`] is: the
+    /// thirty-two bytes and the payload out of this request's heap, one
+    /// owner, in the list under the next id, and the memory limit
+    /// or php's `Resource ID space overflow` as the fatal that ends the
+    /// request.
+    pub(crate) fn new_resource<T: std::any::Any + Send>(
+        &mut self,
+        kind: ResourceType,
+        payload: T,
+    ) -> Result<Resource, Thrown> {
+        let allocated = self.heap.resource_with(kind, payload);
+        self.fatal_of(allocated).map(Resource::of)
+    }
+
+    /// The type's name as registered.
+    pub(crate) fn resource_type_name(&self, kind: ResourceType) -> Option<&[u8]> {
+        self.resources.type_name(kind)
+    }
+
+    /// `zend_list_close`, what [`Resource::close`] is.
+    pub(crate) fn close_resource(&mut self, r: Res) {
+        Heap::resource_close(&mut Hooks(self), r);
+    }
+
+    /// The native payload of `r` as `T`, borrowed for as long as the
+    /// request is.
+    pub(crate) fn resource_native<T: std::any::Any + Send>(&self, r: Res) -> Option<&T> {
+        self.heap.resource_native(r)
+    }
+
+    /// The native payload of `r` as `T`, mutably.
+    pub(crate) fn resource_native_mut<T: std::any::Any + Send>(
+        &mut self,
+        r: Res,
+    ) -> Option<&mut T> {
+        self.heap.resource_native_mut(r)
+    }
+
+    /// `zend_close_rsrc_list`, the first act of
+    /// `zend_shutdown_executor_values` (design §5.10): every open
+    /// resource closed from the top down, its destructor served, before
+    /// the object storage is freed.
+    pub(crate) fn close_resources(&mut self) {
+        Heap::close_resources(&mut Hooks(self));
     }
 
     // -------------------------------------------------------- arrays
@@ -2359,7 +2469,7 @@ impl Request {
         key: php_heap::Key,
         value: Value,
     ) -> Result<(), Thrown> {
-        let z = value.into_zval(self);
+        let z = value.into_zval();
         let written = Heap::array_update(&mut Hooks(self), a, key, z);
         self.fatal_of(written)
     }
@@ -2367,7 +2477,7 @@ impl Request {
     /// `zend_hash_next_index_insert` over `a`, which has one owner:
     /// `false`, and `value` given up, when the next element is taken.
     pub(crate) fn array_append(&mut self, a: Arr, value: Value) -> Result<bool, Thrown> {
-        let z = value.into_zval(self);
+        let z = value.into_zval();
         let appended = self.heap.array_append(a, z);
         if appended == Ok(false) {
             Heap::release(&mut Hooks(self), z);
@@ -2600,8 +2710,13 @@ impl HeapHooks for Hooks<'_> {
         let _ = (obj, visit);
     }
 
-    fn free_resource(&mut self, res: u32) {
-        self.0.resources.remove(res);
+    /// `list_dtor_ex`: the type's destructor as registered, handed the
+    /// resource with the type it had, as php hands it a copy of the
+    /// struct; a type with no destructor closes silently.
+    fn free_resource(&mut self, res: Res, kind: ResourceType) {
+        if let Some(dtor) = self.0.resources.dtor(kind) {
+            dtor(self.0, Resource::of(res));
+        }
     }
 
     fn out_of_memory(&mut self, bytes: usize) -> Fatal {

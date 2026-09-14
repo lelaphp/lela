@@ -2,24 +2,21 @@
 //! over Zend's layouts. What a native holds is a [`Value`]; the layout
 //! knowledge stays in `php_heap`.
 //!
-//! **What stands on the heap, and what does not yet.** A string, an
-//! array and an object are `php_heap`'s (design §5.2, §5.3, §5.4):
+//! **Every kind stands on the heap.** A string, an array, an object, a
+//! resource and a reference are `php_heap`'s (design §5.2–§5.5):
 //! [`PhpString`] is the pointer php's `zend_string *` is, [`PhpArray`]
-//! the pointer php's `zend_array *` is and [`PhpObject`] the pointer
-//! php's `zend_object *` is, sixteen bytes of [`Value`] name any of them
-//! exactly as a zval does, and each is allocated out of the request's
-//! heap and nowhere else, so `memory_get_usage()` counts every string,
-//! every array and every object a native builds (design §5.13). A
-//! resource and a reference are still owned Rust data behind the same
-//! names, the stand-ins the rest of Lane A replaces (design §11, days
-//! 3–7); a `Value` holding one of those owns it as Rust owns a `Vec`,
-//! and an array holding one boxes it, the heap counting the box.
+//! the pointer php's `zend_array *` is, [`PhpObject`] the pointer php's
+//! `zend_object *` is, [`Resource`] the pointer php's `zend_resource *`
+//! is and [`PhpRef`] the pointer php's `zend_reference *` is; sixteen
+//! bytes of [`Value`] name any of them exactly as a zval does, and each
+//! is allocated out of the request's heap and nowhere else, so
+//! `memory_get_usage()` counts every one a native builds (design
+//! §5.13).
 //!
-//! **Ownership, as design §5.1 decides it.** `PhpString`, `PhpArray` and
-//! `PhpObject` are `Copy` and have no `Drop`; cloning a `Value` that
-//! holds one is php's `ZVAL_COPY_VALUE`, a bitwise copy that touches no
-//! refcount, and the engine's `addref` beside it is what makes the two
-//! `ZVAL_COPY`.
+//! **Ownership, as design §5.1 decides it.** Every face is `Copy` and
+//! has no `Drop`; cloning a `Value` is php's `ZVAL_COPY_VALUE`, a
+//! bitwise copy that touches no refcount, and the engine's `addref`
+//! beside it is what makes the two `ZVAL_COPY`.
 //! Owners are taken and given up explicitly, by the engine, where php's
 //! handlers do it: a value the engine hands a native is the frame's, a
 //! value a native hands back is the engine's from the moment it is
@@ -30,7 +27,7 @@
 use std::any::Any;
 use std::cmp::Ordering;
 
-use php_heap::{Arr, Obj, Str, Zval, ZvalType};
+use php_heap::{Arr, Obj, Ref, Res, Str, Zval, ZvalType};
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
@@ -714,39 +711,175 @@ impl std::fmt::Debug for PhpObject {
     }
 }
 
-/// A `&$x` reference: one cell several holders share (design §5.5).
-#[derive(Debug, Clone, PartialEq)]
-pub struct PhpRef {
-    value: Box<Value>,
-}
+/// A `&$x` reference: one cell several holders share (design §5.5),
+/// php's `zend_reference *`, thirty-two bytes of the request's heap
+/// holding the value and, once typed properties can be referenced, the
+/// sources that type it. Naming one takes no owner, as php's pointer
+/// does not; `Copy` is what makes it a pointer and not a cell of its
+/// own, and the engine counts the owners where php's handlers do.
+#[derive(Clone, Copy)]
+pub struct PhpRef(Ref);
 
 impl PhpRef {
-    /// A reference holding `value`.
-    #[must_use]
-    pub fn new(value: Value) -> PhpRef {
-        PhpRef {
-            value: Box::new(value),
-        }
+    /// The face over a heap reference the engine already holds.
+    pub(crate) const fn of(r: Ref) -> PhpRef {
+        PhpRef(r)
     }
 
-    /// The value held.
-    #[must_use]
-    pub fn get(&self) -> &Value {
-        &self.value
+    /// The heap reference, for the engine's refcount traffic.
+    pub(crate) const fn heap(self) -> Ref {
+        self.0
     }
 
-    /// Replace the value held.
-    pub fn set(&mut self, value: Value) {
-        *self.value = value;
+    /// A reference holding `value`, php's `ZVAL_NEW_REF`: one owner of
+    /// the cell, and `value` the cell's from here, so a caller that
+    /// keeps a second name of what `value` names takes its own owner.
+    /// The `Err` is the memory limit as the fatal that ends the request.
+    pub fn new(req: &mut Request, value: Value) -> Result<PhpRef, Thrown> {
+        req.reference(value)
+    }
+
+    /// The value held, `Z_REFVAL`: a view, no owner taken.
+    #[must_use]
+    pub fn get(&self) -> Value {
+        Value::of_zval(self.0.val())
+    }
+
+    /// Replace the value held, the reference's half of
+    /// `zend_assign_to_variable`: `value` is the cell's from here, and
+    /// what the cell held is released last, after the write, which is
+    /// where a destructor is served.
+    pub fn set(&self, req: &mut Request, value: Value) {
+        req.reference_set(self.0, value);
+    }
+
+    /// The reference as a value, `ZVAL_REF`: named, no owner taken.
+    #[must_use]
+    pub const fn as_value(&self) -> Value {
+        Value::of(Inner::Reference(*self))
     }
 }
 
-/// A resource: its id, type name and whether it is closed (design §5.5).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Resource {
-    pub id: u32,
-    pub type_name: PhpString,
-    pub closed: bool,
+/// Two names are equal when they name one cell, php's pointer
+/// equality.
+impl PartialEq for PhpRef {
+    fn eq(&self, other: &PhpRef) -> bool {
+        self.0.is_same(other.0)
+    }
+}
+
+impl std::fmt::Debug for PhpRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.0)
+    }
+}
+
+/// A resource type as the request's table numbers it
+/// (`zend_register_list_destructors_ex`): what a resource carries as
+/// php's `int type`, naming its type name and its destructor.
+pub use php_heap::ResourceType;
+
+/// A resource (design §5.5): php's `zend_resource *`, thirty-two bytes
+/// of the request's heap in the list `EG(regular_list)` is, its id the
+/// one `get_resource_id()` reads, its type the number
+/// [`crate::api::request::Resources::register_type`] handed out and, for
+/// an internal type, the native payload as one typed slot. Naming one
+/// takes no owner, as php's pointer does not; `Copy` is what makes it a
+/// pointer and not a struct, and the engine counts the owners where
+/// php's handlers do. The per-type destructor is served through seam 1
+/// when the last owner lets go, or once at [`Resource::close`].
+#[derive(Clone, Copy)]
+pub struct Resource(Res);
+
+impl Resource {
+    /// The face over a heap resource the engine already holds.
+    pub(crate) const fn of(r: Res) -> Resource {
+        Resource(r)
+    }
+
+    /// The heap resource, for the engine's refcount traffic.
+    pub(crate) const fn heap(self) -> Res {
+        self.0
+    }
+
+    /// A resource of `kind` carrying `payload`, php's
+    /// `zend_register_resource`: one owner, in the list under the id
+    /// [`Resource::id`] reads, the payload counted with it. The `Err` is
+    /// the memory limit as the fatal that ends the request, or php's
+    /// `Resource ID space overflow`.
+    pub fn new<T: Any + Send>(
+        req: &mut Request,
+        kind: ResourceType,
+        payload: T,
+    ) -> Result<Resource, Thrown> {
+        req.new_resource(kind, payload)
+    }
+
+    /// The resource as a value, `ZVAL_RES`: named, no owner taken.
+    #[must_use]
+    pub const fn as_value(&self) -> Value {
+        Value::of(Inner::Resource(*self))
+    }
+
+    /// `get_resource_id()`: the list's index, `Z_RES_HANDLE`.
+    #[must_use]
+    pub fn id(&self) -> i64 {
+        self.0.id()
+    }
+
+    /// The type, and `None` once closed.
+    #[must_use]
+    pub fn kind(&self) -> Option<ResourceType> {
+        self.0.resource_type()
+    }
+
+    /// Whether [`Resource::close`] ran: `resource (closed)` in every
+    /// type name php prints.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.0.is_closed()
+    }
+
+    /// `zend_rsrc_list_get_rsrc_type`: the type's name as registered,
+    /// and `None` once closed or for a type the table does not know.
+    #[must_use]
+    pub fn type_name<'a>(&self, req: &'a Request) -> Option<&'a [u8]> {
+        req.resource_type_name(self.kind()?)
+    }
+
+    /// `zend_list_close`: the per-type destructor served once and the
+    /// payload dropped, the resource left closed for its owners, which
+    /// is what `fclose($f)` leaves `$f` as.
+    pub fn close(&self, req: &mut Request) {
+        req.close_resource(self.0);
+    }
+
+    /// The native payload, as `T`, borrowed for as long as the request
+    /// is: `None` for a resource of another payload, of none or closed.
+    #[must_use]
+    pub fn native<'a, T: Any + Send>(&self, req: &'a Request) -> Option<&'a T> {
+        req.resource_native(self.0)
+    }
+
+    /// The native payload, mutably, the request held for as long as the
+    /// borrow is, so no second name reaches it meanwhile.
+    pub fn native_mut<'a, T: Any + Send>(&self, req: &'a mut Request) -> Option<&'a mut T> {
+        req.resource_native_mut(self.0)
+    }
+}
+
+/// Two names are equal when they name one resource, php's pointer
+/// equality, which `===` is for resources.
+impl PartialEq for Resource {
+    fn eq(&self, other: &Resource) -> bool {
+        self.0.is_same(other.0)
+    }
+}
+
+impl std::fmt::Debug for Resource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.0)
+    }
 }
 
 /// A borrowed view of a value by type, for matching.
@@ -764,10 +897,8 @@ pub enum ValueRef<'a> {
     Reference(&'a PhpRef),
 }
 
-/// The states a value has; the skeleton constructs `Reference` in tests
-/// alone, since no `&$x` exists yet, and `Undef` for a frame's slots.
+/// The states a value has, the zval's own set.
 #[derive(Debug, Clone, PartialEq, Default)]
-#[allow(dead_code)]
 enum Inner {
     Undef,
     #[default]
@@ -783,11 +914,9 @@ enum Inner {
 }
 
 /// One PHP value. Cloning one is php's `ZVAL_COPY_VALUE`: sixteen bytes
-/// copied for a scalar, a string, an array and an object, no refcount
-/// touched, so the clone names what the original names and owns nothing
-/// the original did not give up; the engine takes and releases owners
-/// where php's handlers do. A resource and a reference are still owned
-/// Rust data and are cloned as such until their lane lands.
+/// copied whatever the kind, no refcount touched, so the clone names
+/// what the original names and owns nothing the original did not give
+/// up; the engine takes and releases owners where php's handlers do.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Value {
     inner: Inner,
@@ -854,6 +983,12 @@ impl Value {
         Value::of(Inner::Resource(r))
     }
 
+    /// A reference, not followed.
+    #[must_use]
+    pub const fn reference(r: PhpRef) -> Value {
+        Value::of(Inner::Reference(r))
+    }
+
     /// The type.
     #[must_use]
     pub const fn tag(&self) -> TypeTag {
@@ -883,7 +1018,7 @@ impl Value {
             Inner::Str(_) => "string",
             Inner::Array(_) => "array",
             Inner::Object(_) => "object",
-            Inner::Resource(r) if r.closed => "resource (closed)",
+            Inner::Resource(r) if r.is_closed() => "resource (closed)",
             Inner::Resource(_) => "resource",
             Inner::Reference(r) => r.get().type_name(),
         }
@@ -906,14 +1041,16 @@ impl Value {
         }
     }
 
-    /// The value a reference holds, or the value itself, `ZVAL_DEREF`.
-    /// Not `Deref`: a value is not a pointer to another value.
+    /// The value a reference holds, or the value itself, `ZVAL_DEREF`:
+    /// a view, no owner taken, since a reference holds one value and
+    /// never another reference. Not `Deref`: a value is not a pointer to
+    /// another value.
     #[must_use]
     #[allow(clippy::should_implement_trait)]
-    pub fn deref(&self) -> &Value {
+    pub fn deref(&self) -> Value {
         match &self.inner {
-            Inner::Reference(r) => r.get().deref(),
-            _ => self,
+            Inner::Reference(r) => r.get(),
+            _ => self.clone(),
         }
     }
 
@@ -925,14 +1062,14 @@ impl Value {
             Inner::Str(s) => s.heap().refcount(),
             Inner::Array(a) => a.heap().refcount(),
             Inner::Object(o) => o.heap().refcount(),
+            Inner::Resource(r) => r.heap().refcount(),
+            Inner::Reference(r) => r.heap().refcount(),
             _ => 1,
         }
     }
 
-    /// A zval as the face names it, no owner taken: the string, the
-    /// array or the object is named and not copied, as php's
-    /// `ZVAL_COPY_VALUE` names it, and an owned kind boxed into an
-    /// array's bucket is cloned out, as its stand-in is cloned anywhere.
+    /// A zval as the face names it, no owner taken: what it names is
+    /// named and not copied, as php's `ZVAL_COPY_VALUE` names it.
     pub(crate) fn of_zval(zval: Zval) -> Value {
         if let Some(n) = zval.as_long() {
             return Value::int(n);
@@ -952,11 +1089,11 @@ impl Value {
         if let Some(o) = zval.as_obj() {
             return Value::object(PhpObject::of(o));
         }
-        if let Some(r) = zval.as_boxed::<Resource>() {
-            return Value::resource(r.clone());
+        if let Some(r) = zval.as_resource() {
+            return Value::resource(Resource::of(r));
         }
-        if let Some(r) = zval.as_boxed::<PhpRef>() {
-            return Value::of(Inner::Reference(r.clone()));
+        if let Some(r) = zval.as_reference() {
+            return Value::reference(PhpRef::of(r));
         }
         match zval.kind() {
             ZvalType::Undef => Value::undef(),
@@ -964,30 +1101,39 @@ impl Value {
         }
     }
 
-    /// The zval this value is, for an array's bucket or a property
-    /// slot: the sixteen bytes a scalar, a string, an array or an object
-    /// already is, and for an owned kind the box the heap counts in
-    /// their place. `UNDEF` is a bucket's tombstone and never an
-    /// element, so a value nothing wrote is `null` here, as php reads
-    /// one.
-    pub(crate) fn into_zval(self, req: &mut Request) -> Zval {
-        match self.inner {
-            Inner::Undef | Inner::Null => Zval::null(),
-            Inner::Bool(b) => Zval::bool(b),
-            Inner::Int(n) => Zval::long(n),
-            Inner::Float(f) => Zval::double(f),
+    /// The zval this value is: the sixteen bytes it names, no owner
+    /// taken, `UNDEF` for a slot nothing wrote.
+    pub(crate) fn to_zval(&self) -> Zval {
+        match &self.inner {
+            Inner::Undef => Zval::UNDEF,
+            Inner::Null => Zval::null(),
+            Inner::Bool(b) => Zval::bool(*b),
+            Inner::Int(n) => Zval::long(*n),
+            Inner::Float(f) => Zval::double(*f),
             Inner::Str(s) => Zval::string(s.heap()),
             Inner::Array(a) => Zval::array(a.heap()),
             Inner::Object(o) => Zval::object(o.heap()),
-            Inner::Resource(r) => req.heap_mut().boxed(ZvalType::Resource, Box::new(r)),
-            Inner::Reference(r) => req.heap_mut().boxed(ZvalType::Reference, Box::new(r)),
+            Inner::Resource(r) => Zval::resource(r.heap()),
+            Inner::Reference(r) => Zval::reference(r.heap()),
         }
     }
 
-    /// `Some` for a `bool`.
+    /// The zval this value is inside an array's bucket or a property
+    /// slot, where `UNDEF` is a tombstone and never an element: a value
+    /// nothing wrote is `null` there, as php reads one.
+    pub(crate) fn into_zval(self) -> Zval {
+        match self.inner {
+            Inner::Undef => Zval::null(),
+            _ => self.to_zval(),
+        }
+    }
+
+    /// `Some` for a `bool`. Every `as_*` reads the value as it stands,
+    /// as php's `Z_*_P` do: a reference is not followed, and
+    /// [`Value::deref`] is the `ZVAL_DEREF` before it.
     #[must_use]
     pub fn as_bool(&self) -> Option<bool> {
-        match self.deref().inner {
+        match self.inner {
             Inner::Bool(b) => Some(b),
             _ => None,
         }
@@ -996,7 +1142,7 @@ impl Value {
     /// `Some` for an `int`.
     #[must_use]
     pub fn as_int(&self) -> Option<i64> {
-        match self.deref().inner {
+        match self.inner {
             Inner::Int(n) => Some(n),
             _ => None,
         }
@@ -1005,7 +1151,7 @@ impl Value {
     /// `Some` for a `float`.
     #[must_use]
     pub fn as_float(&self) -> Option<f64> {
-        match self.deref().inner {
+        match self.inner {
             Inner::Float(f) => Some(f),
             _ => None,
         }
@@ -1014,7 +1160,7 @@ impl Value {
     /// `Some` for a `string`.
     #[must_use]
     pub fn as_php_string(&self) -> Option<&PhpString> {
-        match &self.deref().inner {
+        match &self.inner {
             Inner::Str(s) => Some(s),
             _ => None,
         }
@@ -1029,7 +1175,7 @@ impl Value {
     /// `Some` for an `array`.
     #[must_use]
     pub fn as_array(&self) -> Option<&PhpArray> {
-        match &self.deref().inner {
+        match &self.inner {
             Inner::Array(a) => Some(a),
             _ => None,
         }
@@ -1038,7 +1184,7 @@ impl Value {
     /// `Some` for an `object`.
     #[must_use]
     pub fn as_object(&self) -> Option<&PhpObject> {
-        match &self.deref().inner {
+        match &self.inner {
             Inner::Object(o) => Some(o),
             _ => None,
         }
@@ -1047,7 +1193,7 @@ impl Value {
     /// `Some` for a `resource`.
     #[must_use]
     pub fn as_resource(&self) -> Option<&Resource> {
-        match &self.deref().inner {
+        match &self.inner {
             Inner::Resource(r) => Some(r),
             _ => None,
         }
@@ -1060,11 +1206,6 @@ impl Value {
             Inner::Reference(r) => Some(r),
             _ => None,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn reference(r: PhpRef) -> Value {
-        Value::of(Inner::Reference(r))
     }
 }
 
@@ -1215,11 +1356,82 @@ mod tests {
         );
     }
 
+    /// A reference is php's thirty-two bytes of the request's heap, a
+    /// value naming it is followed by `deref` and by every `as_*`, a
+    /// write through it releases what the cell held, and the last
+    /// release gives the cell back with what it holds.
     #[test]
-    fn a_reference_is_followed_by_deref() {
-        let r = Value::reference(PhpRef::new(Value::int(3)));
-        assert_eq!(r.tag(), TypeTag::Reference);
-        assert_eq!(r.as_int(), Some(3));
-        assert_eq!(r.type_name(), "int");
+    fn a_reference_is_a_cell_of_the_heap_and_is_followed_by_deref() {
+        let mut req = crate::test::request();
+        let start = req.memory_usage(false);
+        let Ok(r) = PhpRef::new(&mut req, Value::int(3)) else {
+            return;
+        };
+        assert_eq!(req.memory_usage(false) - start, 32);
+        let v = r.as_value();
+        assert_eq!(v.tag(), TypeTag::Reference);
+        assert_eq!(v.as_int(), None, "not followed, as Z_LVAL_P is not");
+        assert_eq!(v.deref().as_int(), Some(3));
+        assert_eq!(v.type_name(), "int");
+        assert_eq!(v.refcount(), 1);
+        let Ok(text) = PhpString::new(&mut req, b"held through the reference") else {
+            return;
+        };
+        r.set(&mut req, Value::string(text));
+        assert_eq!(
+            v.deref().as_str_bytes().map(<[u8]>::to_vec),
+            Some(b"held through the reference".to_vec())
+        );
+        assert_eq!(text.heap().refcount(), 1, "the cell holds the one owner");
+        req.release(v);
+        assert_eq!(
+            req.memory_usage(false),
+            start,
+            "the cell and its string went"
+        );
+    }
+
+    /// A resource is php's thirty-two bytes in the request's list, its
+    /// id from one, its type name the table's, a close serves the
+    /// destructor once and leaves it `resource (closed)`, and the last
+    /// release frees it.
+    #[test]
+    fn a_resource_is_a_list_entry_closed_once_and_freed_at_the_last_release() {
+        fn dtor(req: &mut Request, r: Resource) {
+            let seen = r.native::<u32>(req).copied().unwrap_or(0);
+            let _ = req.define_constant(b"dtor", Value::int(i64::from(seen)));
+        }
+        let mut req = crate::test::request();
+        let start = req.memory_usage(false);
+        let kind = req.resources().register_type(b"stream", Some(dtor));
+        let Ok(r) = Resource::new(&mut req, kind, 7u32) else {
+            return;
+        };
+        assert_eq!(req.memory_usage(false) - start, 32 + 16);
+        assert_eq!(r.id(), 1);
+        assert_eq!(r.type_name(&req), Some(&b"stream"[..]));
+        assert_eq!(r.native::<u32>(&req), Some(&7));
+        let v = r.as_value();
+        assert_eq!(v.type_name(), "resource");
+        assert_eq!(req.resource(1), Some(r));
+        r.close(&mut req);
+        r.close(&mut req);
+        assert_eq!(v.type_name(), "resource (closed)");
+        assert_eq!(r.type_name(&req), None);
+        assert_eq!(r.native::<u32>(&req), None);
+        assert_eq!(req.resource(1), Some(r), "closed, still listed");
+        assert_eq!(
+            req.constant_named(b"dtor").and_then(|v| v.as_int()),
+            Some(7),
+            "the destructor ran once, reading the payload"
+        );
+        assert_eq!(req.memory_usage(false) - start, 32);
+        req.release(v);
+        assert_eq!(req.resource(1), None);
+        assert_eq!(req.memory_usage(false), start);
+        let Ok(next) = Resource::new(&mut req, kind, 0u8) else {
+            return;
+        };
+        assert_eq!(next.id(), 2, "an id is never given twice");
     }
 }

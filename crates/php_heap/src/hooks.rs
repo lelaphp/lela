@@ -19,6 +19,7 @@
 use crate::Heap;
 use crate::Zval;
 use crate::object::Obj;
+use crate::resource::{Res, ResourceType};
 
 /// What ends a request's PHP code short of a normal return (design
 /// §5.9): `E_ERROR` and its kin, or the memory limit. Carried as the
@@ -51,8 +52,12 @@ pub trait HeapHooks {
     fn free_native(&mut self, obj: Obj);
     /// The values the object owns, for the cycle collector's traversal.
     fn gc_children(&mut self, obj: Obj, visit: &mut dyn FnMut(Zval));
-    /// A resource's per-type destructor.
-    fn free_resource(&mut self, res: u32);
+    /// A resource's per-type destructor, `list_dtor_ex`: served once,
+    /// by `zend_list_close` or by the release that reaches zero, with
+    /// the resource already closed and the type it had handed beside
+    /// it, as php hands the destructor a copy of the struct; the
+    /// payload is still readable and is dropped after this returns.
+    fn free_resource(&mut self, res: Res, kind: ResourceType);
     /// The memory limit was hit asking for `bytes` more.
     fn out_of_memory(&mut self, bytes: usize) -> Fatal;
 }

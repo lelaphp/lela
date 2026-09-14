@@ -478,14 +478,16 @@ impl Engine {
         }
         // `php_request_shutdown`'s order (design §5.10): the destructors
         // of what is still live before the extensions' `rshutdown`, in
-        // reverse bundle order, and the object storage freed after them
-        // in `shutdown_executor`.
+        // reverse bundle order, then `shutdown_executor`, which closes
+        // the open resources first (`zend_shutdown_executor_values`)
+        // and frees the object storage after them.
         req.call_destructors();
         for extension in self.shared.extensions.iter().rev() {
             if let Some(rshutdown) = extension.rshutdown {
                 rshutdown(&mut req);
             }
         }
+        req.close_resources();
         req.free_object_storage();
         // `php_error_cb` rendered the fatal where it was raised, on
         // whichever of the two streams the ini entries name; what is left

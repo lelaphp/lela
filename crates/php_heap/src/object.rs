@@ -38,8 +38,7 @@
 // eight-aligned, and the header's alignment is eight.
 #![allow(clippy::cast_possible_truncation)]
 
-use std::alloc::Layout;
-use std::any::{Any, TypeId};
+use std::any::Any;
 use std::cell::Cell;
 use std::ptr::NonNull;
 
@@ -47,6 +46,7 @@ use crate::array::Arr;
 use crate::gc::{self, Refcounted};
 use crate::hooks::{Fatal, HeapHooks};
 use crate::mm::Mm;
+use crate::payload::{Payload, payload_of};
 use crate::{Heap, Zval, ZvalType};
 
 /// The identity of an object in the store (design §5.4): the index php
@@ -69,37 +69,6 @@ const BUCKET_INVALID: usize = 1;
 /// The store's table at request start, what `memory_get_usage()` reads
 /// before the request serves a line: 1024 buckets of a pointer each.
 pub(crate) const INIT_BYTES: usize = INIT_SIZE as usize * BUCKET;
-
-/// What the heap needs of a payload's type, php's `handlers->offset` and
-/// `free_obj` for the slot alone: its layout, its type and its drop. One
-/// per type, promoted to `'static` from a constant, so the header holds
-/// a thin pointer where php holds `handlers`.
-struct Payload {
-    layout: Layout,
-    type_id: fn() -> TypeId,
-    drop: unsafe fn(NonNull<u8>),
-}
-
-/// `ptr::drop_in_place` over the payload as its type.
-///
-/// # Safety
-///
-/// `at` is a live, initialised `T` nothing will read again.
-unsafe fn drop_payload<T>(at: NonNull<u8>) {
-    // SAFETY: the caller's contract: a live `T` at `at`.
-    unsafe { std::ptr::drop_in_place(at.cast::<T>().as_ptr()) };
-}
-
-/// The one table for `T`.
-fn payload_of<T: Any + Send>() -> &'static Payload {
-    const {
-        &Payload {
-            layout: Layout::new::<T>(),
-            type_id: TypeId::of::<T>,
-            drop: drop_payload::<T>,
-        }
-    }
-}
 
 /// `zend_object`: forty bytes, php's own order, out of the heap, the
 /// property slots after it.
@@ -328,7 +297,7 @@ impl Obj {
     /// The payload as `T`, when the object carries one of that type.
     fn native_ptr<T: Any + Send>(self) -> Option<NonNull<T>> {
         let payload = self.header().payload.get()?;
-        if (payload.type_id)() != TypeId::of::<T>() {
+        if !payload.is::<T>() {
             return None;
         }
         Some(self.payload_addr(payload).cast())
@@ -762,16 +731,7 @@ impl Heap {
 mod tests {
     use super::*;
 
-    /// The mappings the allocator's tests count are the process's, and
-    /// the test runner `runs` its tests beside each other, so a test that
-    /// maps a chunk takes this first.
-    fn alone() -> std::sync::MutexGuard<'static, ()> {
-        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        match SERIAL.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
-    }
+    use crate::serial::alone;
 
     /// What the heap's tests pass where a request would serve a
     /// destructor: the heap itself, and a log of what would have been
@@ -802,7 +762,7 @@ mod tests {
             self.log.push((obj.id(), "free_native"));
         }
         fn gc_children(&mut self, _obj: Obj, _visit: &mut dyn FnMut(Zval)) {}
-        fn free_resource(&mut self, _res: u32) {}
+        fn free_resource(&mut self, _: crate::Res, _: crate::ResourceType) {}
         fn out_of_memory(&mut self, bytes: usize) -> Fatal {
             Fatal::OutOfMemory(bytes)
         }
@@ -960,7 +920,7 @@ mod tests {
         }
         fn free_native(&mut self, _obj: Obj) {}
         fn gc_children(&mut self, _obj: Obj, _visit: &mut dyn FnMut(Zval)) {}
-        fn free_resource(&mut self, _res: u32) {}
+        fn free_resource(&mut self, _: crate::Res, _: crate::ResourceType) {}
         fn out_of_memory(&mut self, bytes: usize) -> Fatal {
             Fatal::OutOfMemory(bytes)
         }

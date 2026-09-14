@@ -31,6 +31,20 @@ impl Frame {
         }
     }
 
+    /// How many slots the frame has: the CVs, the temporaries and the
+    /// extra arguments, which is what `i_free_compiled_variables` and
+    /// the temporaries' release walk when the frame leaves.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Whether the frame has no slots at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+
     /// The zval in `slot`, copied.
     #[must_use]
     pub fn slot(&self, slot: Slot) -> Zval {

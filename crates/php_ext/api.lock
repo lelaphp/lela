@@ -193,6 +193,7 @@ request::Request::register_tick_function
 request::Request::register_wrapper
 request::Request::request_headers
 request::Request::reset_memory_peak
+request::Request::resource
 request::Request::resources
 request::Request::response_code
 request::Request::restore_error_handler
@@ -220,10 +221,9 @@ request::Request::umask
 request::Request::unregister_tick_function
 request::Request::write
 request::Request::write_stderr
+request::ResourceDtor
 request::Resources
-request::Resources::get
-request::Resources::insert
-request::Resources::remove
+request::Resources::register_type
 request::Stream
 request::StreamFilter
 request::StreamWrapper
@@ -315,6 +315,7 @@ values::PhpObject::prop
 values::PhpObject::props
 values::PhpObject::set_prop
 values::PhpRef
+values::PhpRef::as_value
 values::PhpRef::get
 values::PhpRef::new
 values::PhpRef::set
@@ -326,6 +327,16 @@ values::PhpString::len
 values::PhpString::new
 values::PhpString::product
 values::Resource
+values::Resource::as_value
+values::Resource::close
+values::Resource::id
+values::Resource::is_closed
+values::Resource::kind
+values::Resource::native
+values::Resource::native_mut
+values::Resource::new
+values::Resource::type_name
+values::ResourceType
 values::TypeTag
 values::Value
 values::Value::array
@@ -346,6 +357,7 @@ values::Value::int
 values::Value::null
 values::Value::object
 values::Value::refcount
+values::Value::reference
 values::Value::resource
 values::Value::string
 values::Value::tag

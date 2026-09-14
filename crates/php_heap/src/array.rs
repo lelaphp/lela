@@ -1223,16 +1223,7 @@ mod tests {
     use super::*;
     use crate::{Heap, Intern};
 
-    /// The mappings the allocator's tests count are the process's, and
-    /// the test runner `runs` its tests beside each other, so a test that
-    /// maps a chunk takes this first.
-    fn alone() -> std::sync::MutexGuard<'static, ()> {
-        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        match SERIAL.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
-    }
+    use crate::serial::alone;
 
     /// The hooks the array's tests pass: a heap and nothing to serve,
     /// since no element here is an object.
@@ -1253,7 +1244,7 @@ mod tests {
         fn destruct(&mut self, _obj: crate::Obj) {}
         fn free_native(&mut self, _obj: crate::Obj) {}
         fn gc_children(&mut self, _obj: crate::Obj, _visit: &mut dyn FnMut(Zval)) {}
-        fn free_resource(&mut self, _res: u32) {}
+        fn free_resource(&mut self, _: crate::Res, _: crate::ResourceType) {}
         fn out_of_memory(&mut self, bytes: usize) -> Fatal {
             Fatal::OutOfMemory(bytes)
         }
@@ -1502,8 +1493,9 @@ mod tests {
         );
     }
 
-    /// A nested array is released with its holder, and a boxed stand-in
-    /// is dropped when its last owner goes, or swept with the nothing.heap.
+    /// A nested array is released with its holder, and so is a
+    /// resource's payload when the array held its last owner, or by the
+    /// sweep when nothing released it.
     #[test]
     fn what_an_array_holds_goes_with_it() {
         struct Tracked(std::sync::Arc<std::sync::atomic::AtomicUsize>);
@@ -1523,23 +1515,29 @@ mod tests {
             let Ok(inner) = nothing.heap.array() else {
                 return;
             };
-            let boxed = nothing
+            let Ok(held) = nothing
                 .heap
-                .boxed(ZvalType::Reference, Box::new(Tracked(dropped.clone())));
-            assert!(boxed.is_boxed());
-            assert!(boxed.as_boxed::<Tracked>().is_some());
-            assert!(matches!(nothing.heap.array_append(inner, boxed), Ok(true)));
+                .resource_with(crate::ResourceType(1), Tracked(dropped.clone()))
+            else {
+                return;
+            };
+            let held = Zval::resource(held);
+            assert!(held.as_resource().is_some());
+            assert!(matches!(nothing.heap.array_append(inner, held), Ok(true)));
             assert!(matches!(
                 nothing.heap.array_append(outer, Zval::array(inner)),
                 Ok(true)
             ));
-            let swept = nothing
+            let Ok(swept) = nothing
                 .heap
-                .boxed(ZvalType::Resource, Box::new(Tracked(dropped.clone())));
-            assert!(swept.as_boxed::<Tracked>().is_some());
+                .resource_with(crate::ResourceType(1), Tracked(dropped.clone()))
+            else {
+                return;
+            };
+            assert!(nothing.heap.resource_native::<Tracked>(swept).is_some());
             Heap::release(&mut nothing, Zval::array(outer));
             assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
-            assert_eq!(nothing.heap.memory_usage(false), start);
+            assert_eq!(nothing.heap.memory_usage(false), start + 32 + 16);
         }
         assert_eq!(
             dropped.load(std::sync::atomic::Ordering::SeqCst),

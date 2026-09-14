@@ -1,19 +1,18 @@
 //! The engine's half of a frame (design §5.6): what `php_heap`'s VM
 //! stack does not hold, because it belongs with the engine's `Func` and
 //! not with the memory model — the op array being served, the opline the
-//! loop is at, the frame's slots, and where the caller wants the value
-//! the frame returns. Beside them, the calls `INIT_FCALL` builds and
-//! `DO_ICALL` serves, which are php's frames pushed on the VM stack
-//! before their arguments are known.
+//! loop is at, and where the caller wants the value the frame returns.
+//! Beside them, the calls `INIT_FCALL` builds and `DO_ICALL` serves,
+//! which are php's frames pushed on the VM stack before their arguments
+//! are known.
 //!
-//! The slots are [`Value`]s: a scalar, a string or an array in one is
-//! the heap's zval, sixteen bytes naming a `php_heap` string or array
+//! The slots are the heap's: a CV or a temporary is a zval of
+//! `php_heap::Frame`, read and written through the request's `slot`,
+//! `take_slot` and `set_slot` as a [`Value`] naming what the zval names
 //! with no owner taken (design §5.1), and the engine takes and gives up
 //! owners here where php's handlers do, with `ZVAL_COPY`,
 //! `ZVAL_COPY_VALUE` and `FREE_OP` as [`take_operand`], [`operand`] and
-//! [`free_operand`]. An object, a resource and a reference in a slot are
-//! still the owned stand-ins of `api::values`, and the slots move to the
-//! heap's frame with the rest of Lane A (design §11, days 3–7).
+//! [`free_operand`].
 
 use std::sync::Arc;
 
@@ -34,8 +33,6 @@ pub(crate) struct FrameState {
     pub(crate) unit: Arc<Unit>,
     /// Where in it the loop stands.
     pub(crate) opline: u32,
-    /// The CVs, then the temporaries past the last CV.
-    pub(crate) slots: Vec<Value>,
     /// The caller's slot for what this frame returns, when the call that
     /// pushed it wants the value.
     pub(crate) returns_to: Option<(FrameRef, u32)>,
@@ -79,30 +76,22 @@ pub(crate) struct Vm {
 
 impl Vm {
     /// Push one frame's state; its place is the `FrameRef` the VM stack
-    /// gave the frame, and the two are pushed and popped together.
+    /// gave the frame, and the two are pushed and popped together. The
+    /// slots are the stack's, every one `IS_UNDEF` until an opline
+    /// writes it (`i_init_func_execute_data`), which is what a read of
+    /// a CV warns of.
     pub(crate) fn push(&mut self, unit: Arc<Unit>) {
-        let code = code_of(&unit);
-        let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
-        // `i_init_func_execute_data`: every CV is `IS_UNDEF` until an
-        // opline writes it, which is what a read of one warns of.
         self.frames.push(FrameState {
             unit,
             opline: 0,
-            slots: vec![Value::undef(); slots],
             returns_to: None,
         });
     }
 
-    /// The frame's state off the stack, its slots handed back for the
-    /// request to release: php's `i_free_compiled_variables` over the
-    /// CVs, and the temporaries with them, since a temporary the compiler
-    /// numbered for an opline's value and nothing read is still an owner
-    /// here.
-    pub(crate) fn pop(&mut self) -> Vec<Value> {
-        self.frames
-            .pop()
-            .map(|state| state.slots)
-            .unwrap_or_default()
+    /// The frame's state off the stack; its slots are the heap frame's,
+    /// released by the request before it pops both.
+    pub(crate) fn pop(&mut self) {
+        self.frames.pop();
     }
 
     pub(crate) fn at(&self, frame: FrameRef) -> Option<&FrameState> {
@@ -152,37 +141,6 @@ impl Vm {
     pub(crate) fn advance(&mut self, frame: FrameRef) {
         if let Some(state) = self.at_mut(frame) {
             state.opline = state.opline.saturating_add(1);
-        }
-    }
-
-    /// The value in a slot, a view of it: `ZVAL_COPY_VALUE`, no owner
-    /// taken. A slot past the end reads as `null`, as an uninitialised
-    /// zval reads.
-    pub(crate) fn slot(&self, frame: FrameRef, at: u32) -> Value {
-        self.at(frame)
-            .and_then(|state| state.slots.get(at as usize))
-            .cloned()
-            .unwrap_or_else(Value::null)
-    }
-
-    /// The value out of a slot, the slot left `UNDEF`: what the slot
-    /// owned is the caller's now, which is how a temporary is consumed.
-    pub(crate) fn take_slot(&mut self, frame: FrameRef, at: u32) -> Value {
-        self.at_mut(frame)
-            .and_then(|state| state.slots.get_mut(at as usize))
-            .map_or_else(Value::null, |slot| std::mem::replace(slot, Value::undef()))
-    }
-
-    /// `value` into a slot, the slot owning it from here, and what the
-    /// slot held handed back for the caller to release; a slot past the
-    /// end takes nothing and hands `value` back.
-    pub(crate) fn set_slot(&mut self, frame: FrameRef, at: u32, value: Value) -> Value {
-        match self
-            .at_mut(frame)
-            .and_then(|state| state.slots.get_mut(at as usize))
-        {
-            Some(slot) => std::mem::replace(slot, value),
-            None => value,
         }
     }
 
@@ -284,7 +242,7 @@ pub(crate) fn operand(
     match kind {
         OperandKind::Const => constant(code, ConstIdx(field)),
         OperandKind::Cv => {
-            let value = req.vm().slot(frame, field);
+            let value = req.slot(frame, field);
             if value.tag() != TypeTag::Undef {
                 return value;
             }
@@ -296,7 +254,7 @@ pub(crate) fn operand(
             warning(req, &format!("Undefined variable ${name}"));
             Value::null()
         }
-        OperandKind::Tmp | OperandKind::Var => req.vm().slot(frame, temporary_slot(code, field)),
+        OperandKind::Tmp | OperandKind::Var => req.slot(frame, temporary_slot(code, field)),
         OperandKind::Unused => Value::null(),
     }
 }
@@ -305,7 +263,10 @@ pub(crate) fn operand(
 /// one more owner taken (`ZVAL_COPY`, `Z_TRY_ADDREF`), a `TMP` or a `VAR`
 /// moved out of its slot, which is left `UNDEF` (`ZVAL_COPY_VALUE` and
 /// no `FREE_OP`). This is what `ASSIGN`, `SEND_*` and `RETURN` read,
-/// each of them a handler that keeps the value past the opline.
+/// each of them a handler that keeps the value past the opline, and
+/// each of them `ZVAL_COPY_DEREF` over a CV: a reference the CV holds
+/// is followed and the value it holds is what is copied, never the
+/// cell (`zend_copy_to_variable`, `Z/Zend/zend_execute.h:142-145`).
 pub(crate) fn take_operand(
     req: &mut Request,
     frame: FrameRef,
@@ -314,11 +275,9 @@ pub(crate) fn take_operand(
     field: u32,
 ) -> Value {
     match kind {
-        OperandKind::Tmp | OperandKind::Var => {
-            req.vm_mut().take_slot(frame, temporary_slot(code, field))
-        }
+        OperandKind::Tmp | OperandKind::Var => req.take_slot(frame, temporary_slot(code, field)),
         OperandKind::Const | OperandKind::Cv | OperandKind::Unused => {
-            let value = operand(req, frame, code, kind, field);
+            let value = operand(req, frame, code, kind, field).deref();
             req.addref(&value);
             value
         }
@@ -336,7 +295,7 @@ pub(crate) fn free_operand(
     field: u32,
 ) {
     if matches!(kind, OperandKind::Tmp | OperandKind::Var) {
-        let value = req.vm_mut().take_slot(frame, temporary_slot(code, field));
+        let value = req.take_slot(frame, temporary_slot(code, field));
         req.release(value);
     }
 }

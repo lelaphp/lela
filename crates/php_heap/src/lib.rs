@@ -31,7 +31,6 @@
 )]
 
 mod array;
-mod boxed;
 mod compare;
 mod gc;
 mod hooks;
@@ -39,6 +38,9 @@ mod map;
 mod mm;
 mod numeric;
 mod object;
+mod payload;
+mod reference;
+mod resource;
 mod stack;
 mod string;
 mod zval;
@@ -49,6 +51,8 @@ pub use hooks::{Fatal, HeapHooks};
 pub use map::{MapPtr, MapTable};
 pub use numeric::{Number, double_to_string, numeric_prefix, power, shift_left, shift_right};
 pub use object::{Obj, ObjectId};
+pub use reference::Ref;
+pub use resource::{Res, ResourceType};
 pub use stack::{EntryGuard, Frame, FrameRef, Slot, VmStack};
 pub use string::{Intern, Str, Strings};
 pub use zval::{Zval, ZvalType};
@@ -70,6 +74,10 @@ pub struct Heap {
     /// reached. Declared before `mm` so that it drops first, while the
     /// objects it walks are still mapped.
     store: object::Store,
+    /// php's `EG(regular_list)`: the resources by id, whose sweep
+    /// drops the payloads no close reached. Declared before `mm` for the
+    /// same reason the store is.
+    resources: resource::RegularList,
     mm: mm::Mm,
     /// php's `CG(interned_strings)`: the strings this request interned,
     /// live until the request ends (`Z/Zend/zend_string.c:346-353`).
@@ -81,9 +89,6 @@ pub struct Heap {
     /// `HashTable`: 40960 bytes of the request's own memory on the first
     /// string it interns, and doubling where php's doubles.
     buckets: string::Buckets,
-    /// The boxed stand-ins for a resource and a reference, swept when
-    /// the heap drops.
-    boxes: boxed::Boxes,
 }
 
 impl Default for Heap {
@@ -102,10 +107,10 @@ impl Heap {
         let store = object::Store::new(&mut mm);
         Heap {
             store,
+            resources: resource::RegularList::default(),
             mm,
             interned: string::Table::default(),
             buckets: string::Buckets::new(),
-            boxes: boxed::Boxes::default(),
         }
     }
 
@@ -241,17 +246,18 @@ impl Heap {
             a.addref();
         } else if let Some(o) = z.as_obj() {
             o.addref();
-        } else if let Some(b) = z.boxed_ptr() {
-            // SAFETY: the zval names a box this heap holds and has not
-            // dropped, which is what a refcounted zval says.
-            unsafe { b.as_ref() }.addref();
+        } else if let Some(r) = z.as_resource() {
+            r.addref();
+        } else if let Some(r) = z.as_reference() {
+            r.addref();
         }
     }
 
     /// One owner fewer, `zval_ptr_dtor`: a refcount decrement, and when
     /// it reaches zero the value is freed, an array's elements released
-    /// with it and an object's destructor served through `hooks` (seam
-    /// 1). The hooks are what says this may re-enter, and the heap is
+    /// with it, an object's destructor served through `hooks` (seam 1),
+    /// a resource's per-type destructor the same way and a reference's
+    /// value released before its cell. The hooks are what says this may re-enter, and the heap is
     /// theirs: it is asked for at each step and again after every call
     /// up, since the destructor may have grown it.
     pub fn release(hooks: &mut dyn HeapHooks, z: Zval) {
@@ -268,23 +274,15 @@ impl Heap {
             if o.delref() == 0 {
                 Heap::store_del(hooks, o);
             }
-        } else if let Some(b) = z.boxed_ptr() {
-            // SAFETY: the zval names a box this heap holds and has not
-            // dropped, which is what a refcounted zval says.
-            if unsafe { b.as_ref() }.delref() == 0 {
-                // SAFETY: the box came from this heap's `boxed` and its
-                // last owner has given it up.
-                unsafe { hooks.heap().boxes.drop_box(b) };
+        } else if let Some(r) = z.as_resource() {
+            if r.delref() == 0 {
+                Heap::resource_free(hooks, r);
             }
+        } else if let Some(r) = z.as_reference()
+            && r.delref() == 0
+        {
+            Heap::reference_destroy(hooks, r);
         }
-    }
-
-    /// A zval of `kind` naming `value`, boxed and counted by this heap:
-    /// the stand-in for a resource or a reference inside an array until
-    /// each stands on the heap as its own (design §11, days 3–7). One
-    /// owner; dropped when the last gives it up, or swept with the heap.
-    pub fn boxed(&mut self, kind: ZvalType, value: Box<dyn std::any::Any + Send>) -> Zval {
-        self.boxes.add(kind, value)
     }
 }
 
@@ -319,20 +317,26 @@ impl Intern for Heap {
     }
 }
 
+// The mappings the allocator's tests count are the process's, and the
+// test runner `runs` its tests beside each other, in every file at once,
+// so a test that maps a chunk takes this first: one guard for the crate,
+// since a guard per file holds nothing against the others.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The mappings the allocator's tests count are the process's, and
-    /// the test runner `runs` its tests beside each other, so a test that
-    /// maps a chunk takes this first.
-    fn alone() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) mod serial {
+    pub(crate) fn alone() -> std::sync::MutexGuard<'static, ()> {
         static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
         match SERIAL.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::serial::alone;
 
     /// A request that allocates and frees reads back where it started,
     /// and every size lands in the bin, `run` or huge block php's
@@ -718,7 +722,7 @@ mod tests {
         fn destruct(&mut self, _obj: Obj) {}
         fn free_native(&mut self, _obj: Obj) {}
         fn gc_children(&mut self, _obj: Obj, _visit: &mut dyn FnMut(Zval)) {}
-        fn free_resource(&mut self, _res: u32) {}
+        fn free_resource(&mut self, _: crate::Res, _: crate::ResourceType) {}
         fn out_of_memory(&mut self, bytes: usize) -> Fatal {
             Fatal::OutOfMemory(bytes)
         }

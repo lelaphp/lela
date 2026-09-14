@@ -35,7 +35,7 @@ use crate::api::values::{PhpArray, PhpString, TypeTag, Value, ValueRef};
 /// NAN
 /// ```
 pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, Thrown> {
-    let value = value.deref();
+    let value = &value.deref();
     match value.as_ref() {
         ValueRef::Str(s) => {
             req.addref(value);
@@ -56,7 +56,7 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, T
             warning(req, "Array to string conversion");
             PhpString::new(req, b"Array")
         }
-        ValueRef::Resource(r) => PhpString::new(req, format!("Resource id #{}", r.id).as_bytes()),
+        ValueRef::Resource(r) => PhpString::new(req, format!("Resource id #{}", r.id()).as_bytes()),
         // `false` and `null` are both the empty string, and so is an
         // object until its arm lands.
         ValueRef::Undef
@@ -112,9 +112,9 @@ pub(crate) fn is_true(req: &mut Request, value: &Value) -> bool {
         }
         ValueRef::Str(s) => !(s.is_empty() || s.as_bytes() == b"0"),
         ValueRef::Array(a) => !a.is_empty(),
-        ValueRef::Resource(r) => r.id != 0,
+        ValueRef::Resource(r) => r.id() != 0,
         // `deref` followed the reference already.
-        ValueRef::Reference(r) => is_true(req, r.get()),
+        ValueRef::Reference(r) => is_true(req, &r.get()),
     }
 }
 
@@ -557,7 +557,7 @@ pub(crate) fn concat(req: &mut Request, left: &Value, right: &Value) -> Result<V
 /// bool(false)
 /// ```
 pub(crate) fn compare(req: &mut Request, left: &Value, right: &Value) -> Ordering {
-    let (left, right) = (left.deref(), right.deref());
+    let (left, right) = (&left.deref(), &right.deref());
     if let (Some(a), Some(b)) = (scalar(left), scalar(right)) {
         return php_heap::compare(a, b, req.precision());
     }
@@ -779,7 +779,7 @@ pub(crate) fn spaceship(req: &mut Request, left: &Value, right: &Value) -> Resul
 /// bool(false)
 /// ```
 pub(crate) fn identical(left: &Value, right: &Value) -> bool {
-    let (left, right) = (left.deref(), right.deref());
+    let (left, right) = (&left.deref(), &right.deref());
     if let (Some(a), Some(b)) = (scalar(left), scalar(right)) {
         return php_heap::identical(a, b);
     }
@@ -791,7 +791,7 @@ pub(crate) fn identical(left: &Value, right: &Value) -> bool {
                     .all(|((k, v), (l, w))| k == l && identical(&v, &w))
         }
         (ValueRef::Object(a), ValueRef::Object(b)) => a == b,
-        (ValueRef::Resource(a), ValueRef::Resource(b)) => a.id == b.id,
+        (ValueRef::Resource(a), ValueRef::Resource(b)) => a == b,
         _ => false,
     }
 }
@@ -874,7 +874,7 @@ fn silent_number(value: ValueRef<'_>) -> Scalar<'static> {
     match value {
         ValueRef::Int(n) => Scalar::Long(n),
         ValueRef::Float(f) => Scalar::Double(f),
-        ValueRef::Resource(r) => Scalar::Long(i64::from(r.id)),
+        ValueRef::Resource(r) => Scalar::Long(r.id()),
         ValueRef::Str(s) => match numeric_prefix(s.as_bytes()) {
             Some((Number::Long(n), _)) => Scalar::Long(n),
             Some((Number::Double(d), _)) => Scalar::Double(d),
@@ -985,7 +985,7 @@ fn compare_arrays(req: &mut Request, left: PhpArray, right: PhpArray) -> Orderin
 /// |1|5577
 /// ```
 pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Thrown> {
-    let value = value.deref();
+    let value = &value.deref();
     match value.as_ref() {
         ValueRef::Int(n) => Ok(match n.checked_add(1) {
             Some(more) => Value::int(more),
@@ -1083,7 +1083,7 @@ pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Throw
 /// bool(false)
 /// ```
 pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Thrown> {
-    let value = value.deref();
+    let value = &value.deref();
     match value.as_ref() {
         ValueRef::Int(n) => Ok(match n.checked_sub(1) {
             Some(less) => Value::int(less),
@@ -1231,7 +1231,7 @@ fn increment_string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown
 ///   thrown in %s on line 2
 /// ```
 pub(crate) fn strlen(req: &mut Request, value: &Value) -> Result<Value, Thrown> {
-    let value = value.deref();
+    let value = &value.deref();
     if let Some(s) = value.as_php_string() {
         return Ok(Value::int(i64::try_from(s.len()).unwrap_or(i64::MAX)));
     }
@@ -1297,12 +1297,12 @@ pub(crate) fn strlen(req: &mut Request, value: &Value) -> Result<Value, Thrown> 
 /// bool(true)
 /// ```
 pub(crate) fn type_check(value: &Value, mask: u32) -> bool {
-    let value = value.deref();
+    let value = &value.deref();
     if (mask >> php_type(value)) & 1 == 0 {
         return false;
     }
     match value.as_ref() {
-        ValueRef::Resource(r) if mask == MAY_BE_RESOURCE => !r.closed,
+        ValueRef::Resource(r) if mask == MAY_BE_RESOURCE => !r.is_closed(),
         _ => true,
     }
 }
@@ -1392,7 +1392,7 @@ pub(crate) fn defined(req: &Request, name: &[u8]) -> bool {
 ///   thrown in %s on line 2
 /// ```
 pub(crate) fn count(req: &mut Request, value: &Value, sizeof: bool) -> Result<i64, Thrown> {
-    let value = value.deref();
+    let value = &value.deref();
     if let Some(array) = value.as_array() {
         return Ok(i64::try_from(array.len()).unwrap_or(i64::MAX));
     }
@@ -1491,7 +1491,7 @@ fn numbers(
     left: &Value,
     right: &Value,
 ) -> Result<(Number, Number), Thrown> {
-    let (left, right) = (left.deref(), right.deref());
+    let (left, right) = (&left.deref(), &right.deref());
     let unsupported = |req: &mut Request| {
         throw(
             req,
@@ -1522,7 +1522,7 @@ fn longs(
     left: &Value,
     right: &Value,
 ) -> Result<(i64, i64), Thrown> {
-    let (left, right) = (left.deref(), right.deref());
+    let (left, right) = (&left.deref(), &right.deref());
     let unsupported = |req: &mut Request| {
         throw(
             req,

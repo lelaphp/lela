@@ -276,7 +276,7 @@ fn var_dump(req: &mut Request) -> Result<Value, Thrown> {
 /// elements each through `php_array_element_dump`, the key at `level + 1`
 /// and the value at `level + 2`.
 fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) {
-    let value = value.deref();
+    let value = &value.deref();
     if level > 1 {
         out.extend(std::iter::repeat_n(b' ', level - 1));
     }
@@ -529,7 +529,7 @@ fn ini_set(req: &mut Request) -> Result<Value, Thrown> {
     }
     let option = string_argument(req, 1)?;
     let value = req.argument(2).unwrap_or_default();
-    let value = value.deref();
+    let value = &value.deref();
     if matches!(
         value.as_ref(),
         ValueRef::Array(_) | ValueRef::Object(_) | ValueRef::Resource(_)

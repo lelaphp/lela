@@ -197,7 +197,7 @@ pub(crate) fn do_icall<T: Tier>(
                 req.release(value);
             } else {
                 let slot = exec::temporary_slot(code, op.out);
-                let previous = req.vm_mut().set_slot(frame, slot, value);
+                let previous = req.set_slot(frame, slot, value);
                 req.release(previous);
             }
             Ok(advance(req, frame))
@@ -209,15 +209,19 @@ pub(crate) fn do_icall<T: Tier>(
     }
 }
 
-/// `ZEND_ASSIGN`, `zend_assign_to_variable` (`Z/Zend/zend_execute.h`):
-/// the value in `op2` becomes the CV's, a temporary moved into it and a
-/// CV or a constant copied with one more owner; the temporary `result`
-/// names is one more owner again (`ZVAL_COPY`) under `RETURN_VALUE_USED`
-/// and is not written where the compiler marked it `UNUSED`, which is
-/// every assignment that is a statement; and what the CV held is given
-/// up last, after the write, which is where a destructor is served once
-/// objects stand on the heap (`i_zval_ptr_dtor(garbage)`). The reference
-/// a CV may hold comes with references.
+/// `ZEND_ASSIGN`, `zend_assign_to_variable`
+/// (`Z/Zend/zend_execute.h:165`): the value in `op2` becomes the CV's, a
+/// temporary moved into it and a CV or a constant copied with one more
+/// owner; the temporary `result` names is one more owner again
+/// (`ZVAL_COPY`) under `RETURN_VALUE_USED` and is not written where the
+/// compiler marked it `UNUSED`, which is every assignment that is a
+/// statement; and what the CV held is given up last, after the write,
+/// which is where a destructor is served (`i_zval_ptr_dtor(garbage)`).
+/// A CV holding a reference is the first thing php tests (`Z_ISREF_P`,
+/// line 171): the write goes to the value the cell holds and the cell
+/// stays the CV's, so every other holder of the cell reads the new
+/// value; the witness of that is `&$x`'s, once it compiles, and the
+/// test beside the handlers holds it meanwhile.
 ///
 /// A CV given a new string gives its old one back to the heap, so what
 /// `memory_get_usage()` reads falls by what the old string took, and
@@ -257,17 +261,18 @@ pub(crate) fn assign<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let value = exec::take_operand(req, frame, code, op.op2_type, op.op2);
-    let garbage = if op.out_type == OperandKind::Unused {
-        req.vm_mut().set_slot(frame, op.op1, value)
-    } else {
+    if op.out_type != OperandKind::Unused {
         req.addref(&value);
-        let garbage = req.vm_mut().set_slot(frame, op.op1, value.clone());
         let slot = exec::temporary_slot(code, op.out);
-        let previous = req.vm_mut().set_slot(frame, slot, value);
+        let previous = req.set_slot(frame, slot, value.clone());
         req.release(previous);
-        garbage
-    };
-    req.release(garbage);
+    }
+    if let Some(r) = req.slot(frame, op.op1).as_php_ref() {
+        req.reference_set(r.heap(), value);
+    } else {
+        let garbage = req.set_slot(frame, op.op1, value);
+        req.release(garbage);
+    }
     Ok(advance(req, frame))
 }
 
@@ -658,7 +663,7 @@ pub(crate) fn r#return<T: Tier>(
     let caller = req.stack_mut().current();
     match returns_to {
         Some((at, slot)) => {
-            let previous = req.vm_mut().set_slot(at, slot, returned);
+            let previous = req.set_slot(at, slot, returned);
             req.release(previous);
         }
         None => req.release(returned),
@@ -689,7 +694,7 @@ fn binary(
     match computed {
         Ok(value) => {
             let slot = exec::temporary_slot(code, op.out);
-            let previous = req.vm_mut().set_slot(frame, slot, value);
+            let previous = req.set_slot(frame, slot, value);
             req.release(previous);
             Ok(advance(req, frame))
         }
@@ -718,7 +723,7 @@ fn unary(
     match computed {
         Ok(value) => {
             let slot = exec::temporary_slot(code, op.out);
-            let previous = req.vm_mut().set_slot(frame, slot, value);
+            let previous = req.set_slot(frame, slot, value);
             req.release(previous);
             Ok(advance(req, frame))
         }
@@ -760,9 +765,9 @@ fn incdec(
                     req.addref(&stepped);
                     stepped.clone()
                 };
-                req.vm_mut().set_slot(frame, out, value);
+                req.set_slot(frame, out, value);
             }
-            req.vm_mut().set_slot(frame, slot, stepped);
+            req.set_slot(frame, slot, stepped);
             Ok(advance(req, frame))
         }
         Err(thrown) => {
@@ -1059,8 +1064,9 @@ mod tests {
         }
     }
 
-    /// A unit whose main op array has one CV and one `ASSIGN` of the
-    /// constant `1` into it, its value unused: `$a = 1;`.
+    /// A unit whose main op array has one CV, one temporary and one
+    /// `ASSIGN` of the constant `1` into the CV, its value unused:
+    /// `$a = 1;`.
     fn assigning() -> Arc<Unit> {
         Arc::new(Unit {
             main: OpArray {
@@ -1076,6 +1082,7 @@ mod tests {
                 .into_boxed_slice(),
                 literals: vec![php_heap::Zval::long(1)].into_boxed_slice(),
                 num_cvs: 1,
+                num_tmps: 1,
                 ..OpArray::default()
             },
             ..Unit::default()
@@ -1108,7 +1115,7 @@ mod tests {
             return;
         };
         let id = php_heap::ObjectId(object.index());
-        let previous = req.vm_mut().set_slot(frame, 0, object.as_value());
+        let previous = req.set_slot(frame, 0, object.as_value());
         req.release(previous);
         assert!(!req.is_pending());
 
@@ -1116,7 +1123,7 @@ mod tests {
             assign::<Nop>(&mut req, frame, code, &op),
             Ok(Stepped::Same(frame))
         );
-        assert_eq!(req.vm().slot(frame, 0).as_int(), Some(1), "written first");
+        assert_eq!(req.slot(frame, 0).as_int(), Some(1), "written first");
         assert!(
             req.is_pending(),
             "the release reached the destructor, whose call raised on the request"
@@ -1130,5 +1137,65 @@ mod tests {
             1,
             "the store holds the pending Error and nothing else"
         );
+    }
+
+    /// `zend_assign_to_variable`'s first test (`Z/Zend/zend_execute.h:171`):
+    /// `ASSIGN` over a CV holding a reference writes the value the cell
+    /// holds, releases what the cell held after the write, and leaves the
+    /// cell the CV's, so a second CV bound to the same cell reads the new
+    /// value, which is what `$b = &$a; $a = 1;` shows once `&$x`
+    /// compiles. The temporary `result` names, under `RETURN_VALUE_USED`,
+    /// is the value and never the cell.
+    #[test]
+    fn an_assign_into_a_cv_holding_a_reference_writes_the_referent() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let unit = assigning();
+        let frame = req.push_frame(Arc::clone(&unit));
+        let code = crate::exec::code_of(&unit);
+        let mut op = code.oplines.first().copied().unwrap_or_default();
+        op.out_type = OperandKind::Tmp;
+        op.out = 0;
+        let Ok(text) = crate::api::values::PhpString::new(&mut req, b"in the cell") else {
+            return;
+        };
+        let Ok(cell) = crate::api::values::PhpRef::new(&mut req, Value::string(text)) else {
+            return;
+        };
+        let start = req.memory_usage(false);
+        // Two CVs would share the cell; this frame has one, and the test
+        // is the second holder.
+        req.addref(&cell.as_value());
+        let previous = req.set_slot(frame, 0, cell.as_value());
+        req.release(previous);
+
+        assert_eq!(
+            assign::<Nop>(&mut req, frame, code, &op),
+            Ok(Stepped::Same(frame))
+        );
+        assert_eq!(
+            req.slot(frame, 0).as_php_ref(),
+            Some(&cell),
+            "the CV still holds the cell"
+        );
+        assert_eq!(cell.get().as_int(), Some(1), "and the cell holds the value");
+        assert_eq!(
+            req.memory_usage(false),
+            start - 40,
+            "what the cell held went back to the heap"
+        );
+        assert_eq!(
+            req.slot(frame, 1).as_int(),
+            Some(1),
+            "the result is the value, not the cell"
+        );
+        req.pop_frame();
+        assert_eq!(
+            cell.get().as_int(),
+            Some(1),
+            "the second holder keeps the cell"
+        );
+        req.release(cell.as_value());
+        assert_eq!(req.memory_usage(false), start - 40 - 32);
     }
 }
