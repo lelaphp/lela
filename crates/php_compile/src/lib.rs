@@ -44,7 +44,7 @@ pub mod syntax {
 use php_heap::Intern;
 use php_syntax::Parsed;
 use php_unit::decl::{ConstDecl, FunctionDecl, Name};
-use php_unit::{Level, Unit};
+use php_unit::{Diagnostic, Level, Unit};
 
 /// What the compiler is told beside the source (design §4.1).
 #[derive(Debug, Clone, PartialEq)]
@@ -94,13 +94,21 @@ impl Default for Options {
 /// parser's first `syntax error, …` where php's parser refused the file,
 /// and for the compiler's own sentence where php's would have compiled it
 /// and this compiler cannot read it yet; `E_COMPILE_ERROR` for what
-/// php's compiler refuses after parsing, the stack limit
-/// ([`StackLimit::check`]) first among them.
+/// php's compiler refuses after parsing, the `(unset)` cast and the
+/// stack limit ([`StackLimit::check`]) among them.
+///
+/// `raised` is what `zend_error` raised before the fatal and php had
+/// already rendered when it bailed out: the scanner's warning and
+/// deprecation (design §6.1) up to the token the parser refused, and
+/// for a fatal after the parse every one of them, then the compiler's
+/// own; each in the order raised, for the engine to render before the
+/// fatal as php's request shows them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileError {
     pub level: Level,
     pub message: String,
     pub line: u32,
+    pub raised: Vec<Diagnostic>,
 }
 
 /// Parse and compile one source file: what the engine calls for the
@@ -132,29 +140,65 @@ pub fn compile(
     options: &Options,
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
-    // php compiles nothing of a file its parser refused: the first parse
-    // error, which `Parsed::diagnostics` holds first, is the compile
-    // error, in php's words at php's line (design §6.1). What php raises
-    // at another level, a warning it scans past or the `(unset)` cast's
-    // compile error, is not rendered here yet (#163).
-    if let Some(refused) = parsed
-        .diagnostics
-        .iter()
-        .find(|d| d.level == php_syntax::Level::Parse)
-    {
-        return Err(CompileError {
-            level: Level::Parse,
-            message: refused.message.clone(),
-            line: refused.line,
+    // `Parsed::diagnostics` is in php's order (design §6.1): the
+    // scanner's and the parser's by position, the compiler's one after
+    // them all. php's scanner raises as it scans and its parser stops at
+    // the token it did not want, so what stands before the first fatal
+    // was raised and what stands after it never was; php compiles
+    // nothing of a file its parser refused, and the first fatal is the
+    // compile error, in php's words at php's line, with what was raised
+    // before it carried beside it.
+    let mut raised = Vec::new();
+    for diagnostic in &parsed.diagnostics {
+        let level = level_of(diagnostic.level);
+        if diagnostic.level.is_fatal() {
+            return Err(CompileError {
+                level,
+                message: diagnostic.message.clone(),
+                line: diagnostic.line,
+                raised,
+            });
+        }
+        raised.push(Diagnostic {
+            level,
+            line: diagnostic.line,
+            message: diagnostic.message.as_str().into(),
         });
     }
     let read = read::read(&parsed.source, options.stack).map_err(|trouble| CompileError {
         level: trouble.level,
         message: trouble.what,
         line: trouble.line,
+        raised: raised.clone(),
     })?;
     let lines = u32::try_from(parsed.source.split(|b| *b == b'\n').count()).unwrap_or(u32::MAX);
-    emit::unit(&read, options, lines, strings)
+    // The scanner's diagnostics stand before the compiler's on the unit,
+    // as php raised them: the whole file is scanned before
+    // `zend_compile_top_stmt` runs, and opcache records both kinds on a
+    // `persistent_script` to replay on a hit.
+    match emit::unit(&read, options, lines, strings) {
+        Ok(mut unit) => {
+            raised.append(&mut unit.diagnostics);
+            unit.diagnostics = raised;
+            Ok(unit)
+        }
+        Err(mut refused) => {
+            raised.append(&mut refused.raised);
+            refused.raised = raised;
+            Err(refused)
+        }
+    }
+}
+
+/// php's level for what the scanner or the parser raised: the same
+/// `E_*` under the unit's name for it.
+fn level_of(level: php_syntax::Level) -> Level {
+    match level {
+        php_syntax::Level::Parse => Level::Parse,
+        php_syntax::Level::CompileError => Level::CompileError,
+        php_syntax::Level::CompileWarning => Level::CompileWarning,
+        php_syntax::Level::Deprecated => Level::Deprecated,
+    }
 }
 
 #[cfg(test)]
@@ -932,6 +976,86 @@ mod tests {
              0010 ECHO string(\"\\xFF\")\n\
              0011 ECHO string(\"NANz\")\n\
              0012 RETURN int(1)\n"
+        );
+    }
+
+    /// The scanner's deprecations and warning stand on the unit before
+    /// the compiler's own warning, each at its line, as php raised them:
+    /// the whole file is scanned before `zend_compile_top_stmt` runs.
+    #[test]
+    fn the_scanners_diagnostics_stand_on_the_unit_before_the_compilers() {
+        let (unit, _strings) = unit_and_strings(
+            b"<?php\n$x = 1;\n(integer)$x;\n(float)1;\n$s = (string)$x;\n(boolean)$x;\necho (int)\"12abc\", \"\\777\", NAN . \"z\";\n",
+        );
+        let raised = |level, line, message: &str| Diagnostic {
+            level,
+            line,
+            message: message.into(),
+        };
+        assert_eq!(
+            unit.diagnostics,
+            vec![
+                raised(
+                    Level::Deprecated,
+                    3,
+                    "Non-canonical cast (integer) is deprecated, use the (int) cast instead"
+                ),
+                raised(
+                    Level::Deprecated,
+                    6,
+                    "Non-canonical cast (boolean) is deprecated, use the (bool) cast instead"
+                ),
+                raised(
+                    Level::CompileWarning,
+                    7,
+                    "Octal escape sequence overflow \\777 is greater than \\377"
+                ),
+                raised(
+                    Level::Warning,
+                    7,
+                    "unexpected NAN value was coerced to string"
+                ),
+            ]
+        );
+    }
+
+    /// A fatal carries what was raised before it: the scanner's warning
+    /// up to the token the parser refused, and none past it, since php's
+    /// scanner never reached there; every one of them for the `(unset)`
+    /// cast, whose `E_COMPILE_ERROR` php raises once the file has parsed.
+    #[test]
+    fn a_fatal_carries_what_the_scanner_raised_before_it() {
+        let refused = |source: &[u8]| {
+            let mut strings = php_heap::Strings::new();
+            compile(
+                &php_syntax::parse(source, &php_syntax::Options::default()),
+                &Options::default(),
+                &mut strings,
+            )
+            .err()
+        };
+        let overflow = |line| Diagnostic {
+            level: Level::CompileWarning,
+            line,
+            message: "Octal escape sequence overflow \\777 is greater than \\377".into(),
+        };
+        assert_eq!(
+            refused(b"<?php\necho \"\\777\";\necho 1 +;\necho \"\\777\";"),
+            Some(CompileError {
+                level: Level::Parse,
+                message: "syntax error, unexpected token \";\"".into(),
+                line: 3,
+                raised: vec![overflow(2)],
+            })
+        );
+        assert_eq!(
+            refused(b"<?php\necho \"\\777\";\n(unset)$x;\necho \"\\777\";"),
+            Some(CompileError {
+                level: Level::CompileError,
+                message: "The (unset) cast is no longer supported".into(),
+                line: 3,
+                raised: vec![overflow(2), overflow(4)],
+            })
         );
     }
 
@@ -1909,6 +2033,7 @@ mod tests {
                 level: Level::Parse,
                 message: "syntax error, unexpected token \";\"".into(),
                 line: 2,
+                raised: Vec::new(),
             })
         );
     }

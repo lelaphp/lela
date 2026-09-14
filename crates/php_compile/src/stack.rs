@@ -125,6 +125,7 @@ impl StackLimit {
                 "Maximum call stack size of {max_stack_size} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached during compilation. Try splitting expression"
             ),
             line,
+            raised: Vec::new(),
         })
     }
 }

@@ -131,7 +131,12 @@ pub(crate) fn unit(
         line: 1,
         diagnostics: Vec::new(),
     };
-    emit.statements(read)?;
+    // A fatal leaves the file with what `zend_error` had raised before
+    // it already rendered, so those travel with it.
+    if let Err(mut refused) = emit.statements(read) {
+        refused.raised = emit.diagnostics;
+        return Err(refused);
+    }
     emit.final_return();
     swap_commutative(&mut emit.oplines);
     let num_cvs = u32::try_from(emit.vars.len()).unwrap_or(u32::MAX);
@@ -215,6 +220,7 @@ impl Emit<'_> {
             level: Level::Parse,
             message: message.into(),
             line: self.line,
+            raised: Vec::new(),
         }
     }
 

@@ -478,6 +478,42 @@ impl Engine {
     /// ```expect exit=255
     /// Parse error: syntax error, unexpected token ";" in %s on line 2
     /// ```
+    ///
+    /// What php's scanner raised before its parser refused is rendered
+    /// before the refusal, in the order php raised them, since php's
+    /// `php_error_cb` had already written each when the parser bailed
+    /// out; the scanner's octal overflow is an `E_COMPILE_WARNING`
+    /// (design §6.1).
+    ///
+    /// ```php
+    /// echo "\777";
+    /// echo 1 +;
+    /// ```
+    /// ```expect exit=255
+    /// Warning: Octal escape sequence overflow \777 is greater than \377 in %s on line 2
+    ///
+    /// Parse error: syntax error, unexpected token ";" in %s on line 3
+    /// ```
+    ///
+    /// The `(unset)` cast is what php's compiler refuses after the whole
+    /// file has parsed, `zend_compile_cast`'s `E_COMPILE_ERROR`: the
+    /// `Fatal error:` head, and php's status for a fatal, with the
+    /// scanner's deprecation on the line before it rendered first. The
+    /// frame carries no `Stack trace:` under the recipe, whose
+    /// `fatal_error_backtraces=Off` is `run-tests.php`'s own; php's default
+    /// of `On` prints one, and this engine reads the entry as php with it
+    /// off does.
+    ///
+    /// ```php
+    /// $x = 1; (integer)$x;
+    /// (unset)$x;
+    /// echo 'never';
+    /// ```
+    /// ```expect exit=255
+    /// Deprecated: Non-canonical cast (integer) is deprecated, use the (int) cast instead in %s on line 2
+    ///
+    /// Fatal error: The (unset) cast is no longer supported in %s on line 3
+    /// ```
     pub fn serve(&self, description: RequestDescription, sink: &mut dyn OutputSink) -> Observables {
         let source = description.source.clone();
         let script = description
@@ -520,6 +556,9 @@ impl Engine {
             // request ends before a frame is pushed.
             Some(Err(refused)) => {
                 let file = req.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+                for raised in &refused.raised {
+                    req.note_error_in(raised.level, &raised.message, &file, raised.line);
+                }
                 req.end_in_compile_time(refused.level, &refused.message, &file, refused.line);
             }
             None => {}
@@ -625,6 +664,36 @@ fn compile(
 /// ```expect
 /// Warning: unexpected NAN value was coerced to string in %s on line 3
 /// aNANz
+/// ```
+///
+/// The scanner's are among them, before the compiler's, at the levels
+/// php raises each under (design §6.1): the octal escape overflow is an
+/// `E_COMPILE_WARNING` and the byte written is the low eight bits of
+/// what the digits spell, `(char) ZEND_STRTOL`; a non-canonical cast
+/// spelling is the `E_DEPRECATED` 8.5 raises, and the cast itself runs.
+///
+/// ```php
+/// echo "\777", "|", ord("\777"), "|", "\101\x41";
+/// ```
+/// ```expect
+/// Warning: Octal escape sequence overflow \777 is greater than \377 in %s on line 2
+///
+/// Warning: Octal escape sequence overflow \777 is greater than \377 in %s on line 2
+/// %c|255|AA
+/// ```
+///
+/// ```php
+/// $x = "7 apples"; echo (integer)$x, "|", (double)$x, "|", (binary)$x, "|", (boolean)$x;
+/// ```
+/// ```expect
+/// Deprecated: Non-canonical cast (integer) is deprecated, use the (int) cast instead in %s on line 2
+///
+/// Deprecated: Non-canonical cast (double) is deprecated, use the (float) cast instead in %s on line 2
+///
+/// Deprecated: Non-canonical cast (binary) is deprecated, use the (string) cast instead in %s on line 2
+///
+/// Deprecated: Non-canonical cast (boolean) is deprecated, use the (bool) cast instead in %s on line 2
+/// 7|7|7 apples|1
 /// ```
 fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
     for raised in &unit.diagnostics {
