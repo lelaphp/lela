@@ -31,6 +31,7 @@
 )]
 
 mod array;
+mod block;
 mod compare;
 mod gc;
 mod hooks;
@@ -46,6 +47,7 @@ mod string;
 mod zval;
 
 pub use array::{Arr, ArrIter, Key};
+pub use block::Block;
 pub use compare::{Scalar, compare, identical};
 pub use hooks::{Fatal, HeapHooks};
 pub use map::{MapPtr, MapTable};

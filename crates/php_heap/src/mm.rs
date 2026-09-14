@@ -292,6 +292,38 @@ impl Mm {
         }
     }
 
+    /// `_erealloc` (`Z/Zend/zend_alloc.c:1674`, `zend_mm_realloc_heap`)
+    /// as its accounting: `size` usable bytes with the first
+    /// `min(old, size)` of the old ones copied in, the old block given
+    /// back, and the peak where the larger of the two footprints put it
+    /// and not where both stood at once, which is what
+    /// `zend_mm_realloc_slow` (`:1569`) restores after its own alloc,
+    /// copy and free. Whether php moved the bytes or grew the `run` in
+    /// place is not observable: the bin, `run` and huge numbers land the
+    /// same either way, so this moves them always.
+    ///
+    /// # Safety
+    ///
+    /// `at` is a pointer this heap returned from [`Mm::alloc`] for `old`
+    /// bytes and has not been freed since.
+    pub(crate) unsafe fn realloc(
+        &mut self,
+        at: NonNull<u8>,
+        old: usize,
+        size: usize,
+    ) -> Result<NonNull<u8>, Fatal> {
+        let peak = self.peak;
+        let moved = self.alloc(size)?;
+        // SAFETY: `at` holds `old` readable bytes and `moved` is a fresh
+        // allocation of `size`, so the shorter of the two is in both.
+        unsafe { std::ptr::copy_nonoverlapping(at.as_ptr(), moved.as_ptr(), old.min(size)) };
+        // SAFETY: the caller's contract, `at` is live in this heap; its
+        // bytes are copied and nothing reads it after this.
+        unsafe { self.free(at) };
+        self.peak = peak.max(self.size);
+        Ok(moved)
+    }
+
     /// `_efree`: give `at` back to the bin, `run` or huge block it came
     /// from. php reads what it is from the chunk's page map, and so does
     /// this, so a pointer carries no header of its own.
