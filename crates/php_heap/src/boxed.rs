@@ -1,13 +1,13 @@
-//! The stand-in for the kinds not yet on the heap: an object, a resource
-//! or a reference written into an array is owned Rust data still
-//! (design §11, days 3–7), and an array's bucket is sixteen bytes that
-//! must name it. So the value is boxed, the box carries the refcounted
-//! header every heap value carries, and the heap counts it as it counts
-//! a string: one owner per `addref`, dropped when the last gives it up,
-//! and swept with the request when none did, as php's object store is
+//! The stand-in for the kinds not yet on the heap: a resource or a
+//! reference written into an array is owned Rust data still (design
+//! §11, days 3–7), and an array's bucket is sixteen bytes that must name
+//! it. So the value is boxed, the box carries the refcounted header
+//! every heap value carries, and the heap counts it as it counts a
+//! string: one owner per `addref`, dropped when the last gives it up,
+//! and swept with the request when none did, as the object store is
 //! swept at shutdown. What is boxed is on the system allocator and is
-//! not in `memory_get_usage()`, which is where an object stands today
-//! anyway; the store of design §5.4 replaces all of this.
+//! not in `memory_get_usage()`; the reference and the resource of
+//! design §5.5 replace it.
 
 use std::any::Any;
 use std::ptr::NonNull;

@@ -7,6 +7,7 @@ use std::ptr::NonNull;
 use crate::Str;
 use crate::array::Arr;
 use crate::boxed::Boxed;
+use crate::object::Obj;
 
 /// The type byte of a zval, numbered as `Zend/zend_types.h` numbers it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -120,9 +121,22 @@ impl Zval {
         }
     }
 
+    /// `ZVAL_OBJ`: the object, refcounted and collectable, as every
+    /// object is (design §5.4).
+    #[must_use]
+    pub fn object(o: Obj) -> Zval {
+        Zval {
+            value: o.payload(),
+            kind: ZvalType::Object,
+            type_flags: Zval::TYPE_REFCOUNTED | Zval::TYPE_COLLECTABLE,
+            _pad: 0,
+            u2: 0,
+        }
+    }
+
     /// A zval of `kind` naming a boxed value the heap counts: the
-    /// stand-in for an object, a resource or a reference until each
-    /// stands on the heap as its own (design §11, days 3–7). The payload
+    /// stand-in for a resource or a reference until each stands on the
+    /// heap as its own (design §11, days 3–7). The payload
     /// is the box, and the private bit in the flags says so, so that no
     /// reader takes it for the store entry it will be.
     pub(crate) fn boxed(kind: ZvalType, b: NonNull<Boxed>) -> Zval {
@@ -202,6 +216,19 @@ impl Zval {
         }
     }
 
+    /// The object of an `Object`, else `None`. Naming it does not take
+    /// an owner, as php's `Z_OBJ` does not.
+    #[must_use]
+    pub fn as_obj(self) -> Option<Obj> {
+        match self.kind {
+            // SAFETY: the payload of an `Object` that is not boxed was
+            // written by `Zval::object` from a live object, and a zval
+            // that names a freed object is the same mistake in php.
+            ZvalType::Object if !self.is_boxed() => unsafe { Obj::from_payload(self.value) },
+            _ => None,
+        }
+    }
+
     /// The boxed value a zval of an owned kind names, as `T`, and `None`
     /// for a zval that names none or one of another type. What is
     /// borrowed lives while the zval's owner holds it.
@@ -254,12 +281,6 @@ impl Zval {
     /// This engine's own bit: the payload is a boxed stand-in.
     const TYPE_BOXED: u8 = 1 << 7;
 }
-
-/// The identity of an object in the store (design §5.4): the index php
-/// reports as `spl_object_id()`, and what weak references, `WeakMap`
-/// keys and the garbage collector enumerate by.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ObjectId(pub u32);
 
 #[cfg(test)]
 mod tests {

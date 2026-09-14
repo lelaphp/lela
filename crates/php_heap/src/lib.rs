@@ -9,11 +9,13 @@
 //! the allocator of §5.13, the string of §5.2 and the array of §5.3 are
 //! here in full: a request's memory is chunks, bins and `runs` php's
 //! way, the numbers php reports come from that accounting and from
-//! nowhere else, and an array is `zend_hash` to the byte. The object
-//! and the VM stack are still safe stand-ins whose public shape is
-//! `heap.lock`, and the copy of `zend_objects_store` and `zend_vm_stack`
-//! lands behind it (design §11, days 3–7). Nothing here panics: a slot
-//! that is not there reads as `UNDEF`, as php's uninitialised zval does.
+//! nowhere else, an array is `zend_hash` to the byte and an object is
+//! `zend_object` in its store, `zend_objects_store`, the destructor
+//! served through the seam with the heap handed back for it. The VM
+//! stack is still a safe stand-in whose public shape is `heap.lock`,
+//! and the copy of `zend_vm_stack` lands behind it (design §11, days
+//! 3–7). Nothing here panics: a slot that is not there reads as `UNDEF`,
+//! as php's uninitialised zval does.
 #![deny(
     clippy::undocumented_unsafe_blocks,
     clippy::multiple_unsafe_ops_per_block
@@ -36,6 +38,7 @@ mod hooks;
 mod map;
 mod mm;
 mod numeric;
+mod object;
 mod stack;
 mod string;
 mod zval;
@@ -45,9 +48,10 @@ pub use compare::{Scalar, compare, identical};
 pub use hooks::{Fatal, HeapHooks};
 pub use map::{MapPtr, MapTable};
 pub use numeric::{Number, double_to_string, numeric_prefix, power, shift_left, shift_right};
+pub use object::{Obj, ObjectId};
 pub use stack::{EntryGuard, Frame, FrameRef, Slot, VmStack};
 pub use string::{Intern, Str, Strings};
-pub use zval::{ObjectId, Zval, ZvalType};
+pub use zval::{Zval, ZvalType};
 
 /// The per-request heap (design §5.13): the allocator every string,
 /// array, object and frame passes through, and the only accountant of
@@ -61,6 +65,11 @@ pub use zval::{ObjectId, Zval, ZvalType};
 /// allocated out of this heap and go back with everything else.
 #[derive(Debug)]
 pub struct Heap {
+    /// php's `EG(objects_store)`: the table of ids, whose buckets are
+    /// the request's memory and whose sweep drops the payloads no free
+    /// reached. Declared before `mm` so that it drops first, while the
+    /// objects it walks are still mapped.
+    store: object::Store,
     mm: mm::Mm,
     /// php's `CG(interned_strings)`: the strings this request interned,
     /// live until the request ends (`Z/Zend/zend_string.c:346-353`).
@@ -72,7 +81,7 @@ pub struct Heap {
     /// `HashTable`: 40960 bytes of the request's own memory on the first
     /// string it interns, and doubling where php's doubles.
     buckets: string::Buckets,
-    /// The boxed stand-ins for the kinds not yet on the heap, swept when
+    /// The boxed stand-ins for a resource and a reference, swept when
     /// the heap drops.
     boxes: boxed::Boxes,
 }
@@ -84,11 +93,16 @@ impl Default for Heap {
 }
 
 impl Heap {
-    /// A heap with php's main chunk mapped and nothing allocated in it.
+    /// A heap with php's main chunk mapped and the object store's table
+    /// laid down in it, which is what `init_executor` allocates before
+    /// the request serves a line, and nothing else.
     #[must_use]
     pub fn new() -> Heap {
+        let mut mm = mm::Mm::new();
+        let store = object::Store::new(&mut mm);
         Heap {
-            mm: mm::Mm::new(),
+            store,
+            mm,
             interned: string::Table::default(),
             buckets: string::Buckets::new(),
             boxes: boxed::Boxes::default(),
@@ -225,6 +239,8 @@ impl Heap {
             s.addref();
         } else if let Some(a) = z.as_arr() {
             a.addref();
+        } else if let Some(o) = z.as_obj() {
+            o.addref();
         } else if let Some(b) = z.boxed_ptr() {
             // SAFETY: the zval names a box this heap holds and has not
             // dropped, which is what a refcounted zval says.
@@ -232,20 +248,25 @@ impl Heap {
         }
     }
 
-    /// One owner fewer: a refcount decrement, and when it reaches zero the
-    /// value is freed through `hooks`, which may serve a destructor
-    /// (`zval_ptr_dtor`). The parameter is what says this may re-enter:
-    /// an array's elements are released with it, and one of them may be
-    /// the object whose destructor runs.
-    pub fn release(&mut self, z: Zval, hooks: &mut dyn HeapHooks) {
+    /// One owner fewer, `zval_ptr_dtor`: a refcount decrement, and when
+    /// it reaches zero the value is freed, an array's elements released
+    /// with it and an object's destructor served through `hooks` (seam
+    /// 1). The hooks are what says this may re-enter, and the heap is
+    /// theirs: it is asked for at each step and again after every call
+    /// up, since the destructor may have grown it.
+    pub fn release(hooks: &mut dyn HeapHooks, z: Zval) {
         if !z.is_refcounted() {
             return;
         }
         if let Some(s) = z.as_str() {
-            self.release_string(s);
+            hooks.heap().release_string(s);
         } else if let Some(a) = z.as_arr() {
             if a.delref() == 0 {
-                self.array_destroy(a, hooks);
+                Heap::array_destroy(hooks, a);
+            }
+        } else if let Some(o) = z.as_obj() {
+            if o.delref() == 0 {
+                Heap::store_del(hooks, o);
             }
         } else if let Some(b) = z.boxed_ptr() {
             // SAFETY: the zval names a box this heap holds and has not
@@ -253,16 +274,15 @@ impl Heap {
             if unsafe { b.as_ref() }.delref() == 0 {
                 // SAFETY: the box came from this heap's `boxed` and its
                 // last owner has given it up.
-                unsafe { self.boxes.drop_box(b) };
+                unsafe { hooks.heap().boxes.drop_box(b) };
             }
         }
     }
 
     /// A zval of `kind` naming `value`, boxed and counted by this heap:
-    /// the stand-in for an object, a resource or a reference inside an
-    /// array until each stands on the heap as its own (design §11, days
-    /// 3–7). One owner; dropped when the last gives it up, or swept with
-    /// the heap.
+    /// the stand-in for a resource or a reference inside an array until
+    /// each stands on the heap as its own (design §11, days 3–7). One
+    /// owner; dropped when the last gives it up, or swept with the heap.
     pub fn boxed(&mut self, kind: ZvalType, value: Box<dyn std::any::Any + Send>) -> Zval {
         self.boxes.add(kind, value)
     }
@@ -323,7 +343,8 @@ mod tests {
         let mut heap = Heap::new();
         let start = heap.memory_usage(false);
         let real = heap.memory_usage(true);
-        assert_eq!(start, 0);
+        // The object store's table, and nothing else, before a line runs.
+        assert_eq!(start, object::INIT_BYTES);
         assert_eq!(real, mm::CHUNK_SIZE);
         let mut strings = Vec::new();
         for len in [0usize, 1, 7, 8, 100, 3000, 5000, 3_000_000] {
@@ -360,7 +381,8 @@ mod tests {
     ///
     /// **Every number here is php's own**, the bin arithmetic of design
     /// §5.13 over php's sizes: 40 bytes for a string of eight, 32 for one
-    /// of four, and 40960 for the table the first intern lays down.
+    /// of four, and 40960 for the table the first intern lays down, over
+    /// the object store's 8192 that every request starts with.
     #[test]
     fn what_a_request_interned_is_its_own_and_the_next_request_starts_where_it_did() {
         use std::sync::atomic::Ordering::Relaxed;
@@ -369,11 +391,12 @@ mod tests {
         let mut started_at = Vec::new();
         for _ in 0..2 {
             let mut heap = Heap::new();
-            started_at.push(heap.memory_usage(false));
+            started_at.push(heap.memory_usage(false) - object::INIT_BYTES);
+            let heap_start = object::INIT_BYTES;
             // The frozen table answers first and allocates nothing.
             let frozen = heap.intern(b"");
             assert!(matches!(frozen, Ok(s) if s.is_empty()));
-            assert_eq!(heap.memory_usage(false), 0);
+            assert_eq!(heap.memory_usage(false), heap_start);
             assert_eq!(heap.interned(), 0);
             // Every other string is one allocation, once.
             let first = heap.intern(b"var_dump");
@@ -387,7 +410,7 @@ mod tests {
             // Eight bytes, the header and the NUL: php's forty-byte bin,
             // and the table's own 40960 beside it, laid down by this
             // first intern and by no earlier act.
-            assert_eq!(heap.memory_usage(false), 40 + 40960);
+            assert_eq!(heap.memory_usage(false), heap_start + 40 + 40960);
             assert!(first.is_interned());
             assert!(
                 !first.is_persistent(),
@@ -396,15 +419,15 @@ mod tests {
             // A release never frees an interned string, as php's does not;
             // the request's end is what takes it.
             heap.release_string(first);
-            assert_eq!(heap.memory_usage(false), 41000);
+            assert_eq!(heap.memory_usage(false), heap_start + 41000);
             // A string the request made and gave up goes back at once.
             let made = heap.string(b"made");
             assert!(made.is_ok());
             if let Ok(made) = made {
-                assert_eq!(heap.memory_usage(false), 41032);
+                assert_eq!(heap.memory_usage(false), heap_start + 41032);
                 heap.release_string(made);
             }
-            assert_eq!(heap.memory_usage(false), 41000);
+            assert_eq!(heap.memory_usage(false), heap_start + 41000);
         }
         assert_eq!(started_at, vec![0, 0], "every request starts at zero");
         assert_eq!(
@@ -429,30 +452,31 @@ mod tests {
     fn the_interned_table_s_storage_is_php_s_and_doubles_where_php_s_doubles() {
         let _alone = alone();
         let mut heap = Heap::new();
+        let start = heap.memory_usage(false);
         // The frozen table answers before this one and lays nothing down,
         // so a request that interns only what the process froze pays
         // nothing at all.
         assert!(matches!(heap.intern(b""), Ok(s) if s.is_empty()));
         assert!(matches!(heap.intern(b"a"), Ok(s) if s.len() == 1));
-        assert_eq!(heap.memory_usage(false), 0);
+        assert_eq!(heap.memory_usage(false), start);
         // The first string that is this table's brings the whole array
         // with it, beside the 32-byte bin the string itself takes.
         assert!(heap.intern(b"s0").is_ok(), "the heap would not intern");
-        assert_eq!(heap.memory_usage(false), 40960 + 32);
+        assert_eq!(heap.memory_usage(false), start + 40960 + 32);
         for i in 1..1024u32 {
             let interned = heap.intern(format!("s{i}").as_bytes());
             assert!(interned.is_ok(), "the heap would not intern s{i}");
         }
         assert_eq!(heap.interned(), 1024);
         // 1024 strings of the 32-byte bin, and the array they fill.
-        assert_eq!(heap.memory_usage(false), 40960 + 1024 * 32);
-        assert_eq!(heap.memory_peak(), 40960 + 1024 * 32);
+        assert_eq!(heap.memory_usage(false), start + 40960 + 1024 * 32);
+        assert_eq!(heap.memory_peak(), start + 40960 + 1024 * 32);
         // The one that fills it doubles it: the 2048-bucket array is
         // allocated, what the smaller held is copied over, and the
         // smaller goes back, so the peak holds both for that long.
         assert!(heap.intern(b"s1024").is_ok(), "the heap would not grow");
-        assert_eq!(heap.memory_usage(false), 81920 + 1025 * 32);
-        assert_eq!(heap.memory_peak(), 81920 + 40960 + 1025 * 32);
+        assert_eq!(heap.memory_usage(false), start + 81920 + 1025 * 32);
+        assert_eq!(heap.memory_peak(), start + 81920 + 40960 + 1025 * 32);
     }
 
     /// A string past 2 MiB is a huge block, and php rounds one to the
@@ -497,22 +521,23 @@ mod tests {
             }
         }
         let mut heap = Heap::new();
+        let start = heap.memory_usage(false);
         let real = heap.memory_usage(true);
         let allocated = heap.string(&vec![b'x'; 3_000_000]);
         assert!(allocated.is_ok(), "the heap would not allocate 3 MB");
         let Ok(s) = allocated else { return };
         let rounded = 3_000_032usize.next_multiple_of(page);
         let node = 24;
-        assert_eq!(heap.memory_usage(false), rounded + node);
-        assert_eq!(heap.memory_peak(), rounded + node);
+        assert_eq!(heap.memory_usage(false) - start, rounded + node);
+        assert_eq!(heap.memory_peak() - start, rounded + node);
         assert_eq!(heap.memory_usage(true), real + rounded);
         // php's own numbers, where the machine's page is the oracle's.
         if page == 16 * 1024 {
-            assert_eq!(heap.memory_usage(false), 3_014_680);
+            assert_eq!(heap.memory_usage(false) - start, 3_014_680);
             assert_eq!(heap.memory_usage(true) - real, 3_014_656);
         }
         heap.release_string(s);
-        assert_eq!(heap.memory_usage(false), 0);
+        assert_eq!(heap.memory_usage(false), start);
         assert_eq!(heap.memory_usage(true), real);
     }
 
@@ -521,20 +546,20 @@ mod tests {
     #[test]
     fn a_string_takes_the_bytes_php_s_takes() {
         let _alone = alone();
-        let mut heap = Heap::new();
-        let allocated = heap.string(b"demo");
+        let mut nothing = Recorder { heap: Heap::new() };
+        let start = nothing.heap.memory_usage(false);
+        let allocated = nothing.heap.string(b"demo");
         assert!(allocated.is_ok(), "the heap would not allocate four bytes");
         let Ok(s) = allocated else { return };
-        assert_eq!(heap.memory_usage(false), 32);
+        assert_eq!(nothing.heap.memory_usage(false) - start, 32);
         let z = Zval::string(s);
         assert!(z.is_refcounted());
-        heap.addref(z);
+        nothing.heap.addref(z);
         assert_eq!(s.refcount(), 2);
-        let mut nothing = Recorder;
-        heap.release(z, &mut nothing);
+        Heap::release(&mut nothing, z);
         assert_eq!(s.refcount(), 1);
-        heap.release(z, &mut nothing);
-        assert_eq!(heap.memory_usage(false), 0);
+        Heap::release(&mut nothing, z);
+        assert_eq!(nothing.heap.memory_usage(false), start);
     }
 
     /// The limit is met on chunk growth, with php's own text.
@@ -580,8 +605,9 @@ mod tests {
                 Err(f) => break f,
             }
         };
-        // 511 free pages to a chunk, two to an allocation.
-        assert_eq!(held.len(), 255);
+        // 511 free pages to a chunk, two of them the object store's
+        // table, two to an allocation.
+        assert_eq!(held.len(), 254);
         assert_eq!(
             fatal,
             Fatal::Error(
@@ -602,8 +628,9 @@ mod tests {
         let mut heap = Heap::new();
         heap.set_memory_limit(2 * mm::CHUNK_SIZE);
         // A string of 3000 bytes is the 3072-byte bin, four slots to a
-        // `run` of three pages, so two chunks hold 340 `runs` and the
-        // next one meets the limit.
+        // `run` of three pages, so two chunks, less the two pages of the
+        // object store's table, hold 339 `runs` and the next one meets
+        // the limit.
         let mut held = Vec::new();
         let fatal = loop {
             match heap.string(&[b'x'; 3000]) {
@@ -611,7 +638,7 @@ mod tests {
                 Err(f) => break f,
             }
         };
-        assert_eq!(held.len(), 340 * 4);
+        assert_eq!(held.len(), 339 * 4);
         assert_eq!(heap.memory_usage(true), 2 * mm::CHUNK_SIZE);
         assert_eq!(
             fatal,
@@ -636,14 +663,14 @@ mod tests {
         for s in held.drain(..) {
             heap.release_string(s);
         }
-        assert_eq!(heap.memory_usage(false), 0);
+        assert_eq!(heap.memory_usage(false), object::INIT_BYTES);
         assert_eq!(heap.memory_usage(true), 2 * mm::CHUNK_SIZE);
         let swept = heap.string(&[b'x'; 1760]);
         assert!(swept.is_ok(), "the sweep did not give the free runs back");
-        // The 1020 pages of the 340 `runs`, and the chunk the sweep
+        // The 1017 pages of the 339 `runs`, and the chunk the sweep
         // emptied kept against the next growth, as php keeps one.
         assert_eq!(heap.memory_usage(true), 2 * mm::CHUNK_SIZE);
-        assert_eq!(heap.memory_usage(false), 1792);
+        assert_eq!(heap.memory_usage(false), object::INIT_BYTES + 1792);
         if let Ok(s) = swept {
             heap.release_string(s);
         }
@@ -673,19 +700,24 @@ mod tests {
             for s in held {
                 heap.release_string(s);
             }
-            assert_eq!(heap.memory_usage(false), 0);
+            assert_eq!(heap.memory_usage(false), object::INIT_BYTES);
         }
         assert_eq!(mm::MAPPINGS.load(Relaxed), before);
     }
 
     /// What the heap's tests pass where a request would serve a
     /// destructor: nothing to serve, because a string has none.
-    struct Recorder;
+    struct Recorder {
+        heap: Heap,
+    }
 
     impl HeapHooks for Recorder {
-        fn destruct(&mut self, _obj: ObjectId) {}
-        fn free_native(&mut self, _obj: ObjectId) {}
-        fn gc_children(&mut self, _obj: ObjectId, _visit: &mut dyn FnMut(Zval)) {}
+        fn heap(&mut self) -> &mut Heap {
+            &mut self.heap
+        }
+        fn destruct(&mut self, _obj: Obj) {}
+        fn free_native(&mut self, _obj: Obj) {}
+        fn gc_children(&mut self, _obj: Obj, _visit: &mut dyn FnMut(Zval)) {}
         fn free_resource(&mut self, _res: u32) {}
         fn out_of_memory(&mut self, bytes: usize) -> Fatal {
             Fatal::OutOfMemory(bytes)

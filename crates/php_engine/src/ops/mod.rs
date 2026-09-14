@@ -1733,6 +1733,7 @@ mod tests {
     #[test]
     fn two_arrays_are_identical_by_count_then_by_each_key_and_value_in_order() {
         let mut req = crate::test::request();
+        let start = req.memory_usage(false);
         let list = || vec![(Key::Int(0), Value::int(1)), (Key::Int(1), Value::int(2))];
         let (a, b) = (array(&mut req, list()), array(&mut req, list()));
         assert!(identical(&a, &b));
@@ -1761,6 +1762,6 @@ mod tests {
         for value in [a, b, one, swapped, floated, nested.0, nested.1] {
             req.release(value);
         }
-        assert_eq!(req.memory_usage(false), 0, "every array went back");
+        assert_eq!(req.memory_usage(false), start, "every array went back");
     }
 }

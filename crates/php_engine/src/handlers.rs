@@ -818,6 +818,7 @@ mod tests {
     use super::*;
     use crate::engine::{Engine, RequestDescription};
     use crate::probe::{Asked, Probe};
+    use crate::tier::Nop;
 
     /// A unit whose main op array is one `JMP` to `target`, its
     /// safepoint number `number`.
@@ -1014,5 +1015,120 @@ mod tests {
         );
         assert_eq!(req.state::<Asked>().sites.len(), 1);
         req.stack_mut().pop_entry(guard);
+    }
+
+    /// A class declaring `__destruct`, as an extension declares one:
+    /// what [`Request`]'s side of seam 1 looks for on the class of the
+    /// object it is handed.
+    fn destructible(name: &[u8]) -> php_unit::decl::ClassDecl {
+        use php_unit::decl::{
+            ClassDecl, ClassFlags, ClassKind, EnumBacking, FunctionDecl, MethodDecl, Name,
+            Visibility,
+        };
+        ClassDecl {
+            name: Name(name.into()),
+            kind: ClassKind::Class,
+            flags: ClassFlags::default(),
+            parent: None,
+            interfaces: Vec::new(),
+            traits: Vec::new(),
+            backing: EnumBacking::Pure,
+            constants: Vec::new(),
+            properties: Vec::new(),
+            methods: vec![MethodDecl {
+                function: FunctionDecl {
+                    name: Name(b"__destruct".as_slice().into()),
+                    parameters: Vec::new(),
+                    return_type: None,
+                    returns_by_ref: false,
+                    attributes: Vec::new(),
+                    doc_comment: None,
+                    file: Name(Box::new([])),
+                    line: 0,
+                },
+                visibility: Visibility::Public,
+                is_instance: true,
+                is_abstract: false,
+                is_final: false,
+                tentative_return: false,
+            }],
+            attributes: Vec::new(),
+            doc_comment: None,
+            file: Name(Box::new([])),
+            line: 0,
+        }
+    }
+
+    /// A unit whose main op array has one CV and one `ASSIGN` of the
+    /// constant `1` into it, its value unused: `$a = 1;`.
+    fn assigning() -> Arc<Unit> {
+        Arc::new(Unit {
+            main: OpArray {
+                oplines: vec![Opline {
+                    opcode: Opcode::Assign,
+                    op1_type: OperandKind::Cv,
+                    op1: 0,
+                    op2_type: OperandKind::Const,
+                    op2: 0,
+                    out_type: OperandKind::Unused,
+                    ..Opline::default()
+                }]
+                .into_boxed_slice(),
+                literals: vec![php_heap::Zval::long(1)].into_boxed_slice(),
+                num_cvs: 1,
+                ..OpArray::default()
+            },
+            ..Unit::default()
+        })
+    }
+
+    /// Design §5.10 and seam 1: `ASSIGN` over a CV holding an object's
+    /// last owner writes the CV and then gives the object up, and the
+    /// release reaches the class's `__destruct` through the heap's hooks
+    /// with the request whole, since serving a method takes `&mut
+    /// Request`. No method can be served until #259 and #260, so what
+    /// the destructor's call leaves today is php's `Error` for an
+    /// undefined method, pending on the request: that the raise landed
+    /// is the proof the seam was crossed, and the witness that reads
+    /// `__destruct`'s own bytes replaces this test when a native class
+    /// can declare one. The object is freed after the destructor, its
+    /// bucket free again, as `zend_objects_store_del` frees it.
+    #[test]
+    fn an_assign_over_the_last_owner_serves_the_destructor_after_the_write() {
+        let destructible = crate::api::abi::ExtensionBuilder::default()
+            .classes(vec![destructible(b"Destructible")])
+            .build("destructible");
+        let engine = Engine::builder().extensions(&[destructible]).build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let unit = assigning();
+        let frame = req.push_frame(Arc::clone(&unit));
+        let code = crate::exec::code_of(&unit);
+        let op = code.oplines.first().copied().unwrap_or_default();
+        let Ok(object) = req.new_object_of("Destructible") else {
+            return;
+        };
+        let id = php_heap::ObjectId(object.index());
+        let previous = req.vm_mut().set_slot(frame, 0, object.as_value());
+        req.release(previous);
+        assert!(!req.is_pending());
+
+        assert_eq!(
+            assign::<Nop>(&mut req, frame, code, &op),
+            Ok(Stepped::Same(frame))
+        );
+        assert_eq!(req.vm().slot(frame, 0).as_int(), Some(1), "written first");
+        assert!(
+            req.is_pending(),
+            "the release reached the destructor, whose call raised on the request"
+        );
+        assert!(
+            req.heap().stored(id).is_none(),
+            "and the object was freed after the destructor"
+        );
+        assert_eq!(
+            req.heap().objects(),
+            1,
+            "the store holds the pending Error and nothing else"
+        );
     }
 }

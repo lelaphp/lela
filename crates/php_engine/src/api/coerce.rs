@@ -190,7 +190,7 @@ pub fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thrown> {
         ValueRef::Array(a) => Ok(*a),
         ValueRef::Object(o) => {
             let mut array = PhpArray::new(req)?;
-            for (key, entry) in o.entries() {
+            for (key, entry) in o.entries(req)? {
                 req.addref(&entry);
                 if let Key::Str(s) = &key {
                     req.addref(&Value::string(*s));
@@ -213,18 +213,21 @@ pub fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thrown> {
 /// `(object)`.
 pub fn to_object(req: &mut Request, value: &Value) -> Result<PhpObject, Thrown> {
     match value.as_ref() {
-        ValueRef::Object(o) => Ok(o.clone()),
+        ValueRef::Object(o) => Ok(*o),
         ValueRef::Reference(r) => to_object(req, r.get()),
         _ => {
-            let mut object = req.new_object_of("stdClass");
+            let object = req.new_object_of("stdClass")?;
             if let Some(array) = value.as_array() {
                 for (key, entry) in array.snapshot() {
                     let name = key.to_prop_name(req)?;
-                    object.set_prop(name, entry);
+                    req.addref(&entry);
+                    object.set_prop(req, name, entry)?;
                 }
             } else if !matches!(value.as_ref(), ValueRef::Null | ValueRef::Undef) {
                 let name = PhpString::new(req, b"scalar")?;
-                object.set_prop(name, value.deref().clone());
+                let scalar = value.deref().clone();
+                req.addref(&scalar);
+                object.set_prop(req, name, scalar)?;
             }
             Ok(object)
         }

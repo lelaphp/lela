@@ -37,6 +37,14 @@ pub(crate) const PERSISTENT: u32 = 1 << 7;
 pub(crate) const PERMANENT: u32 = 1 << 8;
 /// `IS_STR_VALID_UTF8`: the bytes were checked once and are valid UTF-8.
 pub(crate) const VALID_UTF8: u32 = 1 << 9;
+/// `IS_OBJ_DESTRUCTOR_CALLED`: `zend_objects_store_del` served the
+/// destructor, and serves it no second time.
+pub(crate) const OBJ_DESTRUCTOR_CALLED: u32 = 1 << 8;
+/// `IS_OBJ_FREE_CALLED`: `free_obj` ran over the members, once.
+pub(crate) const OBJ_FREE_CALLED: u32 = 1 << 9;
+/// `IS_OBJ_LAZY_UNINITIALIZED`: above the flags, in the collector's
+/// half of the word, where php keeps it (`Z/Zend/zend_types.h:867`).
+pub(crate) const OBJ_LAZY_UNINITIALIZED: u32 = 1 << 31;
 
 impl Refcounted {
     /// A header with one owner, of `kind`, with `flags` set.
@@ -59,6 +67,12 @@ impl Refcounted {
         count
     }
 
+    /// `GC_SET_REFCOUNT`: the count as `zend_objects_store_del` holds it
+    /// at one across a destructor.
+    pub(crate) fn set_refcount(&self, count: u32) {
+        self.refcount.set(count);
+    }
+
     /// `GC_DELREF`: one owner fewer, and the count that is left. A count
     /// already at zero stays there, so a double release cannot wrap.
     pub(crate) fn delref(&self) -> u32 {
@@ -70,6 +84,11 @@ impl Refcounted {
     /// `GC_FLAGS`.
     pub(crate) fn flags(&self) -> u32 {
         self.type_info.get() & FLAGS_MASK
+    }
+
+    /// One bit of the whole word, for the bits php keeps above the flags.
+    pub(crate) fn has_info(&self, bit: u32) -> bool {
+        self.type_info.get() & bit != 0
     }
 
     /// `GC_ADD_FLAGS`.

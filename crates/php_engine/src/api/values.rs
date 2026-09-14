@@ -2,22 +2,24 @@
 //! over Zend's layouts. What a native holds is a [`Value`]; the layout
 //! knowledge stays in `php_heap`.
 //!
-//! **What stands on the heap, and what does not yet.** A string and an
-//! array are `php_heap`'s (design §5.2, §5.3): [`PhpString`] is the
-//! pointer php's `zend_string *` is and [`PhpArray`] the pointer php's
-//! `zend_array *` is, sixteen bytes of [`Value`] name either exactly as
-//! a zval does, and each is allocated out of the request's heap and
-//! nowhere else, so `memory_get_usage()` counts every string and every
-//! array a native builds (design §5.13). An object, a resource and a
-//! reference are still owned Rust data behind the same names, the
-//! stand-ins the rest of Lane A replaces (design §11, days 3–7); a
-//! `Value` holding one of those owns it as Rust owns a `Vec`, and an
-//! array holding one boxes it, the heap counting the box.
+//! **What stands on the heap, and what does not yet.** A string, an
+//! array and an object are `php_heap`'s (design §5.2, §5.3, §5.4):
+//! [`PhpString`] is the pointer php's `zend_string *` is, [`PhpArray`]
+//! the pointer php's `zend_array *` is and [`PhpObject`] the pointer
+//! php's `zend_object *` is, sixteen bytes of [`Value`] name any of them
+//! exactly as a zval does, and each is allocated out of the request's
+//! heap and nowhere else, so `memory_get_usage()` counts every string,
+//! every array and every object a native builds (design §5.13). A
+//! resource and a reference are still owned Rust data behind the same
+//! names, the stand-ins the rest of Lane A replaces (design §11, days
+//! 3–7); a `Value` holding one of those owns it as Rust owns a `Vec`,
+//! and an array holding one boxes it, the heap counting the box.
 //!
-//! **Ownership, as design §5.1 decides it.** `PhpString` and `PhpArray`
-//! are `Copy` and have no `Drop`; cloning a `Value` that holds one is
-//! php's `ZVAL_COPY_VALUE`, a bitwise copy that touches no refcount, and
-//! the engine's `addref` beside it is what makes the two `ZVAL_COPY`.
+//! **Ownership, as design §5.1 decides it.** `PhpString`, `PhpArray` and
+//! `PhpObject` are `Copy` and have no `Drop`; cloning a `Value` that
+//! holds one is php's `ZVAL_COPY_VALUE`, a bitwise copy that touches no
+//! refcount, and the engine's `addref` beside it is what makes the two
+//! `ZVAL_COPY`.
 //! Owners are taken and given up explicitly, by the engine, where php's
 //! handlers do it: a value the engine hands a native is the frame's, a
 //! value a native hands back is the engine's from the moment it is
@@ -27,9 +29,8 @@
 
 use std::any::Any;
 use std::cmp::Ordering;
-use std::sync::Arc;
 
-use php_heap::{Arr, Str, Zval, ZvalType};
+use php_heap::{Arr, Obj, Str, Zval, ZvalType};
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
@@ -564,124 +565,126 @@ pub struct ClosureInfo {
     pub scope: Option<ClassId>,
 }
 
-/// An object (design §5.4): identity, class, declared and dynamic
-/// properties, and the typed native payload of an internal class. In the
-/// heap an object is a store entry reached by its id; here it is owned.
-#[derive(Debug, Clone)]
-pub struct PhpObject {
-    id: u32,
-    class: ClassId,
-    props: Vec<(PhpString, Value)>,
-    native: Option<Arc<dyn Any + Send + Sync>>,
-    lazy: bool,
-    closure: Option<Box<ClosureInfo>>,
-}
+/// An object (design §5.4): php's `zend_object *`, one allocation of
+/// the request's heap in the object store, the forty-byte header, a
+/// zval per declared property and, for an internal class, the native
+/// payload as one typed slot. Naming one takes no owner, as php's
+/// pointer does not; `Copy` is what makes it a pointer and not a struct,
+/// and the engine counts the owners where php's handlers do. The
+/// destructor is served when the last owner lets go, through seam 1.
+///
+/// What is read through the request is read through it because the
+/// heap is the request's: a property is a view of the slot or the
+/// dynamic table, no owner taken, and a write is `zend_std_write_property`
+/// without the handler in the way yet, the value the object's from then
+/// on and the name given up as [`PhpArray::set`] gives a key up.
+#[derive(Clone, Copy)]
+pub struct PhpObject(Obj);
 
 impl PhpObject {
-    pub(crate) fn new(id: u32, class: ClassId) -> PhpObject {
-        PhpObject {
-            id,
-            class,
-            props: Vec::new(),
-            native: None,
-            lazy: false,
-            closure: None,
-        }
+    /// The face over a heap object the engine already holds.
+    pub(crate) const fn of(o: Obj) -> PhpObject {
+        PhpObject(o)
     }
 
-    /// The object as a value.
+    /// The heap object, for the engine's refcount traffic.
+    pub(crate) const fn heap(self) -> Obj {
+        self.0
+    }
+
+    /// The object as a value, `ZVAL_OBJ`: named, no owner taken.
     #[must_use]
-    pub fn as_value(&self) -> Value {
-        Value::object(self.clone())
+    pub const fn as_value(&self) -> Value {
+        Value::object(*self)
     }
 
     /// The class of the object.
     #[must_use]
     pub fn class(&self) -> ClassId {
-        self.class
+        ClassId(self.0.class())
     }
 
-    /// `spl_object_id()`.
+    /// `spl_object_id()`: the store's index.
     #[must_use]
     pub fn index(&self) -> u32 {
-        self.id
+        self.0.id().0
     }
 
     /// Whether the object is of `class` or a subclass, `instanceof`. The
     /// skeleton knows no hierarchy: an exact class alone.
     #[must_use]
     pub fn instance_of(&self, class: ClassId) -> bool {
-        self.class == class
+        self.class() == class
     }
 
-    /// What a `Closure` carries, for a closure object.
+    /// What a `Closure` carries, for a closure object: its native
+    /// payload, as php's `zend_closure` is the object's own struct.
     #[must_use]
-    pub fn closure(&self) -> Option<&ClosureInfo> {
-        self.closure.as_deref()
+    pub fn closure<'a>(&self, req: &'a Request) -> Option<&'a ClosureInfo> {
+        self.native::<ClosureInfo>(req)
     }
 
     /// The declared and dynamic properties in declaration order,
-    /// `get_object_vars` from inside the class.
-    #[must_use]
-    pub fn props(&self) -> &[(PhpString, Value)] {
-        &self.props
+    /// `get_object_vars` from inside the class: views, no owner taken.
+    /// A declared name is the interned string php's is, so the `Err` is
+    /// the memory limit refusing the intern.
+    pub fn props(&self, req: &mut Request) -> Result<Vec<(PhpString, Value)>, Thrown> {
+        req.object_entries(self.0)
     }
 
     /// The properties as array entries, mangled names and all, what
-    /// `(array)` produces.
-    #[must_use]
-    pub fn entries(&self) -> Vec<(Key, Value)> {
-        self.props
-            .iter()
-            .map(|(name, value)| (Key::from_string(*name), value.clone()))
-            .collect()
+    /// `(array)` produces: views, no owner taken.
+    pub fn entries(&self, req: &mut Request) -> Result<Vec<(Key, Value)>, Thrown> {
+        Ok(self
+            .props(req)?
+            .into_iter()
+            .map(|(name, value)| (Key::from_string(name), value))
+            .collect())
     }
 
-    /// One property by name, without a handler in the way.
+    /// One property by name, without a handler in the way: a view of
+    /// it, and `None` for a property that is not there or a declared
+    /// one nothing has written.
     #[must_use]
-    pub fn prop(&self, name: &[u8]) -> Option<&Value> {
-        self.props
-            .iter()
-            .find(|(n, _)| n.as_bytes() == name)
-            .map(|(_, v)| v)
+    pub fn prop(&self, req: &Request, name: &[u8]) -> Option<Value> {
+        req.object_prop(self.0, name)
     }
 
     /// Write one property by name, without a handler in the way. The
-    /// name is a string the caller holds, as `zend_std_write_property`
-    /// is handed one; a property already there keeps the name it had.
-    pub fn set_prop(&mut self, name: PhpString, value: Value) {
-        match self
-            .props
-            .iter_mut()
-            .find(|(n, _)| n.as_bytes() == name.as_bytes())
-        {
-            Some((_, slot)) => *slot = value,
-            None => self.props.push((name, value)),
-        }
+    /// value is the object's from here, and so is the name, which is
+    /// given up once the slot or the table has taken its own, as
+    /// `zend_hash_update` takes a key's. What the property held is
+    /// released last, after the write, which is where a destructor is
+    /// served (`zend_assign_to_variable`). The `Err` is the memory
+    /// limit refusing the dynamic table.
+    pub fn set_prop(&self, req: &mut Request, name: PhpString, value: Value) -> Result<(), Thrown> {
+        req.object_set_prop(self.0, name, value)
     }
 
-    /// The native payload, as `T`.
+    /// The native payload, as `T`, borrowed for as long as the request
+    /// is: `None` for an object of another payload or of none.
     #[must_use]
-    pub fn native<T: Any + Send + Sync>(&self) -> Option<&T> {
-        self.native.as_deref().and_then(|n| n.downcast_ref::<T>())
+    pub fn native<'a, T: Any + Send>(&self, req: &'a Request) -> Option<&'a T> {
+        req.native(self.0)
     }
 
-    /// The native payload, mutably; `None` while another owner holds it.
-    pub fn native_mut<T: Any + Send + Sync>(&mut self) -> Option<&mut T> {
-        Arc::get_mut(self.native.as_mut()?).and_then(|n| n.downcast_mut::<T>())
+    /// The native payload, mutably, the request held for as long as the
+    /// borrow is, so no second name reaches it meanwhile.
+    pub fn native_mut<'a, T: Any + Send>(&self, req: &'a mut Request) -> Option<&'a mut T> {
+        req.native_mut(self.0)
     }
 
     /// Whether the object is an uninitialised lazy ghost or proxy.
     #[must_use]
     pub fn is_lazy(&self) -> bool {
-        self.lazy
+        self.0.is_lazy()
     }
 
     /// Whether `name` is a property whose read would initialise a lazy
     /// object.
     #[must_use]
-    pub fn is_lazy_prop(&self, name: &[u8]) -> bool {
-        self.lazy && self.prop(name).is_none()
+    pub fn is_lazy_prop(&self, req: &Request, name: &[u8]) -> bool {
+        self.is_lazy() && self.prop(req, name).is_none()
     }
 
     /// The initializer of a lazy object, while it is uninitialised.
@@ -694,6 +697,20 @@ impl PhpObject {
     #[must_use]
     pub fn lazy_real(&self) -> Option<&PhpObject> {
         None
+    }
+}
+
+/// Two names are equal when they name one object, php's pointer
+/// equality, which `===` is for objects.
+impl PartialEq for PhpObject {
+    fn eq(&self, other: &PhpObject) -> bool {
+        self.0.is_same(other.0)
+    }
+}
+
+impl std::fmt::Debug for PhpObject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.0)
     }
 }
 
@@ -765,18 +782,12 @@ enum Inner {
     Reference(PhpRef),
 }
 
-impl PartialEq for PhpObject {
-    fn eq(&self, other: &PhpObject) -> bool {
-        self.id == other.id
-    }
-}
-
 /// One PHP value. Cloning one is php's `ZVAL_COPY_VALUE`: sixteen bytes
-/// copied for a scalar, a string and an array, no refcount touched, so
-/// the clone names what the original names and owns nothing the
-/// original did not give up; the engine takes and releases owners where
-/// php's handlers do. An object, a resource and a reference are still
-/// owned Rust data and are cloned as such until their lane lands.
+/// copied for a scalar, a string, an array and an object, no refcount
+/// touched, so the clone names what the original names and owns nothing
+/// the original did not give up; the engine takes and releases owners
+/// where php's handlers do. A resource and a reference are still owned
+/// Rust data and are cloned as such until their lane lands.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Value {
     inner: Inner,
@@ -913,14 +924,15 @@ impl Value {
         match &self.inner {
             Inner::Str(s) => s.heap().refcount(),
             Inner::Array(a) => a.heap().refcount(),
+            Inner::Object(o) => o.heap().refcount(),
             _ => 1,
         }
     }
 
-    /// A zval as the face names it, no owner taken: the string or the
-    /// array is named and not copied, as php's `ZVAL_COPY_VALUE` names
-    /// it, and an owned kind boxed into an array's bucket is cloned out,
-    /// as its stand-in is cloned anywhere.
+    /// A zval as the face names it, no owner taken: the string, the
+    /// array or the object is named and not copied, as php's
+    /// `ZVAL_COPY_VALUE` names it, and an owned kind boxed into an
+    /// array's bucket is cloned out, as its stand-in is cloned anywhere.
     pub(crate) fn of_zval(zval: Zval) -> Value {
         if let Some(n) = zval.as_long() {
             return Value::int(n);
@@ -937,8 +949,8 @@ impl Value {
         if let Some(a) = zval.as_arr() {
             return Value::array(PhpArray::of(a));
         }
-        if let Some(o) = zval.as_boxed::<PhpObject>() {
-            return Value::object(o.clone());
+        if let Some(o) = zval.as_obj() {
+            return Value::object(PhpObject::of(o));
         }
         if let Some(r) = zval.as_boxed::<Resource>() {
             return Value::resource(r.clone());
@@ -952,11 +964,12 @@ impl Value {
         }
     }
 
-    /// The zval this value is, for an array's bucket: the sixteen bytes
-    /// a scalar, a string or an array already is, and for an owned kind
-    /// the box the heap counts in their place. `UNDEF` is a bucket's
-    /// tombstone and never an element, so a value nothing wrote is
-    /// `null` here, as php reads one.
+    /// The zval this value is, for an array's bucket or a property
+    /// slot: the sixteen bytes a scalar, a string, an array or an object
+    /// already is, and for an owned kind the box the heap counts in
+    /// their place. `UNDEF` is a bucket's tombstone and never an
+    /// element, so a value nothing wrote is `null` here, as php reads
+    /// one.
     pub(crate) fn into_zval(self, req: &mut Request) -> Zval {
         match self.inner {
             Inner::Undef | Inner::Null => Zval::null(),
@@ -965,7 +978,7 @@ impl Value {
             Inner::Float(f) => Zval::double(f),
             Inner::Str(s) => Zval::string(s.heap()),
             Inner::Array(a) => Zval::array(a.heap()),
-            Inner::Object(o) => req.heap_mut().boxed(ZvalType::Object, Box::new(o)),
+            Inner::Object(o) => Zval::object(o.heap()),
             Inner::Resource(r) => req.heap_mut().boxed(ZvalType::Resource, Box::new(r)),
             Inner::Reference(r) => req.heap_mut().boxed(ZvalType::Reference, Box::new(r)),
         }
@@ -1104,6 +1117,7 @@ mod tests {
     #[test]
     fn a_clone_is_a_refcount_and_a_write_separates() {
         let mut req = crate::test::request();
+        let start = req.memory_usage(false);
         let Ok(mut a) = PhpArray::new(&mut req) else {
             return;
         };
@@ -1123,25 +1137,82 @@ mod tests {
         assert_ne!(&b, first.as_array().unwrap_or(&b));
         req.release(Value::array(b));
         req.release(first);
-        assert_eq!(req.memory_usage(false), 0);
+        assert_eq!(req.memory_usage(false), start);
     }
 
-    /// An object in an array is boxed and comes back out as itself.
+    /// An object a native builds is a store entry out of the request's
+    /// heap, php's forty bytes for a class of no declared properties,
+    /// `spl_object_id()` is its id, cloning a `Value` that holds it
+    /// is `ZVAL_COPY_VALUE` and the engine's `addref` the second owner;
+    /// an array holds it as one more owner and gives it back with the
+    /// array, and the last release frees it, the heap reading what it
+    /// read before.
     #[test]
-    fn an_owned_kind_in_an_array_comes_back_as_itself() {
+    fn an_object_is_a_store_entry_and_a_clone_is_a_refcount() {
         let mut req = crate::test::request();
-        let object = req.new_object_of("stdClass");
-        let id = object.index();
+        let start = req.memory_usage(false);
+        let Ok(object) = req.new_object_of("stdClass") else {
+            return;
+        };
+        assert_eq!(req.memory_usage(false) - start, 40);
+        assert_eq!(object.index(), 1);
+        let first = object.as_value();
+        let second = first.clone();
+        assert_eq!(first.refcount(), 1, "a clone touches no refcount");
+        req.addref(&second);
+        assert_eq!(first.refcount(), 2);
+        assert_eq!(second.as_object(), Some(&object));
         let Ok(mut a) = PhpArray::new(&mut req) else {
             return;
         };
-        assert!(a.append(&mut req, Value::object(object)).is_ok());
+        assert!(a.append(&mut req, second).is_ok());
         assert_eq!(
             a.get(&Key::Int(0))
                 .and_then(|v| v.as_object().map(PhpObject::index)),
-            Some(id)
+            Some(1)
         );
         req.release(Value::array(a));
+        assert_eq!(first.refcount(), 1, "the array gave its owner back");
+        req.release(first);
+        assert_eq!(req.memory_usage(false), start);
+        let Ok(next) = req.new_object_of("stdClass") else {
+            return;
+        };
+        assert_eq!(next.index(), 1, "the id came back off the free list");
+    }
+
+    /// A property written is the object's: read back as a view, the
+    /// name given up once the table took its own, and the value
+    /// released with the object.
+    #[test]
+    fn a_property_is_the_object_s_and_goes_with_it() {
+        let mut req = crate::test::request();
+        let start = req.memory_usage(false);
+        let Ok(object) = req.new_object_of("stdClass") else {
+            return;
+        };
+        let (Ok(name), Ok(text)) = (
+            PhpString::new(&mut req, b"message"),
+            PhpString::new(&mut req, b"a string the object holds"),
+        ) else {
+            return;
+        };
+        assert!(object.set_prop(&mut req, name, Value::string(text)).is_ok());
+        assert_eq!(text.heap().refcount(), 1, "the table holds the one owner");
+        assert_eq!(
+            object
+                .prop(&req, b"message")
+                .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec)),
+            Some(b"a string the object holds".to_vec())
+        );
+        assert_eq!(object.prop(&req, b"missing"), None);
+        assert_eq!(object.entries(&mut req).map(|e| e.len()), Ok(1));
+        req.release(object.as_value());
+        assert_eq!(
+            req.memory_usage(false),
+            start,
+            "the table and its string went with it"
+        );
     }
 
     #[test]

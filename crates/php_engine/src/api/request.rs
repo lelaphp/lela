@@ -13,14 +13,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
-use php_heap::{Arr, Fatal, FrameRef, Heap, HeapHooks, Intern, MapTable, ObjectId, VmStack, Zval};
+use php_heap::{Arr, Fatal, FrameRef, Heap, HeapHooks, Intern, MapTable, Obj, VmStack, Zval};
 use php_unit::Unit;
 use php_unit::decl::{ClassDecl, ClassKind, FunctionDecl};
 
 use crate::api::abi::{Callable, IniVerdict};
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
+use crate::api::values::{
+    ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef,
+};
 use crate::engine::{RequestDescription, Shared};
 use crate::exec::{self, Vm};
 
@@ -279,7 +281,6 @@ pub struct Request {
     umask: u32,
     cwd: PathBuf,
     gc_enabled: bool,
-    next_object: u32,
     streams: u32,
     flushed: bool,
     /// The caller file's `declare(strict_types=1)`.
@@ -329,7 +330,6 @@ impl Request {
             umask: 0o022,
             cwd,
             gc_enabled: true,
-            next_object: 1,
             streams: 0,
             flushed: false,
             strict_types: false,
@@ -417,10 +417,19 @@ impl Request {
 
     /// Leave what a raise made pending where the loop reads it, php's
     /// `EG(exception)`. A `Thrown` that carries none is a fatal or an
-    /// `exit` the raiser already recorded on the request.
+    /// `exit` the raiser already recorded on the request. The
+    /// throwable's one owner is the pending slot's from here; a second
+    /// throwable raised while one is pending is given up, where php
+    /// chains it as the first's `previous` (`zend_throw_exception_internal`),
+    /// which arrives with `catch`.
     pub(crate) fn leave_pending(&mut self, thrown: &Thrown) {
+        let Some(object) = thrown.exception().copied() else {
+            return;
+        };
         if self.pending.is_none() {
-            self.pending = thrown.exception().cloned();
+            self.pending = Some(object);
+        } else {
+            self.release(object.as_value());
         }
     }
 
@@ -457,33 +466,35 @@ impl Request {
         let Some(throwable) = self.pending.take() else {
             return Ok(());
         };
-        let (file, line) = Request::throw_site(&throwable);
-        let class = self.class_name_of(&throwable);
+        let (file, line) = self.throw_site(throwable);
+        let class = self.class_name_of(throwable);
         let compile_time = match class.as_str() {
             "ParseError" => Some(Level::Parse),
             "CompileError" => Some(Level::CompileError),
             _ => None,
         };
-        if let Some(level) = compile_time {
-            let message = string_prop(&throwable, b"message");
+        let fatal = if let Some(level) = compile_time {
+            let message = string_prop(self, throwable, b"message");
             self.note_error_in(level, &message, &file, line);
             match level {
                 Level::Parse => self.end_in_parse(),
                 _ => self.end_in_fatal_logged(&message, &file, line),
             }
-            return Err(Fatal::Error(message));
-        }
-        let message = format!(
-            "Uncaught {}\n  thrown",
-            self.throwable_to_string(&throwable)
-        );
-        self.end_in_fatal_at(&message, &file, line);
-        Err(Fatal::Error(message))
+            Fatal::Error(message)
+        } else {
+            let message = format!("Uncaught {}\n  thrown", self.throwable_to_string(throwable));
+            self.end_in_fatal_at(&message, &file, line);
+            Fatal::Error(message)
+        };
+        // `zend_exception_error` ends with `OBJ_RELEASE(ex)`: the pending
+        // slot's owner, given up once the rendering has read it.
+        self.release(throwable.as_value());
+        Err(fatal)
     }
 
     /// The declared name of a throwable's class, `Error` for one the
     /// tables do not know.
-    fn class_name_of(&self, throwable: &PhpObject) -> String {
+    fn class_name_of(&self, throwable: PhpObject) -> String {
         self.class_decl(throwable.class()).map_or_else(
             || String::from("Error"),
             |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
@@ -495,19 +506,19 @@ impl Request {
     /// chain of `previous` throwables php walks after the first, and the
     /// ` and defined` a `TypeError` whose message names a call site takes,
     /// arrive with the user-function frames that make either reachable.
-    fn throwable_to_string(&self, throwable: &PhpObject) -> String {
+    fn throwable_to_string(&self, throwable: PhpObject) -> String {
         let class = self.class_name_of(throwable);
-        let message = string_prop(throwable, b"message");
-        let (file, line) = Request::throw_site(throwable);
+        let message = string_prop(self, throwable, b"message");
+        let (file, line) = self.throw_site(throwable);
         let file = String::from_utf8_lossy(&file);
         // `zend_trace_to_string` over an empty trace is `#0 {main}`, which
         // is what a throwable made before this engine recorded one has.
         let trace = throwable
-            .prop(b"trace")
-            .and_then(|value| value.as_str_bytes())
+            .prop(self, b"trace")
+            .and_then(|value| value.as_str_bytes().map(<[u8]>::to_vec))
             .map_or_else(
                 || String::from("#0 {main}"),
-                |bytes| String::from_utf8_lossy(bytes).into_owned(),
+                |bytes| String::from_utf8_lossy(&bytes).into_owned(),
             );
         if message.is_empty() {
             format!("{class} in {file}:{line}\nStack trace:\n{trace}")
@@ -517,15 +528,14 @@ impl Request {
     }
 
     /// The `file` and `line` a throwable recorded where it was made.
-    fn throw_site(throwable: &PhpObject) -> (Vec<u8>, u32) {
+    fn throw_site(&self, throwable: PhpObject) -> (Vec<u8>, u32) {
         let file = throwable
-            .prop(b"file")
-            .and_then(|value| value.as_str_bytes())
-            .map(<[u8]>::to_vec)
+            .prop(self, b"file")
+            .and_then(|value| value.as_str_bytes().map(<[u8]>::to_vec))
             .unwrap_or_default();
         let line = throwable
-            .prop(b"line")
-            .and_then(Value::as_int)
+            .prop(self, b"line")
+            .and_then(|value| value.as_int())
             .and_then(|line| u32::try_from(line).ok())
             .unwrap_or(0);
         (file, line)
@@ -539,7 +549,7 @@ impl Request {
     /// on demand; this engine holds what `getTraceAsString` renders, which
     /// is all that `__toString` and the uncaught fatal read, until a frame
     /// chain with user functions in it gives the array something to say.
-    pub(crate) fn note_throw_site(&mut self, throwable: &mut PhpObject) -> Result<(), Thrown> {
+    pub(crate) fn note_throw_site(&mut self, throwable: PhpObject) -> Result<(), Thrown> {
         let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
         let trace = self.trace_as_string();
         let line = Value::int(i64::from(self.current_line()));
@@ -552,7 +562,7 @@ impl Request {
             ),
         ] {
             let name = PhpString::new(self, name)?;
-            throwable.set_prop(name, value);
+            throwable.set_prop(self, name, value)?;
         }
         Ok(())
     }
@@ -690,8 +700,8 @@ impl Request {
                 });
                 let case = decl
                     .filter(|decl| decl.kind == ClassKind::Enum)
-                    .and_then(|_| object.prop(b"name"))
-                    .and_then(Value::as_php_string);
+                    .and_then(|_| object.prop(self, b"name"))
+                    .and_then(|name| name.as_php_string().copied());
                 // `zend_enum_fetch_case_name`: the case's `name`.
                 if let Some(case) = case {
                     out.push_str(&class);
@@ -1137,17 +1147,205 @@ impl Request {
         }
     }
 
-    pub(crate) fn new_object(&mut self, class: ClassId) -> PhpObject {
-        let id = self.next_object;
-        self.next_object = self.next_object.saturating_add(1);
-        PhpObject::new(id, class)
+    /// `zend_objects_new` over `class` (`object_init_ex` without the
+    /// constructor): a store entry out of this request's heap with one
+    /// owner, a slot per declared instance property, as
+    /// `zend_object_properties_size` counts them, and the memory limit
+    /// as the fatal that ends the request.
+    pub(crate) fn new_object(&mut self, class: ClassId) -> Result<PhpObject, Thrown> {
+        let slots = self.class_slots(class);
+        let allocated = self.heap.object(class.0, slots);
+        self.fatal_of(allocated).map(PhpObject::of)
     }
 
-    pub(crate) fn new_object_of(&mut self, class_name: &str) -> PhpObject {
+    /// [`Request::new_object`] by the class's name; a name the tables do
+    /// not know is class zero, `Stringable`, as the skeleton has it.
+    pub(crate) fn new_object_of(&mut self, class_name: &str) -> Result<PhpObject, Thrown> {
         let class = self
             .class_named(class_name.as_bytes())
             .unwrap_or(ClassId(0));
         self.new_object(class)
+    }
+
+    /// `ce->default_properties_count`: the declared instance properties,
+    /// each a slot on the object; the linker that places an inherited
+    /// one arrives with the classes of design §11 days 8–14.
+    fn class_slots(&self, class: ClassId) -> u32 {
+        self.class_decl(class).map_or(0, |decl| {
+            u32::try_from(decl.properties.iter().filter(|p| p.is_instance).count())
+                .unwrap_or(u32::MAX)
+        })
+    }
+
+    /// The slot a declared instance property of `class` sits in,
+    /// `zend_get_property_offset` without visibility yet; `None` for a
+    /// name the class did not declare, which is a dynamic property.
+    fn prop_slot(&self, class: ClassId, name: &[u8]) -> Option<u32> {
+        let decl = self.class_decl(class)?;
+        decl.properties
+            .iter()
+            .filter(|p| p.is_instance)
+            .position(|p| &*p.name.0 == name)
+            .and_then(|i| u32::try_from(i).ok())
+    }
+
+    /// A property read, `zend_std_read_property` without the handler
+    /// in the way: the declared slot, `None` while nothing wrote it, or
+    /// the dynamic table's entry. A view, no owner taken.
+    pub(crate) fn object_prop(&self, o: Obj, name: &[u8]) -> Option<Value> {
+        if let Some(i) = self.prop_slot(ClassId(o.class()), name) {
+            let z = o.slot(i);
+            return (!z.is_undef()).then(|| Value::of_zval(z));
+        }
+        o.properties()?
+            .iter()
+            .find(|(k, _)| matches!(k, php_heap::Key::Str(s) if s.bytes() == name))
+            .map(|(_, z)| Value::of_zval(z))
+    }
+
+    /// A property write, `zend_std_write_property` without the handler
+    /// in the way: into the declared slot, what it held released last,
+    /// or into the dynamic table, materialised on the first write and
+    /// separated when a cast shares it. The name is given up once the
+    /// table has taken its own owner of it.
+    pub(crate) fn object_set_prop(
+        &mut self,
+        o: Obj,
+        name: PhpString,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        if let Some(i) = self.prop_slot(ClassId(o.class()), name.as_bytes()) {
+            let z = value.into_zval(self);
+            Heap::object_set_slot(&mut Hooks(self), o, i, z);
+        } else {
+            let table = self.heap.object_properties(o);
+            let table = self.fatal_of(table)?;
+            let table = self.array_separate(table)?;
+            self.heap.object_set_properties(o, table);
+            self.array_update(table, php_heap::Key::Str(name.heap()), value)?;
+        }
+        self.release(Value::string(name));
+        Ok(())
+    }
+
+    /// The properties in order, the declared slots that hold a value
+    /// then the dynamic table, which is the order
+    /// `rebuild_object_properties` lays the table out in. Views, and a
+    /// declared name is the interned string php's `prop_info->name` is,
+    /// never refcounted, so a caller that takes an owner of it takes
+    /// none; the `Err` is the memory limit refusing the intern.
+    pub(crate) fn object_entries(&mut self, o: Obj) -> Result<Vec<(PhpString, Value)>, Thrown> {
+        let mut entries = Vec::new();
+        let declared: Vec<Box<[u8]>> = self
+            .class_decl(ClassId(o.class()))
+            .map(|decl| {
+                decl.properties
+                    .iter()
+                    .filter(|p| p.is_instance)
+                    .map(|p| p.name.0.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (i, name) in declared.iter().enumerate() {
+            let z = o.slot(u32::try_from(i).unwrap_or(u32::MAX));
+            if z.is_undef() {
+                continue;
+            }
+            let interned = self.heap.intern(name);
+            let name = self.fatal_of(interned).map(PhpString::of)?;
+            entries.push((name, Value::of_zval(z)));
+        }
+        if let Some(table) = o.properties() {
+            for (k, z) in &table {
+                if let php_heap::Key::Str(s) = k {
+                    entries.push((PhpString::of(s), Value::of_zval(z)));
+                }
+            }
+        }
+        Ok(entries)
+    }
+
+    /// `zend_objects_clone_obj` without `__clone`: a fresh entry of the
+    /// same class holding what this one holds, one more owner each; an
+    /// object with a native payload is its class's `clone_obj` to copy
+    /// and, with no handler table yet, php's `Error` for an uncloneable
+    /// object.
+    pub(crate) fn clone_object(&mut self, o: Obj) -> Result<PhpObject, Thrown> {
+        let cloned = self.heap.object_clone(o);
+        if let Some(new) = self.fatal_of(cloned)? {
+            return Ok(PhpObject::of(new));
+        }
+        let class = self.class_name_of(PhpObject::of(o));
+        Err(crate::api::raising::throw(
+            self,
+            "Error",
+            &format!("Trying to clone an uncloneable object of class {class}"),
+        ))
+    }
+
+    /// The native payload of `o` as `T`, borrowed for as long as the
+    /// request is.
+    pub(crate) fn native<T: std::any::Any + Send>(&self, o: Obj) -> Option<&T> {
+        self.heap.native(o)
+    }
+
+    /// The native payload of `o` as `T`, mutably.
+    pub(crate) fn native_mut<T: std::any::Any + Send>(&mut self, o: Obj) -> Option<&mut T> {
+        self.heap.native_mut(o)
+    }
+
+    /// `zend_objects_destroy_object` (`Z/Zend/zend_objects.c:114`): the
+    /// class's `__destruct` served on the object, which the store holds
+    /// at one owner meanwhile. A class with none serves nothing, which
+    /// is every class the tables hold until a method can be declared;
+    /// the visibility check, the pending-throwable rules and the
+    /// shutdown warning arrive with the first destructor.
+    fn destruct(&mut self, o: Obj) {
+        let destructor: Option<Box<[u8]>> = self.class_decl(ClassId(o.class())).and_then(|decl| {
+            decl.methods
+                .iter()
+                .find(|m| m.function.name.0.eq_ignore_ascii_case(b"__destruct"))
+                .map(|m| m.function.name.0.clone())
+        });
+        let Some(destructor) = destructor else {
+            return;
+        };
+        let this = PhpObject::of(o);
+        if let Err(thrown) = crate::api::call::call_method(self, &this, &destructor, &[]) {
+            self.leave_pending(&thrown);
+        }
+    }
+
+    /// `zend_objects_store_call_destructors`, the second step of
+    /// `php_request_shutdown` (design §5.10): every live object's
+    /// destructor not yet served, in store order, and what one leaves
+    /// pending rendered as the uncaught fatal, as `zend_call_function`
+    /// renders it with no frame to throw into. The symbol table php
+    /// walks in reverse before this is the main frame's CVs here, given
+    /// up when it popped (#280).
+    pub(crate) fn call_destructors(&mut self) {
+        Heap::call_destructors(&mut Hooks(self));
+        if let Err(fatal) = self.uncaught() {
+            self.end_in(&fatal);
+        }
+    }
+
+    /// `zend_objects_store_free_object_storage`, in `shutdown_executor`
+    /// after the extensions' `rshutdown`: every live object's members
+    /// and payload freed once, the bytes left for the mass release.
+    pub(crate) fn free_object_storage(&mut self) {
+        Heap::free_object_storage(&mut Hooks(self));
+    }
+
+    /// `free_obj` for the native payload: what it names of the heap
+    /// given back before it is dropped. A `Closure` names its bound
+    /// `$this`, and nothing else with a payload exists yet.
+    fn free_native(&mut self, o: Obj) {
+        if let Some(closure) = self.heap.native_mut::<ClosureInfo>(o)
+            && let Some(this) = closure.this.take()
+        {
+            self.release(this.as_value());
+        }
     }
 
     /// `zend_active_function()`: the native being served, which is the
@@ -2052,6 +2250,13 @@ impl Request {
         &mut self.heap
     }
 
+    /// The request's heap, read: what the store holds, for a test that
+    /// asks after an object's bucket.
+    #[cfg(test)]
+    pub(crate) fn heap(&self) -> &Heap {
+        &self.heap
+    }
+
     /// A string of `bytes` out of this request's heap, what
     /// [`PhpString::new`] is: php's `ZVAL_STRINGL_FAST`, the process's
     /// interned string for the empty string and a string of one byte
@@ -2101,25 +2306,27 @@ impl Request {
     }
 
     /// One more owner of what `value` holds: `Z_TRY_ADDREF_P`, a refcount
-    /// for a string or an array of the request's, nothing for a scalar,
-    /// an interned string or an immutable array. An object, a resource
+    /// for a string, an array or an object of the request's, nothing for
+    /// a scalar, an interned string or an immutable array. A resource
     /// and a reference are owned Rust data until their lane lands, and a
     /// clone of one is a copy, so there is nothing to count.
     pub(crate) fn addref(&self, value: &Value) {
         match value.as_ref() {
             ValueRef::Str(s) => self.heap.addref(Zval::string(s.heap())),
             ValueRef::Array(a) => self.heap.addref(Zval::array(a.heap())),
+            ValueRef::Object(o) => self.heap.addref(Zval::object(o.heap())),
             _ => {}
         }
     }
 
     /// One owner fewer of what `value` holds, `zval_ptr_dtor`: the
-    /// string or the array is freed when its last owner gives it up, an
-    /// array's elements released with it, and an interned string or an
-    /// immutable array never is. The owned kinds drop with the `Value`.
-    /// An object's destructor is served from here when objects stand on
-    /// the heap, through [`HeapHooks`]; nothing here can serve user code
-    /// yet.
+    /// string, the array or the object is freed when its last owner
+    /// gives it up, an array's elements released with it, an object's
+    /// destructor served first through seam 1, and an interned string or
+    /// an immutable array never is. The owned kinds drop with the
+    /// `Value`. The request is the hooks over itself, so the heap the
+    /// destructor allocates from is this one, handed back for the
+    /// duration ([`Hooks`]).
     // Taking the value is the point: the owner is given up here, and a
     // `Value` that is still in hand after this call names what may be
     // freed.
@@ -2127,22 +2334,10 @@ impl Request {
     pub(crate) fn release(&mut self, value: Value) {
         match value.as_ref() {
             ValueRef::Str(s) => self.heap.release_string(s.heap()),
-            ValueRef::Array(a) => {
-                let (heap, mut hooks) = self.heap_and_hooks();
-                heap.release(Zval::array(a.heap()), &mut hooks);
-            }
+            ValueRef::Array(a) => Heap::release(&mut Hooks(self), Zval::array(a.heap())),
+            ValueRef::Object(o) => Heap::release(&mut Hooks(self), Zval::object(o.heap())),
             _ => {}
         }
-    }
-
-    /// The heap beside what it may re-enter: the one borrow that lets a
-    /// release serve a destructor through [`HeapHooks`] while the heap
-    /// is held.
-    fn heap_and_hooks(&mut self) -> (&mut Heap, Hooks<'_>) {
-        let Request {
-            heap, resources, ..
-        } = self;
-        (heap, Hooks { resources })
     }
 
     // -------------------------------------------------------- arrays
@@ -2165,8 +2360,7 @@ impl Request {
         value: Value,
     ) -> Result<(), Thrown> {
         let z = value.into_zval(self);
-        let (heap, mut hooks) = self.heap_and_hooks();
-        let written = heap.array_update(a, key, z, &mut hooks);
+        let written = Heap::array_update(&mut Hooks(self), a, key, z);
         self.fatal_of(written)
     }
 
@@ -2176,8 +2370,7 @@ impl Request {
         let z = value.into_zval(self);
         let appended = self.heap.array_append(a, z);
         if appended == Ok(false) {
-            let (heap, mut hooks) = self.heap_and_hooks();
-            heap.release(z, &mut hooks);
+            Heap::release(&mut Hooks(self), z);
         }
         self.fatal_of(appended)
     }
@@ -2185,8 +2378,7 @@ impl Request {
     /// `zend_hash_del` over `a`, which has one owner: `true` when the key
     /// was there, its value released.
     pub(crate) fn array_del(&mut self, a: Arr, key: php_heap::Key) -> bool {
-        let (heap, mut hooks) = self.heap_and_hooks();
-        heap.array_del(a, key, &mut hooks)
+        Heap::array_del(&mut Hooks(self), a, key)
     }
 
     /// `zend_array_dup`: a copy of `a` with one owner.
@@ -2383,29 +2575,33 @@ impl Request {
 }
 
 /// The request's side of the heap's upward seam (design §4.3, seam 1):
-/// what a release may re-enter, borrowed apart from the heap so that the
-/// heap can be held while it is served. An object's `__destruct` and its
-/// handler table are served from here once objects stand on the heap;
-/// nothing here can serve user code yet.
-struct Hooks<'a> {
-    resources: &'a mut Resources,
-}
+/// the request itself, whole, so that `__destruct` is served by the
+/// request that owns the frames, and the heap the operation is on is
+/// the request's own field, handed back through [`HeapHooks::heap`] at
+/// every step. No second `&mut` on the request: the heap never holds a
+/// borrow of itself across a call up, which is the discipline php keeps
+/// by re-reading `EG(objects_store)` after `dtor_obj`.
+struct Hooks<'a>(&'a mut Request);
 
 impl HeapHooks for Hooks<'_> {
-    fn destruct(&mut self, obj: ObjectId) {
-        let _ = obj;
+    fn heap(&mut self) -> &mut Heap {
+        &mut self.0.heap
     }
 
-    fn free_native(&mut self, obj: ObjectId) {
-        let _ = obj;
+    fn destruct(&mut self, obj: Obj) {
+        self.0.destruct(obj);
     }
 
-    fn gc_children(&mut self, obj: ObjectId, visit: &mut dyn FnMut(Zval)) {
+    fn free_native(&mut self, obj: Obj) {
+        self.0.free_native(obj);
+    }
+
+    fn gc_children(&mut self, obj: Obj, visit: &mut dyn FnMut(Zval)) {
         let _ = (obj, visit);
     }
 
     fn free_resource(&mut self, res: u32) {
-        self.resources.remove(res);
+        self.0.resources.remove(res);
     }
 
     fn out_of_memory(&mut self, bytes: usize) -> Fatal {
@@ -2483,11 +2679,14 @@ fn ini_atol(value: &[u8]) -> i64 {
 }
 
 /// One string property of a throwable, empty where there is none.
-fn string_prop(object: &PhpObject, name: &[u8]) -> String {
+fn string_prop(req: &Request, object: PhpObject, name: &[u8]) -> String {
     object
-        .prop(name)
-        .and_then(|value| value.as_str_bytes())
-        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        .prop(req, name)
+        .and_then(|value| {
+            value
+                .as_str_bytes()
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        })
         .unwrap_or_default()
 }
 

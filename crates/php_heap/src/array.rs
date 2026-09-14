@@ -38,7 +38,7 @@ use crate::gc::{self, Refcounted};
 use crate::hooks::{Fatal, HeapHooks};
 use crate::mm::Mm;
 use crate::string::Str;
-use crate::{Zval, ZvalType};
+use crate::{Heap, Zval, ZvalType};
 
 /// `HT_MIN_SIZE`.
 const MIN_SIZE: u32 = 8;
@@ -901,40 +901,38 @@ impl crate::Heap {
     }
 
     /// `zend_hash_update` or `zend_hash_index_update` over `a`: `z` is
-    /// the array's from here, and what `key` held is released. The array
-    /// has one owner, which the engine's `SEPARATE_ARRAY` made sure of.
-    pub fn array_update(
-        &mut self,
-        a: Arr,
-        key: Key,
-        z: Zval,
-        hooks: &mut dyn HeapHooks,
-    ) -> Result<(), Fatal> {
-        match key {
-            Key::Long(n) => {
-                let _ = self.array_write_long(a, n, z, Write::Update, hooks)?;
-            }
-            Key::Str(s) => self.array_write_str(a, s, z, hooks)?,
+    /// the array's from here, and what `key` held is released last, after
+    /// the write, through `hooks`, which is where a destructor is served
+    /// and why the heap is theirs (seam 1). The array has one owner,
+    /// which the engine's `SEPARATE_ARRAY` made sure of.
+    pub fn array_update(hooks: &mut dyn HeapHooks, a: Arr, key: Key, z: Zval) -> Result<(), Fatal> {
+        let written = match key {
+            Key::Long(n) => hooks.heap().array_write_long(a, n, z, Write::Update)?,
+            Key::Str(s) => hooks.heap().array_write_str(a, s, z)?,
+        };
+        if let Written::Replaced(old) = written {
+            Heap::release(hooks, old);
         }
         Ok(())
     }
 
     /// `zend_hash_next_index_insert`, `$a[] = z`: `false`, and `z` still
     /// the caller's, when `nNextFreeElement` is `ZEND_LONG_MAX` and taken.
+    /// Nothing is replaced, so nothing here can reach user code.
     pub fn array_append(&mut self, a: Arr, z: Zval) -> Result<bool, Fatal> {
-        let mut nothing = Unhooked;
-        self.array_write_long(a, a.next_free(), z, Write::Next, &mut nothing)
+        Ok(self.array_write_long(a, a.next_free(), z, Write::Next)? != Written::Refused)
     }
 
-    /// `_zend_hash_index_add_or_update_i`.
+    /// `_zend_hash_index_add_or_update_i`: what it did, the value it
+    /// replaced handed back for the caller to release once the heap is
+    /// let go of.
     fn array_write_long(
         &mut self,
         a: Arr,
         index: i64,
         z: Zval,
         write: Write,
-        hooks: &mut dyn HeapHooks,
-    ) -> Result<bool, Fatal> {
+    ) -> Result<Written, Fatal> {
         let index = if write == Write::Next && index == i64::MIN {
             0
         } else {
@@ -948,22 +946,21 @@ impl crate::Heap {
                 let old = a.read_slot(idx);
                 if !old.is_undef() {
                     if write == Write::Next {
-                        return Ok(false);
+                        return Ok(Written::Refused);
                     }
                     a.write_slot(idx, z);
-                    self.release(old, hooks);
-                    return Ok(true);
+                    return Ok(Written::Replaced(old));
                 }
                 a.packed_to_hash(&mut self.mm)?;
             } else if h < u64::from(a.table_size()) {
                 a.add_to_packed(h as u32, z);
-                return Ok(true);
+                return Ok(Written::Added);
             } else if (h >> 1) < u64::from(a.table_size())
                 && (a.table_size() >> 1) < header.num_elements.get()
             {
                 a.packed_grow(&mut self.mm)?;
                 a.add_to_packed(h as u32, z);
-                return Ok(true);
+                return Ok(Written::Added);
             } else {
                 if a.num_used() >= a.table_size() {
                     header.table_size.set(a.table_size() + a.table_size());
@@ -974,21 +971,20 @@ impl crate::Heap {
             if h < u64::from(a.table_size()) {
                 a.real_init_packed(&mut self.mm)?;
                 a.add_to_packed(h as u32, z);
-                return Ok(true);
+                return Ok(Written::Added);
             }
             a.real_init_mixed(&mut self.mm)?;
         } else {
             if let Some(idx) = a.find_long(h) {
                 if write == Write::Next {
-                    return Ok(false);
+                    return Ok(Written::Refused);
                 }
                 let mut b = a.read_bucket(idx);
                 let old = b.val;
                 b.val = z;
                 b.val.set_next(old.next());
                 a.write_bucket(idx, b);
-                self.release(old, hooks);
-                return Ok(true);
+                return Ok(Written::Replaced(old));
             }
             if a.num_used() >= a.table_size() {
                 a.do_resize(&mut self.mm)?;
@@ -1013,18 +1009,13 @@ impl crate::Heap {
             });
         }
         header.num_elements.set(header.num_elements.get() + 1);
-        Ok(true)
+        Ok(Written::Added)
     }
 
     /// `_zend_hash_add_or_update_i` with `HASH_UPDATE`: the key is the
-    /// bucket's own from here, one more owner unless it is interned.
-    fn array_write_str(
-        &mut self,
-        a: Arr,
-        key: Str,
-        z: Zval,
-        hooks: &mut dyn HeapHooks,
-    ) -> Result<(), Fatal> {
+    /// bucket's own from here, one more owner unless it is interned; the
+    /// value replaced, if one was, handed back to release.
+    fn array_write_str(&mut self, a: Arr, key: Str, z: Zval) -> Result<Written, Fatal> {
         let h = key.hash();
         let header = a.header();
         if a.is_uninitialized() {
@@ -1038,8 +1029,7 @@ impl crate::Heap {
                 b.val = z;
                 b.val.set_next(old.next());
                 a.write_bucket(idx, b);
-                self.release(old, hooks);
-                return Ok(());
+                return Ok(Written::Replaced(old));
             }
             if a.num_used() >= a.table_size() {
                 a.do_resize(&mut self.mm)?;
@@ -1061,24 +1051,24 @@ impl crate::Heap {
             },
         );
         a.link(idx);
-        Ok(())
+        Ok(Written::Added)
     }
 
     /// `zend_hash_del` and `zend_hash_index_del`: the element at `key`
-    /// gone, its value released and its string key given up; `false` for
-    /// a key that is not there.
-    pub fn array_del(&mut self, a: Arr, key: Key, hooks: &mut dyn HeapHooks) -> bool {
+    /// gone, its value released through `hooks` and its string key given
+    /// up; `false` for a key that is not there.
+    pub fn array_del(hooks: &mut dyn HeapHooks, a: Arr, key: Key) -> bool {
         let Some(idx) = a.find(key) else {
             return false;
         };
         if !a.is_packed() {
             a.unlink(idx);
             if let Some(k) = a.read_bucket(idx).key {
-                self.release_string(k);
+                hooks.heap().release_string(k);
             }
         }
         let old = a.del_at(idx);
-        self.release(old, hooks);
+        Heap::release(hooks, old);
         true
     }
 
@@ -1185,13 +1175,14 @@ impl crate::Heap {
         Ok(())
     }
 
-    /// `zend_array_destroy`: every element released, every string key
-    /// given up, the data and then the header back to this heap.
-    pub(crate) fn array_destroy(&mut self, a: Arr, hooks: &mut dyn HeapHooks) {
+    /// `zend_array_destroy`: every element released through `hooks`, in
+    /// order, with the table standing around each, every string key
+    /// given up, then the data and the header back to the heap.
+    pub(crate) fn array_destroy(hooks: &mut dyn HeapHooks, a: Arr) {
         let used = a.num_used();
         if a.is_packed() {
             for i in 0..used {
-                self.release(a.read_slot(i), hooks);
+                Heap::release(hooks, a.read_slot(i));
             }
         } else if !a.is_uninitialized() {
             for i in 0..used {
@@ -1199,35 +1190,32 @@ impl crate::Heap {
                 if b.val.is_undef() {
                     continue;
                 }
-                self.release(b.val, hooks);
+                Heap::release(hooks, b.val);
                 if let Some(k) = b.key {
-                    self.release_string(k);
+                    hooks.heap().release_string(k);
                 }
             }
         }
+        let heap = hooks.heap();
         if let Some(data) = a.data_addr() {
             // SAFETY: the data was this heap's and every element in it is
             // released.
-            unsafe { self.mm.free(data) };
+            unsafe { heap.mm.free(data) };
         }
         // SAFETY: the header came from `array_sized` and its last owner
         // has given it up.
-        unsafe { self.mm.free(a.address()) };
+        unsafe { heap.mm.free(a.address()) };
     }
 }
 
-/// What a write passes where nothing it releases can reach user code:
-/// the next-index insert refuses an occupied slot and replaces nothing.
-pub(crate) struct Unhooked;
-
-impl HeapHooks for Unhooked {
-    fn destruct(&mut self, _obj: crate::ObjectId) {}
-    fn free_native(&mut self, _obj: crate::ObjectId) {}
-    fn gc_children(&mut self, _obj: crate::ObjectId, _visit: &mut dyn FnMut(Zval)) {}
-    fn free_resource(&mut self, _res: u32) {}
-    fn out_of_memory(&mut self, bytes: usize) -> Fatal {
-        Fatal::OutOfMemory(bytes)
-    }
+/// What a write did: the element added, an element's value replaced and
+/// handed back for the release that may reach user code, or the
+/// next-index insert refused because `ZEND_LONG_MAX` is taken.
+#[derive(Clone, Copy, PartialEq)]
+enum Written {
+    Added,
+    Replaced(Zval),
+    Refused,
 }
 
 #[cfg(test)]
@@ -1246,7 +1234,30 @@ mod tests {
         }
     }
 
-    use Unhooked as Nothing;
+    /// The hooks the array's tests pass: a heap and nothing to serve,
+    /// since no element here is an object.
+    struct Nothing {
+        heap: Heap,
+    }
+
+    impl Nothing {
+        fn new() -> Nothing {
+            Nothing { heap: Heap::new() }
+        }
+    }
+
+    impl HeapHooks for Nothing {
+        fn heap(&mut self) -> &mut Heap {
+            &mut self.heap
+        }
+        fn destruct(&mut self, _obj: crate::Obj) {}
+        fn free_native(&mut self, _obj: crate::Obj) {}
+        fn gc_children(&mut self, _obj: crate::Obj, _visit: &mut dyn FnMut(Zval)) {}
+        fn free_resource(&mut self, _res: u32) {}
+        fn out_of_memory(&mut self, bytes: usize) -> Fatal {
+            Fatal::OutOfMemory(bytes)
+        }
+    }
 
     fn keys(a: Arr) -> Vec<i64> {
         a.iter()
@@ -1276,39 +1287,45 @@ mod tests {
     #[test]
     fn an_array_takes_the_bytes_php_s_takes() {
         let _alone = alone();
-        let mut heap = Heap::new();
-        let mut nothing = Nothing;
-        let a = heap.array();
+        let mut nothing = Nothing::new();
+        let start = nothing.heap.memory_usage(false);
+        let a = nothing.heap.array();
         assert!(a.is_ok(), "the heap would not allocate a header");
         let Ok(a) = a else { return };
-        assert_eq!(heap.memory_usage(false), 56);
-        assert!(matches!(heap.array_append(a, Zval::long(1)), Ok(true)));
-        assert_eq!(heap.memory_usage(false), 56 + 160);
+        assert_eq!(nothing.heap.memory_usage(false), start + 56);
+        assert!(matches!(
+            nothing.heap.array_append(a, Zval::long(1)),
+            Ok(true)
+        ));
+        assert_eq!(nothing.heap.memory_usage(false), start + 56 + 160);
         assert!(a.is_packed());
         for i in 2..=8 {
-            assert!(matches!(heap.array_append(a, Zval::long(i)), Ok(true)));
+            assert!(matches!(
+                nothing.heap.array_append(a, Zval::long(i)),
+                Ok(true)
+            ));
         }
-        assert_eq!(heap.memory_usage(false), 56 + 160);
-        assert!(matches!(heap.array_append(a, Zval::long(9)), Ok(true)));
-        assert_eq!(heap.memory_usage(false), 56 + 320);
-        assert_eq!(heap.memory_peak(), 56 + 160 + 320);
+        assert_eq!(nothing.heap.memory_usage(false), start + 56 + 160);
+        assert!(matches!(
+            nothing.heap.array_append(a, Zval::long(9)),
+            Ok(true)
+        ));
+        assert_eq!(nothing.heap.memory_usage(false), start + 56 + 320);
+        assert_eq!(nothing.heap.memory_peak(), start + 56 + 160 + 320);
         assert_eq!(a.table_size(), 16);
         assert_eq!(a.len(), 9);
         assert_eq!(a.next_free(), 9);
-        let key = heap.string(b"name");
+        let key = nothing.heap.string(b"name");
         let Ok(key) = key else { return };
-        assert!(
-            heap.array_update(a, Key::Str(key), Zval::long(10), &mut nothing)
-                .is_ok()
-        );
+        assert!(Heap::array_update(&mut nothing, a, Key::Str(key), Zval::long(10)).is_ok());
         assert!(!a.is_packed());
-        assert_eq!(heap.memory_usage(false), 56 + 640 + 32);
+        assert_eq!(nothing.heap.memory_usage(false), start + 56 + 640 + 32);
         assert_eq!(key.refcount(), 2, "the bucket holds the key");
         assert_eq!(a.get(Key::Str(key)).and_then(Zval::as_long), Some(10));
         assert_eq!(a.get(Key::Long(3)).and_then(Zval::as_long), Some(4));
-        heap.release_string(key);
-        heap.release(Zval::array(a), &mut nothing);
-        assert_eq!(heap.memory_usage(false), 0);
+        nothing.heap.release_string(key);
+        Heap::release(&mut nothing, Zval::array(a));
+        assert_eq!(nothing.heap.memory_usage(false), start);
     }
 
     /// `nNextFreeElement` under the 8.3 rule: a negative first key sets
@@ -1317,35 +1334,34 @@ mod tests {
     #[test]
     fn the_next_free_element_is_php_s() {
         let _alone = alone();
-        let mut heap = Heap::new();
-        let mut nothing = Nothing;
-        let Ok(a) = heap.array() else { return };
+        let mut nothing = Nothing::new();
+        let Ok(a) = nothing.heap.array() else { return };
         assert_eq!(a.next_free(), i64::MIN);
-        assert!(
-            heap.array_update(a, Key::Long(-5), Zval::long(1), &mut nothing)
-                .is_ok()
-        );
+        assert!(Heap::array_update(&mut nothing, a, Key::Long(-5), Zval::long(1)).is_ok());
         assert_eq!(a.next_free(), -4);
-        assert!(matches!(heap.array_append(a, Zval::long(2)), Ok(true)));
+        assert!(matches!(
+            nothing.heap.array_append(a, Zval::long(2)),
+            Ok(true)
+        ));
         assert_eq!(keys(a), vec![-5, -4]);
-        assert!(
-            heap.array_update(a, Key::Long(10), Zval::long(3), &mut nothing)
-                .is_ok()
-        );
+        assert!(Heap::array_update(&mut nothing, a, Key::Long(10), Zval::long(3)).is_ok());
         assert_eq!(a.next_free(), 11);
-        assert!(heap.array_del(a, Key::Long(10), &mut nothing));
+        assert!(Heap::array_del(&mut nothing, a, Key::Long(10)));
         assert_eq!(a.next_free(), 11);
         assert_eq!(a.len(), 2);
-        assert!(matches!(heap.array_append(a, Zval::long(4)), Ok(true)));
+        assert!(matches!(
+            nothing.heap.array_append(a, Zval::long(4)),
+            Ok(true)
+        ));
         assert_eq!(keys(a), vec![-5, -4, 11]);
         // `ZEND_LONG_MAX` taken: the next insert is refused.
-        assert!(
-            heap.array_update(a, Key::Long(i64::MAX), Zval::null(), &mut nothing)
-                .is_ok()
-        );
+        assert!(Heap::array_update(&mut nothing, a, Key::Long(i64::MAX), Zval::null()).is_ok());
         assert_eq!(a.next_free(), i64::MAX);
-        assert!(matches!(heap.array_append(a, Zval::long(5)), Ok(false)));
-        heap.release(Zval::array(a), &mut nothing);
+        assert!(matches!(
+            nothing.heap.array_append(a, Zval::long(5)),
+            Ok(false)
+        ));
+        Heap::release(&mut nothing, Zval::array(a));
     }
 
     /// A deleted element is a tombstone until the rehash compacts it:
@@ -1356,16 +1372,18 @@ mod tests {
     #[test]
     fn a_deleted_element_is_a_tombstone_and_the_pointer_survives_the_rehash() {
         let _alone = alone();
-        let mut heap = Heap::new();
-        let mut nothing = Nothing;
-        let Ok(a) = heap.array() else { return };
-        let Ok(key) = heap.intern(b"k") else { return };
-        assert!(
-            heap.array_update(a, Key::Str(key), Zval::long(0), &mut nothing)
-                .is_ok()
-        );
+        let mut nothing = Nothing::new();
+        let start = nothing.heap.memory_usage(false);
+        let Ok(a) = nothing.heap.array() else { return };
+        let Ok(key) = nothing.heap.intern(b"k") else {
+            return;
+        };
+        assert!(Heap::array_update(&mut nothing, a, Key::Str(key), Zval::long(0)).is_ok());
         for i in 1..8 {
-            assert!(matches!(heap.array_append(a, Zval::long(i)), Ok(true)));
+            assert!(matches!(
+                nothing.heap.array_append(a, Zval::long(i)),
+                Ok(true)
+            ));
         }
         assert_eq!(a.table_size(), 8);
         assert_eq!(keys(a), vec![-1, 0, 1, 2, 3, 4, 5, 6]);
@@ -1375,15 +1393,18 @@ mod tests {
             a.entry_at(a.position()).and_then(|(_, z)| z.as_long()),
             Some(3)
         );
-        assert!(heap.array_del(a, Key::Long(0), &mut nothing));
-        assert!(heap.array_del(a, Key::Long(1), &mut nothing));
+        assert!(Heap::array_del(&mut nothing, a, Key::Long(0)));
+        assert!(Heap::array_del(&mut nothing, a, Key::Long(1)));
         assert_eq!(a.len(), 6);
         assert_eq!(keys(a), vec![-1, 2, 3, 4, 5, 6]);
         assert_eq!(a.position(), 3, "the pointer stands where it stood");
         // The ninth write finds the table full, and with two of eight
         // buckets tombstones, more than a thirty-second, it compacts in
         // place rather than doubling.
-        assert!(matches!(heap.array_append(a, Zval::long(8)), Ok(true)));
+        assert!(matches!(
+            nothing.heap.array_append(a, Zval::long(8)),
+            Ok(true)
+        ));
         assert_eq!(a.table_size(), 8);
         assert_eq!(keys(a), vec![-1, 2, 3, 4, 5, 6, 7]);
         assert_eq!(a.position(), 1, "and moved with its element");
@@ -1400,8 +1421,8 @@ mod tests {
         assert_eq!(a.entry_at(a.position()), None, "past the end");
         assert!(!a.forward(), "and no further");
         assert!(!a.backward(), "prev() past the end fails as php's does");
-        heap.release(Zval::array(a), &mut nothing);
-        assert_eq!(heap.memory_usage(false), 0);
+        Heap::release(&mut nothing, Zval::array(a));
+        assert_eq!(nothing.heap.memory_usage(false), start);
     }
 
     /// A packed table stays packed under holes and `unset` of its last
@@ -1409,34 +1430,27 @@ mod tests {
     #[test]
     fn a_packed_table_with_holes_and_its_trimmed_end() {
         let _alone = alone();
-        let mut heap = Heap::new();
-        let mut nothing = Nothing;
-        let Ok(a) = heap.array() else { return };
-        assert!(
-            heap.array_update(a, Key::Long(0), Zval::long(0), &mut nothing)
-                .is_ok()
-        );
-        assert!(
-            heap.array_update(a, Key::Long(3), Zval::long(3), &mut nothing)
-                .is_ok()
-        );
+        let mut nothing = Nothing::new();
+        let Ok(a) = nothing.heap.array() else { return };
+        assert!(Heap::array_update(&mut nothing, a, Key::Long(0), Zval::long(0)).is_ok());
+        assert!(Heap::array_update(&mut nothing, a, Key::Long(3), Zval::long(3)).is_ok());
         assert!(a.is_packed(), "a key below the table size keeps it packed");
         assert_eq!(a.len(), 2);
         assert_eq!(keys(a), vec![0, 3]);
         assert!(!a.contains(Key::Long(1)));
-        assert!(heap.array_del(a, Key::Long(3), &mut nothing));
+        assert!(Heap::array_del(&mut nothing, a, Key::Long(3)));
         assert_eq!(a.next_free(), 4);
-        assert!(matches!(heap.array_append(a, Zval::long(4)), Ok(true)));
+        assert!(matches!(
+            nothing.heap.array_append(a, Zval::long(4)),
+            Ok(true)
+        ));
         assert_eq!(keys(a), vec![0, 4]);
         // Writing into a hole keeps the order, which packed cannot, so
         // the table becomes a hash.
-        assert!(
-            heap.array_update(a, Key::Long(2), Zval::long(2), &mut nothing)
-                .is_ok()
-        );
+        assert!(Heap::array_update(&mut nothing, a, Key::Long(2), Zval::long(2)).is_ok());
         assert!(!a.is_packed());
         assert_eq!(keys(a), vec![0, 4, 2]);
-        heap.release(Zval::array(a), &mut nothing);
+        Heap::release(&mut nothing, Zval::array(a));
     }
 
     /// `zend_array_dup` is `SEPARATE_ARRAY`'s copy: the elements one
@@ -1445,39 +1459,51 @@ mod tests {
     #[test]
     fn separation_copies_once_and_counts_the_elements() {
         let _alone = alone();
-        let mut heap = Heap::new();
-        let mut nothing = Nothing;
-        let Ok(a) = heap.array() else { return };
-        let Ok(s) = heap.string(b"shared") else {
+        let mut nothing = Nothing::new();
+        let start = nothing.heap.memory_usage(false);
+        let Ok(a) = nothing.heap.array() else { return };
+        let Ok(s) = nothing.heap.string(b"shared") else {
             return;
         };
-        assert!(matches!(heap.array_append(a, Zval::string(s)), Ok(true)));
+        assert!(matches!(
+            nothing.heap.array_append(a, Zval::string(s)),
+            Ok(true)
+        ));
         let z = Zval::array(a);
         assert!(z.is_refcounted());
-        heap.addref(z);
+        nothing.heap.addref(z);
         assert_eq!(a.refcount(), 2);
-        let before = heap.memory_usage(false);
-        let Ok(b) = heap.separate(a) else { return };
+        let before = nothing.heap.memory_usage(false);
+        let Ok(b) = nothing.heap.separate(a) else {
+            return;
+        };
         assert!(!b.is_same(a), "two owners: a copy");
         assert_eq!(a.refcount(), 1);
         assert_eq!(b.refcount(), 1);
         assert_eq!(s.refcount(), 2, "the string is held by both arrays");
-        assert_eq!(heap.memory_usage(false), before + 56 + 160);
-        assert!(matches!(heap.array_append(b, Zval::long(2)), Ok(true)));
+        assert_eq!(nothing.heap.memory_usage(false), before + 56 + 160);
+        assert!(matches!(
+            nothing.heap.array_append(b, Zval::long(2)),
+            Ok(true)
+        ));
         assert_eq!(a.len(), 1);
         assert_eq!(b.len(), 2);
         assert!(
-            heap.separate(b).is_ok_and(|c| c.is_same(b)),
+            nothing.heap.separate(b).is_ok_and(|c| c.is_same(b)),
             "one owner: itself"
         );
-        heap.release(Zval::array(b), &mut nothing);
+        Heap::release(&mut nothing, Zval::array(b));
         assert_eq!(s.refcount(), 1, "and by the one that is left");
-        heap.release(z, &mut nothing);
-        assert_eq!(heap.memory_usage(false), 0, "which took the string with it");
+        Heap::release(&mut nothing, z);
+        assert_eq!(
+            nothing.heap.memory_usage(false),
+            start,
+            "which took the string with it"
+        );
     }
 
     /// A nested array is released with its holder, and a boxed stand-in
-    /// is dropped when its last owner goes, or swept with the heap.
+    /// is dropped when its last owner goes, or swept with the nothing.heap.
     #[test]
     fn what_an_array_holds_goes_with_it() {
         struct Tracked(std::sync::Arc<std::sync::atomic::AtomicUsize>);
@@ -1489,23 +1515,31 @@ mod tests {
         let _alone = alone();
         let dropped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         {
-            let mut heap = Heap::new();
-            let mut nothing = Nothing;
-            let Ok(outer) = heap.array() else { return };
-            let Ok(inner) = heap.array() else { return };
-            let boxed = heap.boxed(ZvalType::Object, Box::new(Tracked(dropped.clone())));
+            let mut nothing = Nothing::new();
+            let start = nothing.heap.memory_usage(false);
+            let Ok(outer) = nothing.heap.array() else {
+                return;
+            };
+            let Ok(inner) = nothing.heap.array() else {
+                return;
+            };
+            let boxed = nothing
+                .heap
+                .boxed(ZvalType::Reference, Box::new(Tracked(dropped.clone())));
             assert!(boxed.is_boxed());
             assert!(boxed.as_boxed::<Tracked>().is_some());
-            assert!(matches!(heap.array_append(inner, boxed), Ok(true)));
+            assert!(matches!(nothing.heap.array_append(inner, boxed), Ok(true)));
             assert!(matches!(
-                heap.array_append(outer, Zval::array(inner)),
+                nothing.heap.array_append(outer, Zval::array(inner)),
                 Ok(true)
             ));
-            let swept = heap.boxed(ZvalType::Resource, Box::new(Tracked(dropped.clone())));
+            let swept = nothing
+                .heap
+                .boxed(ZvalType::Resource, Box::new(Tracked(dropped.clone())));
             assert!(swept.as_boxed::<Tracked>().is_some());
-            heap.release(Zval::array(outer), &mut nothing);
+            Heap::release(&mut nothing, Zval::array(outer));
             assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
-            assert_eq!(heap.memory_usage(false), 0);
+            assert_eq!(nothing.heap.memory_usage(false), start);
         }
         assert_eq!(
             dropped.load(std::sync::atomic::Ordering::SeqCst),
@@ -1519,19 +1553,23 @@ mod tests {
     #[test]
     fn a_sort_keeps_keys_and_is_stable() {
         let _alone = alone();
-        let mut heap = Heap::new();
-        let mut nothing = Nothing;
-        let Ok(a) = heap.array() else { return };
+        let mut nothing = Nothing::new();
+        let Ok(a) = nothing.heap.array() else { return };
         for v in [3, 1, 2, 1] {
-            assert!(matches!(heap.array_append(a, Zval::long(v)), Ok(true)));
+            assert!(matches!(
+                nothing.heap.array_append(a, Zval::long(v)),
+                Ok(true)
+            ));
         }
-        assert!(heap.array_del(a, Key::Long(2), &mut nothing));
+        assert!(Heap::array_del(&mut nothing, a, Key::Long(2)));
         a.end();
-        let sorted = heap.array_sort(a, &mut |x, y| x.as_long().cmp(&y.as_long()));
+        let sorted = nothing
+            .heap
+            .array_sort(a, &mut |x, y| x.as_long().cmp(&y.as_long()));
         assert!(sorted.is_ok());
         assert_eq!(keys(a), vec![1, 3, 0]);
         assert_eq!(a.position(), 0);
         assert!(!a.is_packed());
-        heap.release(Zval::array(a), &mut nothing);
+        Heap::release(&mut nothing, Zval::array(a));
     }
 }

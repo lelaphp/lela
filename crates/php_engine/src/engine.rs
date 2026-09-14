@@ -476,11 +476,17 @@ impl Engine {
             }
             None => {}
         }
+        // `php_request_shutdown`'s order (design §5.10): the destructors
+        // of what is still live before the extensions' `rshutdown`, in
+        // reverse bundle order, and the object storage freed after them
+        // in `shutdown_executor`.
+        req.call_destructors();
         for extension in self.shared.extensions.iter().rev() {
             if let Some(rshutdown) = extension.rshutdown {
                 rshutdown(&mut req);
             }
         }
+        req.free_object_storage();
         // `php_error_cb` rendered the fatal where it was raised, on
         // whichever of the two streams the ini entries name; what is left
         // for the host is the log form of it, whether or not `log_errors`
@@ -1202,9 +1208,11 @@ mod tests {
                 "what the request interned is the request's own memory"
             );
         }
+        // The object store's table, and nothing else, before a line runs
+        // (design §5.4): 1024 buckets of a pointer each.
         assert_eq!(
             started_at,
-            vec![0, 0],
+            vec![8192, 8192],
             "every request starts where the one before it did"
         );
         assert_eq!(

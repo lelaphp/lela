@@ -100,15 +100,20 @@ pub fn instantiate(
     new_object(req, class)
 }
 
-/// `object_init_ex`: an instance with its defaults and no constructor call.
+/// `object_init_ex`: an instance with its defaults and no constructor
+/// call, a store entry of the request's heap with one owner, the
+/// caller's.
 pub fn new_object(req: &mut Request, class: ClassId) -> Result<PhpObject, Thrown> {
-    Ok(req.new_object(class))
+    req.new_object(class)
 }
 
-/// `clone`, through the class's `clone_obj` handler and `__clone`.
+/// `clone`: `zend_objects_clone_obj`, a fresh entry holding what the
+/// object holds with one more owner each, through the class's
+/// `clone_obj` handler and `__clone` once the table exists; an object
+/// with a native payload is php's `Error` for an uncloneable object
+/// until then.
 pub fn clone(req: &mut Request, object: &PhpObject) -> Result<PhpObject, Thrown> {
-    let _ = req;
-    Ok(object.clone())
+    req.clone_object(object.heap())
 }
 
 /// `zend_lookup_class`: the linked class named, autoloading if needed.
@@ -225,22 +230,23 @@ pub fn closure_from_callable(req: &mut Request, callable: &Callable) -> Result<P
     Err(no_loop(req, &callable.name()))
 }
 
-/// Read a property through the class's `read_property` handler.
+/// Read a property through the class's `read_property` handler: a
+/// view, `null` for one that is not there, as `zend_std_read_property`
+/// answers with `BP_VAR_IS`.
 pub fn read_prop(req: &mut Request, object: &PhpObject, name: &[u8]) -> Result<Value, Thrown> {
-    let _ = req;
-    Ok(object.prop(name).cloned().unwrap_or_default())
+    Ok(object.prop(req, name).unwrap_or_default())
 }
 
-/// Write a property through the class's `write_property` handler.
+/// Write a property through the class's `write_property` handler: the
+/// value is the object's from here.
 pub fn write_prop(
     req: &mut Request,
-    object: &mut PhpObject,
+    object: &PhpObject,
     name: &[u8],
     value: Value,
 ) -> Result<(), Thrown> {
     let name = PhpString::new(req, name)?;
-    object.set_prop(name, value);
-    Ok(())
+    object.set_prop(req, name, value)
 }
 
 /// Read a `static` property of `class`.
@@ -289,7 +295,7 @@ pub fn new_lazy_proxy(
 /// `ReflectionClass::resetAsLazyGhost`.
 pub fn reset_as_lazy_ghost(
     req: &mut Request,
-    object: &mut PhpObject,
+    object: &PhpObject,
     initializer: &Callable,
 ) -> Result<(), Thrown> {
     let _ = (req, object, initializer);
@@ -299,7 +305,7 @@ pub fn reset_as_lazy_ghost(
 /// `ReflectionClass::resetAsLazyProxy`.
 pub fn reset_as_lazy_proxy(
     req: &mut Request,
-    object: &mut PhpObject,
+    object: &PhpObject,
     factory: &Callable,
 ) -> Result<(), Thrown> {
     let _ = (req, object, factory);
@@ -307,13 +313,13 @@ pub fn reset_as_lazy_proxy(
 }
 
 /// `ReflectionClass::initializeLazyObject`: serve the initializer now.
-pub fn initialize_lazy(req: &mut Request, object: &mut PhpObject) -> Result<(), Thrown> {
+pub fn initialize_lazy(req: &mut Request, object: &PhpObject) -> Result<(), Thrown> {
     let _ = (req, object);
     Ok(())
 }
 
 /// `ReflectionClass::markLazyObjectAsInitialized`.
-pub fn skip_lazy_initialization(req: &mut Request, object: &mut PhpObject) -> Result<(), Thrown> {
+pub fn skip_lazy_initialization(req: &mut Request, object: &PhpObject) -> Result<(), Thrown> {
     let _ = (req, object);
     Ok(())
 }

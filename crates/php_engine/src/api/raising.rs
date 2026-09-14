@@ -122,22 +122,25 @@ fn throwable_at(
     file: &[u8],
     line: u32,
 ) -> Result<PhpObject, Thrown> {
-    let mut object = req.new_object_of(class);
+    let object = req.new_object_of(class)?;
     let message = Value::string(PhpString::new(req, message.as_bytes())?);
     let file = Value::string(PhpString::new(req, file)?);
     let line = Value::int(i64::from(line));
     for (name, value) in [(&b"message"[..], message), (b"file", file), (b"line", line)] {
         let name = PhpString::new(req, name)?;
-        object.set_prop(name, value);
+        object.set_prop(req, name, value)?;
     }
     Ok(object)
 }
 
-/// Make a throwable pending, `zend_throw_exception_object`; a value that
+/// Make a throwable pending, `zend_throw_exception_object`: one more
+/// owner of the object, the pending slot's, as `ZEND_THROW` takes one
+/// before it frees its operand; the caller keeps its own. A value that
 /// is not an object becomes an `Error`.
 pub fn throw_value(req: &mut Request, throwable: &Value) -> Thrown {
     if let Some(object) = throwable.as_object() {
-        return Thrown::of(Some(object.clone()));
+        req.addref(throwable);
+        return Thrown::of(Some(*object));
     }
     throw(
         req,
@@ -151,11 +154,11 @@ pub fn throw_value(req: &mut Request, throwable: &Value) -> Thrown {
 /// that is the site an uncaught one names. Its strings are the
 /// request's, and the `Err` is the memory limit refusing them.
 pub fn new_throwable(req: &mut Request, class: &str, message: &str) -> Result<Value, Thrown> {
-    let mut object = req.new_object_of(class);
+    let object = req.new_object_of(class)?;
     let name = PhpString::new(req, b"message")?;
     let message = PhpString::new(req, message.as_bytes())?;
-    object.set_prop(name, Value::string(message));
-    req.note_throw_site(&mut object)?;
+    object.set_prop(req, name, Value::string(message))?;
+    req.note_throw_site(object)?;
     Ok(object.as_value())
 }
 
