@@ -8,7 +8,7 @@
 //! `Scripting` state, and `${` goes through `LookingForVarName`, exactly
 //! like Zend.
 
-use crate::source::Diagnostic;
+use crate::source::{Diagnostic, Level};
 
 use super::{Lexer, State, is_label_start};
 use crate::SyntaxKind;
@@ -48,14 +48,15 @@ impl Lexer<'_> {
                 _ => self.pos += 1,
             }
         }
-        if !terminated {
-            let eof = self.span(self.text.len(), self.text.len());
-            self.diag(Diagnostic::new(
-                eof,
-                "string runs to end of file without a closing delimiter",
-            ));
-        }
-        self.emit(SyntaxKind::SINGLE_QUOTED, start);
+        // Unclosed: php hands the parser the rest of the file as one
+        // `T_ENCAPSED_AND_WHITESPACE`, the quote included, and the parser
+        // says `unexpected string content "abc"` where it stands.
+        let kind = if terminated {
+            SyntaxKind::SINGLE_QUOTED
+        } else {
+            SyntaxKind::STRING_TEXT
+        };
+        self.emit(kind, start);
     }
 
     // ----- DoubleQuoted and Backquote ------------------------------------------
@@ -130,8 +131,31 @@ impl Lexer<'_> {
             } else {
                 "Invalid UTF-8 codepoint escape sequence"
             };
-            self.diag(Diagnostic::new(span, text));
+            let line = self.line(start);
+            self.diag(Diagnostic::new(span, line, text));
             self.pos = start + 2; // recover after `\u`; the rest re-scans as text
+            return;
+        }
+        if matches!(self.byte(start + 1), b'0'..=b'7') {
+            // `\NNN`: up to three octal digits. Three that name more than
+            // 0377 are still one escape, one byte, and php warns as it
+            // scans (`zend_scan_escape_string`).
+            let mut i = start + 1;
+            while i < start + 4 && matches!(self.byte(i), b'0'..=b'7') {
+                i += 1;
+            }
+            if i == start + 4 && self.byte(start + 1) >= b'4' {
+                let span = self.span(start, i);
+                let line = self.line(start);
+                let digits = String::from_utf8_lossy(&self.text[start + 1..i]).into_owned();
+                self.diag(Diagnostic::of(
+                    Level::CompileWarning,
+                    span,
+                    line,
+                    format!("Octal escape sequence overflow \\{digits} is greater than \\377"),
+                ));
+            }
+            self.pos = i;
             return;
         }
         self.pos = (start + 2).min(self.text.len());
@@ -294,11 +318,6 @@ impl Lexer<'_> {
                 // Zend {ANY_CHAR}: the byte comes back as a token of its own
                 // and the parser says `unexpected character 0x%02X`.
                 self.pos = start + 1;
-                let span = self.span(start, self.pos);
-                self.diag(Diagnostic::new(
-                    span,
-                    format!("syntax error, unexpected character 0x{b:02X}"),
-                ));
                 self.emit(SyntaxKind::ERROR, start);
             }
         }

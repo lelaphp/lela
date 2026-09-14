@@ -17,7 +17,7 @@ use std::fmt::Write as _;
 /// lossless on the way: the token texts concatenate to the source, on
 /// every recovery path included.
 pub fn parse_lossless(src: &str) -> php_syntax::Parsed {
-    let parsed = php_syntax::parse(src.as_bytes());
+    let parsed = php_syntax::parse(src.as_bytes(), &php_syntax::Options::default());
     let mut text = Vec::new();
     for token in &parsed.tokens {
         text.extend_from_slice(

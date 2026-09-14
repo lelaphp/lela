@@ -149,7 +149,8 @@ fn top_level_const_keyword_name_rejected() {
                   INT@18..19 "1"
                 SEMICOLON@19..20 ";"
             error@12..15 syntax error, unexpected token "for", expecting identifier
-            error@16..17 syntax error, unexpected token "="
+            error@16..17 syntax error, unexpected token "=", expecting "("
+            error@16..17 syntax error, unexpected token "=", expecting end of file
         "#]],
     );
 }
@@ -310,14 +311,18 @@ fn enum_named_reserved_word_rejected() {
         expect![[r#"
             SOURCE_FILE@0..18
               OPEN_TAG@0..6 "<?php "
-              EXPR_STMT@6..15
-                IDENT@6..10 "enum"
-                ERROR@11..15
+              ENUM_DECL@6..11
+                ENUM_KW@6..10 "enum"
+                CLASS_BODY@11..11
+              EXPR_STMT@11..15
+                LIST_EXPR@11..15
                   LIST_KW@11..15 "list"
               BLOCK@16..18
                 L_CURLY@16..17 "{"
                 R_CURLY@17..18 "}"
-            error@11..15 syntax error, unexpected token "list"
+            error@11..15 syntax error, unexpected token "list", expecting identifier
+            error@11..15 syntax error, unexpected token "list", expecting "{"
+            error@16..17 syntax error, unexpected token "{", expecting "("
         "#]],
     );
 }
@@ -527,7 +532,7 @@ fn function_named_match_rejected() {
                 L_CURLY@23..24 "{"
                 R_CURLY@24..25 "}"
             error@15..20 syntax error, unexpected token "match", expecting "("
-            error@15..20 syntax error, unexpected token "match"
+            error@15..20 syntax error, unexpected token "match", expecting "{"
         "#]],
     );
 }
@@ -635,8 +640,8 @@ fn private_set_with_spaces() {
                     SEMICOLON@40..41 ";"
                   R_CURLY@42..43 "}"
             error@28..29 syntax error, unexpected token ")", expecting token "&"
+            error@30..33 syntax error, unexpected identifier "int", expecting "|"
             error@30..33 syntax error, unexpected identifier "int", expecting variable
-            error@30..33 syntax error, unexpected identifier "int"
         "#]],
     );
 }

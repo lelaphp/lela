@@ -112,8 +112,13 @@ impl Lexer<'_> {
                 if start < ws_end {
                     self.pos = ws_end;
                     if info.mixed_closing {
+                        // php finds the closing marker's mix while it
+                        // scans the body ahead, and reports it on the
+                        // line after the opener whichever line the
+                        // marker stands on (probed 8.5.9).
                         let span = self.span(line_start, ws_end);
-                        self.diag(Diagnostic::new(span, MIXED_INDENTATION));
+                        let line = self.heredoc_opener_line().saturating_add(1);
+                        self.diag(Diagnostic::new(span, line, MIXED_INDENTATION));
                     }
                     self.emit(SyntaxKind::HEREDOC_INDENT, start);
                 }
@@ -246,13 +251,20 @@ impl Lexer<'_> {
     /// One defect per line, and the wrong-class byte always precedes the
     /// content byte, so the mix wins when both apply, Zend's order.
     fn hold_body_indent(&mut self, line_start: usize, strip_end: usize, info: &HeredocInfo) {
+        // php finds the closing marker before it judges a body line, and
+        // a marker that mixes tabs and spaces is where it throws: no
+        // body line is judged after that.
+        if info.mixed_closing {
+            return;
+        }
         let prefix = self.span(line_start, strip_end);
         let bad_mix = (line_start..strip_end).any(|i| {
             let is_space = self.byte(i) == b' ';
             is_space != info.uses_spaces
         });
-        if bad_mix && !info.mixed_closing {
-            self.diag(Diagnostic::new(prefix, MIXED_INDENTATION));
+        let line = self.line(line_start);
+        if bad_mix {
+            self.diag(Diagnostic::new(prefix, line, MIXED_INDENTATION));
             return;
         }
         let stripped = strip_end - line_start;
@@ -262,12 +274,22 @@ impl Lexer<'_> {
         {
             self.diag(Diagnostic::new(
                 prefix,
+                line,
                 format!(
                     "Invalid body indentation level (expecting an indentation level of at least {})",
                     info.indent_len
                 ),
             ));
         }
+    }
+
+    /// The line of the open heredoc's `<<<`, read off the state frame.
+    fn heredoc_opener_line(&self) -> u32 {
+        let opener = self
+            .frames
+            .last()
+            .map_or(0, |frame| frame.aux.opener.start as usize);
+        self.line(opener)
     }
 
     /// Computes, once per heredoc and cached in the aux slot, the closing

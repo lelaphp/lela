@@ -4,7 +4,7 @@
 
 use crate::SyntaxKind as K;
 use crate::parser::{CompletedMarker, Marker, Parser};
-use crate::source::Diagnostic;
+use crate::source::{Diagnostic, Level};
 
 use super::{ckw, decl, strings};
 
@@ -78,14 +78,23 @@ pub(crate) fn expr_list(p: &mut Parser<'_>) {
 /// `Expr,+` with an optional trailing comma before `closer`: the call-like
 /// construct lists (`unset(…)`, `isset(…)`) take one since php 7.3.
 pub(crate) fn expr_list_trailing(p: &mut Parser<'_>, closer: K) {
+    let mut after_comma = false;
     loop {
         if !expr(p) {
-            p.error_unexpected();
+            // After a comma php's clause collapses to the closer
+            // (`isset($x, ;` is `expecting ")"`, probed 8.5.9).
+            let d = if after_comma {
+                p.unexpected_here_expecting(php_list_closer(closer))
+            } else {
+                p.unexpected_here()
+            };
+            p.error(d);
             break;
         }
         if !p.eat(K::COMMA) || p.peek_at(closer) {
             break;
         }
+        after_comma = true;
     }
 }
 
@@ -306,6 +315,8 @@ fn expr_bp_inner(p: &mut Parser<'_>, min_bp: u8) -> Option<Lhs> {
             }
             if let Some(els) = expr_bp(p, rbp) {
                 els.finish(p);
+            } else {
+                p.error_unexpected();
             }
             lhs = Lhs::Done(m.complete(p, K::TERNARY_EXPR));
             prev_tier = None;
@@ -382,7 +393,8 @@ fn prefix(p: &mut Parser<'_>) -> Option<Lhs> {
     // One-shot: only the immediately next primary may be an unassigned
     // `list(...)` (a `foreach` target, an array or list element); a
     // descent through another primary first revokes the grant.
-    let list_target_ok = std::mem::take(&mut p.list_target_ok);
+    let list_target_ok = std::mem::take(&mut p.grants.list_target);
+    let void_ok = std::mem::take(&mut p.grants.void);
     let kind = p.current();
     let done = |cm: CompletedMarker| Some(Lhs::Done(cm));
     match kind {
@@ -400,13 +412,34 @@ fn prefix(p: &mut Parser<'_>) -> Option<Lhs> {
             done(m.complete(p, K::PREFIX_INC_DEC_EXPR))
         }
         K::CAST | K::CAST_REMOVED => {
-            let m = p.start();
-            // `(void)` (8.5) prefixes the whole statement expression in
-            // php (`(void) f() + 1` casts the sum, pinned 8.5.6); the
-            // other casts bind like unary operators. Where it may stand
-            // is the compiler's.
             let lower = p.current_text().to_ascii_lowercase();
+            // `(void)` (8.5) is a statement form and a `for` header's,
+            // never an operand (`T_VOID_CAST expr ';'`,
+            // `non_empty_for_exprs`): where the grant is not given it is
+            // the token php did not want, which the enclosing site names
+            // (`$y = (void)$x;` is `unexpected token "(void)"`, `[(void)$y]`
+            // adds `expecting "]"`, probed 8.5.9). Granted, it prefixes the
+            // whole expression (`(void) f() + 1` casts the sum).
             let is_void = lower.windows(4).any(|w| w == b"void");
+            if is_void && !void_ok {
+                return None;
+            }
+            let m = p.start();
+            if kind == K::CAST_REMOVED && lower.windows(5).any(|w| w == b"unset") {
+                // `(unset)` parses as a cast and php's compiler refuses
+                // it, `zend_compile_cast` at the pin: a compile error,
+                // after every parse error in the file (design §6.1's
+                // lexical fatals; `(real)` is the lexer's, since php's
+                // scanner throws on it).
+                let span = p.current_span();
+                let line = p.line_here();
+                p.error(Diagnostic::of(
+                    Level::CompileError,
+                    span,
+                    line,
+                    "The (unset) cast is no longer supported",
+                ));
+            }
             p.bump(kind);
             operand(p, if is_void { 0 } else { BP_UNARY });
             done(m.complete(p, K::CAST_EXPR))
@@ -486,7 +519,7 @@ fn prefix(p: &mut Parser<'_>) -> Option<Lhs> {
             p.bump(K::LIST_KW);
             p.bump(K::L_PAREN);
             array_elements(p, K::R_PAREN);
-            super::expect_closer(p, K::R_PAREN, "`(`");
+            super::expect_closer(p, K::R_PAREN, Some("\")\""));
             // Zend: `list(...)` exists only as an `=` target, a `foreach`
             // target, or nested in an enclosing destructuring pattern;
             // `var_dump(list($a))` is a parse error at the next token,
@@ -502,14 +535,14 @@ fn prefix(p: &mut Parser<'_>) -> Option<Lhs> {
             p.bump(K::ARRAY_KW);
             p.bump(K::L_PAREN);
             array_elements(p, K::R_PAREN);
-            super::expect_closer(p, K::R_PAREN, "`(`");
+            super::expect_closer(p, K::R_PAREN, Some("\")\""));
             done(m.complete(p, K::ARRAY_EXPR))
         }
         K::L_BRACK => {
             let m = p.start();
             p.bump(K::L_BRACK);
             array_elements(p, K::R_BRACK);
-            super::expect_closer(p, K::R_BRACK, "`[`");
+            super::expect_closer(p, K::R_BRACK, Some("\"]\""));
             done(m.complete(p, K::ARRAY_EXPR))
         }
         K::L_PAREN => {
@@ -518,7 +551,9 @@ fn prefix(p: &mut Parser<'_>) -> Option<Lhs> {
             if expr_bp(p, 0).map(|lhs| lhs.finish(p)).is_none() {
                 p.error_unexpected();
             }
-            super::expect_closer(p, K::R_PAREN, "`(`");
+            // After a parenthesised expression the operator set is too
+            // large to spell: no clause (`(1 ;`, probed 8.5.9).
+            super::expect_closer(p, K::R_PAREN, None);
             done(m.complete(p, K::PAREN_EXPR))
         }
         K::INT | K::FLOAT | K::SINGLE_QUOTED => {
@@ -571,10 +606,16 @@ fn prefix(p: &mut Parser<'_>) -> Option<Lhs> {
                 }
             }
         }
-        // `static` as a class reference (`static::…`, `static` as a type).
+        // `static` as a class reference (`static::…`, `static` as a type):
+        // in expression position `::` is the one continuation php can
+        // spell (`static ;` is `expecting "::"`, probed 8.5.9).
         K::STATIC_KW => {
             let m = p.start();
             p.bump_remap(K::IDENT);
+            if !p.peek_at(K::COLON_COLON) && !p.grants.new_class {
+                let d = p.unexpected_here_expecting("\"::\"");
+                p.error(d);
+            }
             Some(Lhs::Bare(m, K::IDENT))
         }
         K::IDENT | K::NAME_QUALIFIED | K::NAME_FULLY_QUALIFIED | K::NAME_RELATIVE => {
@@ -644,7 +685,6 @@ fn is_variable_production(lhs: &Lhs) -> bool {
             | K::VAR_VAR_EXPR
             | K::DYNAMIC_VAR_EXPR
             | K::SUBSCRIPT_EXPR
-            | K::LEGACY_CURLY_SUBSCRIPT_EXPR
             | K::MEMBER_ACCESS_EXPR
             | K::SCOPED_ACCESS_EXPR
             | K::CALL_EXPR
@@ -685,39 +725,45 @@ fn starts_dereferenceable(lead: K) -> bool {
 
 /// The operand of `= &` or an `unset()` argument: a single Zend `variable`
 /// production, a primary plus dereference trailers and no binary operator.
-/// The diagnostic is raised at the current token when the operand is not
-/// a variable production, php's error site (`unset($x + $y)` errors at
-/// `+`, `$a = &new A();` at `;`).
-fn variable_only(p: &mut Parser<'_>) {
-    // php sub-cases the `variable`-position `expecting …` clause by the
-    // primary's shape (probed 8.5.7): a bare `new X` (no constructor
-    // parens) wants its argument list, `"("`; a dereferenceable primary
-    // that is not dereferenced wants the dereference set `"->" or "?->"
-    // or "["`; a scalar that is not dereferenceable carries no clause
-    // (php errors at the token; once `prefix` has consumed it this
-    // reports one token late, the inherited behaviour). The leading token
-    // is captured before `prefix` consumes it, the string-or-int
-    // discriminator.
+/// php sub-cases the `variable`-position `expecting …` clause by the
+/// primary's shape (probed 8.5.7): a bare `new X` (no constructor parens)
+/// wants its argument list, `"("`; a dereferenceable primary that is not
+/// dereferenced wants the dereference set `"->" or "?->" or "["`; a
+/// scalar that is not dereferenceable is the unexpected token itself.
+fn variable_only(p: &mut Parser<'_>) -> Option<K> {
+    variable_or_pattern(p, false)
+}
+
+/// [`variable_only`], or with `patterns` also a destructuring pattern.
+fn variable_or_pattern(p: &mut Parser<'_>, patterns: bool) -> Option<K> {
+    // php errors at the token that starts what is no variable at all
+    // (`unset(1)` and `foreach ($a as 1` are `unexpected integer "1"`,
+    // probed 8.5.9); the diagnostic is built here, before the primary is
+    // consumed, and raised only then.
     let lead = p.current();
-    if let Some(mut lhs) = prefix(p) {
-        while let Some(trailer) = at_trailer(p, &lhs) {
-            lhs = apply_trailer(p, lhs, trailer);
-        }
-        if !is_variable_production(&lhs) {
-            if matches!(lhs, Lhs::NewBare(_)) {
-                let d = p.unexpected_here_expecting("\"(\"");
-                p.error(d);
-            } else if starts_dereferenceable(lead) {
-                let d = p.unexpected_here_expecting("\"->\" or \"?->\" or \"[\"");
-                p.error(d);
-            } else {
-                p.error_unexpected();
-            }
-        }
-        lhs.finish(p);
-    } else {
-        p.error_unexpected();
+    let at_lead = p.unexpected_here();
+    let Some(mut lhs) = prefix(p) else {
+        p.error(at_lead);
+        return None;
+    };
+    while let Some(trailer) = at_trailer(p, &lhs) {
+        lhs = apply_trailer(p, lhs, trailer);
     }
+    let pattern = patterns && matches!(lhs.kind(), K::LIST_EXPR | K::ARRAY_EXPR);
+    if !is_variable_production(&lhs) && !pattern {
+        if matches!(lhs, Lhs::NewBare(_)) {
+            let d = p.unexpected_here_expecting("\"(\"");
+            p.error(d);
+        } else if starts_dereferenceable(lead) {
+            let d = p.unexpected_here_expecting(AFTER_VARIABLE);
+            p.error(d);
+        } else {
+            p.error(at_lead);
+        }
+    }
+    let kind = lhs.kind();
+    lhs.finish(p);
+    Some(kind)
 }
 
 /// The `= &` reference-assignment target (Zend: `'=' ampersand variable`).
@@ -725,16 +771,43 @@ fn ref_target(p: &mut Parser<'_>) {
     variable_only(p);
 }
 
+/// php's clause at the closer after a `variable` production: the
+/// dereference set, which is what `unset($x ;` and `foreach ($a as $b ;`
+/// print (probed 8.5.9).
+pub(crate) const AFTER_VARIABLE: &str = "\"->\" or \"?->\" or \"[\"";
+
 /// The `unset(...)` arguments: each a `variable` production (php's
 /// `unset_variables`); a trailing comma is legal. The empty list is the
 /// closer's.
 pub(crate) fn unset_operands(p: &mut Parser<'_>) {
+    let mut after_comma = false;
+    // `?>` is the `;` php's scanner makes of it, unexpected here with
+    // no clause, and left for the enclosing construct.
+    if p.peek_at(K::CLOSE_TAG) {
+        p.error_unexpected();
+    }
     while !p.at_eof() && !p.peek_at(K::R_PAREN) && !p.peek_at(K::CLOSE_TAG) {
+        // After a comma php's clause collapses to the closer
+        // (`unset($x, ;` is `expecting ")"`, probed 8.5.9); at the first
+        // argument the set is too large to spell.
+        if after_comma && !at_expr_start(p) {
+            let d = p.unexpected_here_expecting("\")\"");
+            p.error(d);
+            break;
+        }
         variable_only(p);
         if !p.eat(K::COMMA) {
             break;
         }
+        after_comma = true;
     }
+}
+
+/// A `foreach` key or target: one Zend `foreach_variable`, which is a
+/// `variable` production or a `list(…)` or `[…]` pattern (the grant is
+/// the caller's). The completed operand's kind, for the closer's clause.
+pub(crate) fn variable_target(p: &mut Parser<'_>) -> Option<K> {
+    variable_or_pattern(p, true)
 }
 
 /// `$$x` and `${expr}`, the variable variables. Under php 7's uniform
@@ -748,7 +821,7 @@ pub(crate) fn variable_variable(p: &mut Parser<'_>) -> CompletedMarker {
         K::L_CURLY => {
             p.bump(K::L_CURLY);
             operand(p, 0);
-            super::expect_closer(p, K::R_CURLY, "`{`");
+            super::expect_closer(p, K::R_CURLY, None);
             m.complete(p, K::DYNAMIC_VAR_EXPR)
         }
         K::VARIABLE => {
@@ -785,32 +858,10 @@ pub(crate) fn variable_variable(p: &mut Parser<'_>) -> CompletedMarker {
         }
         _ => {
             // php's clause at Zend's `simple_variable` slot is the fixed
-            // set `variable or "{" or "$"`, and a double-quoted string
-            // here is named by its content (`$"…";` is `unexpected
+            // set `variable or "{" or "$"` (`$"…";` is `unexpected
             // double-quoted string "…", expecting variable or "{" or
-            // "$"`, probed 8.5.7, bug70430). The lexer splits an
-            // interpolated string into opener, text and closer tokens,
-            // so the content is assembled from the tokens between the
-            // quotes.
-            const EXPECTING: &str = "variable or \"{\" or \"$\"";
-            let d = if p.peek_at(K::DOUBLE_QUOTE) {
-                let mut content = Vec::new();
-                let mut n = 1;
-                while !matches!(p.nth(n), K::DOUBLE_QUOTE | K::EOF) {
-                    content.extend_from_slice(p.nth_text(n));
-                    n += 1;
-                }
-                let lossy = String::from_utf8_lossy(&content);
-                let snippet: String = lossy.chars().take(64).collect();
-                Diagnostic::new(
-                    p.current_span(),
-                    format!(
-                        "syntax error, unexpected double-quoted string \"{snippet}\", expecting {EXPECTING}"
-                    ),
-                )
-            } else {
-                p.unexpected_here_expecting(EXPECTING)
-            };
+            // "$"`, probed 8.5.7, bug70430).
+            let d = p.unexpected_here_expecting("variable or \"{\" or \"$\"");
             p.error(d);
             m.complete(p, K::VAR_VAR_EXPR)
         }
@@ -878,7 +929,10 @@ fn new_expr(p: &mut Parser<'_>) -> Lhs {
     // a bare name are not part of the class reference: they dangle and
     // the enclosing construct reports them, exactly where php errors on
     // `new A->p` and `new A[0]`.
-    if let Some(mut lhs) = prefix(p) {
+    p.grants.new_class = true;
+    let class_ref = prefix(p);
+    p.grants.new_class = false;
+    if let Some(mut lhs) = class_ref {
         let mut bare_name = matches!(lhs, Lhs::Bare(..));
         let paren_prefix = lhs.kind() == K::PAREN_EXPR;
         if !paren_prefix {
@@ -914,10 +968,12 @@ fn new_expr(p: &mut Parser<'_>) -> Lhs {
         // call-argument position bug43343 pins (probed 8.5.7). The
         // statement-position form spells `expecting "class"` instead, a
         // bison-state nuance with no corpus row; the pinned clause stands.
+        // Elsewhere php spells `"class"`, the anonymous class being the
+        // one keyword continuation (`new ;`, probed 8.5.9).
         let d = if p.peek_at(K::NAMESPACE_KW) {
             p.unexpected_here_expecting("\":\"")
         } else {
-            p.unexpected_here()
+            p.unexpected_here_expecting("\"class\"")
         };
         p.error(d);
     }
@@ -938,9 +994,10 @@ fn match_expr(p: &mut Parser<'_>) -> CompletedMarker {
     p.bump(K::MATCH_KW);
     if p.eat(K::L_PAREN) {
         operand(p, 0);
-        super::expect_closer(p, K::R_PAREN, "`(`");
+        super::expect_closer(p, K::R_PAREN, None);
     } else {
-        p.error_unexpected();
+        let d = p.unexpected_here_expecting("\"(\"");
+        p.error(d);
     }
     if p.eat(K::L_CURLY) {
         while !p.at_eof() && !p.peek_at(K::R_CURLY) {
@@ -955,12 +1012,21 @@ fn match_expr(p: &mut Parser<'_>) -> CompletedMarker {
             } else {
                 let conds = p.start();
                 // The conditions allow a trailing comma before `=>`
-                // (php-src `match_arm_cond_list`).
+                // (php-src `match_arm_cond_list`). At an arm's start
+                // php's clause is the closer's (`{ , }` and `{ 1 => 2,
+                // => 3 }` are `expecting "}"`, probed 8.5.9).
+                let mut first = true;
                 loop {
                     if !expr(p) {
-                        p.error_unexpected();
+                        let d = if first {
+                            p.unexpected_here_expecting("\"}\"")
+                        } else {
+                            p.unexpected_here_expecting("\"=>\"")
+                        };
+                        p.error(d);
                         break;
                     }
+                    first = false;
                     if !p.eat(K::COMMA) || p.peek_at(K::FAT_ARROW) {
                         break;
                     }
@@ -968,7 +1034,13 @@ fn match_expr(p: &mut Parser<'_>) -> CompletedMarker {
                 conds.complete(p, K::MATCH_CONDS);
             }
             if !p.eat(K::FAT_ARROW) {
-                p.error_unexpected();
+                // After the conditions only `=>` can follow (`{ 1 ;`,
+                // `{ default ;`, probed 8.5.9); an arm that failed at its
+                // first token already said so.
+                if !p.has_error_at_or_after(p.current_span().start) {
+                    let d = p.unexpected_here_expecting("\"=>\"");
+                    p.error(d);
+                }
                 arm.complete(p, K::MATCH_ARM);
                 // Recovery: skip to `,` or `}`.
                 while !p.at_eof() && !p.peek_at(K::COMMA) && !p.peek_at(K::R_CURLY) {
@@ -985,9 +1057,10 @@ fn match_expr(p: &mut Parser<'_>) -> CompletedMarker {
                 break;
             }
         }
-        super::expect_closer(p, K::R_CURLY, "`{`");
+        super::expect_closer(p, K::R_CURLY, Some("\"}\""));
     } else {
-        p.error_unexpected();
+        let d = p.unexpected_here_expecting("\"{\"");
+        p.error(d);
     }
     m.complete(p, K::MATCH_EXPR)
 }
@@ -997,7 +1070,7 @@ fn isset_expr(p: &mut Parser<'_>) -> CompletedMarker {
     p.bump(K::ISSET_KW);
     if p.eat(K::L_PAREN) {
         expr_list_trailing(p, K::R_PAREN);
-        super::expect_closer(p, K::R_PAREN, "`(`");
+        super::expect_closer(p, K::R_PAREN, Some("\")\""));
     } else {
         // php's bison clause at the mandatory-paren keywords (probed
         // 8.5.7: `isset` and `isset;` are `… expecting "("`, the end of
@@ -1013,7 +1086,7 @@ fn empty_or_eval(p: &mut Parser<'_>, kw: K, node: K) -> CompletedMarker {
     p.bump(kw);
     if p.eat(K::L_PAREN) {
         operand(p, 0);
-        super::expect_closer(p, K::R_PAREN, "`(`");
+        super::expect_closer(p, K::R_PAREN, None);
     } else {
         // php's bison clause (probed 8.5.7, require_parse_exception:
         // `empty` at the end of the input is `syntax error, unexpected
@@ -1028,7 +1101,12 @@ fn empty_or_eval(p: &mut Parser<'_>, kw: K, node: K) -> CompletedMarker {
 /// and a destructuring pattern.
 pub(crate) fn array_elements(p: &mut Parser<'_>, closer: K) {
     // `?>` is a hard recovery anchor: never consumed as a stray element;
-    // the enclosing construct reports it.
+    // it is the `;` php's scanner makes of it, reported here with the
+    // element position's clause and left for the enclosing construct.
+    if p.peek_at(K::CLOSE_TAG) {
+        let d = p.unexpected_here_expecting(php_list_closer(closer));
+        p.error(d);
+    }
     while !p.at_eof() && !p.peek_at(closer) && !p.peek_at(K::CLOSE_TAG) {
         let el = p.start();
         if p.peek_at(K::COMMA) {
@@ -1051,7 +1129,7 @@ pub(crate) fn array_elements(p: &mut Parser<'_>, closer: K) {
             // An element position is a Zend `array_pair`: a nested
             // `list(...)` here needs no `=` of its own (and a list key
             // parses in php too; its rejection is the compiler's).
-            p.list_target_ok = true;
+            p.grants.list_target = true;
             if let Some(parsed) = expr_bp(p, 0) {
                 if !byref_first && p.peek_at(K::FAT_ARROW) {
                     // It was the key: wrapped as `ArrayKey`, with the `=>`.
@@ -1065,7 +1143,7 @@ pub(crate) fn array_elements(p: &mut Parser<'_>, closer: K) {
                         // compiler rejects the spread.
                         p.bump(K::DOT_DOT_DOT);
                     }
-                    p.list_target_ok = true;
+                    p.grants.list_target = true;
                     operand(p, 0);
                 } else {
                     parsed.finish(p);
@@ -1166,29 +1244,10 @@ enum Trailer {
     Call,
     /// `[index]`.
     Subscript,
-    /// `{index}`, the curly subscript removed in 8.0.
-    CurlySubscript,
     /// `->member` or `?->member`.
     Member,
     /// `::member`.
     Scoped,
-}
-
-/// The kinds that may take a legacy `{0}` curly subscript (removed in 8.0;
-/// parsed for the compiler's targeted fatal alone, and gated to a
-/// variable-shaped operand so a block is never misread).
-fn lhs_takes_curly_subscript(lhs: &Lhs) -> bool {
-    matches!(
-        lhs.kind(),
-        K::SIMPLE_VAR_EXPR
-            | K::VAR_VAR_EXPR
-            | K::DYNAMIC_VAR_EXPR
-            | K::SUBSCRIPT_EXPR
-            | K::LEGACY_CURLY_SUBSCRIPT_EXPR
-            | K::MEMBER_ACCESS_EXPR
-            | K::SCOPED_ACCESS_EXPR
-            | K::CALL_EXPR
-    )
 }
 
 /// The postfix trailer the current token begins for this operand, if any.
@@ -1205,7 +1264,10 @@ fn at_trailer(p: &mut Parser<'_>, lhs: &Lhs) -> Option<Trailer> {
         K::L_BRACK => Trailer::Subscript,
         K::ARROW | K::NULLSAFE_ARROW => Trailer::Member,
         K::COLON_COLON => Trailer::Scoped,
-        K::L_CURLY if lhs_takes_curly_subscript(lhs) => Trailer::CurlySubscript,
+        // `$s{0}`, the curly offset 8.0 removed, is no trailer: php has no
+        // such production, so the `{` is the token the enclosing site did
+        // not want (`$s{0};` is `unexpected token "{"`, `foo($s{0})` adds
+        // `expecting ")"`, probed 8.5.9; design §6.1's lexical fatals).
         _ => return None,
     })
 }
@@ -1221,18 +1283,15 @@ fn apply_trailer(p: &mut Parser<'_>, lhs: Lhs, trailer: Trailer) -> Lhs {
         Trailer::Subscript => {
             let m = lhs.wrap(p);
             p.bump(K::L_BRACK);
-            if !p.peek_at(K::R_BRACK) {
-                operand(p, 0);
+            // `$x[]` is legal (a push), so at `[` php spells the closer
+            // beside the operand (`$x[ ;` is `expecting "]"`, probed
+            // 8.5.9).
+            if !p.peek_at(K::R_BRACK) && expr_bp(p, 0).map(|e| e.finish(p)).is_none() {
+                let d = p.unexpected_here_expecting("\"]\"");
+                p.error(d);
             }
-            super::expect_closer(p, K::R_BRACK, "`[`");
+            super::expect_closer(p, K::R_BRACK, Some("\"]\""));
             Lhs::Done(m.complete(p, K::SUBSCRIPT_EXPR))
-        }
-        Trailer::CurlySubscript => {
-            let m = lhs.wrap(p);
-            p.bump(K::L_CURLY);
-            operand(p, 0);
-            super::expect_closer(p, K::R_CURLY, "`{`");
-            Lhs::Done(m.complete(p, K::LEGACY_CURLY_SUBSCRIPT_EXPR))
         }
         Trailer::Member => {
             let m = lhs.wrap(p);
@@ -1275,7 +1334,7 @@ fn member_selector(p: &mut Parser<'_>, scoped: bool) {
             let m = p.start();
             p.bump(K::L_CURLY);
             operand(p, 0);
-            super::expect_closer(p, K::R_CURLY, "`{`");
+            super::expect_closer(p, K::R_CURLY, None);
             m.complete(p, K::BRACED_MEMBER);
         }
         K::CLASS_KW if scoped => {
@@ -1292,6 +1351,15 @@ fn member_selector(p: &mut Parser<'_>, scoped: bool) {
             }
             m.complete(p, K::MEMBER_NAME);
         }
-        _ => p.error_unexpected(),
+        _ => {
+            // `$x-> ;` is `expecting identifier or variable or "{" or "$"`;
+            // after `::` the set is too large to spell (probed 8.5.9).
+            let d = if scoped {
+                p.unexpected_here()
+            } else {
+                p.unexpected_here_expecting("identifier or variable or \"{\" or \"$\"")
+            };
+            p.error(d);
+        }
     }
 }

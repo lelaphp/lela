@@ -37,7 +37,7 @@ fn missing_semicolon_repair() {
                   LITERAL_EXPR@18..19
                     INT@18..19 "2"
                 SEMICOLON@19..20 ";"
-            error@12..12 syntax error, unexpected variable "$b"
+            error@13..15 syntax error, unexpected variable "$b"
         "#]],
     );
 }
@@ -60,7 +60,7 @@ fn missing_comma_in_array() {
                       INT@9..10 "2"
                   R_BRACK@10..11 "]"
                 SEMICOLON@11..12 ";"
-            error@8..8 syntax error, unexpected integer "2", expecting "]"
+            error@9..10 syntax error, unexpected integer "2", expecting "]"
         "#]],
     );
 }
@@ -83,7 +83,7 @@ fn missing_comma_in_args() {
                       INT@10..11 "2"
                     R_PAREN@11..12 ")"
                 SEMICOLON@12..13 ";"
-            error@9..9 syntax error, unexpected integer "2", expecting ")"
+            error@10..11 syntax error, unexpected integer "2", expecting ")"
         "#]],
     );
 }
@@ -107,7 +107,7 @@ fn unclosed_paren() {
                     LITERAL_EXPR@8..9
                       INT@8..9 "1"
                 SEMICOLON@9..10 ";"
-            error@9..10 unclosed delimiter `(`
+            error@9..10 syntax error, unexpected token ";", expecting ")"
         "#]],
     );
 }
@@ -159,7 +159,7 @@ fn unclosed_bracket() {
                       LITERAL_EXPR@15..16
                         INT@15..16 "2"
                 SEMICOLON@16..17 ";"
-            error@16..17 unclosed delimiter `[`
+            error@16..17 syntax error, unexpected token ";", expecting "]"
         "#]],
     );
 }
@@ -216,7 +216,7 @@ fn wrong_alt_terminator() {
                 ERROR@14..22
                   ENDWHILE_KW@14..22 "endwhile"
                 SEMICOLON@22..23 ";"
-            error@14..22 expected `endif` to close the alternative syntax
+            error@14..22 syntax error, unexpected token "endwhile", expecting "elseif" or "else" or "endif"
         "#]],
     );
 }
@@ -238,7 +238,7 @@ fn close_tag_inside_unfinished_call() {
                   ARG_LIST@7..8
                     L_PAREN@7..8 "("
               CLOSE_TAG@9..11 "?>"
-            error@9..11 `?>` ends the script inside an unfinished `(` construct
+            error@9..11 syntax error, unexpected token ";"
         "#]],
     );
 }
@@ -266,7 +266,7 @@ fn inline_html_hard_anchor_recovery() {
                 LITERAL_EXPR@31..32
                   INT@31..32 "1"
                 SEMICOLON@32..33 ";"
-            error@14..16 `?>` ends the script inside an unfinished `(` construct
+            error@14..16 syntax error, unexpected token ";"
         "#]],
     );
 }
@@ -315,8 +315,9 @@ fn keyword_soup_if_if_if() {
                   IF_KW@9..11 "if"
                   IF_STMT@12..14
                     IF_KW@12..14 "if"
-            error@9..11 syntax error, unexpected token "if"
-            error@12..14 syntax error, unexpected token "if"
+            error@9..11 syntax error, unexpected token "if", expecting "("
+            error@12..14 syntax error, unexpected token "if", expecting "("
+            error@14..14 syntax error, unexpected end of file, expecting "("
             error@14..14 syntax error, unexpected end of file
         "#]],
     );
@@ -360,7 +361,7 @@ fn function_without_body() {
                   R_PAREN@17..18 ")"
               EMPTY_STMT@18..19
                 SEMICOLON@18..19 ";"
-            error@18..19 syntax error, unexpected token ";"
+            error@18..19 syntax error, unexpected token ";", expecting "{"
         "#]],
     );
 }
@@ -385,8 +386,7 @@ fn unterminated_string_at_eof() {
                     DOUBLE_QUOTE@11..12 "\""
                     LITERAL_STRING_PART@12..15
                       STRING_TEXT@12..15 "abc"
-            error@15..15 string runs to end of file without a closing delimiter
-            error@15..15 syntax error, unexpected end of file
+            error@15..15 syntax error, unexpected end of file, expecting variable or "${" or "{$"
         "#]],
     );
 }

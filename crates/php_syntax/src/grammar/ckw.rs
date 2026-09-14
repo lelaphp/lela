@@ -26,19 +26,6 @@ pub(crate) fn is_member_name(kind: K) -> bool {
     kind == K::IDENT || kind.is_keyword() || kind == K::MAGIC_CONST
 }
 
-/// Is `kind` usable where a bare, possibly qualified, name is required: a
-/// type position, an `instanceof` right-hand side, a `new` class reference,
-/// an attribute name, a `use` import? A qualified-name token always is;
-/// among the keywords only the contextual ones are, since php reserves the
-/// rest at the grammar level (`if (...)` never parses `if` as a function
-/// name).
-pub(crate) fn is_name_start(kind: K) -> bool {
-    matches!(
-        kind,
-        K::IDENT | K::NAME_QUALIFIED | K::NAME_FULLY_QUALIFIED | K::NAME_RELATIVE
-    ) || is_contextual_only(kind)
-}
-
 /// The keywords php does not reserve: the lexer keywordizes them, since the
 /// schema declares them as keywords, but they are plain identifiers in any
 /// position that is not their trigger.
@@ -52,15 +39,19 @@ pub(crate) fn is_contextual_only(kind: K) -> bool {
 }
 
 /// The `enum` declaration lookahead, php's scanner rule as parser
-/// lookahead: at `enum`, a declaration iff the next significant token can
-/// be a declaration name, a plain identifier or a contextual-only keyword.
-/// A class-like name takes `T_STRING` in php, so `enum List {}` is a parse
-/// error there and here; `enum(...)`, `enum::`, `enum->` and `enum;` are
-/// expressions over an identifier named `enum`.
+/// lookahead: at `enum`, a declaration iff the next significant token
+/// begins with a label byte, which is an identifier or any keyword but
+/// `extends` and `implements` (`zend_language_scanner.l`: `"enum"
+/// {WHITESPACE_OR_COMMENTS}[a-zA-Z_\x80-\xff]`). A class-like name takes
+/// `T_STRING` in php, so `enum list {}` is `T_ENUM` and then a parse
+/// error, `expecting identifier`, there and here; `enum(...)`, `enum::`,
+/// `enum->` and `enum;` are expressions over an identifier named `enum`.
 ///
 /// `next` is the token after the `enum` keyword.
 pub(crate) fn enum_is_declaration(next: K) -> bool {
-    next == K::IDENT || is_contextual_only(next)
+    next == K::IDENT
+        || is_contextual_only(next)
+        || (next.is_keyword() && !matches!(next, K::EXTENDS_KW | K::IMPLEMENTS_KW))
 }
 
 /// The `readonly` disambiguation (8.2): `readonly(` is a call of a
@@ -113,24 +104,16 @@ mod tests {
     }
 
     #[test]
-    fn name_positions_reject_reserved() {
-        assert!(is_name_start(K::IDENT));
-        assert!(is_name_start(K::NAME_QUALIFIED));
-        assert!(is_name_start(K::ENUM_KW));
-        assert!(!is_name_start(K::LIST_KW));
-        assert!(!is_name_start(K::MATCH_KW));
-        assert!(!is_name_start(K::STATIC_KW));
-    }
-
-    #[test]
     fn enum_lookahead() {
         assert!(enum_is_declaration(K::IDENT));
         // `enum Enum {}`: a contextual-only keyword is a remappable name.
         assert!(enum_is_declaration(K::ENUM_KW));
-        // `enum List {}`: a reserved word as a class-like name is a parse
-        // error in php and here (the expression reading then fails on
-        // the name).
-        assert!(!enum_is_declaration(K::LIST_KW));
+        // `enum list {}`: php's scanner reads `T_ENUM` before any label,
+        // and the reserved word is then the parser's `expecting
+        // identifier`; `enum extends` and `enum implements` stay names.
+        assert!(enum_is_declaration(K::LIST_KW));
+        assert!(!enum_is_declaration(K::EXTENDS_KW));
+        assert!(!enum_is_declaration(K::IMPLEMENTS_KW));
         assert!(!enum_is_declaration(K::L_PAREN));
         assert!(!enum_is_declaration(K::COLON_COLON));
         assert!(!enum_is_declaration(K::SEMICOLON));

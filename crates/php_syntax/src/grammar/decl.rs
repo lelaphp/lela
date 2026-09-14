@@ -14,10 +14,19 @@ pub(crate) fn attribute_groups(p: &mut Parser<'_>) {
     while p.peek_at(K::ATTRIBUTE_OPEN) {
         let g = p.start();
         p.bump(K::ATTRIBUTE_OPEN);
+        let mut after_comma = false;
         loop {
             let a = p.start();
             if !types::name_ref(p) {
-                p.error_unexpected();
+                // After a comma the trailing comma has reduced and only
+                // `]` may follow (`#[A, ;` is `expecting "]"`, probed
+                // 8.5.9); at the first attribute the set is not spelled.
+                let d = if after_comma {
+                    p.unexpected_here_expecting("\"]\"")
+                } else {
+                    p.unexpected_here()
+                };
+                p.error(d);
                 a.abandon(p);
                 break;
             }
@@ -28,11 +37,12 @@ pub(crate) fn attribute_groups(p: &mut Parser<'_>) {
             if !p.eat(K::COMMA) {
                 break;
             }
+            after_comma = true;
             if p.peek_at(K::R_BRACK) {
                 break; // a trailing comma
             }
         }
-        super::expect_closer(p, K::R_BRACK, "`#[`");
+        super::expect_closer(p, K::R_BRACK, Some("\"]\""));
         g.complete(p, K::ATTRIBUTE_GROUP);
     }
 }
@@ -83,12 +93,20 @@ pub(crate) fn function_decl(p: &mut Parser<'_>, m: Marker) {
     name_token(p, "\"(\"");
     param_list(p);
     ret_type(p);
+    body_block(p);
+    m.complete(p, K::FUNCTION_DECL);
+}
+
+/// A function's or a closure's body, whose `{` is the one token php
+/// spells after the head (`function f();` and `$f = function()
+/// use ($x);` are `expecting "{"`, probed 8.5.9).
+fn body_block(p: &mut Parser<'_>) {
     if p.peek_at(K::L_CURLY) {
         block(p);
     } else {
-        p.error_unexpected();
+        let d = p.unexpected_here_expecting("\"{\"");
+        p.error(d);
     }
-    m.complete(p, K::FUNCTION_DECL);
 }
 
 /// The declaration name: a plain identifier (a contextual-only keyword
@@ -136,7 +154,7 @@ pub(crate) fn modifiers_then_class(p: &mut Parser<'_>, m: Marker) {
 pub(crate) fn class_decl(p: &mut Parser<'_>, m: Marker) {
     p.bump(K::CLASS_KW);
     name_token(p, "identifier");
-    extends_clause(p);
+    extends_clause(p, false);
     implements_clause(p);
     class_body(p);
     m.complete(p, K::CLASS_DECL);
@@ -145,7 +163,7 @@ pub(crate) fn class_decl(p: &mut Parser<'_>, m: Marker) {
 pub(crate) fn interface_decl(p: &mut Parser<'_>, m: Marker) {
     p.bump(K::INTERFACE_KW);
     name_token(p, "identifier");
-    extends_clause(p);
+    extends_clause(p, true);
     class_body(p);
     m.complete(p, K::INTERFACE_DECL);
 }
@@ -166,9 +184,8 @@ pub(crate) fn enum_decl(p: &mut Parser<'_>, m: Marker) {
         types::type_expr(p);
         b.complete(p, K::ENUM_BACKING);
     }
-    // An enum takes no `extends`; one is parsed for the compiler's
-    // targeted fatal.
-    extends_clause(p);
+    // An enum takes no `extends`: php's parser refuses it as the body's
+    // `expecting "{"` (probed 8.5.9), which `class_body` says.
     implements_clause(p);
     class_body(p);
     m.complete(p, K::ENUM_DECL);
@@ -186,13 +203,16 @@ pub(crate) fn anon_class_decl(p: &mut Parser<'_>) -> CompletedMarker {
     if p.peek_at(K::L_PAREN) {
         arg_list(p);
     }
-    extends_clause(p);
+    extends_clause(p, false);
     implements_clause(p);
     class_body(p);
     m.complete(p, K::ANON_CLASS_DECL)
 }
 
-fn extends_clause(p: &mut Parser<'_>) {
+/// `extends …`: one name for a class, a list for an interface; a
+/// second name after a class's is the body's `expecting "{"` (probed
+/// 8.5.9: `class A extends B, C`).
+fn extends_clause(p: &mut Parser<'_>, several: bool) {
     if p.peek_at(K::EXTENDS_KW) {
         let m = p.start();
         p.bump(K::EXTENDS_KW);
@@ -201,7 +221,7 @@ fn extends_clause(p: &mut Parser<'_>) {
                 p.error_unexpected();
                 break;
             }
-            if !p.eat(K::COMMA) {
+            if !several || !p.eat(K::COMMA) {
                 break;
             }
         }
@@ -255,7 +275,7 @@ fn class_body(p: &mut Parser<'_>) {
         }
         class_member(p);
     }
-    super::expect_closer(p, K::R_CURLY, "`{`");
+    super::expect_closer(p, K::R_CURLY, None);
     m.complete(p, K::CLASS_BODY);
 }
 
@@ -271,7 +291,9 @@ fn class_member(p: &mut Parser<'_>) {
         enum_case(p, m);
         return;
     }
+    let before = p.current_span().start;
     modifiers(p);
+    let modified = p.current_span().start != before;
     match p.current() {
         K::CONST_KW => {
             p.bump(K::CONST_KW);
@@ -281,7 +303,7 @@ fn class_member(p: &mut Parser<'_>) {
                 types::type_expr(p);
             }
             const_declarators(p, true);
-            semicolon(p);
+            super::semicolon_expecting(p, Some("\",\" or \";\""));
             m.complete(p, K::CLASS_CONST_DECL);
         }
         K::FUNCTION_KW => {
@@ -310,7 +332,16 @@ fn class_member(p: &mut Parser<'_>) {
             property_tail(p, m);
         }
         _ => {
-            p.error_unexpected();
+            // A token that starts no member: php spells `"function"` at
+            // a member's start and `variable` after modifiers, where a
+            // property is the one continuation it lists (`class A { = }`,
+            // `class A { public ; }`, probed 8.5.9).
+            let d = if modified {
+                p.unexpected_here_expecting("variable")
+            } else {
+                p.unexpected_here_expecting("\"function\"")
+            };
+            p.error(d);
             m.abandon(p);
             let e = p.start();
             while !p.at_eof()
@@ -337,8 +368,8 @@ fn property_tail(p: &mut Parser<'_>, m: Marker) {
         let d = p.start();
         if p.at(K::VARIABLE) {
             p.bump(K::VARIABLE);
-            if p.eat(K::EQ) {
-                expr::expr(p);
+            if p.eat(K::EQ) && !expr::expr(p) {
+                p.error_unexpected();
             }
             d.complete(p, K::PROPERTY_DECLARATOR);
         } else {
@@ -359,7 +390,9 @@ fn property_tail(p: &mut Parser<'_>, m: Marker) {
     if p.peek_at(K::L_CURLY) {
         property_hook_list(p);
     } else {
-        semicolon(p);
+        // Another declarator may follow (`public $x }` is `expecting ","
+        // or ";"`, probed 8.5.9).
+        super::semicolon_expecting(p, Some("\",\" or \";\""));
     }
     m.complete(p, K::PROPERTY_DECL);
 }
@@ -383,7 +416,10 @@ pub(crate) fn property_hook_list(p: &mut Parser<'_>) {
                 p.bump_remap(K::IDENT);
             }
         } else {
-            p.error_unexpected();
+            // A hook is named by an identifier (`{ ; }` and `{ = }` are
+            // `expecting identifier`, probed 8.5.9).
+            let diag = p.unexpected_here_expecting("identifier");
+            p.error(diag);
             h.abandon(p);
             let e = p.start();
             p.bump_any();
@@ -402,21 +438,23 @@ pub(crate) fn property_hook_list(p: &mut Parser<'_>) {
             semicolon(p);
             b.complete(p, K::HOOK_ARROW_BODY);
         } else {
-            semicolon(p);
+            // After the hook's name php lists its three continuations
+            // (`{ get }` is `expecting "=>" or ";" or "{"`, probed 8.5.9).
+            super::semicolon_expecting(p, Some("\"=>\" or \";\" or \"{\""));
         }
         h.complete(p, K::PROPERTY_HOOK);
     }
-    super::expect_closer(p, K::R_CURLY, "`{`");
+    super::expect_closer(p, K::R_CURLY, None);
     m.complete(p, K::PROPERTY_HOOK_LIST);
 }
 
 fn enum_case(p: &mut Parser<'_>, m: Marker) {
     p.bump(K::CASE_KW);
     member_name(p);
-    if p.eat(K::EQ) {
-        expr::expr(p);
+    if p.eat(K::EQ) && !expr::expr(p) {
+        p.error_unexpected();
     }
-    semicolon(p);
+    super::semicolon_expecting(p, Some("\";\""));
     m.complete(p, K::ENUM_CASE_DECL);
 }
 
@@ -445,10 +483,12 @@ fn trait_use(p: &mut Parser<'_>, m: Marker) {
             }
             trait_adaptation(p);
         }
-        super::expect_closer(p, K::R_CURLY, "`{`");
+        super::expect_closer(p, K::R_CURLY, None);
         list.complete(p, K::TRAIT_ADAPTATION_LIST);
     } else {
-        semicolon(p);
+        // Another trait, the terminator or the adaptations may follow
+        // (`use T }` is `expecting "," or ";" or "{"`, probed 8.5.9).
+        super::semicolon_expecting(p, Some("\",\" or \";\" or \"{\""));
     }
     m.complete(p, K::TRAIT_USE_DECL);
 }
@@ -457,6 +497,7 @@ fn trait_adaptation(p: &mut Parser<'_>) {
     let m = p.start();
     // `TraitMethodRef`: `(Name '::')? member`.
     let r = p.start();
+    let r_start = p.current_span().start;
     if (p.peek_at(K::IDENT)
         || p.peek_at(K::NAME_QUALIFIED)
         || p.peek_at(K::NAME_FULLY_QUALIFIED)
@@ -471,8 +512,15 @@ fn trait_adaptation(p: &mut Parser<'_>) {
         p.bump_any();
         p.bump(K::COLON_COLON);
     }
+    let qualified = p.current_span().start != r_start;
     member_name(p);
     r.complete(p, K::TRAIT_METHOD_REF);
+    if p.peek_at(K::INSTEADOF_KW) && !qualified {
+        // `insteadof` takes a qualified method (`f insteadof B` is
+        // `unexpected token "insteadof", expecting "::"`, probed 8.5.9).
+        let diag = p.unexpected_here_expecting("\"::\"");
+        p.error(diag);
+    }
     if p.peek_at(K::INSTEADOF_KW) {
         p.bump(K::INSTEADOF_KW);
         loop {
@@ -484,7 +532,7 @@ fn trait_adaptation(p: &mut Parser<'_>) {
                 break;
             }
         }
-        semicolon(p);
+        super::semicolon_expecting(p, Some("\";\""));
         m.complete(p, K::INSTEADOF_ADAPTATION);
     } else if p.peek_at(K::AS_KW) {
         p.bump(K::AS_KW);
@@ -503,14 +551,31 @@ fn trait_adaptation(p: &mut Parser<'_>) {
         ) && !(p.nth(1) == K::SEMICOLON && p.current() == K::IDENT)
         {
             p.bump_any();
-        }
-        if ckw::is_member_name(p.current()) {
+            if ckw::is_member_name(p.current()) {
+                member_name(p);
+            }
+        } else if ckw::is_member_name(p.current()) {
             member_name(p);
+        } else {
+            // `f as ;` wants a modifier or an alias (probed 8.5.9).
+            p.error_unexpected();
         }
-        semicolon(p);
+        super::semicolon_expecting(p, Some("\";\""));
         m.complete(p, K::AS_ADAPTATION);
     } else {
-        p.error_unexpected();
+        // After a bare method php still expects its `::`, after a
+        // qualified one its `as` (`{ f ;` is `expecting "::"`, `{ T::f
+        // ;` `expecting "as"`, probed 8.5.9).
+        let diag = if p.has_error_at_or_after(p.current_span().start) {
+            None
+        } else if qualified {
+            Some(p.unexpected_here_expecting("\"as\""))
+        } else {
+            Some(p.unexpected_here_expecting("\"::\""))
+        };
+        if let Some(diag) = diag {
+            p.error(diag);
+        }
         // Consumed to `;` or `}` for progress.
         let e = p.start();
         while !p.at_eof() && !p.peek_at(K::SEMICOLON) && !p.peek_at(K::R_CURLY) {
@@ -536,7 +601,8 @@ pub(crate) fn member_name(p: &mut Parser<'_>) {
         // short_echo_as_identifier). Everything else keeps the
         // unexpected-token wording.
         let d = if p.peek_at(K::OPEN_TAG_ECHO) {
-            Diagnostic::new(p.current_span(), "Cannot use \"<?=\" as an identifier")
+            let (span, line) = (p.current_span(), p.line_here());
+            Diagnostic::new(span, line, "Cannot use \"<?=\" as an identifier")
         } else {
             p.unexpected_here()
         };
@@ -561,9 +627,10 @@ pub(crate) fn const_declarators(p: &mut Parser<'_>, semi_reserved: bool) {
         };
         if acceptable {
             member_name(p);
-            if p.eat(K::EQ) {
-                expr::expr(p);
-            } else {
+            if !p.eat(K::EQ) {
+                // `const X ;` is `unexpected token ";"` (probed 8.5.9).
+                p.error_unexpected();
+            } else if !expr::expr(p) {
                 p.error_unexpected();
             }
             d.complete(p, K::CONST_DECLARATOR);
@@ -610,6 +677,10 @@ pub(crate) fn param_list(p: &mut Parser<'_>) {
         m.complete(p, K::PARAM_LIST);
         return;
     }
+    if p.peek_at(K::CLOSE_TAG) {
+        let d = p.unexpected_here_expecting("variable");
+        p.error(d);
+    }
     while !p.at_eof() && !p.peek_at(K::R_PAREN) && !p.peek_at(K::CLOSE_TAG) {
         let param = p.start();
         attribute_groups(p);
@@ -619,13 +690,22 @@ pub(crate) fn param_list(p: &mut Parser<'_>) {
         }
         // `&` (by reference) and `...` (variadic): `&` here is by
         // reference because an intersection's `&` was consumed inside
-        // the type.
-        p.eat(K::AMP);
+        // the type. php's scanner splits `&` by what follows, and one
+        // that no variable or `...` follows is itself the unexpected
+        // token (`function f(& ;` is `unexpected token "&", expecting
+        // variable`, probed 8.5.9).
+        if p.peek_at(K::AMP) && matches!(p.nth(1), K::VARIABLE | K::DOT_DOT_DOT) {
+            p.bump(K::AMP);
+        }
         p.eat(K::DOT_DOT_DOT);
         if p.at(K::VARIABLE) {
             p.bump(K::VARIABLE);
         } else {
-            p.error_unexpected();
+            // A parameter is named by a variable, and php spells it
+            // whatever stood before (`function f( ;`, `function f(int ;`,
+            // `function f($x, ;` are `expecting variable`, probed 8.5.9).
+            let d = p.unexpected_here_expecting("variable");
+            p.error(d);
             param.abandon(p);
             // Progress: one token consumed unless at a list boundary.
             if !p.peek_at(K::R_PAREN) && !p.peek_at(K::COMMA) && !p.at_eof() {
@@ -638,8 +718,8 @@ pub(crate) fn param_list(p: &mut Parser<'_>) {
             }
             continue;
         }
-        if p.eat(K::EQ) {
-            expr::expr(p);
+        if p.eat(K::EQ) && !expr::expr(p) {
+            p.error_unexpected();
         }
         if p.peek_at(K::L_CURLY) {
             // The accessors of a promoted parameter's property (8.4).
@@ -660,7 +740,7 @@ pub(crate) fn param_list(p: &mut Parser<'_>) {
             break;
         }
     }
-    super::expect_closer(p, K::R_PAREN, "`(`");
+    super::expect_closer(p, K::R_PAREN, Some("\")\""));
     m.complete(p, K::PARAM_LIST);
 }
 
@@ -684,33 +764,43 @@ pub(crate) fn closure_expr(p: &mut Parser<'_>, m: Option<Marker>) -> CompletedMa
         let u = p.start();
         p.bump(K::USE_KW);
         if p.eat(K::L_PAREN) {
+            let mut after_comma = false;
             while !p.at_eof() && !p.peek_at(K::R_PAREN) {
                 let v = p.start();
-                p.eat(K::AMP);
+                let by_ref = p.eat(K::AMP);
                 if p.at(K::VARIABLE) {
                     p.bump(K::VARIABLE);
                     v.complete(p, K::CLOSURE_USE_VAR);
                 } else {
-                    p.error_unexpected();
+                    // php's clause at the first use variable is the
+                    // three-way set, both `&` spellings included (`use
+                    // ( ;` is `expecting variable or "&" or token "&"`);
+                    // after a comma the closer alone (probed 8.5.9).
+                    let diag = if after_comma {
+                        p.unexpected_here_expecting("\")\"")
+                    } else if by_ref {
+                        p.unexpected_here_expecting("variable")
+                    } else {
+                        p.unexpected_here_expecting("variable or \"&\" or token \"&\"")
+                    };
+                    p.error(diag);
                     v.abandon(p);
                     break;
                 }
                 if !p.eat(K::COMMA) {
                     break;
                 }
+                after_comma = true;
             }
-            super::expect_closer(p, K::R_PAREN, "`(`");
+            super::expect_closer(p, K::R_PAREN, Some("\")\""));
         } else {
-            p.error_unexpected();
+            let diag = p.unexpected_here_expecting("\"(\"");
+            p.error(diag);
         }
         u.complete(p, K::CLOSURE_USE_CLAUSE);
     }
     ret_type(p);
-    if p.peek_at(K::L_CURLY) {
-        block(p);
-    } else {
-        p.error_unexpected();
-    }
+    body_block(p);
     m.complete(p, K::CLOSURE_EXPR)
 }
 
@@ -722,9 +812,13 @@ pub(crate) fn arrow_fn_expr(p: &mut Parser<'_>, m: Option<Marker>) -> CompletedM
     param_list(p);
     ret_type(p);
     if !p.eat(K::FAT_ARROW) {
+        // `fn() ;` is `expecting "=>"` (probed 8.5.9).
+        let d = p.unexpected_here_expecting("\"=>\"");
+        p.error(d);
+    }
+    if !expr::expr(p) {
         p.error_unexpected();
     }
-    expr::expr(p);
     m.complete(p, K::ARROW_FN_EXPR)
 }
 
@@ -737,7 +831,8 @@ pub(crate) fn arrow_fn_expr(p: &mut Parser<'_>, m: Option<Marker>) -> CompletedM
 pub(crate) fn arg_list(p: &mut Parser<'_>) {
     let m = p.start();
     if !p.eat(K::L_PAREN) {
-        p.error_unexpected();
+        let d = p.unexpected_here_expecting("\"(\"");
+        p.error(d);
         m.complete(p, K::ARG_LIST);
         return;
     }
@@ -748,6 +843,12 @@ pub(crate) fn arg_list(p: &mut Parser<'_>) {
     // spell). Whether an argument has been consumed decides whether the
     // plain-expression failure pins php's clause.
     let mut after_comma = false;
+    // `?>` is never consumed as an argument: it is the `;` php's scanner
+    // makes of it, and at the first argument's position php spells no
+    // clause (`f( ?>`, probed 8.5.9).
+    if p.peek_at(K::CLOSE_TAG) {
+        p.error_unexpected();
+    }
     while !p.at_eof() && !p.peek_at(K::R_PAREN) && !p.peek_at(K::CLOSE_TAG) {
         if p.peek_at(K::DOT_DOT_DOT) {
             if p.nth(1) == K::R_PAREN {
@@ -805,6 +906,6 @@ pub(crate) fn arg_list(p: &mut Parser<'_>) {
         }
         after_comma = true;
     }
-    super::expect_closer(p, K::R_PAREN, "`(`");
+    super::expect_closer(p, K::R_PAREN, Some("\")\""));
     m.complete(p, K::ARG_LIST);
 }

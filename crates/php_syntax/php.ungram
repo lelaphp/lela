@@ -375,7 +375,7 @@ Expr = LiteralExpr | MagicConstExpr | InterpolatedStringExpr | HeredocExpr
      | PrintExpr | ThrowExpr | YieldExpr | YieldFromExpr | IncludeExpr
      | IssetExpr | EmptyExpr | EvalExpr
      | CallExpr | MemberAccessExpr | ScopedAccessExpr
-     | SubscriptExpr | LegacyCurlySubscriptExpr
+     | SubscriptExpr
      | ClosureExpr | ArrowFnExpr
 // NOTE: bare NameRef as Expr = constant fetch / fn name; 'true','false',
 // 'null' live here, not in LiteralExpr — they are constants (M1 resolves).
@@ -476,9 +476,9 @@ BracedMember     = '{' inner:Expr '}'
 SubscriptExpr = base:Expr! '[' index:Expr? ']'
 // NOTE: absent index = push form '$a[] = …' — legal only as write
 // target (VALIDATE).
-LegacyCurlySubscriptExpr = base:Expr! '{' index:Expr '}'
-// NOTE: removed 8.0; parsed solely to issue the targeted MHT diagnostic
-// (M0 §3 language-level policy).
+// NOTE: the curly offset '$s{0}' 8.0 removed has no rule: php's grammar
+// has none, so the '{' is the token the enclosing site did not want, and
+// the parser says so as php says it (design §6.1).
 
 ArrayExpr = ( 'array' '(' ArrayElement,* ')' | '[' ArrayElement,* ']' )
 ListExpr  = 'list' '(' ArrayElement,* ')'

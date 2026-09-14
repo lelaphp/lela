@@ -379,7 +379,7 @@ fn the_token_texts_concatenate_to_the_input() {
         b"<?= 'x' ?>\n<?php 0x1G;",
         b"\xff\xfe<?php \"\xc3\x28\";",
     ] {
-        let parsed = parse(source);
+        let parsed = parse(source, &php_syntax::Options::default());
         let mut text = Vec::new();
         for token in &parsed.tokens {
             text.extend_from_slice(

@@ -473,8 +473,7 @@ fn unset_of_binary_expr_rejected() {
                   VARIABLE@17..19 "$y"
                   R_PAREN@19..20 ")"
                 SEMICOLON@20..21 ";"
-            error@15..16 unclosed delimiter `(`
-            error@15..16 syntax error, unexpected token "+"
+            error@15..16 syntax error, unexpected token "+", expecting "->" or "?->" or "["
         "#]],
     );
 }
@@ -730,7 +729,7 @@ fn fully_qualified_name_inside_group_use_rejected() {
                     NAME_FULLY_QUALIFIED@20..24 "\\Qux"
                   R_CURLY@24..25 "}"
                 SEMICOLON@25..26 ";"
-            error@20..24 syntax error, unexpected fully qualified name "\Qux", expecting identifier or namespaced name or "function" or "const"
+            error@20..24 syntax error, unexpected fully qualified name "\Qux", expecting "}"
         "#]],
     );
 }

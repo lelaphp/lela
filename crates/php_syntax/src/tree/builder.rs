@@ -570,9 +570,17 @@ mod tests {
             &tokens,
             vec![
                 start(SyntaxKind::SOURCE_FILE),
-                Event::Error(Box::new(Diagnostic::new(Span::new(FileId(0), 0, 5), "one"))),
+                Event::Error(Box::new(Diagnostic::new(
+                    Span::new(FileId(0), 0, 5),
+                    1,
+                    "one",
+                ))),
                 token(SyntaxKind::OPEN_TAG),
-                Event::Error(Box::new(Diagnostic::new(Span::new(FileId(0), 5, 5), "two"))),
+                Event::Error(Box::new(Diagnostic::new(
+                    Span::new(FileId(0), 5, 5),
+                    1,
+                    "two",
+                ))),
                 Event::Finish,
             ],
         );

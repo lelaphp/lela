@@ -24,6 +24,13 @@ pub struct LineIndex {
     len: u32,
 }
 
+impl Default for LineIndex {
+    /// The index of the empty text: one line, no bytes.
+    fn default() -> LineIndex {
+        LineIndex::new(b"")
+    }
+}
+
 impl LineIndex {
     /// Builds the index for `text`, which [`crate::load_bytes`] has held
     /// under 4 GiB; a longer text is indexed up to that length.
@@ -71,6 +78,14 @@ impl LineIndex {
             line: u32::try_from(line).unwrap_or(u32::MAX),
             col,
         }
+    }
+
+    /// The 1-based line of `offset`, as php numbers lines in `on line N`:
+    /// the `\n`s before it, plus one. An offset past the end is the last
+    /// line, where an end-of-file diagnostic stands.
+    #[must_use]
+    pub fn line_number(&self, offset: u32) -> u32 {
+        self.line_col(offset).line.saturating_add(1)
     }
 
     /// The byte offset of a [`LineCol`]; `None` when the line does not

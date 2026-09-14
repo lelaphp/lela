@@ -21,6 +21,7 @@ mod strings;
 mod tests;
 
 use crate::SyntaxKind;
+use crate::line_index::LineIndex;
 use crate::source::{Diagnostic, FileId, Span};
 
 /// One lexed token: its kind, where it starts and how long it is. The
@@ -52,13 +53,20 @@ impl Default for LexOptions {
     }
 }
 
-/// What one lex produced: the token stream and the lexical diagnostics.
+/// What one lex produced: the token stream and the scanner's diagnostics.
 #[derive(Debug)]
 pub struct Lexed {
     /// The tokens, in source order. No EOF sentinel; the sum of the
     /// lengths equals the input length.
     pub tokens: Vec<Token>,
-    /// Lexical diagnostics, in emission order.
+    /// What php's scanner raises on its own, in emission order: what it
+    /// throws (`Unterminated comment starting line 3`,
+    /// `Invalid numeric literal`, the heredoc indentation rules, the
+    /// `(real)` cast) and
+    /// what it warns of and scans past (the octal escape overflow, the
+    /// non-canonical cast spelling). What the scanner hands the parser
+    /// as a token (a stray byte, an unterminated string) is the parser's
+    /// to name, and raises nothing here.
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -66,7 +74,19 @@ pub struct Lexed {
 /// `INITIAL`.
 #[must_use]
 pub fn lex(file: FileId, text: &[u8], options: &LexOptions) -> Lexed {
-    Lexer::new(file, text, options).lex()
+    lex_with_lines(file, text, options, &LineIndex::new(text))
+}
+
+/// [`lex`] over a line table already built for `text`, which `parse`
+/// keeps for the parser and hands back on `Parsed`.
+#[must_use]
+pub(crate) fn lex_with_lines(
+    file: FileId,
+    text: &[u8],
+    options: &LexOptions,
+    lines: &LineIndex,
+) -> Lexed {
+    Lexer::new(file, text, options, lines).lex()
 }
 
 /// A scanner state. The stack's factoring and the names are Zend's, so a
@@ -161,6 +181,8 @@ enum StateKind {
 pub(crate) struct Lexer<'a> {
     pub(crate) file: FileId,
     pub(crate) text: &'a [u8],
+    /// The line table, for the line a diagnostic reports.
+    lines: &'a LineIndex,
     pub(crate) short_open_tag: bool,
     /// Current scan position; always a token boundary between dispatches.
     pub(crate) pos: usize,
@@ -174,7 +196,12 @@ pub(crate) struct Lexer<'a> {
 }
 
 impl<'a> Lexer<'a> {
-    pub(crate) fn new(file: FileId, text: &'a [u8], options: &LexOptions) -> Lexer<'a> {
+    pub(crate) fn new(
+        file: FileId,
+        text: &'a [u8],
+        options: &LexOptions,
+        lines: &'a LineIndex,
+    ) -> Lexer<'a> {
         // The 4 GiB cap `load_bytes` holds is what makes every `narrow`
         // below exact. Assert it once, at the one construction site.
         debug_assert!(
@@ -189,6 +216,7 @@ impl<'a> Lexer<'a> {
         Lexer {
             file,
             text,
+            lines,
             short_open_tag: options.short_open_tag,
             pos: 0,
             frames: vec![StateFrame {
@@ -231,7 +259,6 @@ impl<'a> Lexer<'a> {
                 before.2,
             );
         }
-        self.eof_diagnostics();
         debug_assert_eq!(self.emitted, self.text.len(), "token coverage gap");
         Lexed {
             tokens: self.tokens,
@@ -280,6 +307,11 @@ impl<'a> Lexer<'a> {
 
     pub(crate) fn diag(&mut self, d: Diagnostic) {
         self.diags.push(d);
+    }
+
+    /// The 1-based line of `offset`, for the line a diagnostic reports.
+    pub(crate) fn line(&self, offset: usize) -> u32 {
+        self.lines.line_number(narrow(offset))
     }
 
     pub(crate) fn span(&self, start: usize, end: usize) -> Span {
@@ -448,45 +480,6 @@ impl<'a> Lexer<'a> {
             return Some((SyntaxKind::OPEN_TAG, 2));
         }
         None
-    }
-
-    // ----- EOF ---------------------------------------------------------------
-
-    /// The unterminated-construct diagnostic for the topmost string-ish
-    /// state still open at EOF; a deeper one is the parser's to say.
-    fn eof_diagnostics(&mut self) {
-        let eof = self.span(self.text.len(), self.text.len());
-        for frame in self.frames.iter().rev() {
-            let opener = frame.aux.opener;
-            let d = match &frame.state {
-                State::DoubleQuoted | State::Backquote => Diagnostic::new(
-                    eof,
-                    "string runs to end of file without a closing delimiter",
-                ),
-                State::Heredoc { .. } | State::Nowdoc { .. } => {
-                    // php (probed 8.5.7, flexible-heredoc-error6/7): a
-                    // heredoc or nowdoc whose body has zero bytes, EOF
-                    // directly after the start token's newline, reports the
-                    // bare `unexpected end of file`; any body content, a
-                    // lone newline or trailing spaces included, adds bison's
-                    // four-token expected set. The body starts on the line
-                    // after the opener (`<<<LABEL` requires its newline), so
-                    // emptiness is "no line start follows the opener".
-                    let body_start = self.next_line_start(opener.start as usize);
-                    let empty_body = body_start.is_none_or(|b| b >= self.text.len());
-                    let text = if empty_body {
-                        "syntax error, unexpected end of file"
-                    } else {
-                        "syntax error, unexpected end of file, expecting variable \
-                         or heredoc end or \"${\" or \"{$\""
-                    };
-                    Diagnostic::new(eof, text)
-                }
-                _ => continue,
-            };
-            self.diags.push(d);
-            return;
-        }
     }
 }
 

@@ -1839,15 +1839,19 @@ fn legacy_curly_offset() {
         expect![[r#"
             SOURCE_FILE@0..12
               OPEN_TAG@0..6 "<?php "
-              EXPR_STMT@6..12
-                LEGACY_CURLY_SUBSCRIPT_EXPR@6..11
-                  SIMPLE_VAR_EXPR@6..8
-                    VARIABLE@6..8 "$s"
-                  L_CURLY@8..9 "{"
+              EXPR_STMT@6..8
+                SIMPLE_VAR_EXPR@6..8
+                  VARIABLE@6..8 "$s"
+              BLOCK@8..11
+                L_CURLY@8..9 "{"
+                EXPR_STMT@9..10
                   LITERAL_EXPR@9..10
                     INT@9..10 "0"
-                  R_CURLY@10..11 "}"
+                R_CURLY@10..11 "}"
+              EMPTY_STMT@11..12
                 SEMICOLON@11..12 ";"
+            error@8..9 syntax error, unexpected token "{"
+            error@10..11 syntax error, unexpected token "}"
         "#]],
     );
 }

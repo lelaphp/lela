@@ -1,5 +1,6 @@
 use super::*;
 use crate::lexer::{LexOptions, Token, lex};
+use crate::line_index::LineIndex;
 use crate::tree;
 
 fn tokens(kinds: &[(SyntaxKind, u32)]) -> Vec<Token> {
@@ -24,7 +25,8 @@ fn marker_precede_chains() {
         (SyntaxKind::INT, 1),
     ]);
     let input = Input::new(text, &raw);
-    let mut p = Parser::new(&input, FileId(0));
+    let lines = LineIndex::new(text);
+    let mut p = Parser::new(&input, FileId(0), &lines);
 
     let m = p.start();
     p.bump(SyntaxKind::INT);
@@ -61,7 +63,8 @@ fn expected_set_ranked_and_cleared_by_a_bump() {
     let text = b"$x;";
     let raw = tokens(&[(SyntaxKind::VARIABLE, 2), (SyntaxKind::SEMICOLON, 1)]);
     let input = Input::new(text, &raw);
-    let mut p = Parser::new(&input, FileId(0));
+    let lines = LineIndex::new(text);
+    let mut p = Parser::new(&input, FileId(0), &lines);
     assert!(!p.at(SyntaxKind::COMMA));
     assert!(!p.at_any(&[SyntaxKind::R_PAREN, SyntaxKind::COMMA]));
     assert!(!p.peek_at(SyntaxKind::IDENT));
@@ -83,7 +86,8 @@ fn unexpected_here_spells_php() {
     let text = b"<?php $x = (1];";
     let lexed = lex(FileId(0), text, &LexOptions::default());
     let input = Input::new(text, &lexed.tokens);
-    let mut p = Parser::new(&input, FileId(0));
+    let lines = LineIndex::new(text);
+    let mut p = Parser::new(&input, FileId(0), &lines);
     p.bump(SyntaxKind::OPEN_TAG);
     p.bump(SyntaxKind::VARIABLE);
     assert_eq!(
@@ -106,11 +110,6 @@ fn unexpected_here_spells_php() {
         p.unexpected_here_expecting("\")\"").message,
         "Unclosed '(' does not match ']'"
     );
-    assert_eq!(
-        p.open_delim_span(SyntaxKind::R_PAREN).map(|s| s.start),
-        Some(11)
-    );
-    assert_eq!(p.open_delim_span(SyntaxKind::R_BRACK), None);
     p.bump(SyntaxKind::R_BRACK);
     p.bump(SyntaxKind::SEMICOLON);
     assert!(p.at_eof());
@@ -120,7 +119,8 @@ fn unexpected_here_spells_php() {
     let text = b"<?php $x = 1";
     let lexed = lex(FileId(0), text, &LexOptions::default());
     let input = Input::new(text, &lexed.tokens);
-    let mut p = Parser::new(&input, FileId(0));
+    let lines = LineIndex::new(text);
+    let mut p = Parser::new(&input, FileId(0), &lines);
     while !p.at_eof() {
         p.bump_any();
     }
@@ -136,7 +136,8 @@ fn unexpected_here_spells_php() {
     let text = b"<?php $x = 1);\n\n$y = (\n1];";
     let lexed = lex(FileId(0), text, &LexOptions::default());
     let input = Input::new(text, &lexed.tokens);
-    let mut p = Parser::new(&input, FileId(0));
+    let lines = LineIndex::new(text);
+    let mut p = Parser::new(&input, FileId(0), &lines);
     while !p.at(SyntaxKind::R_PAREN) {
         p.bump_any();
     }
@@ -255,7 +256,8 @@ fn parse_nested(src: &[u8]) -> tree::Built {
     let lexed = lex(FileId(0), src, &LexOptions::default());
     assert!(lexed.diagnostics.is_empty(), "the lexer has no depth");
     let input = Input::new(src, &lexed.tokens);
-    let mut p = Parser::new(&input, FileId(0));
+    let lines = LineIndex::new(src);
+    let mut p = Parser::new(&input, FileId(0), &lines);
     crate::grammar::source_file(&mut p);
     tree::build(&lexed.tokens, p.finish())
 }

@@ -2,7 +2,7 @@
 //! numbers, casts, comments, and the entries into the string and heredoc
 //! states.
 
-use crate::source::Diagnostic;
+use crate::source::{Diagnostic, Level};
 
 use super::{Lexer, State, is_label_continue, is_label_start};
 use crate::SyntaxKind;
@@ -301,11 +301,13 @@ impl Lexer<'_> {
             self.pos += 1;
         }
         if !terminated {
+            // php throws before it counts the comment's newlines, so the
+            // line it reports is the one the comment opened on.
             let eof = self.span(self.text.len(), self.text.len());
-            #[allow(clippy::naive_bytecount)] // no extra dep; only at an unterminated comment
-            let open_line = 1 + self.text[..start].iter().filter(|&&b| b == b'\n').count();
+            let open_line = self.line(start);
             self.diag(Diagnostic::new(
                 eof,
+                open_line,
                 format!("Unterminated comment starting line {open_line}"),
             ));
         }
@@ -340,12 +342,42 @@ impl Lexer<'_> {
             let removed = CASTS_REMOVED.iter().any(|c| word.eq_ignore_ascii_case(c));
             if removed || CASTS.iter().any(|c| word.eq_ignore_ascii_case(c)) {
                 self.pos = i + 1;
+                let span = self.span(start, self.pos);
+                let line = self.line(start);
                 let kind = if removed {
-                    // `(real)` and `(unset)`: one token, so the parser can
-                    // say `The (real) cast has been removed, use (float)
-                    // instead` as php does (design §6.1's lexical fatals).
+                    // `(real)` and `(unset)` lex as one token. php's
+                    // scanner throws on `(real)` as it scans it, so that
+                    // one is raised here; `(unset)` reaches php's
+                    // compiler as a cast and is the parser's to refuse
+                    // (design §6.1's lexical fatals).
+                    if word.eq_ignore_ascii_case(b"real") {
+                        self.diag(Diagnostic::new(
+                            span,
+                            line,
+                            "The (real) cast has been removed, use (float) instead",
+                        ));
+                    }
                     SyntaxKind::CAST_REMOVED
                 } else {
+                    // The four spellings 8.5 deprecates, each naming the
+                    // canonical one, `zend_language_scanner.l` at the pin.
+                    let canonical = match word.to_ascii_lowercase().as_slice() {
+                        b"integer" => Some(("integer", "int")),
+                        b"double" => Some(("double", "float")),
+                        b"binary" => Some(("binary", "string")),
+                        b"boolean" => Some(("boolean", "bool")),
+                        _ => None,
+                    };
+                    if let Some((spelled, canonical)) = canonical {
+                        self.diag(Diagnostic::of(
+                            Level::Deprecated,
+                            span,
+                            line,
+                            format!(
+                                "Non-canonical cast ({spelled}) is deprecated, use the ({canonical}) cast instead"
+                            ),
+                        ));
+                    }
                     SyntaxKind::CAST
                 };
                 self.emit(kind, start);
@@ -449,23 +481,15 @@ impl Lexer<'_> {
 
     // ----- error bytes ---------------------------------------------------------------------
 
-    /// Bytes no scripting rule accepts (controls, DEL): one ERROR token per
-    /// maximal span and one diagnostic, php's `unexpected character 0x%02X`
-    /// for the leading byte, since php stops at the first parse error and
-    /// never reaches the rest.
+    /// Bytes no scripting rule accepts (controls, DEL): Zend's `{ANY_CHAR}`
+    /// hands each back as `T_BAD_CHARACTER` and its parser says
+    /// `unexpected character 0x%02X` for the first it meets, so the span
+    /// is one ERROR token, named by the parser where it reaches it.
     fn lex_bad_bytes(&mut self) {
         let start = self.pos;
         while self.pos < self.text.len() && is_bad_scripting_byte(self.byte(self.pos)) {
             self.pos += 1;
         }
-        let span = self.span(start, self.pos);
-        self.diag(Diagnostic::new(
-            span,
-            format!(
-                "syntax error, unexpected character 0x{:02X}",
-                self.byte(start)
-            ),
-        ));
         self.emit(SyntaxKind::ERROR, start);
     }
 }

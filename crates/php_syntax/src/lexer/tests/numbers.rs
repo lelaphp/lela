@@ -71,21 +71,22 @@ fn adjacent_dots() {
 }
 
 #[test]
-fn invalid_numbers_still_one_token() {
-    // Recovery: one token, one diagnostic (its span is asserted in
-    // diagnostics.rs).
-    check_php("0x", &[(INT, "0x")]);
-    check_php("0b", &[(INT, "0b")]);
-    check_php("0o", &[(INT, "0o")]);
-    check_php("0xZ", &[(INT, "0x"), (IDENT, "Z")]);
-    check_php("0o8", &[(INT, "0o"), (INT, "8")]);
+fn malformed_numbers_cut_where_zends_pattern_ends() {
+    // What `token_get_all` cuts under the pin: the number is the longest
+    // match and the rest is the identifier php's parser then names.
+    check_php("0x", &[(INT, "0"), (IDENT, "x")]);
+    check_php("0b", &[(INT, "0"), (IDENT, "b")]);
+    check_php("0o", &[(INT, "0"), (IDENT, "o")]);
+    check_php("0xZ", &[(INT, "0"), (IDENT, "xZ")]);
+    check_php("0o8", &[(INT, "0"), (IDENT, "o8")]);
     check_php("08", &[(INT, "08")]);
     check_php("0_8", &[(INT, "0_8")]);
-    check_php("1_", &[(INT, "1_")]);
-    check_php("1__2", &[(INT, "1__2")]);
-    check_php("1_.5", &[(FLOAT, "1_.5")]);
-    check_php("1._5", &[(FLOAT, "1._5")]);
-    check_php("1_e5", &[(FLOAT, "1_e5")]);
-    check_php("0x_FF", &[(INT, "0x_FF")]);
-    check_php("0x1_", &[(INT, "0x1_")]);
+    check_php("1_", &[(INT, "1"), (IDENT, "_")]);
+    check_php("1__2", &[(INT, "1"), (IDENT, "__2")]);
+    check_php("1_.5", &[(INT, "1"), (IDENT, "_"), (FLOAT, ".5")]);
+    check_php("1._5", &[(FLOAT, "1."), (IDENT, "_5")]);
+    check_php("1_e5", &[(INT, "1"), (IDENT, "_e5")]);
+    check_php("0x_FF", &[(INT, "0"), (IDENT, "x_FF")]);
+    check_php("0x1_", &[(INT, "0x1"), (IDENT, "_")]);
+    check_php("1_2_", &[(INT, "1_2"), (IDENT, "_")]);
 }

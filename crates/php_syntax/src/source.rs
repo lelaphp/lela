@@ -5,7 +5,7 @@
 
 /// Identifies a file. A newtype over `u32`; the mapping from a `FileId` to
 /// a path is its owner's, not this type's.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileId(pub u32);
 
 /// A byte range inside a single file.
@@ -139,6 +139,7 @@ pub fn load_bytes(file: FileId, bytes: Vec<u8>) -> Result<Box<[u8]>, Diagnostic>
                 start: 0,
                 len: 0,
             },
+            1,
             format!(
                 "file is {} bytes, larger than the {gib:.0} GiB limit",
                 bytes.len()
@@ -148,27 +149,73 @@ pub fn load_bytes(file: FileId, bytes: Vec<u8>) -> Result<Box<[u8]>, Diagnostic>
     Ok(bytes.into_boxed_slice())
 }
 
-/// One diagnostic the lexer raised: what php's scanner says where it has a
-/// text of its own (`Unterminated comment starting line 3`,
-/// `Invalid numeric literal`) and the span it points at. There is no code number
-/// (design §6.1). Where php reports the same defect from its parser, with
-/// bison's `unexpected …, expecting …` for the state it was in, the text
-/// here is still the inherited one; the sites are re-worded to php's, and
-/// the shape settled, with the parse entry (#206).
+/// php's kind for what the lexer or the parser raises: the `E_*` level
+/// `php_error_cb` renders it under, which is the head of the line php
+/// prints (`Parse error`, `Fatal error`, `Warning`, `Deprecated`) and
+/// whether the request goes on. What design §6.1 calls the error kind; a
+/// diagnostic carries no code number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Level {
+    /// `E_PARSE`: what the scanner and the parser refuse with. The
+    /// request ends before it runs.
+    Parse,
+    /// `E_COMPILE_ERROR`: a fatal php raises while compiling the tree, so
+    /// after every parse error in the file; the parser's one such is the
+    /// `(unset)` cast.
+    CompileError,
+    /// `E_COMPILE_WARNING`: the request goes on; the scanner's octal
+    /// escape overflow.
+    CompileWarning,
+    /// `E_DEPRECATED`: the request goes on; the scanner's non-canonical
+    /// cast spelling.
+    Deprecated,
+}
+
+impl Level {
+    /// Whether php stops on it: the request never runs after a `Parse` or
+    /// a `CompileError`.
+    #[must_use]
+    pub fn is_fatal(self) -> bool {
+        matches!(self, Level::Parse | Level::CompileError)
+    }
+}
+
+/// One diagnostic the lexer or the parser raised: php's text, at php's
+/// line, under php's level (design §6.1). The text is what `php` prints
+/// between the level's head and ` in <file> on line <n>`: bison's
+/// `syntax error, unexpected …, expecting …` for the state the parser
+/// was in, the scanner's own sentences (`Invalid numeric literal`,
+/// `Unterminated comment starting line 3`), and the bracket balance
+/// (`Unclosed '{' on line 3`). There is no code number.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
     /// The defect site: the smallest range that must change.
     pub span: Span,
-    /// The text, php's where php's scanner has one.
+    /// The 1-based line php reports, `CG(zend_lineno)` when it raised:
+    /// the line the scanner stands on after the unexpected token, which
+    /// is the token's last line, and the line the scanner had reached
+    /// where it throws mid-token.
+    pub line: u32,
+    /// php's level for it.
+    pub level: Level,
+    /// php's text.
     pub message: String,
 }
 
 impl Diagnostic {
-    /// A diagnostic at `span` with `message`.
+    /// A parse error at `span`, reported on `line`, with `message`.
     #[must_use]
-    pub fn new(span: Span, message: impl Into<String>) -> Diagnostic {
+    pub fn new(span: Span, line: u32, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::of(Level::Parse, span, line, message)
+    }
+
+    /// A diagnostic under `level` at `span`, reported on `line`.
+    #[must_use]
+    pub fn of(level: Level, span: Span, line: u32, message: impl Into<String>) -> Diagnostic {
         Diagnostic {
             span,
+            line,
+            level,
             message: message.into(),
         }
     }

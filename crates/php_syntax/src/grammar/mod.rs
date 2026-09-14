@@ -12,13 +12,17 @@
 //! or statement-introducing keyword; (3) bounded absorption into an
 //! `ERROR` node under the forward-progress invariant.
 //!
-//! **What a diagnostic says.** The engine has one voice (design §6.1), so
-//! a site whose inherited wording had php's text beside it carries php's,
-//! and the parser's own `unexpected …` is php's already. Four sites had
-//! only Mahout's wording and keep it until #206 re-words the 74 to php's
-//! at php's line: the close tag inside an unfinished construct, the stray
-//! token where a closer was due, the stray closer no opener matches, and
-//! the alternative-syntax terminator, wrong or missing.
+//! **What a diagnostic says.** The engine has one voice (design §6.1):
+//! every site words its diagnostic as php words it, `syntax error,
+//! unexpected …` with the `, expecting …` clause bison prints at that
+//! position where the site pins one, at php's line. A missing `;` or `,`
+//! is the unexpected token that stood where it was due, named as such;
+//! what the repair decides is only how the tree goes on. A token that
+//! cannot start a statement takes the enclosing list's clause
+//! ([`Parser::stmt_clause`]), which is how `const` inside a function,
+//! `(void)` where php forbids it, a stray byte and an unclosed
+//! single-quoted string all read as php reads them: as the token php did
+//! not want there.
 
 pub(crate) mod ckw;
 mod decl;
@@ -27,8 +31,8 @@ mod strings;
 mod types;
 
 use crate::SyntaxKind as K;
-use crate::parser::{CompletedMarker, Parser, php_token_name};
-use crate::source::{Diagnostic, Span};
+use crate::parser::{CompletedMarker, Parser};
+use crate::source::Span;
 
 /// The tokens that introduce a statement: the sync anchors, and the
 /// "next token starts a statement" half of the missing-`;` repair.
@@ -74,9 +78,12 @@ fn at_stmt_recovery(p: &mut Parser<'_>) -> bool {
         || STMT_START.contains(&p.current())
 }
 
-/// A whole file into a `SOURCE_FILE` node.
+/// A whole file into a `SOURCE_FILE` node. The top level is where php's
+/// clause for a token that starts no statement is `end of file` (probed
+/// 8.5.9: `<?php =`).
 pub(crate) fn source_file(p: &mut Parser<'_>) {
     let m = p.start();
+    p.stmt_clause = Some("end of file");
     while !p.at_eof() {
         if p.is_stuck() {
             // The forward-progress backstop: never loop without consuming.
@@ -136,6 +143,15 @@ pub(crate) fn absorb_balanced(p: &mut Parser<'_>) -> CompletedMarker {
 }
 
 fn statement_inner(p: &mut Parser<'_>, top_level: bool) {
+    // `const`, `use` and `namespace` are php's `top_statement`s: inside
+    // a function, a block or a control-flow body they are the unexpected
+    // token, with the enclosing list's clause (design §6.1's nested
+    // `const`; probed 8.5.9: `function f(){ const D = 2; }`, `if (1):
+    // const X = 1; endif;`). Parsed anyway, so the tree keeps the shape.
+    if !top_level && matches!(p.current(), K::CONST_KW | K::USE_KW | K::NAMESPACE_KW) {
+        let d = p.unexpected_at_stmt();
+        p.error(d);
+    }
     match p.current() {
         K::SEMICOLON => {
             let m = p.start();
@@ -202,14 +218,17 @@ fn statement_inner(p: &mut Parser<'_>, top_level: bool) {
             let m = p.start();
             decl::modifiers_then_class(p, m);
         }
-        // A lexer-error token already carries the lexer's diagnostic;
-        // reporting it again would be a cascade. Absorbed quietly.
+        // A stray byte, which php's scanner hands its parser as
+        // `T_BAD_CHARACTER`: `unexpected character 0x0E` with the list's
+        // clause.
         K::ERROR => {
+            let d = p.unexpected_at_stmt();
+            p.error(d);
             let e = p.start();
             p.bump(K::ERROR);
             e.complete(p, K::ERROR);
         }
-        K::ATTRIBUTE_OPEN => attributed_statement(p),
+        K::ATTRIBUTE_OPEN => attributed_statement(p, top_level),
         K::IDENT if p.nth(1) == K::COLON => {
             let m = p.start();
             p.bump(K::IDENT);
@@ -222,7 +241,7 @@ fn statement_inner(p: &mut Parser<'_>, top_level: bool) {
 
 /// `#[…]` at statement position: a declaration's attributes, or an
 /// expression statement whose closure carries them.
-fn attributed_statement(p: &mut Parser<'_>) {
+fn attributed_statement(p: &mut Parser<'_>, top_level: bool) {
     match peek_past_attributes(p) {
         K::FUNCTION_KW
         | K::CLASS_KW
@@ -258,7 +277,7 @@ fn attributed_statement(p: &mut Parser<'_>) {
                 // shape, and placement is the compiler's.
                 _ => {
                     m.abandon(p);
-                    statement(p, false);
+                    statement(p, top_level);
                 }
             }
         }
@@ -306,21 +325,41 @@ fn function_is_decl(p: &mut Parser<'_>) -> bool {
     name == K::IDENT || ckw::is_contextual_only(name) || name == K::READONLY_KW
 }
 
-/// `{ Stmt* }`, completing a `BLOCK` node.
+/// `{ Stmt* }`, completing a `BLOCK` node: a statement list whose
+/// statements are php's `inner_statement`s.
 pub(crate) fn block(p: &mut Parser<'_>) -> CompletedMarker {
+    block_of(p, false)
+}
+
+/// [`block`], or with `top_level` the braces of a `namespace { … }`,
+/// whose statements are php's `top_statement`s. Inside braces a token
+/// that starts no statement carries no clause (probed 8.5.9: `{ = }`,
+/// `namespace A { = }`).
+fn block_of(p: &mut Parser<'_>, top_level: bool) -> CompletedMarker {
     let m = p.start();
     if !p.eat(K::L_CURLY) {
-        p.error_unexpected();
+        // Where a block is the one continuation php spells it (`try ;`,
+        // `catch (E) ;`, `finally ;` are `expecting "{"`, probed 8.5.9).
+        let d = p.unexpected_here_expecting("\"{\"");
+        p.error(d);
         return m.complete(p, K::BLOCK);
     }
-    stmt_list_until(p, &[K::R_CURLY]);
-    expect_closer(p, K::R_CURLY, "`{`");
+    stmt_list_until(p, &[K::R_CURLY], None, top_level);
+    expect_closer(p, K::R_CURLY, None);
     m.complete(p, K::BLOCK)
 }
 
 /// Statements until one of `enders`, or the end of the input, with the
-/// stuck recovery.
-fn stmt_list_until(p: &mut Parser<'_>, enders: &[K]) {
+/// stuck recovery; `clause` is what a token that starts no statement
+/// reports as expected inside this list, and the enclosing list's clause
+/// stands again after it.
+fn stmt_list_until(
+    p: &mut Parser<'_>,
+    enders: &[K],
+    clause: Option<&'static str>,
+    top_level: bool,
+) {
+    let outer = std::mem::replace(&mut p.stmt_clause, clause);
     while !p.at_eof() && !enders.contains(&p.current()) {
         if p.is_stuck() {
             let e = p.start();
@@ -328,19 +367,23 @@ fn stmt_list_until(p: &mut Parser<'_>, enders: &[K]) {
             e.complete(p, K::ERROR);
             continue;
         }
-        statement(p, false);
+        statement(p, top_level);
     }
+    p.stmt_clause = outer;
 }
 
 /// A `STMT_LIST` node for an alternative-syntax body, ending before any
-/// of `enders`, the construct's `end…` keyword family.
-fn alt_stmt_list(p: &mut Parser<'_>, enders: &[K]) {
+/// of `enders`, the construct's `end…` keyword family; `clause` is the
+/// body's own (`"elseif" or "else" or "endif"` inside an `if:`; none
+/// inside a `while:`, an `else:` or a `for:`; probed 8.5.9).
+fn alt_stmt_list(p: &mut Parser<'_>, enders: &[K], clause: Option<&'static str>) {
     let m = p.start();
-    stmt_list_until(p, enders);
+    stmt_list_until(p, enders, clause, false);
     m.complete(p, K::STMT_LIST);
 }
 
-/// The zero-width span after the previous token, where a repair inserts.
+/// The zero-width span after the previous token: where a missing `;` or
+/// `,` was due, which is what the repairs ask the high-water mark about.
 fn after_previous(p: &Parser<'_>) -> Span {
     let insert_at = p.prev_span();
     Span {
@@ -350,30 +393,26 @@ fn after_previous(p: &Parser<'_>) -> Span {
     }
 }
 
-/// Expects a closing delimiter. On failure: a `?>` in the way is the close
-/// tag ending an unfinished construct, the end of the input is php's
-/// balance text through the parser, and anything else the stray token
-/// where the closer was due. The parser's delimiter stack is what the
-/// opener is read from.
-pub(crate) fn expect_closer(p: &mut Parser<'_>, closer: K, opener_name: &str) {
+/// Expects a closing delimiter. On failure the diagnostic is php's for
+/// what stands there: the end of the input inside an open delimiter and
+/// a closer that closes the wrong thing are the balance text, and any
+/// other token, a `?>` (which php's scanner hands its parser as `;`)
+/// included, is the unexpected token with `expecting`, the clause php
+/// prints at this closer's position where it prints one (`")"` after a
+/// complete argument, none after a parenthesised expression, whose
+/// operator set is too large to spell). A site whose list already
+/// reported the token at this offset says nothing more.
+pub(crate) fn expect_closer(p: &mut Parser<'_>, closer: K, expecting: Option<&str>) {
     if p.eat(closer) {
         return;
     }
-    let d = if p.peek_at(K::CLOSE_TAG) {
-        Diagnostic::new(
-            p.current_span(),
-            format!("`?>` ends the script inside an unfinished {opener_name} construct"),
-        )
-    } else if p.at_eof() {
-        // The end of the input inside an open delimiter: php's
-        // `Unclosed '{' [on line N]`.
-        p.unexpected_here()
-    } else {
-        Diagnostic::new(
-            p.current_span(),
-            format!("unclosed delimiter {opener_name}"),
-        )
-    };
+    if !p.at_eof()
+        && p.bracket_closer_message().is_none()
+        && p.has_error_at_or_after(p.current_span().start)
+    {
+        return;
+    }
+    let d = p.unexpected_here_maybe_expecting(expecting);
     p.error(d);
 }
 
@@ -410,63 +449,39 @@ pub(crate) fn semicolon_expecting(p: &mut Parser<'_>, expecting: Option<&str>) {
     if p.peek_at(K::CLOSE_TAG) || p.peek_at(K::INLINE_HTML) {
         return;
     }
-    let span = after_previous(p);
-    // `{` counts as a statement start (a block) only across a line break:
-    // on the same line it is far likelier a stray brace on the current
-    // statement, and php reports it as the unexpected token (`const X = 1
-    // {0};` is `unexpected token "{", expecting "," or ";"`, probed 8.5.7).
+    // The statement already failed at or after where the `;` was due:
+    // the earlier diagnostic is the story (`function echo(){}` reports
+    // the parameter list's `expecting "("`, `const return` the name
+    // slot's `expecting identifier`). Otherwise the diagnostic is php's:
+    // the token that stood where the `;` was due, with the terminator's
+    // clause, at that token's line.
+    if !p.has_error_at_or_after(after_previous(p).start) {
+        let d = p.unexpected_here_maybe_expecting(expecting);
+        p.error(d);
+    }
+    // What the repair decides is the tree: a statement start on the next
+    // line, or any token across a line break, is far likelier the next
+    // statement than a stray on this one, so the parse goes on from it
+    // rather than skipping to a boundary. `{` counts as a statement start
+    // only across a line break: on the same line it is far likelier a
+    // stray brace on the current statement (`const X = 1 {0};`, probed
+    // 8.5.7).
     let stmt_starts_here =
         p.newline_before_current() || (STMT_START.contains(&p.current()) && !p.peek_at(K::L_CURLY));
-    if stmt_starts_here {
-        // The statement already failed at or after this offset: the
-        // earlier diagnostic is the story (php's wording is its
-        // unexpected-token one: `function echo(){}` reports the
-        // parameter list's `expecting "("`, `const return` the name
-        // slot's `expecting identifier`). A zero-width repair here would
-        // sort ahead of it.
-        if p.has_error_at_or_after(span.start) {
-            return;
-        }
-        // The high-confidence repair, worded as php words the missing
-        // terminator: the bison parser names the token it choked on, with
-        // no `expecting …` clause, since the statement-boundary expected
-        // set is large (`$x = []\nFOO` is `unexpected identifier "FOO"`,
-        // `$x = 1\n$y` is `unexpected variable "$y"`, a trailing-newline
-        // end of input `unexpected end of file`, all pinned 8.5.7).
-        let message = if p.at_eof() {
-            "syntax error, unexpected end of file".to_owned()
-        } else {
-            format!(
-                "syntax error, unexpected {}",
-                php_token_name(p.current(), p.current_text())
-            )
-        };
-        p.error(Diagnostic::new(span, message));
-    } else {
-        if let Some(expecting) = expecting {
-            let d = p.unexpected_here_expecting(expecting);
-            p.error(d);
-        } else {
-            p.error_unexpected();
-        }
+    if !stmt_starts_here {
         recover_to_stmt_boundary(p);
     }
 }
 
-/// The missing-comma repair, shared by the argument and element lists: a
-/// zero-width insertion after the previous token, worded as php words it.
-/// `php_closer` is the list's close token as php spells it: after a
-/// complete element php's expected set collapses to the closer alone
-/// (`[1 2]` is `unexpected integer "2", expecting "]"`, `foo(1 2)`
-/// `expecting ")"`, probed 8.5.7), so the text names the unexpected next
-/// token with that clause.
+/// The missing-comma repair, shared by the argument and element lists:
+/// the token that stood where the `,` was due, worded as php words it,
+/// and the list goes on from it. `php_closer` is the list's close token
+/// as php spells it: after a complete element php's expected set
+/// collapses to the closer alone (`[1 2]` is `unexpected integer "2",
+/// expecting "]"`, `foo(1 2)` `expecting ")"`, probed 8.5.7).
 pub(crate) fn missing_comma(p: &mut Parser<'_>, php_closer: &str) {
-    let span = after_previous(p);
-    let message = format!(
-        "syntax error, unexpected {}, expecting {php_closer}",
-        php_token_name(p.current(), p.current_text())
-    );
-    p.error(Diagnostic::new(span, message));
+    let d = p.unexpected_here_expecting(php_closer);
+    p.error(d);
 }
 
 /// The level-2 and level-3 recovery: absorb tokens into an `ERROR` node
@@ -496,31 +511,20 @@ pub(crate) fn recover_to_stmt_boundary(p: &mut Parser<'_>) {
 
 fn expr_stmt(p: &mut Parser<'_>) {
     let m = p.start();
+    // `(void) expr;` is a statement form of its own in php
+    // (`T_VOID_CAST expr ';'`): the grant is for the primary at the
+    // statement's start alone.
+    p.grants.void = true;
     if expr::expr(p) {
         semicolon(p);
         m.complete(p, K::EXPR_STMT);
     } else {
-        // No expression could start here: one token absorbed for
-        // progress, then synchronised. A stray closer gets php's
-        // bracket-balance wording (`Unmatched '}'`, `Unclosed '{' does
-        // not match ')'`) through the parser; a closer that matches its
-        // opener but stands where no expression can, the stray-closer
-        // wording; anything else the unexpected-token one.
-        let d = if p.bracket_closer_message().is_some() {
-            p.unexpected_here()
-        } else if matches!(p.current(), K::R_PAREN | K::R_BRACK)
-            || (p.peek_at(K::R_CURLY) && p.open_delim_span(K::R_CURLY).is_none())
-        {
-            Diagnostic::new(
-                p.current_span(),
-                format!(
-                    "stray `{}` with no matching opener",
-                    String::from_utf8_lossy(p.current_text())
-                ),
-            )
-        } else {
-            p.unexpected_here()
-        };
+        // No expression could start here: php's unexpected token, with
+        // the enclosing list's clause, and the balance text where the
+        // token is a closer (`Unmatched '}'`, `Unclosed '{' does not
+        // match ')'`). One token absorbed for progress, then
+        // synchronised.
+        let d = p.unexpected_at_stmt();
         p.error(d);
         m.abandon(p);
         if !at_stmt_recovery(p) {
@@ -550,10 +554,7 @@ fn echo_stmt(p: &mut Parser<'_>) {
 fn return_stmt(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(K::RETURN_KW);
-    if !p.peek_at(K::SEMICOLON) && !p.peek_at(K::CLOSE_TAG) && !p.at_eof() {
-        expr::expr(p);
-    }
-    semicolon(p);
+    single_value_tail(p);
     m.complete(p, K::RETURN_STMT);
 }
 
@@ -566,11 +567,21 @@ fn break_continue_stmt(p: &mut Parser<'_>) {
         p.bump(K::CONTINUE_KW);
         K::CONTINUE_STMT
     };
-    if !p.peek_at(K::SEMICOLON) && !p.peek_at(K::CLOSE_TAG) && !p.at_eof() {
-        expr::expr(p);
-    }
-    semicolon(p);
+    single_value_tail(p);
     m.complete(p, kind);
+}
+
+/// The optional value and the `;` of a `return`, `break` or `continue`:
+/// php's clause at the value slot and after it is `";"` alone (`return
+/// ,;` and `return 1 foo` are `expecting ";"`, probed 8.5.9).
+fn single_value_tail(p: &mut Parser<'_>) {
+    if !p.peek_at(K::SEMICOLON) && !p.peek_at(K::CLOSE_TAG) && !p.at_eof() && !expr::expr(p) {
+        let d = p.unexpected_here_expecting("\";\"");
+        p.error(d);
+        recover_to_stmt_boundary(p);
+        return;
+    }
+    semicolon_expecting(p, Some("\";\""));
 }
 
 fn goto_stmt(p: &mut Parser<'_>) {
@@ -585,7 +596,7 @@ fn goto_stmt(p: &mut Parser<'_>) {
         let d = p.unexpected_here_expecting("identifier");
         p.error(d);
     }
-    semicolon(p);
+    semicolon_expecting(p, Some("\";\""));
     m.complete(p, K::GOTO_STMT);
 }
 
@@ -602,7 +613,10 @@ fn global_stmt(p: &mut Parser<'_>) {
             // `simple_variable`.
             expr::variable_variable(p);
         } else {
-            p.error_unexpected();
+            // `global ;` and `global $x, ;` are `expecting variable or
+            // "$"` (probed 8.5.9).
+            let d = p.unexpected_here_expecting("variable or \"$\"");
+            p.error(d);
             break;
         }
         if !p.eat(K::COMMA) {
@@ -610,25 +624,10 @@ fn global_stmt(p: &mut Parser<'_>) {
         }
     }
     // After a `global` variable php expects another `,`-separated simple
-    // variable or the terminating `;`. A trailing token that is neither,
-    // a `->`, `[` or `::` trailer on a `$$name`
-    // (globalNonSimpleVariableError: `global $$foo->bar;`), is
-    // `unexpected "->", expecting "," or ";"` (probed 8.5.7). The generic
-    // `semicolon` repair path drops the clause, so the set is named here;
-    // a plain missing `;` (a statement start or a newline) still takes
-    // the repair.
-    if p.peek_at(K::SEMICOLON)
-        || p.peek_at(K::CLOSE_TAG)
-        || p.peek_at(K::INLINE_HTML)
-        || STMT_START.contains(&p.current())
-        || p.newline_before_current()
-    {
-        semicolon(p);
-    } else {
-        let d = p.unexpected_expecting("\",\" or \";\"");
-        p.error(d);
-        recover_to_stmt_boundary(p);
-    }
+    // variable or the terminating `;`: a trailer on a `$$name`
+    // (globalNonSimpleVariableError: `global $$foo->bar;`) is
+    // `unexpected "->", expecting "," or ";"` (probed 8.5.7).
+    semicolon_expecting(p, Some("\",\" or \";\""));
     m.complete(p, K::GLOBAL_STMT);
 }
 
@@ -639,20 +638,22 @@ fn static_var_stmt(p: &mut Parser<'_>) {
         let d = p.start();
         if p.at(K::VARIABLE) {
             p.bump(K::VARIABLE);
-            if p.eat(K::EQ) {
-                expr::expr(p);
+            if p.eat(K::EQ) && !expr::expr(p) {
+                p.error_unexpected();
             }
             d.complete(p, K::STATIC_VAR_DECLARATOR);
         } else {
             d.abandon(p);
-            p.error_unexpected();
+            // `static $x, ;` is `expecting variable` (probed 8.5.9).
+            let diag = p.unexpected_here_expecting("variable");
+            p.error(diag);
             break;
         }
         if !p.eat(K::COMMA) {
             break;
         }
     }
-    semicolon(p);
+    semicolon_expecting(p, Some("\",\" or \";\""));
     m.complete(p, K::STATIC_VAR_STMT);
 }
 
@@ -664,7 +665,7 @@ fn unset_stmt(p: &mut Parser<'_>) {
         // production (`unset($x + $y)` errors at `+`, `unset(new A())`
         // at `)`).
         expr::unset_operands(p);
-        expect_closer(p, K::R_PAREN, "`(`");
+        expect_closer(p, K::R_PAREN, Some(expr::AFTER_VARIABLE));
     } else {
         // php's bison clause at the mandatory-paren keywords (probed
         // 8.5.7: `unset` at the end of the input is `… unexpected end of
@@ -672,7 +673,7 @@ fn unset_stmt(p: &mut Parser<'_>) {
         let d = p.unexpected_here_expecting("\"(\"");
         p.error(d);
     }
-    semicolon(p);
+    semicolon_expecting(p, Some("\";\""));
     m.complete(p, K::UNSET_STMT);
 }
 
@@ -702,9 +703,16 @@ fn halt_compiler_stmt(p: &mut Parser<'_>, top_level: bool) {
     let m = p.start();
     p.bump(K::HALT_COMPILER_KW);
     if p.eat(K::L_PAREN) {
-        expect_closer(p, K::R_PAREN, "`(`");
+        expect_closer(p, K::R_PAREN, Some("\")\""));
+    } else {
+        let d = p.unexpected_here_expecting("\"(\"");
+        p.error(d);
     }
-    p.eat(K::SEMICOLON);
+    if !p.eat(K::SEMICOLON) && !p.has_error_at_or_after(p.current_span().start) {
+        // `__halt_compiler() foo` is `expecting ";"` (probed 8.5.9).
+        let d = p.unexpected_here_expecting("\";\"");
+        p.error(d);
+    }
     if p.peek_at(K::HALT_DATA) {
         p.bump(K::HALT_DATA);
     }
@@ -715,12 +723,19 @@ fn halt_compiler_stmt(p: &mut Parser<'_>, top_level: bool) {
 // Control flow
 // ---------------------------------------------------------------------------
 
+/// The parenthesised condition of `if`, `elseif`, `while`, `do … while`
+/// and `switch`: the `(` is the one token php spells after the keyword
+/// (`if if` is `expecting "("`), and after the condition the operator set is
+/// too large to spell (`if ($x ;` has no clause; probed 8.5.9).
 fn paren_cond(p: &mut Parser<'_>) {
     if p.eat(K::L_PAREN) {
-        expr::expr(p);
-        expect_closer(p, K::R_PAREN, "`(`");
+        if !expr::expr(p) {
+            p.error_unexpected();
+        }
+        expect_closer(p, K::R_PAREN, None);
     } else {
-        p.error_unexpected();
+        let d = p.unexpected_here_expecting("\"(\"");
+        p.error(d);
     }
 }
 
@@ -742,34 +757,48 @@ fn if_stmt(p: &mut Parser<'_>) {
             K::ENDSWITCH_KW,
             K::ENDDECLARE_KW,
         ];
-        alt_stmt_list(p, ENDERS);
+        // Inside an `if:` or `elseif:` body php spells the three
+        // continuations; after `else:` only `endif` can follow and the
+        // clause is gone (probed 8.5.9).
+        const IF_CLAUSE: Option<&str> = Some("\"elseif\" or \"else\" or \"endif\"");
+        alt_stmt_list(p, ENDERS, IF_CLAUSE);
+        let mut clause = IF_CLAUSE;
         while p.peek_at(K::ELSEIF_KW) || (p.peek_at(K::ELSE_KW) && p.nth(1) == K::IF_KW) {
             let c = p.start();
             if p.peek_at(K::ELSEIF_KW) {
                 p.bump(K::ELSEIF_KW);
             } else {
                 // `else if` in the alternative syntax: parsed as an
-                // `elseif` clause; the compiler rejects it.
+                // `elseif` clause; the compiler rejects it (`else if
+                // (2):` is `unexpected token "if", expecting ":"`).
                 p.bump(K::ELSE_KW);
+                let d = p.unexpected_here_expecting("\":\"");
+                p.error(d);
                 p.bump(K::IF_KW);
             }
             paren_cond(p);
             if !p.eat(K::COLON) {
-                p.error_unexpected();
+                // In the alternative syntax the `:` is the one
+                // continuation (`elseif (2) ;` and `else ;` are
+                // `expecting ":"`, probed 8.5.9).
+                let d = p.unexpected_here_expecting("\":\"");
+                p.error(d);
             }
-            alt_stmt_list(p, ENDERS);
+            alt_stmt_list(p, ENDERS, IF_CLAUSE);
             c.complete(p, K::ALT_ELSEIF_CLAUSE);
         }
         if p.peek_at(K::ELSE_KW) {
             let c = p.start();
             p.bump(K::ELSE_KW);
             if !p.eat(K::COLON) {
-                p.error_unexpected();
+                let d = p.unexpected_here_expecting("\":\"");
+                p.error(d);
             }
-            alt_stmt_list(p, ALT_ENDERS);
+            alt_stmt_list(p, ALT_ENDERS, None);
+            clause = None;
             c.complete(p, K::ALT_ELSE_CLAUSE);
         }
-        alt_terminator(p, K::ENDIF_KW, "endif");
+        alt_terminator(p, K::ENDIF_KW, clause);
     } else {
         statement(p, false);
         while p.peek_at(K::ELSEIF_KW) {
@@ -789,6 +818,10 @@ fn if_stmt(p: &mut Parser<'_>) {
     m.complete(p, K::IF_STMT);
 }
 
+/// php's clause inside an alternative-syntax switch body, the arm
+/// starters beside the closer in the body's own order (probed 8.5.9).
+const ALT_SWITCH_CLAUSE: &str = "\"endswitch\" or \"case\" or \"default\"";
+
 /// The alternative-syntax terminator family.
 const ALT_ENDERS: &[K] = &[
     K::ENDIF_KW,
@@ -799,27 +832,29 @@ const ALT_ENDERS: &[K] = &[
     K::ENDDECLARE_KW,
 ];
 
-/// Consumes the `end…;` of an alternative-syntax construct, with a
-/// diagnostic when the terminator is wrong or missing.
-fn alt_terminator(p: &mut Parser<'_>, ender: K, name: &str) {
+/// Consumes the `end…;` of an alternative-syntax construct. A wrong
+/// `end…` keyword, or the end of the input, is the token php did not
+/// want after the body, with the body's clause (`if (1): endwhile;` is
+/// `unexpected token "endwhile", expecting "elseif" or "else" or
+/// "endif"`, `while (1): echo 1;` at the end is `unexpected end of
+/// file`; probed 8.5.9); after the keyword only `;` can follow.
+fn alt_terminator(p: &mut Parser<'_>, ender: K, clause: Option<&str>) {
     if p.eat(ender) {
-        semicolon(p);
+        semicolon_expecting(p, Some("\";\""));
         return;
     }
-    let message = format!("expected `{name}` to close the alternative syntax");
+    let d = p.unexpected_here_maybe_expecting(clause);
+    p.error(d);
     if ALT_ENDERS.contains(&p.current()) {
         // The wrong `end…` keyword: consumed, with its `;`, as the
         // construct's end, the one reading that makes the construct
         // close.
-        p.error(Diagnostic::new(p.current_span(), message));
         let e = p.start();
         p.bump_any();
         e.complete(p, K::ERROR);
         p.eat(K::SEMICOLON);
         return;
     }
-    // Missing entirely: where it was expected.
-    p.error(Diagnostic::new(after_previous(p), message));
     recover_to_stmt_boundary(p);
 }
 
@@ -828,8 +863,8 @@ fn while_stmt(p: &mut Parser<'_>) {
     p.bump(K::WHILE_KW);
     paren_cond(p);
     if p.eat(K::COLON) {
-        alt_stmt_list(p, ALT_ENDERS);
-        alt_terminator(p, K::ENDWHILE_KW, "endwhile");
+        alt_stmt_list(p, ALT_ENDERS, None);
+        alt_terminator(p, K::ENDWHILE_KW, None);
     } else {
         statement(p, false);
     }
@@ -844,9 +879,12 @@ fn do_while_stmt(p: &mut Parser<'_>) {
         p.bump(K::WHILE_KW);
         paren_cond(p);
     } else {
-        p.error_unexpected();
+        // After the body only `while` can follow (`do ;` is `unexpected
+        // end of file, expecting "while"`, probed 8.5.9).
+        let d = p.unexpected_here_expecting("\"while\"");
+        p.error(d);
     }
-    semicolon(p);
+    semicolon_expecting(p, Some("\";\""));
     m.complete(p, K::DO_WHILE_STMT);
 }
 
@@ -856,55 +894,100 @@ fn for_stmt(p: &mut Parser<'_>) {
     if p.eat(K::L_PAREN) {
         let w = p.start();
         if !p.peek_at(K::SEMICOLON) {
-            expr::expr_list(p);
+            for_exprs(p, false);
         }
         w.complete(p, K::FOR_INIT);
-        p.eat(K::SEMICOLON);
+        for_semicolon(p);
         let w = p.start();
         if !p.peek_at(K::SEMICOLON) {
-            expr::expr_list(p);
+            for_exprs(p, true);
         }
         w.complete(p, K::FOR_COND);
-        p.eat(K::SEMICOLON);
+        for_semicolon(p);
         let w = p.start();
-        if !p.peek_at(K::R_PAREN) {
-            expr::expr_list(p);
+        if !p.peek_at(K::R_PAREN) && !p.peek_at(K::SEMICOLON) {
+            for_exprs(p, false);
         }
         w.complete(p, K::FOR_STEP);
-        expect_closer(p, K::R_PAREN, "`(`");
+        expect_closer(p, K::R_PAREN, Some("\")\""));
     } else {
-        p.error_unexpected();
+        let d = p.unexpected_here_expecting("\"(\"");
+        p.error(d);
     }
     if p.eat(K::COLON) {
-        alt_stmt_list(p, ALT_ENDERS);
-        alt_terminator(p, K::ENDFOR_KW, "endfor");
+        alt_stmt_list(p, ALT_ENDERS, None);
+        alt_terminator(p, K::ENDFOR_KW, None);
     } else {
         statement(p, false);
     }
     m.complete(p, K::FOR_STMT);
 }
 
+/// One of a `for` header's three expression lists, php's
+/// `non_empty_for_exprs`: every element may be a `(void)` cast, except
+/// the last of the condition list, whose value is the test
+/// (`for_cond_exprs`); there php wants another element (`for (;(void)$x;)`
+/// is `unexpected token ";", expecting ","`, probed 8.5.9).
+fn for_exprs(p: &mut Parser<'_>, cond: bool) {
+    loop {
+        let voided = p.peek_at(K::CAST)
+            && p.current_text()
+                .to_ascii_lowercase()
+                .windows(4)
+                .any(|w| w == b"void");
+        p.grants.void = true;
+        if !expr::expr(p) {
+            p.error_unexpected();
+            break;
+        }
+        if !p.eat(K::COMMA) {
+            if cond && voided && p.peek_at(K::SEMICOLON) {
+                let d = p.unexpected_here_expecting("\",\"");
+                p.error(d);
+            }
+            break;
+        }
+    }
+}
+
+/// A `;` between a `for` header's lists: after a complete list php
+/// expects it or another element (`for (1 2;;)` is `unexpected integer
+/// "2", expecting ";"`, probed 8.5.9); a stray closer is the balance
+/// text.
+fn for_semicolon(p: &mut Parser<'_>) {
+    if !p.eat(K::SEMICOLON) && !p.has_error_at_or_after(p.current_span().start) {
+        let d = p.unexpected_here_expecting("\";\"");
+        p.error(d);
+    }
+}
+
 fn foreach_stmt(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(K::FOREACH_KW);
     if p.eat(K::L_PAREN) {
-        expr::expr(p);
+        if !expr::expr(p) {
+            p.error_unexpected();
+        }
         if !p.eat(K::AS_KW) {
             p.error_unexpected();
         }
-        // `key => target` or just `target`, either by reference. A
-        // leading `&` before the first expression is usually the
-        // by-reference value target, but php also parses the illegal
-        // by-reference key form `&$k => $v`: the grammar shapes that as
-        // a `FOREACH_KEY` carrying the `&`, and the compiler rejects it
-        // (`Key element cannot be a reference`). A target is a Zend
-        // `foreach_variable`: `list(...)` destructures here without an
-        // `=` (the one-shot grant).
+        // `key => target` or just `target`, either by reference, each a
+        // Zend `foreach_variable`: a variable production, or a
+        // `list(...)` or `[...]` pattern, which destructures here without
+        // an `=` (the one-shot grant). A leading `&` before the first
+        // expression is usually the by-reference value target, but php
+        // also parses the illegal by-reference key form `&$k => $v`: the
+        // grammar shapes that as a `FOREACH_KEY` carrying the `&`, and
+        // the compiler rejects it (`Key element cannot be a reference`).
+        // At the closer php's clause is the dereference set after a
+        // variable or a `[…]` pattern, and `"=>" or ")"` after a
+        // `list(…)` that may yet be the key (probed 8.5.9).
+        let mut closer = Some(expr::AFTER_VARIABLE);
         if p.peek_at(K::AMP) {
             let t = p.start();
             p.bump(K::AMP);
-            p.list_target_ok = true;
-            expr::expr(p);
+            p.grants.list_target = true;
+            expr::variable_target(p);
             if p.peek_at(K::FAT_ARROW) {
                 // `&$k => …`: what was parsed was the by-reference key,
                 // completed as `FOREACH_KEY` with the `&` inside it for
@@ -914,42 +997,45 @@ fn foreach_stmt(p: &mut Parser<'_>) {
                 p.bump(K::FAT_ARROW);
                 let v = p.start();
                 p.eat(K::AMP);
-                p.list_target_ok = true;
-                expr::expr(p);
+                p.grants.list_target = true;
+                expr::variable_target(p);
                 v.complete(p, K::FOREACH_TARGET);
             } else {
                 t.complete(p, K::FOREACH_TARGET);
             }
         } else {
             let first = p.start();
-            p.list_target_ok = true;
-            let has_expr = expr::expr(p);
-            if has_expr && p.peek_at(K::FAT_ARROW) {
+            p.grants.list_target = true;
+            let target = expr::variable_target(p);
+            if target.is_some() && p.peek_at(K::FAT_ARROW) {
                 // What was parsed was the key; `=>` lives inside
                 // `ForeachKey`.
                 p.bump(K::FAT_ARROW);
                 first.complete(p, K::FOREACH_KEY);
                 let t = p.start();
                 p.eat(K::AMP);
-                p.list_target_ok = true;
-                expr::expr(p);
+                p.grants.list_target = true;
+                expr::variable_target(p);
                 t.complete(p, K::FOREACH_TARGET);
-            } else if has_expr {
+            } else if target.is_some() {
                 first.complete(p, K::FOREACH_TARGET);
+                if target == Some(K::LIST_EXPR) {
+                    closer = Some("\"=>\" or \")\"");
+                }
             } else {
                 // No target expression at all: the schema promises a
                 // `ForeachKey` is only ever built around a parsed key.
                 first.abandon(p);
-                p.error_unexpected();
             }
         }
-        expect_closer(p, K::R_PAREN, "`(`");
+        expect_closer(p, K::R_PAREN, closer);
     } else {
-        p.error_unexpected();
+        let d = p.unexpected_here_expecting("\"(\"");
+        p.error(d);
     }
     if p.eat(K::COLON) {
-        alt_stmt_list(p, ALT_ENDERS);
-        alt_terminator(p, K::ENDFOREACH_KW, "endforeach");
+        alt_stmt_list(p, ALT_ENDERS, None);
+        alt_terminator(p, K::ENDFOREACH_KW, None);
     } else {
         statement(p, false);
     }
@@ -960,33 +1046,57 @@ fn switch_stmt(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(K::SWITCH_KW);
     paren_cond(p);
+    // Inside a switch body php spells the arm starters beside the
+    // closer, in the body's own order (probed 8.5.9).
     if p.eat(K::L_CURLY) {
-        switch_arms(p, &[K::R_CURLY]);
-        expect_closer(p, K::R_CURLY, "`{`");
+        switch_arms(p, &[K::R_CURLY], "\"case\" or \"default\" or \"}\"");
+        expect_closer(p, K::R_CURLY, None);
     } else if p.peek_at(K::COLON) {
         p.bump(K::COLON);
-        switch_arms(p, &[K::ENDSWITCH_KW]);
-        alt_terminator(p, K::ENDSWITCH_KW, "endswitch");
+        switch_arms(p, &[K::ENDSWITCH_KW], ALT_SWITCH_CLAUSE);
+        alt_terminator(p, K::ENDSWITCH_KW, Some(ALT_SWITCH_CLAUSE));
     } else {
-        p.error_unexpected();
+        let d = p.unexpected_here_expecting("\":\" or \"{\"");
+        p.error(d);
     }
     m.complete(p, K::SWITCH_STMT);
 }
 
-fn switch_arms(p: &mut Parser<'_>, enders: &[K]) {
+fn switch_arms(p: &mut Parser<'_>, enders: &[K], clause: &'static str) {
+    let outer = p.stmt_clause.replace(clause);
+    // One `;` may open the list (`switch_case_list: '{' ';' case_list
+    // '}'`), an archaism php's grammar keeps.
+    if p.peek_at(K::SEMICOLON) {
+        let e = p.start();
+        p.bump(K::SEMICOLON);
+        e.complete(p, K::EMPTY_STMT);
+    }
     while !p.at_eof() && !enders.contains(&p.current()) {
         if p.peek_at(K::CASE_KW) || p.peek_at(K::DEFAULT_KW) {
             let arm = p.start();
-            if p.peek_at(K::CASE_KW) {
-                p.bump(K::CASE_KW);
-                expr::expr(p);
-            } else {
+            let is_default = p.peek_at(K::DEFAULT_KW);
+            if is_default {
                 p.bump(K::DEFAULT_KW);
+            } else {
+                p.bump(K::CASE_KW);
+                if !expr::expr(p) {
+                    p.error_unexpected();
+                }
             }
             // A `;` after `case` or `default` is legal, archaic, and in
-            // the corpus.
-            if !p.eat(K::COLON) && !p.eat(K::SEMICOLON) {
-                p.error_unexpected();
+            // the corpus; php spells both after `default` (`default }`
+            // is `expecting ":" or ";"`, probed 8.5.9), where after a
+            // case's expression the operator set is too large.
+            if !p.eat(K::COLON)
+                && !p.eat(K::SEMICOLON)
+                && !p.has_error_at_or_after(p.current_span().start)
+            {
+                let d = if is_default {
+                    p.unexpected_here_expecting("\":\" or \";\"")
+                } else {
+                    p.unexpected_here()
+                };
+                p.error(d);
             }
             let body = p.start();
             while !p.at_eof()
@@ -1005,12 +1115,14 @@ fn switch_arms(p: &mut Parser<'_>, enders: &[K]) {
             body.complete(p, K::STMT_LIST);
             arm.complete(p, K::SWITCH_ARM);
         } else {
-            p.error_unexpected();
+            let d = p.unexpected_at_stmt();
+            p.error(d);
             let e = p.start();
             p.bump_any();
             e.complete(p, K::ERROR);
         }
     }
+    p.stmt_clause = outer;
 }
 
 fn try_stmt(p: &mut Parser<'_>) {
@@ -1033,9 +1145,10 @@ fn try_stmt(p: &mut Parser<'_>) {
             }
             list.complete(p, K::CATCH_TYPE_LIST);
             p.eat(K::VARIABLE); // a capture-less catch is 8.0
-            expect_closer(p, K::R_PAREN, "`(`");
+            expect_closer(p, K::R_PAREN, Some("\")\""));
         } else {
-            p.error_unexpected();
+            let d = p.unexpected_here_expecting("\"(\"");
+            p.error(d);
         }
         block(p);
         c.complete(p, K::CATCH_CLAUSE);
@@ -1073,11 +1186,18 @@ fn namespace_def(p: &mut Parser<'_>) {
         // namespaced-names RFC (`namespace fn;`, `namespace enum {}`;
         // php-src namespace_name_reserved_keywords.php, pinned 8.5.6).
         p.bump_remap(K::IDENT);
+    } else if !p.peek_at(K::L_CURLY) {
+        // `namespace ;` is `expecting "{"` (probed 8.5.9).
+        let d = p.unexpected_here_expecting("\"{\"");
+        p.error(d);
     }
     if p.peek_at(K::L_CURLY) {
-        block(p);
+        block_of(p, true);
     } else {
-        semicolon(p);
+        // After the name only `;` or the braces can follow (`namespace A
+        // foo` is `expecting "{"`, probed 8.5.9: bison lists the one
+        // shift, the `;` being a default reduction's).
+        semicolon_expecting(p, Some("\"{\""));
     }
     m.complete(p, K::NAMESPACE_DEF);
 }
@@ -1091,11 +1211,12 @@ fn use_stmt(p: &mut Parser<'_>) {
     // per-item kind, a distinction php's expected-set clause reflects
     // when a group item is malformed (`… expecting … or "function" or
     // "const"` for the mixed form alone).
-    let mixed = !((p.peek_at(K::FUNCTION_KW) || p.peek_at(K::CONST_KW))
-        && (ckw::is_name_start(p.nth(1)) || p.nth(1) == K::BACKSLASH));
+    let mixed = !(p.peek_at(K::FUNCTION_KW) || p.peek_at(K::CONST_KW));
     if !mixed {
         p.bump_any();
     }
+    let mut after_comma = false;
+    let mut grouped = false;
     loop {
         // The group form, `Prefix\{ … }`: the prefix may be fully
         // qualified (`use function \Foo\{…}`, php-src ns_095).
@@ -1106,12 +1227,32 @@ fn use_stmt(p: &mut Parser<'_>) {
             && p.nth(2) == K::L_CURLY
         {
             use_group(p, mixed);
+            grouped = true;
         } else {
             let c = p.start();
             if !types::name_ref(p) {
-                p.error_unexpected();
+                // A statement-level kind, or a comma, reduces to the
+                // name slot (`use function ;` and `use A, ;` are
+                // `expecting identifier or fully qualified name or
+                // namespaced name`); a bare `use ;` spells no clause
+                // (probed 8.5.9).
+                let d = if mixed && !after_comma {
+                    p.unexpected_here()
+                } else {
+                    p.unexpected_here_expecting(
+                        "identifier or fully qualified name or namespaced name",
+                    )
+                };
+                p.error(d);
                 c.abandon(p);
                 break;
+            }
+            // `A\` with nothing after the separator is a group whose
+            // brace is missing (`use A\ ;` is `expecting "{"`).
+            if p.peek_at(K::BACKSLASH) {
+                p.bump(K::BACKSLASH);
+                let d = p.unexpected_here_expecting("\"{\"");
+                p.error(d);
             }
             use_alias(p);
             c.complete(p, K::USE_CLAUSE);
@@ -1119,8 +1260,16 @@ fn use_stmt(p: &mut Parser<'_>) {
         if !p.eat(K::COMMA) {
             break;
         }
+        after_comma = true;
     }
-    semicolon(p);
+    // After a group only `;` can follow; after a plain clause another
+    // may (`use A\{B} foo` is `expecting ";"`, `use A foo` `expecting ","
+    // or ";"`, probed 8.5.9).
+    if grouped {
+        semicolon_expecting(p, Some("\";\""));
+    } else {
+        semicolon_expecting(p, Some("\",\" or \";\""));
+    }
     m.complete(p, K::USE_STMT);
 }
 
@@ -1185,9 +1334,11 @@ fn use_group(p: &mut Parser<'_>, mixed: bool) {
         }
         // A name inside the braces is relative to the prefix: a leading
         // `\` is a parse error in php (`use A\{\B}`, php-src ns_096),
-        // legal on the prefix alone.
+        // legal on the prefix alone; after a comma the clause is the
+        // closer's, as for any item (`use Foo\{Baz, \Qux}` is
+        // `expecting "}"`, probed 8.5.9).
         if p.peek_at(K::NAME_FULLY_QUALIFIED) {
-            let d = p.unexpected_expecting(item_start_expecting);
+            let d = p.unexpected_expecting(expecting);
             p.error(d);
             // `name_ref` still consumes it: one diagnostic, and the tree
             // keeps its shape.
@@ -1236,7 +1387,7 @@ fn use_group(p: &mut Parser<'_>, mixed: bool) {
         }
         break;
     }
-    expect_closer(p, K::R_CURLY, "`{`");
+    expect_closer(p, K::R_CURLY, Some("\"}\""));
     g.complete(p, K::USE_GROUP);
 }
 
@@ -1252,8 +1403,10 @@ fn use_alias(p: &mut Parser<'_>) {
             a.complete(p, K::USE_ALIAS);
         } else {
             // `UseAlias.name` is a promise (`!`): without a name the node
-            // may not exist, so the stray `as` becomes an `ERROR`.
-            p.error_unexpected();
+            // may not exist, so the stray `as` becomes an `ERROR`. php
+            // spells the slot (`use A as ;` is `expecting identifier`).
+            let d = p.unexpected_here_expecting("identifier");
+            p.error(d);
             a.complete(p, K::ERROR);
         }
     }
@@ -1262,35 +1415,47 @@ fn use_alias(p: &mut Parser<'_>) {
 fn declare_stmt(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(K::DECLARE_KW);
+    // php's clauses down the directive list (probed 8.5.9): `declare(`
+    // wants `identifier`, the name wants `"="`, the value nothing it can
+    // spell, and the complete directive `"," or ")"`.
     if p.eat(K::L_PAREN) {
         loop {
             let d = p.start();
             if p.at(K::IDENT) {
                 p.bump(K::IDENT);
                 if p.eat(K::EQ) {
-                    expr::expr(p);
+                    if !expr::expr(p) {
+                        p.error_unexpected();
+                    }
+                } else {
+                    let diag = p.unexpected_here_expecting("\"=\"");
+                    p.error(diag);
                 }
                 d.complete(p, K::DECLARE_DIRECTIVE);
             } else {
                 d.abandon(p);
-                p.error_unexpected();
+                let diag = p.unexpected_here_expecting("identifier");
+                p.error(diag);
                 break;
             }
             if !p.eat(K::COMMA) {
                 break;
             }
         }
-        expect_closer(p, K::R_PAREN, "`(`");
+        expect_closer(p, K::R_PAREN, Some("\",\" or \")\""));
     } else {
-        p.error_unexpected();
+        let d = p.unexpected_here_expecting("\"(\"");
+        p.error(d);
     }
     if p.eat(K::COLON) {
-        alt_stmt_list(p, ALT_ENDERS);
-        alt_terminator(p, K::ENDDECLARE_KW, "enddeclare");
-    } else if p.peek_at(K::L_CURLY) {
-        statement(p, false);
+        alt_stmt_list(p, ALT_ENDERS, None);
+        alt_terminator(p, K::ENDDECLARE_KW, None);
+    } else if p.peek_at(K::SEMICOLON) {
+        p.bump(K::SEMICOLON);
     } else {
-        semicolon(p);
+        // php's `declare_statement` is any statement: `declare(ticks=1)
+        // foo();` runs `foo()` under the directive (probed 8.5.9).
+        statement(p, false);
     }
     m.complete(p, K::DECLARE_STMT);
 }

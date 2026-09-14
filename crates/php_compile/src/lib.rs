@@ -90,7 +90,11 @@ pub fn compile_source(
     options: &Options,
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
-    compile(&php_syntax::parse(source), options, strings)
+    compile(
+        &php_syntax::parse(source, &php_syntax::Options::default()),
+        options,
+        strings,
+    )
 }
 
 /// Compile one parsed file into a unit, interning its constant strings
@@ -139,7 +143,7 @@ mod tests {
     fn unit_and_strings(source: &[u8]) -> (Unit, php_heap::Strings) {
         let mut strings = php_heap::Strings::new();
         let unit = compile(
-            &php_syntax::parse(source),
+            &php_syntax::parse(source, &php_syntax::Options::default()),
             &Options::default(),
             &mut strings,
         )
@@ -357,7 +361,10 @@ mod tests {
             ..Options::default()
         };
         let compiled = compile(
-            &php_syntax::parse(b"<?php echo T_LNUMBER - 1, \\PHP_OS;"),
+            &php_syntax::parse(
+                b"<?php echo T_LNUMBER - 1, \\PHP_OS;",
+                &php_syntax::Options::default(),
+            ),
             &options,
             &mut strings,
         );
@@ -378,7 +385,7 @@ mod tests {
         );
         assert!(
             compile(
-                &php_syntax::parse(b"<?php echo t_lnumber;"),
+                &php_syntax::parse(b"<?php echo t_lnumber;", &php_syntax::Options::default()),
                 &options,
                 &mut strings
             )
@@ -740,7 +747,7 @@ mod tests {
         // ini entry, as `zend_double_to_str` reads `EG(precision)`.
         let mut strings = php_heap::Strings::new();
         let unit = compile(
-            &php_syntax::parse(b"<?php echo 1 / 3 . '';"),
+            &php_syntax::parse(b"<?php echo 1 / 3 . '';", &php_syntax::Options::default()),
             &Options {
                 precision: 3,
                 ..Options::default()
@@ -1052,7 +1059,7 @@ mod tests {
         let mut strings = php_heap::Strings::new();
         assert!(
             compile(
-                &php_syntax::parse(b"<?php echo FOO;"),
+                &php_syntax::parse(b"<?php echo FOO;", &php_syntax::Options::default()),
                 &Options::default(),
                 &mut strings
             )
@@ -1415,7 +1422,7 @@ mod tests {
     fn what_the_reader_cannot_read_is_a_compile_error_at_its_line() {
         let mut strings = php_heap::Strings::new();
         let trouble = compile(
-            &php_syntax::parse(b"<?php\n$x == 1;"),
+            &php_syntax::parse(b"<?php\n$x == 1;", &php_syntax::Options::default()),
             &Options::default(),
             &mut strings,
         )

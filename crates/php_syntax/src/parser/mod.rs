@@ -14,7 +14,12 @@
 //! grammar position has a fixed `, expecting …` clause in php's tables,
 //! the site pins it through [`Parser::unexpected_expecting`] or
 //! [`Parser::unexpected_here_expecting`]; the recorded expected set is the
-//! parser's own and is not printed.
+//! parser's own and is not printed. A statement position's clause is the
+//! enclosing list's, [`Parser::stmt_clause`], which the list loops set:
+//! `expecting end of file` at the top level, `"elseif" or "else" or
+//! "endif"` inside an alternative-syntax `if`, none inside a block. The
+//! line is php's too, [`Parser::line_here`]: the scanner's line after the
+//! unexpected token, so a token spanning lines reports its last.
 //!
 //! **What is bounded.** Grammar recursion is capped at [`MAX_DEPTH`]
 //! levels through [`Parser::enter_depth`]; php's bison stack refuses on
@@ -30,6 +35,7 @@
 mod input;
 
 use crate::SyntaxKind;
+use crate::line_index::LineIndex;
 use crate::source::{Diagnostic, FileId, Span};
 use crate::tree::{Event, TOMBSTONE};
 
@@ -40,6 +46,9 @@ pub struct Parser<'t> {
     input: &'t Input<'t>,
     pos: usize,
     file: FileId,
+    /// The line table, for the line a diagnostic reports and php's `on
+    /// line N` inside the bracket-balance text.
+    lines: &'t LineIndex,
     events: Vec<Event>,
     /// The kinds recorded as expected at the current position since the
     /// last consumed token, in the order the grammar asked.
@@ -65,11 +74,15 @@ pub struct Parser<'t> {
     /// The open delimiters, pushed and popped by every consumed token:
     /// where php's `Unclosed '('` and `Unmatched ')'` read their opener.
     delims: Vec<(SyntaxKind, Span)>,
-    /// A one-shot grant the next primary consumes: `list(...)` parsed
-    /// there needs no `=` after it (a `foreach` target, an array or list
-    /// element; Zend's `array_pair` contexts). Taken at the top of the
-    /// prefix parse so only the immediately next primary inherits it.
-    pub(crate) list_target_ok: bool,
+    /// The one-shot grants the next primary consumes.
+    pub(crate) grants: Grants,
+    /// php's `, expecting …` clause for a token that cannot start a
+    /// statement where one is due, which is the enclosing list's: bison
+    /// prints the list's own continuations where they are few enough.
+    /// The list loops set it and restore it (probed 8.5.9: `<?php =` is
+    /// `expecting end of file`, `if (1): =` is `expecting "elseif" or
+    /// "else" or "endif"`, `{ = }` has no clause).
+    pub(crate) stmt_clause: Option<&'static str>,
     /// The highest start offset of any diagnostic raised so far. php's
     /// wording at a statement that has already gone wrong is the
     /// unexpected-token one (`const return` is `unexpected token "return",
@@ -80,6 +93,24 @@ pub struct Parser<'t> {
 }
 
 const FUEL: u32 = 256;
+
+/// One-shot grants the grammar gives the next primary and the prefix
+/// parse takes at its top, so only the immediately next primary
+/// inherits one; a descent through another primary first revokes it.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Grants {
+    /// `list(...)` parsed here needs no `=` after it: a `foreach`
+    /// target, an array or list element (Zend's `array_pair` contexts).
+    pub(crate) list_target: bool,
+    /// A `(void)` cast may stand here, which php allows at a statement's
+    /// start and in a `for` header's expression lists and nowhere else
+    /// (`zend_language_parser.y`: `T_VOID_CAST expr ';'`,
+    /// `non_empty_for_exprs`). Elsewhere `(void)` is the unexpected token.
+    pub(crate) void: bool,
+    /// The primary is a `new` expression's class reference, where a bare
+    /// `static` stands on its own (`new static`).
+    pub(crate) new_class: bool,
+}
 
 /// The grammar nesting cap: a bound on the parser's recursion, and on
 /// nothing else. Well clear of real code (Mahout's 193k-file corpus
@@ -130,8 +161,9 @@ pub struct CompletedMarker {
 }
 
 impl<'t> Parser<'t> {
-    /// A parser at the start of `input`.
-    pub fn new(input: &'t Input<'t>, file: FileId) -> Parser<'t> {
+    /// A parser at the start of `input`, `lines` being the table over the
+    /// same source.
+    pub fn new(input: &'t Input<'t>, file: FileId, lines: &'t LineIndex) -> Parser<'t> {
         let burst_cap = u32::try_from(input.len())
             .unwrap_or(u32::MAX)
             .saturating_mul(4)
@@ -140,6 +172,7 @@ impl<'t> Parser<'t> {
             input,
             pos: 0,
             file,
+            lines,
             events: Vec::new(),
             expected: Vec::new(),
             fuel: FUEL,
@@ -148,7 +181,8 @@ impl<'t> Parser<'t> {
             depth: 0,
             depth_reported: false,
             delims: Vec::new(),
-            list_target_ok: false,
+            grants: Grants::default(),
+            stmt_clause: None,
             errors_high_water: None,
         }
     }
@@ -176,11 +210,6 @@ impl<'t> Parser<'t> {
     /// The current token's text.
     pub fn current_text(&self) -> &'t [u8] {
         self.input.text(self.pos)
-    }
-
-    /// The text of the token `n` ahead.
-    pub fn nth_text(&self, n: usize) -> &'t [u8] {
-        self.input.text(self.pos + n)
     }
 
     /// The current token's span.
@@ -262,6 +291,20 @@ impl<'t> Parser<'t> {
         self.do_bump(remap);
     }
 
+    /// Consumes the current token, which is `kind`, without it entering
+    /// or leaving the bracket nesting: the `[` and `]` of a string's
+    /// `$a[…]`, which php's `ST_VAR_OFFSET` scanner state returns without
+    /// `enter_nesting`, so an unclosed one is never `Unclosed '['`.
+    pub fn bump_unnested(&mut self, kind: SyntaxKind) {
+        debug_assert_eq!(self.input.kind(self.pos), kind, "bump kind mismatch");
+        debug_assert!(!self.at_eof(), "bump at EOF");
+        self.events.push(Event::Token { remap: kind });
+        self.pos += 1;
+        self.fuel = FUEL;
+        self.burst = 0;
+        self.expected.clear();
+    }
+
     /// Consumes whatever the current token is; nothing at the end.
     pub fn bump_any(&mut self) {
         let kind = self.input.kind(self.pos);
@@ -290,16 +333,6 @@ impl<'t> Parser<'t> {
         self.fuel = FUEL;
         self.burst = 0;
         self.expected.clear();
-    }
-
-    /// The span of the nearest open delimiter `closer` would close.
-    pub fn open_delim_span(&self, closer: SyntaxKind) -> Option<Span> {
-        let pair = Bracket::from_closer(closer)?;
-        self.delims
-            .iter()
-            .rev()
-            .find(|(k, _)| Bracket::from_opener(*k) == Some(pair))
-            .map(|(_, span)| *span)
     }
 
     /// At `kind`, consume it and answer true; otherwise record the
@@ -341,6 +374,60 @@ impl<'t> Parser<'t> {
         seen
     }
 
+    /// The line php reports for a diagnostic at the current token: the
+    /// scanner's line once the token is scanned, so a token spanning
+    /// lines reports its last, and the end of the input reports the last
+    /// line. The one case apart is php's: an unclosed single-quoted string
+    /// is handed back without its newlines counted, so it reports the
+    /// line it opened on.
+    pub fn line_here(&self) -> u32 {
+        let range = self.input.range(self.pos);
+        let text = self.input.text(self.pos);
+        let unclosed_single = self.input.kind(self.pos) == SyntaxKind::STRING_TEXT
+            && self.pos + 1 >= self.input.len()
+            && matches!(text, [b'\'', ..] | [b'b' | b'B', b'\'', ..]);
+        if unclosed_single {
+            return self.lines.line_number(range.start);
+        }
+        // A `"` opening a string with no interpolation is one token to
+        // php, closing quote included (see `unexpected_name`).
+        if self.plain_double_quoted() {
+            return self.lines.line_number(self.input.range(self.pos + 2).end());
+        }
+        self.lines.line_number(range.end())
+    }
+
+    /// Whether the current token opens a `"…"` with no interpolation:
+    /// the mark, one text and the mark, or the two marks.
+    fn plain_double_quoted(&self) -> bool {
+        self.input.kind(self.pos) == SyntaxKind::DOUBLE_QUOTE
+            && ((self.input.kind(self.pos + 1) == SyntaxKind::STRING_TEXT
+                && self.input.kind(self.pos + 2) == SyntaxKind::DOUBLE_QUOTE)
+                || self.input.kind(self.pos + 1) == SyntaxKind::DOUBLE_QUOTE)
+    }
+
+    /// The current token as php names it in `syntax error, unexpected …`
+    /// ([`php_token_name`]), with the one case one token cannot settle: a
+    /// `"` that opens a string with no interpolation is one
+    /// `T_CONSTANT_ENCAPSED_STRING` in php, `double-quoted string "abc"`,
+    /// where the lexer here split it into the mark, its text and the
+    /// closing mark.
+    fn unexpected_name(&self) -> String {
+        let kind = self.input.kind(self.pos);
+        if kind == SyntaxKind::DOUBLE_QUOTE {
+            let (next, after) = (self.input.kind(self.pos + 1), self.input.kind(self.pos + 2));
+            if next == SyntaxKind::DOUBLE_QUOTE {
+                return "double-quoted string \"\"".to_owned();
+            }
+            if next == SyntaxKind::STRING_TEXT && after == SyntaxKind::DOUBLE_QUOTE {
+                let mut quoted = b"\"".to_vec();
+                quoted.extend_from_slice(self.input.text(self.pos + 1));
+                return php_token_name(SyntaxKind::SINGLE_QUOTED, &quoted);
+            }
+        }
+        php_token_name(kind, self.current_text())
+    }
+
     /// php's `syntax error, unexpected …` for the current token, or its
     /// bracket-balance text where that applies: `Unclosed '('` at the end
     /// of the input inside an open delimiter, `Unmatched ')'` and
@@ -349,20 +436,20 @@ impl<'t> Parser<'t> {
     /// and it is what `eval()`'s `ParseError` carries.
     pub fn unexpected_here(&mut self) -> Diagnostic {
         let span = self.current_span();
+        let line = self.line_here();
         if self.at_eof() {
             if let Some(m) = self.unclosed_eof_message() {
-                return Diagnostic::new(span, m);
+                return Diagnostic::new(span, line, m);
             }
-            return Diagnostic::new(span, "syntax error, unexpected end of file");
+            return Diagnostic::new(span, line, "syntax error, unexpected end of file");
         }
         if let Some(m) = self.bracket_closer_message() {
-            return Diagnostic::new(span, m);
+            return Diagnostic::new(span, line, m);
         }
-        let kind = self.input.kind(self.pos);
-        let text = self.current_text();
         Diagnostic::new(
             span,
-            format!("syntax error, unexpected {}", php_token_name(kind, text)),
+            line,
+            format!("syntax error, unexpected {}", self.unexpected_name()),
         )
     }
 
@@ -384,13 +471,13 @@ impl<'t> Parser<'t> {
     /// not `EOF`: a site reaches for this with a concrete token in hand.
     pub fn unexpected_expecting(&mut self, expecting: &str) -> Diagnostic {
         let span = self.current_span();
-        let kind = self.input.kind(self.pos);
-        let text = self.current_text();
+        let line = self.line_here();
         Diagnostic::new(
             span,
+            line,
             format!(
                 "syntax error, unexpected {}, expecting {expecting}",
-                php_token_name(kind, text)
+                self.unexpected_name()
             ),
         )
     }
@@ -407,8 +494,10 @@ impl<'t> Parser<'t> {
                 return self.unexpected_here();
             }
             let span = self.current_span();
+            let line = self.line_here();
             return Diagnostic::new(
                 span,
+                line,
                 format!("syntax error, unexpected end of file, expecting {expecting}"),
             );
         }
@@ -418,15 +507,35 @@ impl<'t> Parser<'t> {
         self.unexpected_expecting(expecting)
     }
 
+    /// [`unexpected_here_expecting`](Self::unexpected_here_expecting) with
+    /// the clause `Some`, [`unexpected_here`](Self::unexpected_here) with
+    /// it `None`: for a site whose clause the caller decides.
+    pub fn unexpected_here_maybe_expecting(&mut self, expecting: Option<&str>) -> Diagnostic {
+        match expecting {
+            Some(expecting) => self.unexpected_here_expecting(expecting),
+            None => self.unexpected_here(),
+        }
+    }
+
+    /// The diagnostic for a token that cannot start a statement where one
+    /// is due: [`unexpected_here`](Self::unexpected_here) with the
+    /// enclosing list's clause, [`Parser::stmt_clause`]. At the end of
+    /// the input the clause is gone: a statement php required and did
+    /// not get is its bare `unexpected end of file` (`declare(ticks=1)`,
+    /// probed 8.5.9).
+    pub fn unexpected_at_stmt(&mut self) -> Diagnostic {
+        let clause = if self.at_eof() {
+            None
+        } else {
+            self.stmt_clause
+        };
+        self.unexpected_here_maybe_expecting(clause)
+    }
+
     /// The 1-based line of a byte offset, for php's `on line N` in the
-    /// bracket-balance text; counts the `\n`s before it.
+    /// bracket-balance text.
     fn line_of(&self, offset: u32) -> u32 {
-        let src = self.input.source();
-        let end = (offset as usize).min(src.len());
-        // No extra dependency for a count that happens at an error site.
-        #[allow(clippy::naive_bytecount)]
-        let newlines = src[..end].iter().filter(|&&b| b == b'\n').count();
-        1 + u32::try_from(newlines).unwrap_or(u32::MAX)
+        self.lines.line_number(offset)
     }
 
     /// php's bracket-balance text when the current token is a closer that
@@ -490,7 +599,8 @@ impl<'t> Parser<'t> {
             if !self.depth_reported {
                 self.depth_reported = true;
                 let span = self.current_span();
-                self.error(Diagnostic::new(span, "memory exhausted"));
+                let line = self.line_here();
+                self.error(Diagnostic::new(span, line, "memory exhausted"));
             }
             return false;
         }
@@ -626,7 +736,9 @@ const SHOWN: usize = 30;
 /// three namespaced-name kinds, `heredoc start "<<<EOT"`. The text is cut
 /// at its first newline, one layer of quotes is taken off it, and past
 /// thirty bytes it ends in `...`; a quoted string says which quote it
-/// opened with. A bare `"` is `double-quote mark`, and an invalid byte is
+/// opened with. A bare `"` is `double-quote mark` (a `"` opening a
+/// string with no interpolation is the parser's `double-quoted string`,
+/// which needs the tokens after it), and an invalid byte is
 /// `character 0x00`. The end of the input is the caller's `end of file`.
 ///
 /// Measured under the pin at 8.5.9: `const die` reports `unexpected
@@ -643,8 +755,10 @@ pub fn php_token_name(kind: SyntaxKind, text: &[u8]) -> String {
         return format!("token \"{canonical}\"");
     }
     if kind == SyntaxKind::ERROR
-        && let [byte] = text
+        && let Some(byte) = text.first()
     {
+        // One ERROR token spans every stray byte in a run; php stops at
+        // the first.
         return format!("character 0x{byte:02X}");
     }
     let mut class = match kind {

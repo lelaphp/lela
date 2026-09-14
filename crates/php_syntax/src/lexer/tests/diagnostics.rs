@@ -1,10 +1,16 @@
-//! Text and span assertions for every lexical diagnostic: an unexpected
-//! byte, an unterminated string, heredoc or comment at EOF, a malformed
-//! number, a malformed `\u{…}` escape, and heredoc indentation.
+//! Text, span, line and level assertions for every diagnostic the
+//! scanner raises on its own: an unterminated comment at EOF, a legacy
+//! octal number with a bad digit, a malformed `\u{…}` escape, an octal
+//! escape past `\377`, heredoc indentation, the `(real)` cast and a
+//! non-canonical cast spelling. What php's scanner hands its parser as a
+//! token, a stray byte, an unterminated string or the identifier after a
+//! malformed number, raises nothing here: the token is the parser's to
+//! name, and the parser's tests and the recovery fixtures hold that
+//! text.
 
 use super::*;
 use crate::lexer::{LexOptions, lex};
-use crate::source::Diagnostic;
+use crate::source::{Diagnostic, Level};
 
 fn lex_diags(input: &[u8]) -> Vec<Diagnostic> {
     let lexed = lex(F, input, &LexOptions::default());
@@ -24,128 +30,132 @@ fn assert_one(ds: &[Diagnostic], text_starts: &str, start: u32, len: u32) {
     assert_eq!((ds[0].span.start, ds[0].span.len), (start, len));
 }
 
-const UNTERMINATED_STRING: &str = "string runs to end of file without a closing delimiter";
-const UNTERMINATED_HEREDOC: &str = "syntax error, unexpected end of file, expecting variable \
-                                    or heredoc end or \"${\" or \"{$\"";
 const INVALID_ESCAPE: &str = "Invalid UTF-8 codepoint escape sequence";
 const MIXED: &str = "Invalid indentation - tabs and spaces cannot be mixed";
-
-fn unexpected_char(byte: u8) -> String {
-    format!("syntax error, unexpected character 0x{byte:02X}")
-}
-
-fn unexpected_ident(id: &str) -> String {
-    format!("syntax error, unexpected identifier \"{id}\"")
-}
 
 fn under_indented(width: usize) -> String {
     format!("Invalid body indentation level (expecting an indentation level of at least {width})")
 }
 
 #[test]
-fn unexpected_bytes_one_per_span() {
-    assert_eq!(
-        diags(b"<?php \x00\x01\x02;"),
-        vec![(unexpected_char(0x00), 6, 3)]
+fn stray_bytes_are_one_error_token_per_span_and_no_diagnostic() {
+    // Zend's `{ANY_CHAR}` hands each back as `T_BAD_CHARACTER`; the
+    // parser names the first byte of the span.
+    check_bytes(
+        b"<?php \x00\x01\x02;",
+        &[
+            (OPEN_TAG, b"<?php "),
+            (ERROR, b"\x00\x01\x02"),
+            (SEMICOLON, b";"),
+        ],
     );
-    // Two separate spans: two diagnostics.
-    assert_eq!(
-        diags(b"<?php \x00;\x7F;"),
-        vec![(unexpected_char(0x00), 6, 1), (unexpected_char(0x7F), 8, 1)]
+    assert_eq!(diags(b"<?php \x00\x01\x02;"), vec![]);
+    assert_eq!(diags(b"<?php \x00;\x7F;"), vec![]);
+}
+
+#[test]
+fn unterminated_strings_are_the_parsers() {
+    // php returns the rest of the file as `T_ENCAPSED_AND_WHITESPACE`
+    // for an unclosed `'`, the quote included, and its parser says
+    // `unexpected string content "abc"`; an unclosed `"`, backtick,
+    // heredoc or nowdoc reaches its parser as an unclosed run, and the
+    // parser's `unexpected end of file` carries the clause.
+    check("<?php 'abc", &[(OPEN_TAG, "<?php "), (STRING_TEXT, "'abc")]);
+    check(
+        "<?php b'abc",
+        &[(OPEN_TAG, "<?php "), (STRING_TEXT, "b'abc")],
     );
+    for src in [
+        &b"<?php 'abc"[..],
+        b"<?php \"abc",
+        b"<?php b\"abc",
+        b"<?php `cmd",
+        b"<?php <<<EOT\nbody",
+        b"<?php <<<EOT\n",
+        b"<?php <<<'EOT'\nbody\nEOT2",
+        b"<?php \"$a[",
+    ] {
+        assert_eq!(diags(src), vec![], "{src:?}");
+    }
 }
 
 #[test]
-fn unterminated_single_quoted() {
-    assert_one(&lex_diags(b"<?php 'abc"), UNTERMINATED_STRING, 10, 0);
-}
-
-#[test]
-fn unterminated_double_quoted() {
-    assert_one(&lex_diags(b"<?php \"abc"), UNTERMINATED_STRING, 10, 0);
-}
-
-#[test]
-fn unterminated_b_prefixed() {
-    assert_one(&lex_diags(b"<?php b\"abc"), UNTERMINATED_STRING, 11, 0);
-}
-
-#[test]
-fn unterminated_backquote() {
-    assert_one(&lex_diags(b"<?php `cmd"), UNTERMINATED_STRING, 10, 0);
-}
-
-#[test]
-fn unterminated_heredoc() {
-    assert_one(
-        &lex_diags(b"<?php <<<EOT\nbody"),
-        UNTERMINATED_HEREDOC,
-        17,
-        0,
-    );
-    // A body of zero bytes is php's bare `unexpected end of file`.
-    let ds = lex_diags(b"<?php <<<EOT\n");
+fn removed_and_deprecated_casts() {
+    // php's scanner throws on `(real)` as it scans it, on the token's
+    // line; `(unset)` is the parser's, since php's compiler refuses it.
+    let ds = lex_diags(b"<?php\n( Real )$x; (unset)$y;");
     assert_eq!(ds.len(), 1);
-    assert_eq!(ds[0].message, "syntax error, unexpected end of file");
+    assert_eq!(
+        ds[0].message,
+        "The (real) cast has been removed, use (float) instead"
+    );
+    assert_eq!((ds[0].span.start, ds[0].span.len, ds[0].line), (6, 8, 2));
+    assert_eq!(ds[0].level, Level::Parse);
+    // The four spellings 8.5 deprecates, each naming its canonical one.
+    let ds = lex_diags(b"<?php (integer)$a; (double)$b; (binary)$c; (boolean)$d; (int)$e;");
+    let texts: Vec<&str> = ds.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(
+        texts,
+        [
+            "Non-canonical cast (integer) is deprecated, use the (int) cast instead",
+            "Non-canonical cast (double) is deprecated, use the (float) cast instead",
+            "Non-canonical cast (binary) is deprecated, use the (string) cast instead",
+            "Non-canonical cast (boolean) is deprecated, use the (bool) cast instead",
+        ]
+    );
+    assert!(ds.iter().all(|d| d.level == Level::Deprecated));
 }
 
 #[test]
-fn unterminated_nowdoc() {
-    // `EOT2` goes on with a label character, so it does not terminate.
-    assert_one(
-        &lex_diags(b"<?php <<<'EOT'\nbody\nEOT2"),
-        UNTERMINATED_HEREDOC,
-        24,
-        0,
+fn octal_escape_overflow_warns_per_escape_on_its_line() {
+    // Three octal digits past `\377` are one escape and one warning,
+    // reported on the escape's own line; `\4000` is `\400` and a `0`;
+    // `\377` and two-digit escapes are silent, as is a single-quoted
+    // string.
+    let ds = lex_diags(b"<?php \"\\777\n\\4000\\377\\40\"; '\\777'; `\\400`;");
+    let seen: Vec<(&str, u32, Level)> = ds
+        .iter()
+        .map(|d| (d.message.as_str(), d.line, d.level))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            (
+                "Octal escape sequence overflow \\777 is greater than \\377",
+                1,
+                Level::CompileWarning
+            ),
+            (
+                "Octal escape sequence overflow \\400 is greater than \\377",
+                2,
+                Level::CompileWarning
+            ),
+            (
+                "Octal escape sequence overflow \\400 is greater than \\377",
+                2,
+                Level::CompileWarning
+            ),
+        ]
     );
+    // A heredoc body is held to the same rule.
+    let ds = lex_diags(b"<?php <<<E\n\n\\777\nE;");
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].line, 3);
 }
 
 #[test]
 fn unterminated_block_comment() {
-    // php's text names the line the comment opened on.
+    // php's text names the line the comment opened on, and so does the
+    // line it reports, whatever line the input ends on.
     assert_one(
         &lex_diags(b"<?php /* x"),
         "Unterminated comment starting line 1",
         10,
         0,
     );
-    assert_one(
-        &lex_diags(b"<?php\n\n/* x"),
-        "Unterminated comment starting line 3",
-        11,
-        0,
-    );
-}
-
-#[test]
-fn bare_radix_prefixes() {
-    assert_eq!(diags(b"<?php 0x;"), vec![(unexpected_ident("x"), 6, 2)]);
-    assert_eq!(diags(b"<?php 0b;"), vec![(unexpected_ident("b"), 6, 2)]);
-    assert_eq!(diags(b"<?php 0o;"), vec![(unexpected_ident("o"), 6, 2)]);
-    // `0x_` consumes the underscore into the token span.
-    assert_eq!(diags(b"<?php 0x_;"), vec![(unexpected_ident("x_"), 6, 3)]);
-}
-
-#[test]
-fn underscore_placement() {
-    // The span pinpoints the offending underscore byte; the text is the
-    // identifier php's parser reports, which begins there.
-    assert_eq!(diags(b"<?php 1_;"), vec![(unexpected_ident("_"), 7, 1)]);
-    assert_eq!(diags(b"<?php 1__2;"), vec![(unexpected_ident("__2"), 7, 1)]);
-    assert_eq!(diags(b"<?php 1_.5;"), vec![(unexpected_ident("_"), 7, 1)]);
-    assert_eq!(diags(b"<?php 1._5;"), vec![(unexpected_ident("_5"), 8, 1)]);
-    assert_eq!(diags(b"<?php 0x1_;"), vec![(unexpected_ident("_"), 9, 1)]);
-    assert_eq!(
-        diags(b"<?php 0x_FF;"),
-        vec![(unexpected_ident("x_FF"), 8, 1)]
-    );
-    // One diagnostic per token, even with several violations.
-    assert_eq!(
-        diags(b"<?php 1__2__3;"),
-        vec![(unexpected_ident("__2__3"), 7, 1)]
-    );
-    // Legal placements: silent.
-    assert_eq!(diags(b"<?php 1_2 + 0x1_2 + 1_2.3_4e5_6;"), vec![]);
+    let ds = lex_diags(b"<?php\n\n/* x\n\n");
+    assert_one(&ds, "Unterminated comment starting line 3", 13, 0);
+    assert_eq!(ds[0].line, 3);
 }
 
 #[test]
@@ -237,18 +247,16 @@ fn body_mixes_tabs_and_spaces() {
 
 #[test]
 fn closing_marker_mixes_tabs_and_spaces() {
-    // ` \t` on the closing line itself.
+    // ` \t` on the closing line itself: the span is the marker's
+    // indentation, and the line php reports is the one after the
+    // opener, wherever the marker stands (probed 8.5.9).
     assert_eq!(
         diags(b"<?php <<<E\n \tx\n \tE;"),
         vec![(MIXED.into(), 15, 2)]
     );
-}
-
-#[test]
-fn unterminated_string_then_eof_inside_interpolation_states() {
-    // EOF while still inside `$a[` (VarOffset above DoubleQuoted): the
-    // string diagnostic still fires for the enclosing string state.
-    assert_one(&lex_diags(b"<?php \"$a["), UNTERMINATED_STRING, 10, 0);
+    let ds = lex_diags(b"<?php <<<E\n a\n\n \tE;");
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].line, 2);
 }
 
 #[test]
