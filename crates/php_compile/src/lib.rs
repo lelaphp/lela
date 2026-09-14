@@ -1462,7 +1462,7 @@ mod tests {
         ] {
             let mut strings = php_heap::Strings::new();
             let unit = compile(
-                &php_syntax::parse(source),
+                &php_syntax::parse(source, &php_syntax::Options::default()),
                 &Options::default(),
                 &mut strings,
             )
