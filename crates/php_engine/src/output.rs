@@ -1,0 +1,1183 @@
+//! The `php_output` layer, `Z/main/output.c` at the pin's tag: the handler
+//! stack a request's bytes pass through on their way to the host, laid
+//! down on the request heap where php lays it, so what `ob_start()`
+//! holds and what the first byte written holds are what
+//! `memory_get_usage()` says under php (design §5.13). One `Output` per
+//! request, php's `OG` and the header state `sapi_send_headers` keeps
+//! beside it; `write` is `php_output_write` and `buffer_op` the `ob_*`
+//! bodies. The functions that may serve PHP code, a user handler or the
+//! header callback, take `&mut Request`; the stack's own moves take the
+//! heap alone.
+//!
+//! What the first non-empty write holds, and #244, which named it: `php_output_op` (`Z/main/output.c:1098`) reaches
+//! `php_output_header` (`:102`) once bytes are about to reach the host
+//! (`:1131`), which is `php_header()` (`Z/ext/standard/head.c:70`) and
+//! `sapi_send_headers()` (`Z/main/SAPI.c:861`). That lays down the
+//! default `Content-type`: `get_default_content_type` (`:299`)
+//! `emalloc`s `"text/html; charset=UTF-8"` and its NUL, twenty-five
+//! bytes in the thirty-two-byte bin, and `SG(sapi_headers).mimetype`
+//! (`:880`) holds them until `sapi_deactivate_destroy` (`:542`). The
+//! `Content-type: ...` header line built beside it (`:884`) is freed at
+//! once under the CLI, whose `header_handler` answers zero
+//! (`Z/sapi/cli/php_cli.c:376`, `sapi_header_add_op` at
+//! `Z/main/SAPI.c:656`). So the thirty-two bytes are the mimetype and
+//! nothing of the handler stack: an empty `echo` holds nothing, since
+//! `context.out.used` gates the header, and `default_charset=` holds
+//! sixteen.
+// The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
+#![allow(rustdoc::invalid_codeblock_attributes)]
+
+use php_heap::{Block, Fatal, Heap, Str};
+
+use crate::api::abi::Callable;
+use crate::api::call;
+use crate::api::raising::{Level, Thrown, docref};
+use crate::api::request::{OutputOp, Request};
+use crate::api::values::{Key, PhpArray, PhpString, Value, ValueRef};
+
+/// The handler operations, `Z/main/php_output.h:23-29`.
+const HANDLER_WRITE: u32 = 0x00;
+const HANDLER_START: u32 = 0x01;
+const HANDLER_CLEAN: u32 = 0x02;
+const HANDLER_FLUSH: u32 = 0x04;
+const HANDLER_FINAL: u32 = 0x08;
+
+/// The handler flags, `Z/main/php_output.h:32-47`.
+const HANDLER_USER: u32 = 0x0001;
+const HANDLER_CLEANABLE: u32 = 0x0010;
+const HANDLER_FLUSHABLE: u32 = 0x0020;
+const HANDLER_REMOVABLE: u32 = 0x0040;
+pub(crate) const HANDLER_STDFLAGS: u32 = 0x0070;
+const HANDLER_STARTED: u32 = 0x1000;
+const HANDLER_DISABLED: u32 = 0x2000;
+const HANDLER_PROCESSED: u32 = 0x4000;
+const HANDLER_PRODUCED_OUTPUT: u32 = 0x8000;
+
+/// A size as php's `zend_long`.
+fn long(n: usize) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
+}
+
+/// `PHP_OUTPUT_HANDLER_ABILITY_FLAGS`.
+fn ability_flags(flags: u32) -> u32 {
+    flags & !0xf00f
+}
+
+/// `php_output_stack_pop`'s flags, `Z/main/php_output.h:57-60`.
+const POP_TRY: u32 = 0x000;
+const POP_FORCE: u32 = 0x001;
+const POP_DISCARD: u32 = 0x010;
+const POP_SILENT: u32 = 0x100;
+
+/// `OG(flags)`, `Z/main/php_output.h:63-70`.
+const IMPLICITFLUSH: u32 = 0x01;
+const DISABLED: u32 = 0x02;
+const WRITTEN: u32 = 0x04;
+const SENT: u32 = 0x08;
+const ACTIVATED: u32 = 0x10_0000;
+
+/// `PHP_OUTPUT_HANDLER_INITBUF_SIZE` (`Z/main/php_output.h:84-90`): a
+/// chunk size rounded up to 4 KiB, or 16 KiB for none.
+fn initbuf_size(chunk_size: usize) -> usize {
+    if chunk_size > 0 {
+        (chunk_size + 0xfff) & !0xfff
+    } else {
+        0x4000
+    }
+}
+
+/// `sizeof(php_output_handler)` (`Z/main/php_output.h:123-137`): the
+/// name, two ints, the chunk size, the buffer's four words, `opaq`, the
+/// dtor and the function, eighty bytes `ecalloc`'d by
+/// `php_output_handler_init` (`Z/main/output.c:870`).
+const HANDLER_RECORD: usize = 80;
+/// `sizeof(php_output_handler_user_func_t)` (`Z/main/php_output.h:117`):
+/// the `fci`, the `fcc` and the `zoh` zval, 120 bytes `ecalloc`'d by
+/// `php_output_handler_create_user` (`Z/main/output.c:483`).
+const USER_RECORD: usize = 120;
+/// `STACK_BLOCK_SIZE` (`Z/Zend/zend_stack.h:31`) pointers: what
+/// `zend_stack_push` grows `OG(handlers).elements` by (`Z/Zend/zend_stack.c:37`).
+const STACK_BLOCK: usize = 16 * 8;
+
+/// `php_output_default_handler_name`.
+const DEFAULT_NAME: &[u8] = b"default output handler";
+
+/// What the handler's function is, `php_output_handler.func`.
+enum Func {
+    /// `php_output_handler_default_func`: the buffer passed along.
+    Default,
+    /// `php_output_handler_user_func_t`: the callable, its `zoh` copy
+    /// held, and the record `ecalloc`'d beside it.
+    User { callable: Callable, record: Block },
+}
+
+/// One `php_output_handler` (`Z/main/php_output.h:123`): its fields
+/// here, and `record` the eighty bytes php holds them in.
+struct Handler {
+    record: Block,
+    /// `name`, a string of the request's.
+    name: Str,
+    flags: u32,
+    level: usize,
+    /// `size`, the chunk size.
+    size: usize,
+    /// `buffer.data` and `buffer.size`; `None` once a failed handler
+    /// handed its buffer on as what came out.
+    buffer: Option<Block>,
+    /// `buffer.used`.
+    used: usize,
+    func: Func,
+}
+
+/// `php_output_handler_status_t`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Status {
+    Failure,
+    Success,
+    NoData,
+}
+
+/// `php_output_context` (`Z/main/php_output.h:100`): the operation and
+/// the bytes going into a handler and coming out of it. php holds them
+/// as borrowed or `estrndup`'d pointers freed before the operation
+/// returns; these are the loop's own and hold nothing of the heap.
+struct Context {
+    op: u32,
+    input: Vec<u8>,
+    out: Vec<u8>,
+}
+
+impl Context {
+    fn new(op: u32) -> Context {
+        Context {
+            op,
+            input: Vec::new(),
+            out: Vec::new(),
+        }
+    }
+
+    /// `php_output_context_pass`.
+    fn pass(&mut self) {
+        self.out = std::mem::take(&mut self.input);
+    }
+
+    /// `php_output_context_swap`.
+    fn swap(&mut self) {
+        self.input = std::mem::take(&mut self.out);
+    }
+
+    /// `php_output_context_reset`.
+    fn reset(&mut self) {
+        self.input.clear();
+        self.out.clear();
+    }
+}
+
+/// `zend_output_globals` (`Z/main/php_output.h:139-146`), and the two
+/// things of `sapi_globals` the first write moves: `headers_sent` and
+/// the default `mimetype`.
+pub(crate) struct Output {
+    /// `OG(handlers)`, bottom first; the top is `OG(active)`.
+    handlers: Vec<Handler>,
+    /// `OG(handlers).elements`: the `zend_stack`'s own storage, sixteen
+    /// pointers a block, grown by a push past `max` and freed by
+    /// `zend_stack_destroy` at deactivation and never before, so a
+    /// popped handler leaves its slot's 128 bytes out for the request.
+    elements: Option<Block>,
+    /// `OG(handlers).max`, in elements.
+    max: usize,
+    /// `OG(running)`, by position.
+    running: Option<usize>,
+    flags: u32,
+    /// `OG(output_start_filename)` and `OG(output_start_lineno)`.
+    started: Option<(Vec<u8>, u32)>,
+    /// `SG(headers_sent)`.
+    headers_sent: bool,
+    /// `SG(sapi_headers).mimetype`, the thirty-two bytes this file's doc
+    /// names, out from the first byte to the host until the request ends.
+    mimetype: Option<Block>,
+}
+
+impl Output {
+    /// `php_output_activate` (`Z/main/output.c:159`): `OG` zeroed,
+    /// the stack initialised, which `zend_stack_init` does without an
+    /// allocation, and the layer marked active.
+    pub(crate) fn activate() -> Output {
+        Output {
+            handlers: Vec::new(),
+            elements: None,
+            max: 0,
+            running: None,
+            flags: ACTIVATED,
+            started: None,
+            headers_sent: false,
+            mimetype: None,
+        }
+    }
+
+    pub(crate) fn started_at(&self) -> Option<(Vec<u8>, u32)> {
+        self.started.clone()
+    }
+
+    pub(crate) fn headers_sent(&self) -> bool {
+        self.headers_sent
+    }
+
+    /// `php_output_get_level`.
+    fn level(&self) -> usize {
+        self.handlers.len()
+    }
+
+    /// `php_output_set_implicit_flush`.
+    fn set_implicit_flush(&mut self, on: bool) {
+        if on {
+            self.flags |= IMPLICITFLUSH;
+        } else {
+            self.flags &= !IMPLICITFLUSH;
+        }
+    }
+
+    /// `zend_stack_push` (`Z/Zend/zend_stack.c:33`): another block of
+    /// sixteen slots when the top has reached `max`, then the handler
+    /// on top; its return is the level.
+    fn push(&mut self, heap: &mut Heap, handler: Handler) -> Result<usize, Fatal> {
+        if self.handlers.len() >= self.max {
+            self.max += 16;
+            self.elements = Some(match self.elements.take() {
+                Some(elements) => heap.block_resize(elements, self.max * 8)?,
+                None => heap.block(STACK_BLOCK)?,
+            });
+        }
+        self.handlers.push(handler);
+        Ok(self.handlers.len() - 1)
+    }
+
+    /// `php_output_handler_init` (`Z/main/output.c:865`): the record,
+    /// the name held, the buffer of its initial size. What the heap
+    /// refuses is the fatal, with what was laid down given back.
+    fn handler_init(
+        heap: &mut Heap,
+        name: Str,
+        chunk_size: usize,
+        flags: u32,
+        func: Func,
+    ) -> Result<Handler, Fatal> {
+        let record = heap.block(HANDLER_RECORD)?;
+        let buffer = match heap.block(initbuf_size(chunk_size)) {
+            Ok(buffer) => buffer,
+            Err(fatal) => {
+                heap.free_block(record);
+                return Err(fatal);
+            }
+        };
+        Ok(Handler {
+            record,
+            name,
+            flags,
+            level: 0,
+            size: chunk_size,
+            buffer: Some(buffer),
+            used: 0,
+            func,
+        })
+    }
+
+    /// `php_output_handler_append` (`Z/main/output.c:882`): the bytes
+    /// into the buffer, grown by the larger of the chunk's initial size
+    /// and the shortfall's, rounded; whether the handler need not be served
+    /// yet, which a chunked handler answers no once it holds a chunk,
+    /// unless a handler is already running.
+    ///
+    /// A chunk of 100 starts a 4 KiB buffer and 5000 bytes grow it by
+    /// 4 KiB more; the outer buffer takes what the chunked one passes
+    /// on, so nothing reaches the host and the mimetype is not laid
+    /// down.
+    ///
+    /// ```php
+    /// ob_start(); $b = memory_get_usage(); ob_start(null, 100); echo str_repeat("x", 5000); $grown = memory_get_usage() - $b; ob_end_clean();
+    /// ob_start(null, 100); echo str_repeat("x", 250); $chunk = memory_get_usage() - $b; ob_end_clean(); ob_end_clean(); var_dump($grown, $chunk);
+    /// ```
+    /// ```expect
+    /// int(8320)
+    /// int(4224)
+    /// ```
+    fn append(&mut self, heap: &mut Heap, at: usize, input: &[u8]) -> Result<bool, Fatal> {
+        let running = self.running.is_some();
+        let Some(handler) = self.handlers.get_mut(at) else {
+            return Ok(true);
+        };
+        if input.is_empty() {
+            return Ok(true);
+        }
+        self.flags |= WRITTEN;
+        let Some(mut buffer) = handler.buffer.take() else {
+            return Ok(true);
+        };
+        if buffer.len() - handler.used <= input.len() {
+            let grow_int = initbuf_size(handler.size);
+            let grow_buf = initbuf_size(input.len() - (buffer.len() - handler.used));
+            let grown = buffer.len() + grow_int.max(grow_buf);
+            buffer = heap.block_resize(buffer, grown)?;
+        }
+        buffer.bytes_mut()[handler.used..handler.used + input.len()].copy_from_slice(input);
+        handler.used += input.len();
+        handler.buffer = Some(buffer);
+        if handler.size != 0 && handler.used >= handler.size {
+            return Ok(running);
+        }
+        Ok(true)
+    }
+
+    /// The handler's buffered bytes, `buffer.data` to `buffer.used`.
+    fn buffered(&self, at: usize) -> Vec<u8> {
+        self.handlers
+            .get(at)
+            .and_then(|handler| Some(handler.buffer.as_ref()?.bytes()[..handler.used].to_vec()))
+            .unwrap_or_default()
+    }
+
+    /// `php_output_handler_dtor` and `php_output_handler_free`
+    /// (`Z/main/output.c:706-736`): the name released, the buffer, the
+    /// user record and the record itself given back.
+    fn handler_free(heap: &mut Heap, handler: Handler) -> Option<Value> {
+        heap.release_string(handler.name);
+        if let Some(buffer) = handler.buffer {
+            heap.free_block(buffer);
+        }
+        heap.free_block(handler.record);
+        match handler.func {
+            Func::Default => None,
+            Func::User { callable, record } => {
+                heap.free_block(record);
+                Some(callable.into_value())
+            }
+        }
+    }
+
+    /// `php_output_handler_status`'s fields (`Z/main/output.c:1235`),
+    /// read before the array they fill is built on the heap.
+    fn status_fields(&self, at: usize) -> Option<StatusFields> {
+        let handler = self.handlers.get(at)?;
+        Some(StatusFields {
+            name: handler.name.bytes().to_vec(),
+            flags: handler.flags,
+            level: handler.level,
+            chunk_size: handler.size,
+            buffer_size: handler.buffer.as_ref().map_or(0, Block::len),
+            buffer_used: handler.used,
+        })
+    }
+}
+
+/// The seven keys of one `ob_get_status()` row.
+struct StatusFields {
+    name: Vec<u8>,
+    flags: u32,
+    level: usize,
+    chunk_size: usize,
+    buffer_size: usize,
+    buffer_used: usize,
+}
+
+impl StatusFields {
+    /// `php_output_handler_status`: the row as its array.
+    fn into_array(self, req: &mut Request) -> Result<Value, Thrown> {
+        let mut entry = PhpArray::new(req)?;
+        let name = Value::string(PhpString::new(req, &self.name)?);
+        let rows: [(&[u8], Value); 7] = [
+            (b"name", name),
+            (b"type", Value::int(i64::from(self.flags & 0xf))),
+            (b"flags", Value::int(i64::from(self.flags))),
+            (b"level", Value::int(long(self.level))),
+            (b"chunk_size", Value::int(long(self.chunk_size))),
+            (b"buffer_size", Value::int(long(self.buffer_size))),
+            (b"buffer_used", Value::int(long(self.buffer_used))),
+        ];
+        for (key, value) in rows {
+            let key = Key::Str(PhpString::new(req, key)?);
+            entry.set(req, key, value)?;
+        }
+        Ok(Value::array(entry))
+    }
+}
+
+/// What a pop's notice calls its act, `discard` or `send`.
+fn pop_verb(flags: u32) -> &'static str {
+    if flags & POP_DISCARD != 0 {
+        "discard"
+    } else {
+        "send"
+    }
+}
+
+/// `php_output_write` (`Z/main/output.c:241`): through the stack while
+/// the layer is active, else `php_output_direct`, unless the layer is
+/// disabled.
+///
+/// The first non-empty write holds thirty-two bytes, the mimetype this
+/// file's doc names, and an empty one holds nothing; a second write holds no
+/// more (#211's witness reads its deltas before it prints for this
+/// reason, and this is the reason).
+///
+/// ```php
+/// $b = memory_get_usage(); echo ""; var_dump(memory_get_usage() - $b);
+/// ```
+/// ```expect
+/// int(0)
+/// ```
+/// ```php
+/// $b = memory_get_usage(); echo "x"; var_dump(memory_get_usage() - $b); var_dump(memory_get_usage() - $b);
+/// ```
+/// ```expect
+/// xint(32)
+/// int(32)
+/// ```
+pub(crate) fn write(req: &mut Request, bytes: &[u8]) {
+    let flags = req.output().flags;
+    if flags & ACTIVATED != 0 {
+        op(req, HANDLER_WRITE, bytes);
+    } else if flags & DISABLED == 0 {
+        req.ub_write(bytes);
+    }
+}
+
+/// `php_output_lock_error` (`Z/main/output.c:773`): an `ob_*` act
+/// from inside a running handler deactivates the layer and is php's
+/// fatal.
+fn lock_error(req: &mut Request, operation: u32) -> bool {
+    let output = req.output();
+    if operation != 0 && output.level() > 0 && output.running.is_some() {
+        deactivate(req);
+        let message = format!(
+            "{}(): Cannot use output buffering in output buffering display handlers",
+            req.active_native()
+        );
+        req.end_in_fatal(&message);
+        return true;
+    }
+    false
+}
+
+/// `php_output_op` (`Z/main/output.c:1098`): the operation through the
+/// one active handler or the whole stack, and what comes out to the
+/// host, with the header block committed at the first byte that does.
+fn op(req: &mut Request, operation: u32, bytes: &[u8]) {
+    if lock_error(req, operation) {
+        return;
+    }
+    let mut context = Context::new(operation);
+    let count = req.output().level();
+    if count > 0 {
+        context.input = bytes.to_vec();
+        if count > 1 {
+            apply_op_topdown(req, &mut context);
+        } else if req.output().handlers[0].flags & HANDLER_DISABLED == 0 {
+            handler_op(req, 0, &mut context);
+        } else {
+            context.pass();
+        }
+    } else {
+        context.out = bytes.to_vec();
+    }
+    if !context.out.is_empty() {
+        header(req);
+        if req.output().flags & DISABLED == 0 {
+            req.ub_write(&context.out);
+            req.output_mut().flags |= SENT;
+        }
+    }
+}
+
+/// `zend_stack_apply_with_argument` over `php_output_stack_apply_op`,
+/// `ZEND_STACK_APPLY_TOPDOWN`: from the top down until a handler keeps
+/// everything.
+fn apply_op_topdown(req: &mut Request, context: &mut Context) {
+    let mut at = req.output().level();
+    while at > 0 {
+        at -= 1;
+        if stack_apply_op(req, at, context) {
+            break;
+        }
+    }
+}
+
+/// `php_output_stack_apply_op` (`Z/main/output.c:1160`): whether the
+/// walk stops here.
+fn stack_apply_op(req: &mut Request, at: usize, context: &mut Context) -> bool {
+    let Some(handler) = req.output().handlers.get(at) else {
+        return true;
+    };
+    let was_disabled = handler.flags & HANDLER_DISABLED != 0;
+    let level = handler.level;
+    let status = if was_disabled {
+        Status::Failure
+    } else {
+        handler_op(req, at, context)
+    };
+    match status {
+        Status::NoData => true,
+        Status::Success => {
+            if level != 0 {
+                context.swap();
+            }
+            false
+        }
+        Status::Failure => {
+            if was_disabled {
+                if level == 0 {
+                    context.pass();
+                }
+            } else if level != 0 {
+                context.swap();
+            }
+            false
+        }
+    }
+}
+
+/// `php_output_handler_op` (`Z/main/output.c:917`): the input into the
+/// handler's buffer, and the handler served when it must, a user handler
+/// with the buffer as a string of the request's and the operation, the
+/// default one passing its buffer along. A user handler that wrote to
+/// the layer is disabled for it, with php's deprecation; one that
+/// returned `false`, or threw, fails and its buffer goes on unchanged.
+fn handler_op(req: &mut Request, at: usize, context: &mut Context) -> Status {
+    let Some(handler) = req.output().handlers.get(at) else {
+        return Status::Failure;
+    };
+    if handler.flags & HANDLER_DISABLED != 0 {
+        return Status::Failure;
+    }
+    if lock_error(req, context.op) {
+        return Status::Failure;
+    }
+    let output = req.output_mut();
+    if context.op == HANDLER_WRITE && output.level() > 0 && output.running.is_some() {
+        output.handlers[at].flags |= HANDLER_PRODUCED_OUTPUT;
+    }
+    let original_op = context.op;
+    let (output, heap) = req.output_and_heap();
+    let storable = match output.append(heap, at, &context.input) {
+        Ok(storable) => storable,
+        Err(fatal) => {
+            req.end_in(&fatal);
+            return Status::Failure;
+        }
+    };
+    let mut still_have_handler = true;
+    let status;
+    if storable && context.op == HANDLER_WRITE {
+        return Status::NoData;
+    }
+    let (started, user) = {
+        let Some(handler) = req.output().handlers.get(at) else {
+            return Status::Failure;
+        };
+        let user = match &handler.func {
+            Func::User { callable, .. } => Some(callable.clone()),
+            Func::Default => None,
+        };
+        (handler.flags & HANDLER_STARTED != 0, user)
+    };
+    if !started {
+        context.op |= HANDLER_START;
+    }
+    req.output_mut().running = Some(at);
+    if let Some(callable) = user {
+        let buffered = req.output().buffered(at);
+        status = match user_handler(req, &callable, &buffered, context) {
+            Ok(status) => status,
+            Err(thrown) => {
+                req.leave_pending(&thrown);
+                Status::Failure
+            }
+        };
+        still_have_handler = req.output().handlers.len() > at;
+        if still_have_handler && req.output().handlers[at].flags & HANDLER_PRODUCED_OUTPUT != 0 {
+            // The handler wrote through the layer it serves: php's
+            // deprecation, and the flag taken back.
+            let output = req.output_mut();
+            output.handlers[at].flags &= !HANDLER_PRODUCED_OUTPUT;
+            let name = String::from_utf8_lossy(output.handlers[at].name.bytes()).into_owned();
+            docref(
+                req,
+                Level::Deprecated,
+                &format!("Producing output from user output handler {name} is deprecated"),
+            );
+        }
+    } else {
+        context.input = req.output().buffered(at);
+        context.pass();
+        status = if context.out.is_empty() {
+            Status::NoData
+        } else {
+            Status::Success
+        };
+    }
+    let output = req.output_mut();
+    if still_have_handler && at < output.handlers.len() {
+        output.handlers[at].flags |= HANDLER_STARTED;
+    }
+    output.running = None;
+    if !still_have_handler {
+        return status;
+    }
+    settle(req, at, status, context);
+    context.op = original_op;
+    status
+}
+
+/// The end of `php_output_handler_op` (`Z/main/output.c:1063-1090`):
+/// a failed handler disabled, its buffer handed on as what comes out
+/// and given back; one that kept everything or gave something out is
+/// emptied and marked processed.
+fn settle(req: &mut Request, at: usize, status: Status, context: &mut Context) {
+    let (output, heap) = req.output_and_heap();
+    let Some(handler) = output.handlers.get_mut(at) else {
+        return;
+    };
+    match status {
+        Status::Failure => {
+            handler.flags |= HANDLER_DISABLED;
+            context.out.clear();
+            if let Some(buffer) = handler.buffer.take() {
+                context
+                    .out
+                    .extend_from_slice(&buffer.bytes()[..handler.used]);
+                heap.free_block(buffer);
+            }
+            handler.used = 0;
+        }
+        Status::NoData => {
+            context.reset();
+            handler.used = 0;
+            handler.flags |= HANDLER_PROCESSED;
+        }
+        Status::Success => {
+            handler.used = 0;
+            handler.flags |= HANDLER_PROCESSED;
+        }
+    }
+}
+
+/// The user handler's call (`Z/main/output.c:944-1035`): `ob_data` as
+/// a string of the request's, `ob_mode` the operation, and what it
+/// returned read: `false` fails, a bool keeps everything, anything
+/// else is its string form and is what comes out.
+fn user_handler(
+    req: &mut Request,
+    callable: &Callable,
+    buffered: &[u8],
+    context: &mut Context,
+) -> Result<Status, Thrown> {
+    let data = PhpString::new(req, buffered)?;
+    let arguments = [Value::string(data), Value::int(i64::from(context.op))];
+    let returned = call::call(req, callable, &arguments);
+    req.release(Value::string(data));
+    let returned = returned?;
+    let status = match returned.as_ref() {
+        ValueRef::Bool(false) => Status::Failure,
+        ValueRef::Bool(true) => Status::NoData,
+        _ => {
+            let text = crate::api::coerce::to_string(req, &returned)?;
+            let status = if text.is_empty() {
+                Status::NoData
+            } else {
+                context.out = text.as_bytes().to_vec();
+                Status::Success
+            };
+            req.release(Value::string(text));
+            status
+        }
+    };
+    req.release(returned);
+    Ok(status)
+}
+
+/// `php_output_header` (`Z/main/output.c:102`): where the body started,
+/// taken once, and the header block committed through `php_header`;
+/// the layer is disabled when that refuses it.
+fn header(req: &mut Request) {
+    if req.output().headers_sent {
+        return;
+    }
+    if req.output().started.is_none() {
+        let file = req.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+        let line = req.current_line();
+        req.output_mut().started = Some((file, line));
+    }
+    if !send_headers(req) {
+        req.output_mut().flags |= DISABLED;
+    }
+}
+
+/// `sapi_send_headers` (`Z/main/SAPI.c:861`) under the CLI: the default
+/// `Content-type` laid down as this file's doc says, the header line
+/// built beside it and freed at once by `sapi_header_add_op`, the
+/// callback `header_register_callback` left served, and `headers_sent`
+/// set; the CLI's `send_headers` answers that it sent them. Nothing
+/// here answers `headers_only`, the `HEAD` request that refuses a
+/// body, since no host describes one yet.
+fn send_headers(req: &mut Request) -> bool {
+    if req.output().headers_sent {
+        return true;
+    }
+    let mimetype = default_content_type(req);
+    let (output, heap) = req.output_and_heap();
+    match heap.block(mimetype.len() + 1) {
+        Ok(mut block) => {
+            block.bytes_mut()[..mimetype.len()].copy_from_slice(&mimetype);
+            output.mimetype = Some(block);
+        }
+        Err(fatal) => {
+            req.end_in(&fatal);
+            return false;
+        }
+    }
+    // `default_header.header`, `Content-type: ` and the mimetype: the
+    // CLI's `header_handler` answers zero and `sapi_header_add_op` frees
+    // it before `sapi_send_headers` goes on.
+    let line_len = "Content-type: ".len() + mimetype.len() + 1;
+    if let Ok(line) = req.heap_mut().block(line_len) {
+        req.heap_mut().free_block(line);
+    }
+    if let Some(callback) = req.take_header_callback() {
+        if let Err(thrown) = call::call(req, &callback, &[]) {
+            req.leave_pending(&thrown);
+        }
+        req.release(callback.into_value());
+    }
+    req.output_mut().headers_sent = true;
+    true
+}
+
+/// `get_default_content_type` (`Z/main/SAPI.c:299`): `default_mimetype`
+/// with `; charset=` and `default_charset` after it when the charset
+/// is set and the type is `text/`.
+fn default_content_type(req: &Request) -> Vec<u8> {
+    let mimetype = req
+        .ini_get(b"default_mimetype")
+        .map_or_else(|| b"text/html".to_vec(), <[u8]>::to_vec);
+    let charset = req
+        .ini_get(b"default_charset")
+        .map_or_else(|| b"UTF-8".to_vec(), <[u8]>::to_vec);
+    if !charset.is_empty() && mimetype.len() >= 5 && mimetype[..5].eq_ignore_ascii_case(b"text/") {
+        let mut content_type = mimetype;
+        content_type.extend_from_slice(b"; charset=");
+        content_type.extend_from_slice(&charset);
+        content_type
+    } else {
+        mimetype
+    }
+}
+
+/// `php_output_stack_pop` (`Z/main/output.c:1258`): the top handler
+/// served a last time, `FINAL` with `CLEAN` when discarding, popped, what
+/// came out written on through the rest, and the handler freed after
+/// the write. A pop of nothing, or of a handler that is not removable
+/// without `FORCE`, is the notice and nothing else.
+///
+/// ```php
+/// ob_start(); echo "a"; ob_start(); echo "b"; ob_end_flush(); $outer = ob_get_contents(); ob_end_clean(); var_dump($outer);
+/// ```
+/// ```expect
+/// string(2) "ab"
+/// ```
+fn stack_pop(req: &mut Request, flags: u32) -> bool {
+    let level = req.output().level();
+    if level == 0 {
+        if flags & POP_SILENT == 0 {
+            let verb = pop_verb(flags);
+            docref(
+                req,
+                Level::Notice,
+                &format!("Failed to {verb} buffer. No buffer to {verb}"),
+            );
+        }
+        return false;
+    }
+    let top = level - 1;
+    let (top_flags, name, top_level) = {
+        let handler = &req.output().handlers[top];
+        (
+            handler.flags,
+            String::from_utf8_lossy(handler.name.bytes()).into_owned(),
+            handler.level,
+        )
+    };
+    if flags & POP_FORCE == 0 && top_flags & HANDLER_REMOVABLE == 0 {
+        if flags & POP_SILENT == 0 {
+            let verb = pop_verb(flags);
+            docref(
+                req,
+                Level::Notice,
+                &format!("Failed to {verb} buffer of {name} ({top_level})"),
+            );
+        }
+        return false;
+    }
+    let mut context = Context::new(HANDLER_FINAL);
+    if top_flags & HANDLER_DISABLED == 0 {
+        if top_flags & HANDLER_STARTED == 0 {
+            context.op |= HANDLER_START;
+        }
+        if flags & POP_DISCARD != 0 {
+            context.op |= HANDLER_CLEAN;
+        }
+        handler_op(req, top, &mut context);
+    }
+    // `zend_stack_del_top`: a handler a fatal inside the run already
+    // freed is not popped twice.
+    let orphan = if req.output().handlers.len() > top {
+        req.output_mut().handlers.pop()
+    } else {
+        None
+    };
+    if !context.out.is_empty() && flags & POP_DISCARD == 0 {
+        write(req, &context.out);
+    }
+    if let Some(orphan) = orphan {
+        free_handler(req, orphan);
+    }
+    true
+}
+
+/// `php_output_handler_free` with the user handler's `zoh` released
+/// through the request, which is where a value's last owner is served.
+fn free_handler(req: &mut Request, handler: Handler) {
+    if let Some(value) = Output::handler_free(req.heap_mut(), handler) {
+        req.release(value);
+    }
+}
+
+/// `php_output_flush` (`Z/main/output.c:255`): the top handler served
+/// with `FLUSH`, and what came out written through the handlers under
+/// it, the top set aside for the write and put back.
+fn flush(req: &mut Request) -> bool {
+    let level = req.output().level();
+    if level == 0 || req.output().handlers[level - 1].flags & HANDLER_FLUSHABLE == 0 {
+        return false;
+    }
+    let mut context = Context::new(HANDLER_FLUSH);
+    handler_op(req, level - 1, &mut context);
+    if !context.out.is_empty() {
+        let top = req.output_mut().handlers.pop();
+        write(req, &context.out);
+        if let Some(top) = top {
+            let (output, heap) = req.output_and_heap();
+            if let Err(fatal) = output.push(heap, top) {
+                req.end_in(&fatal);
+            }
+        }
+    }
+    true
+}
+
+/// `php_output_clean` (`Z/main/output.c:290`): the top handler served
+/// with `CLEAN`, what it holds dropped.
+fn clean(req: &mut Request) -> bool {
+    let level = req.output().level();
+    if level == 0 || req.output().handlers[level - 1].flags & HANDLER_CLEANABLE == 0 {
+        return false;
+    }
+    let mut context = Context::new(HANDLER_CLEAN);
+    handler_op(req, level - 1, &mut context);
+    true
+}
+
+/// `php_output_end_all` (`Z/main/output.c:325`): every handler popped,
+/// removable or not, top first, at shutdown's third step.
+///
+/// ```php
+/// ob_start(); echo "a"; ob_start(); echo "b"; ob_start(null, 0, 0); echo "c";
+/// ```
+/// ```expect
+/// abc
+/// ```
+pub(crate) fn end_all(req: &mut Request) {
+    while req.output().level() > 0 && stack_pop(req, POP_FORCE) {}
+}
+
+/// `php_output_deactivate` (`Z/main/output.c:176`): the header block
+/// committed if nothing sent it, the layer inactive, every handler
+/// left freed and the stack's storage with them; and
+/// `sapi_deactivate_destroy` (`Z/main/SAPI.c:537`) after it, the
+/// mimetype given back. Nothing of the request runs between the two,
+/// so they are one act here.
+pub(crate) fn deactivate(req: &mut Request) {
+    if req.output().flags & ACTIVATED != 0 {
+        header(req);
+        let output = req.output_mut();
+        output.flags ^= ACTIVATED;
+        output.running = None;
+        while let Some(handler) = req.output_mut().handlers.pop() {
+            free_handler(req, handler);
+        }
+        let (output, heap) = req.output_and_heap();
+        if let Some(elements) = output.elements.take() {
+            heap.free_block(elements);
+        }
+        output.max = 0;
+    }
+    let (output, heap) = req.output_and_heap();
+    output.started = None;
+    if let Some(mimetype) = output.mimetype.take() {
+        heap.free_block(mimetype);
+    }
+}
+
+/// `php_output_handler_start` (`Z/main/output.c:545`): the handler
+/// pushed and made active, or refused while the layer is inactive or a
+/// handler is running. No conflict or alias is registered, since no
+/// extension registers one yet.
+fn handler_start(req: &mut Request, handler: Handler) -> bool {
+    if req.output().flags & ACTIVATED == 0 || lock_error(req, HANDLER_START) {
+        free_handler(req, handler);
+        return false;
+    }
+    let (output, heap) = req.output_and_heap();
+    match output.push(heap, handler) {
+        Ok(level) => {
+            output.handlers[level].level = level;
+            true
+        }
+        Err(fatal) => {
+            req.end_in(&fatal);
+            false
+        }
+    }
+}
+
+/// `php_output_start_user` (`Z/main/output.c:430`): the default
+/// handler for no callback, `php_output_handler_create_internal` with
+/// the name a string of the request's; else
+/// `php_output_handler_create_user`, the user record `ecalloc`'d, the
+/// name what `zend_fcall_info_init` names the callable, the string
+/// itself for a string, and the callable's value held as `zoh`.
+fn start_user(
+    req: &mut Request,
+    callback: Option<&Callable>,
+    chunk_size: usize,
+    flags: u32,
+) -> Result<bool, Thrown> {
+    let handler = match callback {
+        None => {
+            let name = req.string(DEFAULT_NAME)?.heap();
+            let (_, heap) = req.output_and_heap();
+            Output::handler_init(heap, name, chunk_size, ability_flags(flags), Func::Default)
+        }
+        Some(callable) => {
+            let value = callable.clone().into_value();
+            let name = match value.as_php_string() {
+                Some(s) => {
+                    req.addref(&value);
+                    s.heap()
+                }
+                None => req.string(callable.name().as_bytes())?.heap(),
+            };
+            req.addref(&value);
+            let (_, heap) = req.output_and_heap();
+            let record = match heap.block(USER_RECORD) {
+                Ok(record) => record,
+                Err(fatal) => {
+                    heap.release_string(name);
+                    req.release(value);
+                    req.end_in(&fatal);
+                    return Err(Thrown::of(None));
+                }
+            };
+            Output::handler_init(
+                heap,
+                name,
+                chunk_size,
+                ability_flags(flags) | HANDLER_USER,
+                Func::User {
+                    callable: callable.clone(),
+                    record,
+                },
+            )
+        }
+    };
+    match handler {
+        Ok(handler) => Ok(handler_start(req, handler)),
+        Err(fatal) => {
+            req.end_in(&fatal);
+            Err(Thrown::of(None))
+        }
+    }
+}
+
+/// `php_output_get_contents`: the active handler's buffer as a string
+/// of the request's, `None` for no handler.
+fn contents(req: &mut Request) -> Result<Option<Value>, Thrown> {
+    let level = req.output().level();
+    if level == 0 {
+        return Ok(None);
+    }
+    let buffered = req.output().buffered(level - 1);
+    Ok(Some(Value::string(PhpString::new(req, &buffered)?)))
+}
+
+/// The active handler's name and level, for a notice.
+fn active_named(req: &Request) -> String {
+    let output = req.output();
+    match output.handlers.last() {
+        Some(handler) => format!(
+            "{} ({})",
+            String::from_utf8_lossy(handler.name.bytes()),
+            handler.level
+        ),
+        None => String::new(),
+    }
+}
+
+/// A notice of the `ob_*` natives, and the `false` it stands before.
+fn refused(req: &mut Request, message: &str) -> Value {
+    docref(req, Level::Notice, message);
+    Value::bool(false)
+}
+
+/// The `PHP_FUNCTION` bodies of `Z/main/output.c:1373-1591`, each over
+/// the operation it wraps, with php's notices: the ones that move the
+/// stack here, the ones that read it in [`read_op`].
+pub(crate) fn buffer_op(req: &mut Request, op: &OutputOp) -> Result<Value, Thrown> {
+    let level = req.output().level();
+    Ok(match op {
+        OutputOp::Start {
+            callback,
+            chunk_size,
+            flags,
+        } => {
+            let chunk_size = usize::try_from(*chunk_size).unwrap_or(0);
+            let flags = u32::try_from(*flags).unwrap_or(HANDLER_STDFLAGS);
+            if start_user(req, callback.as_ref(), chunk_size, flags)? {
+                Value::bool(true)
+            } else {
+                refused(req, "Failed to create buffer")
+            }
+        }
+        OutputOp::Flush => {
+            if level == 0 {
+                refused(req, "Failed to flush buffer. No buffer to flush")
+            } else if flush(req) {
+                Value::bool(true)
+            } else {
+                let named = active_named(req);
+                refused(req, &format!("Failed to flush buffer of {named}"))
+            }
+        }
+        OutputOp::Clean => {
+            if level == 0 {
+                refused(req, "Failed to delete buffer. No buffer to delete")
+            } else if clean(req) {
+                Value::bool(true)
+            } else {
+                let named = active_named(req);
+                refused(req, &format!("Failed to delete buffer of {named}"))
+            }
+        }
+        OutputOp::EndFlush => {
+            if level == 0 {
+                refused(
+                    req,
+                    "Failed to delete and flush buffer. No buffer to delete or flush",
+                )
+            } else {
+                Value::bool(stack_pop(req, POP_TRY))
+            }
+        }
+        OutputOp::EndClean => {
+            if level == 0 {
+                refused(req, "Failed to delete buffer. No buffer to delete")
+            } else {
+                Value::bool(stack_pop(req, POP_DISCARD | POP_TRY))
+            }
+        }
+        OutputOp::GetFlush => match contents(req)? {
+            None => refused(
+                req,
+                "Failed to delete and flush buffer. No buffer to delete or flush",
+            ),
+            Some(contents) => {
+                if !stack_pop(req, POP_TRY) {
+                    let named = active_named(req);
+                    refused(req, &format!("Failed to delete buffer of {named}"));
+                }
+                contents
+            }
+        },
+        OutputOp::GetClean => {
+            if level == 0 {
+                return Ok(Value::bool(false));
+            }
+            match contents(req)? {
+                None => refused(req, "Failed to delete buffer. No buffer to delete"),
+                Some(contents) => {
+                    if !stack_pop(req, POP_DISCARD | POP_TRY) {
+                        let named = active_named(req);
+                        refused(req, &format!("Failed to delete buffer of {named}"));
+                    }
+                    contents
+                }
+            }
+        }
+        OutputOp::ImplicitFlush(on) => {
+            req.output_mut().set_implicit_flush(*on);
+            Value::null()
+        }
+        OutputOp::GetContents
+        | OutputOp::GetLevel
+        | OutputOp::GetLength
+        | OutputOp::ListHandlers
+        | OutputOp::GetStatus { .. } => read_op(req, op)?,
+    })
+}
+
+/// The `ob_*` natives that read the stack: `ob_get_contents`,
+/// `ob_get_level`, `ob_get_length`, `ob_list_handlers` and
+/// `ob_get_status`.
+fn read_op(req: &mut Request, op: &OutputOp) -> Result<Value, Thrown> {
+    let level = req.output().level();
+    Ok(match op {
+        OutputOp::GetContents => contents(req)?.unwrap_or_else(|| Value::bool(false)),
+        OutputOp::GetLevel => Value::int(long(level)),
+        OutputOp::GetLength => match req.output().handlers.last() {
+            Some(handler) => Value::int(long(handler.used)),
+            None => Value::bool(false),
+        },
+        OutputOp::ListHandlers => {
+            let mut list = PhpArray::new(req)?;
+            let names: Vec<Vec<u8>> = req
+                .output()
+                .handlers
+                .iter()
+                .map(|handler| handler.name.bytes().to_vec())
+                .collect();
+            for name in names {
+                let name = Value::string(PhpString::new(req, &name)?);
+                list.append(req, name)?;
+            }
+            Value::array(list)
+        }
+        OutputOp::GetStatus { full } => {
+            if level == 0 {
+                Value::array(PhpArray::new(req)?)
+            } else if *full {
+                let mut rows = PhpArray::new(req)?;
+                for at in 0..level {
+                    if let Some(fields) = req.output().status_fields(at) {
+                        let row = fields.into_array(req)?;
+                        rows.append(req, row)?;
+                    }
+                }
+                Value::array(rows)
+            } else {
+                match req.output().status_fields(level - 1) {
+                    Some(fields) => fields.into_array(req)?,
+                    None => Value::array(PhpArray::new(req)?),
+                }
+            }
+        }
+        _ => Value::bool(false),
+    })
+}

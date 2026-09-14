@@ -156,6 +156,28 @@ impl Shared {
             ("PHP_INT_SIZE", Zval::long(8)),
             ("E_ALL", Zval::long(32767)),
         ]);
+        // `main/main.stub.php:260-328`: the output layer's constants,
+        // the operation `ob_start`'s callback is handed and the flags
+        // it is started with (`Z/main/php_output.h:23-45`).
+        values.extend(
+            [
+                ("PHP_OUTPUT_HANDLER_START", 0x01),
+                ("PHP_OUTPUT_HANDLER_WRITE", 0x00),
+                ("PHP_OUTPUT_HANDLER_FLUSH", 0x04),
+                ("PHP_OUTPUT_HANDLER_CLEAN", 0x02),
+                ("PHP_OUTPUT_HANDLER_FINAL", 0x08),
+                ("PHP_OUTPUT_HANDLER_CONT", 0x00),
+                ("PHP_OUTPUT_HANDLER_END", 0x08),
+                ("PHP_OUTPUT_HANDLER_CLEANABLE", 0x10),
+                ("PHP_OUTPUT_HANDLER_FLUSHABLE", 0x20),
+                ("PHP_OUTPUT_HANDLER_REMOVABLE", 0x40),
+                ("PHP_OUTPUT_HANDLER_STDFLAGS", 0x70),
+                ("PHP_OUTPUT_HANDLER_STARTED", 0x1000),
+                ("PHP_OUTPUT_HANDLER_DISABLED", 0x2000),
+                ("PHP_OUTPUT_HANDLER_PROCESSED", 0x4000),
+            ]
+            .map(|(name, value)| (name, Zval::long(value))),
+        );
         values
     }
 
@@ -477,16 +499,21 @@ impl Engine {
             None => {}
         }
         // `php_request_shutdown`'s order (design §5.10): the destructors
-        // of what is still live before the extensions' `rshutdown`, in
-        // reverse bundle order, then `shutdown_executor`, which closes
-        // the open resources first (`zend_shutdown_executor_values`)
-        // and frees the object storage after them.
+        // of what is still live, then every output handler popped
+        // (`php_output_end_all`), before the extensions' `rshutdown`, in
+        // reverse bundle order; the output layer deactivated after
+        // them, with the header block committed if nothing had; then
+        // `shutdown_executor`, which closes the open resources first
+        // (`zend_shutdown_executor_values`) and frees the object
+        // storage after them.
         req.call_destructors();
+        crate::output::end_all(&mut req);
         for extension in self.shared.extensions.iter().rev() {
             if let Some(rshutdown) = extension.rshutdown {
                 rshutdown(&mut req);
             }
         }
+        crate::output::deactivate(&mut req);
         req.close_resources();
         req.free_object_storage();
         // `php_error_cb` rendered the fatal where it was raised, on

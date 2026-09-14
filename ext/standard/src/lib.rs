@@ -30,6 +30,8 @@
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+mod output;
+
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::coerce::{coerce_param, is_type};
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, Type};
@@ -114,6 +116,7 @@ pub fn extension() -> Extension {
             (type_check_declared(b"is_object"), is_object),
             (type_check_declared(b"is_scalar"), is_scalar),
         ])
+        .functions(output::natives())
         .constants(vec![
             constant(b"COUNT_NORMAL", COUNT_NORMAL),
             constant(b"COUNT_RECURSIVE", COUNT_RECURSIVE),

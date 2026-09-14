@@ -27,6 +27,7 @@ mod handlers;
 mod interrupt;
 mod natives;
 mod ops;
+mod output;
 #[cfg(test)]
 mod probe;
 // The test face is on for an extension's dev-dependency, and for this

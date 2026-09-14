@@ -28,6 +28,7 @@ use crate::api::values::{
 };
 use crate::engine::{RequestDescription, Shared};
 use crate::exec::{self, Vm};
+use crate::output::Output;
 
 /// php's version, what `PHP_VERSION` and `phpversion()` say.
 pub const PHP_VERSION: &str = "8.5.9";
@@ -260,7 +261,12 @@ pub struct Request {
     map: MapTable,
     states: Vec<(TypeId, Box<dyn Any + Send>)>,
     ini: Vec<(Vec<u8>, Vec<u8>)>,
+    /// What passed the `php_output` layer, php's `sapi_module.ub_write`: the
+    /// bytes the host will be handed, kept until `serve` hands them.
     body: Vec<u8>,
+    /// The `php_output` layer, `main/output.c`'s `OG` and the header state
+    /// `sapi_send_headers` keeps beside it (`crate::output`).
+    output: Output,
     headers: Vec<Vec<u8>>,
     header_callback: Option<Callable>,
     /// The host's log as `php_log_err` was given it, one entry per call,
@@ -288,7 +294,6 @@ pub struct Request {
     cwd: PathBuf,
     gc_enabled: bool,
     streams: u32,
-    flushed: bool,
     /// The caller file's `declare(strict_types=1)`.
     strict_types: bool,
     /// php's `EG(exception)`: the throwable a handler left pending, which
@@ -316,6 +321,7 @@ impl Request {
             states: Vec::new(),
             ini: Vec::new(),
             body: Vec::new(),
+            output: Output::activate(),
             headers: Vec::new(),
             header_callback: None,
             aside: Vec::new(),
@@ -337,7 +343,6 @@ impl Request {
             cwd,
             gc_enabled: true,
             streams: 0,
-            flushed: false,
             strict_types: false,
             pending: None,
             returned: Value::null(),
@@ -1542,9 +1547,37 @@ impl Request {
 
     // -------------------------------------------------- output and headers
 
-    /// Write body bytes, through the buffer stack when one is active.
+    /// Write body bytes, `php_output_write`: through the handler stack
+    /// while one is active, and what passes it reaches the host, with
+    /// the header block committed at the first byte that does
+    /// (`crate::output`).
     pub fn write(&mut self, bytes: &[u8]) {
+        crate::output::write(self, bytes);
+    }
+
+    /// `sapi_module.ub_write`: bytes past the `php_output` layer, the host's.
+    pub(crate) fn ub_write(&mut self, bytes: &[u8]) {
         self.body.extend_from_slice(bytes);
+    }
+
+    /// The `php_output` layer, and the heap it lays its handlers down in.
+    pub(crate) fn output_and_heap(&mut self) -> (&mut Output, &mut Heap) {
+        (&mut self.output, &mut self.heap)
+    }
+
+    pub(crate) fn output(&self) -> &Output {
+        &self.output
+    }
+
+    pub(crate) fn output_mut(&mut self) -> &mut Output {
+        &mut self.output
+    }
+
+    /// `header_register_callback`'s callable, taken to be served once by
+    /// `sapi_send_headers`, which unsets `SG(callback_func)` before the
+    /// call so a second send finds none.
+    pub(crate) fn take_header_callback(&mut self) -> Option<Callable> {
+        self.header_callback.take()
     }
 
     /// Write to the host's error stream, bytes as given: php's
@@ -1556,37 +1589,24 @@ impl Request {
         self.aside.push(Aside::Stderr(bytes.to_vec()));
     }
 
-    /// `flush()`: hand what is buffered to the host now.
-    pub fn flush(&mut self) {
-        self.flushed = true;
-    }
+    /// `flush()`, `sapi_flush`: the host may push what it has. The host
+    /// is handed the body by `serve`, once, so there is nothing to push
+    /// before then; the handler stack is `ob_flush`'s, not this.
+    pub fn flush(&mut self) {}
 
-    /// One `ob_*` operation. The skeleton has no buffer stack: every
-    /// operation answers as php does at level zero.
+    /// One `ob_*` operation on the handler stack, the `PHP_FUNCTION`
+    /// bodies of `Z/main/output.c:1373-1591` over the layer in
+    /// `crate::output`; the notices are theirs, raised through the
+    /// native being served.
     pub fn output_buffer_op(&mut self, op: &OutputOp) -> Result<Value, Thrown> {
-        Ok(match op {
-            OutputOp::Start { .. } => Value::bool(true),
-            OutputOp::GetLevel => Value::int(0),
-            OutputOp::GetStatus { .. } | OutputOp::ListHandlers => {
-                Value::array(PhpArray::new(self)?)
-            }
-            OutputOp::ImplicitFlush(_) => Value::null(),
-            _ => Value::bool(false),
-        })
+        crate::output::buffer_op(self, op)
     }
 
-    /// Where the first body byte was written, `headers_sent`'s file and
-    /// line, once it has been.
+    /// Where the first byte reached the host, `php_output_get_start_filename`
+    /// and `_lineno`, once one has.
     #[must_use]
     pub fn output_started_at(&self) -> Option<(Vec<u8>, u32)> {
-        if self.body.is_empty() {
-            None
-        } else {
-            Some((
-                self.current_file().map(<[u8]>::to_vec).unwrap_or_default(),
-                self.current_line(),
-            ))
-        }
+        self.output.started_at()
     }
 
     /// `header()`: add a header line, replacing one of the same name
@@ -1634,11 +1654,12 @@ impl Request {
         self.headers.clone()
     }
 
-    /// `headers_sent()`: where the header block was committed, once it was.
+    /// `headers_sent()`: `SG(headers_sent)`, and where the body started
+    /// when it was a body byte that sent them.
     #[must_use]
     pub fn headers_sent(&self) -> Option<(Vec<u8>, u32)> {
-        if self.flushed {
-            self.output_started_at()
+        if self.output.headers_sent() {
+            Some(self.output.started_at().unwrap_or_default())
         } else {
             None
         }
