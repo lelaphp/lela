@@ -19,7 +19,12 @@
 //! to a string where it stands whether or not the other side folds, as
 //! `zend_compile_binary_op` converts it, so `2 . $a` is a `CONCAT` over
 //! the constant `"2"`; a `<` over two constants folds always, through
-//! the same `zend_compare` the opcode reads.
+//! the same `zend_compare` the opcode reads. A call of a name in
+//! [`crate::special`]'s table is served as php's compiler serves it,
+//! a constant or an opcode of its own (`ZEND_STRLEN`, `ZEND_TYPE_CHECK`,
+//! `ZEND_DEFINED`, `ZEND_COUNT`), where the engine's function table
+//! holds the name as a native ([`Options::functions`]); any other call
+//! is `INIT_FCALL`, `SEND_*` and `DO_ICALL`.
 //!
 //! A variable read is a `CV` operand and no opline (`zend_try_compile_cv`),
 //! and an assignment to one is `ASSIGN` with the CV in `op1` and the value
@@ -46,7 +51,7 @@
 use std::cmp::Ordering;
 
 use php_heap::{Fatal, Intern, Number, Scalar, Zval, ZvalType, double_to_string, numeric_prefix};
-use php_unit::decl::{ConstDecl, ConstExpr, Name};
+use php_unit::decl::{ConstDecl, ConstExpr, FunctionDecl, Name};
 use php_unit::{Diagnostic, Level, OpArray, Opcode, OperandKind, Opline, OplineIdx, Unit};
 
 use crate::read::{BinaryOp, Expr, Read, Stmt};
@@ -64,6 +69,8 @@ pub(crate) struct Emit<'a> {
     precision: i32,
     /// The engine's persistent constants, [`Options::persistent`].
     persistent: &'a [ConstDecl],
+    /// The engine's natives, [`Options::functions`].
+    functions: &'a [FunctionDecl],
     oplines: Vec<Opline>,
     constants: Vec<Zval>,
     vars: Vec<Name>,
@@ -81,7 +88,7 @@ pub(crate) struct Emit<'a> {
 /// call returned (php's `IS_VAR`); a temporary an operator wrote
 /// (php's `IS_TMP_VAR`); or a CV, the variable itself (php's `IS_CV`).
 #[derive(Debug, Clone, Copy)]
-enum Where {
+pub(crate) enum Where {
     Constant(Zval),
     Returned(u32),
     Temporary(u32),
@@ -101,6 +108,7 @@ pub(crate) fn unit(
         strings,
         precision: options.precision,
         persistent: &options.persistent,
+        functions: &options.functions,
         oplines: Vec::new(),
         constants: Vec::new(),
         vars: Vec::new(),
@@ -171,7 +179,7 @@ impl Emit<'_> {
         at
     }
 
-    fn cache_slot(&mut self) -> u32 {
+    pub(crate) fn cache_slot(&mut self) -> u32 {
         let at = self.cache_slots;
         self.cache_slots = self.cache_slots.saturating_add(1);
         at
@@ -493,7 +501,7 @@ impl Emit<'_> {
     }
 
     /// `zend_compile_expr`: compile `expr` and say where its value is.
-    fn expr(&mut self, expr: &Expr) -> Result<Where, CompileError> {
+    pub(crate) fn expr(&mut self, expr: &Expr) -> Result<Where, CompileError> {
         match expr {
             Expr::Call { name, arguments } => self.call(name, arguments),
             Expr::Unary { minus, operand } => self.unary(*minus, operand),
@@ -708,6 +716,29 @@ impl Emit<'_> {
         Ok(self.emit_binary(Opcode::Mul, operand, Where::Constant(sign)))
     }
 
+    /// `zend_emit_op_tmp` over one operand: the opline with `op1`,
+    /// `extended_value` as the caller sets it after the emission, and a
+    /// temporary for what it leaves, which is where the value is.
+    pub(crate) fn emit_unary(
+        &mut self,
+        opcode: Opcode,
+        operand: Where,
+        extended_value: u32,
+    ) -> Where {
+        let (op1_type, op1) = self.operand(operand);
+        let out = self.temporary();
+        self.push(Opline {
+            opcode,
+            op1_type,
+            op1,
+            out_type: OperandKind::Tmp,
+            out,
+            extended_value,
+            ..Opline::default()
+        });
+        Where::Temporary(out)
+    }
+
     /// `zend_emit_op_tmp`: the opline with both operands and a temporary
     /// for what it leaves, which is where the value is.
     fn emit_binary(&mut self, opcode: Opcode, left: Where, right: Where) -> Where {
@@ -796,7 +827,7 @@ impl Emit<'_> {
                     .ok_or_else(|| self.fatal("arithmetic this compiler cannot fold yet"))
             }
             Expr::Call { name, arguments } => self
-                .special(&unqualified(name), arguments)?
+                .special_constant(&unqualified(name), arguments)?
                 .ok_or_else(|| self.fatal("a call this compiler cannot fold")),
             Expr::Var(_) | Expr::Assign { .. } | Expr::PreInc(_) | Expr::PostInc(_) => {
                 Err(self.fatal("a variable is no constant expression"))
@@ -804,14 +835,16 @@ impl Emit<'_> {
         }
     }
 
-    /// `zend_compile_call` for a name known at compile time: the constant
-    /// `zend_try_compile_special_func` folds the call to where the name
-    /// is in [`crate::special`]'s table and its arguments fold, and the
-    /// call otherwise, with `zend_compile_args` for its arguments. Every
-    /// callable this engine has is a native, so the call op is
-    /// `DO_ICALL`; the compile-time table that also answers
-    /// `INIT_FCALL_BY_NAME` and `DO_UCALL` comes with the engine's
-    /// declarations.
+    /// `zend_compile_call` for a name known at compile time: what
+    /// `zend_try_compile_special_func` makes of the call where the name
+    /// is one of the engine's natives ([`Self::native`]) and in
+    /// [`crate::special`]'s table, a constant or an opcode of its own,
+    /// and the call otherwise, with `zend_compile_args` for its
+    /// arguments. Every callable this engine has is a native, so the
+    /// call op is `DO_ICALL`; a name the table has not is
+    /// `INIT_FCALL_BY_NAME` in php (`zend_compile_dynamic_call`) and the
+    /// same `INIT_FCALL` here until that opcode has a handler (#252), and
+    /// `DO_UCALL` comes with user functions.
     ///
     /// Every call is given a `VAR` for what it returns (`zend_emit_op`
     /// with a `result`, `zend_make_var_result`), numbered whether or not
@@ -820,8 +853,8 @@ impl Emit<'_> {
     /// `RETURN_VALUE_USED`.
     fn call(&mut self, name: &[u8], arguments: &[Expr]) -> Result<Where, CompileError> {
         let lowered = unqualified(name);
-        if let Some(folded) = self.special(&lowered, arguments)? {
-            return Ok(Where::Constant(folded));
+        if let Some(served) = self.special(&lowered, arguments)? {
+            return Ok(served);
         }
         let lowered = self.string(&lowered)?;
         let lowered = self.constant(lowered);
@@ -912,6 +945,18 @@ fn frameless_icall(opcode: Opcode) -> bool {
 }
 
 impl Emit<'_> {
+    /// `zend_hash_find_ptr(CG(function_table), lcname)` with php's
+    /// `fbc->type == ZEND_INTERNAL_FUNCTION` test folded in: whether the
+    /// lowered name is one of the natives the engine declared
+    /// ([`Options::functions`]), which is what
+    /// `zend_try_compile_special_func` requires before it serves a call
+    /// itself, so a name the bundle has not is the call.
+    pub(crate) fn native(&self, lowered: &[u8]) -> bool {
+        self.functions
+            .iter()
+            .any(|decl| decl.name.0.eq_ignore_ascii_case(lowered))
+    }
+
     /// `zend_try_ct_eval_const`: php substitutes a persistent constant's
     /// value where it stands, so a `T_*` of the tokenizer reaches no
     /// opline. The table is the engine's, what its extensions declared

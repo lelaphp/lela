@@ -14,8 +14,11 @@
 //! `ZEND_DIV`, `ZEND_MOD`, `ZEND_POW`, `ZEND_SL` and `ZEND_SR` and the
 //! `ZEND_CONCAT` that php emits for what its compiler does not fold,
 //! `ZEND_IS_SMALLER`, which a loop's condition is, `ZEND_PRE_INC` and
-//! `ZEND_POST_INC`, which step a CV in place, and `ZEND_FREE`, which
-//! gives up a temporary nothing reads.
+//! `ZEND_POST_INC`, which step a CV in place, `ZEND_FREE`, which
+//! gives up a temporary nothing reads, and the four opcodes php's
+//! compiler emits for a call in `zend_try_compile_special_func`'s table
+//! (#219): `ZEND_STRLEN`, `ZEND_TYPE_CHECK`, `ZEND_DEFINED` and
+//! `ZEND_COUNT`.
 
 // Every handler is generic over the tier and hands back the same edge, so
 // the generated dispatch calls them all the same way; the ones that raise a
@@ -383,6 +386,68 @@ pub(crate) fn post_inc<T: Tier>(
     incdec(req, frame, code, op, true)
 }
 
+/// `ZEND_STRLEN`: [`crate::ops::strlen`] over the operand, into the
+/// temporary the opline's `result` field names; the operand freed after
+/// the kernel (`FREE_OP1`), so a temporary string is given up here.
+pub(crate) fn strlen<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    unary(req, frame, code, op, crate::ops::strlen)
+}
+
+/// `ZEND_TYPE_CHECK`: [`crate::ops::type_check`] over the operand with
+/// the mask in `extended_value`, into the temporary; the operand freed
+/// after it. php's handler branches on the answer where a `JMPZ` or a
+/// `JMPNZ` follows (`ZEND_VM_SMART_BRANCH`); the compiler emits the two
+/// oplines and the jump reads the temporary, which is the same
+/// observable path one opline longer.
+pub(crate) fn type_check<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let mask = op.extended_value;
+    unary(req, frame, code, op, |_, value| {
+        Ok(Value::bool(crate::ops::type_check(value, mask)))
+    })
+}
+
+/// `ZEND_DEFINED`: [`crate::ops::defined`] over the constant string
+/// `op1` names, into the temporary. The cache slot in `extended_value`
+/// is not read: php keeps the answer in the per-request opline cache
+/// (design §5.4), and the answer is the same whether or not it was
+/// kept, so the cache lands with the fetches whose cost it changes.
+pub(crate) fn defined<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    unary(req, frame, code, op, |req, value| {
+        let name = value.as_str_bytes().unwrap_or_default();
+        Ok(Value::bool(crate::ops::defined(req, name)))
+    })
+}
+
+/// `ZEND_COUNT`: [`crate::ops::count`] over the operand, `sizeof`'s
+/// bit in `extended_value`, into the temporary; the operand freed after
+/// it.
+pub(crate) fn count<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let sizeof = op.extended_value != 0;
+    unary(req, frame, code, op, |req, value| {
+        crate::ops::count(req, value, sizeof).map(Value::int)
+    })
+}
+
 /// `ZEND_JMP`: the unconditional jump `pass_two` leaves, its target
 /// opline in `op1`. A jump to an earlier opline is a loop's back-edge
 /// and is a safepoint site (design §5.7): the frame is positioned at the
@@ -479,6 +544,35 @@ fn binary(
     let computed = kernel(req, &left, &right);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    match computed {
+        Ok(value) => {
+            let slot = exec::temporary_slot(code, op.out);
+            let previous = req.vm_mut().set_slot(frame, slot, value);
+            req.release(previous);
+            Ok(advance(req, frame))
+        }
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            Ok(Stepped::Threw(frame))
+        }
+    }
+}
+
+/// The body the one-operand kernels' handlers share: the operand
+/// addressed, the kernel called, the operand freed (`FREE_OP1`), and
+/// what the kernel returned written into the temporary the opline's
+/// `result` field names. A kernel that threw leaves the throwable
+/// pending, which is the `Threw` edge the loop reads.
+fn unary(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    kernel: impl FnOnce(&mut Request, &Value) -> Result<Value, Thrown>,
+) -> Edge {
+    let operand = exec::operand(req, frame, code, op.op1_type, op.op1);
+    let computed = kernel(req, &operand);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
     match computed {
         Ok(value) => {
             let slot = exec::temporary_slot(code, op.out);

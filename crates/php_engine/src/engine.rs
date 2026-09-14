@@ -179,6 +179,7 @@ impl Shared {
             filename,
             self.precision(),
             &self.constants,
+            &self.functions,
             &mut *strings,
         )
     }
@@ -459,6 +460,7 @@ impl Engine {
                     &script,
                     precision,
                     &shared.constants,
+                    &shared.functions,
                     req.heap_mut(),
                 ))
             }
@@ -517,12 +519,15 @@ impl Engine {
 /// unit's constant strings are interned into (design §5.2), `precision`
 /// the ini entry php's compiler renders a double constant at, and
 /// `persistent` the constants the bundle declared, which the compiler
-/// substitutes where they are written.
+/// substitutes where they are written, and `functions` the natives it
+/// declared, which the compiler reads as `CG(function_table)` before it
+/// serves a call of `zend_try_compile_special_func`'s table itself.
 fn compile(
     source: &[u8],
     filename: &[u8],
     precision: i32,
     persistent: &[ConstDecl],
+    functions: &[(FunctionDecl, Entry)],
     strings: &mut dyn Intern,
 ) -> Result<Arc<Unit>, CompileError> {
     let options = php_compile::Options {
@@ -530,6 +535,7 @@ fn compile(
         strict_types: false,
         precision,
         persistent: persistent.to_vec(),
+        functions: functions.iter().map(|(decl, _)| decl.clone()).collect(),
     };
     php_compile::compile_source(source, &options, strings).map(Arc::new)
 }
@@ -1148,7 +1154,7 @@ mod tests {
         for _ in 0..2 {
             let mut req = Request::new(Arc::clone(&engine.shared), description(""));
             started_at.push(req.memory_usage(false));
-            let compiled = compile(source, b"witness.php", 14, &[], req.heap_mut());
+            let compiled = compile(source, b"witness.php", 14, &[], &[], req.heap_mut());
             assert!(compiled.is_ok(), "the source compiles");
             assert!(
                 req.memory_usage(false) > 0,

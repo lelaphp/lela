@@ -3,14 +3,19 @@
 //! keeps in `ext/standard` and this engine keeps here, so an engine with
 //! no extensions serves a program that uses Zend alone (design §4.10).
 //!
-//! Eight of them are here: the two the first witness of a loop needs, the
+//! Ten of them are here: the two the first witness of a loop needs, the
 //! three that read what `php_heap::mm` accounts, so the allocator's
 //! numbers are php's numbers under a witness and not under a terminal
 //! session a person typed once, `ini_get` and `ini_set`, which read and
 //! move the engine's own ini table so a witness can reach what an entry
-//! decides and what it kept, and `set_time_limit`, which moves the one
-//! entry the execution timer is armed from. Each is declared and paired with its entry exactly as an
-//! extension's are, so there is one shape for a native and not two.
+//! decides and what it kept, `set_time_limit`, which moves the one
+//! entry the execution timer is armed from, and `strlen` and `defined`,
+//! the two of `zend_builtin_functions.c` whose calls php's compiler
+//! serves itself (#219): the compiler emits `ZEND_STRLEN` and
+//! `ZEND_DEFINED` over their kernels where it reads the name, and reads
+//! it only where the bundle declares the native. Each is declared and
+//! paired with its entry exactly as an extension's are, so there is one
+//! shape for a native and not two.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -101,7 +106,117 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
             ),
             set_time_limit as Entry,
         ),
+        (
+            declared(
+                b"strlen",
+                &[parameter(b"string", Some(Type::String), false)],
+                Some(Type::Int),
+            ),
+            strlen as Entry,
+        ),
+        (
+            declared(
+                b"defined",
+                &[parameter(b"constant_name", Some(Type::String), false)],
+                Some(Type::Bool),
+            ),
+            defined as Entry,
+        ),
     ]
+}
+
+/// `strlen(string $string): int`, php's `ZEND_FUNCTION(strlen)`
+/// (`Z/Zend/zend_builtin_functions.c:374`): one `Z_PARAM_STR` and its
+/// byte length. A call of one argument never reaches here, since the
+/// compiler emits `ZEND_STRLEN` over [`crate::ops::strlen`] for it
+/// (`zend_compile_func_strlen`); what does is a call of any other
+/// count, which `ZEND_PARSE_PARAMETERS_START(1, 1)` refuses, and the
+/// native's frame is on the trace where the opcode's is not.
+///
+/// ```php
+/// var_dump(strlen("a", "b"));
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: strlen() expects exactly 1 argument, 2 given in %s:2
+/// Stack trace:
+/// #0 %s(2): strlen('a', 'b')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+fn strlen(req: &mut Request) -> Result<Value, Thrown> {
+    let count = req.argument_count();
+    if count != 1 {
+        return Err(wrong_argument_count(req, 1, 1, count));
+    }
+    let string = string_argument(req, 1)?;
+    Ok(Value::int(as_long(string.len())))
+}
+
+/// `defined(string $constant_name): bool`, php's `ZEND_FUNCTION(defined)`
+/// (`Z/Zend/zend_builtin_functions.c:608`), which is
+/// `zend_get_constant_ex` under `ZEND_FETCH_CLASS_SILENT`: a leading
+/// `\` is dropped; a `::` names a class constant, which waits with the
+/// classes (`zend_get_class_constant_ex`) and is `false` here; a `\`
+/// left in the name is a namespaced constant, looked up with the
+/// namespace lowered and the name as written, in the table alone; and
+/// anything else is [`crate::ops::defined`], the table and then `true`,
+/// `false` and `null` in any case. The compiler emits `ZEND_DEFINED`
+/// where the name is written as a string with neither separator in it
+/// (`zend_compile_func_defined`), so what reaches here is a name it
+/// could not read, with a separator, or not a string, which `Z_PARAM_STR`
+/// coerces as it coerces every string parameter.
+///
+/// ```php
+/// var_dump(defined(null), defined("\\"), defined("Foo\\PHP_VERSION"), defined("\\PHP_VERSION"), defined("A::B"), defined("foo\\PHP_VERSION"), defined("\\Foo\\BAR"), defined("\\TRUE"), defined("x:y"), defined(":E_ALL"), defined("::E_ALL"));
+/// ```
+/// ```expect
+/// Deprecated: defined(): Passing null to parameter #1 ($constant_name) of type string is deprecated in %s on line 2
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// ```
+///
+/// ```php
+/// var_dump(defined(token_get_all("<?php 1;")));
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: defined(): Argument #1 ($constant_name) must be of type string, array given in %s:2
+/// Stack trace:
+/// #0 %s(2): defined(Array)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+fn defined(req: &mut Request) -> Result<Value, Thrown> {
+    let count = req.argument_count();
+    if count != 1 {
+        return Err(wrong_argument_count(req, 1, 1, count));
+    }
+    let name = string_argument(req, 1)?;
+    let mut bytes = name.as_bytes();
+    if let Some(rest) = bytes.strip_prefix(b"\\") {
+        bytes = rest;
+    }
+    if let Some(colon) = bytes.iter().rposition(|b| *b == b':')
+        && colon > 0
+        && bytes.get(colon - 1) == Some(&b':')
+    {
+        return Ok(Value::bool(false));
+    }
+    if let Some(separator) = bytes.iter().rposition(|b| *b == b'\\') {
+        let (namespace, constant) = bytes.split_at(separator);
+        let mut lowered = namespace.to_ascii_lowercase();
+        lowered.extend_from_slice(constant);
+        return Ok(Value::bool(req.constant_named(&lowered).is_some()));
+    }
+    Ok(Value::bool(crate::ops::defined(req, bytes)))
 }
 
 /// `var_dump(mixed $value, mixed ...$values): void`, php's

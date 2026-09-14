@@ -59,6 +59,17 @@ pub fn deprecated(req: &mut Request, message: &str) {
     raise(req, Level::Deprecated, message);
 }
 
+/// `php_error_docref(NULL, level, ...)`: a diagnostic from inside a
+/// native, its message behind the native's declared name and `(): `,
+/// which is how `ext/standard`'s natives raise most of what they raise
+/// (`chr(): Providing a value not in-between 0 and 255 is deprecated,
+/// ...`). The docref itself, php's link into the manual, is off in the
+/// CLI's ini and is not rendered here.
+pub fn docref(req: &mut Request, level: Level, message: &str) {
+    let text = format!("{}(): {message}", req.active_native());
+    raise(req, level, &text);
+}
+
 /// `E_ERROR`: `php_error_cb` renders it where the request stands and the
 /// request ends after this; the `Thrown` says so.
 pub fn fatal(req: &mut Request, message: &str) -> Thrown {

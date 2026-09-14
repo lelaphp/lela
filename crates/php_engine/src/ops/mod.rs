@@ -10,7 +10,7 @@
 
 use std::cmp::Ordering;
 
-use php_heap::{Number, Scalar, double_to_string, numeric_prefix};
+use php_heap::{Number, Scalar, ZvalType, double_to_string, numeric_prefix};
 
 use crate::api::raising::{Thrown, deprecated, throw, warning};
 use crate::api::request::Request;
@@ -841,6 +841,257 @@ fn increment_string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown
         out.insert(0, if first == b'0' { b'1' } else { first });
     }
     PhpString::new(req, &out)
+}
+
+/// `ZEND_STRLEN`'s handler (`Z/Zend/zend_vm_def.h:8759`), the length of
+/// the string an operand is, which is what php's compiler emits for
+/// `strlen($a)` in place of the call (`zend_compile_func_strlen`),
+/// so the native of the same name serves `strlen` only where the
+/// compiler could not see it. A string is its byte length. Anything else
+/// goes the way `Z_PARAM_STR` would take it: under `strict_types` a
+/// `TypeError`; otherwise `null` is the 8.1 deprecation and zero, a
+/// bool, a long or a double is the length of the string it converts to
+/// (`zend_parse_arg_str_weak`, so a NAN warns as [`to_string`] warns),
+/// and an array, a resource or an object with no `__toString` is
+/// php's `TypeError`, both texts the handler's own literals with
+/// `zend_zval_value_name` in the second. A variable nothing has written
+/// is the undefined-variable warning and then null's deprecation, in
+/// that order.
+///
+/// ```php
+/// $n = NAN; $t = true; $f = false; $d = 1.5; $i = 12345; $u = null;
+/// var_dump(strlen($n), strlen($t), strlen($f), strlen($d), strlen($i), strlen($u), strlen($undef), strlen("héllo"));
+/// ```
+/// ```expect
+/// Warning: unexpected NAN value was coerced to string in %s on line 3
+///
+/// Deprecated: strlen(): Passing null to parameter #1 ($string) of type string is deprecated in %s on line 3
+///
+/// Warning: Undefined variable $undef in %s on line 3
+///
+/// Deprecated: strlen(): Passing null to parameter #1 ($string) of type string is deprecated in %s on line 3
+/// int(3)
+/// int(1)
+/// int(0)
+/// int(3)
+/// int(5)
+/// int(0)
+/// int(0)
+/// int(6)
+/// ```
+///
+/// The opcode throws from the frame it stands in, so an uncaught
+/// `TypeError` carries no frame of `strlen`'s own above `{main}`, where
+/// the native's would.
+///
+/// ```php
+/// var_dump(strlen(token_get_all('<?php 1;')));
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: strlen(): Argument #1 ($string) must be of type string, array given in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn strlen(req: &mut Request, value: &Value) -> Result<Value, Thrown> {
+    let value = value.deref();
+    if let Some(s) = value.as_php_string() {
+        return Ok(Value::int(i64::try_from(s.len()).unwrap_or(i64::MAX)));
+    }
+    if !req.caller_strict_types() {
+        match value.as_ref() {
+            ValueRef::Undef | ValueRef::Null => {
+                deprecated(
+                    req,
+                    "strlen(): Passing null to parameter #1 ($string) of type string is deprecated",
+                );
+                return Ok(Value::int(0));
+            }
+            ValueRef::Bool(_) | ValueRef::Int(_) | ValueRef::Float(_) => {
+                let text = to_string(req, value)?;
+                let len = i64::try_from(text.len()).unwrap_or(i64::MAX);
+                req.release(Value::string(text));
+                return Ok(Value::int(len));
+            }
+            _ => {}
+        }
+    }
+    let name = value_name(req, value);
+    Err(throw(
+        req,
+        "TypeError",
+        &format!("strlen(): Argument #1 ($string) must be of type string, {name} given"),
+    ))
+}
+
+/// `ZEND_TYPE_CHECK`'s handler (`Z/Zend/zend_vm_def.h:8821`): whether
+/// the value's type is one of the `MAY_BE_*` bits in `mask`, which is
+/// `1 << Z_TYPE` for one type and the bits of a bool, a long, a double
+/// and a string for `is_scalar` (`zend_compile_func_typecheck`,
+/// `zend_compile_func_is_scalar`). The one type with more to it is a
+/// resource: a closed one, whose `zend_rsrc_list_get_rsrc_type` is
+/// null, is not one, so `is_resource` answers `false` for it. A
+/// reference is followed to what it holds, and a variable nothing has
+/// written reads as null after the warning, so `is_null($undef)` is the
+/// warning and `true`.
+///
+/// ```php
+/// $s = "1"; $t = token_get_all("<?php 1;"); $u = null; $f = 1.5; $c = false; var_dump(is_int($s), is_int(1), is_string($s), is_scalar($s), is_scalar($t), is_scalar($u), is_scalar($f), is_scalar($c), is_null($u), is_null($undef), is_bool($c), is_array($t), is_float($f), is_object($t), is_resource($t), is_long(1), is_integer(1), is_double($f));
+/// ```
+/// ```expect
+/// Warning: Undefined variable $undef in %s on line 2
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// ```
+pub(crate) fn type_check(value: &Value, mask: u32) -> bool {
+    let value = value.deref();
+    if (mask >> php_type(value)) & 1 == 0 {
+        return false;
+    }
+    match value.as_ref() {
+        ValueRef::Resource(r) if mask == MAY_BE_RESOURCE => !r.closed,
+        _ => true,
+    }
+}
+
+/// `ZEND_DEFINED`'s handler (`Z/Zend/zend_vm_def.h:8857`) and
+/// `zend_quick_check_constant` under it: whether a constant of exactly
+/// this name exists as the request serves, which is what php's compiler
+/// emits for `defined('NAME')` over a name it could not substitute
+/// (`zend_compile_func_defined`), and what the native of the same name
+/// reads once it has taken the namespace or the class off the name. A
+/// name is looked up as written, then as one of `true`, `false` and
+/// `null` in any case (`zend_get_special_const`), which the opcode never
+/// asks for, since the compiler substitutes those, and the native does.
+/// php keeps the answer in the opline's cache slot (design §5.4); the
+/// slot is `extended_value` here and nothing reads it yet, since the
+/// answer is the same whether or not it was kept.
+///
+/// ```php
+/// var_dump(defined("NOPE"), defined("PHP_VERSION"), defined("E_ALL"), defined("php_version"), defined("PHP_EOL"), $n = "PHP_VERSION", defined($n), defined("\\PHP_VERSION"), defined("Foo\\PHP_VERSION"), defined("A::B"), defined("TRUE"), defined("nulL"), defined("\\true"), defined("\\"), defined(""), defined(1));
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// string(11) "PHP_VERSION"
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// ```
+pub(crate) fn defined(req: &Request, name: &[u8]) -> bool {
+    if req.constant_named(name).is_some() {
+        return true;
+    }
+    matches!(
+        name.to_ascii_lowercase().as_slice(),
+        b"true" | b"false" | b"null"
+    )
+}
+
+/// `ZEND_COUNT`'s handler (`Z/Zend/zend_vm_def.h:9480`), which is what
+/// php's compiler emits for `count($a)` and `sizeof($a)` in place of the
+/// call (`zend_compile_func_count`), and the one arm the native of the
+/// same name shares with it: an array is its element count; an object
+/// is served by its `count_elements` handler or its `Countable::count`,
+/// neither of which any class here has yet, so it is the `TypeError`;
+/// and anything else is the `TypeError` too, naming the function as it
+/// was written, `sizeof` where `extended_value` says so, and the value
+/// as `zend_zval_value_name` names it. A variable nothing has written is
+/// the warning and then the error for null.
+///
+/// ```php
+/// var_dump(count(token_get_all("<?php 1;")), sizeof(token_get_all("<?php 1;")));
+/// ```
+/// ```expect
+/// int(3)
+/// int(3)
+/// ```
+///
+/// ```php
+/// var_dump(count($undef));
+/// ```
+/// ```expect exit=255
+/// Warning: Undefined variable $undef in %s on line 2
+///
+/// Fatal error: Uncaught TypeError: count(): Argument #1 ($value) must be of type Countable|array, null given in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// var_dump(sizeof(true));
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: sizeof(): Argument #1 ($value) must be of type Countable|array, true given in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn count(req: &mut Request, value: &Value, sizeof: bool) -> Result<i64, Thrown> {
+    let value = value.deref();
+    if let Some(array) = value.as_array() {
+        return Ok(i64::try_from(array.len()).unwrap_or(i64::MAX));
+    }
+    let function = if sizeof { "sizeof" } else { "count" };
+    let name = value_name(req, value);
+    Err(throw(
+        req,
+        "TypeError",
+        &format!(
+            "{function}(): Argument #1 ($value) must be of type Countable|array, {name} given"
+        ),
+    ))
+}
+
+/// `MAY_BE_RESOURCE`, `1 << IS_RESOURCE`: the one mask `ZEND_TYPE_CHECK`
+/// reads past the type byte.
+const MAY_BE_RESOURCE: u32 = 1 << (ZvalType::Resource as u32);
+
+/// `Z_TYPE_P`: php's number for a value's type, the `IS_*` of
+/// `zend_types.h`, which `ZEND_TYPE_CHECK` shifts its mask by. A bool is
+/// two of them, `IS_FALSE` and `IS_TRUE`.
+fn php_type(value: &Value) -> u32 {
+    let ty = match value.as_ref() {
+        ValueRef::Undef => ZvalType::Undef,
+        ValueRef::Null => ZvalType::Null,
+        ValueRef::Bool(false) => ZvalType::False,
+        ValueRef::Bool(true) => ZvalType::True,
+        ValueRef::Int(_) => ZvalType::Long,
+        ValueRef::Float(_) => ZvalType::Double,
+        ValueRef::Str(_) => ZvalType::String,
+        ValueRef::Array(_) => ZvalType::Array,
+        ValueRef::Object(_) => ZvalType::Object,
+        ValueRef::Resource(_) => ZvalType::Resource,
+        ValueRef::Reference(_) => ZvalType::Reference,
+    };
+    ty as u32
 }
 
 /// `zend_zval_value_name` (`Z/Zend/zend_API.c:157`): what a `TypeError`

@@ -37,7 +37,7 @@ pub mod syntax {
 use php_heap::Intern;
 use php_syntax::Parsed;
 use php_unit::Unit;
-use php_unit::decl::{ConstDecl, Name};
+use php_unit::decl::{ConstDecl, FunctionDecl, Name};
 
 /// What the compiler is told beside the source (design §4.1).
 #[derive(Debug, Clone, PartialEq)]
@@ -55,6 +55,13 @@ pub struct Options {
     /// (`CONST_PERSISTENT`), which `zend_try_ct_eval_const` substitutes
     /// where they are written; a name not here is fetched as the program serves.
     pub persistent: Vec<ConstDecl>,
+    /// The natives the engine's bundle declared, php's `CG(function_table)`
+    /// as `zend_compile_call` reads it: what `zend_try_compile_special_func`
+    /// requires a name to be one of before it serves the call itself
+    /// (`fbc->type == ZEND_INTERNAL_FUNCTION`), so a name the bundle has
+    /// not is the call. Every function here is a native; a user function
+    /// is declared by nothing this compiler reads yet.
+    pub functions: Vec<FunctionDecl>,
 }
 
 impl Default for Options {
@@ -64,6 +71,7 @@ impl Default for Options {
             strict_types: false,
             precision: 14,
             persistent: Vec::new(),
+            functions: Vec::new(),
         }
     }
 }
@@ -162,11 +170,34 @@ mod tests {
         let mut strings = php_heap::Strings::new();
         let unit = compile(
             &php_syntax::parse(source, &php_syntax::Options::default()),
-            &Options::default(),
+            &bundled(),
             &mut strings,
         )
         .unwrap_or_default();
         (unit, strings)
+    }
+
+    /// The options of an engine whose bundle declares every name of
+    /// `special::TABLE` as a native, which php's `-n` has: what the
+    /// fold reads as `CG(function_table)`, so the tests below compile
+    /// under the table php compiles under.
+    fn bundled() -> Options {
+        Options {
+            functions: special::TABLE
+                .iter()
+                .map(|(name, _)| FunctionDecl {
+                    name: Name((*name).into()),
+                    parameters: Vec::new(),
+                    return_type: None,
+                    returns_by_ref: false,
+                    attributes: Vec::new(),
+                    doc_comment: None,
+                    file: Name(Box::new([])),
+                    line: 0,
+                })
+                .collect(),
+            ..Options::default()
+        }
     }
 
     #[test]
@@ -1375,21 +1406,16 @@ mod tests {
         }
     }
 
-    /// What php leaves to an opcode (`ZEND_STRLEN`, `ZEND_DEFINED`,
-    /// `ZEND_COUNT`) or to the call itself is the ordinary call here,
-    /// and never a constant it is not: a `strlen` over anything but a
-    /// constant string, a `chr` whose long is not written as such or is
-    /// outside the byte, an `ord` over any other string, a `defined`
-    /// over a namespaced name, an unknown one or no string, a wrong
-    /// count of arguments, and a name whose row is an opcode.
+    /// What php leaves to the call itself is the ordinary call here,
+    /// and never a constant or an opcode it is not: a `chr` whose long
+    /// is not written as such or is outside the byte, an `ord` over any
+    /// other string, a `defined` over a namespaced or a class name or
+    /// over no written value, a wrong count of arguments, and a name
+    /// whose row has no kernel yet.
     #[test]
-    fn a_special_name_this_compiler_cannot_fold_is_the_ordinary_call() {
+    fn a_special_name_php_leaves_to_the_call_is_the_ordinary_call() {
         for (source, name) in [
-            (&b"<?php echo strlen(1);"[..], &b"strlen"[..]),
-            (b"<?php echo strlen(INF);", b"strlen"),
-            (b"<?php echo strlen(null);", b"strlen"),
-            (b"<?php echo strlen($a);", b"strlen"),
-            (b"<?php echo strlen();", b"strlen"),
+            (&b"<?php echo strlen();"[..], &b"strlen"[..]),
             (b"<?php echo strlen('a', 'b');", b"strlen"),
             (b"<?php echo chr(1 + 64);", b"chr"),
             (b"<?php echo chr(-0);", b"chr"),
@@ -1401,12 +1427,14 @@ mod tests {
             (b"<?php echo ord(65);", b"ord"),
             (b"<?php echo defined('A\\\\B');", b"defined"),
             (b"<?php echo defined('A::B');", b"defined"),
-            (b"<?php echo defined('NOPE');", b"defined"),
-            (b"<?php echo defined('inf');", b"defined"),
-            (b"<?php echo defined(1.5);", b"defined"),
             (b"<?php echo defined(null);", b"defined"),
-            (b"<?php echo count('x');", b"count"),
-            (b"<?php echo is_int(1);", b"is_int"),
+            (b"<?php echo defined(INF);", b"defined"),
+            (b"<?php echo defined();", b"defined"),
+            (b"<?php echo count($a, 1);", b"count"),
+            (b"<?php echo is_int();", b"is_int"),
+            (b"<?php echo is_int($a, $b);", b"is_int"),
+            (b"<?php echo intval($a);", b"intval"),
+            (b"<?php echo gettype($a);", b"gettype"),
         ] {
             assert!(
                 ordinary_call(source, name),
@@ -1414,6 +1442,200 @@ mod tests {
                 String::from_utf8_lossy(source)
             );
         }
+    }
+
+    /// `zend_try_compile_special_func` reads `fbc` off `CG(function_table)`
+    /// before the table, so under a bundle that declares none of the
+    /// names, which `Options::default` is, every one is the ordinary
+    /// call, the four constant shapes included.
+    #[test]
+    fn a_special_name_the_bundle_has_not_is_the_ordinary_call() {
+        for (source, name) in [
+            (&b"<?php echo strlen($a);"[..], &b"strlen"[..]),
+            (b"<?php echo strlen('a');", b"strlen"),
+            (b"<?php echo chr(65);", b"chr"),
+            (b"<?php echo ord('a');", b"ord"),
+            (b"<?php echo defined('INF');", b"defined"),
+            (b"<?php echo defined('NOPE');", b"defined"),
+            (b"<?php echo is_int($a);", b"is_int"),
+            (b"<?php echo count($a);", b"count"),
+        ] {
+            let mut strings = php_heap::Strings::new();
+            let unit = compile(
+                &php_syntax::parse(source),
+                &Options::default(),
+                &mut strings,
+            )
+            .unwrap_or_default();
+            let oplines = &unit.main.oplines;
+            assert!(
+                oplines.first().map(|op| op.opcode) == Some(Opcode::InitFcall)
+                    && literal_text(&unit, 0).as_deref() == Some(name)
+                    && oplines.iter().any(|op| op.opcode == Opcode::DoIcall),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
+
+    /// The oracle's dump under the pin's `dump` regime of #219's program
+    /// and of its kin: `STRLEN` over the CV, over a constant
+    /// that is not a string and over what a `CONCAT` left, `COUNT` for
+    /// `count` and `sizeof` alike, `TYPE_CHECK` with the mask each
+    /// `is_*` writes, and `DEFINED` over the name as a string with its
+    /// cache slot, `1.5` written as `"1.5"`; and the name in any case,
+    /// with or without a leading separator.
+    #[test]
+    fn the_opcode_shapes_of_the_special_table_are_php_s() {
+        assert_eq!(
+            dump_of(b"<?php echo strlen($a), count($a), is_int($a), defined('NOPE');"),
+            main_dump(
+                9,
+                1,
+                4,
+                "0000 T1 = STRLEN CV0($a)\n\
+                 0001 ECHO T1\n\
+                 0002 T2 = COUNT CV0($a)\n\
+                 0003 ECHO T2\n\
+                 0004 T3 = TYPE_CHECK (long) CV0($a)\n\
+                 0005 ECHO T3\n\
+                 0006 T4 = DEFINED string(\"NOPE\")\n\
+                 0007 ECHO T4\n\
+                 0008 RETURN int(1)\n"
+            )
+        );
+        assert_eq!(
+            dump_of(
+                b"<?php echo strlen(1), strlen(INF), strlen(null), strlen($a . $b), STRLEN('ab');"
+            ),
+            main_dump(
+                11,
+                2,
+                5,
+                "0000 T2 = STRLEN int(1)\n\
+                 0001 ECHO T2\n\
+                 0002 T3 = STRLEN float(inf)\n\
+                 0003 ECHO T3\n\
+                 0004 T4 = STRLEN null\n\
+                 0005 ECHO T4\n\
+                 0006 T5 = CONCAT CV0($a) CV1($b)\n\
+                 0007 T6 = STRLEN T5\n\
+                 0008 ECHO T6\n\
+                 0009 ECHO int(2)\n\
+                 0010 RETURN int(1)\n"
+            )
+        );
+        assert_eq!(
+            dump_of(
+                b"<?php echo defined('inf'), defined(1.5), defined('NOPE'), $x = defined('NOPE');"
+            ),
+            main_dump(
+                10,
+                1,
+                5,
+                "0000 T1 = DEFINED string(\"inf\")\n\
+                 0001 ECHO T1\n\
+                 0002 T2 = DEFINED string(\"1.5\")\n\
+                 0003 ECHO T2\n\
+                 0004 T3 = DEFINED string(\"NOPE\")\n\
+                 0005 ECHO T3\n\
+                 0006 T4 = DEFINED string(\"NOPE\")\n\
+                 0007 T5 = ASSIGN CV0($x) T4\n\
+                 0008 ECHO T5\n\
+                 0009 RETURN int(1)\n"
+            )
+        );
+        let (unit, _strings) =
+            unit_and_strings(b"<?php echo sizeof($a), defined('A'), defined('B');");
+        let extended: Vec<_> = unit
+            .main
+            .oplines
+            .iter()
+            .filter(|op| matches!(op.opcode, Opcode::Count | Opcode::Defined))
+            .map(|op| (op.opcode, op.extended_value))
+            .collect();
+        assert_eq!(
+            extended,
+            [
+                (Opcode::Count, 1),
+                (Opcode::Defined, 0),
+                (Opcode::Defined, 1)
+            ],
+            "sizeof's bit, and one cache slot per DEFINED"
+        );
+        assert_eq!(unit.main.cache_size, 2);
+    }
+
+    /// The oracle's dump of every `is_*` row and of `count` and `sizeof`
+    /// over a constant and a CV: `TYPE_CHECK` with the mask each name
+    /// writes, `is_bool` two bits and `is_scalar` five, over a constant
+    /// where one is written, and `COUNT` the same for both names.
+    #[test]
+    fn the_type_check_and_count_rows_are_php_s_masks() {
+        assert_eq!(
+            dump_of(
+                b"<?php echo sizeof($a), is_scalar($a), is_bool($a), is_int(1), count(\"x\"), is_null($u), \\is_integer($a), Is_Float($a), is_double($a), is_string($a), is_array($a), is_object($a), is_resource($a), is_long($a);"
+            ),
+            main_dump(
+                29,
+                2,
+                14,
+                "0000 T2 = COUNT CV0($a)\n\
+                 0001 ECHO T2\n\
+                 0002 T3 = TYPE_CHECK TYPE [bool, long, double, string] CV0($a)\n\
+                 0003 ECHO T3\n\
+                 0004 T4 = TYPE_CHECK (bool) CV0($a)\n\
+                 0005 ECHO T4\n\
+                 0006 T5 = TYPE_CHECK (long) int(1)\n\
+                 0007 ECHO T5\n\
+                 0008 T6 = COUNT string(\"x\")\n\
+                 0009 ECHO T6\n\
+                 0010 T7 = TYPE_CHECK (null) CV1($u)\n\
+                 0011 ECHO T7\n\
+                 0012 T8 = TYPE_CHECK (long) CV0($a)\n\
+                 0013 ECHO T8\n\
+                 0014 T9 = TYPE_CHECK (double) CV0($a)\n\
+                 0015 ECHO T9\n\
+                 0016 T10 = TYPE_CHECK (double) CV0($a)\n\
+                 0017 ECHO T10\n\
+                 0018 T11 = TYPE_CHECK (string) CV0($a)\n\
+                 0019 ECHO T11\n\
+                 0020 T12 = TYPE_CHECK (array) CV0($a)\n\
+                 0021 ECHO T12\n\
+                 0022 T13 = TYPE_CHECK (object) CV0($a)\n\
+                 0023 ECHO T13\n\
+                 0024 T14 = TYPE_CHECK (resource) CV0($a)\n\
+                 0025 ECHO T14\n\
+                 0026 T15 = TYPE_CHECK (long) CV0($a)\n\
+                 0027 ECHO T15\n\
+                 0028 RETURN int(1)\n"
+            )
+        );
+    }
+
+    /// `zend_do_free` over what the four opcodes leave: none of them is
+    /// one php marks `UNUSED`, so a value nothing reads is a `FREE`.
+    #[test]
+    fn a_special_opcode_nothing_reads_is_freed() {
+        assert_eq!(
+            dump_of(b"<?php $n = strlen($a); strlen($a); is_int($a); count($a); defined('NOPE');"),
+            main_dump(
+                11,
+                2,
+                6,
+                "0000 T2 = STRLEN CV1($a)\n\
+                 0001 ASSIGN CV0($n) T2\n\
+                 0002 T4 = STRLEN CV1($a)\n\
+                 0003 FREE T4\n\
+                 0004 T5 = TYPE_CHECK (long) CV1($a)\n\
+                 0005 FREE T5\n\
+                 0006 T6 = COUNT CV1($a)\n\
+                 0007 FREE T6\n\
+                 0008 T7 = DEFINED string(\"NOPE\")\n\
+                 0009 FREE T7\n\
+                 0010 RETURN int(1)\n"
+            )
+        );
     }
 
     /// The table is `zend_try_compile_special_func_ex`'s names in its
@@ -1426,8 +1648,10 @@ mod tests {
         assert_eq!(TABLE.first().map(|(n, _)| *n), Some(&b"strlen"[..]));
         assert_eq!(TABLE.last().map(|(n, _)| *n), Some(&b"clone"[..]));
         assert_eq!(row(b"defined"), Some(Special::Defined));
-        assert_eq!(row(b"is_integer"), Some(Special::Opcode));
-        assert_eq!(row(b"sizeof"), Some(Special::Opcode));
+        assert_eq!(row(b"is_integer"), Some(Special::TypeCheck(0x10)));
+        assert_eq!(row(b"is_scalar"), Some(Special::TypeCheck(0x7c)));
+        assert_eq!(row(b"sizeof"), Some(Special::Count { sizeof: true }));
+        assert_eq!(row(b"intval"), Some(Special::Opcode));
         assert_eq!(row(b"var_dump"), None);
         let names: Vec<&[u8]> = TABLE.iter().map(|(n, _)| *n).collect();
         let mut sorted = names.clone();

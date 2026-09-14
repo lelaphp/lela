@@ -11,12 +11,13 @@
 
 use std::cmp::Ordering;
 
+use php_heap::ZvalType;
 use php_unit::decl::Type;
 
 use crate::api::abi::Callable;
 use crate::api::raising::{Thrown, arg_type_error, throw};
 use crate::api::request::Request;
-use crate::api::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use crate::api::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 /// php's binary operators as `zend_binary_op` names them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -254,20 +255,37 @@ pub fn key_of(req: &mut Request, value: &Value) -> Result<Key, Thrown> {
     }
 }
 
-/// `count()` of a countable value; a scalar is php's `TypeError`.
+/// `count()` of a countable value, the kernel [`crate::ops::count`]
+/// through the face: an array's element count, and php's `TypeError`
+/// for anything else, naming the native that is active, `sizeof` for
+/// the alias, as `zend_argument_type_error` names it.
 pub fn count(req: &mut Request, value: &Value) -> Result<i64, Thrown> {
-    match value.as_ref() {
-        ValueRef::Array(a) => Ok(i64::try_from(a.len()).unwrap_or(i64::MAX)),
-        ValueRef::Reference(r) => count(req, r.get()),
-        _ => Err(throw(
-            req,
-            "TypeError",
-            &format!(
-                "count(): Argument #1 ($value) must be of type Countable|array, {} given",
-                value.type_name()
-            ),
-        )),
-    }
+    let sizeof = req.active_native() == "sizeof";
+    crate::ops::count(req, value, sizeof)
+}
+
+/// `php_is_type` (`Z/ext/standard/type.c`), the kernel
+/// [`crate::ops::type_check`] through the face: whether the value is of
+/// `tag`, a reference followed to what it holds, both of a bool's types
+/// for [`TypeTag::Bool`], and a closed resource not a resource
+/// (`zend_rsrc_list_get_rsrc_type`). What `is_int`, `is_string` and
+/// their kin answer where the compiler did not emit `ZEND_TYPE_CHECK`
+/// for the call.
+#[must_use]
+pub fn is_type(value: &Value, tag: TypeTag) -> bool {
+    let mask = match tag {
+        TypeTag::Undef => 1 << (ZvalType::Undef as u32),
+        TypeTag::Null => 1 << (ZvalType::Null as u32),
+        TypeTag::Bool => (1 << (ZvalType::False as u32)) | (1 << (ZvalType::True as u32)),
+        TypeTag::Int => 1 << (ZvalType::Long as u32),
+        TypeTag::Float => 1 << (ZvalType::Double as u32),
+        TypeTag::String => 1 << (ZvalType::String as u32),
+        TypeTag::Array => 1 << (ZvalType::Array as u32),
+        TypeTag::Object => 1 << (ZvalType::Object as u32),
+        TypeTag::Resource => 1 << (ZvalType::Resource as u32),
+        TypeTag::Reference => 1 << (ZvalType::Reference as u32),
+    };
+    crate::ops::type_check(value, mask)
 }
 
 /// `===`.

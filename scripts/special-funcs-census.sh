@@ -24,7 +24,9 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 exec python3 - "$ROOT" "$HERE/crates/php_compile/src/special.rs" <<'PY'
 import re, sys, os, glob, collections
 root, table = sys.argv[1], sys.argv[2]
-names = re.findall(r'^\s*\(b"([a-z_]+)", Special::', open(table).read(), re.M)
+# A row is `(b"name", Special::...)`, on one line or, where rustfmt
+# wrapped it, with the name alone on its line after the paren.
+names = re.findall(r'^\s*\(?b"([a-z_]+)",', open(table).read(), re.M)
 per_commit = ("Zend/tests", "tests", "sapi/cli")
 
 def file_section(text):
