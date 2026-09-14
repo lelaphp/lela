@@ -180,23 +180,31 @@ pub fn to_number(req: &mut Request, value: &Value) -> Result<Value, Thrown> {
     }
 }
 
-/// `(array)`.
+/// `(array)`: the array itself, named and not copied, as `ZVAL_COPY_VALUE`
+/// names it; an object's properties as a new array; a scalar as a new
+/// array of one. What is handed back is the caller's to own: an array
+/// that already was one has no owner taken, and a new one has its one.
 pub fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thrown> {
-    let _ = req;
     match value.as_ref() {
-        ValueRef::Undef | ValueRef::Null => Ok(PhpArray::new()),
-        ValueRef::Array(a) => Ok(a.clone()),
+        ValueRef::Undef | ValueRef::Null => PhpArray::new(req),
+        ValueRef::Array(a) => Ok(*a),
         ValueRef::Object(o) => {
-            let mut array = PhpArray::new();
+            let mut array = PhpArray::new(req)?;
             for (key, entry) in o.entries() {
-                array.set(key, entry);
+                req.addref(&entry);
+                if let Key::Str(s) = &key {
+                    req.addref(&Value::string(*s));
+                }
+                array.set(req, key, entry)?;
             }
             Ok(array)
         }
         ValueRef::Reference(r) => to_array(req, r.get()),
         _ => {
-            let mut array = PhpArray::new();
-            array.append(value.deref().clone());
+            let mut array = PhpArray::new(req)?;
+            let element = value.deref().clone();
+            req.addref(&element);
+            array.append(req, element)?;
             Ok(array)
         }
     }

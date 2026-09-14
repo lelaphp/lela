@@ -234,6 +234,22 @@ pub(crate) fn do_icall<T: Tier>(
 /// int(8192)
 /// int(0)
 /// ```
+///
+/// An array assigned from a CV is `ZVAL_COPY`, one more owner of the one
+/// array and no element copied (design §5.3): the second variable
+/// holds it through the first giving it up, and the heap gets the rows
+/// back, 1176 bytes for the five of `token_get_all` here, only when the
+/// last owner does.
+///
+/// ```php
+/// $t = token_get_all('<?php echo 12;'); $b = memory_get_usage();
+/// $u = $t; $t = 1; $shared = memory_get_usage() - $b;
+/// $u = 1; var_dump($shared, memory_get_usage() - $b);
+/// ```
+/// ```expect
+/// int(0)
+/// int(-1176)
+/// ```
 pub(crate) fn assign<T: Tier>(
     req: &mut Request,
     frame: FrameRef,

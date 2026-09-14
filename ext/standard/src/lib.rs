@@ -204,24 +204,30 @@ fn count(req: &mut Request) -> Result<Value, Thrown> {
         ));
     }
     match value.deref().as_array() {
-        Some(array) if mode == COUNT_RECURSIVE => Ok(Value::int(count_recursive(array))),
+        Some(array) if mode == COUNT_RECURSIVE => Ok(Value::int(count_recursive(req, *array))),
         _ => php_ext::coerce::count(req, &value).map(Value::int),
     }
 }
 
 /// `php_count_recursive`: the elements, and every nested array's
 /// elements counted the same way, a reference followed to what it
-/// holds. php protects the walk against an array that holds itself;
-/// no array a native builds here does, and the recursion guard lands
-/// with the memory model's arrays (#241).
-fn count_recursive(array: &PhpArray) -> i64 {
-    let own = i64::try_from(array.len()).unwrap_or(i64::MAX);
-    array
-        .iter()
-        .filter_map(|(_, element)| element.deref().as_array())
-        .fold(own, |count, nested| {
-            count.saturating_add(count_recursive(nested))
-        })
+/// holds, and the walk guarded as php guards it, so an array that
+/// holds itself is the warning `Recursion detected` and a zero where
+/// the walk meets itself again.
+fn count_recursive(req: &mut Request, array: PhpArray) -> i64 {
+    if array.is_recursive() {
+        docref(req, Level::Warning, "Recursion detected");
+        return 0;
+    }
+    array.protect();
+    let mut count = i64::try_from(array.len()).unwrap_or(i64::MAX);
+    for (_, element) in &array {
+        if let Some(nested) = element.deref().as_array() {
+            count = count.saturating_add(count_recursive(req, *nested));
+        }
+    }
+    array.unprotect();
+    count
 }
 
 /// `ord(string $character): int`, php's `PHP_FUNCTION(ord)`

@@ -535,9 +535,10 @@ const REQUEST_TABLE_SIZE: u32 = 1024;
 /// the peak reads.
 ///
 /// What is here is that allocation and php's `nTableSize`. The lookup
-/// itself is still [`Table`]'s `HashMap` on the system allocator, the
-/// stand-in for `zend_hash` until the array of design §5.3 lands; what
-/// this type holds is the bytes php's number reports.
+/// itself is still [`Table`]'s `HashMap` on the system allocator, and
+/// the two become one [`crate::Arr`], the array of design §5.3, with
+/// #277; what this type holds meanwhile is the bytes php's number
+/// reports.
 ///
 /// The absolute number, held to the oracle. The two function names this
 /// source interns cost 40 and 48, php's aligned string size over each,

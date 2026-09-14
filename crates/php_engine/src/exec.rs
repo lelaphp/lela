@@ -6,14 +6,14 @@
 //! `DO_ICALL` serves, which are php's frames pushed on the VM stack
 //! before their arguments are known.
 //!
-//! The slots are [`Value`]s: a scalar or a string in one is the heap's
-//! zval, sixteen bytes naming a `php_heap` string with no owner taken
-//! (design §5.1), and the engine takes and gives up owners here where
-//! php's handlers do, with `ZVAL_COPY`, `ZVAL_COPY_VALUE` and `FREE_OP`
-//! as [`take_operand`], [`operand`] and [`free_operand`]. An array, an
-//! object, a resource and a reference in a slot are still the owned
-//! stand-ins of `api::values`, and move to the heap's frame with the
-//! rest of Lane A (design §11, days 3–7).
+//! The slots are [`Value`]s: a scalar, a string or an array in one is
+//! the heap's zval, sixteen bytes naming a `php_heap` string or array
+//! with no owner taken (design §5.1), and the engine takes and gives up
+//! owners here where php's handlers do, with `ZVAL_COPY`,
+//! `ZVAL_COPY_VALUE` and `FREE_OP` as [`take_operand`], [`operand`] and
+//! [`free_operand`]. An object, a resource and a reference in a slot are
+//! still the owned stand-ins of `api::values`, and the slots move to the
+//! heap's frame with the rest of Lane A (design §11, days 3–7).
 
 use std::sync::Arc;
 
@@ -350,23 +350,10 @@ pub(crate) fn constant(code: &OpArray, at: ConstIdx) -> Value {
 }
 
 /// A zval as the value vocabulary holds it, no owner taken: the string
-/// is named and not copied, as php's `ZVAL_COPY_VALUE` names it. Only
-/// the forms a compiled program's constant table holds are here; the
-/// rest are the memory model's and arrive with it (design §11, Lane A).
+/// or the array is named and not copied, as php's `ZVAL_COPY_VALUE`
+/// names it.
 pub(crate) fn value_of(zval: Zval) -> Value {
-    if let Some(n) = zval.as_long() {
-        return Value::int(n);
-    }
-    if let Some(f) = zval.as_double() {
-        return Value::float(f);
-    }
-    if let Some(b) = zval.as_bool() {
-        return Value::bool(b);
-    }
-    match zval.as_str() {
-        Some(s) => Value::string(PhpString::of(s)),
-        None => Value::null(),
-    }
+    Value::of_zval(zval)
 }
 
 /// The opline at `at` of `code`, if there is one.

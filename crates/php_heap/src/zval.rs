@@ -1,7 +1,12 @@
 //! The zval (design §5.1): sixteen bytes, `Copy`, no `Drop`. Zend's type
 //! numbering is kept so that the all-zero value is `IS_UNDEF`.
 
+use std::any::Any;
+use std::ptr::NonNull;
+
 use crate::Str;
+use crate::array::Arr;
+use crate::boxed::Boxed;
 
 /// The type byte of a zval, numbered as `Zend/zend_types.h` numbers it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -98,10 +103,59 @@ impl Zval {
         }
     }
 
+    /// `ZVAL_ARR`: the array, refcounted unless it is immutable, which is
+    /// what a compiled program's constant array is (design §5.3).
+    #[must_use]
+    pub fn array(a: Arr) -> Zval {
+        Zval {
+            value: a.payload(),
+            kind: ZvalType::Array,
+            type_flags: if a.is_immutable() {
+                0
+            } else {
+                Zval::TYPE_REFCOUNTED | Zval::TYPE_COLLECTABLE
+            },
+            _pad: 0,
+            u2: 0,
+        }
+    }
+
+    /// A zval of `kind` naming a boxed value the heap counts: the
+    /// stand-in for an object, a resource or a reference until each
+    /// stands on the heap as its own (design §11, days 3–7). The payload
+    /// is the box, and the private bit in the flags says so, so that no
+    /// reader takes it for the store entry it will be.
+    pub(crate) fn boxed(kind: ZvalType, b: NonNull<Boxed>) -> Zval {
+        Zval {
+            value: b.as_ptr().expose_provenance() as u64,
+            kind,
+            type_flags: Zval::TYPE_REFCOUNTED | Zval::TYPE_BOXED,
+            _pad: 0,
+            u2: 0,
+        }
+    }
+
     /// The type byte.
     #[must_use]
     pub const fn kind(self) -> ZvalType {
         self.kind
+    }
+
+    /// `Z_ISUNDEF`.
+    #[must_use]
+    pub const fn is_undef(self) -> bool {
+        matches!(self.kind, ZvalType::Undef)
+    }
+
+    /// `Z_NEXT`: the `u2` word, which inside an array's bucket is the
+    /// next bucket of the hash chain.
+    pub(crate) const fn next(self) -> u32 {
+        self.u2
+    }
+
+    /// Write `Z_NEXT`.
+    pub(crate) const fn set_next(&mut self, next: u32) {
+        self.u2 = next;
     }
 
     /// The payload of a `Long`, else `None`.
@@ -135,6 +189,47 @@ impl Zval {
         }
     }
 
+    /// The array of an `Array`, else `None`. Naming it does not take an
+    /// owner, as php's `Z_ARR` does not.
+    #[must_use]
+    pub fn as_arr(self) -> Option<Arr> {
+        match self.kind {
+            // SAFETY: the payload of an `Array` was written by
+            // `Zval::array` from a live array, and a zval that names a
+            // freed array is the same mistake in php.
+            ZvalType::Array => unsafe { Arr::from_payload(self.value) },
+            _ => None,
+        }
+    }
+
+    /// The boxed value a zval of an owned kind names, as `T`, and `None`
+    /// for a zval that names none or one of another type. What is
+    /// borrowed lives while the zval's owner holds it.
+    #[must_use]
+    pub fn as_boxed<T: Any>(&self) -> Option<&T> {
+        self.boxed_ptr()
+            // SAFETY: the payload was written by `Zval::boxed` from a live
+            // box the heap counts, held by whoever holds this zval.
+            .map(|b| unsafe { b.as_ref() })
+            .and_then(|b| b.value().downcast_ref::<T>())
+    }
+
+    /// Whether the payload is a boxed stand-in.
+    #[must_use]
+    pub const fn is_boxed(self) -> bool {
+        self.type_flags & Zval::TYPE_BOXED != 0
+    }
+
+    /// The box the payload names, for the heap's counting.
+    pub(crate) fn boxed_ptr(self) -> Option<NonNull<Boxed>> {
+        if !self.is_boxed() {
+            return None;
+        }
+        let at: *mut Boxed =
+            std::ptr::with_exposed_provenance_mut(usize::try_from(self.value).unwrap_or(0));
+        NonNull::new(at)
+    }
+
     /// `Some(true)` for `True`, `Some(false)` for `False`, else `None`.
     #[must_use]
     pub const fn as_bool(self) -> Option<bool> {
@@ -154,6 +249,10 @@ impl Zval {
 
     /// `IS_TYPE_REFCOUNTED`.
     const TYPE_REFCOUNTED: u8 = 1;
+    /// `IS_TYPE_COLLECTABLE`: may be part of a cycle.
+    const TYPE_COLLECTABLE: u8 = 1 << 1;
+    /// This engine's own bit: the payload is a boxed stand-in.
+    const TYPE_BOXED: u8 = 1 << 7;
 }
 
 /// The identity of an object in the store (design §5.4): the index php

@@ -273,6 +273,7 @@ values::Key::to_prop_name
 values::PhpArray
 values::PhpArray::append
 values::PhpArray::contains
+values::PhpArray::copy
 values::PhpArray::cursor_current
 values::PhpArray::cursor_end
 values::PhpArray::cursor_key
@@ -282,9 +283,11 @@ values::PhpArray::cursor_reset
 values::PhpArray::get
 values::PhpArray::is_empty
 values::PhpArray::is_list
+values::PhpArray::is_recursive
 values::PhpArray::iter
 values::PhpArray::len
 values::PhpArray::new
+values::PhpArray::protect
 values::PhpArray::replace
 values::PhpArray::separate
 values::PhpArray::set
@@ -293,6 +296,7 @@ values::PhpArray::snapshot_refs
 values::PhpArray::sort_by
 values::PhpArray::to_value
 values::PhpArray::try_append
+values::PhpArray::unprotect
 values::PhpArray::unset
 values::PhpObject
 values::PhpObject::as_value

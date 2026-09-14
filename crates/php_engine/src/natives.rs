@@ -304,7 +304,7 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) {
                     out.extend_from_slice(b"\"]=>\n");
                 }
             }
-            dump(req, out, element, level + 2);
+            dump(req, out, &element, level + 2);
         }
         if level > 1 {
             out.extend(std::iter::repeat_n(b' ', level - 1));

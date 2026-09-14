@@ -411,6 +411,31 @@ pub fn extension() -> Extension {
 /// `flags & TOKEN_PARSE` chooses between [`tokenize`] and
 /// [`tokenize_parse`], as `tokenize_common` chooses.
 ///
+/// **What the rows take is what php's take** (design §5.3, §5.13). The
+/// rows and the strings in them are the request's heap's: `array_init`
+/// is the 56-byte header, the first `add_next_index` a packed table of
+/// eight, 136 bytes in the 160-byte bin, and `array_init_size(&token,
+/// 3)` the same two allocations per row, since `zend_hash_check_size`
+/// rounds three up to eight; a token's text is `zend_string_init` past
+/// one byte and `ZSTR_CHAR` at one (`make_str`), which allocates
+/// nothing. Four rows of three and the table of five, with three texts
+/// past one byte: `216 + 4 * 216 + 3 * 32`, read before anything is
+/// printed because php's first write holds thirty-two bytes for its
+/// `php_output` layer, and all of it back when the variable gives the
+/// array up. php shares the text of a token that repeats within one call
+/// (`make_str`'s `interned_strings`), and this engine does not yet
+/// (#276), so the source below repeats none.
+///
+/// ```php
+/// $b = memory_get_usage();
+/// $t = token_get_all('<?php echo 12;'); $held = memory_get_usage() - $b;
+/// $t = 1; var_dump($held, memory_get_usage() - $b);
+/// ```
+/// ```expect
+/// int(1176)
+/// int(0)
+/// ```
+///
 /// ```php
 /// var_dump(token_get_all(1));
 /// ```
@@ -446,19 +471,19 @@ fn token_get_all(req: &mut Request) -> Result<Value, Thrown> {
     } else {
         tokenize_parse(req, code.as_bytes(), short_open_tag)?
     };
-    let mut rows = PhpArray::new();
+    let mut rows = PhpArray::new(req)?;
     for token in tokens {
         let text = code.as_bytes().get(token.start..token.end).unwrap_or(&[]);
         let text = Value::string(PhpString::new(req, text)?);
         match token.name.and_then(names::id_of) {
             Some(id) => {
-                let mut row = PhpArray::new();
-                row.append(Value::int(id));
-                row.append(text);
-                row.append(Value::int(i64::from(token.line)));
-                rows.append(Value::array(row));
+                let mut row = PhpArray::new(req)?;
+                row.append(req, Value::int(id))?;
+                row.append(req, text)?;
+                row.append(req, Value::int(i64::from(token.line)))?;
+                rows.append(req, Value::array(row))?;
             }
-            None => rows.append(text),
+            None => rows.append(req, text)?,
         }
     }
     Ok(Value::array(rows))

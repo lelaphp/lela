@@ -151,7 +151,7 @@ pub(crate) fn is_true(req: &mut Request, value: &Value) -> bool {
 /// ```
 pub(crate) fn add(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
     if let (Some(a), Some(b)) = (left.deref().as_array(), right.deref().as_array()) {
-        return Ok(Value::array(merged(a, b)));
+        return Ok(Value::array(merged(req, *a, *b)?));
     }
     let (a, b) = numbers(req, "+", left, right)?;
     Ok(match (a, b) {
@@ -562,7 +562,7 @@ pub(crate) fn compare(req: &mut Request, left: &Value, right: &Value) -> Orderin
         return php_heap::compare(a, b, req.precision());
     }
     match (left.as_ref(), right.as_ref()) {
-        (ValueRef::Array(a), ValueRef::Array(b)) => compare_arrays(req, a, b),
+        (ValueRef::Array(a), ValueRef::Array(b)) => compare_arrays(req, *a, *b),
         (ValueRef::Object(a), ValueRef::Object(b)) if a == b => Ordering::Equal,
         // php's default arm: a null or a bool as the other side's truth,
         // which is also what its own `IS_NULL` and `IS_OBJECT` pairs
@@ -788,7 +788,7 @@ pub(crate) fn identical(left: &Value, right: &Value) -> bool {
             a.len() == b.len()
                 && a.iter()
                     .zip(b.iter())
-                    .all(|((k, v), (l, w))| k == l && identical(v, w))
+                    .all(|((k, v), (l, w))| k == l && identical(&v, &w))
         }
         (ValueRef::Object(a), ValueRef::Object(b)) => a == b,
         (ValueRef::Resource(a), ValueRef::Resource(b)) => a.id == b.id,
@@ -890,7 +890,7 @@ fn silent_number(value: ValueRef<'_>) -> Scalar<'static> {
 /// left array looked up in the right one, a key the right one lacks
 /// making the left the greater, and the two values compared by
 /// [`compare`] until one pair differs.
-fn compare_arrays(req: &mut Request, left: &PhpArray, right: &PhpArray) -> Ordering {
+fn compare_arrays(req: &mut Request, left: PhpArray, right: PhpArray) -> Ordering {
     if left.len() != right.len() {
         return left.len().cmp(&right.len());
     }
@@ -898,7 +898,7 @@ fn compare_arrays(req: &mut Request, left: &PhpArray, right: &PhpArray) -> Order
         let Some(other) = right.get(&key) else {
             return Ordering::Greater;
         };
-        let ordering = compare(req, &value, other);
+        let ordering = compare(req, &value, &other);
         if ordering != Ordering::Equal {
             return ordering;
         }
@@ -1466,17 +1466,19 @@ fn promoted(stayed: Option<i64>, overflowed: f64) -> Value {
     stayed.map_or_else(|| Value::float(overflowed), Value::int)
 }
 
-/// `add_function_array`: the left array with every key of the right one
-/// it does not already carry, which is `zend_hash_merge` with php's
-/// `overwrite` off.
-fn merged(left: &PhpArray, right: &PhpArray) -> PhpArray {
-    let mut union = left.clone();
-    for (key, value) in right.snapshot() {
+/// `add_function_array`: a copy of the left array (`zend_array_dup`)
+/// with every key of the right one it does not already carry, which is
+/// `zend_hash_merge` with php's `overwrite` off and `zval_add_ref` on
+/// each element taken. The copy has one owner, the caller's.
+fn merged(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<PhpArray, Thrown> {
+    let mut union = left.copy(req)?;
+    for (key, value) in right.snapshot_refs() {
         if !union.contains(&key) {
-            union.set(key, value);
+            req.addref(&value);
+            union.set(req, key, value)?;
         }
     }
-    union
+    Ok(union)
 }
 
 /// Both operands as `zendi_try_convert_scalar_to_number` converts them,
@@ -1714,10 +1716,12 @@ mod tests {
     use super::*;
     use crate::api::values::Key;
 
-    fn array(entries: Vec<(Key, Value)>) -> Value {
-        let mut a = PhpArray::new();
+    fn array(req: &mut Request, entries: Vec<(Key, Value)>) -> Value {
+        let Ok(mut a) = PhpArray::new(req) else {
+            return Value::null();
+        };
         for (k, v) in entries {
-            a.set(k, v);
+            let _ = a.set(req, k, v);
         }
         Value::array(a)
     }
@@ -1728,30 +1732,35 @@ mod tests {
     /// same map in another order and is not identical.
     #[test]
     fn two_arrays_are_identical_by_count_then_by_each_key_and_value_in_order() {
+        let mut req = crate::test::request();
         let list = || vec![(Key::Int(0), Value::int(1)), (Key::Int(1), Value::int(2))];
-        assert!(identical(&array(list()), &array(list())));
-        assert!(!identical(
-            &array(list()),
-            &array(vec![(Key::Int(0), Value::int(1))])
-        ));
-        assert!(!identical(
-            &array(list()),
-            &array(vec![
-                (Key::Int(1), Value::int(2)),
-                (Key::Int(0), Value::int(1))
-            ])
-        ));
-        assert!(!identical(
-            &array(list()),
-            &array(vec![
+        let (a, b) = (array(&mut req, list()), array(&mut req, list()));
+        assert!(identical(&a, &b));
+        let one = array(&mut req, vec![(Key::Int(0), Value::int(1))]);
+        assert!(!identical(&a, &one));
+        let swapped = array(
+            &mut req,
+            vec![(Key::Int(1), Value::int(2)), (Key::Int(0), Value::int(1))],
+        );
+        assert!(!identical(&a, &swapped));
+        let floated = array(
+            &mut req,
+            vec![
                 (Key::Int(0), Value::int(1)),
-                (Key::Int(1), Value::float(2.0))
-            ])
-        ));
-        assert!(identical(
-            &array(vec![(Key::Int(0), array(list()))]),
-            &array(vec![(Key::Int(0), array(list()))])
-        ));
-        assert!(!identical(&array(list()), &Value::int(1)));
+                (Key::Int(1), Value::float(2.0)),
+            ],
+        );
+        assert!(!identical(&a, &floated));
+        let inner = (array(&mut req, list()), array(&mut req, list()));
+        let nested = (
+            array(&mut req, vec![(Key::Int(0), inner.0)]),
+            array(&mut req, vec![(Key::Int(0), inner.1)]),
+        );
+        assert!(identical(&nested.0, &nested.1));
+        assert!(!identical(&a, &Value::int(1)));
+        for value in [a, b, one, swapped, floated, nested.0, nested.1] {
+            req.release(value);
+        }
+        assert_eq!(req.memory_usage(false), 0, "every array went back");
     }
 }

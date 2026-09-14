@@ -6,14 +6,14 @@
 //! zero reaches user code without this crate knowing what a VM is.
 //!
 //! The crate is the first of the `unsafe` homes the manifest names, and
-//! the allocator of §5.13 and the string of §5.2 are here in full: a
-//! request's memory is chunks, bins and `runs` php's way, and the numbers
-//! php reports come from that accounting and from nowhere else. The
-//! array, the object and the VM stack are still safe stand-ins whose
-//! public shape is `heap.lock`, and the copy of `zend_hash` and
-//! `zend_vm_stack` lands behind it (design §11, days 3–7). Nothing here
-//! panics: a slot that is not there reads as `UNDEF`, as php's
-//! uninitialised zval does.
+//! the allocator of §5.13, the string of §5.2 and the array of §5.3 are
+//! here in full: a request's memory is chunks, bins and `runs` php's
+//! way, the numbers php reports come from that accounting and from
+//! nowhere else, and an array is `zend_hash` to the byte. The object
+//! and the VM stack are still safe stand-ins whose public shape is
+//! `heap.lock`, and the copy of `zend_objects_store` and `zend_vm_stack`
+//! lands behind it (design §11, days 3–7). Nothing here panics: a slot
+//! that is not there reads as `UNDEF`, as php's uninitialised zval does.
 #![deny(
     clippy::undocumented_unsafe_blocks,
     clippy::multiple_unsafe_ops_per_block
@@ -28,6 +28,8 @@
     clippy::unimplemented
 )]
 
+mod array;
+mod boxed;
 mod compare;
 mod gc;
 mod hooks;
@@ -38,6 +40,7 @@ mod stack;
 mod string;
 mod zval;
 
+pub use array::{Arr, ArrIter, Key};
 pub use compare::{Scalar, compare, identical};
 pub use hooks::{Fatal, HeapHooks};
 pub use map::{MapPtr, MapTable};
@@ -69,6 +72,9 @@ pub struct Heap {
     /// `HashTable`: 40960 bytes of the request's own memory on the first
     /// string it interns, and doubling where php's doubles.
     buckets: string::Buckets,
+    /// The boxed stand-ins for the kinds not yet on the heap, swept when
+    /// the heap drops.
+    boxes: boxed::Boxes,
 }
 
 impl Default for Heap {
@@ -85,6 +91,7 @@ impl Heap {
             mm: mm::Mm::new(),
             interned: string::Table::default(),
             buckets: string::Buckets::new(),
+            boxes: boxed::Boxes::default(),
         }
     }
 
@@ -216,20 +223,48 @@ impl Heap {
         }
         if let Some(s) = z.as_str() {
             s.addref();
+        } else if let Some(a) = z.as_arr() {
+            a.addref();
+        } else if let Some(b) = z.boxed_ptr() {
+            // SAFETY: the zval names a box this heap holds and has not
+            // dropped, which is what a refcounted zval says.
+            unsafe { b.as_ref() }.addref();
         }
     }
 
     /// One owner fewer: a refcount decrement, and when it reaches zero the
     /// value is freed through `hooks`, which may serve a destructor
-    /// (`zval_ptr_dtor`). The parameter is what says this may re-enter.
+    /// (`zval_ptr_dtor`). The parameter is what says this may re-enter:
+    /// an array's elements are released with it, and one of them may be
+    /// the object whose destructor runs.
     pub fn release(&mut self, z: Zval, hooks: &mut dyn HeapHooks) {
-        let _ = hooks;
         if !z.is_refcounted() {
             return;
         }
         if let Some(s) = z.as_str() {
             self.release_string(s);
+        } else if let Some(a) = z.as_arr() {
+            if a.delref() == 0 {
+                self.array_destroy(a, hooks);
+            }
+        } else if let Some(b) = z.boxed_ptr() {
+            // SAFETY: the zval names a box this heap holds and has not
+            // dropped, which is what a refcounted zval says.
+            if unsafe { b.as_ref() }.delref() == 0 {
+                // SAFETY: the box came from this heap's `boxed` and its
+                // last owner has given it up.
+                unsafe { self.boxes.drop_box(b) };
+            }
         }
+    }
+
+    /// A zval of `kind` naming `value`, boxed and counted by this heap:
+    /// the stand-in for an object, a resource or a reference inside an
+    /// array until each stands on the heap as its own (design §11, days
+    /// 3–7). One owner; dropped when the last gives it up, or swept with
+    /// the heap.
+    pub fn boxed(&mut self, kind: ZvalType, value: Box<dyn std::any::Any + Send>) -> Zval {
+        self.boxes.add(kind, value)
     }
 }
 

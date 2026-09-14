@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
-use php_heap::{Fatal, FrameRef, Heap, HeapHooks, Intern, MapTable, ObjectId, VmStack, Zval};
+use php_heap::{Arr, Fatal, FrameRef, Heap, HeapHooks, Intern, MapTable, ObjectId, VmStack, Zval};
 use php_unit::Unit;
 use php_unit::decl::{ClassDecl, ClassKind, FunctionDecl};
 
@@ -246,6 +246,9 @@ pub struct Request {
     heap: Heap,
     stack: VmStack,
     vm: Vm,
+    /// The map table of design §5.14, laid down with the request and
+    /// read once a published unit has map-pointer offsets to give it.
+    #[allow(dead_code)]
     map: MapTable,
     states: Vec<(TypeId, Box<dyn Any + Send>)>,
     ini: Vec<(Vec<u8>, Vec<u8>)>,
@@ -1317,7 +1320,9 @@ impl Request {
         Ok(match op {
             OutputOp::Start { .. } => Value::bool(true),
             OutputOp::GetLevel => Value::int(0),
-            OutputOp::GetStatus { .. } | OutputOp::ListHandlers => Value::array(PhpArray::new()),
+            OutputOp::GetStatus { .. } | OutputOp::ListHandlers => {
+                Value::array(PhpArray::new(self)?)
+            }
             OutputOp::ImplicitFlush(_) => Value::null(),
             _ => Value::bool(false),
         })
@@ -1411,11 +1416,12 @@ impl Request {
     /// The request headers the host received, `getallheaders()`, as
     /// strings of the request's.
     pub fn request_headers(&mut self) -> Result<PhpArray, Thrown> {
-        let mut array = PhpArray::new();
+        let mut array = PhpArray::new(self)?;
         let headers = self.description.headers.clone();
         for (name, value) in &headers {
             let key = Key::Str(PhpString::new(self, name)?);
-            array.set(key, Value::string(PhpString::new(self, value)?));
+            let value = Value::string(PhpString::new(self, value)?);
+            array.set(self, key, value)?;
         }
         Ok(array)
     }
@@ -1428,7 +1434,7 @@ impl Request {
         let Some((level, message, file, line)) = self.last_error.clone() else {
             return Ok(None);
         };
-        let mut array = PhpArray::new();
+        let mut array = PhpArray::new(self)?;
         for (name, value) in [
             (&b"type"[..], Value::int(level.bit())),
             (
@@ -1439,7 +1445,7 @@ impl Request {
             (b"line", Value::int(i64::from(line))),
         ] {
             let key = Key::Str(PhpString::new(self, name)?);
-            array.set(key, value);
+            array.set(self, key, value)?;
         }
         Ok(Some(array))
     }
@@ -1501,10 +1507,9 @@ impl Request {
 
     /// `debug_backtrace()` with php's options and limit; empty while no
     /// frame is live.
-    #[must_use]
-    pub fn backtrace(&self, options: i64, limit: i64) -> PhpArray {
+    pub fn backtrace(&mut self, options: i64, limit: i64) -> Result<PhpArray, Thrown> {
         let _ = (options, limit);
-        PhpArray::new()
+        PhpArray::new(self)
     }
 
     /// The file of the frame that called the native,
@@ -1621,16 +1626,18 @@ impl Request {
     /// `get_defined_functions()`: `internal` and `user` lists, the names
     /// strings of the request's.
     pub fn defined_functions(&mut self) -> Result<PhpArray, Thrown> {
-        let mut internal = PhpArray::new();
+        let mut internal = PhpArray::new(self)?;
         let shared = Arc::clone(&self.shared);
         for (decl, _) in &shared.functions {
-            internal.append(Value::string(PhpString::new(self, &decl.name.0)?));
+            let name = Value::string(PhpString::new(self, &decl.name.0)?);
+            internal.append(self, name)?;
         }
-        let mut array = PhpArray::new();
+        let mut array = PhpArray::new(self)?;
         let key = Key::Str(PhpString::new(self, b"internal")?);
-        array.set(key, Value::array(internal));
+        array.set(self, key, Value::array(internal))?;
         let key = Key::Str(PhpString::new(self, b"user")?);
-        array.set(key, Value::array(PhpArray::new()));
+        let user = PhpArray::new(self)?;
+        array.set(self, key, Value::array(user))?;
         Ok(array)
     }
 
@@ -1643,11 +1650,12 @@ impl Request {
     /// `get_defined_constants()`: what `define()` declared in this
     /// request, each name a string of the request's.
     pub fn constants(&mut self) -> Result<PhpArray, Thrown> {
-        let mut array = PhpArray::new();
+        let mut array = PhpArray::new(self)?;
         let constants = self.constants.clone();
         for (name, value) in constants {
             let key = Key::Str(PhpString::new(self, &name)?);
-            array.set(key, value);
+            self.addref(&value);
+            array.set(self, key, value)?;
         }
         Ok(array)
     }
@@ -1860,12 +1868,13 @@ impl Request {
     /// `ini_get_all()`: every entry with its current value, as strings
     /// of the request's.
     pub fn ini_entries(&mut self) -> Result<PhpArray, Thrown> {
-        let mut array = PhpArray::new();
+        let mut array = PhpArray::new(self)?;
         let shared = Arc::clone(&self.shared);
         for (name, default) in shared.ini_defaults() {
             let value = self.ini_get(name).unwrap_or(default).to_vec();
             let key = Key::Str(PhpString::new(self, name)?);
-            array.set(key, Value::string(PhpString::new(self, &value)?));
+            let value = Value::string(PhpString::new(self, &value)?);
+            array.set(self, key, value)?;
         }
         Ok(array)
     }
@@ -1994,13 +2003,14 @@ impl Request {
     /// `parse_str()`: a query string as an array, its strings the
     /// request's.
     pub fn parse_query(&mut self, query: &[u8]) -> Result<PhpArray, Thrown> {
-        let mut array = PhpArray::new();
+        let mut array = PhpArray::new(self)?;
         for pair in query.split(|b| *b == b'&').filter(|p| !p.is_empty()) {
             let mut halves = pair.splitn(2, |b| *b == b'=');
             let name = halves.next().unwrap_or_default();
             let value = halves.next().unwrap_or_default();
             let key = Key::from_string(PhpString::new(self, name)?);
-            array.set(key, Value::string(PhpString::new(self, value)?));
+            let value = Value::string(PhpString::new(self, value)?);
+            array.set(self, key, value)?;
         }
         Ok(array)
     }
@@ -2087,38 +2097,132 @@ impl Request {
     /// memory limit as php's fatal, which `zend_mm` raises where the
     /// allocation was asked for and which ends the request from there.
     fn allocated(&mut self, allocated: Result<php_heap::Str, Fatal>) -> Result<PhpString, Thrown> {
-        match allocated {
-            Ok(s) => Ok(PhpString::of(s)),
-            Err(fatal) => {
-                self.end_in(&fatal);
-                Err(Thrown::of(None))
-            }
-        }
+        self.fatal_of(allocated).map(PhpString::of)
     }
 
     /// One more owner of what `value` holds: `Z_TRY_ADDREF_P`, a refcount
-    /// for a string of the request's, nothing for a scalar or an interned
-    /// string. An array, an object, a resource and a reference are owned
-    /// Rust data until their lane lands, and a clone of one is a copy,
-    /// so there is nothing to count.
+    /// for a string or an array of the request's, nothing for a scalar,
+    /// an interned string or an immutable array. An object, a resource
+    /// and a reference are owned Rust data until their lane lands, and a
+    /// clone of one is a copy, so there is nothing to count.
     pub(crate) fn addref(&self, value: &Value) {
-        if let ValueRef::Str(s) = value.as_ref() {
-            self.heap.addref(Zval::string(s.heap()));
+        match value.as_ref() {
+            ValueRef::Str(s) => self.heap.addref(Zval::string(s.heap())),
+            ValueRef::Array(a) => self.heap.addref(Zval::array(a.heap())),
+            _ => {}
         }
     }
 
     /// One owner fewer of what `value` holds, `zval_ptr_dtor`: the
-    /// string is freed when its last owner gives it up, and an interned
-    /// one never is. The owned kinds drop with the `Value`. An object's
-    /// destructor is served from here when objects stand on the heap,
-    /// through [`HeapHooks`]; nothing here can serve user code yet.
+    /// string or the array is freed when its last owner gives it up, an
+    /// array's elements released with it, and an interned string or an
+    /// immutable array never is. The owned kinds drop with the `Value`.
+    /// An object's destructor is served from here when objects stand on
+    /// the heap, through [`HeapHooks`]; nothing here can serve user code
+    /// yet.
     // Taking the value is the point: the owner is given up here, and a
     // `Value` that is still in hand after this call names what may be
     // freed.
     #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn release(&mut self, value: Value) {
-        if let ValueRef::Str(s) = value.as_ref() {
-            self.heap.release_string(s.heap());
+        match value.as_ref() {
+            ValueRef::Str(s) => self.heap.release_string(s.heap()),
+            ValueRef::Array(a) => {
+                let (heap, mut hooks) = self.heap_and_hooks();
+                heap.release(Zval::array(a.heap()), &mut hooks);
+            }
+            _ => {}
+        }
+    }
+
+    /// The heap beside what it may re-enter: the one borrow that lets a
+    /// release serve a destructor through [`HeapHooks`] while the heap
+    /// is held.
+    fn heap_and_hooks(&mut self) -> (&mut Heap, Hooks<'_>) {
+        let Request {
+            heap, resources, ..
+        } = self;
+        (heap, Hooks { resources })
+    }
+
+    // -------------------------------------------------------- arrays
+
+    /// An empty array out of this request's heap, what [`PhpArray::new`]
+    /// is: php's `array_init`, and the memory limit as the fatal that
+    /// ends the request.
+    pub(crate) fn array(&mut self) -> Result<PhpArray, Thrown> {
+        let allocated = self.heap.array();
+        self.fatal_of(allocated).map(PhpArray::of)
+    }
+
+    /// `zend_hash_update` or `zend_hash_index_update` over `a`, which
+    /// has one owner: `value` is the array's from here, what `key` held
+    /// is released, and a string key is one more owner.
+    pub(crate) fn array_update(
+        &mut self,
+        a: Arr,
+        key: php_heap::Key,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let z = value.into_zval(self);
+        let (heap, mut hooks) = self.heap_and_hooks();
+        let written = heap.array_update(a, key, z, &mut hooks);
+        self.fatal_of(written)
+    }
+
+    /// `zend_hash_next_index_insert` over `a`, which has one owner:
+    /// `false`, and `value` given up, when the next element is taken.
+    pub(crate) fn array_append(&mut self, a: Arr, value: Value) -> Result<bool, Thrown> {
+        let z = value.into_zval(self);
+        let appended = self.heap.array_append(a, z);
+        if appended == Ok(false) {
+            let (heap, mut hooks) = self.heap_and_hooks();
+            heap.release(z, &mut hooks);
+        }
+        self.fatal_of(appended)
+    }
+
+    /// `zend_hash_del` over `a`, which has one owner: `true` when the key
+    /// was there, its value released.
+    pub(crate) fn array_del(&mut self, a: Arr, key: php_heap::Key) -> bool {
+        let (heap, mut hooks) = self.heap_and_hooks();
+        heap.array_del(a, key, &mut hooks)
+    }
+
+    /// `zend_array_dup`: a copy of `a` with one owner.
+    pub(crate) fn array_dup(&mut self, a: Arr) -> Result<Arr, Thrown> {
+        let copied = self.heap.array_dup(a);
+        self.fatal_of(copied)
+    }
+
+    /// `SEPARATE_ARRAY`: `a` itself with one owner, else a copy of it
+    /// with one, `a` one owner fewer.
+    pub(crate) fn array_separate(&mut self, a: Arr) -> Result<Arr, Thrown> {
+        let separated = self.heap.separate(a);
+        self.fatal_of(separated)
+    }
+
+    /// `zend_hash_sort` over `a`, which has one owner, keys kept.
+    pub(crate) fn array_sort(
+        &mut self,
+        a: Arr,
+        compare: &mut dyn FnMut(Zval, Zval) -> std::cmp::Ordering,
+    ) -> Result<(), Thrown> {
+        let sorted = self.heap.array_sort(a, compare);
+        self.fatal_of(sorted)
+    }
+
+    /// What the heap answered, as the native sees it: the value, or the
+    /// fatal the allocator raised, recorded here where `zend_mm` leaves
+    /// the request, as the `Thrown` carrying no throwable that ends the
+    /// native.
+    fn fatal_of<T>(&mut self, answered: Result<T, Fatal>) -> Result<T, Thrown> {
+        match answered {
+            Ok(value) => Ok(value),
+            Err(fatal) => {
+                self.end_in(&fatal);
+                Err(Thrown::of(None))
+            }
         }
     }
 
@@ -2173,7 +2277,7 @@ impl Request {
     /// `gc_status()` with php 8.5's fields, the keys strings of the
     /// request's.
     pub fn gc_status(&mut self) -> Result<PhpArray, Thrown> {
-        let mut array = PhpArray::new();
+        let mut array = PhpArray::new(self)?;
         for (name, value) in [
             ("running", Value::bool(false)),
             ("protected", Value::bool(false)),
@@ -2189,7 +2293,7 @@ impl Request {
             ("free_time", Value::float(0.0)),
         ] {
             let key = Key::Str(PhpString::new(self, name.as_bytes())?);
-            array.set(key, value);
+            array.set(self, key, value)?;
         }
         Ok(array)
     }
@@ -2278,7 +2382,16 @@ impl Request {
     }
 }
 
-impl HeapHooks for Request {
+/// The request's side of the heap's upward seam (design §4.3, seam 1):
+/// what a release may re-enter, borrowed apart from the heap so that the
+/// heap can be held while it is served. An object's `__destruct` and its
+/// handler table are served from here once objects stand on the heap;
+/// nothing here can serve user code yet.
+struct Hooks<'a> {
+    resources: &'a mut Resources,
+}
+
+impl HeapHooks for Hooks<'_> {
     fn destruct(&mut self, obj: ObjectId) {
         let _ = obj;
     }
@@ -2296,7 +2409,6 @@ impl HeapHooks for Request {
     }
 
     fn out_of_memory(&mut self, bytes: usize) -> Fatal {
-        let _ = &self.map;
         Fatal::OutOfMemory(bytes)
     }
 }

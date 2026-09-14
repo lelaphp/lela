@@ -169,16 +169,16 @@ pub fn eval_const_expr(
             )),
         },
         ConstExpr::Array(elements) => {
-            let mut array = crate::api::values::PhpArray::new();
+            let mut array = crate::api::values::PhpArray::new(req)?;
             for (key, value) in elements {
                 let value = eval_const_expr(req, value, scope)?;
                 match key {
                     Some(key) => {
                         let key = eval_const_expr(req, key, scope)?;
                         let key = crate::api::coerce::key_of(req, &key)?;
-                        array.set(key, value);
+                        array.set(req, key, value)?;
                     }
-                    None => array.append(value),
+                    None => array.append(req, value)?,
                 }
             }
             Ok(Value::array(array))

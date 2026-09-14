@@ -26,6 +26,8 @@ const FLAGS_MASK: u32 = 0x0000_03f0;
 
 /// `GC_NOT_COLLECTABLE`: a string is never part of a cycle.
 pub(crate) const NOT_COLLECTABLE: u32 = 1 << 4;
+/// `GC_PROTECTED`: a walk is inside this value, php's recursion guard.
+pub(crate) const PROTECTED: u32 = 1 << 5;
 /// `GC_IMMUTABLE`, which strings spell `IS_STR_INTERNED`.
 pub(crate) const IMMUTABLE: u32 = 1 << 6;
 /// `GC_PERSISTENT`, which strings spell `IS_STR_PERSISTENT`: allocated

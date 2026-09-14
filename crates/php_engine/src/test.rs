@@ -78,3 +78,14 @@ impl Engine {
         }
     }
 }
+
+/// A request on a fresh engine, for a unit test of the face that needs
+/// one to allocate through: the CLI description and nothing served.
+#[cfg(test)]
+pub(crate) fn request() -> crate::api::request::Request {
+    let engine = Engine::builder().build();
+    crate::api::request::Request::new(
+        std::sync::Arc::clone(&engine.shared),
+        RequestDescription::default(),
+    )
+}
