@@ -46,6 +46,12 @@ pub struct Manifest {
     pub rules: Vec<Rule>,
     #[serde(rename = "week", default)]
     pub weeks: Vec<Week>,
+    /// `[lock_home]`: the crate a lock's file lives with, for a lock no
+    /// `[[crate]]` row names. A seam whose producer is a file and not a
+    /// crate (`ops`, generated from `ops.toml`) has no row to carry it,
+    /// and the file still lives somewhere; this table says where.
+    #[serde(rename = "lock_home", default)]
+    pub lock_homes: BTreeMap<String, String>,
     /// The pin the `[oracle]` row names, loaded from that file by the
     /// oracle module, whose grammar it is.
     #[serde(skip)]
@@ -643,6 +649,7 @@ impl Manifest {
             edges: Vec::new(),
             rules: Vec::new(),
             weeks: Vec::new(),
+            lock_homes: BTreeMap::new(),
             pin: Pin::default(),
             root: PathBuf::new(),
         }
@@ -785,7 +792,9 @@ impl Manifest {
     /// The crate a lock lives with: the one whose row names it, or the
     /// crate its `lock_from` entry names for a lock listed on one row and
     /// generated from another (`api.lock` on `php_engine`'s row, from
-    /// `php_ext`). `None` for a lock no row names.
+    /// `php_ext`), else the crate `[lock_home]` names for a lock whose
+    /// seam has no producing crate at all (`ops.lock`, rendered from
+    /// `ops.toml`). `None` for a lock nothing names.
     pub fn lock_home(&self, lock: &str) -> Option<String> {
         self.crates
             .iter()
@@ -796,6 +805,7 @@ impl Manifest {
                     .cloned()
                     .unwrap_or_else(|| c.name.clone())
             })
+            .or_else(|| self.lock_homes.get(lock).cloned())
     }
 
     /// The `on = "pub"` rule named for `lock`, `<lock>-line`: the note at
