@@ -537,7 +537,34 @@ fn compile(
 
 /// The unit's main op array served on a fresh entry frame; the loop's
 /// fatal, if any, ends the request.
+///
+/// What compiling the unit raised is raised first, each through the
+/// path a runtime diagnostic takes and at the unit's own file and the
+/// compiler's line, which is `zend_emit_recorded_errors_ex` over a
+/// cached `persistent_script`'s `warnings`
+/// (`Z/ext/opcache/ZendAccelerator.c:1939`) and, for a unit compiled by
+/// this request, where `zend_error` under `CG(in_compilation)` had
+/// already put it. So the order against what the program writes is
+/// php's, and a cache hit raises what a miss raised, as the oracle does
+/// with no cache at all.
+///
+/// ```php
+/// echo 'a';
+/// echo NAN . 'z';
+/// ```
+/// ```expect
+/// Warning: unexpected NAN value was coerced to string in %s on line 3
+/// aNANz
+/// ```
 fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
+    for raised in &unit.diagnostics {
+        req.note_error_in(
+            raised.level,
+            &raised.message,
+            &unit.main.filename.0,
+            raised.line,
+        );
+    }
     let frame = req.push_frame(Arc::clone(unit));
     if let Err(fatal) = entry(req, frame) {
         req.end_in(&fatal);
@@ -1066,6 +1093,44 @@ mod tests {
         assert_eq!(first.bytes(), b"shared");
         assert!(first.is_interned(), "a published constant is interned");
         assert!(first.is_same(second), "one `zend_string`, read by both");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// What compiling a file raised is raised on every request that
+    /// serves it, the cache hit as the miss, in the unit's own file and
+    /// at the compiler's line, before the op array writes anything: what
+    /// the oracle does with no cache, and what opcache does on a hit
+    /// with `opcache.record_warnings` on. `error_reporting` set from
+    /// the ini masks it as it masks a runtime warning, since the path
+    /// is one.
+    #[test]
+    fn a_cached_unit_raises_what_compiling_it_raised_on_every_request() {
+        let engine = Engine::builder().build();
+        let path = std::env::temp_dir().join(format!("dax-{}-nan.php", std::process::id()));
+        assert!(std::fs::write(&path, b"<?php\necho 'a';\necho NAN . 'z';").is_ok());
+        let name = path.to_string_lossy().as_bytes().to_vec();
+        let described = || RequestDescription {
+            sapi_name: String::from("cli"),
+            script_name: Some(name.clone()),
+            ..RequestDescription::default()
+        };
+        for _ in 0..2 {
+            let mut sink = Kept::default();
+            engine.serve(described(), &mut sink);
+            assert_eq!(
+                String::from_utf8_lossy(&sink.body),
+                format!(
+                    "\nWarning: unexpected NAN value was coerced to string in {} on line 3\naNANz",
+                    path.to_string_lossy()
+                )
+            );
+        }
+        let mut masked = Kept::default();
+        Engine::builder()
+            .ini("error_reporting", "0")
+            .build()
+            .serve(described(), &mut masked);
+        assert_eq!(String::from_utf8_lossy(&masked.body), "aNANz");
         let _ = std::fs::remove_file(&path);
     }
 

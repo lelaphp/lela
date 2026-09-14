@@ -12,49 +12,10 @@
 use crate::api::request::Request;
 use crate::api::values::{PhpObject, PhpString, Value};
 
-/// php's error levels, `E_*`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Level {
-    Error,
-    Warning,
-    Parse,
-    Notice,
-    CoreError,
-    CoreWarning,
-    CompileError,
-    CompileWarning,
-    UserError,
-    UserWarning,
-    UserNotice,
-    Strict,
-    RecoverableError,
-    Deprecated,
-    UserDeprecated,
-}
-
-impl Level {
-    /// php's number for the level, what `error_reporting` masks.
-    #[must_use]
-    pub(crate) const fn bit(self) -> i64 {
-        match self {
-            Level::Error => 1,
-            Level::Warning => 2,
-            Level::Parse => 4,
-            Level::Notice => 8,
-            Level::CoreError => 16,
-            Level::CoreWarning => 32,
-            Level::CompileError => 64,
-            Level::CompileWarning => 128,
-            Level::UserError => 256,
-            Level::UserWarning => 512,
-            Level::UserNotice => 1024,
-            Level::Strict => 2048,
-            Level::RecoverableError => 4096,
-            Level::Deprecated => 8192,
-            Level::UserDeprecated => 16384,
-        }
-    }
-}
+/// php's error levels, `E_*`: the unit's, since a compile-time
+/// diagnostic is recorded on the unit at one of them and raised here
+/// (design §6.1).
+pub use php_unit::Level;
 
 /// What a native returns when it does not return a value: a throwable is
 /// pending on the request, or the request is ending in a fatal or an

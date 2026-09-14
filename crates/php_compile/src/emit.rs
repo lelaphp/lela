@@ -47,7 +47,7 @@ use std::cmp::Ordering;
 
 use php_heap::{Fatal, Intern, Number, Scalar, Zval, ZvalType, double_to_string, numeric_prefix};
 use php_unit::decl::{ConstDecl, ConstExpr, Name};
-use php_unit::{OpArray, Opcode, OperandKind, Opline, OplineIdx};
+use php_unit::{Diagnostic, Level, OpArray, Opcode, OperandKind, Opline, OplineIdx, Unit};
 
 use crate::read::{BinaryOp, Expr, Read, Stmt};
 use crate::{CompileError, Options};
@@ -71,6 +71,8 @@ pub(crate) struct Emit<'a> {
     temporaries: u32,
     cache_slots: u32,
     line: u32,
+    /// What `zend_error` raised so far, [`Unit::diagnostics`].
+    diagnostics: Vec<Diagnostic>,
 }
 
 /// Where an expression left its value, php's `znode`: the value itself
@@ -86,15 +88,15 @@ enum Where {
     Cv(u32),
 }
 
-/// The main op array of one source file: its statements, then php's
-/// implicit final `RETURN 1` (`zend_emit_final_return`, with
-/// `extended_value` at -1).
-pub(crate) fn main_op_array(
+/// The unit of one source file: its main op array, the statements and
+/// then php's implicit final `RETURN 1` (`zend_emit_final_return`, with
+/// `extended_value` at -1), and the diagnostics raised on the way.
+pub(crate) fn unit(
     read: &Read,
     options: &Options,
     lines: u32,
     strings: &mut dyn Intern,
-) -> Result<OpArray, CompileError> {
+) -> Result<Unit, CompileError> {
     let mut emit = Emit {
         strings,
         precision: options.precision,
@@ -106,23 +108,28 @@ pub(crate) fn main_op_array(
         temporaries: 0,
         cache_slots: 0,
         line: 1,
+        diagnostics: Vec::new(),
     };
     emit.statements(read)?;
     emit.final_return();
     let num_cvs = u32::try_from(emit.vars.len()).unwrap_or(u32::MAX);
-    Ok(OpArray {
-        oplines: emit.oplines.into_boxed_slice(),
-        literals: emit.constants.into_boxed_slice(),
-        vars: emit.vars.into_boxed_slice(),
-        num_cvs,
-        num_tmps: emit.temporaries,
-        try_catch: Box::new([]),
-        live_ranges: Box::new([]),
-        safepoints: emit.safepoints.into_boxed_slice(),
-        filename: options.filename.clone(),
-        line_start: 1,
-        line_end: lines.max(1),
-        cache_size: emit.cache_slots,
+    Ok(Unit {
+        main: OpArray {
+            oplines: emit.oplines.into_boxed_slice(),
+            literals: emit.constants.into_boxed_slice(),
+            vars: emit.vars.into_boxed_slice(),
+            num_cvs,
+            num_tmps: emit.temporaries,
+            try_catch: Box::new([]),
+            live_ranges: Box::new([]),
+            safepoints: emit.safepoints.into_boxed_slice(),
+            filename: options.filename.clone(),
+            line_start: 1,
+            line_end: lines.max(1),
+            cache_size: emit.cache_slots,
+        },
+        diagnostics: emit.diagnostics,
+        ..Unit::default()
     })
 }
 
@@ -184,6 +191,19 @@ impl Emit<'_> {
             message: message.into(),
             line: self.line,
         }
+    }
+
+    /// `zend_error` under `CG(in_compilation)` for what is not a fatal:
+    /// the diagnostic is recorded on the unit at the line
+    /// `zend_get_compiled_lineno` answers (`get_filename_lineno`,
+    /// `Z/Zend/zend.c:1640`), for the engine to raise before the op
+    /// array runs, which is where php writes it.
+    fn raise(&mut self, level: Level, message: &str) {
+        self.diagnostics.push(Diagnostic {
+            level,
+            line: self.line,
+            message: message.into(),
+        });
     }
 
     /// The constant string for these bytes, interned into whichever home
@@ -628,21 +648,43 @@ impl Emit<'_> {
     /// `_convert_to_string` over a constant: null and false the empty
     /// string, true `"1"`, a long its digits, a double the text
     /// `zend_double_to_str` renders at the compile-time precision, a
-    /// string itself. A NAN is left as written: php converts it here
-    /// and raises the coercion warning while compiling, and this
-    /// compiler has no way to raise a diagnostic yet (#218), so the
-    /// opcode is left to raise it, which prints the same text at the
-    /// same line.
+    /// string itself. A NAN is the text `NAN` and the warning
+    /// `zend_double_to_str` raises after rendering it
+    /// (`Z/Zend/zend_operators.c:3600`), raised while the file compiles,
+    /// so it stands before anything the program writes and the op
+    /// array carries the string, as php's does.
+    ///
+    /// ```php
+    /// echo 'a'; echo NAN . 'z';
+    /// ```
+    /// ```expect
+    /// Warning: unexpected NAN value was coerced to string in %s on line 2
+    /// aNANz
+    /// ```
+    ///
+    /// The warning is the compilation's and not the statement's: it is
+    /// raised before `ini_set()` runs, and once per operand converted.
+    ///
+    /// ```php
+    /// ini_set('error_reporting', '0');
+    /// $a = 1; echo NAN . $a . NAN;
+    /// ```
+    /// ```expect
+    /// Warning: unexpected NAN value was coerced to string in %s on line 3
+    ///
+    /// Warning: unexpected NAN value was coerced to string in %s on line 3
+    /// NAN1NAN
+    /// ```
     pub(crate) fn stringified(&mut self, value: Zval) -> Result<Option<Zval>, CompileError> {
         if let Some(n) = value.as_long() {
             return Ok(Some(self.string(n.to_string().as_bytes())?));
         }
         if let Some(d) = value.as_double() {
+            let text = self.string(double_to_string(d, self.precision).as_bytes())?;
             if d.is_nan() {
-                return Ok(None);
+                self.raise(Level::Warning, "unexpected NAN value was coerced to string");
             }
-            let text = double_to_string(d, self.precision);
-            return Ok(Some(self.string(text.as_bytes())?));
+            return Ok(Some(text));
         }
         match value.kind() {
             ZvalType::String => Ok(Some(value)),

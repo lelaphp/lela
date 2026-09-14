@@ -30,4 +30,4 @@ pub use op::{
     CacheSlot, ConstIdx, Effects, LiveRange, OpArray, OperandKind, Opline, OplineIdx, TryCatch,
 };
 pub use opcode::Opcode;
-pub use unit::Unit;
+pub use unit::{Diagnostic, Level, Unit};

@@ -105,10 +105,7 @@ pub fn compile(
         line: trouble.line,
     })?;
     let lines = u32::try_from(parsed.source.split(|b| *b == b'\n').count()).unwrap_or(u32::MAX);
-    Ok(Unit {
-        main: emit::main_op_array(&read, options, lines, strings)?,
-        ..Unit::default()
-    })
+    emit::unit(&read, options, lines, strings)
 }
 
 #[cfg(test)]
@@ -769,11 +766,11 @@ mod tests {
                  0004 ECHO T3\n\
                  0005 T4 = CONCAT string(\"ab\") CV0($a)\n\
                  0006 ECHO T4\n\
-                 0007 T5 = CONCAT float(nan) CV0($a)\n\
+                 0007 T5 = CONCAT string(\"NAN\") CV0($a)\n\
                  0008 ECHO T5\n\
                  0009 RETURN int(1)\n"
             ),
-            "php's, but for the `string(\"NAN\")` php converts the NAN to (#218)"
+            "php's own op array"
         );
         assert_eq!(
             literal_text(&unit, 1),
@@ -791,13 +788,46 @@ mod tests {
             "the left fold is one string"
         );
         assert_eq!(
-            unit.main
-                .literals
-                .get(4)
-                .and_then(|z| z.as_double())
-                .map(f64::is_nan),
-            Some(true),
-            "a NAN is left as written until the compiler can warn (#218)"
+            literal_text(&unit, 4),
+            Some(b"NAN".to_vec()),
+            "the NAN is the string `zend_double_to_str` renders"
+        );
+    }
+
+    /// `zend_double_to_str` over a NAN raises the coercion warning while
+    /// the file compiles, and the unit carries it as opcache carries a
+    /// `persistent_script`'s `warnings`: `E_WARNING`, php's text, at the
+    /// line the fold stood on, once per operand converted and in the
+    /// order they were, with the folded string in the op array. A unit
+    /// with nothing raised carries nothing.
+    #[test]
+    fn a_nan_a_fold_converts_is_the_warning_the_unit_carries() {
+        use php_unit::{Diagnostic, Level};
+        let (unit, _strings) =
+            unit_and_strings(b"<?php\necho 'a';\necho NAN . 'z';\necho 1 . NAN . NAN;");
+        assert_eq!(
+            unit.dump(),
+            "\n$_main:\n     ; (lines=4, args=0, vars=0, tmps=0)\n\
+             \x20    ; (before optimizer)\n     ; :1-4\n     ; return  [] RANGE[0..0]\n\
+             0000 ECHO string(\"a\")\n\
+             0001 ECHO string(\"NANz\")\n\
+             0002 ECHO string(\"1NANNAN\")\n\
+             0003 RETURN int(1)\n"
+        );
+        let coerced = |line| Diagnostic {
+            level: Level::Warning,
+            line,
+            message: "unexpected NAN value was coerced to string".into(),
+        };
+        assert_eq!(
+            unit.diagnostics,
+            vec![coerced(3), coerced(4), coerced(4)],
+            "one per operand converted, at the statement's line"
+        );
+        assert!(unit_of(b"<?php echo 'a' . 'b';").diagnostics.is_empty());
+        assert!(
+            unit_of(b"<?php echo NAN;").diagnostics.is_empty(),
+            "an `ECHO` over a NAN converts nothing at compile time; the kernel warns"
         );
     }
 

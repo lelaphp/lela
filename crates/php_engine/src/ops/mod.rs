@@ -468,7 +468,8 @@ pub(crate) fn shift_right(req: &mut Request, left: &Value, right: &Value) -> Res
 /// ```
 ///
 /// A NAN is the warning `zval_get_string` raises, where the operand is
-/// not a constant php's compiler converted first (#218).
+/// not a constant php's compiler converted first; that one is the
+/// compiler's, raised before the op array runs (`Emit::stringified`).
 ///
 /// ```php
 /// $nan = NAN;
