@@ -171,6 +171,7 @@ Options:
 ```
 .
 ├── AGENTS.md
+├── CLAUDE.md
 ├── clippy.toml
 ├── ctype
 ├── curl
@@ -193,4 +194,4 @@ Options:
 ├── standard
 └── tokenizer
 ```
-<!-- /computed in=facc5db3e5124a5e0d969a8e533e21804b5160530145f3c363e1bb30c96d1c75 out=98d3faf5502df40e95a6a77b691f664c23bc16f52c564ed43b02eb9c3e23246b -->
+<!-- /computed in=e842b2ad94ece6af566c4fb7a154bd521ccffdf204020e6be4e195738446c10e out=fd690685c66c1c8116533139fffd6e4712c3b133860a8bb97ad22dd173f97d5d -->
