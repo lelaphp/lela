@@ -1014,13 +1014,28 @@ impl Request {
     /// diagnostic to without php's leading newline. Under any other
     /// host `stderr` is the body, since php's test is on
     /// `sapi_module.name` and the plain form is its `else`.
+    ///
+    /// The value is read as `php_get_display_errors_mode`
+    /// (`Z/main/main.c:492-517`) reads it: no entry, `on`, `yes`,
+    /// `true` and `stdout` are `PHP_DISPLAY_ERRORS_STDOUT`, `stderr` is
+    /// `PHP_DISPLAY_ERRORS_STDERR`, and any other value is `ZEND_ATOL`
+    /// of it narrowed to php's `uint8_t`, where `2` is the error stream,
+    /// `0` is off and every other number is `STDOUT`. The narrowing is
+    /// php's and observable, `256` is off and `258` the error stream,
+    /// so it is copied.
     fn display_errors(&self) -> Display {
-        let value = self.ini_get(b"display_errors");
-        let text = value.map(<[u8]>::to_ascii_lowercase);
-        match text.as_deref() {
-            Some(b"stderr") if self.host_writes_stderr() => Display::Stderr,
-            _ if ini_truth(value) => Display::Body,
-            _ => Display::Off,
+        let mode = match self.ini_get(b"display_errors") {
+            None => DISPLAY_ERRORS_STDOUT,
+            Some(value) => match value.to_ascii_lowercase().as_slice() {
+                b"on" | b"yes" | b"true" | b"stdout" => DISPLAY_ERRORS_STDOUT,
+                b"stderr" => DISPLAY_ERRORS_STDERR,
+                _ => display_errors_mode(ini_atol(value)),
+            },
+        };
+        match mode {
+            0 => Display::Off,
+            DISPLAY_ERRORS_STDERR if self.host_writes_stderr() => Display::Stderr,
+            _ => Display::Body,
         }
     }
 
@@ -2254,6 +2269,23 @@ enum Display {
     Off,
     Body,
     Stderr,
+}
+
+/// `PHP_DISPLAY_ERRORS_STDOUT` and `PHP_DISPLAY_ERRORS_STDERR`
+/// (`Z/main/php_globals.h:36-37`), the two modes of `PG(display_errors)`
+/// beside zero.
+const DISPLAY_ERRORS_STDOUT: u8 = 1;
+const DISPLAY_ERRORS_STDERR: u8 = 2;
+
+/// `uint8_t mode = ZEND_ATOL(...)` at `Z/main/main.c:513`: the number
+/// narrowed to php's byte.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "php's `uint8_t mode = ZEND_ATOL(value)`, whose narrowing is the behaviour being copied"
+)]
+fn display_errors_mode(number: i64) -> u8 {
+    number as u8
 }
 
 /// `zend_ini_parse_bool`: an ini entry read as on or off, where "off",

@@ -937,6 +937,47 @@ mod tests {
         );
     }
 
+    /// `display_errors` is read as `php_get_display_errors_mode`
+    /// (`Z/main/main.c:492-517`) reads it: a number is `ZEND_ATOL` of the
+    /// value narrowed to php's `uint8_t`, where `2` is the error stream,
+    /// `0` is off and any other is the body, php's `STDOUT` fallback.
+    /// Measured under the pin, `-d display_errors=2` over `<?php\necho
+    /// NAN;` writes `NAN` alone to stdout and the warning to stderr, as
+    /// ` 2` and `2x` do, `atoll` skipping the space and stopping at the
+    /// `x`; `7` and `-1` write the plain form on the body; `256` narrows
+    /// to `0` and writes `NAN` alone, and `258` narrows to `2`; a word
+    /// that is none of php's five, `abc`, is `ZEND_ATOL`'s zero.
+    #[test]
+    fn a_numeric_display_errors_is_read_as_phps_uint8_mode() {
+        let under = |value: &str| {
+            let engine = Engine::builder().ini("display_errors", value).build();
+            let mut kept = Kept::default();
+            engine.serve(description("<?php\necho NAN;"), &mut kept);
+            (
+                String::from_utf8_lossy(&kept.body).into_owned(),
+                kept.stderr(),
+            )
+        };
+        let on_stderr = (
+            String::from("NAN"),
+            format!("Warning: {NAN_WARNING} in witness.php on line 2\n"),
+        );
+        let on_body = (
+            format!("\nWarning: {NAN_WARNING} in witness.php on line 2\nNAN"),
+            String::new(),
+        );
+        let off = (String::from("NAN"), String::new());
+        for value in ["2", " 2", "2x", "258", "-254"] {
+            assert_eq!(under(value), on_stderr, "{value:?} is the error stream");
+        }
+        for value in ["7", "-1", "1", "stdout", "on", "yes", "true"] {
+            assert_eq!(under(value), on_body, "{value:?} is the body");
+        }
+        for value in ["0", "256", "abc", "", "off", "no", "false"] {
+            assert_eq!(under(value), off, "{value:?} is off");
+        }
+    }
+
     /// The error stream and the log are two channels on the sink, so a
     /// host with an `error_log` file keeps the stderr form of a
     /// diagnostic off the file, and one diagnostic at
