@@ -348,6 +348,62 @@ pub fn extension() -> Extension {
 /// }
 /// ```
 ///
+/// A byte that pops `ST_VAR_OFFSET` (`<ST_VAR_OFFSET>[ \n\r\t\\'#]`,
+/// `yyless(0)` then a zero-width `T_ENCAPSED_AND_WHITESPACE`) is an
+/// empty row between the `[` and the text that starts at the same byte:
+/// the lexer carries the token, and this walk keeps it out of the
+/// stretch of text after it.
+///
+/// ```php
+/// var_dump(token_get_all('<?php "$a[ 1 ]"'));
+/// ```
+/// ```expect exit=0
+/// array(7) {
+///   [0]=>
+///   array(3) {
+///     [0]=>
+///     int(394)
+///     [1]=>
+///     string(6) "<?php "
+///     [2]=>
+///     int(1)
+///   }
+///   [1]=>
+///   string(1) """
+///   [2]=>
+///   array(3) {
+///     [0]=>
+///     int(266)
+///     [1]=>
+///     string(2) "$a"
+///     [2]=>
+///     int(1)
+///   }
+///   [3]=>
+///   string(1) "["
+///   [4]=>
+///   array(3) {
+///     [0]=>
+///     int(268)
+///     [1]=>
+///     string(0) ""
+///     [2]=>
+///     int(1)
+///   }
+///   [5]=>
+///   array(3) {
+///     [0]=>
+///     int(268)
+///     [1]=>
+///     string(4) " 1 ]"
+///     [2]=>
+///     int(1)
+///   }
+///   [6]=>
+///   string(1) """
+/// }
+/// ```
+///
 /// `ZEND_PARSE_PARAMETERS_START(1, 2)`: `Z_PARAM_STR` over the code and
 /// an optional `Z_PARAM_LONG` over the flags, so `1` is the code `"1"`,
 /// and a call outside that arity is php's `ArgumentCountError`, which

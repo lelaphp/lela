@@ -221,18 +221,63 @@ fn var_offset_bare_word_and_variable() {
 
 #[test]
 fn var_offset_whitespace_falls_back_to_text() {
-    // Zend's [ \n\r\t\\'#] rule pops ST_VAR_OFFSET; the rest is text, and
-    // php's parse error on it is the parser's to say.
+    // Zend's [ \n\r\t\\'#] rule pops ST_VAR_OFFSET with `yyless(0)` and
+    // returns a zero-width T_ENCAPSED_AND_WHITESPACE at the byte; the
+    // rest is text, and php's parse error on it is the parser's to say.
     check_php(
         "\"$a[ 0]\"",
         &[
             (DOUBLE_QUOTE, "\""),
             (VARIABLE, "$a"),
             (L_BRACK, "["),
+            (STRING_TEXT, ""),
             (STRING_TEXT, " 0]"),
             (DOUBLE_QUOTE, "\""),
         ],
     );
+    // Each of the seven bytes pops the same way, in a heredoc and a
+    // backquote as in `"…"`.
+    for byte in [" ", "\n", "\r", "\t", "\\", "'", "#"] {
+        check_php(
+            &format!("\"$a[{byte}]\""),
+            &[
+                (DOUBLE_QUOTE, "\""),
+                (VARIABLE, "$a"),
+                (L_BRACK, "["),
+                (STRING_TEXT, ""),
+                (STRING_TEXT, &format!("{byte}]")),
+                (DOUBLE_QUOTE, "\""),
+            ],
+        );
+    }
+    check_php(
+        "`$a[ 0]`",
+        &[
+            (BACKQUOTE, "`"),
+            (VARIABLE, "$a"),
+            (L_BRACK, "["),
+            (STRING_TEXT, ""),
+            (STRING_TEXT, " 0]"),
+            (BACKQUOTE, "`"),
+        ],
+    );
+}
+
+#[test]
+fn var_offset_zero_width_token_stands_at_the_byte_it_pops_on() {
+    // The empty token's offset is the popping byte's, and the text token
+    // after it starts at the same offset: `yyless(0)` consumed nothing.
+    let input = "<?php \"$a[ 0]\"";
+    let lexed = lex(F, input.as_bytes(), &LexOptions::default());
+    let empty: Vec<usize> = (0..lexed.tokens.len())
+        .filter(|&i| lexed.tokens[i].len == 0)
+        .collect();
+    assert_eq!(empty, [4], "one zero-width token, after the `[`");
+    let token = lexed.tokens[4];
+    assert_eq!((token.kind, token.offset), (STRING_TEXT, 10));
+    assert_eq!(&input.as_bytes()[10..11], b" ");
+    let next = lexed.tokens[5];
+    assert_eq!((next.kind, next.offset, next.len), (STRING_TEXT, 10, 3));
 }
 
 #[test]

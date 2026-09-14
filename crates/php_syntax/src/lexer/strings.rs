@@ -290,10 +290,15 @@ impl Lexer<'_> {
                 self.pos = start + self.label_len(start);
                 self.emit(SyntaxKind::IDENT, start);
             }
-            // Zend: [ \n\r\t\\'#] pops back so the byte re-scans as string
-            // text (upstream emits a zero-width T_ENCAPSED_AND_WHITESPACE
-            // purely for error positioning; there are no empty tokens here).
-            b' ' | b'\n' | b'\r' | b'\t' | b'\\' | b'\'' | b'#' => self.pop_state(),
+            // Zend `<ST_VAR_OFFSET>[ \n\r\t\\'#]`: `yyless(0)`, pop, and a
+            // zero-width `T_ENCAPSED_AND_WHITESPACE` returned at the byte,
+            // which then re-scans as string text. The parser's word on it
+            // is `unexpected string content ""`, and `token_get_all` has
+            // the empty row; both are php's only with the token.
+            b' ' | b'\n' | b'\r' | b'\t' | b'\\' | b'\'' | b'#' => {
+                self.emit_empty(SyntaxKind::STRING_TEXT);
+                self.pop_state();
+            }
             // Zend {TOKENS}|[{}"`]: bare single-character tokens.
             b';' => self.offset_punct(SyntaxKind::SEMICOLON),
             b':' => self.offset_punct(SyntaxKind::COLON),

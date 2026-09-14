@@ -299,6 +299,23 @@ fn what_the_scanner_hands_over_as_a_token_the_parser_names() {
         first("<?php $x = \"$a[]\";").1,
         "syntax error, unexpected token \"]\", expecting \"-\" or identifier or variable or number"
     );
+    // A byte that pops `ST_VAR_OFFSET` is handed over as a zero-width
+    // string content, so the token php names is empty and stands on the
+    // line before the newline it pops on.
+    assert_eq!(
+        first("<?php $x = \"$a[ 1 ]\";"),
+        (
+            1,
+            "syntax error, unexpected string content \"\", expecting \"-\" or identifier or variable or number".into()
+        )
+    );
+    assert_eq!(
+        first("<?php $x = \"$a[\n1]\";"),
+        (
+            1,
+            "syntax error, unexpected string content \"\", expecting \"-\" or identifier or variable or number".into()
+        )
+    );
     assert_eq!(
         first("<?php echo 0x_1;").1,
         "syntax error, unexpected identifier \"x_1\", expecting \",\" or \";\""

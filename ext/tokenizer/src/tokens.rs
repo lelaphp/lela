@@ -361,6 +361,15 @@ impl Walk<'_> {
         use SyntaxKind as K;
         let kind = self.tokens[i].kind;
         match kind {
+            // The zero-width text `<ST_VAR_OFFSET>[ \n\r\t\\'#]` returns
+            // before the byte it pops on: a row of its own, empty, and
+            // never the head of the run that starts at the same byte.
+            K::STRING_TEXT if self.tokens[i].len == 0 => {
+                self.leave_offset();
+                self.flush();
+                let (start, end) = self.span(i);
+                self.push(Some("T_ENCAPSED_AND_WHITESPACE"), start, end);
+            }
             K::STRING_TEXT | K::HEREDOC_INDENT => {
                 self.leave_offset();
                 self.extend_run(i, kind == K::HEREDOC_INDENT);

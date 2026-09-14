@@ -294,8 +294,21 @@ impl<'a> Lexer<'a> {
     /// Emits the token covering `start..self.pos`. Every dispatch site emits
     /// a token before it changes the state stack for it.
     pub(crate) fn emit(&mut self, kind: SyntaxKind, start: usize) {
-        debug_assert_eq!(start, self.emitted, "token not contiguous");
         debug_assert!(self.pos > start, "empty token");
+        self.emit_upto(kind, start);
+    }
+
+    /// Emits the one zero-width token php's scanner returns, `yyless(0)`
+    /// before `RETURN_TOKEN`: `T_ENCAPSED_AND_WHITESPACE` at the byte
+    /// that pops `ST_VAR_OFFSET` ([`Lexer::lex_var_offset`]). The byte is
+    /// not consumed, so the stream stays contiguous and the next token
+    /// starts where this one does.
+    pub(crate) fn emit_empty(&mut self, kind: SyntaxKind) {
+        self.emit_upto(kind, self.pos);
+    }
+
+    fn emit_upto(&mut self, kind: SyntaxKind, start: usize) {
+        debug_assert_eq!(start, self.emitted, "token not contiguous");
         self.tokens.push(Token {
             kind,
             offset: narrow(start),
