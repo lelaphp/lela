@@ -14,20 +14,47 @@
 //!
 //! **The doc comment.** php keeps one pending doc comment, `CG(doc_comment)`:
 //! the last `T_DOC_COMMENT` the scanner passed, cleared by every `}`
-//! (`zend_language_scanner.l`, the `<ST_IN_SCRIPTING>"}"` rule), and taken,
-//! then cleared, by the declaration that reaches a `backup_doc_comment` in
-//! `zend_language_parser.y`. So a blank line does not detach a doc comment,
-//! a statement between the comment and the declaration does not either,
-//! and a doc comment before a closure's `}` is gone by the next declaration.
-//! Measured under the pin at 8.5.9 with `ReflectionClass::getDocComment()`:
-//! `/** D1 */\n\nclass A {}` reads D1, `/** D2 */ $x = 1; class B {}` reads
-//! D2, `function f() {} /** D3 */\nclass C {}` reads D3, and
-//! `/** D7 */ if (1) { } class G {}` reads `false`. The builder walks the
-//! same state over the token stream and a node whose kind opts into
-//! `HasDocComment` takes it at its `Start`, which stands for the
-//! `backup_doc_comment` position of every declaration the schema names
-//! until the grammar places each (#229). Mahout's rule, the comment block
-//! directly above with no blank line, is not php's and is not kept.
+//! (`zend_language_scanner.l`, the `<ST_IN_SCRIPTING>"}"` rule at 8.5.9),
+//! and taken, then cleared, where the parser reduces `backup_doc_comment`
+//! in `zend_language_parser.y`. So a blank line does not detach a doc
+//! comment, a statement between the comment and the declaration does not
+//! either, and a doc comment before a closure's `}` is gone by the next
+//! declaration. Measured under the pin at 8.5.9 with
+//! `ReflectionClass::getDocComment()`: `/** D1 */\n\nclass A {}` reads D1,
+//! `/** D2 */ $x = 1; class B {}` reads D2, `function f() {} /** D3 */\n
+//! class C {}` reads D3, and `/** D7 */ if (1) { } class G {}` reads
+//! `false`. Mahout's rule, the comment block directly above with no blank
+//! line, is not php's and is not kept.
+//!
+//! The builder walks the same state over the token stream, and the take is
+//! the grammar's: the parser emits [`Event::DocComment`] where php's rule
+//! has its `backup_doc_comment`, and the innermost open node takes what is
+//! pending then. What is pending is what php's scanner has passed, and
+//! bison reads a token ahead only where a state needs the lookahead to
+//! choose: a `backup_doc_comment` reduced in a state with that one action
+//! is reduced before the next token is scanned. So the grammar places the
+//! event before the last token php had read at the reduction, and the
+//! builder passes over the whitespace and comments before that token and
+//! takes: a class takes before its `{`, since `extends_from` and
+//! `implements_list` need the lookahead (`class F extends /** D5 */ A {}`
+//! reads D5, and `class F extends A /** D6 */ {}` D6); a function or a
+//! method takes before its name, since `returns_ref` needs the lookahead
+//! and `function_name` does not (`function /** X */ f() {}` reads X,
+//! `function f /** X2 */ () {}` `false`); a trait before its name, an
+//! enum case before `case` (`case /** C2 */ B = 1; case C = 2;` gives C2
+//! to C), a parameter before its variable, a property accessor before
+//! its name, a closure before its `(`; a property or constant declarator after
+//! its last token, since a `=` or an operator may follow (`/** P */ public
+//! $x, $y;` gives P to `$x` alone, `public $z /** P3 */;` P3 to `$z`, and
+//! `const E = 1 /** K3 */, F = 2;` K3 to E). An attribute group takes at
+//! its `#[` and [`Event::DocCommentRestore`] puts what it took back after
+//! its `]`, php's `CG(doc_comment) = $2` in the `attribute` rule, so
+//! `/** D4 */ #[Attr(static function(){})] class Y {}` reads D4 past the
+//! closure's `}` and `#[Attr(/** IN */ 1)] class Y {}` reads `false`.
+//! Every position was probed under the pin; the tests of
+//! `tests/doc_comment.rs` hold each. A node whose kind does not opt into
+//! `HasDocComment` still takes, which keeps the state right, and its
+//! `resolve` reads nothing of it.
 //!
 //! **A required child that is absent.** `!` is the parser's promise
 //! (convention A2), and the typed struct cannot be built without the
@@ -66,6 +93,13 @@ pub enum Event {
     },
     /// A diagnostic raised at this point of the stream.
     Error(Box<Diagnostic>),
+    /// php's `backup_doc_comment` at this position of the grammar: the
+    /// innermost open node takes the pending doc comment, and none is
+    /// pending after (the docs above).
+    DocComment,
+    /// The `attribute` rule's `CG(doc_comment) = $2`: what the innermost
+    /// open node took at its `DocComment` is pending again.
+    DocCommentRestore,
 }
 
 /// The kind of an abandoned `Start`, which the builder skips. `EOF` is
@@ -99,7 +133,7 @@ struct Frame {
     at: usize,
     /// Where the node's direct children begin in `pending`.
     children_from: usize,
-    /// The doc comment the node took at its `Start`.
+    /// The doc comment the node took at its `DocComment` event.
     doc_comment: Option<TokenId>,
 }
 
@@ -173,6 +207,8 @@ pub fn build(tokens: &[Token], mut events: Vec<Event>) -> Built {
             Event::Finish => builder.finish(),
             Event::Token { remap } => builder.token(remap),
             Event::Error(diagnostic) => diagnostics.push(*diagnostic),
+            Event::DocComment => builder.take_doc_comment(),
+            Event::DocCommentRestore => builder.restore_doc_comment(),
         }
     }
     while !builder.frames.is_empty() {
@@ -216,16 +252,11 @@ impl Builder<'_> {
     fn start(&mut self, chain: impl Iterator<Item = SyntaxKind>) {
         self.skip_insignificant();
         for kind in chain {
-            let doc_comment = if kind.takes_doc_comment() {
-                self.doc_comment.take()
-            } else {
-                None
-            };
             self.frames.push(Frame {
                 kind,
                 at: self.elements.len(),
                 children_from: self.pending.len(),
-                doc_comment,
+                doc_comment: None,
             });
             self.elements.push(Element::Node {
                 kind,
@@ -233,6 +264,26 @@ impl Builder<'_> {
                 index: 0,
                 descendants: 0,
             });
+        }
+    }
+
+    /// php's `backup_doc_comment`: the innermost open node takes the
+    /// pending doc comment, with the whitespace and comments before the
+    /// next significant token passed over first, since php's scanner had
+    /// passed them when the grammar placed the event (the docs above).
+    fn take_doc_comment(&mut self) {
+        self.skip_insignificant();
+        let taken = self.doc_comment.take();
+        if let Some(frame) = self.frames.last_mut() {
+            frame.doc_comment = taken;
+        }
+    }
+
+    /// The `attribute` rule's restore: what the innermost open node took
+    /// is pending again.
+    fn restore_doc_comment(&mut self) {
+        if let Some(frame) = self.frames.last() {
+            self.doc_comment = frame.doc_comment;
         }
     }
 
@@ -341,7 +392,7 @@ mod tests {
     use super::*;
     use crate::lexer::LexOptions;
     use crate::source::FileId;
-    use crate::tree::{ClassDecl, FunctionDecl, HasDocComment, PropertyDecl, dump};
+    use crate::tree::{ClassDecl, FunctionDecl, HasDocComment, PropertyDeclarator, dump};
 
     fn start(kind: SyntaxKind) -> Event {
         Event::Start {
@@ -358,13 +409,15 @@ mod tests {
         crate::lexer::lex(FileId(0), source, &LexOptions::default()).tokens
     }
 
-    /// `class X {}` as events, under an open `SOURCE_FILE`.
+    /// `class X {}` as events, under an open `SOURCE_FILE`; the take
+    /// stands before the `{`, as the grammar places it.
     fn class_decl() -> Vec<Event> {
         use SyntaxKind::*;
         vec![
             start(CLASS_DECL),
             token(CLASS_KW),
             token(IDENT),
+            Event::DocComment,
             start(CLASS_BODY),
             token(L_CURLY),
             token(R_CURLY),
@@ -418,6 +471,7 @@ mod tests {
                     vec![
                         start(FUNCTION_DECL),
                         token(FUNCTION_KW),
+                        Event::DocComment,
                         token(IDENT),
                         start(PARAM_LIST),
                         token(L_PAREN),
@@ -474,22 +528,19 @@ mod tests {
         assert_eq!(f.doc_comment(), None, "D2 was taken by class B");
     }
 
-    /// Taken, then cleared: one doc comment reaches one declaration, and a
+    /// Taken, then cleared: one doc comment reaches one declarator, and a
     /// member's doc comment is its own (the class body's `{` resets
     /// nothing; php resets on `}` alone).
     #[test]
     fn a_doc_comment_is_taken_once() {
         use SyntaxKind::*;
-        let source = b"<?php /** C */ class A { /** P */ public $x; public $y; }";
+        let source = b"<?php /** C */ class A { /** P */ public $x, $y; }";
         let tokens = lexed(source);
-        let property = |events: &mut Vec<Event>| {
+        let declarator = |events: &mut Vec<Event>| {
             events.extend([
-                start(PROPERTY_DECL),
-                token(PUBLIC_KW),
                 start(PROPERTY_DECLARATOR),
                 token(VARIABLE),
-                Event::Finish,
-                token(SEMICOLON),
+                Event::DocComment,
                 Event::Finish,
             ]);
         };
@@ -497,11 +548,16 @@ mod tests {
             start(CLASS_DECL),
             token(CLASS_KW),
             token(IDENT),
+            Event::DocComment,
             start(CLASS_BODY),
             token(L_CURLY),
+            start(PROPERTY_DECL),
+            token(PUBLIC_KW),
         ];
-        property(&mut events);
-        property(&mut events);
+        declarator(&mut events);
+        events.push(token(COMMA));
+        declarator(&mut events);
+        events.extend([token(SEMICOLON), Event::Finish]);
         events.extend([token(R_CURLY), Event::Finish, Event::Finish]);
         let built = build(&tokens, file(events));
         assert!(
@@ -516,11 +572,86 @@ mod tests {
         );
         let docs: Vec<Option<&[u8]>> = built
             .tree
-            .nodes::<PropertyDecl>()
+            .nodes::<PropertyDeclarator>()
             .iter()
             .map(|p| text(source, &tokens, p.doc_comment()))
             .collect();
         assert_eq!(docs, [Some(&b"/** P */"[..]), None]);
+    }
+
+    /// The take passes over the whitespace and comments before the next
+    /// significant token first, so a comment between the class name and
+    /// `{` is the class's,
+    /// and a take where no node is open drops the comment, as php's
+    /// `backup_doc_comment` returns it to a rule that keeps nothing.
+    #[test]
+    fn a_take_passes_over_the_comments_before_it() {
+        let source = b"<?php class A /** D6 */ {}";
+        let tokens = lexed(source);
+        let built = build(&tokens, file(class_decl()));
+        let class = &built.tree.nodes::<ClassDecl>()[0];
+        assert_eq!(
+            text(source, &tokens, class.doc_comment()),
+            Some(&b"/** D6 */"[..])
+        );
+        let built = build(&tokens, vec![Event::DocComment, Event::DocCommentRestore]);
+        assert!(built.tree.nodes::<ClassDecl>().is_empty());
+    }
+
+    /// The attribute's restore: what the group took at `#[` is pending
+    /// again after `]`, past a `}` inside the group.
+    #[test]
+    fn an_attribute_group_gives_back_what_it_took() {
+        use SyntaxKind::*;
+        let source = b"<?php /** D4 */ #[A(function(){})] class Y {}";
+        let tokens = lexed(source);
+        let events = vec![
+            start(CLASS_DECL),
+            start(ATTRIBUTE_GROUP),
+            Event::DocComment,
+            token(ATTRIBUTE_OPEN),
+            start(ATTRIBUTE),
+            token(IDENT),
+            start(ARG_LIST),
+            token(L_PAREN),
+            start(CLOSURE_EXPR),
+            token(FUNCTION_KW),
+            Event::DocComment,
+            start(PARAM_LIST),
+            token(L_PAREN),
+            token(R_PAREN),
+            Event::Finish,
+            start(BLOCK),
+            token(L_CURLY),
+            token(R_CURLY),
+            Event::Finish,
+            Event::Finish,
+            token(R_PAREN),
+            Event::Finish,
+            Event::Finish,
+            token(R_BRACK),
+            Event::DocCommentRestore,
+            Event::Finish,
+            token(CLASS_KW),
+            token(IDENT),
+            Event::DocComment,
+            start(CLASS_BODY),
+            token(L_CURLY),
+            token(R_CURLY),
+            Event::Finish,
+            Event::Finish,
+        ];
+        let built = build(&tokens, file(events));
+        assert!(
+            built.missing.is_empty(),
+            "{}",
+            dump(&built.tree, &tokens, source)
+        );
+        let class = &built.tree.nodes::<ClassDecl>()[0];
+        assert_eq!(
+            text(source, &tokens, class.doc_comment()),
+            Some(&b"/** D4 */"[..])
+        );
     }
 
     /// What the parser did not consume is the root's last children, an

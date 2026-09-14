@@ -221,7 +221,9 @@ fn a_required_child_absent_is_reported_and_the_node_is_an_error() {
 #[test]
 fn mixins_and_doc_comments() {
     // `/** Doc */ #[Attr] class C {}`: the doc comment is taken by the
-    // declaration, the attribute group is its first field, and the name
+    // attribute group at `#[`, pending again after `]` and taken by the
+    // declaration before its `{`, as the grammar places the events; the
+    // attribute group is the declaration's first field, and the name
     // field skips the `class` keyword to `C`.
     use SyntaxKind::*;
     let hand = Hand::new(
@@ -231,14 +233,17 @@ fn mixins_and_doc_comments() {
             token(OPEN_TAG),
             start(CLASS_DECL),
             start(ATTRIBUTE_GROUP),
+            Event::DocComment,
             token(ATTRIBUTE_OPEN),
             start(ATTRIBUTE),
             token(IDENT),
             FINISH,
             token(R_BRACK),
+            Event::DocCommentRestore,
             FINISH,
             token(CLASS_KW),
             token(IDENT),
+            Event::DocComment,
             start(CLASS_BODY),
             token(L_CURLY),
             token(R_CURLY),

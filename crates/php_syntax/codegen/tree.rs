@@ -83,9 +83,10 @@ const EXTRA_DISPLAY: &[(&str, &str)] = &[
 /// Rust keywords that occur as schema labels; emitted as raw identifiers.
 const RAW_LABELS: &[&str] = &["ref", "trait", "type", "else", "use", "as", "in"];
 
-/// The field every node opting into `HasDocComment` carries: the builder
-/// records which comment block is a declaration's doc comment as a token
-/// index on the declaration node (design §4.9).
+/// The field every node opting into `HasDocComment` carries: the token
+/// index of the doc comment the node took where php's grammar reaches a
+/// `backup_doc_comment`, which the parser emits as an event and the
+/// builder hands to `resolve` (design §4.9).
 const DOC_COMMENT: &str = "doc_comment";
 
 // ---------------------------------------------------------------------------
@@ -776,7 +777,7 @@ fn fields_of(model: &Model<'_>, def: &Def, errors: &mut Vec<Error>) -> Vec<Field
                 Field {
                     name: DOC_COMMENT.to_owned(),
                     ty: "Option<TokenId>".to_owned(),
-                    doc: "the doc comment the builder attached to the declaration, a \
+                    doc: "the doc comment the node took where php's grammar takes it, a \
                           `DOC_COMMENT` token of the token stream"
                         .to_owned(),
                     mixin: Some(trait_name.clone()),
@@ -1146,40 +1147,6 @@ fn emit_resolve(buf: &mut String, model: &Model<'_>) {
     buf.push_str("        _ => Resolved::Untyped,\n    }\n}\n\n");
 }
 
-/// `SyntaxKind::takes_doc_comment`: the kinds whose node opts into
-/// `HasDocComment`, so the builder knows where php's pending doc comment
-/// is taken (`backup_doc_comment` in `zend_language_parser.y`).
-fn emit_doc_comment_kinds(buf: &mut String, model: &Model<'_>) {
-    let owners: Vec<String> = model
-        .defs
-        .iter()
-        .filter(|info| {
-            info.class == DefClass::StructNode
-                && info.def.traits.iter().any(|t| {
-                    model
-                        .info(t)
-                        .is_some_and(|i| i.class == DefClass::Trait && i.def.rule.is_none())
-                })
-        })
-        .map(|info| format!("SyntaxKind::{}", screaming_snake(&info.def.name)))
-        .collect();
-    let body = if owners.is_empty() {
-        "false".to_owned()
-    } else {
-        format!("matches!(self, {})", owners.join(" | "))
-    };
-    let _ = write!(
-        buf,
-        "impl SyntaxKind {{\n    \
-             /// Does a node of this kind take the pending doc comment (`HasDocComment`)?\n    \
-             #[must_use]\n    \
-             pub fn takes_doc_comment(self) -> bool {{\n        \
-             {body}\n    \
-             }}\n\
-         }}\n\n"
-    );
-}
-
 /// One alternation as an enum: a variant per listed node carrying its
 /// index (or the alternation enum itself, or the token, by what the node
 /// is), and a variant per listed token carrying its `TokenId`.
@@ -1294,7 +1261,8 @@ fn emit_traits(buf: &mut String, model: &Model<'_>, errors: &mut Vec<Error>) {
         if def.rule.is_none() {
             let _ = write!(
                 buf,
-                "    /// The doc comment the builder attached to the declaration.\n    \
+                "    /// The doc comment the node took where php's grammar takes it \
+                 (`backup_doc_comment`).\n    \
                  fn {DOC_COMMENT}(&self) -> Option<TokenId>;\n"
             );
         } else {
@@ -1395,7 +1363,6 @@ pub fn generate(grammar: &Grammar) -> Result<String, Vec<Error>> {
     emit_traits(&mut buf, &model, &mut errors);
     emit_nodes(&mut buf, &model);
     emit_resolve(&mut buf, &model);
-    emit_doc_comment_kinds(&mut buf, &model);
 
     if errors.is_empty() {
         Ok(buf)
@@ -1713,7 +1680,6 @@ mod tests {
             "        SyntaxKind::DECL => push(&mut nodes.decl, Decl::resolve(range, children, doc_comment)),",
             "        SyntaxKind::ROOT => push(&mut nodes.root, Ok(Root::resolve(range, children, doc_comment))),",
             "        _ => Resolved::Untyped,",
-            "    pub fn takes_doc_comment(self) -> bool {\n        matches!(self, SyntaxKind::DECL)",
         ] {
             assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
         }

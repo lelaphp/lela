@@ -9,10 +9,15 @@ use crate::source::Diagnostic;
 
 use super::{block, ckw, expr, semicolon, types};
 
-/// `#[…]` attribute groups, zero or more.
+/// `#[…]` attribute groups, zero or more. A group takes the pending doc
+/// comment at its `#[` and gives it back after its `]`, php's
+/// `attribute: T_ATTRIBUTE backup_doc_comment … ']' { CG(doc_comment) =
+/// $2; }`, so what a closure's `}` or a comment inside the group did to
+/// it is undone for the declaration after.
 pub(crate) fn attribute_groups(p: &mut Parser<'_>) {
     while p.peek_at(K::ATTRIBUTE_OPEN) {
         let g = p.start();
+        p.doc_comment();
         p.bump(K::ATTRIBUTE_OPEN);
         let mut after_comma = false;
         loop {
@@ -43,6 +48,7 @@ pub(crate) fn attribute_groups(p: &mut Parser<'_>) {
             }
         }
         super::expect_closer(p, K::R_BRACK, Some("\"]\""));
+        p.doc_comment_restore();
         g.complete(p, K::ATTRIBUTE_GROUP);
     }
 }
@@ -88,6 +94,12 @@ pub(crate) fn modifiers(p: &mut Parser<'_>) {
 pub(crate) fn function_decl(p: &mut Parser<'_>, m: Marker) {
     p.bump(K::FUNCTION_KW);
     p.eat(K::AMP);
+    // `function returns_ref function_name backup_doc_comment '('`: the
+    // name is the lookahead `returns_ref` needed and `function_name`
+    // reduces without one, so the take reads what stands before the
+    // name and not what stands after it (probed 8.5.9: `function /** X */
+    // f()` reads X, `function f /** X2 */ ()` reads false).
+    p.doc_comment();
     // A function name reduces to the parameter-list state; php's clause
     // here is `"("`, not `identifier` (probed 8.5.7: `function die()`).
     name_token(p, "\"(\"");
@@ -151,11 +163,18 @@ pub(crate) fn modifiers_then_class(p: &mut Parser<'_>, m: Marker) {
     }
 }
 
+/// A class takes the doc comment before its `{`: `T_STRING extends_from
+/// implements_list backup_doc_comment '{'`, and both clauses need the
+/// lookahead to know they are absent, so the `{` is read before the take
+/// (probed 8.5.9: `class F extends /** D5 */ A {}` reads D5, `class F
+/// extends A /** D6 */ {}` D6, `class F /** D6b */ {}` D6b). An
+/// interface, an enum and an anonymous class read the same way.
 pub(crate) fn class_decl(p: &mut Parser<'_>, m: Marker) {
     p.bump(K::CLASS_KW);
     name_token(p, "identifier");
     extends_clause(p, false);
     implements_clause(p);
+    p.doc_comment();
     class_body(p);
     m.complete(p, K::CLASS_DECL);
 }
@@ -164,12 +183,18 @@ pub(crate) fn interface_decl(p: &mut Parser<'_>, m: Marker) {
     p.bump(K::INTERFACE_KW);
     name_token(p, "identifier");
     extends_clause(p, true);
+    p.doc_comment();
     class_body(p);
     m.complete(p, K::INTERFACE_DECL);
 }
 
+/// A trait takes before its name: `T_TRAIT T_STRING backup_doc_comment
+/// '{'` has nothing between the name and the take that needs the
+/// lookahead, so a comment between the name and `{` is not the trait's
+/// (probed 8.5.9: `/** T */ trait T1 /** T2 */ {}` reads T).
 pub(crate) fn trait_decl(p: &mut Parser<'_>, m: Marker) {
     p.bump(K::TRAIT_KW);
+    p.doc_comment();
     name_token(p, "identifier");
     class_body(p);
     m.complete(p, K::TRAIT_DECL);
@@ -187,6 +212,7 @@ pub(crate) fn enum_decl(p: &mut Parser<'_>, m: Marker) {
     // An enum takes no `extends`: php's parser refuses it as the body's
     // `expecting "{"` (probed 8.5.9), which `class_body` says.
     implements_clause(p);
+    p.doc_comment();
     class_body(p);
     m.complete(p, K::ENUM_DECL);
 }
@@ -205,6 +231,7 @@ pub(crate) fn anon_class_decl(p: &mut Parser<'_>) -> CompletedMarker {
     }
     extends_clause(p, false);
     implements_clause(p);
+    p.doc_comment();
     class_body(p);
     m.complete(p, K::ANON_CLASS_DECL)
 }
@@ -309,6 +336,8 @@ fn class_member(p: &mut Parser<'_>) {
         K::FUNCTION_KW => {
             p.bump(K::FUNCTION_KW);
             p.eat(K::AMP);
+            // As a function's: before the name (`function_decl`).
+            p.doc_comment();
             member_name(p);
             param_list(p);
             ret_type(p);
@@ -362,7 +391,16 @@ fn class_member(p: &mut Parser<'_>) {
 
 /// The declarators, and the optional accessors, of a property
 /// declaration, after any type. `m` covers the attributes, modifiers and
-/// type.
+/// type. Each declarator takes the doc comment after its last token,
+/// php's `property: T_VARIABLE backup_doc_comment | T_VARIABLE '=' expr
+/// backup_doc_comment`, where the `=`, the operator or the `{` that may
+/// follow is the lookahead already read (probed 8.5.9: `/** P */ public
+/// $x, $y;` gives P to `$x` alone, `public $z /** P3 */;` P3 to `$z`,
+/// `public $w = 1 /** P4 */;` P4 to `$w`). The constant declarators of
+/// [`const_declarators`] take the same way; `tests/doc_comment.rs` holds
+/// both to the measurement, and the witness on
+/// `ReflectionProperty::getDocComment()` stands here once the engine
+/// serves a class (#257).
 fn property_tail(p: &mut Parser<'_>, m: Marker) {
     loop {
         let d = p.start();
@@ -371,6 +409,7 @@ fn property_tail(p: &mut Parser<'_>, m: Marker) {
             if p.eat(K::EQ) && !expr::expr(p) {
                 p.error_unexpected();
             }
+            p.doc_comment();
             d.complete(p, K::PROPERTY_DECLARATOR);
         } else {
             d.abandon(p);
@@ -406,6 +445,11 @@ pub(crate) fn property_hook_list(p: &mut Parser<'_>) {
         attribute_groups(p);
         modifiers(p);
         p.eat(K::AMP);
+        // `property_hook_modifiers returns_ref T_STRING backup_doc_comment`:
+        // before the name, as a function's (probed 8.5.9: `{ /** HG */
+        // get { … } }` gives HG to the accessor and nothing to the
+        // property).
+        p.doc_comment();
         if ckw::is_hook_name(p.current()) || p.current().is_keyword() {
             if p.peek_at(K::IDENT) {
                 p.bump(K::IDENT);
@@ -448,7 +492,12 @@ pub(crate) fn property_hook_list(p: &mut Parser<'_>) {
     m.complete(p, K::PROPERTY_HOOK_LIST);
 }
 
+/// `T_CASE backup_doc_comment identifier`: the take reduces once `case`
+/// is shifted, before the name is read, so a comment between `case` and
+/// the name is the next case's (probed 8.5.9: `case /** C2 */ B = 1; case
+/// C = 2;` gives false to B and C2 to C).
 fn enum_case(p: &mut Parser<'_>, m: Marker) {
+    p.doc_comment();
     p.bump(K::CASE_KW);
     member_name(p);
     if p.eat(K::EQ) && !expr::expr(p) {
@@ -616,7 +665,11 @@ pub(crate) fn member_name(p: &mut Parser<'_>) {
 /// The `const` declarators, `NAME = expr (, NAME = expr)*`. A class
 /// constant takes the semi-reserved set; a top-level constant takes a
 /// plain identifier only (php-src `const_list` against
-/// `class_const_list`: `const FOR = 1;` is a parse error in php).
+/// `class_const_list`: `const FOR = 1;` is a parse error in php). Each
+/// declarator takes the doc comment after its expression, php's
+/// `class_const_decl` and `const_decl`, both `… '=' expr
+/// backup_doc_comment` (probed 8.5.9: `/** K */ const C = 1, D = 2;`
+/// gives K to C alone and `const E = 1 /** K3 */, F = 2;` K3 to E).
 pub(crate) fn const_declarators(p: &mut Parser<'_>, semi_reserved: bool) {
     loop {
         let d = p.start();
@@ -633,6 +686,7 @@ pub(crate) fn const_declarators(p: &mut Parser<'_>, semi_reserved: bool) {
             } else if !expr::expr(p) {
                 p.error_unexpected();
             }
+            p.doc_comment();
             d.complete(p, K::CONST_DECLARATOR);
         } else {
             d.abandon(p);
@@ -698,6 +752,12 @@ pub(crate) fn param_list(p: &mut Parser<'_>) {
             p.bump(K::AMP);
         }
         p.eat(K::DOT_DOT_DOT);
+        // `… T_VARIABLE backup_doc_comment` in both `parameter` rules:
+        // the take reduces once the variable is shifted, before what
+        // follows is read, so it is what stands before the variable
+        // (probed 8.5.9: `fn(/** A */ $x) => 1` takes A and `fn($x /** B
+        // */) => 1` leaves B for the next declaration).
+        p.doc_comment();
         if p.at(K::VARIABLE) {
             p.bump(K::VARIABLE);
         } else {
@@ -759,6 +819,10 @@ pub(crate) fn closure_expr(p: &mut Parser<'_>, m: Option<Marker>) -> CompletedMa
     let m = m.unwrap_or_else(|| p.start());
     p.bump(K::FUNCTION_KW);
     p.eat(K::AMP);
+    // `function returns_ref backup_doc_comment '('`: the `(` is the
+    // lookahead `returns_ref` needed (probed 8.5.9: `function /** F */ ()
+    // {}` reads F, `function () /** G */ {}` false).
+    p.doc_comment();
     param_list(p);
     if p.peek_at(K::USE_KW) {
         let u = p.start();
@@ -809,6 +873,8 @@ pub(crate) fn arrow_fn_expr(p: &mut Parser<'_>, m: Option<Marker>) -> CompletedM
     let m = m.unwrap_or_else(|| p.start());
     p.bump(K::FN_KW);
     p.eat(K::AMP);
+    // As a closure's: `fn returns_ref backup_doc_comment '('`.
+    p.doc_comment();
     param_list(p);
     ret_type(p);
     if !p.eat(K::FAT_ARROW) {

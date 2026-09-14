@@ -347,6 +347,21 @@ impl<'t> Parser<'t> {
         }
     }
 
+    /// php's `backup_doc_comment` at this position of the grammar: the
+    /// innermost open node takes the pending doc comment. The grammar
+    /// places it before the last token php's parser had read when it
+    /// reduces the rule, which `tree::builder`'s docs derive position by
+    /// position.
+    pub fn doc_comment(&mut self) {
+        self.events.push(Event::DocComment);
+    }
+
+    /// The `attribute` rule's `CG(doc_comment) = $2`: after the group's
+    /// `]`, what it took at its `#[` is pending again.
+    pub fn doc_comment_restore(&mut self) {
+        self.events.push(Event::DocCommentRestore);
+    }
+
     /// Raises a diagnostic.
     pub fn error(&mut self, diagnostic: Diagnostic) {
         let start = diagnostic.span.start;

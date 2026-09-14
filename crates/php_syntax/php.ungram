@@ -68,7 +68,9 @@
 //   the compiler generalizes over HasAttributes/HasModifiers/etc.
 //   instead of matching node-by-node. HasDocComment is the one
 //   trivia-backed trait: it declares no children; the field it injects
-//   is the token index of the doc comment the builder attached.
+//   is the token index of the doc comment the node took, at the position
+//   of the grammar where php's backup_doc_comment stands (the parser
+//   emits the take there; the builder's docs say what php's rule is).
 //
 // A6 — Trivia. Whitespace and comments are trivia tokens: present in
 //   the token stream (losslessness), invisible to this schema and to
@@ -315,16 +317,23 @@ ClassBody   = '{' ClassMember* '}'
 ClassMember = ClassConstDecl | PropertyDecl | MethodDecl | TraitUseDecl
             | EnumCaseDecl
 
-ClassConstDecl : HasAttributes HasModifiers HasDocComment =
+ClassConstDecl : HasAttributes HasModifiers =
     'const' ty:TypeExpr? ConstDeclarator,+ ';'       // typed: LEVEL 8.3
-ConstDeclarator = name:MemberName! '=' value:Expr
+ConstDeclarator : HasDocComment = name:MemberName! '=' value:Expr
 // NOTE: semi-reserved names legal ('const FOR = 1'); 'class' excluded.
+// The doc comment is the declarator's, not the statement's: php's
+// class_const_decl and const_decl each end in backup_doc_comment, so in
+// `/** K */ const C = 1, D = 2;` only C carries K (probed 8.5.9 with
+// ReflectionClassConstant::getDocComment()).
 // Initializers stay unevaluated expressions through M0 (item tree keeps
 // spans; const-expr evaluation is M1).
 
-PropertyDecl : HasAttributes HasModifiers HasDocComment =
+PropertyDecl : HasAttributes HasModifiers =
     ty:TypeExpr? PropertyDeclarator,+ ( ';' | hooks:PropertyHookList )
-PropertyDeclarator = var:<variable>! ('=' init:Expr)?
+PropertyDeclarator : HasDocComment = var:<variable>! ('=' init:Expr)?
+// NOTE: the doc comment is the declarator's, as php's property rule takes
+// it: `/** P */ public $x, $y;` gives P to $x alone (probed 8.5.9 with
+// ReflectionProperty::getDocComment()).
 // VALIDATE: hooks ⇒ exactly one declarator and no 'readonly'; typed
 // property rules; 'var' excludes other visibility.
 
