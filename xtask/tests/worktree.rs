@@ -339,6 +339,120 @@ fn a_branch_on_no_track_is_taken_off_main_through_the_add_command() {
     );
 }
 
+/// A worktree's `target/` is its own, seeded from the clone's `target/debug`
+/// by `cp -c -R` before `xtask` is built there (harness-design.md §5, "A
+/// track's worktrees"; #245, #251): the dependencies are blocks the two
+/// directories share and the build compiles the workspace's own crates
+/// alone, and what the worktree holds afterwards is a `target/debug/xtask`
+/// built from its own sources, whose root is the worktree, with no
+/// `CARGO_TARGET_DIR` set and no `.cargo/config.toml` written. The clone
+/// here holds this workspace's dependency build, seeded the way the add
+/// seeds, so on a volume without clonefile it is the cold branch that is
+/// held: one line saying so and a worktree ready all the same. The retire
+/// removes the seeded copy with the worktree and leaves the clone's.
+#[test]
+fn an_add_seeds_the_worktrees_target_from_the_clones_and_builds_the_workspace_alone() {
+    let root = repository("seed");
+    fs::create_dir_all(root.join("target")).unwrap();
+    let cloned = Command::new("cp")
+        .args(["-c", "-R"])
+        .arg(workspace().join("target/debug"))
+        .arg(root.join("target/debug"))
+        .output()
+        .unwrap();
+    let warm = cloned.status.success();
+    write(
+        &root,
+        "target/harness/log.jsonl",
+        "{\"instrument\":\"the-clones-own\"}\n",
+    );
+
+    let (code, out) = add(&root, &["t-x/warm"]);
+    assert_eq!(code, 0, "{out}");
+    let dir = worktree_of(&root, "t-x/warm");
+    let built = dir.join("target/debug/xtask");
+    assert!(built.is_file(), "no built xtask: {out}");
+    assert!(
+        fs::symlink_metadata(dir.join("target/debug"))
+            .unwrap()
+            .file_type()
+            .is_dir(),
+        "the worktree's target/debug is a directory of its own, not a link to the clone's"
+    );
+    assert!(
+        !root.join("target/worktrees").exists() && !dir.join("target/harness/log.jsonl").exists(),
+        "no shared target directory, and the clone's readings are not the worktree's: {out}"
+    );
+    assert_eq!(
+        sh(&dir, &["git", "status", "--porcelain"]).trim(),
+        "",
+        "nothing tracked is written, .cargo/config.toml among it: {out}"
+    );
+
+    // The binary's root is the worktree: run from elsewhere with no
+    // `--root`, it answers for the branch it was built on, not the clone's
+    // `main` and not this workspace's branch.
+    let track = Command::new(&built)
+        .args(["track", "--json"])
+        .current_dir(&root)
+        .env_remove("CARGO")
+        .env_remove("CARGO_MANIFEST_DIR")
+        .output()
+        .unwrap();
+    let facts: serde_json::Value =
+        serde_json::from_slice(&track.stdout).unwrap_or_else(|e| panic!("{e}: {out}"));
+    assert_eq!(facts["branch"], "t-x/warm", "{facts}");
+
+    if warm {
+        assert!(
+            out.contains("seeded target/debug from the clone's"),
+            "{out}"
+        );
+        assert!(
+            out.contains(" and 0 dependencies:"),
+            "the build compiled the workspace's own crates and no dependency: {out}"
+        );
+        assert!(
+            !out.contains("compiling 0 crates of the workspace"),
+            "the workspace's own crates are the worktree's build, not the clone's: {out}"
+        );
+    } else {
+        assert_eq!(
+            out.lines()
+                .filter(|l| l.contains("the worktree starts cold"))
+                .count(),
+            1,
+            "one line says the seeding failed: {out}"
+        );
+        assert!(
+            !out.contains(" and 0 dependencies:"),
+            "a cold worktree compiles its dependencies: {out}"
+        );
+    }
+    assert!(
+        out.contains(&format!("ready: cd {}", dir.display())),
+        "{out}"
+    );
+
+    let (code, out) = retire(&root, &["t-x/warm"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        !dir.exists(),
+        "the seeded copy goes with the worktree: {out}"
+    );
+    assert_eq!(
+        root.join("target/debug/xtask").is_file(),
+        warm,
+        "the clone's own build is not what retire removes: {out}"
+    );
+    assert!(
+        fs::read_to_string(root.join("target/harness/log.jsonl"))
+            .unwrap()
+            .contains("the-clones-own"),
+        "the clone's readings stand: {out}"
+    );
+}
+
 /// The retire half: a worktree's readings live in its own `target/harness/`
 /// and removing the worktree removes them, so the log is appended into the
 /// track's store first and the track's `status --section permits` counts

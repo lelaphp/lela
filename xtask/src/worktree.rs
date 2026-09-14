@@ -2,7 +2,7 @@
 //! `xtask worktree add`, which lays one down ready to be worked in, and
 //! `xtask worktree retire`, which keeps its evidence and removes it. A
 //! track runs an agent per worktree on a branch off its track branch, and
-//! three facts about a fresh worktree are why the add is an instrument and
+//! four facts about a fresh worktree are why the add is an instrument and
 //! not a bare `git worktree add`:
 //!
 //! * `computed` trust is a person's grant (§11), and the grant on a clone
@@ -21,6 +21,20 @@
 //!   `oracle.toml` are tracked, so all three carry over on their own, as
 //!   the php-src tree the pin names does by being outside the clone. They
 //!   are reported, not set again.
+//! * A worktree's `target/` is its own, and that build starts warm: `add`
+//!   seeds `target/debug` from the clone's with `cp -c -R`, a
+//!   clone-on-write copy where the volume supports one, so the registry
+//!   dependencies are blocks the two directories share and cargo compiles
+//!   the workspace's own crates alone, since a fresh checkout's files are
+//!   newer than the seeded fingerprints (§5, "A track's worktrees"; #245).
+//!   What it must not do is give two worktrees one `CARGO_TARGET_DIR`:
+//!   cargo keys a workspace member's artifact by its path under the
+//!   workspace root and judges the slot fresh by mtime, so a checkout
+//!   whose files predate another worktree's build would run that
+//!   worktree's binary (#251), where `built_root`, `built::judges` and
+//!   `permit` each rest on a binary that belongs to one checkout. So no
+//!   variable is set and no `.cargo/config.toml` is written; the seeding
+//!   is best-effort and a `cp -c` that cannot is one line and a cold start.
 //!
 //! The branch names its own track ([`Track::of`]): the longest existing
 //! branch that is a proper path prefix of it, `main` for a branch on none,
@@ -171,6 +185,7 @@ pub fn add(root: &Path, branch: &str, ticket: Option<Ticket>) -> Result<PathBuf>
         ),
     }
 
+    seed(&dir, root);
     let mut ready = true;
     ready &= build(ADD, &dir);
     ready &= lay_local(&dir);
@@ -270,24 +285,91 @@ fn append_log(dir: &Path, root: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// The worktree's `target/debug` seeded from the clone's at `root` with
+/// `cp -c -R`, a clone-on-write copy where the volume supports one, so the
+/// build that follows compiles the workspace's own crates and no
+/// dependency (harness-design.md §5, "A track's worktrees"; #245). The
+/// copy is `target/debug` and nothing beside it: the worktree's
+/// `target/harness/` is its own from its first instrument. Best-effort: a
+/// clone with no `target/debug`, and a `cp -c` that fails, are one line
+/// and a cold start, with what a failed copy left removed so the worktree
+/// is as cold as the line says. The seeded `xtask` binary is taken away
+/// too, so the one under the worktree's `target/debug` is built from the
+/// worktree's sources or is not there: a build that fails leaves no binary
+/// whose root is the clone's for the hook's walk to find.
+fn seed(dir: &Path, root: &Path) {
+    let from = root.join("target/debug");
+    if !from.is_dir() {
+        say(
+            ADD,
+            &format!(
+                "nothing to seed target/debug from: {} holds no build, so the worktree starts cold",
+                from.display()
+            ),
+        );
+        return;
+    }
+    let to = dir.join("target/debug");
+    let copied = fs::create_dir_all(dir.join("target")).and_then(|()| {
+        Command::new("cp")
+            .args(["-c", "-R"])
+            .arg(&from)
+            .arg(&to)
+            .stdin(Stdio::null())
+            .output()
+    });
+    let failed = match copied {
+        Ok(out) if out.status.success() => {
+            let _ = fs::remove_file(to.join("xtask"));
+            say(
+                ADD,
+                "seeded target/debug from the clone's by cp -c: the dependencies are blocks the two share, and the build compiles the workspace's own crates",
+            );
+            return;
+        }
+        Ok(out) => {
+            let why = String::from_utf8_lossy(&out.stderr);
+            format!(
+                "cp -c -R {} failed ({})",
+                from.display(),
+                why.lines().next().unwrap_or("").trim()
+            )
+        }
+        Err(err) => format!("cp did not run ({err})"),
+    };
+    let _ = fs::remove_dir_all(&to);
+    complain(ADD, &format!("{failed}; the worktree starts cold"));
+}
+
 /// `xtask` built here, so the first `Edit` is judged rather than waiting
-/// on a build; whether it was. `whose` prefixes the lines, since `track
-/// new` builds its clone through this too.
+/// on a build; whether it was, with what the build compiled on the line:
+/// the workspace's own crates, which a seeded worktree compiles, and the
+/// dependencies, which it does not. `whose` prefixes the lines, since
+/// `track new` and `track sync` build through this too.
 pub(crate) fn build(whose: &str, dir: &Path) -> bool {
     let built = Command::new("cargo")
-        .args(["build", "-q", "-p", "xtask"])
+        .args(["build", "-p", "xtask"])
         .current_dir(dir)
         .stdin(Stdio::null())
-        .status();
+        .output();
     match built {
-        Ok(status) if status.success() => {
+        Ok(out) if out.status.success() => {
+            let (own, deps) = compiled(dir, &String::from_utf8_lossy(&out.stderr));
+            let what = if own + deps == 0 {
+                "nothing".to_owned()
+            } else {
+                format!("{own} crates of the workspace and {deps} dependencies")
+            };
             say(
                 whose,
-                "built target/debug/xtask: the first Edit in it is judged by this build, not by a cold cargo run",
+                &format!(
+                    "built target/debug/xtask, compiling {what}: the first Edit in it is judged by this build, not by a cold cargo run"
+                ),
             );
             true
         }
-        Ok(_) => {
+        Ok(out) => {
+            eprint!("{}", String::from_utf8_lossy(&out.stderr));
             complain(
                 whose,
                 "cargo build -p xtask failed; an Edit there is judged by a cold cargo run or denied",
@@ -302,6 +384,30 @@ pub(crate) fn build(whose: &str, dir: &Path) -> bool {
             false
         }
     }
+}
+
+/// What a build compiled, read from cargo's `Compiling` lines: the crates
+/// of the workspace at `dir`, whose line names a path under it, and the
+/// dependencies, whose line names none or one elsewhere.
+fn compiled(dir: &Path, stderr: &str) -> (usize, usize) {
+    let dir = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let mut own = 0;
+    let mut deps = 0;
+    for line in stderr.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("Compiling ") else {
+            continue;
+        };
+        let at = rest
+            .rsplit_once(" (")
+            .and_then(|(_, path)| path.strip_suffix(')'))
+            .and_then(|path| fs::canonicalize(path).ok());
+        if at.is_some_and(|path| path.starts_with(&dir)) {
+            own += 1;
+        } else {
+            deps += 1;
+        }
+    }
+    (own, deps)
 }
 
 /// The built harness of `dir`, release before debug as the command hook
