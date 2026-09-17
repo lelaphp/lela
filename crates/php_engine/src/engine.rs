@@ -704,6 +704,9 @@ fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
             raised.line,
         );
     }
+    if !req.declare_classes(unit) {
+        return;
+    }
     let frame = req.push_frame(Arc::clone(unit));
     if let Err(fatal) = entry(req, frame) {
         req.end_in(&fatal);
@@ -798,6 +801,41 @@ mod tests {
             String::from_utf8_lossy(&sink.body).into_owned(),
             observables,
         )
+    }
+
+    /// A class the compiler bound with no opline (`zend_compile_class_decl`
+    /// under `toplevel`) is declared into the request's table before the
+    /// main op array runs, so the source the doc-comment witness of
+    /// `php_syntax` declares runs (#257); a name Zend registered is
+    /// `zend_class_redeclaration_error` in the wording for an internal
+    /// class, and one a unit of this request declared names its site.
+    /// Both are `E_COMPILE_ERROR` at the class's line, rendered before
+    /// any of the file runs.
+    #[test]
+    fn a_unit_s_classes_are_declared_before_its_main_op_array_runs() {
+        let engine = Engine::builder().build();
+        let (body, observables) = served(
+            &engine,
+            "<?php\nclass M { /** P */ public $x, $y; /** K */ const A = 1, B = 2; }\necho 1;",
+        );
+        assert_eq!((body.as_str(), observables.exit_code), ("1", 0));
+        let (body, observables) = served(&engine, "<?php\necho 1;\nclass Exception {}");
+        assert_eq!(
+            (body.as_str(), observables.exit_code),
+            (
+                "\nFatal error: Cannot redeclare class Exception in witness.php on line 3\n",
+                255
+            )
+        );
+        let (body, observables) = served(&engine, "<?php\necho 1;\nclass M {}\nclass m {}");
+        assert_eq!(
+            (body.as_str(), observables.exit_code),
+            (
+                "\nParse error: a class declared twice this compiler cannot read yet in witness.php on line 4\n",
+                255
+            ),
+            "php emits a DECLARE_CLASS for the second and fails it at run time; that opline is not emitted yet"
+        );
     }
 
     #[test]

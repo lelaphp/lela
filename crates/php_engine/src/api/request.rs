@@ -312,6 +312,15 @@ pub struct Request {
     /// (`zend_call_stack_init`) from the two `zend.*_stack_size`
     /// entries; what the compiler is held to (design §5.6).
     stack_limit: StackLimit,
+    /// The classes the units this request served declared, each the
+    /// unit that holds it and the index of its declaration, in the
+    /// order declared: php's `EG(class_table)` past what the engine
+    /// registered at startup. A `ClassId` past the engine's classes
+    /// counts into this list. What design §6.2 binds early into an
+    /// immutable linked class shared across requests is not built yet,
+    /// so every class a unit declares is this request's, the
+    /// `DECLARE_CLASS_DELAYED` path, and dropped with it.
+    declared: Vec<(Arc<Unit>, u32)>,
 }
 
 impl Request {
@@ -355,6 +364,7 @@ impl Request {
             interrupt: Interrupt::default(),
             timer: None,
             stack_limit: StackLimit::UNCHECKED,
+            declared: Vec::new(),
         };
         // Request state in bundle order (ADR-0005).
         for extension in &req.shared.extensions {
@@ -1548,9 +1558,51 @@ impl Request {
         self.shared
             .classes
             .iter()
-            .position(|decl| decl.name.0.to_ascii_lowercase() == wanted)
+            .map(|decl| &decl.name)
+            .chain(
+                self.declared
+                    .iter()
+                    .filter_map(|(unit, at)| unit.classes.get(usize::try_from(*at).ok()?))
+                    .map(|decl| &decl.name),
+            )
+            .position(|name| name.0.to_ascii_lowercase() == wanted)
             .and_then(|i| u32::try_from(i).ok())
             .map(ClassId)
+    }
+
+    /// `do_bind_class` for every class the unit declares, before its
+    /// main op array runs: php binds a top-level class with no parent
+    /// at compile time and the compiler emitted no opline for it, so
+    /// the request's table takes it here. A name already declared is
+    /// `zend_class_redeclaration_error`, `E_COMPILE_ERROR` in php's two
+    /// wordings, the site of the earlier declaration named when it was
+    /// a user class, and the request ends before the frame is pushed;
+    /// php runs nothing of a file whose class fails to bind.
+    pub(crate) fn declare_classes(&mut self, unit: &Arc<Unit>) -> bool {
+        for (at, decl) in unit.classes.iter().enumerate() {
+            if let Some(existing) = self.class_named(&decl.name.0) {
+                let message = match self.class_decl(existing) {
+                    Some(earlier) if !earlier.file.0.is_empty() => format!(
+                        "Cannot redeclare class {} (previously declared in {}:{})",
+                        String::from_utf8_lossy(&decl.name.0),
+                        String::from_utf8_lossy(&earlier.file.0),
+                        earlier.line
+                    ),
+                    _ => format!(
+                        "Cannot redeclare class {}",
+                        String::from_utf8_lossy(&decl.name.0)
+                    ),
+                };
+                let file = decl.file.0.to_vec();
+                self.end_in_compile_time(Level::CompileError, &message, &file, decl.line);
+                return false;
+            }
+            let Ok(at) = u32::try_from(at) else {
+                return false;
+            };
+            self.declared.push((Arc::clone(unit), at));
+        }
+        true
     }
 
     pub(crate) fn function_named(&self, name: &[u8]) -> Option<Function> {
@@ -1902,7 +1954,14 @@ impl Request {
     /// The declaration of a linked class.
     #[must_use]
     pub fn class_decl(&self, class: ClassId) -> Option<&ClassDecl> {
-        self.shared.classes.get(usize::try_from(class.0).ok()?)
+        let at = usize::try_from(class.0).ok()?;
+        match at.checked_sub(self.shared.classes.len()) {
+            None => self.shared.classes.get(at),
+            Some(declared) => {
+                let (unit, index) = self.declared.get(declared)?;
+                unit.classes.get(usize::try_from(*index).ok()?)
+            }
+        }
     }
 
     /// The declaration of a linked function.
@@ -1917,7 +1976,8 @@ impl Request {
     /// `get_declared_classes()`, in declaration order.
     #[must_use]
     pub fn declared_classes(&self) -> Vec<ClassId> {
-        (0..u32::try_from(self.shared.classes.len()).unwrap_or(u32::MAX))
+        let count = self.shared.classes.len() + self.declared.len();
+        (0..u32::try_from(count).unwrap_or(u32::MAX))
             .map(ClassId)
             .collect()
     }
