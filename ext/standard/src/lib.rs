@@ -19,7 +19,8 @@
 //! call the compiler could not shape, which for the type checks is a
 //! call of the wrong count of arguments until dynamic calls land, for
 //! `count` the two-argument call, and for `chr` and `ord` an argument
-//! not written as a value.
+//! not written as a value. The `ob_*` natives are `output`'s and the
+//! header natives `head`'s, each over the engine's layer.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -33,6 +34,7 @@
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+mod head;
 mod output;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
@@ -121,6 +123,7 @@ pub fn extension() -> Extension {
         ])
         .functions(string_natives())
         .functions(output::natives())
+        .functions(head::natives())
         .constants(vec![
             constant(b"COUNT_NORMAL", COUNT_NORMAL),
             constant(b"COUNT_RECURSIVE", COUNT_RECURSIVE),
