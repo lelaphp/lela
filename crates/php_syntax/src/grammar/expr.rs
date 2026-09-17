@@ -998,8 +998,12 @@ fn class_name_reference(p: &mut Parser<'_>) -> bool {
     // What can start one: `class_name` (`static`, a name), a
     // `simple_variable` (`$v`, `$$v`, `${e}`) or `(`. A literal, `new`
     // or a string is the unexpected token (`$x instanceof 1;`, probed
-    // 8.5.9); `prefix` would read it as an operand.
+    // 8.5.9); `prefix` would read it as an operand. `callable` is a
+    // type and never a `class_name`: `new callable` is `expecting
+    // "class"` and `$x instanceof callable` the bare token (probed
+    // 8.5.9), the site's word as for any token that starts nothing.
     let starts = match p.current() {
+        K::IDENT if ckw::is_callable_text(K::IDENT, p.current_text()) => false,
         K::IDENT
         | K::NAME_QUALIFIED
         | K::NAME_FULLY_QUALIFIED

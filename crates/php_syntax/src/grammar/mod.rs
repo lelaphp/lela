@@ -620,12 +620,14 @@ fn single_value_tail(p: &mut Parser<'_>) {
 fn goto_stmt(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(K::GOTO_KW);
-    if p.at(K::IDENT) {
+    if p.at(K::IDENT) && !ckw::is_callable_text(K::IDENT, p.current_text()) {
         p.bump(K::IDENT);
     } else {
-        // A `goto` target is a plain label identifier; php spells the
+        // A `goto` target is a plain label identifier, `T_STRING`, so
+        // `callable` is refused with the reserved words; php spells the
         // clause when it is missing (`goto exit`, `goto 5` and `goto ;`
-        // are `expecting identifier`, probed 8.5.7).
+        // are `expecting identifier`, probed 8.5.7; `goto callable`,
+        // 8.5.9).
         let d = p.unexpected_here_expecting("identifier");
         p.error(d);
     }
@@ -1276,12 +1278,12 @@ fn use_stmt(p: &mut Parser<'_>) {
             grouped = true;
         } else {
             let c = p.start();
-            if !types::name_ref(p) {
+            if !use_name_ref(p) {
                 // A statement-level kind, or a comma, reduces to the
                 // name slot (`use function ;` and `use A, ;` are
                 // `expecting identifier or fully qualified name or
                 // namespaced name`); a bare `use ;` spells no clause
-                // (probed 8.5.9).
+                // (`use ;`, `use callable;`, probed 8.5.9).
                 let d = if mixed && !after_comma {
                     p.unexpected_here()
                 } else {
@@ -1389,7 +1391,7 @@ fn use_group(p: &mut Parser<'_>, mixed: bool) {
             // `name_ref` still consumes it: one diagnostic, and the tree
             // keeps its shape.
         }
-        if !types::name_ref(p) {
+        if !use_name_ref(p) {
             let d = p.unexpected_expecting(expecting);
             p.error(d);
             item.abandon(p);
@@ -1435,6 +1437,20 @@ fn use_group(p: &mut Parser<'_>, mixed: bool) {
     }
     expect_closer(p, K::R_CURLY, Some("\"}\""));
     g.complete(p, K::USE_GROUP);
+}
+
+/// The name a `use` clause or group item imports: php's `namespace_name`
+/// is `T_STRING` or a namespaced name, and `callable` is `T_CALLABLE` to
+/// its scanner, so the bare word is refused where `types::name_ref`
+/// would take it as a type (`use callable;`, `use function callable;`
+/// and `use A\{callable};` are parse errors; `use A\callable;` is a name
+/// and the compiler's fatal, probed 8.5.9). Consumes one token, or
+/// nothing on `false`.
+fn use_name_ref(p: &mut Parser<'_>) -> bool {
+    if ckw::is_callable_text(p.current(), p.current_text()) {
+        return false;
+    }
+    types::name_ref(p)
 }
 
 fn use_alias(p: &mut Parser<'_>) {

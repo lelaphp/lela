@@ -686,10 +686,15 @@ pub(crate) fn member_name(p: &mut Parser<'_>) {
 pub(crate) fn const_declarators(p: &mut Parser<'_>, semi_reserved: bool) {
     loop {
         let d = p.start();
+        // A top-level name is `T_STRING`, which `callable` is not to
+        // php's scanner (`const callable = 1;` is `expecting
+        // identifier`, probed 8.5.9); a class constant takes it through
+        // `semi_reserved`.
         let acceptable = if semi_reserved {
             ckw::is_member_name(p.current())
         } else {
-            p.peek_at(K::IDENT) || ckw::is_contextual_only(p.current())
+            (p.peek_at(K::IDENT) && !ckw::is_callable_text(K::IDENT, p.current_text()))
+                || ckw::is_contextual_only(p.current())
         };
         if acceptable {
             member_name(p);

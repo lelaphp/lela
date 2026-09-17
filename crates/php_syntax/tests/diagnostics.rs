@@ -700,3 +700,87 @@ fn no_site_names_the_wanted_token_as_the_unwanted_one_on_a_stray_close_tag() {
         }
     }
 }
+
+#[test]
+fn callable_is_refused_where_php_reads_a_class_reference_a_label_a_const_or_a_use_name() {
+    // php's scanner hands the parser `T_CALLABLE`, and `class_name`,
+    // `goto`'s label, `const_decl`'s name and `use_declaration`'s name are
+    // `T_STRING` or a namespaced name: each is a `ParseError` under the
+    // pin, with php's clause at that state.
+    for (src, message) in [
+        (
+            "<?php new callable;",
+            "syntax error, unexpected token \"callable\", expecting \"class\"",
+        ),
+        (
+            "<?php new callable();",
+            "syntax error, unexpected token \"callable\", expecting \"class\"",
+        ),
+        (
+            "<?php echo new callable;",
+            "syntax error, unexpected token \"callable\", expecting \"class\"",
+        ),
+        (
+            "<?php $x instanceof callable;",
+            "syntax error, unexpected token \"callable\"",
+        ),
+        (
+            "<?php goto callable;",
+            "syntax error, unexpected token \"callable\", expecting identifier",
+        ),
+        (
+            "<?php const callable = 1;",
+            "syntax error, unexpected token \"callable\", expecting identifier",
+        ),
+        (
+            "<?php const A = 1, callable = 2;",
+            "syntax error, unexpected token \"callable\", expecting identifier",
+        ),
+        (
+            "<?php use callable;",
+            "syntax error, unexpected token \"callable\"",
+        ),
+        (
+            "<?php use callable as x;",
+            "syntax error, unexpected token \"callable\"",
+        ),
+        (
+            "<?php use function callable;",
+            "syntax error, unexpected token \"callable\", expecting identifier or fully qualified name or namespaced name",
+        ),
+        (
+            "<?php use const callable;",
+            "syntax error, unexpected token \"callable\", expecting identifier or fully qualified name or namespaced name",
+        ),
+        (
+            "<?php use A\\{callable};",
+            "syntax error, unexpected token \"callable\", expecting identifier or namespaced name or \"function\" or \"const\"",
+        ),
+    ] {
+        assert_eq!(first(src), (1, message.into()), "{src}");
+    }
+    // The line is the token's: php reports where `callable` stands.
+    assert_eq!(
+        first("<?php\n\nnew callable;"),
+        (
+            3,
+            "syntax error, unexpected token \"callable\", expecting \"class\"".into()
+        )
+    );
+    // Where php takes the word, no diagnostic: `callable` as a type, an
+    // anonymous class, a class constant and a qualified `use` name whose
+    // last segment is `callable` (that one is the compiler's fatal).
+    for src in [
+        "<?php function f(callable $c){}",
+        "<?php function f(): ?callable {}",
+        "<?php new class {};",
+        "<?php $x instanceof A;",
+        "<?php goto a; a: ;",
+        "<?php const A = 1;",
+        "<?php class A { const callable = 1; }",
+        "<?php use A\\callable;",
+        "<?php use A\\B;",
+    ] {
+        assert_eq!(diagnostics(src), [], "{src}");
+    }
+}
