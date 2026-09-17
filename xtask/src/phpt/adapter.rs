@@ -209,12 +209,22 @@ impl<'a> Adapter<'a> {
 
 /// The extensions a binary loads under the recipe, as upstream asks for
 /// them: `Core` dropped, `Zend OPcache` mapped to `opcache` and the rest
-/// lowered (run-tests.php:2908-2916).
+/// lowered (run-tests.php:2908-2916). Upstream asks a program,
+/// `get_loaded_extensions()` joined by `implode`; this lane asks the
+/// binary's own listing, `-m`, which ends at the first blank line, so
+/// the answer is the host's and stands before the engine serves one
+/// native of `ext/standard` (#261). php reads `-m` off the line whatever
+/// follows it, so the recipe's program is written and not served.
 fn loaded_extensions(oracle: &Oracle<'_>, binary: &Path) -> Result<Vec<String>> {
-    let snippet = r#"echo implode("\n", get_loaded_extensions());"#;
-    let out = oracle.run_under(&Invocation::new(binary, Program::Snippet(snippet)))?;
+    let listing = [String::from("-m")];
+    let out = oracle.run_under(&Invocation {
+        flags: &listing,
+        ..Invocation::new(binary, Program::Snippet(""))
+    })?;
     Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
+        .skip(1)
+        .take_while(|line| !line.trim().is_empty())
         .map(str::trim)
         .filter(|name| !name.is_empty() && *name != "Core")
         .map(|name| {
