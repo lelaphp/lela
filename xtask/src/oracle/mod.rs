@@ -427,7 +427,9 @@ impl Pin {
 }
 
 /// What `run` executes: a snippet, written to the recipe's `script_name` with its
-/// preamble, or a file that already is a program, run from its directory.
+/// preamble and run by that name, or a file that already is a program, run
+/// from its directory by its absolute path, as upstream's runner hands a
+/// test's program to php (#331).
 #[derive(Debug, Clone, Copy)]
 pub enum Program<'a> {
     Snippet(&'a str),
@@ -762,8 +764,8 @@ fn renumber(haystack: &[u8], token: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Where a program runs: its directory and the file it is written to, and a directory of this
-/// run's own for the streams, removed on drop.
+/// Where a program runs: its directory and the path it is run by, and a
+/// directory of this run's own for the streams, removed on drop.
 struct Scratch {
     dir: PathBuf,
     script: PathBuf,
@@ -780,39 +782,62 @@ impl Scratch {
                     .with_context(|| format!("writing {}", recipe.script_name))?;
                 (own.path().to_path_buf(), script)
             }
-            Program::File(path) => {
-                let dir = path
-                    .parent()
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-                let script = path
-                    .file_name()
-                    .map(PathBuf::from)
-                    .with_context(|| format!("{} names no file", path.display()))?;
-                (dir, script)
-            }
+            Program::File(path) => (dir_of(path), run_by(path)?),
         };
         Ok(Scratch { dir, script, own })
     }
 
-    /// The recipe's normalisation of a stream: [`normalise`], and then the
-    /// scratch directory, as given and as the kernel resolves it, replaced
-    /// by the token.
+    /// The recipe's normalisation of a stream: [`normalise_in`] over the
+    /// directory the program ran in.
     fn normalise(&self, rules: &Normalise, bytes: Vec<u8>) -> Vec<u8> {
-        let mut bytes = normalise(rules, bytes);
-        let mut forms = vec![self.dir.clone()];
-        if let Ok(real) = self.dir.canonicalize() {
-            forms.push(real);
-        }
-        forms.sort_by_key(|p| std::cmp::Reverse(p.as_os_str().len()));
-        for form in forms {
-            let form = form.to_string_lossy();
-            if !form.is_empty() {
-                bytes = replace(&bytes, form.as_bytes(), rules.scratch_token.as_bytes());
-            }
-        }
-        bytes
+        normalise_in(rules, &self.dir, bytes)
     }
+}
+
+/// The directory a file program runs in: its own, and the current one
+/// for a bare name.
+fn dir_of(path: &Path) -> PathBuf {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
+}
+
+/// The path a file program is run by: its directory as the kernel
+/// resolves it, joined with the file's own name, which is what upstream's
+/// runner hands php, `realpath` of the test's directory and the program's
+/// name. `__FILE__`, `ReflectionClass::getFileName()`, the name php's
+/// dump prints into each block and every error site print the path a
+/// program was run by, so a `%s<name>.php` expectation, whose `%s` is one
+/// character or more, is met only by a name with its directory before it
+/// (#331). The fresh-process adapter runs a file by this path and the
+/// linked compiler is handed the same one, so the two sides of a dump
+/// carry one name; [`normalise_in`] puts the token where the directory
+/// was, so what is compared carries no machine's path.
+pub fn run_by(path: &Path) -> Result<PathBuf> {
+    let dir = dir_of(path);
+    let name = path
+        .file_name()
+        .with_context(|| format!("{} names no file", path.display()))?;
+    Ok(dir.canonicalize().unwrap_or(dir).join(name))
+}
+
+/// The recipe's normalisation of what a program wrote or was compiled
+/// under in `dir`: [`normalise`], and then the directory, as given and as
+/// the kernel resolves it, replaced by the token.
+pub fn normalise_in(rules: &Normalise, dir: &Path, bytes: Vec<u8>) -> Vec<u8> {
+    let mut bytes = normalise(rules, bytes);
+    let mut forms = vec![dir.to_path_buf()];
+    if let Ok(real) = dir.canonicalize() {
+        forms.push(real);
+    }
+    forms.sort_by_key(|p| std::cmp::Reverse(p.as_os_str().len()));
+    for form in forms {
+        let form = form.to_string_lossy();
+        if !form.is_empty() {
+            bytes = replace(&bytes, form.as_bytes(), rules.scratch_token.as_bytes());
+        }
+    }
+    bytes
 }
 
 fn replace(haystack: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {

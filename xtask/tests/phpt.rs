@@ -541,3 +541,63 @@ fn the_full_corpus_is_a_flag_the_manifest_denies_at_the_tool_call() {
         .expect("the rule denies a pattern");
     assert!(rule.contains("phpt"), "{rule}");
 }
+
+/// A binary standing where the engine's would that prints `__FILE__` as
+/// the engine prints it, the path the program was run by, taken as the
+/// first argument ending in `.php`; or, with `bare`, that name alone, the
+/// relative name the lane handed before #331.
+fn echoing_engine(scratch: &Scratch, bare: bool) -> PathBuf {
+    let name = if bare { "bare-name" } else { "as-given" };
+    let path = scratch.root.join("engine").join(name);
+    let printed = if bare { "$(basename \"$arg\")" } else { "$arg" };
+    fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    *.php) file=\"{printed}\"; printf 'string(%s) \"%s\"\\n' \"${{#file}}\" \"$file\"; exit 0 ;;\n  esac\ndone\nexit 1\n"
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    path
+}
+
+/// The fixture at `xtask/fixtures/phpt/FileName_basic.phpt` (#331): a
+/// `--EXPECTF--` of `%sFileName_basic.php`, where `%s` is one character
+/// or more, as the corpus pins `ReflectionClass::getFileName()` and every
+/// error site. Upstream's runner hands php the program's absolute path,
+/// and the engine prints `__FILE__` as the path it was run by, so the
+/// fixture is met when the lane hands the absolute path and missed on the
+/// bare name the lane handed before: the second engine is the fixture's
+/// negative control, and the first is what the runner now does.
+#[test]
+fn a_program_runs_by_its_absolute_path_so_a_directory_before_its_name_is_matched() {
+    if oracle().is_none() {
+        return;
+    }
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/phpt/FileName_basic.phpt");
+    let text = fs::read_to_string(&fixture).unwrap();
+    assert!(
+        text.contains("\"%sFileName_basic.php\""),
+        "the fixture expects a directory before the name: {text}"
+    );
+    let scratch = Scratch::new("absolute", &[("FileName_basic.phpt", &text)]);
+
+    let bare = echoing_engine(&scratch, true);
+    let reading = scratch.run(&registry(""), &bare);
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert!(
+        reading.message.contains("FileName_basic.phpt"),
+        "the fixture fails on the relative name: {}",
+        reading.message
+    );
+
+    let as_given = echoing_engine(&scratch, false);
+    let reading = scratch.run(&registry(""), &as_given);
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    assert_eq!(count(&reading, "passed"), 1);
+    assert_eq!(count(&reading, "failed"), 0);
+}

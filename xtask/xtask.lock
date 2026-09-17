@@ -145,6 +145,8 @@ oracle::Verdict
 oracle::compare
 oracle::diff
 oracle::normalise
+oracle::normalise_in
+oracle::run_by
 oracle::verdict
 permit::Adapter
 permit::Arguments

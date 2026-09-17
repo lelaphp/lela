@@ -1,10 +1,11 @@
 //! The fresh-process adapter of design §8's `ScriptExec` seam: how one
 //! `.phpt` is judged. The test's program is written where upstream writes
-//! it and run through the binary under test with the sections that shape
-//! one run (`--INI--`, `--ARGS--`, `--ENV--`, `--STDIN--`,
-//! `--CAPTURE_STDIO--`), its `SKIPIF` and `CLEAN` sections run beside it
-//! under the oracle, and what it wrote held to its `--EXPECT*--` section with
-//! php's normalisation. The verdict goes through [`oracle::verdict`], so
+//! it and run through the binary under test by its absolute path, as
+//! upstream hands it (#331), with the sections that shape one run
+//! (`--INI--`, `--ARGS--`, `--ENV--`, `--STDIN--`, `--CAPTURE_STDIO--`),
+//! its `SKIPIF` and `CLEAN` sections run beside it under the oracle by the
+//! same shape of path, and what it wrote held to its `--EXPECT*--` section
+//! with php's normalisation. The verdict goes through [`oracle::verdict`], so
 //! the registry decides what a difference means (harness §4.3). The tally,
 //! the subsets and the reading are `phpt`'s; this is the per-item judge it
 //! contributes.

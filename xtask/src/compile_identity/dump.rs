@@ -15,8 +15,9 @@
 //! **Why one program under one name.** php prints the name it was given
 //! into each block of the dump, so two programs under two names would
 //! differ there before an opline was compared. One program, under one
-//! name, in one directory, under one recipe: what is left between the two
-//! dumps is the compiler.
+//! name, the absolute path the process adapter runs a file by
+//! ([`oracle::run_by`], #331), in one directory, under one recipe: what
+//! is left between the two dumps is the compiler.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -98,19 +99,13 @@ impl<'a> Dumps<'a> {
     }
 
     /// The engine's side of one dump: the linked compiler over the
-    /// program's own bytes, under the name php was given for them, or the
+    /// program's own bytes, under the path php was given for them, or the
     /// binary compiling the file php compiled.
     fn engine_dump(&self, program: &Path, body: &[u8]) -> Result<Dumped> {
         match &self.compiler {
-            Compiler::Linked(engine) => linked::dump(
-                engine,
-                &self.oracle.pin().recipe.normalise,
-                body,
-                program
-                    .file_name()
-                    .unwrap_or(program.as_os_str())
-                    .as_encoded_bytes(),
-            ),
+            Compiler::Linked(engine) => {
+                linked::dump(engine, &self.oracle.pin().recipe.normalise, body, program)
+            }
             Compiler::Binary(binary) => self.dump(binary, program),
         }
     }
