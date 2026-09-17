@@ -1,0 +1,22 @@
+# php: the binary (design §4.1). The bundle's enabled set on one engine, the
+# tier the bundle names, served by php_sapi's CLI host. Two edges, php_bundle
+# and php_sapi; the engine is named through the host face alone.
+[package]
+name = "php"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The binary: the bundle's enabled set on one engine, behind the CLI host"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "php"
+path = "src/main.rs"
+
+[dependencies]
+php_bundle = { path = "../php_bundle" }
+php_sapi = { path = "../php_sapi" }

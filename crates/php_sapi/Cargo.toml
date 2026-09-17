@@ -1,0 +1,19 @@
+# php_sapi: the hosts (design §4.1, §4.3 seam 4, §5.14). Each builds a request
+# description and supplies a sink; the CLI is the first, CGI, the FastCGI
+# worker and the dev server follow. Two edges: php_engine through the host
+# face, `sapi.lock`, and php_proto for the codecs; never `api`.
+[package]
+name = "php_sapi"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The hosts: the CLI, and as each lands, CGI, the FastCGI worker and the dev server"
+
+[lints]
+workspace = true
+
+[dependencies]
+php_engine = { path = "../php_engine" }
+php_proto = { path = "../php_proto" }
