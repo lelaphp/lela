@@ -2824,8 +2824,9 @@ mod tests {
     /// each source read once: `NEW` into a `VAR` with its `DO_FCALL`
     /// unused and the `FREE` or the live range `zend_do_free` leaves;
     /// the two `INIT_*_METHOD_CALL`s with their arguments sent for a
-    /// callee nothing is known of; `INSTANCEOF` into a temporary, and
-    /// `false` where the left side is a constant.
+    /// callee nothing is known of; `INSTANCEOF` into a temporary, a
+    /// chain of them grouped to the left with the second over the
+    /// first's temporary, and `false` where the left side is a constant.
     #[test]
     fn new_compiles_to_php_s_op_array() {
         let cases: &[(&[u8], usize, u32, u32, &str)] = &[
@@ -2881,10 +2882,11 @@ mod tests {
         assert_eq!(unit.main.cache_size, 2, "NEW and INSTANCEOF take one each");
     }
 
-    /// The two `INIT_*_METHOD_CALL`s and `INSTANCEOF`, read as
-    /// [`new_compiles_to_php_s_op_array`]'s cases were.
+    /// The two `INIT_*_METHOD_CALL`s, read as
+    /// [`new_compiles_to_php_s_op_array`]'s cases were, and `INSTANCEOF`
+    /// as an argument sent.
     #[test]
-    fn the_method_calls_and_instanceof_compile_to_php_s_op_arrays() {
+    fn the_method_calls_compile_to_php_s_op_arrays() {
         let cases: &[(&[u8], usize, u32, u32, &str)] = &[
             (
                 b"<?php $x = E::m();",
@@ -2945,6 +2947,29 @@ mod tests {
                  0004 DO_FCALL\n\
                  0005 RETURN int(1)\n",
             ),
+        ];
+        for (source, lines, vars, tmps, oplines) in cases {
+            assert_eq!(
+                dump_of(source),
+                main_dump(*lines, *vars, *tmps, oplines),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+        let (unit, _strings) = unit_and_strings(b"<?php E::m(); $o->n();");
+        assert_eq!(
+            unit.main.cache_size, 4,
+            "each INIT takes two cache slots, the class and the method"
+        );
+    }
+
+    /// `INSTANCEOF` as the oracle at 8.5.9 dumps it: into a temporary,
+    /// freed where the test is a statement; `false` where the left side
+    /// is a constant; a chain grouped to the left, the second over the
+    /// first's temporary.
+    #[test]
+    fn instanceof_compiles_to_php_s_op_array() {
+        let cases: &[(&[u8], usize, u32, u32, &str)] = &[
             (
                 b"<?php $o = 1; $o instanceof E;",
                 4,
@@ -2965,6 +2990,17 @@ mod tests {
                  0002 ECHO bool(false)\n\
                  0003 RETURN int(1)\n",
             ),
+            (
+                b"<?php $o = 1; echo $o instanceof E instanceof F;",
+                5,
+                1,
+                3,
+                "0000 ASSIGN CV0($o) int(1)\n\
+                 0001 T2 = INSTANCEOF CV0($o) string(\"E\")\n\
+                 0002 T3 = INSTANCEOF T2 string(\"F\")\n\
+                 0003 ECHO T3\n\
+                 0004 RETURN int(1)\n",
+            ),
         ];
         for (source, lines, vars, tmps, oplines) in cases {
             assert_eq!(
@@ -2974,11 +3010,6 @@ mod tests {
                 String::from_utf8_lossy(source)
             );
         }
-        let (unit, _strings) = unit_and_strings(b"<?php E::m(); $o->n();");
-        assert_eq!(
-            unit.main.cache_size, 4,
-            "each INIT takes two cache slots, the class and the method"
-        );
     }
 
     /// `zend_delayed_compile_prop` as the oracle at 8.5.9 dumps it under
@@ -3217,9 +3248,7 @@ mod tests {
     }
 
     /// What stands beside these four and is not read yet is refused as
-    /// such; what php's grammar refuses, an `instanceof` of an
-    /// `instanceof`, the parser has refused in php's words before the
-    /// reader sees it.
+    /// such.
     #[test]
     fn what_stands_beside_new_and_the_calls_is_refused_as_not_yet_read() {
         let refused = |source: &[u8]| {
@@ -3253,11 +3282,6 @@ mod tests {
         assert_eq!(
             refused(b"<?php echo $o instanceof $c;").as_deref(),
             Some("an `instanceof` of what is no class name this compiler cannot read yet")
-        );
-        assert_eq!(
-            refused(b"<?php echo $o instanceof E instanceof F;").as_deref(),
-            Some("syntax error, unexpected token \"instanceof\""),
-            "the parser's own refusal stands first"
         );
         assert_eq!(
             refused(b"<?php new self;").as_deref(),

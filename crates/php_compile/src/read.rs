@@ -1262,36 +1262,48 @@ impl Reader<'_> {
         }
     }
 
-    /// `expr instanceof C`, php's non-associative level between `!` and
-    /// the unary operators (`%precedence T_INSTANCEOF` stands below
-    /// `'~'` and the casts in `zend_language_parser.y`), so `-$a
-    /// instanceof C` is php's `(-$a) instanceof C` and a second
-    /// `instanceof` after the first is php's parse error, refused here.
+    /// `expr instanceof C`, php's level between `!` and the unary
+    /// operators (`%precedence T_INSTANCEOF` stands below `'~'` and the
+    /// casts in `zend_language_parser.y`), so `-$a instanceof C` is
+    /// php's `(-$a) instanceof C`. The rule is `expr T_INSTANCEOF
+    /// class_name_reference` with no associativity declared, so a
+    /// second `instanceof` reads the first as its left side, php's
+    /// `($o instanceof E) instanceof F`, a chain grouped to the left as
+    /// the arithmetic levels are; the oracle at 8.5.9 compiles it to two
+    /// `INSTANCEOF`s, the second over the first's temporary, and a
+    /// bool on the left is no object, so the chain is `false`.
+    ///
+    /// ```php
+    /// $o = 1;
+    /// var_dump($o instanceof E instanceof F);
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// ```
+    ///
     /// The class is a name as written; `self`, `parent` and `static`
     /// are the emitter's to refuse, and a class held in a variable is
     /// not read.
     fn instance_of(&mut self) -> Result<Expr, Trouble> {
-        let left = self.unary()?;
-        self.skip_trivia();
-        if !self.word_ahead(b"instanceof") {
-            return Ok(left);
+        let mut left = self.unary()?;
+        loop {
+            self.skip_trivia();
+            if !self.word_ahead(b"instanceof") {
+                return Ok(left);
+            }
+            self.bump(10);
+            self.skip_trivia();
+            if !self.name_ahead() {
+                return Err(self.trouble(
+                    "an `instanceof` of what is no class name this compiler cannot read yet",
+                ));
+            }
+            let class = self.name();
+            left = Expr::Instanceof {
+                expr: Child::new(left),
+                class,
+            };
         }
-        self.bump(10);
-        self.skip_trivia();
-        if !self.name_ahead() {
-            return Err(self.trouble(
-                "an `instanceof` of what is no class name this compiler cannot read yet",
-            ));
-        }
-        let class = self.name();
-        self.skip_trivia();
-        if self.word_ahead(b"instanceof") {
-            return Err(self.trouble("an `instanceof` of an `instanceof`, which php does not read"));
-        }
-        Ok(Expr::Instanceof {
-            expr: Child::new(left),
-            class,
-        })
     }
 
     /// `-$a` and `+$a`, which bind tighter than either level and nest.
