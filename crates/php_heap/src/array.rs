@@ -136,6 +136,40 @@ pub(crate) fn persistent_array(entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
     Ok(a)
 }
 
+/// `_zend_hash_init(ht, size, NULL, ZSTR_HASH_LOOKUP, 0)` over a header
+/// the system allocator holds: what `zend_init_interned_strings_ht` does
+/// to `CG(interned_strings)` (`Z/Zend/zend_string.c:78-84`), whose
+/// `HashTable` is a field of `zend_compiler_globals` and not the request's
+/// memory, while the data it lays down on the first add is the request's
+/// own. [`free_table_header`] gives the header back; the data goes with
+/// the heap whose allocator handed it out.
+pub(crate) fn table_header(size: u32) -> Result<Arr, Fatal> {
+    let size = check_size(size)?;
+    let at = System.alloc(HEADER)?;
+    // SAFETY: the allocation is the header's size and nothing else
+    // holds it.
+    Ok(unsafe { Arr::init(at, size) })
+}
+
+/// The header [`table_header`] laid down, back to the system allocator.
+/// Its data is not touched: that is the request heap's, freed with the
+/// heap's chunks, so this runs after the heap or over an array whose
+/// data was never laid down.
+pub(crate) fn free_table_header(a: Arr) {
+    // SAFETY: the header came from `table_header` and nothing names it.
+    unsafe { System.free(a.address()) };
+}
+
+/// `zend_hash_add_new(ht, str, &val)` under `zend_add_interned_string`
+/// (`Z/Zend/zend_string.c:173-185`): `s`, interned already, as its own
+/// key and as the value, out of `mm` for the data the first add lays
+/// down and for each doubling. The caller has looked the bytes up and
+/// found nothing, so the add is an add.
+pub(crate) fn add_interned(mm: &mut Mm, a: Arr, s: Str) -> Result<(), Fatal> {
+    write_str(mm, a, s, Zval::string(s))?;
+    Ok(())
+}
+
 /// `pefree` over a [`persistent_array`]: the data, then the header.
 pub(crate) fn free_persistent_array(a: Arr) {
     if let Some(data) = a.data_addr() {
@@ -532,6 +566,30 @@ impl Arr {
                     .is_some_and(|k| k.is_same(key) || k.bytes() == key.bytes())
             {
                 return Some(idx);
+            }
+            idx = b.val.next();
+        }
+        None
+    }
+
+    /// `zend_interned_string_ht_lookup_ex` (`Z/Zend/zend_string.c:132-169`):
+    /// the string key whose hash is `h` and whose bytes are `bytes`, for
+    /// a table of interned strings asked about bytes that are not yet a
+    /// string. The walk is [`Arr::find_str`]'s over the chain `h` names,
+    /// comparing the bytes, since the caller holds no string to be the
+    /// same as.
+    pub(crate) fn find_bytes(self, h: u64, bytes: &[u8]) -> Option<Str> {
+        if self.is_uninitialized() || self.is_packed() {
+            return None;
+        }
+        let mut idx = self.read_hash((h as u32) | self.mask());
+        while idx != INVALID {
+            let b = self.read_bucket(idx);
+            if b.h == h
+                && let Some(k) = b.key
+                && k.bytes() == bytes
+            {
+                return Some(k);
             }
             idx = b.val.next();
         }

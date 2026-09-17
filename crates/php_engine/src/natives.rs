@@ -614,7 +614,7 @@ fn type_text(ty: &Type) -> String {
 /// heap holds beside the interned strings is on the system allocator
 /// in this engine, the op array, the compiler and the tree, which
 /// design §5.13 states as the one approximation and the divergence row
-/// on the witness of `Buckets` records.
+/// on the witness of `php_heap::string::Table` records.
 ///
 /// ```php
 /// var_dump(memory_get_usage(true), memory_get_peak_usage(true));
@@ -992,7 +992,7 @@ mod tests {
     /// comparable: what php's request heap holds beside the interned
     /// strings and their table is here on the system allocator, the op
     /// array, the compiler and the tree, which design §5.13 states as an
-    /// approximation. The witness on `php_heap::string::Buckets` holds the
+    /// approximation. The witness on `php_heap::string::Table` holds the
     /// two numbers to each other under the divergence row that says so
     /// (#178). What replaces this pin with a number both answer is #174's
     /// witness, where a variable in `php_compile` and a `str_repeat()`

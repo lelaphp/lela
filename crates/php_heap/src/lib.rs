@@ -86,13 +86,11 @@ pub struct Heap {
     /// php's `CG(interned_strings)`: the strings this request interned,
     /// live until the request ends (`Z/Zend/zend_string.c:346-353`).
     /// The strings are the request's own memory and are counted as such,
-    /// and so is the table's own storage in [`string::Buckets`] beside
-    /// it.
+    /// and so is the table's data, one [`Arr`] whose 40960 bytes the
+    /// first string it interns lays down, doubling where php's doubles.
+    /// Declared after `mm` so that the chunks holding that data are gone
+    /// before the table frees its header.
     interned: string::Table,
-    /// The storage that table takes, php's bucket array for the same
-    /// `HashTable`: 40960 bytes of the request's own memory on the first
-    /// string it interns, and doubling where php's doubles.
-    buckets: string::Buckets,
 }
 
 impl Default for Heap {
@@ -113,8 +111,7 @@ impl Heap {
             store,
             resources: resource::RegularList::default(),
             mm,
-            interned: string::Table::default(),
-            buckets: string::Buckets::new(),
+            interned: string::Table::new(),
         }
     }
 
@@ -315,8 +312,7 @@ impl Intern for Heap {
         // SAFETY: the allocation is exactly the size `init` asks for and
         // nothing else holds it.
         let s = unsafe { Str::init(at, bytes, string::INTERNED) };
-        self.buckets.add_one(&mut self.mm)?;
-        self.interned.add(hash, s);
+        self.interned.add(&mut self.mm, s)?;
         Ok(s)
     }
 
