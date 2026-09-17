@@ -63,11 +63,13 @@
 
 use std::cmp::Ordering;
 
-use php_heap::{Fatal, Intern, Number, Scalar, Zval, ZvalType, double_to_string, numeric_prefix};
+use php_heap::{
+    Fatal, Intern, Key, Number, Scalar, Zval, ZvalType, double_to_string, numeric_prefix,
+};
 use php_unit::decl::{ConstDecl, ConstExpr, FunctionDecl, Name};
 use php_unit::{Diagnostic, Level, OpArray, Opcode, OperandKind, Opline, OplineIdx, Unit};
 
-use crate::read::{BinaryOp, CastTo, Expr, Read, Stmt};
+use crate::read::{Arm, BinaryOp, Case, CastTo, Expr, Read, Stmt};
 use crate::{CompileError, Options, StackLimit};
 
 /// One op array under construction, and the home its constant strings
@@ -96,7 +98,53 @@ pub(crate) struct Emit<'a> {
     line: u32,
     /// What `zend_error` raised so far, [`Unit::diagnostics`].
     diagnostics: Vec<Diagnostic>,
+    /// `CG(context).brk_cont_array`: every loop and `switch` of the op
+    /// array, in the order begun, and `current_brk_cont`, the innermost
+    /// one open.
+    loops: Vec<Loop>,
+    current_loop: Option<usize>,
+    /// The `ZEND_BRK` and `ZEND_CONT` oplines, which `pass_two` turns
+    /// into the `JMP` each is once every loop's end is known: the opline,
+    /// the loop it was written in, its depth and whether it breaks.
+    breaks: Vec<Pending>,
 }
+
+/// `zend_brk_cont_element`: one loop or `switch`, the loop it stands in,
+/// where `break` and `continue` out of it land, and the temporary a
+/// `switch` holds its subject in, which a `break` out past it frees
+/// (`zend_loop_var`, the `ZEND_FREE` of `zend_handle_loops_and_finally_ex`).
+struct Loop {
+    parent: Option<usize>,
+    is_switch: bool,
+    brk: u32,
+    cont: u32,
+    var: Option<(OperandKind, u32)>,
+}
+
+/// One `break` or `continue` before `pass_two` resolves it.
+struct Pending {
+    at: u32,
+    r#loop: usize,
+    depth: u32,
+    is_break: bool,
+}
+
+/// The jump table of one `SWITCH_LONG`, `SWITCH_STRING` or `MATCH`
+/// while its targets are being learnt: the opline, the constant slot
+/// reserved for the array, and the entries so far.
+struct Table {
+    at: u32,
+    slot: u32,
+    entries: Vec<(Key, Zval)>,
+}
+
+/// `ZEND_FREE_ON_RETURN`, the bit `zend_compile.h` sets on the `FREE` a
+/// `break` or `continue` emits for the subject of each `switch` it
+/// leaves, which the live-range walk reads (`crate::live`).
+const FREE_ON_RETURN: u32 = 1 << 0;
+/// `ZEND_FREE_SWITCH`, the bit `zend_compile.h` sets on the `FREE` of a
+/// `switch` or `match` subject at its end.
+const FREE_SWITCH: u32 = 1 << 1;
 
 /// Where an expression left its value, php's `znode`: the value itself
 /// for a constant, which reaches the table only when the opline that
@@ -134,6 +182,9 @@ pub(crate) fn unit(
         cache_slots: 0,
         line: 1,
         diagnostics: Vec::new(),
+        loops: Vec::new(),
+        current_loop: None,
+        breaks: Vec::new(),
     };
     // A fatal leaves the file with what `zend_error` had raised before
     // it already rendered, so those travel with it.
@@ -142,6 +193,7 @@ pub(crate) fn unit(
         return Err(refused);
     }
     emit.final_return();
+    emit.resolve_breaks();
     swap_commutative(&mut emit.oplines);
     let live_ranges = crate::live::live_ranges(&mut emit.oplines, emit.temporaries);
     let num_cvs = u32::try_from(emit.vars.len()).unwrap_or(u32::MAX);
@@ -319,6 +371,9 @@ impl Emit<'_> {
                 body,
             } => self.r#for(init, cond, step, body)?,
             Stmt::While { cond, body } => self.r#while(cond, body)?,
+            Stmt::Switch { expr, cases } => self.switch(expr, cases)?,
+            Stmt::Break(depth) => self.break_continue(depth.as_ref(), true)?,
+            Stmt::Continue(depth) => self.break_continue(depth.as_ref(), false)?,
         }
         Ok(())
     }
@@ -350,14 +405,17 @@ impl Emit<'_> {
             opcode: Opcode::Jmp,
             ..Opline::default()
         });
+        self.begin_loop(None, false);
         let start = self.next();
         self.statements(body)?;
+        let continue_at = self.next();
         self.line = line;
         let step = self.expr_list(step)?;
         self.do_free(step);
         self.update_jump_target_to_next(jump);
         let cond = self.expr_list(cond)?;
         self.emit_cond_jump(cond, start);
+        self.end_loop(continue_at);
         Ok(())
     }
 
@@ -369,13 +427,588 @@ impl Emit<'_> {
             opcode: Opcode::Jmp,
             ..Opline::default()
         });
+        self.begin_loop(None, false);
         let start = self.next();
         self.statements(body)?;
+        let continue_at = self.next();
         self.line = line;
         self.update_jump_target_to_next(jump);
         let cond = self.expr(cond)?;
         self.emit_cond_jump(cond, start);
+        self.end_loop(continue_at);
         Ok(())
+    }
+
+    /// `zend_begin_loop`: one more element of `brk_cont_array`, the
+    /// innermost from here, holding the subject's temporary when a
+    /// `switch` has one to free.
+    fn begin_loop(&mut self, var: Option<Where>, is_switch: bool) {
+        let var = match var {
+            Some(Where::Temporary(at)) => Some((OperandKind::Tmp, at)),
+            Some(Where::Returned(at)) => Some((OperandKind::Var, at)),
+            _ => None,
+        };
+        self.loops.push(Loop {
+            parent: self.current_loop,
+            is_switch,
+            brk: 0,
+            cont: 0,
+            var,
+        });
+        self.current_loop = Some(self.loops.len() - 1);
+    }
+
+    /// `zend_end_loop`: `continue` lands at `cont`, `break` at the
+    /// opline about to be emitted, and the loop outside is the innermost
+    /// again.
+    fn end_loop(&mut self, cont: u32) {
+        let brk = self.next();
+        if let Some(current) = self.current_loop
+            && let Some(open) = self.loops.get_mut(current)
+        {
+            open.brk = brk;
+            open.cont = cont;
+            self.current_loop = open.parent;
+        }
+    }
+
+    /// `zend_compile_break_continue`: the depth, `1` unwritten and
+    /// otherwise the positive integer php's compiler holds it to; the
+    /// loop or `switch` it stands in, without which php refuses; the
+    /// `FREE` of each `switch` subject the jump leaves behind
+    /// (`zend_handle_loops_and_finally_ex`), which is also where a depth
+    /// past the loops that stand is refused; the compile-time warning
+    /// for a `continue` that targets a `switch`; then the `ZEND_BRK` or
+    /// `ZEND_CONT`, here the `JMP` `pass_two` makes of it once its
+    /// target is known ([`Self::resolve_breaks`]).
+    fn break_continue(&mut self, depth: Option<&Expr>, is_break: bool) -> Result<(), CompileError> {
+        let word = if is_break { "break" } else { "continue" };
+        let depth = match depth {
+            None => 1,
+            Some(expr) => {
+                let Some(value) = self.constant_of(expr)? else {
+                    return Err(self.compile_error(format!(
+                        "'{word}' operator with non-integer operand is no longer supported"
+                    )));
+                };
+                match value.as_long() {
+                    Some(depth) if depth >= 1 => u32::try_from(depth).unwrap_or(u32::MAX),
+                    _ => {
+                        return Err(self.compile_error(format!(
+                            "'{word}' operator accepts only positive integers"
+                        )));
+                    }
+                }
+            }
+        };
+        let Some(current) = self.current_loop else {
+            return Err(
+                self.compile_error(format!("'{word}' not in the 'loop' or 'switch' context"))
+            );
+        };
+        // `zend_handle_loops_and_finally_ex`: the loops inside the target
+        // are left, each `switch` subject among them freed on the way.
+        let mut left = 0;
+        let mut at = Some(current);
+        while left + 1 < depth {
+            let Some(index) = at else {
+                break;
+            };
+            let Some((var, parent)) = self.loops.get(index).map(|open| (open.var, open.parent))
+            else {
+                break;
+            };
+            if let Some((kind, var)) = var {
+                self.push(Opline {
+                    opcode: Opcode::Free,
+                    op1_type: kind,
+                    op1: var,
+                    extended_value: FREE_ON_RETURN,
+                    ..Opline::default()
+                });
+            }
+            at = parent;
+            left += 1;
+        }
+        if at.is_none() || left + 1 < depth {
+            let plural = if depth == 1 { "" } else { "s" };
+            return Err(self.compile_error(format!("Cannot '{word}' {depth} level{plural}")));
+        }
+        if !is_break
+            && let Some(target) = at.and_then(|index| self.loops.get(index))
+            && target.is_switch
+        {
+            let hint = if target.parent.is_none() {
+                String::new()
+            } else {
+                format!(". Did you mean to use \"continue {}\"?", depth + 1)
+            };
+            let message = if depth == 1 {
+                format!("\"continue\" targeting switch is equivalent to \"break\"{hint}")
+            } else {
+                format!(
+                    "\"continue {depth}\" targeting switch is equivalent to \"break {depth}\"{hint}"
+                )
+            };
+            self.raise(Level::CompileWarning, &message);
+        }
+        let opline = self.push(Opline {
+            opcode: Opcode::Jmp,
+            ..Opline::default()
+        });
+        self.breaks.push(Pending {
+            at: opline,
+            r#loop: current,
+            depth,
+            is_break,
+        });
+        Ok(())
+    }
+
+    /// `pass_two`'s `ZEND_BRK` and `ZEND_CONT` arm, `zend_get_brk_cont_target`:
+    /// the loop `depth` levels out from the one the jump was written in,
+    /// and its `brk` or `cont` as the `JMP`'s target.
+    fn resolve_breaks(&mut self) {
+        for jump in std::mem::take(&mut self.breaks) {
+            let mut index = jump.r#loop;
+            let mut levels = jump.depth;
+            while levels > 1 {
+                match self.loops.get(index).and_then(|open| open.parent) {
+                    Some(parent) => index = parent,
+                    None => break,
+                }
+                levels -= 1;
+            }
+            let Some(target) = self.loops.get(index) else {
+                continue;
+            };
+            let target = if jump.is_break {
+                target.brk
+            } else {
+                target.cont
+            };
+            if let Some(opline) = self.oplines.get_mut(jump.at as usize) {
+                opline.op1 = target;
+            }
+        }
+    }
+
+    /// `zend_compile_switch`: the subject compiled, then the loop
+    /// begun over it; the cases' type read
+    /// (`determine_switch_jumptable_type`) and, where
+    /// `should_use_jumptable` asks for one, five `long` cases or two
+    /// `string` ones, a `SWITCH_LONG` or `SWITCH_STRING` over the table
+    /// as a constant array, its slot in the table taken here and the
+    /// array laid down once every target is known; the chain over the
+    /// cases and the `JMP` to the default; each case's statements with
+    /// the jumps aimed at them and the table's targets recorded; the
+    /// loop ended, and the subject freed when it is a temporary.
+    fn switch(&mut self, expr: &Expr, cases: &[Case]) -> Result<(), CompileError> {
+        let subject = self.expr(expr)?;
+        self.begin_loop(Some(subject), true);
+        let case_node = self.temporary();
+        let mut table = match self.switch_jumptable_type(cases)? {
+            Some(kind) if should_use_jumptable(cases, kind) => Some(self.emit_table(
+                if kind == ZvalType::Long {
+                    Opcode::SwitchLong
+                } else {
+                    Opcode::SwitchString
+                },
+                subject,
+            )),
+            _ => None,
+        };
+        let jumps = self.switch_chain(subject, case_node, cases)?;
+        let default_jump = self.push(Opline {
+            opcode: Opcode::Jmp,
+            ..Opline::default()
+        });
+        let mut has_default = false;
+        for (case, jump) in cases.iter().zip(jumps) {
+            if let (Some((cond, _)), Some(jump)) = (&case.cond, jump) {
+                self.update_jump_target_to_next(jump);
+                self.table_add(&mut table, cond)?;
+            } else {
+                has_default = true;
+                self.update_jump_target_to_next(default_jump);
+                self.table_default_to_next(table.as_ref());
+            }
+            self.statements(&case.body)?;
+        }
+        if !has_default {
+            self.update_jump_target_to_next(default_jump);
+            self.table_default_to_next(table.as_ref());
+        }
+        self.lay_table(table)?;
+        let end = self.next();
+        self.end_loop(end);
+        self.free_subject(subject);
+        Ok(())
+    }
+
+    /// The chain of `zend_compile_switch`: per case, one `IS_EQUAL`
+    /// (`CASE` over a temporary subject) into the one shared temporary
+    /// and a `JMPNZ` forward, or a `JMPZ` or `JMPNZ` over the case alone
+    /// when the subject is a constant `false` or `true`; the default's
+    /// one default clause refused as php refuses it. The jump of each
+    /// case, none for the default.
+    fn switch_chain(
+        &mut self,
+        subject: Where,
+        case_node: u32,
+        cases: &[Case],
+    ) -> Result<Vec<Option<u32>>, CompileError> {
+        let mut jumps = Vec::with_capacity(cases.len());
+        let mut has_default = false;
+        for case in cases {
+            let Some((cond, cond_line)) = &case.cond else {
+                if has_default {
+                    self.line = case.line;
+                    return Err(
+                        self.compile_error("Switch statements may only contain one default clause")
+                    );
+                }
+                has_default = true;
+                jumps.push(None);
+                continue;
+            };
+            self.line = *cond_line;
+            let cond = self.expr(cond)?;
+            let jump = match subject {
+                Where::Constant(value) if value.kind() == ZvalType::False => {
+                    self.cond_jump_forward(Opcode::Jmpz, cond)
+                }
+                Where::Constant(value) if value.kind() == ZvalType::True => {
+                    self.cond_jump_forward(Opcode::Jmpnz, cond)
+                }
+                _ => {
+                    let opcode = match subject {
+                        Where::Temporary(_) | Where::Returned(_) => Opcode::Case,
+                        _ => Opcode::IsEqual,
+                    };
+                    self.case(opcode, subject, cond, case_node);
+                    self.cond_jump_forward(Opcode::Jmpnz, Where::Temporary(case_node))
+                }
+            };
+            jumps.push(Some(jump));
+        }
+        Ok(jumps)
+    }
+
+    /// One comparison of the chain, `zend_emit_op` with `SET_NODE` of
+    /// the shared temporary as what it leaves: `IS_EQUAL`, `CASE`,
+    /// `IS_IDENTICAL` or `CASE_STRICT` over the subject and the
+    /// condition.
+    fn case(&mut self, opcode: Opcode, subject: Where, cond: Where, case_node: u32) {
+        let (op1_type, op1) = self.operand(subject);
+        let (op2_type, op2) = self.operand(cond);
+        self.push(Opline {
+            opcode,
+            op1_type,
+            op1,
+            op2_type,
+            op2,
+            out_type: OperandKind::Tmp,
+            out: case_node,
+            ..Opline::default()
+        });
+    }
+
+    /// `determine_switch_jumptable_type`: `long` or `string` when every
+    /// case is a constant of that one type and no string case is
+    /// numeric, which a hash lookup could not compare as `==` compares
+    /// it; nothing otherwise.
+    fn switch_jumptable_type(&mut self, cases: &[Case]) -> Result<Option<ZvalType>, CompileError> {
+        let mut common = None;
+        for case in cases {
+            let Some((cond, _)) = &case.cond else {
+                continue;
+            };
+            let Some(value) = self.constant_of(cond)? else {
+                return Ok(None);
+            };
+            let kind = value.kind();
+            if kind != ZvalType::Long && kind != ZvalType::String {
+                return Ok(None);
+            }
+            match common {
+                None => common = Some(kind),
+                Some(held) if held != kind => return Ok(None),
+                Some(_) => {}
+            }
+            if let Some(s) = value.as_str()
+                && numeric_prefix(s.bytes()).is_some_and(|(_, trailing)| !trailing)
+            {
+                return Ok(None);
+            }
+        }
+        Ok(common)
+    }
+
+    /// The opline over a jump table, `SWITCH_LONG`, `SWITCH_STRING` or
+    /// `MATCH`: the constant slot the array will take, reserved as
+    /// `zend_emit_op` adds the constant when the opline is emitted, and
+    /// the opline over the subject and it.
+    fn emit_table(&mut self, opcode: Opcode, subject: Where) -> Table {
+        let slot = self.literal(Zval::null());
+        let (op1_type, op1) = self.operand(subject);
+        let at = self.push(Opline {
+            opcode,
+            op1_type,
+            op1,
+            op2_type: OperandKind::Const,
+            op2: slot,
+            ..Opline::default()
+        });
+        Table {
+            at,
+            slot,
+            entries: Vec::new(),
+        }
+    }
+
+    /// `zend_hash_index_add` or `zend_hash_add` of the opline about to be
+    /// emitted under the condition's value: the first case of a value
+    /// keeps its target. Nothing where no table is being built.
+    fn table_add(&mut self, table: &mut Option<Table>, cond: &Expr) -> Result<(), CompileError> {
+        let Some(table) = table else {
+            return Ok(());
+        };
+        let target = self.next();
+        if let Some(key) = self.jump_key(cond)?
+            && !table.entries.iter().any(|(held, _)| *held == key)
+        {
+            table.entries.push((key, Zval::long(i64::from(target))));
+        }
+        Ok(())
+    }
+
+    /// The table opline's `extended_value` aimed at the opline about to
+    /// be emitted: where the default lands.
+    fn table_default_to_next(&mut self, table: Option<&Table>) {
+        let Some(table) = table else {
+            return;
+        };
+        let target = self.next();
+        if let Some(opline) = self.oplines.get_mut(table.at as usize) {
+            opline.extended_value = target;
+        }
+    }
+
+    /// The constant array the slot was reserved for, laid down in the
+    /// home the unit's strings are in ([`Intern::constant_array`]).
+    fn lay_table(&mut self, table: Option<Table>) -> Result<(), CompileError> {
+        let Some(table) = table else {
+            return Ok(());
+        };
+        let array = match self.strings.constant_array(&table.entries) {
+            Ok(array) => array,
+            Err(Fatal::Error(message)) => return Err(self.fatal(message)),
+            Err(Fatal::OutOfMemory(_)) => return Err(self.fatal("Out of memory")),
+        };
+        if let Some(held) = self.constants.get_mut(table.slot as usize) {
+            *held = Zval::array(array);
+        }
+        Ok(())
+    }
+
+    /// The key a case or an arm condition adds to a jump table: its
+    /// integer, or its string as interned; nothing for a constant of
+    /// another type, which the type walk ruled out already.
+    fn jump_key(&mut self, cond: &Expr) -> Result<Option<Key>, CompileError> {
+        let Some(value) = self.constant_of(cond)? else {
+            return Ok(None);
+        };
+        Ok(match value.kind() {
+            ZvalType::Long => value.as_long().map(Key::Long),
+            ZvalType::String => value.as_str().map(Key::Str),
+            _ => None,
+        })
+    }
+
+    /// The `FREE` after a `switch` or a `match` whose subject is a
+    /// temporary, flagged `ZEND_FREE_SWITCH`; a constant or a CV is
+    /// nobody's to free.
+    fn free_subject(&mut self, subject: Where) {
+        let (kind, at) = match subject {
+            Where::Temporary(at) => (OperandKind::Tmp, at),
+            Where::Returned(at) => (OperandKind::Var, at),
+            Where::Constant(_) | Where::Cv(_) => return,
+        };
+        self.push(Opline {
+            opcode: Opcode::Free,
+            op1_type: kind,
+            op1: at,
+            extended_value: FREE_SWITCH,
+            ..Opline::default()
+        });
+    }
+
+    /// `zend_compile_match`: the subject and one temporary for the
+    /// conditions' answers, allocated whether or not the chain uses it;
+    /// `MATCH` over the table where every condition is a constant `long`
+    /// or `string` and there are two or more (`can_match_use_jumptable`),
+    /// else the chain and the `JMP` to the default; a `MATCH_ERROR`
+    /// first where no arm is the default, so the value's temporary is
+    /// defined before it is freed; then the arms; the constant `null`
+    /// for a `match` with no arm; and the subject freed when it is a
+    /// temporary.
+    fn r#match(&mut self, expr: &Expr, arms: &[Arm], line: u32) -> Result<Where, CompileError> {
+        self.line = line;
+        let subject = self.expr(expr)?;
+        let case_node = self.temporary();
+        let mut has_default = false;
+        for arm in arms {
+            if arm.conds.is_none() {
+                if has_default {
+                    self.line = arm.line;
+                    return Err(
+                        self.compile_error("Match expressions may only contain one default arm")
+                    );
+                }
+                has_default = true;
+            }
+        }
+        let mut table = None;
+        let mut jumps = Vec::new();
+        let mut default_jump = None;
+        if self.match_uses_jumptable(arms)? {
+            table = Some(self.emit_table(Opcode::Match, subject));
+        } else {
+            jumps = self.match_chain(subject, case_node, arms)?;
+            default_jump = Some(self.push(Opline {
+                opcode: Opcode::Jmp,
+                ..Opline::default()
+            }));
+        }
+        if !has_default {
+            if let Some(jump) = default_jump {
+                self.update_jump_target_to_next(jump);
+            }
+            self.table_default_to_next(table.as_ref());
+            let (op1_type, op1) = self.operand(subject);
+            self.push(Opline {
+                opcode: Opcode::MatchError,
+                op1_type,
+                op1,
+                ..Opline::default()
+            });
+        }
+        let result = self.match_arms(arms, &mut table, &jumps, default_jump)?;
+        self.lay_table(table)?;
+        self.free_subject(subject);
+        Ok(match result {
+            Some(out) => Where::Temporary(out),
+            None => Where::Constant(Zval::null()),
+        })
+    }
+
+    /// `can_match_use_jumptable` and `count_match_conds`: every
+    /// condition a constant `long` or `string`, and two or more of them.
+    fn match_uses_jumptable(&mut self, arms: &[Arm]) -> Result<bool, CompileError> {
+        let mut count = 0;
+        for arm in arms {
+            let Some(conds) = &arm.conds else {
+                continue;
+            };
+            for (cond, _) in conds {
+                count += 1;
+                let Some(value) = self.constant_of(cond)? else {
+                    return Ok(false);
+                };
+                if !matches!(value.kind(), ZvalType::Long | ZvalType::String) {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(count >= 2)
+    }
+
+    /// The chain of `zend_compile_match`: per condition, at its line, one
+    /// `IS_IDENTICAL` (`CASE_STRICT` over a temporary subject) into the
+    /// shared temporary and a `JMPNZ` forward. The jump of each condition.
+    fn match_chain(
+        &mut self,
+        subject: Where,
+        case_node: u32,
+        arms: &[Arm],
+    ) -> Result<Vec<u32>, CompileError> {
+        let mut jumps = Vec::new();
+        for (cond, cond_line) in arms.iter().filter_map(|arm| arm.conds.as_ref()).flatten() {
+            self.line = *cond_line;
+            let cond = self.expr(cond)?;
+            let opcode = match subject {
+                Where::Temporary(_) | Where::Returned(_) => Opcode::CaseStrict,
+                _ => Opcode::IsIdentical,
+            };
+            self.case(opcode, subject, cond, case_node);
+            jumps.push(self.cond_jump_forward(Opcode::Jmpnz, Where::Temporary(case_node)));
+        }
+        Ok(jumps)
+    }
+
+    /// The arms of `zend_compile_match`: each condition's jump aimed at
+    /// its arm and the table's target recorded, the default's `JMP` and
+    /// the table's default at the default arm; the body as a `QM_ASSIGN`
+    /// into the one temporary, `zend_emit_op_tmp` allocating it at the
+    /// first arm, and a `JMP` past the arms, every one aimed at the
+    /// opline after the last. That temporary, none for no arm.
+    fn match_arms(
+        &mut self,
+        arms: &[Arm],
+        table: &mut Option<Table>,
+        jumps: &[u32],
+        default_jump: Option<u32>,
+    ) -> Result<Option<u32>, CompileError> {
+        let mut result = None;
+        let mut ends = Vec::with_capacity(arms.len());
+        let mut jumps = jumps.iter().copied();
+        for arm in arms {
+            if let Some(conds) = &arm.conds {
+                for (cond, _) in conds {
+                    if let Some(jump) = jumps.next() {
+                        self.update_jump_target_to_next(jump);
+                    }
+                    self.table_add(table, cond)?;
+                }
+            } else {
+                if let Some(jump) = default_jump {
+                    self.update_jump_target_to_next(jump);
+                }
+                self.table_default_to_next(table.as_ref());
+            }
+            self.line = arm.line;
+            let body = self.expr(&arm.body)?;
+            let (op1_type, op1) = self.operand(body);
+            let out = *result.get_or_insert_with(|| self.temporary());
+            self.push(Opline {
+                opcode: Opcode::QmAssign,
+                op1_type,
+                op1,
+                out_type: OperandKind::Tmp,
+                out,
+                ..Opline::default()
+            });
+            ends.push(self.push(Opline {
+                opcode: Opcode::Jmp,
+                ..Opline::default()
+            }));
+        }
+        for end in ends {
+            self.update_jump_target_to_next(end);
+        }
+        Ok(result)
+    }
+
+    /// `zend_error_noreturn(E_COMPILE_ERROR, …)` at the line the
+    /// compiler stands on.
+    fn compile_error(&self, message: impl Into<String>) -> CompileError {
+        CompileError {
+            level: Level::CompileError,
+            message: message.into(),
+            line: self.line,
+            raised: Vec::new(),
+        }
     }
 
     /// `zend_compile_for_expr_list`: every expression compiled in turn,
@@ -529,12 +1162,31 @@ impl Emit<'_> {
         });
     }
 
-    /// `zend_update_jump_target_to_next`: the `JMP` at `jump` aimed at
-    /// the opline about to be emitted.
+    /// `zend_emit_cond_jump(opcode, cond, 0)`: the condition tested and
+    /// the jump forward to a target not yet known, which
+    /// [`Self::update_jump_target_to_next`] fills in; the opline's number
+    /// for it.
+    fn cond_jump_forward(&mut self, opcode: Opcode, cond: Where) -> u32 {
+        let (op1_type, op1) = self.operand(cond);
+        self.push(Opline {
+            opcode,
+            op1_type,
+            op1,
+            ..Opline::default()
+        })
+    }
+
+    /// `zend_update_jump_target_to_next`: the jump at `jump` aimed at
+    /// the opline about to be emitted, in the field its opcode keeps a
+    /// target in, `op1` for a `JMP` and `op2` for the conditional jumps.
     fn update_jump_target_to_next(&mut self, jump: u32) {
         let target = self.next();
         if let Some(opline) = self.oplines.get_mut(jump as usize) {
-            opline.op1 = target;
+            if opline.opcode == Opcode::Jmp {
+                opline.op1 = target;
+            } else {
+                opline.op2 = target;
+            }
         }
     }
 
@@ -572,6 +1224,7 @@ impl Emit<'_> {
             Expr::PostInc(var) => Ok(self.incdec(var, Opcode::PostInc)),
             Expr::PreDec(var) => Ok(self.incdec(var, Opcode::PreDec)),
             Expr::PostDec(var) => Ok(self.incdec(var, Opcode::PostDec)),
+            Expr::Match { expr, arms, line } => self.r#match(expr, arms, *line),
             known => Ok(Where::Constant(self.constant_expr(known)?)),
         }
     }
@@ -952,6 +1605,7 @@ impl Emit<'_> {
             | Expr::PostInc(_)
             | Expr::PreDec(_)
             | Expr::PostDec(_) => Err(self.fatal("a variable is no constant expression")),
+            Expr::Match { .. } => Err(self.fatal("a match is no constant expression")),
             // `zend_compile_expr` folds no cast; only a constant
             // expression's walk does (`zend_eval_const_expr`), and none is
             // read yet.
@@ -1389,6 +2043,17 @@ fn type_check(op: BinaryOp, left: Where, right: Where) -> Option<(Where, u32)> {
 /// first operand of a `MUL` or an `IS_EQUAL` and `2 * $a` is php's
 /// `MUL CV0($a) int(2)`. The order is observable: the `TypeError` of
 /// `2 * []` names `array * int`.
+/// `should_use_jumptable` (`Z/Zend/zend_compile.c:6279`): five cases,
+/// the default among them, for a `long` table and two for a `string`
+/// one.
+fn should_use_jumptable(cases: &[Case], kind: ZvalType) -> bool {
+    if kind == ZvalType::Long {
+        cases.len() >= 5
+    } else {
+        cases.len() >= 2
+    }
+}
+
 fn swap_commutative(oplines: &mut [Opline]) {
     for op in oplines {
         if op.opcode.is_commutative() && (op.op1_type as u8) < (op.op2_type as u8) {

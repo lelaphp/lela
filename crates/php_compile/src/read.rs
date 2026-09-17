@@ -10,8 +10,10 @@
 //! What it reads: the open and close tags with the text around them,
 //! `<?=` as the `echo` php reads it as, an `echo` of one or more
 //! expressions, the empty statement, an expression statement, a block,
-//! a `for` and a `while` whose body is a block or one statement, and
-//! inside an expression a number, a single- or double-quoted string with no
+//! a `for` and a `while` whose body is a block or one statement, a
+//! `switch` with its cases between braces, `break` and `continue` with
+//! or without a depth, and
+//! inside an expression a `match`, a number, a single- or double-quoted string with no
 //! interpolation, `true`, `false`, `null`, a constant by name, a call of
 //! a named function, a parenthesised expression, a variable `$a` that is
 //! a CV, an assignment `$a = expr` to one, `$a++` and `++$a` on one,
@@ -53,6 +55,35 @@ pub(crate) enum Stmt {
     },
     /// `while (cond) body`, php's `ZEND_AST_WHILE`.
     While { cond: Expr, body: Read },
+    /// `switch (expr) { case …: … default: … }`, php's `ZEND_AST_SWITCH`
+    /// over a `ZEND_AST_SWITCH_LIST`.
+    Switch { expr: Expr, cases: Vec<Case> },
+    /// `break;` or `break n;`, php's `ZEND_AST_BREAK` with the depth
+    /// written after it, if one is; what it may be is the emitter's to
+    /// refuse as `zend_compile_break_continue` refuses it.
+    Break(Option<Expr>),
+    /// `continue;` or `continue n;`, php's `ZEND_AST_CONTINUE`.
+    Continue(Option<Expr>),
+}
+
+/// One `case cond:` or `default:` of a `switch` with the statements
+/// under it, php's `ZEND_AST_SWITCH_CASE`: the condition at the line it
+/// starts on, which the opline over it carries, and the keyword's line.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Case {
+    pub(crate) cond: Option<(Expr, u32)>,
+    pub(crate) body: Read,
+    pub(crate) line: u32,
+}
+
+/// One `cond, cond => body` or `default => body` of a `match`, php's
+/// `ZEND_AST_MATCH_ARM`: the conditions, none for the default arm, each
+/// at its own line, and the body at its.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Arm {
+    pub(crate) conds: Option<Vec<(Expr, u32)>>,
+    pub(crate) body: Expr,
+    pub(crate) line: u32,
 }
 
 /// One expression.
@@ -104,6 +135,14 @@ pub(crate) enum Expr {
     PreDec(Vec<u8>),
     /// `$a--`, php's `ZEND_AST_POST_DEC`.
     PostDec(Vec<u8>),
+    /// `match (expr) { arms }`, php's `ZEND_AST_MATCH` over a
+    /// `ZEND_AST_MATCH_ARM_LIST`; `line` is the subject's, which the
+    /// `MATCH` and the chain over it are emitted at.
+    Match {
+        expr: Child,
+        arms: Vec<Arm>,
+        line: u32,
+    },
 }
 
 /// One child of an expression, php's `zend_ast.child[i]`: the expression
@@ -428,6 +467,18 @@ impl Reader<'_> {
             self.bump(5);
             return self.r#while().map(Some);
         }
+        if self.word_ahead(b"switch") {
+            self.bump(6);
+            return self.switch().map(Some);
+        }
+        if self.word_ahead(b"break") {
+            self.bump(5);
+            return self.depth().map(|depth| Some(Stmt::Break(depth)));
+        }
+        if self.word_ahead(b"continue") {
+            self.bump(8);
+            return self.depth().map(|depth| Some(Stmt::Continue(depth)));
+        }
         let expr = self.expr()?;
         self.end_of_statement()?;
         Ok(Some(Stmt::Effect(expr)))
@@ -456,6 +507,162 @@ impl Reader<'_> {
         self.punctuation(b')', "a `while` whose parenthesis nothing closes")?;
         let body = self.body()?;
         Ok(Stmt::While { cond, body })
+    }
+
+    /// `switch (expr) { … }`, the keyword read: the subject between the
+    /// parentheses, then the cases between the braces, each `case expr`
+    /// or `default` closed by `:` or `;` as php's grammar takes either,
+    /// with the statements up to the next case or the closing brace.
+    /// The alternative syntax, `switch (…): … endswitch;`, is not read
+    /// yet.
+    fn switch(&mut self) -> Result<Stmt, Trouble> {
+        self.punctuation(b'(', "a `switch` with no parenthesis after it")?;
+        let expr = self.expr()?;
+        self.punctuation(b')', "a `switch` whose parenthesis nothing closes")?;
+        self.punctuation(b'{', "a `switch` this compiler cannot read yet")?;
+        let mut cases = Vec::new();
+        loop {
+            self.skip_trivia();
+            if self.byte(0) == Some(b'}') {
+                self.bump(1);
+                return Ok(Stmt::Switch { expr, cases });
+            }
+            if self.byte(0) == Some(b';') {
+                // php's grammar takes one `;` after the brace and nothing
+                // else before the first case.
+                if !cases.is_empty() {
+                    return Err(self.trouble("a `switch` this compiler cannot read yet"));
+                }
+                self.bump(1);
+                continue;
+            }
+            let line = self.line;
+            let cond = if self.word_ahead(b"case") {
+                self.bump(4);
+                self.skip_trivia();
+                let cond_line = self.line;
+                Some((self.expr()?, cond_line))
+            } else if self.word_ahead(b"default") {
+                self.bump(7);
+                None
+            } else {
+                return Err(self.trouble("a `switch` whose case this compiler cannot read"));
+            };
+            self.skip_trivia();
+            if !matches!(self.byte(0), Some(b':' | b';')) {
+                return Err(self.trouble("a `case` no colon closes"));
+            }
+            self.bump(1);
+            let mut body = Read::new();
+            loop {
+                self.skip_trivia();
+                if self.byte(0) == Some(b'}')
+                    || self.word_ahead(b"case")
+                    || self.word_ahead(b"default")
+                {
+                    break;
+                }
+                if self.at >= self.source.len() {
+                    return Err(self.trouble("a `switch` no brace closes"));
+                }
+                if self.starts_with(b"?>") {
+                    return Err(
+                        self.trouble("a close tag inside a block this compiler cannot read yet")
+                    );
+                }
+                let line = self.line;
+                if let Some(statement) = self.statement()? {
+                    body.push((statement, line));
+                }
+            }
+            cases.push(Case { cond, body, line });
+        }
+    }
+
+    /// What follows a `break` or a `continue`: nothing, or the
+    /// expression php's grammar reads before the `;`.
+    fn depth(&mut self) -> Result<Option<Expr>, Trouble> {
+        self.skip_trivia();
+        if self.byte(0) == Some(b';') || self.starts_with(b"?>") || self.at >= self.source.len() {
+            self.end_of_statement()?;
+            return Ok(None);
+        }
+        let depth = self.expr()?;
+        self.end_of_statement()?;
+        Ok(Some(depth))
+    }
+
+    /// `match (expr) { arms }`, the keyword read: the subject between
+    /// the parentheses, then each arm as php's `match_arm` has it, the
+    /// conditions separated by commas with one allowed before the `=>`,
+    /// or `default`, then the body; arms separated by commas, with one
+    /// allowed before the closing brace.
+    fn r#match(&mut self) -> Result<Expr, Trouble> {
+        self.punctuation(b'(', "a `match` with no parenthesis after it")?;
+        self.skip_trivia();
+        let line = self.line;
+        let expr = Child::new(self.expr()?);
+        self.punctuation(b')', "a `match` whose parenthesis nothing closes")?;
+        self.punctuation(b'{', "a `match` with no brace after it")?;
+        let mut arms = Vec::new();
+        loop {
+            self.skip_trivia();
+            if self.byte(0) == Some(b'}') {
+                self.bump(1);
+                return Ok(Expr::Match { expr, arms, line });
+            }
+            if !arms.is_empty() {
+                if self.byte(0) != Some(b',') {
+                    return Err(self.trouble("a `match` whose arms no comma separates"));
+                }
+                self.bump(1);
+                self.skip_trivia();
+                if self.byte(0) == Some(b'}') {
+                    self.bump(1);
+                    return Ok(Expr::Match { expr, arms, line });
+                }
+            }
+            let conds = if self.word_ahead(b"default") {
+                self.bump(7);
+                None
+            } else {
+                let mut conds = Vec::new();
+                loop {
+                    self.skip_trivia();
+                    if !conds.is_empty() && self.starts_with(b"=>") {
+                        break;
+                    }
+                    if !conds.is_empty() {
+                        if self.byte(0) != Some(b',') {
+                            return Err(
+                                self.trouble("a `match` arm whose conditions no comma separates")
+                            );
+                        }
+                        self.bump(1);
+                        self.skip_trivia();
+                        if self.starts_with(b"=>") {
+                            break;
+                        }
+                    }
+                    let line = self.line;
+                    conds.push((self.expr()?, line));
+                }
+                Some(conds)
+            };
+            self.skip_trivia();
+            if !self.starts_with(b"=>") {
+                return Err(self.trouble("a `match` arm with no `=>`"));
+            }
+            self.bump(2);
+            self.skip_trivia();
+            let body_line = self.line;
+            let body = self.expr()?;
+            arms.push(Arm {
+                conds,
+                body,
+                line: body_line,
+            });
+        }
     }
 
     /// One expected byte, or the trouble that names what was wanted.
@@ -544,7 +751,9 @@ impl Reader<'_> {
         self.check_stack()?;
         let left = self.equality()?;
         self.skip_trivia();
-        if !(self.byte(0) == Some(b'=') && self.byte(1) != Some(b'=')) {
+        // `==` is the equality read above, and `=>` closes a `match`
+        // arm's conditions.
+        if self.byte(0) != Some(b'=') || matches!(self.byte(1), Some(b'=' | b'>')) {
             return Ok(left);
         }
         let Expr::Var(var) = left else {
@@ -794,6 +1003,10 @@ impl Reader<'_> {
                 }
                 self.bump(1);
                 Ok(inner)
+            }
+            Some(b'm' | b'M') if self.word_ahead(b"match") => {
+                self.bump(5);
+                self.r#match()
             }
             Some(b) if b.is_ascii_alphabetic() || b == b'_' || b == b'\\' => self.named(),
             _ => Err(self.trouble("an expression this compiler cannot read yet")),
