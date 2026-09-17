@@ -14,7 +14,7 @@
 //! §5.13).
 //!
 //! **Ownership, as design §5.1 decides it.** Every face is `Copy` and
-//! has no `Drop`; cloning a `Value` is php's `ZVAL_COPY_VALUE`, a
+//! has no `Drop`; copying a `Value` is php's `ZVAL_COPY_VALUE`, a
 //! bitwise copy that touches no refcount, and the engine's `addref`
 //! beside it is what makes the two `ZVAL_COPY`.
 //! Owners are taken and given up explicitly, by the engine, where php's
@@ -404,7 +404,7 @@ impl PhpArray {
     /// The elements in order, references followed, views of them.
     #[must_use]
     pub fn snapshot(&self) -> Vec<(Key, Value)> {
-        self.iter().map(|(k, v)| (k, v.deref().clone())).collect()
+        self.iter().map(|(k, v)| (k, v.deref())).collect()
     }
 
     /// The elements in order, references kept as references.
@@ -900,7 +900,7 @@ pub enum ValueRef<'a> {
 }
 
 /// The states a value has, the zval's own set.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 enum Inner {
     Undef,
     #[default]
@@ -915,11 +915,13 @@ enum Inner {
     Reference(PhpRef),
 }
 
-/// One PHP value. Cloning one is php's `ZVAL_COPY_VALUE`: sixteen bytes
-/// copied whatever the kind, no refcount touched, so the clone names
-/// what the original names and owns nothing the original did not give
-/// up; the engine takes and releases owners where php's handlers do.
-#[derive(Debug, Clone, PartialEq, Default)]
+/// One PHP value. It is `Copy`, as design §5.1 decides a zval is, and
+/// the copy is php's `ZVAL_COPY_VALUE`: sixteen bytes copied whatever
+/// the kind, no refcount touched, so the copy names what the original
+/// names and owns nothing the original did not give up; the engine's
+/// `addref` beside it is `ZVAL_COPY`, and the engine takes and releases
+/// owners where php's handlers do.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Value {
     inner: Inner,
 }
@@ -1052,7 +1054,7 @@ impl Value {
     pub fn deref(&self) -> Value {
         match &self.inner {
             Inner::Reference(r) => r.get(),
-            _ => self.clone(),
+            _ => *self,
         }
     }
 
@@ -1061,7 +1063,7 @@ impl Value {
     pub(crate) fn undef_as_null(&self) -> Value {
         match self.inner {
             Inner::Undef => Value::null(),
-            _ => self.clone(),
+            _ => *self,
         }
     }
 
@@ -1114,13 +1116,13 @@ impl Value {
 
     /// The zval this value is: the sixteen bytes it names, no owner
     /// taken, `UNDEF` for a slot nothing wrote.
-    pub(crate) fn to_zval(&self) -> Zval {
-        match &self.inner {
+    pub(crate) fn to_zval(self) -> Zval {
+        match self.inner {
             Inner::Undef => Zval::UNDEF,
             Inner::Null => Zval::null(),
-            Inner::Bool(b) => Zval::bool(*b),
-            Inner::Int(n) => Zval::long(*n),
-            Inner::Float(f) => Zval::double(*f),
+            Inner::Bool(b) => Zval::bool(b),
+            Inner::Int(n) => Zval::long(n),
+            Inner::Float(f) => Zval::double(f),
             Inner::Str(s) => Zval::string(s.heap()),
             Inner::Array(a) => Zval::array(a.heap()),
             Inner::Object(o) => Zval::object(o.heap()),
@@ -1262,12 +1264,12 @@ mod tests {
         req.release(Value::array(a));
     }
 
-    /// Cloning a `Value` that holds an array names the one array
+    /// Copying a `Value` that holds an array names the one array
     /// (`ZVAL_COPY_VALUE`), the engine's `addref` is the second owner
     /// (`ZVAL_COPY`), and a write through the second name separates it
     /// as `SEPARATE_ARRAY` does: the first name reads what it read.
     #[test]
-    fn a_clone_is_a_refcount_and_a_write_separates() {
+    fn a_copy_is_a_refcount_and_a_write_separates() {
         let mut req = crate::test::request();
         let start = req.memory_usage(false);
         let Ok(mut a) = PhpArray::new(&mut req) else {
@@ -1275,8 +1277,8 @@ mod tests {
         };
         assert!(a.append(&mut req, Value::int(1)).is_ok());
         let first = Value::array(a);
-        let second = first.clone();
-        assert_eq!(first.refcount(), 1, "a clone touches no refcount");
+        let second = first;
+        assert_eq!(first.refcount(), 1, "a copy touches no refcount");
         req.addref(&second);
         assert_eq!(first.refcount(), 2);
         let Some(mut b) = second.as_array().copied() else {
@@ -1294,13 +1296,13 @@ mod tests {
 
     /// An object a native builds is a store entry out of the request's
     /// heap, php's forty bytes for a class of no declared properties,
-    /// `spl_object_id()` is its id, cloning a `Value` that holds it
+    /// `spl_object_id()` is its id, copying a `Value` that holds it
     /// is `ZVAL_COPY_VALUE` and the engine's `addref` the second owner;
     /// an array holds it as one more owner and gives it back with the
     /// array, and the last release frees it, the heap reading what it
     /// read before.
     #[test]
-    fn an_object_is_a_store_entry_and_a_clone_is_a_refcount() {
+    fn an_object_is_a_store_entry_and_a_copy_is_a_refcount() {
         let mut req = crate::test::request();
         let start = req.memory_usage(false);
         let Ok(object) = req.new_object_of("stdClass") else {
@@ -1309,8 +1311,8 @@ mod tests {
         assert_eq!(req.memory_usage(false) - start, 40);
         assert_eq!(object.index(), 1);
         let first = object.as_value();
-        let second = first.clone();
-        assert_eq!(first.refcount(), 1, "a clone touches no refcount");
+        let second = first;
+        assert_eq!(first.refcount(), 1, "a copy touches no refcount");
         req.addref(&second);
         assert_eq!(first.refcount(), 2);
         assert_eq!(second.as_object(), Some(&object));

@@ -1364,7 +1364,7 @@ pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Throw
                 req,
                 "Increment on type bool has no effect, this will change in the next major version of PHP",
             );
-            Ok(value.clone())
+            Ok(*value)
         }
         ValueRef::Array(_)
         | ValueRef::Resource(_)
@@ -1460,7 +1460,7 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
                     req,
                     "Decrement on non-numeric string has no effect and is deprecated",
                 );
-                Ok(value.clone())
+                Ok(*value)
             }
         },
         // php's `IS_NULL` arm; an uninitialised zval reads as null here.
@@ -1476,7 +1476,7 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
                 req,
                 "Decrement on type bool has no effect, this will change in the next major version of PHP",
             );
-            Ok(value.clone())
+            Ok(*value)
         }
         ValueRef::Array(_)
         | ValueRef::Resource(_)

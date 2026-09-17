@@ -2177,7 +2177,7 @@ impl Request {
         offset: Option<&Value>,
     ) -> Result<Value, Thrown> {
         self.array_access(object)?;
-        let offset = offset.cloned().unwrap_or_else(Value::null);
+        let offset = offset.copied().unwrap_or_else(Value::null);
         crate::api::call::call_method(self, &object, b"offsetGet", &[offset])
     }
 
@@ -2193,9 +2193,8 @@ impl Request {
             self.release(value);
             return Err(thrown);
         }
-        let offset = offset.cloned().unwrap_or_else(Value::null);
-        let served =
-            crate::api::call::call_method(self, &object, b"offsetSet", &[offset, value.clone()]);
+        let offset = offset.copied().unwrap_or_else(Value::null);
+        let served = crate::api::call::call_method(self, &object, b"offsetSet", &[offset, value]);
         self.release(value);
         self.release(served?);
         Ok(())
@@ -2510,7 +2509,7 @@ impl Request {
     pub(crate) fn callable_of(&self, value: &Value) -> Option<Callable> {
         let name = value.as_str_bytes()?;
         self.function_named(name)?;
-        Some(Callable::named(value.clone(), name))
+        Some(Callable::named(*value, name))
     }
 
     pub(crate) fn class_named(&self, name: &[u8]) -> Option<ClassId> {
@@ -2579,7 +2578,7 @@ impl Request {
         self.constants
             .iter()
             .find(|(n, _)| n.as_slice() == name)
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| *v)
             .or_else(|| self.shared.constant(name))
     }
 
@@ -2856,7 +2855,7 @@ impl Request {
     pub fn argument(&self, position: u32) -> Option<Value> {
         let call = self.vm.serving_call()?;
         let index = usize::try_from(position.checked_sub(1)?).ok()?;
-        call.arguments.get(index).cloned()
+        call.arguments.get(index).copied()
     }
 
     /// `zend_parse_arg_*_weak` writing what it coerced back into the

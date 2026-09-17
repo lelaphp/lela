@@ -202,7 +202,7 @@ pub fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thrown> {
         ValueRef::Reference(r) => to_array(req, &r.get()),
         _ => {
             let mut array = PhpArray::new(req)?;
-            let element = value.deref().clone();
+            let element = value.deref();
             req.addref(&element);
             array.append(req, element)?;
             Ok(array)
@@ -225,7 +225,7 @@ pub fn to_object(req: &mut Request, value: &Value) -> Result<PhpObject, Thrown> 
                 }
             } else if !matches!(value.as_ref(), ValueRef::Null | ValueRef::Undef) {
                 let name = PhpString::new(req, b"scalar")?;
-                let scalar = value.deref().clone();
+                let scalar = value.deref();
                 req.addref(&scalar);
                 object.set_prop(req, name, scalar)?;
             }
@@ -499,26 +499,26 @@ fn coerce_typed(
             _ => want(req, "float"),
         },
         Type::String => match value.as_ref() {
-            ValueRef::Str(_) => Ok(value.clone()),
+            ValueRef::Str(_) => Ok(*value),
             ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) if !strict => {
                 let coerced = Value::string(to_string(req, value)?);
-                req.replace_argument(position, coerced.clone());
+                req.replace_argument(position, coerced);
                 Ok(coerced)
             }
             _ => want(req, "string"),
         },
         Type::Array => match value.as_ref() {
-            ValueRef::Array(_) => Ok(value.clone()),
+            ValueRef::Array(_) => Ok(*value),
             _ => want(req, "array"),
         },
         Type::Object => match value.as_ref() {
-            ValueRef::Object(_) => Ok(value.clone()),
+            ValueRef::Object(_) => Ok(*value),
             _ => want(req, "object"),
         },
         Type::Nullable(inner) => match value.as_ref() {
             ValueRef::Null | ValueRef::Undef => Ok(Value::null()),
             _ => coerce_typed(req, value, inner, position, true),
         },
-        _ => Ok(value.clone()),
+        _ => Ok(*value),
     }
 }

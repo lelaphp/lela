@@ -1705,7 +1705,7 @@ pub(crate) fn assign<T: Tier>(
     if op.out_type != OperandKind::Unused {
         req.addref(&value);
         let slot = exec::temporary_slot(code, op.out);
-        let previous = req.set_slot(frame, slot, value.clone());
+        let previous = req.set_slot(frame, slot, value);
         req.release(previous);
     }
     if let Some(r) = req.slot(frame, op.op1).as_php_ref() {
@@ -1805,7 +1805,7 @@ pub(crate) fn assign_ref<T: Tier>(
     };
     let bound = cell.as_value();
     req.addref(&bound);
-    let garbage = req.set_slot(frame, op.op1, bound.clone());
+    let garbage = req.set_slot(frame, op.op1, bound);
     write_out(req, frame, code, op, &bound);
     req.release(garbage);
     Ok(advance(req, frame))
@@ -2000,7 +2000,7 @@ fn write_out(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, va
         return;
     }
     req.addref(value);
-    let previous = req.set_slot(frame, exec::temporary_slot(code, op.out), value.clone());
+    let previous = req.set_slot(frame, exec::temporary_slot(code, op.out), *value);
     req.release(previous);
 }
 
@@ -2707,7 +2707,7 @@ fn incdec(
                     held
                 } else {
                     req.addref(&stepped);
-                    stepped.clone()
+                    stepped
                 };
                 req.set_slot(frame, out, value);
             }
