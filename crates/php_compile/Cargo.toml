@@ -15,3 +15,9 @@ workspace = true
 php_heap = { path = "../php_heap" }
 php_syntax = { path = "../php_syntax" }
 php_unit = { path = "../php_unit" }
+
+# The stack limit on the main thread: libtest runs a `#[test]` on a thread
+# of its own, and this one has to stand where `execve` left the environment.
+[[test]]
+name = "stack_thread"
+harness = false
