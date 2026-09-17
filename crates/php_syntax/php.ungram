@@ -283,7 +283,7 @@ FunctionDecl : HasAttributes HasDocComment =
 RetType   = ':' ty:TypeExpr
 ParamList = '(' Param,* ')'
 
-Param : HasAttributes HasModifiers =
+Param : HasAttributes HasModifiers HasDocComment =
     ty:TypeExpr? byref:'&'? variadic:'...'? var:<variable>!
     ('=' default:Expr)? hooks:PropertyHookList?
 // NOTE: modifiers present ⇒ constructor promotion (8.0); hooks on a
@@ -361,7 +361,7 @@ EnumCaseDecl : HasAttributes HasDocComment =
     'case' name:MemberName ('=' value:Expr)? ';'    // LEVEL: 8.1
 
 PropertyHookList = '{' PropertyHook* '}'              // LEVEL: 8.4
-PropertyHook : HasAttributes HasModifiers =
+PropertyHook : HasAttributes HasModifiers HasDocComment =
     byref:'&'? name:<ident>! params:ParamList?
     ( body:Block | arrow:HookArrowBody | ';' )
 HookArrowBody = '=>' value:Expr ';'
@@ -445,7 +445,7 @@ NewExpr = 'new' ( anon:AnonClassDecl | ctor:Expr args:ArgList? )
 // NOTE: 'new Foo()->bar()' (8.4) — postfix chains on NewExpr require
 // the arg parens; the parser owns that rule, the tree just nests.
 // VALIDATE: ctor restricted to class-reference forms.
-AnonClassDecl : HasAttributes HasModifiers =
+AnonClassDecl : HasAttributes HasModifiers HasDocComment =
     'class' args:ArgList? extends:ExtendsClause? implements:ImplementsClause?
     body:ClassBody!
 // NOTE: readonly anonymous classes LEVEL: 8.3.
@@ -497,12 +497,12 @@ ArrayKey     = key:Expr! '=>'
 // position — VALIDATE; spread excludes key/byref — VALIDATE.
 // DESUGAR: ListExpr/ArrayExpr-as-lvalue → indexed extraction.
 
-ClosureExpr : HasAttributes =
+ClosureExpr : HasAttributes HasDocComment =
     'static'? 'function' byref:'&'? params:ParamList! uses:ClosureUseClause?
     ret:RetType? body:Block
 ClosureUseClause = 'use' '(' ClosureUseVar,+ ')'
 ClosureUseVar    = byref:'&'? var:<variable>!
-ArrowFnExpr : HasAttributes =
+ArrowFnExpr : HasAttributes HasDocComment =
     'static'? 'fn' byref:'&'? params:ParamList! ret:RetType? '=>' body:Expr
 // NOTE: arrow-fn auto-capture made explicit in HIR, not here (DESUGAR);
 // body extent vs ',' in arg lists is a Pratt binding-power case with

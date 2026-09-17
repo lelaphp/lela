@@ -245,6 +245,7 @@ fn the_included_nodes_are_built_from_fields() {
             Modifier::PublicKw(TokenId(0)),
             Modifier::ReadonlyKw(TokenId(1)),
         ]),
+        doc_comment: None,
         ty: None,
         byref: None,
         variadic: None,

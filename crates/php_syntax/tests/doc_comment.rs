@@ -7,8 +7,9 @@
 //! it reduces `backup_doc_comment` is a fact of its tables.
 
 use php_syntax::tree::{
-    ClassDecl, ClosureExpr, ConstDeclarator, EnumCaseDecl, EnumDecl, FunctionDecl, HasDocComment,
-    InterfaceDecl, MethodDecl, Node, PropertyDeclarator, TraitDecl,
+    AnonClassDecl, ArrowFnExpr, ClassDecl, ClosureExpr, ConstDeclarator, EnumCaseDecl, EnumDecl,
+    FunctionDecl, HasDocComment, InterfaceDecl, MethodDecl, Node, Param, PropertyDeclarator,
+    PropertyHook, TraitDecl,
 };
 use php_syntax::{Options, Parsed, parse};
 
@@ -232,14 +233,17 @@ fn an_attribute_group_gives_back_what_it_took() {
     );
 }
 
-/// A parameter takes before its variable and a closure before its `(`,
-/// which no node of the schema carries yet and which the state after
-/// them shows: what a parameter or a closure took is not the next
-/// declaration's, and what neither took is.
+/// `ReflectionProperty::getDocComment()` on a promoted property: a
+/// parameter takes before its variable, so a comment after one is the
+/// next parameter's; `ReflectionFunction::getDocComment()` on a closure:
+/// a closure or an arrow function takes before its `(`, and what stands
+/// after the head is nobody's. The state after each is the next
+/// declaration's, so the classes hold that too.
 #[test]
 fn a_parameter_and_a_closure_take_too() {
     let p = parsed(
         "<?php
+class C { function __construct(/** PA */ public $a, public $b /** PB */, public $c = 1) {} }
 $g1 = fn($x /** B */) => 1; class X1 {}
 $g2 = fn(/** A */ $x) => 1; class X2 {}
 $g3 = fn /** C */ ($x) => 1; class X3 {}
@@ -249,8 +253,93 @@ $g6 = function () /** G */ { }; class X6 {}
 ",
     );
     assert_eq!(
-        docs::<ClassDecl>(&p),
-        [Some("/** B */"), None, None, Some("/** E */"), None, None]
+        docs::<Param>(&p),
+        [
+            Some("/** PA */"),
+            None,
+            Some("/** PB */"),
+            None,
+            Some("/** A */"),
+            None,
+            None,
+        ]
     );
-    assert_eq!(p.tree.nodes::<ClosureExpr>().len(), 2);
+    assert_eq!(
+        docs::<ArrowFnExpr>(&p),
+        [None, None, Some("/** C */"), None]
+    );
+    assert_eq!(docs::<ClosureExpr>(&p), [Some("/** F */"), None]);
+    assert_eq!(
+        docs::<ClassDecl>(&p),
+        [
+            None,
+            Some("/** B */"),
+            None,
+            None,
+            Some("/** E */"),
+            None,
+            None
+        ]
+    );
+}
+
+/// `ReflectionClass::getDocComment()` on an anonymous class: it takes
+/// before its `{` as a named class does, so a comment anywhere in the
+/// head, the arguments included, is the class's (probed 8.5.9: `new
+/// class /** N */ {}` N, `new class /** N2 */ extends stdClass {}` N2,
+/// `new class extends stdClass /** N3 */ {}` N3, `new /** N4 */ class
+/// {}` N4, `new class(/** N5 */ 1) {}` N5).
+#[test]
+fn an_anonymous_class_takes_before_its_brace() {
+    let p = parsed(
+        "<?php
+$o = new class /** N */ {};
+$o2 = new class /** N2 */ extends stdClass {};
+$o3 = new class extends stdClass /** N3 */ {};
+$o4 = new /** N4 */ class {};
+$o5 = new class(/** N5 */ 1) { function __construct($x) {} };
+$o6 = new class {};
+",
+    );
+    assert_eq!(
+        docs::<AnonClassDecl>(&p),
+        [
+            Some("/** N */"),
+            Some("/** N2 */"),
+            Some("/** N3 */"),
+            Some("/** N4 */"),
+            Some("/** N5 */"),
+            None
+        ]
+    );
+}
+
+/// `ReflectionMethod::getDocComment()` on what
+/// `ReflectionProperty::getHooks()` hands back: an accessor takes before its
+/// name, after its modifiers, as a method does (probed 8.5.9: `{ /** HG
+/// */ get { … } }` HG, `{ get /** HG2 */ { … } }` none, `{ /** HS */ set
+/// { } get { … } }` HS on `set` and none on `get`, `{ /** HT */ final
+/// get { … } }` HT).
+#[test]
+fn a_property_hook_takes_before_its_name() {
+    let p = parsed(
+        "<?php
+class H {
+  public $q { /** HG */ get { return 1; } }
+  public $r { get /** HG2 */ { return 1; } }
+  public $s { /** HS */ set { } get { return 1; } }
+  public $t { /** HT */ final get { return 1; } }
+}
+",
+    );
+    assert_eq!(
+        docs::<PropertyHook>(&p),
+        [
+            Some("/** HG */"),
+            None,
+            Some("/** HS */"),
+            None,
+            Some("/** HT */")
+        ]
+    );
 }
