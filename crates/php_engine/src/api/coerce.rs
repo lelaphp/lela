@@ -180,58 +180,24 @@ pub fn to_number(req: &mut Request, value: &Value) -> Result<Value, Thrown> {
     }
 }
 
-/// `(array)`: the array itself, named and not copied, as `ZVAL_COPY_VALUE`
-/// names it; an object's properties as a new array; a scalar as a new
-/// array of one. What is handed back is the caller's to own: an array
-/// that already was one has no owner taken, and a new one has its one.
+/// `(array)`, the kernel [`crate::ops::to_array`] through the face:
+/// `null` the empty array, a scalar the one-element array, an object
+/// its properties with php's mangled names, and an array itself. What
+/// is handed back is the caller's to own, as `zval_get_string`'s is:
+/// an array value's own with one more owner, a new one of the
+/// request's otherwise.
 pub fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thrown> {
-    match value.as_ref() {
-        ValueRef::Undef | ValueRef::Null => PhpArray::new(req),
-        ValueRef::Array(a) => Ok(*a),
-        ValueRef::Object(o) => {
-            let mut array = PhpArray::new(req)?;
-            for (key, entry) in o.entries(req)? {
-                req.addref(&entry);
-                if let Key::Str(s) = &key {
-                    req.addref(&Value::string(*s));
-                }
-                array.set(req, key, entry)?;
-            }
-            Ok(array)
-        }
-        ValueRef::Reference(r) => to_array(req, &r.get()),
-        _ => {
-            let mut array = PhpArray::new(req)?;
-            let element = value.deref();
-            req.addref(&element);
-            array.append(req, element)?;
-            Ok(array)
-        }
-    }
+    crate::ops::to_array(req, value)
 }
 
-/// `(object)`.
+/// `(object)`, the kernel [`crate::ops::to_object`] through the face:
+/// `null` an empty `stdClass`, a scalar a `stdClass` with the property
+/// `scalar`, an array a `stdClass` over its elements, and an object
+/// itself. What is handed back is the caller's to own: an object
+/// value's own with one more owner, a new one of the request's
+/// otherwise.
 pub fn to_object(req: &mut Request, value: &Value) -> Result<PhpObject, Thrown> {
-    match value.as_ref() {
-        ValueRef::Object(o) => Ok(*o),
-        ValueRef::Reference(r) => to_object(req, &r.get()),
-        _ => {
-            let object = req.new_object_of("stdClass")?;
-            if let Some(array) = value.as_array() {
-                for (key, entry) in array.snapshot() {
-                    let name = key.to_prop_name(req)?;
-                    req.addref(&entry);
-                    object.set_prop(req, name, entry)?;
-                }
-            } else if !matches!(value.as_ref(), ValueRef::Null | ValueRef::Undef) {
-                let name = PhpString::new(req, b"scalar")?;
-                let scalar = value.deref();
-                req.addref(&scalar);
-                object.set_prop(req, name, scalar)?;
-            }
-            Ok(object)
-        }
-    }
+    crate::ops::to_object(req, value)
 }
 
 /// `zend_is_callable` with the request's scope.

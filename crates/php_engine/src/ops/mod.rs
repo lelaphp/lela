@@ -12,9 +12,12 @@ use std::cmp::Ordering;
 
 use php_heap::{Number, Scalar, ZvalType, double_to_string, numeric_prefix};
 
+use php_unit::decl::Visibility;
+
+use crate::api::abi::PropertyPurpose;
 use crate::api::raising::{Thrown, deprecated, throw, warning};
 use crate::api::request::{Request, append_escaped};
-use crate::api::values::{Key, PhpArray, PhpString, TypeTag, Value, ValueRef};
+use crate::api::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 /// `zval_get_string` (`Z/Zend/zend_operators.c:1066`): a value as the
 /// string php converts it to, which is what `ECHO`, `print`, `.` and
@@ -353,11 +356,10 @@ pub(crate) fn is_true(req: &mut Request, value: &Value) -> bool {
     }
 }
 
-/// What `ZEND_CAST` converts to, the three scalar arms of its handler
+/// What `ZEND_CAST` converts to, the five arms of its handler
 /// (`Z/Zend/zend_vm_def.h:6495`), named by the type constant the
 /// opline's `extended_value` carries. `(bool)` is `ZEND_BOOL` and never
-/// reaches here; `(array)` and `(object)` wait on the tree and the
-/// object store's conversions.
+/// reaches here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CastTo {
     /// `IS_LONG`, `zval_get_long`.
@@ -366,16 +368,22 @@ pub(crate) enum CastTo {
     Double,
     /// `IS_STRING`, `zval_get_string`.
     Str,
+    /// `IS_ARRAY`, `zend_cast_zval_to_array`.
+    Array,
+    /// `IS_OBJECT`, `zend_cast_zval_to_object`.
+    Object,
 }
 
 impl CastTo {
-    /// The arm for php's type constant, nothing for one this engine has
-    /// no conversion for.
+    /// The arm for php's type constant, nothing for one that is not a
+    /// cast's.
     pub(crate) fn of(code: u32) -> Option<CastTo> {
         match code {
             4 => Some(CastTo::Long),
             5 => Some(CastTo::Double),
             6 => Some(CastTo::Str),
+            7 => Some(CastTo::Array),
+            8 => Some(CastTo::Object),
             _ => None,
         }
     }
@@ -405,12 +413,220 @@ impl CastTo {
 /// Warning: The float NAN is not representable as an int, cast occurred in %s on line 2
 /// 0
 /// ```
+///
+/// `(array)` and `(object)` are the handler's other two arms,
+/// [`to_array`] and [`to_object`], each with the witness beside it.
 pub(crate) fn cast(req: &mut Request, value: &Value, to: CastTo) -> Result<Value, Thrown> {
     match to {
         CastTo::Long => Ok(Value::int(get_long(req, value))),
         CastTo::Double => Ok(Value::float(get_double(req, value))),
         CastTo::Str => to_string(req, value).map(Value::string),
+        CastTo::Array => to_array(req, value).map(Value::array),
+        CastTo::Object => to_object(req, value).map(Value::object),
     }
+}
+
+/// `zend_cast_zval_to_array` (`Z/Zend/zend_execute.h:250`) under the
+/// `Z_TYPE_P(expr) == IS_ARRAY` arm of `ZEND_CAST` above it: an array
+/// is itself with one more owner (`ZVAL_COPY_VALUE`, `Z_ADDREF_P`);
+/// `null` is the empty array; a scalar, a resource and a `Closure` are
+/// the one-element array holding it at `0` with one more owner, a NAN
+/// warning on the way (`zend_nan_coerced_to_type_warning`); and any
+/// other object is its properties as `zend_get_properties_for` under
+/// `ZEND_PROP_PURPOSE_ARRAY_CAST` reads them, the class's
+/// `get_properties_for` first and `get_properties` where that slot is
+/// null, each declared name mangled as `zend_declare_typed_property`
+/// mangles it (`\0*\0p` for a protected one, `\0C\0p` for a private
+/// one) and a numeric name an integer key (`zend_proptable_to_symtable`,
+/// `ZEND_HANDLE_NUMERIC`). The array handed back is the caller's to
+/// own, and the `Err` is the memory limit ending the request.
+///
+/// ```php
+/// class A { public $a = 1; protected $b = 2; private $c = 3; public $u; }
+/// $x = token_get_all("1");
+/// var_dump((array)null, (array)1.5, (array)"s", (array)$x, (array)new A, (array)NAN);
+/// ```
+/// ```expect
+/// Warning: unexpected NAN value was coerced to array in %s on line 4
+/// array(0) {
+/// }
+/// array(1) {
+///   [0]=>
+///   float(1.5)
+/// }
+/// array(1) {
+///   [0]=>
+///   string(1) "s"
+/// }
+/// array(1) {
+///   [0]=>
+///   array(3) {
+///     [0]=>
+///     int(267)
+///     [1]=>
+///     string(1) "1"
+///     [2]=>
+///     int(1)
+///   }
+/// }
+/// array(4) {
+///   ["a"]=>
+///   int(1)
+///   ["%0*%0b"]=>
+///   int(2)
+///   ["%0A%0c"]=>
+///   int(3)
+///   ["u"]=>
+///   NULL
+/// }
+/// array(1) {
+///   [0]=>
+///   float(NAN)
+/// }
+/// ```
+pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thrown> {
+    let value = value.deref();
+    match value.as_ref() {
+        ValueRef::Undef | ValueRef::Null => PhpArray::new(req),
+        ValueRef::Array(a) => {
+            req.addref(&value);
+            Ok(*a)
+        }
+        ValueRef::Object(&o) if req.class_named(b"Closure") != Some(o.class()) => {
+            let table = req.object_handlers(o.heap());
+            let rows = match table.get_properties_for(req, o, PropertyPurpose::ArrayCast)? {
+                Some(rows) => rows,
+                None => table.get_properties(req, o)?,
+            };
+            let mangled = mangled_names(req, o.class());
+            let mut array = PhpArray::new(req)?;
+            for (name, entry) in rows {
+                let prefix = mangled
+                    .iter()
+                    .find(|(plain, _)| &**plain == name.as_bytes());
+                let key = if let Some((_, prefix)) = prefix {
+                    let bytes = [prefix.as_slice(), name.as_bytes()].concat();
+                    Key::Str(PhpString::new(req, &bytes)?)
+                } else {
+                    req.addref(&Value::string(name));
+                    Key::from_string(name)
+                };
+                req.addref(&entry);
+                array.set(req, key, entry)?;
+            }
+            Ok(array)
+        }
+        _ => {
+            if value.as_float().is_some_and(f64::is_nan) {
+                warning(req, "unexpected NAN value was coerced to array");
+            }
+            let mut array = PhpArray::new(req)?;
+            req.addref(&value);
+            array.append(req, value)?;
+            Ok(array)
+        }
+    }
+}
+
+/// The prefix `zend_mangle_property_name` puts before each declared
+/// instance property of `class` that is not public: `\0*\0` for a
+/// protected one, `\0Class\0` for a private one. Public names carry
+/// none and are not listed.
+fn mangled_names(req: &Request, class: crate::api::values::ClassId) -> Vec<(Box<[u8]>, Vec<u8>)> {
+    let Some(decl) = req.class_decl(class) else {
+        return Vec::new();
+    };
+    decl.properties
+        .iter()
+        .filter(|p| p.is_instance)
+        .filter_map(|p| {
+            let prefix = match p.visibility {
+                Visibility::Public => return None,
+                Visibility::Protected => b"\0*\0".to_vec(),
+                Visibility::Private => [&b"\0"[..], &decl.name.0, &b"\0"[..]].concat(),
+            };
+            Some((p.name.0.clone(), prefix))
+        })
+        .collect()
+}
+
+/// `zend_cast_zval_to_object` (`Z/Zend/zend_execute.h:225`) under the
+/// `Z_TYPE_P(expr) == IS_OBJECT` arm of `ZEND_CAST` above it: an object
+/// is itself with one more owner; `null` is an empty `stdClass`; an
+/// array is a `stdClass` whose properties are its elements, an integer
+/// key spelt in decimal (`zend_symtable_to_proptable`), each value with
+/// one more owner; and a scalar or a resource is a `stdClass` with the
+/// one property `scalar` holding it, a NAN warning on the way. The
+/// object handed back is the caller's to own, and the `Err` is the
+/// memory limit ending the request.
+///
+/// ```php
+/// class A { public $a = 1; }
+/// $o = new A; $x = token_get_all("1");
+/// var_dump((object)null, (object)1.5, (object)"s", (object)$x, (object)$o === $o, (object)$o, (object)NAN);
+/// ```
+/// ```expect
+/// Warning: unexpected NAN value was coerced to object in %s on line 4
+/// object(stdClass)#2 (0) {
+/// }
+/// object(stdClass)#3 (1) {
+///   ["scalar"]=>
+///   float(1.5)
+/// }
+/// object(stdClass)#4 (1) {
+///   ["scalar"]=>
+///   string(1) "s"
+/// }
+/// object(stdClass)#5 (1) {
+///   ["0"]=>
+///   array(3) {
+///     [0]=>
+///     int(267)
+///     [1]=>
+///     string(1) "1"
+///     [2]=>
+///     int(1)
+///   }
+/// }
+/// bool(true)
+/// object(A)#1 (1) {
+///   ["a"]=>
+///   int(1)
+/// }
+/// object(stdClass)#6 (1) {
+///   ["scalar"]=>
+///   float(NAN)
+/// }
+/// ```
+pub(crate) fn to_object(req: &mut Request, value: &Value) -> Result<PhpObject, Thrown> {
+    let value = value.deref();
+    if let ValueRef::Object(&o) = value.as_ref() {
+        req.addref(&value);
+        return Ok(o);
+    }
+    let object = req.new_object_of("stdClass")?;
+    match value.as_ref() {
+        ValueRef::Undef | ValueRef::Null => {}
+        ValueRef::Array(a) => {
+            for (key, entry) in a.snapshot_refs() {
+                let name = key.to_prop_name(req)?;
+                if matches!(key, Key::Str(_)) {
+                    req.addref(&Value::string(name));
+                }
+                req.addref(&entry);
+                object.set_prop(req, name, entry)?;
+            }
+        }
+        _ => {
+            if value.as_float().is_some_and(f64::is_nan) {
+                warning(req, "unexpected NAN value was coerced to object");
+            }
+            let name = PhpString::new(req, b"scalar")?;
+            req.addref(&value);
+            object.set_prop(req, name, value)?;
+        }
+    }
+    Ok(object)
 }
 
 /// `zval_get_long_func` with `is_strict` off (`Z/Zend/zend_operators.c:957`).

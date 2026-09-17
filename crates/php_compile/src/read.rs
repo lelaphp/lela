@@ -380,11 +380,11 @@ impl BinaryOp {
 }
 
 /// The type a cast is to, php's `attr` on `ZEND_AST_CAST`: the scanner's
-/// `T_INT_CAST`, `T_DOUBLE_CAST`, `T_STRING_CAST` and `T_BOOL_CAST`,
-/// each with the canonical spelling and the one 8.5 deprecates
-/// (`zend_language_scanner.l` at the pin). `(array)` and `(object)` are
-/// refused as what this reader cannot read yet, and `(unset)` as the
-/// compile error `zend_compile_cast` raises for it.
+/// `T_INT_CAST`, `T_DOUBLE_CAST`, `T_STRING_CAST`, `T_ARRAY_CAST`,
+/// `T_OBJECT_CAST` and `T_BOOL_CAST`, each scalar one with the canonical
+/// spelling and the one 8.5 deprecates (`zend_language_scanner.l` at the
+/// pin). `(unset)` is refused as the compile error `zend_compile_cast`
+/// raises for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CastTo {
     /// `(int)` and `(integer)`: `IS_LONG`.
@@ -393,6 +393,10 @@ pub(crate) enum CastTo {
     Double,
     /// `(string)` and `(binary)`: `IS_STRING`.
     Str,
+    /// `(array)`: `IS_ARRAY`.
+    Array,
+    /// `(object)`: `IS_OBJECT`.
+    Object,
     /// `(bool)` and `(boolean)`: `_IS_BOOL`, which php compiles to
     /// `ZEND_BOOL` and never to `ZEND_CAST`.
     Bool,
@@ -405,6 +409,8 @@ impl CastTo {
             CastTo::Long => 4,
             CastTo::Double => 5,
             CastTo::Str => 6,
+            CastTo::Array => 7,
+            CastTo::Object => 8,
             // `_IS_BOOL` is 18 and reaches no opline: `ZEND_BOOL` carries
             // nothing in `extended_value`.
             CastTo::Bool => 0,
@@ -1515,8 +1521,7 @@ impl Reader<'_> {
 
     /// `T_INT_CAST expr` and its kin: the cast token, then the operand at
     /// unary precedence, so `(int)$a ** 2` is php's `(int)($a ** 2)` as
-    /// `-$a ** 2` is. `(array)` and `(object)` wait on the tree; `(unset)`
-    /// is refused at the level `zend_compile_cast` refuses it,
+    /// `-$a ** 2` is. `(unset)` is refused at the level `zend_compile_cast` refuses it,
     /// `E_COMPILE_ERROR`, which php raises once the whole file has parsed
     /// and `Parsed::diagnostics` carries there; and `(real)` is the
     /// scanner's own parse error, carried there too.
@@ -1528,6 +1533,8 @@ impl Reader<'_> {
             b"int" | b"integer" => CastTo::Long,
             b"float" | b"double" => CastTo::Double,
             b"string" | b"binary" => CastTo::Str,
+            b"array" => CastTo::Array,
+            b"object" => CastTo::Object,
             b"bool" | b"boolean" => CastTo::Bool,
             b"unset" => {
                 return Err(Trouble {
@@ -2768,9 +2775,9 @@ mod tests {
     }
 
     /// The cast spellings php's scanner takes, whatever their case and
-    /// with blanks inside the parentheses, each to its type; `(array)`
-    /// and `(object)` are refused as unread, `(unset)` as php's compile
-    /// error, and a parenthesis that opens no cast opens an expression.
+    /// with blanks inside the parentheses, each to its type; `(unset)` is
+    /// refused as php's compile error, and a parenthesis that opens no
+    /// cast opens an expression.
     #[test]
     fn a_cast_is_read_at_unary_precedence() {
         let cast = |to: CastTo, operand: Expr| Expr::Cast {
@@ -2778,7 +2785,7 @@ mod tests {
             operand: Child::new(operand),
         };
         assert_eq!(
-            read(b"<?php (int)$a; ( Integer )$a; (FLOAT)$a; (double)$a; (string)$a; (binary)$a; (bool)$a; (boolean)$a;")
+            read(b"<?php (int)$a; ( Integer )$a; (FLOAT)$a; (double)$a; (string)$a; (binary)$a; (array)$a; (OBJECT)$a; (bool)$a; (boolean)$a;")
                 .unwrap_or_default()
                 .into_iter()
                 .map(|(stmt, _)| stmt)
@@ -2790,6 +2797,8 @@ mod tests {
                 CastTo::Double,
                 CastTo::Str,
                 CastTo::Str,
+                CastTo::Array,
+                CastTo::Object,
                 CastTo::Bool,
                 CastTo::Bool
             ]
@@ -2834,8 +2843,6 @@ mod tests {
                 1
             )]
         );
-        assert!(read(b"<?php (array)$a;").is_err());
-        assert!(read(b"<?php (object)$a;").is_err());
         let unset = read(b"<?php\n(unset)$a;").err();
         assert_eq!(
             unset.as_ref().map(|t| (t.level, t.what.as_str(), t.line)),

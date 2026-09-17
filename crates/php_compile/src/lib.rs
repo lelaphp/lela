@@ -1081,6 +1081,24 @@ mod tests {
         );
     }
 
+    /// `zend_compile_cast`'s other two arms: `(array)` and `(object)` are
+    /// `CAST` with `IS_ARRAY` and `IS_OBJECT` in `extended_value`, which
+    /// the dump prints as php's does.
+    #[test]
+    fn an_array_and_an_object_cast_are_php_s_oplines() {
+        assert_eq!(
+            dump_of(b"<?php\n$x = 1;\n$a = (array)$x;\n$o = (object)$a;\n"),
+            "\n$_main:\n     ; (lines=6, args=0, vars=3, tmps=5)\n\
+             \x20    ; (before optimizer)\n     ; :1-5\n     ; return  [] RANGE[0..0]\n\
+             0000 ASSIGN CV0($x) int(1)\n\
+             0001 T4 = CAST (array) CV0($x)\n\
+             0002 ASSIGN CV1($a) T4\n\
+             0003 T6 = CAST (object) CV1($a)\n\
+             0004 ASSIGN CV2($o) T6\n\
+             0005 RETURN int(1)\n"
+        );
+    }
+
     /// The scanner's deprecations and warning stand on the unit before
     /// the compiler's own warning, each at its line, as php raised them:
     /// the whole file is scanned before `zend_compile_top_stmt` runs.

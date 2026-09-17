@@ -2293,9 +2293,8 @@ pub(crate) fn type_check<T: Tier>(
 
 /// `ZEND_CAST`: [`crate::ops::cast`] over the operand to the type
 /// `extended_value` names, into the temporary; the operand freed after
-/// it. A type this engine converts to nothing yet, `(array)` and
-/// `(object)`, is the internal-error fatal naming the opcode, as an
-/// opcode with no handler is.
+/// it. A type constant that is none of the handler's five arms is the
+/// internal-error fatal naming it, as an opcode with no handler is.
 pub(crate) fn cast<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
