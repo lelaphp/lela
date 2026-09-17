@@ -24,7 +24,12 @@
 //! gives up a temporary nothing reads, and the four opcodes php's
 //! compiler emits for a call in `zend_try_compile_special_func`'s table
 //! (#219): `ZEND_STRLEN`, `ZEND_TYPE_CHECK`, `ZEND_DEFINED` and
-//! `ZEND_COUNT`.
+//! `ZEND_COUNT`; and the ones a `switch` and a `match` compile to
+//! (#256): `ZEND_SWITCH_LONG`, `ZEND_SWITCH_STRING` and `ZEND_MATCH`
+//! over their jump tables, `ZEND_CASE` and `ZEND_CASE_STRICT`, which
+//! keep the subject alive for the next case, `ZEND_QM_ASSIGN`, which
+//! moves an arm's value into the one temporary, `ZEND_MATCH_ERROR`,
+//! which throws for the subject no arm took, and `ZEND_JMPZ`.
 
 // Every handler is generic over the tier and hands back the same edge, so
 // the generated dispatch calls them all the same way; the ones that raise a
@@ -36,8 +41,9 @@ use php_unit::{ConstIdx, OpArray, OperandKind, Opline};
 
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
-use crate::api::values::Value;
+use crate::api::values::{TypeTag, Value};
 use crate::exec::{self, CallStage, CallState};
+use crate::ops::Switched;
 use crate::tier::{SafepointIdx, Site, Stepped, Tier, continued};
 
 /// What one handler did to the frame chain, and the fatal that ends the
@@ -859,6 +865,179 @@ pub(crate) fn jmpnz<T: Tier>(
     Ok(Stepped::Same(frame))
 }
 
+/// `ZEND_JMPZ`: `ZEND_JMPNZ` with the test the other way round, the jump
+/// in `op2` taken when the operand is false; what `zend_compile_switch`
+/// emits over a case of a `switch (false)`. A backward one is served as
+/// [`jmpnz`] serves it, though php's compiler emits none.
+///
+/// ```php
+/// $a = 0;
+/// switch (false) { case $a: echo "zero"; break; case 2: echo "two"; }
+/// switch (true) { case $a: echo "zero"; break; default: echo "none"; }
+/// ```
+/// ```expect
+/// zeronone
+/// ```
+pub(crate) fn jmpz<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let value = exec::operand(req, frame, code, op.op1_type, op.op1);
+    let taken = !crate::ops::is_true(req, &value);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    if !taken {
+        return Ok(advance(req, frame));
+    }
+    let back = op.op2 <= req.vm().opline(frame);
+    req.vm_mut().jump(frame, op.op2);
+    if back {
+        crate::interrupt::check(req)?;
+        continued(T::safepoint(req, frame, Site::Loop(SafepointIdx(op.out))))?;
+    }
+    Ok(Stepped::Same(frame))
+}
+
+/// `ZEND_SWITCH_LONG`: [`crate::ops::switch_long`] over the subject,
+/// read as `GET_OP1_ZVAL_PTR_UNDEF` reads it, and the jump table in
+/// `op2`; the frame at the target or at the default in
+/// `extended_value`, or on to the `CASE` chain after it. The subject is
+/// nobody's to free here; the chain and the switch's `FREE` read it.
+pub(crate) fn switch_long<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let subject = exec::operand_undef(req, frame, code, op.op1_type, op.op1);
+    let table = exec::constant(code, ConstIdx(op.op2));
+    let Some(table) = table.as_array() else {
+        return Err(no_table("SWITCH_LONG"));
+    };
+    Ok(switched(
+        req,
+        frame,
+        crate::ops::switch_long(&subject, *table),
+        op,
+    ))
+}
+
+/// `ZEND_SWITCH_STRING`: [`crate::ops::switch_string`], the same way.
+pub(crate) fn switch_string<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let subject = exec::operand_undef(req, frame, code, op.op1_type, op.op1);
+    let table = exec::constant(code, ConstIdx(op.op2));
+    let Some(table) = table.as_array() else {
+        return Err(no_table("SWITCH_STRING"));
+    };
+    Ok(switched(
+        req,
+        frame,
+        crate::ops::switch_string(&subject, *table),
+        op,
+    ))
+}
+
+/// `ZEND_MATCH`: [`crate::ops::match_target`] over the subject and the
+/// jump table in `op2`; an undefined CV is `ZVAL_UNDEFINED_OP1`, the
+/// warning [`exec::operand`] raises, and then the default.
+pub(crate) fn r#match<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let mut subject = exec::operand_undef(req, frame, code, op.op1_type, op.op1);
+    if subject.tag() == TypeTag::Undef {
+        subject = exec::operand(req, frame, code, op.op1_type, op.op1);
+    }
+    let table = exec::constant(code, ConstIdx(op.op2));
+    let Some(table) = table.as_array() else {
+        return Err(no_table("MATCH"));
+    };
+    Ok(switched(
+        req,
+        frame,
+        crate::ops::match_target(&subject, *table),
+        op,
+    ))
+}
+
+/// `ZEND_MATCH_ERROR`: [`crate::ops::match_unhandled_error`] over the
+/// subject as it stands, `GET_OP1_ZVAL_PTR_UNDEF`, left pending; the
+/// subject is not freed here, as php's handler frees nothing before
+/// `HANDLE_EXCEPTION`.
+pub(crate) fn match_error<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let subject = exec::operand_undef(req, frame, code, op.op1_type, op.op1);
+    let thrown = crate::ops::match_unhandled_error(req, &subject);
+    req.leave_pending(&thrown);
+    Ok(Stepped::Threw(frame))
+}
+
+/// `ZEND_CASE`: [`crate::ops::is_equal`] over a temporary subject and
+/// the case, `op2` freed and `op1` kept for the next case
+/// (`FREE_OP2` alone), which is why `zend_compile_switch` emits it in
+/// place of `IS_EQUAL` for a subject that is a temporary. The `FREE` at
+/// the switch's end gives the subject up.
+///
+/// ```php
+/// $a = "ab";
+/// switch (strlen($a)) { case 1: echo "one"; break; case 2: echo "two"; break; case "2": echo "again"; break; }
+/// switch (strlen($a)) { case "2": echo "again"; }
+/// echo match (strlen($a)) { 1 => "one", 2 => "two" };
+/// echo match (strlen($a)) { "2" => "string", 2 => "int" };
+/// ```
+/// ```expect
+/// twoagaintwoint
+/// ```
+pub(crate) fn case<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    compared(req, frame, code, op, crate::ops::is_equal)
+}
+
+/// `ZEND_CASE_STRICT`: [`crate::ops::is_identical`], the same way, for
+/// the arm of a `match` over a temporary subject.
+pub(crate) fn case_strict<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    compared(req, frame, code, op, crate::ops::is_identical)
+}
+
+/// `ZEND_QM_ASSIGN`: the operand into the temporary `result` names, a
+/// temporary moved and a CV or a constant copied with one more owner,
+/// the reference a CV holds followed (`ZVAL_COPY_DEREF`), an undefined
+/// CV warned about and `null`; what every arm of a `match` leaves its
+/// value by.
+pub(crate) fn qm_assign<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let value = exec::take_operand(req, frame, code, op.op1_type, op.op1);
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, value);
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
 /// `ZEND_RETURN`: the operand taken as the caller's (`ZVAL_COPY` of a
 /// CV or a constant, a temporary moved), then the return safepoint, then
 /// the frame popped (design §4.3 seam 8, §5.8). The safepoint carries
@@ -994,6 +1173,58 @@ fn incdec(
             Ok(Stepped::Threw(frame))
         }
     }
+}
+
+/// The body `CASE` and `CASE_STRICT` share: [`binary`] with `op1` kept,
+/// `FREE_OP2` alone, since the subject is read again by the next case.
+fn compared(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    kernel: fn(&mut Request, &Value, &Value) -> Result<Value, Thrown>,
+) -> Edge {
+    let left = exec::operand(req, frame, code, op.op1_type, op.op1);
+    let right = exec::operand(req, frame, code, op.op2_type, op.op2);
+    let computed = kernel(req, &left, &right);
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    match computed {
+        Ok(value) => {
+            let slot = exec::temporary_slot(code, op.out);
+            let previous = req.set_slot(frame, slot, value);
+            req.release(previous);
+            Ok(advance(req, frame))
+        }
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            Ok(Stepped::Threw(frame))
+        }
+    }
+}
+
+/// Where a jump-table opcode sends the frame: `ZEND_VM_SET_RELATIVE_OPCODE`
+/// to the target or to `extended_value`, or `ZEND_VM_NEXT_OPCODE` on to
+/// the chain. Every target is forward, so none is a safepoint site.
+fn switched(req: &mut Request, frame: FrameRef, switched: Switched, op: &Opline) -> Stepped {
+    match switched {
+        Switched::Target(target) => {
+            req.vm_mut().jump(frame, target);
+            Stepped::Same(frame)
+        }
+        Switched::Default => {
+            req.vm_mut().jump(frame, op.extended_value);
+            Stepped::Same(frame)
+        }
+        Switched::Chain => advance(req, frame),
+    }
+}
+
+/// The fatal for a jump-table opcode whose `op2` is no array, which no
+/// unit the compiler wrote has (design §10).
+fn no_table(opcode: &str) -> Fatal {
+    Fatal::Error(format!(
+        "InternalError: {opcode} names a constant that is no jump table"
+    ))
 }
 
 /// `ZEND_VM_NEXT_OPCODE`: the same frame, at the opline after this one.

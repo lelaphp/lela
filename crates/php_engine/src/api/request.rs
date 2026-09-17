@@ -811,7 +811,7 @@ impl Request {
     /// #1 {main}
     ///   thrown in %s on line 3
     /// ```
-    fn exception_string_param_max_len(&self) -> usize {
+    pub(crate) fn exception_string_param_max_len(&self) -> usize {
         self.ini_get(b"zend.exception_string_param_max_len")
             .map_or(15, |value| usize::try_from(ini_atol(value)).unwrap_or(0))
     }
@@ -2912,7 +2912,7 @@ fn escape_html(message: &str) -> String {
 /// `\v`, `\\`, `\e` or `\xNN` with the digits in upper case, and every
 /// other byte as itself. What a string argument in a trace and
 /// `zend_print_zval_r`'s cousins write.
-fn append_escaped(out: &mut String, bytes: &[u8]) {
+pub(crate) fn append_escaped(out: &mut String, bytes: &[u8]) {
     for &byte in bytes {
         match byte {
             b'\n' => out.push_str("\\n"),

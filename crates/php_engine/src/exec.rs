@@ -259,6 +259,23 @@ pub(crate) fn operand(
     }
 }
 
+/// `GET_OP1_ZVAL_PTR_UNDEF`: [`operand`] without the warning, for a
+/// handler that reads an undefined CV as the `UNDEF` it is and decides
+/// for itself, as `SWITCH_LONG` falls through to the chain and `MATCH`
+/// warns on its own.
+pub(crate) fn operand_undef(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    kind: OperandKind,
+    field: u32,
+) -> Value {
+    match kind {
+        OperandKind::Cv => req.slot(frame, field),
+        _ => operand(req, frame, code, kind, field),
+    }
+}
+
 /// The operand's value as the handler's own: a `CV` or a `CONST` with
 /// one more owner taken (`ZVAL_COPY`, `Z_TRY_ADDREF`), a `TMP` or a `VAR`
 /// moved out of its slot, which is left `UNDEF` (`ZVAL_COPY_VALUE` and

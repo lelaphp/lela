@@ -13,8 +13,8 @@ use std::cmp::Ordering;
 use php_heap::{Number, Scalar, ZvalType, double_to_string, numeric_prefix};
 
 use crate::api::raising::{Thrown, deprecated, throw, warning};
-use crate::api::request::Request;
-use crate::api::values::{PhpArray, PhpString, TypeTag, Value, ValueRef};
+use crate::api::request::{Request, append_escaped};
+use crate::api::values::{Key, PhpArray, PhpString, TypeTag, Value, ValueRef};
 
 /// `zval_get_string` (`Z/Zend/zend_operators.c:1066`): a value as the
 /// string php converts it to, which is what `ECHO`, `print`, `.` and
@@ -64,6 +64,241 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, T
         | ValueRef::Bool(false)
         | ValueRef::Object(_)
         | ValueRef::Reference(_) => PhpString::new(req, b""),
+    }
+}
+
+/// Where a `SWITCH_LONG`, `SWITCH_STRING` or `MATCH` sends the loop:
+/// the opline its jump table names for the subject, the default target
+/// in its `extended_value`, or, for the two `SWITCH_*`, the opline after
+/// it, which is the `CASE` chain php falls back to for a subject of
+/// another type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Switched {
+    Target(u32),
+    Default,
+    Chain,
+}
+
+/// `ZEND_SWITCH_LONG` (`Z/Zend/zend_vm_def.h:9295`): a `long` subject,
+/// a reference to one followed, looked up in the table by
+/// `zend_hash_index_find`, the default where it is not there; any other
+/// subject, an undefined variable among them, is left to the chain,
+/// whose `IS_EQUAL` compares it as `==` does and warns where the
+/// subject is undefined.
+///
+/// ```php
+/// $a = 3;
+/// switch ($a) { case 1: echo "a"; break; case 2: echo "b"; break; case 3: echo "c"; break; case 4: echo "d"; break; case 5: echo "e"; break; default: echo "f"; }
+/// $a = 9;
+/// switch ($a) { case 1: echo "a"; break; case 2: echo "b"; break; case 3: echo "c"; break; case 4: echo "d"; break; case 5: echo "e"; break; default: echo "f"; }
+/// $a = "3";
+/// switch ($a) { case 1: echo "a"; break; case 2: echo "b"; break; case 3: echo "c"; break; case 4: echo "d"; break; case 5: echo "e"; break; default: echo "f"; }
+/// $a = 3.0;
+/// switch ($a) { case 1: echo "a"; break; case 2: echo "b"; break; case 3: echo "c"; break; case 4: echo "d"; break; case 5: echo "e"; break; default: echo "f"; }
+/// $a = 2;
+/// switch ($a) { case 1: echo "a"; case 2: echo "b"; case 3: echo "c"; break; case 4: echo "d"; case 5: echo "e"; }
+/// switch ($u) { case 1: echo "a"; break; case 2: echo "b"; break; case 3: echo "c"; break; case 4: echo "d"; break; case 5: echo "e"; break; default: echo "f"; }
+/// ```
+/// ```expect
+/// cfccbc
+/// Warning: Undefined variable $u in %s on line 12
+///
+/// Warning: Undefined variable $u in %s on line 12
+///
+/// Warning: Undefined variable $u in %s on line 12
+///
+/// Warning: Undefined variable $u in %s on line 12
+///
+/// Warning: Undefined variable $u in %s on line 12
+/// f
+/// ```
+pub(crate) fn switch_long(subject: &Value, table: PhpArray) -> Switched {
+    match subject.deref().as_ref() {
+        ValueRef::Int(n) => found(table.get(&Key::Int(n))),
+        _ => Switched::Chain,
+    }
+}
+
+/// `ZEND_SWITCH_STRING` (`Z/Zend/zend_vm_def.h:9323`): a string
+/// subject, a reference to one followed, looked up in the table by
+/// `zend_hash_find`, its bytes and nothing else, since the compiler
+/// keeps a numeric string out of the table; the default where it is not
+/// there; any other subject is left to the chain.
+///
+/// ```php
+/// $a = "y";
+/// switch ($a) { case "x": echo "a"; break; case "y": echo "b"; break; default: echo "c"; }
+/// $a = "z";
+/// switch ($a) { case "x": echo "a"; break; case "y": echo "b"; break; default: echo "c"; }
+/// $a = 0;
+/// switch ($a) { case "x": echo "a"; break; case "y": echo "b"; break; default: echo "c"; }
+/// $a = "1e1";
+/// switch ($a) { case "x": echo "a"; break; case "10": echo "b"; break; default: echo "c"; }
+/// $a = "x";
+/// switch ($a) { case "x": echo "a"; case "y": echo "b"; break; default: echo "c"; }
+/// ```
+/// ```expect
+/// bccbab
+/// ```
+pub(crate) fn switch_string(subject: &Value, table: PhpArray) -> Switched {
+    match subject.deref().as_ref() {
+        ValueRef::Str(s) => found(table.get(&Key::Str(*s))),
+        _ => Switched::Chain,
+    }
+}
+
+/// `ZEND_MATCH` (`Z/Zend/zend_vm_def.h:9356`): a `long` subject looked
+/// up by `zend_hash_index_find` and a string one by `zend_hash_find`,
+/// each its own kind and nothing else, which is `===`; a reference
+/// followed; every other subject the default, an undefined variable
+/// among them, which the handler has warned about (`ZVAL_UNDEFINED_OP1`)
+/// before it asks.
+///
+/// ```php
+/// $a = 1;
+/// echo match ($a) { 1 => "x", "s" => "y", default => "z" };
+/// $a = "s";
+/// echo match ($a) { 1 => "x", "s" => "y", default => "z" };
+/// $a = "1";
+/// echo match ($a) { 1 => "x", "s" => "y", default => "z" };
+/// $a = 1.0;
+/// echo match ($a) { 1 => "x", "s" => "y", default => "z" };
+/// $a = 3;
+/// echo match ($a) { 1, 3 => "x", "s" => "y", default => "z" };
+/// echo match ($u) { 1 => "x", "s" => "y", default => "z" };
+/// echo match (true) { $a > 2 => "big", default => "small" };
+/// ```
+/// ```expect
+/// xyzzx
+/// Warning: Undefined variable $u in %s on line 12
+/// zbig
+/// ```
+pub(crate) fn match_target(subject: &Value, table: PhpArray) -> Switched {
+    match subject.deref().as_ref() {
+        ValueRef::Int(n) => found(table.get(&Key::Int(n))),
+        ValueRef::Str(s) => found(table.get(&Key::Str(*s))),
+        _ => Switched::Default,
+    }
+}
+
+/// The target a table holds under a key, or the default where none.
+fn found(target: Option<Value>) -> Switched {
+    match target.and_then(|target| target.as_int()) {
+        Some(target) => Switched::Target(u32::try_from(target).unwrap_or(u32::MAX)),
+        None => Switched::Default,
+    }
+}
+
+/// `zend_match_unhandled_error` (`Z/Zend/zend_execute.c`): the
+/// `UnhandledMatchError` a `MATCH_ERROR` throws over the subject no arm
+/// took. A scalar is rendered by `smart_str_append_scalar`: `NULL`,
+/// `true` or `false`, a long in decimal, a double at `precision`
+/// (`smart_str_append_double`), a string in `'` escaped as
+/// `smart_str_append_escaped` escapes it and cut at
+/// `zend.exception_string_param_max_len` bytes with `...`; anything else
+/// is named by its type, `zend_zval_type_name`, a class for an object.
+///
+/// ```php
+/// $a = 9;
+/// echo match ($a) { 1 => "x", "s" => "y" };
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught UnhandledMatchError: Unhandled match case 9 in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+///
+/// ```php
+/// $a = "a long string\nwith more";
+/// echo match ($a) { 1 => "x" };
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught UnhandledMatchError: Unhandled match case 'a long string\nw...' in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+///
+/// ```php
+/// $a = 1.5;
+/// echo match ($a) { 1 => "x", 2 => "y" };
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught UnhandledMatchError: Unhandled match case 1.5 in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+///
+/// ```php
+/// $a = true;
+/// echo match ($a) { 1 => "x", 2 => "y" };
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught UnhandledMatchError: Unhandled match case true in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+///
+/// An undefined subject is warned about at the `MATCH` and is `NULL`
+/// at the `MATCH_ERROR`, which reads the CV as it stands.
+///
+/// ```php
+/// echo match ($u) { 1 => "x", 2 => "y" };
+/// ```
+/// ```expect exit=255
+/// Warning: Undefined variable $u in %s on line 2
+///
+/// Fatal error: Uncaught UnhandledMatchError: Unhandled match case NULL in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn match_unhandled_error(req: &mut Request, subject: &Value) -> Thrown {
+    let subject = subject.deref();
+    let message = match subject.as_ref() {
+        ValueRef::Undef | ValueRef::Null => String::from("Unhandled match case NULL"),
+        ValueRef::Bool(b) => format!("Unhandled match case {}", if b { "true" } else { "false" }),
+        ValueRef::Int(n) => format!("Unhandled match case {n}"),
+        ValueRef::Float(f) => {
+            let precision = match req.precision() {
+                0 => 1,
+                precision => precision,
+            };
+            format!("Unhandled match case {}", double_to_string(f, precision))
+        }
+        ValueRef::Str(s) => {
+            let mut text = String::from("Unhandled match case '");
+            let cut = req.exception_string_param_max_len();
+            append_escaped(&mut text, &s.as_bytes()[..cut.min(s.len())]);
+            if s.len() > cut {
+                text.push_str("...");
+            }
+            text.push('\'');
+            text
+        }
+        ValueRef::Array(_)
+        | ValueRef::Object(_)
+        | ValueRef::Resource(_)
+        | ValueRef::Reference(_) => {
+            format!("Unhandled match case of type {}", type_name(req, &subject))
+        }
+    };
+    throw(req, "UnhandledMatchError", &message)
+}
+
+/// `zend_zval_type_name`: a class for an object, `null` for an
+/// undefined value, and php's type name for the rest.
+fn type_name(req: &Request, value: &Value) -> String {
+    match value.as_ref() {
+        ValueRef::Object(o) => req.class_decl(o.class()).map_or_else(
+            || String::from("object"),
+            |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
+        ),
+        ValueRef::Undef => String::from("null"),
+        _ => String::from(value.type_name()),
     }
 }
 
