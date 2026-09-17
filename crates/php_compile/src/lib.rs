@@ -3674,6 +3674,7 @@ mod tests {
                 doc_comment: None,
                 file: Name(Box::new([])),
                 line: 0,
+                end_line: 0,
             }],
             ..Options::default()
         };

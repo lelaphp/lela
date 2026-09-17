@@ -595,8 +595,32 @@ impl Request {
 
     /// `zend_hash_find_ptr(&ce->function_table, lcname)` over the
     /// class's native methods: the method under the lowered name, by
-    /// identity, and none where the class has no entry of that name.
+    /// identity, the class's own first and then each parent's, since
+    /// `zend_do_inheritance` copies a parent's table into the child's
+    /// (`ReflectionObject` answers `getName` with `ReflectionClass`'s);
+    /// none where no class of the chain has an entry of that name.
     pub(crate) fn method_named(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
+        let mut at = Some(class);
+        let mut depth = 0;
+        while let Some(class) = at {
+            if let Some(function) = self.own_method_named(class, lowered) {
+                return Some(function);
+            }
+            depth += 1;
+            if depth > 64 {
+                return None;
+            }
+            at = self
+                .class_decl(class)?
+                .parent
+                .as_ref()
+                .and_then(|name| self.class_named(&name.0));
+        }
+        None
+    }
+
+    /// [`Request::method_named`] over one class's own declarations.
+    fn own_method_named(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
         let decl = self.class_decl(class)?;
         let base = self.shared.functions.len();
         self.shared
@@ -2586,6 +2610,17 @@ impl Request {
         (!parameter.variadic).then(|| String::from_utf8_lossy(&parameter.name.0).into_owned())
     }
 
+    /// `arg_info->type` of the active native's parameter at `position`,
+    /// what `zend_null_arg_deprecated` names the type by; none where the
+    /// native declares no type there.
+    pub(crate) fn active_parameter_type(&self, position: u32) -> Option<php_unit::decl::Type> {
+        let decl = self.function_decl(self.active_native_function()?)?;
+        decl.parameters
+            .get(usize::try_from(position.checked_sub(1)?).ok()?)?
+            .ty
+            .clone()
+    }
+
     /// The `($name)` `zend_argument_error_variadic` and
     /// `zend_param_must_be_nullable` write after `#N`, with its leading
     /// space, and nothing where the parameter has no name.
@@ -3267,6 +3302,29 @@ impl Request {
             })
             .and_then(|i| u32::try_from(i).ok())
             .map(ExtensionId)
+    }
+
+    /// `ce->info.internal.module`: the extension that declared a native
+    /// class, `ReflectionClass::getExtension` reads it; none for a class
+    /// Zend declares itself, whose `zend_module_entry` php has as `Core` and this
+    /// engine as no `Extension` value yet, and none for a user class.
+    #[must_use]
+    pub fn class_extension(&self, class: ClassId) -> Option<ExtensionId> {
+        let at = usize::try_from(class.0).ok()?;
+        let zend = self
+            .shared
+            .classes
+            .len()
+            .saturating_sub(self.shared.extensions.iter().map(|e| e.classes.len()).sum());
+        let mut start = zend;
+        for (i, extension) in self.shared.extensions.iter().enumerate() {
+            let end = start.saturating_add(extension.classes.len());
+            if (start..end).contains(&at) {
+                return u32::try_from(i).ok().map(ExtensionId);
+            }
+            start = end;
+        }
+        None
     }
 
     fn extension_of(&self, extension: ExtensionId) -> Option<&Extension> {

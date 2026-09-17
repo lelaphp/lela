@@ -19,8 +19,8 @@
 use std::cmp::Ordering;
 
 use php_unit::decl::{
-    ClassDecl, ClassFlags, ClassKind, EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, Type,
-    Visibility,
+    ClassDecl, ClassFlags, ClassKind, EnumBacking, FunctionDecl, MethodDecl, Name, Parameter,
+    PropertyDecl, Type, Visibility,
 };
 
 use crate::api::abi::{CloneObj, Entry, NativeClassDecl, ObjectHandlers};
@@ -436,11 +436,97 @@ fn declared(name: &[u8], kind: ClassKind, parent: Option<&[u8]>) -> ClassDecl {
         traits: Vec::new(),
         backing: EnumBacking::Pure,
         constants: Vec::new(),
-        properties: Vec::new(),
+        // php declares the seven properties on `Exception` and `Error`
+        // alike (`zend_exceptions.stub.php`), and a child inherits them.
+        properties: match (kind, parent) {
+            (ClassKind::Class, None) => throwable_properties(),
+            _ => Vec::new(),
+        },
         methods: Vec::new(),
         attributes: Vec::new(),
         doc_comment: None,
         file: Name(Box::new([])),
         line: 0,
+        end_line: 0,
     }
+}
+
+/// The properties `Exception` and `Error` declare, as
+/// `zend_exceptions.stub.php` writes them and in its order: `message`,
+/// `string`, `code`, `file`, `line`, `trace`, `previous`. What
+/// `zend_default_exception_new` fills at creation, `file`, `line` and
+/// `trace`, the raisers of `api::raising` write by name; the rest hold
+/// the stub's defaults. Their visibility is what `ReflectionClass::
+/// hasProperty` and `getDefaultProperties` read: a child sees the four
+/// protected ones and not the three private.
+///
+/// ```php
+/// $r = new ReflectionClass('Exception'); var_dump($r->hasProperty('message'), $r->hasProperty('trace'), (new ReflectionClass('TypeError'))->hasProperty('trace'), $r->getDefaultProperties());
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// array(7) {
+///   ["message"]=>
+///   string(0) ""
+///   ["string"]=>
+///   string(0) ""
+///   ["code"]=>
+///   int(0)
+///   ["file"]=>
+///   string(0) ""
+///   ["line"]=>
+///   int(0)
+///   ["trace"]=>
+///   array(0) {
+///   }
+///   ["previous"]=>
+///   NULL
+/// }
+/// ```
+fn throwable_properties() -> Vec<PropertyDecl> {
+    use php_unit::decl::{ConstExpr, Type};
+    let property = |name: &[u8], visibility, ty, default| PropertyDecl {
+        name: Name(name.into()),
+        visibility,
+        is_instance: true,
+        is_readonly: false,
+        ty,
+        default,
+        attributes: Vec::new(),
+        doc_comment: None,
+    };
+    let empty = || Some(ConstExpr::Str(Box::new([])));
+    vec![
+        property(b"message", Visibility::Protected, None, empty()),
+        property(b"string", Visibility::Private, Some(Type::String), empty()),
+        property(
+            b"code",
+            Visibility::Protected,
+            None,
+            Some(ConstExpr::Long(0)),
+        ),
+        property(b"file", Visibility::Protected, Some(Type::String), empty()),
+        property(
+            b"line",
+            Visibility::Protected,
+            Some(Type::Int),
+            Some(ConstExpr::Long(0)),
+        ),
+        property(
+            b"trace",
+            Visibility::Private,
+            Some(Type::Array),
+            Some(ConstExpr::Array(Vec::new())),
+        ),
+        property(
+            b"previous",
+            Visibility::Private,
+            Some(Type::Nullable(Box::new(Type::Named(Name::from(
+                "Throwable",
+            ))))),
+            Some(ConstExpr::Null),
+        ),
+    ]
 }

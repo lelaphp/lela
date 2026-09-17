@@ -405,6 +405,74 @@ pub fn coerce_param(
     coerce_typed(req, value, ty, position, false)
 }
 
+/// `zend_parse_arg_*_weak` on `null` for a scalar parameter that is
+/// not nullable: the value `null` coerces to under the 8.1 rule,
+/// `false`, `0`, `0.0` or the empty string, and none for a type php
+/// does not coerce `null` into. The caller raises
+/// `zend_null_arg_deprecated` beside it and writes the value back as
+/// the argument, as the `Z_PARAM_*` macros do.
+///
+/// ```php
+/// new ReflectionExtension(null);
+/// ```
+/// ```expect exit=255
+/// Deprecated: ReflectionExtension::__construct(): Passing null to parameter #1 ($name) of type string is deprecated in %s on line 2
+///
+/// Fatal error: Uncaught ReflectionException: Extension "" does not exist in %s:2
+/// Stack trace:
+/// #0 %s(2): ReflectionExtension->__construct('')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+fn null_as_scalar(req: &mut Request, ty: &Type) -> Result<Option<Value>, Thrown> {
+    Ok(match ty {
+        Type::Bool => Some(Value::bool(false)),
+        Type::Int => Some(Value::int(0)),
+        Type::Float => Some(Value::float(0.0)),
+        Type::String => Some(Value::string(PhpString::new(req, b"")?)),
+        _ => None,
+    })
+}
+
+/// The declared type as `zend_type_to_string` writes it into the null
+/// deprecation, for the shapes a native parameter declares: a scalar,
+/// a class, `?T`, and a union in its declared order.
+fn declared_type_name(ty: &Type) -> String {
+    match ty {
+        Type::Mixed => String::from("mixed"),
+        Type::Void => String::from("void"),
+        Type::Never => String::from("never"),
+        Type::Null => String::from("null"),
+        Type::Bool => String::from("bool"),
+        Type::False => String::from("false"),
+        Type::True => String::from("true"),
+        Type::Int => String::from("int"),
+        Type::Float => String::from("float"),
+        Type::String => String::from("string"),
+        Type::Array => String::from("array"),
+        Type::Object => String::from("object"),
+        Type::Iterable => String::from("iterable"),
+        Type::Callable => String::from("callable"),
+        Type::CalledClass => String::from("static"),
+        Type::SelfClass => String::from("self"),
+        Type::ParentClass => String::from("parent"),
+        Type::Named(name) => String::from_utf8_lossy(&name.0).into_owned(),
+        Type::Nullable(inner) => format!("?{}", declared_type_name(inner)),
+        Type::Union(members) | Type::Intersection(members) => {
+            let glue = if matches!(ty, Type::Union(_)) {
+                "|"
+            } else {
+                "&"
+            };
+            members
+                .iter()
+                .map(declared_type_name)
+                .collect::<Vec<_>>()
+                .join(glue)
+        }
+    }
+}
+
 /// [`coerce_param`] with the type named as the parameter declares it:
 /// `nullable` is set inside a `?T`, so the `TypeError` for what does
 /// not coerce says `?int` where php's `Z_EXPECTED_LONG_OR_NULL` does
@@ -419,6 +487,18 @@ fn coerce_typed(
 ) -> Result<Value, Thrown> {
     let strict = req.caller_strict_types();
     let value = &value.deref();
+    if !strict
+        && !nullable
+        && matches!(value.as_ref(), ValueRef::Null | ValueRef::Undef)
+        && let Some(coerced) = null_as_scalar(req, ty)?
+    {
+        let declared = req
+            .active_parameter_type(position)
+            .map_or_else(|| declared_type_name(ty), |ty| declared_type_name(&ty));
+        crate::api::raising::arg_null_deprecated(req, position, &declared);
+        req.replace_argument(position, coerced.clone());
+        return Ok(coerced);
+    }
     let want = |req: &mut Request, name: &str| {
         let question = if nullable { "?" } else { "" };
         Err(arg_type_error(

@@ -175,6 +175,7 @@ request::Request::backtrace
 request::Request::called_scope
 request::Request::class_alias
 request::Request::class_decl
+request::Request::class_extension
 request::Request::clear_last_error
 request::Request::constants
 request::Request::current_file

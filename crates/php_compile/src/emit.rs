@@ -478,6 +478,7 @@ impl Emit<'_> {
             doc_comment: class.doc_comment.clone().map(Vec::into_boxed_slice),
             file: self.filename.clone(),
             line,
+            end_line: class.end_line,
         };
         for constant in &class.constants {
             self.line = constant.line;

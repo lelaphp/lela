@@ -90,6 +90,8 @@ pub(crate) struct Class {
     pub(crate) doc_comment: Option<Vec<u8>>,
     pub(crate) properties: Vec<Property>,
     pub(crate) constants: Vec<Constant>,
+    /// The line of the closing brace, `ce->info.user.line_end`.
+    pub(crate) end_line: u32,
 }
 
 /// One property declarator, php's `ZEND_AST_PROP_ELEM` with the group's
@@ -680,10 +682,12 @@ impl Reader<'_> {
             doc_comment,
             properties: Vec::new(),
             constants: Vec::new(),
+            end_line: 0,
         };
         loop {
             self.skip_trivia();
             if self.byte(0) == Some(b'}') {
+                class.end_line = self.line;
                 self.close_brace();
                 return Ok(Stmt::Class(class));
             }

@@ -140,6 +140,7 @@ fn php_token_class() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
         doc_comment: None,
         file: Name(Box::new([])),
         line: 0,
+        end_line: 0,
     };
     (decl, php_token_methods())
 }

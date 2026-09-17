@@ -210,6 +210,9 @@ pub struct ClassConstDecl {
 }
 
 /// A class, interface, trait or enum, unlinked: names, not identities.
+/// `line` and `end_line` are `ce->info.user.line_start` and `line_end`,
+/// the lines of the keyword and of the closing brace, and zero on a
+/// native, whose `file` is empty.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassDecl {
     pub name: Name,
@@ -226,6 +229,7 @@ pub struct ClassDecl {
     pub doc_comment: Option<Box<[u8]>>,
     pub file: Name,
     pub line: u32,
+    pub end_line: u32,
 }
 
 /// A global constant, `const X = ...;` or `define()` folded at compile time.
