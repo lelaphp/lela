@@ -582,6 +582,7 @@ impl Emit<'_> {
             | Expr::This
             | Expr::Prop { .. }
             | Expr::Assign { .. }
+            | Expr::AssignProp { .. }
             | Expr::Call { .. }
             | Expr::PreInc(_)
             | Expr::PostInc(_)
@@ -1468,6 +1469,11 @@ impl Emit<'_> {
             Expr::This => Ok(self.fetch_this(OperandKind::Tmp)),
             Expr::Prop { object, name } => self.prop(object, name),
             Expr::Assign { var, value } => self.assign(var, value),
+            Expr::AssignProp {
+                object,
+                name,
+                value,
+            } => self.assign_prop(object, name, value),
             Expr::PreInc(var) => Ok(self.incdec(var, Opcode::PreInc)),
             Expr::PostInc(var) => Ok(self.incdec(var, Opcode::PostInc)),
             Expr::PreDec(var) => Ok(self.incdec(var, Opcode::PreDec)),
@@ -1527,6 +1533,92 @@ impl Emit<'_> {
             op2,
             out_type: OperandKind::Tmp,
             out,
+            ..Opline::default()
+        });
+        Ok(Where::Temporary(out))
+    }
+
+    /// `zend_compile_assign`, the `ZEND_AST_PROP` arm: the property
+    /// fetch compiled delayed (`zend_delayed_compile_prop` under
+    /// `BP_VAR_W`), the value after it, the delayed oplines laid down at
+    /// `zend_delayed_compile_end` with the last of them turned into
+    /// `ASSIGN_OBJ` writing a temporary, and `OP_DATA` carrying the value
+    /// (`zend_emit_op_data`). What is delayed is the chain of property
+    /// fetches alone: the receiver under the chain is compiled where it
+    /// stands, before the value, as `zend_delayed_compile_var` compiles
+    /// a CV or `$this` (`FETCH_THIS` into a `VAR`); each fetch but the
+    /// last is `FETCH_OBJ_W` into a `VAR` (`zend_adjust_for_fetch_type`
+    /// under `BP_VAR_W`), its name one constant in `op2` and three cache
+    /// slots in `extended_value`, and its `VAR` is numbered, its name
+    /// added and its slots taken when the fetch is delayed, before the
+    /// value's own, which is the order php's temporaries come in. A
+    /// call under the chain is php's `SEPARATE` over its `VAR`
+    /// (`zend_separate_if_call_and_write`), and anything else under it
+    /// is php's compile error for a temporary expression in a write;
+    /// neither is read yet.
+    fn assign_prop(
+        &mut self,
+        object: &Expr,
+        name: &[u8],
+        value: &Expr,
+    ) -> Result<Where, CompileError> {
+        let mut names = vec![name];
+        let mut base = object;
+        while let Expr::Prop { object, name } = base {
+            names.push(name);
+            base = object;
+        }
+        if !matches!(base, Expr::Var(_) | Expr::This) {
+            return Err(self.fatal(
+                "a property assignment over what is no variable this compiler cannot read yet",
+            ));
+        }
+        let receiver = self.receiver(base)?;
+        let (mut op1_type, mut op1) = self.operand(receiver);
+        let mut links = Vec::with_capacity(names.len());
+        for name in names.iter().rev() {
+            let name = self.string(name)?;
+            let name_at = self.literal(name);
+            let out = self.temporary();
+            let slots = self.cache_slots(3);
+            links.push((name_at, out, slots));
+        }
+        let value = self.expr(value)?;
+        let (data_type, data) = self.operand(value);
+        let Some((last, fetches)) = links.split_last() else {
+            return Err(self.fatal("a property assignment with no property"));
+        };
+        for &(name_at, out, slots) in fetches {
+            self.push(Opline {
+                opcode: Opcode::FetchObjW,
+                op1_type,
+                op1,
+                op2_type: OperandKind::Const,
+                op2: name_at,
+                out_type: OperandKind::Var,
+                out,
+                extended_value: slots,
+                ..Opline::default()
+            });
+            op1_type = OperandKind::Var;
+            op1 = out;
+        }
+        let &(name_at, out, slots) = last;
+        self.push(Opline {
+            opcode: Opcode::AssignObj,
+            op1_type,
+            op1,
+            op2_type: OperandKind::Const,
+            op2: name_at,
+            out_type: OperandKind::Tmp,
+            out,
+            extended_value: slots,
+            ..Opline::default()
+        });
+        self.push(Opline {
+            opcode: Opcode::OpData,
+            op1_type: data_type,
+            op1: data,
             ..Opline::default()
         });
         Ok(Where::Temporary(out))
@@ -1869,6 +1961,7 @@ impl Emit<'_> {
             | Expr::This
             | Expr::Prop { .. }
             | Expr::Assign { .. }
+            | Expr::AssignProp { .. }
             | Expr::PreInc(_)
             | Expr::PostInc(_)
             | Expr::PreDec(_)

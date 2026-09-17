@@ -190,6 +190,13 @@ pub(crate) enum Expr {
         var: Vec<u8>,
         value: Child,
     },
+    /// `$o->p = expr`, php's `ZEND_AST_ASSIGN` to a `ZEND_AST_PROP`:
+    /// the property's receiver, its name as written, and the value.
+    AssignProp {
+        object: Child,
+        name: Vec<u8>,
+        value: Child,
+    },
     /// `++$a`, php's `ZEND_AST_PRE_INC`, whose grammar puts a variable
     /// and nothing else after the `++`.
     PreInc(Vec<u8>),
@@ -283,6 +290,10 @@ impl Drop for Child {
                     left.take()
                 }
                 Expr::Assign { value, .. } => value.take(),
+                Expr::AssignProp { object, value, .. } => {
+                    drop(value);
+                    object.take()
+                }
                 _ => return,
             };
         }
@@ -1114,16 +1125,27 @@ impl Reader<'_> {
         if self.byte(0) != Some(b'=') || matches!(self.byte(1), Some(b'=' | b'>')) {
             return Ok(left);
         }
-        let Expr::Var(var) = left else {
-            return Err(
-                self.trouble("an assignment to what is no variable this compiler cannot read yet")
-            );
-        };
-        self.bump(1);
-        Ok(Expr::Assign {
-            var,
-            value: Child::new(self.expr()?),
-        })
+        match left {
+            Expr::Var(var) => {
+                self.bump(1);
+                Ok(Expr::Assign {
+                    var,
+                    value: Child::new(self.expr()?),
+                })
+            }
+            Expr::Prop { object, name } => {
+                self.bump(1);
+                Ok(Expr::AssignProp {
+                    object,
+                    name,
+                    value: Child::new(self.expr()?),
+                })
+            }
+            _ => {
+                Err(self
+                    .trouble("an assignment to what is no variable this compiler cannot read yet"))
+            }
+        }
     }
 
     /// `==`, `!=`, `<>`, `===`, `!==` and `<=>`, php's non-associative

@@ -3442,6 +3442,75 @@ mod tests {
         }
     }
 
+    /// `$o->p = v` as the oracle dumps it (`zend_compile_assign`, the
+    /// `ZEND_AST_PROP` arm): the value's oplines, then `ASSIGN_OBJ` over
+    /// the receiver with the name as one constant and `OP_DATA` carrying
+    /// the value; a chain is `FETCH_OBJ_W` into a `VAR` per link but the
+    /// last, each `VAR` numbered before the value's temporaries; the
+    /// temporary `ASSIGN_OBJ` writes is marked unused where nothing
+    /// reads it and kept where an assignment does; `$this` under the chain is
+    /// `FETCH_THIS` into a `VAR` where it stands, before the value.
+    #[test]
+    fn a_property_assignment_compiles_to_assign_obj_as_php_emits_it() {
+        let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+            (
+                b"<?php $o->p = 1;",
+                3,
+                1,
+                1,
+                "0000 ASSIGN_OBJ CV0($o) string(\"p\")\n\
+                 0001 OP_DATA int(1)\n\
+                 0002 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $x = $o->q->p = $y;",
+                5,
+                3,
+                3,
+                "0000 V3 = FETCH_OBJ_W CV1($o) string(\"q\")\n\
+                 0001 T4 = ASSIGN_OBJ V3 string(\"p\")\n\
+                 0002 OP_DATA CV2($y)\n\
+                 0003 ASSIGN CV0($x) T4\n\
+                 0004 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    4: 0002 - 0003 (tmp/var)\n",
+            ),
+            (
+                b"<?php $this->p = 1;",
+                4,
+                0,
+                2,
+                "0000 V0 = FETCH_THIS\n\
+                 0001 ASSIGN_OBJ V0 string(\"p\")\n\
+                 0002 OP_DATA int(1)\n\
+                 0003 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $o->q->r->p = 1;",
+                5,
+                1,
+                3,
+                "0000 V1 = FETCH_OBJ_W CV0($o) string(\"q\")\n\
+                 0001 V2 = FETCH_OBJ_W V1 string(\"r\")\n\
+                 0002 ASSIGN_OBJ V2 string(\"p\")\n\
+                 0003 OP_DATA int(1)\n\
+                 0004 RETURN int(1)\n",
+            ),
+        ];
+        for (source, lines, vars, tmps, oplines) in cases {
+            assert_eq!(
+                dump_of(source),
+                main_dump(*lines, *vars, *tmps, oplines),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+        assert!(
+            refused(b"<?php f()->p = 1;").is_some(),
+            "a call under the chain is php's SEPARATE, not read yet"
+        );
+    }
+
     /// `zend_get_compatible_func_or_null`: a public method of a class
     /// the engine declared is a callee the compiler knows, so its
     /// arguments are sent as `SEND_VAL` and `SEND_VAR`; a private one,

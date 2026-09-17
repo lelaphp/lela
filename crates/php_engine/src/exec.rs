@@ -300,6 +300,42 @@ pub(crate) fn operand_undef(
     }
 }
 
+/// `GET_OP1_OBJ_ZVAL_PTR_PTR_UNDEF(BP_VAR_W)`: the container of a
+/// property write, as it stands and with no diagnostic, since the write
+/// site raises its own `Error` over what it finds there: a CV read
+/// undefined or not (`BP_VAR_W` warns of nothing), a `VAR` read through
+/// the `IS_INDIRECT` a `FETCH_*_W` left in it (`_get_zval_ptr_ptr_var`,
+/// `Z_INDIRECT`) and as it stands otherwise, which is what `NEW` and
+/// `FETCH_THIS` leave. An `UNUSED` operand is `$this`, which no frame
+/// here carries yet, and a `CONST` or a `TMP` is no container php
+/// compiles a write over.
+pub(crate) fn container(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    kind: OperandKind,
+    field: u32,
+    opcode: &str,
+) -> Result<Value, php_heap::Fatal> {
+    match kind {
+        OperandKind::Cv => Ok(req.slot(frame, field)),
+        OperandKind::Var => {
+            let slot = temporary_slot(code, field);
+            let Some(at) = req.slot_ptr(frame, slot) else {
+                return Ok(Value::undef());
+            };
+            let z = at.read();
+            Ok(value_of(z.as_indirect().map_or(z, php_heap::ZvalRef::read)))
+        }
+        OperandKind::Unused => Err(php_heap::Fatal::Error(format!(
+            "InternalError: {opcode} over $this, which no frame here carries"
+        ))),
+        OperandKind::Const | OperandKind::Tmp => Err(php_heap::Fatal::Error(format!(
+            "InternalError: {opcode} over a constant or a temporary, which php compiles no write over"
+        ))),
+    }
+}
+
 /// The operand's value as the handler's own: a `CV` or a `CONST` with
 /// one more owner taken (`ZVAL_COPY`, `Z_TRY_ADDREF`), a `TMP` or a `VAR`
 /// moved out of its slot, which is left `UNDEF` (`ZVAL_COPY_VALUE` and

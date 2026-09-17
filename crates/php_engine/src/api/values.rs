@@ -1056,6 +1056,15 @@ impl Value {
         }
     }
 
+    /// The value with `UNDEF` read as `null`, which is how
+    /// `zend_zval_value_name` names a slot nothing wrote.
+    pub(crate) fn undef_as_null(&self) -> Value {
+        match self.inner {
+            Inner::Undef => Value::null(),
+            _ => self.clone(),
+        }
+    }
+
     /// The refcount of a refcounted value, `Z_REFCOUNT`; one for a
     /// scalar, an interned string or an immutable array.
     #[must_use]

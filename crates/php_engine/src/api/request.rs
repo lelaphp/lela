@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use php_compile::StackLimit;
 use php_heap::{
     Arr, Fatal, FrameRef, Heap, HeapHooks, Intern, MapTable, Obj, Ref, Res, ResourceType, Slot,
-    VmStack, Zval,
+    VmStack, Zval, ZvalRef,
 };
 use php_unit::decl::{ClassDecl, ClassKind, FunctionDecl, MethodDecl, Visibility};
 use php_unit::{FramelessEntry, Unit};
@@ -475,6 +475,15 @@ impl Request {
         let old = f.slot(Slot(at));
         f.set(Slot(at), value.to_zval());
         Value::of_zval(old)
+    }
+
+    /// The zval in a slot of `frame` in place, php's `EX_VAR(var)`
+    /// (design §5.6): what a `FETCH_*_W` points its `VAR` at, and what
+    /// the `ASSIGN*` over that `VAR` reads through when an `IS_INDIRECT`
+    /// stands there (`_get_zval_ptr_ptr_var`). None for a slot the
+    /// frame does not have.
+    pub(crate) fn slot_ptr(&mut self, frame: FrameRef, at: u32) -> Option<ZvalRef> {
+        self.stack.frame_mut(frame)?.slot_ptr(Slot(at))
     }
 
     /// The served call off the stack, `zend_vm_stack_free_args` over what
@@ -1755,6 +1764,41 @@ impl Request {
         let class = self.class_name(class);
         crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
         Ok(Value::null())
+    }
+
+    /// `zend_get_property_offset` at a write site, what `FETCH_OBJ_W`
+    /// and `ASSIGN_OBJ` place the name by: the declared slot `name` sits
+    /// in and whether it is typed, where the executed scope may reach
+    /// it; php's `Error` `Cannot access private property C::$p` where
+    /// it may not (`zend_bad_property_access`); and none for a name the
+    /// class did not declare, which is a dynamic property.
+    pub(crate) fn declared_slot_for_write(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+    ) -> Result<Option<(u32, bool)>, Thrown> {
+        let Some((slot, visibility, typed)) = self.declared_slot(class, name) else {
+            return Ok(None);
+        };
+        if !self.may_access(class, visibility) {
+            return Err(self.inaccessible_property(class, visibility, name));
+        }
+        Ok(Some((slot, typed)))
+    }
+
+    /// `zend_assign_to_variable` over a declared slot, `ASSIGN_OBJ`'s
+    /// fast path over a slot that holds a value (`fast_assign_obj`):
+    /// `value` is the slot's from here and what it held is released
+    /// last, after the write, which is where a destructor is served; a
+    /// slot holding a reference is written through the cell
+    /// (`Z_ISREF_P(variable_ptr)`), so every holder of the cell reads
+    /// the new value.
+    pub(crate) fn assign_declared_slot(&mut self, o: Obj, i: u32, value: Value) {
+        if let Some(r) = o.slot(i).as_reference() {
+            self.reference_set(r, value);
+        } else {
+            Heap::object_set_slot(&mut Hooks(self), o, i, value.into_zval());
+        }
     }
 
     /// `zend_std_write_property`, the `Std` slot: into the declared

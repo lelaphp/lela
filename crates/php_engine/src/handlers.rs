@@ -948,6 +948,118 @@ pub(crate) fn fetch_obj_r<T: Tier>(
     Ok(advance(req, frame))
 }
 
+/// `ZEND_FETCH_OBJ_W` (`Z/Zend/zend_vm_def.h:2238`),
+/// `zend_fetch_property_address` under `BP_VAR_W`: the link of a
+/// property chain before the one written, `$o->q` of `$o->q->p = 1`,
+/// whose `VAR` is left holding an `IS_INDIRECT` to the property's slot
+/// (`ZVAL_INDIRECT(result, ptr)`) for the `ASSIGN_OBJ` after it to write
+/// through (design §5.6). The container is read in place and warns of
+/// nothing ([`exec::container`]), a reference it holds followed; what is
+/// no object is php's `Error` `Attempt to modify property "q" on null`
+/// (`zend_throw_non_object_error`, this opcode's arm), the operand freed
+/// first (`FREE_OP1_VAR_PTR`). On an object the name is placed by
+/// `zend_std_get_property_ptr_ptr`: a declared slot the scope may reach
+/// is the slot in place, written or not, since under `BP_VAR_W` an
+/// `UNDEF` slot is handed back as it stands for the write after it to
+/// find; one the scope may not reach is `zend_bad_property_access`'s
+/// `Error`. A name the class did not declare is a bucket of the dynamic
+/// table, made on the spot with php's deprecation
+/// (`Creation of dynamic property C::$q is deprecated`), which nothing
+/// names in place yet and is the internal-error fatal meanwhile.
+///
+/// ```php
+/// class C { public $p = 1; public $q; }
+/// $o = new C; $o->q = new C;
+/// $o->q->p = 5; $r = $o->p = 7;
+/// var_dump($o->q->p, $o->p, $r);
+/// ```
+/// ```expect
+/// int(5)
+/// int(7)
+/// int(7)
+/// ```
+///
+/// ```php
+/// $u->q->p = 1;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Attempt to modify property "q" on null in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// class C { private $q; }
+/// $o = new C;
+/// $o->q->p = 1;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Cannot access private property C::$q in %s:4
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 4
+/// ```
+pub(crate) fn fetch_obj_w<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let name = match op.op2_type {
+        OperandKind::Const => exec::constant(code, ConstIdx(op.op2)),
+        _ => {
+            return Err(Fatal::Error(String::from(
+                "InternalError: ZEND_FETCH_OBJ_W over a property named at run time",
+            )));
+        }
+    };
+    let name = name.as_str_bytes().unwrap_or_default().to_vec();
+    let container =
+        exec::container(req, frame, code, op.op1_type, op.op1, "ZEND_FETCH_OBJ_W")?.deref();
+    let Some(object) = container.as_object().copied() else {
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+        let shown = crate::ops::value_name(req, &container.undef_as_null());
+        let thrown = crate::api::raising::throw(
+            req,
+            "Error",
+            &format!(
+                "Attempt to modify property \"{}\" on {shown}",
+                String::from_utf8_lossy(&name)
+            ),
+        );
+        return threw(req, frame, &thrown);
+    };
+    let placed = req.declared_slot_for_write(object.class(), &name);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    let slot = match placed {
+        Ok(Some((slot, _))) => slot,
+        Ok(None) => {
+            return Err(Fatal::Error(format!(
+                "InternalError: ZEND_FETCH_OBJ_W over the dynamic property ${}, whose bucket nothing names in place yet",
+                String::from_utf8_lossy(&name)
+            )));
+        }
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let Some(at) = object.heap().slot_ref(slot) else {
+        return Err(Fatal::Error(format!(
+            "InternalError: ZEND_FETCH_OBJ_W placed ${} in slot {slot}, which the object does not have",
+            String::from_utf8_lossy(&name)
+        )));
+    };
+    let out = exec::temporary_slot(code, op.out);
+    let previous = req.take_slot(frame, out);
+    req.release(previous);
+    let Some(var) = req.slot_ptr(frame, out) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_FETCH_OBJ_W writes a VAR the frame does not have",
+        )));
+    };
+    var.write(php_heap::Zval::indirect(at));
+    Ok(advance(req, frame))
+}
+
 /// `ZEND_CLONE` (`Z/Zend/zend_vm_def.h:6010`), what the compiler emits
 /// for `clone $o` and a one-argument `clone($o)`: the operand read as
 /// `GET_OP1_OBJ_ZVAL_PTR_UNDEF` reads it, a reference followed, an
@@ -1595,6 +1707,199 @@ pub(crate) fn assign<T: Tier>(
         req.release(garbage);
     }
     Ok(advance(req, frame))
+}
+
+/// `ZEND_ASSIGN_OBJ` (`Z/Zend/zend_vm_def.h:2466`), `$o->p = v`, two
+/// oplines: this one names the container and the property and the
+/// `OP_DATA` after it carries the value (`GET_OP_DATA_ZVAL_PTR`), so the
+/// handler steps over both (`ZEND_VM_NEXT_OPCODE_EX(1, 2)`). The
+/// container is read in place ([`exec::container`]): a CV as it stands,
+/// or a `VAR` through the `IS_INDIRECT` a `FETCH_OBJ_W` left there
+/// (`_get_zval_ptr_ptr_var`), which is where [`php_heap::Frame::slot_ptr`]
+/// is read through; a reference it holds is followed. The value is the
+/// handler's own as `ASSIGN` takes it, a temporary moved and a CV or a
+/// constant copied, a CV's reference followed, an undefined CV warned
+/// of. What is no object is php's `Error` `Attempt to assign property
+/// "p" on null` (`zend_throw_non_object_error`), `null` in the
+/// temporary `out` names where it is read and the value given up
+/// (`FREE_OP_DATA`). On an object a declared slot the scope may reach
+/// is written in place (`zend_assign_to_variable`,
+/// [`Request::assign_declared_slot`]), what it held released after the
+/// write; one the scope may not reach is `zend_bad_property_access`'s
+/// `Error`; a name the class did not declare goes to the object's
+/// handler table's `write_property`, which lays it in the dynamic
+/// table. The temporary `out` names is one more owner of the value
+/// under `RETURN_VALUE_USED` (`ZVAL_COPY`) and is not written where
+/// the compiler marked it `UNUSED`. Then `FREE_OP1_VAR_PTR`: a
+/// `VAR` holding an `IS_INDIRECT` owns nothing and is left `UNDEF`, one
+/// holding the object `NEW` or `FETCH_THIS` left gives it up. A typed
+/// slot's coercion (`zend_assign_to_typed_prop`) is not served yet, and
+/// only a native declares one, so a write to it is the internal-error
+/// fatal naming the gap; the dynamic property's deprecation
+/// (`Creation of dynamic property C::$p is deprecated`) is not raised
+/// yet either.
+///
+/// A property given a new string gives its old one back to the heap,
+/// as a CV does under `ASSIGN`, and the deltas are read before anything
+/// is printed for the same reason.
+///
+/// ```php
+/// class C { public $p; }
+/// $o = new C; $b = memory_get_usage();
+/// $o->p = str_repeat("ab", 3000); $held = memory_get_usage() - $b;
+/// $o->p = "x"; var_dump($held, memory_get_usage() - $b, $o->p);
+/// ```
+/// ```expect
+/// int(8192)
+/// int(0)
+/// string(1) "x"
+/// ```
+///
+/// The value is read before the container is tested, so an undefined
+/// CV warns before the `Error` over the container is raised.
+///
+/// ```php
+/// $u->p = $v;
+/// ```
+/// ```expect exit=255
+/// Warning: Undefined variable $v in %s on line 2
+///
+/// Fatal error: Uncaught Error: Attempt to assign property "p" on null in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// A declared slot nothing has written is handed back as it stands by
+/// the `FETCH_OBJ_W` before this, so the write through it finds `null`.
+///
+/// ```php
+/// class C { public $q; }
+/// $o = new C;
+/// $o->q->p = 1;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Attempt to assign property "p" on null in %s:4
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 4
+/// ```
+///
+/// ```php
+/// class C { protected $p = 1; }
+/// $o = new C;
+/// $o->p = 2;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Cannot access protected property C::$p in %s:4
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 4
+/// ```
+pub(crate) fn assign_obj<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let name = match op.op2_type {
+        OperandKind::Const => exec::constant(code, ConstIdx(op.op2)),
+        _ => {
+            return Err(Fatal::Error(String::from(
+                "InternalError: ZEND_ASSIGN_OBJ over a property named at run time",
+            )));
+        }
+    };
+    let at = req.vm().opline(frame);
+    let Some(data) = exec::opline_at(code, at.saturating_add(1))
+        .filter(|next| next.opcode == php_unit::Opcode::OpData)
+    else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ASSIGN_OBJ with no OP_DATA after it",
+        )));
+    };
+    let container =
+        exec::container(req, frame, code, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ")?.deref();
+    let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
+    let written = if let Some(object) = container.as_object().copied() {
+        assign_property(req, frame, code, op, object, &name, value)?
+    } else {
+        let shown_name = String::from_utf8_lossy(name.as_str_bytes().unwrap_or_default());
+        let shown = crate::ops::value_name(req, &container.undef_as_null());
+        let thrown = crate::api::raising::throw(
+            req,
+            "Error",
+            &format!("Attempt to assign property \"{shown_name}\" on {shown}"),
+        );
+        write_out(req, frame, code, op, &Value::null());
+        req.release(value);
+        Err(thrown)
+    };
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    if let Err(thrown) = written {
+        return threw(req, frame, &thrown);
+    }
+    req.vm_mut().jump(frame, at.saturating_add(2));
+    Ok(Stepped::Same(frame))
+}
+
+/// `ASSIGN_OBJ`'s body over an object: the name placed
+/// ([`Request::declared_slot_for_write`]), the temporary `out` names
+/// written under `RETURN_VALUE_USED`, and the value into the declared
+/// slot in place or through the object's handler table's
+/// `write_property` for a name the class did not declare. `value` is
+/// given up on the `Error` path, as `FREE_OP_DATA` gives it up.
+fn assign_property(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    object: crate::api::values::PhpObject,
+    name: &Value,
+    value: Value,
+) -> Result<Result<(), Thrown>, Fatal> {
+    let bytes = name.as_str_bytes().unwrap_or_default();
+    let shown_name = String::from_utf8_lossy(bytes).into_owned();
+    let placed = match req.declared_slot_for_write(object.class(), bytes) {
+        Ok(placed) => placed,
+        Err(thrown) => {
+            req.release(value);
+            return Ok(Err(thrown));
+        }
+    };
+    match placed {
+        Some((_, true)) => Err(Fatal::Error(format!(
+            "InternalError: ZEND_ASSIGN_OBJ over the typed property ${shown_name}, whose coercion is not served yet"
+        ))),
+        Some((slot, false)) => {
+            write_out(req, frame, code, op, &value);
+            req.assign_declared_slot(object.heap(), slot, value);
+            Ok(Ok(()))
+        }
+        None => {
+            let Some(key) = name.as_php_string().copied() else {
+                return Err(Fatal::Error(String::from(
+                    "InternalError: ZEND_ASSIGN_OBJ over a property whose name is no string",
+                )));
+            };
+            write_out(req, frame, code, op, &value);
+            req.addref(name);
+            let table = req.object_handlers(object.heap());
+            Ok(table.write_property(req, object, key, value))
+        }
+    }
+}
+
+/// `if (RETURN_VALUE_USED(opline)) ZVAL_COPY(EX_VAR(opline->result.var), value)`:
+/// the temporary `out` names one more owner of `value`, and nothing
+/// where the compiler marked the temporary `UNUSED`.
+fn write_out(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, value: &Value) {
+    if op.out_type == OperandKind::Unused {
+        return;
+    }
+    req.addref(value);
+    let previous = req.set_slot(frame, exec::temporary_slot(code, op.out), value.clone());
+    req.release(previous);
 }
 
 /// `ZEND_ADD`: [`crate::ops::add`] over the two operands, into the
