@@ -4,6 +4,7 @@
 use std::path::Path;
 use std::process::Command;
 
+use xtask::manifest::Manifest;
 use xtask::oracle::{PROMISE_VARIABLE, TREE_VARIABLE};
 use xtask::reading::{Reading, Status, Store};
 use xtask::scratch::Tree;
@@ -107,10 +108,13 @@ fn locks_and_budget_render_the_readings_the_instruments_wrote() {
     heap.message = "php_heap: 20001 lines over the ceiling of 20000".into();
     store.record(std::slice::from_ref(&heap)).unwrap();
 
+    // The ceiling column is the tracked manifest's `[budget] api_items`,
+    // whatever a person has it at (#338).
+    let ceiling = Manifest::load(&root).unwrap().budget.api_items.to_string();
     let (ok, md, _) = status(&root, &["--section", "locks"]);
     assert!(ok);
     assert!(
-        md.contains("api.lock") && md.contains("301") && md.contains("400"),
+        md.contains("api.lock") && md.contains("301") && md.contains(&ceiling),
         "{md}"
     );
     assert!(

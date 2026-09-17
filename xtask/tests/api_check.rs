@@ -2,11 +2,17 @@
 //! by the tracked manifest: locks, edges and bundle order (ticket #4). One
 //! fixture per rule the instrument evaluates must fail; `clean` must pass.
 
+use std::fmt::Write as _;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use xtask::api_check;
 use xtask::manifest::{Manifest, OneOrMany, Rule, Seam};
 use xtask::reading::{Reading, Status};
+use xtask::scratch::Tree;
+
+mod common;
+use common::scratch_workspace;
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -88,14 +94,57 @@ fn a_public_item_without_a_lock_line_fails_naming_the_lock_file() {
     assert_eq!(failures(&readings).len(), 1);
 }
 
+/// The `ceiling` fixture is one item past `[budget] api_items` whatever the
+/// tracked manifest carries (#338): the fixture directory holds the
+/// crate's `Cargo.toml`, and the items and their lock lines are laid down
+/// here in a scratch workspace from the ceiling the manifest reads, so a
+/// person moving the ceiling moves the fixture with it.
 #[test]
 fn api_lock_over_the_ceiling_fails() {
-    let readings = readings("ceiling");
+    let manifest = Manifest::load(workspace()).unwrap();
+    let seam = manifest
+        .seams
+        .iter()
+        .find(|s| s.name == "api")
+        .expect("the manifest has the api seam");
+    let ceiling = manifest
+        .lock_ceiling(seam)
+        .expect("the api seam has a ceiling");
+    let items = ceiling + 1;
+
+    // A reading hashes its scope's tree through git, so the scratch tree
+    // is a repository, the way every scratch workspace here is.
+    let scratch = Tree::new("api-check-ceiling").unwrap();
+    scratch_workspace(workspace(), &scratch).unwrap();
+    let crate_dir = scratch.join("crates/php_ext");
+    fs::create_dir_all(crate_dir.join("src")).unwrap();
+    fs::copy(
+        fixture("ceiling").join("crates/php_ext/Cargo.toml"),
+        crate_dir.join("Cargo.toml"),
+    )
+    .unwrap();
+    let names = (0..items)
+        .map(|i| format!("ITEM_{i:04}"))
+        .collect::<Vec<_>>();
+    let mut lib = format!("//! {items} public items: one over the ceiling of {ceiling}.\n");
+    let mut lock = format!("# {items} items, every one with a line; the ceiling is what fails.\n");
+    for name in &names {
+        writeln!(lib, "pub const {name}: u8 = 0;").unwrap();
+        writeln!(lock, "{name}").unwrap();
+    }
+    fs::write(crate_dir.join("src/lib.rs"), lib).unwrap();
+    fs::write(crate_dir.join("api.lock"), lock).unwrap();
+
+    let readings = api_check::hold(&manifest, &scratch, false).unwrap();
     let api = of(&readings, "api");
     assert_eq!(api.status, Status::Fail, "{}", api.message);
-    assert_eq!(api.numbers["items"], 401.into());
-    assert!(api.message.contains("401"), "{}", api.message);
-    assert!(api.message.contains("400"), "{}", api.message);
+    assert_eq!(api.numbers["items"], i64::try_from(items).unwrap().into());
+    assert!(api.message.contains(&items.to_string()), "{}", api.message);
+    assert!(
+        api.message.contains(&ceiling.to_string()),
+        "{}",
+        api.message
+    );
 }
 
 #[test]

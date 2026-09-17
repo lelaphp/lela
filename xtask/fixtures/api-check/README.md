@@ -10,7 +10,7 @@ built; the instrument reads manifests and sources.
 |-------------|-------------------------------------------------|------|
 | `clean`     | every rule, as the positive control             | pass |
 | `lock-line` | a public item with no line in the seam's lock   | fail |
-| `ceiling`   | `api.lock` over `[budget] api_items`            | fail |
+| `ceiling`   | `api.lock` over `[budget] api_items`; the crate's `Cargo.toml` alone, its items laid down by the test at one past the ceiling the manifest carries (#338) | fail |
 | `edge`      | a crate dependency outside its `[[edge]]` rows  | fail |
 | `deny-edge` | a `use` path across a `deny = true` module edge | fail |
 | `bundle`    | a bundle order that is not topological          | fail |
