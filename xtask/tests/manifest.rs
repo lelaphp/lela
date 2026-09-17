@@ -363,3 +363,22 @@ fn avoid_from_names_the_glossary_whole_or_one_section_of_it() {
     );
     assert!(Manifest::parse(&bare).is_err());
 }
+
+/// A `[lock_home]` table names the crate a lock lives with when no
+/// `[[crate]]` row carries it (the `ops` seam's producer is a file). A
+/// manifest that carries the table parses, the home is read from it, and
+/// a row's own lock still wins over the table.
+#[test]
+fn a_lock_home_table_names_the_home_of_a_lock_no_row_carries() {
+    let head = "[oracle]\npin = \"oracle.toml\"\n[budget]\ntotal = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\nclean_build_release_s = 1\napi_items = 1\nbindings = 1\n";
+    let whole = format!(
+        "{head}[[crate]]\nname = \"php_heap\"\nbudget = 1\nlock = \"heap.lock\"\n[lock_home]\n\"ops.lock\" = \"php_unit\"\n"
+    );
+    let manifest = Manifest::parse(&whole).unwrap();
+    assert_eq!(manifest.lock_home("ops.lock").as_deref(), Some("php_unit"));
+    assert_eq!(manifest.lock_home("heap.lock").as_deref(), Some("php_heap"));
+    assert_eq!(manifest.lock_home("api.lock"), None);
+    let bare = Manifest::parse(head).unwrap();
+    assert!(bare.lock_homes.is_empty());
+    assert_eq!(bare.lock_home("ops.lock"), None);
+}
