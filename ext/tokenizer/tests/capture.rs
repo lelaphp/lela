@@ -188,3 +188,23 @@ fn without_the_flag_the_scanner_s_names_stand() {
         "T_OPEN_TAG T_STRING T_DOUBLE_COLON T_STATIC ; T_CLASS T_STRING { T_CONST T_LIST = T_LNUMBER ; } T_STRING T_DOUBLE_COLON T_CLASS ;"
     );
 }
+
+/// `PhpToken` through `serve` on an engine of this crate alone:
+/// `tokenize` called on the class and `getTokenName` on an instance,
+/// each a native method the engine reached through
+/// `ExtensionBuilder::classes` (#259). What the oracle printed for the
+/// same call is beside each method in `src/lib.rs`; this holds the
+/// calls on the crate's own engine, where the bundle is not linked.
+#[test]
+fn php_token_s_class_and_instance_methods_are_served() {
+    assert_eq!(
+        served("<?php var_dump(class_exists('PhpToken'), PhpToken::tokenize('1'));"),
+        "bool(true)\narray(1) {\n  [0]=>\n  object(PhpToken)#1 (4) {\n    [\"id\"]=>\n    int(267)\n    [\"text\"]=>\n    string(1) \"1\"\n    [\"line\"]=>\n    int(1)\n    [\"pos\"]=>\n    int(0)\n  }\n}\n"
+    );
+    assert_eq!(
+        served(
+            "<?php $t = new PhpToken(T_ECHO, 'echo'); var_dump($t->getTokenName(), get_class($t), $t instanceof PhpToken, $t instanceof Stringable);"
+        ),
+        "string(6) \"T_ECHO\"\nstring(8) \"PhpToken\"\nbool(true)\nbool(true)\n"
+    );
+}
