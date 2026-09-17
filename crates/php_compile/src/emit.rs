@@ -66,10 +66,13 @@ use std::cmp::Ordering;
 use php_heap::{
     Fatal, Intern, Key, Number, Scalar, Zval, ZvalType, double_to_string, numeric_prefix,
 };
-use php_unit::decl::{ConstDecl, ConstExpr, FunctionDecl, Name};
+use php_unit::decl::{
+    ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr, EnumBacking,
+    FunctionDecl, Name, PropertyDecl,
+};
 use php_unit::{Diagnostic, Level, OpArray, Opcode, OperandKind, Opline, OplineIdx, Unit};
 
-use crate::read::{Arm, BinaryOp, Case, CastTo, Expr, Read, Stmt};
+use crate::read::{Arm, BinaryOp, Case, CastTo, Class, Expr, Read, Stmt};
 use crate::{CompileError, Options, StackLimit};
 
 /// One op array under construction, and the home its constant strings
@@ -98,6 +101,12 @@ pub(crate) struct Emit<'a> {
     line: u32,
     /// What `zend_error` raised so far, [`Unit::diagnostics`].
     diagnostics: Vec<Diagnostic>,
+    /// The classes the file declares, [`Unit::classes`], in the order
+    /// `zend_compile_class_decl` bound them.
+    classes: Vec<ClassDecl>,
+    /// The file's name, [`Options::filename`], what a declaration
+    /// records as its site.
+    filename: Name,
     /// `CG(context).brk_cont_array`: every loop and `switch` of the op
     /// array, in the order begun, and `current_brk_cont`, the innermost
     /// one open.
@@ -182,6 +191,8 @@ pub(crate) fn unit(
         cache_slots: 0,
         line: 1,
         diagnostics: Vec::new(),
+        classes: Vec::new(),
+        filename: options.filename.clone(),
         loops: Vec::new(),
         current_loop: None,
         breaks: Vec::new(),
@@ -213,6 +224,7 @@ pub(crate) fn unit(
             cache_size: emit.cache_slots,
         },
         diagnostics: emit.diagnostics,
+        classes: emit.classes,
         ..Unit::default()
     })
 }
@@ -374,8 +386,163 @@ impl Emit<'_> {
             Stmt::Switch { expr, cases } => self.switch(expr, cases)?,
             Stmt::Break(depth) => self.break_continue(depth.as_ref(), true)?,
             Stmt::Continue(depth) => self.break_continue(depth.as_ref(), false)?,
+            Stmt::Class(class) => self.class(class)?,
         }
         Ok(())
+    }
+
+    /// `zend_compile_class_decl` for a top-level class with no parent
+    /// and no interface: the declaration goes into the unit's classes
+    /// and no opline is emitted, since php binds such a class at
+    /// compile time (`zend_hash_add_ptr(CG(class_table), …)` under
+    /// `toplevel`), and the oracle's dump of `class M {} echo 1;` is the
+    /// `ECHO` and the `RETURN` alone. The name a second declaration of
+    /// the same file repeats fails that bind in php, which then emits a
+    /// `DECLARE_CLASS` for the runtime fatal; that opline is not emitted
+    /// here, so the repeat is refused as not yet read. The members are
+    /// `zend_compile_prop_decl` and `zend_compile_class_const_decl`: a
+    /// name declared twice is php's fatal in php's words, at the
+    /// declarator's line, and a default or a value is kept as the
+    /// constant expression it was written as (design §4.7).
+    fn class(&mut self, class: &Class) -> Result<(), CompileError> {
+        let wanted = class.name.to_ascii_lowercase();
+        if self
+            .classes
+            .iter()
+            .any(|declared| declared.name.0.to_ascii_lowercase() == wanted)
+        {
+            return Err(self.fatal("a class declared twice this compiler cannot read yet"));
+        }
+        let line = self.line;
+        let name = Name(class.name.clone().into_boxed_slice());
+        let mut decl = ClassDecl {
+            name,
+            kind: ClassKind::Class,
+            flags: ClassFlags::default(),
+            parent: None,
+            interfaces: Vec::new(),
+            traits: Vec::new(),
+            backing: EnumBacking::Pure,
+            constants: Vec::new(),
+            properties: Vec::new(),
+            methods: Vec::new(),
+            attributes: Vec::new(),
+            doc_comment: class.doc_comment.clone().map(Vec::into_boxed_slice),
+            file: self.filename.clone(),
+            line,
+        };
+        for constant in &class.constants {
+            self.line = constant.line;
+            if decl.constants.iter().any(|c| *c.name.0 == *constant.name) {
+                return Err(self.compile_error(format!(
+                    "Cannot redefine class constant {}::{}",
+                    String::from_utf8_lossy(&class.name),
+                    String::from_utf8_lossy(&constant.name)
+                )));
+            }
+            let value = self.const_expr(&constant.value)?;
+            decl.constants.push(ClassConstDecl {
+                name: Name(constant.name.clone().into_boxed_slice()),
+                visibility: constant.visibility,
+                is_final: constant.is_final,
+                ty: None,
+                value,
+                attributes: Vec::new(),
+                doc_comment: constant.doc_comment.clone().map(Vec::into_boxed_slice),
+            });
+        }
+        for property in &class.properties {
+            self.line = property.line;
+            if decl.properties.iter().any(|p| *p.name.0 == *property.name) {
+                return Err(self.compile_error(format!(
+                    "Cannot redeclare {}::${}",
+                    String::from_utf8_lossy(&class.name),
+                    String::from_utf8_lossy(&property.name)
+                )));
+            }
+            let default = match &property.default {
+                Some(expr) => Some(self.const_expr(expr)?),
+                None => None,
+            };
+            decl.properties.push(PropertyDecl {
+                name: Name(property.name.clone().into_boxed_slice()),
+                visibility: property.visibility,
+                is_instance: !property.is_static,
+                is_readonly: false,
+                ty: None,
+                default,
+                attributes: Vec::new(),
+                doc_comment: property.doc_comment.clone().map(Vec::into_boxed_slice),
+            });
+        }
+        self.line = line;
+        self.classes.push(decl);
+        Ok(())
+    }
+
+    /// A constant expression as a declaration keeps it (design §4.7):
+    /// `zend_const_expr_to_zval` folds what `zend_eval_const_expr` can,
+    /// so `1 + 2` is `3` and a number or a string as written is itself, and what names a
+    /// constant stays the tree it was written as, for the engine to
+    /// evaluate on first use. `zend_is_allowed_in_const_expr` refuses a
+    /// variable, a call, an assignment and an increment in php's words;
+    /// a cast or a `match`, which php allows or refuses on its own
+    /// terms, is not read yet.
+    fn const_expr(&mut self, expr: &Expr) -> Result<ConstExpr, CompileError> {
+        self.check_stack()?;
+        match expr {
+            Expr::Null => Ok(ConstExpr::Null),
+            Expr::Bool(b) => Ok(ConstExpr::Bool(*b)),
+            Expr::Int(n) => Ok(ConstExpr::Long(*n)),
+            Expr::Float(f) => Ok(ConstExpr::Double(*f)),
+            Expr::Str(bytes) => Ok(ConstExpr::Str(bytes.clone().into_boxed_slice())),
+            Expr::Constant(name) => Ok(ConstExpr::Constant(Name(name.clone().into_boxed_slice()))),
+            Expr::Unary { .. } | Expr::Binary { .. } => {
+                if let Some(folded) = self.constant_of(expr)? {
+                    match folded.kind() {
+                        ZvalType::Null => return Ok(ConstExpr::Null),
+                        ZvalType::False => return Ok(ConstExpr::Bool(false)),
+                        ZvalType::True => return Ok(ConstExpr::Bool(true)),
+                        ZvalType::Long => {
+                            if let Some(n) = folded.as_long() {
+                                return Ok(ConstExpr::Long(n));
+                            }
+                        }
+                        ZvalType::Double => {
+                            if let Some(f) = folded.as_double() {
+                                return Ok(ConstExpr::Double(f));
+                            }
+                        }
+                        _ => {}
+                    }
+                    return Err(self.fatal("a constant expression this compiler cannot read yet"));
+                }
+                match expr {
+                    Expr::Unary { minus, operand } => Ok(ConstExpr::Unary {
+                        op: Name(if *minus { b"-".as_slice() } else { b"+" }.into()),
+                        operand: Box::new(self.const_expr(operand)?),
+                    }),
+                    Expr::Binary { op, left, right } => Ok(ConstExpr::Binary {
+                        op: Name(op.spelling().as_bytes().into()),
+                        lhs: Box::new(self.const_expr(left)?),
+                        rhs: Box::new(self.const_expr(right)?),
+                    }),
+                    _ => Err(self.fatal("a constant expression this compiler cannot read yet")),
+                }
+            }
+            Expr::Var(_)
+            | Expr::Assign { .. }
+            | Expr::Call { .. }
+            | Expr::PreInc(_)
+            | Expr::PostInc(_)
+            | Expr::PreDec(_)
+            | Expr::PostDec(_) => {
+                Err(self.compile_error("Constant expression contains invalid operations"))
+            }
+            Expr::Cast { .. } | Expr::Match { .. } => {
+                Err(self.fatal("a constant expression this compiler cannot read yet"))
+            }
+        }
     }
 
     /// `zend_compile_stmt_list`: each statement at its own line.

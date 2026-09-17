@@ -12,7 +12,10 @@
 //! expressions, the empty statement, an expression statement, a block,
 //! a `for` and a `while` whose body is a block or one statement, a
 //! `switch` with its cases between braces, `break` and `continue` with
-//! or without a depth, and
+//! or without a depth, a top-level `class` with no parent, interface,
+//! attribute or modifier whose members are untyped properties and
+//! constants, each declarator taking the pending doc comment as php's
+//! `backup_doc_comment` takes it, and
 //! inside an expression a `match`, a number, a single- or double-quoted string with no
 //! interpolation, `true`, `false`, `null`, a constant by name, a call of
 //! a named function, a parenthesised expression, a variable `$a` that is
@@ -30,6 +33,7 @@ use std::fmt;
 use std::ops::Deref;
 
 use php_unit::Level;
+use php_unit::decl::Visibility;
 
 use crate::StackLimit;
 
@@ -64,6 +68,50 @@ pub(crate) enum Stmt {
     Break(Option<Expr>),
     /// `continue;` or `continue n;`, php's `ZEND_AST_CONTINUE`.
     Continue(Option<Expr>),
+    /// `class M { … }` at the top level, php's `ZEND_AST_CLASS`.
+    Class(Class),
+}
+
+/// One class declaration, php's `zend_ast_decl` for a class: the name as
+/// written, the doc comment taken before its `{` (`class_declaration_statement`
+/// reduces `backup_doc_comment` after `implements_list`), and its
+/// members as php's `ZEND_AST_PROP_GROUP` and `ZEND_AST_CLASS_CONST_GROUP`
+/// hold them, one declarator each so the doc comment and the line are
+/// the declarator's own.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Class {
+    pub(crate) name: Vec<u8>,
+    pub(crate) doc_comment: Option<Vec<u8>>,
+    pub(crate) properties: Vec<Property>,
+    pub(crate) constants: Vec<Constant>,
+}
+
+/// One property declarator, php's `ZEND_AST_PROP_ELEM` with the group's
+/// modifiers beside it: `public $x`, `static $y = 1`. Its doc comment is
+/// what was pending after its last token, php's `property: T_VARIABLE
+/// backup_doc_comment | T_VARIABLE '=' expr backup_doc_comment`.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Property {
+    pub(crate) name: Vec<u8>,
+    pub(crate) visibility: Visibility,
+    pub(crate) is_static: bool,
+    pub(crate) default: Option<Expr>,
+    pub(crate) doc_comment: Option<Vec<u8>>,
+    pub(crate) line: u32,
+}
+
+/// One class constant declarator, php's `ZEND_AST_CONST_ELEM` with the
+/// group's modifiers beside it: `const A = 1`, `final protected const B = 2`.
+/// Its doc comment is taken after its value, `class_const_decl: identifier
+/// '=' expr backup_doc_comment`.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Constant {
+    pub(crate) name: Vec<u8>,
+    pub(crate) visibility: Visibility,
+    pub(crate) is_final: bool,
+    pub(crate) value: Expr,
+    pub(crate) doc_comment: Option<Vec<u8>>,
+    pub(crate) line: u32,
 }
 
 /// One `case cond:` or `default:` of a `switch` with the statements
@@ -242,6 +290,33 @@ pub(crate) enum BinaryOp {
     Spaceship,
 }
 
+impl BinaryOp {
+    /// The operator as php's grammar spells it, what a constant
+    /// expression's `Binary` node names it by (design §4.7).
+    pub(crate) fn spelling(self) -> &'static str {
+        match self {
+            BinaryOp::Add => "+",
+            BinaryOp::Sub => "-",
+            BinaryOp::Mul => "*",
+            BinaryOp::Div => "/",
+            BinaryOp::Mod => "%",
+            BinaryOp::Pow => "**",
+            BinaryOp::Sl => "<<",
+            BinaryOp::Sr => ">>",
+            BinaryOp::Concat => ".",
+            BinaryOp::IsSmaller => "<",
+            BinaryOp::IsSmallerOrEqual => "<=",
+            BinaryOp::Greater => ">",
+            BinaryOp::GreaterOrEqual => ">=",
+            BinaryOp::IsEqual => "==",
+            BinaryOp::IsNotEqual => "!=",
+            BinaryOp::IsIdentical => "===",
+            BinaryOp::IsNotIdentical => "!==",
+            BinaryOp::Spaceship => "<=>",
+        }
+    }
+}
+
 /// The type a cast is to, php's `attr` on `ZEND_AST_CAST`: the scanner's
 /// `T_INT_CAST`, `T_DOUBLE_CAST`, `T_STRING_CAST` and `T_BOOL_CAST`,
 /// each with the canonical spelling and the one 8.5 deprecates
@@ -287,6 +362,12 @@ struct Reader<'a> {
     /// walk stands in for the compiler's over the tree (design §4.9), so
     /// the check `zend_compile_expr` makes is made here.
     stack: StackLimit,
+    /// php's `CG(doc_comment)`: the last `/**` comment the scanner passed,
+    /// cleared by every `}` (`zend_language_scanner.l`, the
+    /// `<ST_IN_SCRIPTING>"}"` rule at 8.5.9) and taken, then cleared,
+    /// where the grammar reduces `backup_doc_comment`; the rule
+    /// `php_syntax::tree::builder` walks, kept here the same way.
+    doc_comment: Option<Vec<u8>>,
 }
 
 /// What one source file holds, or the first thing in it this cannot read.
@@ -296,6 +377,7 @@ pub(crate) fn read(source: &[u8], stack: StackLimit) -> Result<Read, Trouble> {
         at: 0,
         line: 1,
         stack,
+        doc_comment: None,
     };
     let mut out = Read::new();
     loop {
@@ -410,7 +492,7 @@ impl Reader<'_> {
                 return Ok(());
             }
             if in_block && self.byte(0) == Some(b'}') {
-                self.bump(1);
+                self.close_brace();
                 return Ok(());
             }
             if self.starts_with(b"?>") {
@@ -479,9 +561,221 @@ impl Reader<'_> {
             self.bump(8);
             return self.depth().map(|depth| Some(Stmt::Continue(depth)));
         }
+        if self.word_ahead(b"class") {
+            self.bump(5);
+            return self.class().map(Some);
+        }
         let expr = self.expr()?;
         self.end_of_statement()?;
         Ok(Some(Stmt::Effect(expr)))
+    }
+
+    /// `class M { members }`, the keyword read: php's
+    /// `class_declaration_statement` with no modifier, no `extends`, no
+    /// `implements` and no attribute, which are refused as what this
+    /// cannot read yet rather than read as a class without them. The
+    /// name is what `zend_assert_valid_class_name` refuses when it is a
+    /// reserved one, php's text at php's level. The doc comment is taken
+    /// before the `{`. The members are property groups and constant
+    /// groups; a method, a typed property or constant, a trait `use`,
+    /// an enum case, an accessor list or an attribute is refused the same way.
+    fn class(&mut self) -> Result<Stmt, Trouble> {
+        self.skip_trivia();
+        let name = self.name();
+        if name.is_empty() || name.contains(&b'\\') {
+            return Err(self.trouble("a class this compiler cannot read yet"));
+        }
+        if is_reserved_class_name(&name) {
+            return Err(Trouble {
+                level: Level::CompileError,
+                what: format!(
+                    "Cannot use \"{}\" as a class name as it is reserved",
+                    String::from_utf8_lossy(&name)
+                ),
+                line: self.line,
+            });
+        }
+        self.skip_trivia();
+        if self.byte(0) != Some(b'{') {
+            return Err(self.trouble(
+                "a class with a parent, an interface or an attribute this compiler cannot read yet",
+            ));
+        }
+        let doc_comment = self.doc_comment.take();
+        self.bump(1);
+        let mut class = Class {
+            name,
+            doc_comment,
+            properties: Vec::new(),
+            constants: Vec::new(),
+        };
+        loop {
+            self.skip_trivia();
+            if self.byte(0) == Some(b'}') {
+                self.close_brace();
+                return Ok(Stmt::Class(class));
+            }
+            if self.at >= self.source.len() {
+                return Err(self.trouble("a class no brace closes"));
+            }
+            self.member(&mut class)?;
+        }
+    }
+
+    /// One member group of a class body: the modifiers, then a constant
+    /// group or a property group. php's `zend_add_member_modifier`
+    /// refuses a second visibility in its own words; every other
+    /// modifier this does not model is refused as not yet read.
+    fn member(&mut self, class: &mut Class) -> Result<(), Trouble> {
+        let line = self.line;
+        let mut visibility = None;
+        let mut is_static = false;
+        let mut is_final = false;
+        loop {
+            self.skip_trivia();
+            let seen = if self.word_ahead(b"public") {
+                Some(Visibility::Public)
+            } else if self.word_ahead(b"protected") {
+                Some(Visibility::Protected)
+            } else if self.word_ahead(b"private") {
+                Some(Visibility::Private)
+            } else if self.word_ahead(b"var") {
+                Some(Visibility::Public)
+            } else {
+                None
+            };
+            if let Some(seen) = seen {
+                if visibility.is_some() {
+                    return Err(Trouble {
+                        level: Level::CompileError,
+                        what: String::from("Multiple access type modifiers are not allowed"),
+                        line: self.line,
+                    });
+                }
+                visibility = Some(seen);
+                self.name();
+                continue;
+            }
+            if self.word_ahead(b"static") {
+                self.bump(6);
+                is_static = true;
+                continue;
+            }
+            if self.word_ahead(b"final") {
+                self.bump(5);
+                is_final = true;
+                continue;
+            }
+            break;
+        }
+        let visibility = visibility.unwrap_or_default();
+        if self.word_ahead(b"const") && !is_static {
+            self.bump(5);
+            return self.constants(class, visibility, is_final, line);
+        }
+        if self.byte(0) == Some(b'$') && !is_final {
+            return self.properties(class, visibility, is_static, line);
+        }
+        Err(self.trouble("a class member this compiler cannot read yet"))
+    }
+
+    /// `const A = 1, B = 2;` with the group's modifiers already read:
+    /// each declarator takes the doc comment after its value. A type
+    /// before the name (8.3) is refused as not yet read.
+    fn constants(
+        &mut self,
+        class: &mut Class,
+        visibility: Visibility,
+        is_final: bool,
+        line: u32,
+    ) -> Result<(), Trouble> {
+        loop {
+            self.skip_trivia();
+            let name = self.name();
+            if name.is_empty() || name.contains(&b'\\') {
+                return Err(self.trouble("a class constant this compiler cannot read yet"));
+            }
+            self.skip_trivia();
+            if self.byte(0) != Some(b'=') {
+                return Err(self.trouble("a class constant this compiler cannot read yet"));
+            }
+            self.bump(1);
+            let value = self.expr()?;
+            self.skip_trivia();
+            let doc_comment = self.doc_comment.take();
+            class.constants.push(Constant {
+                name,
+                visibility,
+                is_final,
+                value,
+                doc_comment,
+                line,
+            });
+            match self.byte(0) {
+                Some(b',') => self.bump(1),
+                Some(b';') => {
+                    self.bump(1);
+                    return Ok(());
+                }
+                _ => return Err(self.trouble("a class constant this compiler cannot read yet")),
+            }
+        }
+    }
+
+    /// `$x, $y = 1;` with the group's modifiers already read: each
+    /// declarator takes the doc comment after its last token, the
+    /// variable or the default. An accessor list after a declarator is
+    /// refused as not yet read.
+    fn properties(
+        &mut self,
+        class: &mut Class,
+        visibility: Visibility,
+        is_static: bool,
+        line: u32,
+    ) -> Result<(), Trouble> {
+        loop {
+            self.skip_trivia();
+            if self.byte(0) != Some(b'$') {
+                return Err(self.trouble("a property this compiler cannot read yet"));
+            }
+            self.bump(1);
+            let name = self.name();
+            if name.is_empty() || name.contains(&b'\\') {
+                return Err(self.trouble("a property this compiler cannot read yet"));
+            }
+            self.skip_trivia();
+            let default = if self.byte(0) == Some(b'=') {
+                self.bump(1);
+                let value = self.expr()?;
+                self.skip_trivia();
+                Some(value)
+            } else {
+                None
+            };
+            let doc_comment = self.doc_comment.take();
+            class.properties.push(Property {
+                name,
+                visibility,
+                is_static,
+                default,
+                doc_comment,
+                line,
+            });
+            match self.byte(0) {
+                Some(b',') => self.bump(1),
+                Some(b';') => {
+                    self.bump(1);
+                    return Ok(());
+                }
+                _ => return Err(self.trouble("a property this compiler cannot read yet")),
+            }
+        }
+    }
+
+    /// A `}`: php's scanner clears the pending doc comment at every one.
+    fn close_brace(&mut self) {
+        self.bump(1);
+        self.doc_comment = None;
     }
 
     /// `for (init; cond; step) body`, the keyword read: three expression
@@ -524,7 +818,7 @@ impl Reader<'_> {
         loop {
             self.skip_trivia();
             if self.byte(0) == Some(b'}') {
-                self.bump(1);
+                self.close_brace();
                 return Ok(Stmt::Switch { expr, cases });
             }
             if self.byte(0) == Some(b';') {
@@ -608,7 +902,7 @@ impl Reader<'_> {
         loop {
             self.skip_trivia();
             if self.byte(0) == Some(b'}') {
-                self.bump(1);
+                self.close_brace();
                 return Ok(Expr::Match { expr, arms, line });
             }
             if !arms.is_empty() {
@@ -618,7 +912,7 @@ impl Reader<'_> {
                 self.bump(1);
                 self.skip_trivia();
                 if self.byte(0) == Some(b'}') {
-                    self.bump(1);
+                    self.close_brace();
                     return Ok(Expr::Match { expr, arms, line });
                 }
             }
@@ -1348,11 +1642,22 @@ impl Reader<'_> {
                 Some(b'/') if self.byte(1) == Some(b'/') => self.line_comment(),
                 Some(b'#') if self.byte(1) != Some(b'[') => self.line_comment(),
                 Some(b'/') if self.byte(1) == Some(b'*') => {
+                    // A doc comment is `/**` and whitespace, php's
+                    // scanner pattern `"/**"{WHITESPACE}`, so `/**/` and
+                    // `/**x*/` are plain comments.
+                    let start = self.at;
+                    let is_doc = self.byte(2) == Some(b'*')
+                        && self
+                            .byte(3)
+                            .is_some_and(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'));
                     self.bump(2);
                     while self.at < self.source.len() && !self.starts_with(b"*/") {
                         self.bump(1);
                     }
                     self.bump(2.min(self.source.len() - self.at));
+                    if is_doc {
+                        self.doc_comment = Some(self.taken(start));
+                    }
                 }
                 _ => return,
             }
@@ -1366,6 +1671,29 @@ impl Reader<'_> {
             self.bump(1);
         }
     }
+}
+
+/// `zend_is_reserved_class_name`: the names `reserved_class_names` lists
+/// in `zend_compile.c`, which no class may take, whatever the case.
+fn is_reserved_class_name(name: &[u8]) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_slice(),
+        b"bool"
+            | b"false"
+            | b"float"
+            | b"int"
+            | b"null"
+            | b"parent"
+            | b"self"
+            | b"static"
+            | b"string"
+            | b"true"
+            | b"void"
+            | b"never"
+            | b"iterable"
+            | b"object"
+            | b"mixed"
+    )
 }
 
 /// `zend_is_auto_global`: the names `php_startup_auto_globals` and

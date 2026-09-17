@@ -207,6 +207,7 @@ fn level_of(level: php_syntax::Level) -> Level {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use php_unit::decl::{ConstExpr, Visibility};
     use php_unit::{Opcode, OperandKind, OplineIdx};
 
     /// A unit whose constant strings are one engine's, which is what the
@@ -2645,6 +2646,166 @@ mod tests {
              0008 JMP 0010\n\
              0009 JMP 0010\n\
              0010 RETURN int(1)\n"
+        );
+    }
+
+    /// `zend_compile_class_decl` for the class the doc-comment witness
+    /// of `php_syntax` declares (#257): bound at compile time with no
+    /// opline, so the main op array is the oracle's `ECHO` and `RETURN`
+    /// alone; the declaration among the unit's classes with each
+    /// declarator's doc comment as `backup_doc_comment` took it (probed
+    /// 8.5.9: `/** P */ public $x, $y;` gives P to `$x` alone), the
+    /// constants' values as written, and a `}` clearing what is pending.
+    #[test]
+    fn a_class_with_properties_and_constants_is_bound_with_no_opline() {
+        let (unit, _strings) = unit_and_strings(
+            b"<?php\nclass M { /** P */ public $x, $y = 1 /** P2 */; /** K */ const A = 1, B = 2; static $s; /** F */ final protected const C = -A; }\n/** D */ { } class N /** D2 */ { var $v /** V */; }\necho 1;\n",
+        );
+        assert_eq!(
+            unit.dump(&[]),
+            "\n$_main:\n     ; (lines=2, args=0, vars=0, tmps=0)\n     ; (before optimizer)\n     ; :1-5\n     ; return  [] RANGE[0..0]\n0000 ECHO int(1)\n0001 RETURN int(1)\n",
+            "the class emits no opline; php binds it at compile time"
+        );
+        assert_eq!(unit.classes.len(), 2, "two classes, got {:?}", unit.classes);
+        let (m, n) = (&unit.classes[0], &unit.classes[1]);
+        assert_eq!(
+            (m.name.0.as_ref(), m.line, m.doc_comment.as_deref()),
+            (b"M".as_slice(), 2, None)
+        );
+        let props: Vec<_> = m
+            .properties
+            .iter()
+            .map(|p| {
+                (
+                    p.name.0.as_ref(),
+                    p.is_instance,
+                    p.default.clone(),
+                    p.doc_comment.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            props,
+            vec![
+                (b"x".as_slice(), true, None, Some(b"/** P */".as_slice())),
+                (b"y", true, Some(ConstExpr::Long(1)), Some(b"/** P2 */")),
+                (b"s", false, None, None),
+            ]
+        );
+        let consts: Vec<_> = m
+            .constants
+            .iter()
+            .map(|c| {
+                (
+                    c.name.0.as_ref(),
+                    c.visibility,
+                    c.is_final,
+                    c.value.clone(),
+                    c.doc_comment.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            consts,
+            vec![
+                (
+                    b"A".as_slice(),
+                    Visibility::Public,
+                    false,
+                    ConstExpr::Long(1),
+                    Some(b"/** K */".as_slice())
+                ),
+                (b"B", Visibility::Public, false, ConstExpr::Long(2), None),
+                (
+                    b"C",
+                    Visibility::Protected,
+                    true,
+                    ConstExpr::Unary {
+                        op: Name(b"-".as_slice().into()),
+                        operand: Box::new(ConstExpr::Constant(Name(b"A".as_slice().into()))),
+                    },
+                    Some(b"/** F */"),
+                ),
+            ]
+        );
+        assert_eq!(
+            (n.name.0.as_ref(), n.line, n.doc_comment.as_deref()),
+            (b"N".as_slice(), 3, Some(b"/** D2 */".as_slice())),
+            "the close brace before it cleared D, and a class takes before its open brace"
+        );
+        assert_eq!(
+            n.properties[0].doc_comment.as_deref(),
+            Some(b"/** V */".as_slice())
+        );
+        assert_eq!(
+            n.properties[0].visibility,
+            Visibility::Public,
+            "`var` is public"
+        );
+    }
+
+    /// What `zend_compile_prop_decl`, `zend_compile_class_const_decl`,
+    /// `zend_assert_valid_class_name` and `zend_add_member_modifier`
+    /// refuse, in php's words at the declarator's line, and what this
+    /// compiler does not read yet, refused as such rather than compiled
+    /// to something else.
+    #[test]
+    fn what_php_s_compiler_refuses_in_a_class_is_refused_in_its_words() {
+        let refused = |source: &[u8]| {
+            let mut strings = php_heap::Strings::new();
+            compile(
+                &php_syntax::parse(source, &php_syntax::Options::default()),
+                &bundled(),
+                &mut strings,
+            )
+            .err()
+            .map(|e| (e.level, e.message, e.line))
+        };
+        let compile_error =
+            |message: &str, line| Some((Level::CompileError, message.to_string(), line));
+        assert_eq!(
+            refused(b"<?php\nclass M {\n public $x;\n public $x; }"),
+            compile_error("Cannot redeclare M::$x", 4)
+        );
+        assert_eq!(
+            refused(b"<?php\nclass M { const A = 1;\n const A = 2; }"),
+            compile_error("Cannot redefine class constant M::A", 3)
+        );
+        assert_eq!(
+            refused(b"<?php\nclass Int {}"),
+            compile_error("Cannot use \"Int\" as a class name as it is reserved", 2)
+        );
+        assert_eq!(
+            refused(b"<?php\nclass M { public $x = $y; }"),
+            compile_error("Constant expression contains invalid operations", 2)
+        );
+        assert_eq!(
+            refused(b"<?php\nclass M { const A = f(); }"),
+            compile_error("Constant expression contains invalid operations", 2)
+        );
+        assert_eq!(
+            refused(b"<?php\nclass M { public private $x; }"),
+            compile_error("Multiple access type modifiers are not allowed", 2)
+        );
+        let not_yet = |message: &str, line| Some((Level::Parse, message.to_string(), line));
+        assert_eq!(
+            refused(b"<?php\nclass M {}\nclass m {}"),
+            not_yet("a class declared twice this compiler cannot read yet", 3)
+        );
+        assert_eq!(
+            refused(b"<?php\nclass M extends N {}"),
+            not_yet(
+                "a class with a parent, an interface or an attribute this compiler cannot read yet",
+                2
+            )
+        );
+        assert_eq!(
+            refused(b"<?php\nclass M { public function f() {} }"),
+            not_yet("a class member this compiler cannot read yet", 2)
+        );
+        assert_eq!(
+            refused(b"<?php\nclass M { public int $x; }"),
+            not_yet("a class member this compiler cannot read yet", 2)
         );
     }
 }
