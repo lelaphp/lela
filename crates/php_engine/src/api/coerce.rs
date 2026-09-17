@@ -141,9 +141,9 @@ pub fn to_double(req: &mut Request, value: &Value) -> Result<f64, Thrown> {
     }
 }
 
-/// `zval_get_string`: an object goes through `__toString`, which the
-/// skeleton cannot serve and reports as php's "could not be converted".
-/// The string handed back is the caller's to own, as `zval_get_string`'s
+/// `zval_get_string`: an object goes through its `__toString`, and one
+/// with none is php's `Error` for what could not be converted
+/// (`crate::ops::object_to_string`). The string handed back is the caller's to own, as `zval_get_string`'s
 /// is: a string value's own with one more owner (`zend_string_copy`),
 /// and a new string of the request's for everything else.
 pub fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, Thrown> {
@@ -161,11 +161,7 @@ pub fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, Thrown> 
             PhpString::new(req, b"Array")
         }
         ValueRef::Resource(r) => PhpString::new(req, format!("Resource id #{}", r.id()).as_bytes()),
-        ValueRef::Object(_) => Err(throw(
-            req,
-            "Error",
-            "Object of class could not be converted to string",
-        )),
+        ValueRef::Object(o) => crate::ops::object_to_string(req, *o),
         ValueRef::Reference(r) => to_string(req, &r.get()),
     }
 }

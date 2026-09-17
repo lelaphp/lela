@@ -22,9 +22,9 @@ use crate::api::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value, Va
 /// `zval_get_string` (`Z/Zend/zend_operators.c:1066`): a value as the
 /// string php converts it to, which is what `ECHO`, `print`, `.` and
 /// string interpolation write. An array is php's warning and the word
-/// `Array`; a resource its `Resource id #` and number; an object is the
-/// `Error` php throws for one with no `__toString`, and no class here
-/// has one yet, so that arm waits with the classes. The string is the
+/// `Array`; a resource its `Resource id #` and number; an object is
+/// what its `__toString` returns, or the `Error` php throws for one
+/// with none ([`object_to_string`]). The string is the
 /// caller's to own and release, as `zval_get_string`'s is: a string
 /// value's own with one more owner, a new one of the request's
 /// otherwise, and the `Err` is the memory limit ending the request.
@@ -60,14 +60,77 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, T
             PhpString::new(req, b"Array")
         }
         ValueRef::Resource(r) => PhpString::new(req, format!("Resource id #{}", r.id()).as_bytes()),
-        // `false` and `null` are both the empty string, and so is an
-        // object until its arm lands.
-        ValueRef::Undef
-        | ValueRef::Null
-        | ValueRef::Bool(false)
-        | ValueRef::Object(_)
-        | ValueRef::Reference(_) => PhpString::new(req, b""),
+        ValueRef::Object(o) => object_to_string(req, *o),
+        // `false` and `null` are both the empty string; a reference was
+        // followed above.
+        ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) | ValueRef::Reference(_) => {
+            PhpString::new(req, b"")
+        }
     }
+}
+
+/// `zend_std_cast_object_tostring` (`Z/Zend/zend_object_handlers.c:2558`)
+/// under `zval_get_string`: the class's `__toString` served on the
+/// object with no arguments, and what it returned when that is a
+/// string, the caller's to own as the method's return was. A class
+/// with no `__toString` is php's `Error` naming the class, thrown by
+/// `zval_get_string_func` once the handler failed; a `__toString` that
+/// returned something else is the handler's own `Error`, unless the
+/// method left a throwable pending, which stands as it is. A user
+/// `__toString` is declared `: string` by the compiler and coerces its
+/// return before this reads it, so the second `Error` is a native's
+/// alone.
+///
+/// ```php
+/// class B {}
+/// echo new B;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Object of class B could not be converted to string in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+///
+/// A native class's `__toString` is served as any native method is,
+/// with the object as its receiver.
+///
+/// ```php
+/// echo new ReflectionFunction('ctype_alpha');
+/// ```
+/// ```expect
+/// Function [ <internal:ctype> function ctype_alpha ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> mixed $text ]
+///   }
+///   - Return [ bool ]
+/// }
+/// ```
+pub(crate) fn object_to_string(
+    req: &mut Request,
+    object: crate::api::values::PhpObject,
+) -> Result<PhpString, Thrown> {
+    let class = object.class();
+    if req.method_named(class, b"__tostring").is_some() {
+        let returned = crate::api::call::call_method(req, &object, b"__toString", &[])?;
+        if let Some(text) = returned.as_php_string() {
+            return Ok(*text);
+        }
+        req.release(returned);
+        let name = req.class_name(class);
+        return Err(throw(
+            req,
+            "Error",
+            &format!("Method {name}::__toString() must return a string value"),
+        ));
+    }
+    let name = req.class_name(class);
+    Err(throw(
+        req,
+        "Error",
+        &format!("Object of class {name} could not be converted to string"),
+    ))
 }
 
 /// Where a `SWITCH_LONG`, `SWITCH_STRING` or `MATCH` sends the loop:

@@ -21,7 +21,7 @@ use php_heap::{
 use php_unit::decl::{ClassDecl, ClassKind, FunctionDecl, MethodDecl, Visibility};
 use php_unit::{FramelessEntry, Unit};
 
-use crate::api::abi::{Callable, IniVerdict, ObjectHandlers, PropertyTest, Std};
+use crate::api::abi::{Callable, Extension, IniVerdict, ObjectHandlers, PropertyTest, Std};
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{
@@ -39,6 +39,13 @@ pub const PHP_VERSION: &str = "8.5.9";
 /// and `open_basedir` have been applied.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct HostPath(pub PathBuf);
+
+/// A linked extension, by identity: its position in the bundle's startup
+/// order, which is where its `zend_module_entry` stands in
+/// `module_registry`. `Core`, which php registers first, is no
+/// `Extension` value of the bundle and has no identity here yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExtensionId(pub(crate) u32);
 
 /// What a native intends to do at a path, for the `open_basedir` guard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -3195,6 +3202,96 @@ impl Request {
         std::iter::once(String::from("Core"))
             .chain(self.shared.extensions.iter().map(|e| e.name.clone()))
             .collect()
+    }
+
+    /// `zend_hash_str_find_ptr(&module_registry, lcname)`: the linked
+    /// extension named, php's table being keyed by the lowered name;
+    /// none for a name the bundle has not, and none for `Core` until
+    /// the engine's own natives are an `Extension` value.
+    #[must_use]
+    pub fn extension_named(&self, name: &[u8]) -> Option<ExtensionId> {
+        let wanted = name.to_ascii_lowercase();
+        self.shared
+            .extensions
+            .iter()
+            .position(|e| e.name.as_bytes().to_ascii_lowercase() == wanted)
+            .and_then(|i| u32::try_from(i).ok())
+            .map(ExtensionId)
+    }
+
+    /// `module->name`: the name an extension registered under, as its
+    /// `zend_module_entry` spells it.
+    #[must_use]
+    pub fn extension_name(&self, extension: ExtensionId) -> Option<&str> {
+        self.extension_of(extension).map(|e| e.name.as_str())
+    }
+
+    /// `module->module_number`, `zend_next_free_module` at registration:
+    /// `Core` takes zero at `zend_startup` and each extension the next
+    /// number in startup order, so an extension's is its position in
+    /// the bundle plus one.
+    #[must_use]
+    pub fn extension_number(&self, extension: ExtensionId) -> u32 {
+        extension.0.saturating_add(1)
+    }
+
+    /// The natives an extension declared, in the order it declared
+    /// them: what `CG(function_table)` holds with
+    /// `internal_function.module` naming it.
+    #[must_use]
+    pub fn extension_functions(&self, extension: ExtensionId) -> Vec<Function> {
+        let Some(at) = usize::try_from(extension.0).ok() else {
+            return Vec::new();
+        };
+        let start = self.extension_functions_start(at);
+        let count = self
+            .extension_of(extension)
+            .map_or(0, |e| e.functions.len());
+        (start..start.saturating_add(count))
+            .filter_map(|i| u32::try_from(i).ok())
+            .map(Function)
+            .collect()
+    }
+
+    /// `internal_function.module`: the extension that declared a native
+    /// function; none for a native the engine declares itself, for a
+    /// method and for a user function.
+    #[must_use]
+    pub fn function_extension(&self, function: Function) -> Option<ExtensionId> {
+        let at = usize::try_from(function.0).ok()?;
+        (0..self.shared.extensions.len())
+            .find(|&i| {
+                let start = self.extension_functions_start(i);
+                let count = self.shared.extensions[i].functions.len();
+                (start..start.saturating_add(count)).contains(&at)
+            })
+            .and_then(|i| u32::try_from(i).ok())
+            .map(ExtensionId)
+    }
+
+    fn extension_of(&self, extension: ExtensionId) -> Option<&Extension> {
+        self.shared
+            .extensions
+            .get(usize::try_from(extension.0).ok()?)
+    }
+
+    /// Where extension `at`'s functions begin in the linked table: the
+    /// engine's own natives come first, then each extension's in bundle
+    /// order (`Engine::build`).
+    fn extension_functions_start(&self, at: usize) -> usize {
+        let all: usize = self
+            .shared
+            .extensions
+            .iter()
+            .map(|e| e.functions.len())
+            .sum();
+        let own = self.shared.functions.len().saturating_sub(all);
+        self.shared
+            .extensions
+            .iter()
+            .take(at)
+            .map(|e| e.functions.len())
+            .fold(own, usize::saturating_add)
     }
 
     // -------------------------------------------------- state
