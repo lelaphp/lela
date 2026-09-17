@@ -40,12 +40,19 @@ pub(crate) struct FrameState {
 
 /// One call from its `INIT_FCALL` until the `DO_*CALL` that serves it
 /// returns: what php pushes on the VM stack as a call frame, and keeps
-/// there while the callee runs.
+/// there while the callee runs. A `FRAMELESS_ICALL_*` lays one down too,
+/// over its operands and already serving, for the span of the native:
+/// php pushes no frame for it, but resolves the function off the opline
+/// wherever a frame would have been read, in `zend_active_function` for
+/// a raise's words and in `zend_fetch_debug_backtrace` for the frame a
+/// trace prints, and this is that resolution held in one place.
 pub(crate) struct CallState {
     /// The callee, resolved at the `INIT_FCALL`.
     pub(crate) function: Function,
-    /// The callee's name, for what a raise says.
-    pub(crate) name: PhpString,
+    /// The callee's name as the `INIT_*` constant spelled it, for what a
+    /// raise at the `INIT` says; none for a frameless call, which no
+    /// constant names and no raise reads.
+    pub(crate) name: Option<PhpString>,
     /// The arguments the `SEND_*` oplines have placed, read off this
     /// frame by the callee and by a backtrace taken while it runs, as
     /// `ZEND_CALL_ARG` reads them off php's; nothing copies them.
@@ -63,6 +70,14 @@ pub(crate) struct CallState {
     pub(crate) called_scope: Option<ClassId>,
     /// Where the call stands.
     pub(crate) stage: CallStage,
+    /// Whether the call is a `FRAMELESS_ICALL_*`'s, whose arguments are
+    /// the opline's operands: a coercion of one is kept in `coerced` and
+    /// not written over the argument, as `Z_FLF_PARAM_STR` converts in a
+    /// temporary of the body's and a trace still reads the operand.
+    pub(crate) frameless: bool,
+    /// php's `str_tmp`: what a coercion made for a frameless call, freed
+    /// with the call as `Z_FLF_PARAM_FREE_STR` frees it at the body's end.
+    pub(crate) coerced: Vec<Value>,
 }
 
 /// Where a call stands: its `SEND_*` oplines placing arguments after the

@@ -8,10 +8,13 @@
 //! an item back unchanged until their expansion lands, in the order
 //! `basic_functions.stub.php` declares them: `count` and its alias
 //! `sizeof`, `ord`, `chr`, `str_repeat`, and the `is_*` family with its
-//! aliases. The compiler serves a call of `count`, `sizeof`, `chr`,
-//! `ord` or an `is_*` name itself where it reads the name, as a
-//! constant or as `ZEND_COUNT` and `ZEND_TYPE_CHECK` over the engine's
-//! kernels (`zend_try_compile_special_func`, #219), and reads it only
+//! aliases; then `trim`, `str_contains` and `substr`, the first three to
+//! declare a frameless entry (`ZEND_FRAMELESS_FUNCTION`, #254), whose
+//! call of a covered arity the compiler emits as `FRAMELESS_ICALL_<n>`
+//! over the engine's kernel. The compiler serves a call of `count`,
+//! `sizeof`, `chr`, `ord` or an `is_*` name itself where it reads the
+//! name, as a constant or as `ZEND_COUNT` and `ZEND_TYPE_CHECK` over the
+//! engine's kernels (`zend_try_compile_special_func`, #219), and reads it only
 //! because the bundle declares the native; what reaches the native is a
 //! call the compiler could not shape, which for the type checks is a
 //! call of the wrong count of arguments until dynamic calls land, for
@@ -116,6 +119,7 @@ pub fn extension() -> Extension {
             (type_check_declared(b"is_object"), is_object),
             (type_check_declared(b"is_scalar"), is_scalar),
         ])
+        .functions(string_natives())
         .functions(output::natives())
         .constants(vec![
             constant(b"COUNT_NORMAL", COUNT_NORMAL),
@@ -123,6 +127,62 @@ pub fn extension() -> Extension {
         ])
         .request_state::<State>()
         .build("standard")
+}
+
+/// The natives of `string.c` declared so far, each with the frameless
+/// entries `basic_functions_arginfo.h` gives it.
+fn string_natives() -> Vec<(FunctionDecl, output::Entry)> {
+    vec![
+        (
+            frameless(
+                declared(
+                    b"trim",
+                    &[
+                        parameter(b"string", Type::String),
+                        Parameter {
+                            default: Some(ConstExpr::Str(TRIM_DEFAULT.into())),
+                            ..parameter(b"characters", Type::String)
+                        },
+                    ],
+                    Type::String,
+                ),
+                &[1, 2],
+            ),
+            trim,
+        ),
+        (
+            frameless(
+                declared(
+                    b"str_contains",
+                    &[
+                        parameter(b"haystack", Type::String),
+                        parameter(b"needle", Type::String),
+                    ],
+                    Type::Bool,
+                ),
+                &[2],
+            ),
+            str_contains,
+        ),
+        (
+            frameless(
+                declared(
+                    b"substr",
+                    &[
+                        parameter(b"string", Type::String),
+                        parameter(b"offset", Type::Int),
+                        Parameter {
+                            default: Some(ConstExpr::Null),
+                            ..parameter(b"length", Type::Nullable(Box::new(Type::Int)))
+                        },
+                    ],
+                    Type::String,
+                ),
+                &[2, 3],
+            ),
+            substr,
+        ),
+    ]
 }
 
 /// `PHP_COUNT_NORMAL` and `PHP_COUNT_RECURSIVE`, what `count`'s
@@ -640,6 +700,336 @@ fn str_repeat(req: &mut Request) -> Result<Value, Thrown> {
     Ok(Value::string(repeated))
 }
 
+/// The characters `trim` strips when given none, `php_trim_int`'s
+/// default set as `basic_functions.stub.php` spells it.
+const TRIM_DEFAULT: &[u8] = b" \n\r\t\x0B\x00";
+
+/// `trim(string $string, string $characters = " \n\r\t\v\x00"): string`,
+/// php's `PHP_FUNCTION(trim)` over `php_do_trim` with both sides
+/// (`Z/ext/standard/string.c:641`, its third way, both ends): the string with every byte
+/// of the set stripped from each end. The set is `php_charmask`'s: a
+/// byte each, with `a..z` a range, and its four warnings for a `..`
+/// with nothing before it, nothing after it, or a lesser byte after,
+/// which strip what the rest of the set says. The string comes back as
+/// it is, one more owner (`zend_string_copy`), when nothing was
+/// stripped; empty, the interned empty string, when everything was;
+/// and a new string of the request's otherwise (`zend_string_init`).
+/// Declared frameless for one argument and for two
+/// (`frameless_function_infos_trim`), so a call of either arity is a
+/// `FRAMELESS_ICALL_1` or `_2` over this body, whose witnesses are the
+/// kernels'.
+///
+/// ```php
+/// var_dump(trim(" \t\n\r\0\x0B a \x0B\0\r\n\t "), trim("xxaxx", "x"), trim("abcxcba", "a..c"), trim("  "), trim("abc", ""));
+/// ```
+/// ```expect
+/// string(1) "a"
+/// string(1) "a"
+/// string(1) "x"
+/// string(0) ""
+/// string(3) "abc"
+/// ```
+///
+/// ```php
+/// var_dump(trim("..a..", ".."), trim("za", "z.."), trim("bab", "..b"), trim("cac", "c..a"), trim("dad", "a..d..e"));
+/// ```
+/// ```expect
+/// Warning: trim(): Invalid '..'-range, no character to the left of '..' in %s on line 2
+///
+/// Warning: trim(): Invalid '..'-range, no character to the right of '..' in %s on line 2
+///
+/// Warning: trim(): Invalid '..'-range, no character to the left of '..' in %s on line 2
+///
+/// Warning: trim(): Invalid '..'-range, '..'-range needs to be incrementing in %s on line 2
+///
+/// Warning: trim(): Invalid '..'-range in %s on line 2
+/// string(1) "a"
+/// string(1) "a"
+/// string(1) "a"
+/// string(0) ""
+/// string(0) ""
+/// ```
+///
+/// A string nothing was stripped from is the argument's own, so the
+/// heap reads the same after the call as before it.
+///
+/// ```php
+/// $s = str_repeat("ab", 50); $b = memory_get_usage(); $t = trim($s); var_dump($t === $s, memory_get_usage() - $b);
+/// ```
+/// ```expect
+/// bool(true)
+/// int(0)
+/// ```
+///
+/// ```php
+/// trim("a", "b", "c");
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: trim() expects at most 2 arguments, 3 given in %s:2
+/// Stack trace:
+/// #0 %s(2): trim('a', 'b', 'c')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+fn trim(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 2)?;
+    let string = string_argument(req, 1)?;
+    let what = if req.argument_count() == 2 {
+        Some(string_argument(req, 2)?)
+    } else {
+        None
+    };
+    let bytes = string.as_bytes();
+    let (start, end) = match what {
+        Some(what) if what.len() == 1 => {
+            let p = what.as_bytes()[0];
+            trimmed(bytes, |c| c == p)
+        }
+        Some(what) => {
+            let mask = charmask(req, what.as_bytes());
+            trimmed(bytes, |c| mask[c as usize])
+        }
+        None => trimmed(bytes, |c| {
+            c <= b' ' && matches!(c, b' ' | b'\n' | b'\r' | b'\t' | 0x0B | 0)
+        }),
+    };
+    if end - start == bytes.len() {
+        let value = Value::string(string);
+        req.addref(&value);
+        return Ok(value);
+    }
+    Ok(Value::string(PhpString::new(req, &bytes[start..end])?))
+}
+
+/// The span of `bytes` left once every byte `strip` names is taken off
+/// both ends, `php_trim_int`'s two loops for `trim` itself.
+fn trimmed(bytes: &[u8], strip: impl Fn(u8) -> bool) -> (usize, usize) {
+    let mut start = 0;
+    let mut end = bytes.len();
+    while start != end && strip(bytes[start]) {
+        start += 1;
+    }
+    while start != end && strip(bytes[end - 1]) {
+        end -= 1;
+    }
+    (start, end)
+}
+
+/// `php_charmask` (`Z/ext/standard/string.c:475`): the 256-entry mask of
+/// a character set, `a..z` a range from the byte before the `..` to the
+/// byte after when the second is not the lesser, and php's four
+/// warnings for a `..` that is no range, each leaving the mask as the
+/// rest of the set builds it.
+fn charmask(req: &mut Request, input: &[u8]) -> [bool; 256] {
+    let mut mask = [false; 256];
+    let mut at = 0;
+    while at < input.len() {
+        let c = input[at];
+        if at + 3 < input.len()
+            && input[at + 1] == b'.'
+            && input[at + 2] == b'.'
+            && input[at + 3] >= c
+        {
+            for byte in c..=input[at + 3] {
+                mask[byte as usize] = true;
+            }
+            at += 4;
+            continue;
+        }
+        if at + 1 < input.len() && input[at] == b'.' && input[at + 1] == b'.' {
+            let message = if at == 0 {
+                "Invalid '..'-range, no character to the left of '..'"
+            } else if at + 2 >= input.len() {
+                "Invalid '..'-range, no character to the right of '..'"
+            } else if input[at - 1] > input[at + 2] {
+                "Invalid '..'-range, '..'-range needs to be incrementing"
+            } else {
+                "Invalid '..'-range"
+            };
+            docref(req, Level::Warning, message);
+            at += 1;
+            continue;
+        }
+        mask[c as usize] = true;
+        at += 1;
+    }
+    mask
+}
+
+/// `str_contains(string $haystack, string $needle): bool`, php's
+/// `PHP_FUNCTION(str_contains)` (`Z/ext/standard/string.c:1815`):
+/// whether the needle's bytes stand anywhere in the haystack's,
+/// `php_memnstr`, which is `true` for the empty needle. Declared
+/// frameless for its two arguments (`frameless_function_infos_str_contains`),
+/// so every call of two is a `FRAMELESS_ICALL_2` over this body, whose
+/// witnesses are the kernel's; what reaches the frame is a call of
+/// another count, or one by name.
+///
+/// ```php
+/// var_dump(str_contains("abc", "bc"), str_contains("abc", "cb"), str_contains("", ""), str_contains("abc", "abcd"), str_contains(true, "1"));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// ```
+///
+/// ```php
+/// str_contains("a");
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: str_contains() expects exactly 2 arguments, 1 given in %s:2
+/// Stack trace:
+/// #0 %s(2): str_contains('a')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+fn str_contains(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 2, 2)?;
+    let haystack = string_argument(req, 1)?;
+    let needle = string_argument(req, 2)?;
+    Ok(Value::bool(memnstr(haystack.as_bytes(), needle.as_bytes())))
+}
+
+/// `php_memnstr`, `zend_memnstr` (`Z/Zend/zend_operators.h`): whether
+/// `needle` stands in `haystack`; an empty needle is found at once.
+fn memnstr(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.is_empty()
+        || haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+/// `substr(string $string, int $offset, ?int $length = null): string`,
+/// php's `PHP_FUNCTION(substr)` over `_zend_substr`
+/// (`Z/ext/standard/string.c:2266`): the bytes from `offset`, counted
+/// from the end when negative and clamped to the start when past it,
+/// and the empty string for an offset past the end; of `length` bytes,
+/// or to the end for a null length, with a negative length stopping
+/// that many bytes short of the end and a length past the end clamped.
+/// The whole string comes back as it is, one more owner
+/// (`RETURN_STR_COPY`), and any other span as `ZVAL_STRINGL_FAST` makes
+/// it: the interned empty string, the interned one-byte string, or a
+/// new string of the request's. Declared frameless for two arguments
+/// and for three (`frameless_function_infos_substr`), so those calls
+/// are a `FRAMELESS_ICALL_2` or `_3` over this body, whose witnesses
+/// are the kernels'.
+///
+/// ```php
+/// $s = "abcdef";
+/// var_dump(substr($s, 0), substr($s, 6), substr($s, 7), substr($s, -6), substr($s, -7), substr($s, 1, -5), substr($s, 1, -6), substr($s, 2, 10), substr("", 0), substr($s, 0, -9223372036854775807 - 1), substr($s, -9223372036854775807 - 1));
+/// ```
+/// ```expect
+/// string(6) "abcdef"
+/// string(0) ""
+/// string(0) ""
+/// string(6) "abcdef"
+/// string(6) "abcdef"
+/// string(0) ""
+/// string(0) ""
+/// string(4) "cdef"
+/// string(0) ""
+/// string(0) ""
+/// string(6) "abcdef"
+/// ```
+///
+/// A span that is the whole string is the argument's own, and the heap
+/// reads the same after the call as before it.
+///
+/// ```php
+/// $s = str_repeat("ab", 50); $b = memory_get_usage(); $t = substr($s, 0, 100); var_dump($t === $s, memory_get_usage() - $b, substr($s, "1", "2.0"));
+/// ```
+/// ```expect
+/// bool(true)
+/// int(0)
+/// string(2) "ba"
+/// ```
+///
+/// ```php
+/// substr("a", 1, 2, 3);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: substr() expects at most 3 arguments, 4 given in %s:2
+/// Stack trace:
+/// #0 %s(2): substr('a', 1, 2, 3)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+fn substr(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 2, 3)?;
+    let string = string_argument(req, 1)?;
+    let mut from = long_argument(req, 2)?;
+    let length = if req.argument_count() == 3 {
+        let given = req.argument(3).unwrap_or_default();
+        let coerced = coerce_param(req, &given, &Type::Nullable(Box::new(Type::Int)), 3)?;
+        coerced.as_int()
+    } else {
+        None
+    };
+    let len = i64::try_from(string.len()).unwrap_or(i64::MAX);
+    if from < 0 {
+        // `-(size_t)f > ZSTR_LEN(str)`: a negative offset further back
+        // than the string is long starts at its first byte.
+        from = if from.unsigned_abs() > u64::try_from(string.len()).unwrap_or(u64::MAX) {
+            0
+        } else {
+            len + from
+        };
+    } else if from > len {
+        return Ok(Value::string(PhpString::new(req, b"")?));
+    }
+    let rest = len - from;
+    let taken = match length {
+        Some(l) if l < 0 => {
+            if l.unsigned_abs() > u64::try_from(rest).unwrap_or(0) {
+                0
+            } else {
+                rest + l
+            }
+        }
+        Some(l) if l > rest => rest,
+        Some(l) => l,
+        None => rest,
+    };
+    if taken == len {
+        let value = Value::string(string);
+        req.addref(&value);
+        return Ok(value);
+    }
+    let start = usize::try_from(from).unwrap_or(0);
+    let end = start + usize::try_from(taken).unwrap_or(0);
+    Ok(Value::string(PhpString::new(
+        req,
+        &string.as_bytes()[start..end],
+    )?))
+}
+
+/// `ZEND_PARSE_PARAMETERS_START(min, max)`'s count check: nothing, or
+/// `zend_wrong_parameters_count_error`'s sentence for a count outside
+/// the range, `exactly` where the two are one and `at least` or `at
+/// most` by which side the count fell.
+fn argument_count_between(req: &mut Request, min: usize, max: usize) -> Result<(), Thrown> {
+    let given = req.argument_count();
+    if (min..=max).contains(&given) {
+        return Ok(());
+    }
+    if min == max {
+        return Err(wrong_argument_count(req, min, given));
+    }
+    let (word, bound) = if given < min {
+        ("at least", min)
+    } else {
+        ("at most", max)
+    };
+    let plural = if bound == 1 { "" } else { "s" };
+    Err(arg_count_error(
+        req,
+        &format!("{word} {bound} argument{plural}, {given} given"),
+    ))
+}
+
 /// `zend_wrong_parameters_count_error` for a native whose minimum is its
 /// maximum: `exactly N arguments, M given`.
 fn wrong_argument_count(req: &mut Request, exactly: usize, given: usize) -> Thrown {
@@ -705,5 +1095,17 @@ fn declared(name: &[u8], parameters: &[Parameter], returns: Type) -> FunctionDec
         doc_comment: None,
         file: Name(Box::new([])),
         line: 0,
+        frameless: Vec::new(),
+    }
+}
+
+/// The declaration with its frameless entries, php's
+/// `frameless_function_infos_<name>` table: one arity per
+/// `ZEND_FRAMELESS_FUNCTION(name, arity)` the native has, in php's
+/// order.
+fn frameless(decl: FunctionDecl, arities: &[u32]) -> FunctionDecl {
+    FunctionDecl {
+        frameless: arities.to_vec(),
+        ..decl
     }
 }

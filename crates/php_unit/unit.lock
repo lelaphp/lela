@@ -9,6 +9,7 @@ Effects::GLOBAL_WRITE
 Effects::NONE
 Effects::THROW
 Effects::contains
+FramelessEntry
 Level
 Level::bit
 LiveKind
@@ -38,3 +39,4 @@ decl::Parameter
 decl::PropertyDecl
 decl::Type
 decl::Visibility
+frameless_table

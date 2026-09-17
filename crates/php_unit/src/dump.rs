@@ -699,6 +699,7 @@ mod tests {
             doc_comment: None,
             file: Name::from("a.php"),
             line: 4,
+            frameless: Vec::new(),
         };
         let function = OpArray {
             line_start: 4,

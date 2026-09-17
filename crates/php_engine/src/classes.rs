@@ -91,6 +91,7 @@ fn private_clone() -> MethodDecl {
             doc_comment: None,
             file: Name(Box::new([])),
             line: 0,
+            frameless: Vec::new(),
         },
         visibility: Visibility::Private,
         is_instance: true,

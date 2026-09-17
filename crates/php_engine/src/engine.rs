@@ -19,8 +19,8 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use php_compile::{CompileError, StackLimit};
 use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
-use php_unit::Unit;
 use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, Name};
+use php_unit::{FramelessEntry, Unit, frameless_table};
 
 use crate::api::abi::{Cache, Entry, Extension, StartupIni};
 use crate::api::request::{Aside, Ending, Request};
@@ -113,6 +113,11 @@ const MAX_ACCELERATED_FILES: usize = 10_000;
 pub(crate) struct Shared {
     pub(crate) extensions: Vec<Extension>,
     pub(crate) functions: Vec<(FunctionDecl, Entry)>,
+    /// `zend_flf_functions` (`Z/Zend/zend_API.c:3115-3133`): the natives
+    /// with a frameless entry, one row per arity in registration order,
+    /// which a `FRAMELESS_ICALL_*`'s `extended_value` indexes. Computed
+    /// from `functions` by the one function the compiler numbers by.
+    pub(crate) frameless: Vec<FramelessEntry>,
     /// The classes Zend declares and then each extension's, in bundle
     /// order, each with its methods on it: what a `ClassId` below the
     /// request's own declarations indexes.
@@ -407,10 +412,11 @@ impl EngineBuilder {
             .filter_map(|e| e.engine_state.as_ref())
             .map(|build| build(&startup))
             .collect();
-        let functions = crate::natives::natives()
+        let functions: Vec<(FunctionDecl, Entry)> = crate::natives::natives()
             .into_iter()
             .chain(extensions.iter().flat_map(|e| e.functions.iter().cloned()))
             .collect();
+        let frameless = frameless_table(functions.iter().map(|(decl, _)| decl));
         // `zend_register_internal_class_with_flags` and `zend_register_functions`
         // over the class's methods: each declaration takes its methods,
         // and each method's entry is numbered in the order it is met.
@@ -464,6 +470,7 @@ impl EngineBuilder {
             shared: Arc::new(Shared {
                 extensions,
                 functions,
+                frameless,
                 classes,
                 methods,
                 constants,
@@ -495,6 +502,26 @@ impl Engine {
             entry: execute::<Nop>,
             tier_extension: Nop::extension(),
         }
+    }
+
+    /// `zend_flf_functions` by name, what `Unit::dump` prints a
+    /// `FRAMELESS_ICALL_*` with in parentheses: the declared name of the
+    /// native each row of the engine's frameless table is, in the
+    /// table's order, so the `extended_value` a unit this engine compiled
+    /// carries indexes the name php's dump would print.
+    #[must_use]
+    pub fn frameless(&self) -> Vec<Name> {
+        self.shared
+            .frameless
+            .iter()
+            .map(|entry| {
+                self.shared
+                    .functions
+                    .get(entry.function as usize)
+                    .map(|(decl, _)| decl.name.clone())
+                    .unwrap_or_default()
+            })
+            .collect()
     }
 
     /// The extensions this engine loaded, `Core` first and then the

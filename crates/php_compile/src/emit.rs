@@ -38,6 +38,14 @@
 //! and a call of a name it has not is `zend_compile_dynamic_call`'s
 //! `INIT_FCALL_BY_NAME` over the name's constant pair, `SEND_*_EX` and
 //! `DO_FCALL_BY_NAME`, for the engine to resolve as the program serves.
+//! Between the two, a call whose count one of the native's frameless
+//! entries serves is `zend_compile_frameless_icall`'s
+//! `FRAMELESS_ICALL_<n>` over the arguments, a third in an `OP_DATA`,
+//! with the engine's table row in `extended_value`; and an unqualified
+//! name in a namespace is `zend_compile_ns_call`'s call by name,
+//! `INIT_NS_FCALL_BY_NAME` over three constants, in a `JMP_FRAMELESS`
+//! branch beside the frameless call where the global function has an
+//! entry (#254).
 //!
 //! A variable read is a `CV` operand and no opline (`zend_try_compile_cv`),
 //! and an assignment to one is `ASSIGN` with the CV in `op1` and the value
@@ -70,7 +78,10 @@ use php_unit::decl::{
     ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr, EnumBacking,
     FunctionDecl, Name, PropertyDecl, Visibility,
 };
-use php_unit::{Diagnostic, Level, OpArray, Opcode, OperandKind, Opline, OplineIdx, Unit};
+use php_unit::{
+    Diagnostic, FramelessEntry, Level, OpArray, Opcode, OperandKind, Opline, OplineIdx, Unit,
+    frameless_table,
+};
 
 use crate::read::{Arm, BinaryOp, Case, CastTo, Class, Expr, Read, Stmt};
 use crate::{CompileError, Options, StackLimit};
@@ -91,6 +102,19 @@ pub(crate) struct Emit<'a> {
     functions: &'a [FunctionDecl],
     /// The engine's classes, [`Options::classes`].
     known_classes: &'a [ClassDecl],
+    /// `zend_flf_functions` over them, what a `FRAMELESS_ICALL_*`'s
+    /// `extended_value` indexes (`find_frameless_function_offset`).
+    frameless: Vec<FramelessEntry>,
+    /// `FC(current_namespace)`: the namespace a `namespace` statement
+    /// put what follows it in, and none before one.
+    namespace: Option<Vec<u8>>,
+    /// `CG(context).in_jmp_frameless_branch`: whether a
+    /// `JMP_FRAMELESS` branch is being compiled, in which no call takes
+    /// a branch of its own.
+    in_jmp_frameless_branch: bool,
+    /// How many statements have been compiled, which is what a first
+    /// `namespace` statement must find at zero.
+    statements_seen: u32,
     /// The thread's stack limit, [`Options::stack`], held to where the
     /// emitter recurses.
     stack: StackLimit,
@@ -185,6 +209,10 @@ pub(crate) fn unit(
         persistent: &options.persistent,
         functions: &options.functions,
         known_classes: &options.classes,
+        frameless: frameless_table(&options.functions),
+        namespace: None,
+        in_jmp_frameless_branch: false,
+        statements_seen: 0,
         stack: options.stack,
         oplines: Vec::new(),
         constants: Vec::new(),
@@ -279,9 +307,21 @@ impl Emit<'_> {
         at
     }
 
+    /// `zend_alloc_cache_slot`: the next slot of the op array's cache, as
+    /// an offset in bytes, one pointer per slot (`sizeof(void*)`), which
+    /// is the number an opline carries and the dump prints for a
+    /// `JMP_FRAMELESS`.
     pub(crate) fn cache_slot(&mut self) -> u32 {
+        self.cache_slots(1)
+    }
+
+    /// `zend_alloc_cache_slots(count)`: the first of `count` slots in a
+    /// row, as an offset in bytes, `op_array->cache_size` grown by
+    /// `count * sizeof(void*)`.
+    fn cache_slots(&mut self, count: u32) -> u32 {
+        const SLOT: u32 = 8;
         let at = self.cache_slots;
-        self.cache_slots = self.cache_slots.saturating_add(1);
+        self.cache_slots = self.cache_slots.saturating_add(count.saturating_mul(SLOT));
         at
     }
 
@@ -351,7 +391,12 @@ impl Emit<'_> {
     }
 
     fn statement(&mut self, statement: &Stmt) -> Result<(), CompileError> {
+        if let Stmt::Namespace(name) = statement {
+            return self.namespace(name);
+        }
+        self.statements_seen = self.statements_seen.saturating_add(1);
         match statement {
+            Stmt::Namespace(_) => {}
             Stmt::Inline(text) => {
                 let text = self.string(text)?;
                 let at = self.constant(text);
@@ -550,6 +595,20 @@ impl Emit<'_> {
                 Err(self.fatal("a constant expression this compiler cannot read yet"))
             }
         }
+    }
+
+    /// `zend_compile_namespace` for the unbraced form: the name is the
+    /// namespace of what follows, and a first one after any statement
+    /// but an empty one is php's compile error (`zend_is_first_statement`);
+    /// a later one moves the namespace, as php's does. No opline.
+    fn namespace(&mut self, name: &[u8]) -> Result<(), CompileError> {
+        if self.namespace.is_none() && self.statements_seen > 0 {
+            return Err(self.compile_error(
+                "Namespace declaration statement has to be the very first statement or after any declare call in the script",
+            ));
+        }
+        self.namespace = Some(name.to_vec());
+        Ok(())
     }
 
     /// `zend_compile_stmt_list`: each statement at its own line.
@@ -1175,7 +1234,9 @@ impl Emit<'_> {
     }
 
     /// `zend_error_noreturn(E_COMPILE_ERROR, …)` at the line the
-    /// compiler stands on.
+    /// compiler stands on: php's own sentence for what its compiler
+    /// refuses after the parse, which ends the request as its
+    /// `E_COMPILE_ERROR` does.
     fn compile_error(&self, message: impl Into<String>) -> CompileError {
         CompileError {
             level: Level::CompileError,
@@ -1215,12 +1276,12 @@ impl Emit<'_> {
     /// overwrites with -1 is read by nothing once the kind is `UNUSED`.
     ///
     /// php steps back over `END_SILENCE`, `EXT_FCALL_END` and `OP_DATA`
-    /// to reach the opline that left the value; none of the three is
-    /// emitted here, so the last opline is the one.
+    /// to reach the opline that left the value; of the three only
+    /// `OP_DATA` is emitted here, after a `FRAMELESS_ICALL_3`.
     fn do_free(&mut self, value: Where) {
         match value {
             Where::Temporary(at) => {
-                if let Some(last) = self.oplines.last_mut()
+                if let Some(last) = self.last_but_op_data()
                     && last.out_type == OperandKind::Tmp
                     && last.out == at
                 {
@@ -1271,7 +1332,7 @@ impl Emit<'_> {
                 self.free(OperandKind::Tmp, at);
             }
             Where::Returned(at) => {
-                let Some(last) = self.oplines.last_mut() else {
+                let Some(last) = self.last_but_op_data() else {
                     return;
                 };
                 if last.out_type == OperandKind::Var && last.out == at {
@@ -1305,6 +1366,15 @@ impl Emit<'_> {
             }
             Where::Constant(_) | Where::Cv(_) => {}
         }
+    }
+
+    /// The last opline that is no `OP_DATA`, which is the one that left
+    /// the value `zend_do_free` is given.
+    fn last_but_op_data(&mut self) -> Option<&mut Opline> {
+        self.oplines
+            .iter_mut()
+            .rev()
+            .find(|opline| opline.opcode != Opcode::OpData)
     }
 
     /// `zend_emit_op(NULL, ZEND_FREE, op1, NULL)`: the temporary or the
@@ -1752,7 +1822,7 @@ impl Emit<'_> {
             Expr::Float(f) => Ok(Zval::double(*f)),
             Expr::Str(bytes) => self.string(bytes),
             Expr::Constant(name) => self
-                .persistent(name)?
+                .const_name(name)?
                 .ok_or_else(|| self.fatal("a constant this compiler cannot read yet")),
             // `zend_try_ct_eval_unary_pm`: php folds unary `-` and `+` as
             // the multiplication by -1 and by 1 it would otherwise emit.
@@ -1786,9 +1856,15 @@ impl Emit<'_> {
                 fold(*op, left, right)
                     .ok_or_else(|| self.fatal("arithmetic this compiler cannot fold yet"))
             }
-            Expr::Call { name, arguments } => self
-                .special_constant(&unqualified(name), arguments)?
-                .ok_or_else(|| self.fatal("a call this compiler cannot fold")),
+            Expr::Call { name, arguments } => {
+                let (resolved, runtime) = self.function_name(name);
+                let folded = if runtime {
+                    None
+                } else {
+                    self.special_constant(&resolved.to_ascii_lowercase(), arguments)?
+                };
+                folded.ok_or_else(|| self.fatal("a call this compiler cannot fold"))
+            }
             Expr::Var(_)
             | Expr::This
             | Expr::Prop { .. }
@@ -1825,11 +1901,18 @@ impl Emit<'_> {
     /// nothing does, which is what the engine's `DO_ICALL` reads as
     /// `RETURN_VALUE_USED`.
     fn call(&mut self, name: &[u8], arguments: &[Expr]) -> Result<Where, CompileError> {
-        let lowered = unqualified(name);
-        if !self.native(&lowered) {
-            return self.dynamic_call(name, arguments);
+        let (resolved, runtime) = self.function_name(name);
+        if runtime {
+            return self.ns_call(&resolved, arguments);
         }
+        let lowered = resolved.to_ascii_lowercase();
+        let Some(index) = self.native_index(&lowered) else {
+            return self.dynamic_call(&resolved, arguments);
+        };
         if let Some(served) = self.special(&lowered, arguments)? {
+            return Ok(served);
+        }
+        if let Some(served) = self.frameless_icall(index, arguments, None)? {
             return Ok(served);
         }
         let lowered = self.string(&lowered)?;
@@ -2069,7 +2152,7 @@ impl Emit<'_> {
     /// `self`, `parent` and `static` name no class of the table
     /// (`zend_get_class_fetch_type`) and are refused as not yet read.
     fn class_name_literal(&mut self, name: &[u8]) -> Result<u32, CompileError> {
-        let written = resolved(name);
+        let written = self.class_name(name);
         if written.eq_ignore_ascii_case(b"self")
             || written.eq_ignore_ascii_case(b"parent")
             || written.eq_ignore_ascii_case(b"static")
@@ -2077,19 +2160,11 @@ impl Emit<'_> {
             return Err(self.fatal("a class reference of the scope this compiler cannot read yet"));
         }
         let lowered = written.to_ascii_lowercase();
-        let written = self.string(written)?;
+        let written = self.string(&written)?;
         let lowered = self.string(&lowered)?;
         let at = self.literal(written);
         self.literal(lowered);
         Ok(at)
-    }
-
-    /// `zend_alloc_cache_slots(count)`: the first of `count` slots in a
-    /// row.
-    fn cache_slots(&mut self, count: u32) -> u32 {
-        let at = self.cache_slots;
-        self.cache_slots = self.cache_slots.saturating_add(count);
-        at
     }
 
     /// `zend_get_compatible_func_or_null` over `CG(class_table)`: whether
@@ -2098,7 +2173,7 @@ impl Emit<'_> {
     /// of the name; a private or protected one is compatible only from
     /// inside the class, which nothing here is.
     fn known_method(&self, class: &[u8], method: &[u8]) -> bool {
-        let class = resolved(class).to_ascii_lowercase();
+        let class = self.class_name(class).to_ascii_lowercase();
         let method = method.to_ascii_lowercase();
         self.known_classes
             .iter()
@@ -2117,12 +2192,290 @@ impl Emit<'_> {
     /// the engine reads the second as the one after the first
     /// (`Z_STR_P(function_name+1)`).
     fn func_name_literal(&mut self, name: &[u8]) -> Result<u32, CompileError> {
-        let written = resolved(name);
+        let written = name;
         let lowered = written.to_ascii_lowercase();
         let written = self.string(written)?;
         let lowered = self.string(&lowered)?;
         let at = self.literal(written);
         self.literal(lowered);
+        Ok(at)
+    }
+
+    /// `zend_compile_function_name` over `zend_resolve_function_name`:
+    /// the name a call is resolved to, and whether the resolution waits
+    /// for the program to be served. A name written with a leading `\` is
+    /// what follows it, fully qualified; `namespace\f` is the current
+    /// namespace before `f`, fully qualified; a name with a `\` in it
+    /// is the current namespace before it, fully qualified, since no
+    /// `use` is read here; and an unqualified name is itself where no
+    /// namespace stands, and the namespace before it where one does,
+    /// resolved as the program serves, which is the `true`.
+    fn function_name(&self, name: &[u8]) -> (Vec<u8>, bool) {
+        if let Some(fully_qualified) = name.strip_prefix(b"\\") {
+            return (fully_qualified.to_vec(), false);
+        }
+        let Some(namespace) = &self.namespace else {
+            return (name.to_vec(), false);
+        };
+        let prefixed = |rest: &[u8]| {
+            let mut full = namespace.clone();
+            full.push(b'\\');
+            full.extend_from_slice(rest);
+            full
+        };
+        if name.len() > 10 && name[..10].eq_ignore_ascii_case(b"namespace\\") {
+            return (prefixed(&name[10..]), false);
+        }
+        (prefixed(name), !name.contains(&b'\\'))
+    }
+
+    /// `zend_resolve_class_name` for a name no `use` is read for: a name
+    /// written with a leading `\` is what follows it, and in a namespace
+    /// `namespace\C` and any other name take the namespace before them,
+    /// as [`Self::function_name`] resolves a function's, with nothing
+    /// waiting for the program, since a class name resolves at compile
+    /// time.
+    fn class_name(&self, name: &[u8]) -> Vec<u8> {
+        self.function_name(name).0
+    }
+
+    /// `zend_compile_const` over `zend_resolve_const_name` and
+    /// `zend_try_ct_eval_const`: the value of the constant `name` names
+    /// where php substitutes it, and nothing where php emits
+    /// `FETCH_CONSTANT`. A leading `\` names the global constant; an
+    /// unqualified name in a namespace names the namespace's own, which
+    /// nothing declares, so php fetches it as the program serves and
+    /// falls back to the global one then; outside a namespace it is
+    /// the persistent table's.
+    fn const_name(&mut self, name: &[u8]) -> Result<Option<Zval>, CompileError> {
+        if self.namespace.is_some() && !name.starts_with(b"\\") {
+            return Ok(None);
+        }
+        self.persistent(name)
+    }
+
+    /// `find_frameless_function_info` (`Z/Zend/zend_compile.c:4649`): the
+    /// arity of the native's first frameless entry that serves a call
+    /// of `count` arguments, none where none does. An entry serves the
+    /// call when its arity is at least the count, the native's required
+    /// count is at most the count, and a variadic native's entry is of
+    /// the count exactly; a call of more than three arguments has none.
+    fn frameless_arity(&self, index: usize, count: usize) -> Option<u32> {
+        let decl = self.functions.get(index)?;
+        if count > 3 {
+            return None;
+        }
+        let required = decl
+            .parameters
+            .iter()
+            .take_while(|p| p.default.is_none() && !p.variadic)
+            .count();
+        let variadic = decl.parameters.iter().any(|p| p.variadic);
+        let count32 = u32::try_from(count).ok()?;
+        decl.frameless
+            .iter()
+            .copied()
+            .find(|&arity| arity >= count32 && required <= count && (!variadic || arity == count32))
+    }
+
+    /// `find_frameless_function_offset`: the row of the engine's
+    /// frameless table for the native at `index` and `arity`, the
+    /// `extended_value` the opline carries.
+    fn frameless_offset(&self, index: usize, arity: u32) -> Option<u32> {
+        let function = u32::try_from(index).ok()?;
+        self.frameless
+            .iter()
+            .position(|entry| entry.function == function && entry.arity == arity)
+            .and_then(|at| u32::try_from(at).ok())
+    }
+
+    /// `zend_compile_frameless_icall` and `zend_compile_frameless_icall_ex`
+    /// (`Z/Zend/zend_compile.c:4690-4732`): the call of the native at
+    /// `index` as `FRAMELESS_ICALL_<n>` where an entry of its serves the
+    /// argument count, and nothing where none does, which is the
+    /// ordinary call. The arguments are compiled in order and each
+    /// parameter the call left out is filled from its declared default
+    /// (`zend_get_default_from_internal_arg_info`), a default this
+    /// compiler cannot read as a value leaving the call as it is; the
+    /// first two are the opline's operands and a third is an `OP_DATA`
+    /// after it. The value is a temporary of the opline's own
+    /// (`zend_emit_op_tmp`), or `into` where `zend_compile_ns_call`
+    /// hands over the `VAR` its call by name returns into, so both
+    /// branches leave the value in one place.
+    fn frameless_icall(
+        &mut self,
+        index: usize,
+        arguments: &[Expr],
+        into: Option<u32>,
+    ) -> Result<Option<Where>, CompileError> {
+        let Some(arity) = self.frameless_arity(index, arguments.len()) else {
+            return Ok(None);
+        };
+        let Some(offset) = self.frameless_offset(index, arity) else {
+            return Ok(None);
+        };
+        let mut values = Vec::new();
+        for at in 0..arity as usize {
+            if let Some(argument) = arguments.get(at) {
+                values.push(self.expr(argument)?);
+                continue;
+            }
+            let default = self
+                .functions
+                .get(index)
+                .and_then(|decl| decl.parameters.get(at))
+                .and_then(|parameter| parameter.default.as_ref())
+                .and_then(|default| self.default_value(default).transpose())
+                .transpose()?;
+            let Some(default) = default else {
+                return Ok(None);
+            };
+            values.push(Where::Constant(default));
+        }
+        let opcode = match arity {
+            0 => Opcode::FramelessIcall0,
+            1 => Opcode::FramelessIcall1,
+            2 => Opcode::FramelessIcall2,
+            _ => Opcode::FramelessIcall3,
+        };
+        let (out_type, out) = match into {
+            Some(var) => (OperandKind::Var, var),
+            None => (OperandKind::Tmp, self.temporary()),
+        };
+        let mut operands = values.iter().map(|value| self.operand(*value));
+        let (op1_type, op1) = operands.next().unwrap_or((OperandKind::Unused, 0));
+        let (op2_type, op2) = operands.next().unwrap_or((OperandKind::Unused, 0));
+        let data = operands.next();
+        self.push(Opline {
+            opcode,
+            op1_type,
+            op1,
+            op2_type,
+            op2,
+            out_type,
+            out,
+            extended_value: offset,
+            ..Opline::default()
+        });
+        if let Some((op1_type, op1)) = data {
+            // `zend_emit_op_data`
+            self.push(Opline {
+                opcode: Opcode::OpData,
+                op1_type,
+                op1,
+                ..Opline::default()
+            });
+        }
+        Ok(Some(match into {
+            Some(var) => Where::Returned(var),
+            None => Where::Temporary(out),
+        }))
+    }
+
+    /// `zend_get_default_from_internal_arg_info` for a default written
+    /// as a value: the constant, or nothing for one written as an
+    /// expression, which no frameless entry of php's reaches.
+    fn default_value(&mut self, default: &ConstExpr) -> Result<Option<Zval>, CompileError> {
+        Ok(match default {
+            ConstExpr::Null => Some(Zval::null()),
+            ConstExpr::Bool(b) => Some(Zval::bool(*b)),
+            ConstExpr::Long(n) => Some(Zval::long(*n)),
+            ConstExpr::Double(d) => Some(Zval::double(*d)),
+            ConstExpr::Str(bytes) => Some(self.string(bytes)?),
+            _ => None,
+        })
+    }
+
+    /// `zend_compile_ns_call` (`Z/Zend/zend_compile.c:4734`): the call of
+    /// an unqualified name in a namespace, resolved as the program
+    /// serves. `INIT_NS_FCALL_BY_NAME` over the name's three constants,
+    /// the arguments sent for a callee nothing is known of, and
+    /// `DO_FCALL_BY_NAME`. Where the global function of that name has a
+    /// frameless entry for the count, and no such branch is being
+    /// compiled already, the call by name is put in a branch:
+    /// `JMP_FRAMELESS` over the lowered name before it, which the engine
+    /// takes when the namespace declares no function of the name, a `JMP`
+    /// past the frameless call after it, and the `FRAMELESS_ICALL_<n>`
+    /// itself, returning into the same `VAR`, compiled with its arguments
+    /// a second time. The `JMP_FRAMELESS` takes its cache slot after
+    /// the `INIT_NS_FCALL_BY_NAME` took its own, which is the number
+    /// the dump prints.
+    fn ns_call(&mut self, name: &[u8], arguments: &[Expr]) -> Result<Where, CompileError> {
+        let name_constants = self.ns_func_name_literal(name)?;
+        let lowered = name.to_ascii_lowercase();
+        let unqualified = lowered
+            .rsplit(|b| *b == b'\\')
+            .next()
+            .unwrap_or_default()
+            .to_vec();
+        let mut branch = None;
+        if !self.in_jmp_frameless_branch
+            && let Some(index) = self.native_index(&unqualified)
+            && self.frameless_arity(index, arguments.len()).is_some()
+        {
+            self.in_jmp_frameless_branch = true;
+            let over = self.string(&lowered)?;
+            let op1 = self.literal(over);
+            let at = self.push(Opline {
+                opcode: Opcode::JmpFrameless,
+                op1_type: OperandKind::Const,
+                op1,
+                ..Opline::default()
+            });
+            branch = Some((at, index));
+        }
+        let count = u32::try_from(arguments.len()).unwrap_or(0);
+        let slot = self.cache_slot();
+        self.push(Opline {
+            opcode: Opcode::InitNsFcallByName,
+            op2_type: OperandKind::Const,
+            op2: name_constants,
+            out: slot,
+            extended_value: count,
+            ..Opline::default()
+        });
+        self.args(arguments, false)?;
+        let returned = self.call_op(Opcode::DoFcallByName);
+        if let Some((jmp_fl, index)) = branch
+            && let Where::Returned(var) = returned
+        {
+            let jmp_end = self.push(Opline {
+                opcode: Opcode::Jmp,
+                ..Opline::default()
+            });
+            let target = self.next();
+            self.frameless_icall(index, arguments, Some(var))?;
+            let slot = self.cache_slot();
+            if let Some(opline) = self.oplines.get_mut(jmp_fl as usize) {
+                opline.op2 = target;
+                opline.extended_value = slot;
+            }
+            let after = self.next();
+            if let Some(opline) = self.oplines.get_mut(jmp_end as usize) {
+                opline.op1 = after;
+            }
+            self.in_jmp_frameless_branch = false;
+        }
+        Ok(returned)
+    }
+
+    /// `zend_add_ns_func_name_literal`: the name with its namespace as
+    /// written, its lowered form, and the lowered name alone, three
+    /// slots in a row, which the engine reads as the two after the first
+    /// (`Z_STR_P(function_name + 1)`, `+ 2`).
+    fn ns_func_name_literal(&mut self, name: &[u8]) -> Result<u32, CompileError> {
+        let lowered = name.to_ascii_lowercase();
+        let unqualified = lowered
+            .rsplit(|b| *b == b'\\')
+            .next()
+            .unwrap_or_default()
+            .to_vec();
+        let written = self.string(name)?;
+        let lowered = self.string(&lowered)?;
+        let unqualified = self.string(&unqualified)?;
+        let at = self.literal(written);
+        self.literal(lowered);
+        self.literal(unqualified);
         Ok(at)
     }
 
@@ -2235,9 +2588,15 @@ impl Emit<'_> {
     /// `zend_try_compile_special_func` requires before it serves a call
     /// itself, so a name the bundle has not is the call.
     pub(crate) fn native(&self, lowered: &[u8]) -> bool {
+        self.native_index(lowered).is_some()
+    }
+
+    /// [`Self::native`] with the native's place in the table, php's
+    /// `fbc`: what the frameless table is indexed by.
+    fn native_index(&self, lowered: &[u8]) -> Option<usize> {
         self.functions
             .iter()
-            .any(|decl| decl.name.0.eq_ignore_ascii_case(lowered))
+            .position(|decl| decl.name.0.eq_ignore_ascii_case(lowered))
     }
 
     /// `zend_try_ct_eval_const`: php substitutes a persistent constant's
@@ -2538,21 +2897,4 @@ fn scalar(value: Zval, string: Option<&php_heap::Str>) -> Scalar<'_> {
         ZvalType::False => Scalar::Bool(false),
         _ => Scalar::Null,
     }
-}
-
-/// `zend_resolve_function_name` for a name in no namespace: the leading
-/// separator of `\var_dump` dropped and the rest as written, which is
-/// the name a constant pair keeps and an `Error` names.
-fn resolved(name: &[u8]) -> &[u8] {
-    let mut at = 0;
-    while name.get(at) == Some(&b'\\') {
-        at += 1;
-    }
-    &name[at..]
-}
-
-/// [`resolved`] lowered as `zend_string_tolower` lowers it for the
-/// function table's key and `INIT_FCALL`'s operand.
-fn unqualified(name: &[u8]) -> Vec<u8> {
-    resolved(name).to_ascii_lowercase()
 }

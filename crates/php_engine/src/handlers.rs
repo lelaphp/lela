@@ -29,7 +29,12 @@
 //! over their jump tables, `ZEND_CASE` and `ZEND_CASE_STRICT`, which
 //! keep the subject alive for the next case, `ZEND_QM_ASSIGN`, which
 //! moves an arm's value into the one temporary, `ZEND_MATCH_ERROR`,
-//! which throws for the subject no arm took, and `ZEND_JMPZ`.
+//! which throws for the subject no arm took, and `ZEND_JMPZ`;
+//! the frameless call `zend_compile_frameless_icall` emits
+//! for a native with an entry of the call's arity (#254),
+//! `ZEND_FRAMELESS_ICALL_0` to `ZEND_FRAMELESS_ICALL_3`, and the two
+//! `zend_compile_ns_call` puts around it for an unqualified name in a
+//! namespace, `ZEND_JMP_FRAMELESS` and `ZEND_INIT_NS_FCALL_BY_NAME`.
 
 // Every handler is generic over the tier and hands back the same edge, so
 // the generated dispatch calls them all the same way; the ones that raise a
@@ -199,12 +204,14 @@ fn init_call(
     let count = usize::try_from(op.extended_value).unwrap_or(0);
     req.vm_mut().push_call(CallState {
         function,
-        name,
+        name: Some(name),
         arguments: Vec::new(),
         count,
         this: None,
         called_scope: None,
         stage: CallStage::Building,
+        frameless: false,
+        coerced: Vec::new(),
     });
     Ok(advance(req, frame))
 }
@@ -494,12 +501,14 @@ pub(crate) fn new<T: Tier>(
     });
     req.vm_mut().push_call(CallState {
         function,
-        name,
+        name: Some(name),
         arguments: Vec::new(),
         count,
         this,
         called_scope: constructor.map(|_| class),
         stage: CallStage::Building,
+        frameless: false,
+        coerced: Vec::new(),
     });
     Ok(advance(req, frame))
 }
@@ -622,12 +631,14 @@ pub(crate) fn init_static_method_call<T: Tier>(
     };
     req.vm_mut().push_call(CallState {
         function,
-        name,
+        name: Some(name),
         arguments: Vec::new(),
         count: usize::try_from(op.extended_value).unwrap_or(0),
         this: None,
         called_scope: Some(class),
         stage: CallStage::Building,
+        frameless: false,
+        coerced: Vec::new(),
     });
     Ok(advance(req, frame))
 }
@@ -760,12 +771,14 @@ pub(crate) fn init_method_call<T: Tier>(
     };
     req.vm_mut().push_call(CallState {
         function,
-        name,
+        name: Some(name),
         arguments: Vec::new(),
         count: usize::try_from(op.extended_value).unwrap_or(0),
         this,
         called_scope: Some(class),
         stage: CallStage::Building,
+        frameless: false,
+        coerced: Vec::new(),
     });
     Ok(advance(req, frame))
 }
@@ -1077,6 +1090,337 @@ fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opco
                 req.release(previous);
             }
             Ok(advance(req, frame))
+        }
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            Ok(Stepped::Threw(frame))
+        }
+    }
+}
+
+/// `ZEND_INIT_NS_FCALL_BY_NAME`: the call frame for an unqualified name
+/// written in a namespace, which php's compiler resolves as the program
+/// serves (`zend_compile_ns_call`). `op2` names the three constants
+/// `zend_add_ns_func_name_literal` laid down: the name as written with
+/// the namespace before it, its lowered form, and the lowered name
+/// alone; the callee is looked up under the second and then the third
+/// (`Z/Zend/zend_vm_def.h`, the handler's two `zend_hash_find_known_hash`),
+/// and the `Error` for a name nothing declares says the first. The
+/// frame it pushes is the one `INIT_FCALL` pushes, so the `SEND_*_EX`
+/// and `DO_FCALL_BY_NAME` after it are served the same way.
+///
+/// ```php
+/// namespace Foo;
+/// echo \strlen("ab"), "|", strlen("abc"), "|", trim(" x "), "\n";
+/// nope(1);
+/// ```
+/// ```expect exit=255
+/// 2|3|x
+///
+/// Fatal error: Uncaught Error: Call to undefined function Foo\nope() in %s:4
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 4
+/// ```
+pub(crate) fn init_ns_fcall_by_name<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let written = ConstIdx(op.op2);
+    let lowered = ConstIdx(op.op2.saturating_add(1));
+    let unqualified = ConstIdx(op.op2.saturating_add(2));
+    let lookup = if exec::constant(code, lowered)
+        .as_str_bytes()
+        .is_some_and(|name| req.function_named(name).is_some())
+    {
+        lowered
+    } else {
+        unqualified
+    };
+    init_call(req, frame, code, op, lookup, written)
+}
+
+/// `ZEND_JMP_FRAMELESS` (`Z/Zend/zend_vm_def.h:9743`): the jump
+/// `zend_compile_ns_call` puts before the call by name of an unqualified
+/// name in a namespace whose global function has a frameless entry.
+/// `op1` is the lowered name with the namespace before it,
+/// `foo\substr`; where the function table has that name the call by
+/// name is what follows and the jump is not taken, `ZEND_JMP_FL_MISS`,
+/// and where it has not, the name is the global function's and the jump
+/// lands on the `FRAMELESS_ICALL_*` over it, `ZEND_JMP_FL_HIT`. php
+/// primes the answer into the opline's cache slot the first time and
+/// reads it after; the table is looked up each time here, which reads
+/// the same while nothing declares a function as the program serves,
+/// the way `INIT_FCALL_BY_NAME` resolves at every `INIT` here.
+///
+/// ```php
+/// namespace Foo;
+/// $s = "hello";
+/// var_dump(substr($s, 1, 3), substr($s, -2), str_contains($s, "ell"), trim(" " . $s . " "));
+/// ```
+/// ```expect
+/// string(3) "ell"
+/// string(2) "lo"
+/// bool(true)
+/// string(5) "hello"
+/// ```
+pub(crate) fn jmp_frameless<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let name = exec::constant(code, ConstIdx(op.op1));
+    let hit = name
+        .as_str_bytes()
+        .is_some_and(|name| req.function_named(name).is_none());
+    if hit {
+        req.vm_mut().jump(frame, op.op2);
+        return Ok(Stepped::Same(frame));
+    }
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_FRAMELESS_ICALL_0` (`Z/Zend/zend_vm_def.h:9766`): the native at
+/// `extended_value` of the engine's frameless table served over no
+/// argument, its value written into the temporary `result` names. No
+/// native of php 8.5.9 declares an entry of this arity
+/// (`ZEND_FRAMELESS_FUNCTION(name, 0)` appears in no source at the pin),
+/// so php's compiler emits this opcode for no program and no witness
+/// reaches it under the oracle; the test beside the handlers holds it
+/// over an op array built by hand, and what it shares with the three
+/// below is [`frameless_call`], whose witnesses are theirs.
+///
+/// ```php
+/// var_dump(str_contains("abc", "b"));
+/// ```
+/// ```expect
+/// bool(true)
+/// ```
+pub(crate) fn frameless_icall_0<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    frameless_call(req, frame, code, op, &[])
+}
+
+/// `ZEND_FRAMELESS_ICALL_1` (`Z/Zend/zend_vm_def.h:9786`): the native
+/// over `op1`, read `GET_OP1_ZVAL_PTR_DEREF` and freed `FREE_OP1` after
+/// the native returned, as [`frameless_call`] reads and frees it.
+///
+/// ```php
+/// $s = " a b ";
+/// var_dump(trim($s), trim("\t\n x\0"), trim(12), trim(""));
+/// ```
+/// ```expect
+/// string(3) "a b"
+/// string(1) "x"
+/// string(2) "12"
+/// string(0) ""
+/// ```
+///
+/// A raise inside the native reads the native's declaration off the
+/// frame this opcode lays down, so its words are the framed call's, and
+/// the trace prints the frame php synthesises for a frameless call
+/// (`zend_fetch_debug_backtrace`, `Z/Zend/zend_builtin_functions.c:1984`),
+/// with the operand as passed. An undefined CV is `null` with the
+/// warning, and `null` to a string parameter is the 8.1 deprecation.
+///
+/// ```php
+/// var_dump(trim($u));
+/// trim(token_get_all("<?php"));
+/// ```
+/// ```expect exit=255
+/// Warning: Undefined variable $u in %s on line 2
+///
+/// Deprecated: trim(): Passing null to parameter #1 ($string) of type string is deprecated in %s on line 2
+/// string(0) ""
+///
+/// Fatal error: Uncaught TypeError: trim(): Argument #1 ($string) must be of type string, array given in %s:3
+/// Stack trace:
+/// #0 %s(3): trim(Array)
+/// #1 {main}
+///   thrown in %s on line 3
+/// ```
+pub(crate) fn frameless_icall_1<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    frameless_call(req, frame, code, op, &[(op.op1_type, op.op1)])
+}
+
+/// `ZEND_FRAMELESS_ICALL_2` (`Z/Zend/zend_vm_def.h:9812`): the native
+/// over `op1` and `op2`, the two freed in that order after it returned.
+///
+/// ```php
+/// $h = "haystack";
+/// var_dump(str_contains($h, "st"), str_contains($h, ""), str_contains($h, "x"), str_contains(1234, 23), trim("xaxx", "x"), substr($h, 4), substr($h, -3), substr($h, 9), substr("ab", 1) . "c");
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// string(1) "a"
+/// string(4) "tack"
+/// string(3) "ack"
+/// string(0) ""
+/// string(2) "bc"
+/// ```
+///
+/// What a coercion made is the body's own and not the operand's: a
+/// trace taken after the first argument was coerced prints the number
+/// it was passed as, where the framed call prints the string
+/// (`Z_FLF_PARAM_STR` against `Z_PARAM_STR`), and the temporary an
+/// argument came in is given up after the native returned, so the
+/// heap reads the same before and after.
+///
+/// ```php
+/// $b = memory_get_usage(); $a = "z"; str_contains($a . "y", $a . "x"); var_dump(memory_get_usage() - $b);
+/// str_contains(12, token_get_all(""));
+/// ```
+/// ```expect exit=255
+/// int(0)
+///
+/// Fatal error: Uncaught TypeError: str_contains(): Argument #2 ($needle) must be of type string, array given in %s:3
+/// Stack trace:
+/// #0 %s(3): str_contains(12, Array)
+/// #1 {main}
+///   thrown in %s on line 3
+/// ```
+pub(crate) fn frameless_icall_2<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    frameless_call(
+        req,
+        frame,
+        code,
+        op,
+        &[(op.op1_type, op.op1), (op.op2_type, op.op2)],
+    )
+}
+
+/// `ZEND_FRAMELESS_ICALL_3` (`Z/Zend/zend_vm_def.h:9846`): the native
+/// over `op1`, `op2` and the `OP_DATA` after the opline
+/// (`GET_OP_DATA_ZVAL_PTR_DEREF`), the three freed in that order after
+/// it returned, and the loop stepped past the `OP_DATA`,
+/// `ZEND_VM_NEXT_OPCODE_EX(1, 2)`.
+///
+/// ```php
+/// $s = "hello world";
+/// var_dump(substr($s, 0, 5), substr($s, 6, 100), substr($s, -5, 2), substr($s, 2, -8), substr($s, 3, -9), substr($s, 3, null), substr($s, 11, 1), substr($s, 5, 0));
+/// ```
+/// ```expect
+/// string(5) "hello"
+/// string(5) "world"
+/// string(2) "wo"
+/// string(1) "l"
+/// string(0) ""
+/// string(8) "lo world"
+/// string(0) ""
+/// string(0) ""
+/// ```
+///
+/// ```php
+/// substr("abc", 1, "x");
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: substr(): Argument #3 ($length) must be of type ?int, string given in %s:2
+/// Stack trace:
+/// #0 %s(2): substr('abc', 1, 'x')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn frameless_icall_3<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let at = req.vm().opline(frame);
+    let Some(data) = exec::opline_at(code, at.saturating_add(1)) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_FRAMELESS_ICALL_3 with no OP_DATA after it",
+        )));
+    };
+    frameless_call(
+        req,
+        frame,
+        code,
+        op,
+        &[
+            (op.op1_type, op.op1),
+            (op.op2_type, op.op2),
+            (data.op1_type, data.op1),
+        ],
+    )
+}
+
+/// The body the four `FRAMELESS_ICALL_*` handlers share: the native the
+/// engine's frameless table holds at `extended_value` (`ZEND_FLF_FUNC`,
+/// `ZEND_FLF_HANDLER`), served over the operands in `arguments`. php
+/// hands its frameless body the operands and a `return_value` and no
+/// frame; here the body is the native's one entry, which reads its
+/// arguments off the call it is being served from, so the operands are
+/// laid down as a call already serving, each read as the handler reads
+/// it (`GET_OP*_ZVAL_PTR_DEREF`) with one more owner where php holds a
+/// pointer, and the call is popped after the native returned, which
+/// frees each operand where php's `FREE_OP*` frees it. What the native
+/// returned is the temporary's, `ZVAL_NULL(result)` and then the
+/// body's write of it; a native that threw leaves the throwable
+/// pending as `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION` finds it. The loop
+/// steps past the opline and past the `OP_DATA` a third argument came
+/// in.
+fn frameless_call(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    arguments: &[(OperandKind, u32)],
+) -> Edge {
+    let Some(entry) = req.frameless_entry(op.extended_value) else {
+        return Err(Fatal::Error(format!(
+            "InternalError: {} indexes frameless entry {} and the engine's table has {} entries",
+            op.opcode.name(),
+            op.extended_value,
+            req.frameless_count()
+        )));
+    };
+    let values: Vec<Value> = arguments
+        .iter()
+        .map(|&(kind, field)| exec::take_operand(req, frame, code, kind, field))
+        .collect();
+    req.vm_mut().push_call(CallState {
+        function: Function(entry.function),
+        name: None,
+        count: values.len(),
+        arguments: values,
+        this: None,
+        called_scope: None,
+        stage: CallStage::Serving,
+        frameless: true,
+        coerced: Vec::new(),
+    });
+    let served = req.serve_native(Function(entry.function));
+    req.pop_call();
+    let at = req.vm().opline(frame);
+    let width = if arguments.len() == 3 { 2 } else { 1 };
+    match served {
+        Ok(value) => {
+            let slot = exec::temporary_slot(code, op.out);
+            let previous = req.set_slot(frame, slot, value);
+            req.release(previous);
+            req.vm_mut().jump(frame, at.saturating_add(width));
+            Ok(Stepped::Same(frame))
         }
         Err(thrown) => {
             req.leave_pending(&thrown);
@@ -2252,6 +2596,113 @@ mod tests {
         assert_eq!(req.vm().opline(frame), 3);
     }
 
+    /// An extension of one native, `seven()`, with a frameless entry of
+    /// arity zero, which no native of php's declares: what
+    /// `FRAMELESS_ICALL_0` needs to be reached at all.
+    fn with_a_nullary_frameless_native() -> Engine {
+        use crate::api::abi::ExtensionBuilder;
+        use php_unit::decl::{FunctionDecl, Name};
+        fn seven(_: &mut Request) -> Result<Value, Thrown> {
+            Ok(Value::int(7))
+        }
+        let decl = FunctionDecl {
+            name: Name::from("seven"),
+            parameters: Vec::new(),
+            return_type: None,
+            returns_by_ref: false,
+            attributes: Vec::new(),
+            doc_comment: None,
+            file: Name::default(),
+            line: 0,
+            frameless: vec![0],
+        };
+        let extension = ExtensionBuilder::default()
+            .functions(vec![(decl, seven as crate::api::abi::Entry)])
+            .build("nullary");
+        Engine::builder().extensions(&[extension]).build()
+    }
+
+    /// `ZEND_FRAMELESS_ICALL_0` serves the native at the table's row
+    /// over no argument, into the temporary, and steps one opline; the
+    /// row is the native's place in `zend_flf_functions`, which the
+    /// engine built from the bundle in registration order. No program
+    /// reaches this opcode under the oracle, since no native of php
+    /// 8.5.9 declares a nullary entry; this unit is that program.
+    #[test]
+    fn a_nullary_frameless_call_serves_the_native_into_its_temporary() {
+        let engine = with_a_nullary_frameless_native();
+        let row = engine
+            .shared
+            .frameless
+            .iter()
+            .position(|entry| entry.arity == 0)
+            .and_then(|at| u32::try_from(at).ok())
+            .unwrap_or(u32::MAX);
+        assert_eq!(
+            engine.frameless().get(row as usize).map(|n| n.0.as_ref()),
+            Some(&b"seven"[..])
+        );
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let unit = Arc::new(Unit {
+            main: OpArray {
+                oplines: vec![Opline {
+                    opcode: Opcode::FramelessIcall0,
+                    out_type: OperandKind::Tmp,
+                    out: 0,
+                    extended_value: row,
+                    ..Opline::default()
+                }]
+                .into_boxed_slice(),
+                num_tmps: 1,
+                ..OpArray::default()
+            },
+            ..Unit::default()
+        });
+        let frame = req.push_frame(Arc::clone(&unit));
+        let code = crate::exec::code_of(&unit);
+        let call = code.oplines.first().copied().unwrap_or_default();
+        assert_eq!(
+            frameless_icall_0::<Nop>(&mut req, frame, code, &call),
+            Ok(Stepped::Same(frame))
+        );
+        assert_eq!(req.slot(frame, 0).as_int(), Some(7));
+        assert_eq!(req.vm().opline(frame), 1);
+        assert!(
+            req.vm().serving_call().is_none(),
+            "the call is popped with the native"
+        );
+    }
+
+    /// A row past the engine's table is the internal-error fatal that
+    /// names it, never a read past the end.
+    #[test]
+    fn a_row_the_table_has_not_is_an_internal_error() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let unit = Arc::new(Unit {
+            main: OpArray {
+                oplines: vec![Opline {
+                    opcode: Opcode::FramelessIcall0,
+                    out_type: OperandKind::Tmp,
+                    out: 0,
+                    extended_value: 1_000_000,
+                    ..Opline::default()
+                }]
+                .into_boxed_slice(),
+                num_tmps: 1,
+                ..OpArray::default()
+            },
+            ..Unit::default()
+        });
+        let frame = req.push_frame(Arc::clone(&unit));
+        let code = crate::exec::code_of(&unit);
+        let call = code.oplines.first().copied().unwrap_or_default();
+        assert!(matches!(
+            frameless_icall_0::<Nop>(&mut req, frame, code, &call),
+            Err(Fatal::Error(message)) if message.starts_with("InternalError: ZEND_FRAMELESS_ICALL_0 indexes frameless entry 1000000")
+        ));
+    }
+
     /// `zend_undefined_function_helper` names the constant as written
     /// (`RT_CONSTANT(opline, opline->op2)`) where the lookup read the
     /// lowered one after it, so the `Error` for `NoPe()` says `NoPe`;
@@ -2334,6 +2785,7 @@ mod tests {
                     doc_comment: None,
                     file: Name(Box::new([])),
                     line: 0,
+                    frameless: Vec::new(),
                 },
                 visibility: Visibility::Public,
                 is_instance: true,

@@ -216,8 +216,8 @@ fn level_of(level: php_syntax::Level) -> Level {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use php_unit::decl::{ConstExpr, Visibility};
-    use php_unit::{Opcode, OperandKind, OplineIdx};
+    use php_unit::decl::{ConstExpr, Parameter, Type, Visibility};
+    use php_unit::{Opcode, OperandKind, OplineIdx, frameless_table};
 
     /// A unit whose constant strings are one engine's, which is what the
     /// unit cache holds (design §6.3).
@@ -236,10 +236,17 @@ mod tests {
     }
 
     /// The dump of one source, read while the table its strings were
-    /// interned into still stands.
+    /// interned into still stands, under the frameless table of the
+    /// bundle the source compiled against, as the engine hands it to
+    /// `compile-identity`.
     fn dump_of(source: &[u8]) -> String {
         let (unit, _strings) = unit_and_strings(source);
-        unit.dump(&[])
+        let functions = bundled().functions;
+        let names: Vec<Name> = frameless_table(&functions)
+            .iter()
+            .map(|entry| functions[entry.function as usize].name.clone())
+            .collect();
+        unit.dump(&names)
     }
 
     fn unit_and_strings(source: &[u8]) -> (Unit, php_heap::Strings) {
@@ -264,11 +271,74 @@ mod tests {
         b"memory_get_usage",
     ];
 
+    /// The natives with a frameless entry the tests below call, as
+    /// `ext/standard` declares them: the name, the parameters as php's
+    /// stub has them with a default where the stub has one, and the
+    /// arities of `frameless_function_infos_<name>`.
+    fn frameless_natives() -> Vec<FunctionDecl> {
+        let parameter = |name: &str, ty: Type, default: Option<ConstExpr>| Parameter {
+            name: Name::from(name),
+            ty: Some(ty),
+            by_ref: false,
+            variadic: false,
+            default,
+            attributes: Vec::new(),
+        };
+        [
+            (
+                "trim",
+                vec![
+                    parameter("string", Type::String, None),
+                    parameter(
+                        "characters",
+                        Type::String,
+                        Some(ConstExpr::Str(b" ".as_slice().into())),
+                    ),
+                ],
+                vec![1, 2],
+            ),
+            (
+                "str_contains",
+                vec![
+                    parameter("haystack", Type::String, None),
+                    parameter("needle", Type::String, None),
+                ],
+                vec![2],
+            ),
+            (
+                "substr",
+                vec![
+                    parameter("string", Type::String, None),
+                    parameter("offset", Type::Int, None),
+                    parameter(
+                        "length",
+                        Type::Nullable(Box::new(Type::Int)),
+                        Some(ConstExpr::Null),
+                    ),
+                ],
+                vec![2, 3],
+            ),
+        ]
+        .into_iter()
+        .map(|(name, parameters, frameless)| FunctionDecl {
+            name: Name::from(name),
+            parameters,
+            return_type: None,
+            returns_by_ref: false,
+            attributes: Vec::new(),
+            doc_comment: None,
+            file: Name(Box::new([])),
+            line: 0,
+            frameless,
+        })
+        .collect()
+    }
+
     /// The options of an engine whose bundle declares every name of
     /// `special::TABLE` and every name of [`CALLED`] as a native, which
-    /// php's `-n` has: what `zend_compile_call` reads as
-    /// `CG(function_table)`, so the tests below compile under the table
-    /// php compiles under.
+    /// php's `-n` has, and then [`frameless_natives`]: what
+    /// `zend_compile_call` reads as `CG(function_table)`, so the tests
+    /// below compile under the table php compiles under.
     fn bundled() -> Options {
         Options {
             functions: special::TABLE
@@ -284,7 +354,9 @@ mod tests {
                     doc_comment: None,
                     file: Name(Box::new([])),
                     line: 0,
+                    frameless: Vec::new(),
                 })
+                .chain(frameless_natives())
                 .collect(),
             ..Options::default()
         }
@@ -344,7 +416,10 @@ mod tests {
             "zend_vm_calc_used_stack: five header slots and one argument, sixteen bytes each"
         );
         assert_eq!(unit.main.oplines[1].op1, 96);
-        assert_eq!(unit.main.cache_size, 2, "one cache slot per INIT_FCALL");
+        assert_eq!(
+            unit.main.cache_size, 16,
+            "one cache slot per INIT_FCALL, a pointer each"
+        );
         assert_eq!(
             unit.main.num_tmps, 2,
             "one temporary per call, as php counts them here"
@@ -1939,7 +2014,7 @@ mod tests {
         assert_eq!(init.op1_type, OperandKind::Unused);
         assert_eq!((init.op2_type, init.op2), (OperandKind::Const, 0));
         assert_eq!(init.out, 0, "one cache slot, zend_alloc_cache_slot");
-        assert_eq!(unit.main.cache_size, 1);
+        assert_eq!(unit.main.cache_size, 8);
         assert_eq!(literal_text(&unit, 0).as_deref(), Some(&b"nope"[..]));
         assert_eq!(
             literal_text(&unit, 1).as_deref(),
@@ -1985,7 +2060,7 @@ mod tests {
         assert_eq!(literal_text(&unit, 2).as_deref(), Some(&b"nope2"[..]));
         assert_eq!(literal_text(&unit, 3).as_deref(), Some(&b"nope2"[..]));
         assert_eq!(
-            unit.main.cache_size, 2,
+            unit.main.cache_size, 16,
             "one cache slot per INIT_FCALL_BY_NAME"
         );
     }
@@ -2100,11 +2175,11 @@ mod tests {
             [
                 (Opcode::Count, 1),
                 (Opcode::Defined, 0),
-                (Opcode::Defined, 1)
+                (Opcode::Defined, 8)
             ],
-            "sizeof's bit, and one cache slot per DEFINED"
+            "sizeof's bit, and one cache slot per DEFINED, eight bytes each"
         );
-        assert_eq!(unit.main.cache_size, 2);
+        assert_eq!(unit.main.cache_size, 16);
     }
 
     /// The oracle's dump of every `is_*` row and of `count` and `sizeof`
@@ -2199,6 +2274,218 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), names.len(), "each name once");
+    }
+
+    /// The oracle's dump under `[regime.dump]` of a call of each
+    /// frameless arity `ext/standard` declares: `str_contains` of two,
+    /// `trim` of one and of two, `substr` of two, and `str_contains`
+    /// over a temporary; each a `FRAMELESS_ICALL_<n>` into a temporary
+    /// with the table's row in `extended_value`, the one nothing reads
+    /// freed by a `FREE` (`zend_do_free`), and the temporaries numbered
+    /// as php numbers them, one skipped per assignment.
+    #[test]
+    fn a_call_a_frameless_entry_serves_is_frameless_icall_with_its_row() {
+        let source = b"<?php $a = \"x\"; $b = str_contains($a, \"y\"); $t = trim($a); $u = trim($a, \"x\"); substr($a, 1); echo str_contains($a . \"z\", \"z\");";
+        assert_eq!(
+            dump_of(source),
+            main_dump(
+                13,
+                4,
+                10,
+                "0000 ASSIGN CV0($a) string(\"x\")\n\
+                 0001 T5 = FRAMELESS_ICALL_2(str_contains) CV0($a) string(\"y\")\n\
+                 0002 ASSIGN CV1($b) T5\n\
+                 0003 T7 = FRAMELESS_ICALL_1(trim) CV0($a)\n\
+                 0004 ASSIGN CV2($t) T7\n\
+                 0005 T9 = FRAMELESS_ICALL_2(trim) CV0($a) string(\"x\")\n\
+                 0006 ASSIGN CV3($u) T9\n\
+                 0007 T11 = FRAMELESS_ICALL_2(substr) CV0($a) int(1)\n\
+                 0008 FREE T11\n\
+                 0009 T12 = CONCAT CV0($a) string(\"z\")\n\
+                 0010 T13 = FRAMELESS_ICALL_2(str_contains) T12 string(\"z\")\n\
+                 0011 ECHO T13\n\
+                 0012 RETURN int(1)\n"
+            )
+        );
+        let unit = unit_of(source);
+        let rows: Vec<(Opcode, u32)> = unit
+            .main
+            .oplines
+            .iter()
+            .filter(|op| op.opcode.is_frameless_icall())
+            .map(|op| (op.opcode, op.extended_value))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (Opcode::FramelessIcall2, 2),
+                (Opcode::FramelessIcall1, 0),
+                (Opcode::FramelessIcall2, 1),
+                (Opcode::FramelessIcall2, 3),
+                (Opcode::FramelessIcall2, 2),
+            ],
+            "zend_flf_functions in registration order: trim 1, trim 2, str_contains 2, substr 2, substr 3"
+        );
+    }
+
+    /// A third argument rides in an `OP_DATA` after the opline
+    /// (`zend_emit_op_data`), and `zend_do_free` steps back over it to
+    /// the call that left the value. The oracle's dump prints a live
+    /// range for the temporary across the `OP_DATA`, #255's table, and
+    /// the dump here is the oracle's under `[regime.dump]`, live ranges
+    /// and all.
+    #[test]
+    fn a_third_argument_is_an_op_data_after_the_frameless_call() {
+        let source = b"<?php $a = \"x\"; $s = substr($a, 1, 2); substr($a, 1, 2);";
+        assert_eq!(
+            dump_of(source),
+            main_dump(
+                8,
+                2,
+                4,
+                "0000 ASSIGN CV0($a) string(\"x\")\n\
+                 0001 T3 = FRAMELESS_ICALL_3(substr) CV0($a) int(1)\n\
+                 0002 OP_DATA int(2)\n\
+                 0003 ASSIGN CV1($s) T3\n\
+                 0004 T5 = FRAMELESS_ICALL_3(substr) CV0($a) int(1)\n\
+                 0005 OP_DATA int(2)\n\
+                 0006 FREE T5\n\
+                 0007 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    3: 0002 - 0003 (tmp/var)\n\
+                 \x20    5: 0005 - 0006 (tmp/var)\n"
+            )
+        );
+    }
+
+    /// A count no entry serves is the ordinary call, whatever the
+    /// name: `str_contains` of one argument is below its required
+    /// count, `trim` of three is above every arity, and a name the
+    /// bundle has not is the call by name.
+    #[test]
+    fn a_count_no_entry_serves_is_the_ordinary_call() {
+        assert_eq!(
+            dump_of(b"<?php str_contains($a); trim($a, $b, $c); nope($a, $b);"),
+            main_dump(
+                13,
+                3,
+                3,
+                "0000 INIT_FCALL 1 96 string(\"str_contains\")\n\
+                 0001 SEND_VAR CV0($a) 1\n\
+                 0002 DO_ICALL\n\
+                 0003 INIT_FCALL 3 128 string(\"trim\")\n\
+                 0004 SEND_VAR CV0($a) 1\n\
+                 0005 SEND_VAR CV1($b) 2\n\
+                 0006 SEND_VAR CV2($c) 3\n\
+                 0007 DO_ICALL\n\
+                 0008 INIT_FCALL_BY_NAME 2 string(\"nope\")\n\
+                 0009 SEND_VAR_EX CV0($a) 1\n\
+                 0010 SEND_VAR_EX CV1($b) 2\n\
+                 0011 DO_FCALL_BY_NAME\n\
+                 0012 RETURN int(1)\n"
+            )
+        );
+    }
+
+    /// The oracle's dump of `zend_compile_ns_call`'s shape for an
+    /// unqualified name in a namespace: `JMP_FRAMELESS` over the
+    /// lowered name with its cache slot, printed in bytes, the call by
+    /// name through `INIT_NS_FCALL_BY_NAME`, `SEND_*_EX` and
+    /// `DO_FCALL_BY_NAME`, the `JMP` past the branch, and the
+    /// `FRAMELESS_ICALL_<n>` into the same `VAR`, freed by a `FREE`
+    /// where nothing reads it. A `\`-qualified name resolves at compile
+    /// time as outside a namespace, and a call nested in the branch
+    /// takes no branch of its own (`in_jmp_frameless_branch`).
+    #[test]
+    fn an_unqualified_name_in_a_namespace_is_jmp_frameless_around_the_call_by_name() {
+        assert_eq!(
+            dump_of(b"<?php namespace Foo; $a = \"x\"; $b = str_contains($a, \"y\"); \\trim($a); trim(nope($a));"),
+            main_dump(
+                25,
+                2,
+                7,
+                "0000 ASSIGN CV0($a) string(\"x\")\n\
+                 0001 JMP_FRAMELESS 8 string(\"foo\\\\str_contains\") 0007\n\
+                 0002 INIT_NS_FCALL_BY_NAME 2 string(\"Foo\\\\str_contains\")\n\
+                 0003 SEND_VAR_EX CV0($a) 1\n\
+                 0004 SEND_VAL_EX string(\"y\") 2\n\
+                 0005 V3 = DO_FCALL_BY_NAME\n\
+                 0006 JMP 0008\n\
+                 0007 V3 = FRAMELESS_ICALL_2(str_contains) CV0($a) string(\"y\")\n\
+                 0008 ASSIGN CV1($b) V3\n\
+                 0009 T5 = FRAMELESS_ICALL_1(trim) CV0($a)\n\
+                 0010 FREE T5\n\
+                 0011 JMP_FRAMELESS 40 string(\"foo\\\\trim\") 0019\n\
+                 0012 INIT_NS_FCALL_BY_NAME 1 string(\"Foo\\\\trim\")\n\
+                 0013 INIT_NS_FCALL_BY_NAME 1 string(\"Foo\\\\nope\")\n\
+                 0014 SEND_VAR_EX CV0($a) 1\n\
+                 0015 V6 = DO_FCALL_BY_NAME\n\
+                 0016 SEND_VAR_NO_REF_EX V6 1\n\
+                 0017 V7 = DO_FCALL_BY_NAME\n\
+                 0018 JMP 0023\n\
+                 0019 INIT_NS_FCALL_BY_NAME 1 string(\"Foo\\\\nope\")\n\
+                 0020 SEND_VAR_EX CV0($a) 1\n\
+                 0021 V8 = DO_FCALL_BY_NAME\n\
+                 0022 V7 = FRAMELESS_ICALL_1(trim) V8\n\
+                 0023 FREE V7\n\
+                 0024 RETURN int(1)\n"
+            )
+        );
+    }
+
+    /// The three constants `zend_add_ns_func_name_literal` lays down,
+    /// in a row: the name with its namespace as written, lowered, and
+    /// the lowered name alone; a second `namespace` statement moves the
+    /// namespace, and a qualified name is the namespace before it,
+    /// resolved at compile time as `INIT_FCALL_BY_NAME`.
+    #[test]
+    fn a_namespace_call_carries_php_s_three_constants() {
+        let (unit, _strings) =
+            unit_and_strings(b"<?php namespace A; namespace B\\C; Str_Contains(\"a\", \"b\"); D\\e(); namespace\\f();");
+        let literal = |at: usize| {
+            unit.main.literals[at]
+                .as_str()
+                .map(|s| String::from_utf8_lossy(s.bytes()).into_owned())
+        };
+        assert_eq!(
+            unit.main.oplines[1].opcode,
+            Opcode::InitNsFcallByName,
+            "after the JMP_FRAMELESS"
+        );
+        let at = unit.main.oplines[1].op2 as usize;
+        assert_eq!(literal(at).as_deref(), Some("B\\C\\Str_Contains"));
+        assert_eq!(literal(at + 1).as_deref(), Some("b\\c\\str_contains"));
+        assert_eq!(literal(at + 2).as_deref(), Some("str_contains"));
+        let by_name: Vec<String> = unit
+            .main
+            .oplines
+            .iter()
+            .filter(|op| op.opcode == Opcode::InitFcallByName)
+            .filter_map(|op| literal(op.op2 as usize))
+            .collect();
+        assert_eq!(by_name, ["B\\C\\D\\e", "B\\C\\f"]);
+    }
+
+    /// `zend_compile_namespace`: a first `namespace` after any statement
+    /// is php's `E_COMPILE_ERROR` in php's words at the statement's line.
+    #[test]
+    fn a_namespace_after_a_statement_is_php_s_compile_error() {
+        let mut strings = php_heap::Strings::new();
+        let trouble = compile(
+            &php_syntax::parse(b"<?php 1;\nnamespace Foo;", &php_syntax::Options::default()),
+            &bundled(),
+            &mut strings,
+        )
+        .err();
+        assert_eq!(
+            trouble,
+            Some(CompileError {
+                level: Level::CompileError,
+                message: "Namespace declaration statement has to be the very first statement or after any declare call in the script".into(),
+                line: 2,
+                raised: Vec::new(),
+            })
+        );
     }
 
     #[test]
@@ -2879,7 +3166,10 @@ mod tests {
             );
         }
         let (unit, _strings) = unit_and_strings(b"<?php new E; $o instanceof E;");
-        assert_eq!(unit.main.cache_size, 2, "NEW and INSTANCEOF take one each");
+        assert_eq!(
+            unit.main.cache_size, 16,
+            "NEW and INSTANCEOF take one cache slot each, eight bytes a slot"
+        );
     }
 
     /// The two `INIT_*_METHOD_CALL`s, read as
@@ -2958,8 +3248,8 @@ mod tests {
         }
         let (unit, _strings) = unit_and_strings(b"<?php E::m(); $o->n();");
         assert_eq!(
-            unit.main.cache_size, 4,
-            "each INIT takes two cache slots, the class and the method"
+            unit.main.cache_size, 32,
+            "each INIT takes two cache slots, the class and the method, eight bytes a slot"
         );
     }
 
@@ -3089,8 +3379,8 @@ mod tests {
         }
         let (unit, _strings) = unit_and_strings(b"<?php $o->p;");
         assert_eq!(
-            unit.main.cache_size, 3,
-            "a property fetch takes three cache slots (zend_alloc_cache_slots(3))"
+            unit.main.cache_size, 24,
+            "a property fetch takes three cache slots (zend_alloc_cache_slots(3)), eight bytes a slot"
         );
     }
 
@@ -3174,6 +3464,7 @@ mod tests {
                 doc_comment: None,
                 file: Name(Box::new([])),
                 line: 0,
+                frameless: Vec::new(),
             },
             visibility,
             is_instance: false,

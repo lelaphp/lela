@@ -440,13 +440,29 @@ pub fn coerce_param(
     ty: &Type,
     position: u32,
 ) -> Result<Value, Thrown> {
+    coerce_typed(req, value, ty, position, false)
+}
+
+/// [`coerce_param`] with the type named as the parameter declares it:
+/// `nullable` is set inside a `?T`, so the `TypeError` for what does
+/// not coerce says `?int` where php's `Z_EXPECTED_LONG_OR_NULL` does
+/// (`zend_wrong_parameter_type_error` over the `_OR_NULL` row of
+/// `Z_EXPECTED_TYPES`).
+fn coerce_typed(
+    req: &mut Request,
+    value: &Value,
+    ty: &Type,
+    position: u32,
+    nullable: bool,
+) -> Result<Value, Thrown> {
     let strict = req.caller_strict_types();
     let value = &value.deref();
     let want = |req: &mut Request, name: &str| {
+        let question = if nullable { "?" } else { "" };
         Err(arg_type_error(
             req,
             position,
-            &format!("be of type {name}, {} given", value.type_name()),
+            &format!("be of type {question}{name}, {} given", value.type_name()),
         ))
     };
     match ty {
@@ -501,7 +517,7 @@ pub fn coerce_param(
         },
         Type::Nullable(inner) => match value.as_ref() {
             ValueRef::Null | ValueRef::Undef => Ok(Value::null()),
-            _ => coerce_param(req, value, inner, position),
+            _ => coerce_typed(req, value, inner, position, true),
         },
         _ => Ok(value.clone()),
     }

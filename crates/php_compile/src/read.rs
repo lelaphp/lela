@@ -15,7 +15,8 @@
 //! or without a depth, a top-level `class` with no parent, interface,
 //! attribute or modifier whose members are untyped properties and
 //! constants, each declarator taking the pending doc comment as php's
-//! `backup_doc_comment` takes it, and
+//! `backup_doc_comment` takes it, the
+//! unbraced `namespace A\B;`, and
 //! inside an expression a `match`, a number, a single- or double-quoted string with no
 //! interpolation, `true`, `false`, `null`, a constant by name, a call of
 //! a named function, a parenthesised expression, a variable `$a` that is
@@ -59,6 +60,11 @@ pub(crate) enum Stmt {
     },
     /// `while (cond) body`, php's `ZEND_AST_WHILE`.
     While { cond: Expr, body: Read },
+    /// `namespace A\B;`, php's `ZEND_AST_NAMESPACE` with no body: the
+    /// name as written, in force for what follows it. The braced form
+    /// and the global `namespace;` are refused as what this reader
+    /// cannot read yet.
+    Namespace(Vec<u8>),
     /// `switch (expr) { case …: … default: … }`, php's `ZEND_AST_SWITCH`
     /// over a `ZEND_AST_SWITCH_LIST`.
     Switch { expr: Expr, cases: Vec<Case> },
@@ -602,6 +608,10 @@ impl Reader<'_> {
             self.bump(5);
             return self.class().map(Some);
         }
+        if self.word_ahead(b"namespace") && self.byte(9) != Some(b'\\') {
+            self.bump(9);
+            return self.namespace().map(Some);
+        }
         let expr = self.expr()?;
         self.end_of_statement()?;
         Ok(Some(Stmt::Effect(expr)))
@@ -994,6 +1004,23 @@ impl Reader<'_> {
                 line: body_line,
             });
         }
+    }
+
+    /// `namespace Name;`, the keyword read: the name and its `;`. A
+    /// keyword followed by `\` is the relative name `namespace\foo` and
+    /// is read as an expression instead, so it never reaches here.
+    fn namespace(&mut self) -> Result<Stmt, Trouble> {
+        self.skip_trivia();
+        let name = self.name();
+        if name.is_empty() || name.starts_with(b"\\") {
+            return Err(self.trouble("a namespace declaration this compiler cannot read yet"));
+        }
+        self.skip_trivia();
+        if self.byte(0) == Some(b'{') {
+            return Err(self.trouble("a namespace declaration this compiler cannot read yet"));
+        }
+        self.end_of_statement()?;
+        Ok(Stmt::Namespace(name))
     }
 
     /// One expected byte, or the trouble that names what was wanted.

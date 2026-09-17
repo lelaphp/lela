@@ -146,6 +146,17 @@ pub struct Parameter {
 
 /// A function's declaration: its signature, doc comment and site; the
 /// body is the unit's op array of the same index.
+///
+/// `frameless` is a native's `zend_frameless_function_info` list
+/// (`Z/Zend/zend_frameless_function.h`): the arities it serves without
+/// a call frame, in the order php's `frameless_function_infos_*` table
+/// lists them, `trim`'s being `[1, 2]`. php pairs each arity with a
+/// handler of its own; here the handler is the native's one entry,
+/// served over the arguments the opline carries, so the arity is the
+/// whole row. Empty on a user function and on a native with no such
+/// entry, as php's `frameless_function_infos` is null there. The
+/// compiler emits `FRAMELESS_ICALL_<n>` for a call whose count an
+/// arity here covers, and [`crate::frameless_table`] numbers the rows.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionDecl {
     pub name: Name,
@@ -156,6 +167,7 @@ pub struct FunctionDecl {
     pub doc_comment: Option<Box<[u8]>>,
     pub file: Name,
     pub line: u32,
+    pub frameless: Vec<u32>,
 }
 
 /// A method: a function with a visibility, whether it is an instance

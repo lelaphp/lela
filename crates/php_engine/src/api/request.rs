@@ -18,8 +18,8 @@ use php_heap::{
     Arr, Fatal, FrameRef, Heap, HeapHooks, Intern, MapTable, Obj, Ref, Res, ResourceType, Slot,
     VmStack, Zval,
 };
-use php_unit::Unit;
 use php_unit::decl::{ClassDecl, ClassKind, FunctionDecl, MethodDecl, Visibility};
+use php_unit::{FramelessEntry, Unit};
 
 use crate::api::abi::{Callable, IniVerdict};
 use crate::api::call::Function;
@@ -481,10 +481,15 @@ impl Request {
     /// after it.
     pub(crate) fn pop_call(&mut self) {
         if let Some(call) = self.vm.pop_call() {
+            for value in call.coerced {
+                self.release(value);
+            }
             for value in call.arguments {
                 self.release(value);
             }
-            self.release(Value::string(call.name));
+            if let Some(name) = call.name {
+                self.release(Value::string(name));
+            }
             if let Some(this) = call.this {
                 self.release(this.as_value());
             }
@@ -512,12 +517,14 @@ impl Request {
         }
         self.vm.push_call(CallState {
             function,
-            name,
+            name: Some(name),
             arguments: arguments.to_vec(),
             count: arguments.len(),
             this,
             called_scope: Some(called_scope),
             stage: CallStage::Serving,
+            frameless: false,
+            coerced: Vec::new(),
         });
         let served = self.serve_native(function);
         self.pop_call();
@@ -1107,7 +1114,8 @@ impl Request {
             let name = self
                 .vm
                 .serving_call()
-                .map(|call| String::from_utf8_lossy(call.name.as_bytes()).into_owned())
+                .and_then(|call| call.name)
+                .map(|name| String::from_utf8_lossy(name.as_bytes()).into_owned())
                 .unwrap_or_default();
             return Err(crate::api::raising::throw(
                 self,
@@ -2303,7 +2311,11 @@ impl Request {
     /// argument's zval: the call frame gives up what it held at
     /// `position` and owns `value` from here, so the native reads a view
     /// and the frame frees the string with the call. A position past
-    /// what the call was given writes nothing.
+    /// what the call was given writes nothing. A frameless call's
+    /// argument is the opline's operand, which php's `Z_FLF_PARAM_STR`
+    /// never writes: it converts a temporary of the body's and frees it
+    /// at the body's end, so the frame keeps `value` beside the argument
+    /// and a trace taken after the coercion prints the operand as passed.
     pub(crate) fn replace_argument(&mut self, position: u32, value: Value) {
         let Some(index) = position
             .checked_sub(1)
@@ -2311,10 +2323,16 @@ impl Request {
         else {
             return;
         };
-        let Some(previous) = self
-            .vm
-            .serving_call_mut()
-            .and_then(|call| call.arguments.get_mut(index))
+        let Some(call) = self.vm.serving_call_mut() else {
+            return;
+        };
+        if call.frameless {
+            call.coerced.push(value);
+            return;
+        }
+        let Some(previous) = call
+            .arguments
+            .get_mut(index)
             .map(|slot| std::mem::replace(slot, value))
         else {
             return;
@@ -2377,6 +2395,19 @@ impl Request {
                 unit.classes.get(usize::try_from(*index).ok()?)
             }
         }
+    }
+
+    /// `ZEND_FLF_FUNC(opline)`: the native and the arity the engine's
+    /// frameless table holds at `at`, a `FRAMELESS_ICALL_*`'s
+    /// `extended_value`; none past the table, which a unit this engine
+    /// compiled never carries.
+    pub(crate) fn frameless_entry(&self, at: u32) -> Option<FramelessEntry> {
+        self.shared.frameless.get(at as usize).copied()
+    }
+
+    /// `zend_flf_count`: how many rows the frameless table has.
+    pub(crate) fn frameless_count(&self) -> usize {
+        self.shared.frameless.len()
     }
 
     /// The declaration of a linked function.
@@ -2896,7 +2927,10 @@ impl Request {
     /// value it already holds into a second place (`zend_string_copy`,
     /// `ZVAL_COPY`): the clone of the `Value` is `ZVAL_COPY_VALUE`, and
     /// this beside it is the second owner, given up with whatever row or
-    /// property the copy is put in.
+    /// property the copy is put in. What a native does before it returns an argument
+    /// as its value, `RETURN_COPY` and `RETURN_STR_COPY`: the frame gives
+    /// its owner up with the call, and the caller's temporary holds the
+    /// one taken here.
     pub fn addref(&self, value: &Value) {
         self.heap.addref(value.to_zval());
     }

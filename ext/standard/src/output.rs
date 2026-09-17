@@ -14,7 +14,7 @@ use php_ext::values::{Value, ValueRef};
 use crate::{declared, parameter};
 
 /// A native's entry, as the builder takes it.
-type Entry = fn(&mut Request) -> Result<Value, Thrown>;
+pub(crate) type Entry = fn(&mut Request) -> Result<Value, Thrown>;
 
 /// The thirteen, in the stub's order.
 ///

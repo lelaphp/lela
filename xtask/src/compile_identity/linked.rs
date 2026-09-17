@@ -46,8 +46,10 @@ pub(super) fn engine(ini: &[String]) -> Engine {
 /// stream is trimmed, so a trailing newline is no difference. A source
 /// the compiler refuses is no dump at all, which is what php's empty
 /// second stream is, and the verdict is what reads the pair. The
-/// frameless table the dump names a `FRAMELESS_ICALL_*` from is empty
-/// while the engine builds none and the compiler emits none.
+/// frameless table the dump names a `FRAMELESS_ICALL_*` from is the
+/// engine's, `zend_flf_functions` by name, since the unit was compiled
+/// under the same engine's natives and its `extended_value` indexes
+/// that table and no other.
 pub(super) fn dump(
     engine: &Engine,
     rules: &Normalise,
@@ -55,7 +57,9 @@ pub(super) fn dump(
     filename: &[u8],
 ) -> Result<Dumped> {
     let Ok(compiled) = panic::catch_unwind(AssertUnwindSafe(|| {
-        engine.unit(source, filename).map(|unit| unit.dump(&[]))
+        engine
+            .unit(source, filename)
+            .map(|unit| unit.dump(&engine.frameless()))
     })) else {
         bail!("the linked compiler panicked; the panic itself is on the harness's second stream");
     };

@@ -17,6 +17,7 @@
 
 pub mod decl;
 mod dump;
+mod frameless;
 mod op;
 mod unit;
 
@@ -26,6 +27,7 @@ mod opcode {
     include!(concat!(env!("OUT_DIR"), "/opcode.rs"));
 }
 
+pub use frameless::{FramelessEntry, frameless_table};
 pub use op::{
     CacheSlot, ConstIdx, Effects, LiveKind, LiveRange, OpArray, OperandKind, Opline, OplineIdx,
     TryCatch,
