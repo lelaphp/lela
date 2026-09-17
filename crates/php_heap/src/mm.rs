@@ -292,36 +292,198 @@ impl Mm {
         }
     }
 
-    /// `_erealloc` (`Z/Zend/zend_alloc.c:1674`, `zend_mm_realloc_heap`)
-    /// as its accounting: `size` usable bytes with the first
-    /// `min(old, size)` of the old ones copied in, the old block given
-    /// back, and the peak where the larger of the two footprints put it
-    /// and not where both stood at once, which is what
-    /// `zend_mm_realloc_slow` (`:1569`) restores after its own alloc,
-    /// copy and free. Whether php moved the bytes or grew the `run` in
-    /// place is not observable: the bin, `run` and huge numbers land the
-    /// same either way, so this moves them always.
+    /// `_erealloc2` (`Z/Zend/zend_alloc.c:1674`, `zend_mm_realloc_heap`):
+    /// `size` usable bytes with the first `copy` of the old ones in them,
+    /// grown or cut where the block stands when php's would be, and moved
+    /// otherwise. What a block's arm does is what php's does, because the
+    /// pages the `run` takes and the chunk a moved block lands in are read
+    /// back by `memory_get_usage(true)` and the limit:
+    ///
+    /// - A bin slot whose new size falls in the same bin is the same
+    ///   slot; one that falls a bin lower is moved down; one that grows
+    ///   within the bins is moved up, the peak restored past the two
+    ///   standing together.
+    /// - A `run` of pages that keeps its page count is the same `run`;
+    ///   one that shrinks gives its tail pages back; one that grows takes
+    ///   the pages after it when they are free, and moves otherwise.
+    /// - A huge block that keeps its rounded size is the same block, and
+    ///   one that shrinks is cut to the new rounding as `zend_mm_chunk_truncate`
+    ///   cuts one. One that grows moves, always: php asks the machine for
+    ///   the pages after the block, `zend_mm_chunk_extend`, and the
+    ///   oracle answers that either way from one request to the next, so the
+    ///   engine takes the arm php takes when the answer is no.
+    ///
+    /// A move is `zend_mm_realloc_slow` (`:1569`): alloc, copy, free, and
+    /// the peak put back where the larger of the two footprints put it,
+    /// not where both stood at once.
     ///
     /// # Safety
     ///
-    /// `at` is a pointer this heap returned from [`Mm::alloc`] for `old`
-    /// bytes and has not been freed since.
+    /// `at` is a pointer this heap returned from [`Mm::alloc`], has not
+    /// been freed since, and its first `copy` bytes are initialised.
     pub(crate) unsafe fn realloc(
         &mut self,
         at: NonNull<u8>,
-        old: usize,
+        copy: usize,
+        size: usize,
+    ) -> Result<NonNull<u8>, Fatal> {
+        let offset = at.as_ptr().addr() & (CHUNK_SIZE - 1);
+        if offset == 0 {
+            // SAFETY: the caller's contract; a chunk-aligned pointer of
+            // this heap is a huge block.
+            return unsafe { self.realloc_huge(at, copy, size) };
+        }
+        let chunk = chunk_of(at);
+        let page_num = offset / PAGE_SIZE;
+        // SAFETY: `at` is live in this heap, so the chunk it sits in is
+        // one of ours and its header is initialised.
+        let info = unsafe { &*chunk.as_ptr() }.map[page_num];
+        let old_size = if info & IS_SRUN != 0 {
+            let old_bin = (info & SRUN_BIN_NUM_MASK) as usize;
+            let old_size = BIN_DATA_SIZE[old_bin];
+            if size <= old_size {
+                if old_bin > 0 && size < BIN_DATA_SIZE[old_bin - 1] {
+                    // Truncation: down to the bin the size falls in.
+                    let moved = self.alloc_small(size_to_bin(size))?;
+                    // SAFETY: `at` holds `copy` readable bytes and
+                    // `moved` is a fresh slot of at least `size`.
+                    unsafe { copy_into(at, moved, copy.min(size)) };
+                    // SAFETY: the caller's contract, and the page map says
+                    // the slot is bin `old_bin`'s.
+                    unsafe { self.free_small(at, old_bin) };
+                    return Ok(moved);
+                }
+                // Reallocation in place: the same slot.
+                return Ok(at);
+            }
+            if size <= MAX_SMALL_SIZE {
+                // A small extension, with the peak restored as the slow
+                // path restores it.
+                let peak = self.peak;
+                let moved = self.alloc_small(size_to_bin(size))?;
+                // SAFETY: `at` holds `copy` readable bytes of a slot of
+                // `old_size`, and `moved` is a fresh slot past that.
+                unsafe { copy_into(at, moved, copy.min(old_size)) };
+                // SAFETY: the caller's contract, and the page map says
+                // the slot is bin `old_bin`'s.
+                unsafe { self.free_small(at, old_bin) };
+                self.peak = peak.max(self.size);
+                return Ok(moved);
+            }
+            old_size
+        } else {
+            let old_pages = info & LRUN_PAGES_MASK;
+            let old_size = old_pages as usize * PAGE_SIZE;
+            if size > MAX_SMALL_SIZE && size <= MAX_LARGE_SIZE {
+                let new_size = size.next_multiple_of(PAGE_SIZE);
+                let new_pages = (new_size / PAGE_SIZE) as u32;
+                // SAFETY: the run is in this chunk, so its header is ours
+                // to write and nothing else holds it.
+                let header = unsafe { &mut *chunk.as_ptr() };
+                let page_num = page_num as u32;
+                if new_size == old_size {
+                    return Ok(at);
+                }
+                if new_size < old_size {
+                    // The tail pages go back.
+                    let rest = old_pages - new_pages;
+                    self.size = self.size.saturating_sub(rest as usize * PAGE_SIZE);
+                    header.map[page_num as usize] = IS_LRUN | new_pages;
+                    header.free_pages += rest;
+                    bitset_reset_range(&mut header.free_map, page_num + new_pages, rest);
+                    return Ok(at);
+                }
+                // The pages after the run, when they are free.
+                let more = new_pages - old_pages;
+                if page_num + new_pages <= PAGES
+                    && bitset_is_free_range(&header.free_map, page_num + old_pages, more)
+                {
+                    self.size += more as usize * PAGE_SIZE;
+                    self.peak = self.peak.max(self.size);
+                    header.free_pages -= more;
+                    bitset_set_range(&mut header.free_map, page_num + old_pages, more);
+                    header.map[page_num as usize] = IS_LRUN | new_pages;
+                    return Ok(at);
+                }
+            }
+            old_size
+        };
+        // SAFETY: the caller's contract, and `old_size` is what the page
+        // map says the block holds.
+        unsafe { self.realloc_slow(at, copy.min(old_size), size) }
+    }
+
+    /// `zend_mm_realloc_slow` (`Z/Zend/zend_alloc.c:1569`): alloc, copy,
+    /// free, and the peak where the larger of the two footprints put it.
+    ///
+    /// # Safety
+    ///
+    /// `at` is live in this heap and holds `copy` readable bytes, no more
+    /// than `size`.
+    unsafe fn realloc_slow(
+        &mut self,
+        at: NonNull<u8>,
+        copy: usize,
         size: usize,
     ) -> Result<NonNull<u8>, Fatal> {
         let peak = self.peak;
         let moved = self.alloc(size)?;
-        // SAFETY: `at` holds `old` readable bytes and `moved` is a fresh
+        // SAFETY: `at` holds `copy` readable bytes and `moved` is a fresh
         // allocation of `size`, so the shorter of the two is in both.
-        unsafe { std::ptr::copy_nonoverlapping(at.as_ptr(), moved.as_ptr(), old.min(size)) };
+        unsafe { copy_into(at, moved, copy.min(size)) };
         // SAFETY: the caller's contract, `at` is live in this heap; its
         // bytes are copied and nothing reads it after this.
         unsafe { self.free(at) };
         self.peak = peak.max(self.size);
         Ok(moved)
+    }
+
+    /// `zend_mm_realloc_huge` (`Z/Zend/zend_alloc.c:1587`): the block
+    /// stands when its rounding does not move; a shorter rounding cuts
+    /// its tail, `zend_mm_chunk_truncate`, and the two sizes move by the
+    /// difference; a longer one, or a size that is no longer huge, is
+    /// the slow path. php's `zend_mm_chunk_extend` is not tried, for the
+    /// reason on [`Mm::realloc`]. The cut is a mapping of the new size
+    /// with the bytes moved over, since a mapping here is the system
+    /// allocator's and has no tail to unmap; where the block stands is
+    /// not observable, what the heap counts is, and that is php's.
+    ///
+    /// # Safety
+    ///
+    /// `at` is a huge block of this heap holding `copy` readable bytes.
+    unsafe fn realloc_huge(
+        &mut self,
+        at: NonNull<u8>,
+        copy: usize,
+        size: usize,
+    ) -> Result<NonNull<u8>, Fatal> {
+        let Some(index) = self.huge.iter().position(|block| block.at == at) else {
+            return Err(Fatal::Error(String::from("zend_mm_heap corrupted")));
+        };
+        let old_size = self.huge[index].size;
+        if size > MAX_LARGE_SIZE {
+            let new_size = size.next_multiple_of(real_page_size());
+            if new_size == old_size {
+                return Ok(at);
+            }
+            if new_size < old_size {
+                let Some(cut) = chunk_alloc(new_size) else {
+                    return Err(out_of_memory(self.real_size, size));
+                };
+                let cut = cut.cast::<u8>();
+                // SAFETY: `at` holds `copy` readable bytes and `cut` is a
+                // fresh mapping of `new_size`, which `copy` is under.
+                unsafe { copy_into(at, cut, copy.min(new_size)) };
+                chunk_free(at.cast(), old_size);
+                self.huge[index].at = cut;
+                self.huge[index].size = new_size;
+                self.real_size = self.real_size.saturating_sub(old_size - new_size);
+                self.size = self.size.saturating_sub(old_size - new_size);
+                return Ok(cut);
+            }
+        }
+        // SAFETY: the caller's contract, and `old_size` is the block's.
+        unsafe { self.realloc_slow(at, copy.min(old_size), size) }
     }
 
     /// `_efree`: give `at` back to the bin, `run` or huge block it came
@@ -978,4 +1140,21 @@ fn bitset_reset_range(map: &mut [u64; PAGE_MAP_LEN], start: u32, len: u32) {
     for page in start..start + len {
         map[page as usize / 64] &= !(1 << (page % 64));
     }
+}
+
+/// `zend_mm_bitset_is_free_range` (`Z/Zend/zend_alloc.c:689`): no page
+/// of the range is taken.
+fn bitset_is_free_range(map: &[u64; PAGE_MAP_LEN], start: u32, len: u32) -> bool {
+    (start..start + len).all(|page| !bitset_is_set(map, page))
+}
+
+/// The `memcpy` of a realloc: the first `len` bytes of `from` into `to`.
+///
+/// # Safety
+///
+/// `from` holds `len` readable bytes, `to` holds `len` writable ones, and
+/// the two do not overlap.
+unsafe fn copy_into(from: NonNull<u8>, to: NonNull<u8>, len: usize) {
+    // SAFETY: the caller's contract, handed on.
+    unsafe { std::ptr::copy_nonoverlapping(from.as_ptr(), to.as_ptr(), len) };
 }

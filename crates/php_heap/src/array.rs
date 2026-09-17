@@ -55,11 +55,36 @@ pub(crate) trait Allocate {
     ///
     /// `at` came from this allocator's `alloc` and nothing names it.
     unsafe fn free(&mut self, at: NonNull<u8>);
+    /// `perealloc2`: `size` usable bytes with the first `copy` of the
+    /// old ones in them, where the old allocation stood when the
+    /// allocator can grow or cut it there, and moved otherwise.
+    ///
+    /// # Safety
+    ///
+    /// `at` came from this allocator's `alloc`, nothing else names it,
+    /// and its first `copy` bytes are initialised.
+    unsafe fn realloc(
+        &mut self,
+        at: NonNull<u8>,
+        copy: usize,
+        size: usize,
+    ) -> Result<NonNull<u8>, Fatal>;
 }
 
 impl Allocate for Mm {
     fn alloc(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
         Mm::alloc(self, size)
+    }
+
+    unsafe fn realloc(
+        &mut self,
+        at: NonNull<u8>,
+        copy: usize,
+        size: usize,
+    ) -> Result<NonNull<u8>, Fatal> {
+        // SAFETY: the caller's, handed on: the block is this heap's, its
+        // first `copy` bytes are written and nothing else names it.
+        unsafe { Mm::realloc(self, at, copy, size) }
     }
 
     unsafe fn free(&mut self, at: NonNull<u8>) {
@@ -111,6 +136,24 @@ impl Allocate for System {
         };
         // SAFETY: the allocation came from `alloc` under this layout.
         unsafe { std::alloc::dealloc(start.as_ptr(), layout) };
+    }
+
+    /// The system allocator has no page map to grow into, so a
+    /// reallocation is the new bytes, the copy and the old given back;
+    /// a constant array is built once and read, so nothing counts it.
+    unsafe fn realloc(
+        &mut self,
+        at: NonNull<u8>,
+        copy: usize,
+        size: usize,
+    ) -> Result<NonNull<u8>, Fatal> {
+        let moved = self.alloc(size)?;
+        // SAFETY: `at` holds `copy` readable bytes and `moved` is a fresh
+        // allocation of `size`, so the shorter of the two is in both.
+        unsafe { moved.copy_from_nonoverlapping(at, copy.min(size)) };
+        // SAFETY: the caller's contract; the bytes are copied out.
+        unsafe { self.free(at) };
+        Ok(moved)
     }
 }
 
@@ -793,26 +836,25 @@ impl Arr {
         Ok(())
     }
 
-    /// `zend_hash_packed_grow`: twice the slots, php's `perealloc2`
-    /// taken as the larger allocation, the used part copied, and the
-    /// smaller given back.
+    /// `zend_hash_packed_grow` (`Z/Zend/zend_hash.c:310`): twice the
+    /// slots, php's `perealloc2` over the used part of the data, so a
+    /// table whose data is a `run` of pages grows where it stands when
+    /// the pages after it are free and `memory_get_peak_usage()` never
+    /// holds the two sizes at once (#278).
     fn packed_grow(self, mm: &mut dyn Allocate) -> Result<(), Fatal> {
         let size = self.table_size();
         if size >= MAX_SIZE {
             return Err(overflow(size.wrapping_mul(2), BUCKET));
         }
         let grown = size * 2;
-        let old = self.data_addr();
-        let new = mm.alloc(Arr::packed_size(grown))?;
         let used_bytes = Arr::hash_size(MIN_MASK) + self.num_used() as usize * SLOT;
-        if let Some(old) = old {
-            // SAFETY: both allocations are at least `used_bytes` and do
-            // not overlap.
-            unsafe { new.copy_from_nonoverlapping(old, used_bytes) };
-            // SAFETY: the old data was this heap's and its used part is
-            // copied.
-            unsafe { mm.free(old) };
-        }
+        let new = match self.data_addr() {
+            // SAFETY: the data is this allocator's, its first `used_bytes`
+            // are the hash and the used slots, and the header is its only
+            // name, replaced below.
+            Some(old) => unsafe { mm.realloc(old, used_bytes, Arr::packed_size(grown)) }?,
+            None => mm.alloc(Arr::packed_size(grown))?,
+        };
         self.set_data_addr(new);
         self.header().table_size.set(grown);
         Ok(())
@@ -1498,6 +1540,58 @@ mod tests {
             .collect()
     }
 
+    /// **Every number here is php's own**, read off the oracle with
+    /// `memory_get_usage()` and `memory_get_peak_usage()` around the same
+    /// appends. The 257th element takes a packed table of 512 slots,
+    /// 8200 bytes, past the bins and into three pages, and the two-page
+    /// table of 256 grows into them where it stands, the pages after it
+    /// being free: usage and peak both read 56 + 12288 = 12344 at 300
+    /// elements, and the address did not move. A block of 5000 bytes
+    /// laid down after it takes the two pages that follow, so the growth
+    /// to 1024 slots, five pages, cannot stay: it moves, and the peak is
+    /// what `zend_mm_realloc_slow` restores, 56 + 20480 + 8192 = 28728,
+    /// never the old `run` beside the new one.
+    #[test]
+    fn a_packed_table_past_the_bins_grows_where_it_stands_and_moves_when_it_cannot() {
+        let _alone = alone();
+        let mut nothing = Nothing::new();
+        let start = nothing.heap.memory_usage(false);
+        let Ok(a) = nothing.heap.array() else { return };
+        for i in 0..300 {
+            assert!(matches!(
+                nothing.heap.array_append(a, Zval::long(i)),
+                Ok(true)
+            ));
+        }
+        assert_eq!(a.table_size(), 512);
+        assert_eq!(nothing.heap.memory_usage(false) - start, 12344);
+        assert_eq!(nothing.heap.memory_peak() - start, 12344);
+        let stood = a.data_addr();
+        let Ok(block) = nothing.heap.block(5000) else {
+            return;
+        };
+        assert_eq!(nothing.heap.memory_usage(false) - start, 12344 + 8192);
+        for i in 300..900 {
+            assert!(matches!(
+                nothing.heap.array_append(a, Zval::long(i)),
+                Ok(true)
+            ));
+        }
+        assert_eq!(a.table_size(), 1024);
+        assert_ne!(
+            a.data_addr(),
+            stood,
+            "the pages after the run were the block's"
+        );
+        assert_eq!(nothing.heap.memory_usage(false) - start, 28728);
+        assert_eq!(nothing.heap.memory_peak() - start, 28728);
+        assert_eq!(a.get(Key::Long(299)).and_then(Zval::as_long), Some(299));
+        assert_eq!(a.get(Key::Long(899)).and_then(Zval::as_long), Some(899));
+        nothing.heap.free_block(block);
+        Heap::release(&mut nothing, Zval::array(a));
+        assert_eq!(nothing.heap.memory_usage(false), start);
+    }
+
     /// The layout is php's: a 56-byte header, thirty-two to a bucket.
     #[test]
     fn the_header_and_the_bucket_are_php_s_sizes() {
@@ -1511,9 +1605,11 @@ mod tests {
     /// **Every number here is php's own.** `zend_new_array` is the 56-byte
     /// bin; the first `$a[] = v` lays a packed table of eight down,
     /// 136 bytes in the 160-byte bin; the ninth element doubles it, 264
-    /// in the 320-byte bin, the larger taken before the smaller goes
-    /// back; and a string key turns it into a hash table of the same
-    /// size, `HT_SIZE_EX(16, -32)`, 640 bytes.
+    /// in the 320-byte bin, and the peak reads the larger alone, since
+    /// `zend_mm_realloc_heap`'s small extension puts the peak back where
+    /// the larger footprint had it (the oracle reads 376 for the two);
+    /// and a string key turns it into a hash table of the same size,
+    /// `HT_SIZE_EX(16, -32)`, 640 bytes.
     #[test]
     fn an_array_takes_the_bytes_php_s_takes() {
         let _alone = alone();
@@ -1541,7 +1637,7 @@ mod tests {
             Ok(true)
         ));
         assert_eq!(nothing.heap.memory_usage(false), start + 56 + 320);
-        assert_eq!(nothing.heap.memory_peak(), start + 56 + 160 + 320);
+        assert_eq!(nothing.heap.memory_peak(), start + 56 + 320);
         assert_eq!(a.table_size(), 16);
         assert_eq!(a.len(), 9);
         assert_eq!(a.next_free(), 9);

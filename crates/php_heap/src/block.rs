@@ -121,6 +121,14 @@ mod tests {
         assert!(block.bytes().iter().all(|b| *b == 0));
         assert_eq!(heap.memory_usage(false) - start, 32);
         block.bytes_mut()[..3].copy_from_slice(b"abc");
+        // A size in the same bin is the same slot, `zend_mm_realloc_heap`'s
+        // reallocation in place.
+        let stood = block.at;
+        let Ok(block) = heap.block_resize(block, 30) else {
+            return;
+        };
+        assert_eq!(block.at, stood);
+        assert_eq!(heap.memory_usage(false) - start, 32);
         let Ok(block) = heap.block_resize(block, 16384) else {
             return;
         };
