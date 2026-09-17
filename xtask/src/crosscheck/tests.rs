@@ -49,6 +49,50 @@ fn the_fixture_is_the_oracles_own_rendering_and_the_one_byte_apart_is_not_a_pass
     );
 }
 
+/// The load number (#317): the rendering with `#10` standing as `#7` is
+/// the oracle's own under the pin's `extension_number_token` row, since
+/// both streams go through [`oracle::normalise`] before the verdict, and
+/// the same bytes against a pin without the row are not.
+#[test]
+fn the_renumbered_fixture_is_a_pass_under_the_row_and_not_without_it() {
+    let oracle = fs::read(fixtures().join("oracle.re")).unwrap();
+    let engine = fs::read(fixtures().join("renumbered.re")).unwrap();
+    assert!(
+        oracle.starts_with(b"Extension [ <persistent> extension #10 ctype")
+            && engine.starts_with(b"Extension [ <persistent> extension #7 ctype"),
+        "the fixture differs by its load number"
+    );
+    let with_row = Manifest::load(Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap())
+        .unwrap()
+        .pin
+        .recipe
+        .normalise;
+    assert!(
+        with_row.extension_number_token.is_some(),
+        "the pin carries the row"
+    );
+    let mut without_row = with_row.clone();
+    without_row.extension_number_token = None;
+
+    let under = |rules: &oracle::Normalise| {
+        judge(
+            &registry(""),
+            "ctype",
+            &oracle::normalise(rules, oracle.clone()),
+            &Rendering::Bytes(oracle::normalise(rules, engine.clone())),
+        )
+    };
+    assert_eq!(under(&with_row), Judgement::Pass);
+    let Judgement::Fail(note) = under(&without_row) else {
+        panic!("the load number is compared without the row")
+    };
+    assert!(
+        note.contains("-Extension [ <persistent> extension #10 ctype")
+            && note.contains("+Extension [ <persistent> extension #7 ctype"),
+        "{note}"
+    );
+}
+
 #[test]
 fn an_absent_rendering_fails_saying_the_engine_rendered_nothing() {
     let judged = judge(

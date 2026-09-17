@@ -102,6 +102,11 @@ timeout_s = 60
 crlf_to_lf = true
 trim = " \t\n\r\u0000\u000B"
 scratch_token = "%SCRATCH%"
+# `php --re`'s first line carries the module's load number, `extension #10`,
+# which is the oracle's build order and never the bundle's (#317). The digits
+# after `extension #` are replaced by the token below in both streams before
+# comparison, so a rendering differs only where the extension does.
+extension_number_token = "%N%"
 
 # The compiled tier's regimes (design §8, jit-design §7). The oracle under
 # `tracing` is the reference for `TRACE start/stop` dumps and for `force` and

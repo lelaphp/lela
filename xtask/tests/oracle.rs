@@ -52,6 +52,48 @@ fn a_snippet_runs_as_witness_php_and_its_output_is_normalised() {
     assert_eq!(out.exit, Some(3));
 }
 
+/// The load number (#317): `extension #<digits>` is `extension #<token>`
+/// under the pin's `extension_number_token` row, on every occurrence, with
+/// the phrase before no digit left as it stands; a pin without the row
+/// compares the number. Both streams of a run go through the same
+/// normalisation, so php's own words on stderr are renumbered as its
+/// rendering on stdout is.
+#[test]
+fn the_load_number_after_extension_is_the_pins_token_in_both_streams() {
+    let text = std::fs::read_to_string(workspace().join("oracle.toml")).unwrap();
+    let tracked = Pin::parse(&text).unwrap();
+    let rules = &tracked.recipe.normalise;
+    let token = rules.extension_number_token.as_deref().unwrap();
+    assert_eq!(token, "%N%", "the row as the ticket recorded it");
+    let rendering = b"Extension [ <persistent> extension #10 ctype version 8.5.9 ] {\n  extension #7 x\n  extension # none\n".to_vec();
+    assert_eq!(
+        String::from_utf8(oracle::normalise(rules, rendering.clone())).unwrap(),
+        "Extension [ <persistent> extension #%N% ctype version 8.5.9 ] {\n  extension #%N% x\n  extension # none"
+    );
+    let mut without = rules.clone();
+    without.extension_number_token = None;
+    assert_eq!(
+        oracle::normalise(&without, rendering.clone()),
+        rendering[..rendering.len() - 1].to_vec(),
+        "without the row the number is compared"
+    );
+    // Through the pin's text: the row absent from the file is `None`, not
+    // a refused key.
+    let stripped: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.starts_with("extension_number_token"))
+        .collect();
+    let stripped = stripped.join("\n");
+    let stripped = Pin::parse(&stripped).unwrap();
+    assert!(stripped.recipe.normalise.extension_number_token.is_none());
+
+    let Some(pin) = pin() else { return };
+    let snippet = r#"echo "extension #10 a\n"; fwrite(STDERR, "extension #42 b");"#;
+    let out = pin.oracle().run(Program::Snippet(snippet), None).unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "extension #%N% a");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "extension #%N% b");
+}
+
 #[test]
 fn a_snippet_gives_the_bytes_php_gives_by_hand_under_the_recipe() {
     let Some(pin) = pin() else { return };

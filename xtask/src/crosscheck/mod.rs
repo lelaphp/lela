@@ -22,9 +22,12 @@
 //!
 //! **The load number.** The first line, `Extension [ <persistent>
 //! extension #10 ctype version ... ]`, carries the module's load number,
-//! which is the oracle's build order and not the bundle's. A
-//! `[recipe.normalise]` row of the pin that replaces it is a person's; the
-//! reading compares the number until one is written.
+//! which is the oracle's build order and not the bundle's. The pin's
+//! `[recipe.normalise] extension_number_token` row (#317) replaces the
+//! digits by its token in both streams, the oracle's as its run normalises
+//! it and the engine's through [`oracle::normalise`], so a rendering
+//! differs only where the extension does; a pin without the row compares
+//! the number, which `renumbered.re` under the fixtures holds.
 
 #[cfg(test)]
 mod tests;

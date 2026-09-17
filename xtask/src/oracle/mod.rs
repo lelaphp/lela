@@ -331,6 +331,12 @@ pub struct Normalise {
     pub crlf_to_lf: bool,
     pub trim: String,
     pub scratch_token: String,
+    /// The token that stands where the digits of `extension #<digits>`
+    /// stood, the module's load number in `php --re`'s first line, which
+    /// is the oracle's build order and never the bundle's (#317). Absent
+    /// from the pin, the number is compared as any other byte.
+    #[serde(default)]
+    pub extension_number_token: Option<String>,
 }
 
 /// `[regime.<name>]`: the compiled tier's regimes, `-d` overrides added
@@ -697,11 +703,13 @@ fn stdin_of(scratch: &Scratch, bytes: Option<&[u8]>) -> Result<Stdio> {
 }
 
 /// The recipe's normalisation of bytes that are not a stream of one run:
-/// CRLF to LF and php's trim set off both ends. What a run's streams go
-/// through is [`Scratch::normalise`], which is this and the scratch prefix;
-/// what a `.phpt` expectation goes through is this alone, since an
-/// expectation ran in no directory. The trim set is the recipe's and is
-/// read nowhere else (design §8).
+/// CRLF to LF, php's trim set off both ends, and the load number after
+/// `extension #` replaced by the pin's token where the pin carries one.
+/// What a run's streams go through is [`Scratch::normalise`], which is
+/// this and the scratch prefix; what a `.phpt` expectation and the
+/// engine's rendering go through is this alone, since neither ran in a
+/// directory. The trim set and the token are the recipe's and are read
+/// nowhere else (design §8).
 pub fn normalise(rules: &Normalise, bytes: Vec<u8>) -> Vec<u8> {
     let bytes = if rules.crlf_to_lf {
         replace(&bytes, b"\r\n", b"\n")
@@ -717,7 +725,41 @@ pub fn normalise(rules: &Normalise, bytes: Vec<u8>) -> Vec<u8> {
         .iter()
         .rposition(|b| !trim.contains(b))
         .map_or(start, |i| i + 1);
-    bytes[start..end].to_vec()
+    let bytes = &bytes[start..end];
+    match &rules.extension_number_token {
+        Some(token) => renumber(bytes, token.as_bytes()),
+        None => bytes.to_vec(),
+    }
+}
+
+/// `extension #` and at least one ASCII digit, so `extension #10 ctype` is
+/// `extension #<token> ctype`; the phrase followed by no digit is left as
+/// it stands.
+const LOAD_NUMBER: &[u8] = b"extension #";
+
+/// Every `extension #<digits>` in `haystack` with the digits replaced by
+/// `token`, the rest byte for byte.
+fn renumber(haystack: &[u8], token: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(haystack.len());
+    let mut i = 0;
+    while i < haystack.len() {
+        if haystack[i..].starts_with(LOAD_NUMBER) {
+            let after = i + LOAD_NUMBER.len();
+            let digits = haystack[after..]
+                .iter()
+                .take_while(|b| b.is_ascii_digit())
+                .count();
+            if digits > 0 {
+                out.extend_from_slice(LOAD_NUMBER);
+                out.extend_from_slice(token);
+                i = after + digits;
+                continue;
+            }
+        }
+        out.push(haystack[i]);
+        i += 1;
+    }
+    out
 }
 
 /// Where a program runs: its directory and the file it is written to, and a directory of this

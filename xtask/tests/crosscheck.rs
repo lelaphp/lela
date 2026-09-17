@@ -17,7 +17,7 @@ use xtask::cli::{Format, Section};
 use xtask::crosscheck::{self, Ask};
 use xtask::divergence::Registry;
 use xtask::manifest::Manifest;
-use xtask::oracle::Promise;
+use xtask::oracle::{self, Promise};
 use xtask::reading::{Number, Reading, Status, Store};
 use xtask::scratch::Tree;
 
@@ -139,10 +139,16 @@ fn every_default_extension_reads_fail_and_the_oracles_bytes_are_kept() {
         assert!(count(reading, "bytes") > 0, "{reading:#?}");
     }
     let kept = crosscheck::kept(&scratch.store, &scratch.manifest.pin.oracle.md5, "ctype");
+    // The fixture is php's own bytes; what is kept is what a run compares,
+    // the fixture under the recipe's normalisation, its load number the
+    // pin's token (#317).
     assert_eq!(
         fs::read(&kept).unwrap(),
-        fs::read(fixtures().join("oracle.re")).unwrap(),
-        "the oracle's bytes at {} are the fixture's",
+        oracle::normalise(
+            &scratch.manifest.pin.recipe.normalise,
+            fs::read(fixtures().join("oracle.re")).unwrap()
+        ),
+        "the oracle's bytes at {} are the fixture's as the recipe normalises them",
         kept.display()
     );
     let rendered = xtask::status::render(
@@ -237,6 +243,58 @@ fn the_fixture_through_run_is_a_pass_and_the_one_byte_apart_is_not() {
             && reading
                 .message
                 .contains("+    Function [ <internal:ctype> function ctype_alnun ] {"),
+        "{}",
+        reading.message
+    );
+}
+
+/// The load number (#317): the rendering whose `#10` stands as `#7` is a
+/// pass through `run` under the pin's `extension_number_token` row, both
+/// streams renumbered before the verdict, and the oracle's bytes are kept
+/// as they were compared; the same bytes under a pin without the row are
+/// a fail naming the number on both sides.
+#[test]
+fn the_renumbered_fixture_through_run_is_a_pass_under_the_row_and_not_without_it() {
+    if oracle().is_none() {
+        return;
+    }
+    let mut scratch = Scratch::new("renumbered");
+    let token = scratch
+        .manifest
+        .pin
+        .recipe
+        .normalise
+        .extension_number_token
+        .clone()
+        .expect("the pin carries the row");
+    let ask = Ask {
+        renderings: Some(scratch.renderings("renumbered.re")),
+        ..one("ctype")
+    };
+    let reading = scratch.one(&ask);
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    let kept = fs::read(crosscheck::kept(
+        &scratch.store,
+        &scratch.manifest.pin.oracle.md5,
+        "ctype",
+    ))
+    .unwrap();
+    assert!(
+        kept.starts_with(format!("Extension [ <persistent> extension #{token} ctype").as_bytes()),
+        "the kept bytes are the compared ones: {}",
+        String::from_utf8_lossy(&kept[..60])
+    );
+
+    scratch.manifest.pin.recipe.normalise.extension_number_token = None;
+    let reading = scratch.one(&ask);
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert!(
+        reading
+            .message
+            .contains("-Extension [ <persistent> extension #10 ctype")
+            && reading
+                .message
+                .contains("+Extension [ <persistent> extension #7 ctype"),
         "{}",
         reading.message
     );
