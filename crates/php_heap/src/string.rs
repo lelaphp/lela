@@ -39,10 +39,11 @@ use std::collections::HashMap;
 use std::ptr::NonNull;
 use std::sync::OnceLock;
 
-use crate::ZvalType;
+use crate::array::{Arr, Key, free_persistent_array, persistent_array};
 use crate::gc::{self, Refcounted};
 use crate::hooks::Fatal;
 use crate::mm::Mm;
+use crate::{Zval, ZvalType};
 
 /// `zend_string` without its bytes: twenty-four bytes, php's own layout,
 /// with `len + 1` bytes following it in the same allocation. The last is
@@ -371,6 +372,14 @@ pub trait Intern {
     /// ask, and the fatal the allocator raised when there is no memory
     /// for it.
     fn intern(&mut self, bytes: &[u8]) -> Result<Str, Fatal>;
+
+    /// A constant array of a unit in this home (design §5.3), php's
+    /// `IS_ARRAY_IMMUTABLE`: the entries in this order, the keys strings
+    /// this home interned or integers, the values scalars; immutable
+    /// from here, so no owner is counted and it lives as long as the
+    /// home does. What a `switch` or a `match` jump table is
+    /// (`zend_compile_switch`, `zend_compile_match`).
+    fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal>;
 }
 
 /// The engine's interned strings (design §5.2, §5.14): the table a unit's
@@ -386,6 +395,9 @@ pub trait Intern {
 /// which the engine alone serialises; a request never grows it.
 pub struct Strings {
     table: Table,
+    /// The constant arrays the units published into this engine hold,
+    /// freed with the table.
+    arrays: Vec<Arr>,
 }
 
 impl Default for Strings {
@@ -400,6 +412,7 @@ impl Strings {
     pub fn new() -> Strings {
         Strings {
             table: Table::default(),
+            arrays: Vec::new(),
         }
     }
 
@@ -428,6 +441,15 @@ impl Intern for Strings {
         self.table.add(hash, s);
         Ok(s)
     }
+
+    /// `zend_persist_zval` over a constant array under opcache: one
+    /// array on the system allocator, immutable, shared by every request
+    /// that serves the unit, freed with the engine.
+    fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
+        let a = persistent_array(entries)?;
+        self.arrays.push(a);
+        Ok(a)
+    }
 }
 
 impl Drop for Strings {
@@ -436,6 +458,9 @@ impl Drop for Strings {
     /// table laid down goes back to the allocator it came from. The
     /// engine outlives every request that can name one.
     fn drop(&mut self) {
+        for a in self.arrays.drain(..) {
+            free_persistent_array(a);
+        }
         for s in self.table.strings() {
             free_persistent(s);
         }

@@ -93,6 +93,7 @@ HeapHooks::gc_children
 HeapHooks::heap
 HeapHooks::out_of_memory
 Intern
+Intern::constant_array
 Intern::intern
 Key
 MapPtr

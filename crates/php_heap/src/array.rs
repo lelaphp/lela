@@ -30,6 +30,7 @@
 // from it is aligned as php's `arData` is.
 #![allow(clippy::cast_possible_truncation, clippy::cast_ptr_alignment)]
 
+use std::alloc::Layout;
 use std::cell::Cell;
 use std::cmp::Ordering;
 use std::ptr::NonNull;
@@ -39,6 +40,112 @@ use crate::hooks::{Fatal, HeapHooks};
 use crate::mm::Mm;
 use crate::string::Str;
 use crate::{Heap, Zval, ZvalType};
+
+/// Where an array's header and data come from: the request's heap for
+/// every array a request builds, which is what `memory_get_usage()`
+/// counts, and the system allocator for a constant array of a published
+/// unit, php's `pemalloc(size, 1)` under opcache (design §5.3). The
+/// algorithm over the table is one whichever answers.
+pub(crate) trait Allocate {
+    /// `size` usable bytes, aligned for a bucket.
+    fn alloc(&mut self, size: usize) -> Result<NonNull<u8>, Fatal>;
+    /// Give an allocation back.
+    ///
+    /// # Safety
+    ///
+    /// `at` came from this allocator's `alloc` and nothing names it.
+    unsafe fn free(&mut self, at: NonNull<u8>);
+}
+
+impl Allocate for Mm {
+    fn alloc(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
+        Mm::alloc(self, size)
+    }
+
+    unsafe fn free(&mut self, at: NonNull<u8>) {
+        // SAFETY: the caller's, handed on: the block is this heap's and
+        // nothing names it.
+        unsafe { Mm::free(self, at) };
+    }
+}
+
+/// The system allocator, for a constant array: each allocation carries
+/// its size in a sixteen-byte prefix, since `free` is handed the
+/// address alone as `pefree` is.
+struct System;
+
+/// The prefix a [`System`] allocation carries.
+const PREFIX: usize = 16;
+
+impl System {
+    fn layout(size: usize) -> Result<Layout, Fatal> {
+        let whole = size.checked_add(PREFIX).ok_or(Fatal::OutOfMemory(size))?;
+        Layout::from_size_align(whole, PREFIX).map_err(|_| Fatal::OutOfMemory(size))
+    }
+}
+
+impl Allocate for System {
+    fn alloc(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
+        let layout = System::layout(size)?;
+        // SAFETY: the layout's size is the prefix and the bytes, never
+        // zero.
+        let at = unsafe { std::alloc::alloc(layout) };
+        let Some(at) = NonNull::new(at) else {
+            return Err(Fatal::OutOfMemory(size));
+        };
+        // SAFETY: the allocation is at least the prefix, which holds the
+        // size for `free` to read.
+        unsafe { at.cast::<usize>().write(size) };
+        // SAFETY: the allocation is the prefix and `size` bytes past it.
+        Ok(unsafe { at.add(PREFIX) })
+    }
+
+    unsafe fn free(&mut self, at: NonNull<u8>) {
+        // SAFETY: `at` is the address `alloc` handed out, the prefix
+        // before it.
+        let start = unsafe { at.sub(PREFIX) };
+        // SAFETY: the prefix holds the size `alloc` wrote.
+        let size = unsafe { start.cast::<usize>().read() };
+        let Ok(layout) = System::layout(size) else {
+            return;
+        };
+        // SAFETY: the allocation came from `alloc` under this layout.
+        unsafe { std::alloc::dealloc(start.as_ptr(), layout) };
+    }
+}
+
+/// A constant array (design §5.3), php's `IS_ARRAY_IMMUTABLE`, out of the
+/// system allocator: the entries written in order as php's compiler
+/// writes a jump table, then the immutable bit, after which no owner is
+/// counted and no write reaches it. Its keys are persistent interned
+/// strings and its values scalars, so freeing it releases nothing;
+/// [`free_persistent_array`] gives its two allocations back.
+pub(crate) fn persistent_array(entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
+    let size = check_size(u32::try_from(entries.len()).unwrap_or(u32::MAX))?;
+    let at = System.alloc(HEADER)?;
+    // SAFETY: the allocation is the header's size and nothing else
+    // holds it.
+    let a = unsafe { Arr::init(at, size) };
+    for (key, z) in entries {
+        match *key {
+            Key::Long(n) => write_long(&mut System, a, n, *z, Write::Update)?,
+            Key::Str(s) => write_str(&mut System, a, s, *z)?,
+        };
+    }
+    a.header().gc.add_flags(gc::IMMUTABLE);
+    Ok(a)
+}
+
+/// `pefree` over a [`persistent_array`]: the data, then the header.
+pub(crate) fn free_persistent_array(a: Arr) {
+    if let Some(data) = a.data_addr() {
+        // SAFETY: the data was `System`'s and nothing in it is owned.
+        unsafe { System.free(data) };
+    }
+    // SAFETY: the header came from `persistent_array` and the unit that
+    // named it is gone.
+    unsafe { System.free(a.address()) };
+}
 
 /// `HT_MIN_SIZE`.
 const MIN_SIZE: u32 = 8;
@@ -577,7 +684,7 @@ impl Arr {
     // ------------------------------------------------------- writes
 
     /// `zend_hash_real_init_packed_ex`.
-    fn real_init_packed(self, mm: &mut Mm) -> Result<(), Fatal> {
+    fn real_init_packed(self, mm: &mut dyn Allocate) -> Result<(), Fatal> {
         let at = mm.alloc(Arr::packed_size(self.table_size()))?;
         self.header().table_mask.set(MIN_MASK);
         self.set_data_addr(at);
@@ -587,7 +694,7 @@ impl Arr {
     }
 
     /// `zend_hash_real_init_mixed_ex`.
-    fn real_init_mixed(self, mm: &mut Mm) -> Result<(), Fatal> {
+    fn real_init_mixed(self, mm: &mut dyn Allocate) -> Result<(), Fatal> {
         let size = self.table_size();
         let at = mm.alloc(Arr::data_size(size))?;
         self.header().table_mask.set(Arr::size_to_mask(size));
@@ -600,7 +707,7 @@ impl Arr {
     /// `zend_hash_packed_to_hash`: the same elements as buckets, the
     /// larger allocation taken before the smaller goes back, then the
     /// rehash that links them.
-    fn packed_to_hash(self, mm: &mut Mm) -> Result<(), Fatal> {
+    fn packed_to_hash(self, mm: &mut dyn Allocate) -> Result<(), Fatal> {
         let size = self.table_size();
         let old = self.data_addr();
         let new = mm.alloc(Arr::data_size(size))?;
@@ -631,7 +738,7 @@ impl Arr {
     /// `zend_hash_packed_grow`: twice the slots, php's `perealloc2`
     /// taken as the larger allocation, the used part copied, and the
     /// smaller given back.
-    fn packed_grow(self, mm: &mut Mm) -> Result<(), Fatal> {
+    fn packed_grow(self, mm: &mut dyn Allocate) -> Result<(), Fatal> {
         let size = self.table_size();
         if size >= MAX_SIZE {
             return Err(overflow(size.wrapping_mul(2), BUCKET));
@@ -656,7 +763,7 @@ impl Arr {
     /// `zend_hash_do_resize`: compact when a thirty-second of the table
     /// is tombstones, else double it, the used buckets copied and
     /// relinked.
-    fn do_resize(self, mm: &mut Mm) -> Result<(), Fatal> {
+    fn do_resize(self, mm: &mut dyn Allocate) -> Result<(), Fatal> {
         let used = self.num_used();
         let elements = self.header().num_elements.get();
         let size = self.table_size();
@@ -900,6 +1007,20 @@ impl crate::Heap {
         Ok(unsafe { Arr::init(at, size) })
     }
 
+    /// The request's half of [`crate::Intern::constant_array`]: the
+    /// entries written in order, then `IS_ARRAY_IMMUTABLE`.
+    pub(crate) fn array_constant(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
+        let a = self.array_sized(u32::try_from(entries.len()).unwrap_or(u32::MAX))?;
+        for (key, z) in entries {
+            match *key {
+                Key::Long(n) => write_long(&mut self.mm, a, n, *z, Write::Update)?,
+                Key::Str(s) => write_str(&mut self.mm, a, s, *z)?,
+            };
+        }
+        a.header().gc.add_flags(gc::IMMUTABLE);
+        Ok(a)
+    }
+
     /// `zend_hash_update` or `zend_hash_index_update` over `a`: `z` is
     /// the array's from here, and what `key` held is released last, after
     /// the write, through `hooks`, which is where a destructor is served
@@ -933,127 +1054,150 @@ impl crate::Heap {
         z: Zval,
         write: Write,
     ) -> Result<Written, Fatal> {
-        let index = if write == Write::Next && index == i64::MIN {
-            0
-        } else {
-            index
-        };
-        let h = index.cast_unsigned();
-        let header = a.header();
-        if a.is_packed() {
-            if h < u64::from(a.num_used()) {
-                let idx = h as u32;
-                let old = a.read_slot(idx);
-                if !old.is_undef() {
-                    if write == Write::Next {
-                        return Ok(Written::Refused);
-                    }
-                    a.write_slot(idx, z);
-                    return Ok(Written::Replaced(old));
-                }
-                a.packed_to_hash(&mut self.mm)?;
-            } else if h < u64::from(a.table_size()) {
-                a.add_to_packed(h as u32, z);
-                return Ok(Written::Added);
-            } else if (h >> 1) < u64::from(a.table_size())
-                && (a.table_size() >> 1) < header.num_elements.get()
-            {
-                a.packed_grow(&mut self.mm)?;
-                a.add_to_packed(h as u32, z);
-                return Ok(Written::Added);
-            } else {
-                if a.num_used() >= a.table_size() {
-                    header.table_size.set(a.table_size() + a.table_size());
-                }
-                a.packed_to_hash(&mut self.mm)?;
-            }
-        } else if a.is_uninitialized() {
-            if h < u64::from(a.table_size()) {
-                a.real_init_packed(&mut self.mm)?;
-                a.add_to_packed(h as u32, z);
-                return Ok(Written::Added);
-            }
-            a.real_init_mixed(&mut self.mm)?;
-        } else {
-            if let Some(idx) = a.find_long(h) {
-                if write == Write::Next {
-                    return Ok(Written::Refused);
-                }
-                let mut b = a.read_bucket(idx);
-                let old = b.val;
-                b.val = z;
-                b.val.set_next(old.next());
-                a.write_bucket(idx, b);
-                return Ok(Written::Replaced(old));
-            }
-            if a.num_used() >= a.table_size() {
-                a.do_resize(&mut self.mm)?;
-            }
-        }
-        let idx = a.num_used();
-        header.num_used.set(idx + 1);
-        a.write_bucket(
-            idx,
-            Bucket {
-                val: z,
-                h,
-                key: None,
-            },
-        );
-        a.link(idx);
-        if index >= header.next_free.get() {
-            header.next_free.set(if index < i64::MAX {
-                index + 1
-            } else {
-                i64::MAX
-            });
-        }
-        header.num_elements.set(header.num_elements.get() + 1);
-        Ok(Written::Added)
+        write_long(&mut self.mm, a, index, z, write)
     }
 
     /// `_zend_hash_add_or_update_i` with `HASH_UPDATE`: the key is the
     /// bucket's own from here, one more owner unless it is interned; the
     /// value replaced, if one was, handed back to release.
     fn array_write_str(&mut self, a: Arr, key: Str, z: Zval) -> Result<Written, Fatal> {
-        let h = key.hash();
-        let header = a.header();
-        if a.is_uninitialized() {
-            a.real_init_mixed(&mut self.mm)?;
-        } else if a.is_packed() {
-            a.packed_to_hash(&mut self.mm)?;
-        } else {
-            if let Some(idx) = a.find_str(key) {
-                let mut b = a.read_bucket(idx);
-                let old = b.val;
-                b.val = z;
-                b.val.set_next(old.next());
-                a.write_bucket(idx, b);
+        write_str(&mut self.mm, a, key, z)
+    }
+}
+
+/// `_zend_hash_index_add_or_update_i` over whichever allocator `a`'s
+/// data is from: the request's heap for a request's array, the system
+/// allocator for a constant one.
+fn write_long(
+    mm: &mut dyn Allocate,
+    a: Arr,
+    index: i64,
+    z: Zval,
+    write: Write,
+) -> Result<Written, Fatal> {
+    let index = if write == Write::Next && index == i64::MIN {
+        0
+    } else {
+        index
+    };
+    let h = index.cast_unsigned();
+    let header = a.header();
+    if a.is_packed() {
+        if h < u64::from(a.num_used()) {
+            let idx = h as u32;
+            let old = a.read_slot(idx);
+            if !old.is_undef() {
+                if write == Write::Next {
+                    return Ok(Written::Refused);
+                }
+                a.write_slot(idx, z);
                 return Ok(Written::Replaced(old));
             }
+            a.packed_to_hash(mm)?;
+        } else if h < u64::from(a.table_size()) {
+            a.add_to_packed(h as u32, z);
+            return Ok(Written::Added);
+        } else if (h >> 1) < u64::from(a.table_size())
+            && (a.table_size() >> 1) < header.num_elements.get()
+        {
+            a.packed_grow(mm)?;
+            a.add_to_packed(h as u32, z);
+            return Ok(Written::Added);
+        } else {
             if a.num_used() >= a.table_size() {
-                a.do_resize(&mut self.mm)?;
+                header.table_size.set(a.table_size() + a.table_size());
             }
+            a.packed_to_hash(mm)?;
         }
-        if !key.is_interned() {
-            key.addref();
-            header.flags.set(header.flags.get() & !STATIC_KEYS);
+    } else if a.is_uninitialized() {
+        if h < u64::from(a.table_size()) {
+            a.real_init_packed(mm)?;
+            a.add_to_packed(h as u32, z);
+            return Ok(Written::Added);
         }
-        let idx = a.num_used();
-        header.num_used.set(idx + 1);
-        header.num_elements.set(header.num_elements.get() + 1);
-        a.write_bucket(
-            idx,
-            Bucket {
-                val: z,
-                h,
-                key: Some(key),
-            },
-        );
-        a.link(idx);
-        Ok(Written::Added)
+        a.real_init_mixed(mm)?;
+    } else {
+        if let Some(idx) = a.find_long(h) {
+            if write == Write::Next {
+                return Ok(Written::Refused);
+            }
+            let mut b = a.read_bucket(idx);
+            let old = b.val;
+            b.val = z;
+            b.val.set_next(old.next());
+            a.write_bucket(idx, b);
+            return Ok(Written::Replaced(old));
+        }
+        if a.num_used() >= a.table_size() {
+            a.do_resize(mm)?;
+        }
     }
+    let idx = a.num_used();
+    header.num_used.set(idx + 1);
+    a.write_bucket(
+        idx,
+        Bucket {
+            val: z,
+            h,
+            key: None,
+        },
+    );
+    a.link(idx);
+    if index >= header.next_free.get() {
+        header.next_free.set(if index < i64::MAX {
+            index + 1
+        } else {
+            i64::MAX
+        });
+    }
+    header.num_elements.set(header.num_elements.get() + 1);
+    Ok(Written::Added)
+}
 
+/// `_zend_hash_add_or_update_i` with `HASH_UPDATE` over whichever
+/// allocator `a`'s data is from: the key is the bucket's own from here,
+/// one more owner unless it is interned; the value replaced, if one was,
+/// handed back to release.
+fn write_str(mm: &mut dyn Allocate, a: Arr, key: Str, z: Zval) -> Result<Written, Fatal> {
+    let h = key.hash();
+    let header = a.header();
+    if a.is_uninitialized() {
+        a.real_init_mixed(mm)?;
+    } else if a.is_packed() {
+        a.packed_to_hash(mm)?;
+    } else {
+        if let Some(idx) = a.find_str(key) {
+            let mut b = a.read_bucket(idx);
+            let old = b.val;
+            b.val = z;
+            b.val.set_next(old.next());
+            a.write_bucket(idx, b);
+            return Ok(Written::Replaced(old));
+        }
+        if a.num_used() >= a.table_size() {
+            a.do_resize(mm)?;
+        }
+    }
+    if !key.is_interned() {
+        key.addref();
+        header.flags.set(header.flags.get() & !STATIC_KEYS);
+    }
+    let idx = a.num_used();
+    header.num_used.set(idx + 1);
+    header.num_elements.set(header.num_elements.get() + 1);
+    a.write_bucket(
+        idx,
+        Bucket {
+            val: z,
+            h,
+            key: Some(key),
+        },
+    );
+    a.link(idx);
+    Ok(Written::Added)
+}
+
+impl crate::Heap {
     /// `zend_hash_del` and `zend_hash_index_del`: the element at `key`
     /// gone, its value released through `hooks` and its string key given
     /// up; `false` for a key that is not there.
@@ -1220,6 +1364,43 @@ enum Written {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_constant_array_is_immutable_in_either_home_and_finds_its_keys() {
+        use crate::{Intern, Strings};
+        let mut strings = Strings::new();
+        let Ok(s) = strings.intern(b"s") else {
+            return;
+        };
+        let entries = [
+            (Key::Long(1), Zval::long(12)),
+            (Key::Str(s), Zval::long(14)),
+            (Key::Long(-3), Zval::long(16)),
+        ];
+        let Ok(a) = strings.constant_array(&entries) else {
+            return;
+        };
+        assert!(a.is_immutable());
+        assert_eq!(a.refcount(), 1);
+        assert!(!Zval::array(a).is_refcounted());
+        assert_eq!(a.len(), 3);
+        assert_eq!(a.get(Key::Long(1)).and_then(Zval::as_long), Some(12));
+        assert_eq!(a.get(Key::Str(s)).and_then(Zval::as_long), Some(14));
+        assert_eq!(a.get(Key::Long(-3)).and_then(Zval::as_long), Some(16));
+        assert_eq!(a.get(Key::Long(2)), None);
+        let keys: Vec<Key> = a.iter().map(|(k, _)| k).collect();
+        assert_eq!(keys, entries.map(|(k, _)| k));
+        let mut heap = Heap::new();
+        let Ok(t) = heap.intern(b"t") else {
+            return;
+        };
+        let Ok(b) = heap.constant_array(&[(Key::Str(t), Zval::long(1))]) else {
+            return;
+        };
+        assert!(b.is_immutable());
+        assert_eq!(b.get(Key::Str(t)).and_then(Zval::as_long), Some(1));
+        drop(strings);
+    }
+
     use super::*;
     use crate::{Heap, Intern};
 

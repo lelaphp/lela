@@ -319,6 +319,14 @@ impl Intern for Heap {
         self.interned.add(hash, s);
         Ok(s)
     }
+
+    /// A constant array of a unit this request alone serves, an `eval`
+    /// or an uncached include: out of this heap and gone with it, as
+    /// its interned strings are, immutable as the published one is so
+    /// that the engine reads one kind of constant array.
+    fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
+        self.array_constant(entries)
+    }
 }
 
 // The mappings the allocator's tests count are the process's, and the
