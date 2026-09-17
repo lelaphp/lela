@@ -496,7 +496,7 @@ fn coerce_typed(
             .active_parameter_type(position)
             .map_or_else(|| declared_type_name(ty), |ty| declared_type_name(&ty));
         crate::api::raising::arg_null_deprecated(req, position, &declared);
-        req.replace_argument(position, coerced.clone());
+        req.replace_argument(position, coerced);
         return Ok(coerced);
     }
     let want = |req: &mut Request, name: &str| {

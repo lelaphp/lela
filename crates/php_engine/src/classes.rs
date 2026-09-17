@@ -205,6 +205,7 @@ pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
 fn std_class() -> ClassDecl {
     ClassDecl {
         interfaces: Vec::new(),
+        properties: Vec::new(),
         ..declared(b"stdClass", ClassKind::Class, None)
     }
 }
@@ -222,6 +223,7 @@ fn closure_class() -> ClassDecl {
             ..ClassFlags::default()
         },
         interfaces: Vec::new(),
+        properties: Vec::new(),
         ..declared(b"Closure", ClassKind::Class, None)
     }
 }
@@ -437,7 +439,8 @@ fn declared(name: &[u8], kind: ClassKind, parent: Option<&[u8]>) -> ClassDecl {
         backing: EnumBacking::Pure,
         constants: Vec::new(),
         // php declares the seven properties on `Exception` and `Error`
-        // alike (`zend_exceptions.stub.php`), and a child inherits them.
+        // alike (`zend_exceptions.stub.php`), and a child inherits them;
+        // `stdClass` and `Closure` set theirs back to none.
         properties: match (kind, parent) {
             (ClassKind::Class, None) => throwable_properties(),
             _ => Vec::new(),
