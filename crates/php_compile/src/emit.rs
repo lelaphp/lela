@@ -28,7 +28,8 @@
 //! the `ZEND_TYPE_CHECK` php emits in its place. After the final return,
 //! `pass_two`'s one change to an operand order: a `COMMUTATIVE` opcode
 //! whose first operand is the lesser kind has its operands swapped, so
-//! `2 * $a` and `2 == $a` read the CV first. A call of a name in
+//! `2 * $a` and `2 == $a` read the CV first, and then `pass_two`'s
+//! live-range table, [`crate::live`]. A call of a name in
 //! [`crate::special`]'s table is served as php's compiler serves it,
 //! a constant or an opcode of its own (`ZEND_STRLEN`, `ZEND_TYPE_CHECK`,
 //! `ZEND_DEFINED`, `ZEND_COUNT`), where the engine's function table
@@ -142,6 +143,7 @@ pub(crate) fn unit(
     }
     emit.final_return();
     swap_commutative(&mut emit.oplines);
+    let live_ranges = crate::live::live_ranges(&mut emit.oplines, emit.temporaries);
     let num_cvs = u32::try_from(emit.vars.len()).unwrap_or(u32::MAX);
     Ok(Unit {
         main: OpArray {
@@ -151,7 +153,7 @@ pub(crate) fn unit(
             num_cvs,
             num_tmps: emit.temporaries,
             try_catch: Box::new([]),
-            live_ranges: Box::new([]),
+            live_ranges,
             safepoints: emit.safepoints.into_boxed_slice(),
             filename: options.filename.clone(),
             line_start: 1,

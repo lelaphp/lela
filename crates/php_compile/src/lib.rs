@@ -19,6 +19,7 @@
 )]
 
 mod emit;
+mod live;
 mod read;
 mod special;
 mod stack;
@@ -1595,6 +1596,67 @@ mod tests {
         assert_eq!(
             unit.main.oplines[13].out_type, Unused,
             "a site keeps its number bare"
+        );
+    }
+
+    /// `zend_calc_live_ranges` over the oracle's dump of
+    /// `echo str_repeat("a", 2) . str_repeat("b", 2);`, `vars=0,
+    /// tmps=3`, which ends in the live-range table:
+    ///
+    /// ```text
+    /// 0000 INIT_FCALL 2 112 string("str_repeat")
+    /// 0001 SEND_VAL string("a") 1
+    /// 0002 SEND_VAL int(2) 2
+    /// 0003 V0 = DO_ICALL
+    /// 0004 INIT_FCALL 2 112 string("str_repeat")
+    /// 0005 SEND_VAL string("b") 1
+    /// 0006 SEND_VAL int(2) 2
+    /// 0007 V1 = DO_ICALL
+    /// 0008 T2 = CONCAT V0 V1
+    /// 0009 ECHO T2
+    /// 0010 RETURN int(1)
+    /// LIVE RANGES:
+    ///      0: 0004 - 0008 (tmp/var)
+    /// ```
+    ///
+    /// The first call's `V0` is defined at 0003 and read at the `CONCAT`
+    /// four oplines on, so it is live from the opline after its
+    /// definition to its use; `V1` and `T2` are each read by the next
+    /// opline, the trivial range php stores nothing for.
+    #[test]
+    fn a_temporary_read_past_the_next_opline_has_php_s_live_range() {
+        use php_unit::{LiveKind, LiveRange};
+        let (unit, _strings) =
+            unit_and_strings(b"<?php echo str_repeat(\"a\", 2) . str_repeat(\"b\", 2);");
+        assert_eq!(
+            unit.dump(&[]),
+            main_dump(
+                11,
+                0,
+                3,
+                "0000 INIT_FCALL 2 112 string(\"str_repeat\")\n\
+                 0001 SEND_VAL string(\"a\") 1\n\
+                 0002 SEND_VAL int(2) 2\n\
+                 0003 V0 = DO_ICALL\n\
+                 0004 INIT_FCALL 2 112 string(\"str_repeat\")\n\
+                 0005 SEND_VAL string(\"b\") 1\n\
+                 0006 SEND_VAL int(2) 2\n\
+                 0007 V1 = DO_ICALL\n\
+                 0008 T2 = CONCAT V0 V1\n\
+                 0009 ECHO T2\n\
+                 0010 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    0: 0004 - 0008 (tmp/var)\n"
+            )
+        );
+        assert_eq!(
+            *unit.main.live_ranges,
+            [LiveRange {
+                var: 0,
+                kind: LiveKind::TmpVar,
+                start: OplineIdx(4),
+                end: OplineIdx(8),
+            }]
         );
     }
 
