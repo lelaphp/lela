@@ -107,9 +107,10 @@ pub(crate) struct Grants {
     /// (`zend_language_parser.y`: `T_VOID_CAST expr ';'`,
     /// `non_empty_for_exprs`). Elsewhere `(void)` is the unexpected token.
     pub(crate) void: bool,
-    /// The primary is a `new` expression's class reference, where a bare
-    /// `static` stands on its own (`new static`).
-    pub(crate) new_class: bool,
+    /// The primary is a `class_name_reference` (`new`'s operand, the right
+    /// operand of `instanceof`), where a bare `static` stands on its own
+    /// (`new static`, `$x instanceof static`).
+    pub(crate) class_ref: bool,
 }
 
 /// The grammar nesting cap: a bound on the parser's recursion, and on

@@ -375,6 +375,49 @@ fn not_with_instanceof() {
 }
 
 #[test]
+fn instanceof_static() {
+    // php's `class_name_reference` takes `T_STATIC`: the late static
+    // binding stands on the right as the name `static` (#262).
+    check(
+        "<?php $x instanceof static;",
+        expect![[r#"
+            SOURCE_FILE@0..27
+              OPEN_TAG@0..6 "<?php "
+              EXPR_STMT@6..27
+                INSTANCEOF_EXPR@6..26
+                  SIMPLE_VAR_EXPR@6..8
+                    VARIABLE@6..8 "$x"
+                  INSTANCEOF_KW@9..19 "instanceof"
+                  IDENT@20..26 "static"
+                SEMICOLON@26..27 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn instanceof_static_scoped_variable() {
+    // A `new_variable` on the right: `static::$c` is a scoped access.
+    check(
+        "<?php $x instanceof static::$c;",
+        expect![[r#"
+            SOURCE_FILE@0..31
+              OPEN_TAG@0..6 "<?php "
+              EXPR_STMT@6..31
+                INSTANCEOF_EXPR@6..30
+                  SIMPLE_VAR_EXPR@6..8
+                    VARIABLE@6..8 "$x"
+                  INSTANCEOF_KW@9..19 "instanceof"
+                  SCOPED_ACCESS_EXPR@20..30
+                    IDENT@20..26 "static"
+                    COLON_COLON@26..28 "::"
+                    SIMPLE_VAR_EXPR@28..30
+                      VARIABLE@28..30 "$c"
+                SEMICOLON@30..31 ";"
+        "#]],
+    );
+}
+
+#[test]
 fn cast_with_pow() {
     // php -r 'var_dump((int)2.9 ** 2);' => 8 — `(int)($x ** 2)`.
     check(

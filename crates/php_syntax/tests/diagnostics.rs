@@ -353,3 +353,88 @@ fn the_options_are_the_file_and_the_lexers() {
         1
     );
 }
+
+#[test]
+fn instanceof_takes_a_class_name_reference() {
+    // php's `class_name_reference`: `class_name` is `T_STATIC | name`, so
+    // `static` stands alone on the right of `instanceof` (#262), and a
+    // `new_variable` or a parenthesised expression stands there too.
+    for src in [
+        "<?php $x instanceof static;",
+        "<?php $x instanceof static::$y;",
+        "<?php $x instanceof static::$b->c;",
+        "<?php $x instanceof namespace\\A;",
+        "<?php $x instanceof $y->z;",
+        "<?php $x instanceof $y[0]->z::$w;",
+        "<?php $x instanceof A::$b[0];",
+        "<?php $x instanceof (A);",
+        "<?php $x instanceof static ?? 1;",
+        // `%nonassoc` on a tier whose right operand is not an `expr`:
+        // the chain is legal, `($x instanceof A) instanceof B`.
+        "<?php $x instanceof A instanceof B;",
+    ] {
+        assert_eq!(diagnostics(src), [], "{src}");
+    }
+    // What is not a class reference is the bare unexpected token; after
+    // `::` php spells the selector it wants; a trailer after the class
+    // reference dangles into the statement, which reports it as it
+    // reports one after `new A`.
+    for (src, message) in [
+        (
+            "<?php $x instanceof 1;",
+            "syntax error, unexpected integer \"1\"",
+        ),
+        (
+            "<?php $x instanceof \"A\";",
+            "syntax error, unexpected double-quoted string \"A\"",
+        ),
+        (
+            "<?php $x instanceof new A;",
+            "syntax error, unexpected token \"new\"",
+        ),
+        (
+            "<?php $x instanceof;",
+            "syntax error, unexpected token \";\"",
+        ),
+        (
+            "<?php $x instanceof A::C;",
+            "syntax error, unexpected identifier \"C\", expecting variable or \"$\"",
+        ),
+        (
+            "<?php $x instanceof static::C;",
+            "syntax error, unexpected identifier \"C\", expecting variable or \"$\"",
+        ),
+        (
+            "<?php $x instanceof A->p;",
+            "syntax error, unexpected token \"->\"",
+        ),
+        (
+            "<?php $x instanceof A[0];",
+            "syntax error, unexpected token \"[\"",
+        ),
+        (
+            "<?php $x instanceof (A)->b;",
+            "syntax error, unexpected token \"->\"",
+        ),
+        (
+            "<?php $x instanceof $y();",
+            "syntax error, unexpected token \"(\"",
+        ),
+        (
+            "<?php echo $x instanceof A[0];",
+            "syntax error, unexpected token \"[\", expecting \",\" or \";\"",
+        ),
+        // `new` reads the same production, and a literal there is the
+        // unexpected token with `new`'s own clause.
+        (
+            "<?php new 1;",
+            "syntax error, unexpected integer \"1\", expecting \"class\"",
+        ),
+        (
+            "<?php new \"A\";",
+            "syntax error, unexpected double-quoted string \"A\", expecting \"class\"",
+        ),
+    ] {
+        assert_eq!(first(src), (1, message.into()), "{src}");
+    }
+}

@@ -150,7 +150,11 @@ fn infix_bp(kind: K) -> Option<BindingPower> {
         K::SHL | K::SHR => (39, 40, None),
         K::PLUS | K::MINUS => (41, 42, None),
         K::STAR | K::SLASH | K::PERCENT => (43, 44, None),
-        K::INSTANCEOF_KW => (47, 48, Some(47)),
+        // `%nonassoc T_INSTANCEOF` in php's table, yet its right operand
+        // is a `class_name_reference`, not an `expr`, so the tier never
+        // meets itself: `$x instanceof A instanceof B` is
+        // `($x instanceof A) instanceof B` (probed 8.5.9).
+        K::INSTANCEOF_KW => (47, 48, None),
         K::STAR_STAR => (53, 52, None), // right; tighter than unary
         _ => return None,
     };
@@ -332,10 +336,9 @@ fn expr_bp_inner(p: &mut Parser<'_>, min_bp: u8) -> Option<Lhs> {
             p.error_unexpected();
         }
 
-        // `instanceof` has a restricted right-hand side (a class
-        // reference); a tight expression is parsed and the compiler
-        // refines it. `is_assign_op` is the one authority for the
-        // assignment family.
+        // `instanceof` takes php's `class_name_reference` on the right,
+        // the grammar `new` reads, not a tight expression. `is_assign_op`
+        // is the one authority for the assignment family.
         let node = if kind == K::INSTANCEOF_KW {
             K::INSTANCEOF_EXPR
         } else if is_assign_op(kind) {
@@ -360,6 +363,13 @@ fn expr_bp_inner(p: &mut Parser<'_>, min_bp: u8) -> Option<Lhs> {
             // php); an operand that is not a variable (`&A::C`, `&new A`)
             // is a parse error at the first token that fails to extend it.
             ref_target(p);
+        } else if node == K::INSTANCEOF_EXPR {
+            // `$x instanceof;` and `$x instanceof 1;` are the bare
+            // unexpected token in php, no `expecting` clause (probed
+            // 8.5.9).
+            if !class_name_reference(p) {
+                p.error_unexpected();
+            }
         } else if let Some(rhs) = expr_bp(p, rbp) {
             rhs.finish(p);
         } else {
@@ -618,11 +628,13 @@ fn prefix(p: &mut Parser<'_>) -> Option<Lhs> {
         }
         // `static` as a class reference (`static::…`, `static` as a type):
         // in expression position `::` is the one continuation php can
-        // spell (`static ;` is `expecting "::"`, probed 8.5.9).
+        // spell (`static ;` is `expecting "::"`, probed 8.5.9); inside a
+        // `class_name_reference` (`new static`, `$x instanceof static`)
+        // it stands on its own, as `types::name_ref` reads it in a type.
         K::STATIC_KW => {
             let m = p.start();
             p.bump_remap(K::IDENT);
-            if !p.peek_at(K::COLON_COLON) && !p.grants.new_class {
+            if !p.peek_at(K::COLON_COLON) && !p.grants.class_ref {
                 let d = p.unexpected_here_expecting("\"::\"");
                 p.error(d);
             }
@@ -931,48 +943,7 @@ fn new_expr(p: &mut Parser<'_>) -> Lhs {
         // An anonymous class is always dereferenceable.
         return Lhs::Done(m.complete(p, K::NEW_EXPR));
     }
-    // `class_name_reference`: the trailer rights depend on the prefix
-    // shape (pinned 8.5.6): a bare name takes only `::` and a
-    // `$`-variable (then the chain is a `new_variable` with the full
-    // trailer set); a variable prefix takes the full set from the start;
-    // a parenthesised expression takes none. `->` and `[` directly after
-    // a bare name are not part of the class reference: they dangle and
-    // the enclosing construct reports them, exactly where php errors on
-    // `new A->p` and `new A[0]`.
-    p.grants.new_class = true;
-    let class_ref = prefix(p);
-    p.grants.new_class = false;
-    if let Some(mut lhs) = class_ref {
-        let mut bare_name = matches!(lhs, Lhs::Bare(..));
-        let paren_prefix = lhs.kind() == K::PAREN_EXPR;
-        if !paren_prefix {
-            loop {
-                match p.current() {
-                    K::COLON_COLON => {
-                        let sm = lhs.wrap(p);
-                        p.bump(K::COLON_COLON);
-                        if !matches!(p.current(), K::VARIABLE | K::DOLLAR) {
-                            // php: `new A::C` is `expecting variable or "$"`.
-                            let d = p.unexpected_expecting("variable or \"$\"");
-                            p.error(d);
-                        }
-                        member_selector(p, true);
-                        lhs = Lhs::Done(sm.complete(p, K::SCOPED_ACCESS_EXPR));
-                        bare_name = false;
-                    }
-                    K::L_BRACK | K::ARROW | K::NULLSAFE_ARROW if !bare_name => {
-                        if let Some(trailer) = at_trailer(p, &lhs) {
-                            lhs = apply_trailer(p, lhs, trailer);
-                        } else {
-                            break;
-                        }
-                    }
-                    _ => break,
-                }
-            }
-        }
-        lhs.finish(p);
-    } else {
+    if !class_name_reference(p) {
         // A bare `namespace` keyword that is not the start of a relative
         // name (`new namespace::$foo`) reports `expecting ":"` in the
         // call-argument position bug43343 pins (probed 8.5.7). The
@@ -997,6 +968,81 @@ fn new_expr(p: &mut Parser<'_>) -> Lhs {
     } else {
         Lhs::NewBare(cm)
     }
+}
+
+/// php's `class_name_reference`, the right operand of `instanceof` and
+/// what `new` names: `class_name` (`static` or a name), a `new_variable`
+/// or a parenthesised expression. The trailer rights depend on the prefix
+/// shape (pinned 8.5.6): a bare name takes only `::` and a `$`-variable
+/// (then the chain is a `new_variable` with the full trailer set); a
+/// variable prefix takes the full set from the start; a parenthesised
+/// expression takes none. `->` and `[` directly after a bare name are not
+/// part of the class reference: they dangle and the enclosing construct
+/// reports them, exactly where php errors on `new A->p`, `new A[0]` and
+/// `$x instanceof A->p`. `false`, consuming nothing, when no prefix can
+/// start here; the site names what it expected.
+///
+/// ```php
+/// $x instanceof A::C;
+/// ```
+/// ```expect exit=255
+/// Parse error: syntax error, unexpected identifier "C", expecting variable or "$" in %s on line 2
+/// ```
+fn class_name_reference(p: &mut Parser<'_>) -> bool {
+    // What can start one: `class_name` (`static`, a name), a
+    // `simple_variable` (`$v`, `$$v`, `${e}`) or `(`. A literal, `new`
+    // or a string is the unexpected token (`$x instanceof 1;`, probed
+    // 8.5.9); `prefix` would read it as an operand.
+    let starts = match p.current() {
+        K::IDENT
+        | K::NAME_QUALIFIED
+        | K::NAME_FULLY_QUALIFIED
+        | K::NAME_RELATIVE
+        | K::STATIC_KW
+        | K::VARIABLE
+        | K::DOLLAR
+        | K::L_PAREN => true,
+        kind => ckw::is_contextual_only(kind),
+    };
+    if !starts {
+        return false;
+    }
+    p.grants.class_ref = true;
+    let class_ref = prefix(p);
+    p.grants.class_ref = false;
+    let Some(mut lhs) = class_ref else {
+        return false;
+    };
+    let mut bare_name = matches!(lhs, Lhs::Bare(..));
+    let paren_prefix = lhs.kind() == K::PAREN_EXPR;
+    if !paren_prefix {
+        loop {
+            match p.current() {
+                K::COLON_COLON => {
+                    let sm = lhs.wrap(p);
+                    p.bump(K::COLON_COLON);
+                    if !matches!(p.current(), K::VARIABLE | K::DOLLAR) {
+                        // php: `new A::C` is `expecting variable or "$"`.
+                        let d = p.unexpected_expecting("variable or \"$\"");
+                        p.error(d);
+                    }
+                    member_selector(p, true);
+                    lhs = Lhs::Done(sm.complete(p, K::SCOPED_ACCESS_EXPR));
+                    bare_name = false;
+                }
+                K::L_BRACK | K::ARROW | K::NULLSAFE_ARROW if !bare_name => {
+                    if let Some(trailer) = at_trailer(p, &lhs) {
+                        lhs = apply_trailer(p, lhs, trailer);
+                    } else {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+    }
+    lhs.finish(p);
+    true
 }
 
 fn match_expr(p: &mut Parser<'_>) -> CompletedMarker {
@@ -1275,6 +1321,15 @@ fn at_trailer(p: &mut Parser<'_>, lhs: &Lhs) -> Option<Trailer> {
     // or `::` is the enclosing construct's parse error, exactly where php
     // reports it.
     if matches!(lhs, Lhs::NewBare(_)) {
+        return None;
+    }
+    // An `instanceof` whose class reference took what it may: the `->`,
+    // `[` or `(` after it is the enclosing construct's (`$x instanceof
+    // A->p;` and `$x instanceof $y();` are the bare unexpected token,
+    // probed 8.5.9).
+    if let Lhs::Done(cm) = lhs
+        && cm.kind == K::INSTANCEOF_EXPR
+    {
         return None;
     }
     Some(match p.current() {
