@@ -497,6 +497,16 @@ impl Engine {
         }
     }
 
+    /// The extensions this engine loaded, `Core` first and then the
+    /// bundle's in startup order, as `get_loaded_extensions()` and the
+    /// CLI's `-m` list them: what a host prints without a request.
+    #[must_use]
+    pub fn loaded_extensions(&self) -> Vec<String> {
+        std::iter::once(String::from("Core"))
+            .chain(self.shared.extensions.iter().map(|e| e.name.clone()))
+            .collect()
+    }
+
     /// The compiled unit for `source`, as the cache holds it: its
     /// constant strings interned into this engine's table, so two units
     /// carrying one constant carry the one `zend_string` (design §5.2).

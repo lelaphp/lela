@@ -36,4 +36,5 @@ mod probe;
 pub mod test;
 pub mod tier;
 
+pub use api::request::PHP_VERSION;
 pub use engine::{Engine, EngineBuilder, Observables, OutputSink, RequestDescription};

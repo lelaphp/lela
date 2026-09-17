@@ -83,12 +83,12 @@ third-engine-design.md
 | heap | heap.lock | 191 |  | pass |
 | unit | unit.lock | 39 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 364 | 400 | pass |
-| sapi | sapi.lock | 0 |  | pass |
+| api | api.lock | 365 | 400 | pass |
+| sapi | sapi.lock | 6 |  | pass |
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 307 |  | pass |
 
-<!-- /computed in=fce3858035dba5fc3f547d5246a5b4b32771f9706c2d152a59a6987251917f2a out=5fc8b01a6e6af40cf671d698dbf3110a416a9aca7f1bf7a9951280b0d2937941 -->
+<!-- /computed in=d1c8894b1993820d4fd5008abc6b5b2a7689e788ae62c7c8c0c3b8bb80bda29a out=6a441facb6dda2ade8d0befb0f8b148e71e43bf27a627820e61f2a6a223f0d1b -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -156,6 +156,7 @@ Options:
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
+├── php
 ├── php_bundle
 ├── php_compile
 ├── php_engine
@@ -163,10 +164,11 @@ Options:
 ├── php_heap
 ├── php_macros
 ├── php_proto
+├── php_sapi
 ├── php_syntax
 └── php_unit
 ```
-<!-- /computed in=62c8d4eb7e0d891921f7853bfacb567cbfa43bcf8d335dd47f18e0f65fb0e7f7 out=22b7791847b5363075cddae77c8635dcae17777b01394a46cf72d03054abdcd9 -->
+<!-- /computed in=58289efa27f4c9a56d26d66985bd384159d2ed91593e6571b94bceaaec15fa88 out=574d41589036448a1d587bafd8fa4f6f4280feb6b64b201ae8301bd98465112e -->
 <!-- computed tree src=ext depth=1 name=layout-ext | do not edit; run computed -->
 ```
 .

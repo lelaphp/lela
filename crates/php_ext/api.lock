@@ -259,6 +259,7 @@ syntax::parse
 test::Capture
 test::Engine
 test::Engine::builder
+test::Engine::loaded_extensions
 test::Engine::serve
 test::Engine::serve_capture
 test::Engine::unit
