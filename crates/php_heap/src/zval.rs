@@ -1,6 +1,8 @@
 //! The zval (design §5.1): sixteen bytes, `Copy`, no `Drop`. Zend's type
 //! numbering is kept so that the all-zero value is `IS_UNDEF`.
 
+use std::ptr::NonNull;
+
 use crate::Str;
 use crate::array::Arr;
 use crate::object::Obj;
@@ -24,6 +26,56 @@ pub enum ZvalType {
     Object = 8,
     Resource = 9,
     Reference = 10,
+    /// `IS_INDIRECT`: a pointer to a zval that stands elsewhere, which is
+    /// what a `FETCH_*_W` leaves in its `VAR` for the `ASSIGN*` after it
+    /// to write through (`ZVAL_INDIRECT`, `Z_INDIRECT`). Never
+    /// refcounted, never a value a program can hold.
+    Indirect = 12,
+}
+
+/// A zval in place, php's `zval *` at the sites a handler keeps one from
+/// one opline to the next: a frame slot ([`crate::Frame::slot_ptr`]) or a
+/// declared property slot ([`Obj::slot_ref`]). `Copy`, owning nothing,
+/// and what an `Indirect` zval carries. Naming a slot does not keep it:
+/// the frame or the object it is in is kept by whoever holds the zval,
+/// as a `zval *` php holds across `FETCH_OBJ_W` and `ASSIGN_OBJ` is kept
+/// by the CV under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ZvalRef(NonNull<Zval>);
+
+impl ZvalRef {
+    pub(crate) const fn new(at: NonNull<Zval>) -> ZvalRef {
+        ZvalRef(at)
+    }
+
+    /// The zval in place, copied: `ZVAL_COPY_VALUE` off a `zval *`, no
+    /// owner taken.
+    #[must_use]
+    pub fn read(self) -> Zval {
+        // SAFETY: the pointer was taken from a live frame slot or object
+        // slot by `Frame::slot_ptr` or `Obj::slot_ref`, and a name kept
+        // past the slot's life is the same mistake in php.
+        unsafe { self.0.as_ptr().read() }
+    }
+
+    /// Write `z` in place, what stood there overwritten and no owner
+    /// touched: the caller has read it and gives it up, as
+    /// `zend_assign_to_variable` gives up `garbage` after the write.
+    pub fn write(self, z: Zval) {
+        // SAFETY: as `read`; the slot is sixteen aligned bytes the frame
+        // or the object laid down.
+        unsafe { self.0.as_ptr().write(z) };
+    }
+
+    fn payload(self) -> u64 {
+        self.0.as_ptr().expose_provenance() as u64
+    }
+
+    fn from_payload(value: u64) -> Option<ZvalRef> {
+        let at: *mut Zval =
+            std::ptr::with_exposed_provenance_mut(usize::try_from(value).unwrap_or(0));
+        NonNull::new(at).map(ZvalRef)
+    }
 }
 
 /// One value slot: a payload word, the type byte, the type flags and the
@@ -156,6 +208,21 @@ impl Zval {
             type_flags: Zval::TYPE_REFCOUNTED | Zval::TYPE_COLLECTABLE,
             _pad: 0,
             u2: 0,
+        }
+    }
+
+    /// `ZVAL_INDIRECT`: the zval that says where another stands.
+    #[must_use]
+    pub fn indirect(at: ZvalRef) -> Zval {
+        Zval::scalar(ZvalType::Indirect, at.payload())
+    }
+
+    /// `Z_INDIRECT` of an `Indirect`, else `None`.
+    #[must_use]
+    pub fn as_indirect(self) -> Option<ZvalRef> {
+        match self.kind {
+            ZvalType::Indirect => ZvalRef::from_payload(self.value),
+            _ => None,
         }
     }
 
@@ -317,5 +384,24 @@ mod tests {
         );
         assert_eq!(Zval::long(1).as_str(), None);
         assert!(!Zval::null().is_refcounted());
+    }
+
+    #[test]
+    fn an_indirect_zval_names_a_slot_in_place() {
+        let mut frame = crate::Frame::new(2);
+        let at = frame.slot_ptr(crate::Slot(1));
+        assert!(at.is_some(), "a frame of two slots has a second");
+        let Some(at) = at else {
+            return;
+        };
+        let indirect = Zval::indirect(at);
+        assert_eq!(indirect.kind(), ZvalType::Indirect);
+        assert!(!indirect.is_refcounted());
+        assert_eq!(indirect.as_indirect(), Some(at));
+        assert_eq!(Zval::long(1).as_indirect(), None);
+        at.write(Zval::long(4));
+        assert_eq!(frame.slot(crate::Slot(1)), Zval::long(4));
+        assert_eq!(at.read(), Zval::long(4));
+        assert_eq!(frame.slot_ptr(crate::Slot(2)), None);
     }
 }

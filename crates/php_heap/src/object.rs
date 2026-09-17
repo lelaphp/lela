@@ -47,7 +47,7 @@ use crate::gc::{self, Refcounted};
 use crate::hooks::{Fatal, HeapHooks};
 use crate::mm::Mm;
 use crate::payload::{Payload, payload_of};
-use crate::{Heap, Zval, ZvalType};
+use crate::{Heap, Zval, ZvalRef, ZvalType};
 
 /// The identity of an object in the store (design §5.4): the index php
 /// reports as `spl_object_id()`, and what weak references, `WeakMap`
@@ -273,6 +273,18 @@ impl Obj {
         // SAFETY: the slot is inside the allocation, and every slot was
         // written by `init`.
         unsafe { self.slot_ptr(i).read() }
+    }
+
+    /// `OBJ_PROP_NUM` in place: the declared slot as a name a handler
+    /// keeps to the next opline, what `FETCH_OBJ_W` leaves in its `VAR`
+    /// (`zend_std_get_property_ptr_ptr`); none for a slot the class did
+    /// not lay down.
+    #[must_use]
+    pub fn slot_ref(&self, i: u32) -> Option<ZvalRef> {
+        if i >= self.slots() {
+            return None;
+        }
+        NonNull::new(self.slot_ptr(i)).map(ZvalRef::new)
     }
 
     /// Write the slot as it stands, no owner touched; a slot the class

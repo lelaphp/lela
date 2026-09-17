@@ -36,6 +36,7 @@ Frame::len
 Frame::new
 Frame::set
 Frame::slot
+Frame::slot_ptr
 FrameRef
 Heap
 Heap::addref
@@ -116,6 +117,7 @@ Obj::is_same
 Obj::properties
 Obj::refcount
 Obj::slot
+Obj::slot_ref
 Obj::slots
 ObjectId
 Ref
@@ -165,6 +167,7 @@ Zval::array
 Zval::as_arr
 Zval::as_bool
 Zval::as_double
+Zval::as_indirect
 Zval::as_long
 Zval::as_obj
 Zval::as_reference
@@ -172,6 +175,7 @@ Zval::as_resource
 Zval::as_str
 Zval::bool
 Zval::double
+Zval::indirect
 Zval::is_refcounted
 Zval::is_undef
 Zval::kind
@@ -181,6 +185,9 @@ Zval::object
 Zval::reference
 Zval::resource
 Zval::string
+ZvalRef
+ZvalRef::read
+ZvalRef::write
 ZvalType
 call_stack_bounds
 call_stack_default_size

@@ -59,7 +59,7 @@ pub use reference::Ref;
 pub use resource::{Res, ResourceType};
 pub use stack::{EntryGuard, Frame, FrameRef, Slot, VmStack};
 pub use string::{Intern, Str, Strings};
-pub use zval::{Zval, ZvalType};
+pub use zval::{Zval, ZvalRef, ZvalType};
 
 /// The per-request heap (design §5.13): the allocator every string,
 /// array, object and frame passes through, and the only accountant of

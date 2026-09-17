@@ -3,7 +3,9 @@
 //! `RETURN*` to know whether the frame returning is the entry frame of
 //! the innermost serving (`jit-design.md` §2.2).
 
-use crate::Zval;
+use std::ptr::NonNull;
+
+use crate::{Zval, ZvalRef};
 
 /// A slot index within one frame: a CV, a temporary or an extra argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -59,6 +61,17 @@ impl Frame {
         if let Some(cell) = self.slots.get_mut(slot.0 as usize) {
             *cell = z;
         }
+    }
+
+    /// The zval in `slot` in place, php's `EX_VAR(var)`: what a
+    /// `FETCH_*_W` points its `VAR` at and what the `ASSIGN*` over that
+    /// `VAR` reads through (design §5.6). The slots never move while
+    /// the frame lives, so the name holds as long as the frame does.
+    /// None for a slot the frame does not have.
+    pub fn slot_ptr(&mut self, slot: Slot) -> Option<ZvalRef> {
+        self.slots
+            .get_mut(slot.0 as usize)
+            .map(|cell| ZvalRef::new(NonNull::from(cell)))
     }
 }
 
