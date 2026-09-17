@@ -269,7 +269,6 @@ pub struct Request {
     /// The `php_output` layer, `main/output.c`'s `OG` and the header state
     /// `sapi_send_headers` keeps beside it (`crate::output`).
     output: Output,
-    headers: Vec<Vec<u8>>,
     header_callback: Option<Callable>,
     /// The host's log as `php_log_err` was given it, one entry per call,
     /// a diagnostic whole however many lines its backtrace adds, and no
@@ -278,7 +277,6 @@ pub struct Request {
     /// the error stream's bytes as `fputs(stderr)` was given them; the
     /// two in the order they were written.
     aside: Vec<Aside>,
-    response_code: i64,
     last_error: Option<(Level, String, Vec<u8>, u32)>,
     ending: Option<Ending>,
     resources: Resources,
@@ -327,6 +325,7 @@ pub struct Request {
 impl Request {
     pub(crate) fn new(shared: Arc<Shared>, description: RequestDescription) -> Request {
         let cwd = description.cwd.clone();
+        let web = description.is_web;
         let mut req = Request {
             shared,
             description,
@@ -337,11 +336,9 @@ impl Request {
             states: Vec::new(),
             ini: Vec::new(),
             body: Vec::new(),
-            output: Output::activate(),
-            headers: Vec::new(),
+            output: Output::activate(web),
             header_callback: None,
             aside: Vec::new(),
-            response_code: 200,
             last_error: None,
             ending: None,
             resources: Resources::default(),
@@ -1172,9 +1169,13 @@ impl Request {
         self.aside.push(Aside::Log(entry.to_vec()));
     }
 
+    /// The header block as the sink is handed it: `SG(sapi_headers).headers`
+    /// rendered one line each, and nothing else, since the status line
+    /// and its shape are the host's (`sapi_cgi_send_headers` writes
+    /// `Status:`, the dev server the HTTP status line).
     pub(crate) fn header_block(&self) -> Vec<u8> {
         let mut block = Vec::new();
-        for header in &self.headers {
+        for header in self.output.headers() {
             block.extend_from_slice(header);
             block.extend_from_slice(b"\r\n");
         }
@@ -2651,49 +2652,36 @@ impl Request {
         self.output.started_at()
     }
 
-    /// `header()`: add a header line, replacing one of the same name
-    /// when `replace` is set; `false` once headers are sent.
-    pub fn header_add(&mut self, line: &[u8], replace: bool) -> bool {
-        if self.headers_sent().is_some() {
-            return false;
-        }
-        let name = line
-            .split(|b| *b == b':')
-            .next()
-            .unwrap_or(line)
-            .to_ascii_lowercase();
-        if replace {
-            self.headers.retain(|h| {
-                h.split(|b| *b == b':')
-                    .next()
-                    .map(<[u8]>::to_ascii_lowercase)
-                    != Some(name.clone())
-            });
-        }
-        self.headers.push(line.to_vec());
-        true
+    /// `header()`, `sapi_header_op` under `SAPI_HEADER_ADD` or
+    /// `SAPI_HEADER_REPLACE` (`crate::output`): the line taken, replacing
+    /// the lines of its name when `replace` is set, with `response_code`
+    /// set when it is not zero; once the block is sent, php's warning
+    /// naming where the body started, and `false`. Under the CLI the
+    /// host's `header_handler` takes no line, so the list stays empty
+    /// and the status line and the response code are all a `header()`
+    /// moves, as under php's.
+    pub fn header_add(&mut self, line: &[u8], replace: bool, response_code: i64) -> bool {
+        crate::output::header_add(self, line, replace, response_code)
     }
 
-    /// `header_remove()`: one header by name, or all with `None`.
-    pub fn header_remove(&mut self, name: Option<&[u8]>) {
-        match name {
-            None => self.headers.clear(),
-            Some(name) => {
-                let name = name.to_ascii_lowercase();
-                self.headers.retain(|h| {
-                    h.split(|b| *b == b':')
-                        .next()
-                        .map(<[u8]>::to_ascii_lowercase)
-                        != Some(name.clone())
-                });
-            }
-        }
+    /// `header_remove()`, `sapi_header_op` under `SAPI_HEADER_DELETE` or,
+    /// with `None`, `SAPI_HEADER_DELETE_ALL`: the lines of that name
+    /// dropped, or all of them; the warnings are `sapi_header_op`'s.
+    pub fn header_remove(&mut self, name: Option<&[u8]>) -> bool {
+        crate::output::header_remove(self, name)
     }
 
-    /// `headers_list()`.
+    /// `headers_list()`: `SG(sapi_headers).headers`, in order.
     #[must_use]
     pub fn headers_list(&self) -> Vec<Vec<u8>> {
-        self.headers.clone()
+        self.output.headers().to_vec()
+    }
+
+    /// `SG(sapi_headers).http_status_line`: the `HTTP/...` line a
+    /// `header()` set, held until the block is sent.
+    #[must_use]
+    pub fn status_line(&self) -> Option<&[u8]> {
+        self.output.status_line()
     }
 
     /// `headers_sent()`: `SG(headers_sent)`, and where the body started
@@ -2712,15 +2700,19 @@ impl Request {
         self.header_callback = Some(callback);
     }
 
-    /// `http_response_code()` as it stands.
+    /// `SG(sapi_headers).http_response_code` as it stands: 200 under a
+    /// web host and zero under the CLI, which `http_response_code()`
+    /// answers `false` for.
     #[must_use]
     pub fn response_code(&self) -> i64 {
-        self.response_code
+        self.output.response_code()
     }
 
-    /// `http_response_code(int)`.
+    /// `http_response_code(int)`'s write, the code alone
+    /// (`Z/ext/standard/head.c:399`); the checks before it are the
+    /// native's.
     pub fn set_response_code(&mut self, code: i64) {
-        self.response_code = code;
+        self.output.set_response_code(code);
     }
 
     /// The request headers the host received, `getallheaders()`, as

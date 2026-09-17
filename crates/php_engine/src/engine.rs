@@ -895,6 +895,31 @@ mod tests {
         }
     }
 
+    /// `sapi_send_headers` under a host whose `header_handler` takes the
+    /// line: the default `Content-type` stands in the block once the
+    /// first body byte reaches it; under the CLI's description the block
+    /// carries nothing, since `sapi_cli_header_handler` answers zero and
+    /// the line is freed (#289).
+    #[test]
+    fn the_default_content_type_reaches_a_web_host_s_block_and_not_the_cli_s() {
+        let engine = Engine::builder().build();
+        let mut web = crate::test::Capture::default();
+        engine.serve(
+            RequestDescription {
+                is_web: true,
+                sapi_name: String::from("cgi-fcgi"),
+                ..description("<?php echo 'x';")
+            },
+            &mut web,
+        );
+        assert_eq!(web.stdout, b"x");
+        assert_eq!(web.headers, b"Content-type: text/html; charset=UTF-8\r\n");
+        let mut cli = crate::test::Capture::default();
+        engine.serve(description("<?php echo 'x';"), &mut cli);
+        assert_eq!(cli.stdout, b"x");
+        assert_eq!(cli.headers, b"");
+    }
+
     fn served(engine: &Engine, source: &str) -> (String, Observables) {
         let mut sink = Kept::default();
         let observables = engine.serve(description(source), &mut sink);

@@ -173,9 +173,9 @@ impl Context {
     }
 }
 
-/// `zend_output_globals` (`Z/main/php_output.h:139-146`), and the two
-/// things of `sapi_globals` the first write moves: `headers_sent` and
-/// the default `mimetype`.
+/// `zend_output_globals` (`Z/main/php_output.h:139-146`), and the
+/// `sapi_globals` the header ops and the first write move:
+/// `SG(sapi_headers)` and `SG(headers_sent)`.
 pub(crate) struct Output {
     /// `OG(handlers)`, bottom first; the top is `OG(active)`.
     handlers: Vec<Handler>,
@@ -196,13 +196,35 @@ pub(crate) struct Output {
     /// `SG(sapi_headers).mimetype`, the thirty-two bytes this file's doc
     /// names, out from the first byte to the host until the request ends.
     mimetype: Option<Block>,
+    /// `SG(sapi_headers).headers`: the lines the host will be handed, in
+    /// the order `sapi_header_add_op` took them.
+    headers: Vec<Vec<u8>>,
+    /// `SG(sapi_headers).send_default_content_type`: on until a
+    /// `Content-Type` header is taken or the block is sent.
+    send_default_content_type: bool,
+    /// `SG(sapi_headers).http_response_code`: 200 under a web host, which
+    /// sets it at request init (`Z/sapi/cgi/cgi_main.c:1181`), and zero
+    /// under the CLI, which does not; `sapi_activate` leaves it.
+    response_code: i64,
+    /// `SG(sapi_headers).http_status_line`, an `HTTP/...` line `header()`
+    /// was given, and the request heap it holds until
+    /// `sapi_send_headers_free`.
+    status_line: Option<(Vec<u8>, Block)>,
+    /// Whether the host's `header_handler` takes a line: every host but
+    /// the CLI, whose handler answers zero
+    /// (`Z/sapi/cli/php_cli.c:376`), so `sapi_header_add_op` frees the
+    /// line and the list stays empty. Read off the description's
+    /// `is_web`.
+    takes_headers: bool,
 }
 
 impl Output {
     /// `php_output_activate` (`Z/main/output.c:159`): `OG` zeroed,
     /// the stack initialised, which `zend_stack_init` does without an
-    /// allocation, and the layer marked active.
-    pub(crate) fn activate() -> Output {
+    /// allocation, and the layer marked active; and `sapi_activate`
+    /// (`Z/main/SAPI.c:429`) for the header state, with the response
+    /// code the host leaves. `web` is the description's `is_web`.
+    pub(crate) fn activate(web: bool) -> Output {
         Output {
             handlers: Vec::new(),
             elements: None,
@@ -212,7 +234,33 @@ impl Output {
             started: None,
             headers_sent: false,
             mimetype: None,
+            headers: Vec::new(),
+            send_default_content_type: true,
+            response_code: if web { 200 } else { 0 },
+            status_line: None,
+            takes_headers: web,
         }
+    }
+
+    /// `SG(sapi_headers).headers`, in order.
+    pub(crate) fn headers(&self) -> &[Vec<u8>] {
+        &self.headers
+    }
+
+    /// `SG(sapi_headers).http_response_code`.
+    pub(crate) fn response_code(&self) -> i64 {
+        self.response_code
+    }
+
+    /// `http_response_code(int)`'s write: the code alone, the status
+    /// line left standing (`Z/ext/standard/head.c:399`).
+    pub(crate) fn set_response_code(&mut self, code: i64) {
+        self.response_code = code;
+    }
+
+    /// `SG(sapi_headers).http_status_line`, while one is held.
+    pub(crate) fn status_line(&self) -> Option<&[u8]> {
+        self.status_line.as_ref().map(|(line, _)| line.as_slice())
     }
 
     pub(crate) fn started_at(&self) -> Option<(Vec<u8>, u32)> {
@@ -711,35 +759,46 @@ fn header(req: &mut Request) {
     }
 }
 
-/// `sapi_send_headers` (`Z/main/SAPI.c:861`) under the CLI: the default
-/// `Content-type` laid down as this file's doc says, the header line
-/// built beside it and freed at once by `sapi_header_add_op`, the
-/// callback `header_register_callback` left served, and `headers_sent`
-/// set; the CLI's `send_headers` answers that it sent them. Nothing
-/// here answers `headers_only`, the `HEAD` request that refuses a
-/// body, since no host describes one yet.
+/// `sapi_send_headers` (`Z/main/SAPI.c:861`): while
+/// `send_default_content_type` stands, the default `Content-type` laid
+/// down as this file's doc says and its header line built beside it,
+/// which `sapi_header_add_op` hands the host, so a web host's block
+/// ends in it and the CLI's, whose `header_handler` answers zero, frees
+/// it at once; the callback `header_register_callback` left served;
+/// `headers_sent` set; and `sapi_send_headers_free`, the status line
+/// given back. The host's `send_headers` answers that it sent them, and
+/// the block itself is rendered for the sink by `Request::header_block`
+/// when `serve` hands it over. Nothing here answers `headers_only`, the
+/// `HEAD` request that refuses a body, since no host describes one yet.
 fn send_headers(req: &mut Request) -> bool {
     if req.output().headers_sent {
         return true;
     }
-    let mimetype = default_content_type(req);
-    let (output, heap) = req.output_and_heap();
-    match heap.block(mimetype.len() + 1) {
-        Ok(mut block) => {
-            block.bytes_mut()[..mimetype.len()].copy_from_slice(&mimetype);
-            output.mimetype = Some(block);
+    if req.output().send_default_content_type {
+        let mimetype = default_content_type(req);
+        let (output, heap) = req.output_and_heap();
+        match heap.block(mimetype.len() + 1) {
+            Ok(mut block) => {
+                block.bytes_mut()[..mimetype.len()].copy_from_slice(&mimetype);
+                output.mimetype = Some(block);
+            }
+            Err(fatal) => {
+                req.end_in(&fatal);
+                return false;
+            }
         }
-        Err(fatal) => {
-            req.end_in(&fatal);
-            return false;
+        // `default_header.header`, `Content-type: ` and the mimetype, on
+        // the request heap while `sapi_header_add_op` decides; a line the
+        // host takes is kept as bytes of the list, and the list's own
+        // `zend_llist` cells are not laid down, since no witness runs
+        // under a web host.
+        let mut line = b"Content-type: ".to_vec();
+        line.extend_from_slice(&mimetype);
+        if let Ok(block) = req.heap_mut().block(line.len() + 1) {
+            req.heap_mut().free_block(block);
         }
-    }
-    // `default_header.header`, `Content-type: ` and the mimetype: the
-    // CLI's `header_handler` answers zero and `sapi_header_add_op` frees
-    // it before `sapi_send_headers` goes on.
-    let line_len = "Content-type: ".len() + mimetype.len() + 1;
-    if let Ok(line) = req.heap_mut().block(line_len) {
-        req.heap_mut().free_block(line);
+        header_add_op(req, false, line);
+        req.output_mut().send_default_content_type = false;
     }
     if let Some(callback) = req.take_header_callback() {
         if let Err(thrown) = call::call(req, &callback, &[]) {
@@ -748,6 +807,261 @@ fn send_headers(req: &mut Request) -> bool {
         req.release(callback.into_value());
     }
     req.output_mut().headers_sent = true;
+    send_headers_free(req);
+    true
+}
+
+/// `sapi_send_headers_free` (`Z/main/SAPI.c:490`): the status line and
+/// its bytes given back.
+fn send_headers_free(req: &mut Request) {
+    let (output, heap) = req.output_and_heap();
+    if let Some((_, block)) = output.status_line.take() {
+        heap.free_block(block);
+    }
+}
+
+/// `sapi_header_op`'s refusal once the block is sent
+/// (`Z/main/SAPI.c:685-694`): php's warning naming where the body
+/// started, through `sapi_module.sapi_error`, which is `php_error`
+/// under the CLI, so the text carries no native's name. `no_headers`
+/// is not read, since no host sets it.
+fn header_modifiable(req: &mut Request) -> bool {
+    if !req.output().headers_sent {
+        return true;
+    }
+    let message = match req.output().started_at() {
+        Some((file, line)) => format!(
+            "Cannot modify header information - headers already sent by (output started at {}:{line})",
+            String::from_utf8_lossy(&file)
+        ),
+        None => String::from("Cannot modify header information - headers already sent"),
+    };
+    req.note_error(Level::Warning, &message);
+    false
+}
+
+/// `sapi_update_response_code` (`Z/main/SAPI.c:586`): a code that
+/// changed drops the status line; one that did not changes nothing.
+fn update_response_code(req: &mut Request, code: i64) {
+    if req.output().response_code == code {
+        return;
+    }
+    send_headers_free(req);
+    req.output_mut().response_code = code;
+}
+
+/// `sapi_extract_response_code` (`Z/main/SAPI.c:572`): the number after
+/// the first space that a second space does not follow, 200 without one.
+fn extract_response_code(line: &[u8]) -> i64 {
+    let mut code = 200;
+    for (at, byte) in line.iter().enumerate() {
+        if *byte == b' ' && line.get(at + 1) != Some(&b' ') {
+            code = atoi(&line[at + 1..]);
+            break;
+        }
+    }
+    code
+}
+
+/// C's `atoi`: leading whitespace, an optional sign, the digits that
+/// follow, and zero for none.
+fn atoi(bytes: &[u8]) -> i64 {
+    let mut at = 0;
+    while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+        at += 1;
+    }
+    let negative = match bytes.get(at) {
+        Some(b'-') => {
+            at += 1;
+            true
+        }
+        Some(b'+') => {
+            at += 1;
+            false
+        }
+        _ => false,
+    };
+    let mut value: i64 = 0;
+    while let Some(digit) = bytes.get(at).filter(|b| b.is_ascii_digit()) {
+        value = value
+            .saturating_mul(10)
+            .saturating_add(i64::from(digit - b'0'));
+        at += 1;
+    }
+    if negative { -value } else { value }
+}
+
+/// `sapi_apply_default_charset` (`Z/main/SAPI.c:365`): a `text/` type
+/// with no `charset=` of its own takes `;charset=` and
+/// `default_charset` after it, with no space, where the default
+/// `Content-type` writes `; charset=`; the type as given otherwise, and
+/// whether it changed.
+fn apply_default_charset(req: &Request, mimetype: &[u8]) -> (Vec<u8>, bool) {
+    let charset = req
+        .ini_get(b"default_charset")
+        .map_or_else(|| b"UTF-8".to_vec(), <[u8]>::to_vec);
+    let has_charset = mimetype
+        .windows("charset=".len())
+        .any(|window| window == b"charset=");
+    if !charset.is_empty() && mimetype.starts_with(b"text/") && !has_charset {
+        let mut applied = mimetype.to_vec();
+        applied.extend_from_slice(b";charset=");
+        applied.extend_from_slice(&charset);
+        (applied, true)
+    } else {
+        (mimetype.to_vec(), false)
+    }
+}
+
+/// The line less its trailing spaces, linefeeds and carriage returns,
+/// as `sapi_header_op` cuts them (`Z/main/SAPI.c:736`).
+fn trimmed_end(line: &[u8]) -> &[u8] {
+    let mut end = line.len();
+    while end > 0 && line[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    &line[..end]
+}
+
+/// `sapi_remove_header` (`Z/main/SAPI.c:600`): every line whose name is
+/// `name`, case aside, with `:` after it; with `prefix_len` set, one
+/// whose first `name.len()` bytes are `name` however it goes on.
+fn remove_header(headers: &mut Vec<Vec<u8>>, name: &[u8], prefix_len: usize) {
+    headers.retain(|header| {
+        !(header.len() > name.len()
+            && (header[name.len()] == b':' || (prefix_len != 0 && name.len() > prefix_len))
+            && header[..name.len()].eq_ignore_ascii_case(name))
+    });
+}
+
+/// `sapi_header_add_op` (`Z/main/SAPI.c:656`): the line to the host's
+/// `header_handler`, which under the CLI answers zero and frees it;
+/// where the host takes it, a replace drops the lines of the same
+/// name first, and the line goes on the end.
+fn header_add_op(req: &mut Request, replace: bool, line: Vec<u8>) {
+    let output = req.output_mut();
+    if !output.takes_headers {
+        return;
+    }
+    if replace && let Some(colon) = line.iter().position(|b| *b == b':') {
+        let name = line[..colon].to_vec();
+        remove_header(&mut output.headers, &name, 0);
+    }
+    output.headers.push(line);
+}
+
+/// `sapi_header_op` for `SAPI_HEADER_ADD` and `SAPI_HEADER_REPLACE`
+/// (`Z/main/SAPI.c:675`), what `header()` and `sapi_add_header` reach:
+/// refused with the warning once the block is sent, and silently for an
+/// empty line; the trailing whitespace cut; a second line or a NUL is
+/// the warning and nothing taken. An `HTTP/` line is the status line and
+/// the response code read off it. A `Content-Type` takes the default
+/// charset, holds the mimetype where none is held yet, is rewritten as
+/// `Content-type: ` and the applied type when the charset was applied,
+/// and stops the default one; a `Location` outside a redirect sets
+/// `response_code` or 302 (the 303 a non-`GET` request past HTTP/1.0
+/// takes reads `request_method` and `proto_num`, which no description
+/// carries yet); a `WWW-Authenticate` sets 401. `Content-Length`'s
+/// switch on `zlib.output_compression` is not read, since there is no
+/// zlib. Then `response_code`, when given, and `sapi_header_add_op`.
+/// Whether the line was taken is the answer.
+pub(crate) fn header_add(
+    req: &mut Request,
+    line: &[u8],
+    replace: bool,
+    response_code: i64,
+) -> bool {
+    if !header_modifiable(req) || line.is_empty() {
+        return false;
+    }
+    let line = trimmed_end(line);
+    if line.iter().any(|b| matches!(b, b'\n' | b'\r')) {
+        req.note_error(
+            Level::Warning,
+            "Header may not contain more than a single header, new line detected",
+        );
+        return false;
+    }
+    if line.contains(&0) {
+        req.note_error(Level::Warning, "Header may not contain NUL bytes");
+        return false;
+    }
+    if line.len() >= 5 && line[..5].eq_ignore_ascii_case(b"HTTP/") {
+        update_response_code(req, extract_response_code(line));
+        send_headers_free(req);
+        let (output, heap) = req.output_and_heap();
+        if let Ok(block) = heap.block(line.len() + 1) {
+            output.status_line = Some((line.to_vec(), block));
+        }
+        return true;
+    }
+    let mut held = line.to_vec();
+    if let Some(colon) = line.iter().position(|b| *b == b':') {
+        let name = &line[..colon];
+        if name.eq_ignore_ascii_case(b"Content-Type") {
+            let mut value = &line[colon + 1..];
+            while value.first() == Some(&b' ') {
+                value = &value[1..];
+            }
+            let (mimetype, applied) = apply_default_charset(req, value);
+            let (output, heap) = req.output_and_heap();
+            if output.mimetype.is_none()
+                && let Ok(mut block) = heap.block(mimetype.len() + 1)
+            {
+                block.bytes_mut()[..mimetype.len()].copy_from_slice(&mimetype);
+                output.mimetype = Some(block);
+            }
+            if applied {
+                held = b"Content-type: ".to_vec();
+                held.extend_from_slice(&mimetype);
+            }
+            output.send_default_content_type = false;
+        } else if name.eq_ignore_ascii_case(b"Location") {
+            let code = req.output().response_code;
+            if !(300..=399).contains(&code) && code != 201 {
+                update_response_code(
+                    req,
+                    if response_code != 0 {
+                        response_code
+                    } else {
+                        302
+                    },
+                );
+            }
+        } else if name.eq_ignore_ascii_case(b"WWW-Authenticate") {
+            update_response_code(req, 401);
+        }
+    }
+    if response_code != 0 {
+        update_response_code(req, response_code);
+    }
+    header_add_op(req, replace, held);
+    true
+}
+
+/// `sapi_header_op` for `SAPI_HEADER_DELETE` and `SAPI_HEADER_DELETE_ALL`
+/// (`Z/main/SAPI.c:675`), what `header_remove()` reaches: refused with
+/// the warning once the block is sent; with no name, the list cleared;
+/// with one, silently nothing for an empty name, the warning for a name
+/// with a colon in it, and every line of that name dropped otherwise.
+/// Whether the act was taken is the answer.
+pub(crate) fn header_remove(req: &mut Request, name: Option<&[u8]>) -> bool {
+    if !header_modifiable(req) {
+        return false;
+    }
+    let Some(name) = name else {
+        req.output_mut().headers.clear();
+        return true;
+    };
+    if name.is_empty() {
+        return false;
+    }
+    let name = trimmed_end(name);
+    if name.contains(&b':') {
+        req.note_error(Level::Warning, "Header to delete may not contain colon.");
+        return false;
+    }
+    remove_header(&mut req.output_mut().headers, name, 0);
     true
 }
 
@@ -902,8 +1216,8 @@ pub(crate) fn end_all(req: &mut Request) {
 /// committed if nothing sent it, the layer inactive, every handler
 /// left freed and the stack's storage with them; and
 /// `sapi_deactivate_destroy` (`Z/main/SAPI.c:537`) after it, the
-/// mimetype given back. Nothing of the request runs between the two,
-/// so they are one act here.
+/// mimetype and the status line given back. Nothing of the request
+/// runs between the two, so they are one act here.
 pub(crate) fn deactivate(req: &mut Request) {
     if req.output().flags & ACTIVATED != 0 {
         header(req);
@@ -924,6 +1238,7 @@ pub(crate) fn deactivate(req: &mut Request) {
     if let Some(mimetype) = output.mimetype.take() {
         heap.free_block(mimetype);
     }
+    send_headers_free(req);
 }
 
 /// `php_output_handler_start` (`Z/main/output.c:545`): the handler
@@ -1180,4 +1495,94 @@ fn read_op(req: &mut Request, op: &OutputOp) -> Result<Value, Thrown> {
         }
         _ => Value::bool(false),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::api::request::Request;
+    use crate::engine::{Engine, RequestDescription};
+
+    /// A request under a host whose `header_handler` takes a line.
+    fn web_request() -> Request {
+        let engine = Engine::builder().build();
+        Request::new(
+            Arc::clone(&engine.shared),
+            RequestDescription {
+                is_web: true,
+                ..RequestDescription::default()
+            },
+        )
+    }
+
+    /// `sapi_send_headers` under a web host: the default `Content-type`
+    /// goes on the end of the list when the first byte reaches the host,
+    /// after the lines `header()` left, and the block is sent (#289).
+    #[test]
+    fn a_web_host_s_block_ends_in_the_default_content_type_after_the_first_byte() {
+        let mut req = web_request();
+        assert!(req.header_add(b"X-A: 1", true, 0));
+        assert_eq!(req.header_block(), b"X-A: 1\r\n");
+        assert!(req.headers_sent().is_none());
+        assert_eq!(req.response_code(), 200);
+        req.write(b"x");
+        assert_eq!(
+            req.header_block(),
+            b"X-A: 1\r\nContent-type: text/html; charset=UTF-8\r\n"
+        );
+        assert!(req.headers_sent().is_some());
+        assert!(!req.header_add(b"X-B: 2", true, 0));
+    }
+
+    /// `sapi_header_op` on a `Content-Type`: the default charset applied
+    /// with no space and the line rewritten as `Content-type: `, the
+    /// default line stopped, and a replace dropping the lines of the
+    /// name whatever their case; a type that is not `text/` stands as
+    /// written.
+    #[test]
+    fn a_content_type_header_takes_the_default_charset_and_stops_the_default_line() {
+        let mut req = web_request();
+        assert!(req.header_add(b"Content-Type: text/plain", true, 0));
+        assert_eq!(
+            req.headers_list(),
+            [b"Content-type: text/plain;charset=UTF-8".to_vec()]
+        );
+        assert!(req.header_add(b"content-type: application/json", true, 0));
+        assert_eq!(
+            req.headers_list(),
+            [b"content-type: application/json".to_vec()]
+        );
+        assert!(req.header_add(b"X-B: 3", false, 0));
+        assert!(req.header_add(b"X-B: 4", false, 0));
+        assert!(req.header_remove(Some(b"x-b")));
+        req.write(b"x");
+        assert_eq!(req.header_block(), b"content-type: application/json\r\n");
+    }
+
+    /// The CLI's `header_handler` answers zero, so no line is listed, and
+    /// what a `header()` moves under it is the status line and the code:
+    /// an `HTTP/` line sets both, a `Location` outside a redirect sets
+    /// 302, and the block sent gives the status line back.
+    #[test]
+    fn the_cli_s_handler_takes_no_line_and_the_status_line_moves_the_code() {
+        let mut req = crate::test::request();
+        assert_eq!(req.response_code(), 0);
+        assert!(req.header_add(b"X-A: 1", true, 0));
+        assert!(req.headers_list().is_empty());
+        assert!(req.header_add(b"HTTP/1.1 404 Nope\r\n", true, 0));
+        assert_eq!(req.status_line(), Some(&b"HTTP/1.1 404 Nope"[..]));
+        assert_eq!(req.response_code(), 404);
+        assert!(req.header_add(b"Location: /x", true, 0));
+        assert_eq!(req.response_code(), 302);
+        assert!(req.status_line().is_none());
+        assert!(req.header_add(b"HTTP/1.1 302 Found", true, 0));
+        assert!(req.status_line().is_some());
+        assert!(!req.header_add(b"", true, 0));
+        assert!(!req.header_add(b"X-C: a\nb", true, 0));
+        req.write(b"x");
+        assert!(req.status_line().is_none());
+        assert!(req.headers_list().is_empty());
+        assert_eq!(req.header_block(), b"");
+    }
 }
