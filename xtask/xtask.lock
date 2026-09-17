@@ -12,6 +12,9 @@ compile_identity::Ask
 compile_identity::REGIME
 compile_identity::run
 computed::command
+crosscheck::Ask
+crosscheck::kept
+crosscheck::run
 divergence::Counts
 divergence::Counts::cell
 divergence::Divergence

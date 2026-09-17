@@ -256,6 +256,19 @@ pub(crate) enum Command {
     /// Without an argument, the per-commit corpus of design §6.1: every
     /// file of `Zend/tests`, `tests` and `sapi/cli` of the pinned php-src.
     CompileIdentity(Identity),
+    /// Hold each default extension's rendering to the oracle's `php --re
+    /// <name>` bytes, kept in the store; one reading per extension.
+    ///
+    /// The oracle's bytes are kept at
+    /// `target/harness/crosscheck/ext/<name>/<digest>.re`; the reading is
+    /// scoped `ext/<name>` and names the invocation. No engine renders an
+    /// extension yet, so every reading fails saying so.
+    Crosscheck {
+        /// One extension by its php name, repeatable; default the
+        /// bundle's default set.
+        #[arg(long = "ext", value_name = "NAME")]
+        ext: Vec<String>,
+    },
     /// Allow `unsafe` only in the homes the manifest's unsafe.homes rule names.
     UnsafeAudit,
     /// Write the files the manifest's `generated` rules render (ext/clippy.toml).
@@ -539,6 +552,8 @@ pub enum Section {
     /// The port-map reading: the census joined to `api.lock`, with the
     /// rows the port has not taken.
     PortMap,
+    /// The crosscheck readings, one row per extension.
+    Crosscheck,
     /// The ticket readings, one row per ticket: its criteria, what closed
     /// it and the session.
     Ticket,

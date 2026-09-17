@@ -65,7 +65,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=883ac04f68b599a185e175b9ee98b880ebfbbea2f9b93579c71bc06d1e980ec4 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=8d7e783d84216dcf79c427456a7dc562402113f3cd559a40e8511b1c9ca888df out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -140,6 +140,7 @@ Commands:
   phpt               Run the pinned `.phpt` corpus through the engine and hold each test to its `--EXPECT*--` section; one reading per subset, scoped to the crate whose subset it is
   port-map           Join the Mahout census to `api.lock`: every item `same`, `renamed` or `gone`, the rows the port has not taken as the number. One reading, at the crate the lock lives with
   compile-identity   Compile a corpus under the oracle's dump recipe and under the engine, and hold every file to byte-identity; one reading per corpus, scoped to the corpus
+  crosscheck         Hold each default extension's rendering to the oracle's `php --re <name>` bytes, kept in the store; one reading per extension
   unsafe-audit       Allow `unsafe` only in the homes the manifest's unsafe.homes rule names
   generate           Write the files the manifest's `generated` rules render (ext/clippy.toml)
   steer              Apply a proposal to one of the harness's own files, and only where it adds: one changed value writes nothing
@@ -152,7 +153,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=c9606df86cbaddbd9117c43d4137f74d4682ac8e13ea43baca53f13e2b1e8c4f out=6e970f91a24d994ab80d2f44d6e5be3d143369ba9deb072e4dde81463ececadb -->
+<!-- /computed in=0e94038419861567d33c13037aa7e321b3b74975f63470b2612b0defccbcf6ee out=96d11a9ecf72837e00c6fd69cebc30b25fb33eda8288a272f24e73ed031f9f0c -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

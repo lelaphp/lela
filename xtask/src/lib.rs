@@ -5,7 +5,8 @@
 //! the definition of done, `track`, the branch's track and its base,
 //! `vocab`, the glossary as a sensor, `ticket`, the closer, `phpt`, the
 //! subset runner, `witness`, the rustdoc witnesses, `compile_identity`,
-//! op-array identity against php's own dump, and `status`, the one
+//! op-array identity against php's own dump, `crosscheck`, each
+//! extension's rendering against php's own `--re`, and `status`, the one
 //! renderer.
 //!
 //! What the crate exposes is what a caller of an instrument needs and
@@ -26,6 +27,7 @@ pub mod cli;
 pub mod clippy;
 pub mod compile_identity;
 pub mod computed;
+pub mod crosscheck;
 pub mod divergence;
 pub mod done;
 pub mod generated;
@@ -172,6 +174,7 @@ fn command_line() -> Result<()> {
         } => phpt_command(&root, &manifest, &store, subset, full, jit, engine),
         Command::PortMap { tree } => port_map::command(&root, &manifest, &store, tree.as_deref()),
         Command::CompileIdentity(ask) => identity_command(&root, &manifest, &store, ask),
+        Command::Crosscheck { ext } => crosscheck_command(&root, &manifest, &store, ext),
         Command::UnsafeAudit => record(&store, &unsafe_audit::run(&root, &manifest)?),
         Command::Generate => generate_command(&root, &manifest),
         Command::ApiCheck { write } => api_check::run(&manifest, &root, &store, write),
@@ -333,6 +336,25 @@ fn identity_command(
     record(
         store,
         &compile_identity::run(root, manifest, &registry, &ask)?,
+    )
+}
+
+/// `xtask crosscheck`: the extensions asked for, each rendered by the
+/// oracle and held against the engine's rendering, each written.
+fn crosscheck_command(
+    root: &Path,
+    manifest: &Manifest,
+    store: &Store,
+    ext: Vec<String>,
+) -> Result<()> {
+    let registry = Registry::load(root)?;
+    let ask = crosscheck::Ask {
+        ext,
+        renderings: None,
+    };
+    record(
+        store,
+        &crosscheck::run(root, manifest, &registry, store, &ask)?,
     )
 }
 

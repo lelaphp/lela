@@ -267,7 +267,7 @@ Two tables beside the rules. `[telemetry]` carries the sensor telemetry's one nu
 **Interface.** Every instrument ends by writing one reading; every rendering reads them; nothing else touches the store. One shape:
 
 ```toml
-instrument = "witness"                     # api-check | permit | done | track-work | ticket | usage | budget | clippy | test | phpt | port-map | compile-identity | unsafe-audit | steer | divergence-reason | witness | vocab, the subcommands that write one, in cli order; bench | crosscheck | fuzz | mutants are named here and not built yet
+instrument = "witness"                     # api-check | permit | done | track-work | ticket | usage | budget | clippy | test | phpt | port-map | compile-identity | crosscheck | unsafe-audit | steer | divergence-reason | witness | vocab, the subcommands that write one, in cli order; bench | fuzz | mutants are named here and not built yet
 scope = "ext/pcre"                         # a crate, a corpus subset, a gate id, or "workspace"
 rule = "witness.coverage"                  # a manifest rule id when one applies
 status = "fail"                            # pass | fail | skip

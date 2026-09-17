@@ -17,6 +17,7 @@ use serde_json::{Map, Value, json};
 
 use crate::api_check;
 use crate::cli::{Format, Section};
+use crate::crosscheck;
 use crate::divergence::{Kind, Registry, Status};
 use crate::git::git;
 use crate::manifest::{Manifest, Measure, SCRIPTS, Week};
@@ -99,6 +100,7 @@ pub fn render(
         ),
         Section::Bench => (instrument(&readings, crate::bench::INSTRUMENT), INSTRUMENT),
         Section::PortMap => (instrument(&readings, port_map::INSTRUMENT), INSTRUMENT),
+        Section::Crosscheck => (instrument(&readings, crosscheck::INSTRUMENT), INSTRUMENT),
         Section::Ticket => (instrument(&readings, "ticket"), TICKET),
         Section::Track => (last_run(&store.log()?), TRACK),
         Section::Usage => (last_per_scope(&store.log()?, usage::INSTRUMENT), USAGE),
