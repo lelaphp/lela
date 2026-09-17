@@ -7,9 +7,13 @@
 //! of the two served it.
 //!
 //! **Under the recipe.** The pin's preamble goes ahead of the snippet, so
-//! the code stands on line 2 where php's own error text puts it, and the
-//! recipe's ini is laid over the engine's defaults, so `precision`,
-//! `error_reporting` and the rest are the pin's. An entry the engine has
+//! the code stands on line 2 where php's own error text puts it; the
+//! request is named the recipe's `script_name`, so `__FILE__` and the
+//! `in %s on line %d` of a diagnostic read `witness.php` as they do under
+//! the fresh-process adapter, and not `Standard input code`, the name
+//! `serve_capture` gives a piped source (#293); and the recipe's ini is
+//! laid over the engine's defaults, so `precision`, `error_reporting` and
+//! the rest are the pin's. An entry the engine has
 //! no name for is carried and read by nobody, which is what php does with
 //! `opcache.*` when opcache is not loaded.
 //!
@@ -49,7 +53,11 @@ pub(crate) fn serve(recipe: &Recipe, snippet: &str) -> Result<Observation> {
     // A fresh engine per snippet, which is the isolation a process gave
     // (design §8).
     let served = panic::catch_unwind(AssertUnwindSafe(|| {
-        php_bundle::test::engine(&ini).serve_capture(&source, Capture::default())
+        php_bundle::test::engine(&ini).serve_capture_as(
+            recipe.script_name.as_bytes(),
+            &source,
+            Capture::default(),
+        )
     }));
     let wall = started.elapsed();
     let Ok(served) = served else {

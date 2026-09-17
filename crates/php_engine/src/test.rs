@@ -58,11 +58,24 @@ pub struct Served {
 
 impl Engine {
     /// Serve `source` as a CLI request into `sink` and hand back what it
-    /// wrote, the shape every extension's capture test reads.
-    pub fn serve_capture(&self, source: &str, mut sink: Capture) -> Served {
+    /// wrote, the shape every extension's capture test reads. The request
+    /// is named `Standard input code`, the CLI's name for a piped source
+    /// (`php -r`, stdin); a test that pins `__FILE__` or the `in %s on
+    /// line %d` of a diagnostic to another name serves through
+    /// [`Engine::serve_capture_as`].
+    pub fn serve_capture(&self, source: &str, sink: Capture) -> Served {
+        self.serve_capture_as(b"Standard input code", source, sink)
+    }
+
+    /// [`Engine::serve_capture`] with the request named `name`: what
+    /// `__FILE__`, `$_SERVER['SCRIPT_NAME']` and every diagnostic's `in %s`
+    /// read. The witness lane's linked adapter serves each snippet under
+    /// the recipe's `script_name` this way, as the fresh-process adapter
+    /// runs it as that file (#293).
+    pub fn serve_capture_as(&self, name: &[u8], source: &str, mut sink: Capture) -> Served {
         let description = RequestDescription {
             sapi_name: String::from("cli"),
-            script_name: Some(b"Standard input code".to_vec()),
+            script_name: Some(name.to_vec()),
             source: Some(source.as_bytes().to_vec()),
             cwd: std::env::current_dir().unwrap_or_default(),
             ..RequestDescription::default()

@@ -221,6 +221,26 @@ fn the_snippet_runs_as_witness_php_with_the_code_on_line_two() {
 }
 
 #[test]
+fn the_linked_engine_names_the_snippet_witness_php_as_the_recipe_does() {
+    if oracle().is_none() {
+        return;
+    }
+    // The linked adapter serves the snippet under the recipe's
+    // `script_name`, so a diagnostic's `in %s on line %d` names the file
+    // the fresh-process adapter runs it as, and not `Standard input
+    // code`, `serve_capture`'s name for a piped source (#293). The name
+    // is pinned literally, where every witness in the tree writes `%s`.
+    let text = format!(
+        "/// ```php\n/// ini_set('display_errors', 'stderr');\n/// echo $u, 'to the first';\n/// ```\n{}pub fn native() {{}}\n",
+        "/// ```expect\n/// to the first\n/// ```\n/// ```stderr\n/// Warning: Undefined variable $u in witness.php on line 3\n/// ```\n"
+    );
+    let file = Path::new("ext/fixture/src/lib.rs");
+    let tally = judged_under(&Runner::Linked, file, &text, &registry(""), false);
+    let (judgement, note) = only(&tally);
+    assert_eq!(judgement, Judgement::Pass, "{note}");
+}
+
+#[test]
 fn a_witness_that_differs_notes_the_difference_and_an_accepted_row_notes_its_reason() {
     if oracle().is_none() {
         return;
