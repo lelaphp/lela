@@ -547,6 +547,21 @@ pub(crate) fn new<T: Tier>(
 /// #0 {main}
 ///   thrown in %s on line 3
 /// ```
+///
+/// The method found is held to `zend_std_get_static_method`'s access
+/// rule before anything else is asked of it: a private method from the
+/// global scope is `zend_bad_method_call`, the name as written, ahead
+/// of its being an instance method called on the class.
+///
+/// ```php
+/// Exception::__CLONE();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Call to private method Exception::__CLONE() from global scope in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
 pub(crate) fn init_static_method_call<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -575,6 +590,11 @@ pub(crate) fn init_static_method_call<T: Tier>(
                 let thrown = undefined_method(req, class, &written);
                 return threw(req, frame, &thrown);
             };
+            if let Err(thrown) =
+                req.check_method_access(function, written.as_str_bytes().unwrap_or_default())
+            {
+                return threw(req, frame, &thrown);
+            }
             (function, Some(written))
         }
         _ => {
@@ -657,6 +677,22 @@ pub(crate) fn init_static_method_call<T: Tier>(
 /// #0 {main}
 ///   thrown in %s on line 3
 /// ```
+///
+/// `zend_std_get_method`'s access rule ([`Request::check_method_access`]):
+/// a method that is not public is called from its own class's scope,
+/// and from anywhere else, the global scope here, it is
+/// `zend_bad_method_call`, naming the visibility, the declaring class
+/// and the method as written. The receiver is freed before the throw.
+///
+/// ```php
+/// (new Error)->__clone();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Call to private method Error::__clone() from global scope in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
 pub(crate) fn init_method_call<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -695,6 +731,12 @@ pub(crate) fn init_method_call<T: Tier>(
         exec::free_operand(req, frame, code, op.op1_type, op.op1);
         return threw(req, frame, &thrown);
     };
+    if let Err(thrown) =
+        req.check_method_access(function, written.as_str_bytes().unwrap_or_default())
+    {
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+        return threw(req, frame, &thrown);
+    }
     let name = match crate::ops::to_string(req, &written) {
         Ok(name) => name,
         Err(thrown) => return threw(req, frame, &thrown),
@@ -725,6 +767,167 @@ pub(crate) fn init_method_call<T: Tier>(
         called_scope: Some(class),
         stage: CallStage::Building,
     });
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_FETCH_THIS` (`Z/Zend/zend_vm_def.h:9214`): `$this` outside a
+/// method's body. `EX(This)` is an object only on a frame a method call
+/// pushed, and no user frame is one until a method body is compiled,
+/// so the frame here holds no receiver and this is php's `Error`
+/// (`zend_this_not_in_object_context_helper`), the temporary it would
+/// write left undefined (`UNDEF_RESULT`).
+///
+/// ```php
+/// echo $this;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Using $this when not in object context in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// $this->m(1);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Using $this when not in object context in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn fetch_this<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    _: &OpArray,
+    _: &Opline,
+) -> Edge {
+    let thrown = crate::api::raising::throw(req, "Error", "Using $this when not in object context");
+    threw(req, frame, &thrown)
+}
+
+/// `ZEND_FETCH_OBJ_R` (`Z/Zend/zend_vm_def.h:2069`) over a property
+/// named at compile time: the container read as
+/// `GET_OP1_OBJ_ZVAL_PTR_UNDEF` reads it, a reference followed, an
+/// undefined variable having warned; what is no object warns `Attempt
+/// to read property "p" on int` (`zend_wrong_property_read`, the value
+/// as `zend_zval_value_name` names it) and writes `null`. An
+/// object's property is read through the class's `read_property`
+/// ([`Request::read_property`]): the declared slot where the scope may
+/// see it, php's `Error` where it may not, the dynamic table, the
+/// `Error` for a typed property nothing has initialised, and the
+/// warning and `null` for a name the object has not. What is written
+/// is a temporary with one more owner of the value; the container is freed
+/// (`FREE_OP1`) before the pending throwable is read.
+///
+/// ```php
+/// class C { public $p = 1; protected $q = 2; private $r = 3; public $u; }
+/// $c = new C; $n = 1;
+/// var_dump($c->p, $c->u, $c->nope, $n->p, $z->p, $c->p->q);
+/// ```
+/// ```expect
+/// Warning: Undefined property: C::$nope in %s on line 4
+///
+/// Warning: Attempt to read property "p" on int in %s on line 4
+///
+/// Warning: Undefined variable $z in %s on line 4
+///
+/// Warning: Attempt to read property "p" on null in %s on line 4
+///
+/// Warning: Attempt to read property "q" on int in %s on line 4
+/// int(1)
+/// NULL
+/// NULL
+/// NULL
+/// NULL
+/// NULL
+/// ```
+///
+/// ```php
+/// class C { public $p = 1; protected $q = 2; }
+/// $c = new C; echo $c->q;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Cannot access protected property C::$q in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+///
+/// ```php
+/// class C { private $r = 3; }
+/// echo (new C)->r;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Cannot access private property C::$r in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+///
+/// A typed property nothing has written is php's `Error`, `Typed
+/// property C::$t must not be accessed before initialization`; the
+/// witness of that waits on the compiler reading a typed property
+/// (`public int $t;`), which it does not yet, and every typed property
+/// a native declares is written by its constructor.
+///
+/// A native class's declared properties are read the same way: the
+/// four of `PhpToken`, typed and written by its constructor.
+///
+/// ```php
+/// $k = new PhpToken(328, 'echo', 1, 6); $l = new PhpToken(1, 'x');
+/// var_dump($k->id, $k->text, $k->line, $k->pos, $l->line, $l->pos);
+/// ```
+/// ```expect
+/// int(328)
+/// string(4) "echo"
+/// int(1)
+/// int(6)
+/// int(-1)
+/// int(-1)
+/// ```
+pub(crate) fn fetch_obj_r<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let name = match op.op2_type {
+        OperandKind::Const => exec::constant(code, ConstIdx(op.op2)),
+        _ => {
+            return Err(Fatal::Error(String::from(
+                "InternalError: ZEND_FETCH_OBJ_R over a property named at run time",
+            )));
+        }
+    };
+    if op.op1_type == OperandKind::Unused {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_FETCH_OBJ_R over $this, which no frame here carries",
+        )));
+    }
+    let name = name.as_str_bytes().unwrap_or_default().to_vec();
+    let container = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
+    let read = if let Some(object) = container.as_object() {
+        req.read_property(object.heap(), &name)
+    } else {
+        crate::api::raising::warning(
+            req,
+            &format!(
+                "Attempt to read property \"{}\" on {}",
+                String::from_utf8_lossy(&name),
+                crate::ops::value_name(req, &container)
+            ),
+        );
+        Ok(Value::null())
+    };
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    let value = match read {
+        Ok(value) => value,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, value);
+    req.release(previous);
     Ok(advance(req, frame))
 }
 

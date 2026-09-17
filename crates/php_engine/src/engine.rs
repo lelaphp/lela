@@ -414,9 +414,13 @@ impl EngineBuilder {
         // `zend_register_internal_class_with_flags` and `zend_register_functions`
         // over the class's methods: each declaration takes its methods,
         // and each method's entry is numbered in the order it is met.
-        let mut classes: Vec<ClassDecl> = crate::classes::zend_classes();
+        let zend = crate::classes::zend_classes();
+        let mut classes: Vec<ClassDecl> = Vec::new();
         let mut methods = Vec::new();
-        for (decl, entries) in extensions.iter().flat_map(|e| e.classes.iter()) {
+        for (decl, entries) in zend
+            .iter()
+            .chain(extensions.iter().flat_map(|e| e.classes.iter()))
+        {
             let mut decl = decl.clone();
             let class = ClassId(u32::try_from(classes.len()).unwrap_or(u32::MAX));
             for (method, entry) in entries {

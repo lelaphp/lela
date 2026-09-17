@@ -19,7 +19,7 @@ use php_heap::{
     VmStack, Zval,
 };
 use php_unit::Unit;
-use php_unit::decl::{ClassDecl, ClassKind, FunctionDecl, MethodDecl};
+use php_unit::decl::{ClassDecl, ClassKind, FunctionDecl, MethodDecl, Visibility};
 
 use crate::api::abi::{Callable, IniVerdict};
 use crate::api::call::Function;
@@ -614,6 +614,97 @@ impl Request {
                 .and_then(|name| self.class_named(&name.0));
         }
         false
+    }
+
+    /// `zend_get_executed_scope`: the class of the method being served,
+    /// which is a native method's while its entry runs, and none at the
+    /// main op array or inside a function. A user frame carries no
+    /// scope until a method body is compiled, so the loop's own scope
+    /// is the global one.
+    pub(crate) fn executed_scope(&self) -> Option<ClassId> {
+        let call = self.vm.serving_call()?;
+        self.native_method(call.function).map(|m| m.class)
+    }
+
+    /// `ce->parent`: the linked parent of a class, none at a root.
+    pub(crate) fn class_parent(&self, class: ClassId) -> Option<ClassId> {
+        self.class_decl(class)?
+            .parent
+            .as_ref()
+            .and_then(|name| self.class_named(&name.0))
+    }
+
+    /// `zend_check_protected`: whether `scope` is `class` or one of its
+    /// parents, or `class` is `scope` or one of its parents; false with
+    /// no scope. Each walk is cut at a depth no declaration can make.
+    pub(crate) fn check_protected(&self, class: ClassId, scope: Option<ClassId>) -> bool {
+        let Some(scope) = scope else {
+            return false;
+        };
+        let up = |from: ClassId, to: ClassId| {
+            let mut at = Some(from);
+            for _ in 0..64 {
+                match at {
+                    Some(here) if here == to => return true,
+                    Some(here) => at = self.class_parent(here),
+                    None => return false,
+                }
+            }
+            false
+        };
+        up(class, scope) || up(scope, class)
+    }
+
+    /// `zend_std_get_method`'s access check, which
+    /// `zend_std_get_static_method` and `zend_std_get_constructor` share:
+    /// a public method is anyone's; a private or a protected one is
+    /// called from its own class's scope, a protected one from a scope
+    /// `zend_check_protected` relates to it, and otherwise php's `Error`,
+    /// `zend_bad_method_call`, naming the visibility, the method's class
+    /// and the name as `written`, and the calling scope or `global
+    /// scope`. A class with `__call` would take the call instead; none
+    /// declared here has one.
+    pub(crate) fn check_method_access(
+        &mut self,
+        function: Function,
+        written: &[u8],
+    ) -> Result<(), Thrown> {
+        let Some(method) = self.native_method(function) else {
+            return Ok(());
+        };
+        let class = method.class;
+        let Some(decl) = self.method_decl(function) else {
+            return Ok(());
+        };
+        let visibility = decl.visibility;
+        let scope = self.executed_scope();
+        let allowed = match visibility {
+            Visibility::Public => true,
+            _ if scope == Some(class) => true,
+            Visibility::Private => false,
+            Visibility::Protected => self.check_protected(class, scope),
+        };
+        if allowed {
+            return Ok(());
+        }
+        let shown = match visibility {
+            Visibility::Public => "public",
+            Visibility::Protected => "protected",
+            Visibility::Private => "private",
+        };
+        let class = self.class_name(class);
+        let from = match scope {
+            Some(scope) => format!("scope {}", self.class_name(scope)),
+            None => String::from("global scope"),
+        };
+        Err(crate::api::raising::throw(
+            self,
+            "Error",
+            &format!(
+                "Call to {shown} method {class}::{}() from {from}",
+                String::from_utf8_lossy(written)
+            ),
+        ))
     }
 
     /// `object_init_ex`'s refusals: an interface, a trait, an enum or an
@@ -1503,6 +1594,89 @@ impl Request {
             .iter()
             .find(|(k, _)| matches!(k, php_heap::Key::Str(s) if s.bytes() == name))
             .map(|(_, z)| Value::of_zval(z))
+    }
+
+    /// `zend_std_read_property` under `BP_VAR_R`, the handler
+    /// `FETCH_OBJ_R` calls: `zend_get_property_offset` places the name,
+    /// a declared property's slot where the scope may see it, php's
+    /// `Error` `Cannot access private property C::$p` where it may not
+    /// (`zend_bad_property_access`), and the dynamic table for a name
+    /// the class did not declare. A typed slot nothing has written is
+    /// php's `Error` for a property read before initialization; an
+    /// untyped one that `unset` emptied reads as a dynamic name does,
+    /// and a name neither holds warns `Undefined property: C::$p` and
+    /// is `null`. What is read is one more owner of the value
+    /// (`ZVAL_COPY_DEREF`), a reference followed. A `__get` would be
+    /// served between the slot and the warning; no class here has one.
+    pub(crate) fn read_property(&mut self, o: Obj, name: &[u8]) -> Result<Value, Thrown> {
+        let class = ClassId(o.class());
+        let declared = self.class_decl(class).and_then(|decl| {
+            decl.properties
+                .iter()
+                .filter(|p| p.is_instance)
+                .enumerate()
+                .find(|(_, p)| &*p.name.0 == name)
+                .map(|(i, p)| {
+                    (
+                        u32::try_from(i).unwrap_or(u32::MAX),
+                        p.visibility,
+                        p.ty.is_some(),
+                    )
+                })
+        });
+        let shown = String::from_utf8_lossy(name).into_owned();
+        if let Some((slot, visibility, typed)) = declared {
+            let scope = self.executed_scope();
+            let allowed = match visibility {
+                Visibility::Public => true,
+                _ if scope == Some(class) => true,
+                Visibility::Private => false,
+                Visibility::Protected => self.check_protected(class, scope),
+            };
+            if !allowed {
+                let word = match visibility {
+                    Visibility::Public => "public",
+                    Visibility::Protected => "protected",
+                    Visibility::Private => "private",
+                };
+                let class = self.class_name(class);
+                return Err(crate::api::raising::throw(
+                    self,
+                    "Error",
+                    &format!("Cannot access {word} property {class}::${shown}"),
+                ));
+            }
+            let z = o.slot(slot);
+            if !z.is_undef() {
+                let value = Value::of_zval(z).deref();
+                self.addref(&value);
+                return Ok(value);
+            }
+            if typed {
+                let class = self.class_name(class);
+                return Err(crate::api::raising::throw(
+                    self,
+                    "Error",
+                    &format!(
+                        "Typed property {class}::${shown} must not be accessed before initialization"
+                    ),
+                ));
+            }
+        }
+        let dynamic = o
+            .properties()
+            .into_iter()
+            .flat_map(|table| table.iter().collect::<Vec<_>>())
+            .find(|(k, _)| matches!(k, php_heap::Key::Str(s) if s.bytes() == name))
+            .map(|(_, z)| Value::of_zval(z));
+        if let Some(value) = dynamic {
+            let value = value.deref();
+            self.addref(&value);
+            return Ok(value);
+        }
+        let class = self.class_name(class);
+        crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
+        Ok(Value::null())
     }
 
     /// A property write, `zend_std_write_property` without the handler

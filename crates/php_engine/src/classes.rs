@@ -6,28 +6,109 @@
 //! declaration gives is the class a throwable knows itself by, which is
 //! the name an uncaught fatal prints.
 
-use php_unit::decl::{ClassDecl, ClassFlags, ClassKind, EnumBacking, Name};
+use php_unit::decl::{
+    ClassDecl, ClassFlags, ClassKind, EnumBacking, FunctionDecl, MethodDecl, Name, Visibility,
+};
 
-/// `Throwable` and the throwables php declares under it, parents first.
-pub(crate) fn zend_classes() -> Vec<ClassDecl> {
+use crate::api::abi::{Entry, NativeClassDecl};
+use crate::api::raising::Thrown;
+use crate::api::request::Request;
+use crate::api::values::Value;
+
+/// `Throwable` and the throwables php declares under it, parents first,
+/// each with the methods it declares so far beside it: `Exception` and
+/// `Error` carry their private `__clone` (`zend_exceptions.stub.php`),
+/// the one method of theirs the visibility rule of
+/// `zend_std_get_method` has to be held to. The rest of their methods
+/// arrive with the linker (design §6.2).
+pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
     vec![
-        declared(b"Stringable", ClassKind::Interface, None),
-        declared(b"Throwable", ClassKind::Interface, None),
-        declared(b"Exception", ClassKind::Class, None),
-        declared(b"Error", ClassKind::Class, None),
-        declared(b"TypeError", ClassKind::Class, Some(b"Error")),
-        declared(b"ValueError", ClassKind::Class, Some(b"Error")),
-        declared(b"ArithmeticError", ClassKind::Class, Some(b"Error")),
-        declared(
-            b"DivisionByZeroError",
-            ClassKind::Class,
-            Some(b"ArithmeticError"),
+        (
+            declared(b"Stringable", ClassKind::Interface, None),
+            Vec::new(),
         ),
-        declared(b"ArgumentCountError", ClassKind::Class, Some(b"TypeError")),
-        declared(b"UnhandledMatchError", ClassKind::Class, Some(b"Error")),
-        declared(b"CompileError", ClassKind::Class, Some(b"Error")),
-        declared(b"ParseError", ClassKind::Class, Some(b"CompileError")),
+        (
+            declared(b"Throwable", ClassKind::Interface, None),
+            Vec::new(),
+        ),
+        (
+            declared(b"Exception", ClassKind::Class, None),
+            vec![(private_clone(), throwable_clone as Entry)],
+        ),
+        (
+            declared(b"Error", ClassKind::Class, None),
+            vec![(private_clone(), throwable_clone as Entry)],
+        ),
+        (
+            declared(b"TypeError", ClassKind::Class, Some(b"Error")),
+            Vec::new(),
+        ),
+        (
+            declared(b"ValueError", ClassKind::Class, Some(b"Error")),
+            Vec::new(),
+        ),
+        (
+            declared(b"ArithmeticError", ClassKind::Class, Some(b"Error")),
+            Vec::new(),
+        ),
+        (
+            declared(
+                b"DivisionByZeroError",
+                ClassKind::Class,
+                Some(b"ArithmeticError"),
+            ),
+            Vec::new(),
+        ),
+        (
+            declared(b"ArgumentCountError", ClassKind::Class, Some(b"TypeError")),
+            Vec::new(),
+        ),
+        (
+            declared(b"UnhandledMatchError", ClassKind::Class, Some(b"Error")),
+            Vec::new(),
+        ),
+        (
+            declared(b"CompileError", ClassKind::Class, Some(b"Error")),
+            Vec::new(),
+        ),
+        (
+            declared(b"ParseError", ClassKind::Class, Some(b"CompileError")),
+            Vec::new(),
+        ),
     ]
+}
+
+/// `private function __clone(): void {}`, as `Exception` and `Error`
+/// declare it.
+fn private_clone() -> MethodDecl {
+    MethodDecl {
+        function: FunctionDecl {
+            name: Name(b"__clone".as_slice().into()),
+            parameters: Vec::new(),
+            return_type: Some(php_unit::decl::Type::Void),
+            returns_by_ref: false,
+            attributes: Vec::new(),
+            doc_comment: None,
+            file: Name(Box::new([])),
+            line: 0,
+        },
+        visibility: Visibility::Private,
+        is_instance: true,
+        is_abstract: false,
+        is_final: false,
+        tentative_return: false,
+    }
+}
+
+/// `ZEND_METHOD(Exception, __clone)`: private, so a call from outside
+/// the class never reaches it; what reflection could reach is php's
+/// `Exception` saying an object is not cloned this way.
+fn throwable_clone(req: &mut Request) -> Result<Value, Thrown> {
+    Err(crate::api::raising::throw(
+        req,
+        "Exception",
+        "Cannot clone object using __clone()",
+    ))
 }
 
 fn declared(name: &[u8], kind: ClassKind, parent: Option<&[u8]>) -> ClassDecl {
