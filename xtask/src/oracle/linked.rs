@@ -62,3 +62,29 @@ pub(crate) fn serve(recipe: &Recipe, snippet: &str) -> Result<Observation> {
         wall,
     })
 }
+
+/// Whether the linked bundle carries the extension `name`: what the
+/// manifest's `feature =` row names, asked of the engine the way `phpt`
+/// asks a binary through `-m` (harness §7). The bundle xtask links is
+/// `php_bundle`'s default set, so a row behind a feature is one the linked
+/// engine cannot have, and a lane that would run its witness here reads a
+/// fail nobody can fix in the crate (#292); this is what tells the lane to
+/// skip instead. Asked of the engine and not of a `cfg`, since what is
+/// linked is the bundle's word and not a copy in the harness. A name that
+/// is not a feature's shape is not asked and is not loaded.
+pub(crate) fn loads(name: &str) -> bool {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    {
+        return false;
+    }
+    // The one line the four rows' own witnesses ask, so what the probe
+    // reads is what a witness would.
+    let source = format!("<?php var_dump(extension_loaded('{name}'));");
+    let served = panic::catch_unwind(AssertUnwindSafe(|| {
+        php_bundle::test::engine(&[]).serve_capture(&source, Capture::default())
+    }));
+    served.is_ok_and(|served| served.stdout == b"bool(true)\n")
+}

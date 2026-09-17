@@ -433,6 +433,59 @@ fn with_no_binary_built_a_witness_the_linked_engine_misses_fails() {
     );
 }
 
+/// A crate the manifest marks `feature =` is one the linked bundle was
+/// not built with, so its witness is not run and the reading is a skip
+/// naming the feature, the way the lane table has it nightly's (harness
+/// §7; #292): the fence here pins what the linked engine would miss, and
+/// no fail is read.
+#[test]
+fn with_no_binary_built_a_crate_behind_a_feature_the_linked_bundle_lacks_skips() {
+    if oracle().is_none() {
+        return;
+    }
+    let root = scratch(
+        "linked-feature",
+        &block("/// ```expect\n/// 2\n/// ```\n"),
+        false,
+    );
+    let mut manifest = fixture_manifest();
+    manifest.crates[0] = manifest.crates[0].clone().with_feature("fixture");
+    let readings = witness::run(&root, &manifest, &registry(""), &Ask::default()).unwrap();
+    assert_eq!(readings.len(), 1, "{readings:#?}");
+    let reading = &readings[0];
+    assert_eq!(reading.status, Status::Skip, "{reading:#?}");
+    assert_eq!(count(reading, "unlinked"), 1);
+    assert!(!reading.numbers.contains_key("run"), "{reading:#?}");
+    assert!(
+        reading.message.contains("behind feature fixture"),
+        "{}",
+        reading.message
+    );
+    assert!(!reading.tree().is_empty(), "{reading:#?}");
+}
+
+/// And a feature the linked bundle does carry is run as any crate is: the
+/// row says the crate is outside php's default build, and the bundle is
+/// what says whether it is linked here.
+#[test]
+fn with_no_binary_built_a_crate_behind_a_feature_the_linked_bundle_carries_runs() {
+    if oracle().is_none() {
+        return;
+    }
+    let root = scratch(
+        "linked-feature-on",
+        &block("/// ```expect\n/// 1\n/// ```\n"),
+        false,
+    );
+    let mut manifest = fixture_manifest();
+    manifest.crates[0] = manifest.crates[0].clone().with_feature("standard");
+    let readings = witness::run(&root, &manifest, &registry(""), &Ask::default()).unwrap();
+    assert_eq!(readings.len(), 1, "{readings:#?}");
+    let reading = &readings[0];
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    assert_eq!(count(reading, "run"), 1);
+}
+
 /// Nothing to run is complete only with the pinned oracle here to have
 /// run it: green means the oracle agreed, and without the oracle the pass
 /// would be a claim (#60). The engine's absence is another matter: the
