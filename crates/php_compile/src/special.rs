@@ -60,12 +60,15 @@ pub(crate) enum Special {
     /// `extended_value` set where the name written was `sizeof`, so the
     /// `TypeError` names the function as written.
     Count { sizeof: bool },
+    /// `zend_compile_func_clone`: `ZEND_CLONE` over the one argument,
+    /// which is what `clone $o` and `clone($o)` both are; two arguments
+    /// or none is the call to php 8.5's `clone()` function.
+    Clone,
     /// A shape that is an opcode of its own (`ZEND_BOOL`, `ZEND_CAST`,
     /// `ZEND_INIT_USER_CALL`, `ZEND_IN_ARRAY`, `ZEND_GET_CLASS`,
     /// `ZEND_GET_CALLED_CLASS`, `ZEND_GET_TYPE`, `ZEND_FUNC_NUM_ARGS`,
     /// `ZEND_FUNC_GET_ARGS`, `ZEND_ARRAY_KEY_EXISTS`, the ropes of
-    /// `sprintf`, `ZEND_CLONE`) and has no kernel here yet: the ordinary
-    /// call.
+    /// `sprintf`) and has no kernel here yet: the ordinary call.
     Opcode,
 }
 
@@ -126,7 +129,7 @@ pub(crate) const TABLE: &[(&[u8], Special)] = &[
     (b"array_slice", Special::Opcode),
     (b"array_key_exists", Special::Opcode),
     (b"sprintf", Special::Opcode),
-    (b"clone", Special::Opcode),
+    (b"clone", Special::Clone),
 ];
 
 /// The row for a lowered, unqualified name, as
@@ -186,6 +189,7 @@ impl Emit<'_> {
             Some(Special::Count { sizeof }) => {
                 self.over_one(Opcode::Count, arguments, u32::from(sizeof))
             }
+            Some(Special::Clone) => self.over_one(Opcode::Clone, arguments, 0),
             Some(Special::Opcode) | None => Ok(None),
         }
     }
@@ -208,9 +212,10 @@ impl Emit<'_> {
             Some(Special::Chr) => self.chr(arguments),
             Some(Special::Ord) => self.ord(arguments),
             Some(Special::Defined) => self.defined_constant(arguments),
-            Some(Special::TypeCheck(_) | Special::Count { .. } | Special::Opcode) | None => {
-                Ok(None)
-            }
+            Some(
+                Special::TypeCheck(_) | Special::Count { .. } | Special::Clone | Special::Opcode,
+            )
+            | None => Ok(None),
         }
     }
 
@@ -242,8 +247,9 @@ impl Emit<'_> {
         Ok(value.as_str().map(|s| length(s.len())))
     }
 
-    /// `zend_compile_func_typecheck`, `zend_compile_func_is_scalar` and
-    /// `zend_compile_func_count`: one argument, compiled, and the opcode
+    /// `zend_compile_func_typecheck`, `zend_compile_func_is_scalar`,
+    /// `zend_compile_func_count` and `zend_compile_func_clone`: one
+    /// argument, compiled, and the opcode
     /// over it into a temporary with `extended_value` as given; two
     /// arguments or none is the call, whatever the arguments are.
     fn over_one(

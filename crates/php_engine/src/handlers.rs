@@ -34,7 +34,9 @@
 //! for a native with an entry of the call's arity (#254),
 //! `ZEND_FRAMELESS_ICALL_0` to `ZEND_FRAMELESS_ICALL_3`, and the two
 //! `zend_compile_ns_call` puts around it for an unqualified name in a
-//! namespace, `ZEND_JMP_FRAMELESS` and `ZEND_INIT_NS_FCALL_BY_NAME`.
+//! namespace, `ZEND_JMP_FRAMELESS` and `ZEND_INIT_NS_FCALL_BY_NAME`;
+//! and `ZEND_CLONE`, the class's `clone_obj` through its handler table
+//! (#281).
 
 // Every handler is generic over the tier and hands back the same edge, so
 // the generated dispatch calls them all the same way; the ones that raise a
@@ -942,6 +944,103 @@ pub(crate) fn fetch_obj_r<T: Tier>(
     };
     let slot = exec::temporary_slot(code, op.out);
     let previous = req.set_slot(frame, slot, value);
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_CLONE` (`Z/Zend/zend_vm_def.h:6010`), what the compiler emits
+/// for `clone $o` and a one-argument `clone($o)`: the operand read as
+/// `GET_OP1_OBJ_ZVAL_PTR_UNDEF` reads it, a reference followed, an
+/// undefined variable having warned; what is no object is php's
+/// `TypeError` naming `clone()`'s first parameter and the value as
+/// `zend_zval_value_name` names it. An object is
+/// [`Request::clone_object`], the body the `clone()` function shares:
+/// a null `clone_obj` in the table of the class is the `Error` for an
+/// uncloneable object, read before `__clone` is looked at; a `__clone`
+/// the scope may not reach is `zend_bad_method_call`'s; then the
+/// class's `clone_obj` (design §5.4). The copy is written to the
+/// temporary as its one owner, and the operand is freed (`FREE_OP1`)
+/// before the pending throwable is read.
+///
+/// ```php
+/// class C { public $p = 1; }
+/// $c = new C; $d = clone $c;
+/// var_dump($d->p, $c === $d, $d instanceof C, clone($c) instanceof C);
+/// $f = Closure::fromCallable('strlen'); var_dump((clone $f)->__invoke('abc'));
+/// ```
+/// ```expect
+/// int(1)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// int(3)
+/// ```
+///
+/// ```php
+/// clone 1;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: clone(): Argument #1 ($object) must be of type object, int given in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// clone $u;
+/// ```
+/// ```expect exit=255
+/// Warning: Undefined variable $u in %s on line 2
+///
+/// Fatal error: Uncaught TypeError: clone(): Argument #1 ($object) must be of type object, null given in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// A throwable's table carries `default_exception_handlers`, whose
+/// `clone_obj` is null, and that is read before the private `__clone`
+/// `Exception` declares.
+///
+/// ```php
+/// clone new Exception;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Trying to clone an uncloneable object of class Exception in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn clone<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    if op.op1_type == OperandKind::Unused {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_CLONE over $this, which no frame here carries",
+        )));
+    }
+    let operand = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
+    let cloned = match operand.as_object().copied() {
+        Some(object) => req.clone_object(object, None),
+        None => Err(crate::api::raising::throw(
+            req,
+            "TypeError",
+            &format!(
+                "clone(): Argument #1 ($object) must be of type object, {} given",
+                crate::ops::value_name(req, &operand)
+            ),
+        )),
+    };
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    let object = match cloned {
+        Ok(object) => object,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, object.as_value());
     req.release(previous);
     Ok(advance(req, frame))
 }

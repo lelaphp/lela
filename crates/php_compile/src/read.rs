@@ -1417,6 +1417,10 @@ impl Reader<'_> {
                 self.bump(3);
                 self.new_expression()
             }
+            Some(b'c' | b'C') if self.word_ahead(b"clone") => {
+                self.bump(5);
+                self.clone_expression()
+            }
             Some(b) if b.is_ascii_alphabetic() || b == b'_' || b == b'\\' => self.named(),
             _ => Err(self.trouble("an expression this compiler cannot read yet")),
         }
@@ -1557,6 +1561,26 @@ impl Reader<'_> {
             }
             arguments.push(self.expr()?);
         }
+    }
+
+    /// `clone expr`, the keyword read: php's parser makes it the call
+    /// `\clone(expr)`, `ZEND_AST_CALL` over the known name with
+    /// `ZEND_NAME_FQ` and one argument (`Z/Zend/zend_language_parser.y:1264`),
+    /// and the compiler's special table takes it from there. `T_CLONE`
+    /// binds tighter than every operator, so the operand is what stands
+    /// before the first one: an operand with its member calls, or, where
+    /// a sign opens it, that unary expression, since nothing is reduced
+    /// before the sign's operand is read.
+    fn clone_expression(&mut self) -> Result<Expr, Trouble> {
+        self.skip_trivia();
+        let operand = match (self.byte(0), self.byte(1)) {
+            (Some(sign @ (b'-' | b'+')), next) if next != Some(sign) => self.unary()?,
+            _ => self.operand()?,
+        };
+        Ok(Expr::Call {
+            name: b"\\clone".to_vec(),
+            arguments: vec![operand],
+        })
     }
 
     /// `new C(args)` and `new C`, the keyword read: php's `new_expr` over
@@ -1970,6 +1994,28 @@ mod tests {
     fn an_echo_of_one_number_is_one_statement() {
         let read = read(b"<?php echo 1;").unwrap_or_default();
         assert_eq!(read, vec![(Stmt::Echo(vec![Expr::Int(1)]), 1)]);
+    }
+
+    /// `clone $a ** 2` is php's `(clone $a) ** 2`, the construct binding
+    /// tighter than the operator, and the tree is the call php's parser
+    /// makes of it.
+    #[test]
+    fn a_clone_is_the_fully_qualified_call_php_s_parser_makes_of_it() {
+        let read = read(b"<?php echo clone $a ** 2;").unwrap_or_default();
+        assert_eq!(
+            read,
+            vec![(
+                Stmt::Echo(vec![Expr::Binary {
+                    op: BinaryOp::Pow,
+                    left: Child::new(Expr::Call {
+                        name: b"\\clone".to_vec(),
+                        arguments: vec![Expr::Var(b"a".to_vec())],
+                    }),
+                    right: Child::new(Expr::Int(2)),
+                }]),
+                1
+            )]
+        );
     }
 
     #[test]
