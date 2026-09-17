@@ -88,6 +88,9 @@ impl<'a> Adapter<'a> {
             Ok(actual) => actual,
             Err(borked) => return Ok(Judged::new(&id, &name, Judgement::Bork, borked)),
         };
+        if let Some(construct) = unread(&actual) {
+            return Ok(Judged::new(&id, &name, Judgement::Unread, construct));
+        }
         let Some(expectation) = expectation_of(self.oracle.pin(), &phpt) else {
             return Ok(Judged::new(
                 &id,
@@ -250,6 +253,30 @@ fn unhosted(phpt: &Phpt) -> Option<String> {
         return Some("a --PHPDBG-- test; this engine has no debugger host".into());
     }
     None
+}
+
+/// The construct the compiler could not read, when what the program wrote
+/// is the compiler's own refusal and nothing else: one `Parse error` line
+/// whose message ends in `this compiler cannot read yet`, the sentence
+/// `php_compile` raises for a construct it does not read, or in `this
+/// compiler cannot read`, the same refusal from its reader for a shape of
+/// one it does, both in the frame php gives a parse error (#163). php never writes those words, and a
+/// parse error stands before any test code ran, so a body that is the one
+/// line is the compiler's refusal and a body with anything else in it is
+/// the test's own, held to its expectation (harness §4.5 condition 1,
+/// #319). The `PHP ` prefix is `log_errors`' rendering, read for a test
+/// whose `--INI--` sends the diagnostic to the log the runner captures.
+pub(super) fn unread(actual: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(actual);
+    let text = text.trim();
+    if text.lines().count() != 1 {
+        return None;
+    }
+    let refusal = Regex::new(
+        r"^(?:PHP )?Parse error:\s+(.+ this compiler cannot read(?: yet)?) in .+ on line \d+$",
+    )
+    .ok()?;
+    refusal.captures(text).map(|found| found[1].to_owned())
 }
 
 /// Whether the two streams are captured as one, which is upstream's

@@ -20,10 +20,13 @@
 //!    means the reading's `tree` is the content hash over the crate's
 //!    sources now (§13 D.18), the hash every instrument stamps; an
 //!    instrument that does not exist yet has written no reading, so its
-//!    condition is unmet and the list is honest from day one. The one
-//!    reading not held to its status is the `phpt` skip the missing engine
-//!    binary causes, [`no_binary_yet`] (#132); a `witness` reading is held
-//!    to its status, the linked engine having served it (#119).
+//!    condition is unmet and the list is honest from day one. Two `phpt`
+//!    skips are met without passing, each held to its cause and nothing
+//!    else: the one the missing engine binary causes, [`no_binary_yet`]
+//!    (#132), and the one the compiler causes when it refuses every test
+//!    of the subset with its own parse error, [`compiler_unread`] (#319);
+//!    a `witness` reading is held to its status, the linked engine having
+//!    served it (#119).
 //! 2. Every kernel or native added has a witness: the `witness` reading's
 //!    `missing` is zero for the crate.
 //! 3. A lock that differs from its regenerated form is in the diff, read
@@ -396,6 +399,45 @@ fn no_binary_yet(instrument: &str, reading: &Reading) -> bool {
     }
 }
 
+/// Whether a `phpt` skip is met all the same because the compiler, not
+/// the crate, is what stopped every test of the subset (#319).
+///
+/// A `.phpt` the compiler refuses with its own parse error, the `cannot
+/// read yet` refusal `php_compile` raises for a construct it does not
+/// read, is tallied `unread` by the lane: a skip of the compiler's, held
+/// to that cause, a parse error the compiler itself raised before any
+/// test code ran, and to nothing else. A test that parsed and then failed
+/// still counts against the crate, so `failed`, `diverged` and `borked`
+/// are held at zero beside it as they are for `engine_absent`. The
+/// subset's status is over the tests the compiler read, and a subset
+/// whose every test is unread reads skip with `unread` equal to its
+/// count, `tests`, which is what is met here; one with a test the
+/// compiler read and did not fail is a pass on its own merits, and one
+/// with a test skipped for another reason beside the unread ones is not
+/// this rung. harness-design.md §4.5 condition 1 carries the sentence,
+/// and the rung goes away by itself as the compiler reaches the corpus.
+fn compiler_unread(instrument: &str, reading: &Reading) -> bool {
+    if instrument != "phpt" || reading.status != Status::Skip {
+        return false;
+    }
+    let count = |key: &str| match reading.numbers.get(key) {
+        Some(Number::Int(n)) => Some(*n),
+        _ => None,
+    };
+    let unread = count("unread");
+    unread.is_some_and(|n| n > 0)
+        && unread == count("tests")
+        && count("failed") == Some(0)
+        && count("diverged") == Some(0)
+        && count("borked") == Some(0)
+}
+
+/// Condition 1's two rungs for a reading that is not a pass: the causes a
+/// person excused, and no other.
+fn met_without_passing(instrument: &str, reading: &Reading) -> bool {
+    no_binary_yet(instrument, reading) || compiler_unread(instrument, reading)
+}
+
 /// Conditions 1 and 2 for one touched crate.
 fn fresh_readings(
     root: &Path,
@@ -417,7 +459,7 @@ fn fresh_readings(
             ));
             continue;
         }
-        if reading.status != Status::Pass && !no_binary_yet(instrument, &reading) {
+        if reading.status != Status::Pass && !met_without_passing(instrument, &reading) {
             unmet.push(format!(
                 "{instrument}: {name} {}: {}",
                 reading.status.as_str(),
@@ -674,7 +716,7 @@ pub fn run_hook(root: &Path, manifest: &Manifest, registry: &Registry, store: &S
 
 #[cfg(test)]
 mod tests {
-    use super::{FRESH, instruments_of, no_binary_yet};
+    use super::{FRESH, compiler_unread, instruments_of, met_without_passing, no_binary_yet};
     use crate::manifest::Crate;
     use crate::reading::{Reading, Status};
 
@@ -812,6 +854,54 @@ mod tests {
         let mut bare = Reading::new("phpt", "ext/standard");
         bare.status = Status::Skip;
         assert!(!no_binary_yet("phpt", &bare));
+    }
+
+    /// A phpt skip is met where the compiler refused every test of the
+    /// subset with its own parse error (#319), `unread` equal to `tests`
+    /// and nothing counted against the crate. A subset with one test the
+    /// compiler read is not this rung: read and failed, it counts against
+    /// the crate; read and skipped for another cause, the skip is not the
+    /// compiler's; and a reading with no `unread` at all is held to its
+    /// status. The two rungs are read as one by `met_without_passing`,
+    /// and a pass is neither.
+    #[test]
+    fn a_phpt_skip_is_met_where_the_compiler_read_none_of_the_subset() {
+        let skip = |tests: u64, unread: u64, failed: u64, skipped: u64| {
+            let mut reading = Reading::new("phpt", "ext/ctype");
+            reading.status = Status::Skip;
+            reading.count("tests", tests).unwrap();
+            reading.count("unread", unread).unwrap();
+            reading.count("skipped", skipped).unwrap();
+            reading.count("failed", failed).unwrap();
+            reading.count("diverged", 0).unwrap();
+            reading.count("borked", 0).unwrap();
+            reading.count("engine_absent", 0).unwrap();
+            reading
+        };
+        // Every test unread: the compiler's skip, and it is met.
+        assert!(compiler_unread("phpt", &skip(49, 49, 0, 0)));
+        assert!(met_without_passing("phpt", &skip(49, 49, 0, 0)));
+        // Two tests parsed and failed: the crate's, and the reading is a
+        // fail anyway, but the rung is held to the numbers too.
+        assert!(!compiler_unread("phpt", &skip(49, 47, 2, 0)));
+        // One test skipped for another cause beside the unread ones.
+        assert!(!compiler_unread("phpt", &skip(49, 48, 0, 1)));
+        // Nothing unread: every test skipped, which is not this rung.
+        assert!(!compiler_unread("phpt", &skip(3, 0, 0, 3)));
+        assert!(!met_without_passing("phpt", &skip(3, 0, 0, 3)));
+        // A reading without the number is held to its status.
+        let mut bare = Reading::new("phpt", "ext/ctype");
+        bare.status = Status::Skip;
+        bare.count("tests", 5).unwrap();
+        assert!(!compiler_unread("phpt", &bare));
+        // The number is the phpt lane's, read for no other instrument.
+        let mut witness = skip(4, 4, 0, 0);
+        witness.instrument = "witness".to_owned();
+        assert!(!compiler_unread("witness", &witness));
+        // A pass has no need of a rung.
+        let mut pass = skip(49, 49, 0, 0);
+        pass.status = Status::Pass;
+        assert!(!compiler_unread("phpt", &pass));
     }
 
     /// A witness skip is held to its status, whatever its numbers say

@@ -324,6 +324,12 @@ pub(crate) enum Judgement {
     Bork,
     /// A `--XFAIL--` test that failed, which is what that section asks for.
     XFail,
+    /// The compiler refused the test's program with its own parse error,
+    /// the `cannot read yet` refusal `php_compile` raises for a construct
+    /// it does not read, before any test code ran: a skip of the
+    /// compiler's and not a failure of the crate whose subset it is
+    /// (harness §4.5 condition 1, #319).
+    Unread,
 }
 
 impl tally::Judgement for Judgement {
@@ -337,6 +343,7 @@ impl tally::Judgement for Judgement {
             Judgement::Skip => "skip",
             Judgement::Bork => "bork",
             Judgement::XFail => "xfail",
+            Judgement::Unread => "unread",
         }
     }
 
@@ -415,9 +422,10 @@ pub(crate) fn reading(
                 tally.missed()
             ),
             Outcome::NothingRan => format!(
-                "{scope}: no test of the subset ran; {} found, {} skipped",
+                "{scope}: no test of the subset ran; {} found, {} skipped, {} unread by the compiler",
                 tally.found,
-                tally.count(Judgement::Skip)
+                tally.count(Judgement::Skip),
+                tally.count(Judgement::Unread)
             ),
             // A rung this lane never asks for, since an empty subset is
             // not a measurement of the engine; the words are here so no
@@ -426,9 +434,10 @@ pub(crate) fn reading(
                 format!("{scope}: nothing to run and the pinned oracle is absent; {why}")
             }
             Outcome::Passed => format!(
-                "{scope}: {} passed, {} skipped of {} tests",
+                "{scope}: {} passed, {} skipped, {} unread by the compiler of {} tests",
                 tally.count(Judgement::Pass),
                 tally.count(Judgement::Skip),
+                tally.count(Judgement::Unread),
                 tally.judged.len()
             ),
         }
@@ -459,6 +468,11 @@ pub(crate) fn reading(
     reading.count("borked", tally.count(Judgement::Bork))?;
     reading.count("xfailed", tally.count(Judgement::XFail))?;
     reading.count("diverged", tally.count(Judgement::Diverged))?;
+    // The tests the compiler refused with its own parse error before any
+    // test code ran: a skip of the compiler's, held to that cause alone,
+    // and the one `done` meets beside `engine_absent` when it is every
+    // test of the subset (harness §4.5 condition 1, #319).
+    reading.count("unread", tally.count(Judgement::Unread))?;
     // Why nothing ran, where nothing did: the engine has no binary yet,
     // which is the one cause `done` excuses (#132). A subset of a crate
     // not yet created, and a subset whose every test skipped, are the

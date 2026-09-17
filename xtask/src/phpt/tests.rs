@@ -239,6 +239,48 @@ fn the_same_missed_expectation_is_diverged_under_an_accepted_row() {
     assert!(tally.against().is_empty());
 }
 
+/// A program the compiler refused with its own parse error, the one
+/// `Parse error` line ending in `this compiler cannot read yet`, is
+/// unread and the construct is the note; the `PHP ` prefix `log_errors`
+/// gives it reads the same, and so does the reader's `this compiler
+/// cannot read`, the same refusal for a shape of a construct it does read
+/// (#319). Anything else the program wrote is the
+/// test's own: php's own parse error, a body that ran and then met the
+/// refusal, a body that ran and wrote nothing, or one that wrote the words
+/// itself.
+#[test]
+fn a_program_the_compiler_refused_is_unread_and_names_the_construct() {
+    let unread = |body: &str| adapter::unread(body.as_bytes());
+    assert_eq!(
+        unread("\nParse error: a statement this compiler cannot read yet in /t/x.php on line 3\n"),
+        Some("a statement this compiler cannot read yet".to_owned())
+    );
+    assert_eq!(
+        unread(
+            "PHP Parse error:  an expression this compiler cannot read yet in x.php on line 2\n"
+        ),
+        Some("an expression this compiler cannot read yet".to_owned())
+    );
+    assert_eq!(
+        unread(
+            "\nParse error: a call whose arguments this compiler cannot read in bug25745.php on line 8\n"
+        ),
+        Some("a call whose arguments this compiler cannot read".to_owned())
+    );
+    assert_eq!(
+        unread("\nParse error: syntax error, unexpected token \";\" in x.php on line 2\n"),
+        None
+    );
+    assert_eq!(
+        unread(
+            "ran\n\nParse error: a statement this compiler cannot read yet in x.php on line 3\n"
+        ),
+        None
+    );
+    assert_eq!(unread(""), None);
+    assert_eq!(unread("this compiler cannot read yet"), None);
+}
+
 #[test]
 fn a_skipif_that_says_skip_skips_with_its_reason() {
     if oracle().is_none() {

@@ -1552,6 +1552,86 @@ fn a_withdrawn_branch_ticket_is_met_and_a_refused_withdrawal_is_not() {
     assert!(!verdict.met(), "{verdict:#?}");
 }
 
+/// The phpt skip the compiler causes is met, and `done` reaches green
+/// for an extension whose every test the compiler refused with its own
+/// parse error, the reading's `unread` equal to its `tests` and nothing
+/// counted against the crate (#319, harness §4.5 condition 1). It would
+/// be unmet under condition 1 as it stood, which met one skip alone, the
+/// missing binary's: the assertion that the verdict is met is what fails
+/// on that behaviour. The rung is held to its cause: a subset the compiler
+/// read two tests of that then failed is a fail, and a skip with a test
+/// skipped for another cause beside the unread ones is held to its status.
+#[test]
+fn the_phpt_skip_the_compiler_causes_is_met_and_a_test_it_read_still_counts() {
+    let root = scratch("unread");
+    write(&root, "ext/ctype/src/lib.rs", "pub fn ctype_alpha() {}\n");
+    let store = Store::of_workspace(&root);
+    for instrument in ASKED {
+        store
+            .record(&[fresh(&root, instrument, "ext/ctype")])
+            .unwrap();
+    }
+    let phpt = |status: Status, numbers: &[(&str, u64)]| {
+        let mut reading = fresh(&root, "phpt", "ext/ctype");
+        reading.status = status;
+        reading.message =
+            "ext/ctype: no test of the subset ran; 49 found, 0 skipped, 49 unread by the compiler"
+                .to_owned();
+        for (key, n) in numbers {
+            reading.count(key, *n).unwrap();
+        }
+        reading
+    };
+    let clean = [
+        ("engine_absent", 0),
+        ("failed", 0),
+        ("diverged", 0),
+        ("borked", 0),
+    ];
+
+    // Every test unread: the compiler's skip, and the crate is done.
+    let mut numbers = vec![("tests", 49), ("unread", 49), ("skipped", 0)];
+    numbers.extend(clean);
+    store.record(&[phpt(Status::Skip, &numbers)]).unwrap();
+    let verdict = judge(&root);
+    assert!(verdict.met(), "{verdict:#?}");
+
+    // Two tests the compiler read failed on a native another extension
+    // does not declare: the lane's reading is a fail, and it is held.
+    store
+        .record(&[phpt(
+            Status::Fail,
+            &[
+                ("tests", 49),
+                ("unread", 47),
+                ("skipped", 0),
+                ("engine_absent", 0),
+                ("failed", 2),
+                ("diverged", 0),
+                ("borked", 0),
+            ],
+        )])
+        .unwrap();
+    let verdict = judge(&root);
+    assert_eq!(verdict.unmet.len(), 1, "{verdict:#?}");
+    assert!(
+        verdict.unmet[0].starts_with("phpt: ext/ctype fail:"),
+        "{verdict:#?}"
+    );
+
+    // One test skipped for a cause of its own beside the unread ones: not
+    // every test is unread, so the skip is not the compiler's alone.
+    let mut numbers = vec![("tests", 49), ("unread", 48), ("skipped", 1)];
+    numbers.extend(clean);
+    store.record(&[phpt(Status::Skip, &numbers)]).unwrap();
+    let verdict = judge(&root);
+    assert_eq!(verdict.unmet.len(), 1, "{verdict:#?}");
+    assert!(
+        verdict.unmet[0].starts_with("phpt: ext/ctype skip:"),
+        "{verdict:#?}"
+    );
+}
+
 /// The phpt skip the missing engine binary causes is met, and `done`
 /// reaches green for a crate that owns a subset on a checkout with no
 /// engine built (#132). It would be unmet under the rule it replaces,
