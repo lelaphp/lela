@@ -617,23 +617,43 @@ impl Heap {
     /// fresh object of the same class: every slot one more owner of what
     /// the old holds, and the dynamic table shared with one more owner,
     /// separated by the first write. An object with a native payload is
-    /// its class's `clone_obj` to copy and is refused here, since the
-    /// heap cannot copy a payload it only knows how to drop.
+    /// its class's `clone_obj` to copy through
+    /// [`Heap::object_clone_with`] and is refused here, since the heap
+    /// cannot copy a payload it only knows how to drop.
     pub fn object_clone(&mut self, o: Obj) -> Result<Option<Obj>, Fatal> {
         if o.has_native() {
             return Ok(None);
         }
         let new = self.object(o.class(), o.slots())?;
-        for i in 0..o.slots() {
-            let z = o.slot(i);
+        self.clone_members(new, o);
+        Ok(Some(new))
+    }
+
+    /// A class's `clone_obj` over an object with a native payload
+    /// (design §5.4), `zend_closure_clone` and its kin: the members
+    /// copied as [`Heap::object_clone`] copies them, beside `payload`,
+    /// the copy the class made of the old object's, in the new object's
+    /// slot. What the copy names of the heap is the caller's to have
+    /// taken an owner of, as `zend_create_closure` takes one of `$this`.
+    pub fn object_clone_with<T: Any + Send>(&mut self, o: Obj, payload: T) -> Result<Obj, Fatal> {
+        let new = self.object_with(o.class(), o.slots(), payload)?;
+        self.clone_members(new, o);
+        Ok(new)
+    }
+
+    /// The loop of `zend_objects_clone_members`: each declared slot one
+    /// more owner of the old object's value, and the dynamic table
+    /// shared with one more owner, separated by the first write.
+    fn clone_members(&self, new: Obj, old: Obj) {
+        for i in 0..old.slots() {
+            let z = old.slot(i);
             self.addref(z);
             new.write_slot(i, z);
         }
-        if let Some(table) = o.properties() {
+        if let Some(table) = old.properties() {
             table.addref();
             new.header().properties.set(Some(table));
         }
-        Ok(Some(new))
     }
 
     /// `zend_objects_store_del` (`Z/Zend/zend_objects_API.c:162`): the
@@ -1060,6 +1080,42 @@ mod tests {
         assert_eq!(s.refcount(), 1);
         assert_eq!(table.refcount(), 1);
         Heap::release(&mut r, Zval::object(new));
+        assert_eq!(r.heap.memory_usage(false), INIT_BYTES);
+    }
+
+    /// A clone with a payload is the class's: the members copied as a
+    /// clone copies them, the payload the class handed in the new slot,
+    /// and each payload dropped once with its own object.
+    #[test]
+    fn a_clone_with_a_payload_carries_the_copy_the_class_made() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+        let _alone = alone();
+        let dropped = Arc::new(AtomicU32::new(0));
+        let mut r = Recorder::new();
+        let Ok(o) = r.heap.object_with(3, 1, Counted(Arc::clone(&dropped), 42)) else {
+            return;
+        };
+        let Ok(s) = r.heap.string(b"in the slot") else {
+            return;
+        };
+        o.write_slot(0, Zval::string(s));
+        let copied = r.heap.native::<Counted>(o).map_or(0, |c| c.1);
+        let Ok(new) = r
+            .heap
+            .object_clone_with(o, Counted(Arc::clone(&dropped), copied))
+        else {
+            return;
+        };
+        assert_eq!(new.id(), ObjectId(2));
+        assert_eq!(new.class(), 3);
+        assert_eq!(s.refcount(), 2);
+        assert_eq!(r.heap.native::<Counted>(new).map(|c| c.1), Some(42));
+        Heap::release(&mut r, Zval::object(o));
+        assert_eq!(dropped.load(Relaxed), 1);
+        assert_eq!(s.refcount(), 1);
+        Heap::release(&mut r, Zval::object(new));
+        assert_eq!(dropped.load(Relaxed), 2);
         assert_eq!(r.heap.memory_usage(false), INIT_BYTES);
     }
 
