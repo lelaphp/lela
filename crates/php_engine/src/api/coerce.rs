@@ -495,6 +495,10 @@ pub fn coerce_param(
             ValueRef::Array(_) => Ok(value.clone()),
             _ => want(req, "array"),
         },
+        Type::Object => match value.as_ref() {
+            ValueRef::Object(_) => Ok(value.clone()),
+            _ => want(req, "object"),
+        },
         Type::Nullable(inner) => match value.as_ref() {
             ValueRef::Null | ValueRef::Undef => Ok(Value::null()),
             _ => coerce_param(req, value, inner, position),

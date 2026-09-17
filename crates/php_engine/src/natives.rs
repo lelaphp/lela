@@ -3,28 +3,30 @@
 //! keeps in `ext/standard` and this engine keeps here, so an engine with
 //! no extensions serves a program that uses Zend alone (design §4.10).
 //!
-//! Ten of them are here: the two the first witness of a loop needs, the
-//! three that read what `php_heap::mm` accounts, so the allocator's
+//! Twelve of them are here: the two the first witness of a loop needs,
+//! the three that read what `php_heap::mm` accounts, so the allocator's
 //! numbers are php's numbers under a witness and not under a terminal
 //! session a person typed once, `ini_get` and `ini_set`, which read and
 //! move the engine's own ini table so a witness can reach what an entry
 //! decides and what it kept, `set_time_limit`, which moves the one
-//! entry the execution timer is armed from, and `strlen` and `defined`,
+//! entry the execution timer is armed from, `strlen` and `defined`,
 //! the two of `zend_builtin_functions.c` whose calls php's compiler
 //! serves itself (#219): the compiler emits `ZEND_STRLEN` and
 //! `ZEND_DEFINED` over their kernels where it reads the name, and reads
-//! it only where the bundle declares the native. Each is declared and
+//! it only where the bundle declares the native; and `class_exists` and
+//! `get_class`, which read the linked table (#259). Each is declared and
 //! paired with its entry exactly as an extension's are, so there is one
 //! shape for a native and not two.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_unit::decl::{ConstExpr, FunctionDecl, Name, Parameter, Type};
+use php_unit::decl::{ClassKind, ConstExpr, FunctionDecl, Name, Parameter, Type, Visibility};
 
 use crate::api::abi::Entry;
 use crate::api::coerce::{coerce_param, to_string};
 use crate::api::raising::{
-    Thrown, arg_count_error, arg_null_deprecated, arg_type_error, too_few_arguments,
+    Thrown, arg_count_error, arg_null_deprecated, arg_type_error, deprecated, throw,
+    too_few_arguments,
 };
 use crate::api::request::Request;
 use crate::api::values::{Key, PhpString, Value, ValueRef};
@@ -32,6 +34,42 @@ use crate::api::values::{Key, PhpString, Value, ValueRef};
 /// The engine's own natives, in the order php declares them, each
 /// declaration beside its entry.
 pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
+    let mut natives = zend_natives();
+    natives.extend(class_natives());
+    natives
+}
+
+/// The two that read the linked table (#259).
+fn class_natives() -> Vec<(FunctionDecl, Entry)> {
+    vec![
+        (
+            declared(
+                b"class_exists",
+                &[
+                    parameter(b"class", Some(Type::String), false),
+                    Parameter {
+                        default: Some(ConstExpr::Bool(true)),
+                        ..parameter(b"autoload", Some(Type::Bool), false)
+                    },
+                ],
+                Some(Type::Bool),
+            ),
+            class_exists as Entry,
+        ),
+        (
+            declared(
+                b"get_class",
+                &[parameter(b"object", Some(Type::Object), false)],
+                Some(Type::String),
+            ),
+            get_class as Entry,
+        ),
+    ]
+}
+
+/// The ten of `zend_builtin_functions.c` and `ext/standard` that need
+/// the engine's frames, allocator and ini table.
+fn zend_natives() -> Vec<(FunctionDecl, Entry)> {
     vec![
         (
             declared(
@@ -123,6 +161,118 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
             defined as Entry,
         ),
     ]
+}
+
+/// `class_exists(string $class, bool $autoload = true): bool`, php's
+/// `class_exists_impl` (`Z/Zend/zend_builtin_functions.c:1136`) with
+/// `ZEND_ACC_LINKED` to have and `ZEND_ACC_INTERFACE | ZEND_ACC_TRAIT`
+/// to lack: the class under the lowered name, a leading `\` dropped,
+/// which is a class or an enum and not an interface or a trait. The
+/// autoloaders are served for a miss under `$autoload`, and none is
+/// registered yet.
+///
+/// ```php
+/// class M {}
+/// var_dump(class_exists('M'), class_exists('m'), class_exists('\M'), class_exists('Exception'), class_exists('Throwable'), class_exists('Nope'), class_exists('Nope', false));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// ```
+fn class_exists(req: &mut Request) -> Result<Value, Thrown> {
+    let count = req.argument_count();
+    if !(1..=2).contains(&count) {
+        return Err(wrong_argument_count(req, 1, 2, count));
+    }
+    let name = string_argument(req, 1)?;
+    let autoload = if count == 2 {
+        let given = req.argument(2).unwrap_or_default();
+        coerce_param(req, &given, &Type::Bool, 2)?
+            .as_bool()
+            .unwrap_or(true)
+    } else {
+        true
+    };
+    let bytes = name.as_bytes();
+    let bytes = bytes.strip_prefix(b"\\").unwrap_or(bytes);
+    let found = match req.class_named(bytes) {
+        Some(class) => Some(class),
+        None if autoload => crate::api::call::autoload(req, bytes)?,
+        None => None,
+    };
+    let exists = found
+        .and_then(|class| req.class_decl(class))
+        .is_some_and(|decl| !matches!(decl.kind, ClassKind::Interface | ClassKind::Trait));
+    Ok(Value::bool(exists))
+}
+
+/// `get_class(object $object = UNKNOWN): string`, php's
+/// `ZEND_FUNCTION(get_class)` (`Z/Zend/zend_builtin_functions.c:721`):
+/// the declared name of the object's class, `ce->name`; without an
+/// argument the executed scope's name, deprecated since 8.3, and php's
+/// `Error` where there is no scope, which is everywhere a native can be
+/// called from here.
+///
+/// ```php
+/// class M {} $m = new M;
+/// var_dump(get_class($m), get_class(new Exception));
+/// get_class(1);
+/// ```
+/// ```expect exit=255
+/// string(1) "M"
+/// string(9) "Exception"
+///
+/// Fatal error: Uncaught TypeError: get_class(): Argument #1 ($object) must be of type object, int given in %s:4
+/// Stack trace:
+/// #0 %s(4): get_class(1)
+/// #1 {main}
+///   thrown in %s on line 4
+/// ```
+///
+/// ```php
+/// get_class();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: get_class() without arguments must be called from within a class in %s:2
+/// Stack trace:
+/// #0 %s(2): get_class()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+fn get_class(req: &mut Request) -> Result<Value, Thrown> {
+    let count = req.argument_count();
+    if count > 1 {
+        return Err(wrong_argument_count(req, 0, 1, count));
+    }
+    let class = if count == 0 {
+        match req.scope() {
+            Some(scope) => {
+                deprecated(req, "Calling get_class() without arguments is deprecated");
+                scope
+            }
+            None => {
+                return Err(throw(
+                    req,
+                    "Error",
+                    "get_class() without arguments must be called from within a class",
+                ));
+            }
+        }
+    } else {
+        let given = req.argument(1).unwrap_or_default();
+        let object = coerce_param(req, &given, &Type::Object, 1)?;
+        match object.as_object() {
+            Some(object) => object.class(),
+            None => return Ok(Value::null()),
+        }
+    };
+    let name = req.class_name(class);
+    Ok(Value::string(PhpString::new(req, name.as_bytes())?))
 }
 
 /// `strlen(string $string): int`, php's `ZEND_FUNCTION(strlen)`
@@ -257,6 +407,31 @@ fn defined(req: &mut Request) -> Result<Value, Thrown> {
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// An object is `php_var_dump`'s `IS_OBJECT` arm: its class, its
+/// store index, its properties in declaration order with the
+/// visibility php mangles into a name, an untyped property nothing
+/// wrote as `NULL`, and the dynamic ones after.
+///
+/// ```php
+/// class M { public $x = 1; public $y; protected $p = 'p'; private $q = 2.5; }
+/// class N {}
+/// var_dump(new M, new N);
+/// ```
+/// ```expect
+/// object(M)#1 (4) {
+///   ["x"]=>
+///   int(1)
+///   ["y"]=>
+///   NULL
+///   ["p":protected]=>
+///   string(1) "p"
+///   ["q":"M":private]=>
+///   float(2.5)
+/// }
+/// object(N)#2 (0) {
+/// }
+/// ```
 fn var_dump(req: &mut Request) -> Result<Value, Thrown> {
     let count = req.argument_count();
     if count == 0 {
@@ -310,8 +485,122 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) {
             out.extend(std::iter::repeat_n(b' ', level - 1));
         }
         out.extend_from_slice(b"}\n");
+    } else if let Some(object) = value.as_object() {
+        dump_object(req, out, *object, level);
     } else {
         out.extend_from_slice(b"NULL\n");
+    }
+}
+
+/// `php_var_dump`'s `IS_OBJECT` arm: `object(Class)#handle (count) {`,
+/// then each property as `php_object_property_dump` prints it, the
+/// declared ones in declaration order with the visibility php mangles
+/// into the name, `["p":protected]` and `["q":"Class":private]`, and a
+/// typed one nothing has written as `uninitialized(type)`, which is in
+/// the listing and not in the count (`zend_array_count` over a table
+/// with an empty `IS_INDIRECT`); then the dynamic ones.
+fn dump_object(
+    req: &mut Request,
+    out: &mut Vec<u8>,
+    object: crate::api::values::PhpObject,
+    level: usize,
+) {
+    let class = object.class();
+    let declared: Vec<(Vec<u8>, Visibility, Option<Type>)> = req
+        .class_decl(class)
+        .map(|decl| {
+            decl.properties
+                .iter()
+                .filter(|p| p.is_instance)
+                .map(|p| (p.name.0.to_vec(), p.visibility, p.ty.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut rows: Vec<(Vec<u8>, Option<Value>, Option<Type>)> = declared
+        .iter()
+        .filter_map(|(name, visibility, ty)| {
+            let value = object.prop(req, name);
+            if value.is_none() && ty.is_none() {
+                return None;
+            }
+            let shown = match visibility {
+                Visibility::Public => name.clone(),
+                Visibility::Protected => [&b"\""[..], name, b"\":protected"].concat(),
+                Visibility::Private => {
+                    let class = req.class_name(class);
+                    [&b"\""[..], name, b"\":\"", class.as_bytes(), b"\":private"].concat()
+                }
+            };
+            Some((shown, value, ty.clone()))
+        })
+        .collect();
+    let dynamic: Vec<(PhpString, Value)> = object.props(req).unwrap_or_default();
+    for (name, value) in dynamic {
+        if declared
+            .iter()
+            .any(|(declared, _, _)| declared == name.as_bytes())
+        {
+            continue;
+        }
+        rows.push((name.as_bytes().to_vec(), Some(value), None));
+    }
+    let count = rows.iter().filter(|(_, value, _)| value.is_some()).count();
+    let class_name = req.class_name(class);
+    out.extend_from_slice(
+        format!("object({class_name})#{} ({count}) {{\n", object.index()).as_bytes(),
+    );
+    for (shown, value, ty) in rows {
+        out.extend(std::iter::repeat_n(b' ', level + 1));
+        let quoted = shown.first() == Some(&b'"');
+        if quoted {
+            out.extend_from_slice(b"[");
+            out.extend_from_slice(&shown);
+            out.extend_from_slice(b"]=>\n");
+        } else {
+            out.extend_from_slice(b"[\"");
+            out.extend_from_slice(&shown);
+            out.extend_from_slice(b"\"]=>\n");
+        }
+        if let Some(value) = value {
+            dump(req, out, &value, level + 2);
+        } else {
+            out.extend(std::iter::repeat_n(b' ', level + 1));
+            let ty = ty.as_ref().map(type_text).unwrap_or_default();
+            out.extend_from_slice(format!("uninitialized({ty})\n").as_bytes());
+        }
+    }
+    if level > 1 {
+        out.extend(std::iter::repeat_n(b' ', level - 1));
+    }
+    out.extend_from_slice(b"}\n");
+}
+
+/// `zend_type_to_string` over a declared type: the scalar names, a
+/// class name as written, `?T`, and `|` and `&` between the members of
+/// a union and an intersection.
+fn type_text(ty: &Type) -> String {
+    match ty {
+        Type::Mixed => String::from("mixed"),
+        Type::Void => String::from("void"),
+        Type::Never => String::from("never"),
+        Type::Null => String::from("null"),
+        Type::Bool => String::from("bool"),
+        Type::False => String::from("false"),
+        Type::True => String::from("true"),
+        Type::Int => String::from("int"),
+        Type::Float => String::from("float"),
+        Type::String => String::from("string"),
+        Type::Array => String::from("array"),
+        Type::Object => String::from("object"),
+        Type::Iterable => String::from("iterable"),
+        Type::Callable => String::from("callable"),
+        Type::CalledClass => String::from("static"),
+        Type::SelfClass => String::from("self"),
+        Type::ParentClass => String::from("parent"),
+        Type::Named(name) => String::from_utf8_lossy(&name.0).into_owned(),
+        Type::Nullable(inner) => format!("?{}", type_text(inner)),
+        Type::Union(members) => members.iter().map(type_text).collect::<Vec<_>>().join("|"),
+        Type::Intersection(members) => members.iter().map(type_text).collect::<Vec<_>>().join("&"),
     }
 }
 
