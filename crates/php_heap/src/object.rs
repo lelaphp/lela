@@ -435,27 +435,26 @@ impl Store {
         Ok(handle)
     }
 
-    /// `erealloc(object_buckets, 2 * size * sizeof(zend_object *))`: a
-    /// new array of twice the buckets, the old ones copied over and the
-    /// old array given back. php's `erealloc` grows a large block in
-    /// place when the pages after it are free, which #278 covers for a
-    /// packed table and this shares.
+    /// `erealloc(object_buckets, 2 * size * sizeof(zend_object *))`:
+    /// twice the buckets through the heap's `realloc`, so the table grows
+    /// where it stands when the pages after it are free, as php's does,
+    /// and moves otherwise.
     fn grow(&mut self, mm: &mut Mm) -> Result<(), Fatal> {
         let Some(old) = self.buckets else {
             return self.lay_down(mm);
         };
         let new_size = self.size * 2;
-        let at = mm.alloc(new_size as usize * BUCKET)?.cast::<usize>();
-        // SAFETY: the old array holds `size` buckets, the new holds twice
-        // that, and the two do not overlap.
-        unsafe {
-            at.as_ptr()
-                .copy_from_nonoverlapping(old.as_ptr(), self.size as usize);
-        }
-        // SAFETY: the old array came from this heap and every bucket in
-        // it has been copied out.
-        unsafe { mm.free(old.cast()) };
-        self.buckets = Some(at);
+        // SAFETY: the old array came from this heap for `size` buckets,
+        // every one of them written, and `buckets` is its only name,
+        // replaced below.
+        let at = unsafe {
+            mm.realloc(
+                old.cast(),
+                self.size as usize * BUCKET,
+                new_size as usize * BUCKET,
+            )
+        }?;
+        self.buckets = Some(at.cast::<usize>());
         self.size = new_size;
         Ok(())
     }
