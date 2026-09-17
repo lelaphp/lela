@@ -37,17 +37,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::divergence::Registry;
+use crate::divergence::{Kind, Registry};
 use crate::manifest::Manifest;
 use crate::oracle::{self, Invocation, Observation, Oracle, Program, Verdict};
 use crate::reading::{Reading, Status, Store};
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "crosscheck";
-/// The first word of every key the lane compares under: the registry has
-/// no kind of this name yet, so no row accepts a difference here until a
-/// person adds one (harness §4.3).
-pub(crate) const KIND: &str = "crosscheck";
 /// php's flag that prints one extension's rendering and runs nothing.
 pub(crate) const FLAG: &str = "--re";
 /// The file the oracle's bytes are kept in, under the store: what a run
@@ -101,9 +97,11 @@ pub(crate) fn scope(name: &str) -> String {
     format!("ext/{name}")
 }
 
-/// The divergence key of one extension: `crosscheck:ctype`.
+/// The divergence key of one extension: `crosscheck:ctype`, the registry
+/// kind's prefix and the extension's name, so an accepted row under it is
+/// what `judge` reads as `Diverged` (harness §4.3).
 pub(crate) fn id(name: &str) -> String {
-    format!("{KIND}:{name}")
+    format!("{}{name}", Kind::Crosscheck.prefix())
 }
 
 /// Where the oracle's bytes for `name` are kept: under the store, the

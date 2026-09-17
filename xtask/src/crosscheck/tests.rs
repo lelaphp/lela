@@ -93,6 +93,74 @@ fn the_renumbered_fixture_is_a_pass_under_the_row_and_not_without_it() {
     );
 }
 
+/// The registry's `crosscheck` kind (#318): a difference an accepted row
+/// names under `crosscheck:<name>` is `Diverged` with the row's reason and
+/// a pass; the same row with status `open`, or a row for another
+/// extension, accepts nothing.
+#[test]
+fn a_difference_an_accepted_row_names_is_diverged_and_a_pass() {
+    let oracle = fs::read(fixtures().join("oracle.re")).unwrap();
+    let engine = fs::read(fixtures().join("engine.re")).unwrap();
+    let row = |status: &str| {
+        format!(
+            r#"
+[[divergence]]
+id = "crosscheck:ctype"
+kind = "crosscheck"
+reason = "ctype_alnun is the fixture's one byte (fixture)."
+status = "{status}"
+since = "2026-09-18"
+"#
+        )
+    };
+    let accepted = registry(&row("accepted"));
+    let judged = judge(
+        &accepted,
+        "ctype",
+        &oracle,
+        &Rendering::Bytes(engine.clone()),
+    );
+    assert_eq!(
+        judged,
+        Judgement::Diverged("ctype_alnun is the fixture's one byte (fixture).".to_owned())
+    );
+    assert_eq!(judged.status(), Status::Pass);
+    assert_eq!(
+        judge(
+            &accepted,
+            "ctype",
+            &oracle,
+            &Rendering::Bytes(oracle.clone())
+        ),
+        Judgement::Pass,
+        "the same bytes are a pass, row or no row"
+    );
+    assert!(
+        matches!(
+            judge(
+                &accepted,
+                "hash",
+                &oracle,
+                &Rendering::Bytes(engine.clone())
+            ),
+            Judgement::Fail(_)
+        ),
+        "a row for ctype accepts nothing for hash"
+    );
+    assert!(
+        matches!(
+            judge(
+                &registry(&row("open")),
+                "ctype",
+                &oracle,
+                &Rendering::Bytes(engine)
+            ),
+            Judgement::Fail(_)
+        ),
+        "an open row accepts nothing"
+    );
+}
+
 #[test]
 fn an_absent_rendering_fails_saying_the_engine_rendered_nothing() {
     let judged = judge(

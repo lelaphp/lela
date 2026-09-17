@@ -1,10 +1,10 @@
 //! The divergence registry, `docs/divergence.toml` (harness-design.md §4.3):
 //! one row per accepted difference from the oracle, keyed by a witness hash,
-//! a phpt path, a compile-identity path or a trace site. A person writes a
-//! row and its reason; `compare`'s caller or the fuzzer may propose one with
-//! status `open` and an empty reason; the `divergence-reason` instrument
-//! fails an accepted row without a reason. The TOML is the truth; `status
-//! --section divergence` is the rendering.
+//! a phpt path, a compile-identity path, an extension's name or a trace
+//! site. A person writes a row and its reason; `compare`'s caller or the
+//! fuzzer may propose one with status `open` and an empty reason; the
+//! `divergence-reason` instrument fails an accepted row without a reason.
+//! The TOML is the truth; `status --section divergence` is the rendering.
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -27,8 +27,8 @@ pub const INSTRUMENT: &str = "divergence-reason";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Divergence {
-    /// `witness:<hash> | phpt:<path> | compile:<path> | trace:<site>`; the
-    /// prefix is the kind's, and `runner` shares `phpt:`.
+    /// `witness:<hash> | phpt:<path> | compile:<path> | crosscheck:<name> |
+    /// trace:<site>`; the prefix is the kind's, and `runner` shares `phpt:`.
     pub id: String,
     pub kind: Kind,
     /// Written by a person; empty on a proposed row.
@@ -46,16 +46,20 @@ pub enum Kind {
     /// A `phpt:` id where the nightly runner control, not the engine, disagrees.
     Runner,
     Compile,
+    /// A `crosscheck:<name>` id: one extension whose `php --re <name>`
+    /// rendering differs from the oracle's (harness §7).
+    Crosscheck,
     Trace,
 }
 
 impl Kind {
-    /// The five kinds, in the registry's order.
-    pub const ALL: [Kind; 5] = [
+    /// The six kinds, in the registry's order.
+    pub const ALL: [Kind; 6] = [
         Kind::Witness,
         Kind::Phpt,
         Kind::Runner,
         Kind::Compile,
+        Kind::Crosscheck,
         Kind::Trace,
     ];
 
@@ -65,6 +69,7 @@ impl Kind {
             Kind::Phpt => "phpt",
             Kind::Runner => "runner",
             Kind::Compile => "compile",
+            Kind::Crosscheck => "crosscheck",
             Kind::Trace => "trace",
         }
     }
@@ -75,6 +80,7 @@ impl Kind {
             Kind::Witness => "witness:",
             Kind::Phpt | Kind::Runner => "phpt:",
             Kind::Compile => "compile:",
+            Kind::Crosscheck => "crosscheck:",
             Kind::Trace => "trace:",
         }
     }

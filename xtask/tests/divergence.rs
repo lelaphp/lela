@@ -332,6 +332,75 @@ fn status_divergence_renders_the_rows_with_counts_by_kind_and_status() {
     assert_eq!(value["counts"]["total"]["open"], 0);
 }
 
+/// The `crosscheck` kind (#318): `parse` accepts a row keyed by an
+/// extension's name under `crosscheck:`, holds the id to that prefix, and
+/// `status --section divergence` renders the kind's row of counts with the
+/// rest.
+#[test]
+fn a_crosscheck_row_parses_and_status_counts_its_kind() {
+    let row = r#"
+[[divergence]]
+id = "crosscheck:ctype"
+kind = "crosscheck"
+reason = "The fixture's one byte (fixture)."
+status = "accepted"
+since = "2026-09-18"
+"#;
+    let parsed = Registry::parse(row).unwrap();
+    assert_eq!(parsed.rows[0].kind, Kind::Crosscheck);
+    assert_eq!(Kind::Crosscheck.prefix(), "crosscheck:");
+    assert_eq!(Kind::Crosscheck.as_str(), "crosscheck");
+    assert!(parsed.accepted("crosscheck:ctype").is_some());
+    assert_eq!(Kind::ALL.len(), 6);
+    assert_eq!(
+        Kind::ALL.iter().position(|k| *k == Kind::Crosscheck),
+        Kind::ALL
+            .iter()
+            .position(|k| *k == Kind::Compile)
+            .map(|i| i + 1),
+        "after compile, in the registry's order"
+    );
+    let err = Registry::parse(&row.replace("crosscheck:ctype", "ext/ctype"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("ext/ctype") && err.contains("crosscheck:"),
+        "the id carries the kind's prefix: {err}"
+    );
+
+    let root = scratch("crosscheck");
+    let path = root.join(divergence::FILE);
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "{text}
+{row}"
+        ),
+    )
+    .unwrap();
+    let registry = Registry::load(&root).unwrap();
+    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence"]);
+    assert!(ok, "{err}");
+    assert!(
+        md.contains("| crosscheck:ctype | crosscheck | accepted |"),
+        "{md}"
+    );
+    assert!(
+        md.contains(&counts_line(&registry, Some(Kind::Crosscheck))),
+        "the kind's row of counts:\n{md}"
+    );
+    assert!(md.contains("| crosscheck | 0 | 1 | 0 | 1 |"), "{md}");
+    assert!(md.contains(&counts_line(&registry, None)), "{md}");
+    let (ok, json, _) = xtask(
+        &root,
+        &["status", "--section", "divergence", "--format", "json"],
+    );
+    assert!(ok);
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["counts"]["crosscheck"]["accepted"], 1);
+}
+
 #[test]
 fn status_divergence_counts_a_proposed_row_as_open() {
     let root = scratch("open");
