@@ -68,7 +68,7 @@ use php_heap::{
 };
 use php_unit::decl::{
     ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr, EnumBacking,
-    FunctionDecl, Name, PropertyDecl,
+    FunctionDecl, Name, PropertyDecl, Visibility,
 };
 use php_unit::{Diagnostic, Level, OpArray, Opcode, OperandKind, Opline, OplineIdx, Unit};
 
@@ -89,6 +89,8 @@ pub(crate) struct Emit<'a> {
     persistent: &'a [ConstDecl],
     /// The engine's natives, [`Options::functions`].
     functions: &'a [FunctionDecl],
+    /// The engine's classes, [`Options::classes`].
+    known_classes: &'a [ClassDecl],
     /// The thread's stack limit, [`Options::stack`], held to where the
     /// emitter recurses.
     stack: StackLimit,
@@ -182,6 +184,7 @@ pub(crate) fn unit(
         precision: options.precision,
         persistent: &options.persistent,
         functions: &options.functions,
+        known_classes: &options.classes,
         stack: options.stack,
         oplines: Vec::new(),
         constants: Vec::new(),
@@ -536,10 +539,12 @@ impl Emit<'_> {
             | Expr::PreInc(_)
             | Expr::PostInc(_)
             | Expr::PreDec(_)
-            | Expr::PostDec(_) => {
+            | Expr::PostDec(_)
+            | Expr::StaticCall { .. }
+            | Expr::MethodCall { .. } => {
                 Err(self.compile_error("Constant expression contains invalid operations"))
             }
-            Expr::Cast { .. } | Expr::Match { .. } => {
+            Expr::Cast { .. } | Expr::Match { .. } | Expr::New { .. } | Expr::Instanceof { .. } => {
                 Err(self.fatal("a constant expression this compiler cannot read yet"))
             }
         }
@@ -1392,6 +1397,18 @@ impl Emit<'_> {
             Expr::PreDec(var) => Ok(self.incdec(var, Opcode::PreDec)),
             Expr::PostDec(var) => Ok(self.incdec(var, Opcode::PostDec)),
             Expr::Match { expr, arms, line } => self.r#match(expr, arms, *line),
+            Expr::New { class, arguments } => self.new_expression(class, arguments),
+            Expr::StaticCall {
+                class,
+                method,
+                arguments,
+            } => self.static_call(class, method, arguments),
+            Expr::MethodCall {
+                object,
+                method,
+                arguments,
+            } => self.method_call(object, method, arguments),
+            Expr::Instanceof { expr, class } => self.instance_of(expr, class),
             known => Ok(Where::Constant(self.constant_expr(known)?)),
         }
     }
@@ -1773,6 +1790,10 @@ impl Emit<'_> {
             | Expr::PreDec(_)
             | Expr::PostDec(_) => Err(self.fatal("a variable is no constant expression")),
             Expr::Match { .. } => Err(self.fatal("a match is no constant expression")),
+            Expr::New { .. } | Expr::StaticCall { .. } | Expr::MethodCall { .. } => {
+                Err(self.fatal("a call is no constant expression"))
+            }
+            Expr::Instanceof { .. } => Err(self.fatal("an instanceof is no constant expression")),
             // `zend_compile_expr` folds no cast; only a constant
             // expression's walk does (`zend_eval_const_expr`), and none is
             // read yet.
@@ -1843,6 +1864,189 @@ impl Emit<'_> {
         });
         self.args(arguments, false)?;
         Ok(self.call_op(Opcode::DoFcallByName))
+    }
+
+    /// `zend_compile_new` for a class named as written: `NEW` with the
+    /// class's constant pair in `op1`, a cache slot in `op2` and the
+    /// number of arguments in `extended_value`, written into the `VAR`
+    /// the object lands in; then the arguments sent for a callee
+    /// nothing is known of, since the constructor is looked up as the
+    /// program serves (`zend_compile_call_common` with `fbc` null), and
+    /// the `DO_FCALL` that serves it, whose own `VAR` `zend_do_free`
+    /// marks unused. `self`, `parent` and `static` are class references
+    /// of another kind (`zend_get_class_fetch_type`), not read yet.
+    fn new_expression(&mut self, class: &[u8], arguments: &[Expr]) -> Result<Where, CompileError> {
+        let class = self.class_name_literal(class)?;
+        let out = self.temporary();
+        let slot = self.cache_slot();
+        let count = u32::try_from(arguments.len()).unwrap_or(0);
+        self.push(Opline {
+            opcode: Opcode::New,
+            op1_type: OperandKind::Const,
+            op1: class,
+            op2: slot,
+            out_type: OperandKind::Var,
+            out,
+            extended_value: count,
+            ..Opline::default()
+        });
+        self.args(arguments, false)?;
+        let served = self.call_op(Opcode::DoFcall);
+        self.do_free(served);
+        Ok(Where::Returned(out))
+    }
+
+    /// `zend_compile_static_call` for a class and a method both named as
+    /// written: `INIT_STATIC_METHOD_CALL` with the class's constant pair
+    /// in `op1`, the method's in `op2`, two cache slots in `result` and
+    /// the number of arguments in `extended_value`; `__construct` is
+    /// php's `CONSTRUCTOR`, `op2` unused and one cache slot. The callee
+    /// is known where the linked table holds the class and a public
+    /// method of the name (`zend_get_compatible_func_or_null`), which is
+    /// what decides how the arguments are sent; the call op is
+    /// `DO_FCALL` either way (`zend_get_call_op`).
+    fn static_call(
+        &mut self,
+        class: &[u8],
+        method: &[u8],
+        arguments: &[Expr],
+    ) -> Result<Where, CompileError> {
+        let known = self.known_method(class, method);
+        let class_at = self.class_name_literal(class)?;
+        let count = u32::try_from(arguments.len()).unwrap_or(0);
+        let opline = if method.eq_ignore_ascii_case(b"__construct") {
+            Opline {
+                opcode: Opcode::InitStaticMethodCall,
+                op1_type: OperandKind::Const,
+                op1: class_at,
+                out: self.cache_slot(),
+                extended_value: count,
+                ..Opline::default()
+            }
+        } else {
+            let method_at = self.func_name_literal(method)?;
+            Opline {
+                opcode: Opcode::InitStaticMethodCall,
+                op1_type: OperandKind::Const,
+                op1: class_at,
+                op2_type: OperandKind::Const,
+                op2: method_at,
+                out: self.cache_slots(2),
+                extended_value: count,
+                ..Opline::default()
+            }
+        };
+        self.push(opline);
+        self.args(arguments, known)?;
+        Ok(self.call_op(Opcode::DoFcall))
+    }
+
+    /// `zend_compile_method_call` for a receiver that is not `$this`:
+    /// the receiver compiled, `INIT_METHOD_CALL` over it with the
+    /// method's constant pair in `op2`, two cache slots in `result` and
+    /// the number of arguments in `extended_value`, the arguments sent
+    /// for a callee nothing is known of, and `DO_FCALL`.
+    fn method_call(
+        &mut self,
+        object: &Expr,
+        method: &[u8],
+        arguments: &[Expr],
+    ) -> Result<Where, CompileError> {
+        let receiver = self.expr(object)?;
+        let (op1_type, op1) = self.operand(receiver);
+        let method_at = self.func_name_literal(method)?;
+        let count = u32::try_from(arguments.len()).unwrap_or(0);
+        let slot = self.cache_slots(2);
+        self.push(Opline {
+            opcode: Opcode::InitMethodCall,
+            op1_type,
+            op1,
+            op2_type: OperandKind::Const,
+            op2: method_at,
+            out: slot,
+            extended_value: count,
+            ..Opline::default()
+        });
+        self.args(arguments, false)?;
+        Ok(self.call_op(Opcode::DoFcall))
+    }
+
+    /// `zend_compile_instanceof`: a constant on the left is `false`
+    /// where it stands, php's compile-time answer for what is no object;
+    /// otherwise `INSTANCEOF` over the operand with the class's constant
+    /// pair in `op2` and a cache slot in `extended_value`, into a
+    /// temporary.
+    fn instance_of(&mut self, expr: &Expr, class: &[u8]) -> Result<Where, CompileError> {
+        let value = self.expr(expr)?;
+        if let Where::Constant(_) = value {
+            return Ok(Where::Constant(Zval::bool(false)));
+        }
+        let class_at = self.class_name_literal(class)?;
+        let (op1_type, op1) = self.operand(value);
+        let out = self.temporary();
+        let slot = self.cache_slot();
+        self.push(Opline {
+            opcode: Opcode::Instanceof,
+            op1_type,
+            op1,
+            op2_type: OperandKind::Const,
+            op2: class_at,
+            out_type: OperandKind::Tmp,
+            out,
+            extended_value: slot,
+            ..Opline::default()
+        });
+        Ok(Where::Temporary(out))
+    }
+
+    /// `zend_add_class_name_literal` over `zend_resolve_class_name`: the
+    /// name as written with its leading separator dropped, and its
+    /// lowered form in the slot after it, which the engine looks the
+    /// class up by (`Z_STR_P(RT_CONSTANT(opline, opline->op1) + 1)`).
+    /// `self`, `parent` and `static` name no class of the table
+    /// (`zend_get_class_fetch_type`) and are refused as not yet read.
+    fn class_name_literal(&mut self, name: &[u8]) -> Result<u32, CompileError> {
+        let written = resolved(name);
+        if written.eq_ignore_ascii_case(b"self")
+            || written.eq_ignore_ascii_case(b"parent")
+            || written.eq_ignore_ascii_case(b"static")
+        {
+            return Err(self.fatal("a class reference of the scope this compiler cannot read yet"));
+        }
+        let lowered = written.to_ascii_lowercase();
+        let written = self.string(written)?;
+        let lowered = self.string(&lowered)?;
+        let at = self.literal(written);
+        self.literal(lowered);
+        Ok(at)
+    }
+
+    /// `zend_alloc_cache_slots(count)`: the first of `count` slots in a
+    /// row.
+    fn cache_slots(&mut self, count: u32) -> u32 {
+        let at = self.cache_slots;
+        self.cache_slots = self.cache_slots.saturating_add(count);
+        at
+    }
+
+    /// `zend_get_compatible_func_or_null` over `CG(class_table)`: whether
+    /// the class named, one the engine declared ([`Options::classes`])
+    /// or one this file has bound before the call, has a public method
+    /// of the name; a private or protected one is compatible only from
+    /// inside the class, which nothing here is.
+    fn known_method(&self, class: &[u8], method: &[u8]) -> bool {
+        let class = resolved(class).to_ascii_lowercase();
+        let method = method.to_ascii_lowercase();
+        self.known_classes
+            .iter()
+            .chain(self.classes.iter())
+            .find(|decl| decl.name.0.to_ascii_lowercase() == class)
+            .is_some_and(|decl| {
+                decl.methods.iter().any(|m| {
+                    m.function.name.0.to_ascii_lowercase() == method
+                        && m.visibility == Visibility::Public
+                })
+            })
     }
 
     /// `zend_add_func_name_literal`: the name as written and its lowered

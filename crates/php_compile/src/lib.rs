@@ -44,7 +44,7 @@ pub mod syntax {
 
 use php_heap::Intern;
 use php_syntax::Parsed;
-use php_unit::decl::{ConstDecl, FunctionDecl, Name};
+use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, Name};
 use php_unit::{Diagnostic, Level, Unit};
 
 /// What the compiler is told beside the source (design §4.1).
@@ -72,6 +72,14 @@ pub struct Options {
     /// function here is a native; a user function is declared by nothing
     /// this compiler reads yet.
     pub functions: Vec<FunctionDecl>,
+    /// The classes the engine's bundle declared, php's `CG(class_table)`
+    /// as `zend_compile_static_call` reads it: a class the table has
+    /// with a public method of the name written is a callee the
+    /// compiler knows (`zend_get_compatible_func_or_null`), whose
+    /// arguments are sent as a known callee's are; any other class or
+    /// method is resolved as the program serves. Every class here is a
+    /// native one; a class the file itself declares stands beside them.
+    pub classes: Vec<ClassDecl>,
     /// The stack limit of the thread the compiler runs on, php's
     /// `EG(stack_limit)`, which the engine works out once per request
     /// (`zend_call_stack_init`) and the compiler's recursion is held to
@@ -87,6 +95,7 @@ impl Default for Options {
             precision: 14,
             persistent: Vec::new(),
             functions: Vec::new(),
+            classes: Vec::new(),
             stack: StackLimit::UNCHECKED,
         }
     }
@@ -2806,6 +2815,307 @@ mod tests {
         assert_eq!(
             refused(b"<?php\nclass M { public int $x; }"),
             not_yet("a class member this compiler cannot read yet", 2)
+        );
+    }
+
+    /// `zend_compile_new`, `zend_compile_static_call`,
+    /// `zend_compile_method_call` and `zend_compile_instanceof` as the
+    /// oracle at 8.5.9 dumps them under `opcache.opt_debug_level=0x10000`,
+    /// each source read once: `NEW` into a `VAR` with its `DO_FCALL`
+    /// unused and the `FREE` or the live range `zend_do_free` leaves;
+    /// the two `INIT_*_METHOD_CALL`s with their arguments sent for a
+    /// callee nothing is known of; `INSTANCEOF` into a temporary, and
+    /// `false` where the left side is a constant.
+    #[test]
+    fn new_compiles_to_php_s_op_array() {
+        let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+            (
+                b"<?php $o = new E;",
+                4,
+                1,
+                3,
+                "0000 V1 = NEW 0 string(\"E\")\n\
+                 0001 DO_FCALL\n\
+                 0002 ASSIGN CV0($o) V1\n\
+                 0003 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    1: 0001 - 0002 (new)\n",
+            ),
+            (
+                b"<?php new E;",
+                4,
+                0,
+                2,
+                "0000 V0 = NEW 0 string(\"E\")\n\
+                 0001 DO_FCALL\n\
+                 0002 FREE V0\n\
+                 0003 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    0: 0001 - 0002 (new)\n",
+            ),
+            (
+                b"<?php echo (new E(1))->m();",
+                7,
+                0,
+                3,
+                "0000 V0 = NEW 1 string(\"E\")\n\
+                 0001 SEND_VAL_EX int(1) 1\n\
+                 0002 DO_FCALL\n\
+                 0003 INIT_METHOD_CALL 0 V0 string(\"m\")\n\
+                 0004 V2 = DO_FCALL\n\
+                 0005 ECHO V2\n\
+                 0006 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    0: 0001 - 0003 (new)\n",
+            ),
+        ];
+        for (source, lines, vars, tmps, oplines) in cases {
+            assert_eq!(
+                dump_of(source),
+                main_dump(*lines, *vars, *tmps, oplines),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+        let (unit, _strings) = unit_and_strings(b"<?php new E; $o instanceof E;");
+        assert_eq!(unit.main.cache_size, 2, "NEW and INSTANCEOF take one each");
+    }
+
+    /// The two `INIT_*_METHOD_CALL`s and `INSTANCEOF`, read as
+    /// [`new_compiles_to_php_s_op_array`]'s cases were.
+    #[test]
+    fn the_method_calls_and_instanceof_compile_to_php_s_op_arrays() {
+        let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+            (
+                b"<?php $x = E::m();",
+                4,
+                1,
+                2,
+                "0000 INIT_STATIC_METHOD_CALL 0 string(\"E\") string(\"m\")\n\
+                 0001 V1 = DO_FCALL\n\
+                 0002 ASSIGN CV0($x) V1\n\
+                 0003 RETURN int(1)\n",
+            ),
+            (
+                b"<?php E::__construct();",
+                3,
+                0,
+                1,
+                "0000 INIT_STATIC_METHOD_CALL 0 string(\"E\") CONSTRUCTOR\n\
+                 0001 DO_FCALL\n\
+                 0002 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $o = 1; $o->m(1, $o)->n();",
+                8,
+                1,
+                3,
+                "0000 ASSIGN CV0($o) int(1)\n\
+                 0001 INIT_METHOD_CALL 2 CV0($o) string(\"m\")\n\
+                 0002 SEND_VAL_EX int(1) 1\n\
+                 0003 SEND_VAR_EX CV0($o) 2\n\
+                 0004 V2 = DO_FCALL\n\
+                 0005 INIT_METHOD_CALL 0 V2 string(\"n\")\n\
+                 0006 DO_FCALL\n\
+                 0007 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $o = 1; $o->m(f($o));",
+                8,
+                1,
+                3,
+                "0000 ASSIGN CV0($o) int(1)\n\
+                 0001 INIT_METHOD_CALL 1 CV0($o) string(\"m\")\n\
+                 0002 INIT_FCALL_BY_NAME 1 string(\"f\")\n\
+                 0003 SEND_VAR_EX CV0($o) 1\n\
+                 0004 V2 = DO_FCALL_BY_NAME\n\
+                 0005 SEND_VAR_NO_REF_EX V2 1\n\
+                 0006 DO_FCALL\n\
+                 0007 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $o = 1; \\E::m($o instanceof \\E);",
+                6,
+                1,
+                3,
+                "0000 ASSIGN CV0($o) int(1)\n\
+                 0001 INIT_STATIC_METHOD_CALL 1 string(\"E\") string(\"m\")\n\
+                 0002 T2 = INSTANCEOF CV0($o) string(\"E\")\n\
+                 0003 SEND_VAL_EX T2 1\n\
+                 0004 DO_FCALL\n\
+                 0005 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $o = 1; $o instanceof E;",
+                4,
+                1,
+                2,
+                "0000 ASSIGN CV0($o) int(1)\n\
+                 0001 T2 = INSTANCEOF CV0($o) string(\"E\")\n\
+                 0002 FREE T2\n\
+                 0003 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $o = 1; echo 1 instanceof E, strlen('a') instanceof E;",
+                4,
+                1,
+                1,
+                "0000 ASSIGN CV0($o) int(1)\n\
+                 0001 ECHO bool(false)\n\
+                 0002 ECHO bool(false)\n\
+                 0003 RETURN int(1)\n",
+            ),
+        ];
+        for (source, lines, vars, tmps, oplines) in cases {
+            assert_eq!(
+                dump_of(source),
+                main_dump(*lines, *vars, *tmps, oplines),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+        let (unit, _strings) = unit_and_strings(b"<?php E::m(); $o->n();");
+        assert_eq!(
+            unit.main.cache_size, 4,
+            "each INIT takes two cache slots, the class and the method"
+        );
+    }
+
+    /// `zend_get_compatible_func_or_null`: a public method of a class
+    /// the engine declared is a callee the compiler knows, so its
+    /// arguments are sent as `SEND_VAL` and `SEND_VAR`; a private one,
+    /// a class the table has not and a class the file declares with no
+    /// such method are sent for a callee nothing is known of. The
+    /// class's name is matched whatever its case, as `CG(class_table)`
+    /// is keyed by the lowered name.
+    #[test]
+    fn a_public_method_of_a_declared_class_is_a_known_callee() {
+        use php_unit::decl::{
+            ClassDecl, ClassFlags, ClassKind, EnumBacking, MethodDecl, Visibility,
+        };
+        let method = |name: &[u8], visibility| MethodDecl {
+            function: FunctionDecl {
+                name: Name(name.into()),
+                parameters: Vec::new(),
+                return_type: None,
+                returns_by_ref: false,
+                attributes: Vec::new(),
+                doc_comment: None,
+                file: Name(Box::new([])),
+                line: 0,
+            },
+            visibility,
+            is_instance: false,
+            is_abstract: false,
+            is_final: false,
+            tentative_return: false,
+        };
+        let options = Options {
+            classes: vec![ClassDecl {
+                name: Name(b"PhpToken".as_slice().into()),
+                kind: ClassKind::Class,
+                flags: ClassFlags::default(),
+                parent: None,
+                interfaces: Vec::new(),
+                traits: Vec::new(),
+                backing: EnumBacking::Pure,
+                constants: Vec::new(),
+                properties: Vec::new(),
+                methods: vec![
+                    method(b"tokenize", Visibility::Public),
+                    method(b"hidden", Visibility::Private),
+                ],
+                attributes: Vec::new(),
+                doc_comment: None,
+                file: Name(Box::new([])),
+                line: 0,
+            }],
+            ..Options::default()
+        };
+        let dump = |source: &[u8]| {
+            let mut strings = php_heap::Strings::new();
+            compile(
+                &php_syntax::parse(source, &php_syntax::Options::default()),
+                &options,
+                &mut strings,
+            )
+            .unwrap_or_default()
+            .dump(&[])
+        };
+        assert_eq!(
+            dump(b"<?php $a = 1; phptoken::TOKENIZE('<?php ', $a);"),
+            main_dump(
+                6,
+                1,
+                2,
+                "0000 ASSIGN CV0($a) int(1)\n\
+                 0001 INIT_STATIC_METHOD_CALL 2 string(\"phptoken\") string(\"TOKENIZE\")\n\
+                 0002 SEND_VAL string(\"<?php \") 1\n\
+                 0003 SEND_VAR CV0($a) 2\n\
+                 0004 DO_FCALL\n\
+                 0005 RETURN int(1)\n"
+            )
+        );
+        assert_eq!(
+            dump(b"<?php PhpToken::hidden(1); Nope::m(1); class M {} M::m(1);"),
+            main_dump(
+                10,
+                0,
+                3,
+                "0000 INIT_STATIC_METHOD_CALL 1 string(\"PhpToken\") string(\"hidden\")\n\
+                 0001 SEND_VAL_EX int(1) 1\n\
+                 0002 DO_FCALL\n\
+                 0003 INIT_STATIC_METHOD_CALL 1 string(\"Nope\") string(\"m\")\n\
+                 0004 SEND_VAL_EX int(1) 1\n\
+                 0005 DO_FCALL\n\
+                 0006 INIT_STATIC_METHOD_CALL 1 string(\"M\") string(\"m\")\n\
+                 0007 SEND_VAL_EX int(1) 1\n\
+                 0008 DO_FCALL\n\
+                 0009 RETURN int(1)\n"
+            )
+        );
+    }
+
+    /// What stands beside these four and is not read yet is refused as
+    /// such; what php's grammar refuses, an `instanceof` of an
+    /// `instanceof`, the parser has refused in php's words before the
+    /// reader sees it.
+    #[test]
+    fn what_stands_beside_new_and_the_calls_is_refused_as_not_yet_read() {
+        let refused = |source: &[u8]| {
+            let mut strings = php_heap::Strings::new();
+            compile(
+                &php_syntax::parse(source, &php_syntax::Options::default()),
+                &bundled(),
+                &mut strings,
+            )
+            .err()
+            .map(|e| e.message)
+        };
+        assert_eq!(
+            refused(b"<?php new $c;").as_deref(),
+            Some("a `new` of what is no class name this compiler cannot read yet")
+        );
+        assert_eq!(
+            refused(b"<?php echo E::A;").as_deref(),
+            Some("a class constant or a static property this compiler cannot read yet")
+        );
+        assert_eq!(
+            refused(b"<?php echo $o->p;").as_deref(),
+            Some("a property fetch this compiler cannot read yet")
+        );
+        assert_eq!(
+            refused(b"<?php echo $o instanceof $c;").as_deref(),
+            Some("an `instanceof` of what is no class name this compiler cannot read yet")
+        );
+        assert_eq!(
+            refused(b"<?php echo $o instanceof E instanceof F;").as_deref(),
+            Some("syntax error, unexpected token \"instanceof\""),
+            "the parser's own refusal stands first"
+        );
+        assert_eq!(
+            refused(b"<?php new self;").as_deref(),
+            Some("a class reference of the scope this compiler cannot read yet")
         );
     }
 }

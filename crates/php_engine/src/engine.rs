@@ -134,7 +134,26 @@ pub(crate) struct Shared {
     strings: Mutex<Strings>,
 }
 
+/// What the engine has declared, as the compiler reads it: php's
+/// `CG(function_table)`, `CG(class_table)` and the persistent constants,
+/// each a view of the engine's own table.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Declared<'a> {
+    pub(crate) constants: &'a [ConstDecl],
+    pub(crate) functions: &'a [(FunctionDecl, Entry)],
+    pub(crate) classes: &'a [ClassDecl],
+}
+
 impl Shared {
+    /// The tables the compiler reads, as [`Declared`].
+    pub(crate) fn declared(&self) -> Declared<'_> {
+        Declared {
+            constants: &self.constants,
+            functions: &self.functions,
+            classes: &self.classes,
+        }
+    }
+
     /// The engine's own constants, php's `zend_register_standard_constants`
     /// and `main.c`'s `PHP_VERSION` and `PHP_EOL`: the ones a program
     /// reaches with no extension loaded, their strings interned into
@@ -204,8 +223,7 @@ impl Shared {
             source,
             filename,
             self.precision(),
-            &self.constants,
-            &self.functions,
+            self.declared(),
             stack,
             &mut *strings,
         )
@@ -541,8 +559,7 @@ impl Engine {
                     &source,
                     &script,
                     precision,
-                    &shared.constants,
-                    &shared.functions,
+                    shared.declared(),
                     stack,
                     req.heap_mut(),
                 ))
@@ -617,19 +634,18 @@ impl Engine {
 /// dropped: what `serve` needs to render php's parse error, and what
 /// [`Engine::unit`] is the lossy face over. `strings` is the home the
 /// unit's constant strings are interned into (design §5.2), `precision`
-/// the ini entry php's compiler renders a double constant at, and
-/// `persistent` the constants the bundle declared, which the compiler
-/// substitutes where they are written, and `functions` the natives it
-/// declared, which the compiler reads as `CG(function_table)` before it
-/// serves a call of `zend_try_compile_special_func`'s table itself, and
-/// `stack` the calling thread's limit, which the compiler's recursion is
-/// held to.
+/// the ini entry php's compiler renders a double constant at, `declared`
+/// the engine's tables: the constants the bundle declared, which the
+/// compiler substitutes where they are written, the natives, which it
+/// reads as `CG(function_table)` before it serves a call of
+/// `zend_try_compile_special_func`'s table itself, and the classes, which
+/// it reads as `CG(class_table)` to know a method's callee; and `stack`
+/// the calling thread's limit, which the compiler's recursion is held to.
 fn compile(
     source: &[u8],
     filename: &[u8],
     precision: i32,
-    persistent: &[ConstDecl],
-    functions: &[(FunctionDecl, Entry)],
+    declared: Declared<'_>,
     stack: StackLimit,
     strings: &mut dyn Intern,
 ) -> Result<Arc<Unit>, CompileError> {
@@ -637,8 +653,13 @@ fn compile(
         filename: Name(filename.into()),
         strict_types: false,
         precision,
-        persistent: persistent.to_vec(),
-        functions: functions.iter().map(|(decl, _)| decl.clone()).collect(),
+        persistent: declared.constants.to_vec(),
+        functions: declared
+            .functions
+            .iter()
+            .map(|(decl, _)| decl.clone())
+            .collect(),
+        classes: declared.classes.to_vec(),
         stack,
     };
     php_compile::compile_source(source, &options, strings).map(Arc::new)
@@ -1429,8 +1450,7 @@ mod tests {
                 source,
                 b"witness.php",
                 14,
-                &[],
-                &[],
+                Declared::default(),
                 StackLimit::UNCHECKED,
                 req.heap_mut(),
             );

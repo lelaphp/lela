@@ -191,6 +191,33 @@ pub(crate) enum Expr {
         arms: Vec<Arm>,
         line: u32,
     },
+    /// `new C(args)`, php's `ZEND_AST_NEW` over a class named as
+    /// written; `new $c`, `new static` and an anonymous class are not
+    /// read.
+    New {
+        class: Vec<u8>,
+        arguments: Vec<Expr>,
+    },
+    /// `C::m(args)`, php's `ZEND_AST_STATIC_CALL` over a class and a
+    /// method both named as written.
+    StaticCall {
+        class: Vec<u8>,
+        method: Vec<u8>,
+        arguments: Vec<Expr>,
+    },
+    /// `$o->m(args)`, php's `ZEND_AST_METHOD_CALL` over any expression
+    /// and a method named as written.
+    MethodCall {
+        object: Child,
+        method: Vec<u8>,
+        arguments: Vec<Expr>,
+    },
+    /// `$o instanceof C`, php's `ZEND_AST_INSTANCEOF` over a class named
+    /// as written.
+    Instanceof {
+        expr: Child,
+        class: Vec<u8>,
+    },
 }
 
 /// One child of an expression, php's `zend_ast.child[i]`: the expression
@@ -1205,7 +1232,7 @@ impl Reader<'_> {
 
     /// `*`, `/` and `%`, php's higher arithmetic level.
     fn multiplicative(&mut self) -> Result<Expr, Trouble> {
-        let mut left = self.unary()?;
+        let mut left = self.instance_of()?;
         loop {
             self.skip_trivia();
             let op = match (self.byte(0), self.byte(1)) {
@@ -1216,13 +1243,45 @@ impl Reader<'_> {
                 _ => return Ok(left),
             };
             self.bump(1);
-            let right = self.unary()?;
+            let right = self.instance_of()?;
             left = Expr::Binary {
                 op,
                 left: Child::new(left),
                 right: Child::new(right),
             };
         }
+    }
+
+    /// `expr instanceof C`, php's non-associative level between `!` and
+    /// the unary operators (`%precedence T_INSTANCEOF` stands below
+    /// `'~'` and the casts in `zend_language_parser.y`), so `-$a
+    /// instanceof C` is php's `(-$a) instanceof C` and a second
+    /// `instanceof` after the first is php's parse error, refused here.
+    /// The class is a name as written; `self`, `parent` and `static`
+    /// are the emitter's to refuse, and a class held in a variable is
+    /// not read.
+    fn instance_of(&mut self) -> Result<Expr, Trouble> {
+        let left = self.unary()?;
+        self.skip_trivia();
+        if !self.word_ahead(b"instanceof") {
+            return Ok(left);
+        }
+        self.bump(10);
+        self.skip_trivia();
+        if !self.name_ahead() {
+            return Err(self.trouble(
+                "an `instanceof` of what is no class name this compiler cannot read yet",
+            ));
+        }
+        let class = self.name();
+        self.skip_trivia();
+        if self.word_ahead(b"instanceof") {
+            return Err(self.trouble("an `instanceof` of an `instanceof`, which php does not read"));
+        }
+        Ok(Expr::Instanceof {
+            expr: Child::new(left),
+            class,
+        })
     }
 
     /// `-$a` and `+$a`, which bind tighter than either level and nest.
@@ -1267,7 +1326,10 @@ impl Reader<'_> {
         match self.byte(0) {
             Some(b'\'') => self.single_quoted(),
             Some(b'"') => self.double_quoted(),
-            Some(b'$') => self.incremented(),
+            Some(b'$') => {
+                let receiver = self.incremented()?;
+                self.member_calls(receiver)
+            }
             // php's `T_INC variable` and `T_DEC variable`: the variable is
             // the whole operand, so `++$a ** 2` is php's `(++$a) ** 2`.
             Some(step @ (b'+' | b'-')) if self.byte(1) == Some(step) => {
@@ -1296,11 +1358,15 @@ impl Reader<'_> {
                     return Err(self.trouble("a parenthesis no close parenthesis matches"));
                 }
                 self.bump(1);
-                Ok(inner)
+                self.member_calls(inner)
             }
             Some(b'm' | b'M') if self.word_ahead(b"match") => {
                 self.bump(5);
                 self.r#match()
+            }
+            Some(b'n' | b'N') if self.word_ahead(b"new") => {
+                self.bump(3);
+                self.new_expression()
             }
             Some(b) if b.is_ascii_alphabetic() || b == b'_' || b == b'\\' => self.named(),
             _ => Err(self.trouble("an expression this compiler cannot read yet")),
@@ -1370,10 +1436,31 @@ impl Reader<'_> {
     }
 
     /// A name: `true`, `false` and `null`, which php reads whatever their
-    /// case, another constant by name, or a call.
+    /// case, another constant by name, a call, or a call on a class,
+    /// `C::m()`, php's `class_name T_PAAMAYIM_NEKUDOTAYIM member_name
+    /// argument_list`. What else stands after a `::`, a class constant,
+    /// a property of the class or `::class`, is not read yet.
     fn named(&mut self) -> Result<Expr, Trouble> {
         let name = self.name();
         self.skip_trivia();
+        if self.byte(0) == Some(b':') && self.byte(1) == Some(b':') {
+            self.bump(2);
+            self.skip_trivia();
+            let method = self.label();
+            self.skip_trivia();
+            if method.is_empty() || self.byte(0) != Some(b'(') {
+                return Err(self.trouble(
+                    "a class constant or a static property this compiler cannot read yet",
+                ));
+            }
+            self.bump(1);
+            let arguments = self.arguments()?;
+            return self.member_calls(Expr::StaticCall {
+                class: name,
+                method,
+                arguments,
+            });
+        }
         if self.byte(0) != Some(b'(') {
             return match name.to_ascii_lowercase().as_slice() {
                 b"true" => Ok(Expr::Bool(true)),
@@ -1383,12 +1470,20 @@ impl Reader<'_> {
             };
         }
         self.bump(1);
+        let arguments = self.arguments()?;
+        self.member_calls(Expr::Call { name, arguments })
+    }
+
+    /// `argument_list` after its `(`: each argument an expression, `,`
+    /// between them, up to the `)`. A trailing `,`, a by-reference `&`,
+    /// an unpacked `...` and a named argument are not read.
+    fn arguments(&mut self) -> Result<Vec<Expr>, Trouble> {
         let mut arguments = Vec::new();
         loop {
             self.skip_trivia();
             if self.byte(0) == Some(b')') {
                 self.bump(1);
-                return Ok(Expr::Call { name, arguments });
+                return Ok(arguments);
             }
             if !arguments.is_empty() {
                 if self.byte(0) != Some(b',') {
@@ -1398,6 +1493,78 @@ impl Reader<'_> {
             }
             arguments.push(self.expr()?);
         }
+    }
+
+    /// `new C(args)` and `new C`, the keyword read: php's `new_expr` over
+    /// a class named as written, `ctor_arguments` optional. What else
+    /// may follow `new`, a variable, `static` or `class`, is not read.
+    /// A `->` after the arguments is 8.4's `new C()->m()`; without them
+    /// it is php's parse error, and the receiver returned here ends the
+    /// operand.
+    fn new_expression(&mut self) -> Result<Expr, Trouble> {
+        self.skip_trivia();
+        if !self.name_ahead() {
+            return Err(
+                self.trouble("a `new` of what is no class name this compiler cannot read yet")
+            );
+        }
+        let class = self.name();
+        self.skip_trivia();
+        if self.byte(0) != Some(b'(') {
+            return Ok(Expr::New {
+                class,
+                arguments: Vec::new(),
+            });
+        }
+        self.bump(1);
+        let arguments = self.arguments()?;
+        self.member_calls(Expr::New { class, arguments })
+    }
+
+    /// `receiver->m(args)` and the chain of them, php's `callable_variable
+    /// T_OBJECT_OPERATOR property_name argument_list`, each call the
+    /// receiver of the next. A `->` that no `(` follows is a property
+    /// fetch, not read yet; `?->` is left where it stands.
+    fn member_calls(&mut self, mut receiver: Expr) -> Result<Expr, Trouble> {
+        loop {
+            self.skip_trivia();
+            if !(self.byte(0) == Some(b'-') && self.byte(1) == Some(b'>')) {
+                return Ok(receiver);
+            }
+            self.bump(2);
+            self.skip_trivia();
+            let method = self.label();
+            self.skip_trivia();
+            if method.is_empty() || self.byte(0) != Some(b'(') {
+                return Err(self.trouble("a property fetch this compiler cannot read yet"));
+            }
+            self.bump(1);
+            let arguments = self.arguments()?;
+            receiver = Expr::MethodCall {
+                object: Child::new(receiver),
+                method,
+                arguments,
+            };
+        }
+    }
+
+    /// Whether a name, php's `T_STRING` or `T_NAME_*`, starts here.
+    fn name_ahead(&self) -> bool {
+        self.byte(0)
+            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_' || b == b'\\')
+    }
+
+    /// php's `LABEL`, one identifier with no namespace separator in it:
+    /// a member's name, which `identifier` lets a reserved word be.
+    fn label(&mut self) -> Vec<u8> {
+        let start = self.at;
+        while self
+            .byte(0)
+            .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80)
+        {
+            self.bump(1);
+        }
+        self.taken(start)
     }
 
     /// A variable, and php's `variable T_INC` or `variable T_DEC` after
