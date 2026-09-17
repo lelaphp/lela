@@ -4,13 +4,15 @@
 //! and `execute`'s re-entry limit are both built from that pair less
 //! `zend.reserved_stack_size`. php asks one platform at a time, an arm
 //! per `#ifdef`, and answers `false` on a platform it has no arm for;
-//! what is here is the two arms the oracle runs on, macOS and Linux,
-//! each copied from its function, and `None` elsewhere, which leaves
-//! php's own fallback standing where the caller builds the limit: a
-//! local's address for the base and [`call_stack_default_size`] for the
-//! size, `zend_call_stack_default_size` arm for arm. This is the crate
-//! that may say `unsafe`, and each call into the platform is one
-//! operation per block with what makes it sound beside it.
+//! what is here is every arm php has save Windows, which is month two
+//! (design §12), each copied from its function: macOS, Linux, FreeBSD
+//! with `DragonFly`, OpenBSD, NetBSD, Haiku and Solaris with illumos.
+//! `None` stands where php's own `zend_call_stack_get` answers `false`,
+//! and leaves php's fallback standing where the caller builds the
+//! limit: a local's address for the base and [`call_stack_default_size`]
+//! for the size, `zend_call_stack_default_size` arm for arm. This is
+//! the crate that may say `unsafe`, and each call into the platform is
+//! one operation per block with what makes it sound beside it.
 
 /// `zend_call_stack`: the high address of the thread's stack and how far
 /// down from it the stack may reach.
@@ -56,11 +58,60 @@ pub fn call_stack_default_size() -> usize {
 
 /// `zend_call_stack_position`: the address of a local of the calling
 /// frame, php's `__builtin_frame_address(0)`.
-#[cfg(target_os = "linux")]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "netbsd",
+    target_os = "solaris",
+    target_os = "illumos"
+))]
 #[inline]
 fn position() -> usize {
     let here = 0u8;
     std::ptr::addr_of!(here).addr()
+}
+
+/// `getrlimit(RLIMIT_STACK)`'s soft limit, which every arm that sizes
+/// the main thread reads it from, or `None` where the call fails or the
+/// limit is `RLIM_INFINITY`, where php answers `false`.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "solaris",
+    target_os = "illumos"
+))]
+fn stack_rlimit() -> Option<usize> {
+    let mut rlim = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+    // SAFETY: `rlim` is room for one `rlimit`, which the call fills
+    // on success and leaves alone on failure.
+    if unsafe { libc::getrlimit(libc::RLIMIT_STACK, rlim.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: `getrlimit` returned 0, so `rlim` holds an initialised
+    // `rlimit`.
+    let rlim = unsafe { rlim.assume_init() };
+    if rlim.rlim_cur == libc::RLIM_INFINITY {
+        return None;
+    }
+    usize::try_from(rlim.rlim_cur).ok()
+}
+
+/// `sysconf(_SC_PAGESIZE)`, the page the BSD and Haiku arms deduct a
+/// guard of; php spells it `getpagesize()` on FreeBSD, which answers the
+/// same number.
+#[cfg(any(
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "openbsd",
+    target_os = "haiku"
+))]
+fn page_size() -> Option<usize> {
+    // SAFETY: `sysconf` takes one name, reads and writes nothing of
+    // ours and answers a plain number.
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    usize::try_from(page).ok()
 }
 
 /// `zend_call_stack_get_macos`: the base is `pthread_get_stackaddr_np`
@@ -113,7 +164,7 @@ mod platform {
     use std::ffi::c_void;
     use std::mem::MaybeUninit;
 
-    use super::{CallStack, position};
+    use super::{CallStack, position, stack_rlimit};
 
     /// `zend_call_stack_is_main_thread`: the thread whose id is the
     /// process's.
@@ -186,19 +237,7 @@ mod platform {
             prev_end = end;
         }
         let end = found?;
-        let mut rlim = MaybeUninit::<libc::rlimit>::uninit();
-        // SAFETY: `rlim` is room for one `rlimit`, which the call fills
-        // on success and leaves alone on failure.
-        if unsafe { libc::getrlimit(libc::RLIMIT_STACK, rlim.as_mut_ptr()) } != 0 {
-            return None;
-        }
-        // SAFETY: `getrlimit` returned 0, so `rlim` holds an initialised
-        // `rlimit`.
-        let rlim = unsafe { rlim.assume_init() };
-        if rlim.rlim_cur == libc::RLIM_INFINITY {
-            return None;
-        }
-        let mut max_size = usize::try_from(rlim.rlim_cur).ok()?;
+        let mut max_size = stack_rlimit()?;
         if end.wrapping_sub(max_size) < prev_end {
             max_size = prev_end.wrapping_sub(end);
         }
@@ -216,9 +255,485 @@ mod platform {
     }
 }
 
-/// A platform php has an arm for that this crate does not lay down, or
-/// one php has none for: nothing answers, and the fallback stands.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// `zend_call_stack_get_freebsd`, which php runs on `DragonFly` too:
+/// `KERN_USRSTACK` under `RLIMIT_STACK` less the guard pages
+/// `security.bsd.stack_guard_page` counts on the main thread, and
+/// `pthread_attr_get_np` on any other, whose attributes hold the stack
+/// the thread was started on.
+#[cfg(any(target_os = "freebsd", target_os = "dragonfly"))]
+mod platform {
+    use std::ffi::c_void;
+    use std::mem::MaybeUninit;
+    use std::ptr::{null, null_mut};
+
+    use super::{CallStack, page_size, stack_rlimit};
+
+    /// `zend_call_stack_is_main_thread`: `pthread_main_np` answers 1 on
+    /// the process's first thread and -1 before the threading library
+    /// is up, which is the first thread too.
+    fn is_main_thread() -> bool {
+        // SAFETY: `pthread_main_np` takes no argument and reads nothing
+        // of ours; it answers a plain number.
+        let is_main = unsafe { libc::pthread_main_np() };
+        is_main == -1 || is_main == 1
+    }
+
+    /// `zend_call_stack_get_freebsd_pthread`: the attributes of the
+    /// calling thread, which answer bogus values for the main thread,
+    /// so php never asks them there.
+    fn pthread_bounds() -> Option<CallStack> {
+        let mut attr = MaybeUninit::<libc::pthread_attr_t>::uninit();
+        // SAFETY: `attr` is room for one `pthread_attr_t`, which the
+        // call fills on success and leaves alone on failure.
+        if unsafe { libc::pthread_attr_init(attr.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        // SAFETY: `pthread_attr_init` returned 0, so `attr` holds an
+        // initialised `pthread_attr_t`.
+        let mut attr = unsafe { attr.assume_init() };
+        // SAFETY: `pthread_self` takes no argument and answers the
+        // calling thread's own handle, live while the thread runs.
+        let this = unsafe { libc::pthread_self() };
+        // SAFETY: `this` names a live thread and `attr` is initialised;
+        // the call overwrites `attr` with the thread's attributes.
+        let got = unsafe { libc::pthread_attr_get_np(this, &raw mut attr) };
+        let mut addr: *mut c_void = null_mut();
+        let mut max_size: usize = 0;
+        let read = if got == 0 {
+            // SAFETY: `attr` is initialised, and `addr` and `max_size`
+            // are locals of the right types the call writes through.
+            unsafe {
+                libc::pthread_attr_getstack(&raw const attr, &raw mut addr, &raw mut max_size)
+            }
+        } else {
+            got
+        };
+        // SAFETY: `attr` is initialised and is not read after this.
+        unsafe { libc::pthread_attr_destroy(&raw mut attr) };
+        if read != 0 {
+            return None;
+        }
+        Some(CallStack {
+            base: addr.addr().wrapping_add(max_size),
+            max_size,
+        })
+    }
+
+    /// `zend_call_stack_get_freebsd_sysctl`: the main thread's base is
+    /// `kern.usrstack`, and its size the rlimit less the guard pages,
+    /// one by default, that `security.bsd.stack_guard_page` counts.
+    fn sysctl_bounds() -> Option<CallStack> {
+        let mib = [libc::CTL_KERN, libc::KERN_USRSTACK];
+        let mut stack_base: *mut c_void = null_mut();
+        let mut len = size_of::<*mut c_void>();
+        // SAFETY: `mib` is two names and `namelen` says two; `stack_base`
+        // is `len` bytes the call writes through and shortens `len` to;
+        // nothing is set, a null new value of length zero.
+        let asked = unsafe {
+            libc::sysctl(
+                mib.as_ptr(),
+                2,
+                (&raw mut stack_base).cast(),
+                &raw mut len,
+                null(),
+                0,
+            )
+        };
+        if asked != 0 {
+            return None;
+        }
+        let rlimit = stack_rlimit()?;
+        let mut numguards: usize = 0;
+        let mut len = size_of::<usize>();
+        // SAFETY: the name is a NUL-terminated literal; `numguards` is
+        // `len` bytes the call writes through and shortens `len` to;
+        // nothing is set, a null new value of length zero.
+        let asked = unsafe {
+            libc::sysctlbyname(
+                c"security.bsd.stack_guard_page".as_ptr(),
+                (&raw mut numguards).cast(),
+                &raw mut len,
+                null(),
+                0,
+            )
+        };
+        if asked != 0 {
+            return None;
+        }
+        let guard_size = numguards.wrapping_mul(page_size()?);
+        Some(CallStack {
+            base: stack_base.addr(),
+            max_size: rlimit.wrapping_sub(guard_size),
+        })
+    }
+
+    pub(super) fn call_stack_bounds() -> Option<CallStack> {
+        if is_main_thread() {
+            return sysctl_bounds();
+        }
+        pthread_bounds()
+    }
+}
+
+/// `zend_call_stack_get_openbsd`: `pthread_stackseg_np` on a thread the
+/// library started, and `VM_PSSTRINGS` under `RLIMIT_STACK` on the
+/// initial one, whose segment the library only estimates.
+#[cfg(target_os = "openbsd")]
+mod platform {
+    use std::ffi::{c_int, c_void};
+    use std::mem::MaybeUninit;
+    use std::ptr::null_mut;
+
+    use super::{CallStack, page_size, stack_rlimit};
+
+    /// `VM_PSSTRINGS`, `sys/uvm/uvmexp.h`, which `libc` does not carry:
+    /// the address of the process's argument strings, laid down at the
+    /// top of the initial stack.
+    const VM_PSSTRINGS: c_int = 3;
+
+    /// `struct _ps_strings`, `sys/uvm/uvmexp.h`, what `VM_PSSTRINGS`
+    /// answers.
+    #[repr(C)]
+    struct PsStrings {
+        val: *mut c_void,
+    }
+
+    /// php reads the thread information block itself, `TIB_GET()`, and
+    /// takes a thread with none or with `TIB_THREAD_INITIAL_STACK` set
+    /// as the initial one; `pthread_main_np` answers 1 on exactly those
+    /// two, before the library is up and on the flagged thread.
+    fn is_main_thread() -> bool {
+        // SAFETY: `pthread_main_np` takes no argument and reads nothing
+        // of ours; it answers a plain number.
+        unsafe { libc::pthread_main_np() != 0 }
+    }
+
+    /// `zend_call_stack_get_openbsd_pthread`: the thread's segment, its
+    /// size less one page. `pthread_stackseg_np` answers the top of the
+    /// stack in `ss_sp`, `pthread_stackseg_np(3)`, and the base here is
+    /// that address; php's arm at 8.5.9 takes `ss_sp - ss_size`, the
+    /// bottom, so its limit lies a whole stack below the frames and
+    /// never fires, a defect and not a behaviour to copy.
+    fn pthread_bounds() -> Option<CallStack> {
+        // SAFETY: `pthread_self` takes no argument and answers the
+        // calling thread's own handle, live while the thread runs.
+        let this = unsafe { libc::pthread_self() };
+        let mut segment = MaybeUninit::<libc::stack_t>::uninit();
+        // SAFETY: `this` names a live thread; `segment` is room for one
+        // `stack_t`, which the call fills on success and leaves alone
+        // on failure.
+        if unsafe { libc::pthread_stackseg_np(this, segment.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        // SAFETY: `pthread_stackseg_np` returned 0, so `segment` holds
+        // an initialised `stack_t`.
+        let segment = unsafe { segment.assume_init() };
+        Some(CallStack {
+            base: segment.ss_sp.addr(),
+            max_size: segment.ss_size.wrapping_sub(page_size()?),
+        })
+    }
+
+    /// `zend_call_stack_get_openbsd_vm`: the argument strings rounded up
+    /// to a page are the initial stack's base, and its size the rlimit
+    /// less one page.
+    fn vm_bounds() -> Option<CallStack> {
+        let mib = [libc::CTL_VM, VM_PSSTRINGS];
+        let mut ps = PsStrings { val: null_mut() };
+        let mut len = size_of::<PsStrings>();
+        // SAFETY: `mib` is two names and `namelen` says two; `ps` is
+        // `len` bytes the call writes through and shortens `len` to;
+        // nothing is set, a null new value of length zero.
+        let asked = unsafe {
+            libc::sysctl(
+                mib.as_ptr(),
+                2,
+                (&raw mut ps).cast(),
+                &raw mut len,
+                null_mut(),
+                0,
+            )
+        };
+        if asked != 0 {
+            return None;
+        }
+        let rlimit = stack_rlimit()?;
+        let page = page_size()?;
+        let mask = page.wrapping_sub(1);
+        Some(CallStack {
+            base: ps.val.addr().wrapping_add(mask) & !mask,
+            max_size: rlimit.wrapping_sub(page),
+        })
+    }
+
+    pub(super) fn call_stack_bounds() -> Option<CallStack> {
+        if is_main_thread() {
+            return vm_bounds();
+        }
+        pthread_bounds()
+    }
+}
+
+/// `zend_call_stack_get_netbsd`: the process's map under `RLIMIT_STACK`
+/// on the first lwp, read by `sysctl` rather than procfs, which NetBSD
+/// means to retire, and `pthread_getattr_np` less its guard on any
+/// other.
+#[cfg(target_os = "netbsd")]
+mod platform {
+    use std::ffi::{c_int, c_void};
+    use std::mem::MaybeUninit;
+    use std::ptr::{null, null_mut};
+
+    use super::{CallStack, position, stack_rlimit};
+
+    /// The lwp numbered 1 is the process's first.
+    fn is_main_thread() -> bool {
+        // SAFETY: `_lwp_self` takes no argument and reads nothing of
+        // ours; it answers a plain number.
+        unsafe { libc::_lwp_self() == 1 }
+    }
+
+    /// `zend_call_stack_get_netbsd_pthread`: the thread's stack from
+    /// its attributes, less the guard at its low end. php leaves the
+    /// attributes undestroyed; here they are destroyed, which no
+    /// caller can see.
+    fn pthread_bounds() -> Option<CallStack> {
+        let mut attr = MaybeUninit::<libc::pthread_attr_t>::uninit();
+        // SAFETY: `pthread_self` takes no argument and answers the
+        // calling thread's own handle, live while the thread runs.
+        let this = unsafe { libc::pthread_self() };
+        // SAFETY: `attr` is room for one `pthread_attr_t`, which the
+        // call fills on success and leaves alone on failure; `this`
+        // names a live thread.
+        if unsafe { libc::pthread_getattr_np(this, attr.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        // SAFETY: `pthread_getattr_np` returned 0, so `attr` holds an
+        // initialised `pthread_attr_t`.
+        let mut attr = unsafe { attr.assume_init() };
+        let mut addr: *mut c_void = null_mut();
+        let mut max_size: usize = 0;
+        let mut guard_size: usize = 0;
+        // SAFETY: `attr` is initialised, and `addr` and `max_size` are
+        // locals of the right types the call writes through.
+        let mut read = unsafe {
+            libc::pthread_attr_getstack(&raw const attr, &raw mut addr, &raw mut max_size)
+        };
+        if read == 0 {
+            // SAFETY: `attr` is initialised and `guard_size` is a local
+            // of the right type the call writes through.
+            read = unsafe { libc::pthread_attr_getguardsize(&raw const attr, &raw mut guard_size) };
+        }
+        // SAFETY: `attr` is initialised and is not read after this.
+        unsafe { libc::pthread_attr_destroy(&raw mut attr) };
+        if read != 0 {
+            return None;
+        }
+        let low = addr.addr().wrapping_add(guard_size);
+        let max_size = max_size.wrapping_sub(guard_size);
+        Some(CallStack {
+            base: low.wrapping_add(max_size),
+            max_size,
+        })
+    }
+
+    /// `zend_call_stack_get_netbsd_vm`: `VM_PROC_MAP` sized once, taken
+    /// with a third more room as `kinfo_getvmmap` takes it, and the
+    /// entry that holds a local's address is the stack, its end the
+    /// base and the rlimit its size.
+    fn vm_bounds() -> Option<CallStack> {
+        // SAFETY: `getpid` takes no argument, reads and writes nothing
+        // of ours and answers a plain number.
+        let pid = unsafe { libc::getpid() };
+        let entry_size = size_of::<libc::kinfo_vmentry>();
+        let mib = [
+            libc::CTL_VM,
+            libc::VM_PROC,
+            libc::VM_PROC_MAP,
+            pid,
+            c_int::try_from(entry_size).ok()?,
+        ];
+        let mut len: usize = 0;
+        // SAFETY: `mib` is five names and `namelen` says five; a null
+        // old value asks for the size alone, written to `len`; nothing
+        // is set, a null new value of length zero.
+        let asked = unsafe { libc::sysctl(mib.as_ptr(), 5, null_mut(), &raw mut len, null(), 0) };
+        if asked != 0 {
+            return None;
+        }
+        let room = len.wrapping_mul(4) / 3 / entry_size + 1;
+        let mut entries = vec![MaybeUninit::<libc::kinfo_vmentry>::uninit(); room];
+        let mut len = room.wrapping_mul(entry_size);
+        // SAFETY: `mib` is five names and `namelen` says five; `entries`
+        // is `len` bytes the call writes through and shortens `len` to
+        // what it wrote; nothing is set, a null new value of length zero.
+        let asked = unsafe {
+            libc::sysctl(
+                mib.as_ptr(),
+                5,
+                entries.as_mut_ptr().cast(),
+                &raw mut len,
+                null(),
+                0,
+            )
+        };
+        if asked != 0 {
+            return None;
+        }
+        let filled = len / entry_size;
+        let on_stack = u64::try_from(position()).ok()?;
+        let end = entries.get(..filled)?.iter().find_map(|entry| {
+            // SAFETY: the call wrote `len` bytes, so the first `filled`
+            // entries are whole `kinfo_vmentry` values.
+            let entry = unsafe { entry.assume_init_ref() };
+            (entry.kve_start <= on_stack && entry.kve_end >= on_stack).then_some(entry.kve_end)
+        })?;
+        Some(CallStack {
+            base: usize::try_from(end).ok()?,
+            max_size: stack_rlimit()?,
+        })
+    }
+
+    pub(super) fn call_stack_bounds() -> Option<CallStack> {
+        if is_main_thread() {
+            return vm_bounds();
+        }
+        pthread_bounds()
+    }
+}
+
+/// `zend_call_stack_get_haiku`: the kernel's information on the calling
+/// thread, `get_thread_info`, carries its stack's two ends, and the
+/// four guard pages of `USER_STACK_GUARD_SIZE` come off the size.
+#[cfg(target_os = "haiku")]
+mod platform {
+    use std::mem::MaybeUninit;
+    use std::ptr::null;
+
+    use super::{CallStack, page_size};
+
+    pub(super) fn call_stack_bounds() -> Option<CallStack> {
+        // SAFETY: a null name asks for the calling thread's own id; the
+        // call reads and writes nothing of ours.
+        let id = unsafe { libc::find_thread(null()) };
+        if id == libc::B_NAME_NOT_FOUND {
+            return None;
+        }
+        let mut info = MaybeUninit::<libc::thread_info>::uninit();
+        // SAFETY: `id` is the calling thread's, so it names a live
+        // thread; `info` is room for one `thread_info`, which the call
+        // fills on `B_OK` and leaves alone otherwise.
+        if unsafe { libc::get_thread_info(id, info.as_mut_ptr()) } != libc::B_OK {
+            return None;
+        }
+        // SAFETY: `get_thread_info` returned `B_OK`, so `info` holds an
+        // initialised `thread_info`.
+        let info = unsafe { info.assume_init() };
+        let guard_size = page_size()?.wrapping_mul(4);
+        let base = info.stack_end.addr();
+        Some(CallStack {
+            base,
+            max_size: base
+                .wrapping_sub(info.stack_base.addr())
+                .wrapping_sub(guard_size),
+        })
+    }
+}
+
+/// `zend_call_stack_get_solaris`, which php runs on illumos too: the
+/// process's map under `RLIMIT_STACK` on the first lwp, and
+/// `thr_stksegment` on any other.
+#[cfg(any(target_os = "solaris", target_os = "illumos"))]
+mod platform {
+    use std::ffi::{c_int, c_uint};
+    use std::mem::MaybeUninit;
+
+    use super::{CallStack, position, stack_rlimit};
+
+    unsafe extern "C" {
+        /// `thread.h`: the calling thread's stack segment, `ss_sp` its
+        /// top and `ss_size` its size; -1 on failure.
+        fn thr_stksegment(segment: *mut libc::stack_t) -> c_int;
+        /// `sys/lwp.h`: the calling lwp's id, `lwpid_t`, an unsigned int.
+        fn _lwp_self() -> c_uint;
+    }
+
+    /// One `prmap_t` of `/proc/<pid>/map`, `sys/procfs.h`: `pr_vaddr`
+    /// and `pr_size` as two words, `pr_mapname` of `PRMAPSZ` 64 bytes,
+    /// `pr_offset` of eight, then `pr_mflags`, `pr_pagesize`, `pr_shmid`
+    /// and one filler int. `libc` carries none of it, and only the two
+    /// leading words are read.
+    const PRMAP_SIZE: usize =
+        2 * size_of::<usize>() + 64 + size_of::<i64>() + 4 * size_of::<c_int>();
+
+    /// The lwp numbered 1 is the process's first.
+    fn is_main_thread() -> bool {
+        // SAFETY: `_lwp_self` takes no argument and reads nothing of
+        // ours; it answers a plain number.
+        unsafe { _lwp_self() == 1 }
+    }
+
+    /// `zend_call_stack_get_solaris_pthread`: the segment as the
+    /// threading library describes it.
+    fn pthread_bounds() -> Option<CallStack> {
+        let mut segment = MaybeUninit::<libc::stack_t>::uninit();
+        // SAFETY: `segment` is room for one `stack_t`, which the call
+        // fills on success and leaves alone on failure.
+        if unsafe { thr_stksegment(segment.as_mut_ptr()) } < 0 {
+            return None;
+        }
+        // SAFETY: `thr_stksegment` returned 0, so `segment` holds an
+        // initialised `stack_t`.
+        let segment = unsafe { segment.assume_init() };
+        Some(CallStack {
+            base: segment.ss_sp.addr(),
+            max_size: segment.ss_size,
+        })
+    }
+
+    /// `zend_call_stack_get_solaris_proc_maps`: the mapping of
+    /// `/proc/<pid>/map` that holds a local's address is the stack, its
+    /// end the base and the rlimit its size. php reads the file the
+    /// same way after a `Pgrab(PGRAB_RDONLY)` of its own process that it
+    /// never reads through and releases at the end; the grab is not
+    /// carried, which no caller can see.
+    fn proc_map_bounds() -> Option<CallStack> {
+        let map = std::fs::read(format!("/proc/{}/map", std::process::id())).ok()?;
+        let on_stack = position();
+        let word = size_of::<usize>();
+        let end = map.chunks_exact(PRMAP_SIZE).find_map(|entry| {
+            let vaddr = usize::from_ne_bytes(entry.get(..word)?.try_into().ok()?);
+            let size = usize::from_ne_bytes(entry.get(word..2 * word)?.try_into().ok()?);
+            let end = vaddr.wrapping_add(size);
+            (vaddr <= on_stack && end >= on_stack).then_some(end)
+        })?;
+        Some(CallStack {
+            base: end,
+            max_size: stack_rlimit()?,
+        })
+    }
+
+    pub(super) fn call_stack_bounds() -> Option<CallStack> {
+        if is_main_thread() {
+            return proc_map_bounds();
+        }
+        pthread_bounds()
+    }
+}
+
+/// A platform php has no arm for, or Windows, whose arm is month two:
+/// nothing answers, and the fallback stands.
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "haiku",
+    target_os = "solaris",
+    target_os = "illumos"
+)))]
 mod platform {
     use super::CallStack;
 
@@ -231,13 +746,27 @@ mod platform {
 mod tests {
     use super::*;
 
+    /// Whether this platform has an arm above.
+    const ARMED: bool = cfg!(any(
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "haiku",
+        target_os = "solaris",
+        target_os = "illumos"
+    ));
+
     /// A local of the asking frame lies inside the bounds the platform
     /// answers, on the thread the harness runs the test on and on one
     /// spawned at a size of this test's choosing, whose size is what
-    /// was asked for, to the page.
+    /// was asked for, to the guard an arm deducts: one page on OpenBSD
+    /// and NetBSD, four on Haiku.
     #[test]
     fn a_local_lies_within_the_bounds_the_platform_answers() {
-        if cfg!(not(any(target_os = "macos", target_os = "linux"))) {
+        if !ARMED {
             assert_eq!(call_stack_bounds(), None);
             return;
         }
@@ -253,8 +782,9 @@ mod tests {
         };
         assert!(held);
         let max_size = bounds.map_or(0, |stack| stack.max_size);
+        let guard = 4 * 16 * 1024;
         assert!(
-            max_size >= size && max_size < 2 * size,
+            max_size + guard >= size && max_size < 2 * size,
             "a thread spawned at {size} bytes reads as {max_size}"
         );
     }
