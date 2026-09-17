@@ -60,16 +60,9 @@ pub(crate) fn modifiers(p: &mut Parser<'_>) {
         match p.current() {
             K::PUBLIC_KW | K::PROTECTED_KW | K::PRIVATE_KW => {
                 // `private(set)`: four tokens glued in modifier position
-                // (8.4). Zend fuses them in the scanner and tolerates no
-                // interior whitespace (verified 8.5.6: `private (set)` is
-                // a parse error), so only byte-adjacent tokens glue.
-                if p.nth(1) == K::L_PAREN
-                    && p.nth(2) == K::SET_KW
-                    && p.nth(3) == K::R_PAREN
-                    && p.current_span().end() == p.nth_span(1).start
-                    && p.nth_span(1).end() == p.nth_span(2).start
-                    && p.nth_span(2).end() == p.nth_span(3).start
-                {
+                // (8.4), as php's scanner fuses them
+                // (`Parser::at_fused_set_visibility`).
+                if p.at_fused_set_visibility() {
                     let m = p.start();
                     p.bump_any();
                     p.bump(K::L_PAREN);

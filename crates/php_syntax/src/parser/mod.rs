@@ -430,6 +430,43 @@ impl<'t> Parser<'t> {
                 || self.input.kind(self.pos + 1) == SyntaxKind::DOUBLE_QUOTE)
     }
 
+    /// Do the current token and the three after it spell `private(set)`,
+    /// `protected(set)` or `public(set)` as php's scanner fuses them into
+    /// one `T_PRIVATE_SET`, `T_PROTECTED_SET` or `T_PUBLIC_SET` (8.4): the
+    /// visibility keyword, `(`, `set` and `)`, byte-adjacent, since Zend
+    /// tolerates no interior whitespace (probed 8.5.9: `private (set)`
+    /// reports `unexpected token "private"`). The lexer keeps the four
+    /// tokens; the modifier list glues them and the unexpected-token
+    /// clause names them as the one token php saw.
+    ///
+    /// ```php
+    /// private(set) int $x;
+    /// ```
+    /// ```expect exit=255
+    /// Parse error: syntax error, unexpected token "private(set)", expecting end of file in %s on line 2
+    /// ```
+    pub fn at_fused_set_visibility(&self) -> bool {
+        matches!(
+            self.input.kind(self.pos),
+            SyntaxKind::PRIVATE_KW | SyntaxKind::PROTECTED_KW | SyntaxKind::PUBLIC_KW
+        ) && self.input.kind(self.pos + 1) == SyntaxKind::L_PAREN
+            && self.input.kind(self.pos + 2) == SyntaxKind::SET_KW
+            && self.input.kind(self.pos + 3) == SyntaxKind::R_PAREN
+            && self.current_span().end() == self.nth_span(1).start
+            && self.nth_span(1).end() == self.nth_span(2).start
+            && self.nth_span(2).end() == self.nth_span(3).start
+    }
+
+    /// The span of what php sees as the unexpected token: the current
+    /// token, or the four a fused `private(set)` covers.
+    fn unexpected_span(&self) -> Span {
+        if self.at_fused_set_visibility() {
+            let first = self.current_span();
+            return Span::new(self.file, first.start, self.nth_span(3).end());
+        }
+        self.current_span()
+    }
+
     /// The current token as php names it in `syntax error, unexpected …`
     /// ([`php_token_name`]), with the one case one token cannot settle: a
     /// `"` that opens a string with no interpolation is one
@@ -438,6 +475,10 @@ impl<'t> Parser<'t> {
     /// closing mark.
     fn unexpected_name(&self) -> String {
         let kind = self.input.kind(self.pos);
+        if self.at_fused_set_visibility() {
+            let visibility = String::from_utf8_lossy(self.current_text()).to_ascii_lowercase();
+            return format!("token \"{visibility}(set)\"");
+        }
         if kind == SyntaxKind::DOUBLE_QUOTE {
             let (next, after) = (self.input.kind(self.pos + 1), self.input.kind(self.pos + 2));
             if next == SyntaxKind::DOUBLE_QUOTE {
@@ -466,7 +507,7 @@ impl<'t> Parser<'t> {
     /// Parse error: syntax error, unexpected token ";" in %s on line 2
     /// ```
     pub fn unexpected_here(&mut self) -> Diagnostic {
-        let span = self.current_span();
+        let span = self.unexpected_span();
         let line = self.line_here();
         if self.at_eof() {
             if let Some(m) = self.unclosed_eof_message() {
@@ -508,7 +549,7 @@ impl<'t> Parser<'t> {
     /// Parse error: syntax error, unexpected integer "2", expecting ")" in %s on line 2
     /// ```
     pub fn unexpected_expecting(&mut self, expecting: &str) -> Diagnostic {
-        let span = self.current_span();
+        let span = self.unexpected_span();
         let line = self.line_here();
         Diagnostic::new(
             span,

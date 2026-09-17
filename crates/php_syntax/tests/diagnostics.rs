@@ -520,3 +520,31 @@ fn names_php_takes_as_t_string_alone_refuse_a_keyword() {
         assert_eq!(diagnostics(src), [], "{src}");
     }
 }
+
+#[test]
+fn a_fused_set_visibility_is_the_one_token_phps_scanner_fused() {
+    // php's scanner returns `private(set)` as one `T_PRIVATE_SET`, and
+    // its unexpected-token clause names the four characters; with a
+    // space inside, the four are four and the clause names the first.
+    assert_eq!(
+        first("<?php private(set) int $x;"),
+        (
+            1,
+            "syntax error, unexpected token \"private(set)\", expecting end of file".into()
+        )
+    );
+    assert_eq!(
+        first("<?php\nPROTECTED(SET) int $x;"),
+        (
+            2,
+            "syntax error, unexpected token \"protected(set)\", expecting end of file".into()
+        )
+    );
+    assert_eq!(
+        first("<?php private (set) int $x;"),
+        (
+            1,
+            "syntax error, unexpected token \"private\", expecting end of file".into()
+        )
+    );
+}
