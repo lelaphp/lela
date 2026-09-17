@@ -926,8 +926,7 @@ fn ci_test_job_typechecks_the_module_against_the_committed_declarations() {
 
 /// CI per commit (harness-design.md §7): the same instruments over the
 /// workspace, then `done`; the reading store is the only thing the run
-/// uploads, its store and the tickets job's; what it renders is the permits
-/// section.
+/// uploads; what it renders is the permits section.
 #[test]
 fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
     let text = read(".github/workflows/harness.yml");
@@ -949,10 +948,11 @@ fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
         assert!(at > last, "{step} is out of order: {text}");
         last = at;
     }
-    // Two jobs upload, per commit and the tickets job (#25), and each
-    // uploads its store and nothing else.
+    // One job uploads, per commit, and it uploads its store and nothing
+    // else; a ticket is closed by the session that worked it, so no job
+    // closes one on a push (#290).
     let uploads = text.match_indices("upload-artifact").collect::<Vec<_>>();
-    assert_eq!(uploads.len(), 2, "the two stores: {text}");
+    assert_eq!(uploads.len(), 1, "the one store: {text}");
     for (upload, _) in uploads {
         let step = &text[upload..];
         let step = &step[..step.find("\n      - ").unwrap_or(step.len())];
