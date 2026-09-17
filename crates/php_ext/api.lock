@@ -132,6 +132,7 @@ request::PHP_VERSION
 request::PathIntent
 request::Request
 request::Request::absolutize
+request::Request::addref
 request::Request::argument
 request::Request::argument_count
 request::Request::assert_callback

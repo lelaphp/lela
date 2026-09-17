@@ -31,6 +31,8 @@ mod feedback;
 mod names;
 mod tokens;
 
+use std::collections::HashMap;
+
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::call::{new_object, write_prop};
 use php_ext::coerce::coerce_param;
@@ -332,6 +334,20 @@ fn method(function: FunctionDecl, is_instance: bool, is_final: bool) -> MethodDe
 ///   }
 /// }
 /// ```
+///
+/// The texts are `make_str`'s here as under `token_get_all` ([`Texts`]):
+/// the second `echo` and the second `1;` are one more owner each of the
+/// first's string, and no string of their own.
+///
+/// ```php
+/// $b = memory_get_usage();
+/// $t = PhpToken::tokenize('<?php echo 1; echo 2;'); $held = memory_get_usage() - $b;
+/// $t = 1; var_dump($held, memory_get_usage() - $b);
+/// ```
+/// ```expect
+/// int(1560)
+/// int(0)
+/// ```
 fn token_tokenize(req: &mut Request) -> Result<Value, Thrown> {
     let count = req.argument_count();
     if !(1..=2).contains(&count) {
@@ -358,6 +374,7 @@ fn token_tokenize(req: &mut Request) -> Result<Value, Thrown> {
     } else {
         tokenize_parse(req, code.as_bytes(), short_open_tag)?
     };
+    let mut texts = Texts::for_flags(flags);
     let mut rows = PhpArray::new(req)?;
     for token in tokens {
         let text = code.as_bytes().get(token.start..token.end).unwrap_or(&[]);
@@ -366,7 +383,7 @@ fn token_tokenize(req: &mut Request) -> Result<Value, Thrown> {
             None => i64::from(text.first().copied().unwrap_or(0)),
         };
         let object = new_object(req, token_class)?;
-        let text = Value::string(PhpString::new(req, text)?);
+        let text = texts.make_str(req, text)?;
         let pos = i64::try_from(token.start).unwrap_or(i64::MAX);
         fill_token(req, object, id, text, i64::from(token.line), pos)?;
         rows.append(req, Value::object(object))?;
@@ -1031,17 +1048,29 @@ fn value_name(req: &Request, value: &Value) -> String {
 /// past one byte: `216 + 4 * 216 + 3 * 32`, read before anything is
 /// printed because php's first write holds thirty-two bytes for its
 /// `php_output` layer, and all of it back when the variable gives the
-/// array up. php shares the text of a token that repeats within one call
-/// (`make_str`'s `interned_strings`), and this engine does not yet
-/// (#276), so the source below repeats none.
+/// array up. A text that repeats within one call is one string with one
+/// more owner per repeat (`make_str`'s `interned_strings`, [`Texts`]):
+/// the second `echo` and the second `1;` below add their rows and no
+/// string, where `TOKEN_PARSE`, which hands `make_str` no table, adds a
+/// string for the second `echo` as well.
 ///
 /// ```php
 /// $b = memory_get_usage();
 /// $t = token_get_all('<?php echo 12;'); $held = memory_get_usage() - $b;
 /// $t = 1; var_dump($held, memory_get_usage() - $b);
+/// $b = memory_get_usage();
+/// $t = token_get_all('<?php echo 1; echo 2;'); $held = memory_get_usage() - $b;
+/// $t = 1; var_dump($held, memory_get_usage() - $b);
+/// $b = memory_get_usage();
+/// $t = token_get_all('<?php echo 1; echo 2;', TOKEN_PARSE); $held = memory_get_usage() - $b;
+/// $t = 1; var_dump($held, memory_get_usage() - $b);
 /// ```
 /// ```expect
 /// int(1176)
+/// int(0)
+/// int(2168)
+/// int(0)
+/// int(2200)
 /// int(0)
 /// ```
 ///
@@ -1080,10 +1109,11 @@ fn token_get_all(req: &mut Request) -> Result<Value, Thrown> {
     } else {
         tokenize_parse(req, code.as_bytes(), short_open_tag)?
     };
+    let mut texts = Texts::for_flags(flags);
     let mut rows = PhpArray::new(req)?;
     for token in tokens {
         let text = code.as_bytes().get(token.start..token.end).unwrap_or(&[]);
-        let text = Value::string(PhpString::new(req, text)?);
+        let text = texts.make_str(req, text)?;
         match token.name.and_then(names::id_of) {
             Some(id) => {
                 let mut row = PhpArray::new(req)?;
@@ -1096,6 +1126,55 @@ fn token_get_all(req: &mut Request) -> Result<Value, Thrown> {
         }
     }
     Ok(Value::array(rows))
+}
+
+/// php's `make_str` (`Z/ext/tokenizer/tokenizer.c:266`) and the
+/// `interned_strings` table `tokenize()` keys on a token's text: a text
+/// of one byte is `ZSTR_CHAR`, the process's own; a text seen before in
+/// the same call is `zend_string_copy` of the first string, one more
+/// owner and no allocation; a text not yet seen is `zend_string_init`,
+/// remembered for the call. `tokenize_parse()` hands `add_token` no
+/// table, so under `TOKEN_PARSE` every text past one byte is its own
+/// string. The table is the call's, on the C stack in php and freed
+/// before the call returns, so it is not a PHP value, not on the request
+/// heap and not in `memory_get_usage()`.
+enum Texts<'a> {
+    /// `tokenize()`'s table: the first string of each text, by its bytes.
+    Shared(HashMap<&'a [u8], PhpString>),
+    /// `tokenize_parse()`'s `NULL`: no table.
+    Fresh,
+}
+
+impl<'a> Texts<'a> {
+    /// `tokenize_common`'s choice: the table without `TOKEN_PARSE`, none
+    /// with it.
+    fn for_flags(flags: i64) -> Self {
+        if flags & TOKEN_PARSE == 0 {
+            Texts::Shared(HashMap::new())
+        } else {
+            Texts::Fresh
+        }
+    }
+
+    /// `make_str`: the string a row or a property takes for `text`, one
+    /// owner of it handed over, so a repeated text is [`Request::addref`]
+    /// over the first call's string.
+    fn make_str(&mut self, req: &mut Request, text: &'a [u8]) -> Result<Value, Thrown> {
+        let Texts::Shared(table) = self else {
+            return Ok(Value::string(PhpString::new(req, text)?));
+        };
+        if text.len() == 1 {
+            return Ok(Value::string(PhpString::new(req, text)?));
+        }
+        if let Some(first) = table.get(text) {
+            let copy = Value::string(*first);
+            req.addref(&copy);
+            return Ok(copy);
+        }
+        let first = PhpString::new(req, text)?;
+        table.insert(text, first);
+        Ok(Value::string(first))
+    }
 }
 
 /// php's `tokenize()` (`Z/ext/tokenizer/tokenizer.c:321`): the scanner

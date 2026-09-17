@@ -2892,8 +2892,12 @@ impl Request {
     /// One more owner of what `value` holds: `Z_TRY_ADDREF_P`, a refcount
     /// for a string, an array, an object, a resource or a reference of
     /// the request's, nothing for a scalar, an interned string or an
-    /// immutable array.
-    pub(crate) fn addref(&self, value: &Value) {
+    /// immutable array. What a native calls where php's body copies a
+    /// value it already holds into a second place (`zend_string_copy`,
+    /// `ZVAL_COPY`): the clone of the `Value` is `ZVAL_COPY_VALUE`, and
+    /// this beside it is the second owner, given up with whatever row or
+    /// property the copy is put in.
+    pub fn addref(&self, value: &Value) {
         self.heap.addref(value.to_zval());
     }
 
