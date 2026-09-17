@@ -17,11 +17,12 @@
 //! `ZEND_DUMP_LIVE_RANGES`, which the `before optimizer` dump passes,
 //! and the `try`/`catch` table follows it, as php's do.
 //!
-//! **What is not printed.** php prints the jump table of a
-//! `SWITCH_LONG`, `SWITCH_STRING` or `MATCH` from `op2`'s array, one
-//! ` key: target,` per bucket and ` default:` before the
-//! `extended_value` target; that waits on `php_heap` holding an array a
-//! constant can be (#241), and is printed as it lands (#228).
+//! **A jump table.** The `op2` of a `SWITCH_LONG`, `SWITCH_STRING` or
+//! `MATCH` is the constant array `zend_compile_switch` and
+//! `zend_compile_match` lay down, and `zend_dump_op` walks it in place
+//! of `zend_dump_const`: one ` key: target,` per bucket, the string key
+//! in `"` and unescaped as `%s` prints it, then ` default:` before the
+//! `extended_value` target the `JMP_ADDR` shape prints.
 //!
 //! **Numbers.** php prints a temporary by its frame slot, counted past
 //! the CVs (`EX_VAR_TO_NUM`); an opline holds the temporary's own
@@ -251,7 +252,17 @@ fn operand(
 ) {
     match kind {
         OperandKind::Const => {
-            constant(out, body.literals.get(field as usize).copied());
+            let value = body.literals.get(field as usize).copied();
+            if !first
+                && matches!(
+                    op.opcode,
+                    Opcode::SwitchLong | Opcode::SwitchString | Opcode::Match
+                )
+            {
+                jump_table(out, value);
+            } else {
+                constant(out, value);
+            }
         }
         OperandKind::Tmp | OperandKind::Var | OperandKind::Cv => {
             out.push(' ');
@@ -269,6 +280,32 @@ fn operand(
             }
         }
     }
+}
+
+/// The jump table of a `SWITCH_LONG`, `SWITCH_STRING` or `MATCH`, as
+/// `zend_dump_op` prints `op2`'s array: ` key: target,` per bucket in
+/// the table's order, a string key in `"` up to its first NUL as `%s`
+/// reads it, then ` default:`, whose target is the `extended_value`
+/// printed after it. A constant that is no array prints as one.
+fn jump_table(out: &mut String, value: Option<Zval>) {
+    let Some(table) = value.and_then(php_heap::Zval::as_arr) else {
+        constant(out, value);
+        return;
+    };
+    for (key, target) in &table {
+        match key {
+            php_heap::Key::Long(n) => {
+                let _ = write!(out, " {n}:");
+            }
+            php_heap::Key::Str(s) => {
+                let bytes = s.bytes();
+                let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+                let _ = write!(out, " \"{}\":", String::from_utf8_lossy(&bytes[..end]));
+            }
+        }
+        let _ = write!(out, " {:04},", target.as_long().unwrap_or(0));
+    }
+    out.push_str(" default:");
 }
 
 /// `zend_dump_const`: the constant by type, a string escaped as
@@ -846,6 +883,39 @@ mod tests {
         assert_eq!(line(&body, 0), "ASSIGN CV0($a) V2");
         assert_eq!(line(&body, 1), "PRE_INC CV0($a)");
         assert_eq!(line(&body, 2), "JMP 0004");
+    }
+
+    /// The oracle over `$a = 1; echo match ($a) { 1 => "x", "s" => "y",
+    /// default => "z" };` prints
+    /// `MATCH CV0($a) 1: 0012, "s": 0014, default: 0016`: the table's
+    /// buckets in order, then the `extended_value` target.
+    #[test]
+    fn a_jump_table_prints_its_buckets_and_the_default_target() {
+        use php_heap::{Intern, Key, Strings};
+        let mut strings = Strings::new();
+        let Ok(s) = strings.intern(b"s") else {
+            return;
+        };
+        let Ok(table) = strings.constant_array(&[
+            (Key::Long(1), Zval::long(12)),
+            (Key::Str(s), Zval::long(14)),
+        ]) else {
+            return;
+        };
+        let mut body = body(
+            vec![Opline {
+                extended_value: 16,
+                ..with(op(Opcode::Match), OperandKind::Cv, 0, OperandKind::Const, 0)
+            }],
+            vec![Zval::array(table)],
+        );
+        body.vars = vec![Name::from("a")].into_boxed_slice();
+        body.num_cvs = 1;
+        assert_eq!(
+            line(&body, 0),
+            "MATCH CV0($a) 1: 0012, \"s\": 0014, default: 0016"
+        );
+        drop(strings);
     }
 
     /// The oracle over `set_time_limit(1); for (;;) {}` prints
