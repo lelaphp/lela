@@ -607,11 +607,12 @@ impl PhpObject {
         self.0.id().0
     }
 
-    /// Whether the object is of `class` or a subclass, `instanceof`. The
-    /// skeleton knows no hierarchy: an exact class alone.
+    /// Whether the object is of `class`, of a class that extends it, or
+    /// of one that implements it: `instanceof`, `instanceof_function`
+    /// over the linked table the request reads.
     #[must_use]
-    pub fn instance_of(&self, class: ClassId) -> bool {
-        self.class() == class
+    pub fn instance_of(&self, req: &Request, class: ClassId) -> bool {
+        req.instance_of(self.class(), class)
     }
 
     /// What a `Closure` carries, for a closure object: its native

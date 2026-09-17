@@ -1787,8 +1787,19 @@ fn php_type(value: &Value) -> u32 {
 
 /// `zend_zval_value_name` (`Z/Zend/zend_API.c:157`): what a `TypeError`
 /// names a value as, which is its class for an object, `true` or `false`
-/// for a bool, and its type for the rest.
-fn value_name(req: &Request, value: &Value) -> String {
+/// for a bool, and its type for the rest; what `INIT_METHOD_CALL` names
+/// a receiver that is no object as.
+///
+/// ```php
+/// $o = true; $o->m();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Call to a member function m() on true in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn value_name(req: &Request, value: &Value) -> String {
     match value.as_ref() {
         ValueRef::Object(o) => req.class_decl(o.class()).map_or_else(
             || String::from("object"),

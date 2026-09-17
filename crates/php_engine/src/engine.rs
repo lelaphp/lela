@@ -24,7 +24,7 @@ use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, Name};
 
 use crate::api::abi::{Cache, Entry, Extension, StartupIni};
 use crate::api::request::{Aside, Ending, Request};
-use crate::api::values::Value;
+use crate::api::values::{ClassId, Value};
 use crate::exec;
 use crate::tier::{Nop, Tier, execute};
 
@@ -113,7 +113,13 @@ const MAX_ACCELERATED_FILES: usize = 10_000;
 pub(crate) struct Shared {
     pub(crate) extensions: Vec<Extension>,
     pub(crate) functions: Vec<(FunctionDecl, Entry)>,
+    /// The classes Zend declares and then each extension's, in bundle
+    /// order, each with its methods on it: what a `ClassId` below the
+    /// request's own declarations indexes.
     pub(crate) classes: Vec<ClassDecl>,
+    /// Each native method's entry, in the order the classes declare
+    /// them: a `Function` past `functions` indexes here.
+    pub(crate) methods: Vec<NativeMethod>,
     constants: Vec<ConstDecl>,
     pub(crate) engine_states: Vec<Box<dyn Any + Send + Sync>>,
     ini: Vec<(Vec<u8>, Vec<u8>)>,
@@ -132,6 +138,16 @@ pub(crate) struct Shared {
     /// constant strings enter as it is published, grown here alone and
     /// read by every request thread with nothing taken.
     strings: Mutex<Strings>,
+}
+
+/// One native method's entry, `zend_internal_function` on a class:
+/// which class, which of its declared methods, and the function served
+/// for it.
+#[derive(Clone, Copy)]
+pub(crate) struct NativeMethod {
+    pub(crate) class: ClassId,
+    pub(crate) index: u32,
+    pub(crate) entry: Entry,
 }
 
 /// What the engine has declared, as the compiler reads it: php's
@@ -395,10 +411,25 @@ impl EngineBuilder {
             .into_iter()
             .chain(extensions.iter().flat_map(|e| e.functions.iter().cloned()))
             .collect();
-        let classes = crate::classes::zend_classes()
-            .into_iter()
-            .chain(extensions.iter().flat_map(|e| e.classes.iter().cloned()))
-            .collect();
+        // `zend_register_internal_class_with_flags` and `zend_register_functions`
+        // over the class's methods: each declaration takes its methods,
+        // and each method's entry is numbered in the order it is met.
+        let mut classes: Vec<ClassDecl> = crate::classes::zend_classes();
+        let mut methods = Vec::new();
+        for (decl, entries) in extensions.iter().flat_map(|e| e.classes.iter()) {
+            let mut decl = decl.clone();
+            let class = ClassId(u32::try_from(classes.len()).unwrap_or(u32::MAX));
+            for (method, entry) in entries {
+                let index = u32::try_from(decl.methods.len()).unwrap_or(u32::MAX);
+                decl.methods.push(method.clone());
+                methods.push(NativeMethod {
+                    class,
+                    index,
+                    entry: *entry,
+                });
+            }
+            classes.push(decl);
+        }
         let constants: Vec<ConstDecl> = extensions
             .iter()
             .flat_map(|e| e.constants.iter().cloned())
@@ -430,6 +461,7 @@ impl EngineBuilder {
                 extensions,
                 functions,
                 classes,
+                methods,
                 constants,
                 engine_states,
                 ini,

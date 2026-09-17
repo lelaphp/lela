@@ -19,7 +19,7 @@ use php_heap::{
     VmStack, Zval,
 };
 use php_unit::Unit;
-use php_unit::decl::{ClassDecl, ClassKind, FunctionDecl};
+use php_unit::decl::{ClassDecl, ClassKind, FunctionDecl, MethodDecl};
 
 use crate::api::abi::{Callable, IniVerdict};
 use crate::api::call::Function;
@@ -28,7 +28,7 @@ use crate::api::values::{
     ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpRef, PhpString, Resource, Value, ValueRef,
 };
 use crate::engine::{RequestDescription, Shared};
-use crate::exec::{self, Vm};
+use crate::exec::{self, CallStage, CallState, Vm};
 use crate::output::Output;
 
 /// php's version, what `PHP_VERSION` and `phpversion()` say.
@@ -485,7 +485,182 @@ impl Request {
                 self.release(value);
             }
             self.release(Value::string(call.name));
+            if let Some(this) = call.this {
+                self.release(this.as_value());
+            }
         }
+    }
+
+    /// `zend_call_function` over a native method: the call frame pushed
+    /// as `INIT_METHOD_CALL` and the `SEND_*` oplines would push it, the
+    /// receiver and each argument one more owner the frame holds, the
+    /// entry served, and the frame popped whether it returned or threw.
+    pub(crate) fn serve_method(
+        &mut self,
+        function: Function,
+        this: Option<PhpObject>,
+        called_scope: ClassId,
+        arguments: &[Value],
+    ) -> Result<Value, Thrown> {
+        let name = self.declared_name(function);
+        let name = self.interned(name.as_bytes())?;
+        for argument in arguments {
+            self.addref(argument);
+        }
+        if let Some(this) = this {
+            self.addref(&this.as_value());
+        }
+        self.vm.push_call(CallState {
+            function,
+            name,
+            arguments: arguments.to_vec(),
+            count: arguments.len(),
+            this,
+            called_scope: Some(called_scope),
+            stage: CallStage::Serving,
+        });
+        let served = self.serve_native(function);
+        self.pop_call();
+        served
+    }
+
+    /// The entry a `Function` names: one of the natives, or a native
+    /// method numbered past them; none for a number nothing is linked
+    /// under.
+    fn entry_of(&self, function: Function) -> Option<crate::api::abi::Entry> {
+        let at = usize::try_from(function.0).ok()?;
+        match at.checked_sub(self.shared.functions.len()) {
+            None => self.shared.functions.get(at).map(|(_, entry)| *entry),
+            Some(method) => self.shared.methods.get(method).map(|m| m.entry),
+        }
+    }
+
+    /// The native method `function` is, if it is one: its class and its
+    /// index among the class's declared methods.
+    fn native_method(&self, function: Function) -> Option<&crate::engine::NativeMethod> {
+        let at = usize::try_from(function.0).ok()?;
+        self.shared
+            .methods
+            .get(at.checked_sub(self.shared.functions.len())?)
+    }
+
+    /// `zend_hash_find_ptr(&ce->function_table, lcname)` over the
+    /// class's native methods: the method under the lowered name, by
+    /// identity, and none where the class has no entry of that name.
+    pub(crate) fn method_named(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
+        let decl = self.class_decl(class)?;
+        let base = self.shared.functions.len();
+        self.shared
+            .methods
+            .iter()
+            .position(|m| {
+                m.class == class
+                    && decl
+                        .methods
+                        .get(usize::try_from(m.index).unwrap_or(usize::MAX))
+                        .is_some_and(|method| method.function.name.0.eq_ignore_ascii_case(lowered))
+            })
+            .and_then(|i| u32::try_from(base.saturating_add(i)).ok())
+            .map(Function)
+    }
+
+    /// The declaration of a native method, if `function` is one.
+    pub(crate) fn method_decl(&self, function: Function) -> Option<&MethodDecl> {
+        let method = self.native_method(function)?;
+        self.class_decl(method.class)?
+            .methods
+            .get(usize::try_from(method.index).ok()?)
+    }
+
+    /// `ce->name`: the name a class was declared under, and `object`
+    /// for one the tables have no declaration for.
+    pub(crate) fn class_name(&self, class: ClassId) -> String {
+        self.class_decl(class).map_or_else(
+            || String::from("object"),
+            |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
+        )
+    }
+
+    /// `instanceof_function`: whether `class` is `of`, extends it, or
+    /// implements it, the parents walked and each one's interfaces with
+    /// it. A chain longer than any declaration can make is cut, so a
+    /// declaration naming itself as its parent ends here rather than
+    /// never.
+    pub(crate) fn instance_of(&self, class: ClassId, of: ClassId) -> bool {
+        let mut at = Some(class);
+        let mut depth = 0;
+        while let Some(class) = at {
+            if class == of {
+                return true;
+            }
+            let Some(decl) = self.class_decl(class) else {
+                return false;
+            };
+            if decl
+                .interfaces
+                .iter()
+                .filter_map(|name| self.class_named(&name.0))
+                .any(|interface| depth < 64 && self.instance_of(interface, of))
+            {
+                return true;
+            }
+            depth += 1;
+            if depth > 64 {
+                return false;
+            }
+            at = decl
+                .parent
+                .as_ref()
+                .and_then(|name| self.class_named(&name.0));
+        }
+        false
+    }
+
+    /// `object_init_ex`'s refusals: an interface, a trait, an enum or an
+    /// abstract class is php's `Error` for what cannot be instantiated.
+    pub(crate) fn instantiable(&mut self, class: ClassId) -> Result<(), Thrown> {
+        let Some(decl) = self.class_decl(class) else {
+            return Ok(());
+        };
+        let what = match decl.kind {
+            ClassKind::Interface => "interface",
+            ClassKind::Trait => "trait",
+            ClassKind::Enum => "enum",
+            ClassKind::Class if decl.flags.is_abstract => "abstract class",
+            ClassKind::Class => return Ok(()),
+        };
+        let name = self.class_name(class);
+        Err(crate::api::raising::throw(
+            self,
+            "Error",
+            &format!("Cannot instantiate {what} {name}"),
+        ))
+    }
+
+    /// The name a call frame carries for a native method, the interned
+    /// string of its declared name, and the empty string for the pass
+    /// function, which has none.
+    pub(crate) fn method_name_string(&mut self, function: Function) -> Result<PhpString, Thrown> {
+        let name = if function == Function::PASS {
+            String::new()
+        } else {
+            self.declared_name(function)
+        };
+        self.interned(name.as_bytes())
+    }
+
+    /// [`Request::qualified_name`] for a raise about a method called on
+    /// its class.
+    pub(crate) fn qualified_name_of(&self, function: Function) -> String {
+        self.qualified_name(function, None)
+    }
+
+    /// An interned string of this request's heap, never refcounted, for
+    /// a name the engine holds as bytes; the `Err` is the memory limit
+    /// refusing the intern.
+    fn interned(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
+        let interned = self.heap.intern(bytes);
+        self.fatal_of(interned).map(PhpString::of)
     }
 
     /// What the entry frame of the innermost serving returned.
@@ -668,7 +843,7 @@ impl Request {
                 };
                 format!(
                     "#{depth} {file}({line}): {}({arguments})",
-                    self.declared_name(call.function)
+                    self.qualified_name(call.function, call.this)
                 )
             })
             .collect();
@@ -834,12 +1009,10 @@ impl Request {
     /// `Error` a function nothing is linked under raises, in the caller's
     /// spelling.
     pub(crate) fn serve_native(&mut self, function: Function) -> Result<Value, Thrown> {
-        let Some(entry) = self
-            .shared
-            .functions
-            .get(usize::try_from(function.0).unwrap_or(usize::MAX))
-            .map(|(_, entry)| *entry)
-        else {
+        if function == Function::PASS {
+            return Ok(Value::null());
+        }
+        let Some(entry) = self.entry_of(function) else {
             let name = self
                 .vm
                 .serving_call()
@@ -1250,7 +1423,41 @@ impl Request {
     pub(crate) fn new_object(&mut self, class: ClassId) -> Result<PhpObject, Thrown> {
         let slots = self.class_slots(class);
         let allocated = self.heap.object(class.0, slots);
-        self.fatal_of(allocated).map(PhpObject::of)
+        let object = self.fatal_of(allocated).map(PhpObject::of)?;
+        if let Err(thrown) = self.init_properties(object) {
+            self.release(object.as_value());
+            return Err(thrown);
+        }
+        Ok(object)
+    }
+
+    /// `object_properties_init`: each declared instance property's slot
+    /// takes the class's default, `zend_update_class_constants` having
+    /// evaluated the expression it was written as; a property with no
+    /// default is `null` where it is untyped and stays uninitialised
+    /// where it is typed, as `zend_declare_typed_property` leaves it.
+    fn init_properties(&mut self, object: PhpObject) -> Result<(), Thrown> {
+        let class = object.class();
+        let defaults: Vec<(bool, Option<php_unit::decl::ConstExpr>)> = self
+            .class_decl(class)
+            .map(|decl| {
+                decl.properties
+                    .iter()
+                    .filter(|p| p.is_instance)
+                    .map(|p| (p.ty.is_some(), p.default.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (i, (typed, default)) in defaults.into_iter().enumerate() {
+            let value = match default {
+                Some(expr) => crate::api::call::eval_const_expr(self, &expr, Some(class))?,
+                None if typed => continue,
+                None => Value::null(),
+            };
+            let slot = u32::try_from(i).unwrap_or(u32::MAX);
+            Heap::object_set_slot(&mut Hooks(self), object.heap(), slot, value.into_zval());
+        }
+        Ok(())
     }
 
     /// [`Request::new_object`] by the class's name; a name the tables do
@@ -1458,17 +1665,36 @@ impl Request {
     pub(crate) fn active_native(&self) -> String {
         self.active_native_function().map_or_else(
             || String::from("native"),
-            |function| self.declared_name(function),
+            |function| self.qualified_name(function, None),
         )
     }
 
     /// `func->common.function_name`: the name a function was declared
-    /// under, and `native` for one the table has no declaration for.
+    /// under, and `native` for one the table has no declaration for. A
+    /// method's is its own name alone, what `get_active_function_name`
+    /// answers; the class before it is [`Request::qualified_name`]'s.
     fn declared_name(&self, function: Function) -> String {
         self.function_decl(function).map_or_else(
             || String::from("native"),
             |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
         )
+    }
+
+    /// The name a raise or a trace prints a callee under: a function's
+    /// declared name, and `Class::method` for a method, as
+    /// `zend_wrong_parameters_count_error` and `zend_trace_to_string`
+    /// join `func->common.scope->name` to it; a trace joins with `->`
+    /// where the call had a receiver.
+    fn qualified_name(&self, function: Function, this: Option<PhpObject>) -> String {
+        let name = self.declared_name(function);
+        match self.native_method(function) {
+            Some(method) => {
+                let class = self.class_name(method.class);
+                let join = if this.is_some() { "->" } else { "::" };
+                format!("{class}{join}{name}")
+            }
+            None => name,
+        }
     }
 
     /// `get_active_function_arg_name`: the declared name of the active
@@ -1937,16 +2163,31 @@ impl Request {
         None
     }
 
-    /// The class scope of the frame that called the native, `self`.
+    /// `zend_get_executed_scope`, the class scope of the native being
+    /// served: a method's own class (`func->common.scope`), and none for
+    /// a function or outside a native's body.
     #[must_use]
     pub fn scope(&self) -> Option<ClassId> {
-        None
+        let function = self.active_native_function()?;
+        Some(self.native_method(function)?.class)
     }
 
-    /// The called scope, `static`.
+    /// `zend_get_called_scope`, the called scope of the native being
+    /// served, `static`: the receiver's class for an instance call and
+    /// the class named for a call on the class; none for a function or
+    /// outside a native's body.
     #[must_use]
     pub fn called_scope(&self) -> Option<ClassId> {
-        None
+        self.vm.serving_call()?.called_scope
+    }
+
+    /// `ZEND_THIS`, `getThis()`: the receiver of the method being
+    /// served, a name the frame holds an owner of while the call
+    /// stands; none for a call on the class, a function, or outside a
+    /// native's body.
+    #[must_use]
+    pub fn this(&self) -> Option<PhpObject> {
+        self.vm.serving_call()?.this
     }
 
     // -------------------------------------------------- symbols
@@ -1967,10 +2208,11 @@ impl Request {
     /// The declaration of a linked function.
     #[must_use]
     pub fn function_decl(&self, function: Function) -> Option<&FunctionDecl> {
-        self.shared
-            .functions
-            .get(usize::try_from(function.0).ok()?)
-            .map(|(decl, _)| decl)
+        let at = usize::try_from(function.0).ok()?;
+        match at.checked_sub(self.shared.functions.len()) {
+            None => self.shared.functions.get(at).map(|(decl, _)| decl),
+            Some(_) => self.method_decl(function).map(|method| &method.function),
+        }
     }
 
     /// `get_declared_classes()`, in declaration order.

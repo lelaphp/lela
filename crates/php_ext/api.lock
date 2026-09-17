@@ -217,6 +217,7 @@ request::Request::stream_wrappers
 request::Request::superglobal
 request::Request::take_uploaded_file
 request::Request::temp_dir
+request::Request::this
 request::Request::umask
 request::Request::unregister_tick_function
 request::Request::write

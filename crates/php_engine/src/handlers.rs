@@ -39,6 +39,7 @@
 use php_heap::{Fatal, FrameRef};
 use php_unit::{ConstIdx, OpArray, OperandKind, Opline};
 
+use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::api::values::{TypeTag, Value};
@@ -201,6 +202,8 @@ fn init_call(
         name,
         arguments: Vec::new(),
         count,
+        this: None,
+        called_scope: None,
         stage: CallStage::Building,
     });
     Ok(advance(req, frame))
@@ -361,6 +364,494 @@ pub(crate) fn do_fcall_by_name<T: Tier>(
     op: &Opline,
 ) -> Edge {
     do_call(req, frame, code, op, "ZEND_DO_FCALL_BY_NAME")
+}
+
+/// `ZEND_DO_FCALL`: serve the callee an `INIT_STATIC_METHOD_CALL`, an
+/// `INIT_METHOD_CALL` or a `NEW` resolved, which is a native method or
+/// the pass function of a class with no constructor, so this is the
+/// handler's `ZEND_INTERNAL_FUNCTION` arm, `DO_ICALL`'s body: the
+/// frame stays on the stack while the entry runs, with its receiver
+/// for `Request::this` to answer, is popped whether it returned or
+/// threw, the receiver's owner given up with it
+/// (`ZEND_CALL_RELEASE_THIS`), and what it returned is the temporary's
+/// under `RETURN_VALUE_USED` and given up otherwise, which is every
+/// constructor's `DO_FCALL`.
+///
+/// ```php
+/// class M {}
+/// $m = new M(1);
+/// var_dump($m instanceof M);
+/// ```
+/// ```expect
+/// bool(true)
+/// ```
+pub(crate) fn do_fcall<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    do_call(req, frame, code, op, "ZEND_DO_FCALL")
+}
+
+/// `ZEND_NEW` (`Z/Zend/zend_vm_def.h:5941`) over a class named at
+/// compile time: the class looked up by the lowered name of the
+/// constant pair in `op1`, `zend_fetch_class_by_name` with
+/// `ZEND_FETCH_CLASS_EXCEPTION`, so a name nothing declares is php's
+/// `Error` over the name as written; `object_init_ex`, which refuses an
+/// interface, a trait, an enum and an abstract class and otherwise lays
+/// the object down with its declared properties' defaults, into the
+/// `VAR` `result` names; then the constructor's call frame with the
+/// object as its receiver, one more owner (`Z_ADDREF_P(result)`), and
+/// `extended_value` arguments to take. A class with no constructor
+/// and no arguments skips the `DO_FCALL` after this opline
+/// (`ZEND_VM_NEXT_OPCODE_EX(1, 2)`), and one with arguments pushes the
+/// pass function to take them.
+///
+/// ```php
+/// class M { public $a = 1; }
+/// $m = new M; $n = new M(2, 3);
+/// var_dump($m instanceof M, $n instanceof M, $m === $n, $m === $m);
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// ```
+///
+/// ```php
+/// $x = new Nope;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Class "Nope" not found in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// new Throwable;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Cannot instantiate interface Throwable in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// What the object takes is what php's takes: `zend_objects_new` is
+/// the fifty-six-byte `zend_object` with one property slot in it and
+/// sixteen bytes per declared property past the first, so a class of
+/// two properties is seventy-two bytes in the eighty-byte bin, given
+/// back when the variable holding the last owner gives it up.
+///
+/// ```php
+/// class M { public $a = 1; public $b; }
+/// $b = memory_get_usage(); $m = new M; $held = memory_get_usage() - $b;
+/// $m = 1; var_dump($held, memory_get_usage() - $b);
+/// ```
+/// ```expect
+/// int(80)
+/// int(0)
+/// ```
+pub(crate) fn new<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let class = match class_operand(req, code, op.op1_type, op.op1) {
+        Ok(class) => class,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let object = match crate::api::call::new_object(req, class) {
+        Ok(object) => object,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, object.as_value());
+    req.release(previous);
+    let count = usize::try_from(op.extended_value).unwrap_or(0);
+    let constructor = req.method_named(class, b"__construct");
+    if constructor.is_none() {
+        let at = req.vm().opline(frame);
+        let next_is_do_fcall = exec::opline_at(code, at.saturating_add(1))
+            .is_some_and(|next| next.opcode == php_unit::Opcode::DoFcall);
+        if count == 0 && next_is_do_fcall {
+            req.vm_mut().jump(frame, at.saturating_add(2));
+            return Ok(Stepped::Same(frame));
+        }
+    }
+    let function = constructor.unwrap_or(Function::PASS);
+    let name = match req.method_name_string(function) {
+        Ok(name) => name,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let this = constructor.map(|_| {
+        req.addref(&object.as_value());
+        object
+    });
+    req.vm_mut().push_call(CallState {
+        function,
+        name,
+        arguments: Vec::new(),
+        count,
+        this,
+        called_scope: constructor.map(|_| class),
+        stage: CallStage::Building,
+    });
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_INIT_STATIC_METHOD_CALL` (`Z/Zend/zend_vm_def.h:3738`) over a
+/// class and a method both named at compile time: the class by the
+/// lowered name of the pair in `op1`, `Class "X" not found` where
+/// nothing declares it; the method by the lowered name of the pair in
+/// `op2` through `zend_std_get_static_method`, `Call to undefined
+/// method X::m()` where the class has none, the class's declared name
+/// and the method as written; `op2` unused is the constructor, `Cannot
+/// call constructor` where the class has none. An instance method
+/// needs a `$this` of the class in the calling frame, which no frame
+/// here has, so it is `Non-static method X::m() cannot be called
+/// statically`. The call frame carries the class as its called scope
+/// and no receiver.
+///
+/// ```php
+/// Nope::m();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Class "Nope" not found in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// Exception::NoPe(1);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Call to undefined method Exception::NoPe() in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// class M {}
+/// M::__construct();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Cannot call constructor in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+pub(crate) fn init_static_method_call<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let class = match class_operand(req, code, op.op1_type, op.op1) {
+        Ok(class) => class,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let (function, name) = match op.op2_type {
+        OperandKind::Unused => {
+            let Some(constructor) = req.method_named(class, b"__construct") else {
+                let thrown = crate::api::raising::throw(req, "Error", "Cannot call constructor");
+                return threw(req, frame, &thrown);
+            };
+            (constructor, None)
+        }
+        OperandKind::Const => {
+            let written = exec::constant(code, ConstIdx(op.op2));
+            let lowered = exec::constant(code, ConstIdx(op.op2.saturating_add(1)));
+            let Some(function) = lowered
+                .as_str_bytes()
+                .and_then(|lowered| req.method_named(class, lowered))
+            else {
+                let thrown = undefined_method(req, class, &written);
+                return threw(req, frame, &thrown);
+            };
+            (function, Some(written))
+        }
+        _ => {
+            return Err(Fatal::Error(String::from(
+                "InternalError: ZEND_INIT_STATIC_METHOD_CALL over a method named at run time",
+            )));
+        }
+    };
+    if req
+        .method_decl(function)
+        .is_some_and(|decl| decl.is_instance)
+    {
+        let thrown = non_static_method_call(req, function);
+        return threw(req, frame, &thrown);
+    }
+    let name = match name {
+        Some(written) => match crate::ops::to_string(req, &written) {
+            Ok(name) => name,
+            Err(thrown) => return threw(req, frame, &thrown),
+        },
+        None => match req.method_name_string(function) {
+            Ok(name) => name,
+            Err(thrown) => return threw(req, frame, &thrown),
+        },
+    };
+    req.vm_mut().push_call(CallState {
+        function,
+        name,
+        arguments: Vec::new(),
+        count: usize::try_from(op.extended_value).unwrap_or(0),
+        this: None,
+        called_scope: Some(class),
+        stage: CallStage::Building,
+    });
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_INIT_METHOD_CALL` (`Z/Zend/zend_vm_def.h:3583`) over a
+/// receiver and a method named at compile time: the receiver read as
+/// `GET_OP1_OBJ_ZVAL_PTR_UNDEF` reads it, a reference followed, and
+/// what is no object php's `Error` naming the method as written and
+/// the value as `zend_zval_value_name` names it, an undefined variable
+/// having warned first; the method by the lowered name of the pair in
+/// `op2` through the class's `get_method`, `Call to undefined method
+/// X::m()` where the class has none. The call frame takes the receiver
+/// as one more owner (`GC_ADDREF(obj)` for a CV, the temporary's own
+/// owner moved for a `TMP` or a `VAR`) and the receiver's class as its
+/// called scope; a method declared `static` is called on the class,
+/// with no receiver.
+///
+/// ```php
+/// $o = 1; $o->m();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Call to a member function m() on int in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// $u->m(1);
+/// ```
+/// ```expect exit=255
+/// Warning: Undefined variable $u in %s on line 2
+///
+/// Fatal error: Uncaught Error: Call to a member function m() on null in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// class M {}
+/// (new M)->NoPe();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Call to undefined method M::NoPe() in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+pub(crate) fn init_method_call<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let written = match op.op2_type {
+        OperandKind::Const => exec::constant(code, ConstIdx(op.op2)),
+        _ => {
+            return Err(Fatal::Error(String::from(
+                "InternalError: ZEND_INIT_METHOD_CALL over a method named at run time",
+            )));
+        }
+    };
+    let lowered = exec::constant(code, ConstIdx(op.op2.saturating_add(1)));
+    let receiver = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
+    let Some(object) = receiver.as_object().copied() else {
+        let thrown = crate::api::raising::throw(
+            req,
+            "Error",
+            &format!(
+                "Call to a member function {}() on {}",
+                String::from_utf8_lossy(written.as_str_bytes().unwrap_or_default()),
+                crate::ops::value_name(req, &receiver)
+            ),
+        );
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+        return threw(req, frame, &thrown);
+    };
+    let class = object.class();
+    let Some(function) = lowered
+        .as_str_bytes()
+        .and_then(|lowered| req.method_named(class, lowered))
+    else {
+        let thrown = undefined_method(req, class, &written);
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+        return threw(req, frame, &thrown);
+    };
+    let name = match crate::ops::to_string(req, &written) {
+        Ok(name) => name,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    // The frame's owner of the receiver: the temporary's own, moved,
+    // or one more of the CV's or the constant's; a reference the slot
+    // held is followed and given up.
+    let taken = exec::take_operand(req, frame, code, op.op1_type, op.op1);
+    if taken.as_object().is_none() {
+        req.addref(&object.as_value());
+        req.release(taken);
+    }
+    let this = if req
+        .method_decl(function)
+        .is_some_and(|decl| decl.is_instance)
+    {
+        Some(object)
+    } else {
+        req.release(object.as_value());
+        None
+    };
+    req.vm_mut().push_call(CallState {
+        function,
+        name,
+        arguments: Vec::new(),
+        count: usize::try_from(op.extended_value).unwrap_or(0),
+        this,
+        called_scope: Some(class),
+        stage: CallStage::Building,
+    });
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_INSTANCEOF` (`Z/Zend/zend_vm_def.h:8041`) over a class named
+/// at compile time: `true` where the operand is an object of the class
+/// the lowered name of the pair in `op2` names, or of a class that
+/// extends or implements it (`instanceof_function`), the class looked
+/// up with `ZEND_FETCH_CLASS_NO_AUTOLOAD` and silently, so a name
+/// nothing declares is `false`; `false` for anything that is no
+/// object, an undefined variable having warned; a reference is
+/// followed. The operand is freed (`FREE_OP1`).
+///
+/// ```php
+/// class M {} $m = new M; $e = new Exception; $a = 1;
+/// var_dump($m instanceof M, $m instanceof m, $m instanceof Exception, $m instanceof Nope, $a instanceof M, $u instanceof M);
+/// var_dump($e instanceof Exception, $e instanceof Throwable, $e instanceof Stringable, $e instanceof Error, (new TypeError) instanceof Error);
+/// ```
+/// ```expect
+/// Warning: Undefined variable $u in %s on line 3
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// ```
+pub(crate) fn instanceof<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let value = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
+    let answer = match (value.as_object(), op.op2_type) {
+        (Some(object), OperandKind::Const) => {
+            let lowered = exec::constant(code, ConstIdx(op.op2.saturating_add(1)));
+            lowered
+                .as_str_bytes()
+                .and_then(|lowered| req.class_named(lowered))
+                .is_some_and(|class| req.instance_of(object.class(), class))
+        }
+        (Some(_), _) => {
+            return Err(Fatal::Error(String::from(
+                "InternalError: ZEND_INSTANCEOF over a class named at run time",
+            )));
+        }
+        (None, _) => false,
+    };
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, Value::bool(answer));
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
+/// `zend_fetch_class_by_name` with `ZEND_FETCH_CLASS_EXCEPTION` over a
+/// class's constant pair: the class under the lowered name in the slot
+/// after `at`, and php's `Error` naming the one as written where
+/// nothing declares it. A class named as the program serves is not served yet.
+fn class_operand(
+    req: &mut Request,
+    code: &OpArray,
+    kind: OperandKind,
+    at: u32,
+) -> Result<crate::api::values::ClassId, Thrown> {
+    if kind != OperandKind::Const {
+        return Err(crate::api::raising::fatal(
+            req,
+            "InternalError: a class named at run time is not served",
+        ));
+    }
+    let lowered = exec::constant(code, ConstIdx(at.saturating_add(1)));
+    if let Some(class) = lowered
+        .as_str_bytes()
+        .and_then(|lowered| req.class_named(lowered))
+    {
+        return Ok(class);
+    }
+    let written = exec::constant(code, ConstIdx(at));
+    Err(crate::api::raising::throw(
+        req,
+        "Error",
+        &format!(
+            "Class \"{}\" not found",
+            String::from_utf8_lossy(written.as_str_bytes().unwrap_or_default())
+        ),
+    ))
+}
+
+/// `zend_undefined_method`: php's `Error` naming the class as declared
+/// and the method as written.
+fn undefined_method(
+    req: &mut Request,
+    class: crate::api::values::ClassId,
+    written: &Value,
+) -> Thrown {
+    let class = req.class_name(class);
+    crate::api::raising::throw(
+        req,
+        "Error",
+        &format!(
+            "Call to undefined method {class}::{}()",
+            String::from_utf8_lossy(written.as_str_bytes().unwrap_or_default())
+        ),
+    )
+}
+
+/// `zend_non_static_method_call`: php's `Error` naming the method's
+/// class and name as declared.
+fn non_static_method_call(req: &mut Request, function: Function) -> Thrown {
+    let name = req.qualified_name_of(function);
+    crate::api::raising::throw(
+        req,
+        "Error",
+        &format!("Non-static method {name}() cannot be called statically"),
+    )
+}
+
+/// The `Threw` edge: the throwable left pending where the loop reads it.
+fn threw(req: &mut Request, frame: FrameRef, thrown: &Thrown) -> Edge {
+    req.leave_pending(thrown);
+    Ok(Stepped::Threw(frame))
 }
 
 /// The body the two `DO_*CALL` handlers share, `opcode` naming the one
@@ -1693,7 +2184,7 @@ mod tests {
     #[test]
     fn an_assign_over_the_last_owner_serves_the_destructor_after_the_write() {
         let destructible = crate::api::abi::ExtensionBuilder::default()
-            .classes(vec![destructible(b"Destructible")])
+            .classes(vec![(destructible(b"Destructible"), Vec::new())])
             .build("destructible");
         let engine = Engine::builder().extensions(&[destructible]).build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());

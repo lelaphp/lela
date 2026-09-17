@@ -12,9 +12,17 @@ use crate::api::raising::{Thrown, throw};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, PhpObject, PhpString, Value};
 
-/// A linked function: user or native, by identity.
+/// A linked function: user or native, by identity. A native method is
+/// one too, numbered past the functions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Function(pub(crate) u32);
+
+impl Function {
+    /// `zend_pass_function`: the callee `NEW` serves for a class with
+    /// no constructor and arguments to take, which takes them and
+    /// returns `null`.
+    pub(crate) const PASS: Function = Function(u32::MAX);
+}
 
 /// A position in an `iterable`: an array's elements, or a `Traversable`
 /// served through its iterator methods.
@@ -72,38 +80,59 @@ pub fn call_named(
     Err(no_loop(req, &callable.name()))
 }
 
-/// `zend_call_method` on `object`.
+/// `zend_call_method` on `object`: the method looked up on the
+/// object's class by its lowered name, and served on a call frame with
+/// the object as its receiver and the arguments as one more owner each,
+/// the frame popped whether the entry returned or threw. A name the
+/// class has no entry for is php's `Error` for an undefined method.
 pub fn call_method(
     req: &mut Request,
     object: &PhpObject,
     method: &[u8],
     arguments: &[Value],
 ) -> Result<Value, Thrown> {
-    let _ = (object, arguments);
-    Err(throw(
-        req,
-        "Error",
-        &format!(
-            "Call to undefined method {}()",
-            String::from_utf8_lossy(method)
-        ),
-    ))
+    let class = object.class();
+    let Some(function) = req.method_named(class, &method.to_ascii_lowercase()) else {
+        let class = req.class_name(class);
+        return Err(throw(
+            req,
+            "Error",
+            &format!(
+                "Call to undefined method {class}::{}()",
+                String::from_utf8_lossy(method)
+            ),
+        ));
+    };
+    req.serve_method(function, Some(*object), class, arguments)
 }
 
-/// `new $class(...$arguments)`, constructor served.
+/// `new $class(...$arguments)`: [`new_object`] and then the class's
+/// constructor served on it with `arguments`, as `NEW` and its
+/// `DO_FCALL` serve them; a class with none takes the arguments and
+/// serves nothing (`zend_pass_function`).
 pub fn instantiate(
     req: &mut Request,
     class: ClassId,
     arguments: &[Value],
 ) -> Result<PhpObject, Thrown> {
-    let _ = arguments;
-    new_object(req, class)
+    let object = new_object(req, class)?;
+    if let Some(constructor) = req.method_named(class, b"__construct") {
+        let served = req.serve_method(constructor, Some(object), class, arguments);
+        if let Err(thrown) = served {
+            req.release(object.as_value());
+            return Err(thrown);
+        }
+        req.release(served.unwrap_or_default());
+    }
+    Ok(object)
 }
 
-/// `object_init_ex`: an instance with its defaults and no constructor
-/// call, a store entry of the request's heap with one owner, the
-/// caller's.
+/// `object_init_ex`: an instance with its declared properties' defaults
+/// and no constructor call, a store entry of the request's heap with
+/// one owner, the caller's; an interface, a trait, an enum or an
+/// abstract class is php's `Error` for what cannot be instantiated.
 pub fn new_object(req: &mut Request, class: ClassId) -> Result<PhpObject, Thrown> {
+    req.instantiable(class)?;
     req.new_object(class)
 }
 

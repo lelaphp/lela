@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 
-use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, IniDecl};
+use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, IniDecl, MethodDecl};
 
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
@@ -86,6 +86,14 @@ pub(crate) type EngineStateBuilder =
     Arc<dyn Fn(&StartupIni) -> Box<dyn Any + Send + Sync> + Send + Sync>;
 /// The `RINIT` function.
 pub(crate) type Rinit = fn(&mut Request) -> Result<(), Thrown>;
+/// A native class as an extension declares it (design §7.1): the
+/// declaration, and beside it each method's declaration with its entry,
+/// the shape `functions` has. The methods given here are the class's;
+/// the engine places them on the declaration as it links it, so the
+/// declaration's own `methods` is left empty by an extension. A
+/// method's entry is served as a function's is, with the receiver on
+/// the frame as `Request::this` (ADR-0002).
+pub(crate) type NativeClassDecl = (ClassDecl, Vec<(MethodDecl, Entry)>);
 
 /// One extension (design §7.1): declarations paired with entries,
 /// constants, ini entries, the lifecycle functions, and the two state
@@ -94,7 +102,7 @@ pub(crate) type Rinit = fn(&mut Request) -> Result<(), Thrown>;
 pub struct Extension {
     pub(crate) name: String,
     pub(crate) functions: Vec<(FunctionDecl, Entry)>,
-    pub(crate) classes: Vec<ClassDecl>,
+    pub(crate) classes: Vec<NativeClassDecl>,
     pub(crate) constants: Vec<ConstDecl>,
     pub(crate) ini: Vec<IniDecl>,
     pub(crate) request_state: Option<StateBuilder>,
@@ -117,7 +125,7 @@ impl std::fmt::Debug for Extension {
 #[derive(Default)]
 pub struct ExtensionBuilder {
     functions: Vec<(FunctionDecl, Entry)>,
-    classes: Vec<ClassDecl>,
+    classes: Vec<NativeClassDecl>,
     constants: Vec<ConstDecl>,
     ini: Vec<IniDecl>,
     request_state: Option<StateBuilder>,
@@ -134,9 +142,17 @@ impl ExtensionBuilder {
         self
     }
 
-    /// The native classes, declared.
+    /// The native classes: each declaration with its methods' entries
+    /// beside it, `(ClassDecl, Vec<(MethodDecl, Entry)>)`, the shape
+    /// [`ExtensionBuilder::functions`] has. The engine links each into
+    /// the linked table beside the classes Zend declares (design §6.2,
+    /// §7.1); a method's entry reads its arguments as a function's does
+    /// and its receiver as `Request::this`.
     #[must_use]
-    pub fn classes(mut self, classes: Vec<ClassDecl>) -> ExtensionBuilder {
+    pub fn classes(
+        mut self,
+        classes: Vec<(ClassDecl, Vec<(MethodDecl, Entry)>)>,
+    ) -> ExtensionBuilder {
         self.classes.extend(classes);
         self
     }

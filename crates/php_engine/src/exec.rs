@@ -22,7 +22,7 @@ use php_unit::{ConstIdx, OpArray, OperandKind, Opline, Unit};
 use crate::api::call::Function;
 use crate::api::raising::warning;
 use crate::api::request::Request;
-use crate::api::values::{PhpString, TypeTag, Value};
+use crate::api::values::{ClassId, PhpObject, PhpString, TypeTag, Value};
 
 /// One frame's engine state.
 pub(crate) struct FrameState {
@@ -52,6 +52,15 @@ pub(crate) struct CallState {
     pub(crate) arguments: Vec<Value>,
     /// How many the `INIT_FCALL` said there are, which bounds them.
     pub(crate) count: usize,
+    /// `ZEND_CALL_HAS_THIS`: the receiver of a method call, php's
+    /// `EX(This)`, one owner the frame holds until it is popped
+    /// (`ZEND_CALL_RELEASE_THIS`); none for a function or a method
+    /// called on the class.
+    pub(crate) this: Option<PhpObject>,
+    /// The called scope, `static`: the class a method was called on,
+    /// which is the receiver's for an instance call and the one named
+    /// for a call on the class; none for a function.
+    pub(crate) called_scope: Option<ClassId>,
     /// Where the call stands.
     pub(crate) stage: CallStage,
 }
