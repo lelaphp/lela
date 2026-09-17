@@ -322,8 +322,10 @@ impl Shared {
 }
 
 /// The core ini entries and their defaults: php's `main.c` table and
-/// four `zend.` entries of `Zend/zend.c`'s, the two a throwable's trace
-/// reads and the two the stack limit reads (`Shared::stack_limit`),
+/// five entries of `Zend/zend.c`'s, the two a throwable's trace reads,
+/// the two the stack limit reads (`Shared::stack_limit`) and
+/// `fatal_error_backtraces`, php 8.5's, `On` by default
+/// (`Z/Zend/zend.c:263`), which a fatal's trace reads,
 /// under the CLI's hardcoded overrides (`Z/sapi/cli/php_cli.c:116-121`),
 /// which is what the oracle answers with no `php.ini`. `max_execution_time`
 /// and `html_errors` are the two the CLI moves, from `30` and `1`.
@@ -331,8 +333,9 @@ impl Shared {
 /// table and empty here, since an entry with no value at all is one
 /// `ini_set()` refuses to set. `short_open_tag` is the one entry the
 /// scanner reads, `CG(short_tags)`, and `token_get_all` with it.
-const CORE_INI: [(&str, &str); 20] = [
+const CORE_INI: [(&str, &str); 21] = [
     ("short_open_tag", "1"),
+    ("fatal_error_backtraces", "1"),
     ("precision", "14"),
     ("serialize_precision", "-1"),
     ("error_reporting", "32767"),
@@ -626,8 +629,9 @@ impl Engine {
     /// scanner's deprecation on the line before it rendered first. The
     /// frame carries no `Stack trace:` under the recipe, whose
     /// `fatal_error_backtraces=Off` is `run-tests.php`'s own; php's default
-    /// of `On` prints one, and this engine reads the entry as php with it
-    /// off does.
+    /// of `On` prints `#0 {main}` under it, which
+    /// `a_compile_error_carries_php_s_trace_under_the_default_ini` below
+    /// holds, since no `ini_set()` runs before the compiler refuses.
     ///
     /// ```php
     /// $x = 1; (integer)$x;
@@ -982,6 +986,66 @@ mod tests {
         }
     }
 
+    /// `fatal_error_backtraces` is `On` in php's table (`Z/Zend/zend.c:263`)
+    /// and the CLI leaves it, so `php -n` over
+    /// `<?php\nvar_dump(ini_get('fatal_error_backtraces'));` prints
+    /// `string(1) "1"`; the recipe's `Off` is `run-tests.php`'s, which is
+    /// why the witness beside `Request::fatal_error_backtraces` reads `""`.
+    #[test]
+    fn fatal_error_backtraces_is_on_by_default() {
+        let engine = Engine::builder().build();
+        let (body, _) = served(
+            &engine,
+            "<?php\nvar_dump(ini_get('fatal_error_backtraces'));",
+        );
+        assert_eq!(body, "string(1) \"1\"\n");
+    }
+
+    /// The compiler's `E_COMPILE_ERROR` goes through `zend_error_impl`, so
+    /// under php's default it fetches its trace, `#0 {main}` with no
+    /// frame standing, and the parser's `E_PARSE` is a `ParseError`
+    /// `zend_exception_error` renders with none. What the pinned oracle
+    /// writes under `php -n` for `<?php\n(unset)$x;` is the fatal, then
+    /// `Stack trace:` and `#0 {main}`, in the plain form and, under
+    /// `-d html_errors=1`, in the second html format, the trace between
+    /// `<br />` and the newline; and for `<?php\necho 1 +;` the parse
+    /// error alone, under both.
+    #[test]
+    fn a_compile_error_carries_php_s_trace_under_the_default_ini() {
+        let engine = Engine::builder().build();
+        let (body, observables) = served(&engine, "<?php\n(unset)$x;");
+        assert_eq!(
+            body,
+            "\nFatal error: The (unset) cast is no longer supported in witness.php on line 2\nStack trace:\n#0 {main}\n"
+        );
+        assert_eq!(
+            observables.fatal.as_deref(),
+            Some(
+                "PHP Fatal error:  The (unset) cast is no longer supported in witness.php on line 2\nStack trace:\n#0 {main}"
+            )
+        );
+        let (body, observables) = served(&engine, "<?php\necho 1 +;");
+        assert_eq!(
+            (body.as_str(), observables.exit_code),
+            (
+                "\nParse error: syntax error, unexpected token \";\" in witness.php on line 2\n",
+                255
+            )
+        );
+
+        let html = Engine::builder().ini("html_errors", "1").build();
+        let (body, _) = served(&html, "<?php\n(unset)$x;");
+        assert_eq!(
+            body,
+            "<br />\n<b>Fatal error</b>:  The (unset) cast is no longer supported in <b>witness.php</b> on line <b>2</b><br />\nStack trace:\n#0 {main}\n"
+        );
+        let (body, _) = served(&html, "<?php\necho 1 +;");
+        assert_eq!(
+            body,
+            "<br />\n<b>Parse error</b>:  syntax error, unexpected token &quot;;&quot; in <b>witness.php</b> on line <b>2</b><br />\n"
+        );
+    }
+
     /// A class the compiler bound with no opline (`zend_compile_class_decl`
     /// under `toplevel`) is declared into the request's table before the
     /// main op array runs, so the source the doc-comment witness of
@@ -989,7 +1053,9 @@ mod tests {
     /// `zend_class_redeclaration_error` in the wording for an internal
     /// class, and one a unit of this request declared names its site.
     /// Both are `E_COMPILE_ERROR` at the class's line, rendered before
-    /// any of the file runs.
+    /// any of the file runs, over `#0 {main}` under php's default
+    /// `fatal_error_backtraces`, which is what the pinned oracle writes
+    /// for `<?php\necho 1;\nclass Exception {}` under `php -n`.
     #[test]
     fn a_unit_s_classes_are_declared_before_its_main_op_array_runs() {
         let engine = Engine::builder().build();
@@ -1002,7 +1068,7 @@ mod tests {
         assert_eq!(
             (body.as_str(), observables.exit_code),
             (
-                "\nFatal error: Cannot redeclare class Exception in witness.php on line 3\n",
+                "\nFatal error: Cannot redeclare class Exception in witness.php on line 3\nStack trace:\n#0 {main}\n",
                 255
             )
         );
@@ -1094,7 +1160,7 @@ mod tests {
         assert_eq!(
             body,
             format!(
-                "\nFatal error: Maximum call stack size of {} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached during compilation. Try splitting expression in witness.php on line 2\n",
+                "\nFatal error: Maximum call stack size of {} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached during compilation. Try splitting expression in witness.php on line 2\nStack trace:\n#0 {{main}}\n",
                 512 * 1024 - 48 * 1024
             )
         );
@@ -1102,9 +1168,9 @@ mod tests {
         assert_eq!(
             observables.fatal.as_deref(),
             Some(
-                "PHP Fatal error:  Maximum call stack size of 475136 bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached during compilation. Try splitting expression in witness.php on line 2"
+                "PHP Fatal error:  Maximum call stack size of 475136 bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached during compilation. Try splitting expression in witness.php on line 2\nStack trace:\n#0 {main}"
             ),
-            "the log form the host is handed, as for every fatal"
+            "the log form the host is handed, as for every fatal, the trace with it"
         );
 
         let mut masked = Kept::default();

@@ -278,6 +278,12 @@ pub struct Request {
     /// two in the order they were written.
     aside: Vec<Aside>,
     last_error: Option<(Level, String, Vec<u8>, u32)>,
+    /// php's `EG(last_fatal_error_backtrace)`, rendered by
+    /// `zend_trace_to_string`: the trace `zend_error_impl` fetched for the
+    /// fatal being raised under `fatal_error_backtraces`, cleared for
+    /// every diagnostic and by `zend_exception_error`, read by
+    /// `php_error_cb` for the display and the log forms.
+    last_fatal_error_backtrace: Option<String>,
     ending: Option<Ending>,
     resources: Resources,
     superglobals: Vec<(Vec<u8>, PhpArray)>,
@@ -340,6 +346,7 @@ impl Request {
             header_callback: None,
             aside: Vec::new(),
             last_error: None,
+            last_fatal_error_backtrace: None,
             ending: None,
             resources: Resources::default(),
             superglobals: Vec::new(),
@@ -852,15 +859,12 @@ impl Request {
             "CompileError" => Some(Level::CompileError),
             _ => None,
         };
-        let fatal = if let Some(level) = compile_time {
-            let message = string_prop(self, throwable, b"message");
-            self.end_in_compile_time(level, &message, &file, line);
-            Fatal::Error(message)
-        } else {
-            let message = format!("Uncaught {}\n  thrown", self.throwable_to_string(throwable));
-            self.end_in_fatal_at(&message, &file, line);
-            Fatal::Error(message)
+        let message = match compile_time {
+            Some(_) => string_prop(self, throwable, b"message"),
+            None => format!("Uncaught {}\n  thrown", self.throwable_to_string(throwable)),
         };
+        self.end_in_uncaught(compile_time.unwrap_or(Level::Error), &message, &file, line);
+        let fatal = Fatal::Error(message);
         // `zend_exception_error` ends with `OBJ_RELEASE(ex)`: the pending
         // slot's owner, given up once the rendering has read it.
         self.release(throwable.as_value());
@@ -1309,7 +1313,90 @@ impl Request {
     /// entries decide nothing a request can see, and the recipe's
     /// `display_startup_errors=1` shows no difference from php's default
     /// of the same.
+    ///
+    /// A fatal's own trace is php 8.5's `fatal_error_backtraces`
+    /// (`Z/Zend/zend.c:263`, `On` by default), the half of
+    /// `zend_error_impl` before `zend_error_cb` (`Z/Zend/zend.c:1500-1526`):
+    /// `EG(last_fatal_error_backtrace)` is cleared for every diagnostic,
+    /// and while the entry is on a level in `E_FATAL_ERRORS` fetches one
+    /// where the request stands, `zend_fetch_debug_backtrace` under
+    /// `zend.exception_ignore_args`, unless a throwable is pending, which
+    /// php reports ahead of the fatal instead. `php_error_cb` renders it
+    /// under `Stack trace:` after the site in the log form, the xml
+    /// fault, the stderr form and the plain form alike. The recipe
+    /// carries `run-tests.php`'s `fatal_error_backtraces=Off`, so a
+    /// witness turns the entry on first; the frames are the ones a
+    /// throwable's trace walks, so a fatal at a back-edge of the main op
+    /// array stands over `{main}` alone.
+    ///
+    /// ```php
+    /// ini_set('fatal_error_backtraces', '1'); set_time_limit(1); for (;;) {}
+    /// ```
+    /// ```expect exit=255 wall=1s
+    /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 2
+    /// Stack trace:
+    /// #0 {main}
+    /// ```
+    ///
+    /// A fatal raised inside a native stands over the native's frame, as
+    /// a throwable's does, since both are [`Request::trace_as_string`],
+    /// whose witnesses pin the frame and its arguments; the one fatal a
+    /// native of this engine raises while serving, `var_dump()` over a
+    /// `__debugInfo` that answers no array, waits on a compiler that
+    /// reads a method, and the oracle prints
+    /// `#0 %s(2): var_dump(Object(A))` over `#1 {main}` for it.
+    ///
+    /// The stderr form carries the trace as the plain form does, on the
+    /// error stream with it.
+    ///
+    /// ```php
+    /// ini_set('fatal_error_backtraces', '1'); ini_set('display_errors', 'stderr'); set_time_limit(1); for (;;) {}
+    /// ```
+    /// ```expect exit=255 wall=1s
+    /// ```
+    /// ```stderr
+    /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 2
+    /// Stack trace:
+    /// #0 {main}
+    /// ```
+    ///
+    /// The trace is what parts php's two html formats
+    /// (`Z/main/main.c:1471-1476`): an `E_ERROR` or an `E_PARSE` takes the
+    /// first, its message escaped and no trace however the entry stands,
+    /// and every other level the second, unescaped, with the trace
+    /// between `<br />` and the newline that closes the line. A
+    /// `TypeError` left uncaught is the `E_ERROR` an uncaught throwable
+    /// becomes, and `zend_exception_error` fetches no trace for it
+    /// ([`Request::end_in_uncaught`]), so under html an `E_ERROR` with a
+    /// trace is the time limit's or the memory limit's, and it prints
+    /// none.
+    ///
+    /// ```php
+    /// ini_set('fatal_error_backtraces', '1'); ini_set('html_errors', '1'); set_time_limit(1); for (;;) {}
+    /// ```
+    /// ```expect exit=255 wall=1s
+    /// <br />
+    /// <b>Fatal error</b>:  Maximum execution time of 1 second exceeded in <b>%s</b> on line <b>2</b><br />
+    /// ```
+    ///
+    /// The second html format is `E_USER_ERROR`'s, `E_COMPILE_ERROR`'s,
+    /// `E_CORE_ERROR`'s and `E_RECOVERABLE_ERROR`'s; no native here
+    /// raises one while serving, so
+    /// `the_second_html_format_carries_the_trace_after_the_line` below
+    /// holds it to the oracle's bytes for `trigger_error()`.
     pub(crate) fn note_error_in(&mut self, level: Level, message: &str, file: &[u8], line: u32) {
+        // "Always clear the last backtrace."
+        self.last_fatal_error_backtrace = None;
+        if self.pending.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
+            self.last_fatal_error_backtrace = Some(self.trace_as_string());
+        }
+        self.error_cb(level, message, file, line);
+    }
+
+    /// `php_error_cb` (`Z/main/main.c:1370-1500`): the diagnostic stored,
+    /// masked, logged and displayed, with the trace
+    /// [`Request::note_error_in`] fetched, if one, under `Stack trace:`.
+    fn error_cb(&mut self, level: Level, message: &str, file: &[u8], line: u32) {
         if !self.displayed(message, file, line) {
             return;
         }
@@ -1325,8 +1412,9 @@ impl Request {
             return;
         }
         let name = level_name(level);
+        let trace = self.stack_trace_after_the_site();
         if self.log_errors() {
-            let text = format!("PHP {name}:  {message} in {named} on line {line}");
+            let text = format!("PHP {name}:  {message} in {named} on line {line}{trace}");
             self.log_err(text.as_bytes());
         }
         let display = self.display_errors();
@@ -1339,40 +1427,72 @@ impl Request {
             // its string, the message unescaped and no space after the
             // colon; neither string stands around it.
             let text = format!(
-                "<?xml version=\"1.0\"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><int>{}</int></value></member><member><name>faultString</name><value><string>{name}:{message} in {named} on line {line}</string></value></member></struct></value></fault></methodResponse>",
+                "<?xml version=\"1.0\"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><int>{}</int></value></member><member><name>faultString</name><value><string>{name}:{message} in {named} on line {line}{trace}</string></value></member></struct></value></fault></methodResponse>",
                 self.xmlrpc_error_number()
             );
             self.write(text.as_bytes());
         } else if self.html_errors() {
-            // php escapes the message of an `E_ERROR` or an `E_PARSE`
-            // and no other level's, and writes the same bytes around
-            // both; the backtrace that parts php's two html formats is
-            // `fatal_error_backtraces`, which this engine does not keep.
-            let body = match level {
-                Level::Error | Level::Parse => escape_html(message),
-                _ => message.to_owned(),
+            // php's two html formats: the message of an `E_ERROR` or an
+            // `E_PARSE` escaped and no trace after it, and every other
+            // level's as it is with the trace between the `<br />` and
+            // the newline.
+            let prepend = self.ini_text(b"error_prepend_string");
+            let append = self.ini_text(b"error_append_string");
+            let text = match level {
+                Level::Error | Level::Parse => format!(
+                    "{prepend}<br />\n<b>{name}</b>:  {} in <b>{named}</b> on line <b>{line}</b><br />\n{append}",
+                    escape_html(message)
+                ),
+                _ => format!(
+                    "{prepend}<br />\n<b>{name}</b>:  {message} in <b>{named}</b> on line <b>{line}</b><br />{trace}\n{append}"
+                ),
             };
-            let text = format!(
-                "{}<br />\n<b>{name}</b>:  {body} in <b>{named}</b> on line <b>{line}</b><br />\n{}",
-                self.ini_text(b"error_prepend_string"),
-                self.ini_text(b"error_append_string"),
-            );
             self.write(text.as_bytes());
         } else if display == Display::Stderr {
             // php's stderr form stands inside the same `else` as the
             // plain one, so `html_errors` takes a CLI diagnostic off the
             // error stream and onto the body; and it carries neither
             // string around it.
-            let text = format!("{name}: {message} in {named} on line {line}\n");
+            let text = format!("{name}: {message} in {named} on line {line}{trace}\n");
             self.write_stderr(text.as_bytes());
         } else {
             let text = format!(
-                "{}\n{name}: {message} in {named} on line {line}\n{}",
+                "{}\n{name}: {message} in {named} on line {line}{trace}\n{}",
                 self.ini_text(b"error_prepend_string"),
                 self.ini_text(b"error_append_string"),
             );
             self.write(text.as_bytes());
         }
+    }
+
+    /// What `php_error_cb` writes after `on line N` for the fatal's trace:
+    /// `ZSTR_LEN(backtrace) ? "\nStack trace:\n" : ""` and the trace, so
+    /// nothing at all while none was fetched.
+    fn stack_trace_after_the_site(&self) -> String {
+        self.last_fatal_error_backtrace
+            .as_deref()
+            .map_or_else(String::new, |trace| format!("\nStack trace:\n{trace}"))
+    }
+
+    /// `fatal_error_backtraces`, `EG(fatal_error_backtrace_on)` through
+    /// `OnUpdateBool` (`Z/Zend/zend.c:263`), `PHP_INI_ALL`: whether a
+    /// fatal fetches its trace. The engine's default is php's, `1`, which
+    /// `fatal_error_backtraces_is_on_by_default` in `engine` holds; the
+    /// recipe's `fatal_error_backtraces=Off` reaches the table through the
+    /// ini scanner as the empty string, which is what php answers under
+    /// the same `-d`, and `ini_set()` moves it.
+    ///
+    /// ```php
+    /// var_dump(ini_get('fatal_error_backtraces'), ini_set('fatal_error_backtraces', '1'), ini_get('fatal_error_backtraces'));
+    /// ```
+    /// ```expect
+    /// string(0) ""
+    /// string(0) ""
+    /// string(1) "1"
+    /// ```
+    fn fatal_error_backtraces(&self) -> bool {
+        self.ini_get(b"fatal_error_backtraces")
+            .is_some_and(Request::ini_parse_bool)
     }
 
     /// php's `display`, the first branch of `php_error_cb`: a diagnostic
@@ -1474,40 +1594,63 @@ impl Request {
     /// say, and the request ends in it. It is rendered once, here, and
     /// `serve` writes nothing of its own.
     pub(crate) fn end_in_fatal(&mut self, message: &str) {
-        let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
-        let line = self.current_line();
-        self.end_in_fatal_at(message, &file, line);
-    }
-
-    /// The same fatal at a site of its own, which an uncaught throwable
-    /// carries. The first fatal is the one that ends the request, since
-    /// php leaves the request from the first and renders no second.
-    pub(crate) fn end_in_fatal_at(&mut self, message: &str, file: &[u8], line: u32) {
+        // The first fatal is the one that ends the request, since php
+        // leaves the request from the first and renders no second.
         if self.ending.is_some() {
             return;
         }
-        self.note_error_in(Level::Error, message, file, line);
-        self.end_in_fatal_logged(message, file, line);
+        let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+        let line = self.current_line();
+        self.note_error_in(Level::Error, message, &file, line);
+        self.end_at_level(Level::Error, message, &file, line);
+    }
+
+    /// `zend_exception_error` (`Z/Zend/zend_exceptions.c:936-990`): an
+    /// uncaught throwable rendered at the site it recorded, through
+    /// `zend_error_cb` alone and never `zend_error_impl`, with
+    /// `EG(last_fatal_error_backtrace)` cleared first, so the diagnostic
+    /// carries the throwable's own trace in its message and never a
+    /// fatal's after the site, whatever `fatal_error_backtraces` says. A
+    /// `ParseError` or a `CompileError` is rendered at its own level and
+    /// the rest as `E_ERROR`, and the request ends as the level ends it.
+    pub(crate) fn end_in_uncaught(&mut self, level: Level, message: &str, file: &[u8], line: u32) {
+        if self.ending.is_some() {
+            return;
+        }
+        self.last_fatal_error_backtrace = None;
+        self.error_cb(level, message, file, line);
+        self.end_at_level(level, message, file, line);
     }
 
     /// The ending alone, the diagnostic already rendered at its own
-    /// level: the log form the host is handed for a fatal.
-    fn end_in_fatal_logged(&mut self, message: &str, file: &[u8], line: u32) {
-        if self.ending.is_none() {
-            self.ending = Some(Ending::Fatal(format!(
-                "PHP Fatal error:  {message} in {} on line {line}",
-                String::from_utf8_lossy(file)
-            )));
+    /// level: php's status alone for `E_PARSE`, and for every other
+    /// fatal level the log form the host is handed, the trace under
+    /// `Stack trace:` where `php_error_cb` gave `php_log_err` one.
+    fn end_at_level(&mut self, level: Level, message: &str, file: &[u8], line: u32) {
+        if self.ending.is_some() {
+            return;
         }
+        self.ending = Some(match level {
+            Level::Parse => Ending::Parse,
+            _ => Ending::Fatal(format!(
+                "PHP Fatal error:  {message} in {} on line {line}{}",
+                String::from_utf8_lossy(file),
+                self.stack_trace_after_the_site()
+            )),
+        });
     }
 
     /// `E_PARSE` or `E_COMPILE_ERROR` at a site of its own, which is what
-    /// the compiler's refusal carries and what a `ParseError` or
-    /// `CompileError` left uncaught recorded: rendered once through
+    /// the compiler's refusal carries: rendered once through
     /// `php_error_cb` at its level, and the request ended as that level
     /// ends it, php's status alone for the parse error and the log form
     /// beside it for the compile error, which `php_error_cb` bails out
-    /// of as it does from `E_ERROR`.
+    /// of as it does from `E_ERROR`. php's parser refuses by throwing a
+    /// `ParseError` (`zenderror`, `Z/Zend/zend_language_parser.y`), which
+    /// `zend_exception_error` renders with no trace fetched, while the
+    /// compiler's `zend_error_noreturn(E_COMPILE_ERROR, …)` goes through
+    /// `zend_error_impl` and fetches one, `#0 {main}` with no frame
+    /// standing.
     pub(crate) fn end_in_compile_time(
         &mut self,
         level: Level,
@@ -1515,19 +1658,12 @@ impl Request {
         file: &[u8],
         line: u32,
     ) {
+        if level == Level::Parse {
+            self.end_in_uncaught(level, message, file, line);
+            return;
+        }
         self.note_error_in(level, message, file, line);
-        match level {
-            Level::Parse => self.end_in_parse(),
-            _ => self.end_in_fatal_logged(message, file, line),
-        }
-    }
-
-    /// `E_PARSE`: the request ends with php's status and no second
-    /// rendering, the text having gone out with the diagnostic.
-    pub(crate) fn end_in_parse(&mut self) {
-        if self.ending.is_none() {
-            self.ending = Some(Ending::Parse);
-        }
+        self.end_at_level(level, message, file, line);
     }
 
     pub(crate) fn end_in_exit(&mut self, code: i32) {
@@ -3939,6 +4075,21 @@ fn string_prop(req: &Request, object: PhpObject, name: &[u8]) -> String {
 /// it, and `trigger_error()` takes the four `E_USER_*` levels alone.
 /// `E_STRICT` has no raise anywhere: its constant stands `#[Deprecated]`
 /// since 8.4 with the message that the level was removed.
+/// `E_FATAL_ERRORS` (`Z/Zend/zend_errors.h:47`): the six levels
+/// `php_error_cb` bails out of, and the ones `zend_error_impl` fetches a
+/// trace for under `fatal_error_backtraces`.
+fn fatal_errors(level: Level) -> bool {
+    matches!(
+        level,
+        Level::Error
+            | Level::CoreError
+            | Level::CompileError
+            | Level::UserError
+            | Level::RecoverableError
+            | Level::Parse
+    )
+}
+
 fn level_name(level: Level) -> &'static str {
     match level {
         Level::Error | Level::CoreError | Level::CompileError | Level::UserError => "Fatal error",
@@ -4021,7 +4172,10 @@ mod tests {
     /// is rendered under `error_reporting=0`, in the same word its
     /// family takes, and every other level is masked. No raiser reaches
     /// `E_CORE_ERROR` or `E_CORE_WARNING` in this engine, so the mask is
-    /// held here and not by a witness.
+    /// held here and not by a witness. `E_CORE_ERROR` is in
+    /// `E_FATAL_ERRORS`, so under php's default `fatal_error_backtraces`
+    /// it fetches its trace, `#0 {main}` with no frame standing, and the
+    /// warning fetches none.
     #[test]
     fn a_core_level_is_rendered_past_error_reporting() {
         let engine = Engine::builder().ini("error_reporting", "0").build();
@@ -4033,7 +4187,73 @@ mod tests {
         request.note_error_in(Level::Error, "masked", file, 5);
         assert_eq!(
             String::from_utf8_lossy(&request.take_body()),
-            "\nWarning: core in witness.php on line 2\n\nFatal error: core in witness.php on line 3\n"
+            "\nWarning: core in witness.php on line 2\n\nFatal error: core in witness.php on line 3\nStack trace:\n#0 {main}\n"
+        );
+    }
+
+    /// php's second html format (`Z/main/main.c:1475`), the one every
+    /// fatal level but `E_ERROR` and `E_PARSE` takes: the message as it
+    /// is, and the trace between the `<br />` and the newline. What the
+    /// pinned oracle writes for `-d html_errors=1` over
+    /// `<?php\nini_set('fatal_error_backtraces', '1'); trigger_error('b<o>om', E_USER_ERROR);`
+    /// is the 8.4 deprecation and then
+    /// `<br />\n<b>Fatal error</b>:  b<o>om in <b>%s</b> on line <b>2</b><br />\nStack trace:\n#0 %s(2): trigger_error('b<o>om', 256)\n#1 {main}\n`;
+    /// no native here raises `E_USER_ERROR`, so the request has no frame
+    /// and the trace is `{main}` alone. The same level under
+    /// `fatal_error_backtraces=0` fetches none, and the two formats then
+    /// write the same bytes but for the escaping.
+    #[test]
+    fn the_second_html_format_carries_the_trace_after_the_line() {
+        let file = b"witness.php";
+        let engine = Engine::builder().ini("html_errors", "1").build();
+        let mut req = request(&engine);
+        req.note_error_in(Level::UserError, "b<o>om", file, 2);
+        req.note_error_in(Level::Error, "b<o>om", file, 3);
+        assert_eq!(
+            String::from_utf8_lossy(&req.take_body()),
+            "<br />\n<b>Fatal error</b>:  b<o>om in <b>witness.php</b> on line <b>2</b><br />\nStack trace:\n#0 {main}\n\
+             <br />\n<b>Fatal error</b>:  b&lt;o&gt;om in <b>witness.php</b> on line <b>3</b><br />\n"
+        );
+
+        let engine = Engine::builder()
+            .ini("html_errors", "1")
+            .ini("fatal_error_backtraces", "0")
+            .build();
+        let mut req = request(&engine);
+        req.note_error_in(Level::UserError, "b<o>om", file, 2);
+        assert_eq!(
+            String::from_utf8_lossy(&req.take_body()),
+            "<br />\n<b>Fatal error</b>:  b<o>om in <b>witness.php</b> on line <b>2</b><br />\n"
+        );
+    }
+
+    /// The log form and the xml fault carry the trace after the site as
+    /// the plain form does, `ZSTR_LEN(backtrace) ? "\nStack trace:\n" : ""`
+    /// in each of `php_error_cb`'s `spprintf` calls. What the pinned
+    /// oracle writes for `-d log_errors=1 -d display_errors=0` over
+    /// `<?php\n(unset)$x;` is
+    /// `PHP Fatal error:  The (unset) cast is no longer supported in %s on line 2\nStack trace:\n#0 {main}`,
+    /// and for `-d xmlrpc_errors=1` the fault's string is
+    /// `Fatal error:The (unset) cast … on line 2\nStack trace:\n#0 {main}`.
+    #[test]
+    fn the_log_form_and_the_xml_fault_carry_the_trace() {
+        let file = b"witness.php";
+        let engine = Engine::builder()
+            .ini("log_errors", "1")
+            .ini("xmlrpc_errors", "1")
+            .build();
+        let mut req = request(&engine);
+        req.note_error_in(Level::CompileError, "refused", file, 2);
+        assert_eq!(
+            req.take_aside(),
+            vec![super::Aside::Log(
+                b"PHP Fatal error:  refused in witness.php on line 2\nStack trace:\n#0 {main}"
+                    .to_vec()
+            )]
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&req.take_body()),
+            "<?xml version=\"1.0\"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><int>0</int></value></member><member><name>faultString</name><value><string>Fatal error:refused in witness.php on line 2\nStack trace:\n#0 {main}</string></value></member></struct></value></fault></methodResponse>"
         );
     }
 
