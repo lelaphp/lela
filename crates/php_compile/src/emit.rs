@@ -583,6 +583,7 @@ impl Emit<'_> {
             | Expr::Prop { .. }
             | Expr::Assign { .. }
             | Expr::AssignProp { .. }
+            | Expr::AssignRef { .. }
             | Expr::Call { .. }
             | Expr::PreInc(_)
             | Expr::PostInc(_)
@@ -1474,6 +1475,7 @@ impl Emit<'_> {
                 name,
                 value,
             } => self.assign_prop(object, name, value),
+            Expr::AssignRef { var, source } => Ok(self.assign_ref(var, source)),
             Expr::PreInc(var) => Ok(self.incdec(var, Opcode::PreInc)),
             Expr::PostInc(var) => Ok(self.incdec(var, Opcode::PostInc)),
             Expr::PreDec(var) => Ok(self.incdec(var, Opcode::PreDec)),
@@ -1536,6 +1538,33 @@ impl Emit<'_> {
             ..Opline::default()
         });
         Ok(Where::Temporary(out))
+    }
+
+    /// `zend_compile_assign_ref` (`Z/Zend/zend_compile.c:3549`) for
+    /// `$b = &$a` over two variables: the target's CV looked up first
+    /// (`zend_delayed_compile_var` under `BP_VAR_W`, which delays nothing
+    /// for a plain CV), the source's after it (`zend_compile_var` under
+    /// `BP_VAR_W`), then `ASSIGN_REF` over the two into a `VAR`
+    /// (`zend_emit_op`), `extended_value` zero since the source is no
+    /// call (`ZEND_RETURNS_FUNCTION`). No `MAKE_REF` stands between
+    /// them: php emits one only where the source is neither a CV nor
+    /// bound for a plain variable. [`Self::do_free`] marks the `VAR`
+    /// `UNUSED` where nothing reads it, as it marks a call's.
+    fn assign_ref(&mut self, var: &[u8], source: &[u8]) -> Where {
+        let target = self.lookup_cv(var);
+        let source = self.lookup_cv(source);
+        let out = self.temporary();
+        self.push(Opline {
+            opcode: Opcode::AssignRef,
+            op1_type: OperandKind::Cv,
+            op1: target,
+            op2_type: OperandKind::Cv,
+            op2: source,
+            out_type: OperandKind::Var,
+            out,
+            ..Opline::default()
+        });
+        Where::Returned(out)
     }
 
     /// `zend_compile_assign`, the `ZEND_AST_PROP` arm: the property
@@ -1962,6 +1991,7 @@ impl Emit<'_> {
             | Expr::Prop { .. }
             | Expr::Assign { .. }
             | Expr::AssignProp { .. }
+            | Expr::AssignRef { .. }
             | Expr::PreInc(_)
             | Expr::PostInc(_)
             | Expr::PreDec(_)

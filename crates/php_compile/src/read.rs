@@ -197,6 +197,14 @@ pub(crate) enum Expr {
         name: Vec<u8>,
         value: Child,
     },
+    /// `$b = &$a`, php's `ZEND_AST_ASSIGN_REF` over two variables, the
+    /// target and the source, each a name written as is. php's grammar
+    /// puts a variable and nothing else after the `&`; a property, a
+    /// dimension or a call there is not read yet.
+    AssignRef {
+        var: Vec<u8>,
+        source: Vec<u8>,
+    },
     /// `++$a`, php's `ZEND_AST_PRE_INC`, whose grammar puts a variable
     /// and nothing else after the `++`.
     PreInc(Vec<u8>),
@@ -1128,6 +1136,11 @@ impl Reader<'_> {
         match left {
             Expr::Var(var) => {
                 self.bump(1);
+                self.skip_trivia();
+                if self.byte(0) == Some(b'&') {
+                    self.bump(1);
+                    return self.assign_ref(var);
+                }
                 Ok(Expr::Assign {
                     var,
                     value: Child::new(self.expr()?),
@@ -1144,6 +1157,28 @@ impl Reader<'_> {
             _ => {
                 Err(self
                     .trouble("an assignment to what is no variable this compiler cannot read yet"))
+            }
+        }
+    }
+
+    /// The source of `variable '=' ampersand variable`, php's
+    /// `ZEND_AST_ASSIGN_REF`, after the `&`: a variable and nothing else,
+    /// as php's grammar has it, so `$b = &$a = 1` is php's parse error and
+    /// is refused here by what follows. `$this`, `$_GET` and its kin are
+    /// refused as [`Self::variable`] refuses them, and a property, a
+    /// dimension or a call as the source is not read yet.
+    fn assign_ref(&mut self, var: Vec<u8>) -> Result<Expr, Trouble> {
+        self.skip_trivia();
+        if self.byte(0) != Some(b'$') {
+            return Err(self.trouble(
+                "a by-reference assignment from what is no variable this compiler cannot read yet",
+            ));
+        }
+        match self.variable()? {
+            Expr::Var(source) => Ok(Expr::AssignRef { var, source }),
+            _ => {
+                Err(self
+                    .trouble("a by-reference assignment from $this this compiler cannot read yet"))
             }
         }
     }
@@ -2505,6 +2540,40 @@ mod tests {
             b"<?php echo --$a--;".as_slice(),
             b"<?php echo --f();".as_slice(),
             b"<?php echo ---$a;".as_slice(),
+        ] {
+            assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
+        }
+    }
+
+    /// `variable '=' ampersand variable`: the target and the source as
+    /// names, the `&` spaced either way, and the source a variable and
+    /// nothing else.
+    #[test]
+    fn a_by_reference_assignment_reads_its_two_names() {
+        for source in [
+            b"<?php $b = &$a;".as_slice(),
+            b"<?php $b =& $a;".as_slice(),
+            b"<?php $b = & $a;".as_slice(),
+        ] {
+            assert_eq!(
+                read(source).unwrap_or_default(),
+                vec![(
+                    Stmt::Effect(Expr::AssignRef {
+                        var: b"b".to_vec(),
+                        source: b"a".to_vec(),
+                    }),
+                    1
+                )],
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+        for source in [
+            b"<?php $b = &$a = 1;".as_slice(),
+            b"<?php $b = &1;".as_slice(),
+            b"<?php $b = &$this;".as_slice(),
+            b"<?php $b = &$_GET;".as_slice(),
+            b"<?php $b = &$a & 1;".as_slice(),
         ] {
             assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
         }

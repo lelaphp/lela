@@ -3442,6 +3442,102 @@ mod tests {
         }
     }
 
+    /// `$b = &$a` as the oracle dumps it (`zend_compile_assign_ref`):
+    /// `ASSIGN_REF` over the target's CV and the source's, the target
+    /// numbered first, its `VAR` marked unused where nothing reads it
+    /// and kept where an assignment, an `ECHO` or an operator does; the
+    /// same with the `&` spaced either way and with one CV as both.
+    #[test]
+    fn a_by_reference_assignment_compiles_to_assign_ref_as_php_emits_it() {
+        let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+            (
+                b"<?php $b = &$a;",
+                2,
+                2,
+                1,
+                "0000 ASSIGN_REF CV0($b) CV1($a)\n\
+                 0001 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $b =& $a;",
+                2,
+                2,
+                1,
+                "0000 ASSIGN_REF CV0($b) CV1($a)\n\
+                 0001 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $a = &$a;",
+                2,
+                1,
+                1,
+                "0000 ASSIGN_REF CV0($a) CV0($a)\n\
+                 0001 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $c = $b = &$a;",
+                3,
+                3,
+                2,
+                "0000 V3 = ASSIGN_REF CV1($b) CV2($a)\n\
+                 0001 ASSIGN CV0($c) V3\n\
+                 0002 RETURN int(1)\n",
+            ),
+            (
+                b"<?php echo $b = &$a;",
+                3,
+                2,
+                1,
+                "0000 V2 = ASSIGN_REF CV0($b) CV1($a)\n\
+                 0001 ECHO V2\n\
+                 0002 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $x = ($b = &$a) + 1;",
+                4,
+                3,
+                3,
+                "0000 V3 = ASSIGN_REF CV1($b) CV2($a)\n\
+                 0001 T4 = ADD V3 int(1)\n\
+                 0002 ASSIGN CV0($x) T4\n\
+                 0003 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $b = &$a; $a = 1; var_dump($b);",
+                6,
+                2,
+                3,
+                "0000 ASSIGN_REF CV0($b) CV1($a)\n\
+                 0001 ASSIGN CV1($a) int(1)\n\
+                 0002 INIT_FCALL 1 96 string(\"var_dump\")\n\
+                 0003 SEND_VAR CV0($b) 1\n\
+                 0004 DO_ICALL\n\
+                 0005 RETURN int(1)\n",
+            ),
+        ];
+        for (source, lines, vars, tmps, oplines) in cases {
+            assert_eq!(
+                dump_of(source),
+                main_dump(*lines, *vars, *tmps, oplines),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+        for source in [
+            b"<?php $b = &$a = 1;".as_slice(),
+            b"<?php $b = &$o->p;".as_slice(),
+            b"<?php $b = &f();".as_slice(),
+            b"<?php $b = &$this;".as_slice(),
+            b"<?php $b = &&$a;".as_slice(),
+        ] {
+            assert!(
+                refused(source).is_some(),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
+
     /// `$o->p = v` as the oracle dumps it (`zend_compile_assign`, the
     /// `ZEND_AST_PROP` arm): the value's oplines, then `ASSIGN_OBJ` over
     /// the receiver with the name as one constant and `OP_DATA` carrying

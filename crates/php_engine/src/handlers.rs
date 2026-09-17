@@ -36,7 +36,8 @@
 //! `zend_compile_ns_call` puts around it for an unqualified name in a
 //! namespace, `ZEND_JMP_FRAMELESS` and `ZEND_INIT_NS_FCALL_BY_NAME`;
 //! and `ZEND_CLONE`, the class's `clone_obj` through its handler table
-//! (#281).
+//! (#281); and `ZEND_ASSIGN_REF`, which binds two CVs to one cell
+//! (#286).
 
 // Every handler is generic over the tier and hands back the same edge, so
 // the generated dispatch calls them all the same way; the ones that raise a
@@ -1653,8 +1654,15 @@ fn frameless_call(
 /// A CV holding a reference is the first thing php tests (`Z_ISREF_P`,
 /// line 171): the write goes to the value the cell holds and the cell
 /// stays the CV's, so every other holder of the cell reads the new
-/// value; the witness of that is `&$x`'s, once it compiles, and the
-/// test beside the handlers holds it meanwhile.
+/// value, through whichever name the write came.
+///
+/// ```php
+/// $b = &$a; $a = 1; var_dump($b); $b = "x"; var_dump($a);
+/// ```
+/// ```expect
+/// int(1)
+/// string(1) "x"
+/// ```
 ///
 /// A CV given a new string gives its old one back to the heap, so what
 /// `memory_get_usage()` reads falls by what the old string took, and
@@ -1706,6 +1714,100 @@ pub(crate) fn assign<T: Tier>(
         let garbage = req.set_slot(frame, op.op1, value);
         req.release(garbage);
     }
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_ASSIGN_REF` (`Z/Zend/zend_vm_def.h:2839`), `$b = &$a` over two
+/// CVs: `zend_assign_to_variable_reference`
+/// (`Z/Zend/zend_execute.c:565`). The source is read in place under
+/// `BP_VAR_W`, so a CV nothing wrote is made `null` and no warning is
+/// raised (`_get_zval_ptr_cv_BP_VAR_W`); one holding no cell is given
+/// one over the value it held, `ZVAL_NEW_REF` (`ZVAL_MAKE_REF_EX`,
+/// `Z/Zend/zend_types.h:1241`), thirty-two bytes out of the request's
+/// heap that the source CV holds from here. The cell takes one more
+/// owner (`GC_ADDREF`) and the target CV holds it; the temporary
+/// `result` names is one more owner again under `RETURN_VALUE_USED`
+/// (`ZVAL_COPY`), and it is the cell, which the `ASSIGN` or the `ECHO`
+/// that reads the `VAR` follows; what the target held is given up
+/// last (`GC_DTOR(garbage)`). Two names of one cell, `$a = &$a` over a
+/// CV that holds one, are left as they stand. A `VAR` operand is what a
+/// `FETCH_*_W` leaves, `Cannot assign by reference to an array
+/// dimension of an object` over one holding no `IS_INDIRECT`, and is
+/// not served until a dimension or a property is a source; `MAKE_REF`
+/// and `ZEND_RETURNS_FUNCTION` land with it.
+///
+/// One cell, two names: a write through either is read through both,
+/// and a plain assignment from one of them copies the value, not the
+/// cell.
+///
+/// ```php
+/// $b = &$a; var_dump($a, $b); $a = 1; $c = $b; $b = 2; var_dump($a, $b, $c);
+/// ```
+/// ```expect
+/// NULL
+/// NULL
+/// int(2)
+/// int(2)
+/// int(1)
+/// ```
+///
+/// The cell is php's thirty-two bytes and one CV bound to itself takes
+/// one; the deltas are read before anything is printed, as `ASSIGN`'s
+/// are.
+///
+/// ```php
+/// $x = 1; $b = memory_get_usage(); $y = &$x; $held = memory_get_usage() - $b;
+/// $x = &$x; $again = memory_get_usage() - $b; var_dump($held, $again, $x);
+/// ```
+/// ```expect
+/// int(32)
+/// int(32)
+/// int(1)
+/// ```
+///
+/// The `VAR` holds the cell, and an `ASSIGN` reading it follows the
+/// cell to the value: `$c` is a copy and not a third name.
+///
+/// ```php
+/// $a = 1; $c = $b = &$a; $b = 2; var_dump($c);
+/// ```
+/// ```expect
+/// int(1)
+/// ```
+pub(crate) fn assign_ref<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    if op.op1_type != OperandKind::Cv || op.op2_type != OperandKind::Cv {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ASSIGN_REF over a VAR, which no FETCH_*_W leaves yet",
+        )));
+    }
+    let source = req.slot(frame, op.op2);
+    let cell = match source.as_php_ref() {
+        Some(cell) if op.op1 == op.op2 => {
+            write_out(req, frame, code, op, &cell.as_value());
+            return Ok(advance(req, frame));
+        }
+        Some(cell) => *cell,
+        None => {
+            let held = source.undef_as_null();
+            let cell = match req.reference(held) {
+                Ok(cell) => cell,
+                Err(thrown) => return threw(req, frame, &thrown),
+            };
+            // The owner the slot had of `held` is the cell's now.
+            let _moved = req.set_slot(frame, op.op2, cell.as_value());
+            cell
+        }
+    };
+    let bound = cell.as_value();
+    req.addref(&bound);
+    let garbage = req.set_slot(frame, op.op1, bound.clone());
+    write_out(req, frame, code, op, &bound);
+    req.release(garbage);
     Ok(advance(req, frame))
 }
 

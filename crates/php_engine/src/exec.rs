@@ -343,7 +343,12 @@ pub(crate) fn container(
 /// each of them a handler that keeps the value past the opline, and
 /// each of them `ZVAL_COPY_DEREF` over a CV: a reference the CV holds
 /// is followed and the value it holds is what is copied, never the
-/// cell (`zend_copy_to_variable`, `Z/Zend/zend_execute.h:142-145`).
+/// cell (`zend_copy_to_variable`, `Z/Zend/zend_execute.h:142-145`). A
+/// `VAR` holding a reference, what `ASSIGN_REF` leaves under
+/// `RETURN_VALUE_USED`, is followed the same way (lines 156-161): the
+/// value the cell holds is the handler's with one more owner, and the
+/// `VAR`'s owner of the cell is given up, which frees the cell when it
+/// was the last.
 pub(crate) fn take_operand(
     req: &mut Request,
     frame: FrameRef,
@@ -352,7 +357,18 @@ pub(crate) fn take_operand(
     field: u32,
 ) -> Value {
     match kind {
-        OperandKind::Tmp | OperandKind::Var => req.take_slot(frame, temporary_slot(code, field)),
+        OperandKind::Tmp | OperandKind::Var => {
+            let value = req.take_slot(frame, temporary_slot(code, field));
+            match value.as_php_ref() {
+                Some(cell) => {
+                    let held = cell.get();
+                    req.addref(&held);
+                    req.release(value);
+                    held
+                }
+                None => value,
+            }
+        }
         OperandKind::Const | OperandKind::Cv | OperandKind::Unused => {
             let value = operand(req, frame, code, kind, field).deref();
             req.addref(&value);
