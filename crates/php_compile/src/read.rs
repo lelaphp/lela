@@ -166,9 +166,19 @@ pub(crate) enum Expr {
         arguments: Vec<Expr>,
     },
     /// `$a`, php's `ZEND_AST_VAR` over a name written as is, which
-    /// `zend_try_compile_cv` makes a CV: not `$this` and not `$_GET` or
-    /// its kin, which php fetches by other oplines and this refuses.
+    /// `zend_try_compile_cv` makes a CV: not `$this`, which is [`Expr::This`],
+    /// and not `$_GET` or its kin, which php fetches by other oplines and
+    /// this refuses.
     Var(Vec<u8>),
+    /// `$this`, php's `ZEND_AST_VAR` over the one name `is_this_fetch`
+    /// picks out, fetched by `FETCH_THIS` and never a CV.
+    This,
+    /// `$o->p`, php's `ZEND_AST_PROP` over any expression and a property
+    /// named as written; `$o?->p` and `$o->$p` are not read.
+    Prop {
+        object: Child,
+        name: Vec<u8>,
+    },
     /// `$a = expr`, php's `ZEND_AST_ASSIGN` to a variable.
     Assign {
         var: Vec<u8>,
@@ -1461,6 +1471,21 @@ impl Reader<'_> {
                 arguments,
             });
         }
+        // php's grammar reads `unset(`, `isset(` and `empty(` as its
+        // own constructs, never as a call by that name, and each is
+        // still to be read; a `Call` named so would be emitted as
+        // `INIT_FCALL_BY_NAME` for a function that cannot exist.
+        if self.byte(0) == Some(b'(')
+            && matches!(
+                name.to_ascii_lowercase().as_slice(),
+                b"unset" | b"isset" | b"empty"
+            )
+        {
+            return Err(self.trouble(format!(
+                "an `{}` this compiler cannot read yet",
+                String::from_utf8_lossy(&name.to_ascii_lowercase())
+            )));
+        }
         if self.byte(0) != Some(b'(') {
             return match name.to_ascii_lowercase().as_slice() {
                 b"true" => Ok(Expr::Bool(true)),
@@ -1521,10 +1546,12 @@ impl Reader<'_> {
         self.member_calls(Expr::New { class, arguments })
     }
 
-    /// `receiver->m(args)` and the chain of them, php's `callable_variable
-    /// T_OBJECT_OPERATOR property_name argument_list`, each call the
-    /// receiver of the next. A `->` that no `(` follows is a property
-    /// fetch, not read yet; `?->` is left where it stands.
+    /// `receiver->m(args)`, `receiver->p` and the chain of them, php's
+    /// `callable_variable T_OBJECT_OPERATOR property_name argument_list`
+    /// and `T_OBJECT_OPERATOR property_name` with no list after it, each
+    /// member the receiver of the next. A property named by what is no
+    /// label, `$o->$p` and `$o->{'p'}`, is not read yet; `?->` is left
+    /// where it stands.
     fn member_calls(&mut self, mut receiver: Expr) -> Result<Expr, Trouble> {
         loop {
             self.skip_trivia();
@@ -1533,16 +1560,25 @@ impl Reader<'_> {
             }
             self.bump(2);
             self.skip_trivia();
-            let method = self.label();
+            let member = self.label();
+            if member.is_empty() {
+                return Err(
+                    self.trouble("a property named at run time this compiler cannot read yet")
+                );
+            }
             self.skip_trivia();
-            if method.is_empty() || self.byte(0) != Some(b'(') {
-                return Err(self.trouble("a property fetch this compiler cannot read yet"));
+            if self.byte(0) != Some(b'(') {
+                receiver = Expr::Prop {
+                    object: Child::new(receiver),
+                    name: member,
+                };
+                continue;
             }
             self.bump(1);
             let arguments = self.arguments()?;
             receiver = Expr::MethodCall {
                 object: Child::new(receiver),
-                method,
+                method: member,
                 arguments,
             };
         }
@@ -1587,10 +1623,10 @@ impl Reader<'_> {
     }
 
     /// `$` and php's `LABEL`: a letter, `_` or a byte past ASCII, then
-    /// those and digits. What `zend_try_compile_cv` refuses is refused
-    /// here too: `$this`, which php fetches by `FETCH_THIS`, and `$_GET`
-    /// and its kin, which it fetches by `FETCH_R`; and `$$a` and `${`,
-    /// which name a variable at runtime.
+    /// those and digits. `$this` is [`Expr::This`], which php fetches by
+    /// `FETCH_THIS` (`is_this_fetch`). What else `zend_try_compile_cv`
+    /// refuses is refused here too: `$_GET` and its kin, which it fetches
+    /// by `FETCH_R`; and `$$a` and `${`, which name a variable at runtime.
     fn variable(&mut self) -> Result<Expr, Trouble> {
         let start = self.at + 1;
         if !self
@@ -1607,7 +1643,10 @@ impl Reader<'_> {
             self.bump(1);
         }
         let name = self.taken(start);
-        if name == b"this" || is_auto_global(&name) {
+        if name == b"this" {
+            return Ok(Expr::This);
+        }
+        if is_auto_global(&name) {
             return Err(self.trouble("a variable this compiler cannot read yet"));
         }
         Ok(Expr::Var(name))
@@ -2494,8 +2533,15 @@ mod tests {
 
     #[test]
     fn a_variable_php_makes_no_cv_of_is_refused_rather_than_read_as_one() {
+        assert_eq!(
+            read(b"<?php echo $this;").unwrap_or_default(),
+            vec![(Stmt::Echo(vec![Expr::This]), 1)],
+            "$this is the one such variable read, as its own expression"
+        );
         for source in [
-            b"<?php echo $this;".as_slice(),
+            b"<?php $this = 1;".as_slice(),
+            b"<?php unset($this);".as_slice(),
+            b"<?php isset($a);".as_slice(),
             b"<?php echo $GLOBALS;".as_slice(),
             b"<?php echo $_SERVER;".as_slice(),
             b"<?php echo $$a;".as_slice(),

@@ -2981,6 +2981,146 @@ mod tests {
         );
     }
 
+    /// `zend_delayed_compile_prop` as the oracle at 8.5.9 dumps it under
+    /// `opcache.opt_debug_level=0x10000`: `FETCH_OBJ_R` into a temporary
+    /// with the name as one constant, the receiver's operand whatever it
+    /// is, the temporary freed where the fetch is a statement and sent
+    /// by `SEND_VAL` to a callee the table has.
+    #[test]
+    fn property_fetches_compile_to_php_s_op_arrays() {
+        let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+            (
+                b"<?php $x = $o->p;",
+                3,
+                2,
+                2,
+                "0000 T2 = FETCH_OBJ_R CV1($o) string(\"p\")\n\
+                 0001 ASSIGN CV0($x) T2\n\
+                 0002 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $x = $o->p + $o->q;",
+                5,
+                2,
+                4,
+                "0000 T2 = FETCH_OBJ_R CV1($o) string(\"p\")\n\
+                 0001 T3 = FETCH_OBJ_R CV1($o) string(\"q\")\n\
+                 0002 T4 = ADD T2 T3\n\
+                 0003 ASSIGN CV0($x) T4\n\
+                 0004 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    2: 0001 - 0002 (tmp/var)\n",
+            ),
+            (
+                b"<?php (new E)->p;",
+                5,
+                0,
+                3,
+                "0000 V0 = NEW 0 string(\"E\")\n\
+                 0001 DO_FCALL\n\
+                 0002 T2 = FETCH_OBJ_R V0 string(\"p\")\n\
+                 0003 FREE T2\n\
+                 0004 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    0: 0001 - 0002 (new)\n",
+            ),
+            (
+                b"<?php $o->p->q()->r;",
+                6,
+                1,
+                3,
+                "0000 T1 = FETCH_OBJ_R CV0($o) string(\"p\")\n\
+                 0001 INIT_METHOD_CALL 0 T1 string(\"q\")\n\
+                 0002 V2 = DO_FCALL\n\
+                 0003 T3 = FETCH_OBJ_R V2 string(\"r\")\n\
+                 0004 FREE T3\n\
+                 0005 RETURN int(1)\n",
+            ),
+            (
+                b"<?php var_dump($o->p);",
+                5,
+                1,
+                2,
+                "0000 INIT_FCALL 1 96 string(\"var_dump\")\n\
+                 0001 T1 = FETCH_OBJ_R CV0($o) string(\"p\")\n\
+                 0002 SEND_VAL T1 1\n\
+                 0003 DO_ICALL\n\
+                 0004 RETURN int(1)\n",
+            ),
+        ];
+        for (source, lines, vars, tmps, oplines) in cases {
+            assert_eq!(
+                dump_of(source),
+                main_dump(*lines, *vars, *tmps, oplines),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+        let (unit, _strings) = unit_and_strings(b"<?php $o->p;");
+        assert_eq!(
+            unit.main.cache_size, 3,
+            "a property fetch takes three cache slots (zend_alloc_cache_slots(3))"
+        );
+    }
+
+    /// `FETCH_THIS` as the oracle dumps it: `$this` into a temporary
+    /// where it is read and into a `VAR` where it is a receiver or is
+    /// sent to a callee nothing is known of (`zend_compile_simple_var`,
+    /// `zend_compile_args`).
+    #[test]
+    fn this_compiles_to_fetch_this_as_php_emits_it() {
+        let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+            (
+                b"<?php echo $this;",
+                3,
+                0,
+                1,
+                "0000 T0 = FETCH_THIS\n\
+                 0001 ECHO T0\n\
+                 0002 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $this->p;",
+                4,
+                0,
+                2,
+                "0000 V0 = FETCH_THIS\n\
+                 0001 T1 = FETCH_OBJ_R V0 string(\"p\")\n\
+                 0002 FREE T1\n\
+                 0003 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $this->m();",
+                4,
+                0,
+                2,
+                "0000 V0 = FETCH_THIS\n\
+                 0001 INIT_METHOD_CALL 0 V0 string(\"m\")\n\
+                 0002 DO_FCALL\n\
+                 0003 RETURN int(1)\n",
+            ),
+            (
+                b"<?php f($this);",
+                5,
+                0,
+                2,
+                "0000 INIT_FCALL_BY_NAME 1 string(\"f\")\n\
+                 0001 V0 = FETCH_THIS\n\
+                 0002 SEND_VAR_EX V0 1\n\
+                 0003 DO_FCALL_BY_NAME\n\
+                 0004 RETURN int(1)\n",
+            ),
+        ];
+        for (source, lines, vars, tmps, oplines) in cases {
+            assert_eq!(
+                dump_of(source),
+                main_dump(*lines, *vars, *tmps, oplines),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
+
     /// `zend_get_compatible_func_or_null`: a public method of a class
     /// the engine declared is a callee the compiler knows, so its
     /// arguments are sent as `SEND_VAL` and `SEND_VAR`; a private one,
@@ -3101,8 +3241,14 @@ mod tests {
             Some("a class constant or a static property this compiler cannot read yet")
         );
         assert_eq!(
-            refused(b"<?php echo $o->p;").as_deref(),
-            Some("a property fetch this compiler cannot read yet")
+            refused(b"<?php echo $o->$p;").as_deref(),
+            Some("a property named at run time this compiler cannot read yet")
+        );
+        assert_eq!(
+            refused(b"<?php f($o->p);").as_deref(),
+            Some(
+                "a property fetch sent to a callee the table has not this compiler cannot read yet"
+            )
         );
         assert_eq!(
             refused(b"<?php echo $o instanceof $c;").as_deref(),

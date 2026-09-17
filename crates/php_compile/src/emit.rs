@@ -534,6 +534,8 @@ impl Emit<'_> {
                 }
             }
             Expr::Var(_)
+            | Expr::This
+            | Expr::Prop { .. }
             | Expr::Assign { .. }
             | Expr::Call { .. }
             | Expr::PreInc(_)
@@ -1391,6 +1393,10 @@ impl Emit<'_> {
             // `zend_compile_simple_var` through `zend_try_compile_cv`: the
             // variable is its CV, and no opline reads it into anything.
             Expr::Var(name) => Ok(Where::Cv(self.lookup_cv(name))),
+            // `zend_compile_simple_var` for `$this` under `BP_VAR_R`:
+            // `FETCH_THIS` into a temporary.
+            Expr::This => Ok(self.fetch_this(OperandKind::Tmp)),
+            Expr::Prop { object, name } => self.prop(object, name),
             Expr::Assign { var, value } => self.assign(var, value),
             Expr::PreInc(var) => Ok(self.incdec(var, Opcode::PreInc)),
             Expr::PostInc(var) => Ok(self.incdec(var, Opcode::PostInc)),
@@ -1784,6 +1790,8 @@ impl Emit<'_> {
                 .special_constant(&unqualified(name), arguments)?
                 .ok_or_else(|| self.fatal("a call this compiler cannot fold")),
             Expr::Var(_)
+            | Expr::This
+            | Expr::Prop { .. }
             | Expr::Assign { .. }
             | Expr::PreInc(_)
             | Expr::PostInc(_)
@@ -1941,18 +1949,18 @@ impl Emit<'_> {
         Ok(self.call_op(Opcode::DoFcall))
     }
 
-    /// `zend_compile_method_call` for a receiver that is not `$this`:
-    /// the receiver compiled, `INIT_METHOD_CALL` over it with the
-    /// method's constant pair in `op2`, two cache slots in `result` and
-    /// the number of arguments in `extended_value`, the arguments sent
-    /// for a callee nothing is known of, and `DO_FCALL`.
+    /// `zend_compile_method_call`: the receiver compiled,
+    /// `INIT_METHOD_CALL` over it with the method's constant pair in
+    /// `op2`, two cache slots in `result` and the number of arguments in
+    /// `extended_value`, the arguments sent for a callee nothing is
+    /// known of, and `DO_FCALL`.
     fn method_call(
         &mut self,
         object: &Expr,
         method: &[u8],
         arguments: &[Expr],
     ) -> Result<Where, CompileError> {
-        let receiver = self.expr(object)?;
+        let receiver = self.receiver(object)?;
         let (op1_type, op1) = self.operand(receiver);
         let method_at = self.func_name_literal(method)?;
         let count = u32::try_from(arguments.len()).unwrap_or(0);
@@ -1969,6 +1977,61 @@ impl Emit<'_> {
         });
         self.args(arguments, false)?;
         Ok(self.call_op(Opcode::DoFcall))
+    }
+
+    /// The receiver of a method call or a property fetch: `$this` is
+    /// `FETCH_THIS` into a `VAR` (`zend_delayed_compile_prop` and
+    /// `zend_compile_method_call`, where `this_guaranteed_exists` is
+    /// false outside a method's body, which is everywhere this compiler
+    /// reads); anything else is the expression itself.
+    fn receiver(&mut self, object: &Expr) -> Result<Where, CompileError> {
+        match object {
+            Expr::This => Ok(self.fetch_this(OperandKind::Var)),
+            other => self.expr(other),
+        }
+    }
+
+    /// `zend_emit_op(result, ZEND_FETCH_THIS, NULL, NULL)`: `$this` into
+    /// a temporary, a `TMP` where it is read and a `VAR` where it is a
+    /// receiver or is sent to a callee nothing is known of.
+    fn fetch_this(&mut self, out_type: OperandKind) -> Where {
+        let out = self.temporary();
+        self.push(Opline {
+            opcode: Opcode::FetchThis,
+            out_type,
+            out,
+            ..Opline::default()
+        });
+        match out_type {
+            OperandKind::Var => Where::Returned(out),
+            _ => Where::Temporary(out),
+        }
+    }
+
+    /// `zend_delayed_compile_prop` under `BP_VAR_R`, which delays nothing
+    /// this compiler reads: the receiver, then `FETCH_OBJ_R` over it with
+    /// the property's name as one constant in `op2`, three cache slots in
+    /// `extended_value` (`zend_alloc_cache_slots(3)`), written into a
+    /// temporary (`zend_adjust_for_fetch_type`).
+    fn prop(&mut self, object: &Expr, name: &[u8]) -> Result<Where, CompileError> {
+        let receiver = self.receiver(object)?;
+        let (op1_type, op1) = self.operand(receiver);
+        let name = self.string(name)?;
+        let name_at = self.literal(name);
+        let out = self.temporary();
+        let slots = self.cache_slots(3);
+        self.push(Opline {
+            opcode: Opcode::FetchObjR,
+            op1_type,
+            op1,
+            op2_type: OperandKind::Const,
+            op2: name_at,
+            out_type: OperandKind::Tmp,
+            out,
+            extended_value: slots,
+            ..Opline::default()
+        });
+        Ok(Where::Temporary(out))
     }
 
     /// `zend_compile_instanceof`: a constant on the left is `false`
@@ -2070,10 +2133,33 @@ impl Emit<'_> {
     /// `SEND_VAR_EX`, what a call returned by `SEND_VAR_NO_REF_EX`, and a
     /// constant or a temporary by `SEND_VAL_EX`, each of which reads the
     /// parameter's by-reference bit off the callee as the program serves.
+    /// `$this` sent to a callee nothing is known of is `FETCH_THIS` into
+    /// a `VAR` and `SEND_VAR_EX`; a property fetch sent to one is php's
+    /// `CHECK_FUNC_ARG` and `FETCH_OBJ_FUNC_ARG`, not read yet.
     fn args(&mut self, arguments: &[Expr], known: bool) -> Result<(), CompileError> {
         for (at, argument) in arguments.iter().enumerate() {
-            let value = self.expr(argument)?;
             let number = u32::try_from(at).unwrap_or(0) + 1;
+            let value = match argument {
+                Expr::This if !known => {
+                    let this = self.fetch_this(OperandKind::Var);
+                    let (op1_type, op1) = self.operand(this);
+                    self.push(Opline {
+                        opcode: Opcode::SendVarEx,
+                        op1_type,
+                        op1,
+                        op2: number,
+                        out: number - 1,
+                        ..Opline::default()
+                    });
+                    continue;
+                }
+                Expr::Prop { .. } if !known => {
+                    return Err(self.fatal(
+                        "a property fetch sent to a callee the table has not this compiler cannot read yet",
+                    ));
+                }
+                other => self.expr(other)?,
+            };
             let (op1_type, op1) = self.operand(value);
             let opcode = match (known, op1_type) {
                 (true, OperandKind::Var | OperandKind::Cv) => Opcode::SendVar,
