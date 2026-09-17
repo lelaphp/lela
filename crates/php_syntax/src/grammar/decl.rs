@@ -102,7 +102,7 @@ pub(crate) fn function_decl(p: &mut Parser<'_>, m: Marker) {
     p.doc_comment();
     // A function name reduces to the parameter-list state; php's clause
     // here is `"("`, not `identifier` (probed 8.5.7: `function die()`).
-    name_token(p, "\"(\"");
+    name_token(p, NameSlot::Function);
     param_list(p);
     ret_type(p);
     body_block(p);
@@ -121,24 +121,44 @@ fn body_block(p: &mut Parser<'_>) {
     }
 }
 
+/// Which declaration a name slot belongs to, which is what php takes
+/// there and the `, expecting …` clause it spells.
+#[derive(Clone, Copy)]
+enum NameSlot {
+    /// `function_name: T_STRING | T_READONLY`: `readonly` is kept as a
+    /// function's name since 8.1. The slot reduces to a state that can
+    /// only go on to the parameter list, so php's clause is `"("` (probed
+    /// 8.5.7: `function die`; 8.5.9: `function callable`).
+    Function,
+    /// A class, interface, trait or enum: `T_STRING` alone, so `readonly`
+    /// is refused with the rest, and the clause is `identifier` (probed
+    /// 8.5.7: `class static`, `interface 5`; 8.5.9: `class readonly`,
+    /// `enum readonly`, `class callable`).
+    ClassLike,
+}
+
 /// The declaration name: a plain identifier (a contextual-only keyword
-/// remaps). A reserved word is rejected as php rejects it. `expecting` is
-/// php's position-specific `, expecting …` clause at this name slot: the
-/// class-like declarations spell `identifier`, but a `function` name
-/// reduces to a state that can only go on to the parameter list, so php
-/// reports `"("` there (probed 8.5.7: `function die`, `class static`,
-/// `interface 5`; the same clause covers a plain end of input and a
-/// reserved word like `static`).
-fn name_token(p: &mut Parser<'_>, expecting: &str) {
-    if p.at(K::IDENT) {
+/// remaps), never `callable`, which the lexer leaves an `IDENT` and php's
+/// scanner does not. A reserved word is rejected as php rejects it, with
+/// the slot's position-specific clause; the same clause covers a plain
+/// end of input.
+fn name_token(p: &mut Parser<'_>, slot: NameSlot) {
+    let callable = ckw::is_callable_text(p.current(), p.current_text());
+    if p.at(K::IDENT) && !callable {
         p.bump(K::IDENT);
-    } else if ckw::is_contextual_only(p.current()) || p.peek_at(K::READONLY_KW) {
+    } else if ckw::is_contextual_only(p.current())
+        || (matches!(slot, NameSlot::Function) && p.peek_at(K::READONLY_KW))
+    {
         p.bump_remap(K::IDENT);
     } else {
         // The name is missing or a reserved word (`class static {}`
         // reserves `static`, lsb_008 and lsb_009): php's
         // position-specific clause, still yielding to the bracket-balance
         // wording where that applies.
+        let expecting = match slot {
+            NameSlot::Function => "\"(\"",
+            NameSlot::ClassLike => "identifier",
+        };
         let d = p.unexpected_here_expecting(expecting);
         p.error(d);
     }
@@ -171,7 +191,7 @@ pub(crate) fn modifiers_then_class(p: &mut Parser<'_>, m: Marker) {
 /// interface, an enum and an anonymous class read the same way.
 pub(crate) fn class_decl(p: &mut Parser<'_>, m: Marker) {
     p.bump(K::CLASS_KW);
-    name_token(p, "identifier");
+    name_token(p, NameSlot::ClassLike);
     extends_clause(p, false);
     implements_clause(p);
     p.doc_comment();
@@ -181,7 +201,7 @@ pub(crate) fn class_decl(p: &mut Parser<'_>, m: Marker) {
 
 pub(crate) fn interface_decl(p: &mut Parser<'_>, m: Marker) {
     p.bump(K::INTERFACE_KW);
-    name_token(p, "identifier");
+    name_token(p, NameSlot::ClassLike);
     extends_clause(p, true);
     p.doc_comment();
     class_body(p);
@@ -195,14 +215,14 @@ pub(crate) fn interface_decl(p: &mut Parser<'_>, m: Marker) {
 pub(crate) fn trait_decl(p: &mut Parser<'_>, m: Marker) {
     p.bump(K::TRAIT_KW);
     p.doc_comment();
-    name_token(p, "identifier");
+    name_token(p, NameSlot::ClassLike);
     class_body(p);
     m.complete(p, K::TRAIT_DECL);
 }
 
 pub(crate) fn enum_decl(p: &mut Parser<'_>, m: Marker) {
     p.bump(K::ENUM_KW);
-    name_token(p, "identifier");
+    name_token(p, NameSlot::ClassLike);
     if p.peek_at(K::COLON) {
         let b = p.start();
         p.bump(K::COLON);

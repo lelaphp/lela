@@ -438,3 +438,85 @@ fn instanceof_takes_a_class_name_reference() {
         assert_eq!(first(src), (1, message.into()), "{src}");
     }
 }
+
+#[test]
+fn names_php_takes_as_t_string_alone_refuse_a_keyword() {
+    // php's `use_declaration` alias, `function_name` and every class-like
+    // name are `T_STRING` (`function_name` takes `T_READONLY` beside it),
+    // and `callable` is `T_CALLABLE` to php's scanner where the lexer here
+    // leaves it a name: each of these is a `ParseError` under the pin.
+    for (src, message) in [
+        (
+            "<?php use A\\B as list;",
+            "syntax error, unexpected token \"list\", expecting identifier",
+        ),
+        (
+            "<?php use A\\B as callable;",
+            "syntax error, unexpected token \"callable\", expecting identifier",
+        ),
+        (
+            "<?php use A\\B as __CLASS__;",
+            "syntax error, unexpected token \"__CLASS__\", expecting identifier",
+        ),
+        (
+            "<?php function callable(){}",
+            "syntax error, unexpected token \"callable\", expecting \"(\"",
+        ),
+        (
+            "<?php callable();",
+            "syntax error, unexpected token \"callable\", expecting end of file",
+        ),
+        (
+            "<?php callable::x;",
+            "syntax error, unexpected token \"callable\", expecting end of file",
+        ),
+        (
+            "<?php echo callable();",
+            "syntax error, unexpected token \"callable\"",
+        ),
+        (
+            "<?php class readonly {}",
+            "syntax error, unexpected token \"readonly\", expecting identifier",
+        ),
+        (
+            "<?php interface readonly {}",
+            "syntax error, unexpected token \"readonly\", expecting identifier",
+        ),
+        (
+            "<?php trait readonly {}",
+            "syntax error, unexpected token \"readonly\", expecting identifier",
+        ),
+        (
+            "<?php enum readonly {}",
+            "syntax error, unexpected token \"readonly\", expecting identifier",
+        ),
+        (
+            "<?php class callable {}",
+            "syntax error, unexpected token \"callable\", expecting identifier",
+        ),
+    ] {
+        assert_eq!(first(src), (1, message.into()), "{src}");
+    }
+    // The line is the token's: php reports where `callable` stands.
+    assert_eq!(
+        first("<?php\n\nfunction callable(){}"),
+        (
+            3,
+            "syntax error, unexpected token \"callable\", expecting \"(\"".into()
+        )
+    );
+    // Where php takes the word, no diagnostic: `readonly` as a function's
+    // name, `callable` after `::` and `->`, as a type and as a member.
+    for src in [
+        "<?php function readonly(){}",
+        "<?php A::callable;",
+        "<?php $x->callable;",
+        "<?php function f(callable $c){}",
+        "<?php function f(): ?callable {}",
+        "<?php f(callable: 1);",
+        "<?php class A { function callable(){} const callable = 1; }",
+        "<?php use A\\B as enum;",
+    ] {
+        assert_eq!(diagnostics(src), [], "{src}");
+    }
+}

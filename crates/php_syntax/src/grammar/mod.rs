@@ -238,7 +238,9 @@ fn statement_inner(p: &mut Parser<'_>, top_level: bool) {
             e.complete(p, K::ERROR);
         }
         K::ATTRIBUTE_OPEN => attributed_statement(p, top_level),
-        K::IDENT if p.nth(1) == K::COLON => {
+        // A label is `T_STRING ':'`; `callable:` is the keyword out of
+        // place, as any bare `callable` at a statement's start.
+        K::IDENT if p.nth(1) == K::COLON && !ckw::is_callable_text(K::IDENT, p.current_text()) => {
             let m = p.start();
             p.bump(K::IDENT);
             p.bump(K::COLON);
@@ -1433,10 +1435,15 @@ fn use_alias(p: &mut Parser<'_>) {
     if p.peek_at(K::AS_KW) {
         let a = p.start();
         p.bump(K::AS_KW);
-        if p.at(K::IDENT) {
+        // php's alias is `T_STRING` alone (`unprefixed_use_declaration`,
+        // `use_declaration`): a plain identifier or a contextual-only
+        // keyword, never a reserved word, `callable` or a magic constant
+        // (`use A\B as list;`, `as callable`, `as __CLASS__` are
+        // `expecting identifier`, probed 8.5.9).
+        if p.at(K::IDENT) && !ckw::is_callable_text(K::IDENT, p.current_text()) {
             p.bump(K::IDENT);
             a.complete(p, K::USE_ALIAS);
-        } else if ckw::is_member_name(p.current()) {
+        } else if ckw::is_contextual_only(p.current()) {
             p.bump_remap(K::IDENT);
             a.complete(p, K::USE_ALIAS);
         } else {

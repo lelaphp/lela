@@ -903,6 +903,9 @@ fn canonical_spelling(kind: SyntaxKind, text: &[u8]) -> Option<String> {
             format!("({name})")
         }
         SyntaxKind::MAGIC_CONST => String::from_utf8_lossy(text).to_ascii_uppercase(),
+        // `callable` is `T_CALLABLE` to php's scanner and an `IDENT` to
+        // the lexer here: spelled as the keyword it is there.
+        SyntaxKind::IDENT if text.eq_ignore_ascii_case(b"callable") => "callable".to_owned(),
         _ if kind.is_keyword() => String::from_utf8_lossy(text).to_ascii_lowercase(),
         // The scanner hands the parser `;` for `?>`.
         SyntaxKind::CLOSE_TAG => ";".to_owned(),

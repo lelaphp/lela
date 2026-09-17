@@ -640,6 +640,12 @@ fn prefix(p: &mut Parser<'_>) -> Option<Lhs> {
             }
             Some(Lhs::Bare(m, K::IDENT))
         }
+        // A bare `callable` starts nothing: php's `T_CALLABLE` is a type
+        // and a member name, never a constant, a call or a class
+        // reference (`callable();`, `callable::x` are the keyword out of
+        // place, probed 8.5.9). The site that wanted an expression
+        // reports it.
+        K::IDENT if ckw::is_callable_text(kind, p.current_text()) => None,
         K::IDENT | K::NAME_QUALIFIED | K::NAME_FULLY_QUALIFIED | K::NAME_RELATIVE => {
             let m = p.start();
             p.bump(kind);

@@ -38,6 +38,19 @@ pub(crate) fn is_contextual_only(kind: K) -> bool {
     matches!(kind, K::ENUM_KW | K::SET_KW | K::FROM_KW)
 }
 
+/// Is the current token `callable`, the one keyword the lexer leaves an
+/// `IDENT`? php's scanner keywordizes it (`T_CALLABLE`) and its grammar
+/// takes it only as a type, and as a member name through
+/// `semi_reserved`; a function's name (`T_STRING | T_READONLY`), a use
+/// alias, a class-like name and a bare call are `T_STRING` alone, so
+/// `function callable(){}`, `use A as callable;`, `class callable {}` and
+/// `callable();` are parse errors there (probed 8.5.9). The lexer keeps
+/// it an `IDENT` so `token_get_all` reads it by position, and the grammar
+/// reads it by text at the sites php refuses.
+pub(crate) fn is_callable_text(kind: K, text: &[u8]) -> bool {
+    kind == K::IDENT && text.eq_ignore_ascii_case(b"callable")
+}
+
 /// The `enum` declaration lookahead, php's scanner rule as parser
 /// lookahead: at `enum`, a declaration iff the next significant token
 /// begins with a label byte, which is an identifier or any keyword but
