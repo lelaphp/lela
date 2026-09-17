@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use php_heap::{FrameRef, Zval};
-use php_unit::{ConstIdx, OpArray, OperandKind, Opline, Unit};
+use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline, Unit};
 
 use crate::api::call::Function;
 use crate::api::raising::warning;
@@ -36,7 +36,44 @@ pub(crate) struct FrameState {
     /// The caller's slot for what this frame returns, when the call that
     /// pushed it wants the value.
     pub(crate) returns_to: Option<(FrameRef, u32)>,
+    /// The op array's runtime cache, `EX(run_time_cache)`: one slot per
+    /// `sizeof(void *)` of `cache_size`, every one [`Cached::Unprimed`]
+    /// when the frame is pushed (`memset(run_time_cache, 0, cache_size)`
+    /// in `init_func_run_time_cache_i` and in `zend_execute`), and gone
+    /// with the frame. php keeps a function's cache for the request,
+    /// through `ZEND_MAP_PTR(run_time_cache)`; while the only op array
+    /// a frame serves is a unit's main, served once, the frame's life is
+    /// the request's and the two read the same.
+    cache: Box<[Cached]>,
 }
+
+/// One slot of the runtime cache, the `void *` at `CACHE_ADDR(num)`,
+/// named by what the opline that owns the slot writes into it:
+/// `CACHE_PTR(opline->result.num, fbc)` from the `INIT_*` handlers, and
+/// `zend_jmp_fl_result` from `JMP_FRAMELESS`, whose three values are
+/// `ZEND_JMP_FL_UNPRIMED = 0`, `ZEND_JMP_FL_MISS = 1` and
+/// `ZEND_JMP_FL_HIT = 2` (`Z/Zend/zend_frameless_function.h:126`). Zero
+/// is what the fresh cache holds, so the first pass of either finds
+/// `Unprimed` and looks the table up once.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Cached {
+    /// Nothing written yet: the table is looked up on this pass.
+    #[default]
+    Unprimed,
+    /// The callee an `INIT_FCALL`, `INIT_FCALL_BY_NAME` or
+    /// `INIT_NS_FCALL_BY_NAME` resolved on its first pass.
+    Function(Function),
+    /// `ZEND_JMP_FL_MISS`: the table has the name in the namespace, so
+    /// the jump is not taken and the call by name after it runs.
+    Miss,
+    /// `ZEND_JMP_FL_HIT`: the table has not the name in the namespace,
+    /// so the jump lands on the frameless call over the global one.
+    Hit,
+}
+
+/// `sizeof(void *)`: what `zend_alloc_cache_slot` grows `cache_size` by
+/// for one slot, so a slot's number is its byte offset over this.
+const SLOT_BYTES: u32 = 8;
 
 /// One call from its `INIT_FCALL` until the `DO_*CALL` that serves it
 /// returns: what php pushes on the VM stack as a call frame, and keeps
@@ -96,6 +133,22 @@ pub(crate) enum CallStage {
 pub(crate) struct Vm {
     frames: Vec<FrameState>,
     calls: Vec<CallState>,
+    /// How many times a kernel has looked a name up in the function
+    /// table, which is what a primed cache slot spares: the tests count
+    /// it across two passes of one opline.
+    #[cfg(test)]
+    pub(crate) lookups: u32,
+}
+
+/// `zend_hash_find_known_hash(EG(function_table), name)` from a kernel
+/// whose opline owns a cache slot: the lookup a primed slot spares, so
+/// every one is made here and the tests count them.
+pub(crate) fn find_function(req: &mut Request, name: &[u8]) -> Option<Function> {
+    #[cfg(test)]
+    {
+        req.vm_mut().lookups = req.vm_mut().lookups.saturating_add(1);
+    }
+    req.function_named(name)
 }
 
 impl Vm {
@@ -105,10 +158,12 @@ impl Vm {
     /// writes it (`i_init_func_execute_data`), which is what a read of
     /// a CV warns of.
     pub(crate) fn push(&mut self, unit: Arc<Unit>) {
+        let slots = usize::try_from(code_of(&unit).cache_size / SLOT_BYTES).unwrap_or(0);
         self.frames.push(FrameState {
             unit,
             opline: 0,
             returns_to: None,
+            cache: vec![Cached::Unprimed; slots].into_boxed_slice(),
         });
     }
 
@@ -151,6 +206,30 @@ impl Vm {
             .last()
             .and_then(|state| opline_at(code_of(&state.unit), state.opline))
             .map_or(0, |op| op.lineno)
+    }
+
+    /// `CACHED_PTR(num)`: what the runtime cache holds at `slot`, a
+    /// byte offset as the opline carries it. A slot past `cache_size`
+    /// reads `Unprimed`, so a kernel over it looks the table up every
+    /// pass, which is the reading a program that was never given the
+    /// slot would have had; php's would be a read past the allocation.
+    pub(crate) fn cached(&self, frame: FrameRef, slot: CacheSlot) -> Cached {
+        self.at(frame)
+            .and_then(|state| state.cache.get((slot.0 / SLOT_BYTES) as usize))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// `CACHE_PTR(num, ptr)`: `value` into the runtime cache at `slot`,
+    /// where every pass after reads it. A slot past `cache_size` takes
+    /// nothing.
+    pub(crate) fn prime(&mut self, frame: FrameRef, slot: CacheSlot, value: Cached) {
+        if let Some(cell) = self
+            .at_mut(frame)
+            .and_then(|state| state.cache.get_mut((slot.0 / SLOT_BYTES) as usize))
+        {
+            *cell = value;
+        }
     }
 
     /// `ZEND_VM_SET_OPCODE`: the frame stands at `at`, which is where a
@@ -411,4 +490,66 @@ pub(crate) fn value_of(zval: Zval) -> Value {
 /// The opline at `at` of `code`, if there is one.
 pub(crate) fn opline_at(code: &OpArray, at: u32) -> Option<&Opline> {
     code.oplines.get(at as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use php_unit::{CacheSlot, OpArray, Unit};
+
+    use super::Cached;
+    use crate::api::call::Function;
+    use crate::api::request::Request;
+    use crate::engine::{Engine, RequestDescription};
+
+    /// A unit whose main op array has no oplines and `cache_size` bytes
+    /// of runtime cache.
+    fn with_cache(cache_size: u32) -> Arc<Unit> {
+        Arc::new(Unit {
+            main: OpArray {
+                cache_size,
+                ..OpArray::default()
+            },
+            ..Unit::default()
+        })
+    }
+
+    /// A frame is pushed with `cache_size / sizeof(void *)` slots, all
+    /// zero (`memset(run_time_cache, 0, cache_size)`): a slot inside
+    /// keeps what is primed into it, a slot past the end takes nothing
+    /// and reads `Unprimed`, and the cache goes with the frame, so a
+    /// frame pushed after it is popped reads every slot fresh.
+    #[test]
+    fn a_frame_carries_cache_size_bytes_of_slots_and_gives_them_up_with_itself() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let unit = with_cache(24);
+        let frame = req.push_frame(Arc::clone(&unit));
+        for at in [0, 8, 16, 24] {
+            assert_eq!(req.vm().cached(frame, CacheSlot(at)), Cached::Unprimed);
+        }
+        req.vm_mut()
+            .prime(frame, CacheSlot(16), Cached::Function(Function(3)));
+        req.vm_mut().prime(frame, CacheSlot(24), Cached::Hit);
+        assert_eq!(
+            req.vm().cached(frame, CacheSlot(16)),
+            Cached::Function(Function(3)),
+            "the third slot is inside 24 bytes"
+        );
+        assert_eq!(
+            req.vm().cached(frame, CacheSlot(24)),
+            Cached::Unprimed,
+            "the fourth is past them and takes nothing"
+        );
+        req.pop_frame();
+
+        let frame = req.push_frame(unit);
+        assert_eq!(
+            req.vm().cached(frame, CacheSlot(16)),
+            Cached::Unprimed,
+            "a frame pushed after is fresh"
+        );
+        req.pop_frame();
+    }
 }

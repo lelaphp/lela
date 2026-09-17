@@ -45,13 +45,13 @@
 #![allow(clippy::extra_unused_type_parameters, clippy::unnecessary_wraps)]
 
 use php_heap::{Fatal, FrameRef};
-use php_unit::{ConstIdx, OpArray, OperandKind, Opline};
+use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::api::values::{TypeTag, Value};
-use crate::exec::{self, CallStage, CallState};
+use crate::exec::{self, Cached, CallStage, CallState};
 use crate::ops::Switched;
 use crate::tier::{SafepointIdx, Site, Stepped, Tier, continued};
 
@@ -111,10 +111,13 @@ pub(crate) fn echo<T: Tier>(
     }
 }
 
-/// `ZEND_INIT_FCALL`: the call frame for a callee named at compile time,
-/// its lowered name in `op2` and the number of arguments in
-/// `extended_value`. A name nothing is declared under is php's `Error`,
-/// over the same constant.
+/// `ZEND_INIT_FCALL` (`Z/Zend/zend_vm_def.h:4057`): the call frame for a
+/// callee named at compile time, its lowered name in `op2` and the
+/// number of arguments in `extended_value`. The callee is read off the
+/// cache slot `result.num` names and, on the first pass, looked up and
+/// written there (`CACHED_PTR`, `CACHE_PTR`), as the two `INIT_*_BY_NAME`
+/// read and write theirs. A name nothing is declared under is php's
+/// `Error`, over the same constant.
 pub(crate) fn init_fcall<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -122,18 +125,23 @@ pub(crate) fn init_fcall<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let name = ConstIdx(op.op2);
-    init_call(req, frame, code, op, name, name)
+    init_call(req, frame, code, op, &[name], name)
 }
 
-/// `ZEND_INIT_FCALL_BY_NAME`: the call frame for a callee php's compiler
-/// found no function under, resolved here instead. `op2` names the
-/// constant pair `zend_add_func_name_literal` laid down, the name as
-/// written and then its lowered form: the lookup is by the second
+/// `ZEND_INIT_FCALL_BY_NAME` (`Z/Zend/zend_vm_def.h:3871`): the call
+/// frame for a callee php's compiler found no function under, resolved
+/// here instead. `op2` names the constant pair
+/// `zend_add_func_name_literal` laid down, the name as written and then
+/// its lowered form: the lookup is by the second
 /// (`Z_STR_P(function_name+1)`) and the `Error` for a name nothing
 /// declares says the first (`zend_undefined_function_helper`), which is
-/// why `NoPe()` is named as written. The frame it pushes is the one
-/// `INIT_FCALL` pushes, so the `SEND_*_EX` and `DO_FCALL_BY_NAME` after
-/// it are served the same way.
+/// why `NoPe()` is named as written. The callee is read off the cache
+/// slot `result.num` names, `CACHED_PTR(opline->result.num)`, and the
+/// table is looked up only where the slot holds nothing yet, the callee
+/// then written into it for every pass after; the test beside the
+/// handlers counts one lookup over two passes. The frame it pushes is
+/// the one `INIT_FCALL` pushes, so the `SEND_*_EX` and
+/// `DO_FCALL_BY_NAME` after it are served the same way.
 ///
 /// ```php
 /// $a = 'x';
@@ -166,19 +174,24 @@ pub(crate) fn init_fcall_by_name<T: Tier>(
 ) -> Edge {
     let written = ConstIdx(op.op2);
     let lowered = ConstIdx(op.op2.saturating_add(1));
-    init_call(req, frame, code, op, lowered, written)
+    init_call(req, frame, code, op, &[lowered], written)
 }
 
-/// The body the two `INIT_*` handlers share: the callee looked up under
-/// the constant at `lookup`, the `Error` for a name nothing declares
-/// naming the constant at `named`, and the call frame pushed with the
-/// number of arguments `extended_value` says.
+/// The body the three `INIT_*` handlers share: the callee off the cache
+/// slot `result.num` names, or, where the slot is unprimed, looked up
+/// under the constants at `lookups` in order and written into the slot
+/// (`CACHED_PTR`, then `CACHE_PTR(opline->result.num, fbc)`); the
+/// `Error` for a name nothing declares naming the constant at `named`;
+/// and the call frame pushed with the number of arguments
+/// `extended_value` says. A miss primes nothing, as php's does not: the
+/// `Error` is thrown before `CACHE_PTR` is reached, so a name declared
+/// after a failed pass is found on the next.
 fn init_call(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
-    lookup: ConstIdx,
+    lookups: &[ConstIdx],
     named: ConstIdx,
 ) -> Edge {
     let named = exec::constant(code, named);
@@ -189,8 +202,19 @@ fn init_call(
             return Ok(Stepped::Threw(frame));
         }
     };
-    let lookup = exec::constant(code, lookup);
-    let function = req.function_named(lookup.as_str_bytes().unwrap_or(name.as_bytes()));
+    let slot = CacheSlot(op.out);
+    let function = if let Cached::Function(function) = req.vm().cached(frame, slot) {
+        Some(function)
+    } else {
+        let found = lookups.iter().find_map(|&at| {
+            let key = exec::constant(code, at);
+            exec::find_function(req, key.as_str_bytes().unwrap_or(name.as_bytes()))
+        });
+        if let Some(function) = found {
+            req.vm_mut().prime(frame, slot, Cached::Function(function));
+        }
+        found
+    };
     let Some(function) = function else {
         let thrown = crate::api::raising::throw(
             req,
@@ -1312,16 +1336,20 @@ fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opco
     }
 }
 
-/// `ZEND_INIT_NS_FCALL_BY_NAME`: the call frame for an unqualified name
-/// written in a namespace, which php's compiler resolves as the program
-/// serves (`zend_compile_ns_call`). `op2` names the three constants
-/// `zend_add_ns_func_name_literal` laid down: the name as written with
-/// the namespace before it, its lowered form, and the lowered name
-/// alone; the callee is looked up under the second and then the third
-/// (`Z/Zend/zend_vm_def.h`, the handler's two `zend_hash_find_known_hash`),
-/// and the `Error` for a name nothing declares says the first. The
-/// frame it pushes is the one `INIT_FCALL` pushes, so the `SEND_*_EX`
-/// and `DO_FCALL_BY_NAME` after it are served the same way.
+/// `ZEND_INIT_NS_FCALL_BY_NAME` (`Z/Zend/zend_vm_def.h:4024`): the call
+/// frame for an unqualified name written in a namespace, which php's
+/// compiler resolves as the program serves (`zend_compile_ns_call`).
+/// `op2` names the three constants `zend_add_ns_func_name_literal` laid
+/// down: the name as written with the namespace before it, its lowered
+/// form, and the lowered name alone; the callee is looked up under the
+/// second and then the third (the handler's two
+/// `zend_hash_find_known_hash`), and the `Error` for a name nothing
+/// declares says the first. Both lookups are made only where the cache
+/// slot `result.num` names holds nothing yet, and the callee found is
+/// written into it, `CACHE_PTR(opline->result.num, fbc)`, for every
+/// pass after; the test beside the handlers counts the lookups over two
+/// passes. The frame it pushes is the one `INIT_FCALL` pushes, so the
+/// `SEND_*_EX` and `DO_FCALL_BY_NAME` after it are served the same way.
 ///
 /// ```php
 /// namespace Foo;
@@ -1345,15 +1373,7 @@ pub(crate) fn init_ns_fcall_by_name<T: Tier>(
     let written = ConstIdx(op.op2);
     let lowered = ConstIdx(op.op2.saturating_add(1));
     let unqualified = ConstIdx(op.op2.saturating_add(2));
-    let lookup = if exec::constant(code, lowered)
-        .as_str_bytes()
-        .is_some_and(|name| req.function_named(name).is_some())
-    {
-        lowered
-    } else {
-        unqualified
-    };
-    init_call(req, frame, code, op, lookup, written)
+    init_call(req, frame, code, op, &[lowered, unqualified], written)
 }
 
 /// `ZEND_JMP_FRAMELESS` (`Z/Zend/zend_vm_def.h:9743`): the jump
@@ -1363,11 +1383,15 @@ pub(crate) fn init_ns_fcall_by_name<T: Tier>(
 /// `foo\substr`; where the function table has that name the call by
 /// name is what follows and the jump is not taken, `ZEND_JMP_FL_MISS`,
 /// and where it has not, the name is the global function's and the jump
-/// lands on the `FRAMELESS_ICALL_*` over it, `ZEND_JMP_FL_HIT`. php
-/// primes the answer into the opline's cache slot the first time and
-/// reads it after; the table is looked up each time here, which reads
-/// the same while nothing declares a function as the program serves,
-/// the way `INIT_FCALL_BY_NAME` resolves at every `INIT` here.
+/// lands on the `FRAMELESS_ICALL_*` over it, `ZEND_JMP_FL_HIT`. The
+/// answer is read off the cache slot `extended_value` names,
+/// `CACHED_PTR(opline->extended_value)`: `ZEND_JMP_FL_UNPRIMED`, the
+/// zero a fresh cache holds, on the first pass, when the table is
+/// looked up once and `MISS` or `HIT` written into the slot
+/// (`result = (func == NULL) + 1; CACHE_PTR(...)`), and that answer on
+/// every pass after with no lookup, which the test beside the handlers
+/// counts. So a namespaced twin declared after the first pass is not
+/// seen by this opline, as php's is not.
 ///
 /// ```php
 /// namespace Foo;
@@ -1386,11 +1410,21 @@ pub(crate) fn jmp_frameless<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let name = exec::constant(code, ConstIdx(op.op1));
-    let hit = name
-        .as_str_bytes()
-        .is_some_and(|name| req.function_named(name).is_none());
-    if hit {
+    let slot = CacheSlot(op.extended_value);
+    let answer = match req.vm().cached(frame, slot) {
+        Cached::Hit => Cached::Hit,
+        Cached::Miss => Cached::Miss,
+        Cached::Unprimed | Cached::Function(_) => {
+            let name = exec::constant(code, ConstIdx(op.op1));
+            let found = name
+                .as_str_bytes()
+                .is_some_and(|name| exec::find_function(req, name).is_some());
+            let answer = if found { Cached::Miss } else { Cached::Hit };
+            req.vm_mut().prime(frame, slot, answer);
+            answer
+        }
+    };
+    if answer == Cached::Hit {
         req.vm_mut().jump(frame, op.op2);
         return Ok(Stepped::Same(frame));
     }
@@ -3061,10 +3095,18 @@ mod tests {
                 .into_boxed_slice(),
                 literals: vec![written, lowered, argument].into_boxed_slice(),
                 num_tmps: 1,
+                cache_size: 8,
                 ..OpArray::default()
             },
             ..Unit::default()
         })
+    }
+
+    /// Interned `bytes` as a constant, `UNDEF` where the table is full.
+    fn interned(strings: &mut php_heap::Strings, bytes: &[u8]) -> php_heap::Zval {
+        strings
+            .intern(bytes)
+            .map_or(php_heap::Zval::UNDEF, php_heap::Zval::string)
     }
 
     /// `ZEND_INIT_FCALL_BY_NAME` resolves the pair's lowered name into
@@ -3101,6 +3143,245 @@ mod tests {
         );
         assert_eq!(req.slot(frame, 0).as_int(), Some(3));
         assert_eq!(req.vm().opline(frame), 3);
+    }
+
+    /// `ZEND_INIT_FCALL_BY_NAME` over two passes of one opline: the
+    /// first finds its cache slot unprimed, looks the table up once and
+    /// writes the callee into the slot, `CACHE_PTR(opline->result.num,
+    /// fbc)`; the second reads the callee off the slot and looks
+    /// nothing up.
+    #[test]
+    fn a_call_by_name_looks_the_table_up_once_and_reads_its_slot_after() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let mut strings = php_heap::Strings::new();
+        let unit = by_name(&mut strings);
+        let frame = req.push_frame(Arc::clone(&unit));
+        let code = crate::exec::code_of(&unit);
+        let init = code.oplines.first().copied().unwrap_or_default();
+        assert_eq!(
+            req.vm().cached(frame, CacheSlot(init.out)),
+            Cached::Unprimed
+        );
+
+        assert_eq!(
+            init_fcall_by_name::<Nop>(&mut req, frame, code, &init),
+            Ok(Stepped::Same(frame))
+        );
+        assert_eq!(req.vm().lookups, 1, "the first pass looks the table up");
+        let strlen = req.function_named(b"strlen");
+        assert!(strlen.is_some());
+        assert_eq!(
+            req.vm().cached(frame, CacheSlot(init.out)),
+            Cached::Function(strlen.unwrap_or(Function::PASS)),
+            "and primes the slot with the callee"
+        );
+
+        assert_eq!(
+            init_fcall_by_name::<Nop>(&mut req, frame, code, &init),
+            Ok(Stepped::Same(frame))
+        );
+        assert_eq!(req.vm().lookups, 1, "the second pass reads the slot");
+        assert_eq!(
+            popped_callee(&mut req),
+            strlen,
+            "and pushes the same callee"
+        );
+        assert_eq!(popped_callee(&mut req), strlen);
+    }
+
+    /// The call last pushed off the stack, its callee, the name it held
+    /// given up.
+    fn popped_callee(req: &mut Request) -> Option<Function> {
+        let call = req.vm_mut().pop_call()?;
+        if let Some(name) = call.name {
+            req.release(Value::string(name));
+        }
+        Some(call.function)
+    }
+
+    /// `ZEND_INIT_NS_FCALL_BY_NAME` over `Foo\StrLen`, `foo\strlen`,
+    /// `strlen`: the first pass makes the handler's two lookups, the
+    /// namespaced name that misses and the global one that hits, and
+    /// primes the slot; the second pass makes neither.
+    #[test]
+    fn a_namespaced_call_by_name_looks_the_table_up_twice_once() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let mut strings = php_heap::Strings::new();
+        let unit = Arc::new(Unit {
+            main: OpArray {
+                oplines: vec![Opline {
+                    opcode: Opcode::InitNsFcallByName,
+                    op2_type: OperandKind::Const,
+                    op2: 0,
+                    out: 8,
+                    extended_value: 0,
+                    ..Opline::default()
+                }]
+                .into_boxed_slice(),
+                literals: vec![
+                    interned(&mut strings, b"Foo\\StrLen"),
+                    interned(&mut strings, b"foo\\strlen"),
+                    interned(&mut strings, b"strlen"),
+                ]
+                .into_boxed_slice(),
+                cache_size: 16,
+                ..OpArray::default()
+            },
+            ..Unit::default()
+        });
+        let frame = req.push_frame(Arc::clone(&unit));
+        let code = crate::exec::code_of(&unit);
+        let init = code.oplines.first().copied().unwrap_or_default();
+        let strlen = req.function_named(b"strlen");
+
+        assert_eq!(
+            init_ns_fcall_by_name::<Nop>(&mut req, frame, code, &init),
+            Ok(Stepped::Same(frame))
+        );
+        assert_eq!(req.vm().lookups, 2, "foo\\strlen misses, strlen hits");
+        assert_eq!(
+            req.vm().cached(frame, CacheSlot(8)),
+            Cached::Function(strlen.unwrap_or(Function::PASS))
+        );
+        assert_eq!(req.vm().cached(frame, CacheSlot(0)), Cached::Unprimed);
+
+        assert_eq!(
+            init_ns_fcall_by_name::<Nop>(&mut req, frame, code, &init),
+            Ok(Stepped::Same(frame))
+        );
+        assert_eq!(req.vm().lookups, 2, "the second pass looks nothing up");
+        assert_eq!(popped_callee(&mut req), strlen);
+        assert_eq!(popped_callee(&mut req), strlen);
+    }
+
+    /// A miss primes nothing: php's `zend_undefined_function_helper` is
+    /// dispatched to before `CACHE_PTR`, so a second pass over a name
+    /// nothing declares looks the table up again and throws again.
+    #[test]
+    fn a_call_by_name_nothing_declares_primes_no_slot() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let mut strings = php_heap::Strings::new();
+        let unit = Arc::new(Unit {
+            main: OpArray {
+                oplines: vec![Opline {
+                    opcode: Opcode::InitFcallByName,
+                    op2_type: OperandKind::Const,
+                    op2: 0,
+                    out: 0,
+                    ..Opline::default()
+                }]
+                .into_boxed_slice(),
+                literals: vec![
+                    interned(&mut strings, b"NoPe"),
+                    interned(&mut strings, b"nope"),
+                ]
+                .into_boxed_slice(),
+                cache_size: 8,
+                ..OpArray::default()
+            },
+            ..Unit::default()
+        });
+        let frame = req.push_frame(Arc::clone(&unit));
+        let code = crate::exec::code_of(&unit);
+        let init = code.oplines.first().copied().unwrap_or_default();
+        for pass in 1..=2 {
+            assert_eq!(
+                init_fcall_by_name::<Nop>(&mut req, frame, code, &init),
+                Ok(Stepped::Threw(frame))
+            );
+            assert_eq!(req.vm().lookups, pass);
+            assert_eq!(req.vm().cached(frame, CacheSlot(0)), Cached::Unprimed);
+            assert!(matches!(req.uncaught(), Err(Fatal::Error(_))));
+        }
+    }
+
+    /// A unit whose main op array is `JMP_FRAMELESS` over `name`, its
+    /// jump to opline 2, its cache slot at byte 0, then two `NOP`s.
+    fn jmp_frameless_over(strings: &mut php_heap::Strings, name: &[u8]) -> Arc<Unit> {
+        Arc::new(Unit {
+            main: OpArray {
+                oplines: vec![
+                    Opline {
+                        opcode: Opcode::JmpFrameless,
+                        op1_type: OperandKind::Const,
+                        op1: 0,
+                        op2: 2,
+                        extended_value: 0,
+                        ..Opline::default()
+                    },
+                    Opline::default(),
+                    Opline::default(),
+                ]
+                .into_boxed_slice(),
+                literals: vec![interned(strings, name)].into_boxed_slice(),
+                cache_size: 8,
+                ..OpArray::default()
+            },
+            ..Unit::default()
+        })
+    }
+
+    /// `ZEND_JMP_FRAMELESS` over two passes of one opline: the first
+    /// finds `ZEND_JMP_FL_UNPRIMED`, looks the namespaced name up once
+    /// and primes `ZEND_JMP_FL_HIT` where the table has it not, so the
+    /// jump is taken; the second reads `HIT` off the slot and jumps with
+    /// no lookup.
+    #[test]
+    fn a_frameless_jump_primes_a_hit_once_and_jumps_on_it_after() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let mut strings = php_heap::Strings::new();
+        let unit = jmp_frameless_over(&mut strings, b"foo\\substr");
+        let frame = req.push_frame(Arc::clone(&unit));
+        let code = crate::exec::code_of(&unit);
+        let jmp = code.oplines.first().copied().unwrap_or_default();
+        assert_eq!(req.vm().cached(frame, CacheSlot(0)), Cached::Unprimed);
+
+        for pass in 1..=2 {
+            req.vm_mut().jump(frame, 0);
+            assert_eq!(
+                jmp_frameless::<Nop>(&mut req, frame, code, &jmp),
+                Ok(Stepped::Same(frame))
+            );
+            assert_eq!(
+                req.vm().opline(frame),
+                2,
+                "the jump is taken on pass {pass}"
+            );
+            assert_eq!(req.vm().lookups, 1, "one lookup over {pass} pass(es)");
+            assert_eq!(req.vm().cached(frame, CacheSlot(0)), Cached::Hit);
+        }
+    }
+
+    /// The other answer: a name the table has primes `ZEND_JMP_FL_MISS`
+    /// on the first pass, and the jump is not taken on either.
+    #[test]
+    fn a_frameless_jump_primes_a_miss_once_and_falls_through_on_it_after() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let mut strings = php_heap::Strings::new();
+        let unit = jmp_frameless_over(&mut strings, b"strlen");
+        let frame = req.push_frame(Arc::clone(&unit));
+        let code = crate::exec::code_of(&unit);
+        let jmp = code.oplines.first().copied().unwrap_or_default();
+
+        for pass in 1..=2 {
+            req.vm_mut().jump(frame, 0);
+            assert_eq!(
+                jmp_frameless::<Nop>(&mut req, frame, code, &jmp),
+                Ok(Stepped::Same(frame))
+            );
+            assert_eq!(
+                req.vm().opline(frame),
+                1,
+                "on to the call by name on pass {pass}"
+            );
+            assert_eq!(req.vm().lookups, 1);
+            assert_eq!(req.vm().cached(frame, CacheSlot(0)), Cached::Miss);
+        }
     }
 
     /// An extension of one native, `seven()`, with a frameless entry of
