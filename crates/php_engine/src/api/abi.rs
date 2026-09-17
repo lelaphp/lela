@@ -33,6 +33,29 @@ pub enum IniVerdict {
     Rejected,
 }
 
+/// One row of `zend_module_entry.deps`, a `zend_module_dep`
+/// (`Z/Zend/zend_modules.h`): the other extension's name, how this one
+/// stands to it, and the `rel` and `version` a `ZEND_MOD_REQUIRED_EX`
+/// row carries, which php prints after the kind and
+/// `ReflectionExtension::getDependencies` reads. The startup-order
+/// check php makes over the table is `api-check`'s bundle order here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dependency {
+    pub name: String,
+    pub kind: DependencyKind,
+    pub rel: Option<String>,
+    pub version: Option<String>,
+}
+
+/// `MODULE_DEP_REQUIRED`, `MODULE_DEP_CONFLICTS` and
+/// `MODULE_DEP_OPTIONAL`, the three kinds a `zend_module_dep` row has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyKind {
+    Required,
+    Conflicts,
+    Optional,
+}
+
 /// The engine-owned, bounded, get-or-build cache of immutable values an
 /// extension holds as a field of its engine state (ADR-0005): the pcre
 /// pattern cache and the unit cache are its two users. The `Mutex`, the
@@ -89,6 +112,9 @@ pub(crate) type EngineStateBuilder =
     Arc<dyn Fn(&StartupIni) -> Box<dyn Any + Send + Sync> + Send + Sync>;
 /// The `RINIT` function.
 pub(crate) type Rinit = fn(&mut Request) -> Result<(), Thrown>;
+/// The `MINFO` function: writes the extension's `phpinfo()` table
+/// through [`Request::info_table`].
+pub(crate) type Info = fn(&mut Request);
 /// A native class as an extension declares it (design §7.1): the
 /// declaration, beside it each method's declaration with its entry,
 /// the shape `functions` has, and the class's handler table (design
@@ -115,10 +141,12 @@ pub struct Extension {
     pub(crate) classes: Vec<NativeClassDecl>,
     pub(crate) constants: Vec<ConstDecl>,
     pub(crate) ini: Vec<IniDecl>,
+    pub(crate) dependencies: Vec<Dependency>,
     pub(crate) request_state: Option<StateBuilder>,
     pub(crate) engine_state: Option<EngineStateBuilder>,
     pub(crate) rinit: Option<Rinit>,
     pub(crate) rshutdown: Option<fn(&mut Request)>,
+    pub(crate) info: Option<Info>,
 }
 
 impl std::fmt::Debug for Extension {
@@ -138,10 +166,12 @@ pub struct ExtensionBuilder {
     classes: Vec<NativeClassDecl>,
     constants: Vec<ConstDecl>,
     ini: Vec<IniDecl>,
+    dependencies: Vec<Dependency>,
     request_state: Option<StateBuilder>,
     engine_state: Option<EngineStateBuilder>,
     rinit: Option<Rinit>,
     rshutdown: Option<fn(&mut Request)>,
+    info: Option<Info>,
 }
 
 impl ExtensionBuilder {
@@ -203,6 +233,25 @@ impl ExtensionBuilder {
         self
     }
 
+    /// The `deps` table, `ZEND_MOD_REQUIRED("libxml")` and its kin, in
+    /// the order the extension lists them; an extension that declares
+    /// none has php's null pointer, the empty table.
+    #[must_use]
+    pub fn dependencies(mut self, dependencies: Vec<Dependency>) -> ExtensionBuilder {
+        self.dependencies.extend(dependencies);
+        self
+    }
+
+    /// The `MINFO` function, what `phpinfo()`, `php --ri` and
+    /// `ReflectionExtension::info` print for the extension, written
+    /// through [`Request::info_table`]; an extension without one gets
+    /// php's `Version` row and its ini entries.
+    #[must_use]
+    pub fn info(mut self, hook: fn(&mut Request)) -> ExtensionBuilder {
+        self.info = Some(hook);
+        self
+    }
+
     /// Declare request state: built at request start in bundle order,
     /// dropped after the `rshutdown` hooks in reverse (ADR-0005).
     #[must_use]
@@ -248,10 +297,12 @@ impl ExtensionBuilder {
             classes: self.classes,
             constants: self.constants,
             ini: self.ini,
+            dependencies: self.dependencies,
             request_state: self.request_state,
             engine_state: self.engine_state,
             rinit: self.rinit,
             rshutdown: self.rshutdown,
+            info: self.info,
         }
     }
 }

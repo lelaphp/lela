@@ -12,7 +12,10 @@
 //! with its constructor and its `__toString`, rendering as
 //! `_extension_string` and `_function_string` in `php_reflection.c` at
 //! the tag render, in php's wording and order, since `xtask crosscheck`
-//! holds the bytes to `php --re` (design §7.1, §8). A reflection object
+//! holds the bytes to `php --re` (design §7.1, §8), beside the
+//! accessors `php_reflection.c` answers off the `zend_module_entry`,
+//! `getName` to `isTemporary`, `info()` writing the extension's `MINFO`
+//! table as `php_info_print_module` does, and `isDeprecated`. A reflection object
 //! keeps what php keeps on it, the `name` property its stub declares,
 //! and looks the extension or function up again when it renders, which
 //! for the linked tables is the same entry php's `intern->ptr` points
@@ -38,7 +41,7 @@
 
 use std::fmt::Write as _;
 
-use php_ext::abi::{Extension, ExtensionBuilder};
+use php_ext::abi::{DependencyKind, Extension, ExtensionBuilder};
 use php_ext::call::{
     Function, constant, eval_const_expr, lookup_class, lookup_function, new_object,
 };
@@ -100,10 +103,17 @@ pub fn extension() -> Extension {
             reflection_extension(),
         ])
         .request_state::<State>()
+        .info(reflection_info)
         // `zend_module_entry.name` is `Reflection`, the spelling
         // `ReflectionClass::getExtensionName` and `php --re` print;
         // `extension_loaded('reflection')` lowers both sides.
         .build("Reflection")
+}
+
+/// `PHP_MINFO_FUNCTION(reflection)`: the one-row table `Reflection =>
+/// enabled`. The witness is `ReflectionExtension::info`'s.
+fn reflection_info(req: &mut Request) {
+    req.info_table(&[&["Reflection", "enabled"]]);
 }
 
 /// A reflector with `public string $name` and the `Reflector` interface,
@@ -115,7 +125,9 @@ fn named_reflector(name: &[u8]) -> ClassDecl {
     }
 }
 
-/// `abstract class ReflectionFunctionAbstract implements Reflector`.
+/// `abstract class ReflectionFunctionAbstract implements Reflector`,
+/// with `isDeprecated`, which the stub declares here and
+/// `ReflectionFunction` inherits.
 fn reflection_function_abstract() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
     (
         ClassDecl {
@@ -125,7 +137,10 @@ fn reflection_function_abstract() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
             },
             ..named_reflector(b"ReflectionFunctionAbstract")
         },
-        Vec::new(),
+        vec![(
+            tentative(method(b"isDeprecated", &[], Some(Type::Bool))),
+            reflection_function_is_deprecated as Entry,
+        )],
     )
 }
 
@@ -179,21 +194,53 @@ fn reflection_constant() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
     )
 }
 
-/// `ReflectionExtension`: its constructor and `__toString`.
+/// `ReflectionExtension`: its constructor, `__toString`, and the
+/// accessors that take no argument, each tentative as the stub marks
+/// it, in the stub's order; `getVersion`, `getFunctions`,
+/// `getConstants` and `getINIEntries` arrive with the tests that call
+/// them.
 fn reflection_extension() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
-    (
-        named_reflector(b"ReflectionExtension"),
-        vec![
-            (
-                method(b"__construct", &[parameter(b"name", Type::String)], None),
-                reflection_extension_construct as Entry,
-            ),
-            (
-                method(b"__toString", &[], Some(Type::String)),
-                reflection_extension_to_string as Entry,
-            ),
-        ],
-    )
+    let accessors: [(&[u8], Type, Entry); 7] = [
+        (b"getName", Type::String, reflection_extension_get_name),
+        (b"getClasses", Type::Array, reflection_extension_get_classes),
+        (
+            b"getClassNames",
+            Type::Array,
+            reflection_extension_get_class_names,
+        ),
+        (
+            b"getDependencies",
+            Type::Array,
+            reflection_extension_get_dependencies,
+        ),
+        (b"info", Type::Void, reflection_extension_info),
+        (
+            b"isPersistent",
+            Type::Bool,
+            reflection_extension_is_persistent,
+        ),
+        (
+            b"isTemporary",
+            Type::Bool,
+            reflection_extension_is_temporary,
+        ),
+    ];
+    let mut methods: Vec<(MethodDecl, Entry)> = vec![
+        (
+            method(b"__construct", &[parameter(b"name", Type::String)], None),
+            reflection_extension_construct as Entry,
+        ),
+        (
+            method(b"__toString", &[], Some(Type::String)),
+            reflection_extension_to_string as Entry,
+        ),
+    ];
+    methods.extend(
+        accessors
+            .into_iter()
+            .map(|(name, returns, entry)| (tentative(method(name, &[], Some(returns))), entry)),
+    );
+    (named_reflector(b"ReflectionExtension"), methods)
 }
 
 /// `ReflectionClass` as `php_reflection.stub.php` declares it: its six
@@ -817,19 +864,239 @@ fn reflection_extension_construct(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// ```
 fn reflection_extension_to_string(req: &mut Request) -> Result<Value, Thrown> {
+    let extension = this_extension(req)?;
+    let text = extension_string(req, extension, "");
+    Ok(Value::string(PhpString::new(req, text.as_bytes())?))
+}
+
+/// `GET_REFLECTION_OBJECT_PTR(module)` for a `ReflectionExtension`: the
+/// extension `$name` names, looked up again as the constructor found
+/// it; a name the bundle has not is the constructor's
+/// `ReflectionException`.
+fn this_extension(req: &mut Request) -> Result<ExtensionId, Thrown> {
     let (_, name) = this_name(req, "ReflectionExtension")?;
-    let Some(extension) = req.extension_named(&name) else {
-        return Err(throw(
+    match req.extension_named(&name) {
+        Some(extension) => Ok(extension),
+        None => Err(throw(
             req,
             "ReflectionException",
             &format!(
                 "Extension \"{}\" does not exist",
                 String::from_utf8_lossy(&name)
             ),
+        )),
+    }
+}
+
+/// `ReflectionExtension::getName()`: `module->name`, the spelling the
+/// `zend_module_entry` carries whatever the constructor was given.
+///
+/// ```php
+/// var_dump((new ReflectionExtension('CTYPE'))->getName());
+/// ```
+/// ```expect
+/// string(5) "ctype"
+/// ```
+fn reflection_extension_get_name(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let extension = this_extension(req)?;
+    let name = req
+        .extension_name(extension)
+        .map(str::to_owned)
+        .unwrap_or_default();
+    string_value(req, name.as_bytes())
+}
+
+/// `ReflectionExtension::getClasses()`: over `EG(class_table)` in its
+/// order, every class whose `ce->info.internal.module` is this
+/// extension, keyed by its name and holding the `ReflectionClass`
+/// `zend_reflection_class_factory` makes, `object_init_ex` and the name
+/// written with no constructor served, a `ReflectionEnum` for an enum.
+/// The alias key php takes for an aliased class has no case here until
+/// `class_alias` links one. `ctype` declares no class, so the fence
+/// pins the empty walk; the walk over `Reflection`'s classes is
+/// `ReflectionExtension_getClasses_basic.phpt`'s, which names php's
+/// twenty-six where this crate declares a subset, and a fence over one
+/// of them waits on the compiler reading a dimension fetch.
+///
+/// ```php
+/// $e = new ReflectionExtension('ctype'); var_dump($e->getClasses(), $e->getClassNames());
+/// ```
+/// ```expect
+/// array(0) {
+/// }
+/// array(0) {
+/// }
+/// ```
+fn reflection_extension_get_classes(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let extension = this_extension(req)?;
+    let mut classes = PhpArray::new(req)?;
+    for (class, name) in extension_classes(req, extension) {
+        let reflector = reflection_class_factory(req, class)?;
+        let key = Key::Str(PhpString::new(req, &name)?);
+        classes.set(req, key, Value::object(reflector))?;
+    }
+    Ok(Value::array(classes))
+}
+
+/// `ReflectionExtension::getClassNames()`: the same walk as
+/// `getClasses`, the names appended in order. The witness is
+/// `getClasses`'s.
+fn reflection_extension_get_class_names(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let extension = this_extension(req)?;
+    let mut names = PhpArray::new(req)?;
+    for (_, name) in extension_classes(req, extension) {
+        let name = Value::string(PhpString::new(req, &name)?);
+        names.append(req, name)?;
+    }
+    Ok(Value::array(names))
+}
+
+/// `add_extension_class`'s test over the linked table: each class the
+/// extension declared, with its name, in table order.
+fn extension_classes(req: &Request, extension: ExtensionId) -> Vec<(ClassId, Vec<u8>)> {
+    req.declared_classes()
+        .into_iter()
+        .filter(|&class| req.class_extension(class) == Some(extension))
+        .map(|class| (class, class_name_of(req, class)))
+        .collect()
+}
+
+/// `zend_reflection_class_factory`: a `ReflectionClass`, or a
+/// `ReflectionEnum` for an enum, with `$name` written and no
+/// constructor served.
+fn reflection_class_factory(req: &mut Request, class: ClassId) -> Result<PhpObject, Thrown> {
+    let is_enum = req
+        .class_decl(class)
+        .is_some_and(|decl| decl.kind == ClassKind::Enum);
+    let reflector = if is_enum {
+        lookup_class(req, b"ReflectionEnum")?
+    } else {
+        None
+    };
+    let reflector = match reflector {
+        Some(reflector) => reflector,
+        None => class_named(req, b"ReflectionClass")?,
+    };
+    let object = new_object(req, reflector)?;
+    let name = class_name_of(req, class);
+    set_name(req, object, &name)?;
+    Ok(object)
+}
+
+/// `ReflectionExtension::getDependencies()`: `module->deps` walked into
+/// an array keyed by the other extension's name, each value the kind,
+/// `Required`, `Conflicts` or `Optional`, then the row's `rel` and
+/// `version` each after one space where set; the empty array where the
+/// pointer is null, as it is for `ctype`.
+///
+/// ```php
+/// var_dump((new ReflectionExtension('ctype'))->getDependencies());
+/// ```
+/// ```expect
+/// array(0) {
+/// }
+/// ```
+fn reflection_extension_get_dependencies(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let extension = this_extension(req)?;
+    let mut dependencies = PhpArray::new(req)?;
+    for dependency in req.extension_dependencies(extension) {
+        let mut relation = String::from(match dependency.kind {
+            DependencyKind::Required => "Required",
+            DependencyKind::Conflicts => "Conflicts",
+            DependencyKind::Optional => "Optional",
+        });
+        for part in [&dependency.rel, &dependency.version].into_iter().flatten() {
+            relation.push(' ');
+            relation.push_str(part);
+        }
+        let key = Key::Str(PhpString::new(req, dependency.name.as_bytes())?);
+        let value = Value::string(PhpString::new(req, relation.as_bytes())?);
+        dependencies.set(req, key, value)?;
+    }
+    Ok(Value::array(dependencies))
+}
+
+/// `ReflectionExtension::info()`: `php_info_print_module` over the
+/// extension, the name then its `MINFO` table, written to the body as
+/// the CLI prints it; `null` returned, as a `void` method is.
+///
+/// ```php
+/// (new ReflectionExtension('ctype'))->info();
+/// ```
+/// ```expect
+/// ctype
+///
+/// ctype functions => enabled
+/// ```
+fn reflection_extension_info(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let extension = this_extension(req)?;
+    req.extension_info(extension);
+    Ok(Value::null())
+}
+
+/// `ReflectionExtension::isPersistent()`:
+/// `module->type == MODULE_PERSISTENT`, which every extension compiled
+/// into the binary is; `MODULE_TEMPORARY` is `dl()`'s, which this
+/// engine has none of.
+///
+/// ```php
+/// $e = new ReflectionExtension('ctype'); var_dump($e->isPersistent(), $e->isTemporary());
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// ```
+fn reflection_extension_is_persistent(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    this_extension(req)?;
+    Ok(Value::bool(true))
+}
+
+/// `ReflectionExtension::isTemporary()`:
+/// `module->type == MODULE_TEMPORARY`, the complement of
+/// `isPersistent`, whose witness this shares.
+fn reflection_extension_is_temporary(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    this_extension(req)?;
+    Ok(Value::bool(false))
+}
+
+/// `ReflectionFunctionAbstract::isDeprecated()`:
+/// `_function_check_flag(ZEND_ACC_DEPRECATED)`, the bit the
+/// `#[\Deprecated]` attribute sets on a native's or a user function's
+/// declaration, read from the attribute as `_function_string` reads it
+/// for `, deprecated`. `ctype` deprecates none of its eleven.
+///
+/// ```php
+/// var_dump((new ReflectionFunction('ctype_alpha'))->isDeprecated());
+/// ```
+/// ```expect
+/// bool(false)
+/// ```
+fn reflection_function_is_deprecated(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let (_, name) = this_name(req, "ReflectionFunction")?;
+    let Some(function) = lookup_function(req, &name) else {
+        return Err(throw(
+            req,
+            "ReflectionException",
+            &format!(
+                "Function {}() does not exist",
+                String::from_utf8_lossy(&name)
+            ),
         ));
     };
-    let text = extension_string(req, extension, "");
-    Ok(Value::string(PhpString::new(req, text.as_bytes())?))
+    let deprecated = req.function_decl(function).is_some_and(|decl| {
+        decl.attributes
+            .iter()
+            .any(|a| a.name.0.eq_ignore_ascii_case(b"Deprecated"))
+    });
+    Ok(Value::bool(deprecated))
 }
 
 /// `ReflectionFunction::__construct(Closure|string $function)`: the

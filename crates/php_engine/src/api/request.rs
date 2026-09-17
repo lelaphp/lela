@@ -21,7 +21,9 @@ use php_heap::{
 use php_unit::decl::{ClassDecl, ClassKind, FunctionDecl, MethodDecl, Visibility};
 use php_unit::{FramelessEntry, Unit};
 
-use crate::api::abi::{Callable, Extension, IniVerdict, ObjectHandlers, PropertyTest, Std};
+use crate::api::abi::{
+    Callable, Dependency, Extension, IniVerdict, ObjectHandlers, PropertyTest, Std,
+};
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{
@@ -3325,6 +3327,93 @@ impl Request {
             start = end;
         }
         None
+    }
+
+    /// `module->deps`: the rows an extension declared through
+    /// `ExtensionBuilder::dependencies`, in their order; the empty
+    /// table where php's pointer is null, which is every extension that
+    /// declares none.
+    #[must_use]
+    pub fn extension_dependencies(&self, extension: ExtensionId) -> Vec<Dependency> {
+        self.extension_of(extension)
+            .map(|e| e.dependencies.clone())
+            .unwrap_or_default()
+    }
+
+    /// `php_info_print_module` as the CLI prints it, `phpinfo_as_text`
+    /// (`Z/ext/standard/info.c:133`): the name as a one-column table,
+    /// then the extension's `MINFO`; for an extension that declared
+    /// none, a `Version` row and `DISPLAY_INI_ENTRIES`, its ini entries
+    /// under `Directive => Local Value => Master Value`
+    /// (`Z/main/php_ini.c:115`), the master being the engine's default
+    /// and an empty value `no value`. Every bundled extension has a
+    /// version, `PHP_VERSION`, so php's other branch, the bare name, is
+    /// never taken. What `ReflectionExtension::info` and `php --ri` print.
+    pub fn extension_info(&mut self, extension: ExtensionId) {
+        let Some(module) = self.extension_of(extension).cloned() else {
+            return;
+        };
+        self.info_table(&[&[module.name.as_str()]]);
+        if let Some(info) = module.info {
+            info(self);
+            return;
+        }
+        self.info_table(&[&["Version", PHP_VERSION]]);
+        if module.ini.is_empty() {
+            return;
+        }
+        let no_value = || String::from("no value");
+        let shown = |value: Option<&[u8]>| {
+            value
+                .filter(|v| !v.is_empty())
+                .map_or_else(no_value, |v| String::from_utf8_lossy(v).into_owned())
+        };
+        let rows: Vec<[String; 3]> = module
+            .ini
+            .iter()
+            .map(|entry| {
+                [
+                    String::from_utf8_lossy(&entry.name.0).into_owned(),
+                    shown(self.ini_get(&entry.name.0)),
+                    shown(self.shared.ini_default(&entry.name.0)),
+                ]
+            })
+            .collect();
+        let mut table: Vec<&[&str]> = vec![&["Directive", "Local Value", "Master Value"]];
+        let cells: Vec<[&str; 3]> = rows
+            .iter()
+            .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
+            .collect();
+        table.extend(cells.iter().map(<[&str; 3]>::as_slice));
+        self.info_table(&table);
+    }
+
+    /// `php_info_print_table_start` and one `php_info_print_table_row`
+    /// per row as the CLI prints them, `phpinfo_as_text`
+    /// (`Z/ext/standard/info.c:1062-1220`): a blank line, then each
+    /// row's cells with ` => ` between and a newline after, an empty
+    /// cell one space with no ` => ` after it, as php's loop has it.
+    /// A header row prints the same way in text, so an extension's
+    /// `MINFO` writes its whole table through this.
+    pub fn info_table(&mut self, rows: &[&[&str]]) {
+        let mut out = String::from("\n");
+        for row in rows {
+            let last = row.len().saturating_sub(1);
+            for (i, cell) in row.iter().enumerate() {
+                if cell.is_empty() {
+                    out.push(' ');
+                } else {
+                    out.push_str(cell);
+                    if i < last {
+                        out.push_str(" => ");
+                    }
+                }
+                if i == last {
+                    out.push('\n');
+                }
+            }
+        }
+        self.write(out.as_bytes());
     }
 
     fn extension_of(&self, extension: ExtensionId) -> Option<&Extension> {

@@ -7,14 +7,18 @@ abi::Cache::new
 abi::Callable
 abi::CloneObj
 abi::CloneObjWith
+abi::Dependency
+abi::DependencyKind
 abi::Extension
 abi::ExtensionBuilder
 abi::ExtensionBuilder::build
 abi::ExtensionBuilder::class_with
 abi::ExtensionBuilder::classes
 abi::ExtensionBuilder::constants
+abi::ExtensionBuilder::dependencies
 abi::ExtensionBuilder::engine_state
 abi::ExtensionBuilder::functions
+abi::ExtensionBuilder::info
 abi::ExtensionBuilder::ini
 abi::ExtensionBuilder::request_state
 abi::ExtensionBuilder::rinit
@@ -189,7 +193,9 @@ request::Request::env
 request::Request::env_pairs
 request::Request::error_log
 request::Request::error_reporting
+request::Request::extension_dependencies
 request::Request::extension_functions
+request::Request::extension_info
 request::Request::extension_name
 request::Request::extension_named
 request::Request::extension_number
@@ -208,6 +214,7 @@ request::Request::header_remove
 request::Request::headers_list
 request::Request::headers_sent
 request::Request::included_files
+request::Request::info_table
 request::Request::ini_entries
 request::Request::ini_get
 request::Request::ini_parse_bool

@@ -61,7 +61,24 @@ pub fn extension() -> Extension {
             (declared(b"ctype_xdigit"), ctype_xdigit as Entry),
         ])
         .request_state::<State>()
+        .info(ctype_info)
         .build("ctype")
+}
+
+/// `PHP_MINFO_FUNCTION(ctype)`: the one-row table `ctype functions =>
+/// enabled`, what `phpinfo()`, `php --ri ctype` and
+/// `ReflectionExtension::info` print for the extension.
+///
+/// ```php
+/// (new ReflectionExtension('ctype'))->info();
+/// ```
+/// ```expect
+/// ctype
+///
+/// ctype functions => enabled
+/// ```
+fn ctype_info(req: &mut Request) {
+    req.info_table(&[&["ctype functions", "enabled"]]);
 }
 
 /// A native's entry, the shape `ExtensionBuilder::functions` takes.
