@@ -184,7 +184,29 @@ pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
             None,
         ),
         (closure_class(), closure_methods(), Some(&CLOSURE)),
+        (std_class(), Vec::new(), None),
     ]
+}
+
+/// `class stdClass` as `zend_register_standard_class` declares it
+/// (`Z/Zend/zend.c`, `zend_standard_class_def`): no parent, no
+/// interface, no member, and `#[AllowDynamicProperties]`, which the
+/// declaration model has no bit for yet (#326); what `(object)` builds and
+/// what `json_decode` and `unserialize` hand back.
+///
+/// ```php
+/// var_dump(new stdClass, new stdClass instanceof stdClass);
+/// ```
+/// ```expect
+/// object(stdClass)#1 (0) {
+/// }
+/// bool(true)
+/// ```
+fn std_class() -> ClassDecl {
+    ClassDecl {
+        interfaces: Vec::new(),
+        ..declared(b"stdClass", ClassKind::Class, None)
+    }
 }
 
 /// `final class Closure` as `zend_register_closure_ce` declares it: the
