@@ -354,6 +354,32 @@ const CORE_INI: [(&str, &str); 20] = [
     ("zend.reserved_stack_size", "0"),
 ];
 
+/// A host's ini value as the ini scanner hands it to the table
+/// (`Z/Zend/zend_ini_scanner.l:491-501`): a bare `true`, `on` or `yes`
+/// is `1`, a bare `false`, `off`, `no`, `none` or `null` is the empty
+/// string, each in any case and with the spaces and tabs after it eaten,
+/// and every other value stands as written. A `-d` goes through the same
+/// scanner, `php_ini_builder_define` (`Z/main/php_ini_builder.c:63-81`)
+/// writing it as a `php.ini` line, and one whose value begins with a byte
+/// that is not alphanumeric it quotes first, so ` off` stands and `off `
+/// does not. That is why `ini_get('fatal_error_backtraces')` under the
+/// recipe's `fatal_error_backtraces=Off` answers `""` and never `Off`.
+fn scanned_ini_value(value: &str) -> Vec<u8> {
+    let bare = value
+        .bytes()
+        .next()
+        .is_some_and(|first| first.is_ascii_alphanumeric());
+    if !bare {
+        return value.as_bytes().to_vec();
+    }
+    let word = value.trim_end_matches([' ', '\t']).to_ascii_lowercase();
+    match word.as_str() {
+        "true" | "on" | "yes" => b"1".to_vec(),
+        "false" | "off" | "no" | "none" | "null" => Vec::new(),
+        _ => value.as_bytes().to_vec(),
+    }
+}
+
 /// Builds an [`Engine`]: the bundle, the tier and the startup ini.
 pub struct EngineBuilder {
     extensions: Vec<Extension>,
@@ -370,11 +396,12 @@ impl EngineBuilder {
         self
     }
 
-    /// One ini entry as the host's `-d` or `php.ini` sets it.
+    /// One ini entry as the host's `-d` or `php.ini` sets it, the value
+    /// as the ini scanner hands it to the table ([`scanned_ini_value`]).
     #[must_use]
     pub fn ini(mut self, name: &str, value: &str) -> EngineBuilder {
         self.ini
-            .push((name.as_bytes().to_vec(), value.as_bytes().to_vec()));
+            .push((name.as_bytes().to_vec(), scanned_ini_value(value)));
         self
     }
 
@@ -927,6 +954,32 @@ mod tests {
             String::from_utf8_lossy(&sink.body).into_owned(),
             observables,
         )
+    }
+
+    /// What the pinned oracle answers for
+    /// `var_dump(ini_get('error_append_string'))` under
+    /// `-d error_append_string=<value>`: `Off`, `OFF`, `oFf`, `FALSE`,
+    /// `none`, `None`, `NULL` and `off ` are `string(0) ""`; `On`, `YES`
+    /// and `true` are `string(1) "1"`; `0`, `2`, `abc`, `stderr`, `1M`,
+    /// `of` and ` off` stand as written.
+    #[test]
+    fn a_host_s_ini_value_is_read_as_the_scanner_reads_a_bare_word() {
+        let read = |value: &str| {
+            let engine = Engine::builder().ini("error_append_string", value).build();
+            engine
+                .shared
+                .ini_default(b"error_append_string")
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        };
+        for off in ["Off", "OFF", "oFf", "FALSE", "none", "None", "NULL", "off "] {
+            assert_eq!(read(off).as_deref(), Some(""), "{off:?}");
+        }
+        for on in ["On", "YES", "true"] {
+            assert_eq!(read(on).as_deref(), Some("1"), "{on:?}");
+        }
+        for written in ["0", "2", "abc", "stderr", "1M", "of", " off", ""] {
+            assert_eq!(read(written).as_deref(), Some(written), "{written:?}");
+        }
     }
 
     /// A class the compiler bound with no opline (`zend_compile_class_decl`
