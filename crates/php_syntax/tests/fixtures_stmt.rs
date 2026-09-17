@@ -943,6 +943,38 @@ fn halt_compiler_with_trailing_data() {
 }
 
 #[test]
+fn halt_compiler_with_the_close_tag_as_its_semicolon() {
+    // Zend returns `?>` as `';'`, so the close tag is the halt statement's
+    // terminator and the trailer begins after the newline it swallowed
+    // (probed 8.5.9: `__COMPILER_HALT_OFFSET__` is that byte).
+    check(
+        "<?php __halt_compiler() ?>\nrest",
+        expect![[r#"
+        SOURCE_FILE@0..31
+          OPEN_TAG@0..6 "<?php "
+          HALT_COMPILER_STMT@6..31
+            HALT_COMPILER_KW@6..21 "__halt_compiler"
+            L_PAREN@21..22 "("
+            R_PAREN@22..23 ")"
+            CLOSE_TAG@24..27 "?>\n"
+            HALT_DATA@27..31 "rest"
+    "#]],
+    );
+    check(
+        "<?php __halt_compiler() ?>",
+        expect![[r#"
+        SOURCE_FILE@0..26
+          OPEN_TAG@0..6 "<?php "
+          HALT_COMPILER_STMT@6..26
+            HALT_COMPILER_KW@6..21 "__halt_compiler"
+            L_PAREN@21..22 "("
+            R_PAREN@22..23 ")"
+            CLOSE_TAG@24..26 "?>"
+    "#]],
+    );
+}
+
+#[test]
 fn empty_statements() {
     check(
         "<?php ;;",

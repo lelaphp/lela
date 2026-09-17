@@ -548,3 +548,155 @@ fn a_fused_set_visibility_is_the_one_token_phps_scanner_fused() {
         )
     );
 }
+
+/// A diagnostic that names the token it wanted as the token it did not
+/// want: `unexpected token "X", expecting "X"`. No site can raise one;
+/// the halt rule did (#265), taking `;` alone where php's scanner
+/// returns `?>` as `';'`.
+fn names_the_wanted_token_as_unwanted(message: &str) -> bool {
+    let Some(rest) = message.strip_prefix("syntax error, unexpected token \"") else {
+        return false;
+    };
+    let Some((unwanted, clause)) = rest.split_once("\", expecting ") else {
+        return false;
+    };
+    clause
+        .split(" or ")
+        .any(|wanted| wanted == format!("\"{unwanted}\""))
+}
+
+#[test]
+fn halt_compiler_takes_the_close_tag_as_its_semicolon() {
+    // `T_HALT_COMPILER '(' ')' ';'` with the close tag as the `;`: a
+    // whole program php accepts, with or without a trailer.
+    assert_eq!(diagnostics("<?php __halt_compiler() ?>"), []);
+    assert_eq!(diagnostics("<?php __halt_compiler() ?>\nrest"), []);
+    assert_eq!(diagnostics("<?php __halt_compiler() ?>rest"), []);
+}
+
+#[test]
+fn no_site_names_the_wanted_token_as_the_unwanted_one() {
+    assert!(names_the_wanted_token_as_unwanted(
+        "syntax error, unexpected token \";\", expecting \";\""
+    ));
+    assert!(names_the_wanted_token_as_unwanted(
+        "syntax error, unexpected token \";\", expecting \",\" or \";\""
+    ));
+    assert!(!names_the_wanted_token_as_unwanted(
+        "syntax error, unexpected token \";\", expecting \")\""
+    ));
+    // Every statement whose terminator is a `;`, with `?>` standing where
+    // the `;` is due, followed by a trailer and by nothing; `php -l`
+    // takes each clean (probed 8.5.9), and none may raise the sentence.
+    let terminated = [
+        "__halt_compiler()",
+        "echo 1",
+        "print 1",
+        "$x = 1",
+        "f()",
+        "return",
+        "return 1",
+        "global $x",
+        "static $x",
+        "static $x = 1",
+        "unset($x)",
+        "const X = 1",
+        "use A\\B",
+        "use function A\\f",
+        "namespace A",
+        "a: throw $e",
+        "do {} while (1)",
+        "declare(strict_types=1)",
+        "abstract class A { abstract function f(); }",
+        "interface I { const X = 1; function f(); }",
+        "class C { public $x; public int $y = 1; use T; }",
+        "enum E: int { case A = 1; }",
+        "$x = fn() => 1",
+        "$x = function() {}",
+        "$x = new class {}",
+        "exit",
+        "exit(1)",
+        "list($a) = $b",
+        "[$a] = $b",
+    ];
+    for stmt in terminated {
+        for tail in ["", "\n", "\nrest", "rest"] {
+            let src = format!("<?php {stmt} ?>{tail}");
+            let diags = diagnostics(&src);
+            assert_eq!(diags, [], "{src:?}");
+        }
+    }
+}
+
+#[test]
+fn no_site_names_the_wanted_token_as_the_unwanted_one_on_a_stray_close_tag() {
+    // Where the `?>` stands in for a `;` that a construct does not take,
+    // php's word names the token it wanted, never the one it got, as
+    // the one it wanted.
+    let unterminated = [
+        "if (1) ?>",
+        "while (1) ?>",
+        "for (;;) ?>",
+        "foreach ($a as $b) ?>",
+        "switch ($a) ?>",
+        "function f() ?>",
+        "class C ?>",
+        "class C { function f() ?> }",
+        "$x = ?>",
+        "echo 1 + ?>",
+        "f( ?>",
+        "$a[ ?>",
+        "[1, ?>",
+        "\"{$a ?>",
+        "namespace ?>",
+        "use ?>",
+        "const ?>",
+        "const X ?>",
+        "const X = ?>",
+        "static ?>",
+        "global ?>",
+        "unset( ?>",
+        "goto ?>",
+        "try {} ?>",
+        "try {} catch ?>",
+        "match ($a) ?>",
+        "$x = match ($a) { ?>",
+        "fn() ?>",
+        "function() use ?>",
+        "declare ?>",
+        "declare(ticks ?>",
+        "enum E ?>",
+        "enum E: ?>",
+        "class C extends ?>",
+        "class C implements ?>",
+        "interface I extends ?>",
+        "class C { use ?>",
+        "class C { public ?>",
+        "class C { const ?>",
+        "class C { case ?>",
+        "$x instanceof ?>",
+        "new ?>",
+        "clone ?>",
+        "throw ?>",
+        "yield from ?>",
+        "$x?->",
+        "$x->",
+        "$x::",
+        "A::",
+        "#[A ?>",
+        "#[A] ?>",
+        "__halt_compiler ?>",
+        "__halt_compiler( ?>",
+    ];
+    for stmt in unterminated {
+        for tail in ["", "\nrest"] {
+            let src = format!("<?php {stmt}{tail}");
+            for (_, _, message) in diagnostics(&src) {
+                assert!(
+                    !names_the_wanted_token_as_unwanted(&message),
+                    "{src:?} raised {message:?}"
+                );
+            }
+        }
+    }
+}

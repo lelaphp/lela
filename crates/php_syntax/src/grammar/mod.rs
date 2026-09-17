@@ -741,7 +741,13 @@ fn halt_compiler_stmt(p: &mut Parser<'_>, top_level: bool) {
         let d = p.unexpected_here_expecting("\"(\"");
         p.error(d);
     }
-    if !p.eat(K::SEMICOLON) && !p.has_error_at_or_after(p.current_span().start) {
+    // The close tag is the `;` here as at every terminator site (Zend
+    // returns `?>` as `';'`); it is taken into the statement because the
+    // trailer follows it, and the lexer has already stopped.
+    if !p.eat(K::SEMICOLON)
+        && !p.eat(K::CLOSE_TAG)
+        && !p.has_error_at_or_after(p.current_span().start)
+    {
         // `__halt_compiler() foo` is `expecting ";"` (probed 8.5.9).
         let d = p.unexpected_here_expecting("\";\"");
         p.error(d);

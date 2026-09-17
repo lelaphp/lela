@@ -206,7 +206,12 @@ impl Lexer<'_> {
                 }
                 self.emit(SyntaxKind::CLOSE_TAG, start);
                 // Zend: BEGIN(INITIAL), replace and keep the stack below.
-                self.begin_state(State::InlineHtml, self.span(start, self.pos));
+                // Unless the emit completed `__halt_compiler ( )` and
+                // pushed the trailer state: Zend stops lexing there, and
+                // the state it left behind is never read.
+                if !matches!(self.active_state(), State::HaltCompiler) {
+                    self.begin_state(State::InlineHtml, self.span(start, self.pos));
+                }
             }
             (b'-', b'>') => {
                 self.punct(SyntaxKind::NULLSAFE_ARROW, 3);

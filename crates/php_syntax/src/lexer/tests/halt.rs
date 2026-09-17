@@ -124,3 +124,33 @@ fn halt_as_property_name_does_not_arm() {
         ],
     );
 }
+
+#[test]
+fn halt_compiler_takes_the_close_tag_as_its_semicolon() {
+    // Zend returns `?>` as `';'`, so `__halt_compiler() ?>` is the halt
+    // statement and the trailer begins after the tag and the one newline
+    // it swallows: `__COMPILER_HALT_OFFSET__` is that byte (probed 8.5.9).
+    check(
+        "<?php __halt_compiler() ?>\nrest ?> <?php",
+        &[
+            (OPEN_TAG, "<?php "),
+            (HALT_COMPILER_KW, "__halt_compiler"),
+            (L_PAREN, "("),
+            (R_PAREN, ")"),
+            (WHITESPACE, " "),
+            (CLOSE_TAG, "?>\n"),
+            (HALT_DATA, "rest ?> <?php"),
+        ],
+    );
+    check(
+        "<?php __halt_compiler() ?>",
+        &[
+            (OPEN_TAG, "<?php "),
+            (HALT_COMPILER_KW, "__halt_compiler"),
+            (L_PAREN, "("),
+            (R_PAREN, ")"),
+            (WHITESPACE, " "),
+            (CLOSE_TAG, "?>"),
+        ],
+    );
+}

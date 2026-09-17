@@ -151,9 +151,9 @@ pub(crate) struct StateFrame {
     pub(crate) aux: StateAux,
 }
 
-/// Progress of the `__halt_compiler ( ) ;` recognizer. Armed when
-/// `HALT_COMPILER_KW` is emitted in `Scripting`, disarmed when the next
-/// significant tokens deviate from `( ) ;`.
+/// Progress of the `__halt_compiler ( ) ;` recognizer, `?>` standing as
+/// the `;`. Armed when `HALT_COMPILER_KW` is emitted in `Scripting`,
+/// disarmed when the next significant tokens deviate from `( ) ;`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HaltStage {
     Off,
@@ -418,8 +418,12 @@ impl<'a> Lexer<'a> {
             }
             (HaltStage::ExpectLParen, SyntaxKind::L_PAREN) => HaltStage::ExpectRParen,
             (HaltStage::ExpectRParen, SyntaxKind::R_PAREN) => HaltStage::ExpectSemicolon,
-            (HaltStage::ExpectSemicolon, SyntaxKind::SEMICOLON) => {
-                // Everything after the `;` is the verbatim data trailer.
+            (HaltStage::ExpectSemicolon, SyntaxKind::SEMICOLON | SyntaxKind::CLOSE_TAG) => {
+                // Everything after the `;` is the verbatim data trailer. A
+                // close tag stands as the `;` (Zend returns `?>` as `';'`,
+                // and the halt production reduces on it), so the trailer
+                // begins after the tag and the one newline it swallowed:
+                // `__COMPILER_HALT_OFFSET__` is that byte (probed 8.5.9).
                 let here = self.span(self.pos, self.pos);
                 self.push_state(State::HaltCompiler, here);
                 HaltStage::Off
