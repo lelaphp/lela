@@ -1408,7 +1408,9 @@ mod tests {
         let Ok(r) = Resource::new(&mut req, kind, 7u32) else {
             return;
         };
-        assert_eq!(req.memory_usage(false) - start, 32 + 16);
+        // The resource, its payload, and the list's own packed table,
+        // 160, which the request's first resource lays down.
+        assert_eq!(req.memory_usage(false) - start, 160 + 32 + 16);
         assert_eq!(r.id(), 1);
         assert_eq!(r.type_name(&req), Some(&b"stream"[..]));
         assert_eq!(r.native::<u32>(&req), Some(&7));
@@ -1426,10 +1428,14 @@ mod tests {
             Some(7),
             "the destructor ran once, reading the payload"
         );
-        assert_eq!(req.memory_usage(false) - start, 32);
+        assert_eq!(req.memory_usage(false) - start, 160 + 32);
         req.release(v);
         assert_eq!(req.resource(1), None);
-        assert_eq!(req.memory_usage(false), start);
+        assert_eq!(
+            req.memory_usage(false),
+            start + 160,
+            "the list's table stays until the request ends"
+        );
         let Ok(next) = Resource::new(&mut req, kind, 0u8) else {
             return;
         };

@@ -213,6 +213,28 @@ pub(crate) fn add_interned(mm: &mut Mm, a: Arr, s: Str) -> Result<(), Fatal> {
     Ok(())
 }
 
+/// `zend_hash_index_add_new(ht, index, &zv)` over a request's `mm` for a
+/// key the caller knows is not there, which is what `zend_list_insert`
+/// (`Z/Zend/zend_list.c:32-44`) knows of the id `nNextFreeElement` gave
+/// it: the data the first add lays down, packed and sized as the header
+/// says, and the doubling on the add past its end, are `mm`'s.
+pub(crate) fn index_add_new(mm: &mut Mm, a: Arr, index: i64, z: Zval) -> Result<(), Fatal> {
+    write_long(mm, a, index, z, Write::Update)?;
+    Ok(())
+}
+
+/// `zend_hash_index_del(ht, index)` with no destructor: the element
+/// gone and its value handed back to the caller, who is the entry's
+/// destructor, as `list_entry_destructor` is `EG(regular_list)`'s
+/// (`Z/Zend/zend_list.c:174`). `None` for an index that is not there.
+pub(crate) fn index_del(a: Arr, index: i64) -> Option<Zval> {
+    let idx = a.find(Key::Long(index))?;
+    if !a.is_packed() {
+        a.unlink(idx);
+    }
+    Some(a.del_at(idx))
+}
+
 /// `pefree` over a [`persistent_array`]: the data, then the header.
 pub(crate) fn free_persistent_array(a: Arr) {
     if let Some(data) = a.data_addr() {
@@ -459,8 +481,18 @@ impl Arr {
 
     // ------------------------------------------------------ the data
 
-    fn num_used(self) -> u32 {
+    /// `nNumUsed`: the positions written, tombstones included, which
+    /// is where `zend_close_rsrc_list` starts its walk down.
+    pub(crate) fn num_used(self) -> u32 {
         self.header().num_used.get()
+    }
+
+    /// `ht->nNextFreeElement = n`: what `zend_init_rsrc_list`
+    /// (`Z/Zend/zend_list.c:204-208`) writes over the `ZEND_LONG_MIN` the
+    /// init left, so the first resource's id is one and not the 8.3
+    /// rule's.
+    pub(crate) fn set_next_free(self, n: i64) {
+        self.header().next_free.set(n);
     }
 
     fn mask(self) -> u32 {
@@ -1872,7 +1904,10 @@ mod tests {
             assert!(nothing.heap.resource_native::<Tracked>(swept).is_some());
             Heap::release(&mut nothing, Zval::array(outer));
             assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
-            assert_eq!(nothing.heap.memory_usage(false), start + 32 + 16);
+            // The swept resource's thirty-two bytes and its payload, and
+            // the list's own packed table, 160, which the first resource
+            // laid down and nothing gives back before the request ends.
+            assert_eq!(nothing.heap.memory_usage(false), start + 160 + 32 + 16);
         }
         assert_eq!(
             dropped.load(std::sync::atomic::Ordering::SeqCst),

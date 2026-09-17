@@ -78,9 +78,10 @@ pub struct Heap {
     /// reached. Declared before `mm` so that it drops first, while the
     /// objects it walks are still mapped.
     store: object::Store,
-    /// php's `EG(regular_list)`: the resources by id, whose sweep
-    /// drops the payloads no close reached. Declared before `mm` for the
-    /// same reason the store is.
+    /// php's `EG(regular_list)`: the resources by id in one [`Arr`]
+    /// whose data is the request's memory, laid down by the first
+    /// resource, and whose sweep drops the payloads no close reached.
+    /// Declared before `mm` for the same reason the store is.
     resources: resource::RegularList,
     mm: mm::Mm,
     /// php's `CG(interned_strings)`: the strings this request interned,
@@ -109,7 +110,7 @@ impl Heap {
         let store = object::Store::new(&mut mm);
         Heap {
             store,
-            resources: resource::RegularList::default(),
+            resources: resource::RegularList::new(),
             mm,
             interned: string::Table::new(),
         }

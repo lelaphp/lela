@@ -26,11 +26,17 @@
 //! the type; what the payload names of the heap is given back by the
 //! engine's destructor before the drop runs.
 //!
-//! **The list's own storage.** php's `EG(regular_list)` is a packed
-//! `zend_hash` whose bucket array is the request's memory; the list here
-//! is on the system allocator and counts nothing, as the object store's
-//! table did before it moved onto the heap. What the list holds is
-//! php's: the ids from one, never reused within a request
+//! **The list's own storage.** php's `EG(regular_list)` is a `zend_hash`
+//! inited at eight (`zend_init_rsrc_list`, `Z/Zend/zend_list.c:204-208`)
+//! whose data is the request's memory from the first `zend_list_insert`
+//! on, packed, `HT_PACKED_SIZE_EX(8, HT_MIN_MASK)` bytes and doubling
+//! where `zend_hash_packed_grow` doubles; the list here is one [`Arr`]
+//! keyed by id, so those bytes are the array's own data allocation and
+//! `memory_get_usage()` moves by them where php's does. The `HashTable`
+//! itself is a field of `zend_executor_globals` and not `emalloc`ed, so
+//! the header is [`crate::array::table_header`]'s on the system
+//! allocator, charged as php charges it, which is not at all. What the
+//! list holds is php's: the ids from one, never reused within a request
 //! (`zend_hash_next_free_element`), and the overflow fatal at
 //! `ZEND_LONG_MAX`.
 
@@ -38,10 +44,12 @@ use std::any::Any;
 use std::cell::Cell;
 use std::ptr::NonNull;
 
+use crate::array::{Arr, Key, free_table_header, index_add_new, index_del, table_header};
 use crate::gc::{self, Refcounted};
 use crate::hooks::{Fatal, HeapHooks};
+use crate::mm::Mm;
 use crate::payload::{Payload, payload_of};
-use crate::{Heap, ZvalType};
+use crate::{Heap, Zval, ZvalType};
 
 /// A resource type as the engine numbers it: php's `int type`, the
 /// index of its destructor in `list_destructors`.
@@ -229,26 +237,58 @@ fn payload_addr(at: NonNull<PayloadBox>, table: &Payload) -> NonNull<u8> {
     unsafe { at.cast::<u8>().add(payload_offset(table)) }
 }
 
-/// `EG(regular_list)`: the resources of one request by id, the next id
-/// never given, and no owner held.
-#[derive(Default)]
+/// `zend_init_rsrc_list`'s size (`Z/Zend/zend_list.c:204-208`):
+/// `zend_hash_init(&EG(regular_list), 8, NULL, list_entry_destructor, 0)`.
+const LIST_SIZE: u32 = 8;
+
+/// `EG(regular_list)`: the resources of one request by id, one [`Arr`]
+/// whose value at `handle` is the resource's zval and which holds no
+/// owner, the next id never given.
+///
+/// The header is laid down by the first insert on the system allocator,
+/// as php's is a field of `zend_executor_globals` and never the
+/// request's memory; the data is the request's, 136 bytes for the
+/// packed table of eight `zend_list_insert`'s first
+/// `zend_hash_index_add_new` lays down, in php's 160-byte bin, and the
+/// doubling of `zend_hash_packed_grow` on the id that is the table's
+/// size. What `memory_get_usage()` moves by is the resource's thirty-two
+/// bytes and its payload, and the list's own data where php's grows.
+///
+/// Read off the oracle at php's own resource ids, `php -n` at 8.5.9 over
+/// nine `fopen('php://memory', 'r')` into `$a[]`, printing
+/// `get_resource_id` and the step `memory_get_usage()` took: the CLI's
+/// `STDIN`, `STDOUT` and `STDERR` and its source file stand in the list
+/// before the first line, so the first open is id 5, and id 8, the
+/// fourth open, costs 456 where its neighbours cost 296, which is the
+/// packed table's data going from the 160-byte bin to the 320-byte one;
+/// the ninth open, id 13, costs the same 160 more again, that time for
+/// `$a`'s own table. The test below reads the same 160 and 320 over
+/// this list. It is not a witness fence because the engine has no
+/// `fopen` yet to serve it.
+///
 pub(crate) struct RegularList {
-    entries: Vec<Option<Res>>,
-    /// `nNextFreeElement`: the id the next insert takes, from one.
-    next: i64,
+    /// The `HashTable`, laid down by the first insert; `None` is a
+    /// request that has made no resource.
+    arr: Option<Arr>,
 }
 
 impl RegularList {
-    /// `zend_hash_index_find(&EG(regular_list), handle)`.
-    pub(crate) fn get(&self, id: i64) -> Option<Res> {
-        let at = usize::try_from(id.checked_sub(1)?).ok()?;
-        self.entries.get(at).copied().flatten()
+    /// A list holding nothing: what `zend_init_rsrc_list` leaves behind
+    /// at request start, `nNextFreeElement` at zero.
+    pub(crate) const fn new() -> RegularList {
+        RegularList { arr: None }
     }
 
-    /// `zend_list_insert`'s id: `zend_hash_next_free_element`, one for
-    /// the first, and php's fatal at `ZEND_LONG_MAX`.
+    /// `zend_hash_index_find(&EG(regular_list), handle)`.
+    pub(crate) fn get(&self, id: i64) -> Option<Res> {
+        self.arr?.get(Key::Long(id))?.as_resource()
+    }
+
+    /// `zend_list_insert`'s id (`Z/Zend/zend_list.c:32-44`):
+    /// `zend_hash_next_free_element`, one for the first, and php's fatal
+    /// at `ZEND_LONG_MAX`.
     fn next_id(&self) -> Result<i64, Fatal> {
-        let index = self.next;
+        let index = self.arr.map_or(0, |arr| arr.next_free());
         if index == 0 {
             return Ok(1);
         }
@@ -258,37 +298,42 @@ impl RegularList {
         Ok(index)
     }
 
-    /// `zend_hash_index_add_new(&EG(regular_list), handle, &zv)`.
-    fn add(&mut self, id: i64, r: Res) {
-        let at = usize::try_from(id - 1).unwrap_or(0);
-        if self.entries.len() <= at {
-            self.entries.resize(at + 1, None);
-        }
-        if let Some(cell) = self.entries.get_mut(at) {
-            *cell = Some(r);
-        }
-        self.next = id.saturating_add(1);
+    /// `zend_hash_index_add_new(&EG(regular_list), handle, &zv)`, with
+    /// the room the add takes out of `mm`: the packed table on the
+    /// first insert, the doubled one on the id past its end.
+    fn add(&mut self, mm: &mut Mm, id: i64, r: Res) -> Result<(), Fatal> {
+        let arr = if let Some(arr) = self.arr {
+            arr
+        } else {
+            let arr = table_header(LIST_SIZE)?;
+            arr.set_next_free(0);
+            *self.arr.insert(arr)
+        };
+        index_add_new(mm, arr, id, Zval::resource(r))
     }
 
     /// `zend_hash_index_del(&EG(regular_list), handle)` without the
     /// entry's destructor, which the caller serves.
     fn del(&mut self, id: i64) {
-        if let Some(cell) = usize::try_from(id - 1)
-            .ok()
-            .and_then(|at| self.entries.get_mut(at))
-        {
-            *cell = None;
+        if let Some(arr) = self.arr {
+            index_del(arr, id);
         }
     }
 
-    /// How many entries name a live resource.
+    /// How many entries name a live resource, `zend_hash_num_elements`.
     pub(crate) fn live(&self) -> usize {
-        self.entries.iter().flatten().count()
+        self.arr.as_ref().map_or(0, Arr::len)
     }
 
-    /// `nNumUsed`: one past the last id given.
-    fn used(&self) -> usize {
-        self.entries.len()
+    /// `nNumUsed`: one past the last position written.
+    fn used(&self) -> u32 {
+        self.arr.map_or(0, Arr::num_used)
+    }
+
+    /// `ZEND_HASH_ELEMENT(ht, i)`: the resource at position `i`, if one
+    /// stands there.
+    fn at(&self, i: u32) -> Option<Res> {
+        self.arr?.entry_at(i)?.1.as_resource()
     }
 }
 
@@ -296,18 +341,26 @@ impl Drop for RegularList {
     /// `zend_destroy_rsrc_list` after the loop is gone: every
     /// payload still on a resource is dropped, so a payload's own
     /// resources go with the request; the bytes are the heap's and go
-    /// with its chunks. Declared before `mm` on the heap, so this runs
-    /// first.
+    /// with its chunks, the list's data with them. Declared before `mm`
+    /// on the heap, so this runs first, while the data it walks is
+    /// still mapped; the header alone is this list's to free.
     fn drop(&mut self) {
-        for r in self.entries.drain(..).flatten() {
-            r.drop_payload();
+        let Some(arr) = self.arr.take() else {
+            return;
+        };
+        for (_, z) in &arr {
+            if let Some(r) = z.as_resource() {
+                r.drop_payload();
+            }
         }
+        free_table_header(arr);
     }
 }
 
 impl std::fmt::Debug for RegularList {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RegularList({} live, next {})", self.live(), self.next)
+        let next = self.arr.map_or(0, |arr| arr.next_free());
+        write!(f, "RegularList({} live, next {next})", self.live())
     }
 }
 
@@ -375,8 +428,11 @@ impl Heap {
         }
     }
 
-    /// `zend_list_insert` (`Z/Zend/zend_list.c:24`): the id, the
-    /// thirty-two bytes and the entry.
+    /// `zend_list_insert` (`Z/Zend/zend_list.c:32`): the id, the
+    /// thirty-two bytes and the entry, in php's order, so the list's
+    /// data is laid down or doubled after the resource it makes room
+    /// for. An entry the list has no room for gives the thirty-two
+    /// bytes back; php fatals there and gives back nothing.
     fn resource_alloc(
         &mut self,
         kind: ResourceType,
@@ -387,7 +443,12 @@ impl Heap {
         // SAFETY: the allocation is exactly the header's size and nothing
         // else holds it.
         let r = unsafe { Res::init(at, id, kind, ptr) };
-        self.resources.add(id, r);
+        if let Err(fatal) = self.resources.add(&mut self.mm, id, r) {
+            // SAFETY: the header was laid down just above and nothing
+            // names it.
+            unsafe { self.mm.free(at) };
+            return Err(fatal);
+        }
         Ok(r)
     }
 
@@ -464,17 +525,18 @@ impl Heap {
         unsafe { hooks.heap().mm.free(r.address()) };
     }
 
-    /// `zend_close_rsrc_list` (`Z/Zend/zend_list.c:215`), the shutdown
-    /// walk: every open resource closed from the top down, so a
-    /// resource is closed before the ones it was built on, and the walk
-    /// restarted from the new top when a destructor added one.
+    /// `zend_close_rsrc_list` (`Z/Zend/zend_list.c:217`), the shutdown
+    /// walk: every open resource closed from the top position down, so
+    /// a resource is closed before the ones it was built on, the
+    /// element read again each step since a destructor may move the
+    /// data, and the walk restarted from the new top when a destructor
+    /// added one.
     pub fn close_resources(hooks: &mut dyn HeapHooks) {
         let mut num = hooks.heap().resources.used();
         let mut i = num;
         while i > 0 {
             i -= 1;
-            let id = i64::try_from(i).unwrap_or(i64::MAX).saturating_add(1);
-            if let Some(r) = hooks.heap().resources.get(id)
+            if let Some(r) = hooks.heap().resources.at(i)
                 && !r.is_closed()
             {
                 Heap::resource_dtor(hooks, r);
@@ -533,10 +595,18 @@ mod tests {
     // SAFETY: the test never moves the heap off its thread.
     unsafe impl Send for Observed {}
 
+    /// The bin php's allocator serves the list's first data allocation
+    /// from: `HT_PACKED_SIZE_EX(8, HT_MIN_MASK)`, eight zvals and two
+    /// hash slots, 136 bytes, in the 160-byte bin. The first resource of
+    /// a request lays it down and nothing gives it back before the
+    /// request ends.
+    const LIST: usize = 160;
+
     /// A resource is php's thirty-two bytes, its id from one and never
     /// reused, a close serves the destructor once with the type
     /// it had and leaves the entry standing, closed, and the last
-    /// release gives the bytes back and the entry with them.
+    /// release gives the bytes back and the entry with them; the list's
+    /// data, laid down by the first, stays.
     #[test]
     fn a_resource_is_thirty_two_bytes_closed_once_and_freed_at_the_last_release() {
         let _alone = alone();
@@ -558,7 +628,7 @@ mod tests {
         };
         assert_eq!(first.id(), 1);
         assert_eq!(second.id(), 2);
-        assert_eq!(rec.heap.memory_usage(false) - start, 32 + 32 + 16);
+        assert_eq!(rec.heap.memory_usage(false) - start, LIST + 32 + 32 + 16);
         assert_eq!(rec.heap.resources(), 2);
         assert!(rec.heap.resource_native::<Observed>(second).is_some());
         assert!(rec.heap.resource_native::<u8>(second).is_none());
@@ -577,18 +647,18 @@ mod tests {
         assert!(second.is_closed());
         assert_eq!(second.resource_type(), None);
         assert!(rec.heap.resource_at(2).is_some());
-        assert_eq!(rec.heap.memory_usage(false) - start, 32 + 32);
+        assert_eq!(rec.heap.memory_usage(false) - start, LIST + 32 + 32);
         // The last release: no second destructor, the entry gone.
         Heap::release(&mut rec, z);
         Heap::release(&mut rec, z);
         assert_eq!(rec.freed.len(), 1);
         assert!(rec.heap.resource_at(2).is_none());
-        assert_eq!(rec.heap.memory_usage(false) - start, 32);
+        assert_eq!(rec.heap.memory_usage(false) - start, LIST + 32);
         // An open resource released serves its destructor on the way
         // out, and the next id is never one given before.
         Heap::release(&mut rec, Zval::resource(first));
         assert_eq!(rec.freed, vec![(2, 4, true), (1, 3, true)]);
-        assert_eq!(rec.heap.memory_usage(false), start);
+        assert_eq!(rec.heap.memory_usage(false), start + LIST);
         let Ok(third) = rec.heap.resource(ResourceType(3)) else {
             return;
         };
@@ -613,5 +683,45 @@ mod tests {
         };
         drop(rec);
         assert_eq!(drops.get(), 3, "the sweep dropped the last payload");
+    }
+
+    /// `EG(regular_list)`'s storage is the request's, sized as
+    /// `zend_hash_init(..., 8, ...)` sizes a packed table and doubled
+    /// where `zend_hash_packed_grow` doubles it, on the id that is the
+    /// table's size; the 56-byte header is a field of php's
+    /// `zend_executor_globals` and is charged as php charges it, which
+    /// is not at all, so the first resource moves `memory_get_usage()`
+    /// by its own thirty-two bytes and the list's 160 and nothing more.
+    #[test]
+    fn the_list_s_storage_is_php_s_packed_table_and_doubles_at_the_eighth_id() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let start = heap.memory_usage(false);
+        let mut ids = Vec::new();
+        for i in 1..=17 {
+            let Ok(r) = heap.resource(ResourceType(1)) else {
+                return;
+            };
+            ids.push(r.id());
+            let list = match i {
+                1..=7 => LIST,
+                // `HT_PACKED_SIZE_EX(16, HT_MIN_MASK)`, 264, in the
+                // 320-byte bin: the 160 given back, the 320 taken.
+                8..=15 => 320,
+                // `HT_PACKED_SIZE_EX(32, HT_MIN_MASK)`, 520, in the
+                // 640-byte bin.
+                _ => 640,
+            };
+            assert_eq!(
+                heap.memory_usage(false) - start,
+                list + 32 * i,
+                "after resource {i}"
+            );
+        }
+        assert_eq!(ids, (1..=17).collect::<Vec<i64>>());
+        assert_eq!(heap.resources(), 17);
+        assert_eq!(heap.resource_at(8).map(|r| r.id()), Some(8));
+        assert!(heap.resource_at(18).is_none());
+        assert_eq!(heap.resources.used(), 18, "position zero is a hole");
     }
 }
