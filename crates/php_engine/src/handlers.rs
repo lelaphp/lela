@@ -734,9 +734,10 @@ pub(crate) fn init_method_call<T: Tier>(
         return threw(req, frame, &thrown);
     };
     let class = object.class();
+    let table = req.object_handlers(object.heap());
     let Some(function) = lowered
         .as_str_bytes()
-        .and_then(|lowered| req.method_named(class, lowered))
+        .and_then(|lowered| table.get_method(req, object, lowered))
     else {
         let thrown = undefined_method(req, class, &written);
         exec::free_operand(req, frame, code, op.op1_type, op.op1);
@@ -920,8 +921,9 @@ pub(crate) fn fetch_obj_r<T: Tier>(
     }
     let name = name.as_str_bytes().unwrap_or_default().to_vec();
     let container = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
-    let read = if let Some(object) = container.as_object() {
-        req.read_property(object.heap(), &name)
+    let read = if let Some(object) = container.as_object().copied() {
+        let table = req.object_handlers(object.heap());
+        table.read_property(req, object, &name)
     } else {
         crate::api::raising::warning(
             req,

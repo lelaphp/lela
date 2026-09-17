@@ -136,13 +136,13 @@ pub fn new_object(req: &mut Request, class: ClassId) -> Result<PhpObject, Thrown
     req.new_object(class)
 }
 
-/// `clone`: `zend_objects_clone_obj`, a fresh entry holding what the
-/// object holds with one more owner each, through the class's
-/// `clone_obj` handler and `__clone` once the table exists; an object
-/// with a native payload is php's `Error` for an uncloneable object
-/// until then.
+/// `clone`: the class's `clone_obj` (design §5.4), a fresh entry
+/// holding what the object holds with one more owner each and `__clone`
+/// served on it; a class with a null slot is php's `Error` for an
+/// uncloneable object, and a `__clone` the scope may not reach is
+/// `zend_bad_method_call`'s. The copy is the caller's, one owner.
 pub fn clone(req: &mut Request, object: &PhpObject) -> Result<PhpObject, Thrown> {
-    req.clone_object(object.heap())
+    req.clone_object(*object, None)
 }
 
 /// `zend_lookup_class`: the linked class named, autoloading if needed.
@@ -266,8 +266,8 @@ pub fn read_prop(req: &mut Request, object: &PhpObject, name: &[u8]) -> Result<V
     Ok(object.prop(req, name).unwrap_or_default())
 }
 
-/// Write a property through the class's `write_property` handler: the
-/// value is the object's from here.
+/// Write a property through the class's `write_property` (design
+/// §5.4): the value is the object's from here.
 pub fn write_prop(
     req: &mut Request,
     object: &PhpObject,

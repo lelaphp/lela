@@ -21,11 +21,12 @@ use php_heap::{
 use php_unit::decl::{ClassDecl, ClassKind, FunctionDecl, MethodDecl, Visibility};
 use php_unit::{FramelessEntry, Unit};
 
-use crate::api::abi::{Callable, IniVerdict};
+use crate::api::abi::{Callable, IniVerdict, ObjectHandlers, PropertyTest, Std};
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{
-    ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpRef, PhpString, Resource, Value, ValueRef,
+    ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpRef, PhpString, Resource, TypeTag, Value,
+    ValueRef,
 };
 use crate::engine::{RequestDescription, Shared};
 use crate::exec::{self, CallStage, CallState, Vm};
@@ -507,6 +508,27 @@ impl Request {
         called_scope: ClassId,
         arguments: &[Value],
     ) -> Result<Value, Thrown> {
+        self.serve_call(function, this, Some(called_scope), arguments)
+    }
+
+    /// `zend_call_function` over a native function: [`Request::serve_method`]
+    /// with no receiver and no called scope, what `Closure::__invoke`
+    /// serves for a closure over a function.
+    pub(crate) fn serve_function(
+        &mut self,
+        function: Function,
+        arguments: &[Value],
+    ) -> Result<Value, Thrown> {
+        self.serve_call(function, None, None, arguments)
+    }
+
+    fn serve_call(
+        &mut self,
+        function: Function,
+        this: Option<PhpObject>,
+        called_scope: Option<ClassId>,
+        arguments: &[Value],
+    ) -> Result<Value, Thrown> {
         let name = self.declared_name(function);
         let name = self.interned(name.as_bytes())?;
         for argument in arguments {
@@ -521,7 +543,7 @@ impl Request {
             arguments: arguments.to_vec(),
             count: arguments.len(),
             this,
-            called_scope: Some(called_scope),
+            called_scope,
             stage: CallStage::Serving,
             frameless: false,
             coerced: Vec::new(),
@@ -1530,6 +1552,25 @@ impl Request {
         Ok(object)
     }
 
+    /// [`Request::new_object`] carrying `payload` as the native slot of
+    /// design §5.4, `zend_object_alloc(sizeof(custom), ce)`: what an
+    /// internal class's methods reach through the receiver as `T`, and
+    /// what its table's `free_obj` and `get_gc` release and walk.
+    pub(crate) fn new_object_with<T: std::any::Any + Send>(
+        &mut self,
+        class: ClassId,
+        payload: T,
+    ) -> Result<PhpObject, Thrown> {
+        let slots = self.class_slots(class);
+        let allocated = self.heap.object_with(class.0, slots, payload);
+        let object = self.fatal_of(allocated).map(PhpObject::of)?;
+        if let Err(thrown) = self.init_properties(object) {
+            self.release(object.as_value());
+            return Err(thrown);
+        }
+        Ok(object)
+    }
+
     /// `object_properties_init`: each declared instance property's slot
     /// takes the class's default, `zend_update_class_constants` having
     /// evaluated the expression it was written as; a property with no
@@ -1604,21 +1645,12 @@ impl Request {
             .map(|(_, z)| Value::of_zval(z))
     }
 
-    /// `zend_std_read_property` under `BP_VAR_R`, the handler
-    /// `FETCH_OBJ_R` calls: `zend_get_property_offset` places the name,
-    /// a declared property's slot where the scope may see it, php's
-    /// `Error` `Cannot access private property C::$p` where it may not
-    /// (`zend_bad_property_access`), and the dynamic table for a name
-    /// the class did not declare. A typed slot nothing has written is
-    /// php's `Error` for a property read before initialization; an
-    /// untyped one that `unset` emptied reads as a dynamic name does,
-    /// and a name neither holds warns `Undefined property: C::$p` and
-    /// is `null`. What is read is one more owner of the value
-    /// (`ZVAL_COPY_DEREF`), a reference followed. A `__get` would be
-    /// served between the slot and the warning; no class here has one.
-    pub(crate) fn read_property(&mut self, o: Obj, name: &[u8]) -> Result<Value, Thrown> {
-        let class = ClassId(o.class());
-        let declared = self.class_decl(class).and_then(|decl| {
+    /// `zend_get_property_offset` over the class's declared instance
+    /// properties: the slot `name` sits in, its visibility and whether
+    /// it is typed; none for a name the class did not declare, which is
+    /// a dynamic property.
+    fn declared_slot(&self, class: ClassId, name: &[u8]) -> Option<(u32, Visibility, bool)> {
+        self.class_decl(class).and_then(|decl| {
             decl.properties
                 .iter()
                 .filter(|p| p.is_instance)
@@ -1631,28 +1663,66 @@ impl Request {
                         p.ty.is_some(),
                     )
                 })
-        });
+        })
+    }
+
+    /// `zend_verify_property_access`: whether the executed scope may
+    /// reach a property of `class` declared with `visibility`.
+    fn may_access(&self, class: ClassId, visibility: Visibility) -> bool {
+        let scope = self.executed_scope();
+        match visibility {
+            Visibility::Public => true,
+            _ if scope == Some(class) => true,
+            Visibility::Private => false,
+            Visibility::Protected => self.check_protected(class, scope),
+        }
+    }
+
+    /// `zend_bad_property_access`: php's `Error` for a property the
+    /// scope may not reach.
+    fn inaccessible_property(
+        &mut self,
+        class: ClassId,
+        visibility: Visibility,
+        name: &[u8],
+    ) -> Thrown {
+        let word = match visibility {
+            Visibility::Public => "public",
+            Visibility::Protected => "protected",
+            Visibility::Private => "private",
+        };
+        let class = self.class_name(class);
         let shown = String::from_utf8_lossy(name).into_owned();
-        if let Some((slot, visibility, typed)) = declared {
-            let scope = self.executed_scope();
-            let allowed = match visibility {
-                Visibility::Public => true,
-                _ if scope == Some(class) => true,
-                Visibility::Private => false,
-                Visibility::Protected => self.check_protected(class, scope),
-            };
-            if !allowed {
-                let word = match visibility {
-                    Visibility::Public => "public",
-                    Visibility::Protected => "protected",
-                    Visibility::Private => "private",
-                };
-                let class = self.class_name(class);
-                return Err(crate::api::raising::throw(
-                    self,
-                    "Error",
-                    &format!("Cannot access {word} property {class}::${shown}"),
-                ));
+        crate::api::raising::throw(
+            self,
+            "Error",
+            &format!("Cannot access {word} property {class}::${shown}"),
+        )
+    }
+
+    /// `zend_std_read_property` under `BP_VAR_R`, the handler
+    /// `FETCH_OBJ_R` calls: `zend_get_property_offset` places the name,
+    /// a declared property's slot where the scope may see it, php's
+    /// `Error` `Cannot access private property C::$p` where it may not
+    /// (`zend_bad_property_access`), and the dynamic table for a name
+    /// the class did not declare. A typed slot nothing has written is
+    /// php's `Error` for a property read before initialization; an
+    /// untyped one that `unset` emptied reads as a dynamic name does,
+    /// and a name neither holds warns `Undefined property: C::$p` and
+    /// is `null`. What is read is one more owner of the value
+    /// (`ZVAL_COPY_DEREF`), a reference followed. A `__get` would be
+    /// served between the slot and the warning; no class here has one.
+    pub(crate) fn read_property(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+    ) -> Result<Value, Thrown> {
+        let o = object.heap();
+        let class = object.class();
+        let shown = String::from_utf8_lossy(name).into_owned();
+        if let Some((slot, visibility, typed)) = self.declared_slot(class, name) {
+            if !self.may_access(class, visibility) {
+                return Err(self.inaccessible_property(class, visibility, name));
             }
             let z = o.slot(slot);
             if !z.is_undef() {
@@ -1687,18 +1757,20 @@ impl Request {
         Ok(Value::null())
     }
 
-    /// A property write, `zend_std_write_property` without the handler
-    /// in the way: into the declared slot, what it held released last,
-    /// or into the dynamic table, materialised on the first write and
-    /// separated when a cast shares it. The name is given up once the
-    /// table has taken its own owner of it.
-    pub(crate) fn object_set_prop(
+    /// `zend_std_write_property`, the `Std` slot: into the declared
+    /// slot, what it held released last, or into the dynamic table,
+    /// materialised on the first write and separated when a cast shares
+    /// it. The name is given up once the table has taken its own owner
+    /// of it. The visibility rule and the typed-property coercion arrive
+    /// with the kernel that writes a property from PHP code.
+    pub(crate) fn write_property(
         &mut self,
-        o: Obj,
+        object: PhpObject,
         name: PhpString,
         value: Value,
     ) -> Result<(), Thrown> {
-        if let Some(i) = self.prop_slot(ClassId(o.class()), name.as_bytes()) {
+        let o = object.heap();
+        if let Some(i) = self.prop_slot(object.class(), name.as_bytes()) {
             let z = value.into_zval();
             Heap::object_set_slot(&mut Hooks(self), o, i, z);
         } else {
@@ -1749,22 +1821,141 @@ impl Request {
         Ok(entries)
     }
 
-    /// `zend_objects_clone_obj` without `__clone`: a fresh entry of the
-    /// same class holding what this one holds, one more owner each; an
-    /// object with a native payload is its class's `clone_obj` to copy
-    /// and, with no handler table yet, php's `Error` for an uncloneable
-    /// object.
-    pub(crate) fn clone_object(&mut self, o: Obj) -> Result<PhpObject, Thrown> {
-        let cloned = self.heap.object_clone(o);
-        if let Some(new) = self.fatal_of(cloned)? {
-            return Ok(PhpObject::of(new));
+    /// `zend_objects_clone_obj`, the `Std` `clone_obj` slot: a fresh
+    /// entry of the same class holding what this one holds, one more
+    /// owner each, and the class's `__clone` served on it, the copy held
+    /// at one more owner meanwhile and given up with what `__clone`
+    /// threw. An object with a native payload is its class's own
+    /// `clone_obj` to copy, since the heap cannot copy a payload it only
+    /// knows how to drop; `Std` reaching one is the internal-error fatal
+    /// naming the class.
+    pub(crate) fn clone_members(&mut self, object: PhpObject) -> Result<PhpObject, Thrown> {
+        let cloned = self.heap.object_clone(object.heap());
+        let Some(new) = self.fatal_of(cloned)? else {
+            let class = self.class_name(object.class());
+            return self.fatal_of(Err(Fatal::Error(format!(
+                "InternalError: Std::clone_obj over an object of class {class}, whose native payload its own table must copy"
+            ))));
+        };
+        let new = PhpObject::of(new);
+        if self.method_named(object.class(), b"__clone").is_some()
+            && let Err(thrown) = crate::api::call::call_method(self, &new, b"__clone", &[])
+        {
+            self.release(new.as_value());
+            return Err(thrown);
         }
-        let class = self.class_name_of(PhpObject::of(o));
-        Err(crate::api::raising::throw(
+        Ok(new)
+    }
+
+    /// `zend_objects_clone_obj_with`, the `Std` `clone_obj_with` slot:
+    /// the class's `clone_obj`, then each of `properties` written on the
+    /// copy through the class's `write_property`, a reference with one
+    /// owner followed and one with more php's `Error`; the copy is given
+    /// up with what a write threw. The scope php writes under as
+    /// `fake_scope` is not modelled, so the writes are the executed
+    /// scope's.
+    pub(crate) fn clone_members_with(
+        &mut self,
+        object: PhpObject,
+        scope: Option<ClassId>,
+        properties: PhpArray,
+    ) -> Result<PhpObject, Thrown> {
+        let _ = scope;
+        let table = self.object_handlers(object.heap());
+        let Some(clone_obj) = table.clone_obj() else {
+            return Err(self.uncloneable(object));
+        };
+        let new = clone_obj(self, object)?;
+        for (key, value) in properties.snapshot() {
+            let value = match value.as_php_ref() {
+                Some(r) if r.as_value().refcount() > 1 => {
+                    self.release(new.as_value());
+                    return Err(crate::api::raising::throw(
+                        self,
+                        "Error",
+                        "Cannot assign by reference when cloning with updated properties",
+                    ));
+                }
+                Some(_) => value.deref(),
+                None => value,
+            };
+            let name = match key.to_prop_name(self) {
+                Ok(name) => name,
+                Err(thrown) => {
+                    self.release(new.as_value());
+                    return Err(thrown);
+                }
+            };
+            self.addref(&value);
+            if let Err(thrown) = table.write_property(self, new, name, value) {
+                self.release(new.as_value());
+                return Err(thrown);
+            }
+        }
+        Ok(new)
+    }
+
+    /// php's `Error` for a class whose `clone_obj` slot is null.
+    fn uncloneable(&mut self, object: PhpObject) -> Thrown {
+        let class = self.class_name(object.class());
+        crate::api::raising::throw(
             self,
             "Error",
             &format!("Trying to clone an uncloneable object of class {class}"),
-        ))
+        )
+    }
+
+    /// The body `ZEND_CLONE` and the `clone()` function share
+    /// (`Z/Zend/zend_vm_def.h:6010`, `Z/Zend/zend_builtin_functions.c:72`):
+    /// a null `clone_obj` is php's `Error` for an uncloneable object,
+    /// read before anything else; a `__clone` that is not public is held
+    /// to `zend_check_method_accessible` from the executed scope, the
+    /// `Error` `zend_bad_method_call`'s; then the class's `clone_obj`,
+    /// or its `clone_obj_with` where `with` names properties, php's
+    /// `Error` where the class has none. The copy is the caller's, one
+    /// owner.
+    pub(crate) fn clone_object(
+        &mut self,
+        object: PhpObject,
+        with: Option<PhpArray>,
+    ) -> Result<PhpObject, Thrown> {
+        let table = self.object_handlers(object.heap());
+        let Some(clone_obj) = table.clone_obj() else {
+            return Err(self.uncloneable(object));
+        };
+        if let Some(clone) = self.method_named(object.class(), b"__clone") {
+            self.check_method_access(clone, b"__clone")?;
+        }
+        match with.filter(|with| !with.is_empty()) {
+            Some(with) => {
+                let Some(clone_obj_with) = table.clone_obj_with() else {
+                    let class = self.class_name(object.class());
+                    return Err(crate::api::raising::throw(
+                        self,
+                        "Error",
+                        &format!(
+                            "Cloning objects of class {class} with updated properties is not supported"
+                        ),
+                    ));
+                };
+                let scope = self.executed_scope();
+                clone_obj_with(self, object, scope, with)
+            }
+            None => clone_obj(self, object),
+        }
+    }
+
+    /// A class's `clone_obj` over an object with a native payload: the
+    /// members copied as `clone_members` copies them and `payload`, the
+    /// class's copy of the old one, in the new object's slot. What the
+    /// copy names of the heap is the caller's to have taken an owner of.
+    pub(crate) fn clone_with_payload<T: std::any::Any + Send>(
+        &mut self,
+        object: PhpObject,
+        payload: T,
+    ) -> Result<PhpObject, Thrown> {
+        let cloned = self.heap.object_clone_with(object.heap(), payload);
+        self.fatal_of(cloned).map(PhpObject::of)
     }
 
     /// The native payload of `o` as `T`, borrowed for as long as the
@@ -1784,8 +1975,8 @@ impl Request {
     /// is every class the tables hold until a method can be declared;
     /// the visibility check, the pending-throwable rules and the
     /// shutdown warning arrive with the first destructor.
-    fn destruct(&mut self, o: Obj) {
-        let destructor: Option<Box<[u8]>> = self.class_decl(ClassId(o.class())).and_then(|decl| {
+    pub(crate) fn destruct(&mut self, object: PhpObject) {
+        let destructor: Option<Box<[u8]>> = self.class_decl(object.class()).and_then(|decl| {
             decl.methods
                 .iter()
                 .find(|m| m.function.name.0.eq_ignore_ascii_case(b"__destruct"))
@@ -1794,8 +1985,7 @@ impl Request {
         let Some(destructor) = destructor else {
             return;
         };
-        let this = PhpObject::of(o);
-        if let Err(thrown) = crate::api::call::call_method(self, &this, &destructor, &[]) {
+        if let Err(thrown) = crate::api::call::call_method(self, &object, &destructor, &[]) {
             self.leave_pending(&thrown);
         }
     }
@@ -1821,14 +2011,332 @@ impl Request {
         Heap::free_object_storage(&mut Hooks(self));
     }
 
-    /// `free_obj` for the native payload: what it names of the heap
-    /// given back before it is dropped. A `Closure` names its bound
-    /// `$this`, and nothing else with a payload exists yet.
-    fn free_native(&mut self, o: Obj) {
-        if let Some(closure) = self.heap.native_mut::<ClosureInfo>(o)
-            && let Some(this) = closure.this.take()
-        {
-            self.release(this.as_value());
+    /// The handler table an object of `class` is reached through
+    /// (design §5.4): the class's own where it declared one, else the
+    /// nearest ancestor's, as php inherits `create_object` and the table
+    /// it installs, and `Std`'s at a root and for every user class. The
+    /// walk is cut at a depth no declaration can make.
+    pub(crate) fn handlers_of(&self, class: ClassId) -> &'static dyn ObjectHandlers {
+        let mut at = Some(class);
+        for _ in 0..64 {
+            let Some(class) = at else {
+                break;
+            };
+            if let Some(Some(table)) = usize::try_from(class.0)
+                .ok()
+                .and_then(|i| self.shared.handlers.get(i))
+            {
+                return *table;
+            }
+            at = self.class_parent(class);
+        }
+        &Std
+    }
+
+    /// [`Request::handlers_of`] for the object's class, php's
+    /// `zobj->handlers`.
+    pub(crate) fn object_handlers(&self, o: Obj) -> &'static dyn ObjectHandlers {
+        self.handlers_of(ClassId(o.class()))
+    }
+
+    /// `zend_std_get_property_ptr_ptr` without the write: the declared
+    /// slot `name` sits in where the executed scope may reach it, and
+    /// none for a dynamic name or a property the scope may not see,
+    /// which the read and the write handlers take instead.
+    pub(crate) fn property_slot(&self, object: PhpObject, name: &[u8]) -> Option<u32> {
+        let class = object.class();
+        let (slot, visibility, _) = self.declared_slot(class, name)?;
+        self.may_access(class, visibility).then_some(slot)
+    }
+
+    /// `zend_std_has_property`: the declared slot where the scope may
+    /// reach it and it holds a value, else the dynamic table's entry;
+    /// then what `test` asks of the value: that it is there, that it is
+    /// not `null`, or that it is truthy. A slot the scope may not reach
+    /// or nothing wrote is `false`, as php answers with no `__isset`.
+    pub(crate) fn has_property(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+        test: PropertyTest,
+    ) -> bool {
+        let class = object.class();
+        let value = match self.declared_slot(class, name) {
+            Some((slot, visibility, _)) => {
+                if !self.may_access(class, visibility) {
+                    return false;
+                }
+                let z = object.heap().slot(slot);
+                (!z.is_undef()).then(|| Value::of_zval(z))
+            }
+            None => self.object_prop(object.heap(), name),
+        };
+        let Some(value) = value else {
+            return false;
+        };
+        let value = value.deref();
+        match test {
+            PropertyTest::Exists => true,
+            PropertyTest::Isset => value.tag() != TypeTag::Null,
+            PropertyTest::NotEmpty => crate::api::coerce::truthy(self, &value),
+        }
+    }
+
+    /// `zend_std_unset_property`: a declared slot the scope may reach is
+    /// left uninitialised, what it held released; one it may not reach
+    /// is php's `Error`; a dynamic name is removed from the table,
+    /// separated first where a cast shares it.
+    pub(crate) fn unset_property(&mut self, object: PhpObject, name: &[u8]) -> Result<(), Thrown> {
+        let class = object.class();
+        let o = object.heap();
+        if let Some((slot, visibility, _)) = self.declared_slot(class, name) {
+            if !self.may_access(class, visibility) {
+                return Err(self.inaccessible_property(class, visibility, name));
+            }
+            Heap::object_set_slot(&mut Hooks(self), o, slot, Zval::UNDEF);
+            return Ok(());
+        }
+        let Some(table) = o.properties() else {
+            return Ok(());
+        };
+        let table = self.array_separate(table)?;
+        self.heap.object_set_properties(o, table);
+        let key = self.interned(name)?;
+        self.array_del(table, php_heap::Key::Str(key.heap()));
+        Ok(())
+    }
+
+    /// `zend_class_implements_interface(ce, zend_ce_arrayaccess)`: the
+    /// object's class where it is an `ArrayAccess`, else
+    /// `zend_bad_array_access`, php's `Error` for an object used as an
+    /// array.
+    fn array_access(&mut self, object: PhpObject) -> Result<(), Thrown> {
+        let implements = self
+            .class_named(b"ArrayAccess")
+            .is_some_and(|interface| self.instance_of(object.class(), interface));
+        if implements {
+            return Ok(());
+        }
+        let class = self.class_name(object.class());
+        Err(crate::api::raising::throw(
+            self,
+            "Error",
+            &format!("Cannot use object of type {class} as array"),
+        ))
+    }
+
+    /// `zend_std_read_dimension`: `offsetGet` on an `ArrayAccess`, the
+    /// offset `null` for `$o[]`.
+    pub(crate) fn read_dimension(
+        &mut self,
+        object: PhpObject,
+        offset: Option<&Value>,
+    ) -> Result<Value, Thrown> {
+        self.array_access(object)?;
+        let offset = offset.cloned().unwrap_or_else(Value::null);
+        crate::api::call::call_method(self, &object, b"offsetGet", &[offset])
+    }
+
+    /// `zend_std_write_dimension`: `offsetSet` on an `ArrayAccess`, the
+    /// offset `null` for `$o[] = v`; `value` is given up either way.
+    pub(crate) fn write_dimension(
+        &mut self,
+        object: PhpObject,
+        offset: Option<&Value>,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        if let Err(thrown) = self.array_access(object) {
+            self.release(value);
+            return Err(thrown);
+        }
+        let offset = offset.cloned().unwrap_or_else(Value::null);
+        let served =
+            crate::api::call::call_method(self, &object, b"offsetSet", &[offset, value.clone()]);
+        self.release(value);
+        self.release(served?);
+        Ok(())
+    }
+
+    /// `zend_std_has_dimension`: `offsetExists` on an `ArrayAccess`,
+    /// and under `not_empty` the truth of `offsetGet` after it.
+    pub(crate) fn has_dimension(
+        &mut self,
+        object: PhpObject,
+        offset: &Value,
+        not_empty: bool,
+    ) -> Result<bool, Thrown> {
+        self.array_access(object)?;
+        let exists = crate::api::call::call_method(
+            self,
+            &object,
+            b"offsetExists",
+            std::slice::from_ref(offset),
+        )?;
+        let mut answer = crate::api::coerce::truthy(self, &exists);
+        self.release(exists);
+        if answer && not_empty {
+            let value = crate::api::call::call_method(
+                self,
+                &object,
+                b"offsetGet",
+                std::slice::from_ref(offset),
+            )?;
+            answer = crate::api::coerce::truthy(self, &value);
+            self.release(value);
+        }
+        Ok(answer)
+    }
+
+    /// `zend_std_unset_dimension`: `offsetUnset` on an `ArrayAccess`.
+    pub(crate) fn unset_dimension(
+        &mut self,
+        object: PhpObject,
+        offset: &Value,
+    ) -> Result<(), Thrown> {
+        self.array_access(object)?;
+        let served = crate::api::call::call_method(
+            self,
+            &object,
+            b"offsetUnset",
+            std::slice::from_ref(offset),
+        )?;
+        self.release(served);
+        Ok(())
+    }
+
+    /// `zend_std_get_constructor`: the class's `__construct` where the
+    /// executed scope may reach it, `zend_bad_constructor_call`'s
+    /// `Error` where it may not, and none for a class with no
+    /// constructor.
+    pub(crate) fn constructor_of(&mut self, object: PhpObject) -> Result<Option<Function>, Thrown> {
+        let Some(constructor) = self.method_named(object.class(), b"__construct") else {
+            return Ok(None);
+        };
+        self.check_method_access(constructor, b"__construct")?;
+        Ok(Some(constructor))
+    }
+
+    /// `zend_std_cast_object_tostring`: `__toString` for a string, its
+    /// value where it is one and php's `Error` where it is not; `true`
+    /// for a bool; and none for every other type and for a class with no
+    /// `__toString`.
+    pub(crate) fn cast_object(
+        &mut self,
+        object: PhpObject,
+        to: TypeTag,
+    ) -> Result<Option<Value>, Thrown> {
+        match to {
+            TypeTag::String => {
+                if self.method_named(object.class(), b"__tostring").is_none() {
+                    return Ok(None);
+                }
+                let value = crate::api::call::call_method(self, &object, b"__toString", &[])?;
+                if value.as_php_string().is_some() {
+                    return Ok(Some(value));
+                }
+                self.release(value);
+                let class = self.class_name(object.class());
+                Err(crate::api::raising::throw(
+                    self,
+                    "Error",
+                    &format!("Method {class}::__toString() must return a string value"),
+                ))
+            }
+            TypeTag::Bool => Ok(Some(Value::bool(true))),
+            _ => Ok(None),
+        }
+    }
+
+    /// `zend_std_get_debug_info`: what `__debugInfo` returns, an array's
+    /// rows or none for `null`, and `E_ERROR` for anything else; the
+    /// properties for a class with no `__debugInfo`.
+    pub(crate) fn debug_info(
+        &mut self,
+        object: PhpObject,
+    ) -> Result<Vec<(PhpString, Value)>, Thrown> {
+        if self.method_named(object.class(), b"__debuginfo").is_none() {
+            return self.object_entries(object.heap());
+        }
+        let value = crate::api::call::call_method(self, &object, b"__debugInfo", &[])?;
+        let rows = match value.as_array() {
+            Some(array) => {
+                let mut rows = Vec::new();
+                for (key, element) in array.snapshot() {
+                    rows.push((key.to_prop_name(self)?, element));
+                }
+                rows
+            }
+            None if value.tag() == TypeTag::Null => Vec::new(),
+            None => {
+                self.release(value);
+                return Err(crate::api::raising::fatal(
+                    self,
+                    "__debuginfo() must return an array",
+                ));
+            }
+        };
+        self.release(value);
+        Ok(rows)
+    }
+
+    /// `zend_std_get_closure`: the class's `__invoke` with the object as
+    /// its receiver and the class as its scope, and none for a class
+    /// with no `__invoke`.
+    pub(crate) fn invoke_closure(&mut self, object: PhpObject) -> Option<ClosureInfo> {
+        let function = self.method_named(object.class(), b"__invoke")?;
+        Some(ClosureInfo {
+            function,
+            this: Some(object),
+            scope: Some(object.class()),
+        })
+    }
+
+    /// `zend_std_compare_objects`: equal for one object; uncomparable
+    /// across classes; within one class each declared slot in turn,
+    /// both uninitialised passing, one uninitialised greater, both held
+    /// compared as `zend_compare` compares them, and then the dynamic
+    /// tables as arrays, a missing one empty. What is not an object on
+    /// either side is uncomparable here, the cast path being the
+    /// kernel's.
+    pub(crate) fn compare_objects(
+        &mut self,
+        left: &Value,
+        right: &Value,
+    ) -> Result<Option<std::cmp::Ordering>, Thrown> {
+        let (Some(a), Some(b)) = (left.as_object().copied(), right.as_object().copied()) else {
+            return Ok(None);
+        };
+        if a == b {
+            return Ok(Some(std::cmp::Ordering::Equal));
+        }
+        if a.class() != b.class() {
+            return Ok(None);
+        }
+        for i in 0..a.heap().slots() {
+            let (x, y) = (a.heap().slot(i), b.heap().slot(i));
+            match (x.is_undef(), y.is_undef()) {
+                (true, true) => {}
+                (true, false) | (false, true) => return Ok(Some(std::cmp::Ordering::Greater)),
+                (false, false) => {
+                    let order =
+                        crate::api::coerce::compare(self, &Value::of_zval(x), &Value::of_zval(y))?;
+                    if order != std::cmp::Ordering::Equal {
+                        return Ok(Some(order));
+                    }
+                }
+            }
+        }
+        match (a.heap().properties(), b.heap().properties()) {
+            (None, None) => Ok(Some(std::cmp::Ordering::Equal)),
+            (x, y) => {
+                let empty = self.heap.array();
+                let empty = self.fatal_of(empty)?;
+                let x = Value::array(PhpArray::of(x.unwrap_or(empty)));
+                let y = Value::array(PhpArray::of(y.unwrap_or(empty)));
+                let order = crate::api::coerce::compare(self, &x, &y);
+                self.release(Value::array(PhpArray::of(empty)));
+                order.map(Some)
+            }
         }
     }
 
@@ -3264,16 +3772,26 @@ impl HeapHooks for Hooks<'_> {
         &mut self.0.heap
     }
 
+    /// `dtor_obj`, through the table of the object's class (design §5.4).
     fn destruct(&mut self, obj: Obj) {
-        self.0.destruct(obj);
+        let table = self.0.object_handlers(obj);
+        table.dtor_obj(self.0, PhpObject::of(obj));
     }
 
+    /// `free_obj`, through the table: the payload's release is the
+    /// class's, and the drop after it is the heap's.
     fn free_native(&mut self, obj: Obj) {
-        self.0.free_native(obj);
+        let table = self.0.object_handlers(obj);
+        table.free_obj(self.0, PhpObject::of(obj));
     }
 
+    /// `get_gc`, through the table: what the payload owns, handed to the
+    /// collector's walk as zvals.
     fn gc_children(&mut self, obj: Obj, visit: &mut dyn FnMut(Zval)) {
-        let _ = (obj, visit);
+        let table = self.0.object_handlers(obj);
+        table.get_gc(self.0, PhpObject::of(obj), &mut |value| {
+            visit(value.to_zval());
+        });
     }
 
     /// `list_dtor_ex`: the type's destructor as registered, handed the

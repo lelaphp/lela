@@ -648,15 +648,16 @@ impl PhpObject {
         req.object_prop(self.0, name)
     }
 
-    /// Write one property by name, without a handler in the way. The
-    /// value is the object's from here, and so is the name, which is
+    /// Write one property by name through the class's `write_property`
+    /// (design §5.4). The value is the object's from here, and so is the name, which is
     /// given up once the slot or the table has taken its own, as
     /// `zend_hash_update` takes a key's. What the property held is
     /// released last, after the write, which is where a destructor is
     /// served (`zend_assign_to_variable`). The `Err` is the memory
     /// limit refusing the dynamic table.
     pub fn set_prop(&self, req: &mut Request, name: PhpString, value: Value) -> Result<(), Thrown> {
-        req.object_set_prop(self.0, name, value)
+        let table = req.object_handlers(self.0);
+        table.write_property(req, *self, name, value)
     }
 
     /// The native payload, as `T`, borrowed for as long as the request

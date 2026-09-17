@@ -6,15 +6,18 @@
 //! and their lines in `api.lock`.
 
 use std::any::{Any, TypeId};
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 
 use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, IniDecl, MethodDecl};
 
+use crate::api::call::Function;
+use crate::api::coerce::BinaryOp;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
-use crate::api::values::{PhpObject, PhpString, Value};
+use crate::api::values::{ClassId, ClosureInfo, PhpArray, PhpObject, PhpString, TypeTag, Value};
 
 /// The startup ini view an extension's engine state is built from: what
 /// the host set before the first request, immutable afterwards.
@@ -87,13 +90,20 @@ pub(crate) type EngineStateBuilder =
 /// The `RINIT` function.
 pub(crate) type Rinit = fn(&mut Request) -> Result<(), Thrown>;
 /// A native class as an extension declares it (design §7.1): the
-/// declaration, and beside it each method's declaration with its entry,
-/// the shape `functions` has. The methods given here are the class's;
-/// the engine places them on the declaration as it links it, so the
-/// declaration's own `methods` is left empty by an extension. A
-/// method's entry is served as a function's is, with the receiver on
-/// the frame as `Request::this` (ADR-0002).
-pub(crate) type NativeClassDecl = (ClassDecl, Vec<(MethodDecl, Entry)>);
+/// declaration, beside it each method's declaration with its entry,
+/// the shape `functions` has, and the class's handler table (design
+/// §5.4), none where the class takes its parent's, as php's
+/// `create_object` is inherited, and [`Std`]'s at a root. The methods
+/// given here are the class's; the engine places them on the
+/// declaration as it links it, so the declaration's own `methods` is
+/// left empty by an extension. A method's entry is served as a
+/// function's is, with the receiver on the frame as `Request::this`
+/// (ADR-0002).
+pub(crate) type NativeClassDecl = (
+    ClassDecl,
+    Vec<(MethodDecl, Entry)>,
+    Option<&'static dyn ObjectHandlers>,
+);
 
 /// One extension (design §7.1): declarations paired with entries,
 /// constants, ini entries, the lifecycle functions, and the two state
@@ -153,7 +163,29 @@ impl ExtensionBuilder {
         mut self,
         classes: Vec<(ClassDecl, Vec<(MethodDecl, Entry)>)>,
     ) -> ExtensionBuilder {
-        self.classes.extend(classes);
+        self.classes.extend(
+            classes
+                .into_iter()
+                .map(|(decl, methods)| (decl, methods, None)),
+        );
+        self
+    }
+
+    /// One native class with its own handler table (design §5.4): the
+    /// declaration and its methods' entries as [`ExtensionBuilder::classes`]
+    /// takes them, and beside them the [`ObjectHandlers`] the kernels
+    /// dispatch to for an object of the class, `Std` for every slot the
+    /// table leaves to it. A class declared through `classes` takes its
+    /// parent's table, and `Std` at a root, as php inherits
+    /// `create_object`.
+    #[must_use]
+    pub fn class_with(
+        mut self,
+        class: ClassDecl,
+        methods: Vec<(MethodDecl, Entry)>,
+        handlers: &'static dyn ObjectHandlers,
+    ) -> ExtensionBuilder {
+        self.classes.push((class, methods, Some(handlers)));
         self
     }
 
@@ -323,7 +355,322 @@ pub struct Variadic<T>(pub Vec<T>);
 /// on the object, its release and its tracing derived from the type.
 pub trait NativeClass: Any + Send + Sync {}
 
-/// Seam 2 (design §4.3): Zend's 25 handler slots, `Std` being every
-/// slot's default. The slots land with the linker in week two and grow
-/// `api.lock` by their names.
-pub trait ObjectHandlers: Send + Sync {}
+/// What `has_property` is asked of a property, php's
+/// `ZEND_PROPERTY_ISSET`, `ZEND_PROPERTY_NOT_EMPTY` and
+/// `ZEND_PROPERTY_EXISTS`: `isset($o->p)`, `empty($o->p)` and
+/// `property_exists`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyTest {
+    Isset,
+    NotEmpty,
+    Exists,
+}
+
+/// What `get_properties_for` is asked for, php's `zend_prop_purpose`:
+/// the five readers of an object's properties that a class may answer
+/// each in its own way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyPurpose {
+    Debug,
+    ArrayCast,
+    Serialize,
+    VarExport,
+    Json,
+}
+
+/// The `clone_obj` slot: a fresh object holding what this one holds,
+/// one owner, the caller's.
+pub type CloneObj = fn(&mut Request, PhpObject) -> Result<PhpObject, Thrown>;
+/// The `clone_obj_with` slot: `clone($o, [...])`, the clone with each
+/// named property written through `write_property` from `scope`.
+pub type CloneObjWith =
+    fn(&mut Request, PhpObject, Option<ClassId>, PhpArray) -> Result<PhpObject, Thrown>;
+
+/// Seam 2 (design §4.3, §5.4): Zend's 25 handler slots in 8.5 order
+/// (`Z/Zend/zend_object_handlers.h:206-235`), one method each, the
+/// default bodies being [`Std`]'s, the user-class semantics, so an
+/// internal class overrides the slots it needs and inherits the rest.
+/// The table is reached from an object through its class; the kernels
+/// call the table, the methods here call the kernels, and nothing else
+/// knows how an `ArrayObject` indexes.
+///
+/// A slot php marks required is a method with a default body. A slot
+/// php marks optional answers `None` for php's null: `clone_obj` and
+/// `clone_obj_with` answer the function the slot holds, since `clone`
+/// reads the null before it looks at `__clone` and before it calls
+/// anything; `count_elements`, `get_debug_info`, `get_closure`,
+/// `do_operation` and `get_properties_for` answer the value or `None`
+/// in one call, since their kernels fall back either way.
+pub trait ObjectHandlers: Send + Sync {
+    /// `free_obj` for the native payload: what the payload names of the
+    /// heap given back before the payload is dropped, with the members
+    /// already freed and the object's bucket already invalid. `Std`
+    /// releases nothing, a class with no payload naming nothing.
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        let _ = (req, object);
+    }
+
+    /// `dtor_obj`, `zend_objects_destroy_object`: the class's
+    /// `__destruct` served on the object, which the store holds at one
+    /// owner meanwhile.
+    fn dtor_obj(&self, req: &mut Request, object: PhpObject) {
+        req.destruct(object);
+    }
+
+    /// `clone_obj`, `zend_objects_clone_obj` at `Std`: the members
+    /// copied with one more owner each and `__clone` served on the copy.
+    /// `None` is php's null slot, an uncloneable class.
+    fn clone_obj(&self) -> Option<CloneObj> {
+        Some(Request::clone_members)
+    }
+
+    /// `clone_obj_with`, `zend_objects_clone_obj_with` at `Std`: the
+    /// class's `clone_obj`, then each given property written through
+    /// `write_property`. `None` is php's null slot, a class whose
+    /// objects `clone($o, [...])` refuses.
+    fn clone_obj_with(&self) -> Option<CloneObjWith> {
+        Some(Request::clone_members_with)
+    }
+
+    /// `read_property` under `BP_VAR_R`, `zend_std_read_property` at
+    /// `Std`: one more owner of the value read, a reference followed.
+    fn read_property(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        name: &[u8],
+    ) -> Result<Value, Thrown> {
+        req.read_property(object, name)
+    }
+
+    /// `write_property`, `zend_std_write_property` at `Std`: `value` is
+    /// the object's from here and `name` is given up once the object
+    /// has taken its own.
+    fn write_property(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        name: PhpString,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        req.write_property(object, name, value)
+    }
+
+    /// `read_dimension`, `zend_std_read_dimension` at `Std`:
+    /// `offsetGet` on an `ArrayAccess`, `null` for `$o[]`, and php's
+    /// `Error` for an object of any other class.
+    fn read_dimension(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        offset: Option<&Value>,
+    ) -> Result<Value, Thrown> {
+        req.read_dimension(object, offset)
+    }
+
+    /// `write_dimension`, `zend_std_write_dimension` at `Std`:
+    /// `offsetSet` on an `ArrayAccess`, and php's `Error` otherwise.
+    /// `value` is given up either way.
+    fn write_dimension(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        offset: Option<&Value>,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        req.write_dimension(object, offset, value)
+    }
+
+    /// `get_property_ptr_ptr`, `zend_std_get_property_ptr_ptr` at
+    /// `Std`: the declared slot a write fetch may address in place,
+    /// `OBJ_PROP_NUM`'s index, and `None` where the fetch goes through
+    /// `read_property` and `write_property` instead.
+    fn get_property_ptr_ptr(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        name: &[u8],
+    ) -> Option<u32> {
+        req.property_slot(object, name)
+    }
+
+    /// `has_property`, `zend_std_has_property` at `Std`: whether the
+    /// property is there, is set, or is not empty, as `test` asks. A
+    /// class with `__isset` would serve it here; the answer is a `bool`
+    /// until one is declared.
+    fn has_property(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        name: &[u8],
+        test: PropertyTest,
+    ) -> bool {
+        req.has_property(object, name, test)
+    }
+
+    /// `unset_property`, `zend_std_unset_property` at `Std`: the
+    /// declared slot left uninitialised or the dynamic entry removed,
+    /// what it held released.
+    fn unset_property(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        name: &[u8],
+    ) -> Result<(), Thrown> {
+        req.unset_property(object, name)
+    }
+
+    /// `has_dimension`, `zend_std_has_dimension` at `Std`:
+    /// `offsetExists` on an `ArrayAccess`, and `offsetGet`'s truth after
+    /// it under `not_empty`, `empty($o[$k])`.
+    fn has_dimension(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        offset: &Value,
+        not_empty: bool,
+    ) -> Result<bool, Thrown> {
+        req.has_dimension(object, offset, not_empty)
+    }
+
+    /// `unset_dimension`, `zend_std_unset_dimension` at `Std`:
+    /// `offsetUnset` on an `ArrayAccess`.
+    fn unset_dimension(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        offset: &Value,
+    ) -> Result<(), Thrown> {
+        req.unset_dimension(object, offset)
+    }
+
+    /// `get_properties`, `zend_std_get_properties` at `Std`: the
+    /// declared slots that hold a value then the dynamic table, in
+    /// `rebuild_object_properties`' order; views, no owner taken.
+    fn get_properties(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+    ) -> Result<Vec<(PhpString, Value)>, Thrown> {
+        req.object_entries(object.heap())
+    }
+
+    /// `get_method`, `zend_std_get_method` at `Std`: the method under
+    /// the lowered name, by identity, and none where the class has no
+    /// entry of that name. The access rule is the caller's, as php's
+    /// `INIT_METHOD_CALL` applies it after the lookup.
+    fn get_method(&self, req: &mut Request, object: PhpObject, lowered: &[u8]) -> Option<Function> {
+        req.method_named(object.class(), lowered)
+    }
+
+    /// `get_constructor`, `zend_std_get_constructor` at `Std`: the
+    /// class's `__construct` where the calling scope may reach it, php's
+    /// `Error` where it may not, and none for a class with no
+    /// constructor.
+    fn get_constructor(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+    ) -> Result<Option<Function>, Thrown> {
+        req.constructor_of(object)
+    }
+
+    /// `get_class_name`, `zend_std_get_class_name` at `Std`: `ce->name`.
+    fn get_class_name(&self, req: &mut Request, object: PhpObject) -> String {
+        req.class_name(object.class())
+    }
+
+    /// `cast_object`, `zend_std_cast_object_tostring` at `Std`: the
+    /// `__toString` of the class for a string, `true` for a bool, and
+    /// `None`, php's `FAILURE`, for every other type and for a class
+    /// with no `__toString`.
+    fn cast_object(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        to: TypeTag,
+    ) -> Result<Option<Value>, Thrown> {
+        req.cast_object(object, to)
+    }
+
+    /// `count_elements`: what `count()` answers for the object, and
+    /// `None` at `Std`, php's null slot, so `count()` asks `Countable`
+    /// and throws for a class that is not.
+    fn count_elements(&self, req: &mut Request, object: PhpObject) -> Result<Option<i64>, Thrown> {
+        let _ = (req, object);
+        Ok(None)
+    }
+
+    /// `get_debug_info`: the rows `var_dump` and `print_r` show in place
+    /// of the properties; `zend_std_get_debug_info` at `Std`, what
+    /// `__debugInfo` returns, and the properties for a class with none.
+    /// `None` is php's null slot.
+    fn get_debug_info(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+    ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
+        req.debug_info(object).map(Some)
+    }
+
+    /// `get_closure`: the function a call on the object serves, with
+    /// its receiver and scope; `zend_std_get_closure` at `Std`,
+    /// `__invoke` with the object as its receiver, and none for a class
+    /// with no `__invoke`, which is not callable.
+    fn get_closure(&self, req: &mut Request, object: PhpObject) -> Option<ClosureInfo> {
+        req.invoke_closure(object)
+    }
+
+    /// `get_gc`: the values the object's payload owns, for the cycle
+    /// collector's walk. The declared slots and the dynamic table are
+    /// the heap's to walk; `Std` names nothing more.
+    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+        let _ = (req, object, visit);
+    }
+
+    /// `do_operation`: the value an operator over the object answers,
+    /// `right` none for a unary one; `None` at `Std`, php's null slot,
+    /// so the operator is `zend_binop_error`'s.
+    fn do_operation(
+        &self,
+        req: &mut Request,
+        op: BinaryOp,
+        left: &Value,
+        right: Option<&Value>,
+    ) -> Result<Option<Value>, Thrown> {
+        let _ = (req, op, left, right);
+        Ok(None)
+    }
+
+    /// `compare`, `zend_std_compare_objects` at `Std`: equal for one
+    /// object, uncomparable (`None`, php's `ZEND_UNCOMPARABLE`) across
+    /// classes, and the declared slots then the dynamic tables in order
+    /// within one class.
+    fn compare(
+        &self,
+        req: &mut Request,
+        left: &Value,
+        right: &Value,
+    ) -> Result<Option<Ordering>, Thrown> {
+        req.compare_objects(left, right)
+    }
+
+    /// `get_properties_for`: the rows one purpose reads; `None` at
+    /// `Std`, php's null slot, so every purpose reads `get_properties`.
+    fn get_properties_for(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        purpose: PropertyPurpose,
+    ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
+        let _ = (req, object, purpose);
+        Ok(None)
+    }
+}
+
+/// `std_object_handlers`: every slot its default, the table a user
+/// class and a native class that declares none are reached through.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Std;
+
+impl ObjectHandlers for Std {}

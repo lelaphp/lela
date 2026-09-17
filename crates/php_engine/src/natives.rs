@@ -39,9 +39,24 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     natives
 }
 
-/// The two that read the linked table (#259).
+/// The two that read the linked table (#259), and `clone`, which reads
+/// an object's handler table (#281).
 fn class_natives() -> Vec<(FunctionDecl, Entry)> {
     vec![
+        (
+            declared(
+                b"clone",
+                &[
+                    parameter(b"object", Some(Type::Object), false),
+                    Parameter {
+                        default: Some(ConstExpr::Array(Vec::new())),
+                        ..parameter(b"withProperties", Some(Type::Array), false)
+                    },
+                ],
+                Some(Type::Object),
+            ),
+            clone as Entry,
+        ),
         (
             declared(
                 b"class_exists",
@@ -161,6 +176,50 @@ fn zend_natives() -> Vec<(FunctionDecl, Entry)> {
             defined as Entry,
         ),
     ]
+}
+
+/// `clone(object $object, array $withProperties = []): object`, php
+/// 8.5's `ZEND_FUNCTION(clone)` (`Z/Zend/zend_builtin_functions.c:72`),
+/// kept in step with `ZEND_CLONE`, which the compiler emits for a call
+/// with one argument: the class's `clone_obj` (design §5.4) through
+/// [`Request::clone_object`], or its `clone_obj_with` where
+/// `$withProperties` names any, the copy the caller's with one owner.
+/// A first argument that is no object is php's `TypeError`.
+///
+/// ```php
+/// class C { public $p = 1; }
+/// $c = new C; $d = clone($c);
+/// var_dump($d->p, $c === $d, $d instanceof C);
+/// ```
+/// ```expect
+/// int(1)
+/// bool(false)
+/// bool(true)
+/// ```
+fn clone(req: &mut Request) -> Result<Value, Thrown> {
+    let count = req.argument_count();
+    if !(1..=2).contains(&count) {
+        return Err(wrong_argument_count(req, 1, 2, count));
+    }
+    let given = req.argument(1).unwrap_or_default().deref();
+    let Some(object) = given.as_object().copied() else {
+        let tail = format!(
+            "must be of type object, {} given",
+            crate::ops::value_name(req, &given)
+        );
+        return Err(arg_type_error(req, 1, &tail));
+    };
+    let with = if count == 2 {
+        let with = req.argument(2).unwrap_or_default();
+        coerce_param(req, &with, &Type::Array, 2)?
+            .deref()
+            .as_array()
+            .copied()
+    } else {
+        None
+    };
+    req.clone_object(object, with)
+        .map(|cloned| cloned.as_value())
 }
 
 /// `class_exists(string $class, bool $autoload = true): bool`, php's

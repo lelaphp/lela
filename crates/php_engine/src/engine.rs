@@ -22,7 +22,7 @@ use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
 use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, Name};
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
-use crate::api::abi::{Cache, Entry, Extension, StartupIni};
+use crate::api::abi::{Cache, Entry, Extension, ObjectHandlers, StartupIni};
 use crate::api::request::{Aside, Ending, Request};
 use crate::api::values::{ClassId, Value};
 use crate::exec;
@@ -122,6 +122,10 @@ pub(crate) struct Shared {
     /// order, each with its methods on it: what a `ClassId` below the
     /// request's own declarations indexes.
     pub(crate) classes: Vec<ClassDecl>,
+    /// Each native class's handler table (design §5.4), one row per row
+    /// of `classes`: the table the class declared, or none where it
+    /// takes its parent's, `Std`'s at a root.
+    pub(crate) handlers: Vec<Option<&'static dyn ObjectHandlers>>,
     /// Each native method's entry, in the order the classes declare
     /// them: a `Function` past `functions` indexes here.
     pub(crate) methods: Vec<NativeMethod>,
@@ -422,11 +426,13 @@ impl EngineBuilder {
         // and each method's entry is numbered in the order it is met.
         let zend = crate::classes::zend_classes();
         let mut classes: Vec<ClassDecl> = Vec::new();
+        let mut handlers = Vec::new();
         let mut methods = Vec::new();
-        for (decl, entries) in zend
+        for (decl, entries, table) in zend
             .iter()
             .chain(extensions.iter().flat_map(|e| e.classes.iter()))
         {
+            handlers.push(*table);
             let mut decl = decl.clone();
             let class = ClassId(u32::try_from(classes.len()).unwrap_or(u32::MAX));
             for (method, entry) in entries {
@@ -472,6 +478,7 @@ impl EngineBuilder {
                 functions,
                 frameless,
                 classes,
+                handlers,
                 methods,
                 constants,
                 engine_states,
