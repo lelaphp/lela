@@ -3293,10 +3293,25 @@ impl Request {
     /// here is that: the request is ending and nothing is served.
     ///
     /// No PHP snippet reaches that fatal, in this engine or in php,
-    /// whose own corpus has no test naming it: the throwable's class
-    /// would have to declare `__destruct`, which only a user class
-    /// extending `Throwable` can, and only `throw` makes one pending.
-    /// The unit test beside this builds the state the release cannot.
+    /// whose own corpus has no test naming it (harness §8). It would
+    /// take the pending throwable's last owner released while the slot
+    /// still holds it, and php releases one in that state in two places
+    /// only: `zend_clear_exception` empties the slot before
+    /// `OBJ_RELEASE`, under php's own comment that the throwable may
+    /// have a destructor (`Z/Zend/zend_exceptions.c:251-254`), and
+    /// `zend_user_exception_handler` releases `EG(exception)` before
+    /// emptying it (`Z/Zend/zend.c:1949-1953`) but is reached only with
+    /// `EG(current_execute_data)` null, where `zend_call_function`'s
+    /// tail renders the handler's own throwable uncaught and
+    /// `zend_bailout`s first. `zend_exception_set_previous`, called from
+    /// `zend_throw_exception_internal` before the slot is reassigned
+    /// (`Z/Zend/zend_exceptions.c:201-202`), gives up the slot's object
+    /// only where a `previous` chain or the throw itself holds it a
+    /// second time. This engine's slot is the one owner of what stands
+    /// in it and nothing releases that while it stands, so the state is
+    /// unreachable here for its own reason as well. The unit test beside
+    /// this builds what the release cannot, and #458 is the question
+    /// that leaves for a person.
     fn save_pending(&mut self, object: PhpObject) -> Saved {
         match self.pending {
             Some(pending) if pending.index() == object.index() => {
@@ -6563,11 +6578,11 @@ mod tests {
     /// (`Z/Zend/zend_objects.c:157`): a destructor served on the
     /// throwable that is itself pending ends the request there, with no
     /// site, and the destructor is not served. No PHP snippet reaches
-    /// it, here or in php, whose corpus names it nowhere: the
-    /// throwable's class would have to declare `__destruct`, which
-    /// only a user class extending `Throwable` can, and only `throw`
-    /// makes one pending. So the state is built here instead of
-    /// witnessed. The fatal carries no trace of its own, because php
+    /// it, here or in php, whose corpus names it nowhere, and
+    /// [`Request::save_pending`] says which of php's releases would
+    /// have to be the one that reaches it. So the state is built here
+    /// instead of witnessed, which is what harness §8 allows and #390
+    /// settled. The fatal carries no trace of its own, because php
     /// fetches one only while nothing is pending, and here the
     /// throwable is.
     #[test]
