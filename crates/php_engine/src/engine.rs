@@ -746,13 +746,19 @@ impl Engine {
             None => {}
         }
         // `php_request_shutdown`'s order (design §5.10): the destructors
-        // of what is still live, then every output handler popped
+        // of what is still live, which is `zend_call_destructors`, the
+        // symbol table walked in reverse and the object store walked
+        // after it; then every output handler popped
         // (`php_output_end_all`), before the extensions' `rshutdown`, in
         // reverse bundle order; the output layer deactivated after
         // them, with the header block committed if nothing had; then
-        // `shutdown_executor`, which closes the open resources first
+        // `shutdown_executor`, which closes the open resources first,
+        // destroys the symbol table after them
         // (`zend_shutdown_executor_values`) and frees the object
-        // storage after them.
+        // storage last. The globals stand through all of it, as php's
+        // `EG(symbol_table)` does, so the shutdown functions and an
+        // extension's `rshutdown` read a request that still has them.
+        req.shutdown_destructors();
         req.call_destructors();
         crate::output::end_all(&mut req);
         for extension in self.shared.extensions.iter().rev() {
@@ -762,6 +768,7 @@ impl Engine {
         }
         crate::output::deactivate(&mut req);
         req.close_resources();
+        req.destroy_symbol_table();
         req.free_object_storage();
         // `php_error_cb` rendered the fatal where it was raised, on
         // whichever of the two streams the ini entries name; what is left
@@ -893,6 +900,14 @@ fn note_compiled(req: &mut Request, unit: &Arc<Unit>) {
 /// compiled to raised first and `$argv` and `$argc` seeded into the
 /// frame's CVs ([`Request::seed_argv`]); the loop's fatal, if any, ends
 /// the request.
+///
+/// The frame is left the way php leaves the main one, which is not the
+/// way it leaves any other: its CVs are `EG(symbol_table)`, so
+/// `zend_detach_symbol_table` moves them to the request before the pop
+/// ([`Request::detach_symbol_table`]) and the pop frees a frame whose
+/// CVs are all `UNDEF`. The variables are then the request's, through
+/// the shutdown functions and the extensions' `rshutdown`, until
+/// `shutdown_executor` destroys the table (design §5.10).
 fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
     note_compiled(req, unit);
     if !req.declare_classes(unit) {
@@ -901,12 +916,14 @@ fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
     req.declare_functions(unit);
     let frame = req.push_frame(Arc::clone(unit));
     if req.seed_argv(frame, unit).is_err() {
+        req.detach_symbol_table(frame, unit);
         req.pop_frame();
         return;
     }
     if let Err(fatal) = entry(req, frame) {
         req.end_in(&fatal);
     }
+    req.detach_symbol_table(frame, unit);
     req.pop_frame();
 }
 

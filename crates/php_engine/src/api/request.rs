@@ -296,6 +296,17 @@ pub struct Request {
     ending: Option<Ending>,
     resources: Resources,
     superglobals: Vec<(Vec<u8>, PhpArray)>,
+    /// php's `EG(symbol_table)`, the main op array's variables (design
+    /// §5.6, §5.10): its CVs, which `zend_detach_symbol_table` moves
+    /// here in the order the compiler numbered them, each name once and
+    /// this table their one owner. It outlives the frame, so a variable
+    /// the program wrote at the top level is still an owner while the
+    /// shutdown functions are served; `shutdown_destructors` walks the
+    /// table in reverse before the store's walk, and
+    /// `zend_shutdown_executor_values` destroys it after the
+    /// extensions' `rshutdown`. `$GLOBALS`, `compact`, `extract` and
+    /// `get_defined_vars` read this table (design §5.6).
+    symbols: Vec<(Vec<u8>, Value)>,
     constants: Vec<(Vec<u8>, Value)>,
     wrappers: Vec<StreamWrapper>,
     filters: Vec<StreamFilter>,
@@ -376,6 +387,7 @@ impl Request {
             ending: None,
             resources: Resources::default(),
             superglobals: Vec::new(),
+            symbols: Vec::new(),
             constants: Vec::new(),
             wrappers: Vec::new(),
             filters: Vec::new(),
@@ -2934,13 +2946,155 @@ impl Request {
         self.vm.innermost().is_some() || self.vm.serving_call().is_some()
     }
 
-    /// `zend_objects_store_call_destructors`, the second step of
-    /// `php_request_shutdown` (design §5.10): every live object's
+    /// `zend_detach_symbol_table` (`Z/Zend/zend_execute_API.c:1892`),
+    /// what php does when it leaves the main op array's frame, the one
+    /// it marks `ZEND_CALL_TOP_CODE` and gives `EG(symbol_table)` as
+    /// its own (design §5.6): every CV that holds something is moved
+    /// into the symbol table under the name the compiler numbered it
+    /// by, the slot left `UNDEF` so the pop releases nothing, and a
+    /// name whose CV holds nothing is deleted from the table. The
+    /// variables are the request's from here and outlive the frame,
+    /// which is why `$a = new A;` is still an owner while the shutdown
+    /// functions are served and the destructor waits for
+    /// [`Request::shutdown_destructors`].
+    pub(crate) fn detach_symbol_table(&mut self, frame: FrameRef, unit: &Unit) {
+        let names: Vec<Vec<u8>> = exec::code_of(unit)
+            .vars
+            .iter()
+            .map(|name| name.0.to_vec())
+            .collect();
+        for (at, name) in names.into_iter().enumerate() {
+            let value = self.take_slot(frame, u32::try_from(at).unwrap_or(u32::MAX));
+            if value.tag() == TypeTag::Undef {
+                self.symbol_del(&name);
+            } else {
+                self.symbol_update(name, value);
+            }
+        }
+    }
+
+    /// One symbol written, `zend_hash_update`: `value` is the table's
+    /// and what stood under the name is released after the write, the
+    /// name keeping the position it had, as php's update keeps a
+    /// bucket's and only a name the table has not appends.
+    fn symbol_update(&mut self, name: Vec<u8>, value: Value) {
+        if let Some(at) = self.symbols.iter().position(|(key, _)| *key == name) {
+            let old = std::mem::replace(&mut self.symbols[at].1, value);
+            self.release(old);
+            return;
+        }
+        self.symbols.push((name, value));
+    }
+
+    /// One symbol deleted, `zend_hash_del`: the name gone and what it
+    /// held released; a name the table has not is no error, as php's
+    /// delete of a missing key is none.
+    fn symbol_del(&mut self, name: &[u8]) {
+        let Some(at) = self.symbols.iter().position(|(key, _)| key == name) else {
+            return;
+        };
+        let (_, value) = self.symbols.remove(at);
+        self.release(value);
+    }
+
+    /// `shutdown_destructors` (`Z/Zend/zend_execute_API.c:251`), the
+    /// first half of `zend_call_destructors` and so the first
+    /// destructor php serves at shutdown (design §5.10): the symbol
+    /// table walked in reverse, `zend_hash_reverse_apply` over
+    /// `zval_call_destructor`, each symbol that holds an object nothing
+    /// else owns deleted, which serves that object's destructor; the
+    /// walk repeated while the count of symbols moves, since one
+    /// destructor's work can drop another symbol's last other owner.
+    /// [`Request::call_destructors`], the store's walk, runs after it
+    /// and takes what is left.
+    ///
+    /// So two top-level variables holding an object each are served in
+    /// reverse declaration order, the order the CVs were numbered read
+    /// backwards, and not in the order the store made them.
+    ///
+    /// ```php
+    /// class A {
+    ///     public $n;
+    ///     function __construct($n) { $this->n = $n; }
+    ///     function __destruct() { echo "d", $this->n, "\n"; }
+    /// }
+    /// $a = new A(1);
+    /// $b = new A(2);
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// end
+    /// d2
+    /// d1
+    /// ```
+    ///
+    /// A global whose object has an owner beside the symbol is kept by
+    /// the walk and served by the store's after it, in store order, so
+    /// the two orders are visible in one program: `$b`, owned by its
+    /// symbol alone, is served first and backwards; `$a` and `$c`, each
+    /// holding itself, are served after it and forwards.
+    ///
+    /// ```php
+    /// class A {
+    ///     public $n;
+    ///     public $self;
+    ///     function __construct($n) { $this->n = $n; }
+    ///     function __destruct() { echo "d", $this->n, "\n"; }
+    /// }
+    /// $a = new A(1);
+    /// $a->self = $a;
+    /// $b = new A(2);
+    /// $c = new A(3);
+    /// $c->self = $c;
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// end
+    /// d2
+    /// d1
+    /// d3
+    /// ```
+    pub(crate) fn shutdown_destructors(&mut self) {
+        loop {
+            let symbols = self.symbols.len();
+            let mut at = self.symbols.len();
+            while at > 0 {
+                at -= 1;
+                let alone = self
+                    .symbols
+                    .get(at)
+                    .is_some_and(|(_, value)| value.as_object().is_some() && value.refcount() == 1);
+                if alone {
+                    let (_, value) = self.symbols.remove(at);
+                    self.release(value);
+                }
+            }
+            if symbols == self.symbols.len() {
+                break;
+            }
+        }
+    }
+
+    /// `zend_hash_graceful_reverse_destroy(&EG(symbol_table))` in
+    /// `zend_shutdown_executor_values`
+    /// (`Z/Zend/zend_execute_API.c:271`), after the open resources are
+    /// closed and before the object storage is freed: every symbol left
+    /// released from the last to the first. The destructors are behind
+    /// the request by now, `zend_objects_store_call_destructors` having
+    /// marked every object, so this frees and serves nothing.
+    pub(crate) fn destroy_symbol_table(&mut self) {
+        while let Some((_, value)) = self.symbols.pop() {
+            self.release(value);
+        }
+    }
+
+    /// `zend_objects_store_call_destructors`, the second half of
+    /// `zend_call_destructors` (design §5.10): every live object's
     /// destructor not yet served, in store order, and what one leaves
     /// pending rendered as the uncaught fatal, as `zend_call_function`
-    /// renders it with no frame to throw into. The symbol table php
-    /// walks in reverse before this is the main frame's CVs here, given
-    /// up when it popped (#280).
+    /// renders it with no frame to throw into. What the symbol table
+    /// owned alone was served before this by
+    /// [`Request::shutdown_destructors`].
     ///
     /// An object a variable no longer names alone outlives that walk,
     /// so the store's is what serves it: each of these holds itself,
