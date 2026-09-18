@@ -22,10 +22,22 @@
 //! at. `ReflectionException` is declared here as `php_reflection.stub.php`
 //! declares it, under `Exception`.
 //!
-//! Rendered so far: the header, and the `Functions` block with each
-//! function's parameters and return. An extension's `INI`, `Constants`
-//! and `Classes` blocks, `_extension_ini_string`, `_const_string` and
-//! `_class_string`, are not rendered yet; `ctype` has none of the three.
+//! Rendered: `_extension_string`'s header, `Constants`, `Functions`
+//! and `Classes` blocks, `_const_string`, `_class_string` with its
+//! `_class_const_string`, `_property_string` and `_function_string`
+//! rows over the linked tables, and `ReflectionClass::__toString` and
+//! `ReflectionMethod::__toString` over the same two. What php reads off
+//! one class entry after `zend_do_inheritance` and
+//! `zend_do_implement_interfaces` ran, the function table with each
+//! method's scope and prototype, the interface list in its order, the
+//! constants and the properties with their shadows, is computed here
+//! by the same rules over the declarations (`linked_methods`,
+//! `linked_interfaces`, `linked_constants`, `linked_properties`), so
+//! the words `inherits`, `overwrites`, `prototype` and `ctor` are php's.
+//! An extension's `INI` block, `_extension_ini_string`, a user
+//! function's `@@` line, a closure's `Bound Variables`, an object's
+//! `Dynamic properties` and an enum's `Enum cases` are not rendered
+//! yet (#320).
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -98,6 +110,7 @@ pub fn extension() -> Extension {
                     reflection_object_construct as Entry,
                 )],
             ),
+            reflection_method(),
             reflection_property(),
             reflection_constant(),
             reflection_extension(),
@@ -301,7 +314,68 @@ fn reflection_class_methods() -> Vec<(MethodDecl, Entry)> {
         ),
         reflection_class_get_attributes as Entry,
     ));
+    methods.push((
+        method(b"__toString", &[], Some(Type::String)),
+        reflection_class_to_string as Entry,
+    ));
     methods
+}
+
+/// `ReflectionMethod` as `php_reflection.stub.php` declares it: the six
+/// `IS_*` constants, `public string $class` beside the inherited
+/// `$name`, its constructor and `__toString`; `createFromMethodName`
+/// and the accessors arrive with the tests that call them.
+fn reflection_method() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
+    let class_property = PropertyDecl {
+        name: Name::from("class"),
+        ..name_property()
+    };
+    (
+        ClassDecl {
+            constants: [
+                (&b"IS_STATIC"[..], 16),
+                (b"IS_PUBLIC", 1),
+                (b"IS_PROTECTED", 2),
+                (b"IS_PRIVATE", 4),
+                (b"IS_ABSTRACT", 64),
+                (b"IS_FINAL", 32),
+            ]
+            .into_iter()
+            .map(|(name, value)| int_constant(name, value))
+            .collect(),
+            properties: vec![class_property],
+            ..class(
+                b"ReflectionMethod",
+                ClassKind::Class,
+                Some(b"ReflectionFunctionAbstract"),
+                &[],
+            )
+        },
+        vec![
+            (
+                method(
+                    b"__construct",
+                    &[
+                        parameter(
+                            b"objectOrMethod",
+                            Type::Union(vec![Type::Object, Type::String]),
+                        ),
+                        parameter_with_default(
+                            b"method",
+                            Type::Nullable(Box::new(Type::String)),
+                            ConstExpr::Null,
+                        ),
+                    ],
+                    None,
+                ),
+                reflection_method_construct as Entry,
+            ),
+            (
+                method(b"__toString", &[], Some(Type::String)),
+                reflection_method_to_string as Entry,
+            ),
+        ],
+    )
 }
 
 /// The `ReflectionClass` accessors that take no argument: name, return
@@ -866,7 +940,7 @@ fn reflection_extension_construct(req: &mut Request) -> Result<Value, Thrown> {
 fn reflection_extension_to_string(req: &mut Request) -> Result<Value, Thrown> {
     let extension = this_extension(req)?;
     let text = extension_string(req, extension, "");
-    Ok(Value::string(PhpString::new(req, text.as_bytes())?))
+    string_value(req, text.as_bytes())
 }
 
 /// `GET_REFLECTION_OBJECT_PTR(module)` for a `ReflectionExtension`: the
@@ -1868,6 +1942,423 @@ fn reflection_class_get_attributes(req: &mut Request) -> Result<Value, Thrown> {
     Ok(Value::array(PhpArray::new(req)?))
 }
 
+// -------------------------------------------------- ReflectionClass::__toString
+
+/// `ReflectionClass::__toString()`: `_class_string` over the class
+/// `$name` names, no object, indent empty. `JsonException` is the
+/// first class of the bundle with inherited members: `Exception`'s
+/// four protected properties, its three private ones shadowed and
+/// skipped, and ten of its eleven methods, the private `__clone`
+/// skipped, each `inherits Exception` with the prototype the interface
+/// gave it and `ctor` on the constructor.
+///
+/// ```php
+/// echo new ReflectionClass('JsonException');
+/// ```
+/// ```expect
+/// Class [ <internal:json> class JsonException extends Exception implements Throwable, Stringable ] {
+///
+///   - Constants [0] {
+///   }
+///
+///   - Static properties [0] {
+///   }
+///
+///   - Static methods [0] {
+///   }
+///
+///   - Properties [4] {
+///     Property [ protected $message = '' ]
+///     Property [ protected $code = 0 ]
+///     Property [ protected string $file = '' ]
+///     Property [ protected int $line = 0 ]
+///   }
+///
+///   - Methods [10] {
+///     Method [ <internal:Core, inherits Exception, ctor> public method __construct ] {
+///
+///       - Parameters [3] {
+///         Parameter #0 [ <optional> string $message = "" ]
+///         Parameter #1 [ <optional> int $code = 0 ]
+///         Parameter #2 [ <optional> ?Throwable $previous = null ]
+///       }
+///     }
+///
+///     Method [ <internal:Core, inherits Exception> public method __wakeup ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Tentative return [ void ]
+///     }
+///
+///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getMessage ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ string ]
+///     }
+///
+///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getCode ] {
+///
+///       - Parameters [0] {
+///       }
+///     }
+///
+///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getFile ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ string ]
+///     }
+///
+///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getLine ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ int ]
+///     }
+///
+///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getTrace ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ array ]
+///     }
+///
+///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getPrevious ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ ?Throwable ]
+///     }
+///
+///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getTraceAsString ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ string ]
+///     }
+///
+///     Method [ <internal:Core, inherits Exception, prototype Stringable> public method __toString ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ string ]
+///     }
+///   }
+/// }
+/// ```
+///
+/// ```php
+/// echo new ReflectionClass('Throwable');
+/// ```
+/// ```expect
+/// Interface [ <internal:Core> interface Throwable extends Stringable ] {
+///
+///   - Constants [0] {
+///   }
+///
+///   - Static properties [0] {
+///   }
+///
+///   - Static methods [0] {
+///   }
+///
+///   - Properties [0] {
+///   }
+///
+///   - Methods [8] {
+///     Method [ <internal:Core> abstract public method getMessage ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ string ]
+///     }
+///
+///     Method [ <internal:Core> abstract public method getCode ] {
+///
+///       - Parameters [0] {
+///       }
+///     }
+///
+///     Method [ <internal:Core> abstract public method getFile ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ string ]
+///     }
+///
+///     Method [ <internal:Core> abstract public method getLine ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ int ]
+///     }
+///
+///     Method [ <internal:Core> abstract public method getTrace ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ array ]
+///     }
+///
+///     Method [ <internal:Core> abstract public method getPrevious ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ ?Throwable ]
+///     }
+///
+///     Method [ <internal:Core> abstract public method getTraceAsString ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ string ]
+///     }
+///
+///     Method [ <internal:Core, inherits Stringable> abstract public method __toString ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ string ]
+///     }
+///   }
+/// }
+/// ```
+fn reflection_class_to_string(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let class = this_class(req)?;
+    let text = class_string(req, class, "");
+    string_value(req, text.as_bytes())
+}
+
+// -------------------------------------------------- ReflectionMethod
+
+/// `instantiate_reflection_method` as the constructor,
+/// `ReflectionMethod::__construct(object|string $objectOrMethod,
+/// ?string $method = null)`: an object and a name, a class name and a
+/// name, or one `Class::method` string, which 8.5 deprecates in favour
+/// of `createFromMethodName`; the class is `zend_lookup_class` or the
+/// `ReflectionException` every reflector throws, the method is the
+/// linked table's entry under the lowered name or `Method C::m() does
+/// not exist`. `$name` is the method's declared spelling and `$class`
+/// its scope's name, `Exception` for a method `JsonException` inherits,
+/// as `mptr->common.scope->name` is. php keeps the class it was asked
+/// about too, `intern->ce`, which `__toString` renders against; the
+/// reflector here keeps the two properties alone until a native
+/// payload can hold it (#360), so it renders against the declaring
+/// class.
+///
+/// ```php
+/// $m = new ReflectionMethod('JsonException', 'getcode'); $n = new ReflectionMethod(new JsonException, 'getMessage'); var_dump($m->name, $m->class, $n->name, $n->class);
+/// ```
+/// ```expect
+/// string(7) "getCode"
+/// string(9) "Exception"
+/// string(10) "getMessage"
+/// string(9) "Exception"
+/// ```
+///
+/// ```php
+/// new ReflectionMethod('Exception::nope');
+/// ```
+/// ```expect exit=255
+/// Deprecated: Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead in %s on line 2
+///
+/// Fatal error: Uncaught ReflectionException: Method Exception::nope() does not exist in %s:2
+/// Stack trace:
+/// #0 %s(2): ReflectionMethod->__construct('Exception::nope')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// new ReflectionMethod('nocolons');
+/// ```
+/// ```expect exit=255
+/// Deprecated: Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead in %s on line 2
+///
+/// Fatal error: Uncaught ReflectionException: ReflectionMethod::__construct(): Argument #1 ($objectOrMethod) must be a valid method name in %s:2
+/// Stack trace:
+/// #0 %s(2): ReflectionMethod->__construct('nocolons')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// new ReflectionMethod(new Exception);
+/// ```
+/// ```expect exit=255
+/// Deprecated: Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead in %s on line 2
+///
+/// Fatal error: Uncaught ValueError: ReflectionMethod::__construct(): Argument #2 ($method) cannot be null when argument #1 ($objectOrMethod) is an object in %s:2
+/// Stack trace:
+/// #0 %s(2): ReflectionMethod->__construct(Object(Exception))
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// new ReflectionMethod();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: ReflectionMethod::__construct() expects at least 1 argument, 0 given in %s:2
+/// Stack trace:
+/// #0 %s(2): ReflectionMethod->__construct()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+fn reflection_method_construct(req: &mut Request) -> Result<Value, Thrown> {
+    let count = req.argument_count();
+    if count == 0 {
+        return Err(arg_count_error(req, "at least 1 argument, 0 given"));
+    }
+    at_most_arguments(req, 2)?;
+    if count == 1 {
+        deprecated(
+            req,
+            "Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead",
+        );
+    }
+    let second = req
+        .argument(2)
+        .map(|v| v.deref())
+        .filter(|v| !matches!(v.as_ref(), ValueRef::Null | ValueRef::Undef));
+    let first = req.argument(1).unwrap_or_default().deref();
+    let (class, method_name) = match (first.as_ref(), second) {
+        (ValueRef::Object(object), Some(_)) => (object.class(), string_argument(req, 2)?),
+        (ValueRef::Object(_), None) => {
+            // `zend_argument_value_error` with no `must`.
+            return Err(throw(
+                req,
+                "ValueError",
+                "ReflectionMethod::__construct(): Argument #2 ($method) cannot be null when argument #1 ($objectOrMethod) is an object",
+            ));
+        }
+        (ValueRef::Array(_) | ValueRef::Resource(_), _) => {
+            return Err(arg_type_error(
+                req,
+                1,
+                &format!("be of type object|string, {} given", first.type_name()),
+            ));
+        }
+        (_, Some(_)) => {
+            let class = string_argument(req, 1)?;
+            (class_named(req, &class)?, string_argument(req, 2)?)
+        }
+        (_, None) => {
+            let given = string_argument(req, 1)?;
+            let Some(at) = given.windows(2).position(|pair| pair == b"::") else {
+                return Err(throw(
+                    req,
+                    "ReflectionException",
+                    "ReflectionMethod::__construct(): Argument #1 ($objectOrMethod) must be a valid method name",
+                ));
+            };
+            let class = class_named(req, &given[..at])?;
+            (class, given[at + 2..].to_vec())
+        }
+    };
+    let lowered = method_name.to_ascii_lowercase();
+    let Some(found) = linked_methods(req, class)
+        .into_iter()
+        .find(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered)
+    else {
+        let class = class_name_of(req, class);
+        return Err(throw(
+            req,
+            "ReflectionException",
+            &format!(
+                "Method {}::{}() does not exist",
+                String::from_utf8_lossy(&class),
+                String::from_utf8_lossy(&method_name)
+            ),
+        ));
+    };
+    let scope = class_name_of(req, found.scope);
+    if let Some(this) = req.this() {
+        set_name(req, this, &found.decl.function.name.0)?;
+        set_string_prop(req, this, b"class", &scope)?;
+    }
+    Ok(Value::null())
+}
+
+/// `ReflectionMethod::__toString()`: `_function_string` over the
+/// method with the declaring class as its scope, indent empty. The
+/// tentative bit renders as `Tentative return`, a declared return
+/// type as `Return`, and a method with neither has no row.
+///
+/// ```php
+/// echo new ReflectionMethod('JsonSerializable::jsonSerialize');
+/// ```
+/// ```expect
+/// Deprecated: Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead in %s on line 2
+/// Method [ <internal:json> abstract public method jsonSerialize ] {
+///
+///   - Parameters [0] {
+///   }
+///   - Tentative return [ mixed ]
+/// }
+/// ```
+///
+/// ```php
+/// echo new ReflectionMethod('Exception', 'getMessage'), new ReflectionMethod('Exception', 'getCode'), new ReflectionMethod('Exception', '__construct');
+/// ```
+/// ```expect
+/// Method [ <internal:Core, prototype Throwable> final public method getMessage ] {
+///
+///   - Parameters [0] {
+///   }
+///   - Return [ string ]
+/// }
+/// Method [ <internal:Core, prototype Throwable> final public method getCode ] {
+///
+///   - Parameters [0] {
+///   }
+/// }
+/// Method [ <internal:Core, ctor> public method __construct ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <optional> string $message = "" ]
+///     Parameter #1 [ <optional> int $code = 0 ]
+///     Parameter #2 [ <optional> ?Throwable $previous = null ]
+///   }
+/// }
+/// ```
+fn reflection_method_to_string(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let (this, name) = this_name(req, "ReflectionMethod")?;
+    let Some(class) = this
+        .prop(req, b"class")
+        .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
+    else {
+        return Err(throw(
+            req,
+            "Error",
+            "Typed property ReflectionMethod::$class must not be accessed before initialization",
+        ));
+    };
+    let class = class_named(req, &class)?;
+    let lowered = name.to_ascii_lowercase();
+    let Some(found) = linked_methods(req, class)
+        .into_iter()
+        .find(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered)
+    else {
+        let class = class_name_of(req, class);
+        return Err(throw(
+            req,
+            "ReflectionException",
+            &format!(
+                "Method {}::{}() does not exist",
+                String::from_utf8_lossy(&class),
+                String::from_utf8_lossy(&name)
+            ),
+        ));
+    };
+    let text = method_string(req, &found, class, "");
+    string_value(req, text.as_bytes())
+}
+
 // -------------------------------------------------- ReflectionProperty
 
 /// `ReflectionProperty::__construct(object|string $class, string
@@ -2254,17 +2745,33 @@ fn reflection_constant_get_attributes(req: &mut Request) -> Result<Value, Thrown
 }
 
 /// `_extension_string`: the header with the extension's number and
-/// version, then the blocks it has something for. Every bundled
-/// extension is `<persistent>`, as one compiled in is, and its version
-/// is `PHP_VERSION`, as `PHP_CTYPE_VERSION` and its kin are.
-fn extension_string(req: &Request, extension: ExtensionId, indent: &str) -> String {
+/// version, then the blocks it has something for: `Constants`, one
+/// `_const_string` row per constant the extension declared;
+/// `Functions`, one `_function_string` per native; `Classes`, one
+/// `_class_string` per class, each preceded by a blank line as
+/// `_extension_class_string` writes it. Every bundled extension is
+/// `<persistent>`, as one compiled in is, and its version is
+/// `PHP_VERSION`, as `PHP_CTYPE_VERSION` and its kin are. The `INI`
+/// block is not rendered yet (#320); `json` has no ini entry.
+fn extension_string(req: &mut Request, extension: ExtensionId, indent: &str) -> String {
     let mut out = String::new();
-    let name = req.extension_name(extension).unwrap_or_default();
+    let name = req
+        .extension_name(extension)
+        .map(str::to_owned)
+        .unwrap_or_default();
     let _ = writeln!(
         out,
         "{indent}Extension [ <persistent> extension #{} {name} version {PHP_VERSION} ] {{",
         req.extension_number(extension)
     );
+    let constants = req.extension_constants(extension);
+    if !constants.is_empty() {
+        let _ = write!(out, "\n  - Constants [{}] {{\n", constants.len());
+        for constant in &constants {
+            out.push_str(&const_string(req, &constant.0, "    "));
+        }
+        let _ = writeln!(out, "{indent}  }}");
+    }
     let functions = req.extension_functions(extension);
     if !functions.is_empty() {
         out.push_str("\n  - Functions {\n");
@@ -2273,20 +2780,733 @@ fn extension_string(req: &Request, extension: ExtensionId, indent: &str) -> Stri
         }
         let _ = writeln!(out, "{indent}  }}");
     }
+    let classes = extension_classes(req, extension);
+    if !classes.is_empty() {
+        let _ = write!(out, "\n  - Classes [{}] {{", classes.len());
+        let sub_indent = format!("{indent}    ");
+        for (class, _) in classes {
+            out.push('\n');
+            out.push_str(&class_string(req, class, &sub_indent));
+        }
+        let _ = writeln!(out, "{indent}  }}");
+    }
     let _ = writeln!(out, "{indent}}}");
     out
 }
 
-/// `_function_string` with no scope: `Function [ <internal:ext> function
-/// name ] {`, its parameters and its return row, each line under
-/// `indent`. A function with the `Deprecated` attribute carries
-/// `, deprecated` after `<internal`, as `ZEND_ACC_DEPRECATED` does.
-fn function_string(req: &Request, function: Function, indent: &str) -> String {
+/// `_const_string`: `Constant [ <persistent> type NAME ] { value }`,
+/// the flags every constant an extension registers at `MINIT` carries
+/// (`CONST_PERSISTENT`; `no_file_cache` and `deprecated` are none of
+/// the bundle's yet), the value's `zend_zval_type_name`, and the value
+/// as `zval_get_string` prints it, `Array` for an array. The value is
+/// the linked table's, read as `constant()` reads it.
+fn const_string(req: &mut Request, name: &[u8], indent: &str) -> String {
+    let value = constant(req, name).ok().flatten().unwrap_or_default();
+    let shown = value_string(req, &value);
+    format!(
+        "{indent}Constant [ <persistent> {} {} ] {{ {shown} }}\n",
+        value.type_name(),
+        String::from_utf8_lossy(name)
+    )
+}
+
+/// `zval_get_string` for a constant's value as `_const_string` and
+/// `_class_const_string` print it: `Array` for an array, `Object` for
+/// an object, and the string a scalar casts to.
+fn value_string(req: &mut Request, value: &Value) -> String {
+    match value.deref().as_ref() {
+        ValueRef::Array(_) => String::from("Array"),
+        ValueRef::Object(_) => String::from("Object"),
+        _ => php_ext::coerce::to_string(req, value).map_or_else(
+            |_| String::new(),
+            |s| String::from_utf8_lossy(s.as_bytes()).into_owned(),
+        ),
+    }
+}
+
+/// `_class_string` with no object: the header, then the `Constants`,
+/// `Static properties`, `Static methods`, `Properties` and `Methods`
+/// blocks in php's order, each over the linked table with the counts
+/// php prints, a parent's private member skipped as its shadow is
+/// (`prop->ce != ce`, `mptr->common.scope != ce`). A user class carries
+/// its `@@ file start-end` line. `<iterateable>`, `Enum cases` and
+/// `Dynamic properties` are not rendered yet (#320).
+fn class_string(req: &mut Request, class: ClassId, indent: &str) -> String {
     let mut out = String::new();
-    let Some(decl) = req.function_decl(function) else {
+    let Some(decl) = req.class_decl(class).cloned() else {
         return out;
     };
-    let _ = write!(out, "{indent}Function [ <internal");
+    let sub_indent = format!("{indent}    ");
+    let methods = linked_methods(req, class);
+    class_header(req, &mut out, class, &decl, &methods, indent);
+
+    let constants = linked_constants(req, class);
+    let _ = write!(out, "\n{indent}  - Constants [{}] {{\n", constants.len());
+    for (constant, _) in &constants {
+        out.push_str(&class_const_string(req, constant, &sub_indent));
+    }
+    let _ = writeln!(out, "{indent}  }}");
+
+    let properties: Vec<(PropertyDecl, ClassId)> = linked_properties(req, class)
+        .into_iter()
+        .filter(|(p, declaring)| p.visibility != Visibility::Private || *declaring == class)
+        .collect();
+    let visible: Vec<&LinkedMethod> = methods
+        .iter()
+        .filter(|m| m.decl.visibility != Visibility::Private || m.scope == class)
+        .collect();
+    for is_instance in [false, true] {
+        let block = if is_instance {
+            "Properties"
+        } else {
+            "Static properties"
+        };
+        let chosen: Vec<&PropertyDecl> = properties
+            .iter()
+            .filter(|(p, _)| p.is_instance == is_instance)
+            .map(|(p, _)| p)
+            .collect();
+        let _ = write!(out, "\n{indent}  - {block} [{}] {{\n", chosen.len());
+        for property in chosen {
+            out.push_str(&property_string(req, property, &sub_indent));
+        }
+        let _ = writeln!(out, "{indent}  }}");
+
+        let block = if is_instance {
+            "Methods"
+        } else {
+            "Static methods"
+        };
+        let chosen: Vec<&&LinkedMethod> = visible
+            .iter()
+            .filter(|m| m.decl.is_instance == is_instance)
+            .collect();
+        let _ = write!(out, "\n{indent}  - {block} [{}] {{", chosen.len());
+        if chosen.is_empty() {
+            out.push('\n');
+        }
+        for method in chosen {
+            out.push('\n');
+            out.push_str(&method_string(req, method, class, &sub_indent));
+        }
+        let _ = writeln!(out, "{indent}  }}");
+    }
+    let _ = writeln!(out, "{indent}}}");
+    out
+}
+
+/// The first line of `_class_string`: the doc comment where there is
+/// one, the kind, `<internal:ext>` or `<user>`, the modifiers, the
+/// name, `extends`, an enum's backing type and the interface list, then
+/// a user class's `@@ file start-end` line.
+fn class_header(
+    req: &mut Request,
+    out: &mut String,
+    class: ClassId,
+    decl: &ClassDecl,
+    methods: &[LinkedMethod],
+    indent: &str,
+) {
+    if let Some(doc) = &decl.doc_comment {
+        out.push_str(indent);
+        out.push_str(&String::from_utf8_lossy(doc));
+        out.push('\n');
+    }
+    let kind = match decl.kind {
+        ClassKind::Class => "Class",
+        ClassKind::Interface => "Interface",
+        ClassKind::Trait => "Trait",
+        ClassKind::Enum => "Enum",
+    };
+    let _ = write!(out, "{indent}{kind} [ ");
+    let internal = decl.file.0.is_empty();
+    out.push_str(if internal { "<internal" } else { "<user" });
+    if internal && let Some(extension) = req.class_extension_name(class) {
+        let _ = write!(out, ":{extension}");
+    }
+    out.push_str("> ");
+    match decl.kind {
+        ClassKind::Interface => out.push_str("interface "),
+        ClassKind::Trait => out.push_str("trait "),
+        ClassKind::Enum => out.push_str("enum "),
+        ClassKind::Class => {
+            // `ZEND_ACC_IMPLICIT_ABSTRACT_CLASS`: a class with an
+            // abstract method it did not implement is abstract too.
+            if decl.flags.is_abstract || methods.iter().any(|m| m.decl.is_abstract) {
+                out.push_str("abstract ");
+            }
+            if decl.flags.is_final {
+                out.push_str("final ");
+            }
+            if decl.flags.is_readonly {
+                out.push_str("readonly ");
+            }
+            out.push_str("class ");
+        }
+    }
+    out.push_str(&String::from_utf8_lossy(&decl.name.0));
+    if let Some(parent) = &decl.parent {
+        let _ = write!(out, " extends {}", String::from_utf8_lossy(&parent.0));
+    }
+    if decl.kind == ClassKind::Enum {
+        match decl.backing {
+            EnumBacking::Int => out.push_str(": int"),
+            EnumBacking::String => out.push_str(": string"),
+            EnumBacking::Pure => {}
+        }
+    }
+    let interfaces = linked_interfaces(req, class);
+    for (i, interface) in interfaces.iter().enumerate() {
+        let name = class_name_of(req, *interface);
+        let name = String::from_utf8_lossy(&name);
+        if i == 0 {
+            let word = if decl.kind == ClassKind::Interface {
+                "extends"
+            } else {
+                "implements"
+            };
+            let _ = write!(out, " {word} {name}");
+        } else {
+            let _ = write!(out, ", {name}");
+        }
+    }
+    out.push_str(" ] {\n");
+    if !internal {
+        let _ = writeln!(
+            out,
+            "{indent}  @@ {} {}-{}",
+            String::from_utf8_lossy(&decl.file.0),
+            decl.line,
+            decl.end_line
+        );
+    }
+}
+
+/// `_class_const_string`: `Constant [ final? visibility type NAME ] {
+/// value }`, the type the declaration's where it has one and the
+/// value's `zend_zval_type_name` otherwise, the value as
+/// `zval_get_string` prints it, `Array` for an array and `Object` for
+/// an object; a doc comment on the line above.
+fn class_const_string(req: &mut Request, constant: &ClassConstDecl, indent: &str) -> String {
+    let mut out = String::new();
+    if let Some(doc) = &constant.doc_comment {
+        out.push_str(indent);
+        out.push_str(&String::from_utf8_lossy(doc));
+        out.push('\n');
+    }
+    let value = eval_const_expr(req, &constant.value, None).unwrap_or_default();
+    let ty = constant
+        .ty
+        .as_ref()
+        .map_or_else(|| String::from(value.type_name()), type_to_string);
+    let shown = value_string(req, &value);
+    let _ = writeln!(
+        out,
+        "{indent}Constant [ {}{} {ty} {} ] {{ {shown} }}",
+        if constant.is_final { "final " } else { "" },
+        visibility_word(constant.visibility),
+        String::from_utf8_lossy(&constant.name.0)
+    );
+    out
+}
+
+/// `zend_visibility_string`.
+fn visibility_word(visibility: Visibility) -> &'static str {
+    match visibility {
+        Visibility::Public => "public",
+        Visibility::Protected => "protected",
+        Visibility::Private => "private",
+    }
+}
+
+/// `_property_string` for a declared property: `Property [ visibility
+/// type $name = default ]` with the modifier words between where the
+/// declaration has them, the default being the
+/// slot of `default_properties_table` as `format_default_value` prints
+/// it: an untyped property nothing initialised holds `NULL`, a typed
+/// one is `UNDEF` and prints no default. Hooks, `abstract`, `final`
+/// and the asymmetric `(set)` visibilities have no bit on the
+/// declaration model yet and are not rendered.
+fn property_string(req: &mut Request, property: &PropertyDecl, indent: &str) -> String {
+    let mut out = String::new();
+    if let Some(doc) = &property.doc_comment {
+        out.push_str(indent);
+        out.push_str(&String::from_utf8_lossy(doc));
+        out.push('\n');
+    }
+    let _ = write!(
+        out,
+        "{indent}Property [ {} ",
+        visibility_word(property.visibility)
+    );
+    if !property.is_instance {
+        out.push_str("static ");
+    }
+    if property.is_readonly {
+        out.push_str("readonly ");
+    }
+    if let Some(ty) = &property.ty {
+        let _ = write!(out, "{} ", type_to_string(ty));
+    }
+    let _ = write!(out, "${}", String::from_utf8_lossy(&property.name.0));
+    match (&property.default, &property.ty) {
+        (Some(default), _) => {
+            let _ = write!(out, " = {}", default_value_string(req, default));
+        }
+        (None, None) => out.push_str(" = NULL"),
+        (None, Some(_)) => {}
+    }
+    out.push_str(" ]\n");
+    out
+}
+
+/// `format_default_value` over a declared default: `smart_str_append_scalar`
+/// for a scalar, `NULL`, `true`, `false`, the number, or the string in
+/// single quotes with `smart_str_append_escaped`'s escapes; an array as
+/// `[a, b]` or `['k' => v]`; a constant's name as `zend_ast_export`
+/// writes an unevaluated expression.
+fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
+    match expr {
+        ConstExpr::Null => String::from("NULL"),
+        ConstExpr::Bool(b) => String::from(if *b { "true" } else { "false" }),
+        ConstExpr::Long(n) => n.to_string(),
+        ConstExpr::Double(f) => php_ext::coerce::to_string(req, &Value::float(*f)).map_or_else(
+            |_| String::new(),
+            |s| String::from_utf8_lossy(s.as_bytes()).into_owned(),
+        ),
+        ConstExpr::Str(s) => format!("'{}'", escaped(s)),
+        ConstExpr::Array(elements) => {
+            let is_list = elements.iter().all(|(key, _)| key.is_none());
+            let mut out = String::from("[");
+            for (i, (key, value)) in elements.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                if !is_list {
+                    match key {
+                        Some(ConstExpr::Str(s)) => {
+                            let _ = write!(out, "'{}'", escaped(s));
+                        }
+                        Some(key) => out.push_str(&default_value_string(req, key)),
+                        None => out.push_str(&i.to_string()),
+                    }
+                    out.push_str(" => ");
+                }
+                out.push_str(&default_value_string(req, value));
+            }
+            out.push(']');
+            out
+        }
+        ConstExpr::Constant(name) => String::from_utf8_lossy(&name.0).into_owned(),
+        ConstExpr::ClassConstant { class, name } => format!(
+            "{}::{}",
+            String::from_utf8_lossy(&class.0),
+            String::from_utf8_lossy(&name.0)
+        ),
+        _ => String::from("<default>"),
+    }
+}
+
+/// `smart_str_append_escaped`: a backslash, a byte below 32 and one
+/// above 126 escaped, the C escapes for the seven that have one and
+/// `\xHH` for the rest.
+fn escaped(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for &byte in bytes {
+        match byte {
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            0x0C => out.push_str("\\f"),
+            0x0B => out.push_str("\\v"),
+            b'\\' => out.push_str("\\\\"),
+            0x1B => out.push_str("\\e"),
+            32..=126 => out.push(char::from(byte)),
+            _ => {
+                let _ = write!(out, "\\x{byte:02X}");
+            }
+        }
+    }
+    out
+}
+
+/// One row of a linked class's function table, `zend_function` as
+/// `zend_do_inheritance` left it: the declaration, `common.scope`, the
+/// class that declared it, and `common.prototype`'s scope, the
+/// interface or the abstract parent method it implements, where
+/// `do_inheritance_check_on_method` set one.
+#[derive(Clone)]
+struct LinkedMethod {
+    decl: MethodDecl,
+    scope: ClassId,
+    prototype: Option<ClassId>,
+}
+
+/// `ZEND_ACC_CTOR`: the method named `__construct`.
+fn is_constructor(method: &MethodDecl) -> bool {
+    method.function.name.0.eq_ignore_ascii_case(b"__construct")
+}
+
+/// `ce->function_table` after linking: the class's own methods in
+/// declaration order, then each of the parent's appended where the
+/// class has none of that name (`do_inherit_method`), the private ones
+/// too, then each new interface's abstract methods the same way
+/// (`do_interface_implementation`). A method the class declares over a
+/// parent's or an interface's takes the prototype
+/// `do_inheritance_check_on_method` gives it: the parent method's
+/// prototype, or the parent method itself, unless the parent's is
+/// private and not abstract, or a constructor with no abstract
+/// prototype, which leaves none.
+fn linked_methods(req: &mut Request, class: ClassId) -> Vec<LinkedMethod> {
+    linked_methods_at(req, class, 0)
+}
+
+fn linked_methods_at(req: &mut Request, class: ClassId, depth: u32) -> Vec<LinkedMethod> {
+    let Some(decl) = req.class_decl(class).cloned() else {
+        return Vec::new();
+    };
+    let mut table: Vec<LinkedMethod> = decl
+        .methods
+        .iter()
+        .map(|method| LinkedMethod {
+            decl: method.clone(),
+            scope: class,
+            prototype: None,
+        })
+        .collect();
+    if depth > 64 {
+        return table;
+    }
+    let parent = decl
+        .parent
+        .as_ref()
+        .and_then(|name| lookup_class(req, &name.0).ok().flatten());
+    if let Some(parent) = parent {
+        for inherited in linked_methods_at(req, parent, depth + 1) {
+            inherit_method(&mut table, inherited, false);
+        }
+    }
+    let parent_interfaces = parent.map_or_else(Vec::new, |p| linked_interfaces(req, p));
+    let own_interfaces: Vec<ClassId> = linked_interfaces(req, class)
+        .into_iter()
+        .filter(|i| !parent_interfaces.contains(i))
+        .collect();
+    for interface in own_interfaces {
+        for inherited in linked_methods_at(req, interface, depth + 1) {
+            inherit_method(&mut table, inherited, true);
+        }
+    }
+    table
+}
+
+/// `do_inherit_method`: the child's entry of the same name takes the
+/// prototype the check gives it, or the parent's row is appended.
+fn inherit_method(table: &mut Vec<LinkedMethod>, parent: LinkedMethod, is_interface: bool) {
+    let name = parent.decl.function.name.0.to_ascii_lowercase();
+    let child = table
+        .iter_mut()
+        .find(|m| m.decl.function.name.0.to_ascii_lowercase() == name);
+    let Some(child) = child else {
+        table.push(parent);
+        return;
+    };
+    if is_interface && child.scope == parent.scope {
+        // The same method in an interface may be inherited a few times.
+        return;
+    }
+    let flags_private_alone = parent.decl.visibility == Visibility::Private
+        && !parent.decl.is_abstract
+        && !is_constructor(&parent.decl);
+    if flags_private_alone {
+        return;
+    }
+    let proto_is_abstract = parent.prototype.is_some() || parent.decl.is_abstract;
+    if is_constructor(&parent.decl) && !proto_is_abstract {
+        return;
+    }
+    child.prototype = Some(parent.prototype.unwrap_or(parent.scope));
+}
+
+/// `ce->interfaces` after linking, in php's order. An internal class
+/// that declares `__toString` has `Stringable` first, added by
+/// `zend_register_functions` before `zend_class_implements` runs; a
+/// user class has it last among its own, where the compiler appends
+/// it. A class with no interfaces of its own takes its parent's in
+/// reverse (`zend_do_inherit_interfaces` walks `if_num--`), which is
+/// why `JsonException` implements `Throwable, Stringable` where
+/// `Exception` implements `Stringable, Throwable`. An internal class
+/// with interfaces of its own appends each after the parent's, followed
+/// by that interface's own parents in reverse
+/// (`zend_do_implement_interface`); a user class appends its own first
+/// and their parents after all of them
+/// (`zend_do_implement_interfaces`).
+fn linked_interfaces(req: &mut Request, class: ClassId) -> Vec<ClassId> {
+    linked_interfaces_at(req, class, 0)
+}
+
+fn linked_interfaces_at(req: &mut Request, class: ClassId, depth: u32) -> Vec<ClassId> {
+    let Some(decl) = req.class_decl(class).cloned() else {
+        return Vec::new();
+    };
+    let mut list: Vec<ClassId> = Vec::new();
+    if depth > 64 {
+        return list;
+    }
+    let internal = decl.file.0.is_empty();
+    let stringable = lookup_class(req, b"Stringable").ok().flatten();
+    let declares_to_string = decl.kind != ClassKind::Trait
+        && stringable != Some(class)
+        && decl
+            .methods
+            .iter()
+            .any(|m| m.function.name.0.eq_ignore_ascii_case(b"__toString"));
+    let mut own: Vec<ClassId> = decl
+        .interfaces
+        .iter()
+        .filter_map(|name| lookup_class(req, &name.0).ok().flatten())
+        .collect();
+    if declares_to_string && let Some(stringable) = stringable {
+        if internal {
+            list.push(stringable);
+        } else if !own.contains(&stringable) {
+            own.push(stringable);
+        }
+    }
+    let parent = decl
+        .parent
+        .as_ref()
+        .and_then(|name| lookup_class(req, &name.0).ok().flatten());
+    let inherited = parent.map_or_else(Vec::new, |p| linked_interfaces_at(req, p, depth + 1));
+    let push = |list: &mut Vec<ClassId>, id: ClassId| {
+        if !list.contains(&id) {
+            list.push(id);
+        }
+    };
+    if internal {
+        for id in inherited.into_iter().rev() {
+            push(&mut list, id);
+        }
+        for interface in own {
+            push(&mut list, interface);
+            for id in linked_interfaces_at(req, interface, depth + 1)
+                .into_iter()
+                .rev()
+            {
+                push(&mut list, id);
+            }
+        }
+    } else if own.is_empty() {
+        for id in inherited.into_iter().rev() {
+            push(&mut list, id);
+        }
+    } else {
+        let mut added: Vec<ClassId> = Vec::new();
+        for id in inherited {
+            push(&mut list, id);
+        }
+        for interface in own {
+            if !list.contains(&interface) {
+                list.push(interface);
+                added.push(interface);
+            }
+        }
+        for interface in added {
+            for id in linked_interfaces_at(req, interface, depth + 1)
+                .into_iter()
+                .rev()
+            {
+                push(&mut list, id);
+            }
+        }
+    }
+    list
+}
+
+/// `ce->constants_table` after linking: the class's own constants, then
+/// the parent's that are not private and not overridden
+/// (`do_inherit_class_constant`), then each new interface's
+/// (`do_inherit_iface_constant`), each with the class that declared it.
+fn linked_constants(req: &mut Request, class: ClassId) -> Vec<(ClassConstDecl, ClassId)> {
+    linked_constants_at(req, class, 0)
+}
+
+fn linked_constants_at(
+    req: &mut Request,
+    class: ClassId,
+    depth: u32,
+) -> Vec<(ClassConstDecl, ClassId)> {
+    let Some(decl) = req.class_decl(class).cloned() else {
+        return Vec::new();
+    };
+    let own: Vec<(ClassConstDecl, ClassId)> =
+        decl.constants.iter().map(|c| (c.clone(), class)).collect();
+    // An internal class inherits before `zend_declare_class_constant_ex`
+    // adds its own, so the parent's come first; a user class compiles
+    // its own into the table first.
+    let internal = decl.file.0.is_empty();
+    let mut table: Vec<(ClassConstDecl, ClassId)> = if internal { Vec::new() } else { own.clone() };
+    if depth > 64 {
+        return own;
+    }
+    let parent = decl
+        .parent
+        .as_ref()
+        .and_then(|name| lookup_class(req, &name.0).ok().flatten());
+    let mut sources: Vec<ClassId> = parent.into_iter().collect();
+    let parent_interfaces = parent.map_or_else(Vec::new, |p| linked_interfaces(req, p));
+    sources.extend(
+        linked_interfaces(req, class)
+            .into_iter()
+            .filter(|i| !parent_interfaces.contains(i)),
+    );
+    for source in sources {
+        for (constant, declaring) in linked_constants_at(req, source, depth + 1) {
+            let present = table.iter().any(|(c, _)| c.name == constant.name)
+                || (internal && own.iter().any(|(c, _)| c.name == constant.name));
+            if !present && constant.visibility != Visibility::Private {
+                table.push((constant, declaring));
+            }
+        }
+    }
+    if internal {
+        table.extend(own);
+    }
+    table
+}
+
+/// `ce->properties_info` after linking: the class's own properties
+/// and each of the parent's the class does not redeclare
+/// (`do_inherit_property`), a private one among them as the shadow
+/// `_class_string` skips, each with the class that declared it. A user
+/// class has its own first, compiled into the table before
+/// `zend_do_inheritance` appends the parent's; an internal class has
+/// the parent's first, `zend_register_internal_class_ex` inheriting
+/// before `zend_declare_typed_property` adds its own, which is why
+/// `ReflectionMethod` lists `$name` before `$class`.
+fn linked_properties(req: &mut Request, class: ClassId) -> Vec<(PropertyDecl, ClassId)> {
+    let chain = class_chain(req, class);
+    let internal = req
+        .class_decl(class)
+        .is_none_or(|decl| decl.file.0.is_empty());
+    let mut table: Vec<(PropertyDecl, ClassId)> = Vec::new();
+    for at in chain.iter().rev() {
+        let Some(decl) = req.class_decl(*at) else {
+            continue;
+        };
+        for property in &decl.properties {
+            let at_index = table.iter().position(|(p, _)| p.name == property.name);
+            match at_index {
+                // The child's declaration stands where the parent's was
+                // inherited; a user class puts its own before the rest.
+                Some(i) if internal => table[i] = (property.clone(), *at),
+                Some(i) => {
+                    table.remove(i);
+                    table.insert(0, (property.clone(), *at));
+                }
+                None if internal || *at != class => table.push((property.clone(), *at)),
+                None => table.insert(
+                    table.iter().filter(|(_, d)| *d == class).count(),
+                    (property.clone(), *at),
+                ),
+            }
+        }
+    }
+    table
+}
+
+/// `_function_string` with no scope: `Function [ <internal:ext>
+/// function name ] {`, its parameters and its return row, each line
+/// under `indent`. A function with the `Deprecated` attribute carries
+/// `, deprecated` after `<internal`, as `ZEND_ACC_DEPRECATED` does.
+fn function_string(req: &mut Request, function: Function, indent: &str) -> String {
+    let Some(decl) = req.function_decl(function).cloned() else {
+        return String::new();
+    };
+    let module = req
+        .function_extension(function)
+        .and_then(|e| req.extension_name(e))
+        .map(str::to_owned);
+    let mut out = String::new();
+    function_header(&mut out, &decl, module.as_deref(), None, indent);
+    function_body(&mut out, &decl, false, indent);
+    out
+}
+
+/// `_function_string` with a scope, a method of `ce`: `Method [
+/// <internal:ext, inherits S, overwrites O, prototype P, ctor> ... method
+/// name ] {` with the modifier and visibility words between where the
+/// declaration has them, then the
+/// parameters and the return row, `Tentative return` where the
+/// declaration carries the bit. `inherits` names the method's scope
+/// when it is not `ce`; `overwrites` names the scope of the parent's
+/// method of the same name when the method is `ce`'s own and the
+/// parent's is not private; `prototype` names the prototype's scope.
+fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: &str) -> String {
+    let module = req.class_extension_name(method.scope).map(str::to_owned);
+    let mut words: Vec<String> = Vec::new();
+    if method.scope != ce {
+        let scope = class_name_of(req, method.scope);
+        words.push(format!("inherits {}", String::from_utf8_lossy(&scope)));
+    } else if let Some(parent) = class_chain(req, ce).get(1).copied() {
+        let lowered = method.decl.function.name.0.to_ascii_lowercase();
+        let overwrites = linked_methods(req, parent)
+            .into_iter()
+            .find(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered)
+            .filter(|m| m.scope != method.scope && m.decl.visibility != Visibility::Private);
+        if let Some(overwritten) = overwrites {
+            let scope = class_name_of(req, overwritten.scope);
+            words.push(format!("overwrites {}", String::from_utf8_lossy(&scope)));
+        }
+    }
+    if let Some(prototype) = method.prototype {
+        let scope = class_name_of(req, prototype);
+        words.push(format!("prototype {}", String::from_utf8_lossy(&scope)));
+    }
+    if is_constructor(&method.decl) {
+        words.push(String::from("ctor"));
+    }
+    let mut out = String::new();
+    function_header(
+        &mut out,
+        &method.decl.function,
+        module.as_deref(),
+        Some((&method.decl, &words)),
+        indent,
+    );
+    function_body(
+        &mut out,
+        &method.decl.function,
+        method.decl.tentative_return,
+        indent,
+    );
+    out
+}
+
+/// The first line of `_function_string`: the doc comment where there
+/// is one, `Function [` or `Method [`, `<internal:module` or `<user`
+/// with `, deprecated` where the attribute is and a method's
+/// inheritance words, then
+/// the modifiers and the name.
+fn function_header(
+    out: &mut String,
+    decl: &FunctionDecl,
+    module: Option<&str>,
+    method: Option<(&MethodDecl, &[String])>,
+    indent: &str,
+) {
+    if let Some(doc) = &decl.doc_comment {
+        out.push_str(indent);
+        out.push_str(&String::from_utf8_lossy(doc));
+        out.push('\n');
+    }
+    out.push_str(indent);
+    out.push_str(if method.is_some() {
+        "Method [ "
+    } else {
+        "Function [ "
+    });
+    let internal = decl.file.0.is_empty();
+    out.push_str(if internal { "<internal" } else { "<user" });
     if decl
         .attributes
         .iter()
@@ -2294,24 +3514,50 @@ fn function_string(req: &Request, function: Function, indent: &str) -> String {
     {
         out.push_str(", deprecated");
     }
-    if let Some(extension) = req
-        .function_extension(function)
-        .and_then(|e| req.extension_name(e))
-    {
-        let _ = write!(out, ":{extension}");
+    if internal && let Some(module) = module {
+        let _ = write!(out, ":{module}");
     }
-    out.push_str("> function ");
+    if let Some((_, words)) = method {
+        for word in words {
+            let _ = write!(out, ", {word}");
+        }
+    }
+    out.push_str("> ");
+    if let Some((method, _)) = method {
+        if method.is_abstract {
+            out.push_str("abstract ");
+        }
+        if method.is_final {
+            out.push_str("final ");
+        }
+        if !method.is_instance {
+            out.push_str("static ");
+        }
+        let _ = write!(out, "{} method ", visibility_word(method.visibility));
+    } else {
+        out.push_str("function ");
+    }
     if decl.returns_by_ref {
         out.push('&');
     }
     let _ = writeln!(out, "{} ] {{", String::from_utf8_lossy(&decl.name.0));
+}
+
+/// The rest of `_function_string`: the parameters, the return row and
+/// the closing brace. A user function's `@@ file start - end` line
+/// waits on the end line the declaration model does not carry (#320).
+fn function_body(out: &mut String, decl: &FunctionDecl, tentative: bool, indent: &str) {
     let param_indent = format!("{indent}  ");
-    function_parameter_string(&mut out, decl, &param_indent);
+    function_parameter_string(out, decl, &param_indent);
     if let Some(returns) = &decl.return_type {
-        let _ = writeln!(out, "  {indent}- Return [ {} ]", type_to_string(returns));
+        let word = if tentative {
+            "Tentative return"
+        } else {
+            "Return"
+        };
+        let _ = writeln!(out, "  {indent}- {word} [ {} ]", type_to_string(returns));
     }
     let _ = writeln!(out, "{indent}}}");
-    out
 }
 
 /// `_function_parameter_string`: `- Parameters [N] {` and one
@@ -2358,7 +3604,11 @@ fn function_parameter_string(out: &mut String, decl: &FunctionDecl, indent: &str
 
 /// A native parameter's default as `gen_stub.php` writes it into
 /// `zend_internal_arg_info.default_value`: the expression's source
-/// text, which for a scalar is the scalar as written.
+/// text, which for a scalar is the scalar as written, and for a string
+/// the stub's spelling, double-quoted as `zend_exceptions.stub.php` and
+/// the rest of php-src write theirs; a string the stub spells with an
+/// escape needs the written text on the declaration, which the model
+/// does not carry (#320).
 fn const_expr_string(expr: &php_ext::decl::ConstExpr) -> String {
     use php_ext::decl::ConstExpr;
     match expr {
@@ -2366,7 +3616,7 @@ fn const_expr_string(expr: &php_ext::decl::ConstExpr) -> String {
         ConstExpr::Bool(b) => String::from(if *b { "true" } else { "false" }),
         ConstExpr::Long(n) => n.to_string(),
         ConstExpr::Double(f) => f.to_string(),
-        ConstExpr::Str(s) => format!("'{}'", String::from_utf8_lossy(s)),
+        ConstExpr::Str(s) => format!("\"{}\"", String::from_utf8_lossy(s)),
         ConstExpr::Constant(name) => String::from_utf8_lossy(&name.0).into_owned(),
         ConstExpr::Array(elements) if elements.is_empty() => String::from("[]"),
         _ => String::from("<default>"),

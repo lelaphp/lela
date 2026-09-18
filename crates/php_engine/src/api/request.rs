@@ -18,7 +18,7 @@ use php_heap::{
     Arr, Fatal, FrameRef, Heap, HeapHooks, Intern, MapTable, Obj, Ref, Res, ResourceType, Slot,
     VmStack, Zval, ZvalRef,
 };
-use php_unit::decl::{ClassDecl, ClassKind, FunctionDecl, MethodDecl, Visibility};
+use php_unit::decl::{ClassDecl, ClassKind, FunctionDecl, MethodDecl, Name, Visibility};
 use php_unit::{FramelessEntry, Unit};
 
 use crate::api::abi::{
@@ -3336,6 +3336,51 @@ impl Request {
             start = end;
         }
         None
+    }
+
+    /// `ce->info.internal.module->name` as `_class_string` and
+    /// `_function_string` print it after `<internal:`: the extension's
+    /// name for a class an extension declared, `Core` for one Zend
+    /// declares itself, whose `zend_module_entry` php has under that
+    /// name and this engine as no `Extension` value yet (#320), and
+    /// none for a user class.
+    #[must_use]
+    pub fn class_extension_name(&self, class: ClassId) -> Option<&str> {
+        if let Some(extension) = self.class_extension(class) {
+            return self.extension_name(extension);
+        }
+        let at = usize::try_from(class.0).ok()?;
+        (at < self.shared.classes.len()).then_some("Core")
+    }
+
+    /// `ZEND_CONSTANT_MODULE_NUMBER(constant) == module->module_number`
+    /// over `EG(zend_constants)`: the names of the constants an
+    /// extension declared through `ExtensionBuilder::constants`, in the
+    /// order it declared them, each one `api::call::constant` reads the
+    /// value of; empty for an extension that declares none.
+    #[must_use]
+    pub fn extension_constants(&self, extension: ExtensionId) -> Vec<Name> {
+        let Some(at) = usize::try_from(extension.0).ok() else {
+            return Vec::new();
+        };
+        let start: usize = self
+            .shared
+            .extensions
+            .iter()
+            .take(at)
+            .map(|e| e.constants.len())
+            .sum();
+        let count = self
+            .extension_of(extension)
+            .map_or(0, |e| e.constants.len());
+        self.shared
+            .declared()
+            .constants
+            .iter()
+            .skip(start)
+            .take(count)
+            .map(|decl| decl.name.clone())
+            .collect()
     }
 
     /// `module->deps`: the rows an extension declared through

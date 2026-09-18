@@ -180,6 +180,7 @@ request::Request::called_scope
 request::Request::class_alias
 request::Request::class_decl
 request::Request::class_extension
+request::Request::class_extension_name
 request::Request::clear_last_error
 request::Request::constants
 request::Request::current_file
@@ -193,6 +194,7 @@ request::Request::env
 request::Request::env_pairs
 request::Request::error_log
 request::Request::error_reporting
+request::Request::extension_constants
 request::Request::extension_dependencies
 request::Request::extension_functions
 request::Request::extension_info
