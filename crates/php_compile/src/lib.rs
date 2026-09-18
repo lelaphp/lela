@@ -2542,6 +2542,106 @@ mod tests {
         );
     }
 
+    /// #302's program under the oracle's `[regime.dump]`: `@` as
+    /// `zend_compile_silence` shapes it, `BEGIN_SILENCE` into a
+    /// temporary, the call, `END_SILENCE` over that temporary, and the
+    /// `silence` live range from the opline after the begin to the end,
+    /// read off a dump of the oracle's for the first time.
+    #[test]
+    fn a_silenced_call_is_php_s_op_array_ending_in_its_silence_live_range() {
+        let (unit, _strings) = unit_and_strings(b"<?php echo @str_repeat(\"a\", 2);");
+        assert_eq!(
+            unit.dump(&[]),
+            main_dump(
+                8,
+                0,
+                2,
+                "0000 T0 = BEGIN_SILENCE\n\
+                 0001 INIT_FCALL 2 112 string(\"str_repeat\")\n\
+                 0002 SEND_VAL string(\"a\") 1\n\
+                 0003 SEND_VAL int(2) 2\n\
+                 0004 V1 = DO_ICALL\n\
+                 0005 END_SILENCE T0\n\
+                 0006 ECHO V1\n\
+                 0007 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    0: 0001 - 0005 (silence)\n\
+                 \x20    1: 0005 - 0006 (tmp/var)\n"
+            )
+        );
+    }
+
+    /// The rest of `zend_compile_silence` against the oracle's dump: a
+    /// variable under `@` is `zend_compile_simple_var_no_cv`'s
+    /// `FETCH_R (local)` over its name into a temporary and no CV, `$this`
+    /// among them; and `zend_do_free` steps back over the `END_SILENCE`,
+    /// so a call's `VAR` nothing reads is marked unused, a `$a++` becomes
+    /// `PRE_INC`, an `ASSIGN`'s temporary is marked unused, and a fetch's
+    /// temporary is freed after the end. Two `@` nest, each its own range;
+    /// `$b`, the one CV, moves every temporary's number up by one.
+    #[test]
+    fn a_variable_under_a_silence_is_fetched_by_name_and_its_value_freed_past_the_end() {
+        assert_eq!(
+            oplines_of(
+                b"<?php echo @$a, @$this; @$a; @str_repeat(\"a\", 2); @$b++; @$b = 1; @@$c;"
+            ),
+            "0000 T1 = BEGIN_SILENCE\n\
+             0001 T2 = FETCH_R (local) string(\"a\")\n\
+             0002 END_SILENCE T1\n\
+             0003 ECHO T2\n\
+             0004 T3 = BEGIN_SILENCE\n\
+             0005 T4 = FETCH_R (local) string(\"this\")\n\
+             0006 END_SILENCE T3\n\
+             0007 ECHO T4\n\
+             0008 T5 = BEGIN_SILENCE\n\
+             0009 T6 = FETCH_R (local) string(\"a\")\n\
+             0010 END_SILENCE T5\n\
+             0011 FREE T6\n\
+             0012 T7 = BEGIN_SILENCE\n\
+             0013 INIT_FCALL 2 112 string(\"str_repeat\")\n\
+             0014 SEND_VAL string(\"a\") 1\n\
+             0015 SEND_VAL int(2) 2\n\
+             0016 DO_ICALL\n\
+             0017 END_SILENCE T7\n\
+             0018 T9 = BEGIN_SILENCE\n\
+             0019 PRE_INC CV0($b)\n\
+             0020 END_SILENCE T9\n\
+             0021 T11 = BEGIN_SILENCE\n\
+             0022 ASSIGN CV0($b) int(1)\n\
+             0023 END_SILENCE T11\n\
+             0024 T13 = BEGIN_SILENCE\n\
+             0025 T14 = BEGIN_SILENCE\n\
+             0026 T15 = FETCH_R (local) string(\"c\")\n\
+             0027 END_SILENCE T14\n\
+             0028 END_SILENCE T13\n\
+             0029 FREE T15\n\
+             0030 RETURN int(1)\n\
+             LIVE RANGES:\n\
+             \x20    1: 0001 - 0002 (silence)\n\
+             \x20    2: 0002 - 0003 (tmp/var)\n\
+             \x20    3: 0005 - 0006 (silence)\n\
+             \x20    4: 0006 - 0007 (tmp/var)\n\
+             \x20    5: 0009 - 0010 (silence)\n\
+             \x20    6: 0010 - 0011 (tmp/var)\n\
+             \x20    7: 0013 - 0017 (silence)\n\
+             \x20    9: 0019 - 0020 (silence)\n\
+             \x20    11: 0022 - 0023 (silence)\n\
+             \x20    13: 0025 - 0028 (silence)\n\
+             \x20    14: 0026 - 0027 (silence)\n\
+             \x20    15: 0027 - 0029 (tmp/var)\n"
+        );
+        assert_eq!(
+            refused(b"<?php class C { const X = @1; }"),
+            Some(CompileError {
+                level: Level::CompileError,
+                message: "Constant expression contains invalid operations".into(),
+                line: 1,
+                raised: Vec::new(),
+            }),
+            "`zend_is_allowed_in_const_expr` has no `ZEND_AST_SILENCE`"
+        );
+    }
+
     /// The oplines and the live-range table of one source's main op
     /// array, the header left off: what the oracle's dump prints after
     /// `; return  [] RANGE[0..0]`.

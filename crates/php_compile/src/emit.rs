@@ -55,7 +55,12 @@
 //! (`zend_compile_pre_incdec`, `zend_compile_post_incdec`), and a
 //! `POST_INC` whose value nothing reads becomes the `PRE_INC` php's
 //! `zend_do_free` turns it into, so `$i++` as a loop's step is php's
-//! `PRE_INC CV0($i)`. What an opline leaves is written in its
+//! `PRE_INC CV0($i)`. `@expr` is `zend_compile_silence`'s:
+//! `BEGIN_SILENCE` into a temporary, the expression, and `END_SILENCE`
+//! over that temporary; a variable under it is fetched by name, php's
+//! `zend_compile_simple_var_no_cv`, a `FETCH_R (local)` over the name's
+//! constant into a temporary, so the read of an unset variable is inside
+//! the silenced span and no CV is made for it. What an opline leaves is written in its
 //! `out_type` as `zend_emit_op` and `zend_emit_op_tmp` write
 //! `result_type`, `VAR` for what a call returns and `TMP` for what an
 //! operator or an assignment leaves; a value nothing reads is
@@ -101,6 +106,11 @@ use php_unit::{
 
 use crate::read::{Arm, BinaryOp, Case, CastTo, Class, Element, Expr, Read, Stmt, Target};
 use crate::{CompileError, Options, StackLimit};
+
+/// `ZEND_FETCH_LOCAL` (`Z/Zend/zend_compile.h:1083`), the
+/// `extended_value` of a `FETCH_*` by name that is no auto-global, which
+/// the dump prints as `(local)`.
+const FETCH_LOCAL: u32 = 1 << 2;
 
 /// One op array under construction, and the home its constant strings
 /// are interned into (design §5.2): the engine's table when the unit is
@@ -655,7 +665,8 @@ impl Emit<'_> {
             | Expr::PreDec(_)
             | Expr::PostDec(_)
             | Expr::StaticCall { .. }
-            | Expr::MethodCall { .. } => {
+            | Expr::MethodCall { .. }
+            | Expr::Silence(_) => {
                 Err(self.compile_error("Constant expression contains invalid operations"))
             }
             Expr::Cast { .. } | Expr::Match { .. } | Expr::New { .. } | Expr::Instanceof { .. } => {
@@ -1558,13 +1569,15 @@ impl Emit<'_> {
     /// free. `SET_UNUSED` is the kind alone here: the number php
     /// overwrites with -1 is read by nothing once the kind is `UNUSED`.
     ///
-    /// php steps back over `END_SILENCE`, `EXT_FCALL_END` and `OP_DATA`
-    /// to reach the opline that left the value; of the three only
-    /// `OP_DATA` is emitted here, after a `FRAMELESS_ICALL_3`.
+    /// php steps back over `END_SILENCE` and `OP_DATA` to reach the
+    /// opline that left the value, and for a `VAR` over `EXT_FCALL_END`
+    /// too, which is never emitted here; so `@f();` marks the call's
+    /// `VAR` unused through the `END_SILENCE` after it, and `@$a = 1;`
+    /// the `ASSIGN`'s temporary.
     fn do_free(&mut self, value: Where) {
         match value {
             Where::Temporary(at) => {
-                if let Some(last) = self.last_but_op_data()
+                if let Some(last) = self.last_that_left_a_value()
                     && last.out_type == OperandKind::Tmp
                     && last.out == at
                 {
@@ -1615,7 +1628,7 @@ impl Emit<'_> {
                 self.free(OperandKind::Tmp, at);
             }
             Where::Returned(at) => {
-                let Some(last) = self.last_but_op_data() else {
+                let Some(last) = self.last_that_left_a_value() else {
                     return;
                 };
                 if last.out_type == OperandKind::Var && last.out == at {
@@ -1651,13 +1664,14 @@ impl Emit<'_> {
         }
     }
 
-    /// The last opline that is no `OP_DATA`, which is the one that left
-    /// the value `zend_do_free` is given.
-    fn last_but_op_data(&mut self) -> Option<&mut Opline> {
+    /// The last opline that is no `OP_DATA` and no `END_SILENCE`, which
+    /// is the one that left the value `zend_do_free` is given: php walks
+    /// back over both from the last opline before it reads what one left.
+    fn last_that_left_a_value(&mut self) -> Option<&mut Opline> {
         self.oplines
             .iter_mut()
             .rev()
-            .find(|opline| opline.opcode != Opcode::OpData)
+            .find(|opline| !matches!(opline.opcode, Opcode::OpData | Opcode::EndSilence))
     }
 
     /// `zend_emit_op(NULL, ZEND_FREE, op1, NULL)`: the temporary or the
@@ -1741,6 +1755,7 @@ impl Emit<'_> {
         match expr {
             Expr::Call { name, arguments } => self.call(name, arguments),
             Expr::Unary { minus, operand } => self.unary(*minus, operand),
+            Expr::Silence(operand) => self.silence(operand),
             Expr::Cast { to, operand } => self.cast(*to, operand),
             Expr::Binary { op, left, right } => self.binary(*op, left, right),
             // `zend_compile_simple_var` through `zend_try_compile_cv`: the
@@ -2138,6 +2153,59 @@ impl Emit<'_> {
         Ok(self.emit_binary(Opcode::Mul, operand, Where::Constant(sign)))
     }
 
+    /// `zend_compile_silence` (`Z/Zend/zend_compile.c:10896`):
+    /// `BEGIN_SILENCE` into a temporary (`zend_emit_op_tmp`), the
+    /// expression, and `END_SILENCE` over that temporary with nothing
+    /// left. A variable as the expression, `$a` or `$this`, is
+    /// `zend_compile_simple_var_no_cv` under `BP_VAR_R`: `FETCH_R` over
+    /// the name's constant string, `ZEND_FETCH_LOCAL` in
+    /// `extended_value`, into a temporary
+    /// (`zend_adjust_for_fetch_type`), "otherwise the CV access will
+    /// happen outside the silenced section"; `$_GET` and its kin, which
+    /// php fetches `ZEND_FETCH_GLOBAL`, are refused by the reader. The
+    /// value is where the expression left it, and its `zend_do_free`
+    /// steps back over the `END_SILENCE` ([`Self::last_that_left_a_value`]).
+    fn silence(&mut self, operand: &Expr) -> Result<Where, CompileError> {
+        let silence = self.temporary();
+        self.push(Opline {
+            opcode: Opcode::BeginSilence,
+            out_type: OperandKind::Tmp,
+            out: silence,
+            ..Opline::default()
+        });
+        let value = match operand {
+            Expr::Var(name) => self.fetch_by_name(name)?,
+            Expr::This => self.fetch_by_name(b"this")?,
+            _ => self.expr(operand)?,
+        };
+        self.push(Opline {
+            opcode: Opcode::EndSilence,
+            op1_type: OperandKind::Tmp,
+            op1: silence,
+            ..Opline::default()
+        });
+        Ok(value)
+    }
+
+    /// `zend_compile_simple_var_no_cv` under `BP_VAR_R` for a name that
+    /// is no auto-global: `FETCH_R (local)` over the name's constant
+    /// into a temporary.
+    fn fetch_by_name(&mut self, name: &[u8]) -> Result<Where, CompileError> {
+        let name = self.string(name)?;
+        let at = self.constant(name);
+        let out = self.temporary();
+        self.push(Opline {
+            opcode: Opcode::FetchR,
+            op1_type: OperandKind::Const,
+            op1: at,
+            out_type: OperandKind::Tmp,
+            out,
+            extended_value: FETCH_LOCAL,
+            ..Opline::default()
+        });
+        Ok(Where::Temporary(out))
+    }
+
     /// `zend_compile_cast`: the operand compiled first, then `ZEND_BOOL`
     /// over it for `(bool)` and `ZEND_CAST` with the type in
     /// `extended_value` for the rest, into a temporary; nothing is folded,
@@ -2285,6 +2353,7 @@ impl Emit<'_> {
             | Expr::PreDec(_)
             | Expr::PostDec(_) => Err(self.fatal("a variable is no constant expression")),
             Expr::Match { .. } => Err(self.fatal("a match is no constant expression")),
+            Expr::Silence(_) => Err(self.fatal("a silenced expression is no constant expression")),
             Expr::New { .. } | Expr::StaticCall { .. } | Expr::MethodCall { .. } => {
                 Err(self.fatal("a call is no constant expression"))
             }

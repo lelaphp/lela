@@ -25,8 +25,8 @@
 //! interpolation, `true`, `false`, `null`, a constant by name, a call of
 //! a named function, a parenthesised expression, a variable `$a` that is
 //! a CV, an assignment `$a = expr` to one, `$a++` and `++$a` on one,
-//! unary `-` and `+`, a cast to a scalar type in any of the spellings
-//! php's scanner takes, and `<`, `.`, `<<`, `>>`, `+`, `-`, `*`, `/`, `%`
+//! unary `-` and `+`, `@` over an expression, a cast to a scalar type in
+//! any of the spellings php's scanner takes, and `<`, `.`, `<<`, `>>`, `+`, `-`, `*`, `/`, `%`
 //! and `**` at php's precedence levels: `<` under `.` under the shifts
 //! under the additive level under the multiplicative one, `<` not
 //! associating and the rest left to right, and `**` right to left above
@@ -194,6 +194,12 @@ pub(crate) enum Expr {
         minus: bool,
         operand: Child,
     },
+    /// `@$a`, php's `ZEND_AST_SILENCE` over the expression the
+    /// diagnostics of are held: at the level of unary `-` and the casts,
+    /// so `@$a + 1` is php's `(@$a) + 1` and `@$a ** 2` php's
+    /// `@($a ** 2)`; and an assignment after it is inside it, `@$a = 1`
+    /// being php's `@($a = 1)`, as the grammar shifts the `=`.
+    Silence(Child),
     /// `(int)$a`, php's `ZEND_AST_CAST` with the type in `attr`.
     Cast {
         to: CastTo,
@@ -330,7 +336,9 @@ impl Drop for Child {
         let mut first = std::mem::replace(&mut *self.0, Expr::Null);
         loop {
             first = match first {
-                Expr::Unary { operand, .. } | Expr::Cast { operand, .. } => operand.take(),
+                Expr::Unary { operand, .. }
+                | Expr::Cast { operand, .. }
+                | Expr::Silence(operand) => operand.take(),
                 Expr::Binary { left, right, .. } => {
                     drop(right);
                     left.take()
@@ -1226,6 +1234,12 @@ impl Reader<'_> {
     fn expr(&mut self) -> Result<Expr, Trouble> {
         self.check_stack()?;
         let left = self.equality()?;
+        self.assignment(left)
+    }
+
+    /// The `=` php's grammar shifts after a variable, and what it
+    /// assigns: `left` as it stands where no `=` follows.
+    fn assignment(&mut self, left: Expr) -> Result<Expr, Trouble> {
         self.skip_trivia();
         // `==` is the equality read above, and `=>` closes a `match`
         // arm's conditions.
@@ -1489,14 +1503,23 @@ impl Reader<'_> {
         }
     }
 
-    /// `-$a` and `+$a`, which bind tighter than either level and nest.
-    /// `**` binds tighter still, so `-2 ** 2` is php's `-(2 ** 2)`.
+    /// `-$a`, `+$a` and `@$a`, which bind tighter than either level and
+    /// nest, php's one `%precedence` line for `'~'`, the casts and `'@'`.
+    /// `**` binds tighter still, so `-2 ** 2` is php's `-(2 ** 2)`. The
+    /// grammar's `'@' expr` shifts an `=` after the operand rather than
+    /// reducing, so `@$a = 1` is `@($a = 1)`, and the assignment is read
+    /// inside the `@` here.
     fn unary(&mut self) -> Result<Expr, Trouble> {
         self.check_stack()?;
         self.skip_trivia();
         let minus = match (self.byte(0), self.byte(1)) {
             (Some(b'-'), next) if !matches!(next, Some(b'-' | b'=')) => true,
             (Some(b'+'), next) if !matches!(next, Some(b'+' | b'=')) => false,
+            (Some(b'@'), _) => {
+                self.bump(1);
+                let operand = self.unary()?;
+                return Ok(Expr::Silence(Child::new(self.assignment(operand)?)));
+            }
             _ => return self.power(),
         };
         self.bump(1);
@@ -2341,6 +2364,63 @@ mod tests {
                 1
             )],
             "php's scanner has no negative literal; the operator is the tree node"
+        );
+    }
+
+    /// `@` at the level of unary `-`: over the `**` below it, under the
+    /// `+` above it, nesting with `-` either way round, and taking an
+    /// assignment after its operand inside it as php's grammar does.
+    #[test]
+    fn an_at_sign_is_the_silence_php_reads_it_as() {
+        let var = || Child::new(Expr::Var(b"a".to_vec()));
+        assert_eq!(
+            read(b"<?php echo @$a ** 2, @$a + 1, -@$a, @-$a, @@f();").unwrap_or_default(),
+            vec![(
+                Stmt::Echo(vec![
+                    Expr::Silence(Child::new(Expr::Binary {
+                        op: BinaryOp::Pow,
+                        left: var(),
+                        right: Child::new(Expr::Int(2)),
+                    })),
+                    Expr::Binary {
+                        op: BinaryOp::Add,
+                        left: Child::new(Expr::Silence(var())),
+                        right: Child::new(Expr::Int(1)),
+                    },
+                    Expr::Unary {
+                        minus: true,
+                        operand: Child::new(Expr::Silence(var())),
+                    },
+                    Expr::Silence(Child::new(Expr::Unary {
+                        minus: true,
+                        operand: var(),
+                    })),
+                    Expr::Silence(Child::new(Expr::Silence(Child::new(Expr::Call {
+                        name: b"f".to_vec(),
+                        arguments: vec![],
+                    })))),
+                ]),
+                1
+            )]
+        );
+        assert_eq!(
+            read(b"<?php @$a = 1 + 2;").unwrap_or_default(),
+            vec![(
+                Stmt::Effect(Expr::Silence(Child::new(Expr::Assign {
+                    var: b"a".to_vec(),
+                    value: Child::new(Expr::Binary {
+                        op: BinaryOp::Add,
+                        left: Child::new(Expr::Int(1)),
+                        right: Child::new(Expr::Int(2)),
+                    }),
+                }))),
+                1
+            )],
+            "the `=` is shifted, so the assignment is inside the `@`"
+        );
+        assert!(
+            read(b"<?php echo @$a == 1;").is_ok(),
+            "an `==` after the operand is the equality, not an assignment"
         );
     }
 
