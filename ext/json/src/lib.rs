@@ -118,6 +118,7 @@ pub fn extension() -> Extension {
             ),
         ])
         .request_state::<State>()
+        .info(json_info)
         .build("json")
 }
 
@@ -384,4 +385,20 @@ fn json_last_error_msg(req: &mut Request) -> Result<Value, Thrown> {
         _ => "Unknown error",
     };
     Ok(Value::string(PhpString::new(req, message.as_bytes())?))
+}
+
+/// `PHP_MINFO_FUNCTION(json)`: the one-row table `json support =>
+/// enabled`, what `phpinfo()`, `php --ri json` and
+/// `ReflectionExtension::info` print for the extension.
+///
+/// ```php
+/// (new ReflectionExtension('json'))->info();
+/// ```
+/// ```expect
+/// json
+///
+/// json support => enabled
+/// ```
+fn json_info(req: &mut Request) {
+    req.info_table(&[&["json support", "enabled"]]);
 }
