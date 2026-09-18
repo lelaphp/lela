@@ -198,6 +198,9 @@ pub(crate) struct Emit<'a> {
     stack: StackLimit,
     oplines: Vec<Opline>,
     constants: Vec<Zval>,
+    /// [`OpArray::const_exprs`]: the constant expressions a constant of
+    /// kind `IS_CONSTANT_AST` indexes, in the order they were added.
+    const_exprs: Vec<ConstExpr>,
     vars: Vec<Name>,
     safepoints: Vec<OplineIdx>,
     temporaries: u32,
@@ -497,6 +500,7 @@ pub(crate) fn unit(
         stack: options.stack,
         oplines: Vec::new(),
         constants: Vec::new(),
+        const_exprs: Vec::new(),
         vars: Vec::new(),
         safepoints: vec![OplineIdx(0)],
         temporaries: 0,
@@ -560,6 +564,7 @@ pub(crate) fn unit(
 struct Saved {
     oplines: Vec<Opline>,
     constants: Vec<Zval>,
+    const_exprs: Vec<ConstExpr>,
     vars: Vec<Name>,
     safepoints: Vec<OplineIdx>,
     temporaries: u32,
@@ -662,6 +667,16 @@ impl Emit<'_> {
         let at = u32::try_from(self.constants.len()).unwrap_or(u32::MAX);
         self.constants.push(value);
         at
+    }
+
+    /// `zend_ast_create_zval` behind an `IS_CONSTANT_AST` zval: the
+    /// expression into the op array's own table, and the zval that
+    /// indexes it, which a slot of the constant table then holds like
+    /// any other value.
+    fn unevaluated(&mut self, expr: ConstExpr) -> Zval {
+        let at = u32::try_from(self.const_exprs.len()).unwrap_or(u32::MAX);
+        self.const_exprs.push(expr);
+        Zval::const_expr(at)
     }
 
     fn temporary(&mut self) -> u32 {
@@ -1585,16 +1600,17 @@ impl Emit<'_> {
             variadic_seen = parameter.variadic;
             // `zend_compile_params` folds a default under
             // `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`, so one
-            // naming a constant stays an `IS_CONSTANT_AST` literal for
-            // the engine and for Reflection, which this table has no
-            // zval for yet.
+            // naming a constant is not folded: the name stays as
+            // written, and what stands in the constant table is the
+            // `IS_CONSTANT_AST` zval over the expression, which the
+            // engine evaluates on the pass that copies it and
+            // Reflection reads back as the name.
             let folded = match &parameter.default {
+                Some(expr) if names_a_constant(expr) => {
+                    let unevaluated = self.const_expr(expr)?;
+                    Some(self.unevaluated(unevaluated))
+                }
                 Some(expr) => {
-                    if names_a_constant(expr) {
-                        return Err(self.fatal(
-                            "a parameter default naming a constant this compiler cannot read yet",
-                        ));
-                    }
                     let Some(folded) = self.constant_of(expr)? else {
                         return Err(self.fatal("a parameter default this compiler cannot read yet"));
                     };
@@ -1735,6 +1751,7 @@ impl Emit<'_> {
             returns_by_ref: std::mem::take(&mut self.returns_by_ref),
             oplines: std::mem::take(&mut self.oplines),
             constants: std::mem::take(&mut self.constants),
+            const_exprs: std::mem::take(&mut self.const_exprs),
             vars: std::mem::take(&mut self.vars),
             safepoints: std::mem::replace(&mut self.safepoints, vec![OplineIdx(0)]),
             temporaries: std::mem::take(&mut self.temporaries),
@@ -1759,6 +1776,7 @@ impl Emit<'_> {
     fn end_body(&mut self, saved: Saved) {
         self.oplines = saved.oplines;
         self.constants = saved.constants;
+        self.const_exprs = saved.const_exprs;
         self.vars = saved.vars;
         self.safepoints = saved.safepoints;
         self.temporaries = saved.temporaries;
@@ -1804,6 +1822,7 @@ impl Emit<'_> {
         Ok(OpArray {
             oplines: oplines.into_boxed_slice(),
             literals: std::mem::take(&mut self.constants).into_boxed_slice(),
+            const_exprs: std::mem::take(&mut self.const_exprs).into_boxed_slice(),
             vars: vars.into_boxed_slice(),
             num_cvs,
             num_tmps: self.temporaries,
@@ -6658,6 +6677,7 @@ mod tests {
             stack: options.stack,
             oplines: Vec::new(),
             constants: Vec::new(),
+            const_exprs: Vec::new(),
             vars: Vec::new(),
             safepoints: Vec::new(),
             temporaries: 0,

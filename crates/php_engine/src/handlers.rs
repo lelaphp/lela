@@ -1894,6 +1894,40 @@ fn missing_argument(req: &mut Request, frame: FrameRef, passed: u32) -> Thrown {
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// A default naming a constant is the `IS_CONSTANT_AST` constant the
+/// compiler left, evaluated here: a persistent constant, a class
+/// constant, and arithmetic over one:
+///
+/// ```php
+/// class A { const X = 5; }
+/// function f($a = PHP_INT_MAX, $b = A::X, $c = PHP_INT_SIZE * 2) { var_dump($a, $b, $c); }
+/// f();
+/// f(1, 2, 3);
+/// ```
+/// ```expect
+/// int(9223372036854775807)
+/// int(5)
+/// int(16)
+/// int(1)
+/// int(2)
+/// int(3)
+/// ```
+///
+/// A name nothing defines is php's `Error` where the default is
+/// evaluated, which is the callee's own line:
+///
+/// ```php
+/// function g($a = NOPE) { var_dump($a); }
+/// g();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Undefined constant "NOPE" in %s:2
+/// Stack trace:
+/// #0 %s(3): g()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
 pub(crate) fn recv_init<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -1902,11 +1936,20 @@ pub(crate) fn recv_init<T: Tier>(
 ) -> Edge {
     let passed = req.vm().at(frame).map_or(0, |state| state.num_args);
     if op.op1 > passed {
-        let default = exec::constant(code, ConstIdx(op.op2));
-        req.addref(&default);
-        let previous = req.set_slot(frame, op.out, default);
+        let default = match default_value(req, code, ConstIdx(op.op2)) {
+            Ok(default) => default,
+            Err(thrown) => return threw(req, frame, &thrown),
+        };
+        let evaluated = default.1;
+        let previous = req.set_slot(frame, op.out, default.0);
         req.release(previous);
-        return Ok(advance(req, frame));
+        // php goes on to `recv_init_check_type` for a default it
+        // evaluated and returns for one it copied, so a constant
+        // expression's value is held to the parameter's type and a
+        // folded literal is not.
+        if !evaluated {
+            return Ok(advance(req, frame));
+        }
     }
     // php checks the type of an argument that was passed and never of
     // the default it copied, and only where the function has one to
@@ -1916,6 +1959,31 @@ pub(crate) fn recv_init<T: Tier>(
         return threw(req, frame, &thrown);
     }
     Ok(advance(req, frame))
+}
+
+/// `RT_CONSTANT(opline, opline->op2)` as `ZEND_RECV_INIT` reads it: the
+/// value with one more owner, and, where it is the `IS_CONSTANT_AST` the
+/// compiler left for a default naming a constant (`zend_compile_params`
+/// under `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`), the
+/// constant expression it indexes, evaluated in the function's scope
+/// (`zval_update_constant_with_ctx`, `EX(func)->op_array.scope`). The
+/// second word says which of the two it was, since php holds only what
+/// it evaluated to the parameter's type. php keeps an evaluated value
+/// that is not refcounted in the opline's runtime cache; nothing a
+/// program can see turns on that, and it is not kept here.
+fn default_value(req: &mut Request, code: &OpArray, at: ConstIdx) -> Result<(Value, bool), Thrown> {
+    let unevaluated = code
+        .literals
+        .get(at.0 as usize)
+        .and_then(|constant| constant.as_const_expr())
+        .and_then(|at| code.const_exprs.get(at as usize));
+    if let Some(expr) = unevaluated {
+        let scope = req.executed_scope();
+        return Ok((crate::api::call::eval_const_expr(req, expr, scope)?, true));
+    }
+    let value = exec::constant(code, at);
+    req.addref(&value);
+    Ok((value, false))
 }
 
 /// `ZEND_NEW` (`Z/Zend/zend_vm_def.h:5941`) over a class named at

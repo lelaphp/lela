@@ -5,7 +5,7 @@
 use php_heap::Zval;
 
 use crate::Opcode;
-use crate::decl::Name;
+use crate::decl::{ConstExpr, Name};
 use crate::opcode;
 
 /// An index into an op array's oplines.
@@ -262,6 +262,12 @@ pub struct LiveRange {
 pub struct OpArray {
     pub oplines: Box<[Opline]>,
     pub literals: Box<[Zval]>,
+    /// The constant expressions a constant of kind `IS_CONSTANT_AST`
+    /// indexes, php's `zend_ast_ref` behind such a zval: what
+    /// `zend_compile_params` leaves in a `RECV_INIT`'s `op2` for a
+    /// default naming a constant, evaluated by the opline that copies it
+    /// and read as written by Reflection.
+    pub const_exprs: Box<[ConstExpr]>,
     pub vars: Box<[Name]>,
     pub num_cvs: u32,
     pub num_tmps: u32,

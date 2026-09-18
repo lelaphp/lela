@@ -26,6 +26,16 @@ pub enum ZvalType {
     Object = 8,
     Resource = 9,
     Reference = 10,
+    /// `IS_CONSTANT_AST`: a constant expression in the constant table of
+    /// a compiled program, where the compiler left a name unevaluated,
+    /// which is what `zend_compile_params` leaves for a parameter
+    /// default naming a constant. The payload is the index of the
+    /// expression the op array keeps beside that table, and not a
+    /// pointer, since the expression is the unit's and outlives every
+    /// request that reads it. Never refcounted, and never a value a
+    /// program holds: the opline that copies it evaluates it first
+    /// (`zval_update_constant_ex`).
+    ConstExpr = 11,
     /// `IS_INDIRECT`: a pointer to a zval that stands elsewhere, which is
     /// what a `FETCH_*_W` leaves in its `VAR` for the `ASSIGN*` after it
     /// to write through (`ZVAL_INDIRECT`, `Z_INDIRECT`). Never
@@ -208,6 +218,22 @@ impl Zval {
             type_flags: Zval::TYPE_REFCOUNTED | Zval::TYPE_COLLECTABLE,
             _pad: 0,
             u2: 0,
+        }
+    }
+
+    /// `ZVAL_AST`: the constant expression at `at` of the op array's own
+    /// table of them, which is what a constant of this kind names.
+    #[must_use]
+    pub const fn const_expr(at: u32) -> Zval {
+        Zval::scalar(ZvalType::ConstExpr, at as u64)
+    }
+
+    /// `Z_ASTVAL` of an `IS_CONSTANT_AST`, else `None`.
+    #[must_use]
+    pub fn as_const_expr(self) -> Option<u32> {
+        match self.kind {
+            ZvalType::ConstExpr => u32::try_from(self.value).ok(),
+            _ => None,
         }
     }
 

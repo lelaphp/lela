@@ -175,6 +175,7 @@ Zval::UNDEF
 Zval::array
 Zval::as_arr
 Zval::as_bool
+Zval::as_const_expr
 Zval::as_double
 Zval::as_indirect
 Zval::as_long
@@ -183,6 +184,7 @@ Zval::as_reference
 Zval::as_resource
 Zval::as_str
 Zval::bool
+Zval::const_expr
 Zval::double
 Zval::fe_pos
 Zval::indirect

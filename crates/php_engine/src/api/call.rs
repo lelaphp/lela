@@ -363,6 +363,20 @@ pub fn eval_const_expr(
                 ),
             )),
         },
+        // `zend_ast_evaluate`'s `ZEND_AST_CLASS_CONST` arm: the class
+        // fetched by the name as written and its constant read through
+        // `zend_fetch_class_constant`. `self`, `parent` and `static` are
+        // refused while the file compiles, so the name here is a class's.
+        ConstExpr::ClassConstant { class, name } => {
+            let Some(id) = req.class_named(&class.0) else {
+                return Err(throw(
+                    req,
+                    "Error",
+                    &format!("Class \"{}\" not found", String::from_utf8_lossy(&class.0)),
+                ));
+            };
+            req.class_constant(id, &name.0)
+        }
         ConstExpr::Array(elements) => {
             let mut array = crate::api::values::PhpArray::new(req)?;
             for (key, value) in elements {

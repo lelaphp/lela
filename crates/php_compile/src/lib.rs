@@ -3934,6 +3934,67 @@ echo f(1), C::s(), $o->m(1), $o->p;
         assert_eq!(unit.methods.len(), 3);
     }
 
+    /// `zend_compile_params` under
+    /// `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION` (#384): a
+    /// default naming a constant is not folded, so its `RECV_INIT`
+    /// carries the `IS_CONSTANT_AST` value the oracle dumps as
+    /// `zval(type=11)`, the constant expression beside the op array's
+    /// constant table in the order the parameters were compiled, and the
+    /// name as written for Reflection. A default that folds is the value
+    /// it folds to, as it always was.
+    #[test]
+    fn a_parameter_default_naming_a_constant_is_an_unevaluated_constant() {
+        let source: &[u8] =
+            b"<?php\nclass A { const X = 5; }\nfunction f($a = PHP_INT_MAX, $b = A::X, $c = 1) { echo $a; }\n";
+        assert_eq!(
+            dump_of(source),
+            "\n$_main:\n     ; (lines=1, args=0, vars=0, tmps=0)\n\
+             \x20    ; (before optimizer)\n     ; :1-4\n     ; return  [] RANGE[0..0]\n\
+             0000 RETURN int(1)\n\
+             \nf:\n     ; (lines=5, args=3, vars=3, tmps=0)\n\
+             \x20    ; (before optimizer)\n     ; :3-3\n     ; return  [] RANGE[0..0]\n\
+             0000 CV0($a) = RECV_INIT 1 zval(type=11)\n\
+             0001 CV1($b) = RECV_INIT 2 zval(type=11)\n\
+             0002 CV2($c) = RECV_INIT 3 int(1)\n\
+             0003 ECHO CV0($a)\n\
+             0004 RETURN null\n"
+        );
+        let (unit, _strings) = unit_and_strings(source);
+        let body = &unit.functions[0].1;
+        let unevaluated: Vec<&ConstExpr> = body
+            .literals
+            .iter()
+            .filter_map(|constant| constant.as_const_expr())
+            .filter_map(|at| body.const_exprs.get(at as usize))
+            .collect();
+        assert_eq!(
+            unevaluated,
+            vec![
+                &ConstExpr::Constant(Name(b"PHP_INT_MAX".as_slice().into())),
+                &ConstExpr::ClassConstant {
+                    class: Name(b"A".as_slice().into()),
+                    name: Name(b"X".as_slice().into()),
+                },
+            ]
+        );
+        assert_eq!(
+            unit.functions[0]
+                .0
+                .parameters
+                .iter()
+                .map(|p| p.default.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Some(ConstExpr::Constant(Name(b"PHP_INT_MAX".as_slice().into()))),
+                Some(ConstExpr::ClassConstant {
+                    class: Name(b"A".as_slice().into()),
+                    name: Name(b"X".as_slice().into()),
+                }),
+                Some(ConstExpr::Long(1)),
+            ]
+        );
+    }
+
     /// `zend_compile_params` and `zend_compile_return_type` as the
     /// oracle at 8.5.9 dumps them under
     /// `opcache.opt_debug_level=0x10000` (#385): a typed parameter is a
