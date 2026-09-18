@@ -2220,12 +2220,11 @@ fn add_element(
 /// wrong (#367).
 ///
 /// A packed array, a hash with string keys and an empty one: the loop
-/// over the third runs its body no time. The key and the value are
-/// echoed apart until the rope an interpolated string compiles to is
-/// served (#355).
+/// over the second runs its body no time, and the third's key and
+/// value are one interpolated string (#355).
 ///
 /// ```php
-/// foreach (['x', 'y'] as $p) echo $p; foreach ([] as $v) echo 'no'; foreach (['k' => 1] as $k => $v) echo $k, '=', $v;
+/// foreach (['x', 'y'] as $p) echo $p; foreach ([] as $v) echo 'no'; foreach (['k' => 1] as $k => $v) echo "$k=$v";
 /// ```
 /// ```expect
 /// xyk=1
