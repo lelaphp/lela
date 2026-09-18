@@ -15,7 +15,7 @@
 //! yet (#412).
 
 use php_ext::call::call_named;
-use php_ext::coerce::{is_callable, to_callable};
+use php_ext::coerce::{is_callable, to_callable, value_name};
 use php_ext::decl::{FunctionDecl, MethodDecl, Visibility};
 use php_ext::raising::{Thrown, arg_count_error, arg_type_error, throw};
 use php_ext::request::Request;
@@ -1020,7 +1020,7 @@ fn array_argument(req: &mut Request, position: u32) -> Result<PhpArray, Thrown> 
         None => Err(arg_type_error(
             req,
             position,
-            &format!("be of type array, {} given", given.type_name()),
+            &format!("be of type array, {} given", value_name(req, &given)),
         )),
     }
 }
@@ -1255,6 +1255,21 @@ pub(super) fn reflection_method_invoke(req: &mut Request) -> Result<Value, Throw
 /// ```expect
 /// int(5)
 /// int(5)
+/// ```
+///
+/// What is no array is php's `TypeError`, whose tail names the value as
+/// `zend_zval_value_name` does and not as `zend_zval_type_name` does, so
+/// `true` stands where the type alone would read `bool` (#462):
+///
+/// ```php
+/// (new ReflectionMethod('Exception', 'getCode'))->invokeArgs(new Exception, true);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: ReflectionMethod::invokeArgs(): Argument #2 ($args) must be of type array, true given in %s:2
+/// Stack trace:
+/// #0 %s(2): ReflectionMethod->invokeArgs(Object(Exception), true)
+/// #1 {main}
+///   thrown in %s on line 2
 /// ```
 pub(super) fn reflection_method_invoke_args(req: &mut Request) -> Result<Value, Thrown> {
     let (class, decl, scope) = this_method(req)?;

@@ -14,6 +14,7 @@
 //! a `Closure` (#415).
 
 use php_ext::call::{eval_const_expr, instantiate};
+use php_ext::coerce::value_name;
 use php_ext::decl::{ClassKind, MethodDecl, Visibility};
 use php_ext::raising::{Thrown, arg_type_error, throw};
 use php_ext::request::Request;
@@ -357,7 +358,7 @@ pub(super) fn reflection_class_is_instance(req: &mut Request) -> Result<Value, T
         return Err(arg_type_error(
             req,
             1,
-            &format!("be of type object, {} given", given.type_name()),
+            &format!("be of type object, {} given", value_name(req, &given)),
         ));
     };
     let of = object.class();
@@ -909,6 +910,21 @@ pub(super) fn reflection_class_new_instance(req: &mut Request) -> Result<Value, 
 /// ```expect
 /// string(1) "x"
 /// ```
+///
+/// What is no array is php's `TypeError`, whose tail names the value as
+/// `zend_zval_value_name` does and not as `zend_zval_type_name` does, so
+/// `true` stands where the type alone would read `bool` (#462):
+///
+/// ```php
+/// (new ReflectionClass('JsonException'))->newInstanceArgs(true);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: ReflectionClass::newInstanceArgs(): Argument #1 ($args) must be of type array, true given in %s:2
+/// Stack trace:
+/// #0 %s(2): ReflectionClass->newInstanceArgs(true)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
 pub(super) fn reflection_class_new_instance_args(req: &mut Request) -> Result<Value, Thrown> {
     at_most_arguments(req, 1)?;
     let class = this_class(req)?;
@@ -925,7 +941,7 @@ pub(super) fn reflection_class_new_instance_args(req: &mut Request) -> Result<Va
         return Err(arg_type_error(
             req,
             1,
-            &format!("be of type array, {} given", given.type_name()),
+            &format!("be of type array, {} given", value_name(req, &given)),
         ));
     }
     instantiable(req, class)?;

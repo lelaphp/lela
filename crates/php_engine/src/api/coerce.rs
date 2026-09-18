@@ -261,6 +261,20 @@ pub fn is_type(value: &Value, tag: TypeTag) -> bool {
     crate::ops::type_check(value, mask)
 }
 
+/// `zend_zval_value_name` (`Z/Zend/zend_API.c:157`), the kernel
+/// [`crate::ops::value_name`] through the face: what php's error text
+/// names a value as, which is `true` or `false` for a bool, the class
+/// for an object, and the type for the rest. It is what the tail of an
+/// argument type error carries, the last `%s` of php's
+/// `zend_argument_type_error(n, "must be of type %s, %s given", ...)`,
+/// so a native that words one by hand words it with this and not with
+/// [`Value::type_name`], which is `zend_zval_type_name` and says `bool`
+/// where php says `true`.
+#[must_use]
+pub fn value_name(req: &Request, value: &Value) -> String {
+    crate::ops::value_name(req, value)
+}
+
 /// `===`.
 #[must_use]
 pub fn identical(a: &Value, b: &Value) -> bool {
@@ -575,10 +589,15 @@ fn coerce_typed(
     }
     let want = |req: &mut Request, name: &str| {
         let question = if nullable { "?" } else { "" };
+        // `zend_argument_type_error(num, "must be of type %s, %s
+        // given", need, zend_zval_value_name(arg))`: the tail is the
+        // value's name and not its type's, so `true` stands where
+        // `zend_zval_type_name` would read `bool`.
+        let given = value_name(req, value);
         Err(arg_type_error(
             req,
             position,
-            &format!("be of type {question}{name}, {} given", value.type_name()),
+            &format!("be of type {question}{name}, {given} given"),
         ))
     };
     match ty {

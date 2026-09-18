@@ -18,6 +18,7 @@
 //! never prints.
 
 use php_ext::call::eval_const_expr;
+use php_ext::coerce::value_name;
 use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
 use php_ext::raising::{Thrown, arg_type_error, throw};
 use php_ext::request::Request;
@@ -569,7 +570,7 @@ fn construct_function(req: &mut Request) -> Result<FunctionRef, Thrown> {
                     1,
                     &format!(
                         "be a string, an array(class, method), or a callable object, {} given",
-                        first.type_name()
+                        value_name(req, &first)
                     ),
                 ));
             }

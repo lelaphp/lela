@@ -519,30 +519,31 @@ pub fn eval_const_expr(
 /// `foreach` over `value`: an array's elements now, a `Traversable`
 /// through its iterator, a scalar php's `TypeError`.
 pub fn iterate(req: &mut Request, value: &Value) -> Result<Iter, Thrown> {
-    match value.as_array() {
-        Some(array) => Ok(Iter {
-            entries: array
-                .snapshot()
-                .into_iter()
-                .map(|(k, v)| {
-                    let key = match k {
-                        crate::api::values::Key::Int(n) => Value::int(n),
-                        crate::api::values::Key::Str(s) => Value::string(s),
-                    };
-                    (key, v)
-                })
-                .collect(),
-            at: None,
-        }),
-        None => Err(throw(
+    let Some(array) = value.as_array() else {
+        // `zend_type_error("foreach() argument must be of type
+        // array|object, %s given", zend_zval_value_name(array_ptr))` at
+        // `ZEND_FE_RESET_R`: the value's name, not its type's.
+        let given = crate::api::coerce::value_name(req, value);
+        return Err(throw(
             req,
             "TypeError",
-            &format!(
-                "foreach() argument must be of type array|object, {} given",
-                value.type_name()
-            ),
-        )),
-    }
+            &format!("foreach() argument must be of type array|object, {given} given"),
+        ));
+    };
+    Ok(Iter {
+        entries: array
+            .snapshot()
+            .into_iter()
+            .map(|(k, v)| {
+                let key = match k {
+                    crate::api::values::Key::Int(n) => Value::int(n),
+                    crate::api::values::Key::Str(s) => Value::string(s),
+                };
+                (key, v)
+            })
+            .collect(),
+        at: None,
+    })
 }
 
 /// `Closure::fromCallable`.

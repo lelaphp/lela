@@ -121,6 +121,7 @@ coerce::to_number
 coerce::to_object
 coerce::to_string
 coerce::truthy
+coerce::value_name
 decl::Attribute
 decl::AttributeArgument
 decl::ClassConstDecl

@@ -72,6 +72,7 @@ use php_ext::call::{
     Function, constant, eval_const_expr, lookup_class, lookup_function, new_object,
     read_static_prop, write_static_prop,
 };
+use php_ext::coerce::value_name;
 use php_ext::decl::{
     ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, MethodDecl, Name,
     Parameter, PropertyDecl, Type, Visibility,
@@ -344,7 +345,7 @@ fn class_argument(
                     position,
                     &format!(
                         "be of type object|string, {} given",
-                        given.deref().type_name()
+                        value_name(req, &given.deref())
                     ),
                 ));
             }
@@ -1475,7 +1476,7 @@ fn reflection_object_construct(req: &mut Request) -> Result<Value, Thrown> {
         return Err(arg_type_error(
             req,
             1,
-            &format!("be of type object, {} given", given.type_name()),
+            &format!("be of type object, {} given", value_name(req, &given)),
         ));
     };
     let object = *object;
@@ -1904,7 +1905,7 @@ fn reflection_class_is_subclass_of(req: &mut Request) -> Result<Value, Thrown> {
                 1,
                 &format!(
                     "be of type ReflectionClass|string, {} given",
-                    given.type_name()
+                    value_name(req, &given)
                 ),
             ));
         }
@@ -2329,7 +2330,10 @@ fn reflection_method_construct(req: &mut Request) -> Result<Value, Thrown> {
             return Err(arg_type_error(
                 req,
                 1,
-                &format!("be of type object|string, {} given", first.type_name()),
+                &format!(
+                    "be of type object|string, {} given",
+                    value_name(req, &first)
+                ),
             ));
         }
         (_, Some(_)) => {
@@ -2649,7 +2653,7 @@ fn reflection_property_get_value(req: &mut Request) -> Result<Value, Thrown> {
         return Err(arg_type_error(
             req,
             1,
-            &format!("be of type ?object, {} given", given.type_name()),
+            &format!("be of type ?object, {} given", value_name(req, &given)),
         ));
     }
     let (class, name, declared) = this_property(req)?;
@@ -2796,7 +2800,7 @@ fn reflection_property_set_value(req: &mut Request) -> Result<Value, Thrown> {
         return Err(arg_type_error(
             req,
             1,
-            &format!("be of type object, {} given", given.type_name()),
+            &format!("be of type object, {} given", value_name(req, &given)),
         ));
     };
     let value = req.argument(2).unwrap_or_default().deref();

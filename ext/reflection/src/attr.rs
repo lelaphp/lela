@@ -16,7 +16,7 @@
 use std::fmt::Write as _;
 
 use php_ext::call::{call_named, eval_const_expr, instantiate, lookup_class};
-use php_ext::coerce::{to_callable, to_long};
+use php_ext::coerce::{to_callable, to_long, value_name};
 use php_ext::decl::Attribute;
 use php_ext::raising::{Thrown, arg_value_error, throw};
 use php_ext::request::Request;
@@ -405,17 +405,20 @@ fn marker_flags(req: &mut Request, class: ClassId, written: &str) -> Result<i64,
         return Ok(TARGET_ALL);
     };
     let value = eval_const_expr(req, &first.value, Some(class))?;
-    match value.as_int() {
-        Some(flags) => Ok(flags),
-        None => Err(throw(
+    let Some(flags) = value.as_int() else {
+        // `zend_zval_value_name(&flags)`
+        // (`Z/Zend/zend_attributes.c:54`): the value's name, so `true`
+        // stands where the type alone would read `bool`.
+        let given = value_name(req, &value);
+        return Err(throw(
             req,
             "Error",
             &format!(
-                "Attribute::__construct(): Argument #1 ($flags) must be of type int, {} given",
-                value.type_name()
+                "Attribute::__construct(): Argument #1 ($flags) must be of type int, {given} given"
             ),
-        )),
-    }
+        ));
+    };
+    Ok(flags)
 }
 
 /// `zend_get_attribute_object`: the instance, its constructor served
