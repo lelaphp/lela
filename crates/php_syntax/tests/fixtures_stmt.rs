@@ -894,6 +894,25 @@ fn unset_stmt() {
     );
 }
 
+/// php's `unset_variables` takes one operand at least, so `unset()` is
+/// its parse error and not a statement that reads.
+#[test]
+fn unset_stmt_with_no_operand() {
+    check(
+        "<?php unset();",
+        expect![[r#"
+        SOURCE_FILE@0..14
+          OPEN_TAG@0..6 "<?php "
+          UNSET_STMT@6..14
+            UNSET_KW@6..11 "unset"
+            L_PAREN@11..12 "("
+            R_PAREN@12..13 ")"
+            SEMICOLON@13..14 ";"
+        error@12..13 syntax error, unexpected token ")"
+    "#]],
+    );
+}
+
 #[test]
 fn const_stmt_multi_declarator() {
     check(

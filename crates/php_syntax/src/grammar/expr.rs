@@ -805,13 +805,21 @@ fn ref_target(p: &mut Parser<'_>) {
 pub(crate) const AFTER_VARIABLE: &str = "\"->\" or \"?->\" or \"[\"";
 
 /// The `unset(...)` arguments: each a `variable` production (php's
-/// `unset_variables`); a trailing comma is legal. The empty list is the
-/// closer's.
+/// `unset_variables`); a trailing comma is legal.
 pub(crate) fn unset_operands(p: &mut Parser<'_>) {
     let mut after_comma = false;
     // `?>` is the `;` php's scanner makes of it, unexpected here with
     // no clause, and left for the enclosing construct.
     if p.peek_at(K::CLOSE_TAG) {
+        p.error_unexpected();
+    }
+    // `unset_variables` is `unset_variable | unset_variables ','
+    // unset_variable`, so it takes one operand at least and the empty
+    // list is nobody's to reduce: php is at the closer with no rule for
+    // it, `unexpected token ")"` with no clause (probed 8.5.9). Without
+    // this the list walks straight out and the statement stands with an
+    // `UNSET_STMT` carrying nothing.
+    if p.peek_at(K::R_PAREN) {
         p.error_unexpected();
     }
     while !p.at_eof() && !p.peek_at(K::R_PAREN) && !p.peek_at(K::CLOSE_TAG) {
