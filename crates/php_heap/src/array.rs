@@ -39,7 +39,7 @@ use crate::gc::{self, Refcounted};
 use crate::hooks::{Fatal, HeapHooks};
 use crate::mm::Mm;
 use crate::string::Str;
-use crate::{Heap, Zval, ZvalType};
+use crate::{Heap, Zval, ZvalRef, ZvalType};
 
 /// Where an array's header and data come from: the request's heap for
 /// every array a request builds, which is what `memory_get_usage()`
@@ -713,6 +713,31 @@ impl Arr {
     #[must_use]
     pub fn contains(&self, key: Key) -> bool {
         self.find(key).is_some()
+    }
+
+    /// The `zval *` `zend_hash_find` hands back, the entry in place:
+    /// the bucket's `val` in a hash table and the slot in a packed one,
+    /// which is what `zend_std_get_property_ptr_ptr` returns for a
+    /// dynamic property and what `FETCH_OBJ_W` leaves in its `VAR`.
+    /// None where the key is not there.
+    ///
+    /// **A name into a table is a name until the table is written.**
+    /// Every insert may rehash or move the data allocation, as php's
+    /// may, so a `ZvalRef` from here is held across the one opline that
+    /// asked for it and the `ASSIGN*` beside it and no further; php
+    /// holds `zval *` under the same rule.
+    #[must_use]
+    pub fn value_ref(&self, key: Key) -> Option<ZvalRef> {
+        let idx = self.find(key)?;
+        let at = if self.is_packed() {
+            self.slot(idx)
+        } else {
+            // `val` is the bucket's first field and the struct is
+            // `repr(C)`, so this is `&p->val`; the cast itself reads
+            // nothing.
+            self.bucket(idx).cast::<Zval>()
+        };
+        Some(ZvalRef::new(at))
     }
 
     // ------------------------------------------- the internal pointer

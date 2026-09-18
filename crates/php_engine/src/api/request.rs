@@ -2529,8 +2529,11 @@ impl Request {
     /// slot, what it held released last, or into the dynamic table,
     /// materialised on the first write and separated when a cast shares
     /// it. The name is given up once the table has taken its own owner
-    /// of it. The visibility rule and the typed-property coercion arrive
-    /// with the kernel that writes a property from PHP code.
+    /// of it. A name the table does not hold yet is a creation and goes
+    /// through [`Request::dynamic_property_creation`] first, php's two
+    /// arms at `write_std_property`'s `else`; the value is given up with
+    /// the `Error`, as `FREE_OP_DATA` gives it up. The typed-property
+    /// coercion arrives with the kernel that writes one.
     pub(crate) fn write_property(
         &mut self,
         object: PhpObject,
@@ -2542,14 +2545,146 @@ impl Request {
             let z = value.into_zval();
             Heap::object_set_slot(&mut Hooks(self), o, i, z);
         } else {
+            let key = php_heap::Key::Str(name.heap());
+            let held = o.properties().is_some_and(|table| table.contains(key));
+            if !held
+                && let Err(thrown) = self.dynamic_property_creation(object.class(), name.as_bytes())
+            {
+                self.release(value);
+                self.release(Value::string(name));
+                return Err(thrown);
+            }
             let table = self.heap.object_properties(o);
             let table = self.fatal_of(table)?;
             let table = self.array_separate(table)?;
             self.heap.object_set_properties(o, table);
-            self.array_update(table, php_heap::Key::Str(name.heap()), value)?;
+            self.array_update(table, key, value)?;
         }
         self.release(Value::string(name));
         Ok(())
+    }
+
+    /// The two arms php takes before it lays a name the class did not
+    /// declare into the dynamic table, in
+    /// `zend_std_write_property` and in `zend_std_get_property_ptr_ptr`
+    /// alike (`Z/Zend/zend_object_handlers.c:1288`, `:1522`): a class
+    /// with `ZEND_ACC_NO_DYNAMIC_PROPERTIES` is
+    /// `zend_forbidden_dynamic_property`'s `Error`, and a class without
+    /// `ZEND_ACC_ALLOW_DYNAMIC_PROPERTIES` is
+    /// `zend_deprecated_dynamic_property`'s 8.2 deprecation. Only a
+    /// creation takes them: a name the table already holds is written
+    /// with neither.
+    ///
+    /// php's raiser holds one more owner of the object across the
+    /// deprecation and turns the last release into the same `Error`;
+    /// nothing here can drop the object under a diagnostic, since the
+    /// handler that reached this holds it.
+    pub(crate) fn dynamic_property_creation(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+    ) -> Result<(), Thrown> {
+        use php_unit::decl::DynamicProperties;
+        let Some(decl) = self.class_decl(class) else {
+            return Ok(());
+        };
+        let carries = decl.flags.dynamic_properties;
+        if carries == DynamicProperties::Allowed || self.ancestor_declares_property(class, name) {
+            return Ok(());
+        }
+        let shown = String::from_utf8_lossy(name).into_owned();
+        let class_name = self.class_name(class);
+        if carries == DynamicProperties::Forbidden {
+            return Err(crate::api::raising::throw(
+                self,
+                "Error",
+                &format!("Cannot create dynamic property {class_name}::${shown}"),
+            ));
+        }
+        crate::api::raising::deprecated(
+            self,
+            &format!("Creation of dynamic property {class_name}::${shown} is deprecated"),
+        );
+        Ok(())
+    }
+
+    /// Whether a class above `class` declares `name` as an instance
+    /// property. php has no such question: `zend_get_property_offset`
+    /// finds an inherited property at the slot the linker placed it in,
+    /// so a write to it is never a creation. This engine's linker does
+    /// not place inherited members yet (#419), so a throwable subclass
+    /// carries no slot for `message`, `file`, `line` or `trace` and the
+    /// raisers of `api::raising` write them into the dynamic table.
+    /// They are properties php declares, so none of them is a creation
+    /// and none of them is deprecated; the walk is this statement, and
+    /// it goes when the slots are placed.
+    fn ancestor_declares_property(&self, class: ClassId, name: &[u8]) -> bool {
+        let mut at = self
+            .class_decl(class)
+            .and_then(|decl| decl.parent.as_ref())
+            .and_then(|parent| self.class_named(&parent.0));
+        let mut depth = 0;
+        while let Some(class) = at {
+            let Some(decl) = self.class_decl(class) else {
+                return false;
+            };
+            if decl
+                .properties
+                .iter()
+                .any(|p| p.is_instance && &*p.name.0 == name)
+            {
+                return true;
+            }
+            depth += 1;
+            if depth > 64 {
+                return false;
+            }
+            at = decl
+                .parent
+                .as_ref()
+                .and_then(|parent| self.class_named(&parent.0));
+        }
+        false
+    }
+
+    /// `zend_std_get_property_ptr_ptr`'s dynamic arm under `BP_VAR_W`
+    /// (`Z/Zend/zend_object_handlers.c:1491`): the dynamic table
+    /// separated where a cast shares it and the name looked up in it;
+    /// where it is not there, php's two arms over the creation
+    /// ([`Request::dynamic_property_creation`]) and then
+    /// `zend_hash_add(zobj->properties, name, &EG(uninitialized_zval))`,
+    /// which is `IS_NULL` (`zend_execute_API.c:132`) and is what the
+    /// `ASSIGN*` beside this writes through, and what a caught `Error`
+    /// leaves the property holding. The name is given up here, as
+    /// [`Request::write_property`] gives it up.
+    ///
+    /// The `ZvalRef` names a bucket of that table, so it is a name only
+    /// until the table is written again ([`php_heap::Arr::value_ref`]);
+    /// the one opline between this and the write through it is the
+    /// `ASSIGN*` php pairs it with, which inserts nothing.
+    pub(crate) fn dynamic_property_ref(
+        &mut self,
+        object: PhpObject,
+        name: PhpString,
+    ) -> Result<Option<php_heap::ZvalRef>, Thrown> {
+        let o = object.heap();
+        let key = php_heap::Key::Str(name.heap());
+        let held = o.properties().is_some_and(|table| table.contains(key));
+        if !held
+            && let Err(thrown) = self.dynamic_property_creation(object.class(), name.as_bytes())
+        {
+            self.release(Value::string(name));
+            return Err(thrown);
+        }
+        let table = self.heap.object_properties(o);
+        let table = self.fatal_of(table)?;
+        let table = self.array_separate(table)?;
+        self.heap.object_set_properties(o, table);
+        if !held {
+            self.array_update(table, key, Value::null())?;
+        }
+        self.release(Value::string(name));
+        Ok(table.value_ref(key))
     }
 
     /// The properties in order, the declared slots that hold a value

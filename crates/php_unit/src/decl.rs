@@ -3,7 +3,7 @@
 //! constant expressions still unevaluated. Produced by the compiler for
 //! user code and by the native macros for natives; consumed by the linker,
 //! Reflection, the dumpers and the stub cross-check, which read one model.
-//! Data only: no method here, since the seventeen types are re-exported
+//! Data only: no method here, since the eighteen types are re-exported
 //! by `php_engine::api::decl` and their surface is `api.lock`'s.
 
 /// A name as written: bytes, interned by the engine at publication.
@@ -41,6 +41,26 @@ pub struct ClassFlags {
     pub is_abstract: bool,
     pub is_final: bool,
     pub is_readonly: bool,
+    pub dynamic_properties: DynamicProperties,
+}
+
+/// What a class does with a write to a name it did not declare, php's
+/// two `ZEND_ACC_*` bits read as the one question they answer
+/// (`Z/Zend/zend_object_handlers.c:1288`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum DynamicProperties {
+    /// Neither bit, which every class carries unless it says
+    /// otherwise: creating one is php's 8.2 deprecation.
+    #[default]
+    Deprecated,
+    /// `ZEND_ACC_ALLOW_DYNAMIC_PROPERTIES`, what
+    /// `#[\AllowDynamicProperties]` sets and what `stdClass` is
+    /// registered with: creating one raises nothing.
+    Allowed,
+    /// `ZEND_ACC_NO_DYNAMIC_PROPERTIES`, which an enum carries and
+    /// `zend_register_closure_ce` sets on `Closure`: creating one is
+    /// php's `Error`.
+    Forbidden,
 }
 
 /// The backing type of an enum.

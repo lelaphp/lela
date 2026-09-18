@@ -32,6 +32,7 @@ decl::ClassFlags
 decl::ClassKind
 decl::ConstDecl
 decl::ConstExpr
+decl::DynamicProperties
 decl::EnumBacking
 decl::FunctionDecl
 decl::IniDecl

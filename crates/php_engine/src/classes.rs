@@ -19,8 +19,8 @@
 use std::cmp::Ordering;
 
 use php_unit::decl::{
-    ClassDecl, ClassFlags, ClassKind, ConstExpr, EnumBacking, FunctionDecl, MethodDecl, Name,
-    Parameter, PropertyDecl, Type, Visibility,
+    ClassDecl, ClassFlags, ClassKind, ConstExpr, DynamicProperties, EnumBacking, FunctionDecl,
+    MethodDecl, Name, Parameter, PropertyDecl, Type, Visibility,
 };
 
 use crate::api::abi::{CloneObj, Entry, NativeClassDecl, ObjectHandlers};
@@ -339,9 +339,10 @@ fn abstract_static_method(
 
 /// `class stdClass` as `zend_register_standard_class` declares it
 /// (`Z/Zend/zend.c`, `zend_standard_class_def`): no parent, no
-/// interface, no member, and `#[AllowDynamicProperties]`, which the
-/// declaration model has no bit for yet (#326); what `(object)` builds and
-/// what `json_decode` and `unserialize` hand back.
+/// interface, no member, and `ZEND_ACC_ALLOW_DYNAMIC_PROPERTIES`, the
+/// bit `#[\AllowDynamicProperties]` sets, so a name the class did not
+/// declare is written without php's 8.2 deprecation; what `(object)`
+/// builds and what `json_decode` and `unserialize` hand back.
 ///
 /// ```php
 /// var_dump(new stdClass, new stdClass instanceof stdClass);
@@ -353,15 +354,20 @@ fn abstract_static_method(
 /// ```
 fn std_class() -> ClassDecl {
     ClassDecl {
+        flags: ClassFlags {
+            dynamic_properties: DynamicProperties::Allowed,
+            ..ClassFlags::default()
+        },
         interfaces: Vec::new(),
         properties: Vec::new(),
         ..declared(b"stdClass", ClassKind::Class, None)
     }
 }
 
-/// `final class Closure` as `zend_register_closure_ce` declares it: the
-/// two of its methods this engine serves, `fromCallable` on the class
-/// and `__invoke` on an instance. php synthesises `__invoke` in
+/// `final class Closure` as `zend_register_closure_ce` declares it,
+/// `ZEND_ACC_FINAL | ZEND_ACC_NO_DYNAMIC_PROPERTIES` and the two of its
+/// methods this engine serves, `fromCallable` on the class and
+/// `__invoke` on an instance. php synthesises `__invoke` in
 /// `zend_closure_get_method` rather than declaring it; it is a declared
 /// method here until `get_method` can answer a function the table has
 /// no entry for.
@@ -369,6 +375,7 @@ fn closure_class() -> ClassDecl {
     ClassDecl {
         flags: ClassFlags {
             is_final: true,
+            dynamic_properties: DynamicProperties::Forbidden,
             ..ClassFlags::default()
         },
         interfaces: Vec::new(),

@@ -13,8 +13,8 @@ Arr::is_packed
 Arr::is_recursive
 Arr::is_same
 Arr::iter
-Arr::live_from
 Arr::len
+Arr::live_from
 Arr::next_free
 Arr::position
 Arr::protect
@@ -22,6 +22,7 @@ Arr::refcount
 Arr::reset
 Arr::table_size
 Arr::unprotect
+Arr::value_ref
 ArrIter
 Block
 Block::bytes

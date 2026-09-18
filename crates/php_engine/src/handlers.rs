@@ -1561,10 +1561,13 @@ pub(crate) fn fetch_obj_r<T: Tier>(
 /// is the slot in place, written or not, since under `BP_VAR_W` an
 /// `UNDEF` slot is handed back as it stands for the write after it to
 /// find; one the scope may not reach is `zend_bad_property_access`'s
-/// `Error`. A name the class did not declare is a bucket of the dynamic
-/// table, made on the spot with php's deprecation
-/// (`Creation of dynamic property C::$q is deprecated`), which nothing
-/// names in place yet and is the internal-error fatal meanwhile.
+/// `Error`. A name the class did not declare is a bucket of the
+/// object's dynamic table ([`Request::dynamic_property_ref`]): the one
+/// it already holds, named in place through
+/// [`php_heap::Arr::value_ref`], or one made on the spot holding
+/// `EG(uninitialized_zval)`, which php refuses for a class with
+/// `ZEND_ACC_NO_DYNAMIC_PROPERTIES` and deprecates for a class without
+/// `ZEND_ACC_ALLOW_DYNAMIC_PROPERTIES`.
 ///
 /// ```php
 /// class C { public $p = 1; public $q; }
@@ -1599,6 +1602,29 @@ pub(crate) fn fetch_obj_r<T: Tier>(
 /// #0 {main}
 ///   thrown in %s on line 4
 /// ```
+///
+/// A dynamic property is named in place like a declared slot, so the
+/// `ASSIGN_OBJ` after this writes through the bucket and the write
+/// lands on the object the property holds. Each of the two names the
+/// class did not declare is deprecated once, where it is created.
+///
+/// ```php
+/// class C {}
+/// $o = new C; $o->dyn = new C;
+/// $o->dyn->p = 1; var_dump($o);
+/// ```
+/// ```expect
+/// Deprecated: Creation of dynamic property C::$dyn is deprecated in %s on line 3
+///
+/// Deprecated: Creation of dynamic property C::$p is deprecated in %s on line 4
+/// object(C)#1 (1) {
+///   ["dyn"]=>
+///   object(C)#2 (1) {
+///     ["p"]=>
+///     int(1)
+///   }
+/// }
+/// ```
 pub(crate) fn fetch_obj_w<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -1613,6 +1639,7 @@ pub(crate) fn fetch_obj_w<T: Tier>(
             )));
         }
     };
+    let name_value = name;
     let name = name.as_str_bytes().unwrap_or_default().to_vec();
     let container =
         exec::container(req, frame, code, op.op1_type, op.op1, "ZEND_FETCH_OBJ_W")?.deref();
@@ -1631,21 +1658,35 @@ pub(crate) fn fetch_obj_w<T: Tier>(
     };
     let placed = req.declared_slot_for_write(object.class(), &name);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    let slot = match placed {
-        Ok(Some((slot, _))) => slot,
+    let at = match placed {
+        Ok(Some((slot, _))) => {
+            let Some(at) = object.heap().slot_ref(slot) else {
+                return Err(Fatal::Error(format!(
+                    "InternalError: ZEND_FETCH_OBJ_W placed ${} in slot {slot}, which the object does not have",
+                    String::from_utf8_lossy(&name)
+                )));
+            };
+            at
+        }
         Ok(None) => {
-            return Err(Fatal::Error(format!(
-                "InternalError: ZEND_FETCH_OBJ_W over the dynamic property ${}, whose bucket nothing names in place yet",
-                String::from_utf8_lossy(&name)
-            )));
+            let Some(key) = name_value.as_php_string().copied() else {
+                return Err(Fatal::Error(String::from(
+                    "InternalError: ZEND_FETCH_OBJ_W over a property whose name is no string",
+                )));
+            };
+            req.addref(&name_value);
+            match req.dynamic_property_ref(object, key) {
+                Ok(Some(at)) => at,
+                Ok(None) => {
+                    return Err(Fatal::Error(format!(
+                        "InternalError: ZEND_FETCH_OBJ_W laid the dynamic property ${} down and the table does not hold it",
+                        String::from_utf8_lossy(&name)
+                    )));
+                }
+                Err(thrown) => return threw(req, frame, &thrown),
+            }
         }
         Err(thrown) => return threw(req, frame, &thrown),
-    };
-    let Some(at) = object.heap().slot_ref(slot) else {
-        return Err(Fatal::Error(format!(
-            "InternalError: ZEND_FETCH_OBJ_W placed ${} in slot {slot}, which the object does not have",
-            String::from_utf8_lossy(&name)
-        )));
     };
     let out = exec::temporary_slot(code, op.out);
     let previous = req.take_slot(frame, out);
@@ -2476,9 +2517,13 @@ pub(crate) fn assign_ref<T: Tier>(
 /// holding the object `NEW` or `FETCH_THIS` left gives it up. A typed
 /// slot's coercion (`zend_assign_to_typed_prop`) is not served yet, and
 /// only a native declares one, so a write to it is the internal-error
-/// fatal naming the gap; the dynamic property's deprecation
-/// (`Creation of dynamic property C::$p is deprecated`) is not raised
-/// yet either.
+/// fatal naming the gap. Creating a dynamic property is php's two arms
+/// at `write_std_property`'s `else`
+/// ([`Request::dynamic_property_creation`]): the `Error`
+/// `Cannot create dynamic property C::$p` for a class with
+/// `ZEND_ACC_NO_DYNAMIC_PROPERTIES`, and the 8.2 deprecation for a
+/// class without `ZEND_ACC_ALLOW_DYNAMIC_PROPERTIES`; a name the
+/// dynamic table already holds is written with neither.
 ///
 /// A property given a new string gives its old one back to the heap,
 /// as a CV does under `ASSIGN`, and the deltas are read before anything
@@ -2536,6 +2581,44 @@ pub(crate) fn assign_ref<T: Tier>(
 /// Stack trace:
 /// #0 {main}
 ///   thrown in %s on line 4
+/// ```
+///
+/// The deprecation is the creation's, once: the second write to the
+/// same name raises nothing, and `stdClass`, which php registers with
+/// `ZEND_ACC_ALLOW_DYNAMIC_PROPERTIES`, raises nothing at all.
+///
+/// ```php
+/// class C { public $d = 1; }
+/// $o = new C; $o->p = "x"; $o->p = "y";
+/// $s = new stdClass; $s->q = 1;
+/// var_dump($o, $s);
+/// ```
+/// ```expect
+/// Deprecated: Creation of dynamic property C::$p is deprecated in %s on line 3
+/// object(C)#1 (2) {
+///   ["d"]=>
+///   int(1)
+///   ["p"]=>
+///   string(1) "y"
+/// }
+/// object(stdClass)#2 (1) {
+///   ["q"]=>
+///   int(1)
+/// }
+/// ```
+///
+/// A class php registers with `ZEND_ACC_NO_DYNAMIC_PROPERTIES` refuses
+/// the creation outright, which `Closure` is the one of.
+///
+/// ```php
+/// $f = Closure::fromCallable("strlen");
+/// $f->p = 1;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Cannot create dynamic property Closure::$p in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
 /// ```
 pub(crate) fn assign_obj<T: Tier>(
     req: &mut Request,
