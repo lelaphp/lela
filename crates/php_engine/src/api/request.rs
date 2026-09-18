@@ -335,6 +335,23 @@ pub struct Request {
     /// so every class a unit declares is this request's, the
     /// `DECLARE_CLASS_DELAYED` path, and dropped with it.
     declared: Vec<(Arc<Unit>, u32)>,
+    /// The functions and methods the units this request served declared,
+    /// each the unit that holds it and which of its op arrays is the
+    /// body: php's `EG(function_table)` past the natives and each user
+    /// class's `function_table`. A `Function` past the natives and the
+    /// native methods counts into this list (design §5.6).
+    user_functions: Vec<UserFunction>,
+}
+
+/// One row of a backtrace before it is an array: the callee, its
+/// receiver, its arguments, and the file and line of its call site.
+type TraceRow = (Function, Option<PhpObject>, Vec<Value>, Vec<u8>, i64);
+
+/// One user function or method a request declared: the unit and the
+/// body, from which the declaration and the op array are both read.
+pub(crate) struct UserFunction {
+    pub(crate) unit: Arc<Unit>,
+    pub(crate) body: exec::Body,
 }
 
 impl Request {
@@ -379,6 +396,7 @@ impl Request {
             timer: None,
             stack_limit: StackLimit::UNCHECKED,
             declared: Vec::new(),
+            user_functions: Vec::new(),
         };
         // Request state in bundle order (ADR-0005).
         for extension in &req.shared.extensions {
@@ -438,11 +456,70 @@ impl Request {
         frame
     }
 
+    /// Push a frame for the body of the user function `function`, the
+    /// call that reached it served (`zend_vm_stack_push_call_frame` and
+    /// `i_init_func_execute_data`, design §5.6): the CVs and the
+    /// temporaries as slots, the arguments the call placed written into
+    /// the first CVs, which are the parameters, the ones past the
+    /// declared parameters kept beside the frame, and the receiver and
+    /// the called scope carried over; `returns_to` is the caller's slot
+    /// for what the frame returns. None for a function that is no user
+    /// function, which is the caller's internal error to name.
+    pub(crate) fn push_user_frame(
+        &mut self,
+        function: Function,
+        call: exec::CallState,
+        returns_to: Option<(FrameRef, u32)>,
+    ) -> Option<FrameRef> {
+        let (unit, body) = {
+            let user = self.user_function(function)?;
+            (Arc::clone(&user.unit), user.body)
+        };
+        let code = exec::body_of(&unit, body)?;
+        let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
+        let parameters = self
+            .function_decl(function)
+            .map_or(0, |decl| decl.parameters.len());
+        let num_args = u32::try_from(call.arguments.len()).unwrap_or(u32::MAX);
+        let frame = self.stack.push_frame(slots);
+        self.vm.push_body(
+            unit,
+            body,
+            Some(function),
+            call.this,
+            call.called_scope,
+            num_args,
+            returns_to,
+        );
+        let mut extra = Vec::new();
+        for (at, argument) in call.arguments.into_iter().enumerate() {
+            if at < parameters {
+                let previous =
+                    self.set_slot(frame, u32::try_from(at).unwrap_or(u32::MAX), argument);
+                self.release(previous);
+            } else {
+                extra.push(argument);
+            }
+        }
+        if let Some(state) = self.vm.at_mut(frame) {
+            state.extra_args = extra;
+        }
+        if let Some(name) = call.name {
+            self.release(Value::string(name));
+        }
+        for coerced in call.coerced {
+            self.release(coerced);
+        }
+        Some(frame)
+    }
+
     /// The frame off both stacks, every owner its slots held given up
     /// while the frame still stands, `i_free_compiled_variables` over
     /// the CVs and the temporaries with them, since a temporary the
     /// compiler numbered for an opline's value and nothing read is
-    /// still an owner here; then `zend_vm_stack_free_call_frame`.
+    /// still an owner here; the receiver (`ZEND_CALL_RELEASE_THIS`) and
+    /// the extra arguments (`zend_vm_stack_free_extra_args`) with them;
+    /// then `zend_vm_stack_free_call_frame`.
     pub(crate) fn pop_frame(&mut self) {
         let frame = self.stack.current();
         let slots = self.stack.frame(frame).map_or(0, php_heap::Frame::len);
@@ -450,7 +527,14 @@ impl Request {
             let value = self.take_slot(frame, u32::try_from(at).unwrap_or(u32::MAX));
             self.release(value);
         }
-        self.vm.pop();
+        if let Some(state) = self.vm.pop() {
+            if let Some(this) = state.this {
+                self.release(this.as_value());
+            }
+            for extra in state.extra_args {
+                self.release(extra);
+            }
+        }
         self.stack.pop_frame();
     }
 
@@ -595,6 +679,47 @@ impl Request {
             .get(at.checked_sub(self.shared.functions.len())?)
     }
 
+    /// The user function or method `function` is, if it is one: numbered
+    /// past the natives and the native methods.
+    pub(crate) fn user_function(&self, function: Function) -> Option<&UserFunction> {
+        let at = usize::try_from(function.0).ok()?;
+        self.user_functions.get(
+            at.checked_sub(self.shared.functions.len())?
+                .checked_sub(self.shared.methods.len())?,
+        )
+    }
+
+    /// The number a user function at `index` of the table is known by.
+    fn user_function_id(&self, index: usize) -> Option<Function> {
+        let at = self
+            .shared
+            .functions
+            .len()
+            .checked_add(self.shared.methods.len())?
+            .checked_add(index)?;
+        u32::try_from(at).ok().map(Function)
+    }
+
+    /// The class a method belongs to, `func->common.scope`: a native
+    /// method's class, or the request's `ClassId` for the class of a
+    /// user method; none for a function.
+    pub(crate) fn method_class(&self, function: Function) -> Option<ClassId> {
+        if let Some(method) = self.native_method(function) {
+            return Some(method.class);
+        }
+        let user = self.user_function(function)?;
+        let exec::Body::Method { class, .. } = user.body else {
+            return None;
+        };
+        let declared = self
+            .declared
+            .iter()
+            .position(|(unit, at)| Arc::ptr_eq(unit, &user.unit) && *at == class)?;
+        u32::try_from(self.shared.classes.len().checked_add(declared)?)
+            .ok()
+            .map(ClassId)
+    }
+
     /// `zend_hash_find_ptr(&ce->function_table, lcname)` over the
     /// class's native methods: the method under the lowered name, by
     /// identity, the class's own first and then each parent's, since
@@ -621,9 +746,29 @@ impl Request {
         None
     }
 
-    /// [`Request::method_named`] over one class's own declarations.
+    /// [`Request::method_named`] over one class's own declarations: a
+    /// native class's among the native methods, a user class's among the
+    /// user functions declared with it.
     fn own_method_named(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
         let decl = self.class_decl(class)?;
+        let at = usize::try_from(class.0).ok()?;
+        if let Some(declared) = at.checked_sub(self.shared.classes.len()) {
+            let (unit, index) = self.declared.get(declared)?;
+            let method = decl
+                .methods
+                .iter()
+                .position(|method| method.function.name.0.eq_ignore_ascii_case(lowered))?;
+            let method = u32::try_from(method).ok()?;
+            let position = self.user_functions.iter().position(|user| {
+                Arc::ptr_eq(&user.unit, unit)
+                    && user.body
+                        == exec::Body::Method {
+                            class: *index,
+                            method,
+                        }
+            })?;
+            return self.user_function_id(position);
+        }
         let base = self.shared.functions.len();
         self.shared
             .methods
@@ -639,12 +784,23 @@ impl Request {
             .map(Function)
     }
 
-    /// The declaration of a native method, if `function` is one.
+    /// The declaration of a method, native or user, if `function` is one.
     pub(crate) fn method_decl(&self, function: Function) -> Option<&MethodDecl> {
-        let method = self.native_method(function)?;
-        self.class_decl(method.class)?
+        if let Some(method) = self.native_method(function) {
+            return self
+                .class_decl(method.class)?
+                .methods
+                .get(usize::try_from(method.index).ok()?);
+        }
+        let user = self.user_function(function)?;
+        let exec::Body::Method { class, method } = user.body else {
+            return None;
+        };
+        user.unit
+            .classes
+            .get(usize::try_from(class).ok()?)?
             .methods
-            .get(usize::try_from(method.index).ok()?)
+            .get(usize::try_from(method).ok()?)
     }
 
     /// `ce->name`: the name a class was declared under, and `object`
@@ -692,13 +848,21 @@ impl Request {
     }
 
     /// `zend_get_executed_scope`: the class of the method being served,
-    /// which is a native method's while its entry runs, and none at the
-    /// main op array or inside a function. A user frame carries no
-    /// scope until a method body is compiled, so the loop's own scope
-    /// is the global one.
+    /// a native method's while its entry runs and a user method's while
+    /// the loop is in its body (`EX(func)->common.scope`), and none at
+    /// the main op array or inside a function.
     pub(crate) fn executed_scope(&self) -> Option<ClassId> {
-        let call = self.vm.serving_call()?;
-        self.native_method(call.function).map(|m| m.class)
+        self.method_class(self.executing_function()?)
+    }
+
+    /// `EX(func)` of `EG(current_execute_data)`: the native being
+    /// served, or, between natives, the function whose body the
+    /// innermost frame serves; none at the main op array.
+    fn executing_function(&self) -> Option<Function> {
+        if let Some(call) = self.vm.serving_call() {
+            return Some(call.function);
+        }
+        self.vm.innermost()?.function
     }
 
     /// `ce->parent`: the linked parent of a class, none at a root.
@@ -744,10 +908,9 @@ impl Request {
         function: Function,
         written: &[u8],
     ) -> Result<(), Thrown> {
-        let Some(method) = self.native_method(function) else {
+        let Some(class) = self.method_class(function) else {
             return Ok(());
         };
-        let class = method.class;
         let Some(decl) = self.method_decl(function) else {
             return Ok(());
         };
@@ -998,17 +1161,26 @@ impl Request {
         let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
         let line = i64::from(self.current_line());
         let ignore_arguments = self.exception_ignore_args();
-        let calls: Vec<(Function, Option<PhpObject>, Vec<Value>)> = self
+        let mut calls: Vec<TraceRow> = self
             .vm
             .serving_calls()
-            .map(|call| (call.function, call.this, call.arguments.clone()))
+            .map(|call| {
+                (
+                    call.function,
+                    call.this,
+                    call.arguments.clone(),
+                    file.clone(),
+                    line,
+                )
+            })
             .collect();
+        calls.extend(self.user_frames_for_trace());
         let mut trace = PhpArray::new(self)?;
-        for (function, this, arguments) in calls {
+        for (function, this, arguments, file, line) in calls {
             let mut row = PhpArray::new(self)?;
             let name = self.declared_name(function);
-            let method = self.native_method(function).map(|method| {
-                let class = self.class_name(method.class);
+            let method = self.method_class(function).map(|class| {
+                let class = self.class_name(class);
                 (class, if this.is_some() { "->" } else { "::" })
             });
             let file = Value::string(PhpString::new(self, &file)?);
@@ -1034,6 +1206,43 @@ impl Request {
             trace.append(self, Value::array(row))?;
         }
         Ok(trace)
+    }
+
+    /// The rows `zend_fetch_debug_backtrace` walks below the natives:
+    /// one per user frame standing, innermost first and the entry frame
+    /// left out, each the function it serves, its receiver, its
+    /// arguments as they stand (`debug_backtrace_get_args`: the
+    /// parameters' CVs up to the number passed, then the extra ones),
+    /// and the file and line of the frame that called it, which is the
+    /// opline that frame stands at, its `DO_*CALL`.
+    fn user_frames_for_trace(&self) -> Vec<TraceRow> {
+        let frames = self.vm.frames();
+        let mut rows = Vec::new();
+        for (at, state) in frames.iter().enumerate().skip(1).rev() {
+            let Some(function) = state.function else {
+                continue;
+            };
+            let Some(caller) = frames.get(at - 1) else {
+                continue;
+            };
+            let frame = FrameRef(u32::try_from(at).unwrap_or(u32::MAX));
+            let passed = usize::try_from(state.num_args).unwrap_or(0);
+            let mut arguments: Vec<Value> = (0..passed.saturating_sub(state.extra_args.len()))
+                .map(|slot| self.slot(frame, u32::try_from(slot).unwrap_or(u32::MAX)))
+                .collect();
+            arguments.extend(state.extra_args.iter().copied());
+            let file = exec::body_of(&caller.unit, caller.body)
+                .map(|code| code.filename.0.to_vec())
+                .unwrap_or_default();
+            rows.push((
+                function,
+                state.this,
+                arguments,
+                file,
+                i64::from(exec::line_of(caller)),
+            ));
+        }
+        rows
     }
 
     /// `zend_hash_str_update` on a row: `value` at the string key `name`,
@@ -1962,6 +2171,43 @@ impl Request {
         }
     }
 
+    /// `zend_fetch_class_constant`'s lookup (`Z/Zend/zend_constants.c:355`):
+    /// the constant `name` of `class` from the declaration's table,
+    /// `Undefined constant C::A` where it has none, `Cannot access
+    /// private constant C::A` where `zend_verify_const_access` refuses
+    /// the executing scope, and otherwise its value, the constant
+    /// expression the declaration kept evaluated in the class's scope
+    /// (`zval_update_constant_ex`), one owner the caller's.
+    pub(crate) fn class_constant(&mut self, class: ClassId, name: &[u8]) -> Result<Value, Thrown> {
+        let class_name = self.class_name(class);
+        let shown = String::from_utf8_lossy(name).into_owned();
+        let Some(constant) = self
+            .class_decl(class)
+            .and_then(|decl| decl.constants.iter().find(|c| *c.name.0 == *name))
+        else {
+            return Err(crate::api::raising::throw(
+                self,
+                "Error",
+                &format!("Undefined constant {class_name}::{shown}"),
+            ));
+        };
+        let visibility = constant.visibility;
+        let value = constant.value.clone();
+        if !self.may_access(class, visibility) {
+            let word = match visibility {
+                Visibility::Public => "public",
+                Visibility::Protected => "protected",
+                Visibility::Private => "private",
+            };
+            return Err(crate::api::raising::throw(
+                self,
+                "Error",
+                &format!("Cannot access {word} constant {class_name}::{shown}"),
+            ));
+        }
+        crate::api::call::eval_const_expr(self, &value, Some(class))
+    }
+
     /// `zend_bad_property_access`: php's `Error` for a property the
     /// scope may not reach.
     fn inaccessible_property(
@@ -2847,9 +3093,9 @@ impl Request {
     /// where the call had a receiver.
     fn qualified_name(&self, function: Function, this: Option<PhpObject>) -> String {
         let name = self.declared_name(function);
-        match self.native_method(function) {
-            Some(method) => {
-                let class = self.class_name(method.class);
+        match self.method_class(function) {
+            Some(class) => {
+                let class = self.class_name(class);
                 let join = if this.is_some() { "->" } else { "::" };
                 format!("{class}{join}{name}")
             }
@@ -2998,18 +3244,56 @@ impl Request {
                 return false;
             };
             self.declared.push((Arc::clone(unit), at));
+            for method in 0..decl.methods.len() {
+                self.user_functions.push(UserFunction {
+                    unit: Arc::clone(unit),
+                    body: exec::Body::Method {
+                        class: at,
+                        method: u32::try_from(method).unwrap_or(u32::MAX),
+                    },
+                });
+            }
         }
         true
     }
 
+    /// `zend_hash_find(EG(function_table), lcname)`: the native of that
+    /// name, or the user function a unit of this request declared.
     pub(crate) fn function_named(&self, name: &[u8]) -> Option<Function> {
         let wanted = name.to_ascii_lowercase();
-        self.shared
+        if let Some(i) = self
+            .shared
             .functions
             .iter()
             .position(|(decl, _)| decl.name.0.to_ascii_lowercase() == wanted)
-            .and_then(|i| u32::try_from(i).ok())
-            .map(Function)
+        {
+            return u32::try_from(i).ok().map(Function);
+        }
+        let position = self.user_functions.iter().position(|user| {
+            let exec::Body::Function(index) = user.body else {
+                return false;
+            };
+            user.unit
+                .functions
+                .get(usize::try_from(index).unwrap_or(usize::MAX))
+                .is_some_and(|(decl, _)| decl.name.0.to_ascii_lowercase() == wanted)
+        })?;
+        self.user_function_id(position)
+    }
+
+    /// `zend_hash_add_ptr(CG(function_table), …)` for every function the
+    /// unit declares, before its main op array runs: php binds a
+    /// top-level function at compile time and the compiler emitted no
+    /// opline for it, so the request's table takes it here. The compiler
+    /// refused a name the natives have or the file declares twice, so
+    /// nothing collides in a request that serves one unit.
+    pub(crate) fn declare_functions(&mut self, unit: &Arc<Unit>) {
+        for at in 0..unit.functions.len() {
+            self.user_functions.push(UserFunction {
+                unit: Arc::clone(unit),
+                body: exec::Body::Function(u32::try_from(at).unwrap_or(u32::MAX)),
+            });
+        }
     }
 
     pub(crate) fn constant_named(&self, name: &[u8]) -> Option<Value> {
@@ -3340,8 +3624,7 @@ impl Request {
     /// a function or outside a native's body.
     #[must_use]
     pub fn scope(&self) -> Option<ClassId> {
-        let function = self.active_native_function()?;
-        Some(self.native_method(function)?.class)
+        self.executed_scope()
     }
 
     /// `zend_get_called_scope`, the called scope of the native being
@@ -3350,7 +3633,10 @@ impl Request {
     /// outside a native's body.
     #[must_use]
     pub fn called_scope(&self) -> Option<ClassId> {
-        self.vm.serving_call()?.called_scope
+        if let Some(call) = self.vm.serving_call() {
+            return call.called_scope;
+        }
+        self.vm.innermost()?.called_scope
     }
 
     /// `ZEND_THIS`, `getThis()`: the receiver of the method being
@@ -3359,7 +3645,10 @@ impl Request {
     /// native's body.
     #[must_use]
     pub fn this(&self) -> Option<PhpObject> {
-        self.vm.serving_call()?.this
+        if let Some(call) = self.vm.serving_call() {
+            return call.this;
+        }
+        self.vm.innermost()?.this
     }
 
     // -------------------------------------------------- symbols
@@ -3394,10 +3683,19 @@ impl Request {
     #[must_use]
     pub fn function_decl(&self, function: Function) -> Option<&FunctionDecl> {
         let at = usize::try_from(function.0).ok()?;
-        match at.checked_sub(self.shared.functions.len()) {
-            None => self.shared.functions.get(at).map(|(decl, _)| decl),
-            Some(_) => self.method_decl(function).map(|method| &method.function),
+        if at < self.shared.functions.len() {
+            return self.shared.functions.get(at).map(|(decl, _)| decl);
         }
+        if let Some(user) = self.user_function(function)
+            && let exec::Body::Function(index) = user.body
+        {
+            return user
+                .unit
+                .functions
+                .get(usize::try_from(index).ok()?)
+                .map(|(decl, _)| decl);
+        }
+        self.method_decl(function).map(|method| &method.function)
     }
 
     /// `get_declared_classes()`, in declaration order.

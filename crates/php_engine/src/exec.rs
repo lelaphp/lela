@@ -24,18 +24,62 @@ use crate::api::raising::warning;
 use crate::api::request::Request;
 use crate::api::values::{ClassId, PhpObject, PhpString, TypeTag, Value};
 
+/// Which op array of a unit a frame serves: the main one, the body of
+/// one of the unit's functions, or the body of one of its classes'
+/// methods, each by index, as `EX(func)` names one `zend_op_array`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Body {
+    Main,
+    Function(u32),
+    Method { class: u32, method: u32 },
+}
+
+/// The unit a frame serves and which of its op arrays, held by a share
+/// of the unit so the oplines can be read while the request is borrowed.
+pub(crate) struct Serving {
+    pub(crate) unit: Arc<Unit>,
+    pub(crate) body: Body,
+}
+
+impl Serving {
+    /// The op array itself; none for a body the unit has not, which is
+    /// this engine's error and never a program's.
+    pub(crate) fn code(&self) -> Option<&OpArray> {
+        body_of(&self.unit, self.body)
+    }
+}
+
 /// One frame's engine state.
 pub(crate) struct FrameState {
     /// The unit being served, shared with every other request serving it
-    /// and never copied (design §5.14). Which of its op arrays the frame
-    /// is in is the main one, until the call opcodes that push a frame
-    /// pick another (`DO_UCALL`, design §11 days 3–7).
+    /// and never copied (design §5.14).
     pub(crate) unit: Arc<Unit>,
+    /// Which of its op arrays: the main one for the frame `serve` pushes,
+    /// a function's or a method's for one a `DO_UCALL` or a `DO_FCALL*`
+    /// pushed (design §5.6).
+    pub(crate) body: Body,
+    /// The linked function the frame serves, `EX(func)`; none for the
+    /// main op array, which is no function.
+    pub(crate) function: Option<Function>,
     /// Where in it the loop stands.
     pub(crate) opline: u32,
     /// The caller's slot for what this frame returns, when the call that
     /// pushed it wants the value.
     pub(crate) returns_to: Option<(FrameRef, u32)>,
+    /// `EX(This)` as an object: the receiver of a method call, one owner
+    /// the frame holds until it is popped (`ZEND_CALL_RELEASE_THIS`);
+    /// none for the main op array, a function or a method declared `static`.
+    pub(crate) this: Option<PhpObject>,
+    /// The called scope, `static`; none for the main op array or a
+    /// function.
+    pub(crate) called_scope: Option<ClassId>,
+    /// `ZEND_CALL_NUM_ARGS`: how many arguments the call that pushed the
+    /// frame placed, which the `RECV*` prologue reads.
+    pub(crate) num_args: u32,
+    /// The arguments past the declared parameters, which php moves past
+    /// the temporaries (`zend_copy_extra_args`) for `func_get_args` to
+    /// read; owned by the frame and given up with it.
+    pub(crate) extra_args: Vec<Value>,
     /// The op array's runtime cache, `EX(run_time_cache)`: one slot per
     /// `sizeof(void *)` of `cache_size`, every one [`Cached::Unprimed`]
     /// when the frame is pushed (`memset(run_time_cache, 0, cache_size)`
@@ -158,19 +202,62 @@ impl Vm {
     /// writes it (`i_init_func_execute_data`), which is what a read of
     /// a CV warns of.
     pub(crate) fn push(&mut self, unit: Arc<Unit>) {
-        let slots = usize::try_from(code_of(&unit).cache_size / SLOT_BYTES).unwrap_or(0);
+        self.push_body(unit, Body::Main, None, None, None, 0, None);
+    }
+
+    /// Push the state of a frame serving `body` of `unit`: the function
+    /// it is, its receiver and called scope, how many arguments the
+    /// call placed, and where the caller wants what it returns
+    /// (`zend_vm_stack_push_call_frame` with `i_init_func_execute_data`'s
+    /// fields filled).
+    #[allow(clippy::too_many_arguments)] // the frame header's fields, each one fact
+    pub(crate) fn push_body(
+        &mut self,
+        unit: Arc<Unit>,
+        body: Body,
+        function: Option<Function>,
+        this: Option<PhpObject>,
+        called_scope: Option<ClassId>,
+        num_args: u32,
+        returns_to: Option<(FrameRef, u32)>,
+    ) {
+        let cache_size = body_of(&unit, body).map_or(0, |code| code.cache_size);
+        let slots = usize::try_from(cache_size / SLOT_BYTES).unwrap_or(0);
         self.frames.push(FrameState {
             unit,
+            body,
+            function,
             opline: 0,
-            returns_to: None,
+            returns_to,
+            this,
+            called_scope,
+            num_args,
+            extra_args: Vec::new(),
             cache: vec![Cached::Unprimed; slots].into_boxed_slice(),
         });
     }
 
     /// The frame's state off the stack; its slots are the heap frame's,
-    /// released by the request before it pops both.
-    pub(crate) fn pop(&mut self) {
-        self.frames.pop();
+    /// released by the request before it pops both, and its receiver and
+    /// extra arguments are handed back for the request to release.
+    pub(crate) fn pop(&mut self) -> Option<FrameState> {
+        self.frames.pop()
+    }
+
+    /// The innermost frame's state, the one the loop is executing.
+    pub(crate) fn innermost(&self) -> Option<&FrameState> {
+        self.frames.last()
+    }
+
+    /// Every frame's state, the entry frame first.
+    pub(crate) fn frames(&self) -> &[FrameState] {
+        &self.frames
+    }
+
+    /// `Z_OBJ(EX(This))`: the receiver of `frame`, a view with no owner
+    /// taken; none where the frame has none.
+    pub(crate) fn this(&self, frame: FrameRef) -> Option<PhpObject> {
+        self.at(frame).and_then(|state| state.this)
     }
 
     pub(crate) fn at(&self, frame: FrameRef) -> Option<&FrameState> {
@@ -181,10 +268,14 @@ impl Vm {
         self.frames.get_mut(frame.0 as usize)
     }
 
-    /// The unit being served in `frame`, shared rather than copied, so
-    /// the loop can read its oplines while the request is borrowed.
-    pub(crate) fn serving(&self, frame: FrameRef) -> Option<Arc<Unit>> {
-        self.at(frame).map(|state| Arc::clone(&state.unit))
+    /// The unit and the op array being served in `frame`, the unit
+    /// shared rather than copied, so the loop can read its oplines while
+    /// the request is borrowed.
+    pub(crate) fn serving(&self, frame: FrameRef) -> Option<Serving> {
+        self.at(frame).map(|state| Serving {
+            unit: Arc::clone(&state.unit),
+            body: state.body,
+        })
     }
 
     /// Where `frame` is to write what it returns, and nothing when the
@@ -202,10 +293,7 @@ impl Vm {
     /// frame stands at, which is the line a diagnostic names, and zero
     /// while no frame is being served.
     pub(crate) fn executing_line(&self) -> u32 {
-        self.frames
-            .last()
-            .and_then(|state| opline_at(code_of(&state.unit), state.opline))
-            .map_or(0, |op| op.lineno)
+        self.frames.last().map_or(0, line_of)
     }
 
     /// `CACHED_PTR(num)`: what the runtime cache holds at `slot`, a
@@ -302,9 +390,31 @@ impl Vm {
     }
 }
 
-/// The op array of `unit` a frame serves.
+/// The main op array of `unit`, what the frame `serve` pushes serves.
 pub(crate) fn code_of(unit: &Unit) -> &OpArray {
     &unit.main
+}
+
+/// The op array `body` names in `unit`; none for an index the unit has
+/// not.
+pub(crate) fn body_of(unit: &Unit, body: Body) -> Option<&OpArray> {
+    match body {
+        Body::Main => Some(&unit.main),
+        Body::Function(at) => unit.functions.get(at as usize).map(|(_, code)| code),
+        Body::Method { class, method } => unit
+            .methods
+            .iter()
+            .find(|m| m.class == class && m.method == method)
+            .map(|m| &m.body),
+    }
+}
+
+/// The line of the opline `state` stands at, `EX(opline)->lineno`; zero
+/// for a frame past its op array.
+pub(crate) fn line_of(state: &FrameState) -> u32 {
+    body_of(&state.unit, state.body)
+        .and_then(|code| opline_at(code, state.opline))
+        .map_or(0, |op| op.lineno)
 }
 
 /// The slot a `TMP`/`VAR` operand names: temporaries stand past the last
@@ -314,9 +424,11 @@ pub(crate) fn temporary_slot(code: &OpArray, number: u32) -> u32 {
 }
 
 /// One operand's value (seam 6, design §4.3): a constant from the op
-/// array's table, a CV or a temporary from the frame. An `UNUSED` operand
-/// has no value and reads as `null`, which is what a handler that reads
-/// one would have been doing wrong.
+/// array's table, a CV or a temporary from the frame. An `UNUSED`
+/// operand is `&EX(This)` where the opcode reads one
+/// (`GET_OP1_OBJ_ZVAL_PTR_UNDEF`), the frame's receiver as a view, and
+/// reads as `null` on a frame that has none, which is what a handler
+/// that reads one there would have been doing wrong.
 ///
 /// A CV nothing has written is php's `BP_VAR_R` read of an undefined
 /// variable, `zval_undefined_cv` (`Z/Zend/zend_execute.c:242`): the
@@ -358,7 +470,10 @@ pub(crate) fn operand(
             Value::null()
         }
         OperandKind::Tmp | OperandKind::Var => req.slot(frame, temporary_slot(code, field)),
-        OperandKind::Unused => Value::null(),
+        OperandKind::Unused => req
+            .vm()
+            .this(frame)
+            .map_or_else(Value::null, |this| this.as_value()),
     }
 }
 
@@ -385,9 +500,9 @@ pub(crate) fn operand_undef(
 /// undefined or not (`BP_VAR_W` warns of nothing), a `VAR` read through
 /// the `IS_INDIRECT` a `FETCH_*_W` left in it (`_get_zval_ptr_ptr_var`,
 /// `Z_INDIRECT`) and as it stands otherwise, which is what `NEW` and
-/// `FETCH_THIS` leave. An `UNUSED` operand is `$this`, which no frame
-/// here carries yet, and a `CONST` or a `TMP` is no container php
-/// compiles a write over.
+/// `FETCH_THIS` leave. An `UNUSED` operand is `$this`, the frame's
+/// receiver, which the compiler writes only inside an instance method's
+/// body; a `CONST` or a `TMP` is no container php compiles a write over.
 pub(crate) fn container(
     req: &mut Request,
     frame: FrameRef,
@@ -406,9 +521,14 @@ pub(crate) fn container(
             let z = at.read();
             Ok(value_of(z.as_indirect().map_or(z, php_heap::ZvalRef::read)))
         }
-        OperandKind::Unused => Err(php_heap::Fatal::Error(format!(
-            "InternalError: {opcode} over $this, which no frame here carries"
-        ))),
+        OperandKind::Unused => req.vm().this(frame).map_or_else(
+            || {
+                Err(php_heap::Fatal::Error(format!(
+                    "InternalError: {opcode} over $this on a frame with no receiver"
+                )))
+            },
+            |this| Ok(this.as_value()),
+        ),
         OperandKind::Const | OperandKind::Tmp => Err(php_heap::Fatal::Error(format!(
             "InternalError: {opcode} over a constant or a temporary, which php compiles no write over"
         ))),

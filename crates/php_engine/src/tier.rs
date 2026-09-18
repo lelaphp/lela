@@ -12,11 +12,9 @@
 //! every other frame and for no entry frame, which the stack's entry slot
 //! says.
 
-use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 
 use php_heap::{Fatal, FrameRef};
-use php_unit::Unit;
 
 use crate::api::abi::Extension;
 use crate::api::request::Request;
@@ -208,8 +206,8 @@ fn serve<T: Tier>(req: &mut Request, entry: FrameRef) -> Result<(), Fatal> {
             Stepped::Threw(_) => return req.uncaught(),
             Stepped::Done => return Ok(()),
         }
-        let unit = standing(req, frame)?;
-        let code = exec::code_of(&unit);
+        let serving = standing(req, frame)?;
+        let code = code_of(&serving, frame)?;
         let op = *at_opline(req, frame, code)?;
         stepped = dispatch::dispatch::<T>(req, frame, code, &op)?;
     }
@@ -219,18 +217,28 @@ fn serve<T: Tier>(req: &mut Request, entry: FrameRef) -> Result<(), Fatal> {
 /// safepoints; what it did to the frame chain is reported, and a
 /// throwable it raised is left pending.
 pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
-    let unit = standing(req, frame)?;
-    let code = exec::code_of(&unit);
+    let serving = standing(req, frame)?;
+    let code = code_of(&serving, frame)?;
     let op = *at_opline(req, frame, code)?;
     dispatch::dispatch::<Nop>(req, frame, code, &op)
 }
 
 /// What `frame` is serving, held by its own share of the unit so the
 /// oplines can be read while the request is borrowed.
-fn standing(req: &Request, frame: FrameRef) -> Result<Arc<Unit>, Fatal> {
+fn standing(req: &Request, frame: FrameRef) -> Result<exec::Serving, Fatal> {
     req.vm().serving(frame).ok_or_else(|| {
         Fatal::Error(format!(
             "InternalError: frame {} is serving no op array",
+            frame.0
+        ))
+    })
+}
+
+/// The op array `frame` is serving, out of its unit.
+fn code_of(serving: &exec::Serving, frame: FrameRef) -> Result<&php_unit::OpArray, Fatal> {
+    serving.code().ok_or_else(|| {
+        Fatal::Error(format!(
+            "InternalError: frame {} names a body its unit has not",
             frame.0
         ))
     })

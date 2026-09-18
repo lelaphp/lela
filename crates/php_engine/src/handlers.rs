@@ -41,7 +41,11 @@
 //! `ZEND_FE_RESET_R`, `ZEND_FE_FETCH_R` and `ZEND_FE_FREE`; and the
 //! four an interpolated string compiles to (#355): `ZEND_FAST_CONCAT`
 //! for two pieces, `ZEND_ROPE_INIT`, `ZEND_ROPE_ADD` and `ZEND_ROPE_END`
-//! for more.
+//! for more; and the ones a user function's call and body need (#309):
+//! `ZEND_DO_UCALL`, which enters the callee's op array as the
+//! `ZEND_USER_FUNCTION` arm of every `DO_*CALL` does, `ZEND_RECV` and
+//! `ZEND_RECV_INIT`, the parameter prologue, `ZEND_FETCH_THIS` on a
+//! frame with a receiver, and `ZEND_FETCH_CLASS_CONSTANT`.
 
 // Every handler is generic over the tier and hands back the same edge, so
 // the generated dispatch calls them all the same way; the ones that raise a
@@ -58,6 +62,7 @@ use crate::api::values::{TypeTag, Value};
 use crate::exec::{self, Cached, CallStage, CallState};
 use crate::ops::{Offset, Switched};
 use crate::tier::{SafepointIdx, Site, Stepped, Tier, continued};
+use php_unit::Opcode;
 
 /// What one handler did to the frame chain, and the fatal that ends the
 /// request instead.
@@ -430,6 +435,254 @@ pub(crate) fn do_fcall<T: Tier>(
     op: &Opline,
 ) -> Edge {
     do_call(req, frame, code, op, "ZEND_DO_FCALL")
+}
+
+/// `ZEND_DO_UCALL` (`Z/Zend/zend_vm_def.h:4169`): the callee an
+/// `INIT_FCALL` or an `INIT_STATIC_METHOD_CALL` resolved is a user
+/// function the compiler knew, so this is the `ZEND_USER_FUNCTION` arm
+/// alone: the call frame becomes the callee's frame ([`enter`]), and
+/// the loop goes on in it (design §5.6).
+///
+/// ```php
+/// function f($a, $b) { echo $a + $b, "|"; return $a * $b; }
+/// class C { public $p = 2; static function s($x) { return $x . 's'; } function m() { return $this->p + 1; } }
+/// echo f(2, 3), "|", C::s('a'), "|", (new C)->m(), "|", strlen(f(1, 1)), "\n";
+/// f(1, 2);
+/// var_dump(f(2, 2) === 4, f(1, 2, 3) === 2);
+/// ```
+/// ```expect
+/// 5|6|as|3|2|1
+/// 3|4|3|bool(true)
+/// bool(true)
+/// ```
+///
+/// What a call leaves behind is nothing: the frame's slots, its
+/// arguments and its receiver are given up when it is popped, so the
+/// heap stands where it stood.
+///
+/// ```php
+/// function f($a) { $b = str_repeat($a, 100); return strlen($b); }
+/// class C { function m($s) { return f($s) + 1; } }
+/// $c = new C; $before = memory_get_usage();
+/// $n = $c->m('x'); $n = f('yy');
+/// var_dump($n, memory_get_usage() - $before);
+/// ```
+/// ```expect
+/// int(200)
+/// int(0)
+/// ```
+pub(crate) fn do_ucall<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    do_call(req, frame, code, op, "ZEND_DO_UCALL")
+}
+
+/// The `ZEND_USER_FUNCTION` arm of the `DO_*CALL` handlers
+/// (`Z/Zend/zend_vm_def.h:4169`, `i_init_func_execute_data`, design
+/// §5.6): the served call taken off the call stack and pushed as the
+/// callee's frame, its arguments in the parameters' CVs and its
+/// receiver carried over ([`Request::push_user_frame`]), the caller's
+/// slot for the value recorded where `RETURN_VALUE_USED`; then the
+/// `RECV*` prologue. php skips the whole prologue where the function has
+/// no typed parameter and was passed at least as many arguments as it
+/// declares (`Z/Zend/zend_execute.c:4426-4437`), and runs it from opline
+/// zero otherwise; here it runs to the entry safepoint, which the
+/// compiler numbered after the prologue, so a `RECV` that throws is
+/// never inside a recording and the frame is reported [`Stepped::Threw`].
+/// A prologue that raised nothing is [`Stepped::Pushed`], and the loop's
+/// activation performs the interrupt check and raises `Site::Entry`.
+fn enter(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    function: Function,
+) -> Edge {
+    let Some(call) = req.vm_mut().pop_call() else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a user call with no call frame under it",
+        )));
+    };
+    let returns_to =
+        (op.out_type != OperandKind::Unused).then(|| (frame, exec::temporary_slot(code, op.out)));
+    let passed = call.arguments.len();
+    let Some(callee) = req.push_user_frame(function, call, returns_to) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a user function whose body the unit has not",
+        )));
+    };
+    let Some(serving) = req.vm().serving(callee) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: the frame just pushed is serving no op array",
+        )));
+    };
+    let Some(body) = serving.code() else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: the frame just pushed names a body the unit has not",
+        )));
+    };
+    let entry = body.safepoints.first().map_or(0, |at| at.0);
+    let parameters = req
+        .function_decl(function)
+        .map_or(0, |decl| decl.parameters.len());
+    if passed >= parameters {
+        req.vm_mut().jump(callee, entry);
+        return Ok(Stepped::Pushed(callee));
+    }
+    while req.vm().opline(callee) < entry {
+        let Some(prologue) = exec::opline_at(body, req.vm().opline(callee)) else {
+            break;
+        };
+        let stepped = match prologue.opcode {
+            Opcode::Recv => recv::<crate::tier::Nop>(req, callee, body, prologue)?,
+            Opcode::RecvInit => recv_init::<crate::tier::Nop>(req, callee, body, prologue)?,
+            other => {
+                return Err(Fatal::Error(format!(
+                    "InternalError: {} stands before the entry safepoint, where only RECV* may",
+                    other.name()
+                )));
+            }
+        };
+        if let Stepped::Threw(at) = stepped {
+            return Ok(Stepped::Threw(at));
+        }
+    }
+    Ok(Stepped::Pushed(callee))
+}
+
+/// `ZEND_RECV` (`Z/Zend/zend_vm_def.h:5692`): the parameter numbered
+/// `op1`, from one, whose argument the caller placed in the CV
+/// `result` names; nothing to do where the call passed it, and
+/// `zend_missing_arg_error` where it did not, php's
+/// `ArgumentCountError` naming the function as `Class::method` or
+/// alone, how many were passed, the caller's file and line, and how
+/// many the function requires, `exactly` where every parameter is
+/// required and `at least` otherwise. The throwable records the
+/// callee's line, which is where the loop stands, and its trace has
+/// the call as its first row.
+///
+/// ```php
+/// function f($a, $b) {}
+/// f(1);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: Too few arguments to function f(), 1 passed in %s on line 3 and exactly 2 expected in %s:2
+/// Stack trace:
+/// #0 %s(3): f(1)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// class C { function m($a, $b = 1) {} }
+/// (new C)->m();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: Too few arguments to function C::m(), 0 passed in %s on line 3 and at least 1 expected in %s:2
+/// Stack trace:
+/// #0 %s(3): C->m()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn recv<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, op: &Opline) -> Edge {
+    let passed = req.vm().at(frame).map_or(0, |state| state.num_args);
+    if op.op1 <= passed {
+        return Ok(advance(req, frame));
+    }
+    let thrown = missing_argument(req, frame, passed);
+    threw(req, frame, &thrown)
+}
+
+/// `zend_missing_arg_error` (`Z/Zend/zend_execute.c`): the caller is
+/// the frame below, and its opline is the call.
+fn missing_argument(req: &mut Request, frame: FrameRef, passed: u32) -> Thrown {
+    let function = req.vm().at(frame).and_then(|state| state.function);
+    let name = function.map_or_else(String::new, |function| req.qualified_name_of(function));
+    let parameters: Vec<bool> = function
+        .and_then(|function| req.function_decl(function))
+        .map(|decl| {
+            decl.parameters
+                .iter()
+                .map(|parameter| parameter.default.is_none() && !parameter.variadic)
+                .collect()
+        })
+        .unwrap_or_default();
+    let required = parameters
+        .iter()
+        .rposition(|required| *required)
+        .map_or(0, |at| at + 1);
+    let all = parameters.len();
+    let how = if required == all {
+        "exactly"
+    } else {
+        "at least"
+    };
+    let caller = req.vm().frames().iter().rev().nth(1).map(|caller| {
+        (
+            exec::body_of(&caller.unit, caller.body)
+                .map(|code| String::from_utf8_lossy(&code.filename.0).into_owned())
+                .unwrap_or_default(),
+            exec::line_of(caller),
+        )
+    });
+    let message = match caller {
+        Some((file, line)) => format!(
+            "Too few arguments to function {name}(), {passed} passed in {file} on line {line} and {how} {required} expected"
+        ),
+        None => format!(
+            "Too few arguments to function {name}(), {passed} passed and {how} {required} expected"
+        ),
+    };
+    crate::api::raising::throw(req, "ArgumentCountError", &message)
+}
+
+/// `ZEND_RECV_INIT` (`Z/Zend/zend_vm_def.h:5723`): the parameter
+/// numbered `op1` with a default in `op2`; where the call passed no
+/// argument for it, the default is copied into the CV `result` names
+/// (`ZVAL_COPY(param, default_value)`), and nothing is done otherwise.
+///
+/// ```php
+/// function f($a, $b = 'b', $c = [1, 2]) { var_dump($a, $b, $c); }
+/// f(1); f(1, 2); f(1, 2, 3);
+/// ```
+/// ```expect
+/// int(1)
+/// string(1) "b"
+/// array(2) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+/// }
+/// int(1)
+/// int(2)
+/// array(2) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+/// }
+/// int(1)
+/// int(2)
+/// int(3)
+/// ```
+pub(crate) fn recv_init<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let passed = req.vm().at(frame).map_or(0, |state| state.num_args);
+    if op.op1 > passed {
+        let default = exec::constant(code, ConstIdx(op.op2));
+        req.addref(&default);
+        let previous = req.set_slot(frame, op.out, default);
+        req.release(previous);
+    }
+    Ok(advance(req, frame))
 }
 
 /// `ZEND_NEW` (`Z/Zend/zend_vm_def.h:5941`) over a class named at
@@ -828,12 +1081,31 @@ pub(crate) fn init_method_call<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_FETCH_THIS` (`Z/Zend/zend_vm_def.h:9214`): `$this` outside a
-/// method's body. `EX(This)` is an object only on a frame a method call
-/// pushed, and no user frame is one until a method body is compiled,
-/// so the frame here holds no receiver and this is php's `Error`
+/// `ZEND_FETCH_THIS` (`Z/Zend/zend_vm_def.h:9214`): `$this` read as a
+/// value, or as a receiver where the compiler could not know a frame
+/// has one. On a frame a method call pushed, `EX(This)` is the receiver
+/// and the temporary takes one more owner of it (`ZVAL_OBJ_COPY`); on
+/// the main op array, in a function or in a method declared `static` the frame
+/// holds no receiver and this is php's `Error`
 /// (`zend_this_not_in_object_context_helper`), the temporary it would
 /// write left undefined (`UNDEF_RESULT`).
+///
+/// ```php
+/// class C { public $p = 1; function m() { var_dump($this === $this, $this instanceof C); return $this; } static function s() { return $this; } }
+/// $c = new C; var_dump($c->m() === $c);
+/// C::s();
+/// ```
+/// ```expect exit=255
+/// bool(true)
+/// bool(true)
+/// bool(true)
+///
+/// Fatal error: Uncaught Error: Using $this when not in object context in %s:2
+/// Stack trace:
+/// #0 %s(4): C::s()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
 ///
 /// ```php
 /// echo $this;
@@ -857,11 +1129,85 @@ pub(crate) fn init_method_call<T: Tier>(
 pub(crate) fn fetch_this<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
-    _: &OpArray,
-    _: &Opline,
+    code: &OpArray,
+    op: &Opline,
 ) -> Edge {
-    let thrown = crate::api::raising::throw(req, "Error", "Using $this when not in object context");
-    threw(req, frame, &thrown)
+    let Some(this) = req.vm().this(frame) else {
+        let thrown =
+            crate::api::raising::throw(req, "Error", "Using $this when not in object context");
+        return threw(req, frame, &thrown);
+    };
+    let value = this.as_value();
+    req.addref(&value);
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, value);
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_FETCH_CLASS_CONSTANT` (`Z/Zend/zend_vm_def.h`, handler 181)
+/// over a class and a constant both named at compile time, which is
+/// what `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION` leaves of `C::A`: the
+/// class by the lowered name of the pair in `op1`, `Class "X" not
+/// found` where nothing declares it; the constant by name in the
+/// class's constants, `Undefined constant C::A` where it has none; a
+/// constant the scope may not reach is `Cannot access private constant
+/// C::A` (`zend_verify_const_access`); and the value, the constant
+/// expression the declaration kept evaluated on this use
+/// (`zval_update_constant_ex`), into the temporary `result` names.
+/// The two cache slots php primes with the class and the constant are
+/// not read here; the lookup is made on every pass, which nothing
+/// observes.
+///
+/// ```php
+/// class A { const X = 1 + 2; const S = 'a' . 'b'; protected const P = 3; private const Q = 4; static function q() { return A::Q + A::P; } }
+/// echo A::X, A::S, A::q(), "\n";
+/// echo A::P;
+/// ```
+/// ```expect exit=255
+/// 3ab7
+///
+/// Fatal error: Uncaught Error: Cannot access protected constant A::P in %s:4
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 4
+/// ```
+///
+/// ```php
+/// class A {}
+/// echo A::NOPE;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Undefined constant A::NOPE in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+pub(crate) fn fetch_class_constant<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let class = match class_operand(req, code, op.op1_type, op.op1) {
+        Ok(class) => class,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    if op.op2_type != OperandKind::Const {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_FETCH_CLASS_CONSTANT over a constant named at run time",
+        )));
+    }
+    let name = exec::constant(code, ConstIdx(op.op2));
+    let name = name.as_str_bytes().unwrap_or_default().to_vec();
+    let value = match req.class_constant(class, &name) {
+        Ok(value) => value,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, value);
+    req.release(previous);
+    Ok(advance(req, frame))
 }
 
 /// `ZEND_FETCH_OBJ_R` (`Z/Zend/zend_vm_def.h:2069`) over a property
@@ -958,11 +1304,6 @@ pub(crate) fn fetch_obj_r<T: Tier>(
             )));
         }
     };
-    if op.op1_type == OperandKind::Unused {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_FETCH_OBJ_R over $this, which no frame here carries",
-        )));
-    }
     let name = name.as_str_bytes().unwrap_or_default().to_vec();
     let container = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
     let read = if let Some(object) = container.as_object().copied() {
@@ -1325,14 +1666,19 @@ fn threw(req: &mut Request, frame: FrameRef, thrown: &Thrown) -> Edge {
     Ok(Stepped::Threw(frame))
 }
 
-/// The body the two `DO_*CALL` handlers share, `opcode` naming the one
-/// that found no call frame under it.
+/// The body the `DO_*CALL` handlers share, `opcode` naming the one that
+/// found no call frame under it: the `ZEND_USER_FUNCTION` arm enters
+/// the callee's op array ([`enter`]), the `ZEND_INTERNAL_FUNCTION` arm
+/// serves the native on the call frame.
 fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opcode: &str) -> Edge {
     let Some(function) = req.vm_mut().activate_call() else {
         return Err(Fatal::Error(format!(
             "InternalError: {opcode} with no call frame under it"
         )));
     };
+    if req.user_function(function).is_some() {
+        return enter(req, frame, code, op, function);
+    }
     let served = req.serve_native(function);
     req.pop_call();
     match served {
@@ -3250,10 +3596,31 @@ pub(crate) fn qm_assign<T: Tier>(
 
 /// `ZEND_RETURN`: the operand taken as the caller's (`ZVAL_COPY` of a
 /// CV or a constant, a temporary moved), then the return safepoint, then
-/// the frame popped (design §4.3 seam 8, §5.8). The safepoint carries
-/// the number the compiler wrote in `result`, and is raised for every
-/// frame but the entry frame of this serving, which the stack's entry
-/// slot says.
+/// the frame popped (design §4.3 seam 8, §5.8), its CVs, temporaries
+/// and receiver given up with it (`zend_leave_helper`), and the value
+/// written into the caller's slot where the call wanted it and given up
+/// where it did not (`RETURN_VALUE_USED`). The caller goes on after its
+/// call opline. The safepoint carries the number the compiler wrote in
+/// `result`, and is raised for every frame but the entry frame of this
+/// serving, which the stack's entry slot says.
+///
+/// ```php
+/// function f() { return; }
+/// function g() { $a = 1; }
+/// function h($x) { return $x; }
+/// var_dump(f(), g(), h(1.5), h('s'), h(null), h([1]));
+/// ```
+/// ```expect
+/// NULL
+/// NULL
+/// float(1.5)
+/// string(1) "s"
+/// NULL
+/// array(1) {
+///   [0]=>
+///   int(1)
+/// }
+/// ```
 pub(crate) fn r#return<T: Tier>(
     req: &mut Request,
     frame: FrameRef,

@@ -889,6 +889,7 @@ fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
     if !req.declare_classes(unit) {
         return;
     }
+    req.declare_functions(unit);
     let frame = req.push_frame(Arc::clone(unit));
     if req.seed_argv(frame, unit).is_err() {
         req.pop_frame();
@@ -2018,6 +2019,42 @@ mod tests {
             req.state::<Asked>().sites,
             vec![(Site::Entry, frame)],
             "the entry frame is activated, and its own return raises no site"
+        );
+    }
+
+    /// Design §5.6, §8: a user frame is activated after its `RECV*`
+    /// prologue, so `Probe` sees `(Entry, callee)` once per call and
+    /// `Return` once per callee frame; a call whose `RECV` throws is
+    /// reported `Threw` before the activation, so no `Entry` is raised
+    /// for it (#309).
+    #[test]
+    fn a_call_activates_its_frame_once_and_a_recv_that_throws_never_does() {
+        let engine = Engine::builder().tier::<Probe>().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), description(""));
+        let unit = engine
+            .unit(
+                b"<?php function f($a, $b = 1) { return $a; } f(1); f(2, 3); f();",
+                b"witness.php",
+            )
+            .unwrap_or_default();
+        req.declare_functions(&unit);
+        let frame = req.push_frame(unit);
+        let outcome = crate::tier::execute::<Probe>(&mut req, frame);
+        assert!(
+            outcome.is_err(),
+            "the third call's RECV throws and nothing catches it"
+        );
+        let callee = FrameRef(frame.0 + 1);
+        assert_eq!(
+            req.state::<Asked>().sites,
+            vec![
+                (Site::Entry, frame),
+                (Site::Entry, callee),
+                (Site::Return(crate::tier::SafepointIdx(1)), callee),
+                (Site::Entry, callee),
+                (Site::Return(crate::tier::SafepointIdx(1)), callee),
+            ],
+            "two calls activated and returned, the third never activated"
         );
     }
 }
