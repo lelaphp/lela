@@ -3225,9 +3225,9 @@ mod tests {
     /// `A\M`, the name `zend_resolve_class_name` gives `new M` and `M::K`
     /// in the same namespace (#322). The dump is the oracle's under
     /// `[regime.dump]` at 8.5.9 of this program, `NEW 0 string("A\M")`
-    /// with its `DO_FCALL` and `FREE` (a class constant fetch, `M::K`,
-    /// is not read yet, so #322's `echo M::K` stands aside); a file written
-    /// under `opcache.file_update_protection`'s two seconds before the
+    /// with its `DO_FCALL` and `FREE` (#322's own `echo M::K` stands
+    /// aside here and is the test below's); a file written under
+    /// `opcache.file_update_protection`'s two seconds before the
     /// oracle reads it prints no dump at all, which is the empty dump
     /// #322 measured, and not the class. `__CLASS__` in the body folds
     /// to the prefixed name, and a fatal names it as php's does.
@@ -3282,6 +3282,122 @@ mod tests {
                 "Cannot redefine class constant A\\M::K".to_string(),
                 3
             ))
+        );
+    }
+
+    /// `zend_compile_class_const` under `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`,
+    /// which opcache sets, so `zend_try_ct_eval_class_const` folds
+    /// nothing and `M::K` is fetched as the program serves (#372): the
+    /// class's constant pair in `op1` (`zend_set_class_name_op1` over
+    /// `zend_resolve_class_name`, which takes the namespace as
+    /// `zend_compile_class_decl` took it on the declaration), the
+    /// constant's name in `op2`, into a temporary. The dump is the
+    /// oracle's under `[regime.dump]` at 8.5.9 of this program, which is
+    /// #322's own with the `echo M::K` it stood aside from.
+    #[test]
+    fn a_class_constant_is_fetch_class_constant_over_the_resolved_class_name() {
+        let (unit, _strings) =
+            unit_and_strings(b"<?php namespace A; class M { const K = 1; } new M; echo M::K;");
+        assert_eq!(
+            unit.dump(&[]),
+            main_dump(
+                6,
+                0,
+                3,
+                "0000 V0 = NEW 0 string(\"A\\\\M\")\n\
+                 0001 DO_FCALL\n\
+                 0002 FREE V0\n\
+                 0003 T2 = FETCH_CLASS_CONSTANT string(\"A\\\\M\") string(\"K\")\n\
+                 0004 ECHO T2\n\
+                 0005 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    0: 0001 - 0002 (new)\n"
+            )
+        );
+    }
+
+    /// `zend_compile_static_prop` under `BP_VAR_R` (#372): the
+    /// property's name in `op1`, the class's constant pair in `op2`, into
+    /// a temporary (`zend_adjust_for_fetch_type`). The dump is the
+    /// oracle's under `[regime.dump]` at 8.5.9 of `<?php echo C::$p;`,
+    /// whose class the table has not, which php compiles all the same
+    /// and fails on only as it runs. Under a namespace the class takes
+    /// it, as every other class reference does.
+    #[test]
+    fn a_static_property_read_is_fetch_static_prop_r_over_the_resolved_class_name() {
+        assert_eq!(
+            dump_of(b"<?php echo C::$p;"),
+            main_dump(
+                3,
+                0,
+                1,
+                "0000 T0 = FETCH_STATIC_PROP_R string(\"p\") string(\"C\")\n\
+                 0001 ECHO T0\n\
+                 0002 RETURN int(1)\n"
+            )
+        );
+        assert_eq!(
+            dump_of(b"<?php namespace A; class C { } echo C::$p;"),
+            main_dump(
+                3,
+                0,
+                1,
+                "0000 T0 = FETCH_STATIC_PROP_R string(\"p\") string(\"A\\\\C\")\n\
+                 0001 ECHO T0\n\
+                 0002 RETURN int(1)\n"
+            )
+        );
+    }
+
+    /// What stands beside a `C::$p` read and is not read yet is refused
+    /// as such (#372): a write, an assignment and `++`, the property
+    /// the program names as it serves, `self`, `parent` and `static`
+    /// as the class, `C::$p()` whose method the local `$p` names, and
+    /// such a fetch in a constant expression, which php refuses
+    /// outright.
+    #[test]
+    fn what_stands_beside_a_static_property_read_is_refused_as_not_yet_read() {
+        let refused = |source: &[u8]| {
+            let mut strings = php_heap::Strings::new();
+            compile(
+                &php_syntax::parse(source, &php_syntax::Options::default()),
+                &bundled(),
+                &mut strings,
+            )
+            .err()
+            .map(|e| e.message)
+        };
+        assert_eq!(
+            refused(b"<?php C::$p = 1;").as_deref(),
+            Some("an assignment to what is no variable this compiler cannot read yet")
+        );
+        assert_eq!(
+            refused(b"<?php C::$p++;").as_deref(),
+            Some("a statement this compiler cannot read yet")
+        );
+        assert_eq!(
+            refused(b"<?php ++C::$p;").as_deref(),
+            Some("a `++` before what is no variable")
+        );
+        assert_eq!(
+            refused(b"<?php C::$$p;").as_deref(),
+            Some("a static property named at run time this compiler cannot read yet")
+        );
+        assert_eq!(
+            refused(b"<?php C::${'p'};").as_deref(),
+            Some("a static property named at run time this compiler cannot read yet")
+        );
+        assert_eq!(
+            refused(b"<?php C::$p();").as_deref(),
+            Some("a static call whose method is named at run time this compiler cannot read yet")
+        );
+        assert_eq!(
+            refused(b"<?php echo self::$p;").as_deref(),
+            Some("a class reference of the scope this compiler cannot read yet")
+        );
+        assert_eq!(
+            refused(b"<?php class D { const X = C::$p; }").as_deref(),
+            Some("Constant expression contains invalid operations")
         );
     }
 
@@ -4245,12 +4361,8 @@ echo f(1), C::s(), $o->m(1), $o->p;
             Some("a `new` of what is no class name this compiler cannot read yet")
         );
         assert_eq!(
-            refused(b"<?php echo E::$a;").as_deref(),
-            Some("a class constant or a static property this compiler cannot read yet")
-        );
-        assert_eq!(
             refused(b"<?php echo E::class;").as_deref(),
-            Some("a class constant or a static property this compiler cannot read yet")
+            Some("a `::class` or a class member named at run time this compiler cannot read yet")
         );
         assert_eq!(
             refused(b"<?php echo $o->$p;").as_deref(),

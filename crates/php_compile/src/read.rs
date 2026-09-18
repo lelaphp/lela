@@ -374,6 +374,14 @@ pub(crate) enum Expr {
         class: Vec<u8>,
         name: Vec<u8>,
     },
+    /// `C::$p`, php's `ZEND_AST_STATIC_PROP` over a class named as
+    /// written and a `simple_variable` that is one `T_VARIABLE`, the
+    /// property's name without its `$`; `C::$$p` and `C::${expr}` name
+    /// the property as the program serves and are not read.
+    StaticProp {
+        class: Vec<u8>,
+        name: Vec<u8>,
+    },
     /// `C::m(args)`, php's `ZEND_AST_STATIC_CALL` over a class and a
     /// method both named as written.
     StaticCall {
@@ -1900,10 +1908,11 @@ impl Reader<'_> {
     }
 
     /// A name: `true`, `false` and `null`, which php reads whatever their
-    /// case, a magic constant, another constant by name, a call, or a call on a class,
-    /// `C::m()`, php's `class_name T_PAAMAYIM_NEKUDOTAYIM member_name
-    /// argument_list`. What else stands after a `::`, a class constant,
-    /// a property of the class or `::class`, is not read yet.
+    /// case, a magic constant, another constant by name, a call, a call on
+    /// a class, `C::m()`, php's `class_name T_PAAMAYIM_NEKUDOTAYIM
+    /// member_name argument_list`, a constant of a class, `C::K`, or the
+    /// property `C::$p` names. What else stands after a `::`, `::class`
+    /// and a member the program names as it serves, is not read yet.
     fn named(&mut self) -> Result<Expr, Trouble> {
         let line = self.line;
         let name = self.name();
@@ -1911,11 +1920,14 @@ impl Reader<'_> {
         if self.byte(0) == Some(b':') && self.byte(1) == Some(b':') {
             self.bump(2);
             self.skip_trivia();
+            if self.byte(0) == Some(b'$') {
+                return self.static_prop(name);
+            }
             let method = self.label();
             self.skip_trivia();
             if method.is_empty() || method.eq_ignore_ascii_case(b"class") {
                 return Err(self.trouble(
-                    "a class constant or a static property this compiler cannot read yet",
+                    "a `::class` or a class member named at run time this compiler cannot read yet",
                 ));
             }
             if self.byte(0) != Some(b'(') {
@@ -1961,6 +1973,34 @@ impl Reader<'_> {
         self.bump(1);
         let arguments = self.arguments()?;
         self.member_calls(Expr::Call { name, arguments })
+    }
+
+    /// `class_name T_PAAMAYIM_NEKUDOTAYIM simple_variable` after the
+    /// `$`, php's `ZEND_AST_STATIC_PROP`: the property's name is the one
+    /// `T_VARIABLE` of `simple_variable`, taken as written and without
+    /// its `$`, so `C::$this` names the property `this` as php's grammar
+    /// does. The rest of `simple_variable`, `$$p` and `${expr}`, names
+    /// the property as the program serves and is not read yet; neither is
+    /// `member_name: simple_variable`, `C::$p()`, whose method is named
+    /// by the local `$p` and not by the property.
+    fn static_prop(&mut self, class: Vec<u8>) -> Result<Expr, Trouble> {
+        if !self
+            .byte(1)
+            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_' || b >= 0x80)
+        {
+            return Err(
+                self.trouble("a static property named at run time this compiler cannot read yet")
+            );
+        }
+        self.bump(1);
+        let name = self.label();
+        self.skip_trivia();
+        if self.byte(0) == Some(b'(') {
+            return Err(self.trouble(
+                "a static call whose method is named at run time this compiler cannot read yet",
+            ));
+        }
+        self.member_calls(Expr::StaticProp { class, name })
     }
 
     /// `array_pair_list` after its `[`: each element `expr` or

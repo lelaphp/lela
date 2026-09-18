@@ -1141,6 +1141,7 @@ impl Emit<'_> {
             | Expr::PostDec(_)
             | Expr::StaticCall { .. }
             | Expr::MethodCall { .. }
+            | Expr::StaticProp { .. }
             | Expr::Silence(_)
             | Expr::Encaps(_) => {
                 Err(self.compile_error("Constant expression contains invalid operations"))
@@ -2275,6 +2276,7 @@ impl Emit<'_> {
             } => self.method_call(object, method, arguments),
             Expr::Instanceof { expr, class } => self.instance_of(expr, class),
             Expr::ClassConst { class, name } => self.class_const(class, name),
+            Expr::StaticProp { class, name } => self.static_prop(class, name),
             Expr::Array(elements) => self.array(elements),
             known => Ok(Where::Constant(self.constant_expr(known)?)),
         }
@@ -3015,7 +3017,8 @@ impl Emit<'_> {
             | Expr::PreInc(_)
             | Expr::PostInc(_)
             | Expr::PreDec(_)
-            | Expr::PostDec(_) => Err(self.fatal("a variable is no constant expression")),
+            | Expr::PostDec(_)
+            | Expr::StaticProp { .. } => Err(self.fatal("a variable is no constant expression")),
             Expr::Match { .. } => Err(self.fatal("a match is no constant expression")),
             Expr::Silence(_) => Err(self.fatal("a silenced expression is no constant expression")),
             Expr::Encaps(_) => Err(self.fatal("an interpolated string is no constant expression")),
@@ -3435,6 +3438,36 @@ impl Emit<'_> {
             op1: class_at,
             op2_type: OperandKind::Const,
             op2: name_at,
+            out_type: OperandKind::Tmp,
+            out,
+            extended_value: slots,
+            ..Opline::default()
+        });
+        Ok(Where::Temporary(out))
+    }
+
+    /// `zend_compile_static_prop` under `BP_VAR_R`, which delays nothing
+    /// this compiler reads: `FETCH_STATIC_PROP_R` with the property's
+    /// name as one constant in `op1` and three cache slots in
+    /// `extended_value` (`zend_alloc_cache_slots(3)`), then the class's
+    /// constant pair in `op2` (`zend_add_class_name_literal`), which
+    /// reserves no slot of its own where `op1` is a constant. The fetch
+    /// is written into a temporary (`zend_adjust_for_fetch_type`). php
+    /// reads the property's name before the class's, so the literals
+    /// stand in that order; `self`, `parent` and `static` are refused
+    /// as [`Self::class_name_literal`] refuses them.
+    fn static_prop(&mut self, class: &[u8], name: &[u8]) -> Result<Where, CompileError> {
+        let name = self.string(name)?;
+        let name_at = self.literal(name);
+        let out = self.temporary();
+        let slots = self.cache_slots(3);
+        let class_at = self.class_name_literal(class)?;
+        self.push(Opline {
+            opcode: Opcode::FetchStaticPropR,
+            op1_type: OperandKind::Const,
+            op1: name_at,
+            op2_type: OperandKind::Const,
+            op2: class_at,
             out_type: OperandKind::Tmp,
             out,
             extended_value: slots,
