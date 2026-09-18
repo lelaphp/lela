@@ -99,6 +99,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::api_check;
+use crate::crosscheck;
 use crate::divergence::{self, Registry};
 use crate::git::{self, Change};
 use crate::manifest::{Crate, Manifest};
@@ -461,34 +462,53 @@ fn fresh_readings(
     let tree = git::tree_hash(root, &krate.path())?;
     let name = &krate.name;
     for instrument in instruments_of(krate, lock_home) {
-        let Some(reading) = store.read(instrument, name)? else {
-            unmet.push(format!("{instrument}: no reading for {name}"));
-            continue;
-        };
-        if reading.tree() != tree {
-            unmet.push(format!(
-                "{instrument}: the reading for {name} is stale; {name} changed since it was taken"
-            ));
-            continue;
-        }
-        if reading.status != Status::Pass && !met_without_passing(instrument, &reading) {
-            unmet.push(format!(
-                "{instrument}: {name} {}: {}",
-                reading.status.as_str(),
-                reading.message
-            ));
-        }
-        if instrument == "witness"
-            && let Some(Number::Int(missing)) = reading.numbers.get("missing")
-            && *missing > 0
-        {
-            let s = plural(usize::try_from(*missing).unwrap_or(usize::MAX));
-            unmet.push(format!(
-                "witness: {missing} kernel{s} or native{s} in {name} without a witness"
-            ));
+        for scope in scopes_of(instrument, name) {
+            let Some(reading) = store.read(instrument, &scope)? else {
+                unmet.push(format!("{instrument}: no reading for {scope}"));
+                continue;
+            };
+            if reading.tree() != tree {
+                unmet.push(format!(
+                    "{instrument}: the reading for {scope} is stale; {name} changed since it was taken"
+                ));
+                continue;
+            }
+            if reading.status != Status::Pass && !met_without_passing(instrument, &reading) {
+                unmet.push(format!(
+                    "{instrument}: {scope} {}: {}",
+                    reading.status.as_str(),
+                    reading.message
+                ));
+            }
+            if instrument == "witness"
+                && let Some(Number::Int(missing)) = reading.numbers.get("missing")
+                && *missing > 0
+            {
+                let s = plural(usize::try_from(*missing).unwrap_or(usize::MAX));
+                unmet.push(format!(
+                    "witness: {missing} kernel{s} or native{s} in {name} without a witness"
+                ));
+            }
         }
     }
     Ok(())
+}
+
+/// The scopes condition 1 reads for one instrument of a crate: the
+/// crate's name, and for `crosscheck` the `--ri` column's `ext/<name>/ri`
+/// beside it (`crosscheck::Column::scope`), since the lane renders a
+/// default extension twice and both renderings are one sensor held to the
+/// oracle's bytes, so a default extension whose MINFO table is not php's
+/// is not done any more than one whose declarations are not (harness
+/// §4.5 condition 1, ledger 46; #361).
+pub fn scopes_of(instrument: &str, name: &str) -> Vec<String> {
+    let mut scopes = vec![name.to_owned()];
+    if instrument == "crosscheck"
+        && let Some(extension) = name.strip_prefix("ext/")
+    {
+        scopes.push(crosscheck::Column::Ri.scope(extension));
+    }
+    scopes
 }
 
 /// Condition 3: a lock that differs is in the diff, and a lock in the diff

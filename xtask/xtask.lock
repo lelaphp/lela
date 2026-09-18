@@ -47,6 +47,7 @@ done::Verdict::render
 done::judge
 done::run
 done::run_hook
+done::scopes_of
 generated::write_all
 manifest::AvoidFrom
 manifest::AvoidFrom::file
