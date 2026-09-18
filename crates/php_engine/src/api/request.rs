@@ -918,7 +918,7 @@ impl Request {
     /// chain of `previous` throwables php walks after the first, and the
     /// ` and defined` a `TypeError` whose message names a call site takes,
     /// arrive with the user-function frames that make either reachable.
-    fn throwable_to_string(&self, throwable: PhpObject) -> String {
+    pub(crate) fn throwable_to_string(&self, throwable: PhpObject) -> String {
         let class = self.class_name_of(throwable);
         let message = string_prop(self, throwable, b"message");
         let (file, line) = self.throw_site(throwable);
@@ -1725,6 +1725,15 @@ impl Request {
         let allocated = self.heap.object(class.0, slots);
         let object = self.fatal_of(allocated).map(PhpObject::of)?;
         if let Err(thrown) = self.init_properties(object) {
+            self.release(object.as_value());
+            return Err(thrown);
+        }
+        // `zend_default_exception_new`, the throwables' `create_object`:
+        // `file`, `line` and `trace` are the site of `new`, written as
+        // the object is made and before any constructor runs.
+        if crate::classes::records_throw_site(self.handlers_of(class))
+            && let Err(thrown) = self.note_throw_site(object)
+        {
             self.release(object.as_value());
             return Err(thrown);
         }

@@ -19,14 +19,15 @@
 use std::cmp::Ordering;
 
 use php_unit::decl::{
-    ClassDecl, ClassFlags, ClassKind, EnumBacking, FunctionDecl, MethodDecl, Name, Parameter,
-    PropertyDecl, Type, Visibility,
+    ClassDecl, ClassFlags, ClassKind, ConstExpr, EnumBacking, FunctionDecl, MethodDecl, Name,
+    Parameter, PropertyDecl, Type, Visibility,
 };
 
 use crate::api::abi::{CloneObj, Entry, NativeClassDecl, ObjectHandlers};
-use crate::api::raising::{Thrown, arg_count_error, throw};
+use crate::api::coerce::coerce_param;
+use crate::api::raising::{Thrown, arg_count_error, arg_type_error, throw};
 use crate::api::request::Request;
-use crate::api::values::{ClosureInfo, PhpObject, Value};
+use crate::api::values::{ClosureInfo, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 /// `default_exception_handlers`: `clone_obj` null, so every throwable
 /// is uncloneable (`zend_register_default_exception`), and the rest
@@ -41,6 +42,15 @@ impl ObjectHandlers for ThrowableHandlers {
 }
 
 static THROWABLE: ThrowableHandlers = ThrowableHandlers;
+
+/// Whether `handlers` is the throwables' table: php's
+/// `zend_default_exception_new`, the `create_object` of every class
+/// under `Throwable`, records the site of `new` on the object as it is
+/// made, and `Request::new_object` does the same for an object whose
+/// class reaches this table.
+pub(crate) fn records_throw_site(handlers: &'static dyn ObjectHandlers) -> bool {
+    std::ptr::addr_eq(handlers, &raw const THROWABLE)
+}
 
 /// `closure_handlers` (`Z/Zend/zend_closures.c:730`): the slots
 /// `zend_register_closure_ce` overrides over `std_object_handlers`.
@@ -112,31 +122,39 @@ fn closure_clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
 }
 
 /// `Throwable` and the throwables php declares under it, parents first,
-/// each with the methods it declares so far beside it: `Exception` and
-/// `Error` carry their private `__clone` (`zend_exceptions.stub.php`),
-/// the one method of theirs the visibility rule of
-/// `zend_std_get_method` has to be held to. The rest of their methods
-/// arrive with the linker (design §6.2).
+/// each with its methods beside it as `zend_exceptions.stub.php` writes
+/// them: `Stringable` and `Throwable` carry their abstract methods on
+/// the declaration, with no entry to pair, and `Exception` and `Error`
+/// carry the eleven the stub gives each, `Error`'s being
+/// `@implementation-alias`es of `Exception`'s, so one entry serves
+/// both. `__clone` is private, the one method the visibility rule of
+/// `zend_std_get_method` has to be held to.
 pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
     vec![
         (
-            declared(b"Stringable", ClassKind::Interface, None),
+            ClassDecl {
+                methods: vec![abstract_method(b"__toString", Some(Type::String))],
+                ..declared(b"Stringable", ClassKind::Interface, None)
+            },
             Vec::new(),
             None,
         ),
         (
-            declared(b"Throwable", ClassKind::Interface, None),
+            ClassDecl {
+                methods: throwable_abstract_methods(),
+                ..declared(b"Throwable", ClassKind::Interface, None)
+            },
             Vec::new(),
             None,
         ),
         (
             declared(b"Exception", ClassKind::Class, None),
-            vec![(private_clone(), throwable_clone as Entry)],
+            throwable_methods(),
             Some(&THROWABLE),
         ),
         (
             declared(b"Error", ClassKind::Class, None),
-            vec![(private_clone(), throwable_clone as Entry)],
+            throwable_methods(),
             Some(&THROWABLE),
         ),
         (
@@ -389,10 +407,20 @@ fn closure_invoke(req: &mut Request) -> Result<Value, Thrown> {
 /// declare it.
 fn private_clone() -> MethodDecl {
     MethodDecl {
+        visibility: Visibility::Private,
+        ..throwable_method(b"__clone", &[], Some(Type::Void))
+    }
+}
+
+/// One method of a throwable as the stub declares it: public, an
+/// instance member, neither abstract nor final, with `parameters` and
+/// `returns`.
+fn throwable_method(name: &[u8], parameters: &[Parameter], returns: Option<Type>) -> MethodDecl {
+    MethodDecl {
         function: FunctionDecl {
-            name: Name(b"__clone".as_slice().into()),
-            parameters: Vec::new(),
-            return_type: Some(php_unit::decl::Type::Void),
+            name: Name(name.into()),
+            parameters: parameters.to_vec(),
+            return_type: returns,
             returns_by_ref: false,
             attributes: Vec::new(),
             doc_comment: None,
@@ -400,12 +428,114 @@ fn private_clone() -> MethodDecl {
             line: 0,
             frameless: Vec::new(),
         },
-        visibility: Visibility::Private,
+        visibility: Visibility::Public,
         is_instance: true,
         is_abstract: false,
         is_final: false,
         tentative_return: false,
     }
+}
+
+/// A `final public` method of a throwable, the shape the seven getters
+/// of `Exception` and `Error` share.
+fn final_method(name: &[u8], returns: Option<Type>) -> MethodDecl {
+    MethodDecl {
+        is_final: true,
+        ..throwable_method(name, &[], returns)
+    }
+}
+
+/// `public function name(): returns;` on an interface: abstract, as
+/// every interface method is (`ZEND_ACC_ABSTRACT` on each entry of an
+/// interface's table).
+fn abstract_method(name: &[u8], returns: Option<Type>) -> MethodDecl {
+    MethodDecl {
+        is_abstract: true,
+        ..throwable_method(name, &[], returns)
+    }
+}
+
+/// The seven methods `interface Throwable` declares, in the stub's
+/// order; `getCode` declares no return type, the stub's `@return int`
+/// being a comment (its `TODO add proper type`).
+fn throwable_abstract_methods() -> Vec<MethodDecl> {
+    let throwable = || Type::Nullable(Box::new(Type::Named(Name::from("Throwable"))));
+    vec![
+        abstract_method(b"getMessage", Some(Type::String)),
+        abstract_method(b"getCode", None),
+        abstract_method(b"getFile", Some(Type::String)),
+        abstract_method(b"getLine", Some(Type::Int)),
+        abstract_method(b"getTrace", Some(Type::Array)),
+        abstract_method(b"getPrevious", Some(throwable())),
+        abstract_method(b"getTraceAsString", Some(Type::String)),
+    ]
+}
+
+/// The eleven methods `Exception` and `Error` declare, each beside its
+/// entry, in the stub's order: the private `__clone`, the constructor,
+/// `__wakeup` with its tentative `void`, the seven final getters and
+/// `__toString`.
+fn throwable_methods() -> Vec<(MethodDecl, Entry)> {
+    let string_parameter = |name: &[u8], ty: Type, default: ConstExpr| Parameter {
+        name: Name(name.into()),
+        ty: Some(ty),
+        by_ref: false,
+        variadic: false,
+        default: Some(default),
+        attributes: Vec::new(),
+    };
+    let throwable = || Type::Nullable(Box::new(Type::Named(Name::from("Throwable"))));
+    vec![
+        (private_clone(), throwable_clone as Entry),
+        (
+            throwable_method(
+                b"__construct",
+                &[
+                    string_parameter(b"message", Type::String, ConstExpr::Str(Box::new([]))),
+                    string_parameter(b"code", Type::Int, ConstExpr::Long(0)),
+                    string_parameter(b"previous", throwable(), ConstExpr::Null),
+                ],
+                None,
+            ),
+            throwable_construct as Entry,
+        ),
+        (
+            MethodDecl {
+                tentative_return: true,
+                ..throwable_method(b"__wakeup", &[], Some(Type::Void))
+            },
+            throwable_wakeup as Entry,
+        ),
+        (
+            final_method(b"getMessage", Some(Type::String)),
+            throwable_get_message as Entry,
+        ),
+        (final_method(b"getCode", None), throwable_get_code as Entry),
+        (
+            final_method(b"getFile", Some(Type::String)),
+            throwable_get_file as Entry,
+        ),
+        (
+            final_method(b"getLine", Some(Type::Int)),
+            throwable_get_line as Entry,
+        ),
+        (
+            final_method(b"getTrace", Some(Type::Array)),
+            throwable_get_trace as Entry,
+        ),
+        (
+            final_method(b"getPrevious", Some(throwable())),
+            throwable_get_previous as Entry,
+        ),
+        (
+            final_method(b"getTraceAsString", Some(Type::String)),
+            throwable_get_trace_as_string as Entry,
+        ),
+        (
+            throwable_method(b"__toString", &[], Some(Type::String)),
+            throwable_to_string as Entry,
+        ),
+    ]
 }
 
 /// `ZEND_METHOD(Exception, __clone)`: private, so a call from outside
@@ -419,20 +549,277 @@ fn throwable_clone(req: &mut Request) -> Result<Value, Thrown> {
     ))
 }
 
+/// `ZEND_THIS` for a throwable's method: the receiver, or php's `Error`
+/// for a call that reached the entry with none.
+fn this_throwable(req: &mut Request) -> Result<PhpObject, Thrown> {
+    req.this().ok_or_else(|| {
+        throw(
+            req,
+            "Error",
+            "Internal error: Failed to retrieve the throwable receiver",
+        )
+    })
+}
+
+/// `ZEND_METHOD(Exception, __construct)`,
+/// `Exception::__construct(string $message = "", int $code = 0,
+/// ?Throwable $previous = null)`: `zend_parse_parameters` over
+/// `|SlO!`, then `zend_update_exception_properties` writes the three
+/// it was given onto the receiver, `message`, `code` and `previous`,
+/// and leaves the property's default where an argument is absent.
+/// `Error::__construct` is the stub's `@implementation-alias` of it.
+///
+/// ```php
+/// $e = new Exception("boom", 3, new Error("first")); var_dump($e->getMessage(), $e->getCode(), $e->getPrevious()->getMessage(), (new Exception)->getMessage(), (new Exception(12))->getMessage(), (new Error("e", "7"))->getCode());
+/// ```
+/// ```expect
+/// string(4) "boom"
+/// int(3)
+/// string(5) "first"
+/// string(0) ""
+/// string(2) "12"
+/// int(7)
+/// ```
+///
+/// ```php
+/// new Exception("x", 0, new stdClass);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: Exception::__construct(): Argument #3 ($previous) must be of type ?Throwable, stdClass given in %s:2
+/// Stack trace:
+/// #0 %s(2): Exception->__construct('x', 0, Object(stdClass))
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// new Error("x", 0, null, 4);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: Error::__construct() expects at most 3 arguments, 4 given in %s:2
+/// Stack trace:
+/// #0 %s(2): Error->__construct('x', 0, NULL, 4)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+fn throwable_construct(req: &mut Request) -> Result<Value, Thrown> {
+    let count = req.argument_count();
+    if count > 3 {
+        return Err(arg_count_error(
+            req,
+            &format!("at most 3 arguments, {count} given"),
+        ));
+    }
+    let this = this_throwable(req)?;
+    if let Some(message) = req.argument(1) {
+        let message = coerce_param(req, &message, &Type::String, 1)?;
+        req.addref(&message);
+        write_throwable_property(req, this, b"message", message)?;
+    }
+    if let Some(code) = req.argument(2) {
+        let code = coerce_param(req, &code, &Type::Int, 2)?;
+        write_throwable_property(req, this, b"code", code)?;
+    }
+    if let Some(previous) = req.argument(3) {
+        let previous = previous.deref();
+        let is_throwable = match previous.as_object() {
+            Some(object) => req
+                .class_named(b"Throwable")
+                .is_some_and(|throwable| req.instance_of(object.class(), throwable)),
+            None => matches!(previous.as_ref(), ValueRef::Null | ValueRef::Undef),
+        };
+        if !is_throwable {
+            // `zend_zval_value_name`: an object is named by its class.
+            let given = previous.as_object().map_or_else(
+                || String::from(previous.type_name()),
+                |object| req.class_name(object.class()),
+            );
+            return Err(arg_type_error(
+                req,
+                3,
+                &format!("be of type ?Throwable, {given} given"),
+            ));
+        }
+        req.addref(&previous);
+        write_throwable_property(req, this, b"previous", previous)?;
+    }
+    Ok(Value::null())
+}
+
+/// `zend_update_property_ex` on the throwable's base class: the value
+/// written by name, one owner of it the object's.
+fn write_throwable_property(
+    req: &mut Request,
+    this: PhpObject,
+    name: &[u8],
+    value: Value,
+) -> Result<(), Thrown> {
+    let name = PhpString::new(req, name)?;
+    this.set_prop(req, name, value)
+}
+
+/// `ZEND_METHOD(Exception, __wakeup)`: after `unserialize`, a `message`
+/// that is not a string and a `code` that is not an int are unset, the
+/// typed properties being held by their types; a throwable this engine
+/// built holds both as declared, so there is nothing to unset yet, and
+/// `unserialize` is what makes the check reachable.
+///
+/// ```php
+/// $e = new Exception("m"); var_dump($e->__wakeup(), $e->getMessage());
+/// ```
+/// ```expect
+/// NULL
+/// string(1) "m"
+/// ```
+fn throwable_wakeup(req: &mut Request) -> Result<Value, Thrown> {
+    no_arguments(req)?;
+    Ok(Value::null())
+}
+
+/// `ZEND_PARSE_PARAMETERS_NONE()` for a getter: php's
+/// `ArgumentCountError`, `expects exactly 0 arguments, N given`.
+fn no_arguments(req: &mut Request) -> Result<(), Thrown> {
+    let count = req.argument_count();
+    if count == 0 {
+        return Ok(());
+    }
+    Err(arg_count_error(
+        req,
+        &format!("exactly 0 arguments, {count} given"),
+    ))
+}
+
+/// `DEFAULT_0_PARAMS` and `GET_PROPERTY(ZEND_THIS, name)`: the getter's
+/// property read off the receiver, `null` where the slot was never
+/// written, with one more owner for the return.
+fn throwable_property(req: &mut Request, name: &[u8]) -> Result<Value, Thrown> {
+    no_arguments(req)?;
+    let this = this_throwable(req)?;
+    let value = this.prop(req, name).unwrap_or_default();
+    req.addref(&value);
+    Ok(value)
+}
+
+/// `ZEND_METHOD(Exception, getMessage)`: the `message` property. The
+/// witness is the constructor's.
+fn throwable_get_message(req: &mut Request) -> Result<Value, Thrown> {
+    throwable_property(req, b"message")
+}
+
+/// `ZEND_METHOD(Exception, getCode)`: the `code` property. The witness
+/// is the constructor's.
+fn throwable_get_code(req: &mut Request) -> Result<Value, Thrown> {
+    throwable_property(req, b"code")
+}
+
+/// `ZEND_METHOD(Exception, getFile)` and `getLine`: the site
+/// `zend_default_exception_new` recorded, which is where `new` ran.
+///
+/// ```php
+/// $e = new Exception; var_dump($e->getLine(), $e->getFile());
+/// ```
+/// ```expect
+/// int(2)
+/// string(%d) "%s.php"
+/// ```
+fn throwable_get_file(req: &mut Request) -> Result<Value, Thrown> {
+    throwable_property(req, b"file")
+}
+
+/// `ZEND_METHOD(Exception, getLine)`: the `line` property. The witness
+/// is `getFile`'s.
+fn throwable_get_line(req: &mut Request) -> Result<Value, Thrown> {
+    throwable_property(req, b"line")
+}
+
+/// `ZEND_METHOD(Exception, getTrace)`: the `trace` property, the frames
+/// `zend_fetch_debug_backtrace` recorded at the site. This engine
+/// records the trace already rendered, the string `getTraceAsString`
+/// answers (`Request::note_throw_site`), so the frames are not held as
+/// an array yet (#359): a throwable made at the top level has php's
+/// empty trace, and that is the one this answers; one made inside a
+/// call answers the empty array where php answers the frames.
+///
+/// ```php
+/// var_dump((new Exception)->getTrace());
+/// ```
+/// ```expect
+/// array(0) {
+/// }
+/// ```
+fn throwable_get_trace(req: &mut Request) -> Result<Value, Thrown> {
+    no_arguments(req)?;
+    let this = this_throwable(req)?;
+    if let Some(trace) = this
+        .prop(req, b"trace")
+        .filter(|value| value.as_array().is_some())
+    {
+        req.addref(&trace);
+        return Ok(trace);
+    }
+    Ok(Value::array(PhpArray::new(req)?))
+}
+
+/// `ZEND_METHOD(Exception, getPrevious)`: the `previous` property. The
+/// witness is the constructor's.
+fn throwable_get_previous(req: &mut Request) -> Result<Value, Thrown> {
+    throwable_property(req, b"previous")
+}
+
+/// `ZEND_METHOD(Exception, getTraceAsString)`: `zend_trace_to_string`
+/// over the recorded frames, which this engine rendered at the site;
+/// `#0 {main}` is the rendering of no frame.
+///
+/// ```php
+/// var_dump((new Exception)->getTraceAsString());
+/// ```
+/// ```expect
+/// string(9) "#0 {main}"
+/// ```
+fn throwable_get_trace_as_string(req: &mut Request) -> Result<Value, Thrown> {
+    no_arguments(req)?;
+    let this = this_throwable(req)?;
+    let trace = this
+        .prop(req, b"trace")
+        .and_then(|value| value.as_str_bytes().map(<[u8]>::to_vec))
+        .unwrap_or_else(|| b"#0 {main}".to_vec());
+    Ok(Value::string(PhpString::new(req, &trace)?))
+}
+
+/// `ZEND_METHOD(Exception, __toString)`: the class, the message, the
+/// site and the trace, as an uncaught one prints under `Uncaught`.
+///
+/// ```php
+/// echo new Exception("boom");
+/// ```
+/// ```expect
+/// Exception: boom in %s:2
+/// Stack trace:
+/// #0 {main}
+/// ```
+fn throwable_to_string(req: &mut Request) -> Result<Value, Thrown> {
+    no_arguments(req)?;
+    let this = this_throwable(req)?;
+    let text = req.throwable_to_string(this);
+    Ok(Value::string(PhpString::new(req, text.as_bytes())?))
+}
+
 fn declared(name: &[u8], kind: ClassKind, parent: Option<&[u8]>) -> ClassDecl {
     ClassDecl {
         name: Name(name.into()),
         kind,
         flags: ClassFlags::default(),
         parent: parent.map(|p| Name(p.into())),
-        // php declares the interfaces on `Exception` and `Error` alone
-        // and the rest inherit them (`zend_register_default_classes`);
-        // the linker is what carries them down (design §6.2).
+        // php declares `Throwable` on `Exception` and `Error` alone and
+        // the rest inherit it (`zend_register_default_classes`); the
+        // linker is what carries it down (design §6.2). `Stringable` is
+        // never written: `zend_register_functions` adds it to a class
+        // that declares `__toString`, and `Throwable` extends it.
         interfaces: match (kind, parent) {
-            (ClassKind::Class, None) => vec![
-                Name(b"Throwable".as_slice().into()),
-                Name(b"Stringable".as_slice().into()),
-            ],
+            (ClassKind::Class, None) => vec![Name(b"Throwable".as_slice().into())],
+            (ClassKind::Interface, None) if name == b"Throwable" => {
+                vec![Name(b"Stringable".as_slice().into())]
+            }
             _ => Vec::new(),
         },
         traits: Vec::new(),
