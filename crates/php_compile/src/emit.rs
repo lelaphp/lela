@@ -2225,7 +2225,11 @@ impl Emit<'_> {
             | Expr::Encaps(_) => {
                 Err(self.compile_error("Constant expression contains invalid operations"))
             }
-            Expr::Cast { .. } | Expr::Match { .. } | Expr::New { .. } | Expr::Instanceof { .. } => {
+            Expr::Cast { .. }
+            | Expr::Match { .. }
+            | Expr::New { .. }
+            | Expr::Instanceof { .. }
+            | Expr::Ternary { .. } => {
                 Err(self.fatal("a constant expression this compiler cannot read yet"))
             }
         }
@@ -3611,6 +3615,12 @@ impl Emit<'_> {
             Expr::Isset { var, empty } => Ok(self.isset_or_empty(var, *empty)),
             Expr::Closure(closure) => self.closure(closure),
             Expr::CallVar { callee, arguments } => self.call_var(callee, arguments),
+            Expr::Ternary {
+                cond,
+                then,
+                otherwise,
+                ..
+            } => self.conditional(cond, then.as_deref(), otherwise),
             known => Ok(Where::Constant(self.constant_expr(known)?)),
         }
     }
@@ -3655,6 +3665,154 @@ impl Emit<'_> {
             ..Opline::default()
         });
         Ok(Where::Constant(Zval::bool(true)))
+    }
+
+    /// `zend_compile_conditional` (`Z/Zend/zend_compile.c:10505`): the
+    /// condition, a `JMPZ` to the false arm, the true arm into the one
+    /// temporary its `QM_ASSIGN` allocates, a `JMP` past the false arm,
+    /// and the false arm's `QM_ASSIGN` into that same temporary, which
+    /// is where the operator leaves its value. A condition that is
+    /// itself a conditional and stood between no parentheses is php's
+    /// compile error, in the one of three sentences that names which of
+    /// the two was written with a middle arm; `(a ?: b) ?: c` is the
+    /// grouping php lets stand, since it answers what `a ?: (b ?: c)`
+    /// answers.
+    ///
+    /// ```php
+    /// echo 1 ? "a" : "b";
+    /// echo (1 ? "a" : "b");
+    /// echo 0 ? "a" : "b";
+    /// echo (1 ? "a" : "b") ? "c" : "d";
+    /// echo 1 ? "a" : (0 ? "c" : "d");
+    /// ```
+    /// ```expect
+    /// aabca
+    /// ```
+    ///
+    /// An arrow function captures what every arm reads, since
+    /// `find_implicit_binds_recursively` walks a conditional's children
+    /// like any other node's:
+    ///
+    /// ```php
+    /// $a = 1; $b = 2; $c = 3;
+    /// $f = fn () => $a ? $b : $c;
+    /// $g = fn () => $a ?: $c;
+    /// var_dump($f(), $g());
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// int(1)
+    /// ```
+    ///
+    /// The refusal stands while the file compiles, so nothing of it runs:
+    ///
+    /// ```php
+    /// echo "before\n";
+    /// echo 1 ? "a" : "b" ? "c" : "d";
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Unparenthesized `a ? b : c ? d : e` is not supported. Use either `(a ? b : c) ? d : e` or `a ? b : (c ? d : e)` in %s on line 3
+    /// ```
+    fn conditional(
+        &mut self,
+        cond: &Expr,
+        then: Option<&Expr>,
+        otherwise: &Expr,
+    ) -> Result<Where, CompileError> {
+        if let Expr::Ternary {
+            then: nested,
+            parenthesised: false,
+            ..
+        } = cond
+        {
+            match (nested.is_some(), then.is_some()) {
+                (true, true) => return Err(self.compile_error(
+                    "Unparenthesized `a ? b : c ? d : e` is not supported. Use either `(a ? b : c) ? d : e` or `a ? b : (c ? d : e)`",
+                )),
+                (true, false) => return Err(self.compile_error(
+                    "Unparenthesized `a ? b : c ?: d` is not supported. Use either `(a ? b : c) ?: d` or `a ? b : (c ?: d)`",
+                )),
+                (false, true) => return Err(self.compile_error(
+                    "Unparenthesized `a ?: b ? c : d` is not supported. Use either `(a ?: b) ? c : d` or `a ?: (b ? c : d)`",
+                )),
+                (false, false) => {}
+            }
+        }
+        let Some(then) = then else {
+            return self.shorthand_conditional(cond, otherwise);
+        };
+        let tested = self.expr(cond)?;
+        let opnum_jmpz = self.cond_jump_forward(Opcode::Jmpz, tested);
+        let taken = self.expr(then)?;
+        let (op1_type, op1) = self.operand(taken);
+        let out = self.temporary();
+        self.push(Opline {
+            opcode: Opcode::QmAssign,
+            op1_type,
+            op1,
+            out_type: OperandKind::Tmp,
+            out,
+            ..Opline::default()
+        });
+        let opnum_jmp = self.jump_forward();
+        self.update_jump_target_to_next(opnum_jmpz);
+        let untaken = self.expr(otherwise)?;
+        let (op1_type, op1) = self.operand(untaken);
+        self.push(Opline {
+            opcode: Opcode::QmAssign,
+            op1_type,
+            op1,
+            out_type: OperandKind::Tmp,
+            out,
+            ..Opline::default()
+        });
+        self.update_jump_target_to_next(opnum_jmp);
+        Ok(Where::Temporary(out))
+    }
+
+    /// `zend_compile_shorthand_conditional`
+    /// (`Z/Zend/zend_compile.c:10480`), `a ?: c`: the left operand
+    /// compiled once, a `JMP_SET` that leaves it in the temporary and
+    /// jumps past the rest when it is true, and the right operand's
+    /// `QM_ASSIGN` into the same temporary otherwise. The left operand
+    /// is served once, which is what the form is for.
+    ///
+    /// ```php
+    /// function f() { echo "f"; return 0; }
+    /// echo f() ?: "b";
+    /// echo 1 ?: "b";
+    /// ```
+    /// ```expect
+    /// fb1
+    /// ```
+    fn shorthand_conditional(
+        &mut self,
+        cond: &Expr,
+        otherwise: &Expr,
+    ) -> Result<Where, CompileError> {
+        let tested = self.expr(cond)?;
+        let (op1_type, op1) = self.operand(tested);
+        let out = self.temporary();
+        let opnum_jmp_set = self.push(Opline {
+            opcode: Opcode::JmpSet,
+            op1_type,
+            op1,
+            out_type: OperandKind::Tmp,
+            out,
+            ..Opline::default()
+        });
+        let untaken = self.expr(otherwise)?;
+        let (op1_type, op1) = self.operand(untaken);
+        self.push(Opline {
+            opcode: Opcode::QmAssign,
+            op1_type,
+            op1,
+            out_type: OperandKind::Tmp,
+            out,
+            ..Opline::default()
+        });
+        self.update_jump_target_to_next(opnum_jmp_set);
+        Ok(Where::Temporary(out))
     }
 
     /// `zend_compile_pre_incdec` and `zend_compile_post_incdec`, the
@@ -4607,6 +4765,10 @@ impl Emit<'_> {
             // expression's walk does (`zend_eval_const_expr`), and none is
             // read yet.
             Expr::Cast { .. } => Err(self.fatal("a cast is no constant expression here")),
+            // `zend_compile_conditional` folds nothing either: the arm of
+            // `zend_eval_const_expr` that takes the branch a constant
+            // condition picks is not read yet (#437).
+            Expr::Ternary { .. } => Err(self.fatal("a conditional is no constant expression here")),
             // `zend_compile_throw` emits an opline whatever stands
             // around it, so a `throw` folds to nothing.
             Expr::Throw(_) => Err(self.fatal("a `throw` is no constant expression")),
@@ -5986,6 +6148,22 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Expr) {
         }
         Expr::Instanceof { expr, .. } => implicit_uses(names, expr),
         Expr::Throw(operand) => implicit_uses(names, operand),
+        // `ZEND_AST_CONDITIONAL` is no special node either, so the walk
+        // reaches all three children and an arrow function captures what
+        // every arm reads; the middle one is absent for `a ?: c`, which
+        // `find_implicit_binds_recursively` returns on at once.
+        Expr::Ternary {
+            cond,
+            then,
+            otherwise,
+            ..
+        } => {
+            implicit_uses(names, cond);
+            if let Some(then) = then {
+                implicit_uses(names, then);
+            }
+            implicit_uses(names, otherwise);
+        }
         Expr::Match { expr, arms, .. } => {
             implicit_uses(names, expr);
             for arm in arms {

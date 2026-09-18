@@ -5755,6 +5755,43 @@ pub(crate) fn jmpz<T: Tier>(
     Ok(Stepped::Same(frame))
 }
 
+/// `ZEND_JMP_SET`: the left operand of `a ?: c`
+/// (`zend_compile_shorthand_conditional`), read once. True as
+/// [`crate::ops::is_true`] reads it, it is the operator's value: it goes
+/// into the temporary `result` names, taken as [`qm_assign`] takes one,
+/// and the jump in `op2` is taken past the right operand. False, the
+/// operand is freed and the opline after it compiles the right operand.
+/// The jump is forward always, since php's compiler emits this opcode
+/// only over the right operand it has yet to compile, and the opline
+/// carries a temporary in `result` where a back-edge would carry its
+/// safepoint number, so there is no site here to raise.
+///
+/// ```php
+/// function f() { echo "f"; return 0; }
+/// echo f() ?: "b", 1 ?: "b", "" ?: "e", null ?: "n";
+/// ```
+/// ```expect
+/// fb1en
+/// ```
+pub(crate) fn jmp_set<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let value = exec::operand(req, frame, code, op.op1_type, op.op1);
+    if !crate::ops::is_true(req, &value) {
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+        return Ok(advance(req, frame));
+    }
+    let taken = exec::take_operand(req, frame, code, op.op1_type, op.op1);
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, taken);
+    req.release(previous);
+    req.vm_mut().jump(frame, op.op2);
+    Ok(Stepped::Same(frame))
+}
+
 /// `ZEND_SWITCH_LONG`: [`crate::ops::switch_long`] over the subject,
 /// read as `GET_OP1_ZVAL_PTR_UNDEF` reads it, and the jump table in
 /// `op2`; the frame at the target or at the default in

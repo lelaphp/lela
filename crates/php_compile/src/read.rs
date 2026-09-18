@@ -547,6 +547,19 @@ pub(crate) enum Expr {
         var: Vec<u8>,
         empty: bool,
     },
+    /// `a ? b : c` and `a ?: c`, php's `ZEND_AST_CONDITIONAL` over three
+    /// children, the middle absent for the short form as php leaves
+    /// `child[1]` NULL there. `parenthesised` is php's
+    /// `ZEND_PARENTHESIZED_CONDITIONAL`, which the grammar puts in `attr`
+    /// for a conditional a `(` and a `)` stand around and
+    /// `zend_compile_conditional` reads to tell an unparenthesised nested
+    /// one, php's compile error, from the grouping that is written out.
+    Ternary {
+        cond: Child,
+        then: Option<Child>,
+        otherwise: Child,
+        parenthesised: bool,
+    },
 }
 
 /// One child of an expression, php's `zend_ast.child[i]`: the expression
@@ -613,6 +626,16 @@ impl Drop for Child {
                 Expr::AssignRef { target, source } => {
                     drop(source);
                     target.take()
+                }
+                Expr::Ternary {
+                    cond,
+                    then,
+                    otherwise,
+                    ..
+                } => {
+                    drop(then);
+                    drop(otherwise);
+                    cond.take()
                 }
                 _ => return,
             };
@@ -2176,8 +2199,63 @@ impl Reader<'_> {
             self.bump(5);
             return Ok(Expr::Throw(Child::new(self.expr()?)));
         }
+        self.conditional()
+    }
+
+    /// php's `%left '?' ':'`, the tier between the assignment below it
+    /// and the equality above: the condition, then `? b :` or `?:`, then
+    /// the else arm. The middle arm is a whole expression, as php's
+    /// `expr '?' expr ':' expr` has it, so `a ? b ? c : d : e` is read;
+    /// the else arm is read below this tier, so the level associates to
+    /// the left and `a ? b : c ? d : e` is `(a ? b : c) ? d : e`, the
+    /// grouping `zend_compile_conditional` refuses.
+    fn conditional(&mut self) -> Result<Expr, Trouble> {
+        self.check_stack()?;
+        let mut cond = self.below_conditional()?;
+        while self.ternary_ahead() {
+            self.bump(1);
+            self.skip_trivia();
+            let then = if self.byte(0) == Some(b':') {
+                None
+            } else {
+                Some(Child::new(self.expr()?))
+            };
+            self.punctuation(b':', "a `?` whose arms no `:` stands between")?;
+            cond = Expr::Ternary {
+                cond: Child::new(cond),
+                then,
+                otherwise: Child::new(self.below_conditional()?),
+                parenthesised: false,
+            };
+        }
+        Ok(cond)
+    }
+
+    /// One expression below the conditional operator: a `throw`, which
+    /// php's grammar reads in either arm, else the equality level and
+    /// the `=` php's grammar shifts after a variable, which binds inside
+    /// an arm whatever stands around it (`a ? b : $c = 1` is php's
+    /// `a ? b : ($c = 1)`).
+    fn below_conditional(&mut self) -> Result<Expr, Trouble> {
+        self.skip_trivia();
+        if self.word_ahead(b"throw") {
+            self.bump(5);
+            return Ok(Expr::Throw(Child::new(self.expr()?)));
+        }
         let left = self.equality()?;
         self.assignment(left)
+    }
+
+    /// Whether a `?` that opens a conditional stands here: `??` is the
+    /// coalescing operator, `?>` closes the tag and `?->` fetches a
+    /// property, and none of the three is this one.
+    fn ternary_ahead(&mut self) -> bool {
+        self.skip_trivia();
+        if self.byte(0) != Some(b'?') {
+            return false;
+        }
+        let nullsafe = self.byte(1) == Some(b'-') && self.byte(2) == Some(b'>');
+        !(matches!(self.byte(1), Some(b'?' | b'>')) || nullsafe)
     }
 
     /// The `=` php's grammar shifts after a variable, and what it
@@ -2551,12 +2629,18 @@ impl Reader<'_> {
             Some(b'(') if self.cast_ahead().is_some() => self.cast(),
             Some(b'(') => {
                 self.bump(1);
-                let inner = self.expr()?;
+                let mut inner = self.expr()?;
                 self.skip_trivia();
                 if self.byte(0) != Some(b')') {
                     return Err(self.trouble("a parenthesis no close parenthesis matches"));
                 }
                 self.bump(1);
+                // `'(' expr ')'` sets `ZEND_PARENTHESIZED_CONDITIONAL` on
+                // a conditional it stands around, which is what tells
+                // `(a ? b : c) ? d : e` from php's compile error.
+                if let Expr::Ternary { parenthesised, .. } = &mut inner {
+                    *parenthesised = true;
+                }
                 self.member_calls(inner)
             }
             // `inline_function` and `arrow_function` where an

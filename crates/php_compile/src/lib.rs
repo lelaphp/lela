@@ -2869,6 +2869,88 @@ mod tests {
         assert_eq!(table.map(|table| table.len()), Some(2));
     }
 
+    /// #395's program under the oracle's `[regime.dump]`:
+    /// `zend_compile_conditional` is `JMPZ` past the true arm, both arms
+    /// writing the one temporary, and a `JMP` over the false arm;
+    /// `zend_compile_shorthand_conditional` is `JMP_SET` over the left
+    /// operand with the right operand's `QM_ASSIGN` into the same
+    /// temporary; and a parenthesised conditional as a condition is the
+    /// `JMPZ` over the temporary the inner one left.
+    #[test]
+    fn a_conditional_is_jmpz_between_two_qm_assigns_and_a_shorthand_one_is_jmp_set() {
+        assert_eq!(
+            oplines_of(
+                b"<?php\n$a = 1;\necho $a ? \"t\" : \"f\";\necho $a ?: \"f\";\necho ($a ? \"t\" : \"f\") ? \"y\" : \"n\";\n"
+            ),
+            "0000 ASSIGN CV0($a) int(1)\n\
+             0001 JMPZ CV0($a) 0004\n\
+             0002 T2 = QM_ASSIGN string(\"t\")\n\
+             0003 JMP 0005\n\
+             0004 T2 = QM_ASSIGN string(\"f\")\n\
+             0005 ECHO T2\n\
+             0006 T3 = JMP_SET CV0($a) 0008\n\
+             0007 T3 = QM_ASSIGN string(\"f\")\n\
+             0008 ECHO T3\n\
+             0009 JMPZ CV0($a) 0012\n\
+             0010 T4 = QM_ASSIGN string(\"t\")\n\
+             0011 JMP 0013\n\
+             0012 T4 = QM_ASSIGN string(\"f\")\n\
+             0013 JMPZ T4 0016\n\
+             0014 T5 = QM_ASSIGN string(\"y\")\n\
+             0015 JMP 0017\n\
+             0016 T5 = QM_ASSIGN string(\"n\")\n\
+             0017 ECHO T5\n\
+             0018 RETURN int(1)\n"
+        );
+    }
+
+    /// The three sentences `zend_compile_conditional` refuses an
+    /// unparenthesised nested conditional with, by which of the two
+    /// carried a middle arm; `(a ?: b) ?: c` is the fourth grouping,
+    /// which php lets stand. A conditional between parentheses carries
+    /// php's `ZEND_PARENTHESIZED_CONDITIONAL` and is no refusal either.
+    #[test]
+    fn an_unparenthesised_nested_conditional_is_refused_in_php_s_words() {
+        for (source, message) in [
+            (
+                &b"<?php\necho 1 ? 2 : 3 ? 4 : 5;\n"[..],
+                Some(
+                    "Unparenthesized `a ? b : c ? d : e` is not supported. Use either `(a ? b : c) ? d : e` or `a ? b : (c ? d : e)`",
+                ),
+            ),
+            (
+                b"<?php\necho 1 ? 2 : 3 ?: 4;\n",
+                Some(
+                    "Unparenthesized `a ? b : c ?: d` is not supported. Use either `(a ? b : c) ?: d` or `a ? b : (c ?: d)`",
+                ),
+            ),
+            (
+                b"<?php\necho 1 ?: 2 ? 3 : 4;\n",
+                Some(
+                    "Unparenthesized `a ?: b ? c : d` is not supported. Use either `(a ?: b) ? c : d` or `a ?: (b ? c : d)`",
+                ),
+            ),
+            (b"<?php\necho 1 ?: 2 ?: 3;\n", None),
+            (b"<?php\necho (1 ? 2 : 3) ? 4 : 5;\n", None),
+            (b"<?php\necho 1 ? 2 : (3 ? 4 : 5);\n", None),
+        ] {
+            match (refused(source), message) {
+                (Some(error), Some(message)) => {
+                    assert_eq!(error.level, Level::CompileError, "{message}");
+                    assert_eq!(error.message, message);
+                    assert_eq!(error.line, 2, "{message}");
+                }
+                (None, None) => {}
+                (found, wanted) => assert_eq!(
+                    found.map(|error| error.message),
+                    wanted.map(str::to_owned),
+                    "{:?}",
+                    String::from_utf8_lossy(source)
+                ),
+            }
+        }
+    }
+
     /// Five `long` cases, the default among them, are what
     /// `should_use_jumptable` asks for: a `SWITCH_LONG` over the table
     /// before the chain, its `extended_value` the default's target.
