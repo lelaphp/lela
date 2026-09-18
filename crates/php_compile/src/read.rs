@@ -629,6 +629,16 @@ pub(crate) enum Expr {
         left: Child,
         right: Child,
     },
+    /// `$a ??= b`, php's `ZEND_AST_ASSIGN_COALESCE` over a target and a
+    /// value: one token at the assignment level, read right to left,
+    /// whose target is evaluated once and assigned only where what it
+    /// holds is null. The target is a `ZEND_AST_VAR`, which is the CV
+    /// under both fetch types; a dimension or a property waits on the
+    /// `BP_VAR_IS` chain and is refused where it stands.
+    AssignCoalesce {
+        var: Vec<u8>,
+        value: Child,
+    },
 }
 
 /// One child of an expression, php's `zend_ast.child[i]`: the expression
@@ -682,7 +692,7 @@ impl Drop for Child {
                     drop(right);
                     left.take()
                 }
-                Expr::Assign { value, .. } => value.take(),
+                Expr::Assign { value, .. } | Expr::AssignCoalesce { value, .. } => value.take(),
                 Expr::AssignProp { object, value, .. } => {
                     drop(value);
                     object.take()
@@ -2733,11 +2743,11 @@ impl Reader<'_> {
     }
 
     /// php's `%right T_COALESCE`, the level between the conditional
-    /// below it and the equality above: the left side, then `??` and the
+    /// below it and `||` above: the left side, then `??` and the
     /// right side read at this level again, so `a ?? b ?? c` is
-    /// `a ?? (b ?? c)`. `??=` stands at the assignment level and is left
-    /// where it is, so what follows refuses it rather than reading `??`
-    /// out of it.
+    /// `a ?? (b ?? c)`. `??=` is one token at the assignment level and
+    /// is left where it stands, for [`Self::assignment`] to read, rather
+    /// than having a `??` read out of it here.
     fn coalesce(&mut self) -> Result<Expr, Trouble> {
         self.check_stack()?;
         let left = self.boolean_or()?;
@@ -2824,6 +2834,21 @@ impl Reader<'_> {
     /// assigns: `left` as it stands where no `=` follows.
     fn assignment(&mut self, left: Expr) -> Result<Expr, Trouble> {
         self.skip_trivia();
+        // `variable T_COALESCE_EQUAL expr`, one token at this level: the
+        // coalescing level above left it where it stands rather than
+        // reading a `??` out of it.
+        if self.starts_with(b"??=") {
+            self.bump(3);
+            let Expr::Var(var) = left else {
+                return Err(
+                    self.trouble("a `??=` over what is no variable this compiler cannot read yet")
+                );
+            };
+            return Ok(Expr::AssignCoalesce {
+                var,
+                value: Child::new(self.assigned()?),
+            });
+        }
         // `==` is the equality read above, and `=>` closes a `match`
         // arm's conditions.
         if self.byte(0) != Some(b'=') || matches!(self.byte(1), Some(b'=' | b'>')) {
@@ -4273,14 +4298,28 @@ mod tests {
 
     /// `??=` is php's `T_COALESCE_EQUAL`, one token at the assignment
     /// level: the coalescing level leaves it where it stands rather than
-    /// reading a `??` out of it.
+    /// reading a `??` out of it, and the assignment level reads it right
+    /// to left, as it reads the `=` beside it. A `??` with a `=` after a
+    /// space is two tokens and no operator php has, refused here as
+    /// php's parse error refuses it.
     #[test]
-    fn a_coalescing_assignment_is_not_read_as_a_coalesce() {
-        let refused = read(b"<?php $a ??= 1;");
+    fn a_coalescing_assignment_is_read_at_the_assignment_level_right_to_left() {
         assert_eq!(
-            refused.err().map(|trouble| trouble.what),
-            Some("a statement this compiler cannot read yet".to_string())
+            shape(b"<?php $a ??= $b ??= 1;"),
+            shape(b"<?php $a ??= ($b ??= 1);"),
+            "`??=` reads right to left"
         );
+        assert_eq!(
+            shape(b"<?php $a ??= $b ?? 1;"),
+            shape(b"<?php $a ??= ($b ?? 1);"),
+            "`??` binds tighter than `??=`"
+        );
+        assert_eq!(
+            shape(b"<?php $a ??= $b and $c;"),
+            shape(b"<?php ($a ??= $b) and $c;"),
+            "`and` binds looser than `??=`, as it does than `=`"
+        );
+        assert!(read(b"<?php $a ?? = 1;").is_err(), "`?? =` is no operator");
     }
 
     /// The arms php's grammar reduces each spelling into: `elseif` adds
@@ -4592,8 +4631,8 @@ mod tests {
     fn an_operator_this_does_not_read_is_refused_rather_than_taken_for_another() {
         for source in [
             b"<?php echo 'a' .= 'b';".as_slice(),
-            b"<?php echo 1 ??= 2;".as_slice(),
             b"<?php echo 1 | 2;".as_slice(),
+            b"<?php echo 1 ^ 2;".as_slice(),
         ] {
             assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
         }

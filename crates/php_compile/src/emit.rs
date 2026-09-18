@@ -2410,6 +2410,7 @@ impl Emit<'_> {
             | Expr::Prop { .. }
             | Expr::Dim { .. }
             | Expr::Assign { .. }
+            | Expr::AssignCoalesce { .. }
             | Expr::AssignDim { .. }
             | Expr::AssignProp { .. }
             | Expr::AssignRef { .. }
@@ -3868,6 +3869,7 @@ impl Emit<'_> {
                 ..
             } => self.conditional(cond, then.as_deref(), otherwise),
             Expr::Coalesce { left, right } => self.coalesce(left, right),
+            Expr::AssignCoalesce { var, value } => self.assign_coalesce(var, value),
             Expr::And { left, right } => self.short_circuiting(false, left, right),
             Expr::Or { left, right } => self.short_circuiting(true, left, right),
             known => Ok(Where::Constant(self.constant_expr(known)?)),
@@ -4049,6 +4051,76 @@ impl Emit<'_> {
             opcode: Opcode::QmAssign,
             op1_type,
             op1,
+            out_type: OperandKind::Tmp,
+            out,
+            ..Opline::default()
+        });
+        self.update_jump_target_to_next(opnum);
+        Ok(Where::Temporary(out))
+    }
+
+    /// `zend_compile_assign_coalesce` (`Z/Zend/zend_compile.c:10597`),
+    /// `$a ??= b`: [`Self::coalesce`]'s shape with an assignment where
+    /// its `QM_ASSIGN` stands. The target is compiled under `BP_VAR_IS`
+    /// and its oplines memoized, `COALESCE` over what that read holds
+    /// into a temporary with the jump target learnt after the value,
+    /// then the value, then the target compiled again under `BP_VAR_W`
+    /// and `ASSIGN` into a temporary of its own, and `QM_ASSIGN` of that
+    /// into the coalesce's temporary, which is where the operator leaves
+    /// its value. The target is read once however many oplines the two
+    /// fetches take, which is what the form is for.
+    ///
+    /// A `ZEND_AST_VAR` target is the CV under both fetch types, so the
+    /// memoized table holds nothing and no `FREE` arm stands after the
+    /// jump: php emits that arm only where a link of the chain left a
+    /// temporary to give up, which is the `need_frees` branch a
+    /// dimension and a property reach.
+    ///
+    /// The value is served only where the target holds null, and a
+    /// target nothing wrote raises nothing, since the read is
+    /// `BP_VAR_IS`:
+    ///
+    /// ```php
+    /// function f() { echo "f"; return 2; }
+    /// $a = 1; $n = null;
+    /// var_dump($a ??= f());
+    /// var_dump($n ??= f());
+    /// var_dump($undefined ??= 3, $undefined);
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// fint(2)
+    /// int(3)
+    /// int(3)
+    /// ```
+    fn assign_coalesce(&mut self, var: &[u8], value: &Expr) -> Result<Where, CompileError> {
+        let cv = self.lookup_cv(var);
+        let out = self.temporary();
+        let opnum = self.push(Opline {
+            opcode: Opcode::Coalesce,
+            op1_type: OperandKind::Cv,
+            op1: cv,
+            out_type: OperandKind::Tmp,
+            out,
+            ..Opline::default()
+        });
+        let value = self.expr(value)?;
+        let (op2_type, op2) = self.operand(value);
+        let assigned = self.temporary();
+        self.push(Opline {
+            opcode: Opcode::Assign,
+            op1_type: OperandKind::Cv,
+            op1: cv,
+            op2_type,
+            op2,
+            out_type: OperandKind::Tmp,
+            out: assigned,
+            ..Opline::default()
+        });
+        self.push(Opline {
+            opcode: Opcode::QmAssign,
+            op1_type: OperandKind::Tmp,
+            op1: assigned,
             out_type: OperandKind::Tmp,
             out,
             ..Opline::default()
@@ -5247,6 +5319,10 @@ impl Emit<'_> {
             // operator, with the right side left unfolded there; else
             // the right side's truth, which is the answer whichever of
             // the two operators was written.
+            // `zend_compile_assign_coalesce` emits four oplines whatever
+            // stands on either side, and `zend_eval_const_expr` folds
+            // nothing here.
+            Expr::AssignCoalesce { .. } => Err(self.fatal("a `??=` is no constant expression")),
             Expr::And { left, right } => self.short_circuit_fold(false, left, right),
             Expr::Or { left, right } => self.short_circuit_fold(true, left, right),
             // `zend_compile_throw` emits an opline whatever stands
@@ -6603,7 +6679,7 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Expr) {
             implicit_uses(names, left);
             implicit_uses(names, right);
         }
-        Expr::Assign { var, value } => {
+        Expr::Assign { var, value } | Expr::AssignCoalesce { var, value } => {
             note(names, var);
             implicit_uses(names, value);
         }
