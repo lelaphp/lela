@@ -95,11 +95,15 @@ const UNQUALIFIED_IN_NAMESPACE: u32 = 0x800;
 /// Every op array of the unit, one block each, in php's order
 /// (`zend_foreach_op_array`): the main op array, then the functions as
 /// declared, then each class's methods as declared, named
-/// `Class::method`. `frameless` is `zend_flf_functions` by name, what a
-/// `FRAMELESS_ICALL_*`'s `extended_value` indexes.
+/// `Class::method`, and after each of those the functions written
+/// inside it that a `DECLARE_FUNCTION` binds, its `dynamic_func_defs`
+/// in order, each followed by its own. `frameless` is
+/// `zend_flf_functions` by name, what a `FRAMELESS_ICALL_*`'s
+/// `extended_value` indexes.
 pub(crate) fn unit(unit: &Unit, frameless: &[Name]) -> String {
     let mut out = String::new();
     op_array(&mut out, "$_main", 0, &unit.main, frameless);
+    dynamic_defs(&mut out, unit, &unit.main, frameless, 0);
     for (decl, body) in &unit.functions {
         op_array(
             &mut out,
@@ -108,6 +112,7 @@ pub(crate) fn unit(unit: &Unit, frameless: &[Name]) -> String {
             body,
             frameless,
         );
+        dynamic_defs(&mut out, unit, body, frameless, 0);
     }
     for method in &unit.methods {
         let Some(class) = unit.classes.get(method.class as usize) else {
@@ -128,8 +133,33 @@ pub(crate) fn unit(unit: &Unit, frameless: &[Name]) -> String {
             &method.body,
             frameless,
         );
+        dynamic_defs(&mut out, unit, &method.body, frameless, 0);
     }
     out
+}
+
+/// `zend_foreach_op_array_helper`'s recursion: the op arrays of
+/// `body`'s `dynamic_func_defs`, in order, each one followed by its
+/// own. `depth` cuts a table that names an op array already on the way
+/// down, which no compiler here writes and which would otherwise never
+/// end.
+fn dynamic_defs(out: &mut String, unit: &Unit, body: &OpArray, frameless: &[Name], depth: u32) {
+    if depth > 64 {
+        return;
+    }
+    for at in &body.dynamic_func_defs {
+        let Some((decl, nested)) = unit.dynamic.get(*at as usize) else {
+            continue;
+        };
+        op_array(
+            out,
+            &String::from_utf8_lossy(&decl.name.0),
+            num_args(decl),
+            nested,
+            frameless,
+        );
+        dynamic_defs(out, unit, nested, frameless, depth.saturating_add(1));
+    }
 }
 
 /// `op_array->num_args`: the declared parameters less the variadic one.

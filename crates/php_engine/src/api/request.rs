@@ -373,6 +373,26 @@ pub(crate) struct UserFunction {
     pub(crate) body: exec::Body,
 }
 
+/// The declaration of a user function the request's table holds, from
+/// whichever table of its unit the body came out of: one the file
+/// declared at its top level, or one a `DECLARE_FUNCTION` bound where
+/// it stood. None for a method, whose declaration is its class's.
+fn user_function_decl(user: &UserFunction) -> Option<&FunctionDecl> {
+    match user.body {
+        exec::Body::Function(at) => user
+            .unit
+            .functions
+            .get(usize::try_from(at).ok()?)
+            .map(|(decl, _)| decl),
+        exec::Body::Dynamic(at) => user
+            .unit
+            .dynamic
+            .get(usize::try_from(at).ok()?)
+            .map(|(decl, _)| decl),
+        exec::Body::Main | exec::Body::Method { .. } => None,
+    }
+}
+
 impl Request {
     pub(crate) fn new(shared: Arc<Shared>, description: RequestDescription) -> Request {
         let cwd = description.cwd.clone();
@@ -4297,13 +4317,7 @@ impl Request {
             return u32::try_from(i).ok().map(Function);
         }
         let position = self.user_functions.iter().position(|user| {
-            let exec::Body::Function(index) = user.body else {
-                return false;
-            };
-            user.unit
-                .functions
-                .get(usize::try_from(index).unwrap_or(usize::MAX))
-                .is_some_and(|(decl, _)| decl.name.0.to_ascii_lowercase() == wanted)
+            user_function_decl(user).is_some_and(|decl| decl.name.0.to_ascii_lowercase() == wanted)
         })?;
         self.user_function_id(position)
     }
@@ -4314,6 +4328,49 @@ impl Request {
     /// opline for it, so the request's table takes it here. The compiler
     /// refused a name the natives have or the file declares twice, so
     /// nothing collides in a request that serves one unit.
+    /// `do_bind_function` at a `ZEND_DECLARE_FUNCTION`
+    /// (`Z/Zend/zend_compile.c:1287`): the op array the opline's `op2`
+    /// found among the frame's `dynamic_func_defs` into the request's
+    /// function table under the lowered name in `op1`, which is
+    /// `zend_hash_add_ptr(EG(function_table), lcname, func)`. A name the
+    /// table already holds is `do_bind_function_error` at `E_ERROR`,
+    /// naming the new declaration and, where the earlier one was a user
+    /// function with a body, its file and its first line.
+    pub(crate) fn bind_function(
+        &mut self,
+        unit: &Arc<Unit>,
+        at: u32,
+        lowered: &[u8],
+    ) -> Result<(), Thrown> {
+        let Some((decl, _)) = unit.dynamic.get(usize::try_from(at).unwrap_or(usize::MAX)) else {
+            return Err(crate::api::raising::fatal(
+                self,
+                "InternalError: a DECLARE_FUNCTION naming a definition the unit has not",
+            ));
+        };
+        let name = String::from_utf8_lossy(&decl.name.0).into_owned();
+        if let Some(earlier) = self.function_named(lowered) {
+            let site = self
+                .user_function(earlier)
+                .and_then(user_function_decl)
+                .map(|decl| {
+                    format!(
+                        " (previously declared in {}:{})",
+                        String::from_utf8_lossy(&decl.file.0),
+                        decl.line
+                    )
+                })
+                .unwrap_or_default();
+            let message = format!("Cannot redeclare function {name}(){site}");
+            return Err(crate::api::raising::fatal(self, &message));
+        }
+        self.user_functions.push(UserFunction {
+            unit: Arc::clone(unit),
+            body: exec::Body::Dynamic(at),
+        });
+        Ok(())
+    }
+
     pub(crate) fn declare_functions(&mut self, unit: &Arc<Unit>) {
         for at in 0..unit.functions.len() {
             self.user_functions.push(UserFunction {
@@ -4713,14 +4770,8 @@ impl Request {
         if at < self.shared.functions.len() {
             return self.shared.functions.get(at).map(|(decl, _)| decl);
         }
-        if let Some(user) = self.user_function(function)
-            && let exec::Body::Function(index) = user.body
-        {
-            return user
-                .unit
-                .functions
-                .get(usize::try_from(index).ok()?)
-                .map(|(decl, _)| decl);
+        if let Some(decl) = self.user_function(function).and_then(user_function_decl) {
+            return Some(decl);
         }
         self.method_decl(function).map(|method| &method.function)
     }

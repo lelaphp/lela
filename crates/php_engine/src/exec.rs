@@ -25,12 +25,15 @@ use crate::api::request::Request;
 use crate::api::values::{ClassId, PhpObject, PhpString, TypeTag, Value};
 
 /// Which op array of a unit a frame serves: the main one, the body of
-/// one of the unit's functions, or the body of one of its classes'
+/// one of the unit's functions, the body of a function no name bound
+/// while the file compiled and a `DECLARE_FUNCTION` bound where it
+/// stands ([`Unit::dynamic`]), or the body of one of its classes'
 /// methods, each by index, as `EX(func)` names one `zend_op_array`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Body {
     Main,
     Function(u32),
+    Dynamic(u32),
     Method { class: u32, method: u32 },
 }
 
@@ -470,6 +473,7 @@ pub(crate) fn body_of(unit: &Unit, body: Body) -> Option<&OpArray> {
     match body {
         Body::Main => Some(&unit.main),
         Body::Function(at) => unit.functions.get(at as usize).map(|(_, code)| code),
+        Body::Dynamic(at) => unit.dynamic.get(at as usize).map(|(_, code)| code),
         Body::Method { class, method } => unit
             .methods
             .iter()

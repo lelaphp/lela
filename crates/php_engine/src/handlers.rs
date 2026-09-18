@@ -145,6 +145,81 @@ pub(crate) fn declare_class<T: Tier>(
     }
 }
 
+/// `ZEND_DECLARE_FUNCTION` (`Z/Zend/zend_vm_def.h:8013`):
+/// `do_bind_function` over the op array the frame's
+/// `dynamic_func_defs` holds at `op2`, under the lowered name in
+/// `op1`. php's compiler emits one for every function written below
+/// the file's own statement list — inside a block, a loop, a `try` or
+/// another body — so such a function is callable from where its
+/// statement ran and from nowhere earlier, and one whose statement
+/// never runs is never declared. A name the function table already
+/// holds is `do_bind_function_error` at `E_ERROR`, php's fatal
+/// ([`Request::bind_function`]).
+///
+/// ```php
+/// for ($i = 0; $i < 1; $i = $i + 1) { function later() { return 7; } }
+/// var_dump(later());
+/// ```
+/// ```expect
+/// int(7)
+/// ```
+///
+/// ```php
+/// function f() { function g() { return 1; } }
+/// f();
+/// echo "bound\n";
+/// g();
+/// f();
+/// ```
+/// ```expect exit=255
+/// bound
+///
+/// Fatal error: Cannot redeclare function g() (previously declared in %s:2) in %s on line 2
+/// ```
+///
+/// ```php
+/// later();
+/// for ($i = 0; $i < 1; $i = $i + 1) { function later() { return 7; } }
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Call to undefined function later() in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn declare_function<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let Some(serving) = req.vm().serving(frame) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a DECLARE_FUNCTION on a frame serving no op array",
+        )));
+    };
+    let Some(at) = code.dynamic_func_defs.get(op.op2 as usize).copied() else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a DECLARE_FUNCTION whose op2 names no dynamic function definition",
+        )));
+    };
+    let Some(lowered) = exec::constant(code, ConstIdx(op.op1))
+        .as_str_bytes()
+        .map(<[u8]>::to_vec)
+    else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a DECLARE_FUNCTION whose op1 is no function name",
+        )));
+    };
+    match req.bind_function(&serving.unit, at, &lowered) {
+        Ok(()) => Ok(advance(req, frame)),
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            Ok(Stepped::Threw(frame))
+        }
+    }
+}
+
 /// `ZEND_ECHO`: the operand as a string (`zval_get_string`), written to
 /// the request's body, the string given up after the write and the
 /// operand freed (`zend_string_release_ex`, `FREE_OP1`).

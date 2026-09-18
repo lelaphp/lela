@@ -20,6 +20,16 @@ pub struct Unit {
     /// declares too, and a native's body is Rust. In the order
     /// `zend_compile_class_decl` compiled them, class by class.
     pub methods: Vec<MethodBody>,
+    /// Every function of the file that no name binds while it compiles:
+    /// one written inside a block, a loop or another body, which php
+    /// compiles with `toplevel` false and binds with the
+    /// `DECLARE_FUNCTION` opline standing where it was written
+    /// (`zend_begin_func_decl`). php keeps each as a pointer in the
+    /// declaring op array's `dynamic_func_defs`; the unit keeps them in
+    /// one table and an op array keeps indices into it
+    /// ([`OpArray::dynamic_func_defs`]), in the order
+    /// `zend_add_dynamic_func_def` made them.
+    pub dynamic: Vec<(FunctionDecl, OpArray)>,
     /// What `zend_error` raised while the file compiled, in the order
     /// it raised them: a coercion warning from a fold, a deprecation on
     /// a declaration. Kept beside the unit as opcache keeps a

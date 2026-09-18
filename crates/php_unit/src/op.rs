@@ -272,6 +272,15 @@ pub struct OpArray {
     pub line_start: u32,
     pub line_end: u32,
     pub cache_size: u32,
+    /// `op_array->dynamic_func_defs` (`Z/Zend/zend_compile.h:559`): the
+    /// functions written inside this op array that no name binds while
+    /// the file compiles, in the order `zend_add_dynamic_func_def` took
+    /// them, which is the order a `DECLARE_FUNCTION`'s or a
+    /// `DECLARE_LAMBDA_FUNCTION`'s `op2` indexes. php holds a pointer
+    /// per entry; a unit holds every such op array once, in
+    /// [`crate::Unit::dynamic`], and the entry is its index there, so
+    /// no part of a unit points into another.
+    pub dynamic_func_defs: Box<[u32]>,
 }
 
 #[cfg(test)]

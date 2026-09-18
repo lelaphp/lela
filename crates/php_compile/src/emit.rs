@@ -213,6 +213,16 @@ pub(crate) struct Emit<'a> {
     /// entry landing once its body has compiled, which is when php's
     /// `ZEND_ACC_DONE_PASS_TWO` lets a call site know it.
     functions_declared: Vec<(FunctionDecl, OpArray)>,
+    /// The functions the file declares that no name binds while it
+    /// compiles, [`Unit::dynamic`]: php's `dynamic_func_defs` over every
+    /// op array of the file, in the order `zend_add_dynamic_func_def`
+    /// made them. A slot is taken before the body compiles, as php takes
+    /// its offset there, and filled when it has.
+    dynamic: Vec<Option<(FunctionDecl, OpArray)>>,
+    /// `op_array->dynamic_func_defs` of the op array being compiled:
+    /// which entries of [`Emit::dynamic`] it declares, in the order a
+    /// `DECLARE_FUNCTION`'s `op2` indexes them.
+    dynamic_func_defs: Vec<u32>,
     /// The method bodies of `classes`, [`Unit::methods`].
     methods: Vec<MethodBody>,
     /// The file's name, [`Options::filename`], what a declaration
@@ -439,6 +449,8 @@ pub(crate) fn unit(
         diagnostics: Vec::new(),
         classes: Vec::new(),
         functions_declared: Vec::new(),
+        dynamic: Vec::new(),
+        dynamic_func_defs: Vec::new(),
         methods: Vec::new(),
         filename: options.filename.clone(),
         loops: Vec::new(),
@@ -456,9 +468,25 @@ pub(crate) fn unit(
         return Err(refused);
     }
     let main = emit.finish(true, 1, lines.max(1))?;
+    let line = emit.line;
+    let mut dynamic = Vec::with_capacity(emit.dynamic.len());
+    for def in emit.dynamic {
+        let Some(def) = def else {
+            return Err(CompileError {
+                level: Level::Error,
+                message: String::from(
+                    "InternalError: a dynamic function definition whose body never landed",
+                ),
+                line,
+                raised: emit.diagnostics,
+            });
+        };
+        dynamic.push(def);
+    }
     Ok(Unit {
         main,
         functions: emit.functions_declared,
+        dynamic,
         methods: emit.methods,
         diagnostics: emit.diagnostics,
         classes: emit.classes,
@@ -489,6 +517,7 @@ struct Saved {
     this_in_scope: bool,
     return_type: Option<Type>,
     returns_by_ref: bool,
+    dynamic_func_defs: Vec<u32>,
 }
 
 /// `pass_two`'s `ZEND_FAST_CALL` arm (`Z/Zend/zend_opcode.c:1150`):
@@ -959,16 +988,12 @@ impl Emit<'_> {
     /// `do_bind_function_error`, php's `E_COMPILE_ERROR` in its two
     /// wordings, the earlier declaration's file and first line named
     /// when it was a user function. A function declared inside a block,
-    /// a loop or another body is bound as the program serves, by a
-    /// `DECLARE_FUNCTION` opline this compiler does not emit, and is
-    /// refused as not yet read.
+    /// a loop or another body is [`Self::nested_function_decl`].
     fn function_decl(&mut self, function: &Function) -> Result<(), CompileError> {
-        if self.depth != 1 {
-            return Err(self.fatal(
-                "a function declared inside a block or a body this compiler cannot read yet",
-            ));
-        }
         let name = self.prefix_with_ns(&function.name);
+        if self.depth != 1 {
+            return self.nested_function_decl(function, &name);
+        }
         let lowered = name.to_ascii_lowercase();
         if let Some((earlier, body)) = self
             .functions_declared
@@ -990,6 +1015,47 @@ impl Emit<'_> {
         }
         let declared = self.body(function, &name, None, false)?;
         self.functions_declared.push(declared);
+        Ok(())
+    }
+
+    /// `zend_compile_func_decl` with `toplevel` false, which is every
+    /// function php meets below the file's own statement list: inside an
+    /// `if`, a loop, a `try` or another function's body.
+    /// `zend_begin_func_decl` binds no name while the file compiles.
+    /// Instead `zend_add_dynamic_func_def` takes the next offset of the
+    /// enclosing op array's `dynamic_func_defs` and a `DECLARE_FUNCTION`
+    /// opline stands where the declaration was written, the lowered name
+    /// in `op1` and that offset in `op2`, so the binding happens as the
+    /// program serves and only where the statement runs, which is the
+    /// engine's `DECLARE_FUNCTION` handler. The offset is taken before
+    /// the body compiles, as php takes it there, so a function inside
+    /// this one lands after it in the unit's table.
+    ///
+    /// php names no redeclaration here: two declarations of one name
+    /// compile, and the second `DECLARE_FUNCTION` that runs is
+    /// `do_bind_function_error` at `E_ERROR`.
+    fn nested_function_decl(
+        &mut self,
+        function: &Function,
+        name: &[u8],
+    ) -> Result<(), CompileError> {
+        let at = u32::try_from(self.dynamic.len()).unwrap_or(u32::MAX);
+        self.dynamic.push(None);
+        let offset = u32::try_from(self.dynamic_func_defs.len()).unwrap_or(u32::MAX);
+        self.dynamic_func_defs.push(at);
+        let lowered = self.string(&name.to_ascii_lowercase())?;
+        let op1 = self.literal(lowered);
+        self.push(Opline {
+            opcode: Opcode::DeclareFunction,
+            op1_type: OperandKind::Const,
+            op1,
+            op2: offset,
+            ..Opline::default()
+        });
+        let declared = self.body(function, name, None, false)?;
+        if let Some(slot) = self.dynamic.get_mut(at as usize) {
+            *slot = Some(declared);
+        }
         Ok(())
     }
 
@@ -1371,6 +1437,7 @@ impl Emit<'_> {
             try_catch_offset: self.try_catch_offset.take(),
             active_function: self.active_function.replace(name.to_vec()),
             this_in_scope: std::mem::replace(&mut self.this_in_scope, this_in_scope),
+            dynamic_func_defs: std::mem::take(&mut self.dynamic_func_defs),
         }
     }
 
@@ -1394,6 +1461,7 @@ impl Emit<'_> {
         self.this_in_scope = saved.this_in_scope;
         self.return_type = saved.return_type;
         self.returns_by_ref = saved.returns_by_ref;
+        self.dynamic_func_defs = saved.dynamic_func_defs;
     }
 
     /// The op array the emitter holds, finished as `zend_compile` and
@@ -1431,6 +1499,7 @@ impl Emit<'_> {
             line_start,
             line_end,
             cache_size: self.cache_slots,
+            dynamic_func_defs: std::mem::take(&mut self.dynamic_func_defs).into_boxed_slice(),
         })
     }
 
@@ -5619,6 +5688,8 @@ mod tests {
             diagnostics: Vec::new(),
             classes: Vec::new(),
             functions_declared: Vec::new(),
+            dynamic: Vec::new(),
+            dynamic_func_defs: Vec::new(),
             methods: Vec::new(),
             filename: options.filename.clone(),
             loops: Vec::new(),
