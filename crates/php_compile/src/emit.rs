@@ -6167,6 +6167,10 @@ impl Bind {
 /// a closure written inside contributes its `use` list and not its
 /// body, since its own body binds through that list; an arrow function
 /// inside contributes what its body reads.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per node kind, which is what php's walk over the children of a node it makes no special case of comes to here: the length is the number of kinds `Expr` has, and there is nothing in it to shorten that would not be a second walk"
+)]
 fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Expr) {
     match expr {
         Expr::Var(name) => note(names, name),
@@ -6204,9 +6208,21 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Expr) {
         Expr::Prop { object, .. } => implicit_uses(names, object),
         Expr::Dim { container, index } => {
             implicit_uses(names, container);
-            if let Some(index) = index {
-                implicit_uses(names, index);
-            }
+            implicit_uses_of_any(names, index.as_deref());
+        }
+        // `ZEND_AST_CONDITIONAL` is no special node either, so the walk
+        // reaches all three children and an arrow function captures what
+        // every arm reads; the middle one is absent for `a ?: c`, and
+        // `find_implicit_binds_recursively` returns on a null child.
+        Expr::Ternary {
+            cond,
+            then,
+            otherwise,
+            ..
+        } => {
+            implicit_uses(names, cond);
+            implicit_uses_of_any(names, then.as_deref());
+            implicit_uses(names, otherwise);
         }
         Expr::AssignDim { target, value } => {
             implicit_uses(names, target);
@@ -6248,22 +6264,6 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Expr) {
         }
         Expr::Instanceof { expr, .. } => implicit_uses(names, expr),
         Expr::Throw(operand) => implicit_uses(names, operand),
-        // `ZEND_AST_CONDITIONAL` is no special node either, so the walk
-        // reaches all three children and an arrow function captures what
-        // every arm reads; the middle one is absent for `a ?: c`, which
-        // `find_implicit_binds_recursively` returns on at once.
-        Expr::Ternary {
-            cond,
-            then,
-            otherwise,
-            ..
-        } => {
-            implicit_uses(names, cond);
-            if let Some(then) = then {
-                implicit_uses(names, then);
-            }
-            implicit_uses(names, otherwise);
-        }
         Expr::Match { expr, arms, .. } => {
             implicit_uses(names, expr);
             for arm in arms {
@@ -6283,6 +6283,15 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Expr) {
         | Expr::This
         | Expr::ClassConst { .. }
         | Expr::StaticProp { .. } => {}
+    }
+}
+
+/// `find_implicit_binds_recursively` over a child php may leave null,
+/// which it returns on at once: the `ZEND_AST_DIM` with no index and
+/// the `ZEND_AST_CONDITIONAL` written `a ?: c`.
+fn implicit_uses_of_any(names: &mut Vec<Vec<u8>>, expr: Option<&Expr>) {
+    if let Some(expr) = expr {
+        implicit_uses(names, expr);
     }
 }
 
