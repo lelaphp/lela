@@ -6385,30 +6385,36 @@ fn reflection_attribute() -> Declared {
         vec![
             (
                 method(b"getName", &[], Some(Type::String)),
-                unbuilt as Entry,
+                super::attr::reflection_attribute_get_name as Entry,
             ),
-            (method(b"getTarget", &[], Some(Type::Int)), unbuilt as Entry),
+            (
+                method(b"getTarget", &[], Some(Type::Int)),
+                super::attr::reflection_attribute_get_target as Entry,
+            ),
             (
                 method(b"isRepeated", &[], Some(Type::Bool)),
-                unbuilt as Entry,
+                super::attr::reflection_attribute_is_repeated as Entry,
             ),
             (
                 method(b"getArguments", &[], Some(Type::Array)),
-                unbuilt as Entry,
+                super::attr::reflection_attribute_get_arguments as Entry,
             ),
             (
                 method(b"newInstance", &[], Some(Type::Object)),
-                unbuilt as Entry,
+                super::attr::reflection_attribute_new_instance as Entry,
             ),
             (
                 method(b"__toString", &[], Some(Type::String)),
-                unbuilt as Entry,
+                super::attr::reflection_attribute_to_string as Entry,
             ),
             (
                 private(method(b"__clone", &[], Some(Type::Void))),
                 super::func::reflection_clone as Entry,
             ),
-            (private(method(b"__construct", &[], None)), unbuilt as Entry),
+            (
+                private(method(b"__construct", &[], None)),
+                super::attr::reflection_attribute_construct as Entry,
+            ),
         ],
     )
 }

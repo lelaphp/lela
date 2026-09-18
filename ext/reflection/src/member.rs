@@ -20,9 +20,9 @@ use php_ext::values::{ClassId, PhpArray, Value};
 
 use super::signature::type_factory;
 use super::{
-    at_most_arguments, class_const_string, class_constant_named, class_name_of, class_named,
-    const_string, exactly_arguments, namespace_end, property_named, property_string,
-    reflection_class_factory, string_value, this_name,
+    class_const_string, class_constant_named, class_name_of, class_named, const_string,
+    exactly_arguments, namespace_end, property_named, property_string, reflection_class_factory,
+    string_value, this_name,
 };
 
 /// `Reflection::getModifierNames(int $modifiers)`: the words php
@@ -491,10 +491,8 @@ pub(super) fn reflection_property_get_default_value(req: &mut Request) -> Result
 }
 
 /// `ReflectionProperty::getAttributes(?string $name = null, int $flags
-/// = 0)`: `reflect_attributes` over `prop->attributes`.
-/// `ReflectionAttribute` is declared and not served (#414), so a
-/// property that carries one is php's `ReflectionException` for the
-/// missing class rather than a wrong list.
+/// = 0)`: `reflect_attributes` over `prop->attributes` with
+/// `ZEND_ATTRIBUTE_TARGET_PROPERTY`.
 ///
 /// ```php
 /// var_dump((new ReflectionProperty('Exception', 'message'))->getAttributes());
@@ -504,16 +502,10 @@ pub(super) fn reflection_property_get_default_value(req: &mut Request) -> Result
 /// }
 /// ```
 pub(super) fn reflection_property_get_attributes(req: &mut Request) -> Result<Value, Thrown> {
-    at_most_arguments(req, 2)?;
-    let (_, _, found) = this_declared(req)?;
-    if found.is_some_and(|(_, decl)| !decl.attributes.is_empty()) {
-        return Err(throw(
-            req,
-            "ReflectionException",
-            "Class \"ReflectionAttribute\" does not exist",
-        ));
-    }
-    Ok(Value::array(PhpArray::new(req)?))
+    let (class, _, found) = this_declared(req)?;
+    let scope = found.as_ref().map_or(class, |(scope, _)| *scope);
+    let attributes = found.map_or_else(Vec::new, |(_, decl)| decl.attributes.clone());
+    super::attr::reflect_attributes(req, &attributes, Some(scope), super::attr::TARGET_PROPERTY)
 }
 
 // ------------------------------------------ ReflectionClassConstant
@@ -765,8 +757,8 @@ pub(super) fn reflection_class_constant_get_declaring_class(
 }
 
 /// `ReflectionClassConstant::getAttributes(?string $name = null, int
-/// $flags = 0)`: `reflect_attributes` over the constant's attributes.
-/// `ReflectionAttribute` is declared and not served (#414).
+/// $flags = 0)`: `reflect_attributes` over the constant's attributes
+/// with `ZEND_ATTRIBUTE_TARGET_CLASS_CONST`.
 ///
 /// ```php
 /// var_dump((new ReflectionClassConstant('ReflectionFunction', 'IS_DEPRECATED'))->getAttributes());
@@ -776,16 +768,14 @@ pub(super) fn reflection_class_constant_get_declaring_class(
 /// }
 /// ```
 pub(super) fn reflection_class_constant_get_attributes(req: &mut Request) -> Result<Value, Thrown> {
-    at_most_arguments(req, 2)?;
-    let (_, _, decl) = this_constant(req)?;
-    if !decl.attributes.is_empty() {
-        return Err(throw(
-            req,
-            "ReflectionException",
-            "Class \"ReflectionAttribute\" does not exist",
-        ));
-    }
-    Ok(Value::array(PhpArray::new(req)?))
+    let (_, scope, decl) = this_constant(req)?;
+    let attributes = decl.attributes.clone();
+    super::attr::reflect_attributes(
+        req,
+        &attributes,
+        Some(scope),
+        super::attr::TARGET_CLASS_CONST,
+    )
 }
 
 // ----------------------------------------------- ReflectionConstant

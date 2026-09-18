@@ -56,6 +56,7 @@
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+mod attr;
 mod class;
 mod func;
 mod member;
@@ -133,6 +134,7 @@ fn reflection_info(req: &mut Request) {
 /// `ReflectionClass` carry it without a row here. The reflectors php
 /// gives it that keep nothing yet stay `Std` until they do.
 const REFLECTORS: &[&[u8]] = &[
+    b"ReflectionAttribute",
     b"ReflectionClass",
     b"ReflectionObject",
     b"ReflectionMethod",
@@ -155,6 +157,9 @@ const REFLECTORS: &[&[u8]] = &[
 struct Reflected {
     ce: Option<ClassId>,
     object: Option<PhpObject>,
+    /// php's `attribute_reference`, which `ReflectionAttribute` keeps
+    /// where the other reflectors keep `intern->ce`.
+    attribute: Option<attr::AttributeRef>,
 }
 
 /// `reflection_object_handlers`
@@ -222,6 +227,32 @@ fn keep_closure(req: &mut Request, this: PhpObject, object: PhpObject) {
     };
     if let Some(released) = released {
         req.release(released.as_value());
+    }
+}
+
+/// `intern->ptr` as `reflection_attribute_factory` writes it: the
+/// reference the six `ReflectionAttribute` accessors read.
+fn keep_attribute(req: &mut Request, this: PhpObject, kept: attr::AttributeRef) {
+    if let Some(reflected) = this.native_mut::<Reflected>(req) {
+        reflected.attribute = Some(kept);
+    }
+}
+
+/// `GET_REFLECTION_OBJECT_PTR(attr)`: the reference a
+/// `ReflectionAttribute` keeps, or php's `Error` for a reflector read
+/// before anything wrote one.
+fn this_attribute(req: &mut Request) -> Result<attr::AttributeRef, Thrown> {
+    let kept = req
+        .this()
+        .and_then(|this| this.native::<Reflected>(req))
+        .and_then(|reflected| reflected.attribute.clone());
+    match kept {
+        Some(kept) => Ok(kept),
+        None => Err(throw(
+            req,
+            "Error",
+            "Internal error: Failed to retrieve the reflection object",
+        )),
     }
 }
 
@@ -1921,19 +1952,21 @@ fn reflection_class_get_short_name(req: &mut Request) -> Result<Value, Thrown> {
 }
 
 /// `ReflectionClass::getAttributes(?string $name = null, int $flags =
-/// 0)`: `reflect_attributes` over `ce->attributes`, an empty array
-/// for a class with none. A class that has some needs
-/// `ReflectionAttribute`, which no crate declares yet, so the answer
-/// is php's `ReflectionException` for that class rather than a wrong list.
+/// 0)`: `reflect_attributes` over `ce->attributes` with
+/// `ZEND_ATTRIBUTE_TARGET_CLASS`, an empty array for a class with none.
 ///
 /// ```php
 /// class C {} var_dump((new ReflectionClass('C'))->getAttributes(), (new ReflectionClass('ReflectionClass'))->getAttributes());
+/// try { (new ReflectionClass('C'))->getAttributes(null, 4); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// try { (new ReflectionClass('C'))->getAttributes('Nope', ReflectionAttribute::IS_INSTANCEOF); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// array(0) {
 /// }
 /// array(0) {
 /// }
+/// ValueError: ReflectionClass::getAttributes(): Argument #2 ($flags) must be a valid attribute filter flag
+/// Error: Class "Nope" not found
 /// ```
 ///
 /// ```php
@@ -1947,19 +1980,11 @@ fn reflection_class_get_short_name(req: &mut Request) -> Result<Value, Thrown> {
 ///   thrown in %s on line 2
 /// ```
 fn reflection_class_get_attributes(req: &mut Request) -> Result<Value, Thrown> {
-    at_most_arguments(req, 2)?;
     let class = this_class(req)?;
     let attributes = req
         .class_decl(class)
-        .map_or(0, |decl| decl.attributes.len());
-    if attributes > 0 {
-        return Err(throw(
-            req,
-            "ReflectionException",
-            "Class \"ReflectionAttribute\" does not exist",
-        ));
-    }
-    Ok(Value::array(PhpArray::new(req)?))
+        .map_or_else(Vec::new, |decl| decl.attributes.clone());
+    attr::reflect_attributes(req, &attributes, Some(class), attr::TARGET_CLASS)
 }
 
 // -------------------------------------------------- ReflectionClass::__toString
@@ -3027,9 +3052,8 @@ fn reflection_constant_construct(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// ```
 fn reflection_constant_get_attributes(req: &mut Request) -> Result<Value, Thrown> {
-    at_most_arguments(req, 2)?;
     this_name(req, "ReflectionConstant")?;
-    Ok(Value::array(PhpArray::new(req)?))
+    attr::reflect_attributes(req, &[], None, attr::TARGET_CONST)
 }
 
 /// `_extension_string`: the header with the extension's number and

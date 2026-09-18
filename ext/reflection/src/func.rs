@@ -23,9 +23,9 @@ use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value};
 
 use super::signature::{FunctionRef, this_function, type_factory};
 use super::{
-    at_most_arguments, class_name_of, class_named, exactly_arguments, is_constructor,
-    linked_methods, namespace_end, new_object, one_string_argument, reflection_class_factory,
-    set_name, set_string_prop, string_value, this_name,
+    class_name_of, class_named, exactly_arguments, is_constructor, linked_methods, namespace_end,
+    new_object, one_string_argument, reflection_class_factory, set_name, set_string_prop,
+    string_value, this_name,
 };
 
 /// `ZEND_ACC_PUBLIC`, `ZEND_ACC_PROTECTED` and `ZEND_ACC_PRIVATE`, the
@@ -635,29 +635,31 @@ pub(super) fn reflection_function_get_closure_used_variables(
 
 /// `ReflectionFunctionAbstract::getAttributes(?string $name = null,
 /// int $flags = 0)`: `reflect_attributes` over
-/// `fptr->common.attributes`. `ReflectionAttribute` is declared and
-/// not served (#414), so a function that carries one is php's
-/// `ReflectionException` for the missing class rather than a wrong
-/// list.
+/// `fptr->common.attributes`, with `ZEND_ATTRIBUTE_TARGET_METHOD` where
+/// the function has a scope and `ZEND_ATTRIBUTE_TARGET_FUNCTION` where
+/// it has none.
 ///
 /// ```php
 /// var_dump((new ReflectionFunction('json_encode'))->getAttributes());
+/// $m = new ReflectionMethod('ReflectionFunction', 'isDisabled');
+/// var_dump(count($m->getAttributes()), count($m->getAttributes('Deprecated')), count($m->getAttributes('deprecated')), count($m->getAttributes('Other')));
 /// ```
 /// ```expect
 /// array(0) {
 /// }
+/// int(1)
+/// int(1)
+/// int(1)
+/// int(0)
 /// ```
 pub(super) fn reflection_function_get_attributes(req: &mut Request) -> Result<Value, Thrown> {
-    at_most_arguments(req, 2)?;
-    let (_, decl) = this_function(req)?;
-    if !decl.attributes.is_empty() {
-        return Err(throw(
-            req,
-            "ReflectionException",
-            "Class \"ReflectionAttribute\" does not exist",
-        ));
-    }
-    Ok(Value::array(PhpArray::new(req)?))
+    let (function, decl) = this_function(req)?;
+    let (scope, target) = match function {
+        FunctionRef::Method(scope, _) => (Some(scope), super::attr::TARGET_METHOD),
+        _ => (None, super::attr::TARGET_FUNCTION),
+    };
+    let attributes = decl.attributes.clone();
+    super::attr::reflect_attributes(req, &attributes, scope, target)
 }
 
 // ------------------------------------------------- ReflectionMethod

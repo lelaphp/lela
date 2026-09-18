@@ -24,9 +24,9 @@ use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, Value, ValueRef};
 
 use super::{
-    State, at_most_arguments, class_name_of, class_named, exactly_arguments, linked_methods,
-    lookup_function, new_object, parameter_string, reflection_class_factory, required_parameters,
-    set_name, set_string_prop, string_value, this_name, type_to_string,
+    State, class_name_of, class_named, exactly_arguments, linked_methods, lookup_function,
+    new_object, parameter_string, reflection_class_factory, required_parameters, set_name,
+    set_string_prop, string_value, this_name, type_to_string,
 };
 
 /// The function a `ReflectionParameter` reflects, `param->fptr` as a
@@ -1103,16 +1103,13 @@ pub(super) fn reflection_parameter_get_default_value_constant_name(
 /// }
 /// ```
 pub(super) fn reflection_parameter_get_attributes(req: &mut Request) -> Result<Value, Thrown> {
-    at_most_arguments(req, 2)?;
-    let (_, _, parameter) = this_parameter(req)?;
-    if !parameter.attributes.is_empty() {
-        return Err(throw(
-            req,
-            "ReflectionException",
-            "Class \"ReflectionAttribute\" does not exist",
-        ));
-    }
-    Ok(Value::array(PhpArray::new(req)?))
+    let (reference, _, parameter) = this_parameter(req)?;
+    let scope = match reference.function {
+        FunctionRef::Method(scope, _) => Some(scope),
+        _ => None,
+    };
+    let attributes = parameter.attributes.clone();
+    super::attr::reflect_attributes(req, &attributes, scope, super::attr::TARGET_PARAMETER)
 }
 
 // --------------------------------------- ReflectionFunctionAbstract
