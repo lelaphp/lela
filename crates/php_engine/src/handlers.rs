@@ -58,7 +58,7 @@ use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
-use crate::api::values::{ClosureInfo, PhpArray, TypeTag, Value, ValueRef};
+use crate::api::values::{ClosureInfo, PhpArray, PhpString, TypeTag, Value, ValueRef};
 use crate::exec::{self, Cached, CallStage, CallState};
 use crate::ops::{Offset, Switched};
 use crate::tier::{SafepointIdx, Site, Stepped, Tier, continued};
@@ -2872,6 +2872,294 @@ pub(crate) fn fetch_obj_w<T: Tier>(
     };
     var.write(php_heap::Zval::indirect(at));
     Ok(advance(req, frame))
+}
+
+/// `ZEND_FETCH_DIM_R` (`Z/Zend/zend_vm_def.h:1933`), `$a[k]` where a
+/// value is wanted, and `zend_fetch_dimension_address_read` under
+/// `BP_VAR_R` (`Z/Zend/zend_execute.c:3056`) below it. The container is
+/// read as `GET_OP1_ZVAL_PTR_UNDEF(BP_VAR_R)` reads it, warning of
+/// nothing there, and a reference it holds is followed once; then the
+/// four arms php has, each of which reads the dimension for itself, so
+/// an undefined variable in the container warns before one in the
+/// dimension does.
+///
+/// An array is [`array_entry`]: the entry at the key the ladder
+/// [`crate::ops::array_offset`] makes, copied with a reference it holds
+/// followed (`ZVAL_COPY_DEREF`), and php's `Undefined array key`
+/// warning and `null` where the table has none (`zend_undefined_offset`
+/// and `zend_undefined_index`). A string is [`string_offset`], the byte
+/// at the offset. An object's `offsetGet` is the internal-error fatal
+/// naming the gap, since `read_dimension` is not served yet (#441).
+/// Anything else is php's warning `Trying to access array offset on
+/// null` over what `zend_zval_value_name` names it, and `null`.
+///
+/// Both operands are freed after the value is the handler's own
+/// (`FREE_OP2`, `FREE_OP1`), so a chain frees each link's temporary
+/// once the link over it has read through it.
+///
+/// ```php
+/// $a = [1, 'k' => 2];
+/// var_dump($a[0], $a['k'], $a[9], $a['nope']);
+/// ```
+/// ```expect
+/// Warning: Undefined array key 9 in %s on line 3
+///
+/// Warning: Undefined array key "nope" in %s on line 3
+/// int(1)
+/// int(2)
+/// NULL
+/// NULL
+/// ```
+///
+/// A chain reads each link through the one under it, a reference the
+/// container holds is followed, and a reference an entry holds is
+/// followed as the value is copied.
+///
+/// ```php
+/// $u = [[1, 2], [3, 4]];
+/// $r = &$u;
+/// $x = 5; $u[0][0] = &$x;
+/// var_dump($u[1][0], $r[0][0], $u[$k]);
+/// ```
+/// ```expect
+/// Warning: Undefined variable $k in %s on line 5
+///
+/// Deprecated: Using null as an array offset is deprecated, use an empty string instead in %s on line 5
+///
+/// Warning: Undefined array key "" in %s on line 5
+/// int(3)
+/// int(5)
+/// NULL
+/// ```
+///
+/// What is neither an array nor a string warns once for the container
+/// and once for the dimension, in that order, and reads `null`.
+///
+/// ```php
+/// var_dump($z[$k]);
+/// $n = 1; $f = 1.5; $b = false;
+/// var_dump($n[0], $f[0], $b[0], $nn[0]);
+/// ```
+/// ```expect
+/// Warning: Undefined variable $z in %s on line 2
+///
+/// Warning: Undefined variable $k in %s on line 2
+///
+/// Warning: Trying to access array offset on null in %s on line 2
+/// NULL
+///
+/// Warning: Trying to access array offset on int in %s on line 4
+///
+/// Warning: Trying to access array offset on float in %s on line 4
+///
+/// Warning: Trying to access array offset on false in %s on line 4
+///
+/// Warning: Undefined variable $nn in %s on line 4
+///
+/// Warning: Trying to access array offset on null in %s on line 4
+/// NULL
+/// NULL
+/// NULL
+/// NULL
+/// ```
+///
+/// A dimension that is no key is php's `TypeError`.
+///
+/// ```php
+/// $a = [1];
+/// var_dump($a[[]]);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: Cannot access offset of type array on array in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+pub(crate) fn fetch_dim_r<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let container = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
+    let read = read_dimension(req, frame, code, op, &container)?;
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    let value = match read {
+        Ok(value) => value,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, value);
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
+/// The four arms of `zend_fetch_dimension_address_read`, the container
+/// already dereferenced. Each reads the dimension itself, as php reads
+/// it inside the arm it took: `ZVAL_UNDEFINED_OP2` sits in
+/// `slow_index_convert` for an array, in `try_string_offset` for a
+/// string, and after `ZVAL_UNDEFINED_OP1` in the arm that has neither.
+fn read_dimension(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    container: &Value,
+) -> Result<Result<Value, Thrown>, Fatal> {
+    if let Some(array) = container.as_array().copied() {
+        let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
+        let key = match crate::ops::array_offset(req, &dim, op.op2_type == OperandKind::Const) {
+            Ok(key) => key,
+            Err(thrown) => return Ok(Err(thrown)),
+        };
+        return Ok(Ok(array_entry(req, array, key)));
+    }
+    if let Some(text) = container.as_php_string().copied() {
+        let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
+        return Ok(string_offset(req, text, &dim));
+    }
+    if container.as_object().is_some() {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_FETCH_DIM_R over an object, whose offsetGet is not served yet",
+        )));
+    }
+    let named = crate::ops::value_name(req, &container.undef_as_null());
+    // `ZVAL_UNDEFINED_OP1` and `ZVAL_UNDEFINED_OP2`: the warning each
+    // operand raises where it is an unwritten variable, in php's order.
+    let _container = exec::operand(req, frame, code, op.op1_type, op.op1);
+    let _dim = exec::operand(req, frame, code, op.op2_type, op.op2);
+    crate::api::raising::warning(req, &format!("Trying to access array offset on {named}"));
+    Ok(Ok(Value::null()))
+}
+
+/// `zend_fetch_dimension_address_inner` under `BP_VAR_R`
+/// (`Z/Zend/zend_execute.c:2802`): the entry at `key`, copied with one
+/// more owner and a reference it holds followed (`ZVAL_COPY_DEREF`);
+/// php's `Undefined array key` warning and `null` where the table has
+/// none, the key rendered as `zend_undefined_offset` renders a long and
+/// `zend_undefined_index` a string.
+fn array_entry(req: &mut Request, array: PhpArray, key: php_heap::Key) -> Value {
+    if let Some(found) = array.heap().get(key) {
+        let value = exec::value_of(found).deref();
+        req.addref(&value);
+        return value;
+    }
+    let message = match key {
+        php_heap::Key::Long(n) => format!("Undefined array key {n}"),
+        php_heap::Key::Str(s) => format!(
+            "Undefined array key \"{}\"",
+            String::from_utf8_lossy(s.bytes())
+        ),
+    };
+    crate::api::raising::warning(req, &message);
+    Value::null()
+}
+
+/// `try_string_offset` and the `ZVAL_CHAR` after it
+/// (`zend_fetch_dimension_address_read`, `Z/Zend/zend_execute.c:3073`):
+/// the offset php reads out of the dimension, and the one byte at it as
+/// a string of one byte.
+///
+/// A long is itself. A string is `is_numeric_string_ex` with php's
+/// errors allowed: an integer is the offset, with php's warning `Illegal
+/// string offset` where anything but whitespace follows it, and
+/// everything else, a written float among them, is
+/// `zend_illegal_string_offset`'s `TypeError`. `null`, a bool, a float
+/// and an unwritten variable warn `String offset cast occurred` and then
+/// convert, the float silently since the warning has been raised
+/// ([`crate::ops::dval_to_lval_silent`]). An array, an object and a
+/// resource are the `TypeError`.
+///
+/// A negative offset counts from the end. An offset the string is not
+/// long enough for is php's warning `Uninitialized string offset` and
+/// the empty string.
+///
+/// ```php
+/// $s = "abc";
+/// var_dump($s[1], $s[-1], $s["1"], $s[1.7], $s[5], $s["0x1"]);
+/// ```
+/// ```expect
+/// Warning: String offset cast occurred in %s on line 3
+///
+/// Warning: Uninitialized string offset 5 in %s on line 3
+///
+/// Warning: Illegal string offset "0x1" in %s on line 3
+/// string(1) "b"
+/// string(1) "c"
+/// string(1) "b"
+/// string(1) "b"
+/// string(0) ""
+/// string(1) "a"
+/// ```
+///
+/// A dimension that is no offset php reads is its `TypeError`.
+///
+/// ```php
+/// $s = "abc";
+/// var_dump($s["x"]);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: Cannot access offset of type string on string in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+fn string_offset(req: &mut Request, text: PhpString, dim: &Value) -> Result<Value, Thrown> {
+    let dim = dim.deref();
+    let illegal = |req: &mut Request, dim: &Value| {
+        crate::api::raising::throw(
+            req,
+            "TypeError",
+            &format!("Cannot access offset of type {} on string", dim.type_name()),
+        )
+    };
+    let offset = match dim.as_ref() {
+        ValueRef::Int(n) => n,
+        ValueRef::Str(s) => match php_heap::numeric_prefix(s.as_bytes()) {
+            Some((php_heap::Number::Long(n), trailing)) => {
+                if trailing {
+                    crate::api::raising::warning(
+                        req,
+                        &format!(
+                            "Illegal string offset \"{}\"",
+                            String::from_utf8_lossy(s.as_bytes())
+                        ),
+                    );
+                }
+                n
+            }
+            _ => return Err(illegal(req, &dim)),
+        },
+        ValueRef::Undef | ValueRef::Null | ValueRef::Bool(_) | ValueRef::Float(_) => {
+            crate::api::raising::warning(req, "String offset cast occurred");
+            match dim.as_ref() {
+                ValueRef::Float(f) => crate::ops::dval_to_lval_silent(f),
+                ValueRef::Bool(true) => 1,
+                _ => 0,
+            }
+        }
+        ValueRef::Array(_) | ValueRef::Object(_) | ValueRef::Resource(_) => {
+            return Err(illegal(req, &dim));
+        }
+        ValueRef::Reference(_) => return Err(illegal(req, &dim)),
+    };
+    let len = i64::try_from(text.len()).unwrap_or(i64::MAX);
+    let at = if offset < 0 {
+        len.saturating_add(offset)
+    } else {
+        offset
+    };
+    if at < 0 || at >= len {
+        crate::api::raising::warning(req, &format!("Uninitialized string offset {offset}"));
+        return Ok(Value::string(PhpString::new(req, b"")?));
+    }
+    let byte = text
+        .as_bytes()
+        .get(usize::try_from(at).unwrap_or(0))
+        .copied()
+        .unwrap_or(0);
+    Ok(Value::string(PhpString::new(req, &[byte])?))
 }
 
 /// The place a dimension write lands in, php's

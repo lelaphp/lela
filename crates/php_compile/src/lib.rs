@@ -4711,23 +4711,104 @@ class C {
         }
     }
 
-    /// What a dimension write refuses: a dimension read, which
-    /// `FETCH_DIM_R` serves and no handler of this engine has, php's
-    /// `Cannot use [] for reading` among them; and a container under the
-    /// chain that is no plain variable, which php fetches by
-    /// `FETCH_OBJ_W` with `ZEND_FETCH_DIM_WRITE`, by `SEPARATE` over a
-    /// call's `VAR`, or refuses outright for `$this`.
+    /// What a dimension refuses: `[]` where a value is wanted, php's
+    /// `Cannot use [] for reading`; and a container under the chain that
+    /// is no plain variable, which php fetches by `FETCH_OBJ_W` with
+    /// `ZEND_FETCH_DIM_WRITE`, by `SEPARATE` over a call's `VAR`, or
+    /// refuses outright for `$this`.
     #[test]
     fn a_dimension_this_compiler_cannot_read_yet_is_refused() {
         for source in [
             b"<?php $a[] = $b[];".as_slice(),
-            b"<?php echo $a[0];".as_slice(),
+            b"<?php echo $a[];".as_slice(),
             b"<?php $o->p[0] = 1;".as_slice(),
             b"<?php f()[0] = 1;".as_slice(),
             b"<?php $this[0] = 1;".as_slice(),
+            b"<?php echo $o->p[0];".as_slice(),
+            b"<?php echo f()[0];".as_slice(),
         ] {
             assert!(
                 refused(source).is_some(),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
+
+    /// `$a[k]` where a value is wanted as the oracle dumps it
+    /// (`zend_compile_dim` under `BP_VAR_R`): one `FETCH_DIM_R` per link
+    /// of the chain into a temporary, each reading the temporary the
+    /// link under it wrote; a constant string dimension that is a
+    /// canonical decimal integer is that integer
+    /// (`zend_handle_numeric_dim`) and one that is not stands as written;
+    /// a dimension that is itself a dimension is read before the chain
+    /// over it; and a read as the value of a write is the value's oplines
+    /// before the write's, the write's own temporary numbered first.
+    #[test]
+    fn a_dimension_read_compiles_to_fetch_dim_r_as_php_emits_it() {
+        let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+            (
+                b"<?php echo $a[0];",
+                3,
+                1,
+                1,
+                "0000 T1 = FETCH_DIM_R CV0($a) int(0)\n\
+                 0001 ECHO T1\n\
+                 0002 RETURN int(1)\n",
+            ),
+            (
+                b"<?php echo $a[\"10\"];",
+                3,
+                1,
+                1,
+                "0000 T1 = FETCH_DIM_R CV0($a) int(10)\n\
+                 0001 ECHO T1\n\
+                 0002 RETURN int(1)\n",
+            ),
+            (
+                b"<?php echo $a[\"k\"];",
+                3,
+                1,
+                1,
+                "0000 T1 = FETCH_DIM_R CV0($a) string(\"k\")\n\
+                 0001 ECHO T1\n\
+                 0002 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $x = $a[$k][1];",
+                4,
+                3,
+                3,
+                "0000 T3 = FETCH_DIM_R CV1($a) CV2($k)\n\
+                 0001 T4 = FETCH_DIM_R T3 int(1)\n\
+                 0002 ASSIGN CV0($x) T4\n\
+                 0003 RETURN int(1)\n",
+            ),
+            (
+                b"<?php echo $a[$b[0]];",
+                4,
+                2,
+                2,
+                "0000 T2 = FETCH_DIM_R CV1($b) int(0)\n\
+                 0001 T3 = FETCH_DIM_R CV0($a) T2\n\
+                 0002 ECHO T3\n\
+                 0003 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $a[0] = $b[1];",
+                4,
+                2,
+                2,
+                "0000 T3 = FETCH_DIM_R CV1($b) int(1)\n\
+                 0001 ASSIGN_DIM CV0($a) int(0)\n\
+                 0002 OP_DATA T3\n\
+                 0003 RETURN int(1)\n",
+            ),
+        ];
+        for (source, lines, vars, tmps, oplines) in cases {
+            assert_eq!(
+                dump_of(source),
+                main_dump(*lines, *vars, *tmps, oplines),
                 "{}",
                 String::from_utf8_lossy(source)
             );

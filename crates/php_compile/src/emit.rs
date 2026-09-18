@@ -418,6 +418,19 @@ struct DimLink {
     out: u32,
 }
 
+/// `zend_delayed_compile_dim`'s `type`, the two of php's `BP_VAR_*` a
+/// dimension chain is compiled under here. A read is `FETCH_DIM_R` into
+/// a temporary (`zend_adjust_for_fetch_type` under `BP_VAR_R`), where
+/// `[]` is php's compile error `Cannot use [] for reading`; a write is
+/// `FETCH_DIM_W` into a `VAR` carrying `ZEND_FETCH_DIM_DIM`, where `[]`
+/// is the append. `BP_VAR_IS`, `BP_VAR_RW`, `BP_VAR_FUNC_ARG` and
+/// `BP_VAR_UNSET` wait on the opcodes that name them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fetch {
+    Read,
+    Write,
+}
+
 /// What a magic constant folds to: `__LINE__`'s number, or the string
 /// every other one is.
 enum Folded {
@@ -3619,9 +3632,7 @@ impl Emit<'_> {
             } => self.assign_prop(object, name, value),
             Expr::AssignDim { target, value } => self.assign_dim(target, value),
             Expr::AssignRef { target, source } => self.assign_ref(target, source),
-            // `zend_delayed_compile_dim` under `BP_VAR_R`, which is
-            // `FETCH_DIM_R` and no handler of this engine serves yet.
-            Expr::Dim { .. } => Err(self.fatal("a dimension read this compiler cannot read yet")),
+            Expr::Dim { .. } => self.dim_read(expr),
             Expr::PreInc(var) => Ok(self.incdec(var, Opcode::PreInc)),
             Expr::PostInc(var) => Ok(self.incdec(var, Opcode::PostInc)),
             Expr::PreDec(var) => Ok(self.incdec(var, Opcode::PreDec)),
@@ -3910,11 +3921,11 @@ impl Emit<'_> {
         let (op1_type, op1) = match target {
             Expr::Var(name) => (OperandKind::Cv, self.lookup_cv(name)),
             Expr::Dim { .. } => {
-                let (container, links) = self.dim_chain(target)?;
+                let (container, links) = self.dim_chain(target, Fetch::Write)?;
                 let Some((last, fetches)) = links.split_last() else {
                     return Err(self.fatal("a dimension with no dimension"));
                 };
-                let (kind, at) = self.dim_fetches(container, fetches);
+                let (kind, at) = self.dim_fetches(container, fetches, Fetch::Write);
                 self.push(Opline {
                     opcode: Opcode::FetchDimW,
                     op1_type: kind,
@@ -3977,13 +3988,13 @@ impl Emit<'_> {
     /// under a dimension in php's string-offset error; the `[]` of an
     /// append is an `UNUSED` `op2`, which the dump prints as `NEXT`.
     fn assign_dim(&mut self, target: &Expr, value: &Expr) -> Result<Where, CompileError> {
-        let (container, links) = self.dim_chain(target)?;
+        let (container, links) = self.dim_chain(target, Fetch::Write)?;
         let value = self.assigned_value(target, value)?;
         let (data_type, data) = self.operand(value);
         let Some((last, fetches)) = links.split_last() else {
             return Err(self.fatal("a dimension assignment with no dimension"));
         };
-        let (op1_type, op1) = self.dim_fetches(container, fetches);
+        let (op1_type, op1) = self.dim_fetches(container, fetches, Fetch::Write);
         self.push(Opline {
             opcode: Opcode::AssignDim,
             op1_type,
@@ -4003,14 +4014,20 @@ impl Emit<'_> {
         Ok(Where::Temporary(last.out))
     }
 
-    /// `zend_delayed_compile_dim` over a chain of dimensions under a
-    /// write: the container's CV, looked up before anything else, and one
-    /// link per dimension from the innermost out. Each link's dimension
-    /// is compiled where it stands, before the next link and before the
-    /// value, and its `VAR` is numbered after it, which is the order
-    /// `zend_delayed_emit_op` numbers php's. A container that is no plain
-    /// variable, a property or a call under the chain, is not read yet.
-    fn dim_chain(&mut self, target: &Expr) -> Result<(u32, Vec<DimLink>), CompileError> {
+    /// `zend_delayed_compile_dim` over a chain of dimensions under
+    /// `fetch`: the container's CV, looked up before anything else, and
+    /// one link per dimension from the innermost out. Each link's
+    /// dimension is compiled where it stands, before the next link and
+    /// before the value, and its `VAR` is numbered after it, which is the
+    /// order `zend_delayed_emit_op` numbers php's. A container that is no
+    /// plain variable, a property or a call under the chain, is not read
+    /// yet. `[]` with nothing in it is the append under a write and php's
+    /// `Cannot use [] for reading` under a read.
+    fn dim_chain(
+        &mut self,
+        target: &Expr,
+        fetch: Fetch,
+    ) -> Result<(u32, Vec<DimLink>), CompileError> {
         let mut dimensions = Vec::new();
         let mut base = target;
         while let Expr::Dim { container, index } = base {
@@ -4031,6 +4048,9 @@ impl Emit<'_> {
                     let value = Emit::numeric_dim(value);
                     self.operand(value)
                 }
+                None if fetch == Fetch::Read => {
+                    return Err(self.compile_error("Cannot use [] for reading"));
+                }
                 None => (OperandKind::Unused, 0),
             };
             links.push(DimLink {
@@ -4042,26 +4062,51 @@ impl Emit<'_> {
         Ok((container, links))
     }
 
-    /// The `FETCH_DIM_W` oplines under the last link, each the container
-    /// of the next, and the operand the last link's own opline reads.
-    fn dim_fetches(&mut self, container: u32, fetches: &[DimLink]) -> (OperandKind, u32) {
+    /// The fetch oplines of a chain, each the container of the next, and
+    /// the operand the opline after them reads: `FETCH_DIM_W` into a
+    /// `VAR` carrying `ZEND_FETCH_DIM_DIM` under a write, `FETCH_DIM_R`
+    /// into a temporary under a read.
+    fn dim_fetches(
+        &mut self,
+        container: u32,
+        fetches: &[DimLink],
+        fetch: Fetch,
+    ) -> (OperandKind, u32) {
+        let (opcode, out_type, extended_value) = match fetch {
+            Fetch::Read => (Opcode::FetchDimR, OperandKind::Tmp, 0),
+            Fetch::Write => (Opcode::FetchDimW, OperandKind::Var, FETCH_DIM_DIM),
+        };
         let (mut op1_type, mut op1) = (OperandKind::Cv, container);
         for link in fetches {
             self.push(Opline {
-                opcode: Opcode::FetchDimW,
+                opcode,
                 op1_type,
                 op1,
                 op2_type: link.kind,
                 op2: link.at,
-                out_type: OperandKind::Var,
+                out_type,
                 out: link.out,
-                extended_value: FETCH_DIM_DIM,
+                extended_value,
                 ..Opline::default()
             });
-            op1_type = OperandKind::Var;
+            op1_type = out_type;
             op1 = link.out;
         }
         (op1_type, op1)
+    }
+
+    /// `zend_compile_dim` under `BP_VAR_R`, `$a[k]` where a value is
+    /// wanted: the whole chain is `FETCH_DIM_R`, one per link, each
+    /// reading the temporary the link under it wrote
+    /// (`zend_adjust_for_fetch_type` marks the fetch's out operand a
+    /// `TMP` where a write leaves a `VAR`), and the value is the last
+    /// one's temporary.
+    fn dim_read(&mut self, target: &Expr) -> Result<Where, CompileError> {
+        let (container, links) = self.dim_chain(target, Fetch::Read)?;
+        match self.dim_fetches(container, &links, Fetch::Read) {
+            (OperandKind::Tmp, at) => Ok(Where::Temporary(at)),
+            _ => Err(self.fatal("a dimension read with no dimension")),
+        }
     }
 
     /// `zend_handle_numeric_dim`: a constant dimension whose string is a

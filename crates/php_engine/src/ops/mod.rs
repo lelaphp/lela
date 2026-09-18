@@ -2798,6 +2798,46 @@ fn dval_to_lval(req: &mut Request, d: f64) -> i64 {
     }
 }
 
+/// `zend_dval_to_lval_silent` (`Z/Zend/zend_operators.h:138`):
+/// [`dval_to_lval`] with no diagnostic at all, which is how a string
+/// offset reads a float dimension after `String offset cast occurred`
+/// has already been warned (`zend_fetch_dimension_address_read`'s
+/// `IS_DOUBLE` arm), so php warns once and not twice: the truncation,
+/// zero for what is not finite, and `zend_dval_to_lval_slow`'s modular
+/// reading past the long's range, each with no second diagnostic.
+///
+/// ```php
+/// $s = "abcdef";
+/// var_dump($s[1.7], $s[-1.7], $s[NAN], $s[INF], $s[1e20]);
+/// ```
+/// ```expect
+/// Warning: String offset cast occurred in %s on line 3
+///
+/// Warning: String offset cast occurred in %s on line 3
+///
+/// Warning: String offset cast occurred in %s on line 3
+///
+/// Warning: String offset cast occurred in %s on line 3
+///
+/// Warning: String offset cast occurred in %s on line 3
+///
+/// Warning: Uninitialized string offset 7766279631452241920 in %s on line 3
+/// string(1) "b"
+/// string(1) "f"
+/// string(1) "a"
+/// string(1) "a"
+/// string(0) ""
+/// ```
+pub(crate) fn dval_to_lval_silent(d: f64) -> i64 {
+    if !d.is_finite() {
+        0
+    } else if fits_long(d) {
+        truncated(d)
+    } else {
+        modular(d)
+    }
+}
+
 /// `zend_dval_to_lval_cap`: zero for what is not finite, and the long's
 /// own edge past its range, which is `strtol`'s answer kept for a
 /// float-string.
