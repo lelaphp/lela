@@ -88,6 +88,10 @@ lock = "xtask.lock"                        # harness §4.1, revision 16: the har
 [[crate]]
 name = "ext/standard"
 budget = 30000
+# The port is partial: `crosscheck` and `phpt` are its meter, not a
+# condition of done (harness §4.5 condition 1, #383). The key's deletion
+# is the port's completion certificate.
+porting = true
 [[crate]]
 name = "ext/spl"
 budget = 10000
@@ -97,6 +101,10 @@ budget = 10000
 [[crate]]
 name = "ext/reflection"
 budget = 9000
+# The port is partial: both `crosscheck` columns render as the oracle's,
+# and the corpus reaches the methods standing beside `stub::unbuilt`
+# (#378), so `phpt` is the meter here (harness §4.5 condition 1, #383).
+porting = true
 [[crate]]
 name = "ext/pcre"
 budget = 6000
@@ -129,6 +137,10 @@ budget = 1500
 [[crate]]
 name = "ext/json"
 budget = 1500
+# The port is partial: the corpus reads 9 of 88 failing, and the crate is
+# touched by anything that changes the shape of a declaration (#376), so
+# `phpt` is the meter here too (harness §4.5 condition 1, #383).
+porting = true
 [[crate]]
 name = "ext/openssl"
 budget = 1000

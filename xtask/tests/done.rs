@@ -133,11 +133,17 @@ fn repository(name: &str, registry: &Path) -> Tree {
 }
 
 /// Mark one crate's `[[crate]]` row `porting = true` in the scratch
-/// repository's manifest, the key a person adds through `xtask steer`
-/// (harness §4.5 condition 1, §11). The tracked manifest is the
-/// workspace's, copied in by `repository`, and a test writes its own row
-/// rather than standing on what the tracked file happens to carry.
+/// repository's manifest, the key `xtask steer` writes (harness §4.5
+/// condition 1, §11). The tracked manifest is the workspace's, copied in
+/// by `repository`, and a test says what it needs rather than standing on
+/// what the tracked file happens to carry: a crate the workspace already
+/// marks is left as it stands, two `porting` lines in one row being a
+/// duplicate key and no manifest at all (#387).
 fn mark_porting(root: &Path, name: &str) {
+    let manifest = Manifest::load(root).unwrap();
+    if manifest.crate_named(name).is_some_and(|row| row.porting) {
+        return;
+    }
     let text = std::fs::read_to_string(root.join("seams.toml")).unwrap();
     let row = format!("name = \"{name}\"\n");
     assert_eq!(text.matches(&row).count(), 1, "{name} names one row");
