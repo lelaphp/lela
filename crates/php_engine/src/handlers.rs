@@ -2830,7 +2830,7 @@ pub(crate) fn fetch_obj_w<T: Tier>(
         );
         return threw(req, frame, &thrown);
     };
-    let placed = req.declared_slot_for_write(object.class(), &name);
+    let placed = req.declared_slot_for_write(object.class(), &name, "indirectly modify");
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     let at = match placed {
         Ok(Some((slot, _))) => {
@@ -4776,7 +4776,7 @@ fn assign_property(
 ) -> Result<Result<(), Thrown>, Fatal> {
     let bytes = name.as_str_bytes().unwrap_or_default();
     let shown_name = String::from_utf8_lossy(bytes).into_owned();
-    let placed = match req.declared_slot_for_write(object.class(), bytes) {
+    let placed = match req.declared_slot_for_write(object.class(), bytes, "modify") {
         Ok(placed) => placed,
         Err(thrown) => {
             req.release(value);

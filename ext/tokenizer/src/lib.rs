@@ -140,8 +140,10 @@ fn php_token_class() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
     let property = |name: &[u8], ty: Type| PropertyDecl {
         name: Name(name.into()),
         visibility: Visibility::Public,
+        set_visibility: None,
         is_instance: true,
         is_readonly: false,
+        is_final: false,
         ty: Some(ty),
         default: None,
         attributes: Vec::new(),

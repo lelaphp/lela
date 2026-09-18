@@ -4,8 +4,7 @@
 //! and a member's `$class`, look up again.
 //!
 //! What stands beside `stub::unbuilt` still: the property's hooks
-//! (`hasHooks`, `getHooks`, `hasHook`, `getHook`, and the `(set)`
-//! visibilities `isPrivateSet` and `isProtectedSet` read), whose model
+//! (`hasHooks`, `getHooks`, `hasHook`, `getHook`), whose model
 //! `PropertyDecl` has no field for; `getMangledName`, which wants
 //! php's `\0Class\0name` spelling the declaration model does not carry;
 //! `getRawValue`, `setRawValue` and the four lazy entries;
@@ -156,14 +155,23 @@ pub(super) fn reflection_property_to_string(req: &mut Request) -> Result<Value, 
     string_value(req, text.as_bytes())
 }
 
-/// The visibility, `static` and `readonly` bits of a property's
-/// `flags`, the numbers the stub's `IS_*` constants name.
+/// The visibility, set visibility, `final`, `static` and `readonly`
+/// bits of a property's `flags`, the numbers the stub's `IS_*`
+/// constants name.
 fn property_bits(decl: &PropertyDecl) -> i64 {
     let mut bits = match decl.visibility {
         Visibility::Public => 1,
         Visibility::Protected => 2,
         Visibility::Private => 4,
     };
+    match decl.set_visibility {
+        Some(Visibility::Private) => bits |= 4096,
+        Some(_) => bits |= 2048,
+        None => {}
+    }
+    if decl.is_final {
+        bits |= 32;
+    }
     if !decl.is_instance {
         bits |= 16;
     }
@@ -171,6 +179,43 @@ fn property_bits(decl: &PropertyDecl) -> i64 {
         bits |= 128;
     }
     bits
+}
+
+/// `ReflectionProperty::isPrivateSet()`: `ZEND_ACC_PRIVATE_SET`, the
+/// set visibility a `private(set)` property carries.
+///
+/// ```php
+/// class Foo { public private(set) int $bar; }
+/// var_dump((new ReflectionProperty('Foo', 'bar'))->isPrivateSet());
+/// ```
+/// ```expect
+/// bool(true)
+/// ```
+pub(super) fn reflection_property_is_private_set(req: &mut Request) -> Result<Value, Thrown> {
+    set_visibility_is(req, Visibility::Private)
+}
+
+/// `ReflectionProperty::isProtectedSet()`: `ZEND_ACC_PROTECTED_SET`.
+///
+/// ```php
+/// class Foo { public protected(set) int $bar; }
+/// var_dump((new ReflectionProperty('Foo', 'bar'))->isProtectedSet());
+/// ```
+/// ```expect
+/// bool(true)
+/// ```
+pub(super) fn reflection_property_is_protected_set(req: &mut Request) -> Result<Value, Thrown> {
+    set_visibility_is(req, Visibility::Protected)
+}
+
+/// The two `(set)` accessors' body: a dynamic property carries no set
+/// visibility, so it is `false` for either.
+fn set_visibility_is(req: &mut Request, wanted: Visibility) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let (_, _, found) = this_declared(req)?;
+    Ok(Value::bool(found.is_some_and(|(_, decl)| {
+        decl.set_visibility == Some(wanted)
+    })))
 }
 
 /// `ReflectionProperty::getModifiers()`: `prop_get_flags(ref)` kept to

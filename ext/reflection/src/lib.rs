@@ -3441,16 +3441,26 @@ fn property_string(req: &mut Request, property: &PropertyDecl, indent: &str) -> 
         out.push_str(&String::from_utf8_lossy(doc));
         out.push('\n');
     }
-    let _ = write!(
-        out,
-        "{indent}Property [ {} ",
-        visibility_word(property.visibility)
-    );
+    out.push_str(indent);
+    out.push_str("Property [ ");
+    // `_property_string`'s order: `abstract`, `final`, the visibility,
+    // the set visibility, `static`, `readonly`, `virtual`, the type.
+    if property.is_final {
+        out.push_str("final ");
+    }
+    out.push_str(visibility_word(property.visibility));
+    out.push(' ');
     // `zend_declare_typed_property`: a readonly property with no set
     // visibility of its own is `ZEND_ACC_PROTECTED_SET`, which the
-    // `(set)` words print; one written out waits on #327.
-    if property.is_readonly && property.visibility == Visibility::Public {
-        out.push_str("protected(set) ");
+    // `(set)` words print; the implicit one waits on the readonly
+    // modification error that php raises before it.
+    match property.set_visibility {
+        Some(Visibility::Private) => out.push_str("private(set) "),
+        Some(_) => out.push_str("protected(set) "),
+        None if property.is_readonly && property.visibility == Visibility::Public => {
+            out.push_str("protected(set) ");
+        }
+        None => {}
     }
     if !property.is_instance {
         out.push_str("static ");

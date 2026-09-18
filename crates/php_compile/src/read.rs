@@ -305,13 +305,19 @@ pub(crate) struct Use {
 }
 
 /// One property declarator, php's `ZEND_AST_PROP_ELEM` with the group's
-/// modifiers beside it: `public $x`, `static $y = 1`. Its doc comment is
-/// what was pending after its last token, php's `property: T_VARIABLE
+/// modifiers and type beside it: `public $x`, `static $y = 1`,
+/// `public private(set) int $z`. Its doc comment is what was pending
+/// after its last token, php's `property: T_VARIABLE
 /// backup_doc_comment | T_VARIABLE '=' expr backup_doc_comment`.
+/// `set_visibility` is the group's `public(set)`, `protected(set)` or
+/// `private(set)` as written, before `zend_declare_typed_property`
+/// holds it to the read visibility.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Property {
     pub(crate) name: Vec<u8>,
     pub(crate) visibility: Visibility,
+    pub(crate) set_visibility: Option<Visibility>,
+    pub(crate) ty: Option<Type>,
     pub(crate) is_static: bool,
     pub(crate) default: Option<Expr>,
     pub(crate) doc_comment: Option<Vec<u8>>,
@@ -1116,15 +1122,65 @@ impl Reader<'_> {
 
     /// One member group of a class body: the modifiers, then a constant
     /// group or a property group. php's `zend_add_member_modifier`
-    /// refuses a second visibility in its own words; every other
-    /// modifier this does not model is refused as not yet read.
+    /// refuses a second visibility in its own words, and a second set
+    /// visibility in the same words under its own arm
+    /// (`Z/Zend/zend_compile.c:1043`); every other modifier this does
+    /// not model is refused as not yet read.
+    ///
+    /// A property group's type is php's `optional_type_without_static`,
+    /// read where a modifier stood before it, since
+    /// `attributed_class_statement` has no property group without one.
+    ///
+    /// ```php
+    /// class Foo { public private(set) protected(set) int $bar; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Multiple access type modifiers are not allowed in %s on line 2
+    /// ```
+    ///
+    /// The parentheses take nothing between them and the word, so
+    /// `private ( set )` is the plain `private` and a `(` php's parser
+    /// reads as the opening of a DNF type; no witness stands on that,
+    /// since php's own answer there is the parse error a source this
+    /// reader reads in one pass cannot raise.
+    ///
+    /// The word is read whatever its case, as every keyword is:
+    ///
+    /// ```php
+    /// class Foo { public PRIVATE(SET) int $bar = 7; }
+    /// var_dump((new Foo)->bar, (new ReflectionProperty('Foo', 'bar'))->isPrivateSet());
+    /// ```
+    /// ```expect
+    /// int(7)
+    /// bool(true)
+    /// ```
     fn member(&mut self, class: &mut Class) -> Result<(), Trouble> {
         let line = self.line;
         let mut visibility = None;
+        let mut set_visibility = None;
         let mut is_static = false;
         let mut is_final = false;
+        let mut modified = false;
         loop {
             self.skip_trivia();
+            // php's scanner reads `public(set)`, `protected(set)` and
+            // `private(set)` as one token each, the parentheses with
+            // nothing between them and the word
+            // (`Z/Zend/zend_language_scanner.l:1785-1794`), so
+            // `private ( set )` is the plain `private` and the `(`
+            // after it.
+            if let Some(seen) = self.set_visibility_ahead() {
+                if set_visibility.is_some() {
+                    return Err(Trouble {
+                        level: Level::CompileError,
+                        what: String::from("Multiple access type modifiers are not allowed"),
+                        line: self.line,
+                    });
+                }
+                set_visibility = Some(seen);
+                modified = true;
+                continue;
+            }
             let seen = if self.word_ahead(b"public") {
                 Some(Visibility::Public)
             } else if self.word_ahead(b"protected") {
@@ -1145,17 +1201,20 @@ impl Reader<'_> {
                     });
                 }
                 visibility = Some(seen);
+                modified = true;
                 self.name();
                 continue;
             }
             if self.word_ahead(b"static") {
                 self.bump(6);
                 is_static = true;
+                modified = true;
                 continue;
             }
             if self.word_ahead(b"final") {
                 self.bump(5);
                 is_final = true;
+                modified = true;
                 continue;
             }
             break;
@@ -1164,9 +1223,6 @@ impl Reader<'_> {
         if self.word_ahead(b"const") && !is_static {
             self.bump(5);
             return self.constants(class, visibility, is_final, line);
-        }
-        if self.byte(0) == Some(b'$') && !is_final {
-            return self.properties(class, visibility, is_static, line);
         }
         if self.word_ahead(b"function") {
             self.bump(8);
@@ -1178,6 +1234,24 @@ impl Reader<'_> {
                 is_final,
             });
             return Ok(());
+        }
+        if modified && !is_final && self.property_group_ahead() {
+            let ty = if self.byte(0) == Some(b'$') {
+                None
+            } else {
+                Some(self.type_expr()?)
+            };
+            self.skip_trivia();
+            if self.byte(0) == Some(b'$') {
+                return self.properties(
+                    class,
+                    visibility,
+                    set_visibility,
+                    ty.as_ref(),
+                    is_static,
+                    line,
+                );
+            }
         }
         Err(self.trouble("a class member this compiler cannot read yet"))
     }
@@ -1722,14 +1796,18 @@ impl Reader<'_> {
         }
     }
 
-    /// `$x, $y = 1;` with the group's modifiers already read: each
-    /// declarator takes the doc comment after its last token, the
-    /// variable or the default. An accessor list after a declarator is
+    /// `$x, $y = 1;` with the group's modifiers and type already read:
+    /// each declarator takes the doc comment after its last token, the
+    /// variable or the default, and the group's type and set
+    /// visibility, which php's `zend_compile_prop_decl` hands to every
+    /// declarator alike. An accessor list after a declarator is
     /// refused as not yet read.
     fn properties(
         &mut self,
         class: &mut Class,
         visibility: Visibility,
+        set_visibility: Option<Visibility>,
+        ty: Option<&Type>,
         is_static: bool,
         line: u32,
     ) -> Result<(), Trouble> {
@@ -1756,6 +1834,8 @@ impl Reader<'_> {
             class.properties.push(Property {
                 name,
                 visibility,
+                set_visibility,
+                ty: ty.cloned(),
                 is_static,
                 default,
                 doc_comment,
@@ -3272,6 +3352,43 @@ impl Reader<'_> {
 
     fn digit_ahead(&self, ahead: usize) -> bool {
         self.byte(ahead).is_some_and(|b| b.is_ascii_digit())
+    }
+
+    /// php's `T_PUBLIC_SET`, `T_PROTECTED_SET` and `T_PRIVATE_SET`,
+    /// the three one-token asymmetric visibilities of
+    /// `Z/Zend/zend_language_scanner.l:1785-1794`: the word and
+    /// `(set)` with nothing between them, whatever their case, stepped
+    /// over where one stands here.
+    fn set_visibility_ahead(&mut self) -> Option<Visibility> {
+        for (word, seen) in [
+            (&b"public(set)"[..], Visibility::Public),
+            (&b"protected(set)"[..], Visibility::Protected),
+            (&b"private(set)"[..], Visibility::Private),
+        ] {
+            if self
+                .source
+                .get(self.at..self.at.saturating_add(word.len()))
+                .is_some_and(|ahead| ahead.eq_ignore_ascii_case(word))
+            {
+                self.bump(word.len());
+                return Some(seen);
+            }
+        }
+        None
+    }
+
+    /// Whether what stands here can open a property group: the
+    /// variable itself, or the first byte of php's
+    /// `optional_type_without_static`, a `?`, a `\\` or a name.
+    fn property_group_ahead(&self) -> bool {
+        self.byte(0).is_some_and(|b| {
+            b == b'$'
+                || b == b'?'
+                || b == b'\\'
+                || b == b'_'
+                || b.is_ascii_alphabetic()
+                || b >= 0x80
+        })
     }
 
     /// Whether `word` stands here and a name does not go on past it.

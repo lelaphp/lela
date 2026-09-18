@@ -261,12 +261,22 @@ pub struct MethodDecl {
 }
 
 /// A declared property, with its default still an expression.
+///
+/// `set_visibility` is php's asymmetric visibility, `ZEND_ACC_PUBLIC_SET`,
+/// `ZEND_ACC_PROTECTED_SET` and `ZEND_ACC_PRIVATE_SET`: the second
+/// visibility a write is held to, `None` where the property has one
+/// visibility for both. `zend_declare_typed_property` drops a set
+/// visibility equal to `visibility`, so what stands here is stricter
+/// than `visibility` and never `Public`. `is_final` is `ZEND_ACC_FINAL`,
+/// which the same function raises on a `private(set)` property.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PropertyDecl {
     pub name: Name,
     pub visibility: Visibility,
+    pub set_visibility: Option<Visibility>,
     pub is_instance: bool,
     pub is_readonly: bool,
+    pub is_final: bool,
     pub ty: Option<Type>,
     pub default: Option<ConstExpr>,
     pub attributes: Vec<Attribute>,

@@ -107,8 +107,8 @@ use php_unit::{
 
 use crate::read;
 use crate::read::{
-    Arm, BinaryOp, Case, CastTo, Catch, Class, Element, Expr, Function, Magic, Method, Piece, Read,
-    Stmt, Target, Unset, is_auto_global,
+    Arm, BinaryOp, Case, CastTo, Catch, Class, Element, Expr, Function, Magic, Method, Piece,
+    Property, Read, Stmt, Target, Unset, is_auto_global,
 };
 use crate::{CompileError, Options, StackLimit};
 
@@ -1471,8 +1471,10 @@ impl Emit<'_> {
             decl.properties.push(PropertyDecl {
                 name: Name(parameter.name.clone().into_boxed_slice()),
                 visibility: promoted.visibility,
+                set_visibility: None,
                 is_instance: true,
                 is_readonly: promoted.is_readonly,
+                is_final: false,
                 ty: parameter.ty.clone(),
                 default,
                 attributes: Vec::new(),
@@ -2054,7 +2056,9 @@ impl Emit<'_> {
 
     /// `zend_compile_prop_decl`, the same one declarator at a time,
     /// with `CG(context).active_property_info_name` set over the
-    /// default so `__PROPERTY__` folds to the declarator's name.
+    /// default so `__PROPERTY__` folds to the declarator's name, and
+    /// [`Self::set_visibility_of`] over the group's asymmetric
+    /// visibility.
     fn class_properties(
         &mut self,
         decl: &mut ClassDecl,
@@ -2070,6 +2074,7 @@ impl Emit<'_> {
                     String::from_utf8_lossy(&property.name)
                 )));
             }
+            let set_visibility = self.set_visibility_of(property, name)?;
             self.active_property = Some(property.name.clone());
             let default = match &property.default {
                 Some(expr) => Some(self.const_expr(expr)?),
@@ -2079,15 +2084,102 @@ impl Emit<'_> {
             decl.properties.push(PropertyDecl {
                 name: Name(property.name.clone().into_boxed_slice()),
                 visibility: property.visibility,
+                set_visibility,
                 is_instance: !property.is_static,
                 is_readonly: false,
-                ty: None,
+                // `zend_declare_typed_property`: a `private(set)`
+                // property is implicitly final.
+                is_final: set_visibility == Some(Visibility::Private),
+                ty: property.ty.clone(),
                 default,
                 attributes: Vec::new(),
                 doc_comment: property.doc_comment.clone().map(Vec::into_boxed_slice),
             });
         }
         Ok(())
+    }
+
+    /// `zend_declare_typed_property`'s arm over `ZEND_ACC_PPP_SET_MASK`
+    /// (`Z/Zend/zend_API.c:4517-4541`): a set visibility needs a type,
+    /// may not be weaker than the visibility a read is held to, and is
+    /// dropped where the two are the same, which is why a declaration
+    /// model never carries `public(set)`. The strength order is php's
+    /// own, the `ZEND_ACC_*_SET` bits ascending from `PUBLIC_SET`
+    /// (`Z/Zend/zend_compile.h:274-276`).
+    ///
+    /// ```php
+    /// class Foo { public private(set) int $bar = 1; public protected(set) int $baz = 2; }
+    /// $f = new Foo;
+    /// var_dump($f->bar, $f->baz);
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(2)
+    /// ```
+    ///
+    /// An untyped one is refused where the property is named:
+    ///
+    /// ```php
+    /// class Foo { public private(set) $bar; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Property with asymmetric visibility Foo::$bar must have type in %s on line 2
+    /// ```
+    ///
+    /// So is a set visibility weaker than the one a read is held to:
+    ///
+    /// ```php
+    /// class Foo { protected public(set) int $bar; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Visibility of property Foo::$bar must not be weaker than set visibility in %s on line 2
+    /// ```
+    ///
+    /// A set visibility the read visibility equals is dropped, so
+    /// `private private(set)` is the plain private property and is not
+    /// final; `private(set)` raises `ZEND_ACC_FINAL` where it stands.
+    /// php refuses neither of them on a `static` property, which the
+    /// 8.4 proposal did: `static_props.phpt` of
+    /// `Z/Zend/tests/asymmetric_visibility` declares four.
+    ///
+    /// ```php
+    /// class Foo { private private(set) int $a = 1; public private(set) static int $b = 2; }
+    /// var_dump((new ReflectionProperty('Foo', 'a'))->getModifiers());
+    /// var_dump((new ReflectionProperty('Foo', 'b'))->getModifiers());
+    /// ```
+    /// ```expect
+    /// int(4)
+    /// int(4145)
+    /// ```
+    fn set_visibility_of(
+        &self,
+        property: &Property,
+        class_name: &[u8],
+    ) -> Result<Option<Visibility>, CompileError> {
+        let Some(set) = property.set_visibility else {
+            return Ok(None);
+        };
+        let member = format!(
+            "{}::${}",
+            String::from_utf8_lossy(class_name),
+            String::from_utf8_lossy(&property.name)
+        );
+        if property.ty.is_none() {
+            return Err(self.compile_error(format!(
+                "Property with asymmetric visibility {member} must have type"
+            )));
+        }
+        let strength = |visibility| match visibility {
+            Visibility::Public => 0_u8,
+            Visibility::Protected => 1,
+            Visibility::Private => 2,
+        };
+        if strength(property.visibility) > strength(set) {
+            return Err(self.compile_error(format!(
+                "Visibility of property {member} must not be weaker than set visibility"
+            )));
+        }
+        Ok((property.visibility != set).then_some(set))
     }
 
     /// `zend_resolve_class_name` over a name written after `extends` or

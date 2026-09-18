@@ -102,8 +102,10 @@ fn name_property() -> PropertyDecl {
     PropertyDecl {
         name: Name::from("name"),
         visibility: Visibility::Public,
+        set_visibility: None,
         is_instance: true,
         is_readonly: false,
+        is_final: false,
         ty: Some(Type::String),
         default: None,
         attributes: Vec::new(),
@@ -5767,11 +5769,11 @@ fn reflection_property() -> Declared {
             ),
             (
                 method(b"isPrivateSet", &[], Some(Type::Bool)),
-                unbuilt as Entry,
+                super::member::reflection_property_is_private_set as Entry,
             ),
             (
                 method(b"isProtectedSet", &[], Some(Type::Bool)),
-                unbuilt as Entry,
+                super::member::reflection_property_is_protected_set as Entry,
             ),
             (
                 tentative(method(b"isStatic", &[], Some(Type::Bool))),

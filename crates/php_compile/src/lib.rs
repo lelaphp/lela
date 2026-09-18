@@ -3763,9 +3763,59 @@ mod tests {
             refused(b"<?php\nclass M { function f() {} function F() {} }"),
             compile_error("Cannot redeclare M::F()", 2)
         );
+    }
+
+    /// What `zend_declare_typed_property` refuses in a property group's
+    /// modifiers and type, in php's words at the declarator's line.
+    #[test]
+    fn what_php_s_compiler_refuses_in_a_property_group_is_refused_in_its_words() {
+        let refused = |source: &[u8]| {
+            let mut strings = php_heap::Strings::new();
+            compile(
+                &php_syntax::parse(source, &php_syntax::Options::default()),
+                &bundled(),
+                &mut strings,
+            )
+            .err()
+            .map(|e| (e.level, e.message, e.line))
+        };
+        let compile_error =
+            |message: &str, line| Some((Level::CompileError, message.to_string(), line));
         assert_eq!(
             refused(b"<?php\nclass M { public int $x; }"),
-            not_yet("a class member this compiler cannot read yet", 2)
+            None,
+            "a property group's type is read where a modifier stood before it"
+        );
+        assert_eq!(
+            refused(b"<?php\nclass M { public readonly int $x; }"),
+            Some((
+                Level::Parse,
+                String::from("a class member this compiler cannot read yet"),
+                2
+            ))
+        );
+        assert_eq!(
+            refused(b"<?php\nclass M { private(set) protected(set) int $x; }"),
+            compile_error("Multiple access type modifiers are not allowed", 2)
+        );
+        assert_eq!(
+            refused(b"<?php\nclass M { public private(set) $x; }"),
+            compile_error(
+                "Property with asymmetric visibility M::$x must have type",
+                2
+            )
+        );
+        assert_eq!(
+            refused(b"<?php\nclass M { protected public(set) int $x; }"),
+            compile_error(
+                "Visibility of property M::$x must not be weaker than set visibility",
+                2
+            )
+        );
+        assert_eq!(
+            refused(b"<?php\nclass M { public private(set) int $x; }"),
+            None,
+            "a set visibility stricter than the read visibility stands"
         );
     }
 

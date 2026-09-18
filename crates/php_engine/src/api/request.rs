@@ -377,6 +377,18 @@ type TraceRow = (
     Option<(Vec<u8>, i64)>,
 );
 
+/// What `zend_get_property_offset` places a declared instance property
+/// by: the slot it sits in, the visibility a read is held to, the set
+/// visibility a write is held to where it has one of its own, and
+/// whether the property carries a type.
+#[derive(Debug, Clone, Copy)]
+struct DeclaredSlot {
+    slot: u32,
+    visibility: Visibility,
+    set_visibility: Option<Visibility>,
+    typed: bool,
+}
+
 /// One user function or method a request declared: the unit and the
 /// body, from which the declaration and the op array are both read.
 pub(crate) struct UserFunction {
@@ -2472,24 +2484,68 @@ impl Request {
     }
 
     /// `zend_get_property_offset` over the class's declared instance
-    /// properties: the slot `name` sits in, its visibility and whether
-    /// it is typed; none for a name the class did not declare, which is
-    /// a dynamic property.
-    fn declared_slot(&self, class: ClassId, name: &[u8]) -> Option<(u32, Visibility, bool)> {
+    /// properties: the slot `name` sits in, its visibility, its set
+    /// visibility and whether it is typed; none for a name the class
+    /// did not declare, which is a dynamic property.
+    fn declared_slot(&self, class: ClassId, name: &[u8]) -> Option<DeclaredSlot> {
         self.class_decl(class).and_then(|decl| {
             decl.properties
                 .iter()
                 .filter(|p| p.is_instance)
                 .enumerate()
                 .find(|(_, p)| &*p.name.0 == name)
-                .map(|(i, p)| {
-                    (
-                        u32::try_from(i).unwrap_or(u32::MAX),
-                        p.visibility,
-                        p.ty.is_some(),
-                    )
+                .map(|(i, p)| DeclaredSlot {
+                    slot: u32::try_from(i).unwrap_or(u32::MAX),
+                    visibility: p.visibility,
+                    set_visibility: p.set_visibility,
+                    typed: p.ty.is_some(),
                 })
         })
+    }
+
+    /// `zend_asymmetric_property_has_set_access`
+    /// (`Z/Zend/zend_object_handlers.c:590`): whether the executed
+    /// scope may write a property of `class` whose set visibility is
+    /// `set`. The declaring class writes its own; a `protected(set)`
+    /// one is a related scope's too. A `public(set)` never reaches
+    /// here, since `zend_declare_typed_property` drops a set
+    /// visibility the read visibility already equals and refuses one
+    /// weaker than it.
+    fn has_set_access(&self, class: ClassId, set: Visibility) -> bool {
+        let scope = self.executed_scope();
+        scope == Some(class) || (set == Visibility::Protected && self.check_protected(class, scope))
+    }
+
+    /// `zend_asymmetric_visibility_property_modification_error`
+    /// (`Z/Zend/zend_execute.c:931`): php's `Error` for a write the set
+    /// visibility refuses, `operation` the word the site does
+    /// (`modify`, `indirectly modify`, `unset`). php names the called
+    /// scope here, not the executed one; the two differ only where a
+    /// method is reached through a class that inherited it, and the
+    /// linker that inherits a method arrives with the classes of design
+    /// §11 days 8-14.
+    fn set_inaccessible_property(
+        &mut self,
+        class: ClassId,
+        set: Visibility,
+        name: &[u8],
+        operation: &str,
+    ) -> Thrown {
+        let word = match set {
+            Visibility::Private => "private(set)",
+            _ => "protected(set)",
+        };
+        let from = match self.executed_scope() {
+            Some(scope) => format!("scope {}", self.class_name(scope)),
+            None => String::from("global scope"),
+        };
+        let class = self.class_name(class);
+        let shown = String::from_utf8_lossy(name).into_owned();
+        crate::api::raising::throw(
+            self,
+            "Error",
+            &format!("Cannot {operation} {word} property {class}::${shown} from {from}"),
+        )
     }
 
     /// `zend_verify_property_access`: whether the executed scope may
@@ -2623,17 +2679,17 @@ impl Request {
         let o = object.heap();
         let class = object.class();
         let shown = String::from_utf8_lossy(name).into_owned();
-        if let Some((slot, visibility, typed)) = self.declared_slot(class, name) {
-            if !self.may_access(class, visibility) {
-                return Err(self.inaccessible_property(class, visibility, name));
+        if let Some(placed) = self.declared_slot(class, name) {
+            if !self.may_access(class, placed.visibility) {
+                return Err(self.inaccessible_property(class, placed.visibility, name));
             }
-            let z = o.slot(slot);
+            let z = o.slot(placed.slot);
             if !z.is_undef() {
                 let value = Value::of_zval(z).deref();
                 self.addref(&value);
                 return Ok(value);
             }
-            if typed {
+            if placed.typed {
                 let class = self.class_name(class);
                 return Err(crate::api::raising::throw(
                     self,
@@ -2665,19 +2721,76 @@ impl Request {
     /// in and whether it is typed, where the executed scope may reach
     /// it; php's `Error` `Cannot access private property C::$p` where
     /// it may not (`zend_bad_property_access`); and none for a name the
-    /// class did not declare, which is a dynamic property.
+    /// class did not declare, which is a dynamic property. A property
+    /// with a set visibility is held to that one as well
+    /// ([`Request::has_set_access`]), which is the second check
+    /// `zend_std_write_property` and `zend_std_get_property_ptr_ptr`
+    /// make; `operation` is the word the site's error carries.
+    ///
+    /// ```php
+    /// class Foo { public private(set) int $bar = 1; public protected(set) int $baz = 2; }
+    /// $f = new Foo;
+    /// try { $f->bar = 3; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { $f->baz = 4; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { $f->bar->x = 5; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { unset($f->bar); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($f->bar, $f->baz);
+    /// ```
+    /// ```expect
+    /// Cannot modify private(set) property Foo::$bar from global scope
+    /// Cannot modify protected(set) property Foo::$baz from global scope
+    /// Cannot indirectly modify private(set) property Foo::$bar from global scope
+    /// Cannot unset private(set) property Foo::$bar from global scope
+    /// int(1)
+    /// int(2)
+    /// ```
+    ///
+    /// Uncaught, the write from global scope is php's `Error`:
+    ///
+    /// ```php
+    /// class Foo { public private(set) int $bar = 1; }
+    /// $f = new Foo;
+    /// $f->bar = 2;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught Error: Cannot modify private(set) property Foo::$bar from global scope in %s:4
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 4
+    /// ```
+    ///
+    /// A property the class declares with a set visibility and no
+    /// default is uninitialised like any other typed one:
+    ///
+    /// ```php
+    /// class Foo { public private(set) int $bar; }
+    /// $f = new Foo;
+    /// var_dump($f->bar);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught Error: Typed property Foo::$bar must not be accessed before initialization in %s:4
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 4
+    /// ```
     pub(crate) fn declared_slot_for_write(
         &mut self,
         class: ClassId,
         name: &[u8],
+        operation: &str,
     ) -> Result<Option<(u32, bool)>, Thrown> {
-        let Some((slot, visibility, typed)) = self.declared_slot(class, name) else {
+        let Some(placed) = self.declared_slot(class, name) else {
             return Ok(None);
         };
-        if !self.may_access(class, visibility) {
-            return Err(self.inaccessible_property(class, visibility, name));
+        if !self.may_access(class, placed.visibility) {
+            return Err(self.inaccessible_property(class, placed.visibility, name));
         }
-        Ok(Some((slot, typed)))
+        if let Some(set) = placed.set_visibility
+            && !self.has_set_access(class, set)
+        {
+            return Err(self.set_inaccessible_property(class, set, name, operation));
+        }
+        Ok(Some((placed.slot, placed.typed)))
     }
 
     /// `zend_assign_to_variable` over a declared slot, `ASSIGN_OBJ`'s
@@ -3721,8 +3834,9 @@ impl Request {
     /// which the read and the write handlers take instead.
     pub(crate) fn property_slot(&self, object: PhpObject, name: &[u8]) -> Option<u32> {
         let class = object.class();
-        let (slot, visibility, _) = self.declared_slot(class, name)?;
-        self.may_access(class, visibility).then_some(slot)
+        let placed = self.declared_slot(class, name)?;
+        self.may_access(class, placed.visibility)
+            .then_some(placed.slot)
     }
 
     /// `zend_std_has_property`: the declared slot where the scope may
@@ -3738,11 +3852,11 @@ impl Request {
     ) -> bool {
         let class = object.class();
         let value = match self.declared_slot(class, name) {
-            Some((slot, visibility, _)) => {
-                if !self.may_access(class, visibility) {
+            Some(placed) => {
+                if !self.may_access(class, placed.visibility) {
                     return false;
                 }
-                let z = object.heap().slot(slot);
+                let z = object.heap().slot(placed.slot);
                 (!z.is_undef()).then(|| Value::of_zval(z))
             }
             None => self.object_prop(object.heap(), name),
@@ -3760,16 +3874,23 @@ impl Request {
 
     /// `zend_std_unset_property`: a declared slot the scope may reach is
     /// left uninitialised, what it held released; one it may not reach
-    /// is php's `Error`; a dynamic name is removed from the table,
-    /// separated first where a cast shares it.
+    /// is php's `Error`, and so is one whose set visibility the scope
+    /// may not write, whose word here is `unset`
+    /// (`Z/Zend/zend_object_handlers.c:1583`); a dynamic name is
+    /// removed from the table, separated first where a cast shares it.
     pub(crate) fn unset_property(&mut self, object: PhpObject, name: &[u8]) -> Result<(), Thrown> {
         let class = object.class();
         let o = object.heap();
-        if let Some((slot, visibility, _)) = self.declared_slot(class, name) {
-            if !self.may_access(class, visibility) {
-                return Err(self.inaccessible_property(class, visibility, name));
+        if let Some(placed) = self.declared_slot(class, name) {
+            if !self.may_access(class, placed.visibility) {
+                return Err(self.inaccessible_property(class, placed.visibility, name));
             }
-            Heap::object_set_slot(&mut Hooks(self), o, slot, Zval::UNDEF);
+            if let Some(set) = placed.set_visibility
+                && !self.has_set_access(class, set)
+            {
+                return Err(self.set_inaccessible_property(class, set, name, "unset"));
+            }
+            Heap::object_set_slot(&mut Hooks(self), o, placed.slot, Zval::UNDEF);
             return Ok(());
         }
         let Some(table) = o.properties() else {

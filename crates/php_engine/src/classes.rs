@@ -1118,8 +1118,10 @@ fn throwable_properties() -> Vec<PropertyDecl> {
     let property = |name: &[u8], visibility, ty, default| PropertyDecl {
         name: Name(name.into()),
         visibility,
+        set_visibility: None,
         is_instance: true,
         is_readonly: false,
+        is_final: false,
         ty,
         default,
         attributes: Vec::new(),
