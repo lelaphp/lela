@@ -588,6 +588,19 @@ pub(crate) fn new<T: Tier>(
 ///   thrown in %s on line 3
 /// ```
 ///
+/// A class that declares one is past that branch, and its constructor
+/// is an instance method called on the class.
+///
+/// ```php
+/// Exception::__construct();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Non-static method Exception::__construct() cannot be called statically in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+///
 /// The method found is held to `zend_std_get_static_method`'s access
 /// rule before anything else is asked of it: a private method from the
 /// global scope is `zend_bad_method_call`, the name as written, ahead

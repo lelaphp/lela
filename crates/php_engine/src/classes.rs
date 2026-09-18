@@ -734,12 +734,12 @@ fn throwable_get_line(req: &mut Request) -> Result<Value, Thrown> {
 }
 
 /// `ZEND_METHOD(Exception, getTrace)`: the `trace` property, the frames
-/// `zend_fetch_debug_backtrace` recorded at the site. This engine
-/// records the trace already rendered, the string `getTraceAsString`
-/// answers (`Request::note_throw_site`), so the frames are not held as
-/// an array yet (#359): a throwable made at the top level has php's
-/// empty trace, and that is the one this answers; one made inside a
-/// call answers the empty array where php answers the frames.
+/// `zend_fetch_debug_backtrace` recorded at the site
+/// (`Request::note_throw_site`), one more owner taken for the return;
+/// the empty array where the slot holds none. A throwable made at the
+/// top level has no frame below it, and one made inside a native's call
+/// has that call's row, which an uncaught rendering prints; a user
+/// function's frame arrives with the calls that make it (#359).
 ///
 /// ```php
 /// var_dump((new Exception)->getTrace());
@@ -768,8 +768,8 @@ fn throwable_get_previous(req: &mut Request) -> Result<Value, Thrown> {
 }
 
 /// `ZEND_METHOD(Exception, getTraceAsString)`: `zend_trace_to_string`
-/// over the recorded frames, which this engine rendered at the site;
-/// `#0 {main}` is the rendering of no frame.
+/// over the recorded frames, `Request::trace_string_of`; `#0 {main}` is
+/// the rendering of no frame.
 ///
 /// ```php
 /// var_dump((new Exception)->getTraceAsString());
@@ -780,11 +780,8 @@ fn throwable_get_previous(req: &mut Request) -> Result<Value, Thrown> {
 fn throwable_get_trace_as_string(req: &mut Request) -> Result<Value, Thrown> {
     no_arguments(req)?;
     let this = this_throwable(req)?;
-    let trace = this
-        .prop(req, b"trace")
-        .and_then(|value| value.as_str_bytes().map(<[u8]>::to_vec))
-        .unwrap_or_else(|| b"#0 {main}".to_vec());
-    Ok(Value::string(PhpString::new(req, &trace)?))
+    let trace = req.trace_string_of(this);
+    Ok(Value::string(PhpString::new(req, trace.as_bytes())?))
 }
 
 /// `ZEND_METHOD(Exception, __toString)`: the class, the message, the

@@ -923,15 +923,7 @@ impl Request {
         let message = string_prop(self, throwable, b"message");
         let (file, line) = self.throw_site(throwable);
         let file = String::from_utf8_lossy(&file);
-        // `zend_trace_to_string` over an empty trace is `#0 {main}`, which
-        // is what a throwable made before this engine recorded one has.
-        let trace = throwable
-            .prop(self, b"trace")
-            .and_then(|value| value.as_str_bytes().map(<[u8]>::to_vec))
-            .map_or_else(
-                || String::from("#0 {main}"),
-                |bytes| String::from_utf8_lossy(&bytes).into_owned(),
-            );
+        let trace = self.trace_string_of(throwable);
         if message.is_empty() {
             format!("{class} in {file}:{line}\nStack trace:\n{trace}")
         } else {
@@ -955,23 +947,18 @@ impl Request {
 
     /// `zend_default_exception_new`: a throwable records where it was
     /// made, `zend_get_executed_filename` and `zend_get_executed_lineno`,
-    /// and the backtrace `zend_fetch_debug_backtrace` builds there.
-    ///
-    /// php holds the trace as the array `getTrace` answers and renders it
-    /// on demand; this engine holds what `getTraceAsString` renders, which
-    /// is all that `__toString` and the uncaught fatal read, until a frame
-    /// chain with user functions in it gives the array something to say.
+    /// and the backtrace `zend_fetch_debug_backtrace` builds there, the
+    /// array `getTrace` answers, written into the declared `trace` slot;
+    /// `getTraceAsString`, `__toString` and the uncaught fatal render it
+    /// through [`Request::trace_string_of`] when they are asked.
     pub(crate) fn note_throw_site(&mut self, throwable: PhpObject) -> Result<(), Thrown> {
         let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
-        let trace = self.trace_as_string();
+        let trace = self.debug_backtrace()?;
         let line = Value::int(i64::from(self.current_line()));
         for (name, value) in [
             (&b"file"[..], Value::string(PhpString::new(self, &file)?)),
             (b"line", line),
-            (
-                b"trace",
-                Value::string(PhpString::new(self, trace.as_bytes())?),
-            ),
+            (b"trace", Value::array(trace)),
         ] {
             let name = PhpString::new(self, name)?;
             throwable.set_prop(self, name, value)?;
@@ -979,40 +966,149 @@ impl Request {
         Ok(())
     }
 
-    /// `zend_fetch_debug_backtrace` rendered by `zend_trace_to_string`
-    /// with `include_main`: one `#N file(line): name(arguments)` per call
-    /// below the top, then `#N {main}`. php walks `EG(current_execute_data)`;
-    /// the calls this engine has below the op array being served are the
-    /// natives it is serving, read off the call frames still standing on
-    /// [`Vm`], whose file and line are the caller's, as php's frame for a
-    /// native takes them.
-    ///
-    /// The arguments are the frame's, rendered by [`Request::trace_arguments`];
-    /// under `zend.exception_ignore_args` the frame is built without them,
-    /// `DEBUG_BACKTRACE_IGNORE_ARGS`, and the parentheses are empty.
-    fn trace_as_string(&self) -> String {
-        let file = String::from_utf8_lossy(self.current_file().unwrap_or_default());
-        let line = self.current_line();
+    /// `zend_trace_to_string` over the `trace` a throwable holds, with
+    /// `include_main`; a slot that holds no array, which is what a
+    /// throwable made before this engine recorded one has, renders as
+    /// the empty trace does, `#0 {main}`.
+    pub(crate) fn trace_string_of(&self, throwable: PhpObject) -> String {
+        match throwable
+            .prop(self, b"trace")
+            .and_then(|value| value.as_array().copied())
+        {
+            Some(trace) => self.trace_to_string(trace),
+            None => String::from("#0 {main}"),
+        }
+    }
+
+    /// `zend_fetch_debug_backtrace` (`Z/Zend/zend_builtin_functions.c`)
+    /// with the options a throwable is built under, no `include_main`
+    /// and no `DEBUG_BACKTRACE_PROVIDE_OBJECT`: one row per call below
+    /// the op array being served, `file`, `line`, `function`, then
+    /// `class` and `type` for a method, then `args`, in the order php
+    /// adds the keys. php walks `EG(current_execute_data)`; the calls
+    /// this engine has below the op array are the natives it is serving,
+    /// read off the call frames still standing on [`Vm`], whose `file`
+    /// and `line` are the caller's, as php's frame for a native takes
+    /// them. The arguments are the frame's, each followed through a
+    /// reference and one more owner taken, `debug_backtrace_get_args`;
+    /// under `zend.exception_ignore_args` the row has no `args`,
+    /// `DEBUG_BACKTRACE_IGNORE_ARGS`. The `Err` is the memory limit
+    /// refusing the rows.
+    fn debug_backtrace(&mut self) -> Result<PhpArray, Thrown> {
+        let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+        let line = i64::from(self.current_line());
         let ignore_arguments = self.exception_ignore_args();
-        let mut frames: Vec<String> = self
+        let calls: Vec<(Function, Option<PhpObject>, Vec<Value>)> = self
             .vm
             .serving_calls()
-            .enumerate()
-            .map(|(depth, call)| {
-                let arguments = if ignore_arguments {
-                    String::new()
-                } else {
-                    self.trace_arguments(&call.arguments)
-                };
-                format!(
-                    "#{depth} {file}({line}): {}({arguments})",
-                    self.qualified_name(call.function, call.this)
-                )
-            })
+            .map(|call| (call.function, call.this, call.arguments.clone()))
             .collect();
+        let mut trace = PhpArray::new(self)?;
+        for (function, this, arguments) in calls {
+            let mut row = PhpArray::new(self)?;
+            let name = self.declared_name(function);
+            let method = self.native_method(function).map(|method| {
+                let class = self.class_name(method.class);
+                (class, if this.is_some() { "->" } else { "::" })
+            });
+            let file = Value::string(PhpString::new(self, &file)?);
+            self.set_string_key(&mut row, b"file", file)?;
+            self.set_string_key(&mut row, b"line", Value::int(line))?;
+            let name = Value::string(PhpString::new(self, name.as_bytes())?);
+            self.set_string_key(&mut row, b"function", name)?;
+            if let Some((class, join)) = method {
+                let class = Value::string(PhpString::new(self, class.as_bytes())?);
+                self.set_string_key(&mut row, b"class", class)?;
+                let join = Value::string(PhpString::new(self, join.as_bytes())?);
+                self.set_string_key(&mut row, b"type", join)?;
+            }
+            if !ignore_arguments {
+                let mut args = PhpArray::new(self)?;
+                for argument in arguments {
+                    let argument = argument.deref();
+                    self.addref(&argument);
+                    args.append(self, argument)?;
+                }
+                self.set_string_key(&mut row, b"args", Value::array(args))?;
+            }
+            trace.append(self, Value::array(row))?;
+        }
+        Ok(trace)
+    }
+
+    /// `zend_hash_str_update` on a row: `value` at the string key `name`,
+    /// the key a string of the request's that the array takes.
+    fn set_string_key(
+        &mut self,
+        row: &mut PhpArray,
+        name: &[u8],
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let key = Key::Str(PhpString::new(self, name)?);
+        row.set(self, key, value)
+    }
+
+    /// `zend_trace_to_string` (`Z/Zend/zend_exceptions.c:668`) with
+    /// `include_main`: `_build_trace_string` over each row that is an
+    /// array, `#N file(line): ` where the row names a `file`, `[internal
+    /// function]: ` where it names none, the `class` and `type` where
+    /// there are ones, the `function`, and the `args` between the
+    /// parentheses; then `#N {main}`.
+    fn trace_to_string(&self, trace: PhpArray) -> String {
+        let mut frames: Vec<String> = Vec::new();
+        for (_, row) in &trace {
+            let Some(row) = row.as_array() else {
+                continue;
+            };
+            let field = |name: &[u8]| {
+                row.into_iter()
+                    .find(|(key, _)| matches!(key, Key::Str(s) if s.as_bytes() == name))
+                    .map(|(_, value)| value)
+            };
+            let string = |name: &[u8]| {
+                field(name).and_then(|v| {
+                    v.as_str_bytes()
+                        .map(|b| String::from_utf8_lossy(b).into_owned())
+                })
+            };
+            let site = match string(b"file") {
+                Some(file) => {
+                    let line = field(b"line").and_then(|v| v.as_int()).unwrap_or(0);
+                    format!("{file}({line}): ")
+                }
+                None => String::from("[internal function]: "),
+            };
+            let class = string(b"class").unwrap_or_default();
+            let join = string(b"type").unwrap_or_default();
+            let function = string(b"function").unwrap_or_else(|| String::from("unknown"));
+            let arguments = field(b"args")
+                .and_then(|v| v.as_array().copied())
+                .map(|args| {
+                    let values: Vec<Value> = args.into_iter().map(|(_, v)| v).collect();
+                    self.trace_arguments(&values)
+                })
+                .unwrap_or_default();
+            frames.push(format!(
+                "#{} {site}{class}{join}{function}({arguments})",
+                frames.len()
+            ));
+        }
         let main = frames.len();
         frames.push(format!("#{main} {{main}}"));
         frames.join("\n")
+    }
+
+    /// The backtrace a fatal carries, `zend_fetch_debug_backtrace`
+    /// rendered by `zend_trace_to_string` at the site, its rows given
+    /// back once rendered; the memory limit refusing the rows leaves the
+    /// fatal without one.
+    fn trace_as_string(&mut self) -> String {
+        let Ok(trace) = self.debug_backtrace() else {
+            return String::from("#0 {main}");
+        };
+        let text = self.trace_to_string(trace);
+        self.release(Value::array(trace));
+        text
     }
 
     /// `_build_trace_args` (`Z/Zend/zend_exceptions.c:539`) over one

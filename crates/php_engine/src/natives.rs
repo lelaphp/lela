@@ -491,6 +491,35 @@ fn defined(req: &mut Request) -> Result<Value, Thrown> {
 /// object(N)#2 (0) {
 /// }
 /// ```
+///
+/// A throwable is the same arm over the seven properties
+/// `zend_register_default_exception` declares on `Exception` and
+/// `Error`, the constructor's `message` and `code` in their slots, the
+/// site `new` recorded in `file` and `line`, and `trace` the array of
+/// frames below the top, none at the top level (design §5.9).
+///
+/// ```php
+/// var_dump(new Exception('m', 3));
+/// ```
+/// ```expect
+/// object(Exception)#1 (7) {
+///   ["message":protected]=>
+///   string(1) "m"
+///   ["string":"Exception":private]=>
+///   string(0) ""
+///   ["code":protected]=>
+///   int(3)
+///   ["file":protected]=>
+///   string(%d) "%s.php"
+///   ["line":protected]=>
+///   int(2)
+///   ["trace":"Exception":private]=>
+///   array(0) {
+///   }
+///   ["previous":"Exception":private]=>
+///   NULL
+/// }
+/// ```
 fn var_dump(req: &mut Request) -> Result<Value, Thrown> {
     let count = req.argument_count();
     if count == 0 {
