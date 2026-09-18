@@ -10,14 +10,18 @@
 //! What it reads: the open and close tags with the text around them,
 //! `<?=` as the `echo` php reads it as, an `echo` of one or more
 //! expressions, the empty statement, an expression statement, a block,
-//! a `for` and a `while` whose body is a block or one statement, a
+//! a `for`, a `while` and a `foreach` whose body is a block or one
+//! statement, the `foreach` over any expression with a variable as its
+//! value and one as its key, either by reference, a `return` with or
+//! without a value, a
 //! `switch` with its cases between braces, `break` and `continue` with
 //! or without a depth, a top-level `class` with no parent, interface,
 //! attribute or modifier whose members are untyped properties and
 //! constants, each declarator taking the pending doc comment as php's
 //! `backup_doc_comment` takes it, the
 //! unbraced `namespace A\B;`, and
-//! inside an expression a `match`, a number, a single- or double-quoted string with no
+//! inside an expression a `match`, an array expression `[k => v, w]` with
+//! no `...` and no `&`, a number, a single- or double-quoted string with no
 //! interpolation, `true`, `false`, `null`, a constant by name, a call of
 //! a named function, a parenthesised expression, a variable `$a` that is
 //! a CV, an assignment `$a = expr` to one, `$a++` and `++$a` on one,
@@ -60,6 +64,17 @@ pub(crate) enum Stmt {
     },
     /// `while (cond) body`, php's `ZEND_AST_WHILE`.
     While { cond: Expr, body: Read },
+    /// `foreach (expr as key => value) body`, php's `ZEND_AST_FOREACH`:
+    /// the subject, the value target, the key target where one is
+    /// written, and the body's statements.
+    Foreach {
+        expr: Expr,
+        value: Target,
+        key: Option<Target>,
+        body: Read,
+    },
+    /// `return;` or `return expr;`, php's `ZEND_AST_RETURN`.
+    Return(Option<Expr>),
     /// `namespace A\B;`, php's `ZEND_AST_NAMESPACE` with no body: the
     /// name as written, in force for what follows it. The braced form
     /// and the global `namespace;` are refused as what this reader
@@ -76,6 +91,24 @@ pub(crate) enum Stmt {
     Continue(Option<Expr>),
     /// `class M { … }` at the top level, php's `ZEND_AST_CLASS`.
     Class(Class),
+}
+
+/// One target of a `foreach`, php's `foreach_variable`: the expression
+/// written, and whether an `&` stands before it, php's `ZEND_AST_REF`
+/// around it. What the expression may be is the emitter's to refuse as
+/// `zend_compile_foreach` refuses it.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Target {
+    pub(crate) expr: Expr,
+    pub(crate) by_ref: bool,
+}
+
+/// One element of an array expression, php's `ZEND_AST_ARRAY_ELEM`: the
+/// value, and the key where one is written before `=>`.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Element {
+    pub(crate) key: Option<Expr>,
+    pub(crate) value: Expr,
 }
 
 /// One class declaration, php's `zend_ast_decl` for a class: the name as
@@ -150,6 +183,9 @@ pub(crate) enum Expr {
     Int(i64),
     Float(f64),
     Str(Vec<u8>),
+    /// `[1, 'k' => 2]`, php's `ZEND_AST_ARRAY` over its elements; the
+    /// `array(...)` spelling, `...` and `&` are not read.
+    Array(Vec<Element>),
     /// A constant named as written, php's `ZEND_AST_CONST`.
     Constant(Vec<u8>),
     /// `-$a` and `+$a`, php's `ZEND_AST_UNARY_MINUS` and
@@ -611,9 +647,17 @@ impl Reader<'_> {
             self.bump(4);
             return Ok(Some(Stmt::Echo(self.echoed()?)));
         }
+        if self.word_ahead(b"foreach") {
+            self.bump(7);
+            return self.foreach().map(Some);
+        }
         if self.word_ahead(b"for") {
             self.bump(3);
             return self.r#for().map(Some);
+        }
+        if self.word_ahead(b"return") {
+            self.bump(6);
+            return self.depth().map(|value| Some(Stmt::Return(value)));
         }
         if self.word_ahead(b"while") {
             self.bump(5);
@@ -877,6 +921,51 @@ impl Reader<'_> {
         self.punctuation(b')', "a `while` whose parenthesis nothing closes")?;
         let body = self.body()?;
         Ok(Stmt::While { cond, body })
+    }
+
+    /// `foreach (expr as value) body` and `foreach (expr as key => value)
+    /// body`, the keyword read: the subject, then each target as php's
+    /// `foreach_variable` has it, an `&` and a variable; a `list()`, a
+    /// `[...]`, a property or a dimension as a target is not read yet.
+    fn foreach(&mut self) -> Result<Stmt, Trouble> {
+        self.punctuation(b'(', "a `foreach` with no parenthesis after it")?;
+        let expr = self.expr()?;
+        self.skip_trivia();
+        if !self.word_ahead(b"as") {
+            return Err(self.trouble("a `foreach` with no `as` after its subject"));
+        }
+        self.bump(2);
+        let first = self.target()?;
+        self.skip_trivia();
+        let (key, value) = if self.starts_with(b"=>") {
+            self.bump(2);
+            (Some(first), self.target()?)
+        } else {
+            (None, first)
+        };
+        self.punctuation(b')', "a `foreach` whose parenthesis nothing closes")?;
+        let body = self.body()?;
+        Ok(Stmt::Foreach {
+            expr,
+            value,
+            key,
+            body,
+        })
+    }
+
+    /// php's `foreach_variable`: `variable` or `ampersand variable`.
+    fn target(&mut self) -> Result<Target, Trouble> {
+        self.skip_trivia();
+        let by_ref = self.byte(0) == Some(b'&');
+        if by_ref {
+            self.bump(1);
+            self.skip_trivia();
+        }
+        if self.byte(0) != Some(b'$') {
+            return Err(self.trouble("a `foreach` whose target this compiler cannot read yet"));
+        }
+        let expr = self.variable()?;
+        Ok(Target { expr, by_ref })
     }
 
     /// `switch (expr) { … }`, the keyword read: the subject between the
@@ -1465,6 +1554,10 @@ impl Reader<'_> {
                 })
             }
             Some(b) if b.is_ascii_digit() || (b == b'.' && self.digit_ahead(1)) => self.number(),
+            Some(b'[') => {
+                self.bump(1);
+                self.array()
+            }
             Some(b'(') if self.cast_ahead().is_some() => self.cast(),
             Some(b'(') => {
                 self.bump(1);
@@ -1582,14 +1675,14 @@ impl Reader<'_> {
                 arguments,
             });
         }
-        // php's grammar reads `unset(`, `isset(` and `empty(` as its
-        // own constructs, never as a call by that name, and each is
-        // still to be read; a `Call` named so would be emitted as
+        // php's grammar reads `unset(`, `isset(`, `empty(` and `array(`
+        // as its own constructs, never as a call by that name, and each
+        // is still to be read; a `Call` named so would be emitted as
         // `INIT_FCALL_BY_NAME` for a function that cannot exist.
         if self.byte(0) == Some(b'(')
             && matches!(
                 name.to_ascii_lowercase().as_slice(),
-                b"unset" | b"isset" | b"empty"
+                b"unset" | b"isset" | b"empty" | b"array"
             )
         {
             return Err(self.trouble(format!(
@@ -1608,6 +1701,55 @@ impl Reader<'_> {
         self.bump(1);
         let arguments = self.arguments()?;
         self.member_calls(Expr::Call { name, arguments })
+    }
+
+    /// `array_pair_list` after its `[`: each element `expr` or
+    /// `expr => expr`, `,` between them and one allowed before the `]`.
+    /// An element that is empty, unpacked with `...` or taken by
+    /// reference with `&` is not read yet, php's `array(...)` spelling
+    /// neither.
+    fn array(&mut self) -> Result<Expr, Trouble> {
+        let mut elements = Vec::new();
+        loop {
+            self.skip_trivia();
+            if self.byte(0) == Some(b']') {
+                self.bump(1);
+                return Ok(Expr::Array(elements));
+            }
+            if !elements.is_empty() {
+                if self.byte(0) != Some(b',') {
+                    return Err(self.trouble("an array expression this compiler cannot read yet"));
+                }
+                self.bump(1);
+                self.skip_trivia();
+                if self.byte(0) == Some(b']') {
+                    self.bump(1);
+                    return Ok(Expr::Array(elements));
+                }
+            }
+            if matches!(self.byte(0), Some(b',' | b'&')) || self.starts_with(b"...") {
+                return Err(self.trouble("an array expression this compiler cannot read yet"));
+            }
+            let first = self.expr()?;
+            self.skip_trivia();
+            let element = if self.starts_with(b"=>") {
+                self.bump(2);
+                self.skip_trivia();
+                if self.byte(0) == Some(b'&') {
+                    return Err(self.trouble("an array expression this compiler cannot read yet"));
+                }
+                Element {
+                    key: Some(first),
+                    value: self.expr()?,
+                }
+            } else {
+                Element {
+                    key: None,
+                    value: first,
+                }
+            };
+            elements.push(element);
+        }
     }
 
     /// `argument_list` after its `(`: each argument an expression, `,`
@@ -2051,7 +2193,7 @@ fn is_auto_global(name: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{BinaryOp, CastTo, Child, Expr, Level, Read, Stmt, Trouble};
+    use super::{BinaryOp, CastTo, Child, Element, Expr, Level, Read, Stmt, Target, Trouble};
 
     /// The reader on a thread nothing holds to a limit.
     fn read(source: &[u8]) -> Result<Read, Trouble> {
@@ -2869,5 +3011,136 @@ mod tests {
             read(b"<?php echo 1; ?>\r\nafter").unwrap_or_default().pop(),
             Some((Stmt::Inline(b"after".to_vec()), 2))
         );
+    }
+
+    #[test]
+    fn a_foreach_reads_its_subject_and_its_targets_by_value_or_by_reference() {
+        assert_eq!(
+            read(b"<?php\nFOREACH ($a as $v)\n  echo $v;").unwrap_or_default(),
+            vec![(
+                Stmt::Foreach {
+                    expr: Expr::Var(b"a".to_vec()),
+                    value: Target {
+                        expr: Expr::Var(b"v".to_vec()),
+                        by_ref: false,
+                    },
+                    key: None,
+                    body: vec![(Stmt::Echo(vec![Expr::Var(b"v".to_vec())]), 3)],
+                },
+                2
+            )],
+            "the keyword whatever its case, and one statement as the body at its own line"
+        );
+        assert_eq!(
+            read(b"<?php foreach (f() as $k => &$v) {}").unwrap_or_default(),
+            vec![(
+                Stmt::Foreach {
+                    expr: Expr::Call {
+                        name: b"f".to_vec(),
+                        arguments: vec![],
+                    },
+                    value: Target {
+                        expr: Expr::Var(b"v".to_vec()),
+                        by_ref: true,
+                    },
+                    key: Some(Target {
+                        expr: Expr::Var(b"k".to_vec()),
+                        by_ref: false,
+                    }),
+                    body: vec![],
+                },
+                1
+            )]
+        );
+        assert_eq!(
+            read(b"<?php foreach ($a as &$k => $this);").unwrap_or_default(),
+            vec![(
+                Stmt::Foreach {
+                    expr: Expr::Var(b"a".to_vec()),
+                    value: Target {
+                        expr: Expr::This,
+                        by_ref: false,
+                    },
+                    key: Some(Target {
+                        expr: Expr::Var(b"k".to_vec()),
+                        by_ref: true,
+                    }),
+                    body: vec![],
+                },
+                1
+            )],
+            "a key by reference and `$this` are read, for the emitter to refuse in php's words"
+        );
+        for source in [
+            b"<?php foreach ($a) {}".as_slice(),
+            b"<?php foreach ($a as) {}".as_slice(),
+            b"<?php foreach ($a as 1) {}".as_slice(),
+            b"<?php foreach ($a as [$v]) {}".as_slice(),
+            b"<?php foreach ($a as $o->p) {}".as_slice(),
+            b"<?php foreach ($a as $v {}".as_slice(),
+            b"<?php foreach ($a as $v):\nendforeach;".as_slice(),
+        ] {
+            assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
+        }
+    }
+
+    #[test]
+    fn a_return_reads_its_value_or_none() {
+        assert_eq!(
+            read(b"<?php return; return 1 + 2 ?>").unwrap_or_default(),
+            vec![
+                (Stmt::Return(None), 1),
+                (
+                    Stmt::Return(Some(Expr::Binary {
+                        op: BinaryOp::Add,
+                        left: Child::new(Expr::Int(1)),
+                        right: Child::new(Expr::Int(2)),
+                    })),
+                    1
+                ),
+            ]
+        );
+        assert!(read(b"<?php return 1 2;").is_err());
+    }
+
+    #[test]
+    fn an_array_expression_reads_its_elements_with_or_without_keys() {
+        assert_eq!(
+            read(b"<?php echo [], [1, 'k' => $a, [2,],];").unwrap_or_default(),
+            vec![(
+                Stmt::Echo(vec![
+                    Expr::Array(vec![]),
+                    Expr::Array(vec![
+                        Element {
+                            key: None,
+                            value: Expr::Int(1),
+                        },
+                        Element {
+                            key: Some(Expr::Str(b"k".to_vec())),
+                            value: Expr::Var(b"a".to_vec()),
+                        },
+                        Element {
+                            key: None,
+                            value: Expr::Array(vec![Element {
+                                key: None,
+                                value: Expr::Int(2),
+                            }]),
+                        },
+                    ]),
+                ]),
+                1
+            )]
+        );
+        for source in [
+            b"<?php echo [1 2];".as_slice(),
+            b"<?php echo [1, , 2];".as_slice(),
+            b"<?php echo [...$a];".as_slice(),
+            b"<?php echo [&$a];".as_slice(),
+            b"<?php echo ['k' => &$a];".as_slice(),
+            b"<?php echo [1;".as_slice(),
+            b"<?php echo array(1);".as_slice(),
+        ] {
+            assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
+        }
     }
 }

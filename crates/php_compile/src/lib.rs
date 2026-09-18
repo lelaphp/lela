@@ -3763,4 +3763,273 @@ mod tests {
             Some("a class reference of the scope this compiler cannot read yet")
         );
     }
+
+    /// #301's program under the oracle's `[regime.dump]`: `foreach` as
+    /// `zend_compile_foreach` shapes it, the constant array folded by
+    /// `zend_try_ct_eval_array`, `FE_RESET_R` into a `VAR` whose `op2`
+    /// and the fetch's `extended_value` point past the loop, the `JMP`
+    /// back to the fetch, `FE_FREE` at the end, and the `loop` live range
+    /// from the fetch to the free.
+    #[test]
+    fn a_foreach_is_php_s_op_array_ending_in_its_loop_live_range() {
+        let (unit, _strings) = unit_and_strings(b"<?php foreach ([1, 2] as $v) { echo $v; }");
+        assert_eq!(
+            unit.dump(&[]),
+            main_dump(
+                6,
+                1,
+                1,
+                "0000 V1 = FE_RESET_R array(...) 0004\n\
+                 0001 FE_FETCH_R V1 CV0($v) 0004\n\
+                 0002 ECHO CV0($v)\n\
+                 0003 JMP 0001\n\
+                 0004 FE_FREE V1\n\
+                 0005 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    1: 0001 - 0004 (loop)\n"
+            )
+        );
+        let array = unit.main.literals[0]
+            .as_arr()
+            .map(|a| a.iter().collect::<Vec<_>>());
+        assert_eq!(
+            array,
+            Some(vec![
+                (php_heap::Key::Long(0), php_heap::Zval::long(1)),
+                (php_heap::Key::Long(1), php_heap::Zval::long(2)),
+            ]),
+            "the literal is the array php folds"
+        );
+        assert_eq!(
+            unit.main.safepoints.as_ref(),
+            &[OplineIdx(0), OplineIdx(1), OplineIdx(5)],
+            "the entry, the header the back-edge lands on, the return"
+        );
+        assert_eq!(
+            unit.main.oplines[3].out, 1,
+            "the back-edge carries the header's number"
+        );
+        assert_eq!(unit.main.oplines[5].out, 2, "the return's");
+    }
+
+    /// The same program with `return` inside the loop, the oracle's
+    /// dump: `FE_FREE` flagged `ZEND_FREE_ON_RETURN` before the `RETURN`,
+    /// its `op2` the distance to the loop's own `FE_FREE`, and the `loop`
+    /// range split around the return (#255's split, read off a dump of
+    /// the oracle's for the first time).
+    #[test]
+    fn an_early_return_in_a_foreach_splits_the_loop_range_around_its_fe_free() {
+        let (unit, _strings) =
+            unit_and_strings(b"<?php\nforeach ([1, 2] as $v) {\n    echo $v;\n    return;\n}\n");
+        assert_eq!(
+            oplines_of(b"<?php\nforeach ([1, 2] as $v) {\n    echo $v;\n    return;\n}\n"),
+            "0000 V1 = FE_RESET_R array(...) 0006\n\
+             0001 FE_FETCH_R V1 CV0($v) 0006\n\
+             0002 ECHO CV0($v)\n\
+             0003 FE_FREE V1 loop-end(+3)\n\
+             0004 RETURN null\n\
+             0005 JMP 0001\n\
+             0006 FE_FREE V1\n\
+             0007 RETURN int(1)\n\
+             LIVE RANGES:\n\
+             \x20    1: 0001 - 0003 (loop)\n\
+             \x20    1: 0005 - 0006 (loop)\n"
+        );
+        assert_eq!(
+            unit.main.oplines[3].op2, 3,
+            "the distance to the loop's end"
+        );
+        assert_eq!(
+            unit.main.oplines[4].out, 2,
+            "the early return is a site of its own"
+        );
+        assert_eq!(
+            unit.main.oplines[5].out, 1,
+            "the back-edge carries the header's number"
+        );
+        assert_eq!(unit.main.oplines[7].out, 3, "and the final return its own");
+        let lines: Vec<u32> = unit.main.oplines[..7].iter().map(|op| op.lineno).collect();
+        assert_eq!(
+            lines,
+            vec![2, 2, 3, 4, 4, 2, 2],
+            "the JMP and the FE_FREE stand on the foreach's line"
+        );
+    }
+
+    /// The rest of `zend_compile_foreach` against the oracle's dump: a
+    /// key is the temporary the fetch writes, assigned to its CV; a
+    /// `continue` in a `foreach` is a second backward `JMP` to the
+    /// header carrying the header's number, and a `break` a forward one;
+    /// `&$v` is `FE_RESET_RW` and `FE_FETCH_RW`, with `SEPARATE` after a
+    /// call's `VAR`; `break 2` out of the inner loop and `continue 2`
+    /// free the inner iterator on the way, and a `return` frees every
+    /// open loop's, innermost first, a `switch` subject among them.
+    #[test]
+    fn the_key_the_jumps_and_the_reference_of_a_foreach_are_php_s() {
+        let source = b"<?php\nforeach ([1, 2] as $k => $v) {\n    echo $v;\n    continue;\n}\nforeach (f($a) as &$v) { $v = 1; break; }\nforeach ($a as $v) { switch (strlen($v)) { case 1: foreach ($a as $w) { return $v; } } continue 1; }\n";
+        assert_eq!(
+            oplines_of(source),
+            "0000 V4 = FE_RESET_R array(...) 0006\n\
+             0001 T5 = FE_FETCH_R V4 CV0($v) 0006\n\
+             0002 ASSIGN CV1($k) T5\n\
+             0003 ECHO CV0($v)\n\
+             0004 JMP 0001\n\
+             0005 JMP 0001\n\
+             0006 FE_FREE V4\n\
+             0007 INIT_FCALL_BY_NAME 1 string(\"f\")\n\
+             0008 SEND_VAR_EX CV2($a) 1\n\
+             0009 V7 = DO_FCALL_BY_NAME\n\
+             0010 V7 = SEPARATE V7\n\
+             0011 V8 = FE_RESET_RW V7 0016\n\
+             0012 FE_FETCH_RW V8 CV0($v) 0016\n\
+             0013 ASSIGN CV0($v) int(1)\n\
+             0014 JMP 0016\n\
+             0015 JMP 0012\n\
+             0016 FE_FREE V8\n\
+             0017 V10 = FE_RESET_R CV2($a) 0034\n\
+             0018 FE_FETCH_R V10 CV0($v) 0034\n\
+             0019 T11 = STRLEN CV0($v)\n\
+             0020 T12 = CASE T11 int(1)\n\
+             0021 JMPNZ T12 0023\n\
+             0022 JMP 0031\n\
+             0023 V13 = FE_RESET_R CV2($a) 0030\n\
+             0024 FE_FETCH_R V13 CV3($w) 0030\n\
+             0025 FE_FREE V13 loop-end(+5)\n\
+             0026 FREE T11 loop-end(+5)\n\
+             0027 FE_FREE V10 loop-end(+7)\n\
+             0028 RETURN CV0($v)\n\
+             0029 JMP 0024\n\
+             0030 FE_FREE V13\n\
+             0031 FREE T11\n\
+             0032 JMP 0018\n\
+             0033 JMP 0018\n\
+             0034 FE_FREE V10\n\
+             0035 RETURN int(1)\n\
+             LIVE RANGES:\n\
+             \x20    4: 0001 - 0006 (loop)\n\
+             \x20    7: 0010 - 0011 (tmp/var)\n\
+             \x20    8: 0012 - 0016 (loop)\n\
+             \x20    10: 0018 - 0027 (loop)\n\
+             \x20    11: 0020 - 0026 (tmp/var)\n\
+             \x20    13: 0024 - 0025 (loop)\n\
+             \x20    13: 0029 - 0030 (loop)\n\
+             \x20    11: 0029 - 0031 (tmp/var)\n\
+             \x20    10: 0029 - 0034 (loop)\n"
+        );
+        let (unit, _strings) = unit_and_strings(source);
+        let jumps: Vec<(u32, u32)> = [4, 5, 15, 29, 32, 33]
+            .iter()
+            .map(|&at| (unit.main.oplines[at].op1, unit.main.oplines[at].out))
+            .collect();
+        assert_eq!(
+            jumps,
+            vec![(1, 1), (1, 1), (12, 2), (24, 4), (18, 3), (18, 3)],
+            "two back-edges to one header carry one number, the header's"
+        );
+        assert_eq!(
+            unit.main.safepoints.as_ref(),
+            &[
+                OplineIdx(0),
+                OplineIdx(1),
+                OplineIdx(12),
+                OplineIdx(18),
+                OplineIdx(24),
+                OplineIdx(28),
+                OplineIdx(35),
+            ],
+            "the entry, each foreach's header as its loop begins, the two returns"
+        );
+        assert_eq!(
+            unit.main.oplines[14].out, 0,
+            "a break is a forward jump and no site"
+        );
+    }
+
+    /// `zend_try_ct_eval_array`'s keys: a decimal string is its integer,
+    /// a whole double is truncated, `false` and `true` are 0 and 1, a
+    /// repeated key keeps its first place with the last value, and the
+    /// keyless element takes the next index past the largest so far, as
+    /// `nNextFreeElement` has it since php 8.3 for a negative one too.
+    #[test]
+    fn a_constant_array_s_keys_are_the_ones_php_writes() {
+        let (unit, _strings) = unit_and_strings(
+            b"<?php echo ['a' => 1, '1' => 2, 1.0 => 3, true => 4, -5 => 6, 7, '08' => 8, '-0' => 9, false => 10, -7 => 11, 12];",
+        );
+        let array = unit.main.literals[0].as_arr().map(|a| {
+            a.iter()
+                .map(|(k, v)| {
+                    let key = match k {
+                        php_heap::Key::Long(n) => n.to_string(),
+                        php_heap::Key::Str(s) => String::from_utf8_lossy(s.bytes()).into_owned(),
+                    };
+                    (key, v.as_long().unwrap_or(-1))
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            array,
+            Some(vec![
+                ("a".to_owned(), 1),
+                ("1".to_owned(), 4),
+                ("-5".to_owned(), 6),
+                ("2".to_owned(), 7),
+                ("08".to_owned(), 8),
+                ("-0".to_owned(), 9),
+                ("0".to_owned(), 10),
+                ("-7".to_owned(), 11),
+                ("3".to_owned(), 12),
+            ])
+        );
+    }
+
+    #[test]
+    fn what_php_s_compiler_refuses_in_a_foreach_and_an_array_is_refused_in_its_words() {
+        for (source, message) in [
+            (
+                &b"<?php\nforeach ($a as &$k => $v) {}\n"[..],
+                "Key element cannot be a reference",
+            ),
+            (
+                b"<?php\nforeach ($a as $this) {}\n",
+                "Cannot re-assign $this",
+            ),
+            (
+                b"<?php\nforeach ($a as $this => $v) {}\n",
+                "Cannot re-assign $this",
+            ),
+            (
+                b"<?php\nforeach ([1, 2] as $v) { break 2; }\n",
+                "Cannot 'break' 2 levels",
+            ),
+            (
+                b"<?php\nforeach (strlen($a) as &$v) {}\n",
+                "Cannot use result of built-in function in write context",
+            ),
+            (b"<?php\necho [[] => 2];\n", "Illegal offset type"),
+        ] {
+            let error = refused(source).unwrap_or_else(|| CompileError {
+                level: Level::Parse,
+                message: String::from("compiled"),
+                line: 0,
+                raised: Vec::new(),
+            });
+            assert_eq!(error.level, Level::CompileError, "{message}");
+            assert_eq!(error.message, message);
+            assert_eq!(error.line, 2, "{message}");
+        }
+        // What php leaves to `INIT_ARRAY`, which is not emitted yet (#304).
+        for source in [
+            b"<?php echo [null => 1];".as_slice(),
+            b"<?php echo [1.5 => 1];".as_slice(),
+            b"<?php echo [$a];".as_slice(),
+            b"<?php echo [PHP_INT_MAX => 1, 2];".as_slice(),
+        ] {
+            assert_eq!(
+                refused(source).map(|e| e.message).as_deref(),
+                Some("an array expression this compiler cannot read yet"),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
 }

@@ -68,6 +68,22 @@
 //! and carries its safepoint number (design §5.7). php folds nothing
 //! here, so `for (;;)` is a `JMPNZ` over the constant `true` and not a
 //! `JMP`, which is the shape the compile-identity lane holds this to.
+//! A `foreach` is `zend_compile_foreach`'s: `FE_RESET_R` over the
+//! subject into a `VAR`, `FE_FETCH_R` over that `VAR` with the value's
+//! CV in `op2`, the key into a temporary the `ASSIGN` after it reads,
+//! the body, the `JMP` back to the `FE_FETCH_R`, which is the back-edge,
+//! and the `FE_FREE` where the loop ends, which is where the reset's
+//! `op2` and the fetch's `extended_value` point; `FE_RESET_RW` and
+//! `FE_FETCH_RW` where the value is taken by reference. The `FE_FREE`
+//! is the loop's variable, which a `break` or `continue` out past the
+//! loop and a `return` inside it emit marked `ZEND_FREE_ON_RETURN`
+//! (`zend_handle_loops_and_finally_ex`), and the live-range walk reads
+//! that mark ([`crate::live`]). A `return` is `zend_compile_return`'s:
+//! the value, or the constant `null`, after every open loop's variable
+//! is freed, and `RETURN` carrying its safepoint number. An array
+//! expression whose every element is constant is `zend_try_ct_eval_array`'s
+//! one constant array with php's keys; one with a variable in it is
+//! `INIT_ARRAY`, not yet emitted (#304).
 
 use std::cmp::Ordering;
 
@@ -83,7 +99,7 @@ use php_unit::{
     frameless_table,
 };
 
-use crate::read::{Arm, BinaryOp, Case, CastTo, Class, Expr, Read, Stmt};
+use crate::read::{Arm, BinaryOp, Case, CastTo, Class, Element, Expr, Read, Stmt, Target};
 use crate::{CompileError, Options, StackLimit};
 
 /// One op array under construction, and the home its constant strings
@@ -153,7 +169,35 @@ struct Loop {
     is_switch: bool,
     brk: u32,
     cont: u32,
-    var: Option<(OperandKind, u32)>,
+    var: Option<LoopVar>,
+    /// The safepoint number of the loop's header where `continue` lands
+    /// on it by a backward jump, a `foreach`'s `FE_FETCH_*`; a `for`, a
+    /// `while` and a `switch` are continued by a forward jump, which is
+    /// no site (design §5.7).
+    header: Option<u32>,
+}
+
+/// `zend_loop_var` where a loop has one: the opcode that frees it,
+/// `ZEND_FREE` for a `switch` subject and `ZEND_FE_FREE` for a
+/// `foreach`'s iterator, and the operand it frees.
+#[derive(Clone, Copy)]
+struct LoopVar {
+    opcode: Opcode,
+    kind: OperandKind,
+    var: u32,
+}
+
+impl LoopVar {
+    /// `zend_begin_loop`'s test: a loop has a variable to free only where
+    /// its `loop_var` is a `VAR` or a `TMP`; a constant or a CV is nobody's.
+    fn of(opcode: Opcode, var: Where) -> Option<LoopVar> {
+        let (kind, var) = match var {
+            Where::Temporary(at) => (OperandKind::Tmp, at),
+            Where::Returned(at) => (OperandKind::Var, at),
+            Where::Constant(_) | Where::Cv(_) => return None,
+        };
+        Some(LoopVar { opcode, kind, var })
+    }
 }
 
 /// One `break` or `continue` before `pass_two` resolves it.
@@ -431,6 +475,13 @@ impl Emit<'_> {
                 body,
             } => self.r#for(init, cond, step, body)?,
             Stmt::While { cond, body } => self.r#while(cond, body)?,
+            Stmt::Foreach {
+                expr,
+                value,
+                key,
+                body,
+            } => self.foreach(expr, value, key.as_ref(), body)?,
+            Stmt::Return(value) => self.r#return(value.as_ref())?,
             Stmt::Switch { expr, cases } => self.switch(expr, cases)?,
             Stmt::Break(depth) => self.break_continue(depth.as_ref(), true)?,
             Stmt::Continue(depth) => self.break_continue(depth.as_ref(), false)?,
@@ -546,6 +597,19 @@ impl Emit<'_> {
             Expr::Float(f) => Ok(ConstExpr::Double(*f)),
             Expr::Str(bytes) => Ok(ConstExpr::Str(bytes.clone().into_boxed_slice())),
             Expr::Constant(name) => Ok(ConstExpr::Constant(Name(name.clone().into_boxed_slice()))),
+            // `ZEND_AST_ARRAY` in a constant expression stays the tree
+            // it was written as, each element's key and value.
+            Expr::Array(elements) => {
+                let mut items = Vec::with_capacity(elements.len());
+                for element in elements {
+                    let key = match &element.key {
+                        Some(key) => Some(self.const_expr(key)?),
+                        None => None,
+                    };
+                    items.push((key, self.const_expr(&element.value)?));
+                }
+                Ok(ConstExpr::Array(items))
+            }
             Expr::Unary { .. } | Expr::Binary { .. } => {
                 if let Some(folded) = self.constant_of(expr)? {
                     match folded.kind() {
@@ -641,7 +705,7 @@ impl Emit<'_> {
             opcode: Opcode::Jmp,
             ..Opline::default()
         });
-        self.begin_loop(None, false);
+        self.begin_loop(None, None, false);
         let start = self.next();
         self.statements(body)?;
         let continue_at = self.next();
@@ -663,7 +727,7 @@ impl Emit<'_> {
             opcode: Opcode::Jmp,
             ..Opline::default()
         });
-        self.begin_loop(None, false);
+        self.begin_loop(None, None, false);
         let start = self.next();
         self.statements(body)?;
         let continue_at = self.next();
@@ -675,21 +739,222 @@ impl Emit<'_> {
         Ok(())
     }
 
-    /// `zend_begin_loop`: one more element of `brk_cont_array`, the
-    /// innermost from here, holding the subject's temporary when a
-    /// `switch` has one to free.
-    fn begin_loop(&mut self, var: Option<Where>, is_switch: bool) {
-        let var = match var {
-            Some(Where::Temporary(at)) => Some((OperandKind::Tmp, at)),
-            Some(Where::Returned(at)) => Some((OperandKind::Var, at)),
-            _ => None,
+    /// `zend_compile_foreach` (`Z/Zend/zend_compile.c:6094`): the key
+    /// refused where php refuses it, a reference or a list; the subject
+    /// compiled, under `BP_VAR_W` where the value is by reference and
+    /// the subject a variable, which for a CV is the CV itself, with
+    /// `SEPARATE` after a call's `VAR` (`zend_separate_if_call_and_write`);
+    /// `FE_RESET_R` or `FE_RESET_RW` over it into a `VAR`; the loop begun
+    /// with `FE_FREE` over that `VAR` as its variable; `FE_FETCH_R` or
+    /// `FE_FETCH_RW` with the value's CV in `op2`, `$this` refused as
+    /// php refuses it; the key, where one is written, as the temporary
+    /// the fetch writes, assigned to its CV (`zend_make_tmp_result`,
+    /// `zend_emit_assign_znode`); the body; then at the statement's line
+    /// the `JMP` back to the fetch, the back-edge, the reset's `op2` and
+    /// the fetch's `extended_value` aimed past the loop, the loop ended
+    /// and `FE_FREE` over the `VAR`. The header's safepoint is numbered
+    /// when the loop begins, so the `JMP` and every `continue` that lands
+    /// on the fetch carry one number (design §5.7).
+    ///
+    /// A value or a key that is not a variable, a property or a
+    /// dimension under `BP_VAR_W` and a subject `zend_compile_var` would
+    /// fetch for writing are not read yet.
+    fn foreach(
+        &mut self,
+        expr: &Expr,
+        value: &Target,
+        key: Option<&Target>,
+        body: &Read,
+    ) -> Result<(), CompileError> {
+        let line = self.line;
+        if key.is_some_and(|key| key.by_ref) {
+            return Err(self.compile_error("Key element cannot be a reference"));
+        }
+        let by_ref = value.by_ref;
+        let subject = self.foreach_subject(expr, by_ref)?;
+        let (op1_type, op1) = self.operand(subject);
+        let reset = self.temporary();
+        let opnum_reset = self.push(Opline {
+            opcode: if by_ref {
+                Opcode::FeResetRw
+            } else {
+                Opcode::FeResetR
+            },
+            op1_type,
+            op1,
+            out_type: OperandKind::Var,
+            out: reset,
+            ..Opline::default()
+        });
+        let opnum_fetch = self.next();
+        let header = self.safepoint(opnum_fetch);
+        self.begin_loop(
+            Some(LoopVar {
+                opcode: Opcode::FeFree,
+                kind: OperandKind::Var,
+                var: reset,
+            }),
+            Some(header),
+            false,
+        );
+        let value_cv = self.foreach_target(&value.expr)?;
+        self.push(Opline {
+            opcode: if by_ref {
+                Opcode::FeFetchRw
+            } else {
+                Opcode::FeFetchR
+            },
+            op1_type: OperandKind::Var,
+            op1: reset,
+            op2_type: OperandKind::Cv,
+            op2: value_cv,
+            ..Opline::default()
+        });
+        if let Some(key) = key {
+            self.foreach_key(opnum_fetch, &key.expr)?;
+        }
+        self.statements(body)?;
+        self.line = line;
+        self.push(Opline {
+            opcode: Opcode::Jmp,
+            op1: opnum_fetch,
+            out: header,
+            ..Opline::default()
+        });
+        let after = self.next();
+        if let Some(opline) = self.oplines.get_mut(opnum_reset as usize) {
+            opline.op2 = after;
+        }
+        if let Some(opline) = self.oplines.get_mut(opnum_fetch as usize) {
+            opline.extended_value = after;
+        }
+        self.end_loop(opnum_fetch);
+        self.push(Opline {
+            opcode: Opcode::FeFree,
+            op1_type: OperandKind::Var,
+            op1: reset,
+            ..Opline::default()
+        });
+        Ok(())
+    }
+
+    /// The subject of a `foreach`: compiled as an expression, and where
+    /// the value is taken by reference, as `zend_compile_var` under
+    /// `BP_VAR_W` compiles a variable, which for a CV is the CV itself;
+    /// a call's `VAR` is separated after it
+    /// (`zend_separate_if_call_and_write`), and a call whose value is a
+    /// temporary, one of the special table's, is php's compile error. A
+    /// property fetched for writing is not read yet.
+    fn foreach_subject(&mut self, expr: &Expr, by_ref: bool) -> Result<Where, CompileError> {
+        if by_ref && matches!(expr, Expr::Prop { .. }) {
+            return Err(self
+                .fatal("a `foreach` by reference over a property this compiler cannot read yet"));
+        }
+        let subject = self.expr(expr)?;
+        if by_ref && is_call(expr) {
+            let Where::Returned(at) = subject else {
+                return Err(
+                    self.compile_error("Cannot use result of built-in function in write context")
+                );
+            };
+            self.push(Opline {
+                opcode: Opcode::Separate,
+                op1_type: OperandKind::Var,
+                op1: at,
+                out_type: OperandKind::Var,
+                out: at,
+                ..Opline::default()
+            });
+        }
+        Ok(subject)
+    }
+
+    /// The key of a `foreach`: the fetch at `opnum_fetch` given a
+    /// temporary to write the key into (`zend_make_tmp_result`), then
+    /// `zend_emit_assign_znode`'s `ASSIGN` of it into the key's CV, into
+    /// a temporary nothing reads, which `zend_do_free` marks `UNUSED`.
+    fn foreach_key(&mut self, opnum_fetch: u32, key: &Expr) -> Result<(), CompileError> {
+        let key_cv = self.foreach_target(key)?;
+        let key_tmp = self.temporary();
+        if let Some(fetch) = self.oplines.get_mut(opnum_fetch as usize) {
+            fetch.out_type = OperandKind::Tmp;
+            fetch.out = key_tmp;
+        }
+        let out = self.temporary();
+        self.push(Opline {
+            opcode: Opcode::Assign,
+            op1_type: OperandKind::Cv,
+            op1: key_cv,
+            op2_type: OperandKind::Tmp,
+            op2: key_tmp,
+            out_type: OperandKind::Tmp,
+            out,
+            ..Opline::default()
+        });
+        self.do_free(Where::Temporary(out));
+        Ok(())
+    }
+
+    /// The CV a `foreach` value or key is assigned into: a variable
+    /// through `zend_try_compile_cv`, `$this` php's compile error, and
+    /// anything else, which php assigns through a `VAR`, not read yet.
+    fn foreach_target(&mut self, target: &Expr) -> Result<u32, CompileError> {
+        match target {
+            Expr::Var(name) => Ok(self.lookup_cv(name)),
+            Expr::This => Err(self.compile_error("Cannot re-assign $this")),
+            _ => Err(self.fatal("a `foreach` whose target this compiler cannot read yet")),
+        }
+    }
+
+    /// `zend_compile_return` (`Z/Zend/zend_compile.c:5694`) in the main
+    /// op array, which has no return type and no `finally`: the value,
+    /// or the constant `null` where none is written; every open loop's
+    /// variable freed innermost first (`zend_handle_loops_and_finally`,
+    /// which takes every loop on the stack); then `RETURN` over the
+    /// value, carrying its safepoint number as [`Self::final_return`]'s
+    /// carries its own, `extended_value` zero since the main op array
+    /// returns nothing by reference.
+    fn r#return(&mut self, value: Option<&Expr>) -> Result<(), CompileError> {
+        let value = match value {
+            Some(expr) => self.expr(expr)?,
+            None => Where::Constant(Zval::null()),
         };
+        let mut at = self.current_loop;
+        while let Some(index) = at {
+            let Some((var, parent)) = self.loops.get(index).map(|open| (open.var, open.parent))
+            else {
+                break;
+            };
+            if let Some(var) = var {
+                self.free_on_return(var);
+            }
+            at = parent;
+        }
+        let (op1_type, op1) = self.operand(value);
+        let at = self.next();
+        let number = self.safepoint(at);
+        self.push(Opline {
+            opcode: Opcode::Return,
+            op1_type,
+            op1,
+            out: number,
+            ..Opline::default()
+        });
+        Ok(())
+    }
+
+    /// `zend_begin_loop`: one more element of `brk_cont_array`, the
+    /// innermost from here, holding the variable the loop frees when it
+    /// has one, and the header's safepoint number where a `continue`
+    /// jumps back to it.
+    fn begin_loop(&mut self, var: Option<LoopVar>, header: Option<u32>, is_switch: bool) {
         self.loops.push(Loop {
             parent: self.current_loop,
             is_switch,
             brk: 0,
             cont: 0,
             var,
+            header,
         });
         self.current_loop = Some(self.loops.len() - 1);
     }
@@ -706,6 +971,20 @@ impl Emit<'_> {
             open.cont = cont;
             self.current_loop = open.parent;
         }
+    }
+
+    /// One opline of `zend_handle_loops_and_finally_ex`: the loop's
+    /// variable freed by the loop's own opcode, flagged
+    /// `ZEND_FREE_ON_RETURN`, which the live-range walk splits the
+    /// variable's range around ([`crate::live`]).
+    fn free_on_return(&mut self, var: LoopVar) {
+        self.push(Opline {
+            opcode: var.opcode,
+            op1_type: var.kind,
+            op1: var.var,
+            extended_value: FREE_ON_RETURN,
+            ..Opline::default()
+        });
     }
 
     /// `zend_compile_break_continue`: the depth, `1` unwritten and
@@ -754,14 +1033,8 @@ impl Emit<'_> {
             else {
                 break;
             };
-            if let Some((kind, var)) = var {
-                self.push(Opline {
-                    opcode: Opcode::Free,
-                    op1_type: kind,
-                    op1: var,
-                    extended_value: FREE_ON_RETURN,
-                    ..Opline::default()
-                });
+            if let Some(var) = var {
+                self.free_on_return(var);
             }
             at = parent;
             left += 1;
@@ -818,6 +1091,7 @@ impl Emit<'_> {
             let Some(target) = self.loops.get(index) else {
                 continue;
             };
+            let header = if jump.is_break { None } else { target.header };
             let target = if jump.is_break {
                 target.brk
             } else {
@@ -825,6 +1099,12 @@ impl Emit<'_> {
             };
             if let Some(opline) = self.oplines.get_mut(jump.at as usize) {
                 opline.op1 = target;
+                // A `continue` that jumps back to a `foreach`'s header is
+                // a back-edge and carries the header's number, the one
+                // the loop's own `JMP` carries (design §5.7).
+                if let Some(header) = header {
+                    opline.out = header;
+                }
             }
         }
     }
@@ -841,7 +1121,7 @@ impl Emit<'_> {
     /// loop ended, and the subject freed when it is a temporary.
     fn switch(&mut self, expr: &Expr, cases: &[Case]) -> Result<(), CompileError> {
         let subject = self.expr(expr)?;
-        self.begin_loop(Some(subject), true);
+        self.begin_loop(LoopVar::of(Opcode::Free, subject), None, true);
         let case_node = self.temporary();
         let mut table = match self.switch_jumptable_type(cases)? {
             Some(kind) if should_use_jumptable(cases, kind) => Some(self.emit_table(
@@ -1494,6 +1774,12 @@ impl Emit<'_> {
                 arguments,
             } => self.method_call(object, method, arguments),
             Expr::Instanceof { expr, class } => self.instance_of(expr, class),
+            // `zend_compile_array`: the constant `zend_try_ct_eval_array`
+            // folds, or `INIT_ARRAY`, not yet emitted (#304).
+            Expr::Array(_) => match self.constant_of(expr)? {
+                Some(value) => Ok(Where::Constant(value)),
+                None => Err(self.fatal("an array expression this compiler cannot read yet")),
+            },
             known => Ok(Where::Constant(self.constant_expr(known)?)),
         }
     }
@@ -1987,6 +2273,7 @@ impl Emit<'_> {
                 };
                 folded.ok_or_else(|| self.fatal("a call this compiler cannot fold"))
             }
+            Expr::Array(elements) => self.constant_array(elements),
             Expr::Var(_)
             | Expr::This
             | Expr::Prop { .. }
@@ -2006,6 +2293,81 @@ impl Emit<'_> {
             // expression's walk does (`zend_eval_const_expr`), and none is
             // read yet.
             Expr::Cast { .. } => Err(self.fatal("a cast is no constant expression here")),
+        }
+    }
+
+    /// `zend_try_ct_eval_array` (`Z/Zend/zend_compile.c:10085`) over an
+    /// array expression whose every element folds: one constant array in the home
+    /// the unit's strings are in ([`Intern::constant_array`]), the keys as
+    /// php writes them, an integer as itself, a string through
+    /// `zend_symtable_update`, which makes an integer of a decimal one, a
+    /// double truncated where it is a whole number, `false` and `true`
+    /// as 0 and 1, and the element with no key at `nNextFreeElement`,
+    /// one past the largest integer key so far and 0 before any. A
+    /// double that is no whole number, a `null` key, which warns when
+    /// served, or a next index past `ZEND_LONG_MAX` leaves the array to
+    /// the request in php, an `INIT_ARRAY` this compiler does not emit yet
+    /// (#304), and an element that does not fold is the same; an array
+    /// or an object as a key is php's `Illegal offset type`.
+    fn constant_array(&mut self, elements: &[Element]) -> Result<Zval, CompileError> {
+        let mut entries: Vec<(Key, Zval)> = Vec::with_capacity(elements.len());
+        let mut next_free = i64::MIN;
+        for element in elements {
+            let value = self.constant_expr(&element.value)?;
+            let key = match &element.key {
+                None => {
+                    let index = if next_free == i64::MIN { 0 } else { next_free };
+                    if index == i64::MAX && entries.iter().any(|(k, _)| *k == Key::Long(index)) {
+                        return Err(self.fatal("an array expression this compiler cannot read yet"));
+                    }
+                    Key::Long(index)
+                }
+                Some(key) => {
+                    let key = self.constant_expr(key)?;
+                    match key.kind() {
+                        ZvalType::Long => Key::Long(key.as_long().unwrap_or(0)),
+                        ZvalType::String => match key.as_str() {
+                            Some(s) => numeric_key(s.bytes()).map_or(Key::Str(s), Key::Long),
+                            None => Key::Long(0),
+                        },
+                        ZvalType::Double => {
+                            let d = key.as_double().unwrap_or(0.0);
+                            match long_compatible(Number::Double(d)) {
+                                Some(n) => Key::Long(n),
+                                None => {
+                                    return Err(self.fatal(
+                                        "an array expression this compiler cannot read yet",
+                                    ));
+                                }
+                            }
+                        }
+                        ZvalType::False => Key::Long(0),
+                        ZvalType::True => Key::Long(1),
+                        // A null key warns at run time, so php leaves
+                        // the literal to `INIT_ARRAY`.
+                        ZvalType::Null => {
+                            return Err(
+                                self.fatal("an array expression this compiler cannot read yet")
+                            );
+                        }
+                        _ => return Err(self.compile_error("Illegal offset type")),
+                    }
+                }
+            };
+            if let Key::Long(n) = key
+                && n >= next_free
+            {
+                next_free = n.saturating_add(1);
+            }
+            match entries.iter_mut().find(|(k, _)| *k == key) {
+                Some(held) => held.1 = value,
+                None => entries.push((key, value)),
+            }
+        }
+        match self.strings.constant_array(&entries) {
+            Ok(array) => Ok(Zval::array(array)),
+            Err(Fatal::Error(message)) => Err(self.fatal(message)),
+            Err(Fatal::OutOfMemory(_)) => Err(self.fatal("Out of memory")),
         }
     }
 
@@ -2685,6 +3047,44 @@ impl Emit<'_> {
             ..Opline::default()
         });
     }
+}
+
+/// `zend_is_call`: a call by name, a call on a class or a method call,
+/// whose `VAR` is separated where it is written to.
+fn is_call(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Call { .. } | Expr::StaticCall { .. } | Expr::MethodCall { .. }
+    )
+}
+
+/// `ZEND_HANDLE_NUMERIC_STR` (`Z/Zend/zend_hash.h:402`,
+/// `_zend_handle_numeric_str_ex` at `zend_hash.c:3300`): the integer a
+/// string key stands for, a decimal with no leading zero, no sign but
+/// `-`, not `-0`, within `zend_long`; nothing for any other string.
+fn numeric_key(key: &[u8]) -> Option<i64> {
+    let (negative, digits) = match key {
+        [b'-', rest @ ..] => (true, rest),
+        _ => (false, key),
+    };
+    let &first = digits.first()?;
+    if !first.is_ascii_digit() || (first == b'0' && key.len() > 1) || digits.len() > 19 {
+        return None;
+    }
+    let mut n: i64 = 0;
+    for &b in digits {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        let digit = i64::from(b - b'0');
+        n = n.checked_mul(10)?;
+        n = if negative {
+            n.checked_sub(digit)?
+        } else {
+            n.checked_add(digit)?
+        };
+    }
+    Some(n)
 }
 
 /// `zend_vm_calc_used_stack` for a native callee, the number
