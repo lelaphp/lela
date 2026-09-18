@@ -199,6 +199,15 @@ pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
             None,
         ),
         (
+            ClassDecl {
+                methods: array_access_methods(),
+                ..declared(b"ArrayAccess", ClassKind::Interface, None)
+            },
+            Vec::new(),
+            None,
+            None,
+        ),
+        (
             declared(b"Exception", ClassKind::Class, None),
             throwable_methods(),
             Some(&THROWABLE),
@@ -630,6 +639,42 @@ fn throwable_method(name: &[u8], parameters: &[Parameter], returns: Option<Type>
         is_final: false,
         tentative_return: false,
     }
+}
+
+/// One abstract method of a Zend interface, with the parameters the stub
+/// writes and the tentative return type `@tentative-return-type` marks:
+/// a subclass that omits or narrows it is php's deprecation and not a
+/// fatal, which is what `zend_interfaces.stub.php` gives every method of
+/// `ArrayAccess`, `Iterator` and `Countable`.
+fn interface_method(name: &[u8], parameters: &[Parameter], returns: Option<Type>) -> MethodDecl {
+    MethodDecl {
+        is_abstract: true,
+        tentative_return: true,
+        ..throwable_method(name, parameters, returns)
+    }
+}
+
+/// The four methods `interface ArrayAccess` declares, in the stub's
+/// order, each parameter `mixed` as it writes them.
+fn array_access_methods() -> Vec<MethodDecl> {
+    let offset = || Parameter {
+        name: Name(b"offset".as_slice().into()),
+        ty: Some(Type::Mixed),
+        by_ref: false,
+        variadic: false,
+        default: None,
+        attributes: Vec::new(),
+    };
+    let value = Parameter {
+        name: Name(b"value".as_slice().into()),
+        ..offset()
+    };
+    vec![
+        interface_method(b"offsetExists", &[offset()], Some(Type::Bool)),
+        interface_method(b"offsetGet", &[offset()], Some(Type::Mixed)),
+        interface_method(b"offsetSet", &[offset(), value], Some(Type::Void)),
+        interface_method(b"offsetUnset", &[offset()], Some(Type::Void)),
+    ]
 }
 
 /// A `final public` method of a throwable, the shape the seven getters

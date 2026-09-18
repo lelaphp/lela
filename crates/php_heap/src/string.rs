@@ -245,6 +245,32 @@ impl Str {
         hash
     }
 
+    /// One byte of the string written where it stands, the
+    /// `Z_STRVAL_P(str)[offset] = c` of `zend_assign_to_string_offset`
+    /// (`Z/Zend/zend_execute.c`): php writes a string offset into the
+    /// allocation it already has whenever the string has one owner, and
+    /// allocates nothing, which is what `memory_get_peak_usage()` reads.
+    /// The hash and the UTF-8 verdict are forgotten with it, as php's
+    /// `zend_string_forget_hash_val` there does.
+    ///
+    /// Only the one owner of a string the request holds may write one:
+    /// an interned string is a table's and every thread reads it, a
+    /// persistent one is the process's, and a shared one is separated
+    /// first (`SEPARATE_STRING`). Nothing happens where `at` is past the
+    /// bytes, which is the caller having failed to extend it first.
+    pub fn put_byte(self, at: usize, byte: u8) {
+        if self.is_interned() || self.is_persistent() || at >= self.len() {
+            return;
+        }
+        self.forget_hash();
+        // SAFETY: the bytes sit right after the header, inside the same
+        // allocation, and `at` is one of them.
+        let slot = unsafe { self.0.as_ptr().cast::<u8>().add(HEADER + at) };
+        // SAFETY: the caller holds the string's one owner, so no borrow
+        // of [`Str::bytes`] is live across this write.
+        unsafe { slot.write(byte) };
+    }
+
     /// `zend_string_forget_hash_val`: the hash and the UTF-8 verdict are
     /// no longer known, which is what a string that was written into says.
     /// Only a string the request owns is written into; php does not call

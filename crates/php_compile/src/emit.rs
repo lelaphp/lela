@@ -101,8 +101,8 @@ use php_unit::decl::{
     FunctionDecl, MethodDecl, Name, Parameter, PropertyDecl, Type, Visibility,
 };
 use php_unit::{
-    Diagnostic, FramelessEntry, Level, MethodBody, OpArray, Opcode, OperandKind, Opline, OplineIdx,
-    TryCatch, Unit, frameless_table,
+    ConstIdx, Diagnostic, FramelessEntry, Level, MethodBody, OpArray, Opcode, OperandKind, Opline,
+    OplineIdx, TryCatch, Unit, frameless_table,
 };
 
 use crate::read;
@@ -227,6 +227,11 @@ pub(crate) struct Emit<'a> {
     /// which entries of [`Emit::dynamic`] it declares, in the order a
     /// `DECLARE_FUNCTION`'s `op2` indexes them.
     dynamic_func_defs: Vec<u32>,
+    /// The numeric-dimension pairs of the op array being compiled,
+    /// [`OpArray::numeric_dims`]: the slot of every constant dimension
+    /// `zend_handle_numeric_dim` folded, in the order they were laid
+    /// down.
+    numeric_dims: Vec<ConstIdx>,
     /// The method bodies of `classes`, [`Unit::methods`].
     methods: Vec<MethodBody>,
     /// The file's name, [`Options::filename`], what a declaration
@@ -539,6 +544,7 @@ pub(crate) fn unit(
         dynamic_func_defs: Vec::new(),
         static_vars: Vec::new(),
         fn_flags: FnFlags::default(),
+        numeric_dims: Vec::new(),
         methods: Vec::new(),
         filename: options.filename.clone(),
         loops: Vec::new(),
@@ -609,6 +615,7 @@ struct Saved {
     dynamic_func_defs: Vec<u32>,
     static_vars: Vec<Name>,
     fn_flags: FnFlags,
+    numeric_dims: Vec<ConstIdx>,
 }
 
 /// `pass_two`'s `ZEND_FAST_CALL` arm (`Z/Zend/zend_opcode.c:1150`):
@@ -677,8 +684,19 @@ impl Emit<'_> {
     }
 
     /// The slot holding `value`, the same value twice keeping one slot.
+    /// The long of a numeric-dimension pair is not one of them: its
+    /// meaning is the slot after it ([`Self::dim_operand`]), so `$o[10]`
+    /// beside `$o["10"]` would read the written `"10"` if the two shared
+    /// a slot, where php gives every constant a slot of its own
+    /// (`zend_add_literal`) and they never do.
     fn constant(&mut self, value: Zval) -> u32 {
-        if let Some(at) = self.constants.iter().position(|held| *held == value) {
+        let paired = |at: usize| self.numeric_dims.iter().any(|pair| pair.0 as usize == at);
+        if let Some(at) = self
+            .constants
+            .iter()
+            .position(|held| *held == value)
+            .filter(|at| !paired(*at))
+        {
             return u32::try_from(at).unwrap_or(0);
         }
         let at = u32::try_from(self.constants.len()).unwrap_or(u32::MAX);
@@ -884,11 +902,11 @@ impl Emit<'_> {
     /// with the name as one constant in `op2` and three cache slots in
     /// `extended_value` (`zend_alloc_cache_slots(3)`).
     ///
-    /// The constant offset goes through [`Self::numeric_dim`], the one
-    /// `zend_handle_numeric_dim` every dimension is held to; the second
-    /// constant php keeps beside the long for an `ArrayAccess` offset is
-    /// #438, and nothing reaches it while an object dimension is not
-    /// served.
+    /// The constant offset goes through [`Self::dim_operand`], the one
+    /// `zend_handle_numeric_dim` every dimension is held to, so the
+    /// string as written stands in the slot after the long and
+    /// `UNSET_DIM` hands `offsetUnset` on an `ArrayAccess` what php hands
+    /// it (bug #63217).
     fn unset(&mut self, target: &Unset) -> Result<(), CompileError> {
         match target {
             Unset::Var(name) => {
@@ -903,7 +921,7 @@ impl Emit<'_> {
             Unset::Dim { var, dim } => {
                 let cv = self.lookup_cv(var);
                 let dim = self.expr(dim)?;
-                let (op2_type, op2) = self.operand(Self::numeric_dim(dim));
+                let (op2_type, op2) = self.dim_operand(dim);
                 self.push(Opline {
                     opcode: Opcode::UnsetDim,
                     op1_type: OperandKind::Cv,
@@ -1794,6 +1812,7 @@ impl Emit<'_> {
             dynamic_func_defs: std::mem::take(&mut self.dynamic_func_defs),
             static_vars: std::mem::take(&mut self.static_vars),
             fn_flags: std::mem::replace(&mut self.fn_flags, fn_flags),
+            numeric_dims: std::mem::take(&mut self.numeric_dims),
         }
     }
 
@@ -1821,6 +1840,7 @@ impl Emit<'_> {
         self.dynamic_func_defs = saved.dynamic_func_defs;
         self.static_vars = saved.static_vars;
         self.fn_flags = saved.fn_flags;
+        self.numeric_dims = saved.numeric_dims;
     }
 
     /// The op array the emitter holds, finished as `zend_compile` and
@@ -1862,6 +1882,7 @@ impl Emit<'_> {
             dynamic_func_defs: std::mem::take(&mut self.dynamic_func_defs).into_boxed_slice(),
             bound_vars: std::mem::take(&mut self.static_vars).into_boxed_slice(),
             no_receiver: self.fn_flags.is_static,
+            numeric_dims: std::mem::take(&mut self.numeric_dims).into_boxed_slice(),
         })
     }
 
@@ -4045,8 +4066,7 @@ impl Emit<'_> {
             let (kind, at) = match index {
                 Some(index) => {
                     let value = self.expr(index)?;
-                    let value = Emit::numeric_dim(value);
-                    self.operand(value)
+                    self.dim_operand(value)
                 }
                 None if fetch == Fetch::Read => {
                     return Err(self.compile_error("Cannot use [] for reading"));
@@ -4109,23 +4129,31 @@ impl Emit<'_> {
         }
     }
 
-    /// `zend_handle_numeric_dim`: a constant dimension whose string is a
-    /// canonical decimal integer is that integer, so `$a["10"]` and
-    /// `$a[10]` are one key and the handler needs no numeric test over a
-    /// constant. php keeps the string as a second constant beside it for
-    /// an `ArrayAccess` offset (bug #63217); an object container is not
-    /// served yet, and nothing here reads that one.
-    fn numeric_dim(value: Where) -> Where {
+    /// `zend_handle_numeric_dim` (`Z/Zend/zend_compile.c:2788`): a
+    /// constant dimension whose string is a canonical decimal integer is
+    /// that integer, so `$a["10"]` and `$a[10]` are one key and the
+    /// handler needs no numeric test over a constant. php keeps the
+    /// string in a second slot right after it, marked
+    /// `Z_EXTRA = ZEND_EXTRA_VALUE`, which a dimension over an
+    /// `ArrayAccess` object reads instead of the long (bug #63217); here
+    /// the pair is the two slots in a row and the first one's index in
+    /// [`OpArray::numeric_dims`]. Both are `zend_add_literal` as it
+    /// stands, never a slot the table holds already, since the pair is
+    /// read by its adjacency.
+    fn dim_operand(&mut self, value: Where) -> (OperandKind, u32) {
         let Where::Constant(constant) = value else {
-            return value;
+            return self.operand(value);
         };
-        let Some(bytes) = constant.as_str() else {
-            return value;
+        let folded = constant
+            .as_str()
+            .and_then(|bytes| php_heap::canonical_int(bytes.bytes()));
+        let Some(n) = folded else {
+            return self.operand(value);
         };
-        match php_heap::canonical_int(bytes.bytes()) {
-            Some(n) => Where::Constant(Zval::long(n)),
-            None => value,
-        }
+        let at = self.literal(Zval::long(n));
+        let _written = self.literal(constant);
+        self.numeric_dims.push(ConstIdx(at));
+        (OperandKind::Const, at)
     }
 
     /// `zend_compile_expr_with_potential_assign_to_self`: `$a[0] = $a`
@@ -6922,6 +6950,7 @@ mod tests {
             dynamic_func_defs: Vec::new(),
             static_vars: Vec::new(),
             fn_flags: FnFlags::default(),
+            numeric_dims: Vec::new(),
             methods: Vec::new(),
             filename: options.filename.clone(),
             loops: Vec::new(),

@@ -16,6 +16,7 @@ LiveKind
 LiveRange
 MethodBody
 OpArray
+OpArray::dimension_written
 Opcode
 OperandKind
 Opline

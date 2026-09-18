@@ -4711,6 +4711,59 @@ class C {
         }
     }
 
+    /// `zend_handle_numeric_dim`'s pair (`Z/Zend/zend_compile.c:2788`):
+    /// a constant dimension whose string is a canonical decimal integer
+    /// is the long in the operand with the string as written in the slot
+    /// right after it, and the long's slot is that pair's alone,
+    /// so `$o[10]` beside `$o["10"]` reads the long. A dimension written
+    /// as an integer, and one that is no canonical integer, make no pair.
+    #[test]
+    fn a_constant_numeric_dimension_keeps_the_written_string_after_the_long() {
+        use php_heap::Zval;
+        use php_unit::ConstIdx;
+        let (unit, _strings) =
+            unit_and_strings(b"<?php $a[\"10\"] = 1; $a[10] = 2; $a[\"k\"] = 3;");
+        let main = &unit.main;
+        assert_eq!(
+            main.numeric_dims.len(),
+            1,
+            "one pair, for the written \"10\""
+        );
+        let paired = main.numeric_dims[0];
+        assert_eq!(
+            main.dimension_written(paired)
+                .and_then(Zval::as_str)
+                .map(|s| s.bytes().to_vec()),
+            Some(b"10".to_vec()),
+            "the written form stands after the long"
+        );
+        let dims: Vec<Zval> = main
+            .oplines
+            .iter()
+            .filter(|op| op.opcode == Opcode::AssignDim && op.op2_type == OperandKind::Const)
+            .filter_map(|op| main.literals.get(op.op2 as usize).copied())
+            .collect();
+        assert_eq!(dims.len(), 3);
+        assert_eq!(dims[0].as_long(), Some(10), "the written \"10\" folded");
+        assert_eq!(dims[1].as_long(), Some(10), "10 as written");
+        assert_eq!(
+            main.dimension_written(ConstIdx(
+                main.oplines
+                    .iter()
+                    .filter(|op| op.opcode == Opcode::AssignDim)
+                    .nth(1)
+                    .map_or(0, |op| op.op2)
+            ))
+            .and_then(Zval::as_long),
+            Some(10),
+            "a dimension written as an integer keeps no pair and reads as itself"
+        );
+        assert_eq!(
+            dims[2].as_str().map(|s| s.bytes().to_vec()),
+            Some(b"k".to_vec())
+        );
+    }
+
     /// What a dimension refuses: `[]` where a value is wanted, php's
     /// `Cannot use [] for reading`; and a container under the chain that
     /// is no plain variable, which php fetches by `FETCH_OBJ_W` with

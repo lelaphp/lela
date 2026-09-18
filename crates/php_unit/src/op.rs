@@ -302,6 +302,33 @@ pub struct OpArray {
     /// method's own is its [`crate::decl::MethodDecl::is_instance`],
     /// which the linker reads; nothing but a closure sets this.
     pub no_receiver: bool,
+    /// `zend_handle_numeric_dim`'s pairs (`Z/Zend/zend_compile.c:2788`):
+    /// for every constant dimension whose written string was a canonical
+    /// decimal integer, the slot of `literals` holding the integer php
+    /// folded it to, with the string as written in the slot right after
+    /// it. php marks the first of the two `Z_EXTRA = ZEND_EXTRA_VALUE`
+    /// and a dimension handler over an object reads the second (`dim++`,
+    /// `Z/Zend/zend_vm_def.h:6822`), so `$o['10']` hands `offsetGet` the
+    /// string `"10"` where `$a['10']` is the key `10` (bug #63217). The
+    /// slots are ascending, as the compiler lays them down.
+    pub numeric_dims: Box<[ConstIdx]>,
+}
+
+impl OpArray {
+    /// `Z_EXTRA_P(dim) == ZEND_EXTRA_VALUE ? dim + 1 : dim`: the
+    /// dimension a handler over an object reads for the `CONST` operand
+    /// at `at`, which is the string as written where
+    /// `zend_handle_numeric_dim` folded one, and the operand's own slot
+    /// of `literals` everywhere else.
+    #[must_use]
+    pub fn dimension_written(&self, at: ConstIdx) -> Option<Zval> {
+        let paired = self
+            .numeric_dims
+            .binary_search_by_key(&at.0, |c| c.0)
+            .is_ok();
+        let at = if paired { at.0.saturating_add(1) } else { at.0 };
+        self.literals.get(at as usize).copied()
+    }
 }
 
 #[cfg(test)]
