@@ -602,6 +602,20 @@ fn json_encode(req: &mut Request) -> Result<Value, Thrown> {
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// Caught, the throwable answers its class, php's message and the
+/// `JSON_ERROR_*` code the parser stopped with, which is the whole of
+/// what `JSON_THROW_ON_ERROR` carries.
+///
+/// ```php
+/// try { json_decode('[1', false, 512, JSON_THROW_ON_ERROR); } catch (JsonException $e) { var_dump(get_class($e), $e->getMessage(), $e->getCode()); }
+/// ```
+/// ```expect
+/// string(13) "JsonException"
+/// string(12) "Syntax error"
+/// int(4)
+/// ```
+///
 /// The two `INVALID_UTF8_*` options inside a string, which the scanner
 /// answers where the encoder answers them outside one.
 ///
