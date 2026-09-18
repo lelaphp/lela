@@ -594,11 +594,23 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
             };
             let mangled = mangled_names(req, o.class());
             let mut array = PhpArray::new(req)?;
-            for (name, entry) in rows {
-                let prefix = mangled
+            // The rows are the declared slots in slot order and then the
+            // dynamic table, so the declared names are walked with a
+            // cursor rather than looked up: a class that declares `$p`
+            // over a parent's private `$p` has two slots of that name,
+            // and the second row is the second slot.
+            let mut at = 0;
+            let mut prefix_of = |name: &PhpString| {
+                let found = mangled
                     .iter()
-                    .find(|(plain, _)| &**plain == name.as_bytes());
-                let key = if let Some((_, prefix)) = prefix {
+                    .skip(at)
+                    .position(|slot| &*slot.name == name.as_bytes())
+                    .map(|i| i + at)?;
+                at = found + 1;
+                mangled.get(found).and_then(|slot| slot.prefix.clone())
+            };
+            for (name, entry) in rows {
+                let key = if let Some(prefix) = prefix_of(&name) {
                     let bytes = [prefix.as_slice(), name.as_bytes()].concat();
                     Key::Str(PhpString::new(req, &bytes)?)
                 } else {
@@ -622,24 +634,37 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
     }
 }
 
+/// One declared instance property as `zend_mangle_property_name` reads
+/// it: the name as written, and the prefix the mangled key carries,
+/// `None` for a public property, which is mangled with nothing.
+struct MangledName {
+    name: Box<[u8]>,
+    prefix: Option<Vec<u8>>,
+}
+
 /// The prefix `zend_mangle_property_name` puts before each declared
 /// instance property of `class` that is not public: `\0*\0` for a
-/// protected one, `\0Class\0` for a private one. Public names carry
-/// none and are not listed.
-fn mangled_names(req: &Request, class: crate::api::values::ClassId) -> Vec<(Box<[u8]>, Vec<u8>)> {
-    let Some(decl) = req.class_decl(class) else {
-        return Vec::new();
-    };
-    decl.properties
-        .iter()
-        .filter(|p| p.is_instance)
-        .filter_map(|p| {
+/// protected one, `\0Class\0` for a private one, and none for a public
+/// one. Every declared slot is a row, in slot order, so a caller that
+/// walks the object's rows beside this one keeps its place.
+fn mangled_names(req: &Request, class: crate::api::values::ClassId) -> Vec<MangledName> {
+    req.placed_properties(class)
+        .into_iter()
+        .map(|(declaring, p)| {
             let prefix = match p.visibility {
-                Visibility::Public => return None,
-                Visibility::Protected => b"\0*\0".to_vec(),
-                Visibility::Private => [&b"\0"[..], &decl.name.0, &b"\0"[..]].concat(),
+                Visibility::Public => None,
+                Visibility::Protected => Some(b"\0*\0".to_vec()),
+                // `property_info->ce->name`: a private property is
+                // mangled with the class that declared it, which for an
+                // inherited one is a class above.
+                Visibility::Private => req
+                    .class_decl(declaring)
+                    .map(|d| [&b"\0"[..], &d.name.0, &b"\0"[..]].concat()),
             };
-            Some((p.name.0.clone(), prefix))
+            MangledName {
+                name: p.name.0,
+                prefix,
+            }
         })
         .collect()
 }

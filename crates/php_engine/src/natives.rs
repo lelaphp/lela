@@ -31,7 +31,7 @@ use crate::api::raising::{
     too_few_arguments, warning,
 };
 use crate::api::request::Request;
-use crate::api::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use crate::api::values::{ClassId, Key, PhpArray, PhpString, Value, ValueRef};
 
 /// The engine's own natives, in the order php declares them, each
 /// declaration beside its entry.
@@ -933,20 +933,20 @@ fn dump_object(
     }
     object.heap().protect();
     let class = object.class();
-    let declared: Vec<(Vec<u8>, Visibility, Option<Type>)> = req
-        .class_decl(class)
-        .map(|decl| {
-            decl.properties
-                .iter()
-                .filter(|p| p.is_instance)
-                .map(|p| (p.name.0.to_vec(), p.visibility, p.ty.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
+    // `ce->properties_info_table` in slot order, which is what
+    // `rebuild_object_properties_internal` walks: an inherited property
+    // before the class's own, and a private one named by the class that
+    // declared it (`zend_mangle_property_name`).
+    let declared: Vec<(Vec<u8>, ClassId, Visibility, Option<Type>)> = req
+        .placed_properties(class)
+        .into_iter()
+        .map(|(declaring, p)| (p.name.0.to_vec(), declaring, p.visibility, p.ty))
+        .collect();
     let mut rows: Vec<(Vec<u8>, Option<Value>, Option<Type>)> = declared
         .iter()
-        .filter_map(|(name, visibility, ty)| {
-            let value = object.prop(req, name);
+        .enumerate()
+        .filter_map(|(at, (name, declaring, visibility, ty))| {
+            let value = object.slot(u32::try_from(at).unwrap_or(u32::MAX));
             if value.is_none() && ty.is_none() {
                 return None;
             }
@@ -954,7 +954,7 @@ fn dump_object(
                 Visibility::Public => name.clone(),
                 Visibility::Protected => [&b"\""[..], name, b"\":protected"].concat(),
                 Visibility::Private => {
-                    let class = req.class_name(class);
+                    let class = req.class_name(*declaring);
                     [&b"\""[..], name, b"\":\"", class.as_bytes(), b"\":private"].concat()
                 }
             };
@@ -965,7 +965,7 @@ fn dump_object(
     for (name, value) in dynamic {
         if declared
             .iter()
-            .any(|(declared, _, _)| declared == name.as_bytes())
+            .any(|(declared, _, _, _)| declared == name.as_bytes())
         {
             continue;
         }

@@ -2577,12 +2577,10 @@ fn this_property(req: &mut Request) -> Result<(ClassId, Vec<u8>, Option<Property
 /// property read off the object given, which must be of the declaring
 /// class; the read is the slot or the dynamic table by name, php's
 /// `read_property` under `fake_scope`, so visibility is no bar. A
-/// slot nothing wrote holds the declared default in php, placed there
-/// by `object_properties_init`; an object of a class that inherits the
-/// property has no such slot here until the linker places inherited
-/// properties, so the default is evaluated in its stead, and a typed
-/// property with none is php's `Error` for a read before
-/// initialization. A `static` property is
+/// slot holds the declared default, which `object_properties_init` put
+/// there when the object was made, an inherited property's included
+/// (#419); a typed property with no default holds nothing and is php's
+/// `Error` for a read before initialization. A `static` property is
 /// `zend_read_static_property_ex` over the class the reflector was
 /// asked about (`intern->ce`), whose fake scope is that class, and the
 /// argument is neither read nor required; php parses the argument
@@ -2685,12 +2683,6 @@ fn reflection_property_get_value(req: &mut Request) -> Result<Value, Thrown> {
             let value = value.deref();
             req.addref(&value);
             Ok(value)
-        }
-        None if declared.as_ref().is_some_and(|decl| decl.default.is_some()) => {
-            let default = declared
-                .and_then(|decl| decl.default)
-                .unwrap_or(ConstExpr::Null);
-            eval_const_expr(req, &default, Some(class))
         }
         None if declared.as_ref().is_some_and(|decl| decl.ty.is_some()) => {
             let class = class_name_of(req, class);

@@ -403,6 +403,9 @@ type TraceRow = (
 #[derive(Debug, Clone, Copy)]
 struct DeclaredSlot {
     slot: u32,
+    /// `property_info->ce`: the class that declared what stands in the
+    /// slot, which is the scope its visibility is measured against.
+    declaring: ClassId,
     visibility: Visibility,
     set_visibility: Option<Visibility>,
     typed: bool,
@@ -2431,25 +2434,22 @@ impl Request {
     }
 
     /// `object_properties_init`: each declared instance property's slot
-    /// takes the class's default, `zend_update_class_constants` having
-    /// evaluated the expression it was written as; a property with no
-    /// default is `null` where it is untyped and stays uninitialised
+    /// takes its default, `zend_update_class_constants` having evaluated
+    /// the expression it was written as in the scope of the class that
+    /// declared it (`ce->properties_info_table[i]->ce`); a property with
+    /// no default is `null` where it is untyped and stays uninitialised
     /// where it is typed, as `zend_declare_typed_property` leaves it.
+    /// The slots are [`Request::placed_properties`]', so an inherited
+    /// property takes the parent's default in the parent's slot.
     fn init_properties(&mut self, object: PhpObject) -> Result<(), Thrown> {
-        let class = object.class();
-        let defaults: Vec<(bool, Option<php_unit::decl::ConstExpr>)> = self
-            .class_decl(class)
-            .map(|decl| {
-                decl.properties
-                    .iter()
-                    .filter(|p| p.is_instance)
-                    .map(|p| (p.ty.is_some(), p.default.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        for (i, (typed, default)) in defaults.into_iter().enumerate() {
+        let defaults: Vec<(ClassId, bool, Option<php_unit::decl::ConstExpr>)> = self
+            .placed_properties(object.class())
+            .into_iter()
+            .map(|(declaring, p)| (declaring, p.ty.is_some(), p.default))
+            .collect();
+        for (i, (declaring, typed, default)) in defaults.into_iter().enumerate() {
             let value = match default {
-                Some(expr) => crate::api::call::eval_const_expr(self, &expr, Some(class))?,
+                Some(expr) => crate::api::call::eval_const_expr(self, &expr, Some(declaring))?,
                 None if typed => continue,
                 None => Value::null(),
             };
@@ -2457,6 +2457,107 @@ impl Request {
             Heap::object_set_slot(&mut Hooks(self), object.heap(), slot, value.into_zval());
         }
         Ok(())
+    }
+
+    /// `ce->default_properties_table` beside `ce->properties_info_table`
+    /// as `zend_do_inheritance` and `zend_build_properties_info_table`
+    /// leave them (`Z/Zend/zend_inheritance.c:1889`, `:1686`): the
+    /// declared instance properties in slot order, a parent's before the
+    /// class's own, since inheritance copies the parent's table to the
+    /// front of the child's and moves the child's own up behind it. A
+    /// property the class redeclares keeps the slot the parent gave it,
+    /// `do_inherit_property`'s `child_info->offset =
+    /// parent_info->offset`, and the class's own declaration is what
+    /// stands there. A parent's *private* property is not redeclarable:
+    /// php leaves its slot alone and gives the child's a slot of its
+    /// own, which is how `var_dump` shows both. Each row names the class
+    /// that declared what stands in the slot, which is the scope a
+    /// private name is measured against, `property_info->ce`.
+    ///
+    /// The order is what `rebuild_object_properties_internal` walks
+    /// (`Z/Zend/zend_object_handlers.c:75`), so it is the order
+    /// `var_dump`, the `(array)` cast and a `foreach` over an object
+    /// read; `ReflectionMethod` declares `$class` over
+    /// `ReflectionFunctionAbstract`'s `$name`, so the inherited name
+    /// prints first. An inherited property has a slot from here on, so
+    /// it takes the parent's default where php's
+    /// `object_properties_init` copies one.
+    ///
+    /// ```php
+    /// class P { public $a = 1; private $p = 2; protected $q = 3; }
+    /// class C extends P { public $b = 4; public $p = 5; }
+    /// var_dump(new C, new ReflectionMethod('Exception', 'getCode'), (new ReflectionClass('JsonException'))->newInstanceWithoutConstructor()->getMessage());
+    /// ```
+    /// ```expect
+    /// object(C)#1 (5) {
+    ///   ["a"]=>
+    ///   int(1)
+    ///   ["p":"P":private]=>
+    ///   int(2)
+    ///   ["q":protected]=>
+    ///   int(3)
+    ///   ["b"]=>
+    ///   int(4)
+    ///   ["p"]=>
+    ///   int(5)
+    /// }
+    /// object(ReflectionMethod)#2 (2) {
+    ///   ["name"]=>
+    ///   string(7) "getCode"
+    ///   ["class"]=>
+    ///   string(9) "Exception"
+    /// }
+    /// string(0) ""
+    /// ```
+    ///
+    /// The `(array)` cast mangles by the slot and not by the name, so
+    /// the two `$p` slots are two keys, php's
+    /// `zend_mangle_property_name` naming the private one with the class
+    /// that declared it:
+    ///
+    /// ```php
+    /// class P { private $p = 1; protected $q = 2; public $r = 3; }
+    /// class C extends P { public $p = 9; public $s = 4; }
+    /// var_dump((array)(new C));
+    /// ```
+    /// ```expect
+    /// array(5) {
+    ///   ["%0P%0p"]=>
+    ///   int(1)
+    ///   ["%0*%0q"]=>
+    ///   int(2)
+    ///   ["r"]=>
+    ///   int(3)
+    ///   ["p"]=>
+    ///   int(9)
+    ///   ["s"]=>
+    ///   int(4)
+    /// }
+    /// ```
+    pub(crate) fn placed_properties(&self, class: ClassId) -> Vec<(ClassId, PropertyDecl)> {
+        let mut chain = Vec::new();
+        let mut at = Some(class);
+        for _ in 0..64 {
+            let Some(here) = at else { break };
+            chain.push(here);
+            at = self.class_parent(here);
+        }
+        let mut table: Vec<(ClassId, PropertyDecl)> = Vec::new();
+        for here in chain.into_iter().rev() {
+            let Some(decl) = self.class_decl(here) else {
+                continue;
+            };
+            for property in decl.properties.iter().filter(|p| p.is_instance) {
+                let inherited = table.iter().position(|(_, p)| {
+                    p.name == property.name && p.visibility != Visibility::Private
+                });
+                match inherited {
+                    Some(i) => table[i] = (here, property.clone()),
+                    None => table.push((here, property.clone())),
+                }
+            }
+        }
+        table
     }
 
     /// [`Request::new_object`] by the class's name; a name the tables do
@@ -2468,25 +2569,23 @@ impl Request {
         self.new_object(class)
     }
 
-    /// `ce->default_properties_count`: the declared instance properties,
-    /// each a slot on the object; the linker that places an inherited
-    /// one arrives with the classes of design §11 days 8–14.
+    /// `ce->default_properties_count`: the declared instance properties
+    /// of the class and of every class above it, each a slot on the
+    /// object ([`Request::placed_properties`]).
     fn class_slots(&self, class: ClassId) -> u32 {
-        self.class_decl(class).map_or(0, |decl| {
-            u32::try_from(decl.properties.iter().filter(|p| p.is_instance).count())
-                .unwrap_or(u32::MAX)
-        })
+        u32::try_from(self.placed_properties(class).len()).unwrap_or(u32::MAX)
     }
 
     /// The slot a declared instance property of `class` sits in,
     /// `zend_get_property_offset` without visibility yet; `None` for a
-    /// name the class did not declare, which is a dynamic property.
+    /// name no class of the chain declares, which is a dynamic property.
+    /// The last row of the name is the one `ce->properties_info` holds,
+    /// since a class's own declaration is appended after a parent's
+    /// private one of the same name and hides it.
     fn prop_slot(&self, class: ClassId, name: &[u8]) -> Option<u32> {
-        let decl = self.class_decl(class)?;
-        decl.properties
+        self.placed_properties(class)
             .iter()
-            .filter(|p| p.is_instance)
-            .position(|p| &*p.name.0 == name)
+            .rposition(|(_, p)| &*p.name.0 == name)
             .and_then(|i| u32::try_from(i).ok())
     }
 
@@ -2504,23 +2603,21 @@ impl Request {
             .map(|(_, z)| Value::of_zval(z))
     }
 
-    /// `zend_get_property_offset` over the class's declared instance
-    /// properties: the slot `name` sits in, its visibility, its set
-    /// visibility and whether it is typed; none for a name the class
-    /// did not declare, which is a dynamic property.
+    /// `zend_get_property_offset` over the placed instance properties:
+    /// the slot `name` sits in, the class that declared what stands
+    /// there, its visibility, its set visibility and whether it is
+    /// typed; none for a name no class of the chain declares, which is
+    /// a dynamic property.
     fn declared_slot(&self, class: ClassId, name: &[u8]) -> Option<DeclaredSlot> {
-        self.class_decl(class).and_then(|decl| {
-            decl.properties
-                .iter()
-                .filter(|p| p.is_instance)
-                .enumerate()
-                .find(|(_, p)| &*p.name.0 == name)
-                .map(|(i, p)| DeclaredSlot {
-                    slot: u32::try_from(i).unwrap_or(u32::MAX),
-                    visibility: p.visibility,
-                    set_visibility: p.set_visibility,
-                    typed: p.ty.is_some(),
-                })
+        let placed = self.placed_properties(class);
+        let at = placed.iter().rposition(|(_, p)| &*p.name.0 == name)?;
+        let (declaring, p) = placed.get(at)?;
+        Some(DeclaredSlot {
+            slot: u32::try_from(at).unwrap_or(u32::MAX),
+            declaring: *declaring,
+            visibility: p.visibility,
+            set_visibility: p.set_visibility,
+            typed: p.ty.is_some(),
         })
     }
 
@@ -2920,7 +3017,7 @@ impl Request {
         let class = object.class();
         let shown = String::from_utf8_lossy(name).into_owned();
         if let Some(placed) = self.declared_slot(class, name) {
-            if !self.may_access(class, placed.visibility) {
+            if !self.may_access(placed.declaring, placed.visibility) {
                 return Err(self.inaccessible_property(class, placed.visibility, name));
             }
             let z = o.slot(placed.slot);
@@ -3022,11 +3119,11 @@ impl Request {
         let Some(placed) = self.declared_slot(class, name) else {
             return Ok(None);
         };
-        if !self.may_access(class, placed.visibility) {
+        if !self.may_access(placed.declaring, placed.visibility) {
             return Err(self.inaccessible_property(class, placed.visibility, name));
         }
         if let Some(set) = placed.set_visibility
-            && !self.has_set_access(class, set)
+            && !self.has_set_access(placed.declaring, set)
         {
             return Err(self.set_inaccessible_property(class, set, name, operation));
         }
@@ -3136,7 +3233,7 @@ impl Request {
             return Ok(());
         };
         let carries = decl.flags.dynamic_properties;
-        if carries == DynamicProperties::Allowed || self.ancestor_declares_property(class, name) {
+        if carries == DynamicProperties::Allowed {
             return Ok(());
         }
         let shown = String::from_utf8_lossy(name).into_owned();
@@ -3153,45 +3250,6 @@ impl Request {
             &format!("Creation of dynamic property {class_name}::${shown} is deprecated"),
         );
         Ok(())
-    }
-
-    /// Whether a class above `class` declares `name` as an instance
-    /// property. php has no such question: `zend_get_property_offset`
-    /// finds an inherited property at the slot the linker placed it in,
-    /// so a write to it is never a creation. This engine's linker does
-    /// not place inherited members yet (#419), so a throwable subclass
-    /// carries no slot for `message`, `file`, `line` or `trace` and the
-    /// raisers of `api::raising` write them into the dynamic table.
-    /// They are properties php declares, so none of them is a creation
-    /// and none of them is deprecated; the walk is this statement, and
-    /// it goes when the slots are placed.
-    fn ancestor_declares_property(&self, class: ClassId, name: &[u8]) -> bool {
-        let mut at = self
-            .class_decl(class)
-            .and_then(|decl| decl.parent.as_ref())
-            .and_then(|parent| self.class_named(&parent.0));
-        let mut depth = 0;
-        while let Some(class) = at {
-            let Some(decl) = self.class_decl(class) else {
-                return false;
-            };
-            if decl
-                .properties
-                .iter()
-                .any(|p| p.is_instance && &*p.name.0 == name)
-            {
-                return true;
-            }
-            depth += 1;
-            if depth > 64 {
-                return false;
-            }
-            at = decl
-                .parent
-                .as_ref()
-                .and_then(|parent| self.class_named(&parent.0));
-        }
-        false
     }
 
     /// `ZEND_FE_RESET_R`'s separation of a shared property table
@@ -3231,20 +3289,15 @@ impl Request {
     ) -> Result<Option<(u32, php_heap::Key, Value)>, Thrown> {
         let o = object.heap();
         let class = object.class();
-        let declared: Vec<(Box<[u8]>, Visibility)> = self
-            .class_decl(class)
-            .map(|decl| {
-                decl.properties
-                    .iter()
-                    .filter(|p| p.is_instance)
-                    .map(|p| (p.name.0.clone(), p.visibility))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let declared: Vec<(Box<[u8]>, ClassId, Visibility)> = self
+            .placed_properties(class)
+            .into_iter()
+            .map(|(declaring, p)| (p.name.0, declaring, p.visibility))
+            .collect();
         let mut at = from as usize;
-        while let Some((name, visibility)) = declared.get(at) {
+        while let Some((name, declaring, visibility)) = declared.get(at) {
             let z = o.slot(u32::try_from(at).unwrap_or(u32::MAX));
-            if !z.is_undef() && self.may_access(class, *visibility) {
+            if !z.is_undef() && self.may_access(*declaring, *visibility) {
                 let interned = self.heap.intern(name);
                 let key = self.fatal_of(interned).map(php_heap::Key::Str)?;
                 let at = u32::try_from(at).unwrap_or(u32::MAX);
@@ -3312,15 +3365,10 @@ impl Request {
     pub(crate) fn object_entries(&mut self, o: Obj) -> Result<Vec<(PhpString, Value)>, Thrown> {
         let mut entries = Vec::new();
         let declared: Vec<Box<[u8]>> = self
-            .class_decl(ClassId(o.class()))
-            .map(|decl| {
-                decl.properties
-                    .iter()
-                    .filter(|p| p.is_instance)
-                    .map(|p| p.name.0.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
+            .placed_properties(ClassId(o.class()))
+            .into_iter()
+            .map(|(_, p)| p.name.0)
+            .collect();
         for (i, name) in declared.iter().enumerate() {
             let z = o.slot(u32::try_from(i).unwrap_or(u32::MAX));
             if z.is_undef() {
@@ -4075,7 +4123,7 @@ impl Request {
     pub(crate) fn property_slot(&self, object: PhpObject, name: &[u8]) -> Option<u32> {
         let class = object.class();
         let placed = self.declared_slot(class, name)?;
-        self.may_access(class, placed.visibility)
+        self.may_access(placed.declaring, placed.visibility)
             .then_some(placed.slot)
     }
 
@@ -4093,7 +4141,7 @@ impl Request {
         let class = object.class();
         let value = match self.declared_slot(class, name) {
             Some(placed) => {
-                if !self.may_access(class, placed.visibility) {
+                if !self.may_access(placed.declaring, placed.visibility) {
                     return false;
                 }
                 let z = object.heap().slot(placed.slot);
@@ -4122,11 +4170,11 @@ impl Request {
         let class = object.class();
         let o = object.heap();
         if let Some(placed) = self.declared_slot(class, name) {
-            if !self.may_access(class, placed.visibility) {
+            if !self.may_access(placed.declaring, placed.visibility) {
                 return Err(self.inaccessible_property(class, placed.visibility, name));
             }
             if let Some(set) = placed.set_visibility
-                && !self.has_set_access(class, set)
+                && !self.has_set_access(placed.declaring, set)
             {
                 return Err(self.set_inaccessible_property(class, set, name, "unset"));
             }
