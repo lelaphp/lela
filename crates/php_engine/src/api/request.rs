@@ -310,6 +310,14 @@ pub struct Request {
     /// `get_defined_vars` read this table (design §5.6).
     symbols: Vec<(Vec<u8>, Value)>,
     constants: Vec<(Vec<u8>, Value)>,
+    /// `zend_enum_get_case`'s slot (`Z/Zend/zend_enum.c:410`): one
+    /// instance per case of each enum, made on the first read of the
+    /// case and handed back by identity from then on, so that
+    /// `E::A === E::A`. php keeps it in the class's constant table,
+    /// which outlives the request; the linked tables here are shared
+    /// and immutable and an object is neither, so the slot is the
+    /// request's and the cases go with it.
+    enum_cases: Vec<((ClassId, Vec<u8>), PhpObject)>,
     wrappers: Vec<StreamWrapper>,
     filters: Vec<StreamFilter>,
     error_handlers: Vec<Option<Callable>>,
@@ -440,6 +448,7 @@ impl Request {
             superglobals: Vec::new(),
             symbols: Vec::new(),
             constants: Vec::new(),
+            enum_cases: Vec::new(),
             wrappers: Vec::new(),
             filters: Vec::new(),
             error_handlers: Vec::new(),
@@ -2634,7 +2643,60 @@ impl Request {
                 &format!("Cannot access {word} constant {class_name}::{shown}"),
             ));
         }
+        // `zend_fetch_class_constant`'s `ZEND_CLASS_CONST_IS_CASE` arm:
+        // a constant of an enum is a case, and a case is an instance of
+        // the enum and not the expression it was written with.
+        if self
+            .class_decl(class)
+            .is_some_and(|decl| decl.kind == ClassKind::Enum)
+        {
+            return self.enum_case(class, name).map(|case| case.as_value());
+        }
         crate::api::call::eval_const_expr(self, &value, Some(class))
+    }
+
+    /// `zend_enum_get_case` (`Z/Zend/zend_enum.c:410`): the one instance
+    /// of `class` standing for the case `name`, made on the first read
+    /// and handed back by identity from then on, its `name` the case's
+    /// own and, for a backed enum, its `value` the backing value the
+    /// declaration carries. One more owner is taken for the caller, the
+    /// slot keeping its own, as php's constant table keeps one.
+    pub(crate) fn enum_case(&mut self, class: ClassId, name: &[u8]) -> Result<PhpObject, Thrown> {
+        if let Some((_, case)) = self
+            .enum_cases
+            .iter()
+            .find(|((held, under), _)| *held == class && under == name)
+        {
+            let case = *case;
+            self.addref(&case.as_value());
+            return Ok(case);
+        }
+        let Some((_, constant)) = self.class_constant_of(class, name, 0) else {
+            let class = self.class_name(class);
+            return Err(crate::api::raising::throw(
+                self,
+                "Error",
+                &format!(
+                    "Undefined constant {class}::{}",
+                    String::from_utf8_lossy(name)
+                ),
+            ));
+        };
+        let backing = self
+            .class_decl(class)
+            .map_or(php_unit::decl::EnumBacking::Pure, |decl| decl.backing);
+        let case = self.new_object(class)?;
+        let spelled = PhpString::new(self, name)?;
+        let slot = PhpString::new(self, b"name")?;
+        case.set_prop(self, slot, Value::string(spelled))?;
+        if backing != php_unit::decl::EnumBacking::Pure {
+            let value = crate::api::call::eval_const_expr(self, &constant.value, Some(class))?;
+            let slot = PhpString::new(self, b"value")?;
+            case.set_prop(self, slot, value)?;
+        }
+        self.enum_cases.push(((class, name.to_vec()), case));
+        self.addref(&case.as_value());
+        Ok(case)
     }
 
     /// `zend_bad_property_access`: php's `Error` for a property the

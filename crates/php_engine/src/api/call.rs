@@ -446,14 +446,13 @@ pub fn constant(req: &mut Request, name: &[u8]) -> Result<Option<Value>, Thrown>
     Ok(req.constant_named(name))
 }
 
-/// A class constant, its expression evaluated on first use.
+/// `zend_fetch_class_constant`: a class constant, its expression
+/// evaluated on first use in the scope that declared it, and php's
+/// `Error` for one the class has not or the scope may not reach. A
+/// constant of an enum is a case, so what comes back is the enum's one
+/// instance for that case (`zend_enum_get_case`), by identity.
 pub fn class_constant(req: &mut Request, class: ClassId, name: &[u8]) -> Result<Value, Thrown> {
-    let _ = class;
-    Err(throw(
-        req,
-        "Error",
-        &format!("Undefined constant {}", String::from_utf8_lossy(name)),
-    ))
+    req.class_constant(class, name)
 }
 
 /// Evaluate a constant expression in `scope`, `zval_update_constant_ex`.

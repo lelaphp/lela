@@ -5599,7 +5599,7 @@ fn property_hook_type() -> Declared {
         vec![
             (
                 is_static(method(b"cases", &[], Some(Type::Array))),
-                unbuilt as Entry,
+                super::enums::enum_cases as Entry,
             ),
             (
                 is_static(method(
@@ -5607,7 +5607,7 @@ fn property_hook_type() -> Declared {
                     &[parameter(b"value", union(&[Type::Int, Type::String]))],
                     Some(Type::CalledClass),
                 )),
-                unbuilt as Entry,
+                super::enums::enum_from as Entry,
             ),
             (
                 is_static(method(
@@ -5615,7 +5615,7 @@ fn property_hook_type() -> Declared {
                     &[parameter(b"value", union(&[Type::Int, Type::String]))],
                     Some(nullable(Type::CalledClass)),
                 )),
-                unbuilt as Entry,
+                super::enums::enum_try_from as Entry,
             ),
         ],
     )
@@ -6433,7 +6433,7 @@ fn reflection_enum() -> Declared {
                     )],
                     None,
                 ),
-                unbuilt as Entry,
+                super::enums::reflection_enum_construct as Entry,
             ),
             (
                 method(
@@ -6441,7 +6441,7 @@ fn reflection_enum() -> Declared {
                     &[parameter(b"name", Type::String)],
                     Some(Type::Bool),
                 ),
-                unbuilt as Entry,
+                super::enums::reflection_enum_has_case as Entry,
             ),
             (
                 method(
@@ -6449,20 +6449,23 @@ fn reflection_enum() -> Declared {
                     &[parameter(b"name", Type::String)],
                     Some(named(b"ReflectionEnumUnitCase")),
                 ),
-                unbuilt as Entry,
+                super::enums::reflection_enum_get_case as Entry,
             ),
             (
                 method(b"getCases", &[], Some(Type::Array)),
-                unbuilt as Entry,
+                super::enums::reflection_enum_get_cases as Entry,
             ),
-            (method(b"isBacked", &[], Some(Type::Bool)), unbuilt as Entry),
+            (
+                method(b"isBacked", &[], Some(Type::Bool)),
+                super::enums::reflection_enum_is_backed as Entry,
+            ),
             (
                 method(
                     b"getBackingType",
                     &[],
                     Some(nullable(named(b"ReflectionNamedType"))),
                 ),
-                unbuilt as Entry,
+                super::enums::reflection_enum_get_backing_type as Entry,
             ),
         ],
     )
@@ -6486,15 +6489,15 @@ fn reflection_enum_unit_case() -> Declared {
                     ],
                     None,
                 ),
-                unbuilt as Entry,
+                super::enums::reflection_enum_case_construct as Entry,
             ),
             (
                 method(b"getEnum", &[], Some(named(b"ReflectionEnum"))),
-                unbuilt as Entry,
+                super::enums::reflection_enum_case_get_enum as Entry,
             ),
             (
                 method(b"getValue", &[], Some(named(b"UnitEnum"))),
-                unbuilt as Entry,
+                super::enums::reflection_enum_case_get_value as Entry,
             ),
         ],
     )
@@ -6518,7 +6521,7 @@ fn reflection_enum_backed_case() -> Declared {
                     ],
                     None,
                 ),
-                unbuilt as Entry,
+                super::enums::reflection_enum_case_construct as Entry,
             ),
             (
                 method(
@@ -6526,7 +6529,7 @@ fn reflection_enum_backed_case() -> Declared {
                     &[],
                     Some(union(&[Type::Int, Type::String])),
                 ),
-                unbuilt as Entry,
+                super::enums::reflection_enum_case_get_backing_value as Entry,
             ),
         ],
     )

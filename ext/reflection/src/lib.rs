@@ -58,6 +58,7 @@
 
 mod attr;
 mod class;
+mod enums;
 mod func;
 mod member;
 mod signature;
@@ -3201,7 +3202,7 @@ fn class_string(
     }
     let _ = write!(out, "\n{indent}  - Constants [{}] {{\n", constants.len());
     for (constant, _) in &constants {
-        out.push_str(&class_const_string(req, constant, &sub_indent));
+        out.push_str(&class_const_string(req, constant, None, &sub_indent));
     }
     let _ = writeln!(out, "{indent}  }}");
 
@@ -3390,19 +3391,31 @@ fn class_header(
 /// value's `zend_zval_type_name` otherwise, the value as
 /// `zval_get_string` prints it, `Array` for an array and `Object` for
 /// an object; a doc comment on the line above.
-fn class_const_string(req: &mut Request, constant: &ClassConstDecl, indent: &str) -> String {
+fn class_const_string(
+    req: &mut Request,
+    constant: &ClassConstDecl,
+    enum_of: Option<&[u8]>,
+    indent: &str,
+) -> String {
     let mut out = String::new();
     if let Some(doc) = &constant.doc_comment {
         out.push_str(indent);
         out.push_str(&String::from_utf8_lossy(doc));
         out.push('\n');
     }
+    // A case of an enum holds the enum's own instance, so
+    // `zend_zval_type_name` names the enum and the `IS_OBJECT` arm
+    // writes `Object` in place of the value.
     let value = eval_const_expr(req, &constant.value, None).unwrap_or_default();
-    let ty = constant
-        .ty
-        .as_ref()
-        .map_or_else(|| String::from(value.type_name()), type_to_string);
-    let shown = value_string(req, &value);
+    let ty = match (&constant.ty, enum_of) {
+        (Some(ty), _) => type_to_string(ty),
+        (None, Some(name)) => String::from_utf8_lossy(name).into_owned(),
+        (None, None) => String::from(value.type_name()),
+    };
+    let shown = match enum_of {
+        Some(_) => String::from("Object"),
+        None => value_string(req, &value),
+    };
     let _ = writeln!(
         out,
         "{indent}Constant [ {}{} {ty} {} ] {{ {shown} }}",

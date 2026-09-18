@@ -906,6 +906,27 @@ fn dump_object(
     object: crate::api::values::PhpObject,
     level: usize,
 ) {
+    // `php_var_dump`'s `ZEND_ACC_ENUM` arm, ahead of the recursion
+    // guard as php has it: a case is its class and its case name,
+    // `zend_enum_fetch_case_name`, and none of its properties.
+    if req
+        .class_decl(object.class())
+        .is_some_and(|decl| decl.kind == ClassKind::Enum)
+    {
+        let class = req.class_name(object.class());
+        let case = object
+            .prop(req, b"name")
+            .and_then(|name| name.as_str_bytes().map(<[u8]>::to_vec))
+            .unwrap_or_default();
+        out.extend_from_slice(
+            format!(
+                "{common}enum({class}::{})\n",
+                String::from_utf8_lossy(&case)
+            )
+            .as_bytes(),
+        );
+        return;
+    }
     if object.heap().is_recursive() {
         out.extend_from_slice(b"*RECURSION*\n");
         return;

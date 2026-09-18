@@ -13,7 +13,7 @@
 //! ran in.
 
 use php_ext::call::{constant, eval_const_expr};
-use php_ext::decl::{ClassConstDecl, PropertyDecl, Visibility};
+use php_ext::decl::{ClassConstDecl, ClassKind, PropertyDecl, Visibility};
 use php_ext::raising::{Thrown, deprecated, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, PhpArray, Value};
@@ -574,14 +574,21 @@ pub(super) fn reflection_class_constant_get_value(req: &mut Request) -> Result<V
 ///
 /// ```php
 /// echo new ReflectionClassConstant('ReflectionFunction', 'IS_DEPRECATED');
+/// echo new ReflectionClassConstant('PropertyHookType', 'Get');
 /// ```
 /// ```expect
 /// Constant [ public int IS_DEPRECATED ] { 2048 }
+/// Constant [ public PropertyHookType Get ] { Object }
 /// ```
 pub(super) fn reflection_class_constant_to_string(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
-    let (_, _, decl) = this_constant(req)?;
-    let text = class_const_string(req, &decl, "");
+    let (_, scope, decl) = this_constant(req)?;
+    let held = class_name_of(req, scope);
+    let enum_of = req
+        .class_decl(scope)
+        .is_some_and(|decl| decl.kind == ClassKind::Enum)
+        .then_some(held.as_slice());
+    let text = class_const_string(req, &decl, enum_of, "");
     string_value(req, text.as_bytes())
 }
 
