@@ -4772,6 +4772,50 @@ pub(crate) fn bool<T: Tier>(
     })
 }
 
+/// `ZEND_ISEMPTY` (`Z/Zend/zend_compile.h:1005`), the one bit of an
+/// `ISSET_ISEMPTY_*` opline's `extended_value`: the word compiled was
+/// `empty` and not `isset`.
+const ISEMPTY: u32 = 1 << 0;
+
+/// `ZEND_ISSET_ISEMPTY_CV` (`Z/Zend/zend_vm_def.h:7459`), what
+/// `isset($a)` and `empty($a)` compile to over a CV: the slot read where
+/// it stands, and a slot nothing wrote read as the `UNDEF` it is, with
+/// no warning and nothing made of it. Under `isset` the answer is
+/// [`crate::ops::is_set`]; under `ZEND_ISEMPTY` it is
+/// [`crate::ops::is_true`] negated, `!i_zend_is_true`, which is the arm
+/// that can warn, over a NAN. php branches on the answer where a `JMPZ`
+/// or a `JMPNZ` follows (`ZEND_VM_SMART_BRANCH`); the temporary is
+/// written here and the jump reads it, as `TYPE_CHECK`'s is.
+///
+/// ```php
+/// $a = 1; $n = null; $z = "0";
+/// var_dump(isset($a), empty($a), isset($n), empty($n), isset($u), empty($u), empty($z));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// ```
+pub(crate) fn isset_isempty_cv<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let value = req.slot(frame, op.op1);
+    let answer = if op.extended_value & ISEMPTY == 0 {
+        crate::ops::is_set(&value)
+    } else {
+        !crate::ops::is_true(req, &value)
+    };
+    write_out(req, frame, code, op, &Value::bool(answer));
+    Ok(advance(req, frame))
+}
+
 /// `ZEND_DEFINED`: [`crate::ops::defined`] over the constant string
 /// `op1` names, into the temporary. The cache slot in `extended_value`
 /// is not read: php keeps the answer in the per-request opline cache

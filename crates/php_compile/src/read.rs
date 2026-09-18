@@ -472,6 +472,16 @@ pub(crate) enum Expr {
     /// which `throw expr;` is the statement of, so the grammar's
     /// `expr: T_THROW expr` is read wherever a full expression stands.
     Throw(Child),
+    /// `isset($a)` and `empty($a)`, php's `ZEND_AST_ISSET` and
+    /// `ZEND_AST_EMPTY` over one `ZEND_AST_VAR` that
+    /// `zend_try_compile_cv` makes a CV: the variable's name as
+    /// written, and whether the word was `empty`. `isset($this)`,
+    /// `isset($a, $b)`, a dimension, a property and `empty` over what is
+    /// no variable are not read.
+    Isset {
+        var: Vec<u8>,
+        empty: bool,
+    },
 }
 
 /// One child of an expression, php's `zend_ast.child[i]`: the expression
@@ -2397,15 +2407,21 @@ impl Reader<'_> {
                 arguments,
             });
         }
-        // php's grammar reads `unset(`, `isset(`, `empty(` and `array(`
-        // as its own constructs, never as a call by that name, and each
-        // is still to be read; a `Call` named so would be emitted as
-        // `INIT_FCALL_BY_NAME` for a function that cannot exist.
+        // php's grammar reads `isset(` and `empty(` as its own
+        // constructs, never as a call by that name.
+        if self.byte(0) == Some(b'(') {
+            let lowered = name.to_ascii_lowercase();
+            if matches!(lowered.as_slice(), b"isset" | b"empty") {
+                self.bump(1);
+                return self.isset_or_empty(lowered == b"empty");
+            }
+        }
+        // php's grammar reads `unset(` and `array(` as its own
+        // constructs too, and each is still to be read; a `Call` named
+        // so would be emitted as `INIT_FCALL_BY_NAME` for a function
+        // that cannot exist.
         if self.byte(0) == Some(b'(')
-            && matches!(
-                name.to_ascii_lowercase().as_slice(),
-                b"unset" | b"isset" | b"empty" | b"array"
-            )
+            && matches!(name.to_ascii_lowercase().as_slice(), b"unset" | b"array")
         {
             return Err(self.trouble(format!(
                 "an `{}` this compiler cannot read yet",
@@ -2637,6 +2653,36 @@ impl Reader<'_> {
             container: Child::new(receiver),
             index,
         })
+    }
+
+    /// `isset(` or `empty(` read, the parenthesis bumped: php's
+    /// `isset_variables` and `expr` under `ZEND_AST_ISSET` and
+    /// `ZEND_AST_EMPTY`, of which one plain variable is read. php's
+    /// `isset($a, $b)` is `$a && $b` over a chain of jumps, `empty`
+    /// over what is no variable is the `!expr` `zend_compile_isset_or_empty`
+    /// rewrites it to, and `$this`, a dimension and a property each have
+    /// an opcode of their own; none is read yet.
+    fn isset_or_empty(&mut self, empty: bool) -> Result<Expr, Trouble> {
+        let word = if empty { "empty" } else { "isset" };
+        self.skip_trivia();
+        if self.byte(0) != Some(b'$') {
+            return Err(self.trouble(format!(
+                "an `{word}` over what is no plain variable this compiler cannot read yet"
+            )));
+        }
+        let Expr::Var(var) = self.variable()? else {
+            return Err(self.trouble(format!(
+                "an `{word}` over $this this compiler cannot read yet"
+            )));
+        };
+        self.skip_trivia();
+        if self.byte(0) != Some(b')') {
+            return Err(self.trouble(format!(
+                "an `{word}` over what is no plain variable this compiler cannot read yet"
+            )));
+        }
+        self.bump(1);
+        Ok(Expr::Isset { var, empty })
     }
 
     /// Whether a name, php's `T_STRING` or `T_NAME_*`, starts here.
@@ -3799,7 +3845,7 @@ mod tests {
         for source in [
             b"<?php $this = 1;".as_slice(),
             b"<?php unset($this);".as_slice(),
-            b"<?php isset($a);".as_slice(),
+            b"<?php isset($this);".as_slice(),
             b"<?php echo $GLOBALS;".as_slice(),
             b"<?php echo $_SERVER;".as_slice(),
             b"<?php echo $$a;".as_slice(),
@@ -3807,6 +3853,39 @@ mod tests {
             b"<?php echo $1;".as_slice(),
             b"<?php 1 = 2;".as_slice(),
             b"<?php 1 + $a = 2;".as_slice(),
+        ] {
+            assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
+        }
+    }
+
+    #[test]
+    fn isset_and_empty_over_one_plain_variable_are_read_and_nothing_else_is() {
+        assert_eq!(
+            read(b"<?php isset($a); empty($a);").unwrap_or_default(),
+            vec![
+                (
+                    Stmt::Effect(Expr::Isset {
+                        var: b"a".to_vec(),
+                        empty: false
+                    }),
+                    1
+                ),
+                (
+                    Stmt::Effect(Expr::Isset {
+                        var: b"a".to_vec(),
+                        empty: true
+                    }),
+                    1
+                ),
+            ],
+            "`empty` is the same node with the word remembered"
+        );
+        for source in [
+            b"<?php isset($a, $b);".as_slice(),
+            b"<?php isset($a[0]);".as_slice(),
+            b"<?php isset($a->p);".as_slice(),
+            b"<?php empty(1);".as_slice(),
+            b"<?php isset();".as_slice(),
         ] {
             assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
         }

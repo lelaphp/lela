@@ -1936,6 +1936,7 @@ impl Emit<'_> {
             | Expr::StaticProp { .. }
             | Expr::Silence(_)
             | Expr::Throw(_)
+            | Expr::Isset { .. }
             | Expr::Encaps(_) => {
                 Err(self.compile_error("Constant expression contains invalid operations"))
             }
@@ -3322,8 +3323,32 @@ impl Emit<'_> {
             Expr::StaticProp { class, name } => self.static_prop(class, name),
             Expr::Array(elements) => self.array(elements),
             Expr::Throw(operand) => self.throw(operand),
+            Expr::Isset { var, empty } => Ok(self.isset_or_empty(var, *empty)),
             known => Ok(Where::Constant(self.constant_expr(known)?)),
         }
+    }
+
+    /// `zend_compile_isset_or_empty` over a `ZEND_AST_VAR` that
+    /// `zend_try_compile_cv` makes a CV (`Z/Zend/zend_compile.c:10816`):
+    /// `ISSET_ISEMPTY_CV` over the CV into a temporary, with
+    /// `ZEND_ISEMPTY` in `extended_value` for `empty` and nothing for
+    /// `isset`. php's handler branches on the answer where a `JMPZ` or a
+    /// `JMPNZ` follows (`ZEND_VM_SMART_BRANCH`); the temporary stands
+    /// and the jump reads it, which is the same observable path one
+    /// opline longer, as `TYPE_CHECK`'s is.
+    fn isset_or_empty(&mut self, var: &[u8], empty: bool) -> Where {
+        let cv = self.lookup_cv(var);
+        let out = self.temporary();
+        self.push(Opline {
+            opcode: Opcode::IssetIsemptyCv,
+            op1_type: OperandKind::Cv,
+            op1: cv,
+            out_type: OperandKind::Tmp,
+            out,
+            extended_value: u32::from(empty),
+            ..Opline::default()
+        });
+        Where::Temporary(out)
     }
 
     /// `zend_compile_throw` (`Z/Zend/zend_compile.c:5795`): the operand,
@@ -4298,6 +4323,9 @@ impl Emit<'_> {
             // `zend_compile_throw` emits an opline whatever stands
             // around it, so a `throw` folds to nothing.
             Expr::Throw(_) => Err(self.fatal("a `throw` is no constant expression")),
+            // `zend_compile_isset_or_empty` emits an opline over the CV;
+            // `zend_eval_const_expr` folds nothing here.
+            Expr::Isset { .. } => Err(self.fatal("an `isset` is no constant expression")),
         }
     }
 

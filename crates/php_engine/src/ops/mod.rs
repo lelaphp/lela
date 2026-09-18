@@ -419,6 +419,37 @@ pub(crate) fn is_true(req: &mut Request, value: &Value) -> bool {
     }
 }
 
+/// `ZEND_ISSET_ISEMPTY_CV`'s `isset` arm (`Z/Zend/zend_vm_def.h:7465`):
+/// whether the slot holds more than `null`, which a slot nothing wrote
+/// does not (`Z_TYPE_P(value) > IS_NULL`), with a reference followed one
+/// step, so a name bound to a `null` is as unset as the `null` itself
+/// (`!Z_ISREF_P(value) || Z_TYPE_P(Z_REFVAL_P(value)) != IS_NULL`).
+/// Nothing is read into anything and no warning is raised: `isset` over
+/// a variable nothing wrote is the one read of a CV php leaves silent.
+///
+/// ```php
+/// $a = 1; $n = null; $s = ""; $f = false; $z = "0";
+/// var_dump(isset($a), isset($n), isset($s), isset($f), isset($z), isset($u));
+/// $r = &$n; var_dump(isset($r)); $r = 1; var_dump(isset($n));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// ```
+pub(crate) fn is_set(value: &Value) -> bool {
+    match value.as_ref() {
+        ValueRef::Undef | ValueRef::Null => false,
+        ValueRef::Reference(r) => r.get().tag() != TypeTag::Null,
+        _ => true,
+    }
+}
+
 /// What `ZEND_CAST` converts to, the five arms of its handler
 /// (`Z/Zend/zend_vm_def.h:6495`), named by the type constant the
 /// opline's `extended_value` carries. `(bool)` is `ZEND_BOOL` and never
