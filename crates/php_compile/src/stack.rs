@@ -125,8 +125,7 @@ impl StackLimit {
     /// Fatal error: Maximum call stack size of %d bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached during compilation. Try splitting expression in %s on line 2
     /// ```
     pub(crate) fn check(&self, line: u32) -> Result<(), CompileError> {
-        // `zend_call_stack_overflowed`.
-        if position() > self.limit {
+        if !self.overflowed() {
             return Ok(());
         }
         let max_stack_size = self.base.saturating_sub(self.limit);
@@ -138,6 +137,20 @@ impl StackLimit {
             line,
             raised: Vec::new(),
         })
+    }
+}
+
+impl StackLimit {
+    /// `zend_call_stack_overflowed(EG(stack_limit))`: whether the
+    /// calling thread has come down to the limit. What
+    /// [`check`](Self::check) asks before it refuses a compilation and
+    /// what `zend_objects_check_stack_limit` asks before it compares
+    /// two objects, which is the engine's to ask and to word, since the
+    /// text is that site's. [`UNCHECKED`](Self::UNCHECKED) has no
+    /// limit, so it never answers true.
+    #[must_use]
+    pub fn overflowed(&self) -> bool {
+        position() <= self.limit
     }
 }
 

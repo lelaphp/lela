@@ -1271,6 +1271,27 @@ pub(crate) fn concat(req: &mut Request, left: &Value, right: &Value) -> Result<V
 /// #0 {main}
 ///   thrown in %s on line 4
 /// ```
+///
+/// A pair whose dynamic properties hold each other never reaches that
+/// guard: either object carrying a dynamic table sends php down
+/// `zend_compare_symbol_tables`, and the `Error` is `zend_hash_compare`'s
+/// own, over the left table ([`compare_arrays`]).
+///
+/// ```php
+/// class M {}
+/// $a = new M; $b = new M; $a->x = $b; $b->x = $a;
+/// var_dump($a == $b);
+/// ```
+/// ```expect exit=255
+/// Deprecated: Creation of dynamic property M::$x is deprecated in %s on line 3
+///
+/// Deprecated: Creation of dynamic property M::$x is deprecated in %s on line 3
+///
+/// Fatal error: Uncaught Error: Nesting level too deep - recursive dependency? in %s:4
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 4
+/// ```
 pub(crate) fn compare(req: &mut Request, left: &Value, right: &Value) -> Result<Ordering, Thrown> {
     let (left, right) = (&left.deref(), &right.deref());
     if let (Some(a), Some(b)) = (scalar(left), scalar(right)) {
@@ -1586,12 +1607,38 @@ fn silent_number(value: ValueRef<'_>) -> Scalar<'static> {
 
 /// `zend_compare_arrays`, which is `zend_hash_compare` with
 /// `hash_zval_compare_function` and `ordered` off
-/// (`Z/Zend/zend_hash.c:3155`): the counts first, then each key of the
-/// left array looked up in the right one, a key the right one lacks
-/// making the left the greater, and the two values compared by
-/// [`compare`] until one pair differs; also `zend_compare_symbol_tables`,
-/// the same walk over two objects' tables.
+/// (`Z/Zend/zend_hash.c:3205`): one table against itself is equal, a
+/// table the walk is already inside is php's `Error`, and otherwise the
+/// counts first, then each key of the left array looked up in the right
+/// one, a key the right one lacks making the left the greater, and the
+/// two values compared by [`compare`] until one pair differs; also
+/// `zend_compare_symbol_tables`, the same walk over two objects' tables,
+/// which is what ends a pair of objects whose dynamic properties hold
+/// each other.
+///
+/// php protects the left table alone and says why: the right one may be
+/// reached from it, and protecting both would call a shared table a
+/// cycle.
 fn compare_arrays(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<Ordering, Thrown> {
+    if left.heap().is_same(right.heap()) {
+        return Ok(Ordering::Equal);
+    }
+    if left.is_recursive() {
+        return Err(crate::api::raising::throw(
+            req,
+            "Error",
+            "Nesting level too deep - recursive dependency?",
+        ));
+    }
+    left.protect();
+    let ordering = compare_entries(req, left, right);
+    left.unprotect();
+    ordering
+}
+
+/// `zend_hash_compare_impl` under the protection
+/// [`compare_arrays`] takes.
+fn compare_entries(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<Ordering, Thrown> {
     if left.len() != right.len() {
         return Ok(left.len().cmp(&right.len()));
     }

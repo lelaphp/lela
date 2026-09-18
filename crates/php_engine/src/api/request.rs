@@ -3603,14 +3603,29 @@ impl Request {
     /// carries a dynamic table it is `zend_compare_symbol_tables` over
     /// the two rebuilt tables: the counts first, then the left one's keys
     /// looked up in the right one, an uninitialised slot `-1` against a
-    /// held one and `1` the other way. What php's stack-limit check
-    /// answers is not modelled.
+    /// held one and `1` the other way.
+    ///
+    /// php opens the handler with `zend_objects_check_stack_limit`
+    /// (`Z/Zend/zend_object_handlers.c:2231`) and throws
+    /// `Maximum call stack size reached during object comparison` where
+    /// the thread has come down to `zend.max_allowed_stack_size`, which
+    /// is [`php_compile::StackLimit::overflowed`] here and is asked in
+    /// the same place, before either side is even read as an object. It
+    /// ends a walk no recursion guard can: a chain of objects deep
+    /// enough to exhaust the C stack without ever reaching one twice.
     pub(crate) fn compare_objects(
         &mut self,
         left: &Value,
         right: &Value,
     ) -> Result<Option<std::cmp::Ordering>, Thrown> {
         use std::cmp::Ordering;
+        if self.stack_limit.overflowed() {
+            return Err(crate::api::raising::throw(
+                self,
+                "Error",
+                "Maximum call stack size reached during object comparison",
+            ));
+        }
         let (a, b) = match (left.as_object().copied(), right.as_object().copied()) {
             (Some(a), Some(b)) => (a, b),
             (Some(object), None) => return self.compare_cast(object, right, true).map(Some),
