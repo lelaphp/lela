@@ -211,13 +211,25 @@ fn the_snippet_runs_as_witness_php_with_the_code_on_line_two() {
         return;
     }
     // php's own error text names the file and the line, which is what the
-    // recipe's preamble is for (design §8).
+    // recipe's preamble is for (design §8). The oracle runs the snippet as
+    // `%SCRATCH%/witness.php` and the linked engine names it `witness.php`
+    // (#293), and `%s` is one character at least (run-tests.php's
+    // `[^\r\n]+`), so the pin that both adapters meet is `%s 2`, the one
+    // the witness beside `magic_const` in php_compile writes (#364).
     let text = format!(
         "/// ```php\n/// echo __FILE__, ' ', __LINE__;\n/// ```\n{}pub fn native() {{}}\n",
-        "/// ```expect\n/// %switness.php 2\n/// ```\n"
+        "/// ```expect\n/// %s 2\n/// ```\n"
     );
     let tally = judge_text(&text, &registry(""));
     assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
+    let file = Path::new("ext/fixture/src/lib.rs");
+    let linked = judged_under(&Runner::Linked, file, &text, &registry(""), false);
+    let (judgement, note) = only(&linked);
+    assert_eq!(
+        judgement,
+        Judgement::Pass,
+        "under the linked engine: {note}"
+    );
 }
 
 #[test]
