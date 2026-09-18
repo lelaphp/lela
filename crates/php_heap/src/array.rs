@@ -1139,6 +1139,17 @@ impl crate::Heap {
         Ok(unsafe { Arr::init(at, size) })
     }
 
+    /// `zend_new_array(size)` then `zend_hash_real_init_mixed`, which is
+    /// what `INIT_ARRAY` does under `ZEND_ARRAY_NOT_PACKED`: the header
+    /// and the bucket table laid down at once, so the first write finds
+    /// a hash and never a packed list to convert. What `memory_get_usage()`
+    /// reads after `[$x, 'k' => 1]` is this table's size, not the packed one's.
+    pub fn array_mixed(&mut self, size: u32) -> Result<Arr, Fatal> {
+        let a = self.array_sized(size)?;
+        a.real_init_mixed(&mut self.mm)?;
+        Ok(a)
+    }
+
     /// The request's half of [`crate::Intern::constant_array`]: the
     /// entries written in order, then `IS_ARRAY_IMMUTABLE`.
     pub(crate) fn array_constant(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {

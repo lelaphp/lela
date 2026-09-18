@@ -44,6 +44,7 @@ Heap::array
 Heap::array_append
 Heap::array_del
 Heap::array_dup
+Heap::array_mixed
 Heap::array_sized
 Heap::array_sort
 Heap::array_update
