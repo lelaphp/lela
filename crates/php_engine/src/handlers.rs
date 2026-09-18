@@ -38,7 +38,10 @@
 //! and `ZEND_CLONE`, the class's `clone_obj` through its handler table
 //! (#281); and `ZEND_ASSIGN_REF`, which binds two CVs to one cell
 //! (#286); and the three a `foreach` over an array compiles to (#305):
-//! `ZEND_FE_RESET_R`, `ZEND_FE_FETCH_R` and `ZEND_FE_FREE`.
+//! `ZEND_FE_RESET_R`, `ZEND_FE_FETCH_R` and `ZEND_FE_FREE`; and the
+//! four an interpolated string compiles to (#355): `ZEND_FAST_CONCAT`
+//! for two pieces, `ZEND_ROPE_INIT`, `ZEND_ROPE_ADD` and `ZEND_ROPE_END`
+//! for more.
 
 // Every handler is generic over the tier and hands back the same edge, so
 // the generated dispatch calls them all the same way; the ones that raise a
@@ -2479,6 +2482,263 @@ pub(crate) fn concat<T: Tier>(
     op: &Opline,
 ) -> Edge {
     binary(req, frame, code, op, crate::ops::concat)
+}
+
+/// `ZEND_FAST_CONCAT` (`Z/Zend/zend_vm_def.h:3285`): what an
+/// interpolated string of two pieces compiles to
+/// (`zend_compile_rope_finalize`), [`crate::ops::concat`] over the two
+/// operands into the temporary, as `CONCAT` is. php's handler takes the
+/// two-strings arm first and hands the rest to `zval_get_string_func`,
+/// which is the kernel's first arm and its rest: each non-string piece
+/// converted where php converts it, the `Array to string conversion`
+/// warning and an object's `__toString` raised in operand order, and
+/// the operands freed after the kernel (`FREE_OP1`, `FREE_OP2`).
+///
+/// ```php
+/// $a = 1; echo "x$a", "$a";
+/// $f = 1 / 3; $t = true; $n = null; $b = false; echo "|$f", "|$t", "|$n", "|$b|";
+/// ```
+/// ```expect
+/// x11|0.33333333333333|1|||
+/// ```
+///
+/// An array piece is the warning and the word `Array`; an object with a
+/// `__toString` is what it returns, `Exception::__toString` here since
+/// a user method is not compiled yet.
+///
+/// ```php
+/// $a = [1]; $o = new Exception('m');
+/// echo "a=$a", "|o=$o";
+/// ```
+/// ```expect
+/// Warning: Array to string conversion in %s on line 3
+/// a=Array|o=Exception: m in %s:2
+/// Stack trace:
+/// #0 {main}
+/// ```
+pub(crate) fn fast_concat<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    binary(req, frame, code, op, crate::ops::concat)
+}
+
+/// `ZEND_ROPE_INIT` (`Z/Zend/zend_vm_def.h:3410`): the first piece of
+/// an interpolated string of three or more, converted as
+/// `zval_get_string_func` converts it ([`crate::ops::to_string`]), into
+/// element zero of the rope the `result` temporary holds, with
+/// `extended_value` the number of pieces the rope will carry. php lays
+/// the rope's `zend_string *` pointers over the stretch of slots the
+/// compiler reserved, two to a zval; a zval here holds one value, so
+/// the rope is a packed array of the pieces in the stretch's first
+/// slot, sized for all of them at once, and the other reserved slots
+/// stay `UNDEF`. What a program sees is the same: the pieces converted in
+/// order, each warning and `__toString` raised where php raises it, one
+/// string of their joined length at the `ROPE_END`. A piece whose
+/// conversion threw leaves the throwable pending
+/// (`ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION`).
+///
+/// ```php
+/// $a = 1; $b = 2; echo "$a-$b-$a";
+/// ```
+/// ```expect
+/// 1-2-1
+/// ```
+///
+/// A CV nothing wrote is the undefined-variable warning and the empty
+/// piece, `ZVAL_UNDEFINED_OP2` before the conversion.
+///
+/// ```php
+/// $b = 2; echo "$u-$b-$u|";
+/// ```
+/// ```expect
+/// Warning: Undefined variable $u in %s on line 2
+///
+/// Warning: Undefined variable $u in %s on line 2
+/// -2-|
+/// ```
+pub(crate) fn rope_init<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let rope = match req.array_sized(op.extended_value, true) {
+        Ok(rope) => rope,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, Value::array(rope));
+    req.release(previous);
+    rope_piece(req, frame, code, op, rope)
+}
+
+/// `ZEND_ROPE_ADD` (`Z/Zend/zend_vm_def.h:3445`): one more piece,
+/// converted as [`crate::ops::to_string`] converts it, into element
+/// `extended_value` of the rope `op1` names, which is the `result` too
+/// (`op1 and result are the same`). The piece is appended, and
+/// `extended_value` is its index by construction: the compiler numbers
+/// the pieces from zero in emission order.
+///
+/// A float piece is printed at `precision`, a `true` piece is `1`, and
+/// `null` and `false` pieces are empty.
+///
+/// ```php
+/// $f = 1.5; $t = true; $n = null; $b = false;
+/// echo "f=$f t=$t n=$n b=$b|";
+/// ```
+/// ```expect
+/// f=1.5 t=1 n= b=|
+/// ```
+///
+/// An object piece with no `__toString` is php's `Error`, thrown from
+/// the conversion with the rope's pieces so far still held.
+///
+/// ```php
+/// class B {}
+/// $o = new B; $a = 1;
+/// echo "$a-$o-$a";
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Object of class B could not be converted to string in %s:4
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 4
+/// ```
+pub(crate) fn rope_add<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let rope = rope_of(req, frame, code, op)?;
+    rope_piece(req, frame, code, op, rope)
+}
+
+/// `ZEND_ROPE_END` (`Z/Zend/zend_vm_def.h:3480`): the last piece into
+/// its element, then the pieces' lengths summed, one string of that
+/// length filled with them in order, the rope given up and the string
+/// into the temporary the opline's `result` names. A last piece whose
+/// conversion threw releases every piece (`zend_string_release_ex` over
+/// the rope) and leaves the temporary `UNDEF`, the throwable pending.
+///
+/// ```php
+/// $a = 1; $b = 2; $c = 3; echo "$a$b$c|", "$a+$b+$c=", $a + $b + $c, "|";
+/// ```
+/// ```expect
+/// 123|1+2+3=6|
+/// ```
+///
+/// An array piece anywhere in the rope is the warning at the piece and
+/// `Array` in its place; an object piece with a `__toString` is what it
+/// returned, `Exception::__toString` here since a user method is not
+/// compiled yet.
+///
+/// ```php
+/// $a = [1]; $o = new Exception('m'); $n = 7;
+/// echo "$n:$a:$o:$n\n";
+/// ```
+/// ```expect
+/// Warning: Array to string conversion in %s on line 3
+/// 7:Array:Exception: m in %s:2
+/// Stack trace:
+/// #0 {main}:7
+/// ```
+pub(crate) fn rope_end<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let mut rope = rope_of(req, frame, code, op)?;
+    let rope_slot = exec::temporary_slot(code, op.op1);
+    let piece = exec::operand(req, frame, code, op.op2_type, op.op2);
+    let converted = crate::ops::to_string(req, &piece);
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    let appended = match converted {
+        Ok(text) => rope.append(req, Value::string(text)),
+        Err(thrown) => Err(thrown),
+    };
+    if let Err(thrown) = appended {
+        let held = req.take_slot(frame, rope_slot);
+        req.release(held);
+        return threw(req, frame, &thrown);
+    }
+    let len: usize = rope
+        .iter()
+        .map(|(_, v)| {
+            v.as_php_string()
+                .map_or(0, crate::api::values::PhpString::len)
+        })
+        .sum();
+    let joined = crate::api::values::PhpString::filled(req, len, |bytes| {
+        let mut at: usize = 0;
+        for (_, v) in &rope {
+            let Some(s) = v.as_php_string() else {
+                continue;
+            };
+            let end = at.saturating_add(s.len()).min(bytes.len());
+            if let Some(target) = bytes.get_mut(at..end) {
+                target.copy_from_slice(&s.as_bytes()[..target.len()]);
+            }
+            at = end;
+        }
+    });
+    let held = req.take_slot(frame, rope_slot);
+    req.release(held);
+    match joined {
+        Ok(joined) => {
+            let out = exec::temporary_slot(code, op.out);
+            let previous = req.set_slot(frame, out, Value::string(joined));
+            req.release(previous);
+            Ok(advance(req, frame))
+        }
+        Err(thrown) => threw(req, frame, &thrown),
+    }
+}
+
+/// The rope the opline's `op1` temporary holds, the packed array
+/// `ROPE_INIT` put there; a slot holding anything else is an invariant
+/// the compiler's rope emission keeps, so it is an internal error.
+fn rope_of(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Result<crate::api::values::PhpArray, Fatal> {
+    let slot = exec::temporary_slot(code, op.op1);
+    req.slot(frame, slot).as_array().copied().ok_or_else(|| {
+        Fatal::Error(format!(
+            "InternalError: {} over a temporary holding no rope",
+            op.opcode.name()
+        ))
+    })
+}
+
+/// One piece of a rope: the `op2` operand converted as
+/// `zval_get_string_func` converts it, the operand freed (`FREE_OP2`),
+/// and the string appended to the rope; a conversion that threw leaves
+/// the throwable pending, which is the `Threw` edge the loop reads.
+fn rope_piece(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    mut rope: crate::api::values::PhpArray,
+) -> Edge {
+    let piece = exec::operand(req, frame, code, op.op2_type, op.op2);
+    let converted = crate::ops::to_string(req, &piece);
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    let appended = match converted {
+        Ok(text) => rope.append(req, Value::string(text)),
+        Err(thrown) => Err(thrown),
+    };
+    match appended {
+        Ok(()) => Ok(advance(req, frame)),
+        Err(thrown) => threw(req, frame, &thrown),
+    }
 }
 
 /// `ZEND_IS_SMALLER`: [`crate::ops::is_smaller`] over the two operands,
