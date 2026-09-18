@@ -435,6 +435,10 @@ struct DimLink {
 enum Fetch {
     Read,
     Write,
+    /// `BP_VAR_IS`, the read that raises nothing where what it reads is
+    /// not there: `zend_adjust_for_fetch_type`'s third arm, which is
+    /// `FETCH_DIM_R` plus three and a temporary for what it leaves.
+    Is,
 }
 
 /// What a magic constant folds to: `__LINE__`'s number, or the string
@@ -3859,7 +3863,7 @@ impl Emit<'_> {
             Expr::StaticProp { class, name } => self.static_prop(class, name),
             Expr::Array(elements) => self.array(elements),
             Expr::Throw(operand) => self.throw(operand),
-            Expr::Isset { var, empty } => Ok(self.isset_or_empty(var, *empty)),
+            Expr::Isset { var, empty } => self.isset_or_empty(var, *empty),
             Expr::Closure(closure) => self.closure(closure),
             Expr::CallVar { callee, arguments } => self.call_var(callee, arguments),
             Expr::Ternary {
@@ -3876,27 +3880,81 @@ impl Emit<'_> {
         }
     }
 
-    /// `zend_compile_isset_or_empty` over a `ZEND_AST_VAR` that
-    /// `zend_try_compile_cv` makes a CV (`Z/Zend/zend_compile.c:10816`):
-    /// `ISSET_ISEMPTY_CV` over the CV into a temporary, with
-    /// `ZEND_ISEMPTY` in `extended_value` for `empty` and nothing for
-    /// `isset`. php's handler branches on the answer where a `JMPZ` or a
-    /// `JMPNZ` follows (`ZEND_VM_SMART_BRANCH`); the temporary stands
-    /// and the jump reads it, which is the same observable path one
-    /// opline longer, as `TYPE_CHECK`'s is.
-    fn isset_or_empty(&mut self, var: &[u8], empty: bool) -> Where {
-        let cv = self.lookup_cv(var);
-        let out = self.temporary();
+    /// `zend_compile_isset_or_empty` (`Z/Zend/zend_compile.c:10816`),
+    /// whose arms are the variable nodes: a `ZEND_AST_VAR` that
+    /// `zend_try_compile_cv` makes a CV is `ISSET_ISEMPTY_CV` over the
+    /// CV into a temporary, and a `ZEND_AST_DIM` is the chain compiled
+    /// under `BP_VAR_IS` with the last link's opcode overwritten,
+    /// `opline->opcode = ZEND_ISSET_ISEMPTY_DIM_OBJ`, so the link that
+    /// would have fetched asks the table instead. `ZEND_ISEMPTY` goes
+    /// into `extended_value` for `empty` and nothing for `isset`.
+    ///
+    /// php's handler branches on the answer where a `JMPZ` or a `JMPNZ`
+    /// follows (`ZEND_VM_SMART_BRANCH`); the temporary stands and the
+    /// jump reads it, which is the same observable path one opline
+    /// longer, as `TYPE_CHECK`'s is.
+    ///
+    /// Every link under the last is `FETCH_DIM_IS`, the read that raises
+    /// nothing, so a chain says no where a read would have warned:
+    ///
+    /// ```php
+    /// $a = [1, 'k' => null];
+    /// var_dump(isset($a[0]), isset($a['k']), isset($a[9]), empty($a[0]));
+    /// var_dump(isset($a[0][1]), isset($a[9][8][7]), empty($a['k'][0]));
+    /// $s = "abc";
+    /// var_dump(isset($s[1]), isset($s[9]), isset($s["x"]), empty($s[0]));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    fn isset_or_empty(&mut self, var: &Expr, empty: bool) -> Result<Where, CompileError> {
+        let extended_value = u32::from(empty);
+        if let Expr::Var(name) = var {
+            let cv = self.lookup_cv(name);
+            let out = self.temporary();
+            self.push(Opline {
+                opcode: Opcode::IssetIsemptyCv,
+                op1_type: OperandKind::Cv,
+                op1: cv,
+                out_type: OperandKind::Tmp,
+                out,
+                extended_value,
+                ..Opline::default()
+            });
+            return Ok(Where::Temporary(out));
+        }
+        if !matches!(var, Expr::Dim { .. }) {
+            return Err(
+                self.fatal("an `isset` over what is no variable this compiler cannot read yet")
+            );
+        }
+        let (container, links) = self.dim_chain(var, Fetch::Is)?;
+        let Some((last, fetches)) = links.split_last() else {
+            return Err(self.fatal("a dimension with no dimension"));
+        };
+        let (op1_type, op1) = self.dim_fetches(container, fetches, Fetch::Is);
         self.push(Opline {
-            opcode: Opcode::IssetIsemptyCv,
-            op1_type: OperandKind::Cv,
-            op1: cv,
+            opcode: Opcode::IssetIsemptyDimObj,
+            op1_type,
+            op1,
+            op2_type: last.kind,
+            op2: last.at,
             out_type: OperandKind::Tmp,
-            out,
-            extended_value: u32::from(empty),
+            out: last.out,
+            extended_value,
             ..Opline::default()
         });
-        Where::Temporary(out)
+        Ok(Where::Temporary(last.out))
     }
 
     /// `zend_compile_throw` (`Z/Zend/zend_compile.c:5795`): the operand,
@@ -4449,7 +4507,9 @@ impl Emit<'_> {
                     let value = self.expr(index)?;
                     self.dim_operand(value)
                 }
-                None if fetch == Fetch::Read => {
+                // `zend_delayed_compile_dim`: the append names no
+                // element to read, under `BP_VAR_R` and `BP_VAR_IS` alike.
+                None if matches!(fetch, Fetch::Read | Fetch::Is) => {
                     return Err(self.compile_error("Cannot use [] for reading"));
                 }
                 None => (OperandKind::Unused, 0),
@@ -4476,6 +4536,7 @@ impl Emit<'_> {
         let (opcode, out_type, extended_value) = match fetch {
             Fetch::Read => (Opcode::FetchDimR, OperandKind::Tmp, 0),
             Fetch::Write => (Opcode::FetchDimW, OperandKind::Var, FETCH_DIM_DIM),
+            Fetch::Is => (Opcode::FetchDimIs, OperandKind::Tmp, 0),
         };
         let (mut op1_type, mut op1) = (OperandKind::Cv, container);
         for link in fetches {
@@ -6701,7 +6762,7 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Expr) {
         // `ZEND_AST_ISSET` and `ZEND_AST_EMPTY` are no special node, so
         // the walk reaches the `ZEND_AST_VAR` under them and an arrow
         // function captures what its `isset` names.
-        Expr::Isset { var, .. } => note(names, var),
+        Expr::Isset { var, .. } => implicit_uses(names, var),
         Expr::Prop { object, .. } => implicit_uses(names, object),
         Expr::Dim { container, index } => {
             implicit_uses(names, container);

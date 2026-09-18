@@ -3008,7 +3008,7 @@ pub(crate) fn fetch_dim_r<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let container = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
-    let read = read_dimension(req, frame, code, op, &container)?;
+    let read = read_dimension(req, frame, code, op, &container, DimRead::Warning)?;
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     let value = match read {
@@ -3021,17 +3021,76 @@ pub(crate) fn fetch_dim_r<T: Tier>(
     Ok(advance(req, frame))
 }
 
+/// `ZEND_FETCH_DIM_IS` (`Z/Zend/zend_vm_def.h`), a link of a chain an
+/// `isset`, an `empty` or a `??` reads: [`fetch_dim_r`]'s body under
+/// `BP_VAR_IS` ([`DimRead::Silent`]), which reads `null` where the read
+/// that warns would have warned. A key the table has not got, an offset
+/// past the end of a string, a string offset that is no number, and a
+/// container that is neither an array, a string nor an object are all
+/// `null` with nothing raised; an offset whose type is no key at all is
+/// still php's `TypeError`, since `slow_index_convert` and
+/// `zend_illegal_string_offset` raise it under either read.
+///
+/// ```php
+/// $a = [[1], 'k' => "ab"];
+/// var_dump(isset($a[9][8]), isset($a[0][0]), isset($a['k'][1]), isset($a['k'][9]));
+/// var_dump(empty($a[9][8]), empty($a[0][0]), isset($a[0][9]));
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// ```
+pub(crate) fn fetch_dim_is<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let container = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
+    let read = read_dimension(req, frame, code, op, &container, DimRead::Silent)?;
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    let value = match read {
+        Ok(value) => value,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, value);
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
+/// php's `type` argument to `zend_fetch_dimension_address_read`, of
+/// which the two reads use two values: `BP_VAR_R`, which warns of a key
+/// the table has not got, an offset past the end of a string and a
+/// container that is neither; and `BP_VAR_IS`, which warns of none of
+/// the three and reads `null` instead, since what asks is an `isset` or
+/// a `??` and the answer is the question.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DimRead {
+    Warning,
+    Silent,
+}
+
 /// The four arms of `zend_fetch_dimension_address_read`, the container
 /// already dereferenced. Each reads the dimension itself, as php reads
 /// it inside the arm it took: `ZVAL_UNDEFINED_OP2` sits in
 /// `slow_index_convert` for an array, in `try_string_offset` for a
 /// string, and after `ZVAL_UNDEFINED_OP1` in the arm that has neither.
+/// That second warning is raised under both reads; the first and the
+/// `Trying to access array offset` beside it are `BP_VAR_R`'s alone.
 fn read_dimension(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     container: &Value,
+    mode: DimRead,
 ) -> Result<Result<Value, Thrown>, Fatal> {
     if let Some(array) = container.as_array().copied() {
         let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
@@ -3039,15 +3098,25 @@ fn read_dimension(
             Ok(key) => key,
             Err(thrown) => return Ok(Err(thrown)),
         };
-        return Ok(Ok(array_entry(req, array, key)));
+        return Ok(Ok(array_entry(req, array, key, mode)));
     }
     if let Some(text) = container.as_php_string().copied() {
         let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
-        return Ok(string_offset(req, text, &dim));
+        return Ok(string_offset(req, text, &dim, mode));
     }
     if let Some(object) = container.as_object().copied() {
         let dim = object_dim(req, frame, code, op);
-        return Ok(req.read_dimension(object, dim.as_ref()));
+        return Ok(match mode {
+            DimRead::Warning => req.read_dimension(object, dim.as_ref()),
+            DimRead::Silent => req.read_dimension_is(object, dim.as_ref()),
+        });
+    }
+    if mode == DimRead::Silent {
+        // `if (type != BP_VAR_IS && Z_TYPE_P(container) == IS_UNDEF)`:
+        // the container's own read raises nothing here, and the
+        // dimension's still does.
+        let _dim = exec::operand(req, frame, code, op.op2_type, op.op2);
+        return Ok(Ok(Value::null()));
     }
     let named = crate::ops::value_name(req, &container.undef_as_null());
     // `ZVAL_UNDEFINED_OP1` and `ZVAL_UNDEFINED_OP2`: the warning each
@@ -3064,11 +3133,14 @@ fn read_dimension(
 /// php's `Undefined array key` warning and `null` where the table has
 /// none, the key rendered as `zend_undefined_offset` renders a long and
 /// `zend_undefined_index` a string.
-fn array_entry(req: &mut Request, array: PhpArray, key: php_heap::Key) -> Value {
+fn array_entry(req: &mut Request, array: PhpArray, key: php_heap::Key, mode: DimRead) -> Value {
     if let Some(found) = array.heap().get(key) {
         let value = exec::value_of(found).deref();
         req.addref(&value);
         return value;
+    }
+    if mode == DimRead::Silent {
+        return Value::null();
     }
     let message = match key {
         php_heap::Key::Long(n) => format!("Undefined array key {n}"),
@@ -3148,7 +3220,7 @@ fn object_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -
 /// then convert, the float silently since the warning has been raised
 /// ([`crate::ops::dval_to_lval_silent`]). An array, an object and a
 /// resource are the `TypeError`.
-fn string_dim_offset(req: &mut Request, dim: &Value) -> Result<i64, Thrown> {
+fn string_dim_offset(req: &mut Request, dim: &Value, mode: DimRead) -> Result<Option<i64>, Thrown> {
     let dim = dim.deref();
     let illegal = |req: &mut Request, dim: &Value| {
         crate::api::raising::throw(
@@ -3158,7 +3230,7 @@ fn string_dim_offset(req: &mut Request, dim: &Value) -> Result<i64, Thrown> {
         )
     };
     match dim.as_ref() {
-        ValueRef::Int(n) => Ok(n),
+        ValueRef::Int(n) => Ok(Some(n)),
         ValueRef::Str(s) => match php_heap::numeric_prefix(s.as_bytes()) {
             Some((php_heap::Number::Long(n), trailing)) => {
                 if trailing {
@@ -3170,17 +3242,22 @@ fn string_dim_offset(req: &mut Request, dim: &Value) -> Result<i64, Thrown> {
                         ),
                     );
                 }
-                Ok(n)
+                Ok(Some(n))
             }
+            // `if (type == BP_VAR_IS) { ZVAL_NULL(result); return; }`,
+            // the one arm that stands before `zend_illegal_string_offset`.
+            _ if mode == DimRead::Silent => Ok(None),
             _ => Err(illegal(req, &dim)),
         },
         ValueRef::Undef | ValueRef::Null | ValueRef::Bool(_) | ValueRef::Float(_) => {
-            crate::api::raising::warning(req, "String offset cast occurred");
-            Ok(match dim.as_ref() {
+            if mode == DimRead::Warning {
+                crate::api::raising::warning(req, "String offset cast occurred");
+            }
+            Ok(Some(match dim.as_ref() {
                 ValueRef::Float(f) => crate::ops::dval_to_lval_silent(f),
                 ValueRef::Bool(true) => 1,
                 _ => 0,
-            })
+            }))
         }
         ValueRef::Array(_)
         | ValueRef::Object(_)
@@ -3238,8 +3315,15 @@ fn string_dim_offset(req: &mut Request, dim: &Value) -> Result<i64, Thrown> {
 /// #0 {main}
 ///   thrown in %s on line 3
 /// ```
-fn string_offset(req: &mut Request, text: PhpString, dim: &Value) -> Result<Value, Thrown> {
-    let offset = string_dim_offset(req, dim)?;
+fn string_offset(
+    req: &mut Request,
+    text: PhpString,
+    dim: &Value,
+    mode: DimRead,
+) -> Result<Value, Thrown> {
+    let Some(offset) = string_dim_offset(req, dim, mode)? else {
+        return Ok(Value::null());
+    };
     let len = i64::try_from(text.len()).unwrap_or(i64::MAX);
     let at = if offset < 0 {
         len.saturating_add(offset)
@@ -3247,6 +3331,11 @@ fn string_offset(req: &mut Request, text: PhpString, dim: &Value) -> Result<Valu
         offset
     };
     if at < 0 || at >= len {
+        // `if (type != BP_VAR_IS)`: the warning and the empty string are
+        // the read's, and `null` with nothing raised is the other's.
+        if mode == DimRead::Silent {
+            return Ok(Value::null());
+        }
         crate::api::raising::warning(req, &format!("Uninitialized string offset {offset}"));
         return Ok(Value::string(PhpString::new(req, b"")?));
     }
@@ -3454,7 +3543,12 @@ fn assign_string_offset(
     let Some(text) = held.as_php_string().copied() else {
         return Ok(Value::null());
     };
-    let offset = string_dim_offset(req, dim)?;
+    // A write is `BP_VAR_W`, which `zend_check_string_offset` runs
+    // through the read's ladder with php's errors on, so no arm of it
+    // answers `null` here.
+    let Some(offset) = string_dim_offset(req, dim, DimRead::Warning)? else {
+        return Ok(Value::null());
+    };
     let len = i64::try_from(text.len()).unwrap_or(i64::MAX);
     if offset < -len {
         crate::api::raising::warning(req, &format!("Illegal string offset {offset}"));
@@ -3675,7 +3769,7 @@ pub(crate) fn fetch_dim_w<T: Tier>(
             // then `zend_wrong_string_offset_error`, whose sentence the
             // opline's `extended_value` picks.
             let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
-            Err(match string_dim_offset(req, &dim) {
+            Err(match string_dim_offset(req, &dim, DimRead::Warning) {
                 Ok(_) if op.extended_value == FETCH_DIM_REF => crate::api::raising::throw(
                     req,
                     "Error",
@@ -6481,6 +6575,185 @@ pub(crate) fn isset_isempty_cv<T: Tier>(
     Ok(advance(req, frame))
 }
 
+/// `ZEND_ISSET_ISEMPTY_DIM_OBJ` (`Z/Zend/zend_vm_def.h:7546`), what
+/// `isset($a[0])` and `empty($a[0])` compile to over the last link of a
+/// chain: the container read as `GET_OP1_OBJ_ZVAL_PTR_UNDEF(BP_VAR_IS)`
+/// reads it, which warns of nothing, and the answer written into the
+/// temporary as a bool.
+///
+/// An array is asked whether the key is there and what it holds, never
+/// fetched from, so no `Undefined array key` warning is raised on any
+/// path: under `isset` the answer is that the entry stands and is not
+/// `null`, a reference followed, and under `ZEND_ISEMPTY` it is that the
+/// entry is absent or [`crate::ops::is_true`] says no. A string is the
+/// offset being inside it, and under `empty` the byte at it being `0`
+/// (`zend_isset_dim_slow`, `zend_isempty_dim_slow`). An object is
+/// `offsetExists`, with `offsetGet`'s truth after it under `empty`
+/// ([`Request::has_dimension`] with `not_empty`). Everything else is
+/// `false` for `isset` and `true` for `empty`, which is what the two
+/// slow paths answer for a container that is none of the three.
+///
+/// ```php
+/// $a = [1, 'k' => null];
+/// var_dump(isset($a[0]), isset($a['k']), isset($a[9]), empty($a[0]), empty($a['k']));
+/// $s = "abc";
+/// var_dump(isset($s[1]), isset($s[9]), isset($s["x"]), isset($s[-1]));
+/// $z = "0ab";
+/// var_dump(empty($z[0]), empty($z[1]), empty($z[9]));
+/// $n = null;
+/// var_dump(isset($n[0]), empty($n[0]));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// ```
+///
+/// An object is its `ArrayAccess` pair, and a class that is none is
+/// php's `Error` under either word:
+///
+/// ```php
+/// class C implements ArrayAccess {
+///     public function offsetExists($offset): bool { echo "e"; return $offset === 0; }
+///     public function offsetGet($offset): mixed { echo "g"; return 0; }
+///     public function offsetSet($offset, $value): void {}
+///     public function offsetUnset($offset): void {}
+/// }
+/// $c = new C;
+/// var_dump(isset($c[0]), isset($c[1]), empty($c[0]));
+/// $o = new stdClass;
+/// var_dump(isset($o[0]));
+/// ```
+/// ```expect exit=255
+/// eeegbool(true)
+/// bool(false)
+/// bool(true)
+///
+/// Fatal error: Uncaught Error: Cannot use object of type stdClass as array in %s:11
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 11
+/// ```
+pub(crate) fn isset_isempty_dim_obj<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let empty = op.extended_value & ISEMPTY != 0;
+    let container = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
+    let answer = if let Some(array) = container.as_array().copied() {
+        let offset = exec::operand(req, frame, code, op.op2_type, op.op2);
+        crate::ops::isset_dim(
+            req,
+            array,
+            &offset,
+            op.op2_type == OperandKind::Const,
+            empty,
+        )
+    } else {
+        // `if (OP2_TYPE == IS_CONST && Z_EXTRA_P(offset) ==
+        // ZEND_EXTRA_VALUE) offset++`: an object is handed the dimension
+        // as it was written, which is the arm that reads it at all.
+        let offset = if container.as_object().is_some() {
+            object_dim(req, frame, code, op).unwrap_or_else(Value::null)
+        } else {
+            exec::operand(req, frame, code, op.op2_type, op.op2)
+        };
+        isset_container(req, &container, &offset, empty)
+    };
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    match answer {
+        Ok(answer) => {
+            write_out(req, frame, code, op, &Value::bool(answer));
+            Ok(advance(req, frame))
+        }
+        Err(thrown) => threw(req, frame, &thrown),
+    }
+}
+
+/// `zend_isset_dim_slow` and `zend_isempty_dim_slow`
+/// (`Z/Zend/zend_execute.c:3294`), the ladder for a container that is no
+/// array: an object through `has_dimension`, `offsetExists` and, under
+/// `empty`, `offsetGet`'s truth after it, the answer negated for
+/// `empty`; a string the offset standing inside it, and under `empty`
+/// the byte at it being `0`, with an offset that is no simple scalar and
+/// no whole numeric string answering as an absent one does; and
+/// everything else `false` under `isset` and `true` under `empty`, with
+/// nothing raised.
+fn isset_container(
+    req: &mut Request,
+    container: &Value,
+    offset: &Value,
+    empty: bool,
+) -> Result<bool, Thrown> {
+    match container.as_ref() {
+        ValueRef::Object(object) => {
+            let held = req.has_dimension(*object, offset, empty)?;
+            Ok(held != empty)
+        }
+        ValueRef::Str(text) => {
+            let Some(at) = string_isset_offset(req, offset) else {
+                return Ok(empty);
+            };
+            let len = i64::try_from(text.len()).unwrap_or(i64::MAX);
+            let at = if at < 0 { at.saturating_add(len) } else { at };
+            if at < 0 || at >= len {
+                return Ok(empty);
+            }
+            if !empty {
+                return Ok(true);
+            }
+            let byte = text
+                .as_bytes()
+                .get(usize::try_from(at).unwrap_or(0))
+                .copied()
+                .unwrap_or(0);
+            Ok(byte == b'0')
+        }
+        _ => Ok(empty),
+    }
+}
+
+/// The offset `zend_isset_dim_slow` reads out of a dimension over a
+/// string: a long as itself; a type below `IS_STRING`, which is a slot
+/// nothing wrote, a `null`, a bool or a float, through
+/// `zval_get_long_ex`; a string only where `is_numeric_string` reads a
+/// whole long out of it, with nothing raised for one that does not; and
+/// an array, an object or a resource no offset at all, which is `None`
+/// here and the absent offset's answer there.
+fn string_isset_offset(req: &mut Request, offset: &Value) -> Option<i64> {
+    match offset.deref().as_ref() {
+        ValueRef::Int(n) => Some(n),
+        ValueRef::Undef | ValueRef::Null => Some(0),
+        ValueRef::Bool(b) => Some(i64::from(b)),
+        ValueRef::Float(f) => Some(crate::ops::double_to_long(req, f)),
+        ValueRef::Str(s) => match php_heap::numeric_prefix(s.as_bytes()) {
+            Some((php_heap::Number::Long(n), false)) => Some(n),
+            _ => None,
+        },
+        // A reference is followed above, so the arm stands for the
+        // three php's `default` refuses an offset for.
+        ValueRef::Array(_)
+        | ValueRef::Object(_)
+        | ValueRef::Resource(_)
+        | ValueRef::Reference(_) => None,
+    }
+}
+
+/// `ZEND_DEFINED`: [`crate::ops::defined`] over the constant string
 /// `ZEND_DEFINED`: [`crate::ops::defined`] over the constant string
 /// `op1` names, into the temporary. The cache slot in `extended_value`
 /// is not read: php keeps the answer in the per-request opline cache

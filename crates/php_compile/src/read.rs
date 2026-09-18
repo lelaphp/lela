@@ -580,13 +580,13 @@ pub(crate) enum Expr {
     /// `expr: T_THROW expr` is read wherever a full expression stands.
     Throw(Child),
     /// `isset($a)` and `empty($a)`, php's `ZEND_AST_ISSET` and
-    /// `ZEND_AST_EMPTY` over one `ZEND_AST_VAR` that
-    /// `zend_try_compile_cv` makes a CV: the variable's name as
-    /// written, and whether the word was `empty`. `isset($this)`,
-    /// `isset($a, $b)`, a dimension, a property and `empty` over what is
-    /// no variable are not read.
+    /// `ZEND_AST_EMPTY` over one variable node, and whether the word was
+    /// `empty`. The node is a `ZEND_AST_VAR` that `zend_try_compile_cv`
+    /// makes a CV, or a `ZEND_AST_DIM` chain over one, which php
+    /// compiles under `BP_VAR_IS`. `isset($this)`, `isset($a, $b)`, a
+    /// property and `empty` over what is no variable are not read.
     Isset {
-        var: Vec<u8>,
+        var: Child,
         empty: bool,
     },
     /// `a ? b : c` and `a ?: c`, php's `ZEND_AST_CONDITIONAL` over three
@@ -693,6 +693,7 @@ impl Drop for Child {
                     left.take()
                 }
                 Expr::Assign { value, .. } | Expr::AssignCoalesce { value, .. } => value.take(),
+                Expr::Isset { var, .. } => var.take(),
                 Expr::AssignProp { object, value, .. } => {
                     drop(value);
                     object.take()
@@ -3749,32 +3750,45 @@ impl Reader<'_> {
 
     /// `isset(` or `empty(` read, the parenthesis bumped: php's
     /// `isset_variables` and `expr` under `ZEND_AST_ISSET` and
-    /// `ZEND_AST_EMPTY`, of which one plain variable is read. php's
-    /// `isset($a, $b)` is `$a && $b` over a chain of jumps, `empty`
-    /// over what is no variable is the `!expr` `zend_compile_isset_or_empty`
-    /// rewrites it to, and `$this`, a dimension and a property each have
-    /// an opcode of their own; none is read yet.
+    /// `ZEND_AST_EMPTY`, of which a plain variable and a chain of
+    /// dimensions over one are read. php's `isset($a, $b)` is `$a && $b`
+    /// over a chain of jumps, `empty` over what is no variable is the
+    /// `!expr` `zend_compile_isset_or_empty` rewrites it to, and
+    /// `$this`, a property and a class's own property (php's
+    /// `ZEND_AST_STATIC_PROP`) each have an opcode of their own; none is
+    /// read yet.
     fn isset_or_empty(&mut self, empty: bool) -> Result<Expr, Trouble> {
         let word = if empty { "empty" } else { "isset" };
         self.skip_trivia();
         if self.byte(0) != Some(b'$') {
             return Err(self.trouble(format!(
-                "an `{word}` over what is no plain variable this compiler cannot read yet"
+                "an `{word}` over what is no variable this compiler cannot read yet"
             )));
         }
-        let Expr::Var(var) = self.variable()? else {
+        let Expr::Var(name) = self.variable()? else {
             return Err(self.trouble(format!(
                 "an `{word}` over $this this compiler cannot read yet"
             )));
         };
+        let mut var = Expr::Var(name);
+        loop {
+            self.skip_trivia();
+            if self.byte(0) != Some(b'[') {
+                break;
+            }
+            var = self.dimension(var)?;
+        }
         self.skip_trivia();
         if self.byte(0) != Some(b')') {
             return Err(self.trouble(format!(
-                "an `{word}` over what is no plain variable this compiler cannot read yet"
+                "an `{word}` over what is no variable this compiler cannot read yet"
             )));
         }
         self.bump(1);
-        Ok(Expr::Isset { var, empty })
+        Ok(Expr::Isset {
+            var: Child::new(var),
+            empty,
+        })
     }
 
     /// Whether a name, php's `T_STRING` or `T_NAME_*`, starts here.
@@ -5261,20 +5275,20 @@ mod tests {
     }
 
     #[test]
-    fn isset_and_empty_over_one_plain_variable_are_read_and_nothing_else_is() {
+    fn isset_and_empty_over_a_variable_and_a_dimension_are_read_and_nothing_else_is() {
         assert_eq!(
             read(b"<?php isset($a); empty($a);").unwrap_or_default(),
             vec![
                 (
                     Stmt::Effect(Expr::Isset {
-                        var: b"a".to_vec(),
+                        var: Child::new(Expr::Var(b"a".to_vec())),
                         empty: false
                     }),
                     1
                 ),
                 (
                     Stmt::Effect(Expr::Isset {
-                        var: b"a".to_vec(),
+                        var: Child::new(Expr::Var(b"a".to_vec())),
                         empty: true
                     }),
                     1
@@ -5282,9 +5296,25 @@ mod tests {
             ],
             "`empty` is the same node with the word remembered"
         );
+        assert_eq!(
+            read(b"<?php isset($a[0][1]);").unwrap_or_default(),
+            vec![(
+                Stmt::Effect(Expr::Isset {
+                    var: Child::new(Expr::Dim {
+                        container: Child::new(Expr::Dim {
+                            container: Child::new(Expr::Var(b"a".to_vec())),
+                            index: Some(Child::new(Expr::Int(0))),
+                        }),
+                        index: Some(Child::new(Expr::Int(1))),
+                    }),
+                    empty: false
+                }),
+                1
+            )],
+            "the chain under an `isset` is the `ZEND_AST_DIM` chain a read is"
+        );
         for source in [
             b"<?php isset($a, $b);".as_slice(),
-            b"<?php isset($a[0]);".as_slice(),
             b"<?php isset($a->p);".as_slice(),
             b"<?php empty(1);".as_slice(),
             b"<?php isset();".as_slice(),

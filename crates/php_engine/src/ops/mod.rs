@@ -2369,6 +2369,88 @@ pub(crate) fn array_offset(
     }
 }
 
+/// `ZEND_ISSET_ISEMPTY_DIM_OBJ`'s array arm (`Z/Zend/zend_vm_def.h:7546`,
+/// the `isset_dim_obj_array` label): the entry at the key the offset
+/// makes, asked for rather than fetched, so no `Undefined array key`
+/// warning is raised on any path. Under `isset` the answer is that the
+/// entry stands and is neither `null` nor a reference to one
+/// (`Z_TYPE_P(value) > IS_NULL`); under `ZEND_ISEMPTY` it is that the
+/// entry is absent or [`is_true`] says no.
+///
+/// ```php
+/// $a = [0, null, "", "x", false];
+/// var_dump(isset($a[0]), isset($a[1]), isset($a[2]), isset($a[9]));
+/// var_dump(empty($a[0]), empty($a[3]), empty($a[9]));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// ```
+pub(crate) fn isset_dim(
+    req: &mut Request,
+    array: PhpArray,
+    offset: &Value,
+    constant: bool,
+    empty: bool,
+) -> Result<bool, Thrown> {
+    let key = isset_offset(req, offset, constant)?;
+    let found = array.heap().get(key).map(crate::exec::value_of);
+    if empty {
+        return Ok(match found {
+            Some(value) => !is_true(req, &value.deref()),
+            None => true,
+        });
+    }
+    Ok(found.is_some_and(|value| !matches!(value.deref().as_ref(), ValueRef::Null)))
+}
+
+/// `zend_find_array_dim_slow` (`Z/Zend/zend_execute.c:3247`), the key
+/// `zend_find_array_dim_slow` (`Z/Zend/zend_execute.c:3247`), the key
+/// ladder `ZEND_ISSET_ISEMPTY_DIM_OBJ` walks over an array: the same one
+/// [`array_offset`] walks, with `zend_illegal_array_offset_isset`'s
+/// sentence in place of the read's, `Cannot access offset of type %s in
+/// isset or empty`, which is the one arm of the two that differs.
+///
+/// ```php
+/// $a = [1];
+/// try { var_dump(isset($a[[]])); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { var_dump(empty($a[new stdClass])); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Cannot access offset of type array in isset or empty
+/// Cannot access offset of type stdClass in isset or empty
+/// ```
+pub(crate) fn isset_offset(
+    req: &mut Request,
+    offset: &Value,
+    constant: bool,
+) -> Result<php_heap::Key, Thrown> {
+    // `zend_zval_type_name`, which is the class's name for an object
+    // and the type's for everything else.
+    let held = offset.deref();
+    match held.as_ref() {
+        ValueRef::Array(_) => Err(throw(
+            req,
+            "TypeError",
+            "Cannot access offset of type array in isset or empty",
+        )),
+        ValueRef::Object(object) => {
+            let class = req.class_name(object.class());
+            Err(throw(
+                req,
+                "TypeError",
+                &format!("Cannot access offset of type {class} in isset or empty"),
+            ))
+        }
+        _ => array_offset(req, &held, constant),
+    }
+}
+
 /// `ZEND_UNSET_DIM`'s body over an array (`Z/Zend/zend_vm_def.h:6735`,
 /// the `unset_dim_array` label): `zend_hash_del` or
 /// `zend_hash_index_del` at the key the offset makes, over the array the
@@ -2762,7 +2844,27 @@ pub(crate) fn arg_long_weak(req: &mut Request, value: &Value) -> Option<i64> {
 /// one past the range; then the deprecation where the double fits and
 /// the long is not it. `ZEND_DOUBLE_FITS_LONG` is two comparisons NAN
 /// fails neither of, so NAN is warned on and then deprecated.
-fn double_to_long(req: &mut Request, d: f64) -> i64 {
+///
+/// ```php
+/// $a = []; $a[2.5] = 1; var_dump($a);
+/// $b = []; $b[NAN] = 2; var_dump($b);
+/// ```
+/// ```expect
+/// Deprecated: Implicit conversion from float 2.5 to int loses precision in %s on line 2
+/// array(1) {
+///   [2]=>
+///   int(1)
+/// }
+///
+/// Warning: The float NAN is not representable as an int, cast occurred in %s on line 3
+///
+/// Deprecated: Implicit conversion from float NAN to int loses precision in %s on line 3
+/// array(1) {
+///   [0]=>
+///   int(2)
+/// }
+/// ```
+pub(crate) fn double_to_long(req: &mut Request, d: f64) -> i64 {
     let l = dval_to_lval(req, d);
     if !long_compatible(d, l) && fits_long(d) {
         let text = rendered(d);

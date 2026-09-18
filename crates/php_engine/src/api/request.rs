@@ -3996,6 +3996,31 @@ impl Request {
         crate::api::call::call_method(self, &object, b"offsetGet", &[offset])
     }
 
+    /// `zend_std_read_dimension` under `BP_VAR_IS`: `offsetExists`
+    /// first, `null` where it says no, and `offsetGet` after it where it
+    /// says yes, so a chain under an `isset` calls the two in that order
+    /// and calls neither on a class that is no `ArrayAccess`.
+    pub(crate) fn read_dimension_is(
+        &mut self,
+        object: PhpObject,
+        offset: Option<&Value>,
+    ) -> Result<Value, Thrown> {
+        self.array_access(object)?;
+        let offset = offset.copied().unwrap_or_else(Value::null);
+        let exists = crate::api::call::call_method(
+            self,
+            &object,
+            b"offsetExists",
+            std::slice::from_ref(&offset),
+        )?;
+        let answer = crate::api::coerce::truthy(self, &exists);
+        self.release(exists);
+        if !answer {
+            return Ok(Value::null());
+        }
+        crate::api::call::call_method(self, &object, b"offsetGet", &[offset])
+    }
+
     /// `zend_std_write_dimension`: `offsetSet` on an `ArrayAccess`, the
     /// offset `null` for `$o[] = v`; `value` is given up either way.
     pub(crate) fn write_dimension(
