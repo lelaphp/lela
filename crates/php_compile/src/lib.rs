@@ -4218,19 +4218,111 @@ mod tests {
             assert_eq!(error.message, message);
             assert_eq!(error.line, 2, "{message}");
         }
-        // What php leaves to `INIT_ARRAY`, which is not emitted yet (#304).
-        for source in [
-            b"<?php echo [null => 1];".as_slice(),
-            b"<?php echo [1.5 => 1];".as_slice(),
-            b"<?php echo [$a];".as_slice(),
-            b"<?php echo [PHP_INT_MAX => 1, 2];".as_slice(),
-        ] {
-            assert_eq!(
-                refused(source).map(|e| e.message).as_deref(),
-                Some("an array expression this compiler cannot read yet"),
-                "{}",
-                String::from_utf8_lossy(source)
-            );
-        }
+        // `[[] => 2]` under a variable is not php's compile error: the
+        // first pass of `zend_try_ct_eval_array` finds the variable and
+        // leaves the literal to the request, where it is a `TypeError`.
+        assert_eq!(refused(b"<?php echo [[] => 2, $a];"), None);
+    }
+
+    /// `zend_compile_array` against the oracle's dump over the programs
+    /// of #304: an array expression with a variable in it is `INIT_ARRAY`
+    /// over the first element and `ADD_ARRAY_ELEMENT` over each after,
+    /// the temporary numbered after the first element's own and shared
+    /// by every opline, the count above `ZEND_ARRAY_SIZE_SHIFT`, and
+    /// the live range running from the `INIT_ARRAY` to the opline that
+    /// reads the temporary.
+    #[test]
+    fn an_array_with_a_variable_is_init_array_and_add_array_element_as_php_emits_them() {
+        let (unit, _strings) = unit_and_strings(b"<?php $a = ['x', 'y']; $b = [1, $a, 'k' => 2];");
+        assert_eq!(
+            unit.dump(&[]),
+            main_dump(
+                6,
+                2,
+                3,
+                "0000 ASSIGN CV0($a) array(...)\n\
+                 0001 T3 = INIT_ARRAY 3 int(1) NEXT\n\
+                 0002 T3 = ADD_ARRAY_ELEMENT CV0($a) NEXT\n\
+                 0003 T3 = ADD_ARRAY_ELEMENT int(2) string(\"k\")\n\
+                 0004 ASSIGN CV1($b) T3\n\
+                 0005 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    3: 0002 - 0004 (tmp/var)\n"
+            )
+        );
+        assert_eq!(
+            unit.main.oplines.get(1).map(|op| op.extended_value),
+            Some((3 << 2) | 2),
+            "three elements, and ZEND_ARRAY_NOT_PACKED for the string key"
+        );
+        assert_eq!(
+            oplines_of(b"<?php var_dump(['x', 'y'], [1, $a = 2, 'k' => 3]);"),
+            "0000 INIT_FCALL 2 112 string(\"var_dump\")\n\
+             0001 SEND_VAL array(...) 1\n\
+             0002 T1 = INIT_ARRAY 3 int(1) NEXT\n\
+             0003 T2 = ASSIGN CV0($a) int(2)\n\
+             0004 T1 = ADD_ARRAY_ELEMENT T2 NEXT\n\
+             0005 T1 = ADD_ARRAY_ELEMENT int(3) string(\"k\")\n\
+             0006 SEND_VAL T1 2\n\
+             0007 DO_ICALL\n\
+             0008 RETURN int(1)\n\
+             LIVE RANGES:\n\
+             \x20    1: 0003 - 0006 (tmp/var)\n"
+        );
+    }
+
+    /// The rest of `zend_compile_array` against the oracle's dump: what
+    /// `zend_try_ct_eval_array` leaves to the request, a `null` key, a
+    /// float key that is no whole number, and a next index past
+    /// `ZEND_LONG_MAX`, is emitted with the key as written, since the
+    /// handler warns over it; a constant string key that is a decimal is
+    /// the long `zend_handle_numeric_op` makes of it, and one that is
+    /// not sets `ZEND_ARRAY_NOT_PACKED` wherever it stands; a variable
+    /// key is compiled before the value and sets nothing; and an array
+    /// expression nothing reads is freed after its last element.
+    #[test]
+    fn the_keys_of_an_array_with_a_variable_are_emitted_as_php_emits_them() {
+        let (unit, _strings) = unit_and_strings(
+            b"<?php $k = '2'; $x = [1, $k, '3' => 4, 'a' => 5, 1.5 => 6, null => 7, true => 8]; $y = [$k => 1, 5 => 2, 'b' => 3]; [9223372036854775807 => 1, 2];",
+        );
+        assert_eq!(
+            unit.dump(&[]),
+            main_dump(
+                17,
+                3,
+                6,
+                "0000 ASSIGN CV0($k) string(\"2\")\n\
+                 0001 T4 = INIT_ARRAY 7 int(1) NEXT\n\
+                 0002 T4 = ADD_ARRAY_ELEMENT CV0($k) NEXT\n\
+                 0003 T4 = ADD_ARRAY_ELEMENT int(4) int(3)\n\
+                 0004 T4 = ADD_ARRAY_ELEMENT int(5) string(\"a\")\n\
+                 0005 T4 = ADD_ARRAY_ELEMENT int(6) float(1.5)\n\
+                 0006 T4 = ADD_ARRAY_ELEMENT int(7) null\n\
+                 0007 T4 = ADD_ARRAY_ELEMENT int(8) bool(true)\n\
+                 0008 ASSIGN CV1($x) T4\n\
+                 0009 T6 = INIT_ARRAY 3 int(1) CV0($k)\n\
+                 0010 T6 = ADD_ARRAY_ELEMENT int(2) int(5)\n\
+                 0011 T6 = ADD_ARRAY_ELEMENT int(3) string(\"b\")\n\
+                 0012 ASSIGN CV2($y) T6\n\
+                 0013 T8 = INIT_ARRAY 2 (packed) int(1) int(9223372036854775807)\n\
+                 0014 T8 = ADD_ARRAY_ELEMENT int(2) NEXT\n\
+                 0015 FREE T8\n\
+                 0016 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    4: 0002 - 0008 (tmp/var)\n\
+                 \x20    6: 0010 - 0012 (tmp/var)\n\
+                 \x20    8: 0014 - 0015 (tmp/var)\n"
+            )
+        );
+        let flags: Vec<u32> = [1usize, 9, 13]
+            .iter()
+            .filter_map(|&at| unit.main.oplines.get(at))
+            .map(|op| op.extended_value & 3)
+            .collect();
+        assert_eq!(
+            flags,
+            vec![2, 2, 0],
+            "ZEND_ARRAY_NOT_PACKED on the two with a constant string key"
+        );
     }
 }

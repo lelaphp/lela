@@ -88,7 +88,8 @@
 //! is freed, and `RETURN` carrying its safepoint number. An array
 //! expression whose every element is constant is `zend_try_ct_eval_array`'s
 //! one constant array with php's keys; one with a variable in it is
-//! `INIT_ARRAY`, not yet emitted (#304).
+//! `INIT_ARRAY` over the first element and `ADD_ARRAY_ELEMENT` over each
+//! after it, as `zend_compile_array` emits them.
 
 use std::cmp::Ordering;
 
@@ -236,6 +237,13 @@ struct Table {
 /// `break` or `continue` emits for the subject of each `switch` it
 /// leaves, which the live-range walk reads (`crate::live`).
 const FREE_ON_RETURN: u32 = 1 << 0;
+
+/// `ZEND_ARRAY_NOT_PACKED` and `ZEND_ARRAY_SIZE_SHIFT`
+/// (`Z/Zend/zend_compile.h:1202`): the bit `zend_compile_array` sets on
+/// an `INIT_ARRAY` once a constant string key is seen, and where above
+/// the two flags it writes the element count.
+const ARRAY_NOT_PACKED: u32 = 1 << 1;
+const ARRAY_SIZE_SHIFT: u32 = 2;
 /// `ZEND_FREE_SWITCH`, the bit `zend_compile.h` sets on the `FREE` of a
 /// `switch` or `match` subject at its end.
 const FREE_SWITCH: u32 = 1 << 1;
@@ -1796,12 +1804,7 @@ impl Emit<'_> {
                 arguments,
             } => self.method_call(object, method, arguments),
             Expr::Instanceof { expr, class } => self.instance_of(expr, class),
-            // `zend_compile_array`: the constant `zend_try_ct_eval_array`
-            // folds, or `INIT_ARRAY`, not yet emitted (#304).
-            Expr::Array(_) => match self.constant_of(expr)? {
-                Some(value) => Ok(Where::Constant(value)),
-                None => Err(self.fatal("an array expression this compiler cannot read yet")),
-            },
+            Expr::Array(elements) => self.array(elements),
             known => Ok(Where::Constant(self.constant_expr(known)?)),
         }
     }
@@ -2526,7 +2529,9 @@ impl Emit<'_> {
                 };
                 folded.ok_or_else(|| self.fatal("a call this compiler cannot fold"))
             }
-            Expr::Array(elements) => self.constant_array(elements),
+            Expr::Array(elements) => self
+                .constant_array(elements)?
+                .ok_or_else(|| self.fatal("an array expression that is no constant")),
             Expr::Var(_)
             | Expr::This
             | Expr::Prop { .. }
@@ -2552,62 +2557,65 @@ impl Emit<'_> {
     }
 
     /// `zend_try_ct_eval_array` (`Z/Zend/zend_compile.c:10085`) over an
-    /// array expression whose every element folds: one constant array in the home
-    /// the unit's strings are in ([`Intern::constant_array`]), the keys as
-    /// php writes them, an integer as itself, a string through
-    /// `zend_symtable_update`, which makes an integer of a decimal one, a
-    /// double truncated where it is a whole number, `false` and `true`
-    /// as 0 and 1, and the element with no key at `nNextFreeElement`,
-    /// one past the largest integer key so far and 0 before any. A
-    /// double that is no whole number, a `null` key, which warns when
-    /// served, or a next index past `ZEND_LONG_MAX` leaves the array to
-    /// the request in php, an `INIT_ARRAY` this compiler does not emit yet
-    /// (#304), and an element that does not fold is the same; an array
-    /// or an object as a key is php's `Illegal offset type`.
-    fn constant_array(&mut self, elements: &[Element]) -> Result<Zval, CompileError> {
+    /// array expression: nothing unless every key and value folds
+    /// (`zend_eval_const_expr` over each, and the walk stops folding
+    /// only at the compile error php's does), else one constant array
+    /// in the home the unit's strings are in ([`Intern::constant_array`]),
+    /// the keys as php writes them, an integer as itself, a string
+    /// through `zend_symtable_update`, which makes an integer of a
+    /// decimal one, a double truncated where it is a whole number,
+    /// `false` and `true` as 0 and 1, and the element with no key at
+    /// `nNextFreeElement`, one past the largest integer key so far and 0
+    /// before any. A double that is no whole number, a `null` key,
+    /// which warns when served, or a next index past `ZEND_LONG_MAX`
+    /// leaves the array to the request, php's `fail`, and is nothing
+    /// here too; an array or an object as a key is php's `Illegal
+    /// offset type`, raised only once every element is known constant,
+    /// as php raises it in its second pass.
+    fn constant_array(&mut self, elements: &[Element]) -> Result<Option<Zval>, CompileError> {
+        let mut folded: Vec<(Option<Zval>, Zval)> = Vec::with_capacity(elements.len());
+        for element in elements {
+            let key = match &element.key {
+                Some(key) => match self.constant_of(key)? {
+                    Some(key) => Some(key),
+                    None => return Ok(None),
+                },
+                None => None,
+            };
+            let Some(value) = self.constant_of(&element.value)? else {
+                return Ok(None);
+            };
+            folded.push((key, value));
+        }
         let mut entries: Vec<(Key, Zval)> = Vec::with_capacity(elements.len());
         let mut next_free = i64::MIN;
-        for element in elements {
-            let value = self.constant_expr(&element.value)?;
-            let key = match &element.key {
+        for (key, value) in folded {
+            let key = match key {
                 None => {
                     let index = if next_free == i64::MIN { 0 } else { next_free };
                     if index == i64::MAX && entries.iter().any(|(k, _)| *k == Key::Long(index)) {
-                        return Err(self.fatal("an array expression this compiler cannot read yet"));
+                        return Ok(None);
                     }
                     Key::Long(index)
                 }
-                Some(key) => {
-                    let key = self.constant_expr(key)?;
-                    match key.kind() {
-                        ZvalType::Long => Key::Long(key.as_long().unwrap_or(0)),
-                        ZvalType::String => match key.as_str() {
-                            Some(s) => numeric_key(s.bytes()).map_or(Key::Str(s), Key::Long),
-                            None => Key::Long(0),
-                        },
-                        ZvalType::Double => {
-                            let d = key.as_double().unwrap_or(0.0);
-                            match long_compatible(Number::Double(d)) {
-                                Some(n) => Key::Long(n),
-                                None => {
-                                    return Err(self.fatal(
-                                        "an array expression this compiler cannot read yet",
-                                    ));
-                                }
-                            }
+                Some(key) => match key.kind() {
+                    ZvalType::Long => Key::Long(key.as_long().unwrap_or(0)),
+                    ZvalType::String => match key.as_str() {
+                        Some(s) => numeric_key(s.bytes()).map_or(Key::Str(s), Key::Long),
+                        None => Key::Long(0),
+                    },
+                    ZvalType::Double => {
+                        let d = key.as_double().unwrap_or(0.0);
+                        match long_compatible(Number::Double(d)) {
+                            Some(n) => Key::Long(n),
+                            None => return Ok(None),
                         }
-                        ZvalType::False => Key::Long(0),
-                        ZvalType::True => Key::Long(1),
-                        // A null key warns at run time, so php leaves
-                        // the literal to `INIT_ARRAY`.
-                        ZvalType::Null => {
-                            return Err(
-                                self.fatal("an array expression this compiler cannot read yet")
-                            );
-                        }
-                        _ => return Err(self.compile_error("Illegal offset type")),
                     }
-                }
+                    ZvalType::False => Key::Long(0),
+                    ZvalType::True => Key::Long(1),
+                    ZvalType::Null => return Ok(None),
+                    _ => return Err(self.compile_error("Illegal offset type")),
+                },
             };
             if let Key::Long(n) = key
                 && n >= next_free
@@ -2620,10 +2628,96 @@ impl Emit<'_> {
             }
         }
         match self.strings.constant_array(&entries) {
-            Ok(array) => Ok(Zval::array(array)),
+            Ok(array) => Ok(Some(Zval::array(array))),
             Err(Fatal::Error(message)) => Err(self.fatal(message)),
             Err(Fatal::OutOfMemory(_)) => Err(self.fatal("Out of memory")),
         }
+    }
+
+    /// `zend_compile_array` (`Z/Zend/zend_compile.c:10935`): the constant
+    /// [`Self::constant_array`] folds, else the request builds the array
+    /// one element at a time. For each element the key is compiled
+    /// first and, a constant string that is a canonical decimal, made
+    /// the long php's `zend_handle_numeric_op` makes of it, then the
+    /// value; the first element is `INIT_ARRAY` over the two into a
+    /// temporary (`zend_emit_op_tmp`, so the temporary is numbered
+    /// after the first element's own), the count of elements in
+    /// `extended_value` above `ZEND_ARRAY_SIZE_SHIFT`, and every element
+    /// after it `ADD_ARRAY_ELEMENT` over the two with the same temporary
+    /// as its `result`. `ZEND_ARRAY_NOT_PACKED` is set on the
+    /// `INIT_ARRAY` once a constant string key is seen, and
+    /// `ZEND_ARRAY_ELEMENT_REF` never, since a `&` element is not read
+    /// yet; neither is `...`, which would be `ADD_ARRAY_UNPACK`.
+    fn array(&mut self, elements: &[Element]) -> Result<Where, CompileError> {
+        if let Some(value) = self.constant_array(elements)? {
+            return Ok(Where::Constant(value));
+        }
+        let count = u32::try_from(elements.len()).unwrap_or(u32::MAX);
+        let mut init_at = 0usize;
+        let mut out = 0u32;
+        let mut packed = true;
+        for (i, element) in elements.iter().enumerate() {
+            let key = match &element.key {
+                Some(key) => {
+                    let key = self.expr(key)?;
+                    Some(Self::numeric_op(key))
+                }
+                None => None,
+            };
+            let value = self.expr(&element.value)?;
+            let (op1_type, op1) = self.operand(value);
+            let (op2_type, op2) = match key {
+                Some(key) => self.operand(key),
+                None => (OperandKind::Unused, 0),
+            };
+            if i == 0 {
+                out = self.temporary();
+                init_at = self.oplines.len();
+                self.push(Opline {
+                    opcode: Opcode::InitArray,
+                    op1_type,
+                    op1,
+                    op2_type,
+                    op2,
+                    out_type: OperandKind::Tmp,
+                    out,
+                    extended_value: count << ARRAY_SIZE_SHIFT,
+                    ..Opline::default()
+                });
+            } else {
+                self.push(Opline {
+                    opcode: Opcode::AddArrayElement,
+                    op1_type,
+                    op1,
+                    op2_type,
+                    op2,
+                    out_type: OperandKind::Tmp,
+                    out,
+                    ..Opline::default()
+                });
+            }
+            if matches!(key, Some(Where::Constant(k)) if k.kind() == ZvalType::String) {
+                packed = false;
+            }
+        }
+        if !packed && let Some(init) = self.oplines.get_mut(init_at) {
+            init.extended_value |= ARRAY_NOT_PACKED;
+        }
+        Ok(Where::Temporary(out))
+    }
+
+    /// `zend_handle_numeric_op` (`Z/Zend/zend_compile.c:2775`): a
+    /// constant string key that `ZEND_HANDLE_NUMERIC` reads as an integer
+    /// is that integer, so `['3' => 4]` writes at 3; every other operand
+    /// stands.
+    fn numeric_op(key: Where) -> Where {
+        if let Where::Constant(value) = key
+            && let Some(s) = value.as_str()
+            && let Some(n) = numeric_key(s.bytes())
+        {
+            return Where::Constant(Zval::long(n));
+        }
+        key
     }
 
     /// `zend_compile_call`: `CG(function_table)` read first
