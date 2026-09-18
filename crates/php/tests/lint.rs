@@ -102,3 +102,67 @@ fn every_word_left_on_the_line_is_linted_and_the_status_is_the_last_failure_s() 
         )
     );
 }
+
+/// stdout, stderr and the exit code of `php -n -d opcache.enable_cli=1 -d
+/// opcache.opt_debug_level=0x10000 -l <file>`, the recipe's `dump` regime
+/// with `-l` beside it, which is what `xtask compile-identity` runs both
+/// binaries under.
+fn dump(file: &PathBuf) -> (String, String, i32) {
+    let out = Command::new(env!("CARGO_BIN_EXE_php"))
+        .arg("-n")
+        .arg("-d")
+        .arg("opcache.enable_cli=1")
+        .arg("-d")
+        .arg("opcache.opt_debug_level=0x10000")
+        .arg("-l")
+        .arg(file)
+        .output()
+        .unwrap_or_else(|e| panic!("running php -l under the dump regime: {e}"));
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
+/// Design §6.1: php prints its op arrays before the optimizer runs, on
+/// the second stream, and `-l`'s own sentence on the first. The bytes
+/// pinned here are the oracle's for this file at 8.5.9; `xtask
+/// compile-identity` is what holds the two dumps to each other file by
+/// file, and this test is what keeps the binary printing one at all.
+#[test]
+fn the_op_arrays_before_the_optimizer_stand_on_the_second_stream_under_the_ini_bit() {
+    let source = scratch("dumped.php", "<?php\necho 1;\n");
+    assert_eq!(
+        dump(&source),
+        (
+            format!("No syntax errors detected in {}\n", source.display()),
+            format!(
+                "\n$_main:\n     \
+                 ; (lines=2, args=0, vars=0, tmps=0)\n     \
+                 ; (before optimizer)\n     \
+                 ; {}:1-3\n     \
+                 ; return  [] RANGE[0..0]\n\
+                 0000 ECHO int(1)\n\
+                 0001 RETURN int(1)\n",
+                source.display()
+            ),
+            0
+        )
+    );
+}
+
+/// The same file with no `opcache.opt_debug_level` at all: php dumps
+/// nothing, and neither does the engine.
+#[test]
+fn nothing_is_dumped_where_the_ini_does_not_ask_for_it() {
+    let source = scratch("undumped.php", "<?php\necho 1;\n");
+    assert_eq!(
+        lint(&[&source]),
+        (
+            format!("No syntax errors detected in {}\n", source.display()),
+            String::new(),
+            0
+        )
+    );
+}

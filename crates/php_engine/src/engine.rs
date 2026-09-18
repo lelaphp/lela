@@ -407,6 +407,67 @@ fn scanned_ini_value(value: &str) -> Vec<u8> {
     }
 }
 
+/// `ZEND_DUMP_BEFORE_OPTIMIZER` (`Z/Zend/Optimizer/zend_optimizer.h:41`):
+/// the bit of `opcache.opt_debug_level` that asks for each op array as
+/// the compiler left it.
+const BEFORE_OPTIMIZER: i64 = 0x1_0000;
+
+/// `zend_ini_parse_quantity` (`Z/Zend/zend_ini.c:613-841`), which
+/// `OnUpdateLong` reads every whole-number ini entry by: leading and
+/// trailing whitespace ignored, an optional sign, then either a base
+/// prefix — `0x`, `0o`, `0b`, or a leading `0` before a digit, which is
+/// octal as `strtoul` with base zero reads it — or decimal digits, and
+/// last an optional `K`, `M` or `G` multiplier with whitespace allowed
+/// before it. Every shape php interprets as zero for backward
+/// compatibility is zero here: no digit after the sign, no digit after
+/// the prefix, an unknown prefix. What php says about those it says as an
+/// `E_WARNING` from `zend_ini_parse_quantity_warn`, which no ini entry in
+/// this engine raises yet; that gap is one entry's and not this
+/// function's.
+fn ini_quantity(value: &[u8]) -> i64 {
+    let text = String::from_utf8_lossy(value);
+    let text = text.trim_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c']);
+    let (negative, rest) = match text.as_bytes().first() {
+        Some(b'+') => (false, &text[1..]),
+        Some(b'-') => (true, &text[1..]),
+        _ => (false, text),
+    };
+    if !rest.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+        return 0;
+    }
+    // php reads the multiplier off the last byte of the whole value and
+    // the digits off what `strtoul` stopped at, so `0k` is a multiplier
+    // over no prefix and `0x10` is a prefix over no multiplier.
+    let (digits, factor) = match rest.as_bytes().last().copied() {
+        Some(b'g' | b'G') => (&rest[..rest.len() - 1], 1i64 << 30),
+        Some(b'm' | b'M') => (&rest[..rest.len() - 1], 1i64 << 20),
+        Some(b'k' | b'K') => (&rest[..rest.len() - 1], 1i64 << 10),
+        _ => (rest, 1),
+    };
+    let digits = digits.trim_end_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c']);
+    let (digits, radix) = match digits.as_bytes() {
+        [b'0', b'x' | b'X', rest @ ..] => (rest, 16),
+        [b'0', b'o' | b'O', rest @ ..] => (rest, 8),
+        [b'0', b'b' | b'B', rest @ ..] => (rest, 2),
+        [b'0', rest @ ..] if !rest.is_empty() => (rest, 8),
+        rest => (rest, 10),
+    };
+    let taken: String = String::from_utf8_lossy(digits)
+        .chars()
+        .take_while(|c| c.is_digit(radix))
+        .collect();
+    // `strtoul` stopping where it started is php's "no valid leading
+    // digits", which is zero; stopping at the end of what it can hold is
+    // the overflow it keeps the result of.
+    if taken.is_empty() {
+        return 0;
+    }
+    let magnitude = i64::from_str_radix(&taken, radix)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(factor);
+    if negative { -magnitude } else { magnitude }
+}
+
 /// Builds an [`Engine`]: the bundle, the tier and the startup ini.
 pub struct EngineBuilder {
     extensions: Vec<Extension>,
@@ -605,6 +666,48 @@ impl Engine {
     pub fn unit(&self, source: &[u8], filename: &[u8]) -> Option<Arc<Unit>> {
         let stack = self.shared.stack_limit();
         self.shared.publish(source, filename, stack).ok()
+    }
+
+    /// What php prints on the second stream for the program
+    /// `description` names before it runs it, `zend_optimize_op_array`'s
+    /// `ZEND_DUMP_BEFORE_OPTIMIZER` arm
+    /// (`Z/Zend/Optimizer/zend_optimizer.c:1055-1062`): the unit's op
+    /// arrays through `Unit::dump`, or nothing where the engine's
+    /// `opcache.opt_debug_level` carries no `0x10000` bit and nothing
+    /// where the program does not compile (design §6.1).
+    ///
+    /// **The host asks for it, and asks once, before it serves.** php's
+    /// dump is opcache's, taken as the unit is persisted, which is
+    /// after the compiler and before the optimizer; this engine has no
+    /// optimizer and one place a program is compiled, so what is left of
+    /// php's moment is the host's, between describing the request and
+    /// serving it. `php -r`'s code is the one program php dumps nothing
+    /// for, `zend_optimize_op_array`'s `op_array->type ==
+    /// ZEND_EVAL_CODE` return, and the host is what knows a program is
+    /// that (`php_sapi::cli`).
+    ///
+    /// A file's unit is the cache's, the very one the request that
+    /// follows serves; a source the host holds is compiled a second time
+    /// here, into the engine's own table rather than the request's, since
+    /// a unit compiled for one request is not reachable from outside it.
+    /// The dump reads what the compiler emitted and nothing of where the
+    /// strings live, so the two compiles print one dump.
+    #[must_use]
+    pub fn dump_before_optimizer(&self, description: &RequestDescription) -> Option<String> {
+        let level = ini_quantity(self.shared.ini_default(b"opcache.opt_debug_level")?);
+        if level & BEFORE_OPTIMIZER == 0 {
+            return None;
+        }
+        let stack = self.shared.stack_limit();
+        let script = description
+            .script_name
+            .clone()
+            .unwrap_or_else(|| b"Standard input code".to_vec());
+        let unit = match &description.source {
+            Some(source) => self.shared.publish(source, &script, stack).ok()?,
+            None => self.shared.cached(&script, stack)?.ok()?,
+        };
+        Some(unit.dump(&self.frameless()))
     }
 
     /// The one request transaction (design §5.14): compile, seed, serve,
@@ -2081,6 +2184,81 @@ mod tests {
                 (Site::Return(crate::tier::SafepointIdx(1)), callee),
             ],
             "two calls activated and returned, the third never activated"
+        );
+    }
+
+    /// `zend_ini_parse_quantity` (`Z/Zend/zend_ini.c:613-841`), which is
+    /// how `opcache.opt_debug_level=0x10000` is a bit and not a zero: a
+    /// base prefix is read as `strtoul` with base zero reads it, a
+    /// leading `0` before a digit is octal, a `K`, `M` or `G` multiplies,
+    /// and every shape php interprets as zero for backward compatibility
+    /// is zero.
+    #[test]
+    fn a_whole_number_ini_value_is_read_as_php_s_quantity_reads_it() {
+        let read = |value: &str| ini_quantity(value.as_bytes());
+        assert_eq!(
+            read("0x10000"),
+            0x1_0000,
+            "the dump bit, as the pin writes it"
+        );
+        assert_eq!(
+            read("  0X10 "),
+            16,
+            "whitespace either side, and either case"
+        );
+        assert_eq!(read("65536"), 65536, "the same number in decimal");
+        assert_eq!(read("0777"), 511, "a leading zero before a digit is octal");
+        assert_eq!(read("0o17"), 15, "and the explicit octal prefix");
+        assert_eq!(read("0b101"), 5, "and the binary one");
+        assert_eq!(read("-1"), -1, "the sign is read before the digits");
+        assert_eq!(read("2M"), 2 << 20, "a multiplier over decimal digits");
+        assert_eq!(read("0"), 0, "a bare zero is no prefix at all");
+        assert_eq!(read(""), 0, "nothing at all");
+        assert_eq!(read("off"), 0, "no valid leading digits");
+        assert_eq!(read("0z1"), 0, "an unknown prefix");
+        assert_eq!(read("0x"), 0, "no digits after the prefix");
+        assert_eq!(read("09"), 0, "octal that holds no octal digit");
+    }
+
+    /// Design §6.1: what php prints on the second stream before the
+    /// program runs is the op arrays as the compiler left them, and it
+    /// prints them only where `opcache.opt_debug_level` carries the
+    /// `0x10000` bit. The bytes are held to the oracle's by
+    /// `xtask compile-identity`, which runs both binaries over one file;
+    /// what is held here is the switch.
+    #[test]
+    fn the_dump_before_the_optimizer_is_the_op_arrays_under_the_ini_bit_and_nothing_without_it() {
+        let described = description("<?php echo 1;");
+        assert_eq!(
+            Engine::builder().build().dump_before_optimizer(&described),
+            None,
+            "no opt_debug_level at all"
+        );
+        assert_eq!(
+            Engine::builder()
+                .ini("opcache.opt_debug_level", "0")
+                .build()
+                .dump_before_optimizer(&described),
+            None,
+            "the entry at its default"
+        );
+        let dumped = Engine::builder()
+            .ini("opcache.opt_debug_level", "0x10000")
+            .build()
+            .dump_before_optimizer(&described)
+            .unwrap_or_default();
+        assert_eq!(
+            dumped,
+            "\n$_main:\n     ; (lines=2, args=0, vars=0, tmps=0)\n     ; (before optimizer)\n     ; witness.php:1-1\n     ; return  [] RANGE[0..0]\n0000 ECHO int(1)\n0001 RETURN int(1)\n",
+            "the one op array, in php's format"
+        );
+        assert_eq!(
+            Engine::builder()
+                .ini("opcache.opt_debug_level", "0x10000")
+                .build()
+                .dump_before_optimizer(&description("<?php echo 1 +;")),
+            None,
+            "a source the compiler refused is no dump, as php's empty second stream is"
         );
     }
 }

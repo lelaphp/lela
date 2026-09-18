@@ -309,6 +309,7 @@ syntax::parse
 test::Capture
 test::Engine
 test::Engine::builder
+test::Engine::dump_before_optimizer
 test::Engine::frameless
 test::Engine::lint
 test::Engine::loaded_extensions

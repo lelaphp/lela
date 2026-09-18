@@ -750,8 +750,35 @@ pub fn describe(program: &Program, arguments: &[OsString]) -> Result<RequestDesc
 /// exit code the process ends with; see [`describe`].
 pub fn serve(engine: &Engine, program: &Program, arguments: &[OsString]) -> i32 {
     match describe(program, arguments) {
-        Ok(description) => engine.serve(description, &mut Process).exit_code,
+        Ok(description) => {
+            let mut sink = Process;
+            dump(engine, program, &description, &mut sink);
+            engine.serve(description, &mut sink).exit_code
+        }
         Err(code) => code,
+    }
+}
+
+/// php's op arrays as the compiler left them, on the second stream,
+/// where `opcache.opt_debug_level` asks for them
+/// ([`Engine::dump_before_optimizer`], design §6.1): opcache dumps them
+/// as it persists the unit, which is before the program runs and
+/// before `-l`'s own sentence, and this host asks for them in the one
+/// moment php has both. `-r`'s code is the program php dumps nothing
+/// for, its op array being `ZEND_EVAL_CODE`
+/// (`Z/Zend/Optimizer/zend_optimizer.c:1056`); a file and what the host
+/// read from stdin are dumped alike.
+fn dump(
+    engine: &Engine,
+    program: &Program,
+    description: &RequestDescription,
+    sink: &mut dyn OutputSink,
+) {
+    if matches!(program, Program::Direct(_)) {
+        return;
+    }
+    if let Some(arrays) = engine.dump_before_optimizer(description) {
+        sink.write_stderr(arrays.as_bytes());
     }
 }
 
@@ -759,13 +786,16 @@ pub fn serve(engine: &Engine, program: &Program, arguments: &[OsString]) -> i32 
 /// (`php_cli.c:954-961`): the program compiled by [`Engine::lint`] and
 /// not served, then `No syntax errors detected in %s` and 0, or `Errors
 /// parsing %s` and 255, on the sink after what the compiler rendered.
-/// A file that cannot be opened is exit 1 before a request begins.
+/// A file that cannot be opened is exit 1 before a request begins. What
+/// [`dump`] prints stands on the second stream before the sentence, as
+/// php's does.
 pub fn lint(engine: &Engine, program: &Program, sink: &mut dyn OutputSink) -> i32 {
     let description = match describe(program, &[]) {
         Ok(description) => description,
         Err(code) => return code,
     };
     let name = description.script_name.clone().unwrap_or_default();
+    dump(engine, program, &description, sink);
     let served = engine.lint(description, sink);
     let mut line = if served.exit_code == 0 {
         b"No syntax errors detected in ".to_vec()
