@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 
+use php_heap::{Fatal, Heap, Obj};
 use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, IniDecl, MethodDecl};
 
 use crate::api::call::Function;
@@ -124,12 +125,34 @@ pub(crate) type Info = fn(&mut Request);
 /// declaration as it links it, so the declaration's own `methods` is
 /// left empty by an extension. A method's entry is served as a
 /// function's is, with the receiver on the frame as `Request::this`
-/// (ADR-0002).
+/// (ADR-0002). The fourth is the class's `create_object` where its
+/// objects carry a native payload, [`NativeNew`].
 pub(crate) type NativeClassDecl = (
     ClassDecl,
     Vec<(MethodDecl, Entry)>,
     Option<&'static dyn ObjectHandlers>,
+    Option<NativeNew>,
 );
+
+/// `ce->create_object` for a class whose objects carry a native payload
+/// (design §5.4), php's `zend_object_alloc(sizeof(custom), ce)`: the
+/// allocation sized for the payload with the payload's `Default`
+/// already written, so the slot stands before the constructor runs and
+/// a method reaches it through [`PhpObject::native_mut`]. `None` is
+/// php's null slot, a class whose objects are `zend_objects_new` and
+/// carry nothing; the engine takes the nearest parent's, as php
+/// inherits `create_object`.
+pub(crate) type NativeNew = fn(&mut Heap, u32, u32) -> Result<Obj, Fatal>;
+
+/// One [`NativeNew`], the payload's `Default` into a fresh object of
+/// `class` with `slots` declared property slots.
+fn new_with_payload<T: Any + Send + Default>(
+    heap: &mut Heap,
+    class: u32,
+    slots: u32,
+) -> Result<Obj, Fatal> {
+    heap.object_with(class, slots, T::default())
+}
 
 /// One extension (design §7.1): declarations paired with entries,
 /// constants, ini entries, the lifecycle functions, and the two state
@@ -196,8 +219,33 @@ impl ExtensionBuilder {
         self.classes.extend(
             classes
                 .into_iter()
-                .map(|(decl, methods)| (decl, methods, None)),
+                .map(|(decl, methods)| (decl, methods, None, None)),
         );
+        self
+    }
+
+    /// One native class whose objects carry a payload of `T` (design
+    /// §5.4): the declaration and its methods as
+    /// [`ExtensionBuilder::class_with`] takes them, the [`ObjectHandlers`]
+    /// that release and walk what the payload holds, and `T` itself as
+    /// the class's `create_object`. `new` lays the payload down as
+    /// `T::default()` before the constructor runs, so a method reaches
+    /// it through [`PhpObject::native_mut`] with no allocation of its
+    /// own; a subclass takes it as it takes the table, since php
+    /// inherits `create_object`.
+    #[must_use]
+    pub fn class_payload<T: Any + Send + Default>(
+        mut self,
+        class: ClassDecl,
+        methods: Vec<(MethodDecl, Entry)>,
+        handlers: &'static dyn ObjectHandlers,
+    ) -> ExtensionBuilder {
+        self.classes.push((
+            class,
+            methods,
+            Some(handlers),
+            Some(new_with_payload::<T> as NativeNew),
+        ));
         self
     }
 
@@ -215,7 +263,7 @@ impl ExtensionBuilder {
         methods: Vec<(MethodDecl, Entry)>,
         handlers: &'static dyn ObjectHandlers,
     ) -> ExtensionBuilder {
-        self.classes.push((class, methods, Some(handlers)));
+        self.classes.push((class, methods, Some(handlers), None));
         self
     }
 

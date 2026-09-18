@@ -12,6 +12,7 @@ abi::DependencyKind
 abi::Extension
 abi::ExtensionBuilder
 abi::ExtensionBuilder::build
+abi::ExtensionBuilder::class_payload
 abi::ExtensionBuilder::class_with
 abi::ExtensionBuilder::classes
 abi::ExtensionBuilder::constants

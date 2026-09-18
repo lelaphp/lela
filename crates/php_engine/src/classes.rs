@@ -139,6 +139,7 @@ pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
             },
             Vec::new(),
             None,
+            None,
         ),
         (
             ClassDecl {
@@ -147,30 +148,36 @@ pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
             },
             Vec::new(),
             None,
+            None,
         ),
         (
             declared(b"Exception", ClassKind::Class, None),
             throwable_methods(),
             Some(&THROWABLE),
+            None,
         ),
         (
             declared(b"Error", ClassKind::Class, None),
             throwable_methods(),
             Some(&THROWABLE),
+            None,
         ),
         (
             declared(b"TypeError", ClassKind::Class, Some(b"Error")),
             Vec::new(),
+            None,
             None,
         ),
         (
             declared(b"ValueError", ClassKind::Class, Some(b"Error")),
             Vec::new(),
             None,
+            None,
         ),
         (
             declared(b"ArithmeticError", ClassKind::Class, Some(b"Error")),
             Vec::new(),
+            None,
             None,
         ),
         (
@@ -181,31 +188,36 @@ pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
             ),
             Vec::new(),
             None,
+            None,
         ),
         (
             declared(b"ArgumentCountError", ClassKind::Class, Some(b"TypeError")),
             Vec::new(),
+            None,
             None,
         ),
         (
             declared(b"UnhandledMatchError", ClassKind::Class, Some(b"Error")),
             Vec::new(),
             None,
+            None,
         ),
         (
             declared(b"CompileError", ClassKind::Class, Some(b"Error")),
             Vec::new(),
+            None,
             None,
         ),
         (
             declared(b"ParseError", ClassKind::Class, Some(b"CompileError")),
             Vec::new(),
             None,
+            None,
         ),
-        (closure_class(), closure_methods(), Some(&CLOSURE)),
-        (std_class(), Vec::new(), None),
-        (unit_enum(), Vec::new(), None),
-        (backed_enum(), Vec::new(), None),
+        (closure_class(), closure_methods(), Some(&CLOSURE), None),
+        (std_class(), Vec::new(), None, None),
+        (unit_enum(), Vec::new(), None, None),
+        (backed_enum(), Vec::new(), None, None),
     ]
 }
 

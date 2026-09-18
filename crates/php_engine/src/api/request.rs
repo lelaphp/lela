@@ -24,7 +24,7 @@ use php_unit::decl::{
 use php_unit::{FramelessEntry, Opcode, Unit};
 
 use crate::api::abi::{
-    Callable, Dependency, Extension, IniVerdict, ObjectHandlers, PropertyTest, Std,
+    Callable, Dependency, Extension, IniVerdict, NativeNew, ObjectHandlers, PropertyTest, Std,
 };
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
@@ -2208,7 +2208,14 @@ impl Request {
     /// as the fatal that ends the request.
     pub(crate) fn new_object(&mut self, class: ClassId) -> Result<PhpObject, Thrown> {
         let slots = self.class_slots(class);
-        let allocated = self.heap.object(class.0, slots);
+        // `ce->create_object`: a class that declares a native payload
+        // lays it down here, with the object, as
+        // `zend_object_alloc(sizeof(custom), ce)` does; every other
+        // class is `zend_objects_new` (design §5.4).
+        let allocated = match self.native_new_of(class) {
+            Some(new) => new(&mut self.heap, class.0, slots),
+            None => self.heap.object(class.0, slots),
+        };
         let object = self.fatal_of(allocated).map(PhpObject::of)?;
         if let Err(thrown) = self.init_properties(object) {
             self.release(object.as_value());
@@ -3371,6 +3378,25 @@ impl Request {
             at = self.class_parent(class);
         }
         &Std
+    }
+
+    /// The `create_object` of the class or of the nearest parent that
+    /// declares one (design §5.4), php's inherited `ce->create_object`;
+    /// `None` for a class whose objects carry no native payload, which
+    /// is `zend_objects_new`.
+    pub(crate) fn native_new_of(&self, class: ClassId) -> Option<NativeNew> {
+        let mut at = Some(class);
+        for _ in 0..64 {
+            let class = at?;
+            if let Some(Some(new)) = usize::try_from(class.0)
+                .ok()
+                .and_then(|i| self.shared.natives.get(i))
+            {
+                return Some(*new);
+            }
+            at = self.class_parent(class);
+        }
+        None
     }
 
     /// [`Request::handlers_of`] for the object's class, php's

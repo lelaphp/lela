@@ -37,8 +37,11 @@
 //! the words `inherits`, `overwrites`, `prototype` and `ctor` are php's.
 //! Reflection's own twenty-six classes are declared in [`stub`] with
 //! every method the stub has, so `php --re reflection` renders whole.
-//! An extension's `INI` block, `_extension_ini_string`, a closure's
-//! `Bound Variables`, an object's `Dynamic properties` and
+//! A reflector keeps php's `intern->ce` and `intern->obj` in the native
+//! payload [`Reflected`], which its class's `create_object` lays down
+//! (design §5.4), so the class it was asked about and the object it was
+//! made from are what the renderings read. An extension's `INI` block,
+//! `_extension_ini_string`, a closure's `Bound Variables` and
 //! `<iterateable>` are not rendered yet (#375).
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
@@ -62,7 +65,7 @@ mod stub;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use php_ext::abi::{DependencyKind, Extension, ExtensionBuilder};
+use php_ext::abi::{CloneObj, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers};
 use php_ext::call::{
     Function, constant, eval_const_expr, lookup_class, lookup_function, new_object,
 };
@@ -97,8 +100,15 @@ struct State {
 /// bool(true)
 /// ```
 pub fn extension() -> Extension {
-    ExtensionBuilder::default()
-        .classes(stub::classes())
+    let mut builder = ExtensionBuilder::default();
+    for (decl, methods) in stub::classes() {
+        builder = if REFLECTORS.iter().any(|name| *name == decl.name.0.as_ref()) {
+            builder.class_payload::<Reflected>(decl, methods, &Reflector)
+        } else {
+            builder.classes(vec![(decl, methods)])
+        };
+    }
+    builder
         .request_state::<State>()
         .info(reflection_info)
         // `zend_module_entry.name` is `Reflection`, the spelling
@@ -111,6 +121,102 @@ pub fn extension() -> Extension {
 /// enabled`. The witness is `ReflectionExtension::info`'s.
 fn reflection_info(req: &mut Request) {
     req.info_table(&[&["Reflection", "enabled"]]);
+}
+
+/// The classes php gives `reflection_objects_new` as their
+/// `create_object` (`Z/ext/reflection/php_reflection.c:7990-8080`), of
+/// the ones this crate's reflectors read a payload off: the class
+/// reflector, the object reflector php keeps the instance on, and the
+/// two member reflectors whose scope is the class they were asked
+/// about. A subclass takes the payload from its parent, as php inherits
+/// `create_object`, so `ReflectionEnum` and a user class extending
+/// `ReflectionClass` carry it without a row here. The reflectors php
+/// gives it that keep nothing yet stay `Std` until they do.
+const REFLECTORS: &[&[u8]] = &[
+    b"ReflectionClass",
+    b"ReflectionObject",
+    b"ReflectionMethod",
+    b"ReflectionProperty",
+];
+
+/// php's `reflection_object` beside the `name` and `class` properties
+/// the stub declares (`Z/ext/reflection/php_reflection.c:180-188`):
+/// `intern->ce`, the class the reflector was asked about, which is not
+/// always the one that declared what it reflects; and `intern->obj`,
+/// the object a `ReflectionObject` was made from. `_function_string`
+/// takes `intern->ce` as a method's scope, `_class_string` prints the
+/// `Dynamic properties` of `intern->obj`, and
+/// `ReflectionProperty::getValue` holds its argument to `intern->ce`.
+/// The slot is laid down by `new` as the class's `create_object`
+/// (design §5.4) and written by the constructor.
+#[derive(Default)]
+struct Reflected {
+    ce: Option<ClassId>,
+    object: Option<PhpObject>,
+}
+
+/// `reflection_object_handlers`
+/// (`Z/ext/reflection/php_reflection.c:7976-7981`): `free_obj` gives
+/// back the object the reflector kept, `clone_obj` is php's null slot,
+/// which is why `clone $reflector` is php's uncloneable `Error`, and
+/// `get_gc` hands the collector what the payload holds. php's `offset`
+/// and `write_property` are its own bookkeeping and the engine's here.
+struct Reflector;
+
+impl ObjectHandlers for Reflector {
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        if let Some(kept) = object
+            .native_mut::<Reflected>(req)
+            .and_then(|reflected| reflected.object.take())
+        {
+            req.release(kept.as_value());
+        }
+    }
+
+    fn clone_obj(&self) -> Option<CloneObj> {
+        None
+    }
+
+    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+        if let Some(kept) = object
+            .native::<Reflected>(req)
+            .and_then(|reflected| reflected.object)
+        {
+            visit(kept.as_value());
+        }
+    }
+}
+
+/// `intern->ce` and `intern->obj` written as php's constructors write
+/// them, the object one more owner where there is one: what `new` laid
+/// down is overwritten, so nothing the payload held before is lost.
+fn keep(req: &mut Request, this: PhpObject, ce: ClassId, object: Option<PhpObject>) {
+    if let Some(object) = object {
+        req.addref(&object.as_value());
+    }
+    let released = match this.native_mut::<Reflected>(req) {
+        Some(reflected) => {
+            let released = reflected.object.take();
+            reflected.ce = Some(ce);
+            reflected.object = object;
+            released
+        }
+        None => object,
+    };
+    if let Some(released) = released {
+        req.release(released.as_value());
+    }
+}
+
+/// `intern->ce`, the class the reflector was asked about; `None` for a
+/// reflector whose class carries no payload yet.
+fn kept_class(req: &Request, this: PhpObject) -> Option<ClassId> {
+    this.native::<Reflected>(req).and_then(|kept| kept.ce)
+}
+
+/// `intern->obj`, the object a `ReflectionObject` was made from.
+fn kept_object(req: &Request, this: PhpObject) -> Option<PhpObject> {
+    this.native::<Reflected>(req).and_then(|kept| kept.object)
 }
 
 /// A native's entry, the shape `ExtensionBuilder::classes` takes beside
@@ -1202,10 +1308,37 @@ fn reflection_class_construct(req: &mut Request) -> Result<Value, Thrown> {
 
 /// `reflection_class_object_ctor` with `is_object` on,
 /// `ReflectionObject::__construct(object $object)`: the object's class
-/// as `$name`. php keeps the object too, for `hasProperty`'s dynamic
-/// names and the `Dynamic properties` block of `__toString`; the
-/// reflector here keeps the name alone until a native payload can
-/// hold it, so those two read the class and not the instance.
+/// as `$name`, and the object itself as `intern->obj`, one more owner,
+/// which the `Dynamic properties` block of `__toString` reads and
+/// `free_obj` gives back.
+///
+/// ```php
+/// $t = new stdClass; $t->b = 2;
+/// echo new ReflectionObject($t);
+/// ```
+/// ```expect
+/// Object of class [ <internal:Core> class stdClass ] {
+///
+///   - Constants [0] {
+///   }
+///
+///   - Static properties [0] {
+///   }
+///
+///   - Static methods [0] {
+///   }
+///
+///   - Properties [0] {
+///   }
+///
+///   - Dynamic properties [1] {
+///     Property [ <dynamic> public $b ]
+///   }
+///
+///   - Methods [0] {
+///   }
+/// }
+/// ```
 ///
 /// ```php
 /// var_dump(new ReflectionObject(new ReflectionException));
@@ -1237,9 +1370,11 @@ fn reflection_object_construct(req: &mut Request) -> Result<Value, Thrown> {
             &format!("be of type object, {} given", given.type_name()),
         ));
     };
+    let object = *object;
     let name = class_name_of(req, object.class());
     if let Some(this) = req.this() {
         set_name(req, this, &name)?;
+        keep(req, this, object.class(), Some(object));
     }
     Ok(Value::null())
 }
@@ -1976,7 +2111,12 @@ fn reflection_class_get_attributes(req: &mut Request) -> Result<Value, Thrown> {
 fn reflection_class_to_string(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
     let class = this_class(req)?;
-    let text = class_string(req, class, "");
+    // `_class_string(&str, ce, &intern->obj, "")`: the object reflector
+    // hands the instance it kept, and the class reflector php's null
+    // zval, which is what puts `Object of class` and the `Dynamic
+    // properties` block on the one and not the other.
+    let object = req.this().and_then(|this| kept_object(req, this));
+    let text = class_string(req, class, object, "");
     string_value(req, text.as_bytes())
 }
 
@@ -2127,14 +2267,31 @@ fn reflection_method_construct(req: &mut Request) -> Result<Value, Thrown> {
     if let Some(this) = req.this() {
         set_name(req, this, &found.decl.function.name.0)?;
         set_string_prop(req, this, b"class", &scope)?;
+        // `intern->ce = ce`: the class the reflector was asked about,
+        // which `_function_string` takes as the method's scope, where
+        // `$class` is the class that declared the method.
+        keep(req, this, class, None);
     }
     Ok(Value::null())
 }
 
 /// `ReflectionMethod::__toString()`: `_function_string` over the
-/// method with the declaring class as its scope, indent empty. The
+/// method with `intern->ce`, the class the reflector was asked about,
+/// as its scope, indent empty. The
 /// tentative bit renders as `Tentative return`, a declared return
 /// type as `Return`, and a method with neither has no row.
+///
+/// ```php
+/// echo new ReflectionMethod('JsonException', 'getMessage');
+/// ```
+/// ```expect
+/// Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getMessage ] {
+///
+///   - Parameters [0] {
+///   }
+///   - Return [ string ]
+/// }
+/// ```
 ///
 /// ```php
 /// echo new ReflectionMethod('JsonSerializable::jsonSerialize');
@@ -2203,7 +2360,12 @@ fn reflection_method_to_string(req: &mut Request) -> Result<Value, Thrown> {
             ),
         ));
     };
-    let text = method_string(req, &found, class, "");
+    // `_function_string(&str, mptr, intern->ce, "")`: the scope is the
+    // class the reflector was asked about, so a method the class
+    // inherited carries `inherits` and the declaring class's own
+    // carries `overwrites`.
+    let scope = kept_class(req, this).unwrap_or(class);
+    let text = method_string(req, &found, scope, "");
     string_value(req, text.as_bytes())
 }
 
@@ -2282,6 +2444,9 @@ fn reflection_property_construct(req: &mut Request) -> Result<Value, Thrown> {
     if let Some(this) = req.this() {
         set_name(req, this, &name)?;
         set_string_prop(req, this, b"class", &declaring)?;
+        // `intern->ce = ce`: the class asked about, which `getValue`
+        // holds its argument to, where `$class` is the declaring one.
+        keep(req, this, class, None);
     }
     Ok(Value::null())
 }
@@ -2364,6 +2529,14 @@ fn this_property(req: &mut Request) -> Result<(ClassId, Vec<u8>, Option<Property
 fn reflection_property_get_value(req: &mut Request) -> Result<Value, Thrown> {
     at_most_arguments(req, 1)?;
     let (class, name, declared) = this_property(req)?;
+    // `instanceof_function(Z_OBJCE_P(object), intern->ce)`: the object
+    // is held to the class the reflector was asked about, which is the
+    // subclass where the property was reached through one, and not to
+    // the class that declared the property.
+    let asked = req
+        .this()
+        .and_then(|this| kept_class(req, this))
+        .unwrap_or(class);
     if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
         return Err(static_property_unlinked(req, class, &name));
     }
@@ -2385,7 +2558,7 @@ fn reflection_property_get_value(req: &mut Request) -> Result<Value, Thrown> {
             ));
         }
     };
-    if !object.instance_of(req, class) {
+    if !object.instance_of(req, asked) {
         return Err(throw(
             req,
             "ReflectionException",
@@ -2826,7 +2999,7 @@ fn extension_string(req: &mut Request, extension: ExtensionId, indent: &str) -> 
         let sub_indent = format!("{indent}    ");
         for (class, _) in classes {
             out.push('\n');
-            out.push_str(&class_string(req, class, &sub_indent));
+            out.push_str(&class_string(req, class, None, &sub_indent));
         }
         let _ = writeln!(out, "{indent}  }}");
     }
@@ -2880,22 +3053,39 @@ fn value_string(req: &mut Request, value: &Value) -> String {
     }
 }
 
-/// `_class_string` with no object: the header, then the `Constants`,
-/// `Static properties`, `Static methods`, `Properties` and `Methods`
-/// blocks in php's order, an enum's `Enum cases` before its
-/// `Constants`, each over the linked table with the counts php prints,
-/// a parent's private member skipped as its shadow is (`prop->ce !=
-/// ce`, `mptr->common.scope != ce`). A user class carries its `@@ file
-/// start-end` line. `<iterateable>` and `Dynamic properties` are not
-/// rendered yet (#375).
-fn class_string(req: &mut Request, class: ClassId, indent: &str) -> String {
+/// `_class_string`: the header, then the `Constants`,
+/// `Static properties`, `Static methods`, `Properties`,
+/// `Dynamic properties` and `Methods` blocks in php's order, an enum's
+/// `Enum cases` before
+/// its `Constants`, each over the linked table with the counts php
+/// prints, a parent's private member skipped as its shadow is
+/// (`prop->ce != ce`, `mptr->common.scope != ce`). A user class carries
+/// its `@@ file start-end` line. `object` is php's `obj` argument, the
+/// instance an object reflector kept: it turns the header's word into
+/// `Object of class` and is the only thing that puts a `Dynamic
+/// properties` block there at all. `<iterateable>` is not rendered yet
+/// (#375).
+fn class_string(
+    req: &mut Request,
+    class: ClassId,
+    object: Option<PhpObject>,
+    indent: &str,
+) -> String {
     let mut out = String::new();
     let Some(decl) = req.class_decl(class).cloned() else {
         return out;
     };
     let sub_indent = format!("{indent}    ");
     let methods = linked_methods(req, class);
-    class_header(req, &mut out, class, &decl, &methods, indent);
+    class_header(
+        req,
+        &mut out,
+        class,
+        &decl,
+        &methods,
+        object.is_some(),
+        indent,
+    );
 
     // `ZEND_CLASS_CONST_IS_CASE`: an enum's cases go first, under a
     // heading shown only when there are any; the model has no case bit
@@ -2941,6 +3131,28 @@ fn class_string(req: &mut Request, class: ClassId, indent: &str) -> String {
         }
         let _ = writeln!(out, "{indent}  }}");
 
+        // `zend_get_properties_no_lazy_init(Z_OBJ_P(obj))` less every
+        // name `ce->properties_info` has and every mangled one, which
+        // is how php skips a private or protected slot: what is left is
+        // the object's own, and the block stands only for an object
+        // reflector, after `Properties` and before `Methods`.
+        if is_instance && let Some(object) = object {
+            let dynamic = dynamic_properties(req, class, object);
+            let _ = write!(
+                out,
+                "\n{indent}  - Dynamic properties [{}] {{\n",
+                dynamic.len()
+            );
+            for name in &dynamic {
+                let _ = writeln!(
+                    out,
+                    "{sub_indent}Property [ <dynamic> public ${} ]",
+                    String::from_utf8_lossy(name)
+                );
+            }
+            let _ = writeln!(out, "{indent}  }}");
+        }
+
         let block = if is_instance {
             "Methods"
         } else {
@@ -2964,16 +3176,38 @@ fn class_string(req: &mut Request, class: ClassId, indent: &str) -> String {
     out
 }
 
+/// The names in the object's property table the class did not declare,
+/// in the table's order: php's `Dynamic properties` list, a mangled
+/// name (a private or protected slot, whose key begins with a zero
+/// byte) skipped as `ZSTR_VAL(prop_name)[0]` skips it.
+fn dynamic_properties(req: &mut Request, class: ClassId, object: PhpObject) -> Vec<Vec<u8>> {
+    let declared: Vec<Vec<u8>> = req
+        .class_decl(class)
+        .map(|decl| decl.properties.iter().map(|p| p.name.0.to_vec()).collect())
+        .unwrap_or_default();
+    let Ok(entries) = object.props(req) else {
+        return Vec::new();
+    };
+    entries
+        .into_iter()
+        .map(|(name, _)| name.as_bytes().to_vec())
+        .filter(|name| name.first().is_some_and(|byte| *byte != 0))
+        .filter(|name| !declared.iter().any(|shown| shown == name))
+        .collect()
+}
+
 /// The first line of `_class_string`: the doc comment where there is
-/// one, the kind, `<internal:ext>` or `<user>`, the modifiers, the
-/// name, `extends`, an enum's backing type and the interface list, then
-/// a user class's `@@ file start-end` line.
+/// one, `Object of class` for an object reflector and the kind
+/// otherwise, `<internal:ext>` or `<user>`, the modifiers, the name,
+/// `extends`, an enum's backing type and the interface list, then a
+/// user class's `@@ file start-end` line.
 fn class_header(
     req: &mut Request,
     out: &mut String,
     class: ClassId,
     decl: &ClassDecl,
     methods: &[LinkedMethod],
+    of_object: bool,
     indent: &str,
 ) {
     if let Some(doc) = &decl.doc_comment {
@@ -2981,11 +3215,12 @@ fn class_header(
         out.push_str(&String::from_utf8_lossy(doc));
         out.push('\n');
     }
-    let kind = match decl.kind {
-        ClassKind::Class => "Class",
-        ClassKind::Interface => "Interface",
-        ClassKind::Trait => "Trait",
-        ClassKind::Enum => "Enum",
+    let kind = match (of_object, decl.kind) {
+        (true, _) => "Object of class",
+        (false, ClassKind::Class) => "Class",
+        (false, ClassKind::Interface) => "Interface",
+        (false, ClassKind::Trait) => "Trait",
+        (false, ClassKind::Enum) => "Enum",
     };
     let _ = write!(out, "{indent}{kind} [ ");
     let internal = decl.file.0.is_empty();
