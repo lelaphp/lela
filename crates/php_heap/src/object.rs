@@ -237,6 +237,25 @@ impl Obj {
         self.header().gc.has_info(gc::OBJ_LAZY_UNINITIALIZED)
     }
 
+    /// `Z_IS_RECURSIVE_P`: a walk that guards itself with
+    /// [`Obj::protect`] is inside this object already, which is how
+    /// `zend_std_compare_objects` sees an object whose property walk
+    /// leads back to it.
+    #[must_use]
+    pub fn is_recursive(&self) -> bool {
+        self.has_flag(gc::PROTECTED)
+    }
+
+    /// `Z_PROTECT_RECURSION_P`: the walk is inside.
+    pub fn protect(&self) {
+        self.add_flag(gc::PROTECTED);
+    }
+
+    /// `Z_UNPROTECT_RECURSION_P`: the walk is out.
+    pub fn unprotect(&self) {
+        self.header().gc.del_flags(gc::PROTECTED);
+    }
+
     /// The dynamic table, once something has materialised it.
     #[must_use]
     pub fn properties(&self) -> Option<Arr> {

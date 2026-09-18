@@ -88,7 +88,8 @@ impl ObjectHandlers for ClosureHandlers {
 
     /// `zend_closure_compare`: two closures are equal when they carry
     /// one function, one receiver and one scope, and uncomparable
-    /// otherwise.
+    /// otherwise; a side that is no closure is
+    /// `ZEND_COMPARE_OBJECTS_FALLBACK`, `zend_std_compare_objects`.
     fn compare(
         &self,
         req: &mut Request,
@@ -96,10 +97,10 @@ impl ObjectHandlers for ClosureHandlers {
         right: &Value,
     ) -> Result<Option<Ordering>, Thrown> {
         let (Some(a), Some(b)) = (left.as_object().copied(), right.as_object().copied()) else {
-            return Ok(None);
+            return req.compare_objects(left, right);
         };
         let (Some(x), Some(y)) = (a.closure(req), b.closure(req)) else {
-            return Ok(None);
+            return req.compare_objects(left, right);
         };
         let same = x.function == y.function && x.this == y.this && x.scope == y.scope;
         Ok(same.then_some(Ordering::Equal))

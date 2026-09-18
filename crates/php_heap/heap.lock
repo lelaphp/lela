@@ -115,12 +115,15 @@ Obj::class
 Obj::has_native
 Obj::id
 Obj::is_lazy
+Obj::is_recursive
 Obj::is_same
 Obj::properties
+Obj::protect
 Obj::refcount
 Obj::slot
 Obj::slot_ref
 Obj::slots
+Obj::unprotect
 ObjectId
 Ref
 Ref::addref

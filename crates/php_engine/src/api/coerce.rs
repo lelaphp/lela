@@ -267,32 +267,15 @@ pub fn identical(a: &Value, b: &Value) -> bool {
     a.deref() == b.deref()
 }
 
-/// `==`, php 8's comparison.
+/// `==`: [`compare`] finding the two sides equal.
 pub fn loose_eq(req: &mut Request, a: &Value, b: &Value) -> Result<bool, Thrown> {
     compare(req, a, b).map(|o| o == Ordering::Equal)
 }
 
-/// `<=>`, php 8's comparison over the types the skeleton knows.
+/// `<=>`: `zend_compare`, the one ordering the kernels read
+/// ([`crate::ops::compare`]), for a native.
 pub fn compare(req: &mut Request, a: &Value, b: &Value) -> Result<Ordering, Thrown> {
-    match (a.deref().as_ref(), b.deref().as_ref()) {
-        (ValueRef::Int(x), ValueRef::Int(y)) => Ok(x.cmp(&y)),
-        (ValueRef::Str(x), ValueRef::Str(y)) => {
-            match (numeric_string(x.as_bytes()), numeric_string(y.as_bytes())) {
-                (Some(x), Some(y)) => compare(req, &x, &y),
-                _ => Ok(x.as_bytes().cmp(y.as_bytes())),
-            }
-        }
-        (ValueRef::Null | ValueRef::Undef, ValueRef::Null | ValueRef::Undef) => Ok(Ordering::Equal),
-        (ValueRef::Bool(_) | ValueRef::Null, _) | (_, ValueRef::Bool(_) | ValueRef::Null) => {
-            Ok(truthy(req, a).cmp(&truthy(req, b)))
-        }
-        (ValueRef::Array(x), ValueRef::Array(y)) => Ok(x.len().cmp(&y.len())),
-        _ => {
-            let x = to_double(req, a)?;
-            let y = to_double(req, b)?;
-            Ok(x.partial_cmp(&y).unwrap_or(Ordering::Less))
-        }
-    }
+    crate::ops::compare(req, a, b)
 }
 
 /// One binary operator over the types the skeleton knows: `int` and

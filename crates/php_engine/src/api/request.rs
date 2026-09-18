@@ -2513,53 +2513,181 @@ impl Request {
         })
     }
 
-    /// `zend_std_compare_objects`: equal for one object; uncomparable
-    /// across classes; within one class each declared slot in turn,
-    /// both uninitialised passing, one uninitialised greater, both held
-    /// compared as `zend_compare` compares them, and then the dynamic
-    /// tables as arrays, a missing one empty. What is not an object on
-    /// either side is uncomparable here, the cast path being the
-    /// kernel's.
+    /// `zend_std_compare_objects` (`Z/Zend/zend_object_handlers.c:2227`),
+    /// the `Std` `compare` slot. An object against a non-object is the
+    /// cast path: `cast_object` to the other side's type, a refusal for
+    /// an int or a float php's notice and `1` or `1.0` in the object's
+    /// place, a refusal for anything else the object as the greater side,
+    /// and the cast compared by [`crate::ops::compare`] in the object's
+    /// position. Two objects are equal when one; uncomparable, `None`,
+    /// across classes; and within one class, while neither carries a
+    /// dynamic table, each declared slot in turn, both uninitialised
+    /// passing, one uninitialised `1`, both held compared as `zend_compare`
+    /// compares them, the left object protected for the walk and the
+    /// `Error` php throws when the walk reaches it again. Where either
+    /// carries a dynamic table it is `zend_compare_symbol_tables` over
+    /// the two rebuilt tables: the counts first, then the left one's keys
+    /// looked up in the right one, an uninitialised slot `-1` against a
+    /// held one and `1` the other way. What php's stack-limit check
+    /// answers is not modelled.
     pub(crate) fn compare_objects(
         &mut self,
         left: &Value,
         right: &Value,
     ) -> Result<Option<std::cmp::Ordering>, Thrown> {
-        let (Some(a), Some(b)) = (left.as_object().copied(), right.as_object().copied()) else {
-            return Ok(None);
+        use std::cmp::Ordering;
+        let (a, b) = match (left.as_object().copied(), right.as_object().copied()) {
+            (Some(a), Some(b)) => (a, b),
+            (Some(object), None) => return self.compare_cast(object, right, true).map(Some),
+            (None, Some(object)) => return self.compare_cast(object, left, false).map(Some),
+            (None, None) => return Ok(None),
         };
         if a == b {
-            return Ok(Some(std::cmp::Ordering::Equal));
+            return Ok(Some(Ordering::Equal));
         }
         if a.class() != b.class() {
             return Ok(None);
         }
-        for i in 0..a.heap().slots() {
-            let (x, y) = (a.heap().slot(i), b.heap().slot(i));
-            match (x.is_undef(), y.is_undef()) {
-                (true, true) => {}
-                (true, false) | (false, true) => return Ok(Some(std::cmp::Ordering::Greater)),
+        let (x, y) = (a.heap(), b.heap());
+        // `GC_ADDREF` on both for the walk, given up at `done`.
+        self.addref(left);
+        self.addref(right);
+        let order =
+            if x.properties().is_none() && y.properties().is_none() && !x.is_lazy() && !y.is_lazy()
+            {
+                self.compare_slots(x, y)
+            } else {
+                self.compare_tables(x, y)
+            };
+        self.release(*left);
+        self.release(*right);
+        order.map(Some)
+    }
+
+    /// The declared-slot walk of [`Request::compare_objects`], under the
+    /// recursion guard on the left object; it is enough to protect one,
+    /// as php notes, since the other may be reached from it.
+    fn compare_slots(&mut self, x: Obj, y: Obj) -> Result<std::cmp::Ordering, Thrown> {
+        use std::cmp::Ordering;
+        if x.slots() == 0 {
+            return Ok(Ordering::Equal);
+        }
+        if x.is_recursive() {
+            return Err(crate::api::raising::throw(
+                self,
+                "Error",
+                "Nesting level too deep - recursive dependency?",
+            ));
+        }
+        x.protect();
+        let mut order = Ordering::Equal;
+        for i in 0..x.slots() {
+            let (p, q) = (x.slot(i), y.slot(i));
+            order = match (p.is_undef(), q.is_undef()) {
+                (true, true) => continue,
+                (true, false) | (false, true) => Ordering::Greater,
                 (false, false) => {
-                    let order =
-                        crate::api::coerce::compare(self, &Value::of_zval(x), &Value::of_zval(y))?;
-                    if order != std::cmp::Ordering::Equal {
-                        return Ok(Some(order));
+                    match crate::ops::compare(self, &Value::of_zval(p), &Value::of_zval(q)) {
+                        Ok(Ordering::Equal) => continue,
+                        Ok(order) => order,
+                        Err(thrown) => {
+                            x.unprotect();
+                            return Err(thrown);
+                        }
+                    }
+                }
+            };
+            break;
+        }
+        x.unprotect();
+        Ok(order)
+    }
+
+    /// `zend_compare_symbol_tables` over the two objects' rebuilt tables
+    /// (`rebuild_object_properties_internal`): every declared slot, held
+    /// or not, in declaration order and then the dynamic table, so the
+    /// count is the slots and the dynamic entries, and `zend_hash_compare`
+    /// with `ordered` off over them.
+    fn compare_tables(&mut self, x: Obj, y: Obj) -> Result<std::cmp::Ordering, Thrown> {
+        use std::cmp::Ordering;
+        let dynamic = |o: Obj| o.properties().map_or(0, |t| t.len());
+        if dynamic(x) != dynamic(y) {
+            return Ok(dynamic(x).cmp(&dynamic(y)));
+        }
+        for i in 0..x.slots() {
+            let (p, q) = (x.slot(i), y.slot(i));
+            match (p.is_undef(), q.is_undef()) {
+                (true, true) => {}
+                (true, false) => return Ok(Ordering::Less),
+                (false, true) => return Ok(Ordering::Greater),
+                (false, false) => {
+                    let order = crate::ops::compare(self, &Value::of_zval(p), &Value::of_zval(q))?;
+                    if order != Ordering::Equal {
+                        return Ok(order);
                     }
                 }
             }
         }
-        match (a.heap().properties(), b.heap().properties()) {
-            (None, None) => Ok(Some(std::cmp::Ordering::Equal)),
-            (x, y) => {
-                let empty = self.heap.array();
-                let empty = self.fatal_of(empty)?;
-                let x = Value::array(PhpArray::of(x.unwrap_or(empty)));
-                let y = Value::array(PhpArray::of(y.unwrap_or(empty)));
-                let order = crate::api::coerce::compare(self, &x, &y);
-                self.release(Value::array(PhpArray::of(empty)));
-                order.map(Some)
-            }
-        }
+        let (Some(p), Some(q)) = (x.properties(), y.properties()) else {
+            return Ok(Ordering::Equal);
+        };
+        crate::ops::compare(
+            self,
+            &Value::array(PhpArray::of(p)),
+            &Value::array(PhpArray::of(q)),
+        )
+    }
+
+    /// The cast path of [`Request::compare_objects`]: the object's
+    /// `cast_object` to the other side's type, `object_lhs` saying which
+    /// side the object is on, as `zend_std_compare_objects` reads it.
+    fn compare_cast(
+        &mut self,
+        object: PhpObject,
+        other: &Value,
+        object_lhs: bool,
+    ) -> Result<std::cmp::Ordering, Thrown> {
+        use std::cmp::Ordering;
+        let target = other.tag();
+        let casted = match self
+            .object_handlers(object.heap())
+            .cast_object(self, object, target)?
+        {
+            Some(casted) => casted,
+            None => match target {
+                TypeTag::Int | TypeTag::Float => {
+                    let class = self.class_name(object.class());
+                    let to = if target == TypeTag::Int {
+                        "int"
+                    } else {
+                        "float"
+                    };
+                    crate::api::raising::notice(
+                        self,
+                        &format!("Object of class {class} could not be converted to {to}"),
+                    );
+                    if target == TypeTag::Int {
+                        Value::int(1)
+                    } else {
+                        Value::float(1.0)
+                    }
+                }
+                _ => {
+                    return Ok(if object_lhs {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Less
+                    });
+                }
+            },
+        };
+        let order = if object_lhs {
+            crate::ops::compare(self, &casted, other)
+        } else {
+            crate::ops::compare(self, other, &casted)
+        };
+        self.release(casted);
+        order
     }
 
     /// `zend_active_function()`: the native being served, which is the

@@ -1153,10 +1153,13 @@ pub(crate) fn concat(req: &mut Request, left: &Value, right: &Value) -> Result<V
 /// is its id, converted silently as `_zendi_convert_scalar_to_number_silent`
 /// converts both; and an array against a number or a string is the
 /// greater, whichever side it is on. An object is equal to itself and
-/// greater than a null; against anything else it is the greater side,
-/// which is `zend_std_compare_objects`'s answer when the cast fails, and
-/// the property walk of two objects of one class and the warning of a
-/// cast to a number wait with the classes.
+/// greater than a null; against anything else it is the `compare` slot
+/// of its handler table (design §5.4), which at `Std` is
+/// `zend_std_compare_objects` ([`Request::compare_objects`]): two of
+/// one class property by property, two of different classes
+/// `ZEND_UNCOMPARABLE`, which is `1`, and an object against a scalar
+/// through `cast_object`. The `Err` is what a property's own comparison
+/// or a `__toString` threw, and the `Error` the recursion guard raises.
 ///
 /// The long pair and the double pairs are the arms php's `ZEND_IS_SMALLER`
 /// handler takes before it calls `zend_compare`, and `zend_compare`'s own
@@ -1189,18 +1192,98 @@ pub(crate) fn concat(req: &mut Request, left: &Value, right: &Value) -> Result<V
 /// bool(false)
 /// bool(false)
 /// ```
-pub(crate) fn compare(req: &mut Request, left: &Value, right: &Value) -> Ordering {
+///
+/// Two objects of one class compare declared slot by declared slot in
+/// declaration order, each pair by this kernel, so `==` is true when
+/// every property is loosely equal and `<` orders on the first pair
+/// that differs; two objects of two classes are uncomparable, `1`
+/// whichever side each is on, so neither `==` nor `<` and `<=>` is `1`
+/// both ways.
+///
+/// ```php
+/// class M { public $a = 1; public $b; } class N { public $a = 1; }
+/// $m = new M; $n = new M; $p = new M; $p->a = 2; $o = new N;
+/// var_dump($m == $n, $m == $p, $m < $p, $m <=> $p, $p <=> $m, $m == $o, $m < $o, $m <=> $o, $o <=> $m);
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// int(-1)
+/// int(1)
+/// bool(false)
+/// bool(false)
+/// int(1)
+/// int(1)
+/// ```
+///
+/// An object against an int or a float is `cast_object`'s answer, which
+/// no class here has, so it is php's notice and then `1` or `1.0` in
+/// the object's place; against a string it is the class's `__toString`,
+/// and the greater side for a class with none; against a null or a bool
+/// its truth, which is true, with no notice. An object with a dynamic
+/// property compares as `zend_compare_symbol_tables` compares the two
+/// rebuilt tables, the count first; that arm waits on #335 for a witness,
+/// since the engine's creation of one raises no deprecation yet.
+///
+/// ```php
+/// class M { public $a = 1; }
+/// $m = new M;
+/// var_dump($m == 1, $m < 2, $m <=> 1, 1 <=> $m, $m == 1.0, $m == 2, $m == "1", $m == null, $m == true, $m == []);
+/// ```
+/// ```expect
+///
+/// Notice: Object of class M could not be converted to int in %s on line 4
+///
+/// Notice: Object of class M could not be converted to int in %s on line 4
+///
+/// Notice: Object of class M could not be converted to int in %s on line 4
+///
+/// Notice: Object of class M could not be converted to int in %s on line 4
+///
+/// Notice: Object of class M could not be converted to float in %s on line 4
+///
+/// Notice: Object of class M could not be converted to int in %s on line 4
+/// bool(true)
+/// bool(true)
+/// int(0)
+/// int(0)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// ```
+///
+/// A property walk that reaches the object it started from is php's
+/// `Error`, since the object is protected for the walk
+/// (`Z_PROTECT_RECURSION_P`).
+///
+/// ```php
+/// class M { public $a; }
+/// $r = new M; $r->a = $r; $s = new M; $s->a = $s;
+/// var_dump($r == $s);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Nesting level too deep - recursive dependency? in %s:4
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 4
+/// ```
+pub(crate) fn compare(req: &mut Request, left: &Value, right: &Value) -> Result<Ordering, Thrown> {
     let (left, right) = (&left.deref(), &right.deref());
     if let (Some(a), Some(b)) = (scalar(left), scalar(right)) {
-        return php_heap::compare(a, b, req.precision());
+        return Ok(php_heap::compare(a, b, req.precision()));
     }
-    match (left.as_ref(), right.as_ref()) {
-        (ValueRef::Array(a), ValueRef::Array(b)) => compare_arrays(req, *a, *b),
+    Ok(match (left.as_ref(), right.as_ref()) {
+        (ValueRef::Array(a), ValueRef::Array(b)) => compare_arrays(req, *a, *b)?,
         (ValueRef::Object(a), ValueRef::Object(b)) if a == b => Ordering::Equal,
         // php's default arm: a null or a bool as the other side's truth,
         // which is also what its own `IS_NULL` and `IS_OBJECT` pairs
-        // answer; then an object, then an array, then both sides as
-        // numbers.
+        // answer and what `cast_object` to `_IS_BOOL` answers for an
+        // object; then an object's handler, then an array, then both
+        // sides as numbers.
         (ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false), _) => {
             if is_true(req, right) {
                 Ordering::Less
@@ -1229,12 +1312,16 @@ pub(crate) fn compare(req: &mut Request, left: &Value, right: &Value) -> Orderin
                 Ordering::Less
             }
         }
-        (ValueRef::Object(_), _) => Ordering::Greater,
-        (_, ValueRef::Object(_)) => Ordering::Less,
+        // `Z_OBJ_HANDLER_P(object, compare)(op1, op2)`, the object side's
+        // table; `None` is `ZEND_UNCOMPARABLE`, which is `1`.
+        (ValueRef::Object(o), _) | (_, ValueRef::Object(o)) => req
+            .object_handlers(o.heap())
+            .compare(req, left, right)?
+            .unwrap_or(Ordering::Greater),
         (ValueRef::Array(_), _) => Ordering::Greater,
         (_, ValueRef::Array(_)) => Ordering::Less,
         (a, b) => php_heap::compare(silent_number(a), silent_number(b), req.precision()),
-    }
+    })
 }
 
 /// `is_smaller_function` (`Z/Zend/zend_operators.c:2669`): whether
@@ -1247,12 +1334,8 @@ pub(crate) fn compare(req: &mut Request, left: &Value, right: &Value) -> Orderin
 /// ```expect
 /// 012
 /// ```
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the shape every binary kernel has, so one handler body serves them all"
-)]
 pub(crate) fn is_smaller(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
-    Ok(Value::bool(compare(req, left, right) == Ordering::Less))
+    Ok(Value::bool(compare(req, left, right)? == Ordering::Less))
 }
 
 /// `is_smaller_or_equal_function` (`Z/Zend/zend_operators.c:2543`):
@@ -1277,16 +1360,12 @@ pub(crate) fn is_smaller(req: &mut Request, left: &Value, right: &Value) -> Resu
 /// bool(true)
 /// bool(false)
 /// ```
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the shape every binary kernel has, so one handler body serves them all"
-)]
 pub(crate) fn is_smaller_or_equal(
     req: &mut Request,
     left: &Value,
     right: &Value,
 ) -> Result<Value, Thrown> {
-    Ok(Value::bool(compare(req, left, right) != Ordering::Greater))
+    Ok(Value::bool(compare(req, left, right)? != Ordering::Greater))
 }
 
 /// `is_equal_function` (`Z/Zend/zend_operators.c:2522`): whether
@@ -1310,12 +1389,8 @@ pub(crate) fn is_smaller_or_equal(
 /// bool(true)
 /// bool(true)
 /// ```
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the shape every binary kernel has, so one handler body serves them all"
-)]
 pub(crate) fn is_equal(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
-    Ok(Value::bool(compare(req, left, right) == Ordering::Equal))
+    Ok(Value::bool(compare(req, left, right)? == Ordering::Equal))
 }
 
 /// `is_not_equal_function` (`Z/Zend/zend_operators.c:2529`): the
@@ -1336,16 +1411,12 @@ pub(crate) fn is_equal(req: &mut Request, left: &Value, right: &Value) -> Result
 /// bool(true)
 /// bool(true)
 /// ```
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the shape every binary kernel has, so one handler body serves them all"
-)]
 pub(crate) fn is_not_equal(
     req: &mut Request,
     left: &Value,
     right: &Value,
 ) -> Result<Value, Thrown> {
-    Ok(Value::bool(compare(req, left, right) != Ordering::Equal))
+    Ok(Value::bool(compare(req, left, right)? != Ordering::Equal))
 }
 
 /// `compare_function` (`Z/Zend/zend_operators.c:2253`): [`compare`]'s
@@ -1369,12 +1440,8 @@ pub(crate) fn is_not_equal(
 /// int(1)
 /// int(1)
 /// ```
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the shape every binary kernel has, so one handler body serves them all"
-)]
 pub(crate) fn spaceship(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
-    Ok(Value::int(match compare(req, left, right) {
+    Ok(Value::int(match compare(req, left, right)? {
         Ordering::Less => -1,
         Ordering::Equal => 0,
         Ordering::Greater => 1,
@@ -1522,21 +1589,22 @@ fn silent_number(value: ValueRef<'_>) -> Scalar<'static> {
 /// (`Z/Zend/zend_hash.c:3155`): the counts first, then each key of the
 /// left array looked up in the right one, a key the right one lacks
 /// making the left the greater, and the two values compared by
-/// [`compare`] until one pair differs.
-fn compare_arrays(req: &mut Request, left: PhpArray, right: PhpArray) -> Ordering {
+/// [`compare`] until one pair differs; also `zend_compare_symbol_tables`,
+/// the same walk over two objects' tables.
+fn compare_arrays(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<Ordering, Thrown> {
     if left.len() != right.len() {
-        return left.len().cmp(&right.len());
+        return Ok(left.len().cmp(&right.len()));
     }
     for (key, value) in left.snapshot() {
         let Some(other) = right.get(&key) else {
-            return Ordering::Greater;
+            return Ok(Ordering::Greater);
         };
-        let ordering = compare(req, &value, &other);
+        let ordering = compare(req, &value, &other)?;
         if ordering != Ordering::Equal {
-            return ordering;
+            return Ok(ordering);
         }
     }
-    Ordering::Equal
+    Ok(Ordering::Equal)
 }
 
 /// `increment_function` (`Z/Zend/zend_operators.c:2712`): the value
