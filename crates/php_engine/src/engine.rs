@@ -1297,7 +1297,7 @@ mod tests {
     #[test]
     fn a_source_the_compiler_refuses_names_the_construct_it_could_not_read() {
         let engine = Engine::builder().build();
-        let (body, observables) = served(&engine, "<?php\necho !1;");
+        let (body, observables) = served(&engine, "<?php\necho `ls`;");
         assert_eq!(
             body,
             "\nParse error: an expression this compiler cannot read yet in witness.php on line 2\n"
@@ -1318,7 +1318,7 @@ mod tests {
             .ini("display_errors", "0")
             .ini("log_errors", "1")
             .build()
-            .serve(description("<?php\necho !1;"), &mut logged);
+            .serve(description("<?php\necho `ls`;"), &mut logged);
         assert!(logged.body.is_empty());
         assert_eq!(
             logged.logged(),
@@ -1330,7 +1330,7 @@ mod tests {
         let observables = Engine::builder()
             .ini("error_reporting", "0")
             .build()
-            .serve(description("<?php\necho !1;"), &mut masked);
+            .serve(description("<?php\necho `ls`;"), &mut masked);
         assert!(masked.body.is_empty(), "E_PARSE is masked out");
         assert_eq!(observables.exit_code, 255, "the status is php's regardless");
     }

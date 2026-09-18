@@ -2390,7 +2390,7 @@ impl Emit<'_> {
                 }
                 Ok(ConstExpr::Array(items))
             }
-            Expr::Unary { .. } | Expr::Binary { .. } | Expr::Cast { .. } => {
+            Expr::Unary { .. } | Expr::Not(_) | Expr::Binary { .. } | Expr::Cast { .. } => {
                 if let Some(folded) = self.constant_of(expr)? {
                     return folded_const_expr(folded).ok_or_else(|| {
                         self.fatal("a constant expression this compiler cannot read yet")
@@ -2399,6 +2399,10 @@ impl Emit<'_> {
                 match expr {
                     Expr::Unary { minus, operand } => Ok(ConstExpr::Unary {
                         op: Name(if *minus { b"-".as_slice() } else { b"+" }.into()),
+                        operand: Box::new(self.const_expr(operand)?),
+                    }),
+                    Expr::Not(operand) => Ok(ConstExpr::Unary {
+                        op: Name(b"!".as_slice().into()),
                         operand: Box::new(self.const_expr(operand)?),
                     }),
                     Expr::Binary { op, left, right } => Ok(ConstExpr::Binary {
@@ -3822,6 +3826,7 @@ impl Emit<'_> {
         match expr {
             Expr::Call { name, arguments } => self.call(name, arguments),
             Expr::Unary { minus, operand } => self.unary(*minus, operand),
+            Expr::Not(operand) => self.bool_not(operand),
             Expr::Silence(operand) => self.silence(operand),
             Expr::Encaps(pieces) => self.encaps(pieces),
             Expr::Cast { to, operand } => self.cast(*to, operand),
@@ -4959,6 +4964,25 @@ impl Emit<'_> {
         Ok(self.emit_binary(Opcode::Mul, operand, Where::Constant(sign)))
     }
 
+    /// `zend_compile_unary_op` (`Z/Zend/zend_compile.c:10309`) for the
+    /// one operator that reaches it here, `ZEND_BOOL_NOT`: the operand
+    /// compiled, `zend_try_ct_eval_unary_op` over it where it is a
+    /// constant, and `zend_emit_op_tmp` otherwise.
+    ///
+    /// The fold is refused over a double, which is
+    /// `zend_unary_op_produces_error`'s one arm for this opcode, so
+    /// `!1` and `!""` are bools in the op array and `!1.5` is the
+    /// opline over `float(1.5)`, as the oracle's dump has it.
+    fn bool_not(&mut self, operand: &Expr) -> Result<Where, CompileError> {
+        if let Some(value) = self.constant_of(operand)?
+            && value.as_double().is_none()
+        {
+            return Ok(Where::Constant(Zval::bool(!truth(value))));
+        }
+        let operand = self.expr(operand)?;
+        Ok(self.emit_unary(Opcode::BoolNot, operand, 0))
+    }
+
     /// `zend_compile_silence` (`Z/Zend/zend_compile.c:10896`):
     /// `BEGIN_SILENCE` into a temporary (`zend_emit_op_tmp`), the
     /// expression, and `END_SILENCE` over that temporary with nothing
@@ -5299,6 +5323,18 @@ impl Emit<'_> {
                     Zval::long(if *minus { -1 } else { 1 }),
                 )
                 .ok_or_else(|| self.fatal("arithmetic this compiler cannot fold yet"))
+            }
+            // `zend_eval_const_expr`'s `ZEND_AST_UNARY_OP` arm: the
+            // operand folded, then `zend_try_ct_eval_unary_op`, which
+            // `zend_unary_op_produces_error` refuses over a double,
+            // since `ZEND_BOOL_NOT` warns casting a NAN. So `!1.5` is
+            // the opline php leaves standing and never the bool.
+            Expr::Not(operand) => {
+                let value = self.constant_expr(operand)?;
+                if value.as_double().is_some() {
+                    return Err(self.fatal("a `!` over a float is left to its opcode"));
+                }
+                Ok(Zval::bool(!truth(value)))
             }
             Expr::Binary {
                 op: BinaryOp::Concat,
@@ -6727,7 +6763,10 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Expr) {
     match expr {
         Expr::Var(name) => note(names, name),
         Expr::Closure(closure) => implicit_uses_of_closure(names, closure),
-        Expr::Unary { operand, .. } | Expr::Cast { operand, .. } | Expr::Silence(operand) => {
+        Expr::Unary { operand, .. }
+        | Expr::Cast { operand, .. }
+        | Expr::Not(operand)
+        | Expr::Silence(operand) => {
             implicit_uses(names, operand);
         }
         // `ZEND_AST_COALESCE` is no special node either: the walk
@@ -6887,7 +6926,7 @@ fn implicit_uses_of_closure(names: &mut Vec<Vec<u8>>, closure: &read::Closure) {
 fn names_a_constant(expr: &Expr) -> bool {
     match expr {
         Expr::Constant(_) | Expr::ClassConst { .. } => true,
-        Expr::Unary { operand, .. } => names_a_constant(operand),
+        Expr::Unary { operand, .. } | Expr::Not(operand) => names_a_constant(operand),
         Expr::Binary { left, right, .. } => names_a_constant(left) || names_a_constant(right),
         Expr::Array(elements) => elements.iter().any(|element| {
             element.key.as_ref().is_some_and(names_a_constant) || names_a_constant(&element.value)

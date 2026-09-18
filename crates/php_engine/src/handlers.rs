@@ -6589,6 +6589,51 @@ pub(crate) fn bool<T: Tier>(
     })
 }
 
+/// `ZEND_BOOL_NOT` (`Z/Zend/zend_vm_def.h:961`), what `!` compiles to:
+/// [`crate::ops::is_true`] over the operand negated, `!i_zend_is_true`,
+/// into the temporary; the operand freed after it. A temporary this
+/// leaves, `zend_do_free` never frees, as `ZEND_BOOL`'s is never freed.
+///
+/// php's compiler folds the operator over a constant operand that is no
+/// double (`zend_try_ct_eval_unary_op`), so a constant reaches the
+/// kernel only as a float, or from a CV, a call or a temporary.
+///
+/// ```php
+/// $a = 0; var_dump(!$a, !"0", !"", !1, ![], !null);
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// ```
+///
+/// A double is the one constant php leaves for the opcode, and an
+/// object is the operand that is always true.
+///
+/// ```php
+/// var_dump(!1.5, !0.0, !NAN, !!new stdClass);
+/// ```
+/// ```expect
+/// Warning: unexpected NAN value was coerced to bool in %s on line 2
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// ```
+pub(crate) fn bool_not<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    unary(req, frame, code, op, |req, value| {
+        Ok(Value::bool(!crate::ops::is_true(req, value)))
+    })
+}
+
 /// `ZEND_BOOL_XOR` (`Z/Zend/zend_vm_def.h:920`), what `xor` compiles to:
 /// `boolean_xor_function` over both operands, which is
 /// [`crate::ops::is_true`] on each and the two answers differing. It is

@@ -434,6 +434,12 @@ pub(crate) enum Expr {
         minus: bool,
         operand: Child,
     },
+    /// `!$a`, php's `ZEND_AST_UNARY_OP` with `ZEND_BOOL_NOT` in `attr`,
+    /// which `zend_compile_unary_op` emits and `zend_compile_unary_pm`
+    /// does not. It has a level of its own, `%precedence '!'`, with `*`
+    /// below it and `T_INSTANCEOF` above, and it nests: `!!$a` is two of
+    /// them.
+    Not(Child),
     /// `@$a`, php's `ZEND_AST_SILENCE` over the expression the
     /// diagnostics of are held: at the level of unary `-` and the casts,
     /// so `@$a + 1` is php's `(@$a) + 1` and `@$a ** 2` php's
@@ -684,6 +690,7 @@ impl Drop for Child {
             first = match first {
                 Expr::Unary { operand, .. }
                 | Expr::Cast { operand, .. }
+                | Expr::Not(operand)
                 | Expr::Silence(operand) => operand.take(),
                 Expr::Binary { left, right, .. }
                 | Expr::Coalesce { left, right }
@@ -3071,7 +3078,7 @@ impl Reader<'_> {
 
     /// `*`, `/` and `%`, php's higher arithmetic level.
     fn multiplicative(&mut self) -> Result<Expr, Trouble> {
-        let mut left = self.instance_of()?;
+        let mut left = self.not()?;
         loop {
             self.skip_trivia();
             let op = match (self.byte(0), self.byte(1)) {
@@ -3082,13 +3089,42 @@ impl Reader<'_> {
                 _ => return Ok(left),
             };
             self.bump(1);
-            let right = self.instance_of()?;
+            let right = self.not()?;
             left = Expr::Binary {
                 op,
                 left: Child::new(left),
                 right: Child::new(right),
             };
         }
+    }
+
+    /// `!$a`, php's `%precedence '!'`, the one level between `*` below
+    /// it and `T_INSTANCEOF` above it: the grammar's rule is `'!' expr`,
+    /// so the operand runs as far as every operator that binds tighter
+    /// than `!` and stops at every one that does not. `!$a * 2` is
+    /// php's `(!$a) * 2` and `!$a && $b` php's `(!$a) && $b`, since `*`
+    /// and `&&` are below; `!$a instanceof C` is php's
+    /// `!($a instanceof C)` and `!$a ** 2` php's `!($a ** 2)`, since
+    /// `instanceof` and `**` are above. The operator nests, `!!$a`
+    /// being two of them, so the operand is read at this level again.
+    ///
+    /// A `!` the scanner would take as `!=` or `!==` is the equality
+    /// level's and never reaches here.
+    fn not(&mut self) -> Result<Expr, Trouble> {
+        self.check_stack()?;
+        if !self.not_ahead() {
+            return self.instance_of();
+        }
+        self.bump(1);
+        Ok(Expr::Not(Child::new(self.not()?)))
+    }
+
+    /// Whether a `!` that is the operator stands here: php's scanner
+    /// takes `!==` and `!=` first, so a `!` an `=` follows is the
+    /// equality level's token and not this one.
+    fn not_ahead(&mut self) -> bool {
+        self.skip_trivia();
+        self.byte(0) == Some(b'!') && self.byte(1) != Some(b'=')
     }
 
     /// `expr instanceof C`, php's level between `!` and the unary
@@ -3141,9 +3177,17 @@ impl Reader<'_> {
     /// grammar's `'@' expr` shifts an `=` after the operand rather than
     /// reducing, so `@$a = 1` is `@($a = 1)`, and the assignment is read
     /// inside the `@` here.
+    ///
+    /// A `!` where this level's operand stands is the level below,
+    /// which the grammar reaches by shifting the token rather than
+    /// reducing: `-!$a` is php's `-(!$a)` and `(int)!$a` php's
+    /// `(int)(!$a)`, while `-$a instanceof C` stays `(-$a) instanceof C`
+    /// because no `!` was written there.
     fn unary(&mut self) -> Result<Expr, Trouble> {
         self.check_stack()?;
-        self.skip_trivia();
+        if self.not_ahead() {
+            return self.not();
+        }
         let minus = match (self.byte(0), self.byte(1)) {
             (Some(b'-'), next) if !matches!(next, Some(b'-' | b'=')) => true,
             (Some(b'+'), next) if !matches!(next, Some(b'+' | b'=')) => false,
