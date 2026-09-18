@@ -2433,6 +2433,8 @@ impl Emit<'_> {
             | Expr::New { .. }
             | Expr::Instanceof { .. }
             | Expr::Coalesce { .. }
+            | Expr::And { .. }
+            | Expr::Or { .. }
             | Expr::Ternary { .. } => {
                 Err(self.fatal("a constant expression this compiler cannot read yet"))
             }
@@ -3866,6 +3868,8 @@ impl Emit<'_> {
                 ..
             } => self.conditional(cond, then.as_deref(), otherwise),
             Expr::Coalesce { left, right } => self.coalesce(left, right),
+            Expr::And { left, right } => self.short_circuiting(false, left, right),
+            Expr::Or { left, right } => self.short_circuiting(true, left, right),
             known => Ok(Where::Constant(self.constant_expr(known)?)),
         }
     }
@@ -4043,6 +4047,67 @@ impl Emit<'_> {
         let (op1_type, op1) = self.operand(otherwise);
         self.push(Opline {
             opcode: Opcode::QmAssign,
+            op1_type,
+            op1,
+            out_type: OperandKind::Tmp,
+            out,
+            ..Opline::default()
+        });
+        self.update_jump_target_to_next(opnum);
+        Ok(Where::Temporary(out))
+    }
+
+    /// `zend_compile_short_circuiting` (`Z/Zend/zend_compile.c:10350`),
+    /// `a && b` and `a || b` and their word spellings: the left side
+    /// compiled, then `JMPZ_EX` for `&&` or `JMPNZ_EX` for `||` into the
+    /// operator's temporary with the jump target learnt after the right
+    /// side, then the right side's `BOOL` into that same temporary. The
+    /// temporary is the left side's own where the left side left one
+    /// (`SET_NODE(opline_jmpz->result, &left_node)`), so a chain of the
+    /// same operator writes one temporary however long it is, and a new
+    /// one (`zend_make_tmp_result`) where the left side is a CV, a
+    /// constant or a call's `VAR`.
+    ///
+    /// A constant left side is folded where php folds it: the operator
+    /// answers the left side's own truth and the right side is never
+    /// compiled where that truth settles it (`0 && f()`), and where it
+    /// does not, the right side alone is the answer, as the constant it
+    /// folds to or as one `BOOL` over it.
+    fn short_circuiting(
+        &mut self,
+        or: bool,
+        left: &Expr,
+        right: &Expr,
+    ) -> Result<Where, CompileError> {
+        let left = self.expr(left)?;
+        if let Where::Constant(value) = left {
+            let held = truth(value);
+            if held == or {
+                return Ok(Where::Constant(Zval::bool(held)));
+            }
+            let right = self.expr(right)?;
+            if let Where::Constant(value) = right {
+                return Ok(Where::Constant(Zval::bool(truth(value))));
+            }
+            return Ok(self.emit_unary(Opcode::Bool, right, 0));
+        }
+        let (op1_type, op1) = self.operand(left);
+        let out = match left {
+            Where::Temporary(at) => at,
+            _ => self.temporary(),
+        };
+        let opnum = self.push(Opline {
+            opcode: if or { Opcode::JmpnzEx } else { Opcode::JmpzEx },
+            op1_type,
+            op1,
+            out_type: OperandKind::Tmp,
+            out,
+            ..Opline::default()
+        });
+        let otherwise = self.expr(right)?;
+        let (op1_type, op1) = self.operand(otherwise);
+        self.push(Opline {
+            opcode: Opcode::Bool,
             op1_type,
             op1,
             out_type: OperandKind::Tmp,
@@ -4608,8 +4673,8 @@ impl Emit<'_> {
                 Ordering::Equal => 0,
                 Ordering::Greater => 1,
             }),
-            // An arithmetic operator is [`fold`]'s and a `.` is
-            // [`Emit::concat_fold`]'s; neither reaches here.
+            // An arithmetic operator and `xor` are [`fold`]'s and a `.`
+            // is [`Emit::concat_fold`]'s; none of them reaches here.
             BinaryOp::Add
             | BinaryOp::Sub
             | BinaryOp::Mul
@@ -4618,6 +4683,7 @@ impl Emit<'_> {
             | BinaryOp::Pow
             | BinaryOp::Sl
             | BinaryOp::Sr
+            | BinaryOp::BoolXor
             | BinaryOp::Concat => Zval::null(),
         }
     }
@@ -5065,6 +5131,7 @@ impl Emit<'_> {
             BinaryOp::IsIdentical => Opcode::IsIdentical,
             BinaryOp::IsNotIdentical => Opcode::IsNotIdentical,
             BinaryOp::Spaceship => Opcode::Spaceship,
+            BinaryOp::BoolXor => Opcode::BoolXor,
         }
     }
 
@@ -5174,6 +5241,14 @@ impl Emit<'_> {
             // `zend_compile_coalesce` emits two oplines whatever stands
             // on either side, and `zend_eval_const_expr` folds neither.
             Expr::Coalesce { .. } => Err(self.fatal("a `??` is no constant expression")),
+            // `zend_eval_const_expr`'s `ZEND_AST_AND` and `ZEND_AST_OR`
+            // arm (`Z/Zend/zend_compile.c:12116`): the left side folded,
+            // and its own truth the answer where that truth settles the
+            // operator, with the right side left unfolded there; else
+            // the right side's truth, which is the answer whichever of
+            // the two operators was written.
+            Expr::And { left, right } => self.short_circuit_fold(false, left, right),
+            Expr::Or { left, right } => self.short_circuit_fold(true, left, right),
             // `zend_compile_throw` emits an opline whatever stands
             // around it, so a `throw` folds to nothing.
             Expr::Throw(_) => Err(self.fatal("a `throw` is no constant expression")),
@@ -5183,6 +5258,26 @@ impl Emit<'_> {
             Expr::Closure(_) => Err(self.fatal("a closure is no constant expression")),
             Expr::CallVar { .. } => Err(self.fatal("a call is no constant expression")),
         }
+    }
+
+    /// `zend_eval_const_expr`'s `ZEND_AST_AND` and `ZEND_AST_OR` arm:
+    /// the left side folded, and where its truth is the operator's
+    /// answer on its own, that bool, with the right side never folded;
+    /// else the right side's truth, since the left one has settled
+    /// nothing and the operator answers what the right one is. A side
+    /// that does not fold leaves the whole expression unfolded, which is
+    /// php's `return` out of the arm.
+    fn short_circuit_fold(
+        &mut self,
+        or: bool,
+        left: &Expr,
+        right: &Expr,
+    ) -> Result<Zval, CompileError> {
+        let held = truth(self.constant_expr(left)?);
+        if held == or {
+            return Ok(Zval::bool(held));
+        }
+        Ok(Zval::bool(truth(self.constant_expr(right)?)))
     }
 
     /// `zend_try_ct_eval_array` (`Z/Zend/zend_compile.c:10085`) over an
@@ -6501,7 +6596,10 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Expr) {
         // `ZEND_AST_COALESCE` is no special node either: the walk
         // reaches both children, so an arrow function captures what
         // either side reads.
-        Expr::Binary { left, right, .. } | Expr::Coalesce { left, right } => {
+        Expr::Binary { left, right, .. }
+        | Expr::Coalesce { left, right }
+        | Expr::And { left, right }
+        | Expr::Or { left, right } => {
             implicit_uses(names, left);
             implicit_uses(names, right);
         }
@@ -6979,6 +7077,12 @@ fn produces_error(op: BinaryOp, a: Number, b: Number) -> bool {
 /// through the same `add_function` and its kin, and folds unless
 /// `zend_binary_op_produces_error` says the opcode would throw or warn.
 fn fold(op: BinaryOp, left: Zval, right: Zval) -> Option<Zval> {
+    // `boolean_xor_function` reads both sides as `zend_is_true` reads
+    // them, whatever their kind, and never fails, so
+    // `zend_try_ct_eval_binary_op` folds every constant pair.
+    if op == BinaryOp::BoolXor {
+        return Some(Zval::bool(truth(left) != truth(right)));
+    }
     let (a, b) = (number(left)?, number(right)?);
     if produces_error(op, a, b) {
         return None;

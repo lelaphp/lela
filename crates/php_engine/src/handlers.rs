@@ -6404,6 +6404,39 @@ pub(crate) fn bool<T: Tier>(
     })
 }
 
+/// `ZEND_BOOL_XOR` (`Z/Zend/zend_vm_def.h:920`), what `xor` compiles to:
+/// `boolean_xor_function` over both operands, which is
+/// [`crate::ops::is_true`] on each and the two answers differing. It is
+/// the one spelling of the five with no jump in it, so both sides are
+/// served whatever either answers, and `pass_two` swaps its operands
+/// where `op1` is the lesser kind (`SPEC(COMMUTATIVE)`), which the
+/// answer does not read.
+///
+/// ```php
+/// function f($n) { echo "f$n"; return $n; }
+/// var_dump(f(1) xor f(0));
+/// $a = 1; $b = 0; $c = "";
+/// var_dump($a xor $b, $a xor $a, $b xor $c);
+/// ```
+/// ```expect
+/// f1f0bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// ```
+pub(crate) fn bool_xor<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    binary(req, frame, code, op, |req, left, right| {
+        Ok(Value::bool(
+            crate::ops::is_true(req, left) != crate::ops::is_true(req, right),
+        ))
+    })
+}
+
 /// `ZEND_ISEMPTY` (`Z/Zend/zend_compile.h:1005`), the one bit of an
 /// `ISSET_ISEMPTY_*` opline's `extended_value`: the word compiled was
 /// `empty` and not `isset`.
@@ -6556,6 +6589,81 @@ pub(crate) fn jmpz<T: Tier>(
         crate::interrupt::check(req)?;
         continued(T::safepoint(req, frame, Site::Loop(SafepointIdx(op.out))))?;
     }
+    Ok(Stepped::Same(frame))
+}
+
+/// `ZEND_JMPZ_EX` (`Z/Zend/zend_vm_def.h:3180`), the jump
+/// `zend_compile_short_circuiting` leaves for `&&` and for `and`: the
+/// operand read as `GET_OP1_ZVAL_PTR_UNDEF(BP_VAR_R)` reads it, its
+/// truth ([`crate::ops::is_true`]) written into the temporary `result`
+/// names as a bool, and the jump in `op2` taken past the right side
+/// where that truth is false, which is what leaves the right side
+/// unserved. A CV nothing wrote is the undefined-variable warning and a
+/// false, as `ZVAL_UNDEFINED_OP1` raises it. The jump is forward always,
+/// since php's compiler emits this opcode only over a right side it has
+/// yet to compile, and `result` carries a temporary where a back-edge
+/// would carry its safepoint number, so there is no site here to raise,
+/// as [`jmp_set`] has none.
+///
+/// ```php
+/// function f($n) { echo "f$n"; return $n; }
+/// var_dump(f(0) && f(1));
+/// var_dump(f(2) && f(3));
+/// var_dump($u && f(4));
+/// ```
+/// ```expect
+/// f0bool(false)
+/// f2f3bool(true)
+///
+/// Warning: Undefined variable $u in %s on line 5
+/// bool(false)
+/// ```
+pub(crate) fn jmpz_ex<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let value = exec::operand(req, frame, code, op.op1_type, op.op1);
+    let held = crate::ops::is_true(req, &value);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    write_out(req, frame, code, op, &Value::bool(held));
+    if held {
+        return Ok(advance(req, frame));
+    }
+    req.vm_mut().jump(frame, op.op2);
+    Ok(Stepped::Same(frame))
+}
+
+/// `ZEND_JMPNZ_EX` (`Z/Zend/zend_vm_def.h:3216`): [`jmpz_ex`] with the
+/// test the other way round, what `||` and `or` compile to, the jump
+/// taken past the right side where the operand is true. The bool goes
+/// into the temporary whichever way the test went, which is what makes
+/// the operator's value the left side's truth and not the left side.
+///
+/// ```php
+/// function f($n) { echo "f$n"; return $n; }
+/// var_dump(f(1) || f(2));
+/// var_dump(f(0) || f(3));
+/// ```
+/// ```expect
+/// f1bool(true)
+/// f0f3bool(true)
+/// ```
+pub(crate) fn jmpnz_ex<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let value = exec::operand(req, frame, code, op.op1_type, op.op1);
+    let held = crate::ops::is_true(req, &value);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    write_out(req, frame, code, op, &Value::bool(held));
+    if !held {
+        return Ok(advance(req, frame));
+    }
+    req.vm_mut().jump(frame, op.op2);
     Ok(Stepped::Same(frame))
 }
 

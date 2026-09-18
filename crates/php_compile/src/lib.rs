@@ -2964,7 +2964,7 @@ mod tests {
             line: 0,
             raised: Vec::new(),
         };
-        let error = refused(b"<?php\n$a = (1 and 2);\n").unwrap_or_else(compiled);
+        let error = refused(b"<?php\n$a = (1 | 2);\n").unwrap_or_else(compiled);
         assert_eq!(error.level, Level::Parse);
         assert_eq!(
             error.message,

@@ -33,9 +33,10 @@
 //! and `**` at php's precedence levels: `<` under `.` under the shifts
 //! under the additive level under the multiplicative one, `<` not
 //! associating and the rest left to right, and `**` right to left above
-//! unary `-`, with `??` right to left below the comparisons, the
-//! conditional below that, and `=` below them all and read right to
-//! left.
+//! unary `-`, with `&&` and `||` below the comparisons, `??` right to
+//! left below them, the conditional below that, `=` below it, and
+//! `and`, `xor` and `or` below everything, which is why `$a = 1 and 2`
+//! assigns before it answers.
 //! Anything else is a [`crate::CompileError`], so what this cannot read is
 //! refused rather than silently compiled to something else.
 
@@ -611,6 +612,23 @@ pub(crate) enum Expr {
         left: Child,
         right: Child,
     },
+    /// `a && b` and `a and b`, php's `ZEND_AST_AND` over two children,
+    /// which `zend_compile_short_circuiting` emits: the right side is
+    /// reached only where the left is true. The two spellings are one
+    /// node at two precedence levels, `%left T_BOOLEAN_AND` above `??`
+    /// and `%left T_LOGICAL_AND` below `=`.
+    And {
+        left: Child,
+        right: Child,
+    },
+    /// `a || b` and `a or b`, php's `ZEND_AST_OR`, the same node the
+    /// other way round: the right side is reached only where the left is
+    /// false. `%left T_BOOLEAN_OR` and `%left T_LOGICAL_OR` are its two
+    /// levels.
+    Or {
+        left: Child,
+        right: Child,
+    },
 }
 
 /// One child of an expression, php's `zend_ast.child[i]`: the expression
@@ -657,7 +675,10 @@ impl Drop for Child {
                 Expr::Unary { operand, .. }
                 | Expr::Cast { operand, .. }
                 | Expr::Silence(operand) => operand.take(),
-                Expr::Binary { left, right, .. } | Expr::Coalesce { left, right } => {
+                Expr::Binary { left, right, .. }
+                | Expr::Coalesce { left, right }
+                | Expr::And { left, right }
+                | Expr::Or { left, right } => {
                     drop(right);
                     left.take()
                 }
@@ -736,6 +757,10 @@ pub(crate) enum BinaryOp {
     IsNotIdentical,
     /// `ZEND_SPACESHIP`
     Spaceship,
+    /// `ZEND_BOOL_XOR`, which `xor` is: the one word spelling
+    /// `zend_compile_binary_op` serves, with no jump in it, since both
+    /// sides are read whatever either answers.
+    BoolXor,
 }
 
 impl BinaryOp {
@@ -761,6 +786,7 @@ impl BinaryOp {
             BinaryOp::IsIdentical => "===",
             BinaryOp::IsNotIdentical => "!==",
             BinaryOp::Spaceship => "<=>",
+            BinaryOp::BoolXor => "xor",
         }
     }
 }
@@ -2598,7 +2624,68 @@ impl Reader<'_> {
             self.bump(5);
             return Ok(Expr::Throw(Child::new(self.expr()?)));
         }
-        self.conditional()
+        self.logical_or()
+    }
+
+    /// php's `%left T_LOGICAL_OR`, the lowest level of all but `throw`:
+    /// the word spelling of `||`, one `ZEND_AST_OR` per `or` written,
+    /// left to right, and every operand read at the `xor` level above
+    /// it. `$a = 1 or 2` is php's `($a = 1) or 2`, which is the whole
+    /// reason the three words have levels of their own.
+    fn logical_or(&mut self) -> Result<Expr, Trouble> {
+        self.check_stack()?;
+        let mut left = self.logical_xor()?;
+        loop {
+            self.skip_trivia();
+            if !self.word_ahead(b"or") {
+                return Ok(left);
+            }
+            self.bump(2);
+            left = Expr::Or {
+                left: Child::new(left),
+                right: Child::new(self.logical_xor()?),
+            };
+        }
+    }
+
+    /// php's `%left T_LOGICAL_XOR`, between `or` below it and `and`
+    /// above: `ZEND_AST_BINARY_OP` with `ZEND_BOOL_XOR` in `attr`, which
+    /// is the one spelling of the three with no jump under it.
+    fn logical_xor(&mut self) -> Result<Expr, Trouble> {
+        self.check_stack()?;
+        let mut left = self.logical_and()?;
+        loop {
+            self.skip_trivia();
+            if !self.word_ahead(b"xor") {
+                return Ok(left);
+            }
+            self.bump(3);
+            left = Expr::Binary {
+                op: BinaryOp::BoolXor,
+                left: Child::new(left),
+                right: Child::new(self.logical_and()?),
+            };
+        }
+    }
+
+    /// php's `%left T_LOGICAL_AND`, the highest of the three word
+    /// levels and still below `=`: the word spelling of `&&`, the same
+    /// `ZEND_AST_AND` node, with every operand read at the assignment
+    /// level above it.
+    fn logical_and(&mut self) -> Result<Expr, Trouble> {
+        self.check_stack()?;
+        let mut left = self.conditional()?;
+        loop {
+            self.skip_trivia();
+            if !self.word_ahead(b"and") {
+                return Ok(left);
+            }
+            self.bump(3);
+            left = Expr::And {
+                left: Child::new(left),
+                right: Child::new(self.conditional()?),
+            };
+        }
     }
 
     /// php's `%left '?' ':'`, the tier between the assignment below it
@@ -2653,7 +2740,7 @@ impl Reader<'_> {
     /// out of it.
     fn coalesce(&mut self) -> Result<Expr, Trouble> {
         self.check_stack()?;
-        let left = self.equality()?;
+        let left = self.boolean_or()?;
         self.skip_trivia();
         if !self.starts_with(b"??") || self.byte(2) == Some(b'=') {
             return Ok(left);
@@ -2663,6 +2750,51 @@ impl Reader<'_> {
             left: Child::new(left),
             right: Child::new(self.coalesce()?),
         })
+    }
+
+    /// php's `%left T_BOOLEAN_OR`, the level between `??` below it and
+    /// `&&` above: `||`, left to right, one `ZEND_AST_OR` per operator
+    /// written, so `$a || $b || $c` is `($a || $b) || $c`. A single `|`
+    /// is the bitwise level, which is not read.
+    fn boolean_or(&mut self) -> Result<Expr, Trouble> {
+        self.check_stack()?;
+        let mut left = self.boolean_and()?;
+        loop {
+            self.skip_trivia();
+            if !self.starts_with(b"||") {
+                return Ok(left);
+            }
+            self.bump(2);
+            left = Expr::Or {
+                left: Child::new(left),
+                right: Child::new(self.boolean_and()?),
+            };
+        }
+    }
+
+    /// php's `%left T_BOOLEAN_AND`, between `||` below it and the
+    /// bitwise `|` above, which stands where the equality level is read
+    /// here: `&&`, left to right, so `$a || $b && $c` is
+    /// `$a || ($b && $c)`. A single `&` is the bitwise operator and the
+    /// `&` of a by-reference assignment, neither of which is this one.
+    /// php's `variable '=' expr` reaches inside this level, so
+    /// `$a && $b = 1` is php's `$a && ($b = 1)`; that is the grouping
+    /// [`Self::expr`] refuses rather than reads, as it refuses
+    /// `1 + $a = 2`.
+    fn boolean_and(&mut self) -> Result<Expr, Trouble> {
+        self.check_stack()?;
+        let mut left = self.equality()?;
+        loop {
+            self.skip_trivia();
+            if !self.starts_with(b"&&") {
+                return Ok(left);
+            }
+            self.bump(2);
+            left = Expr::And {
+                left: Child::new(left),
+                right: Child::new(self.equality()?),
+            };
+        }
     }
 
     /// Whether a `?` that opens a conditional stands here: `??` is the
@@ -2675,6 +2807,17 @@ impl Reader<'_> {
         }
         let nullsafe = self.byte(1) == Some(b'-') && self.byte(2) == Some(b'>');
         !(matches!(self.byte(1), Some(b'?' | b'>')) || nullsafe)
+    }
+
+    /// What a `=` assigns, read at php's own `%precedence '='`: the
+    /// conditional and every level above it, and not the three word
+    /// operators below it, so `$a = 1 and 2` is php's `($a = 1) and 2`
+    /// and the value stops at the `and`. `$a = $b = 1` reads right to
+    /// left, since this level is where the second `=` is read again,
+    /// and `$a = throw new E` is the `throw` the conditional's arm
+    /// takes.
+    fn assigned(&mut self) -> Result<Expr, Trouble> {
+        self.conditional()
     }
 
     /// The `=` php's grammar shifts after a variable, and what it
@@ -2696,7 +2839,7 @@ impl Reader<'_> {
                 }
                 Ok(Expr::Assign {
                     var,
-                    value: Child::new(self.expr()?),
+                    value: Child::new(self.assigned()?),
                 })
             }
             // `zend_compile_assign`'s `ZEND_AST_DIM` arm, and
@@ -2710,7 +2853,7 @@ impl Reader<'_> {
                 }
                 Ok(Expr::AssignDim {
                     target: Child::new(target),
-                    value: Child::new(self.expr()?),
+                    value: Child::new(self.assigned()?),
                 })
             }
             Expr::Prop { object, name } => {
@@ -2718,7 +2861,7 @@ impl Reader<'_> {
                 Ok(Expr::AssignProp {
                     object,
                     name,
-                    value: Child::new(self.expr()?),
+                    value: Child::new(self.assigned()?),
                 })
             }
             _ => {
@@ -4462,6 +4605,83 @@ mod tests {
         format!("{:?}", read(source).unwrap_or_default())
             .replace("Box::new", "")
             .replace(' ', "")
+    }
+
+    /// php's five short-circuit levels, which stand in two pairs with
+    /// the assignment between them: `%left T_BOOLEAN_AND` above `%left
+    /// T_BOOLEAN_OR`, both above `%precedence '='`, and `%left
+    /// T_LOGICAL_AND`, `%left T_LOGICAL_XOR` and `%left T_LOGICAL_OR`
+    /// below it, in that order. A level that moves is a failing test
+    /// here and not a wrong grouping in a program.
+    #[test]
+    fn the_short_circuit_levels_stand_in_php_s_two_tiers_around_the_assignment() {
+        assert_eq!(
+            shape(b"<?php echo $a || $b && $c;"),
+            shape(b"<?php echo $a || ($b && $c);"),
+            "`&&` binds tighter than `||`"
+        );
+        assert_eq!(
+            shape(b"<?php echo $a && $b || $c && $d;"),
+            shape(b"<?php echo ($a && $b) || ($c && $d);"),
+            "one `||` over the two `&&` beside it"
+        );
+        assert_eq!(
+            shape(b"<?php echo $a && $b && $c;"),
+            shape(b"<?php echo ($a && $b) && $c;"),
+            "`&&` reads left to right"
+        );
+        assert_eq!(
+            shape(b"<?php echo $a or $b and $c;"),
+            shape(b"<?php echo $a or ($b and $c);"),
+            "`and` binds tighter than `or`"
+        );
+        assert_eq!(
+            shape(b"<?php echo $a or $b xor $c;"),
+            shape(b"<?php echo $a or ($b xor $c);"),
+            "`xor` binds tighter than `or`"
+        );
+        assert_eq!(
+            shape(b"<?php echo $a xor $b and $c;"),
+            shape(b"<?php echo $a xor ($b and $c);"),
+            "`and` binds tighter than `xor`"
+        );
+        assert_eq!(
+            shape(b"<?php $x = $a && $b;"),
+            shape(b"<?php $x = ($a && $b);"),
+            "`&&` binds tighter than `=`, so the operator is what is assigned"
+        );
+        assert_eq!(
+            shape(b"<?php $x = $a || $b;"),
+            shape(b"<?php $x = ($a || $b);"),
+            "`||` binds tighter than `=` too"
+        );
+        assert_eq!(
+            shape(b"<?php $x = $a and $b;"),
+            shape(b"<?php ($x = $a) and $b;"),
+            "`and` binds looser than `=`, so the assignment happens first"
+        );
+        assert_eq!(
+            shape(b"<?php $x = $a or $b;"),
+            shape(b"<?php ($x = $a) or $b;"),
+            "`or` binds looser than `=` as well"
+        );
+    }
+
+    /// The two spellings of each operator are one node, so `&&` and
+    /// `and` differ in nothing but where they are read, which is what
+    /// makes the grouping the only observable difference between them.
+    #[test]
+    fn the_word_spellings_read_to_the_same_nodes_as_the_symbols() {
+        assert_eq!(
+            shape(b"<?php echo $a and $b;"),
+            shape(b"<?php echo $a && $b;"),
+            "`and` is `ZEND_AST_AND`, the node `&&` is"
+        );
+        assert_eq!(
+            shape(b"<?php echo $a or $b;"),
+            shape(b"<?php echo $a || $b;"),
+            "`or` is `ZEND_AST_OR`, the node `||` is"
+        );
     }
 
     #[test]
