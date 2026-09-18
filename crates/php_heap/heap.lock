@@ -143,6 +143,7 @@ Res::refcount
 Res::resource_type
 ResourceType
 Scalar
+Scalar::is_true
 Slot
 Str
 Str::addref

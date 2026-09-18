@@ -427,8 +427,21 @@ enum Folded {
 
 /// The `ConstExpr` a folded constant is, which a declaration carries in
 /// the written form `zend_eval_const_expr` left it; `None` for a value
-/// no constant expression of the unit format holds.
+/// no constant expression of the unit format holds. An array is the
+/// keys and values it folded to, each key written out, since a
+/// `ConstExpr` carries no zval and `(array)` folds to one.
 fn folded_const_expr(folded: Zval) -> Option<ConstExpr> {
+    if let Some(array) = folded.as_arr() {
+        let mut items = Vec::with_capacity(array.len());
+        for (key, held) in &array {
+            let key = match key {
+                Key::Long(n) => ConstExpr::Long(n),
+                Key::Str(s) => ConstExpr::Str(s.bytes().into()),
+            };
+            items.push((Some(key), folded_const_expr(held)?));
+        }
+        return Some(ConstExpr::Array(items));
+    }
     Some(match folded.kind() {
         ZvalType::Null => ConstExpr::Null,
         ZvalType::False => ConstExpr::Bool(false),
@@ -2201,7 +2214,7 @@ impl Emit<'_> {
                 }
                 Ok(ConstExpr::Array(items))
             }
-            Expr::Unary { .. } | Expr::Binary { .. } => {
+            Expr::Unary { .. } | Expr::Binary { .. } | Expr::Cast { .. } => {
                 if let Some(folded) = self.constant_of(expr)? {
                     return folded_const_expr(folded).ok_or_else(|| {
                         self.fatal("a constant expression this compiler cannot read yet")
@@ -2244,8 +2257,7 @@ impl Emit<'_> {
             | Expr::Encaps(_) => {
                 Err(self.compile_error("Constant expression contains invalid operations"))
             }
-            Expr::Cast { .. }
-            | Expr::Match { .. }
+            Expr::Match { .. }
             | Expr::New { .. }
             | Expr::Instanceof { .. }
             | Expr::Ternary { .. } => {
@@ -4369,6 +4381,54 @@ impl Emit<'_> {
         }
     }
 
+    /// `zend_try_ct_eval_cast` (`Z/Zend/zend_compile.c:12045`) over one
+    /// folded operand: the value the cast leaves where php folds it, and
+    /// nothing where php leaves the `CAST` opline for the request. php
+    /// folds no cast over a NAN, since casting one warns; `(int)` of a
+    /// double past the long's range is refused, since
+    /// `zend_dval_to_lval` answers it modularly and php will not write
+    /// that into a constant; `(string)` of a double reads the request's
+    /// `precision` and `(string)` of an array warns, so neither folds;
+    /// and there is no `IS_OBJECT` arm at all, so `(object)` never
+    /// folds.
+    fn cast_fold(&mut self, to: CastTo, value: Zval) -> Result<Option<Zval>, CompileError> {
+        if value.as_double().is_some_and(f64::is_nan) {
+            return Ok(None);
+        }
+        Ok(match to {
+            CastTo::Bool => Some(Zval::bool(truth(value))),
+            CastTo::Long => match value.as_double() {
+                Some(d) if !fits_long(d) => None,
+                _ => Some(Zval::long(long_of(value))),
+            },
+            CastTo::Double => Some(Zval::double(double_of(value))),
+            CastTo::Str => match value.kind() {
+                ZvalType::Array | ZvalType::Double => None,
+                _ => self.stringified(value)?,
+            },
+            CastTo::Array => self.array_of(value)?,
+            CastTo::Object => None,
+        })
+    }
+
+    /// `convert_to_array` over a folded constant: an array is itself,
+    /// `null` is the empty array, and every other constant the
+    /// one-element array holding it at `0` (`convert_scalar_to_array`).
+    fn array_of(&mut self, value: Zval) -> Result<Option<Zval>, CompileError> {
+        if value.as_arr().is_some() {
+            return Ok(Some(value));
+        }
+        let entries: &[(Key, Zval)] = match value.kind() {
+            ZvalType::Null => &[],
+            _ => &[(Key::Long(0), value)],
+        };
+        match self.strings.constant_array(entries) {
+            Ok(array) => Ok(Some(Zval::array(array))),
+            Err(Fatal::Error(message)) => Err(self.fatal(message)),
+            Err(Fatal::OutOfMemory(_)) => Err(self.fatal("Out of memory")),
+        }
+    }
+
     /// `zend_compile_unary_pm`: php folds unary `-` and `+` as the
     /// multiplication by -1 and by 1 it would otherwise emit, and emits
     /// that multiplication where the operand is not a constant.
@@ -4780,10 +4840,16 @@ impl Emit<'_> {
             // `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`, which opcache
             // sets, so a class constant is fetched as the program serves.
             Expr::ClassConst { .. } => Err(self.fatal("a class constant is fetched at run time")),
-            // `zend_compile_expr` folds no cast; only a constant
-            // expression's walk does (`zend_eval_const_expr`), and none is
-            // read yet.
-            Expr::Cast { .. } => Err(self.fatal("a cast is no constant expression here")),
+            // `zend_eval_const_expr`'s `ZEND_AST_CAST` arm: the
+            // operand folded, then `zend_try_ct_eval_cast` over it;
+            // `zend_compile_cast` itself folds nothing, which
+            // [`Self::cast`] copies. `(unset)` is refused while the
+            // source is read, where php's grammar puts it.
+            Expr::Cast { to, operand } => {
+                let value = self.constant_expr(operand)?;
+                self.cast_fold(*to, value)?
+                    .ok_or_else(|| self.fatal("a cast this compiler cannot fold"))
+            }
             // `zend_compile_conditional` folds nothing either: the arm of
             // `zend_eval_const_expr` that takes the branch a constant
             // condition picks is not read yet (#437).
@@ -4902,12 +4968,12 @@ impl Emit<'_> {
         for (i, element) in elements.iter().enumerate() {
             let key = match &element.key {
                 Some(key) => {
-                    let key = self.expr(key)?;
+                    let key = self.walked(key)?;
                     Some(Self::numeric_op(key))
                 }
                 None => None,
             };
-            let value = self.expr(&element.value)?;
+            let value = self.walked(&element.value)?;
             let (op1_type, op1) = self.operand(value);
             let (op2_type, op2) = match key {
                 Some(key) => self.operand(key),
@@ -4947,6 +5013,21 @@ impl Emit<'_> {
             init.extended_value |= ARRAY_NOT_PACKED;
         }
         Ok(Where::Temporary(out))
+    }
+
+    /// `zend_eval_const_expr` over one node and then
+    /// `zend_compile_expr` over what it left, which is the order inside
+    /// an array expression: `zend_try_ct_eval_array`'s first pass folds
+    /// every key and value in place, and the emission after it reads
+    /// what the fold left, so a cast inside an array is folded where the
+    /// same cast written anywhere else is the `CAST` opline
+    /// `zend_compile_cast` emits. The constant where the node folds,
+    /// else the oplines that build it.
+    fn walked(&mut self, expr: &Expr) -> Result<Where, CompileError> {
+        match self.constant_of(expr)? {
+            Some(value) => Ok(Where::Constant(value)),
+            None => self.expr(expr),
+        }
     }
 
     /// `zend_handle_numeric_op` (`Z/Zend/zend_compile.c:2775`): a
@@ -6406,6 +6487,103 @@ fn number(value: Zval) -> Option<Number> {
         ZvalType::Null | ZvalType::False => Some(Number::Long(0)),
         ZvalType::True => Some(Number::Long(1)),
         _ => None,
+    }
+}
+
+/// `zval_is_true` over a folded constant: [`Scalar::is_true`] for a
+/// scalar and, for an array, whether it holds anything
+/// (`i_zend_is_true`'s `IS_ARRAY` arm). No object, resource or
+/// reference is a constant a compiler folds.
+fn truth(value: Zval) -> bool {
+    if let Some(array) = value.as_arr() {
+        return !array.is_empty();
+    }
+    let string = value.as_str();
+    scalar(value, string.as_ref()).is_true()
+}
+
+/// `zval_get_long_func` over a folded constant: a null and a false are
+/// zero and a true is one, a long is itself, a double is truncated,
+/// which is all `zend_try_ct_eval_cast` lets through, a string is the
+/// number `is_numeric_string` reads off it with `allow_errors` on, a
+/// double among them capped as `zend_dval_to_lval_cap` caps it, and an
+/// array is whether it holds anything.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "php's `(zend_long) d` under `ZEND_DOUBLE_FITS_LONG`, which the caller held"
+)]
+fn long_of(value: Zval) -> i64 {
+    if let Some(n) = value.as_long() {
+        return n;
+    }
+    if let Some(d) = value.as_double() {
+        return d as i64;
+    }
+    if let Some(s) = value.as_str() {
+        return match numeric_prefix(s.bytes()) {
+            Some((Number::Long(n), _)) => n,
+            Some((Number::Double(d), _)) => dval_to_lval_cap(d),
+            None => 0,
+        };
+    }
+    if let Some(array) = value.as_arr() {
+        return i64::from(!array.is_empty());
+    }
+    i64::from(value.kind() == ZvalType::True)
+}
+
+/// `zval_get_double_func` over a folded constant: a null and a false are
+/// zero and a true is one, a long widens, a double is itself, a string
+/// is what `zend_strtod` reads off it and zero where it opens with no
+/// number, and an array is whether it holds anything.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "php's `(double) lval`, whose rounding is the behaviour being copied"
+)]
+fn double_of(value: Zval) -> f64 {
+    if let Some(n) = value.as_long() {
+        return n as f64;
+    }
+    if let Some(d) = value.as_double() {
+        return d;
+    }
+    if let Some(s) = value.as_str() {
+        return match numeric_prefix(s.bytes()) {
+            Some((number, _)) => number.double(),
+            None => 0.0,
+        };
+    }
+    if let Some(array) = value.as_arr() {
+        return f64::from(u8::from(!array.is_empty()));
+    }
+    f64::from(u8::from(value.kind() == ZvalType::True))
+}
+
+/// `ZEND_DOUBLE_FITS_LONG` on a 64-bit long: `(double) ZEND_LONG_MAX`
+/// rounds up out of the range, so the upper edge is exclusive. Written
+/// as php writes it, two comparisons a NAN fails neither of.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "php's own `(double) ZEND_LONG_MIN` and `(double) ZEND_LONG_MAX`"
+)]
+fn fits_long(d: f64) -> bool {
+    d >= i64::MIN as f64 && d < i64::MAX as f64
+}
+
+/// `zend_dval_to_lval_cap`: zero for what is not finite, and the long's
+/// own edge past its range, which is `strtol`'s answer kept for a
+/// float-string.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "php's `(zend_long) d` inside the range this guards"
+)]
+fn dval_to_lval_cap(d: f64) -> i64 {
+    if !d.is_finite() {
+        0
+    } else if !fits_long(d) {
+        if d > 0.0 { i64::MAX } else { i64::MIN }
+    } else {
+        d as i64
     }
 }
 

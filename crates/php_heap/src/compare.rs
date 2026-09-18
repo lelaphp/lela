@@ -30,10 +30,13 @@ pub enum Scalar<'a> {
 
 impl Scalar<'_> {
     /// `zval_is_true` over a scalar, which the default arm reads a null
-    /// or a bool against. No NAN reaches it: `zend_compare` orders a NAN
-    /// against a null or a bool before it asks, so the warning `zend_is_true`
-    /// raises for one is never raised here.
-    fn is_true(self) -> bool {
+    /// or a bool against and which the compiler's `(bool)` fold reads
+    /// too (`zend_try_ct_eval_cast`'s `_IS_BOOL` arm). No NAN reaches
+    /// it: `zend_compare` orders a NAN against a null or a bool before
+    /// it asks, and `zend_try_ct_eval_cast` folds no cast over one, so
+    /// the warning `zend_is_true` raises for one is never raised here.
+    #[must_use]
+    pub fn is_true(self) -> bool {
         match self {
             Scalar::Null => false,
             Scalar::Bool(b) => b,

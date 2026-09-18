@@ -3934,6 +3934,61 @@ echo f(1), C::s(), $o->m(1), $o->p;
         assert_eq!(unit.methods.len(), 3);
     }
 
+    /// `zend_eval_const_expr`'s `ZEND_AST_CAST` arm (#357): the walk
+    /// inside an array expression folds every key and value in place
+    /// (`zend_try_ct_eval_array`'s first pass), so a cast over a
+    /// constant is the value it casts to even where the array itself is
+    /// no constant, and a cast over a variable stays the `CAST` opline.
+    /// `zend_compile_cast` folds nothing, so the same cast written
+    /// outside such a walk is the opline still.
+    #[test]
+    fn a_cast_inside_an_array_expression_folds_and_one_outside_it_does_not() {
+        assert_eq!(
+            oplines_of(b"<?php\n$a = [(int)\"1\", $b]; $c = [(string)1, (float)$b];\n"),
+            "0000 T3 = INIT_ARRAY 2 (packed) int(1) NEXT\n\
+             0001 T3 = ADD_ARRAY_ELEMENT CV1($b) NEXT\n\
+             0002 ASSIGN CV0($a) T3\n\
+             0003 T5 = INIT_ARRAY 2 (packed) string(\"1\") NEXT\n\
+             0004 T6 = CAST (double) CV1($b)\n\
+             0005 T5 = ADD_ARRAY_ELEMENT T6 NEXT\n\
+             0006 ASSIGN CV2($c) T5\n\
+             0007 RETURN int(1)\n\
+             LIVE RANGES:\n\
+             \x20    3: 0001 - 0002 (tmp/var)\n\
+             \x20    5: 0004 - 0006 (tmp/var)\n"
+        );
+        assert_eq!(
+            oplines_of(b"<?php\n$x = (int)\"1\";\necho (int)\"2\";\n"),
+            "0000 T1 = CAST (long) string(\"1\")\n\
+             0001 ASSIGN CV0($x) T1\n\
+             0002 T3 = CAST (long) string(\"2\")\n\
+             0003 ECHO T3\n\
+             0004 RETURN int(1)\n"
+        );
+        // `zend_try_ct_eval_cast`: `(bool)`, `(int)`, `(float)`,
+        // `(string)` and `(array)` fold, a `(string)` of a double or an
+        // array does not, since one reads `precision` and the other
+        // warns, an `(int)` of a double past the long's range does not,
+        // no cast over a NAN does, and there is no `(object)` arm.
+        let (unit, _strings) = unit_and_strings(
+            b"<?php\nclass C { const B = (bool)\"a\"; const I = (int)\"12abc\"; const F = (float)\"1e3\"; const S = (string)true; const A = (array)1; }\n",
+        );
+        assert_eq!(
+            unit.classes[0]
+                .constants
+                .iter()
+                .map(|c| c.value.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                ConstExpr::Bool(true),
+                ConstExpr::Long(12),
+                ConstExpr::Double(1000.0),
+                ConstExpr::Str(b"1".as_slice().into()),
+                ConstExpr::Array(vec![(Some(ConstExpr::Long(0)), ConstExpr::Long(1))]),
+            ]
+        );
+    }
+
     /// `zend_compile_params` under
     /// `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION` (#384): a
     /// default naming a constant is not folded, so its `RECV_INIT`
