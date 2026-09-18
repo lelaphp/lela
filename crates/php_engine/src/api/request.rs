@@ -1149,12 +1149,43 @@ impl Request {
         )
     }
 
-    /// `Exception::__toString`: the class, the message where there is one,
-    /// the site behind a colon and the trace under `Stack trace:`. The
-    /// chain of `previous` throwables php walks after the first, and the
-    /// ` and defined` a `TypeError` whose message names a call site takes,
-    /// arrive with the user-function frames that make either reachable.
+    /// `Exception::__toString` (`Z/Zend/zend_exceptions.c:692`): each
+    /// throwable of the `previous` chain rendered by
+    /// [`Request::rendering_of`], the deepest first and `this` last,
+    /// with `\n\nNext ` between them, which is php's `prev_str` carried
+    /// through the loop and put after the one it is rendering. The
+    /// walk stops at a throwable it has already rendered, php's
+    /// `Z_PROTECT_RECURSION_P`; a chain is a path through live objects,
+    /// so the store's count is a length it cannot pass.
+    ///
+    /// The ` and defined` a `TypeError` whose message names a call site
+    /// takes arrives with the frames that make it reachable.
     pub(crate) fn throwable_to_string(&self, throwable: PhpObject) -> String {
+        let mut chain = vec![throwable];
+        for _ in 0..=self.heap.objects() {
+            let Some(at) = chain.last().copied() else {
+                break;
+            };
+            let Some(previous) = self.previous_of(at) else {
+                break;
+            };
+            if chain.iter().any(|seen| seen.index() == previous.index()) {
+                break;
+            }
+            chain.push(previous);
+        }
+        chain
+            .iter()
+            .rev()
+            .map(|throwable| self.rendering_of(*throwable))
+            .collect::<Vec<String>>()
+            .join("\n\nNext ")
+    }
+
+    /// One throwable of that chain: the class, the message where there
+    /// is one, the site behind a colon and the trace under `Stack
+    /// trace:`.
+    fn rendering_of(&self, throwable: PhpObject) -> String {
         let class = self.class_name_of(throwable);
         let message = string_prop(self, throwable, b"message");
         let (file, line) = self.throw_site(throwable);
@@ -2026,6 +2057,19 @@ impl Request {
         self.end_at_level(Level::Error, message, &file, line);
     }
 
+    /// `zend_error_noreturn(E_CORE_ERROR, ...)`: the one core fatal
+    /// this engine raises, `zend_objects_destroy_object`'s. php gives
+    /// `E_CORE_ERROR` no site at all (`get_filename_lineno`,
+    /// `Z/Zend/zend.c:1642`), so it is rendered at `Unknown` on line
+    /// zero wherever it was raised, and the request ends in it.
+    fn end_in_core_error(&mut self, message: &str) {
+        if self.ending.is_some() {
+            return;
+        }
+        self.note_error_in(Level::CoreError, message, b"Unknown", 0);
+        self.end_at_level(Level::CoreError, message, b"Unknown", 0);
+    }
+
     /// `zend_exception_error` (`Z/Zend/zend_exceptions.c:936-990`): an
     /// uncaught throwable rendered at the site it recorded, through
     /// `zend_error_cb` alone and never `zend_error_impl`, with
@@ -2699,9 +2743,122 @@ impl Request {
         if !self.destructor_reachable(object, destructor) {
             return;
         }
+        let saved = self.save_pending(object);
+        if matches!(saved, Saved::TheObject) {
+            return;
+        }
         if let Err(thrown) = self.serve_method(destructor, Some(object), class, &[]) {
             self.leave_pending(&thrown);
         }
+        self.restore_pending(saved);
+    }
+
+    /// The first half of `zend_objects_destroy_object`'s protection of
+    /// a destructor from a throwable raised before it
+    /// (`Z/Zend/zend_objects.c:148-168`): the pending slot is emptied
+    /// for the call, and what it held is handed back for
+    /// [`Request::restore_pending`]. A destructor served on the pending
+    /// throwable itself is php's one `E_CORE_ERROR`, and the `None`
+    /// here is that: the request is ending and nothing is served.
+    ///
+    /// No PHP snippet reaches that fatal, in this engine or in php,
+    /// whose own corpus has no test naming it: the throwable's class
+    /// would have to declare `__destruct`, which only a user class
+    /// extending `Throwable` can, and only `throw` makes one pending.
+    /// The unit test beside this builds the state the release cannot.
+    fn save_pending(&mut self, object: PhpObject) -> Saved {
+        match self.pending {
+            Some(pending) if pending.index() == object.index() => {
+                self.end_in_core_error("Attempt to destruct pending exception");
+                Saved::TheObject
+            }
+            _ => match self.pending.take() {
+                Some(pending) => Saved::Throwable(pending),
+                None => Saved::Nothing,
+            },
+        }
+    }
+
+    /// The second half: the throwable the destructor was protected from
+    /// is pending again, and one the destructor itself raised keeps the
+    /// slot with the old one chained onto it as its `previous`
+    /// (`zend_exception_set_previous`), which is what the rendering
+    /// prints under `Next`.
+    ///
+    /// The array here gives its two elements up in order, and the first
+    /// destructor's raise is pending while the second is served: it is
+    /// saved, the second destructor writes its own line and raises in
+    /// its turn, and the two are one uncaught throwable with the first
+    /// under `Next`.
+    ///
+    /// ```php
+    /// class A {
+    ///     public $n;
+    ///     function __construct($n) { $this->n = $n; }
+    ///     function __destruct() { echo "d", $this->n, "\n"; nope(); }
+    /// }
+    /// $a = [new A(1), new A(2)];
+    /// $a = 0;
+    /// echo "after\n";
+    /// ```
+    /// ```expect exit=255
+    /// d1
+    /// d2
+    ///
+    /// Fatal error: Uncaught Error: Call to undefined function nope() in %s:5
+    /// Stack trace:
+    /// #0 %s(8): A->__destruct()
+    /// #1 {main}
+    ///
+    /// Next Error: Call to undefined function nope() in %s:5
+    /// Stack trace:
+    /// #0 %s(8): A->__destruct()
+    /// #1 {main}
+    ///   thrown in %s on line 5
+    /// ```
+    fn restore_pending(&mut self, saved: Saved) {
+        let Saved::Throwable(old) = saved else {
+            return;
+        };
+        match self.pending {
+            Some(new) => self.set_previous(new, old),
+            None => self.pending = Some(old),
+        }
+    }
+
+    /// `zend_exception_set_previous` (`Z/Zend/zend_exceptions.c:103`):
+    /// `previous` is chained onto the end of the chain `throwable`
+    /// already carries, its one owner the property's from here. A
+    /// throwable that is already in that chain, or is `throwable`
+    /// itself, takes its owner back instead, since php refuses to make
+    /// a cycle. A chain is a path through live objects, so the store's
+    /// count is a length no walk of it passes.
+    fn set_previous(&mut self, throwable: PhpObject, previous: PhpObject) {
+        let mut at = throwable;
+        for _ in 0..=self.heap.objects() {
+            if at.index() == previous.index() {
+                break;
+            }
+            if let Some(next) = self.previous_of(at) {
+                at = next;
+                continue;
+            }
+            let Ok(name) = PhpString::new(self, b"previous") else {
+                return;
+            };
+            if at.set_prop(self, name, previous.as_value()).is_ok() {
+                return;
+            }
+            break;
+        }
+        self.release(previous.as_value());
+    }
+
+    /// The `previous` property of a throwable, when it holds one.
+    fn previous_of(&self, throwable: PhpObject) -> Option<PhpObject> {
+        throwable
+            .prop(self, b"previous")
+            .and_then(|value| value.as_object().copied())
     }
 
     /// `zend_objects_destroy_object`'s visibility branch: a public
@@ -5116,6 +5273,18 @@ impl HeapHooks for Hooks<'_> {
     }
 }
 
+/// What `zend_objects_destroy_object` found in the pending slot before
+/// it served a destructor ([`Request::save_pending`]): nothing, one
+/// throwable held there for the duration of the call, or the throwable
+/// that is the object being destroyed, which is php's one
+/// `E_CORE_ERROR` and no call at all.
+#[derive(Clone, Copy)]
+enum Saved {
+    Nothing,
+    Throwable(PhpObject),
+    TheObject,
+}
+
 /// Where `display_errors` sends a diagnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Display {
@@ -5303,6 +5472,103 @@ mod tests {
     use super::{Level, Request, append_escaped, escape_html, level_name};
     use crate::engine::{Engine, RequestDescription};
 
+    /// A class declaring `__destruct`, as an extension declares one:
+    /// what [`Request::destruct`] looks for on the class of the object
+    /// it is handed. Its entry is never served, since the branch under
+    /// test refuses the call before it.
+    fn destructible() -> php_unit::decl::ClassDecl {
+        use php_unit::decl::{
+            ClassDecl, ClassFlags, ClassKind, EnumBacking, FunctionDecl, MethodDecl, Name,
+            Visibility,
+        };
+        ClassDecl {
+            name: Name(b"Destructible".as_slice().into()),
+            kind: ClassKind::Class,
+            flags: ClassFlags::default(),
+            parent: None,
+            interfaces: Vec::new(),
+            traits: Vec::new(),
+            backing: EnumBacking::Pure,
+            constants: Vec::new(),
+            properties: Vec::new(),
+            methods: vec![MethodDecl {
+                function: FunctionDecl {
+                    name: Name(b"__destruct".as_slice().into()),
+                    parameters: Vec::new(),
+                    return_type: None,
+                    returns_by_ref: false,
+                    attributes: Vec::new(),
+                    doc_comment: None,
+                    file: Name(Box::new([])),
+                    line: 0,
+                    frameless: Vec::new(),
+                },
+                visibility: Visibility::Public,
+                is_instance: true,
+                is_abstract: false,
+                is_final: false,
+                tentative_return: false,
+            }],
+            attributes: Vec::new(),
+            doc_comment: None,
+            file: Name(Box::new([])),
+            line: 0,
+            end_line: 0,
+        }
+    }
+
+    /// The entry of the `__destruct` above: the branch under test
+    /// refuses the call, so a raise here is the test failing.
+    fn never_served(req: &mut Request) -> Result<crate::api::values::Value, super::Thrown> {
+        Err(crate::api::raising::throw(
+            req,
+            "Error",
+            "the destructor was served",
+        ))
+    }
+
+    /// `zend_objects_destroy_object`'s `E_CORE_ERROR`
+    /// (`Z/Zend/zend_objects.c:157`): a destructor served on the
+    /// throwable that is itself pending ends the request there, with no
+    /// site, and the destructor is not served. No PHP snippet reaches
+    /// it, here or in php, whose corpus names it nowhere: the
+    /// throwable's class would have to declare `__destruct`, which
+    /// only a user class extending `Throwable` can, and only `throw`
+    /// makes one pending. So the state is built here instead of
+    /// witnessed. The fatal carries no trace of its own, because php
+    /// fetches one only while nothing is pending, and here the
+    /// throwable is.
+    #[test]
+    fn a_destructor_served_on_the_pending_throwable_is_the_core_fatal() {
+        let decl = destructible();
+        let Some(method) = decl.methods.first().cloned() else {
+            return;
+        };
+        let destructible = crate::api::abi::ExtensionBuilder::default()
+            .classes(vec![(
+                decl,
+                vec![(method, never_served as crate::api::abi::Entry)],
+            )])
+            .build("destructible");
+        let engine = Engine::builder().extensions(&[destructible]).build();
+        let mut request = request(&engine);
+        let Ok(object) = request.new_object_of("Destructible") else {
+            return;
+        };
+        request.pending = Some(object);
+
+        request.destruct(object);
+
+        assert!(
+            request.pending.is_some(),
+            "the throwable is pending still, since nothing was served"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&request.take_body()),
+            "\nFatal error: Attempt to destruct pending exception in Unknown on line 0\n"
+        );
+    }
+
     /// A request on a fresh engine's shared state, for a test that gives
     /// `note_error_in` a level no raiser reaches yet.
     fn request(engine: &Engine) -> Request {
@@ -5317,9 +5583,11 @@ mod tests {
 
     /// `(EG(error_reporting) & type) || (type & E_CORE)`: a core level
     /// is rendered under `error_reporting=0`, in the same word its
-    /// family takes, and every other level is masked. No raiser reaches
-    /// `E_CORE_ERROR` or `E_CORE_WARNING` in this engine, so the mask is
-    /// held here and not by a witness. `E_CORE_ERROR` is in
+    /// family takes, and every other level is masked. The one raiser
+    /// that reaches `E_CORE_ERROR` is
+    /// [`Request::save_pending`], which no PHP snippet reaches, and no
+    /// raiser reaches `E_CORE_WARNING`, so the mask is held here and not
+    /// by a witness. `E_CORE_ERROR` is in
     /// `E_FATAL_ERRORS`, so under php's default `fatal_error_backtraces`
     /// it fetches its trace, `#0 {main}` with no frame standing, and the
     /// warning fetches none.
