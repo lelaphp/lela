@@ -62,6 +62,11 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
          /// opline, or the fatal for an opcode this engine does not serve yet.\n\
          /// A handler that leaves a throwable pending says so with\n\
          /// [`Stepped::Threw`], which is the pending test the loop performs.\n\
+         // One arm per opcode served: the length of this function is the\n\
+         // number of handlers and says nothing about the code, so the line\n\
+         // count is no bound on it. Every crate lints under `-D warnings`\n\
+         // (harness §4.2), which reaches generated code too.\n\
+         #[allow(clippy::too_many_lines)]\n\
          pub(crate) fn dispatch<T: Tier>(\n\
          \x20   req: &mut Request,\n\
          \x20   frame: FrameRef,\n\
