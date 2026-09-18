@@ -56,6 +56,7 @@
 
 mod class;
 mod func;
+mod member;
 mod signature;
 mod stub;
 

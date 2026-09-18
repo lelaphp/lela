@@ -33,7 +33,7 @@ fn kind_of(req: &mut Request, class: ClassId) -> ClassKind {
 /// `ZEND_ACC_EXPLICIT_ABSTRACT_CLASS | ZEND_ACC_IMPLICIT_ABSTRACT_CLASS`:
 /// a class declared `abstract`, and one with an abstract method php
 /// marks implicitly abstract at link time.
-fn is_abstract(req: &mut Request, class: ClassId) -> bool {
+pub(super) fn class_is_abstract(req: &mut Request, class: ClassId) -> bool {
     let explicit = req
         .class_decl(class)
         .is_some_and(|decl| decl.flags.is_abstract);
@@ -46,7 +46,7 @@ fn is_abstract(req: &mut Request, class: ClassId) -> bool {
 /// php's `ce_flags & (INTERFACE | TRAIT | ABSTRACT | ENUM)` test, which
 /// `isInstantiable` and `isCloneable` both open with.
 fn cannot_instantiate(req: &mut Request, class: ClassId) -> bool {
-    !matches!(kind_of(req, class), ClassKind::Class) || is_abstract(req, class)
+    !matches!(kind_of(req, class), ClassKind::Class) || class_is_abstract(req, class)
 }
 
 /// `ce->constructor`: the linked `__construct`, with the scope that

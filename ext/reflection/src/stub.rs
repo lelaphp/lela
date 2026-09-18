@@ -4609,7 +4609,7 @@ fn reflection() -> Declared {
                 &[parameter(b"modifiers", Type::Int)],
                 Some(Type::Array),
             ))),
-            unbuilt as Entry,
+            super::member::reflection_get_modifier_names as Entry,
         )],
     )
 }
@@ -5328,7 +5328,7 @@ fn reflection_class() -> Declared {
             ),
             (
                 tentative(method(b"isAbstract", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::member::reflection_class_is_abstract as Entry,
             ),
             (
                 tentative(method(b"isFinal", &[], Some(Type::Bool))),
@@ -5661,11 +5661,11 @@ fn reflection_property() -> Declared {
             ),
             (
                 method(b"__toString", &[], Some(Type::String)),
-                unbuilt as Entry,
+                super::member::reflection_property_to_string as Entry,
             ),
             (
                 tentative(method(b"getName", &[], Some(Type::String))),
-                unbuilt as Entry,
+                super::member::reflection_property_get_name as Entry,
             ),
             (
                 method(b"getMangledName", &[], Some(Type::String)),
@@ -5754,15 +5754,15 @@ fn reflection_property() -> Declared {
             ),
             (
                 tentative(method(b"isPublic", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::member::reflection_property_is_public as Entry,
             ),
             (
                 tentative(method(b"isPrivate", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::member::reflection_property_is_private as Entry,
             ),
             (
                 tentative(method(b"isProtected", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::member::reflection_property_is_protected as Entry,
             ),
             (
                 method(b"isPrivateSet", &[], Some(Type::Bool)),
@@ -5774,19 +5774,19 @@ fn reflection_property() -> Declared {
             ),
             (
                 tentative(method(b"isStatic", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::member::reflection_property_is_static as Entry,
             ),
             (
                 method(b"isReadOnly", &[], Some(Type::Bool)),
-                unbuilt as Entry,
+                super::member::reflection_property_is_read_only as Entry,
             ),
             (
                 tentative(method(b"isDefault", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::member::reflection_property_is_default as Entry,
             ),
             (
                 method(b"isDynamic", &[], Some(Type::Bool)),
-                unbuilt as Entry,
+                super::member::reflection_property_is_dynamic as Entry,
             ),
             (
                 method(b"isAbstract", &[], Some(Type::Bool)),
@@ -5798,11 +5798,11 @@ fn reflection_property() -> Declared {
             ),
             (
                 method(b"isPromoted", &[], Some(Type::Bool)),
-                unbuilt as Entry,
+                super::member::reflection_property_is_promoted as Entry,
             ),
             (
                 tentative(method(b"getModifiers", &[], Some(Type::Int))),
-                unbuilt as Entry,
+                super::member::reflection_property_get_modifiers as Entry,
             ),
             (
                 tentative(method(
@@ -5810,7 +5810,7 @@ fn reflection_property() -> Declared {
                     &[],
                     Some(named(b"ReflectionClass")),
                 )),
-                unbuilt as Entry,
+                super::member::reflection_property_get_declaring_class as Entry,
             ),
             (
                 tentative(method(
@@ -5838,7 +5838,7 @@ fn reflection_property() -> Declared {
                     &[],
                     Some(nullable(named(b"ReflectionType"))),
                 )),
-                unbuilt as Entry,
+                super::member::reflection_property_get_type as Entry,
             ),
             (
                 method(
@@ -5846,19 +5846,19 @@ fn reflection_property() -> Declared {
                     &[],
                     Some(nullable(named(b"ReflectionType"))),
                 ),
-                unbuilt as Entry,
+                super::member::reflection_property_get_settable_type as Entry,
             ),
             (
                 tentative(method(b"hasType", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::member::reflection_property_has_type as Entry,
             ),
             (
                 method(b"hasDefaultValue", &[], Some(Type::Bool)),
-                unbuilt as Entry,
+                super::member::reflection_property_has_default_value as Entry,
             ),
             (
                 tentative(method(b"getDefaultValue", &[], Some(Type::Mixed))),
-                unbuilt as Entry,
+                super::member::reflection_property_get_default_value as Entry,
             ),
             (
                 method(
@@ -5869,7 +5869,7 @@ fn reflection_property() -> Declared {
                     ],
                     Some(Type::Array),
                 ),
-                unbuilt as Entry,
+                super::member::reflection_property_get_attributes as Entry,
             ),
             (method(b"hasHooks", &[], Some(Type::Bool)), unbuilt as Entry),
             (
@@ -5934,32 +5934,35 @@ fn reflection_class_constant() -> Declared {
             ),
             (
                 method(b"__toString", &[], Some(Type::String)),
-                unbuilt as Entry,
+                super::member::reflection_class_constant_to_string as Entry,
             ),
             (
                 tentative(method(b"getName", &[], Some(Type::String))),
-                unbuilt as Entry,
+                super::member::reflection_class_constant_get_name as Entry,
             ),
             (
                 tentative(method(b"getValue", &[], Some(Type::Mixed))),
-                unbuilt as Entry,
+                super::member::reflection_class_constant_get_value as Entry,
             ),
             (
                 tentative(method(b"isPublic", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::member::reflection_class_constant_is_public as Entry,
             ),
             (
                 tentative(method(b"isPrivate", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::member::reflection_class_constant_is_private as Entry,
             ),
             (
                 tentative(method(b"isProtected", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::member::reflection_class_constant_is_protected as Entry,
             ),
-            (method(b"isFinal", &[], Some(Type::Bool)), unbuilt as Entry),
+            (
+                method(b"isFinal", &[], Some(Type::Bool)),
+                super::member::reflection_class_constant_is_final as Entry,
+            ),
             (
                 tentative(method(b"getModifiers", &[], Some(Type::Int))),
-                unbuilt as Entry,
+                super::member::reflection_class_constant_get_modifiers as Entry,
             ),
             (
                 tentative(method(
@@ -5967,7 +5970,7 @@ fn reflection_class_constant() -> Declared {
                     &[],
                     Some(named(b"ReflectionClass")),
                 )),
-                unbuilt as Entry,
+                super::member::reflection_class_constant_get_declaring_class as Entry,
             ),
             (
                 tentative(method(
@@ -5986,20 +5989,23 @@ fn reflection_class_constant() -> Declared {
                     ],
                     Some(Type::Array),
                 ),
-                unbuilt as Entry,
+                super::member::reflection_class_constant_get_attributes as Entry,
             ),
             (
                 method(b"isEnumCase", &[], Some(Type::Bool)),
-                unbuilt as Entry,
+                super::member::reflection_class_constant_is_enum_case as Entry,
             ),
             (
                 method(b"isDeprecated", &[], Some(Type::Bool)),
-                unbuilt as Entry,
+                super::member::reflection_class_constant_is_deprecated as Entry,
             ),
-            (method(b"hasType", &[], Some(Type::Bool)), unbuilt as Entry),
+            (
+                method(b"hasType", &[], Some(Type::Bool)),
+                super::member::reflection_class_constant_has_type as Entry,
+            ),
             (
                 method(b"getType", &[], Some(nullable(named(b"ReflectionType")))),
-                unbuilt as Entry,
+                super::member::reflection_class_constant_get_type as Entry,
             ),
         ],
     )
@@ -6582,23 +6588,23 @@ fn reflection_constant() -> Declared {
             ),
             (
                 method(b"getName", &[], Some(Type::String)),
-                unbuilt as Entry,
+                super::member::reflection_constant_get_name as Entry,
             ),
             (
                 method(b"getNamespaceName", &[], Some(Type::String)),
-                unbuilt as Entry,
+                super::member::reflection_constant_get_namespace_name as Entry,
             ),
             (
                 method(b"getShortName", &[], Some(Type::String)),
-                unbuilt as Entry,
+                super::member::reflection_constant_get_short_name as Entry,
             ),
             (
                 method(b"getValue", &[], Some(Type::Mixed)),
-                unbuilt as Entry,
+                super::member::reflection_constant_get_value as Entry,
             ),
             (
                 method(b"isDeprecated", &[], Some(Type::Bool)),
-                unbuilt as Entry,
+                super::member::reflection_constant_is_deprecated as Entry,
             ),
             (
                 method(
@@ -6614,7 +6620,7 @@ fn reflection_constant() -> Declared {
                     &[],
                     Some(nullable(named(b"ReflectionExtension"))),
                 ),
-                unbuilt as Entry,
+                super::member::reflection_constant_get_extension as Entry,
             ),
             (
                 method(
@@ -6622,11 +6628,11 @@ fn reflection_constant() -> Declared {
                     &[],
                     Some(union(&[Type::String, Type::False])),
                 ),
-                unbuilt as Entry,
+                super::member::reflection_constant_get_extension_name as Entry,
             ),
             (
                 method(b"__toString", &[], Some(Type::String)),
-                unbuilt as Entry,
+                super::member::reflection_constant_to_string as Entry,
             ),
             (
                 method(
