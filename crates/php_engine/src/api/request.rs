@@ -26,7 +26,7 @@ use php_unit::{FramelessEntry, Opcode, Unit};
 use crate::api::abi::{
     Callable, Dependency, Extension, IniVerdict, NativeNew, ObjectHandlers, PropertyTest, Std,
 };
-use crate::api::call::Function;
+use crate::api::call::{Function, Target};
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{
     ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpRef, PhpString, Resource, TypeTag, Value,
@@ -4429,10 +4429,161 @@ impl Request {
         self.strict_types
     }
 
+    /// `zend_is_callable_ex` (`Z/Zend/zend_API.c:4250`) without the
+    /// error text: the callee a value names, or none.
     pub(crate) fn callable_of(&self, value: &Value) -> Option<Callable> {
-        let name = value.as_str_bytes()?;
-        self.function_named(name)?;
-        Some(Callable::named(*value, name))
+        self.callable_checked(value).ok()
+    }
+
+    /// `zend_is_callable_at_frame` (`Z/Zend/zend_API.c:4139`) with its
+    /// `*error`: a function name, a `Class::method` string, a
+    /// `[$object, 'method']` or `['Class', 'method']` pair, or a
+    /// `Closure`, resolved to the callee, the scope and the receiver a
+    /// call takes, and named as `zend_get_callable_name_ex` names it.
+    /// The `Err` is the sentence php's `*error` carries, which is what
+    /// a native's `must be a valid callback` ends with.
+    ///
+    /// What php resolves off the frame it looks from, this does not:
+    /// `self`, `parent` and `static` as the class half, the `__call`
+    /// and `__callStatic` trampolines, and a method's visibility
+    /// against the calling scope, so a non-public method is callable
+    /// here where php refuses it.
+    pub(crate) fn callable_checked(&self, value: &Value) -> Result<Callable, String> {
+        // `case IS_REFERENCE: goto again`.
+        let held = &value.deref();
+        if let Some(object) = held.as_object() {
+            // `case IS_OBJECT`: the `get_closure` handler, which only a
+            // `Closure` has here, then `Class::__invoke`.
+            if object.closure(self).is_some() {
+                let name = self.declared_name(self.closure_callee(*object));
+                return Ok(Callable::of(
+                    *held,
+                    name.as_bytes(),
+                    Target::Closure(*object),
+                ));
+            }
+            let class = object.class();
+            return self.callable_method(*held, class, b"__invoke", Some(*object));
+        }
+        if let Some(array) = held.as_array() {
+            return self.callable_pair(*held, *array);
+        }
+        let Some(name) = held.as_str_bytes() else {
+            return Err(String::from("no array or string given"));
+        };
+        // `zend_is_callable_check_func`: the function table under the
+        // name with a leading `\` skipped, and then the compound name
+        // the last `::` splits.
+        let bare = name.strip_prefix(b"\\").unwrap_or(name);
+        if let Some(function) = self.function_named(bare) {
+            return Ok(Callable::of(*held, name, Target::Function(function)));
+        }
+        let Some(at) = bare.windows(2).rposition(|pair| pair == b"::") else {
+            return Err(format!(
+                "function \"{}\" not found or invalid function name",
+                String::from_utf8_lossy(name)
+            ));
+        };
+        if at == 0 {
+            return Err(String::from("invalid function name"));
+        }
+        let class = self.callable_class(&bare[..at])?;
+        self.callable_method(*held, class, &bare[at + 2..], None)
+    }
+
+    /// `case IS_ARRAY` of `zend_is_callable_at_frame`: exactly two
+    /// members at 0 and 1, the second a method name and the first the
+    /// object or the class name it is looked up on.
+    fn callable_pair(&self, value: Value, array: PhpArray) -> Result<Callable, String> {
+        if array.len() != 2 {
+            return Err(String::from("array callback must have exactly two members"));
+        }
+        let (Some(first), Some(second)) = (array.get(&Key::Int(0)), array.get(&Key::Int(1))) else {
+            return Err(String::from(
+                "array callback has to contain indices 0 and 1",
+            ));
+        };
+        let (first, second) = (first.deref(), second.deref());
+        if let Some(object) = first.as_object() {
+            let Some(method) = second.as_str_bytes() else {
+                return Err(String::from("second array member is not a valid method"));
+            };
+            let class = object.class();
+            return self.callable_method(value, class, method, Some(*object));
+        }
+        let Some(name) = first.as_str_bytes() else {
+            return Err(String::from(
+                "first array member is not a valid class name or object",
+            ));
+        };
+        let Some(method) = second.as_str_bytes() else {
+            return Err(String::from("second array member is not a valid method"));
+        };
+        let class = self.callable_class(name)?;
+        self.callable_method(value, class, method, None)
+    }
+
+    /// `zend_is_callable_check_class`'s last branch, `zend_lookup_class`
+    /// over the class half of a callable.
+    fn callable_class(&self, name: &[u8]) -> Result<ClassId, String> {
+        self.class_named(name.strip_prefix(b"\\").unwrap_or(name))
+            .ok_or_else(|| format!("class \"{}\" not found", String::from_utf8_lossy(name)))
+    }
+
+    /// The method half of `zend_is_callable_check_func`: the entry
+    /// under the lowered name, php's two refusals for an abstract
+    /// method and for an instance method named on the class with no
+    /// receiver, and `zend_create_member_string` for the name the
+    /// callable carries.
+    fn callable_method(
+        &self,
+        value: Value,
+        class: ClassId,
+        method: &[u8],
+        this: Option<PhpObject>,
+    ) -> Result<Callable, String> {
+        let spelled = format!(
+            "{}::{}",
+            self.class_name(class),
+            String::from_utf8_lossy(method)
+        );
+        let Some(function) = self.method_named(class, &method.to_ascii_lowercase()) else {
+            return Err(format!(
+                "class {} does not have a method \"{}\"",
+                self.class_name(class),
+                String::from_utf8_lossy(method)
+            ));
+        };
+        let decl = self.method_decl(function);
+        if decl.is_some_and(|decl| decl.is_abstract) {
+            return Err(format!("cannot call abstract method {spelled}()"));
+        }
+        // `fcc->object = NULL` for a static method, whatever it was
+        // named on, and php's refusal for a non-static one named
+        // statically.
+        let this = this.filter(|_| decl.is_none_or(|decl| decl.is_instance));
+        if this.is_none() && decl.is_some_and(|decl| decl.is_instance) {
+            return Err(format!(
+                "non-static method {spelled}() cannot be called statically"
+            ));
+        }
+        Ok(Callable::of(
+            value,
+            spelled.as_bytes(),
+            Target::Method {
+                function,
+                scope: class,
+                this,
+            },
+        ))
+    }
+
+    /// `zend_get_closure_method_def`: the function a `Closure` object's
+    /// payload holds, [`Function::PASS`] for an object that is none.
+    fn closure_callee(&self, object: PhpObject) -> Function {
+        object
+            .closure(self)
+            .map_or(Function::PASS, |closure| closure.function)
     }
 
     pub(crate) fn class_named(&self, name: &[u8]) -> Option<ClassId> {

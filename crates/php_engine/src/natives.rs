@@ -1437,23 +1437,18 @@ pub(crate) fn call_shutdown_functions(req: &mut Request) {
 /// One `Z_PARAM_FUNC` of a native, php's `"F"`: the argument at
 /// `position` resolved into the callee it names, `zend_parse_arg_func`
 /// over `zend_is_callable_ex`, so a callback is held to being one where
-/// it is taken and not where it is served. The two texts are php's two,
-/// the name no function table has and the value that is no name at all;
-/// a `[$object, 'method']` pair is neither, and until the request
-/// resolves one it takes the second text.
+/// it is taken and not where it is served. The sentence a miss takes is
+/// php's `*error` for that miss, the one `zend_is_callable_ex` wrote.
 fn callable_argument(req: &mut Request, position: u32) -> Result<Callable, Thrown> {
     let given = req.argument(position).unwrap_or_default().deref();
-    if let Some(callable) = req.callable_of(&given) {
-        return Ok(callable);
+    match req.callable_checked(&given) {
+        Ok(callable) => Ok(callable),
+        Err(why) => Err(arg_type_error(
+            req,
+            position,
+            &format!("be a valid callback, {why}"),
+        )),
     }
-    let tail = match given.as_str_bytes() {
-        Some(name) => format!(
-            "be a valid callback, function \"{}\" not found or invalid function name",
-            String::from_utf8_lossy(name)
-        ),
-        None => "be a valid callback, no array or string given".to_owned(),
-    };
-    Err(arg_type_error(req, position, &tail))
 }
 
 /// One `Z_PARAM_LONG` of a native, the argument at `position` read off

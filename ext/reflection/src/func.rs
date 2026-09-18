@@ -9,16 +9,17 @@
 //! `getStaticVariables`, whose facts the declaration model has no field
 //! for (#420); `getEndLine`, which is #376's; `getClosureCalledClass`,
 //! whose `called_scope` the payload does not carry, and `getClosure`,
-//! which waits on `api::call::closure_from_callable`; `invoke` and
-//! `invokeArgs`, which wait on `api::call::call`; `setAccessible` and
-//! `ReflectionFunction`'s `isDisabled`, which the stub marks
+//! which waits on `api::call::closure_from_callable`; `setAccessible`
+//! and `ReflectionFunction`'s `isDisabled`, which the stub marks
 //! `#[\Deprecated]` and the engine does not raise the deprecation of
 //! yet (#412).
 
+use php_ext::call::call_named;
+use php_ext::coerce::{is_callable, to_callable};
 use php_ext::decl::{FunctionDecl, MethodDecl, Visibility};
-use php_ext::raising::{Thrown, throw};
+use php_ext::raising::{Thrown, arg_count_error, arg_type_error, throw};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, Value};
+use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value};
 
 use super::signature::{FunctionRef, this_function, type_factory};
 use super::{
@@ -951,4 +952,315 @@ pub(super) fn reflection_method_create_from_method_name(
     set_name(req, object, &found.decl.function.name.0)?;
     set_string_prop(req, object, b"class", &scope)?;
     Ok(object.as_value())
+}
+
+/// `ZEND_PARSE_PARAMETERS_START(n, -1)`'s count check: php's
+/// `ArgumentCountError`, `expects at least N argument(s), M given`.
+fn at_least_arguments(req: &mut Request, least: usize) -> Result<(), Thrown> {
+    let count = req.argument_count();
+    if count >= least {
+        return Ok(());
+    }
+    let plural = if least == 1 { "" } else { "s" };
+    Err(arg_count_error(
+        req,
+        &format!("at least {least} argument{plural}, {count} given"),
+    ))
+}
+
+/// `Z_PARAM_VARIADIC` from `position` on: the call's remaining
+/// arguments as they stand on the frame, each a view the served call
+/// takes one more owner of.
+fn variadic_arguments(req: &mut Request, from: usize) -> Vec<Value> {
+    (from..=req.argument_count())
+        .filter_map(|position| {
+            let at = u32::try_from(position).ok()?;
+            Some(req.argument(at)?.deref())
+        })
+        .collect()
+}
+
+/// One call's argument list in the two halves `zend_call_function`
+/// takes it in: the positional arguments and the named ones.
+type Arguments = (Vec<Value>, Vec<(PhpString, Value)>);
+
+/// The array `invokeArgs` takes, walked as `zend_call_function` walks
+/// `fci->named_params` (`Z/Zend/zend_execute_API.c:894`): an
+/// integer-keyed element is positional, at the offset its turn in the
+/// walk gives it and never at its key, and a string-keyed one is named;
+/// a positional element after a named one is php's `Error`.
+fn split_arguments(req: &mut Request, array: PhpArray) -> Result<Arguments, Thrown> {
+    let mut positional = Vec::new();
+    let mut named: Vec<(PhpString, Value)> = Vec::new();
+    for (key, value) in array.snapshot() {
+        match key {
+            Key::Int(_) => {
+                if !named.is_empty() {
+                    return Err(throw(
+                        req,
+                        "Error",
+                        "Cannot use positional argument after named argument",
+                    ));
+                }
+                positional.push(value.deref());
+            }
+            Key::Str(name) => named.push((name, value.deref())),
+        }
+    }
+    Ok((positional, named))
+}
+
+/// `Z_PARAM_ARRAY` at `position`, the `h` of `invokeArgs`.
+fn array_argument(req: &mut Request, position: u32) -> Result<PhpArray, Thrown> {
+    let given = req.argument(position).unwrap_or_default().deref();
+    match given.as_array() {
+        Some(array) => Ok(*array),
+        None => Err(arg_type_error(
+            req,
+            position,
+            &format!("be of type array, {} given", given.type_name()),
+        )),
+    }
+}
+
+/// The value `zend_is_callable_ex` resolves to the callee a reflector
+/// already looked its declaration up with: the closure itself, the
+/// function's name, or the `[$object, 'method']` pair a method makes
+/// with the receiver the call was given and the `['Class', 'method']`
+/// pair it makes without one. One owner, the caller's, so that what a
+/// pair holds is released with it.
+fn callable_value(
+    req: &mut Request,
+    function: &FunctionRef,
+    this: Option<PhpObject>,
+) -> Result<Value, Thrown> {
+    match function {
+        FunctionRef::Closure(object) => {
+            let value = object.as_value();
+            req.addref(&value);
+            Ok(value)
+        }
+        FunctionRef::Global(name) => string_value(req, name),
+        FunctionRef::Method(scope, name) => {
+            let first = if let Some(object) = this {
+                let value = object.as_value();
+                req.addref(&value);
+                value
+            } else {
+                let class = class_name_of(req, *scope);
+                string_value(req, &class)?
+            };
+            let method = string_value(req, name)?;
+            let mut pair = PhpArray::new(req)?;
+            pair.set(req, Key::Int(0), first)?;
+            pair.set(req, Key::Int(1), method)?;
+            Ok(Value::array(pair))
+        }
+    }
+}
+
+/// `zend_call_known_fcc` over what a reflector holds, which is what
+/// `ReflectionFunction::invoke` and `reflection_method_invoke` end in:
+/// the callable the reference resolves to, served with the arguments
+/// the call was given, and php's `ReflectionException` for a reference
+/// that resolves to no callee, the `Invocation of ... failed` php
+/// raises when `zend_call_known_fcc` came back with nothing and left
+/// nothing pending. The value the callable was read off is given up
+/// after the call, as `zend_fcc_dtor` gives its copy up.
+fn invoke(
+    req: &mut Request,
+    function: &FunctionRef,
+    this: Option<PhpObject>,
+    arguments: &[Value],
+    named: &[(PhpString, Value)],
+) -> Result<Value, Thrown> {
+    let value = callable_value(req, function, this)?;
+    let served = if is_callable(req, &value) {
+        to_callable(req, &value).and_then(|callable| call_named(req, &callable, arguments, named))
+    } else {
+        let what = invocation_of(req, function);
+        Err(throw(
+            req,
+            "ReflectionException",
+            &format!("Invocation of {what} failed"),
+        ))
+    };
+    req.release(value);
+    served
+}
+
+/// php's two `Invocation of %s failed` subjects: `function name()` and
+/// `method Class::name()`.
+fn invocation_of(req: &mut Request, function: &FunctionRef) -> String {
+    match function {
+        FunctionRef::Global(name) => {
+            format!("function {}()", String::from_utf8_lossy(name))
+        }
+        FunctionRef::Method(scope, name) => format!(
+            "method {}::{}()",
+            String::from_utf8_lossy(&class_name_of(req, *scope)),
+            String::from_utf8_lossy(name)
+        ),
+        FunctionRef::Closure(_) => String::from("function {closure}()"),
+    }
+}
+
+/// `ReflectionFunction::invoke(mixed ...$args): mixed`,
+/// `ZEND_METHOD(ReflectionFunction, invoke)`: the function the
+/// reflector names served with the arguments as passed, and its return
+/// handed back. A reflector over a closure serves the closure, php's
+/// `get_closure` on `intern->obj`.
+///
+/// ```php
+/// var_dump((new ReflectionFunction('strtoupper'))->invoke('ab'));
+/// function pair($a, $b) { return "$a|$b"; }
+/// var_dump((new ReflectionFunction('pair'))->invoke(1, 2));
+/// $f = function ($n) { return $n * 2; };
+/// var_dump((new ReflectionFunction($f))->invoke(21));
+/// ```
+/// ```expect
+/// string(2) "AB"
+/// string(3) "1|2"
+/// int(42)
+/// ```
+pub(super) fn reflection_function_invoke(req: &mut Request) -> Result<Value, Thrown> {
+    let (function, _) = this_function(req)?;
+    let arguments = variadic_arguments(req, 1);
+    invoke(req, &function, None, &arguments, &[])
+}
+
+/// `ReflectionFunction::invokeArgs(array $args): mixed`,
+/// `ZEND_METHOD(ReflectionFunction, invokeArgs)`: the same call with
+/// the array as the whole argument list, which php hands
+/// `zend_call_known_fcc` as `named_params` and its walk reads
+/// positionally for every integer key.
+///
+/// ```php
+/// var_dump((new ReflectionFunction('str_repeat'))->invokeArgs(['ab', 2]));
+/// var_dump((new ReflectionFunction('str_repeat'))->invokeArgs(['times' => 3, 'string' => 'c']));
+/// ```
+/// ```expect
+/// string(4) "abab"
+/// string(3) "ccc"
+/// ```
+pub(super) fn reflection_function_invoke_args(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 1)?;
+    let (function, _) = this_function(req)?;
+    let array = array_argument(req, 1)?;
+    let (arguments, named) = split_arguments(req, array)?;
+    invoke(req, &function, None, &arguments, &named)
+}
+
+/// The receiver `reflection_method_invoke` passes: none for a method
+/// the class declares on itself, whatever was given, since php ignores
+/// the first argument there; and for an instance method the object
+/// given, held to being an instance of the class that declared the
+/// method. php's two `ReflectionException`s are the object missing and
+/// the object of another class.
+fn receiver(
+    req: &mut Request,
+    decl: &MethodDecl,
+    scope: ClassId,
+    position: u32,
+) -> Result<Option<PhpObject>, Thrown> {
+    if !decl.is_instance {
+        return Ok(None);
+    }
+    let given = req.argument(position).unwrap_or_default().deref();
+    let Some(object) = given.as_object() else {
+        let class = class_name_of(req, scope);
+        return Err(throw(
+            req,
+            "ReflectionException",
+            &format!(
+                "Trying to invoke non static method {}::{}() without an object",
+                String::from_utf8_lossy(&class),
+                String::from_utf8_lossy(&decl.function.name.0)
+            ),
+        ));
+    };
+    if !object.instance_of(req, scope) {
+        return Err(throw(
+            req,
+            "ReflectionException",
+            "Given object is not an instance of the class this method was declared in",
+        ));
+    }
+    Ok(Some(*object))
+}
+
+/// php's first refusal in `reflection_method_invoke`, before the
+/// parameters are read at all: an abstract method has no body to enter.
+fn abstract_refused(req: &mut Request, decl: &MethodDecl, scope: ClassId) -> Result<(), Thrown> {
+    if !decl.is_abstract {
+        return Ok(());
+    }
+    let class = class_name_of(req, scope);
+    Err(throw(
+        req,
+        "ReflectionException",
+        &format!(
+            "Trying to invoke abstract method {}::{}()",
+            String::from_utf8_lossy(&class),
+            String::from_utf8_lossy(&decl.function.name.0)
+        ),
+    ))
+}
+
+/// `ReflectionMethod::invoke(?object $object, mixed ...$args): mixed`,
+/// `reflection_method_invoke` with `variadic` set: the method served on
+/// the object given, or on no receiver where the class declares the
+/// method on itself.
+///
+/// ```php
+/// class Greet {
+///     public function hello($who) { return "hello $who"; }
+///     public static function shout($who) { return strtoupper($who); }
+///     private function secret() { return 'shh'; }
+/// }
+/// $greet = new Greet();
+/// var_dump((new ReflectionMethod('Greet', 'hello'))->invoke($greet, 'world'));
+/// var_dump((new ReflectionMethod('Greet', 'shout'))->invoke(null, 'ab'));
+/// var_dump((new ReflectionMethod('Greet', 'secret'))->invoke($greet));
+/// try { (new ReflectionMethod('Greet', 'hello'))->invoke(null); }
+/// catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(11) "hello world"
+/// string(2) "AB"
+/// string(3) "shh"
+/// Trying to invoke non static method Greet::hello() without an object
+/// ```
+pub(super) fn reflection_method_invoke(req: &mut Request) -> Result<Value, Thrown> {
+    let (class, decl, scope) = this_method(req)?;
+    abstract_refused(req, &decl, scope)?;
+    at_least_arguments(req, 1)?;
+    let this = receiver(req, &decl, scope, 1)?;
+    let arguments = variadic_arguments(req, 2);
+    let function = FunctionRef::Method(class, decl.function.name.0.to_vec());
+    invoke(req, &function, this, &arguments, &[])
+}
+
+/// `ReflectionMethod::invokeArgs(?object $object, array $args): mixed`,
+/// `reflection_method_invoke` with `variadic` clear: the same call with
+/// the array as the whole argument list.
+///
+/// ```php
+/// class Sum { public function of($a, $b) { return $a + $b; } }
+/// var_dump((new ReflectionMethod('Sum', 'of'))->invokeArgs(new Sum(), [2, 3]));
+/// var_dump((new ReflectionMethod('Sum', 'of'))->invokeArgs(new Sum(), ['b' => 4, 'a' => 1]));
+/// ```
+/// ```expect
+/// int(5)
+/// int(5)
+/// ```
+pub(super) fn reflection_method_invoke_args(req: &mut Request) -> Result<Value, Thrown> {
+    let (class, decl, scope) = this_method(req)?;
+    abstract_refused(req, &decl, scope)?;
+    exactly_arguments(req, 2)?;
+    let this = receiver(req, &decl, scope, 1)?;
+    let array = array_argument(req, 2)?;
+    let (arguments, named) = split_arguments(req, array)?;
+    let function = FunctionRef::Method(class, decl.function.name.0.to_vec());
+    invoke(req, &function, this, &arguments, &named)
 }

@@ -4868,7 +4868,7 @@ fn reflection_function() -> Declared {
                     &[variadic(b"args", Type::Mixed)],
                     Some(Type::Mixed),
                 )),
-                unbuilt as Entry,
+                super::func::reflection_function_invoke as Entry,
             ),
             (
                 tentative(method(
@@ -4876,7 +4876,7 @@ fn reflection_function() -> Declared {
                     &[parameter(b"args", Type::Array)],
                     Some(Type::Mixed),
                 )),
-                unbuilt as Entry,
+                super::func::reflection_function_invoke_args as Entry,
             ),
             (
                 tentative(method(b"getClosure", &[], Some(named(b"Closure")))),
@@ -5045,7 +5045,7 @@ fn reflection_method() -> Declared {
                     ],
                     Some(Type::Mixed),
                 )),
-                unbuilt as Entry,
+                super::func::reflection_method_invoke as Entry,
             ),
             (
                 tentative(method(
@@ -5056,7 +5056,7 @@ fn reflection_method() -> Declared {
                     ],
                     Some(Type::Mixed),
                 )),
-                unbuilt as Entry,
+                super::func::reflection_method_invoke_args as Entry,
             ),
             (
                 tentative(method(

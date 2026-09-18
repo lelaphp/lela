@@ -25,6 +25,81 @@ impl Function {
     pub(crate) const PASS: Function = Function(u32::MAX);
 }
 
+/// What a [`Callable`] resolved to, `zend_fcall_info_cache`'s three
+/// fields after `zend_is_callable_ex` filled them
+/// (`Z/Zend/zend_API.c:4250`): the callee, the scope the call is made
+/// in, and the receiver it is bound to. A callable is resolved once,
+/// where it is taken, and serving it enters what it holds; php's
+/// `zend_call_known_fcc` does the same with the cache
+/// `zend_fcc_dup` kept.
+#[derive(Clone, Copy)]
+pub(crate) enum Target {
+    /// `fcc.function_handler` alone: a function by name, with no scope
+    /// and no receiver.
+    Function(Function),
+    /// `fcc.called_scope` beside `fcc.object`: a method, its receiver
+    /// `None` where the class declares the method on itself and the
+    /// name is `Class::method`.
+    Method {
+        function: Function,
+        scope: ClassId,
+        this: Option<PhpObject>,
+    },
+    /// `fcc.closure`: a `Closure`, served through its payload as
+    /// `Closure::__invoke` serves it.
+    Closure(PhpObject),
+}
+
+impl std::fmt::Debug for Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Target::Function(function) => write!(f, "Function({})", function.0),
+            Target::Method {
+                function,
+                scope,
+                this,
+            } => write!(
+                f,
+                "Method({}, {}, {:?})",
+                function.0,
+                scope.0,
+                this.map(|object| object.index())
+            ),
+            Target::Closure(object) => write!(f, "Closure({})", object.index()),
+        }
+    }
+}
+
+impl PartialEq for Target {
+    /// By identity, as php compares two `zend_fcall_info_cache`s: the
+    /// same callee, the same scope and the same object. What
+    /// `unregister_tick_function` and `spl_autoload_unregister` compare
+    /// a registered callable by.
+    fn eq(&self, other: &Target) -> bool {
+        match (self, other) {
+            (Target::Function(one), Target::Function(two)) => one == two,
+            (
+                Target::Method {
+                    function: one,
+                    scope: first,
+                    this: here,
+                },
+                Target::Method {
+                    function: two,
+                    scope: second,
+                    this: there,
+                },
+            ) => {
+                one == two
+                    && first == second
+                    && here.map(|object| object.index()) == there.map(|object| object.index())
+            }
+            (Target::Closure(one), Target::Closure(two)) => one.index() == two.index(),
+            _ => false,
+        }
+    }
+}
+
 /// A position in an `iterable`: an array's elements, or a `Traversable`
 /// served through its iterator methods.
 #[derive(Debug, Clone)]
@@ -64,25 +139,30 @@ fn no_loop(req: &mut Request, what: &str) -> Thrown {
     )
 }
 
-/// The callee a `Callable` names, `zend_is_callable_ex` at the top of
-/// `zend_call_function` (`Z/Zend/zend_execute_API.c:824`): the function
-/// table's entry under the name the `Callable` carries, which is how
-/// `zend_fcall_info_init` spelled it. A name the table has not is php's
-/// `Error` for an invalid callback, worded as `zend_is_callable_ex`
-/// words a string's miss; the callables the request hands out are
-/// resolved when they are made, so only one made before its function
-/// was declared reaches it.
-fn function_of(req: &mut Request, callable: &Callable) -> Result<Function, Thrown> {
-    let name = callable.name();
-    match req.function_named(name.as_bytes()) {
-        Some(function) => Ok(function),
-        None => Err(throw(
-            req,
-            "Error",
-            &format!(
-                "Invalid callback {name}, function \"{name}\" not found or invalid function name"
-            ),
-        )),
+/// `zend_call_known_fcc` (`Z/Zend/zend_execute_API.c:1090`): the
+/// resolved callee on a call frame of its own, the branch of
+/// `zend_call_function` a filled `zend_fcall_info_cache` takes, which
+/// is a function with no scope, a method with its scope and receiver,
+/// or a closure through its payload.
+fn serve(req: &mut Request, target: Target, arguments: &[Value]) -> Result<Value, Thrown> {
+    match target {
+        Target::Function(function) => req.serve_function(function, arguments),
+        Target::Method {
+            function,
+            scope,
+            this,
+        } => req.serve_method(function, this, scope, arguments),
+        Target::Closure(object) => req.serve_closure(object, arguments),
+    }
+}
+
+/// The `zend_function` behind a target, `fcc.function_handler`: a
+/// closure's is its payload's, `zend_get_closure_method_def`. What the
+/// named arguments are placed against.
+fn callee(req: &Request, target: Target) -> Option<Function> {
+    match target {
+        Target::Function(function) | Target::Method { function, .. } => Some(function),
+        Target::Closure(object) => object.closure(req).map(|closure| closure.function),
     }
 }
 
@@ -152,9 +232,46 @@ fn function_of(req: &mut Request, callable: &Callable) -> Result<Function, Throw
 /// #3 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// The three forms `zend_is_callable_ex` resolves beside a plain name,
+/// each serving the same way once resolved: a `[$object, 'method']`
+/// pair on its receiver, a `['Class', 'method']` pair and the
+/// `Class::method` string on the class, with no receiver.
+///
+/// ```php
+/// class Wrap {
+///     public function handle($buffer, $mode) { return "[$buffer]"; }
+///     public static function shout($buffer, $mode) { return strtoupper($buffer); }
+/// }
+/// $wrap = new Wrap();
+/// ob_start([$wrap, 'handle']); echo "one"; ob_end_flush(); echo "\n";
+/// ob_start(['Wrap', 'shout']); echo "two"; ob_end_flush(); echo "\n";
+/// ob_start('Wrap::shout'); echo "three"; ob_end_flush(); echo "\n";
+/// ```
+/// ```expect
+/// [one]
+/// TWO
+/// THREE
+/// ```
+///
+/// A pair naming a method the class declares as an instance method is
+/// no callable at all, and the sentence `zend_is_callable_check_func`
+/// writes for it is what the argument error ends with, where the
+/// callback is taken and not where it would be served.
+///
+/// ```php
+/// class Wrap { public function handle() { return 1; } }
+/// register_shutdown_function(['Wrap', 'handle']);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: register_shutdown_function(): Argument #1 ($callback) must be a valid callback, non-static method Wrap::handle() cannot be called statically in %s:3
+/// Stack trace:
+/// #0 %s(3): register_shutdown_function(Array)
+/// #1 {main}
+///   thrown in %s on line 3
+/// ```
 pub fn call(req: &mut Request, callable: &Callable, arguments: &[Value]) -> Result<Value, Thrown> {
-    let function = function_of(req, callable)?;
-    req.serve_function(function, arguments)
+    serve(req, callable.target(), arguments)
 }
 
 /// `zend_call_function` with named arguments after the positional ones,
@@ -171,12 +288,12 @@ pub fn call_named(
     arguments: &[Value],
     named: &[(PhpString, Value)],
 ) -> Result<Value, Thrown> {
-    let function = function_of(req, callable)?;
-    if named.is_empty() {
-        return req.serve_function(function, arguments);
-    }
+    let target = callable.target();
+    let Some(function) = callee(req, target).filter(|_| !named.is_empty()) else {
+        return serve(req, target, arguments);
+    };
     let placed = place_named(req, function, arguments, named)?;
-    req.serve_function(function, &placed)
+    serve(req, target, &placed)
 }
 
 /// `zend_get_arg_offset_by_name` and `zend_handle_named_arg` over one

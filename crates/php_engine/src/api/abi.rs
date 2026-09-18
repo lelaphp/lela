@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use php_heap::{Fatal, Heap, Obj};
 use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, IniDecl, MethodDecl};
 
-use crate::api::call::Function;
+use crate::api::call::{Function, Target};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
@@ -357,23 +357,33 @@ impl ExtensionBuilder {
 
 /// A validated callable: a function name, a `[$object, 'method']` pair,
 /// a `Class::method` string or a `Closure`, as `zend_is_callable` accepts
-/// them, held with the value it came from.
+/// them, held with the value it came from and the callee it resolved to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Callable {
     value: Value,
     name: String,
+    target: Target,
 }
 
 impl Callable {
-    pub(crate) fn named(value: Value, name: &[u8]) -> Callable {
+    pub(crate) fn of(value: Value, name: &[u8], target: Target) -> Callable {
         Callable {
             value,
             name: String::from_utf8_lossy(name).into_owned(),
+            target,
         }
     }
 
     pub(crate) fn name(&self) -> String {
         self.name.clone()
+    }
+
+    /// `zend_fcall_info_cache` as `zend_is_callable_ex` filled it: what
+    /// the callable resolved to when it was made, which is what serving
+    /// it enters. php holds the same three fields for the same span,
+    /// `zend_fcc_dup` past the frame the callable was read off.
+    pub(crate) const fn target(&self) -> Target {
+        self.target
     }
 
     /// The value the callable came from, a view and no owner taken:
