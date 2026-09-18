@@ -3949,6 +3949,20 @@ impl Request {
         self.fatal_of(allocated).map(PhpArray::of)
     }
 
+    /// `zend_new_array(size)`, what `INIT_ARRAY` lays down for the
+    /// elements it was told to expect, and `zend_hash_real_init_mixed`
+    /// over it where the opline says the array cannot be packed
+    /// (`ZEND_ARRAY_NOT_PACKED`); the memory limit as the fatal that ends
+    /// the request.
+    pub(crate) fn array_sized(&mut self, size: u32, packed: bool) -> Result<PhpArray, Thrown> {
+        let allocated = if packed {
+            self.heap.array_sized(size)
+        } else {
+            self.heap.array_mixed(size)
+        };
+        self.fatal_of(allocated).map(PhpArray::of)
+    }
+
     /// `zend_hash_update` or `zend_hash_index_update` over `a`, which
     /// has one owner: `value` is the array's from here, what `key` held
     /// is released, and a string key is one more owner.

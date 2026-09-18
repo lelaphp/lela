@@ -2040,6 +2040,163 @@ pub(crate) fn count(req: &mut Request, value: &Value, sizeof: bool) -> Result<i6
     ))
 }
 
+/// What `ADD_ARRAY_ELEMENT`'s `op2` names: the next index where the
+/// operand is `UNUSED`, or the offset as the operand holds it. A
+/// `constant` offset is a `CONST` operand, whose numeric string the
+/// compiler already made a long of (`zend_handle_numeric_op`), so the
+/// handler reads it as the string it still is: `['07' => 1]` keeps the
+/// key `"07"` and `[$k => 1]` over `$k = '7'` makes it `7`.
+#[derive(Clone, Copy)]
+pub(crate) enum Offset {
+    Next,
+    At { key: Value, constant: bool },
+}
+
+/// `ZEND_ADD_ARRAY_ELEMENT`'s body past its operand addressing
+/// (`Z/Zend/zend_vm_def.h:6224`), the one kernel `INIT_ARRAY` dispatches
+/// into for its first element and `ADD_ARRAY_ELEMENT` for the rest:
+/// `value`, the kernel's to give up from here, written into `array`,
+/// which has one owner, at the key `offset` makes. No offset is
+/// `zend_hash_next_index_insert`, and php's `Error` when
+/// `nNextFreeElement` is `ZEND_LONG_MAX` and taken
+/// (`zend_cannot_add_element`). An offset is `zend_hash_update` over a
+/// string, made a long where it is a canonical decimal and no constant
+/// (`ZEND_HANDLE_NUMERIC`), `zend_hash_index_update` over a long, a
+/// reference followed, `null` the deprecation and the key `""`, a float
+/// `zend_dval_to_lval_safe` with its deprecation, `false` and `true` 0
+/// and 1, a resource its id with php's warning, a slot nothing
+/// wrote the key `""` after the handler's own warning, and an array or
+/// an object the `TypeError` `zend_illegal_array_offset_access` throws,
+/// naming an object by its class as `zend_zval_type_name` does, with
+/// `value` given up. A user handler that throws under the `null`
+/// deprecation ends the opline as `HANDLE_EXCEPTION` does, the value
+/// given up.
+///
+/// ```php
+/// $k = '2'; $f = 1.5; $n = null; $t = true; $s = 'k';
+/// var_dump([$k => 'a', $f => 'b', $n => 'c', $t => 'd', '07' => 'e', 8, $u => 'f', $s => 'g']);
+/// ```
+/// ```expect
+/// Deprecated: Implicit conversion from float 1.5 to int loses precision in %s on line 3
+///
+/// Deprecated: Using null as an array offset is deprecated, use an empty string instead in %s on line 3
+///
+/// Warning: Undefined variable $u in %s on line 3
+/// array(6) {
+///   [2]=>
+///   string(1) "a"
+///   [1]=>
+///   string(1) "d"
+///   [""]=>
+///   string(1) "f"
+///   ["07"]=>
+///   string(1) "e"
+///   [3]=>
+///   int(8)
+///   ["k"]=>
+///   string(1) "g"
+/// }
+/// ```
+///
+/// ```php
+/// $o = [1]; $a = [1, $o => 2];
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: Cannot access offset of type array on array in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// $a = [9223372036854775807 => 1, 2];
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Cannot add element to the array as the next element is already occupied in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn add_array_element(
+    req: &mut Request,
+    array: PhpArray,
+    offset: Offset,
+    value: Value,
+) -> Result<(), Thrown> {
+    let a = array.heap();
+    let key = match offset {
+        Offset::Next => {
+            if req.array_append(a, value)? {
+                return Ok(());
+            }
+            return Err(throw(
+                req,
+                "Error",
+                "Cannot add element to the array as the next element is already occupied",
+            ));
+        }
+        Offset::At { key, constant } => match array_offset(req, &key, constant) {
+            Ok(key) => key,
+            Err(thrown) => {
+                req.release(value);
+                return Err(thrown);
+            }
+        },
+    };
+    req.array_update(a, key, value)
+}
+
+/// The key an `ADD_ARRAY_ELEMENT` offset makes, the `add_again` ladder
+/// of its handler; the `""` of a `null` and of an unwritten slot is the
+/// interned empty string, `ZSTR_EMPTY_ALLOC`, nobody's to release.
+fn array_offset(
+    req: &mut Request,
+    offset: &Value,
+    constant: bool,
+) -> Result<php_heap::Key, Thrown> {
+    let empty = |req: &mut Request| Ok(php_heap::Key::Str(PhpString::new(req, b"")?.heap()));
+    match offset.as_ref() {
+        ValueRef::Str(s) if constant => Ok(php_heap::Key::Str(s.heap())),
+        ValueRef::Str(s) => Ok(Key::from_string(*s).heap()),
+        ValueRef::Int(n) => Ok(php_heap::Key::Long(n)),
+        ValueRef::Reference(r) => array_offset(req, &r.get(), false),
+        ValueRef::Null => {
+            deprecated(
+                req,
+                "Using null as an array offset is deprecated, use an empty string instead",
+            );
+            if req.is_pending() {
+                return Err(Thrown::of(None));
+            }
+            empty(req)
+        }
+        ValueRef::Float(f) => Ok(php_heap::Key::Long(double_to_long(req, f))),
+        ValueRef::Bool(b) => Ok(php_heap::Key::Long(i64::from(b))),
+        ValueRef::Resource(r) => {
+            let id = r.id();
+            warning(
+                req,
+                &format!("Resource ID#{id} used as offset, casting to integer ({id})"),
+            );
+            Ok(php_heap::Key::Long(id))
+        }
+        ValueRef::Undef => empty(req),
+        ValueRef::Array(_) => Err(throw(
+            req,
+            "TypeError",
+            "Cannot access offset of type array on array",
+        )),
+        ValueRef::Object(o) => {
+            let class = req.class_name(o.class());
+            Err(throw(
+                req,
+                "TypeError",
+                &format!("Cannot access offset of type {class} on array"),
+            ))
+        }
+    }
+}
+
 /// `MAY_BE_RESOURCE`, `1 << IS_RESOURCE`: the one mask `ZEND_TYPE_CHECK`
 /// reads past the type byte.
 const MAY_BE_RESOURCE: u32 = 1 << (ZvalType::Resource as u32);

@@ -52,7 +52,7 @@ use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::api::values::{TypeTag, Value};
 use crate::exec::{self, Cached, CallStage, CallState};
-use crate::ops::Switched;
+use crate::ops::{Offset, Switched};
 use crate::tier::{SafepointIdx, Site, Stepped, Tier, continued};
 
 /// What one handler did to the frame chain, and the fatal that ends the
@@ -2036,6 +2036,168 @@ fn write_out(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, va
     req.addref(value);
     let previous = req.set_slot(frame, exec::temporary_slot(code, op.out), *value);
     req.release(previous);
+}
+
+/// `ZEND_ARRAY_ELEMENT_REF`, `ZEND_ARRAY_NOT_PACKED` and
+/// `ZEND_ARRAY_SIZE_SHIFT` (`Z/Zend/zend_compile.h:1201`): the bits of
+/// `INIT_ARRAY`'s and `ADD_ARRAY_ELEMENT`'s `extended_value`, the element
+/// count above the two flags.
+const ARRAY_ELEMENT_REF: u32 = 1 << 0;
+const ARRAY_NOT_PACKED: u32 = 1 << 1;
+const ARRAY_SIZE_SHIFT: u32 = 2;
+
+/// `ZEND_INIT_ARRAY` (`Z/Zend/zend_vm_def.h:6473`), the first opline of
+/// an array expression `zend_try_ct_eval_array` left to the request:
+/// `zend_new_array` sized for the count `extended_value` carries above
+/// `ZEND_ARRAY_SIZE_SHIFT`, laid down as a hash at once where the
+/// compiler set `ZEND_ARRAY_NOT_PACKED` (`zend_hash_real_init_mixed`),
+/// into the temporary the opline's `result` names; then, `op1` being
+/// the first element, `ZEND_VM_DISPATCH_TO_HANDLER(ZEND_ADD_ARRAY_ELEMENT)`
+/// over the same opline, which is [`add_element`] here. An `UNUSED`
+/// `op1` is the empty array and the next opline, which the compiler
+/// folds to a constant and never emits.
+///
+/// ```php
+/// var_dump(['x', 'y'], [1, $a = 2, 'k' => 3]);
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   string(1) "x"
+///   [1]=>
+///   string(1) "y"
+/// }
+/// array(3) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+///   ["k"]=>
+///   int(3)
+/// }
+/// ```
+///
+/// The table is php's: an array with no string key is packed, eight
+/// slots of sixteen bytes and the two-word hash after the fifty-six-byte
+/// header; one the compiler marked `ZEND_ARRAY_NOT_PACKED` is eight
+/// buckets of thirty-two and a sixteen-word hash, so
+/// `memory_get_usage()` reads the second as php does. The deltas are
+/// read before anything is printed, as `ASSIGN`'s are.
+///
+/// ```php
+/// $x = 1; $b = memory_get_usage(); $p = [$x, 2]; $packed = memory_get_usage() - $b;
+/// $m = [$x, 'k' => 2]; $mixed = memory_get_usage() - $b - $packed;
+/// var_dump($packed, $mixed);
+/// ```
+/// ```expect
+/// int(216)
+/// int(376)
+/// ```
+pub(crate) fn init_array<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let size = if op.op1_type == OperandKind::Unused {
+        0
+    } else {
+        op.extended_value >> ARRAY_SIZE_SHIFT
+    };
+    let packed = op.extended_value & ARRAY_NOT_PACKED == 0;
+    let array = match req.array_sized(size, packed) {
+        Ok(array) => array,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, Value::array(array));
+    req.release(previous);
+    if op.op1_type == OperandKind::Unused {
+        return Ok(advance(req, frame));
+    }
+    add_element(req, frame, code, op, array)
+}
+
+/// `ZEND_ADD_ARRAY_ELEMENT` (`Z/Zend/zend_vm_def.h:6224`): one more
+/// element into the array the `result` temporary holds, which
+/// `INIT_ARRAY` left there with one owner, through [`add_element`].
+///
+/// A key is written where it stands, so a repeated one keeps its first
+/// place and takes the last value, and an element with no key lands
+/// past the largest integer key so far, as `nNextFreeElement` moves.
+///
+/// ```php
+/// $a = 1; $k = 'k';
+/// var_dump([5 => $a, 'x', $k => 2, 5 => 'again', 'y']);
+/// ```
+/// ```expect
+/// array(4) {
+///   [5]=>
+///   string(5) "again"
+///   [6]=>
+///   string(1) "x"
+///   ["k"]=>
+///   int(2)
+///   [7]=>
+///   string(1) "y"
+/// }
+/// ```
+pub(crate) fn add_array_element<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let held = req.slot(frame, exec::temporary_slot(code, op.out));
+    let Some(array) = held.as_array().copied() else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ADD_ARRAY_ELEMENT over a temporary holding no array",
+        )));
+    };
+    add_element(req, frame, code, op, array)
+}
+
+/// The body `INIT_ARRAY` and `ADD_ARRAY_ELEMENT` share, the operand
+/// addressing over [`crate::ops::add_array_element`]: `op1` taken as
+/// the array's own (`Z_TRY_ADDREF` over a `CONST` or a `CV`, moved out
+/// of a `TMP` or a `VAR`, a reference followed, a CV nothing wrote the
+/// warning and `null`); `op2` read as it stands
+/// (`GET_OP2_ZVAL_PTR_UNDEF`), a CV nothing wrote warned on here and
+/// handed on as the `UNDEF` it is, a `CONST` marked constant so the
+/// kernel keeps a numeric string; then `FREE_OP2`. The
+/// `ZEND_ARRAY_ELEMENT_REF` arm, `[&$x]`, is not compiled yet and is an
+/// internal error rather than a value written by the wrong rule.
+fn add_element(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    array: crate::api::values::PhpArray,
+) -> Edge {
+    if op.extended_value & ARRAY_ELEMENT_REF != 0 {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ADD_ARRAY_ELEMENT by reference, which this compiler does not emit yet",
+        )));
+    }
+    let value = exec::take_operand(req, frame, code, op.op1_type, op.op1);
+    let offset = if op.op2_type == OperandKind::Unused {
+        Offset::Next
+    } else {
+        let key = exec::operand_undef(req, frame, code, op.op2_type, op.op2);
+        if key.tag() == TypeTag::Undef {
+            exec::operand(req, frame, code, op.op2_type, op.op2);
+        }
+        Offset::At {
+            key,
+            constant: op.op2_type == OperandKind::Const,
+        }
+    };
+    let added = crate::ops::add_array_element(req, array, offset, value);
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    match added {
+        Ok(()) => Ok(advance(req, frame)),
+        Err(thrown) => threw(req, frame, &thrown),
+    }
 }
 
 /// `ZEND_ADD`: [`crate::ops::add`] over the two operands, into the
