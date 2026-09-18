@@ -34,10 +34,12 @@
 //! by the same rules over the declarations (`linked_methods`,
 //! `linked_interfaces`, `linked_constants`, `linked_properties`), so
 //! the words `inherits`, `overwrites`, `prototype` and `ctor` are php's.
-//! An extension's `INI` block, `_extension_ini_string`, a user
-//! function's `@@` line, a closure's `Bound Variables`, an object's
-//! `Dynamic properties` and an enum's `Enum cases` are not rendered
-//! yet (#320).
+//! Reflection's own twenty-six classes are declared in [`stub`] with
+//! every method the stub has, so `php --re reflection` renders whole.
+//! An extension's `INI` block, `_extension_ini_string`, a closure's
+//! `Bound Variables`, an object's `Dynamic properties` and
+//! `<iterateable>` are not rendered yet (#375), and a user function's
+//! `@@` line waits on the compiler (#376).
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -51,6 +53,8 @@
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+mod stub;
+
 use std::fmt::Write as _;
 
 use php_ext::abi::{DependencyKind, Extension, ExtensionBuilder};
@@ -58,8 +62,8 @@ use php_ext::call::{
     Function, constant, eval_const_expr, lookup_class, lookup_function, new_object,
 };
 use php_ext::decl::{
-    ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstExpr, EnumBacking, FunctionDecl,
-    MethodDecl, Name, Parameter, PropertyDecl, Type, Visibility,
+    ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, MethodDecl, Name,
+    PropertyDecl, Type, Visibility,
 };
 use php_ext::raising::{Thrown, arg_count_error, arg_type_error, deprecated, throw};
 use php_ext::request::{ExtensionId, PHP_VERSION, Request};
@@ -81,40 +85,7 @@ struct State {}
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .classes(vec![
-            (
-                class(
-                    b"ReflectionException",
-                    ClassKind::Class,
-                    Some(b"Exception"),
-                    &[],
-                ),
-                Vec::new(),
-            ),
-            (
-                class(b"Reflector", ClassKind::Interface, None, &[b"Stringable"]),
-                Vec::new(),
-            ),
-            reflection_function_abstract(),
-            reflection_function(),
-            reflection_class(),
-            (
-                class(
-                    b"ReflectionObject",
-                    ClassKind::Class,
-                    Some(b"ReflectionClass"),
-                    &[],
-                ),
-                vec![(
-                    method(b"__construct", &[parameter(b"object", Type::Object)], None),
-                    reflection_object_construct as Entry,
-                )],
-            ),
-            reflection_method(),
-            reflection_property(),
-            reflection_constant(),
-            reflection_extension(),
-        ])
+        .classes(stub::classes())
         .request_state::<State>()
         .info(reflection_info)
         // `zend_module_entry.name` is `Reflection`, the spelling
@@ -129,530 +100,9 @@ fn reflection_info(req: &mut Request) {
     req.info_table(&[&["Reflection", "enabled"]]);
 }
 
-/// A reflector with `public string $name` and the `Reflector` interface,
-/// the shape `ReflectionExtension` and `ReflectionConstant` share.
-fn named_reflector(name: &[u8]) -> ClassDecl {
-    ClassDecl {
-        properties: vec![name_property()],
-        ..class(name, ClassKind::Class, None, &[b"Reflector"])
-    }
-}
-
-/// `abstract class ReflectionFunctionAbstract implements Reflector`,
-/// with `isDeprecated`, which the stub declares here and
-/// `ReflectionFunction` inherits.
-fn reflection_function_abstract() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
-    (
-        ClassDecl {
-            flags: ClassFlags {
-                is_abstract: true,
-                ..ClassFlags::default()
-            },
-            ..named_reflector(b"ReflectionFunctionAbstract")
-        },
-        vec![(
-            tentative(method(b"isDeprecated", &[], Some(Type::Bool))),
-            reflection_function_is_deprecated as Entry,
-        )],
-    )
-}
-
-/// `ReflectionFunction`: its constructor and `__toString`.
-fn reflection_function() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
-    (
-        class(
-            b"ReflectionFunction",
-            ClassKind::Class,
-            Some(b"ReflectionFunctionAbstract"),
-            &[],
-        ),
-        vec![
-            (
-                method(
-                    b"__construct",
-                    &[parameter(
-                        b"function",
-                        Type::Union(vec![Type::Named(Name::from("Closure")), Type::String]),
-                    )],
-                    None,
-                ),
-                reflection_function_construct as Entry,
-            ),
-            (
-                method(b"__toString", &[], Some(Type::String)),
-                reflection_function_to_string as Entry,
-            ),
-        ],
-    )
-}
-
-/// `ReflectionConstant`: its constructor and `getAttributes`.
-fn reflection_constant() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
-    (
-        named_reflector(b"ReflectionConstant"),
-        vec![
-            (
-                method(b"__construct", &[parameter(b"name", Type::String)], None),
-                reflection_constant_construct as Entry,
-            ),
-            (
-                method(
-                    b"getAttributes",
-                    &attributes_parameters(),
-                    Some(Type::Array),
-                ),
-                reflection_constant_get_attributes as Entry,
-            ),
-        ],
-    )
-}
-
-/// `ReflectionExtension`: its constructor, `__toString`, and the
-/// accessors that take no argument, each tentative as the stub marks
-/// it, in the stub's order; `getVersion`, `getFunctions`,
-/// `getConstants` and `getINIEntries` arrive with the tests that call
-/// them.
-fn reflection_extension() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
-    let accessors: [(&[u8], Type, Entry); 7] = [
-        (b"getName", Type::String, reflection_extension_get_name),
-        (b"getClasses", Type::Array, reflection_extension_get_classes),
-        (
-            b"getClassNames",
-            Type::Array,
-            reflection_extension_get_class_names,
-        ),
-        (
-            b"getDependencies",
-            Type::Array,
-            reflection_extension_get_dependencies,
-        ),
-        (b"info", Type::Void, reflection_extension_info),
-        (
-            b"isPersistent",
-            Type::Bool,
-            reflection_extension_is_persistent,
-        ),
-        (
-            b"isTemporary",
-            Type::Bool,
-            reflection_extension_is_temporary,
-        ),
-    ];
-    let mut methods: Vec<(MethodDecl, Entry)> = vec![
-        (
-            method(b"__construct", &[parameter(b"name", Type::String)], None),
-            reflection_extension_construct as Entry,
-        ),
-        (
-            method(b"__toString", &[], Some(Type::String)),
-            reflection_extension_to_string as Entry,
-        ),
-    ];
-    methods.extend(
-        accessors
-            .into_iter()
-            .map(|(name, returns, entry)| (tentative(method(name, &[], Some(returns))), entry)),
-    );
-    (named_reflector(b"ReflectionExtension"), methods)
-}
-
-/// `ReflectionClass` as `php_reflection.stub.php` declares it: its six
-/// constants, `public string $name`, and the methods the corpus's tests
-/// call so far; the rest of the stub's sixty-four arrive with the
-/// tests that call them. A return the stub marks tentative is
-/// tentative here.
-fn reflection_class() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
-    (
-        ClassDecl {
-            constants: [
-                (&b"IS_IMPLICIT_ABSTRACT"[..], 16),
-                (b"IS_EXPLICIT_ABSTRACT", 64),
-                (b"IS_FINAL", 32),
-                (b"IS_READONLY", 65536),
-                (b"SKIP_INITIALIZATION_ON_SERIALIZE", 8),
-                (b"SKIP_DESTRUCTOR", 16),
-            ]
-            .into_iter()
-            .map(|(name, value)| int_constant(name, value))
-            .collect(),
-            ..named_reflector(b"ReflectionClass")
-        },
-        reflection_class_methods(),
-    )
-}
-
-/// `ReflectionClass`'s methods, each beside its entry: the constructor,
-/// the accessors that take no argument, the ones that take a name, and
-/// `getAttributes`.
-fn reflection_class_methods() -> Vec<(MethodDecl, Entry)> {
-    let mut methods: Vec<(MethodDecl, Entry)> = vec![(
-        method(
-            b"__construct",
-            &[parameter(
-                b"objectOrClass",
-                Type::Union(vec![Type::Object, Type::String]),
-            )],
-            None,
-        ),
-        reflection_class_construct as Entry,
-    )];
-    methods.extend(
-        reflection_class_plain_accessors()
-            .into_iter()
-            .map(|(name, returns, entry)| (tentative(method(name, &[], Some(returns))), entry)),
-    );
-    methods.extend(reflection_class_named_accessors().into_iter().map(
-        |(name, parameter, returns, entry)| {
-            (tentative(method(name, &[parameter], Some(returns))), entry)
-        },
-    ));
-    methods.push((
-        method(
-            b"getAttributes",
-            &attributes_parameters(),
-            Some(Type::Array),
-        ),
-        reflection_class_get_attributes as Entry,
-    ));
-    methods.push((
-        method(b"__toString", &[], Some(Type::String)),
-        reflection_class_to_string as Entry,
-    ));
-    methods
-}
-
-/// `ReflectionMethod` as `php_reflection.stub.php` declares it: the six
-/// `IS_*` constants, `public string $class` beside the inherited
-/// `$name`, its constructor and `__toString`; `createFromMethodName`
-/// and the accessors arrive with the tests that call them.
-fn reflection_method() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
-    let class_property = PropertyDecl {
-        name: Name::from("class"),
-        ..name_property()
-    };
-    (
-        ClassDecl {
-            constants: [
-                (&b"IS_STATIC"[..], 16),
-                (b"IS_PUBLIC", 1),
-                (b"IS_PROTECTED", 2),
-                (b"IS_PRIVATE", 4),
-                (b"IS_ABSTRACT", 64),
-                (b"IS_FINAL", 32),
-            ]
-            .into_iter()
-            .map(|(name, value)| int_constant(name, value))
-            .collect(),
-            properties: vec![class_property],
-            ..class(
-                b"ReflectionMethod",
-                ClassKind::Class,
-                Some(b"ReflectionFunctionAbstract"),
-                &[],
-            )
-        },
-        vec![
-            (
-                method(
-                    b"__construct",
-                    &[
-                        parameter(
-                            b"objectOrMethod",
-                            Type::Union(vec![Type::Object, Type::String]),
-                        ),
-                        parameter_with_default(
-                            b"method",
-                            Type::Nullable(Box::new(Type::String)),
-                            ConstExpr::Null,
-                        ),
-                    ],
-                    None,
-                ),
-                reflection_method_construct as Entry,
-            ),
-            (
-                method(b"__toString", &[], Some(Type::String)),
-                reflection_method_to_string as Entry,
-            ),
-        ],
-    )
-}
-
-/// The `ReflectionClass` accessors that take no argument: name, return
-/// type and entry, in the stub's order.
-fn reflection_class_plain_accessors() -> Vec<(&'static [u8], Type, Entry)> {
-    let string_or_false = || Type::Union(vec![Type::String, Type::False]);
-    let int_or_false = || Type::Union(vec![Type::Int, Type::False]);
-    let reflection_extension =
-        Type::Nullable(Box::new(Type::Named(Name::from("ReflectionExtension"))));
-    vec![
-        (b"getName", Type::String, reflection_class_get_name),
-        (b"isInternal", Type::Bool, reflection_class_is_internal),
-        (
-            b"isUserDefined",
-            Type::Bool,
-            reflection_class_is_user_defined,
-        ),
-        (
-            b"getFileName",
-            string_or_false(),
-            reflection_class_get_file_name,
-        ),
-        (
-            b"getStartLine",
-            int_or_false(),
-            reflection_class_get_start_line,
-        ),
-        (b"getEndLine", int_or_false(), reflection_class_get_end_line),
-        (
-            b"getDefaultProperties",
-            Type::Array,
-            reflection_class_get_default_properties,
-        ),
-        (
-            b"getExtension",
-            reflection_extension,
-            reflection_class_get_extension,
-        ),
-        (
-            b"getExtensionName",
-            string_or_false(),
-            reflection_class_get_extension_name,
-        ),
-        (b"inNamespace", Type::Bool, reflection_class_in_namespace),
-        (
-            b"getNamespaceName",
-            Type::String,
-            reflection_class_get_namespace_name,
-        ),
-        (
-            b"getShortName",
-            Type::String,
-            reflection_class_get_short_name,
-        ),
-    ]
-}
-
-/// The `ReflectionClass` accessors that take one argument: name, the
-/// parameter, return type and entry.
-fn reflection_class_named_accessors() -> Vec<(&'static [u8], Parameter, Type, Entry)> {
-    let name = || parameter(b"name", Type::String);
-    let class_or_string = Type::Union(vec![
-        Type::Named(Name::from("ReflectionClass")),
-        Type::String,
-    ]);
-    vec![
-        (
-            b"hasProperty",
-            name(),
-            Type::Bool,
-            reflection_class_has_property,
-        ),
-        (
-            b"hasConstant",
-            name(),
-            Type::Bool,
-            reflection_class_has_constant,
-        ),
-        (
-            b"getConstant",
-            name(),
-            Type::Mixed,
-            reflection_class_get_constant,
-        ),
-        (
-            b"isSubclassOf",
-            parameter(b"class", class_or_string),
-            Type::Bool,
-            reflection_class_is_subclass_of,
-        ),
-    ]
-}
-
-/// `ReflectionProperty` as the stub declares it: its ten constants,
-/// `$name` and `$class`, the constructor, `getValue` and `setValue`.
-fn reflection_property() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
-    (
-        ClassDecl {
-            constants: [
-                (&b"IS_STATIC"[..], 16),
-                (b"IS_READONLY", 128),
-                (b"IS_PUBLIC", 1),
-                (b"IS_PROTECTED", 2),
-                (b"IS_PRIVATE", 4),
-                (b"IS_ABSTRACT", 64),
-                (b"IS_PROTECTED_SET", 2048),
-                (b"IS_PRIVATE_SET", 4096),
-                (b"IS_VIRTUAL", 512),
-                (b"IS_FINAL", 32),
-            ]
-            .into_iter()
-            .map(|(name, value)| int_constant(name, value))
-            .collect(),
-            properties: vec![
-                name_property(),
-                PropertyDecl {
-                    name: Name::from("class"),
-                    ..name_property()
-                },
-            ],
-            ..class(
-                b"ReflectionProperty",
-                ClassKind::Class,
-                None,
-                &[b"Reflector"],
-            )
-        },
-        vec![
-            (
-                method(
-                    b"__construct",
-                    &[
-                        parameter(b"class", Type::Union(vec![Type::Object, Type::String])),
-                        parameter(b"property", Type::String),
-                    ],
-                    None,
-                ),
-                reflection_property_construct as Entry,
-            ),
-            (
-                tentative(method(
-                    b"getValue",
-                    &[parameter_with_default(
-                        b"object",
-                        Type::Nullable(Box::new(Type::Object)),
-                        ConstExpr::Null,
-                    )],
-                    Some(Type::Mixed),
-                )),
-                reflection_property_get_value as Entry,
-            ),
-            (
-                tentative(method(
-                    b"setValue",
-                    &[
-                        parameter(b"objectOrValue", Type::Mixed),
-                        parameter(b"value", Type::Mixed),
-                    ],
-                    Some(Type::Void),
-                )),
-                reflection_property_set_value as Entry,
-            ),
-        ],
-    )
-}
-
-/// `?string $name = null, int $flags = 0`, `getAttributes`'s parameters
-/// on every reflector.
-fn attributes_parameters() -> Vec<Parameter> {
-    vec![
-        parameter_with_default(
-            b"name",
-            Type::Nullable(Box::new(Type::String)),
-            ConstExpr::Null,
-        ),
-        parameter_with_default(b"flags", Type::Int, ConstExpr::Long(0)),
-    ]
-}
-
-/// `public const int NAME = value;`, as the stub declares a reflector's
-/// `IS_*` constants.
-fn int_constant(name: &[u8], value: i64) -> ClassConstDecl {
-    ClassConstDecl {
-        name: Name(name.into()),
-        visibility: Visibility::Public,
-        is_final: false,
-        ty: Some(Type::Int),
-        value: ConstExpr::Long(value),
-        attributes: Vec::new(),
-        doc_comment: None,
-    }
-}
-
-/// A method whose return type the stub marks `@tentative-return-type`.
-fn tentative(method: MethodDecl) -> MethodDecl {
-    MethodDecl {
-        tentative_return: true,
-        ..method
-    }
-}
-
 /// A native's entry, the shape `ExtensionBuilder::classes` takes beside
 /// each method.
 type Entry = fn(&mut Request) -> Result<Value, Thrown>;
-
-fn class(name: &[u8], kind: ClassKind, parent: Option<&[u8]>, interfaces: &[&[u8]]) -> ClassDecl {
-    ClassDecl {
-        name: Name(name.into()),
-        kind,
-        flags: ClassFlags::default(),
-        parent: parent.map(|p| Name(p.into())),
-        interfaces: interfaces.iter().map(|i| Name((*i).into())).collect(),
-        traits: Vec::new(),
-        backing: EnumBacking::Pure,
-        constants: Vec::new(),
-        properties: Vec::new(),
-        methods: Vec::new(),
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-    }
-}
-
-/// `public string $name;`, as the stub declares it on each reflector.
-fn name_property() -> PropertyDecl {
-    PropertyDecl {
-        name: Name::from("name"),
-        visibility: Visibility::Public,
-        is_instance: true,
-        is_readonly: false,
-        ty: Some(Type::String),
-        default: None,
-        attributes: Vec::new(),
-        doc_comment: None,
-    }
-}
-
-fn parameter(name: &[u8], ty: Type) -> Parameter {
-    Parameter {
-        name: Name(name.into()),
-        ty: Some(ty),
-        by_ref: false,
-        variadic: false,
-        default: None,
-        attributes: Vec::new(),
-    }
-}
-
-fn parameter_with_default(name: &[u8], ty: Type, default: ConstExpr) -> Parameter {
-    Parameter {
-        default: Some(default),
-        ..parameter(name, ty)
-    }
-}
-
-fn method(name: &[u8], parameters: &[Parameter], returns: Option<Type>) -> MethodDecl {
-    MethodDecl {
-        function: FunctionDecl {
-            name: Name(name.into()),
-            parameters: parameters.to_vec(),
-            return_type: returns,
-            returns_by_ref: false,
-            attributes: Vec::new(),
-            doc_comment: None,
-            file: Name(Box::new([])),
-            line: 0,
-            frameless: Vec::new(),
-        },
-        visibility: Visibility::Public,
-        is_instance: true,
-        is_abstract: false,
-        is_final: false,
-        tentative_return: false,
-    }
-}
 
 /// `ZEND_PARSE_PARAMETERS_START(1, 1)` with one `string`: the count
 /// held to exactly one and the argument read as [`string_argument`].
@@ -933,6 +383,259 @@ fn reflection_extension_construct(req: &mut Request) -> Result<Value, Thrown> {
 ///         Parameter #0 [ <required> mixed $text ]
 ///       }
 ///       - Return [ bool ]
+///     }
+///   }
+/// }
+/// ```
+///
+/// ```php
+/// echo new ReflectionExtension('tokenizer');
+/// ```
+/// ```expect
+/// Extension [ <persistent> extension #%N% tokenizer version 8.5.9 ] {
+///
+///   - Constants [154] {
+///     Constant [ <persistent> int T_LNUMBER ] { 260 }
+///     Constant [ <persistent> int T_DNUMBER ] { 261 }
+///     Constant [ <persistent> int T_STRING ] { 262 }
+///     Constant [ <persistent> int T_NAME_FULLY_QUALIFIED ] { 263 }
+///     Constant [ <persistent> int T_NAME_RELATIVE ] { 264 }
+///     Constant [ <persistent> int T_NAME_QUALIFIED ] { 265 }
+///     Constant [ <persistent> int T_VARIABLE ] { 266 }
+///     Constant [ <persistent> int T_INLINE_HTML ] { 267 }
+///     Constant [ <persistent> int T_ENCAPSED_AND_WHITESPACE ] { 268 }
+///     Constant [ <persistent> int T_CONSTANT_ENCAPSED_STRING ] { 269 }
+///     Constant [ <persistent> int T_STRING_VARNAME ] { 270 }
+///     Constant [ <persistent> int T_NUM_STRING ] { 271 }
+///     Constant [ <persistent> int T_INCLUDE ] { 272 }
+///     Constant [ <persistent> int T_INCLUDE_ONCE ] { 273 }
+///     Constant [ <persistent> int T_EVAL ] { 274 }
+///     Constant [ <persistent> int T_REQUIRE ] { 275 }
+///     Constant [ <persistent> int T_REQUIRE_ONCE ] { 276 }
+///     Constant [ <persistent> int T_LOGICAL_OR ] { 277 }
+///     Constant [ <persistent> int T_LOGICAL_XOR ] { 278 }
+///     Constant [ <persistent> int T_LOGICAL_AND ] { 279 }
+///     Constant [ <persistent> int T_PRINT ] { 280 }
+///     Constant [ <persistent> int T_YIELD ] { 281 }
+///     Constant [ <persistent> int T_YIELD_FROM ] { 282 }
+///     Constant [ <persistent> int T_INSTANCEOF ] { 283 }
+///     Constant [ <persistent> int T_NEW ] { 284 }
+///     Constant [ <persistent> int T_CLONE ] { 285 }
+///     Constant [ <persistent> int T_EXIT ] { 286 }
+///     Constant [ <persistent> int T_IF ] { 287 }
+///     Constant [ <persistent> int T_ELSEIF ] { 288 }
+///     Constant [ <persistent> int T_ELSE ] { 289 }
+///     Constant [ <persistent> int T_ENDIF ] { 290 }
+///     Constant [ <persistent> int T_ECHO ] { 291 }
+///     Constant [ <persistent> int T_DO ] { 292 }
+///     Constant [ <persistent> int T_WHILE ] { 293 }
+///     Constant [ <persistent> int T_ENDWHILE ] { 294 }
+///     Constant [ <persistent> int T_FOR ] { 295 }
+///     Constant [ <persistent> int T_ENDFOR ] { 296 }
+///     Constant [ <persistent> int T_FOREACH ] { 297 }
+///     Constant [ <persistent> int T_ENDFOREACH ] { 298 }
+///     Constant [ <persistent> int T_DECLARE ] { 299 }
+///     Constant [ <persistent> int T_ENDDECLARE ] { 300 }
+///     Constant [ <persistent> int T_AS ] { 301 }
+///     Constant [ <persistent> int T_SWITCH ] { 302 }
+///     Constant [ <persistent> int T_ENDSWITCH ] { 303 }
+///     Constant [ <persistent> int T_CASE ] { 304 }
+///     Constant [ <persistent> int T_DEFAULT ] { 305 }
+///     Constant [ <persistent> int T_MATCH ] { 306 }
+///     Constant [ <persistent> int T_BREAK ] { 307 }
+///     Constant [ <persistent> int T_CONTINUE ] { 308 }
+///     Constant [ <persistent> int T_GOTO ] { 309 }
+///     Constant [ <persistent> int T_FUNCTION ] { 310 }
+///     Constant [ <persistent> int T_FN ] { 311 }
+///     Constant [ <persistent> int T_CONST ] { 312 }
+///     Constant [ <persistent> int T_RETURN ] { 313 }
+///     Constant [ <persistent> int T_TRY ] { 314 }
+///     Constant [ <persistent> int T_CATCH ] { 315 }
+///     Constant [ <persistent> int T_FINALLY ] { 316 }
+///     Constant [ <persistent> int T_THROW ] { 317 }
+///     Constant [ <persistent> int T_USE ] { 318 }
+///     Constant [ <persistent> int T_INSTEADOF ] { 319 }
+///     Constant [ <persistent> int T_GLOBAL ] { 320 }
+///     Constant [ <persistent> int T_STATIC ] { 321 }
+///     Constant [ <persistent> int T_ABSTRACT ] { 322 }
+///     Constant [ <persistent> int T_FINAL ] { 323 }
+///     Constant [ <persistent> int T_PRIVATE ] { 324 }
+///     Constant [ <persistent> int T_PROTECTED ] { 325 }
+///     Constant [ <persistent> int T_PUBLIC ] { 326 }
+///     Constant [ <persistent> int T_PRIVATE_SET ] { 327 }
+///     Constant [ <persistent> int T_PROTECTED_SET ] { 328 }
+///     Constant [ <persistent> int T_PUBLIC_SET ] { 329 }
+///     Constant [ <persistent> int T_READONLY ] { 330 }
+///     Constant [ <persistent> int T_VAR ] { 331 }
+///     Constant [ <persistent> int T_UNSET ] { 332 }
+///     Constant [ <persistent> int T_ISSET ] { 333 }
+///     Constant [ <persistent> int T_EMPTY ] { 334 }
+///     Constant [ <persistent> int T_HALT_COMPILER ] { 335 }
+///     Constant [ <persistent> int T_CLASS ] { 336 }
+///     Constant [ <persistent> int T_TRAIT ] { 337 }
+///     Constant [ <persistent> int T_INTERFACE ] { 338 }
+///     Constant [ <persistent> int T_ENUM ] { 339 }
+///     Constant [ <persistent> int T_EXTENDS ] { 340 }
+///     Constant [ <persistent> int T_IMPLEMENTS ] { 341 }
+///     Constant [ <persistent> int T_NAMESPACE ] { 342 }
+///     Constant [ <persistent> int T_LIST ] { 343 }
+///     Constant [ <persistent> int T_ARRAY ] { 344 }
+///     Constant [ <persistent> int T_CALLABLE ] { 345 }
+///     Constant [ <persistent> int T_LINE ] { 346 }
+///     Constant [ <persistent> int T_FILE ] { 347 }
+///     Constant [ <persistent> int T_DIR ] { 348 }
+///     Constant [ <persistent> int T_CLASS_C ] { 349 }
+///     Constant [ <persistent> int T_TRAIT_C ] { 350 }
+///     Constant [ <persistent> int T_METHOD_C ] { 351 }
+///     Constant [ <persistent> int T_FUNC_C ] { 352 }
+///     Constant [ <persistent> int T_PROPERTY_C ] { 353 }
+///     Constant [ <persistent> int T_NS_C ] { 354 }
+///     Constant [ <persistent> int T_ATTRIBUTE ] { 355 }
+///     Constant [ <persistent> int T_PLUS_EQUAL ] { 356 }
+///     Constant [ <persistent> int T_MINUS_EQUAL ] { 357 }
+///     Constant [ <persistent> int T_MUL_EQUAL ] { 358 }
+///     Constant [ <persistent> int T_DIV_EQUAL ] { 359 }
+///     Constant [ <persistent> int T_CONCAT_EQUAL ] { 360 }
+///     Constant [ <persistent> int T_MOD_EQUAL ] { 361 }
+///     Constant [ <persistent> int T_AND_EQUAL ] { 362 }
+///     Constant [ <persistent> int T_OR_EQUAL ] { 363 }
+///     Constant [ <persistent> int T_XOR_EQUAL ] { 364 }
+///     Constant [ <persistent> int T_SL_EQUAL ] { 365 }
+///     Constant [ <persistent> int T_SR_EQUAL ] { 366 }
+///     Constant [ <persistent> int T_COALESCE_EQUAL ] { 367 }
+///     Constant [ <persistent> int T_BOOLEAN_OR ] { 368 }
+///     Constant [ <persistent> int T_BOOLEAN_AND ] { 369 }
+///     Constant [ <persistent> int T_IS_EQUAL ] { 370 }
+///     Constant [ <persistent> int T_IS_NOT_EQUAL ] { 371 }
+///     Constant [ <persistent> int T_IS_IDENTICAL ] { 372 }
+///     Constant [ <persistent> int T_IS_NOT_IDENTICAL ] { 373 }
+///     Constant [ <persistent> int T_IS_SMALLER_OR_EQUAL ] { 374 }
+///     Constant [ <persistent> int T_IS_GREATER_OR_EQUAL ] { 375 }
+///     Constant [ <persistent> int T_SPACESHIP ] { 376 }
+///     Constant [ <persistent> int T_SL ] { 377 }
+///     Constant [ <persistent> int T_SR ] { 378 }
+///     Constant [ <persistent> int T_INC ] { 379 }
+///     Constant [ <persistent> int T_DEC ] { 380 }
+///     Constant [ <persistent> int T_INT_CAST ] { 381 }
+///     Constant [ <persistent> int T_DOUBLE_CAST ] { 382 }
+///     Constant [ <persistent> int T_STRING_CAST ] { 383 }
+///     Constant [ <persistent> int T_ARRAY_CAST ] { 384 }
+///     Constant [ <persistent> int T_OBJECT_CAST ] { 385 }
+///     Constant [ <persistent> int T_BOOL_CAST ] { 386 }
+///     Constant [ <persistent> int T_UNSET_CAST ] { 387 }
+///     Constant [ <persistent> int T_VOID_CAST ] { 388 }
+///     Constant [ <persistent> int T_OBJECT_OPERATOR ] { 389 }
+///     Constant [ <persistent> int T_NULLSAFE_OBJECT_OPERATOR ] { 390 }
+///     Constant [ <persistent> int T_DOUBLE_ARROW ] { 391 }
+///     Constant [ <persistent> int T_COMMENT ] { 392 }
+///     Constant [ <persistent> int T_DOC_COMMENT ] { 393 }
+///     Constant [ <persistent> int T_OPEN_TAG ] { 394 }
+///     Constant [ <persistent> int T_OPEN_TAG_WITH_ECHO ] { 395 }
+///     Constant [ <persistent> int T_CLOSE_TAG ] { 396 }
+///     Constant [ <persistent> int T_WHITESPACE ] { 397 }
+///     Constant [ <persistent> int T_START_HEREDOC ] { 398 }
+///     Constant [ <persistent> int T_END_HEREDOC ] { 399 }
+///     Constant [ <persistent> int T_DOLLAR_OPEN_CURLY_BRACES ] { 400 }
+///     Constant [ <persistent> int T_CURLY_OPEN ] { 401 }
+///     Constant [ <persistent> int T_PAAMAYIM_NEKUDOTAYIM ] { 402 }
+///     Constant [ <persistent> int T_NS_SEPARATOR ] { 403 }
+///     Constant [ <persistent> int T_ELLIPSIS ] { 404 }
+///     Constant [ <persistent> int T_COALESCE ] { 405 }
+///     Constant [ <persistent> int T_POW ] { 406 }
+///     Constant [ <persistent> int T_POW_EQUAL ] { 407 }
+///     Constant [ <persistent> int T_PIPE ] { 408 }
+///     Constant [ <persistent> int T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG ] { 409 }
+///     Constant [ <persistent> int T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG ] { 410 }
+///     Constant [ <persistent> int T_BAD_CHARACTER ] { 411 }
+///     Constant [ <persistent> int T_DOUBLE_COLON ] { 402 }
+///     Constant [ <persistent> int TOKEN_PARSE ] { 1 }
+///   }
+///
+///   - Functions {
+///     Function [ <internal:tokenizer> function token_get_all ] {
+///
+///       - Parameters [2] {
+///         Parameter #0 [ <required> string $code ]
+///         Parameter #1 [ <optional> int $flags = 0 ]
+///       }
+///       - Return [ array ]
+///     }
+///     Function [ <internal:tokenizer> function token_name ] {
+///
+///       - Parameters [1] {
+///         Parameter #0 [ <required> int $id ]
+///       }
+///       - Return [ string ]
+///     }
+///   }
+///
+///   - Classes [1] {
+///     Class [ <internal:tokenizer> class PhpToken implements Stringable ] {
+///
+///       - Constants [0] {
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [1] {
+///         Method [ <internal:tokenizer> static public method tokenize ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> string $code ]
+///             Parameter #1 [ <optional> int $flags = 0 ]
+///           }
+///           - Return [ array ]
+///         }
+///       }
+///
+///       - Properties [4] {
+///         Property [ public int $id ]
+///         Property [ public string $text ]
+///         Property [ public int $line ]
+///         Property [ public int $pos ]
+///       }
+///
+///       - Methods [5] {
+///         Method [ <internal:tokenizer, ctor> final public method __construct ] {
+///
+///           - Parameters [4] {
+///             Parameter #0 [ <required> int $id ]
+///             Parameter #1 [ <required> string $text ]
+///             Parameter #2 [ <optional> int $line = -1 ]
+///             Parameter #3 [ <optional> int $pos = -1 ]
+///           }
+///         }
+///
+///         Method [ <internal:tokenizer> public method is ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> $kind ]
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:tokenizer> public method isIgnorable ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:tokenizer> public method getTokenName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ ?string ]
+///         }
+///
+///         Method [ <internal:tokenizer, prototype Stringable> public method __toString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///       }
 ///     }
 ///   }
 /// }
@@ -1561,7 +1264,7 @@ fn user_line(req: &Request, class: ClassId, line: fn(&ClassDecl) -> u32) -> Valu
 /// it, `object_init_ex` and the name written, no constructor served;
 /// `null` for a user class. A class Zend declares itself is php's
 /// `Core` `zend_module_entry`, which this engine has no `Extension` value for yet
-/// (#320), so `Exception` answers `null` here and `Core` there; the
+/// (#379), so `Exception` answers `null` here and `Core` there; the
 /// fence stays off that class until the bundle names it.
 ///
 /// ```php
@@ -2752,7 +2455,7 @@ fn reflection_constant_get_attributes(req: &mut Request) -> Result<Value, Thrown
 /// `_extension_class_string` writes it. Every bundled extension is
 /// `<persistent>`, as one compiled in is, and its version is
 /// `PHP_VERSION`, as `PHP_CTYPE_VERSION` and its kin are. The `INI`
-/// block is not rendered yet (#320); `json` has no ini entry.
+/// block is not rendered yet (#375); `json` has no ini entry.
 fn extension_string(req: &mut Request, extension: ExtensionId, indent: &str) -> String {
     let mut out = String::new();
     let name = req
@@ -2826,11 +2529,12 @@ fn value_string(req: &mut Request, value: &Value) -> String {
 
 /// `_class_string` with no object: the header, then the `Constants`,
 /// `Static properties`, `Static methods`, `Properties` and `Methods`
-/// blocks in php's order, each over the linked table with the counts
-/// php prints, a parent's private member skipped as its shadow is
-/// (`prop->ce != ce`, `mptr->common.scope != ce`). A user class carries
-/// its `@@ file start-end` line. `<iterateable>`, `Enum cases` and
-/// `Dynamic properties` are not rendered yet (#320).
+/// blocks in php's order, an enum's `Enum cases` before its
+/// `Constants`, each over the linked table with the counts php prints,
+/// a parent's private member skipped as its shadow is (`prop->ce !=
+/// ce`, `mptr->common.scope != ce`). A user class carries its `@@ file
+/// start-end` line. `<iterateable>` and `Dynamic properties` are not
+/// rendered yet (#375).
 fn class_string(req: &mut Request, class: ClassId, indent: &str) -> String {
     let mut out = String::new();
     let Some(decl) = req.class_decl(class).cloned() else {
@@ -2840,7 +2544,19 @@ fn class_string(req: &mut Request, class: ClassId, indent: &str) -> String {
     let methods = linked_methods(req, class);
     class_header(req, &mut out, class, &decl, &methods, indent);
 
-    let constants = linked_constants(req, class);
+    // `ZEND_CLASS_CONST_IS_CASE`: an enum's cases go first, under a
+    // heading shown only when there are any; the model has no case bit
+    // yet, so an enum's constants are its cases (#377).
+    let (cases, constants): (Vec<_>, Vec<_>) = linked_constants(req, class)
+        .into_iter()
+        .partition(|_| decl.kind == ClassKind::Enum);
+    if !cases.is_empty() {
+        let _ = write!(out, "\n{indent}  - Enum cases [{}] {{\n", cases.len());
+        for (case, _) in &cases {
+            out.push_str(&enum_case_string(req, case, decl.backing, &sub_indent));
+        }
+        let _ = writeln!(out, "{indent}  }}");
+    }
     let _ = write!(out, "\n{indent}  - Constants [{}] {{\n", constants.len());
     for (constant, _) in &constants {
         out.push_str(&class_const_string(req, constant, &sub_indent));
@@ -3010,6 +2726,34 @@ fn class_const_string(req: &mut Request, constant: &ClassConstDecl, indent: &str
     out
 }
 
+/// `_enum_case_string`: `Case NAME` for a pure enum, `Case NAME = value`
+/// for a backed one, the value being the case's backing value as
+/// `zval_get_string` prints it; a doc comment on the line above.
+fn enum_case_string(
+    req: &mut Request,
+    case: &ClassConstDecl,
+    backing: EnumBacking,
+    indent: &str,
+) -> String {
+    let mut out = String::new();
+    if let Some(doc) = &case.doc_comment {
+        out.push_str(indent);
+        out.push_str(&String::from_utf8_lossy(doc));
+        out.push('\n');
+    }
+    let _ = write!(
+        out,
+        "{indent}Case {}",
+        String::from_utf8_lossy(&case.name.0)
+    );
+    if backing != EnumBacking::Pure {
+        let value = eval_const_expr(req, &case.value, None).unwrap_or_default();
+        let _ = write!(out, " = {}", value_string(req, &value));
+    }
+    out.push('\n');
+    out
+}
+
 /// `zend_visibility_string`.
 fn visibility_word(visibility: Visibility) -> &'static str {
     match visibility {
@@ -3039,6 +2783,12 @@ fn property_string(req: &mut Request, property: &PropertyDecl, indent: &str) -> 
         "{indent}Property [ {} ",
         visibility_word(property.visibility)
     );
+    // `zend_declare_typed_property`: a readonly property with no set
+    // visibility of its own is `ZEND_ACC_PROTECTED_SET`, which the
+    // `(set)` words print; one written out waits on #327.
+    if property.is_readonly && property.visibility == Visibility::Public {
+        out.push_str("protected(set) ");
+    }
     if !property.is_instance {
         out.push_str("static ");
     }
@@ -3545,7 +3295,7 @@ fn function_header(
 
 /// The rest of `_function_string`: the parameters, the return row and
 /// the closing brace. A user function's `@@ file start - end` line
-/// waits on the end line the declaration model does not carry (#320).
+/// waits on the end line the declaration model does not carry (#376).
 fn function_body(out: &mut String, decl: &FunctionDecl, tentative: bool, indent: &str) {
     let param_indent = format!("{indent}  ");
     function_parameter_string(out, decl, &param_indent);
@@ -3606,9 +3356,10 @@ fn function_parameter_string(out: &mut String, decl: &FunctionDecl, indent: &str
 /// `zend_internal_arg_info.default_value`: the expression's source
 /// text, which for a scalar is the scalar as written, and for a string
 /// the stub's spelling, double-quoted as `zend_exceptions.stub.php` and
-/// the rest of php-src write theirs; a string the stub spells with an
-/// escape needs the written text on the declaration, which the model
-/// does not carry (#320).
+/// the rest of php-src write theirs, and `<default>` for the stub's
+/// `UNKNOWN`, an optional parameter with nothing to show; a string the
+/// stub spells with an escape needs the written text on the
+/// declaration, which the model does not carry (#377).
 fn const_expr_string(expr: &php_ext::decl::ConstExpr) -> String {
     use php_ext::decl::ConstExpr;
     match expr {
@@ -3617,6 +3368,7 @@ fn const_expr_string(expr: &php_ext::decl::ConstExpr) -> String {
         ConstExpr::Long(n) => n.to_string(),
         ConstExpr::Double(f) => f.to_string(),
         ConstExpr::Str(s) => format!("\"{}\"", String::from_utf8_lossy(s)),
+        expr if stub::is_unknown_default(expr) => String::from("<default>"),
         ConstExpr::Constant(name) => String::from_utf8_lossy(&name.0).into_owned(),
         ConstExpr::Array(elements) if elements.is_empty() => String::from("[]"),
         _ => String::from("<default>"),
