@@ -26,15 +26,16 @@ use crate::api::abi::Entry;
 use crate::api::coerce::{coerce_param, to_string};
 use crate::api::raising::{
     Thrown, arg_count_error, arg_null_deprecated, arg_type_error, deprecated, throw,
-    too_few_arguments,
+    too_few_arguments, warning,
 };
 use crate::api::request::Request;
-use crate::api::values::{Key, PhpString, Value, ValueRef};
+use crate::api::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 /// The engine's own natives, in the order php declares them, each
 /// declaration beside its entry.
 pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     let mut natives = zend_natives();
+    natives.extend(constant_natives());
     natives.extend(class_natives());
     natives
 }
@@ -84,6 +85,36 @@ fn class_natives() -> Vec<(FunctionDecl, Entry)> {
 
 /// The ten of `zend_builtin_functions.c` and `ext/standard` that need
 /// the engine's frames, allocator and ini table.
+/// `define` and `defined`, the constant natives of
+/// `zend_builtin_functions.stub.php`.
+fn constant_natives() -> Vec<(FunctionDecl, Entry)> {
+    vec![
+        (
+            declared(
+                b"define",
+                &[
+                    parameter(b"constant_name", Some(Type::String), false),
+                    parameter(b"value", Some(Type::Mixed), false),
+                    Parameter {
+                        default: Some(ConstExpr::Bool(false)),
+                        ..parameter(b"case_insensitive", Some(Type::Bool), false)
+                    },
+                ],
+                Some(Type::Bool),
+            ),
+            define as Entry,
+        ),
+        (
+            declared(
+                b"defined",
+                &[parameter(b"constant_name", Some(Type::String), false)],
+                Some(Type::Bool),
+            ),
+            defined as Entry,
+        ),
+    ]
+}
+
 fn zend_natives() -> Vec<(FunctionDecl, Entry)> {
     vec![
         (
@@ -166,14 +197,6 @@ fn zend_natives() -> Vec<(FunctionDecl, Entry)> {
                 Some(Type::Int),
             ),
             strlen as Entry,
-        ),
-        (
-            declared(
-                b"defined",
-                &[parameter(b"constant_name", Some(Type::String), false)],
-                Some(Type::Bool),
-            ),
-            defined as Entry,
         ),
     ]
 }
@@ -359,6 +382,184 @@ fn strlen(req: &mut Request) -> Result<Value, Thrown> {
     }
     let string = string_argument(req, 1)?;
     Ok(Value::int(as_long(string.len())))
+}
+
+/// `define(string $constant_name, mixed $value, bool $case_insensitive
+/// = false): bool`, php's `ZEND_FUNCTION(define)`
+/// (`Z/Zend/zend_builtin_functions.c:555`) over `zend_register_constant`
+/// (`Z/Zend/zend_constants.c:511`). The arguments are read first, so a
+/// third that is no bool is its `TypeError` before anything else; a
+/// name with `::` in it is the `ValueError`; a third argument that is
+/// true is the 8.0 warning that it is ignored. An array value is
+/// walked for a reference back into itself, the `ValueError` for a
+/// recursive array, and copied with every reference in it followed
+/// (`copy_constant_array`); every other value takes one more owner. The
+/// name's namespace, the bytes before its last `\`, is lowered, as the
+/// table is keyed; `true`, `false`, `null` in any case,
+/// `__COMPILER_HALT_OFFSET__` and a name the table has are the
+/// warning that the constant is defined already, and `false`. What is
+/// written is what `constant_named` answers, so `defined()`, a
+/// `FETCH_CONSTANT` and `ReflectionConstant` read it from here on.
+///
+/// ```php
+/// var_dump(define("DEMO", "f\0oo"), defined("DEMO"), define("F\0oo", true), defined("F\0oo"), define("\\ns\\Y", 1), defined("NS\\Y"), define("A\\b\\C", 1), defined("a\\b\\C"), define("Z", new stdClass), define("W", [1, [2]]), defined("W"));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// ```
+///
+/// ```php
+/// var_dump(define("X", 1, true), define("X", 2), define("Null", 1), define("__COMPILER_HALT_OFFSET__", 1), define("PHP_EOL", 1));
+/// ```
+/// ```expect
+/// Warning: define(): Argument #3 ($case_insensitive) is ignored since declaration of case-insensitive constants is no longer supported in %s on line 2
+///
+/// Warning: Constant X already defined, this will be an error in PHP 9 in %s on line 2
+///
+/// Warning: Constant Null already defined, this will be an error in PHP 9 in %s on line 2
+///
+/// Warning: Constant __COMPILER_HALT_OFFSET__ already defined, this will be an error in PHP 9 in %s on line 2
+///
+/// Warning: Constant PHP_EOL already defined, this will be an error in PHP 9 in %s on line 2
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// ```
+///
+/// ```php
+/// define("A::B", 1);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ValueError: define(): Argument #1 ($constant_name) cannot be a class constant in %s:2
+/// Stack trace:
+/// #0 %s(2): define('A::B', 1)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// define("X");
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: define() expects at least 2 arguments, 1 given in %s:2
+/// Stack trace:
+/// #0 %s(2): define('X')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+fn define(req: &mut Request) -> Result<Value, Thrown> {
+    let count = req.argument_count();
+    if !(2..=3).contains(&count) {
+        return Err(wrong_argument_count(req, 2, 3, count));
+    }
+    let name = string_argument(req, 1)?;
+    let value = req.argument(2).unwrap_or_default().deref();
+    let ignored = if count == 3 {
+        let given = req.argument(3).unwrap_or_default();
+        coerce_param(req, &given, &Type::Bool, 3)?
+            .as_bool()
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    let bytes = name.as_bytes();
+    if bytes.windows(2).any(|pair| pair == b"::") {
+        return Err(throw(
+            req,
+            "ValueError",
+            "define(): Argument #1 ($constant_name) cannot be a class constant",
+        ));
+    }
+    if ignored {
+        warning(
+            req,
+            "define(): Argument #3 ($case_insensitive) is ignored since declaration of case-insensitive constants is no longer supported",
+        );
+    }
+    let value = if let Some(array) = value.as_array() {
+        if !constant_array_is_acyclic(*array) {
+            return Err(throw(
+                req,
+                "ValueError",
+                "define(): Argument #2 ($value) cannot be a recursive array",
+            ));
+        }
+        Value::array(copy_constant_array(req, *array)?)
+    } else {
+        req.addref(&value);
+        value
+    };
+    let mut key = bytes.to_vec();
+    if let Some(slash) = key.iter().rposition(|b| *b == b'\\') {
+        key[..slash].make_ascii_lowercase();
+    }
+    let special = key == b"__COMPILER_HALT_OFFSET__"
+        || key.eq_ignore_ascii_case(b"true")
+        || key.eq_ignore_ascii_case(b"false")
+        || key.eq_ignore_ascii_case(b"null");
+    if !special && req.define_constant(&key, value)? {
+        return Ok(Value::bool(true));
+    }
+    let shown = key
+        .iter()
+        .position(|b| *b == 0)
+        .map_or(&key[..], |nul| &key[..nul]);
+    warning(
+        req,
+        &format!(
+            "Constant {} already defined, this will be an error in PHP 9",
+            String::from_utf8_lossy(shown)
+        ),
+    );
+    req.release(value);
+    Ok(Value::bool(false))
+}
+
+/// `validate_constant_array_argument`: no array in the value, through
+/// any reference, is one the walk is already inside.
+fn constant_array_is_acyclic(array: PhpArray) -> bool {
+    if array.is_recursive() {
+        return false;
+    }
+    array.protect();
+    let acyclic = array.snapshot().iter().all(|(_, v)| {
+        v.as_array()
+            .is_none_or(|nested| constant_array_is_acyclic(*nested))
+    });
+    array.unprotect();
+    acyclic
+}
+
+/// `copy_constant_array`: a new array of the request's with the same
+/// keys, each value with its reference followed, a nested array copied
+/// the same way and everything else one more owner.
+fn copy_constant_array(req: &mut Request, array: PhpArray) -> Result<PhpArray, Thrown> {
+    let mut copy = PhpArray::new(req)?;
+    for (key, value) in array.snapshot() {
+        let value = if let Some(nested) = value.as_array() {
+            Value::array(copy_constant_array(req, *nested)?)
+        } else {
+            req.addref(&value);
+            value
+        };
+        if let Key::Str(s) = &key {
+            req.addref(&Value::string(*s));
+        }
+        copy.set(req, key, value)?;
+    }
+    Ok(copy)
 }
 
 /// `defined(string $constant_name): bool`, php's `ZEND_FUNCTION(defined)`
