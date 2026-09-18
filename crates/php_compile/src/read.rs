@@ -21,8 +21,9 @@
 //! `backup_doc_comment` takes it, the
 //! unbraced `namespace A\B;`, and
 //! inside an expression a `match`, an array expression `[k => v, w]` with
-//! no `...` and no `&`, a number, a single- or double-quoted string with no
-//! interpolation, `true`, `false`, `null`, a constant by name, a call of
+//! no `...` and no `&`, a number, a single-quoted string, a double-quoted
+//! string with `$a`, `{$a}` and `${a}` interpolated as php's lexer takes
+//! them, `true`, `false`, `null`, a constant by name, a call of
 //! a named function, a parenthesised expression, a variable `$a` that is
 //! a CV, an assignment `$a = expr` to one, `$a++` and `++$a` on one,
 //! unary `-` and `+`, `@` over an expression, a cast to a scalar type in
@@ -175,6 +176,16 @@ pub(crate) struct Arm {
     pub(crate) line: u32,
 }
 
+/// One piece of an interpolated string, php's `encaps_var` or
+/// `T_ENCAPSED_AND_WHITESPACE`: the expression, and whether it was
+/// written `${a}`, php's `ZEND_ENCAPS_VAR_DOLLAR_CURLY`, which
+/// `zend_compile_encaps_list` deprecates.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Piece {
+    pub(crate) expr: Expr,
+    pub(crate) dollar_curly: bool,
+}
+
 /// One expression.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Expr {
@@ -183,6 +194,10 @@ pub(crate) enum Expr {
     Int(i64),
     Float(f64),
     Str(Vec<u8>),
+    /// `"a$b"`, php's `ZEND_AST_ENCAPS_LIST`: the written and the variable
+    /// pieces of a double-quoted string in written order, at least one a
+    /// variable, since a string with none is [`Expr::Str`].
+    Encaps(Vec<Piece>),
     /// `[1, 'k' => 2]`, php's `ZEND_AST_ARRAY` over its elements; the
     /// `array(...)` spelling, `...` and `&` are not read.
     Array(Vec<Element>),
@@ -2055,85 +2070,173 @@ impl Reader<'_> {
         }
     }
 
-    /// `"..."` with no interpolation: the escapes php's scanner takes.
+    /// `"..."`: the escapes php's scanner takes, and the interpolations
+    /// its `ST_DOUBLE_QUOTES` state cuts the string at. `$` before a
+    /// label starts a variable, `{$` opens `T_CURLY_OPEN` and reads a
+    /// variable up to its `}`, and `${` before a label and `}` is the
+    /// `T_DOLLAR_OPEN_CURLY_BRACES` form, kept as written for the
+    /// compiler's deprecation; a `$` or a `{` before anything else is a
+    /// plain byte, and the byte after a `\` is never one of them. A
+    /// variable followed by `[` or `->` and a label, php's `encaps_var`
+    /// over a dimension or a property, and `${expr}` are not read yet.
     fn double_quoted(&mut self) -> Result<Expr, Trouble> {
         self.bump(1);
+        let mut pieces: Vec<Piece> = Vec::new();
         let mut bytes = Vec::new();
         loop {
             match self.byte(0) {
                 None => return Err(self.trouble("a string no quote closes")),
                 Some(b'"') => {
                     self.bump(1);
-                    return Ok(Expr::Str(bytes));
+                    if pieces.is_empty() {
+                        return Ok(Expr::Str(bytes));
+                    }
+                    if !bytes.is_empty() {
+                        pieces.push(Piece {
+                            expr: Expr::Str(bytes),
+                            dollar_curly: false,
+                        });
+                    }
+                    return Ok(Expr::Encaps(pieces));
                 }
-                Some(b'$' | b'{') => {
-                    return Err(self.trouble("an interpolated string this compiler cannot read"));
+                Some(b'$') if self.label_starts(1) => {
+                    let expr = self.variable()?;
+                    self.refuse_dim_or_prop()?;
+                    Self::piece(&mut pieces, &mut bytes, expr, false);
                 }
-                Some(b'\\') => {
-                    let escaped = match self.byte(1) {
-                        Some(b'n') => b'\n',
-                        Some(b't') => b'\t',
-                        Some(b'r') => b'\r',
-                        Some(b'v') => 0x0b,
-                        Some(b'f') => 0x0c,
-                        Some(b'e') => 0x1b,
-                        Some(b @ (b'\\' | b'"' | b'$')) => b,
-                        // `\101`: up to three octal digits, read as php's
-                        // `(char) ZEND_STRTOL(octal_buf, NULL, 8)`, so the
-                        // byte is the low eight bits of what they spell, and
-                        // the scanner's warning for one past `\377` is the
-                        // lexer's, on `Parsed::diagnostics`.
-                        Some(b'0'..=b'7') => {
-                            let mut digits = 1;
-                            while digits < 3 && matches!(self.byte(1 + digits), Some(b'0'..=b'7')) {
-                                digits += 1;
-                            }
-                            let value = self
-                                .taken_ahead(1, digits)
-                                .iter()
-                                .fold(0u8, |n, d| n.wrapping_mul(8).wrapping_add(d - b'0'));
-                            bytes.push(value);
-                            self.bump(1 + digits);
-                            continue;
-                        }
-                        // `\x41`: one or two hex digits; `\x` before anything
-                        // else is left as written, as php's scanner leaves it.
-                        Some(b'x') if self.byte(2).is_some_and(|b| b.is_ascii_hexdigit()) => {
-                            let digits = if self.byte(3).is_some_and(|b| b.is_ascii_hexdigit()) {
-                                2
-                            } else {
-                                1
-                            };
-                            let value = self.taken_ahead(2, digits).iter().fold(0u32, |n, d| {
-                                n * 16 + char::from(*d).to_digit(16).unwrap_or(0)
-                            });
-                            bytes.push(u8::try_from(value).unwrap_or(u8::MAX));
-                            self.bump(2 + digits);
-                            continue;
-                        }
-                        // `\u{1F600}` is php's other escape; refused rather
-                        // than read as the backslash php does not leave
-                        // there.
-                        Some(b'u') => {
-                            return Err(
-                                self.trouble("a string escape this compiler cannot read yet")
-                            );
-                        }
-                        _ => {
-                            bytes.push(b'\\');
-                            self.bump(1);
-                            continue;
-                        }
-                    };
-                    bytes.push(escaped);
-                    self.bump(2);
+                Some(b'{') if self.byte(1) == Some(b'$') => {
+                    self.bump(1);
+                    let expr = self.variable()?;
+                    if self.byte(0) != Some(b'}') {
+                        return Err(self
+                            .trouble("an interpolated expression this compiler cannot read yet"));
+                    }
+                    self.bump(1);
+                    Self::piece(&mut pieces, &mut bytes, expr, false);
                 }
+                Some(b'$') if self.byte(1) == Some(b'{') => {
+                    if !self.label_starts(2) {
+                        return Err(self
+                            .trouble("an interpolated expression this compiler cannot read yet"));
+                    }
+                    self.bump(1);
+                    let expr = self.variable()?;
+                    if self.byte(0) != Some(b'}') {
+                        return Err(self
+                            .trouble("an interpolated expression this compiler cannot read yet"));
+                    }
+                    self.bump(1);
+                    Self::piece(&mut pieces, &mut bytes, expr, true);
+                }
+                Some(b'\\') => self.escape(&mut bytes)?,
                 Some(b) => {
                     bytes.push(b);
                     self.bump(1);
                 }
             }
         }
+    }
+
+    /// The byte or bytes one `\` inside a double-quoted string stands
+    /// for, as `zend_scan_escape_string` reads them, pushed onto `bytes`.
+    fn escape(&mut self, bytes: &mut Vec<u8>) -> Result<(), Trouble> {
+        let escaped = match self.byte(1) {
+            Some(b'n') => b'\n',
+            Some(b't') => b'\t',
+            Some(b'r') => b'\r',
+            Some(b'v') => 0x0b,
+            Some(b'f') => 0x0c,
+            Some(b'e') => 0x1b,
+            Some(b @ (b'\\' | b'"' | b'$')) => b,
+            // `\101`: up to three octal digits, read as php's
+            // `(char) ZEND_STRTOL(octal_buf, NULL, 8)`, so the
+            // byte is the low eight bits of what they spell, and
+            // the scanner's warning for one past `\377` is the
+            // lexer's, on `Parsed::diagnostics`.
+            Some(b'0'..=b'7') => {
+                let mut digits = 1;
+                while digits < 3 && matches!(self.byte(1 + digits), Some(b'0'..=b'7')) {
+                    digits += 1;
+                }
+                let value = self
+                    .taken_ahead(1, digits)
+                    .iter()
+                    .fold(0u8, |n, d| n.wrapping_mul(8).wrapping_add(d - b'0'));
+                bytes.push(value);
+                self.bump(1 + digits);
+                return Ok(());
+            }
+            // `\x41`: one or two hex digits; `\x` before anything
+            // else is left as written, as php's scanner leaves it.
+            Some(b'x') if self.byte(2).is_some_and(|b| b.is_ascii_hexdigit()) => {
+                let digits = if self.byte(3).is_some_and(|b| b.is_ascii_hexdigit()) {
+                    2
+                } else {
+                    1
+                };
+                let value = self.taken_ahead(2, digits).iter().fold(0u32, |n, d| {
+                    n * 16 + char::from(*d).to_digit(16).unwrap_or(0)
+                });
+                bytes.push(u8::try_from(value).unwrap_or(u8::MAX));
+                self.bump(2 + digits);
+                return Ok(());
+            }
+            // `\u{1F600}` is php's other escape; refused rather
+            // than read as the backslash php does not leave
+            // there.
+            Some(b'u') => {
+                return Err(self.trouble("a string escape this compiler cannot read yet"));
+            }
+            // Any other byte stays behind its backslash, and the
+            // scanner steps over it, so `\{$a` is `\{` and then
+            // `$a`, never a `{$`.
+            Some(b) => {
+                bytes.push(b'\\');
+                bytes.push(b);
+                self.bump(2);
+                return Ok(());
+            }
+            None => {
+                bytes.push(b'\\');
+                self.bump(1);
+                return Ok(());
+            }
+        };
+        bytes.push(escaped);
+        self.bump(2);
+        Ok(())
+    }
+
+    /// Whether the byte `ahead` starts a label, php's `LABEL` pattern.
+    fn label_starts(&self, ahead: usize) -> bool {
+        self.byte(ahead)
+            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_' || b >= 0x80)
+    }
+
+    /// The `[` and `->` php's `ST_VAR_OFFSET` and `ST_LOOKING_FOR_PROPERTY`
+    /// states read after a variable inside a string, which this refuses.
+    fn refuse_dim_or_prop(&self) -> Result<(), Trouble> {
+        let dim = self.byte(0) == Some(b'[');
+        let prop = self.byte(0) == Some(b'-') && self.byte(1) == Some(b'>') && self.label_starts(2);
+        if dim || prop {
+            return Err(
+                self.trouble("a dimension or a property in a string this compiler cannot read yet")
+            );
+        }
+        Ok(())
+    }
+
+    /// The plain bytes so far as a piece where there are any, then the
+    /// variable, php's `encaps_list` growing by a `T_ENCAPSED_AND_WHITESPACE`
+    /// and an `encaps_var`.
+    fn piece(pieces: &mut Vec<Piece>, bytes: &mut Vec<u8>, expr: Expr, dollar_curly: bool) {
+        if !bytes.is_empty() {
+            pieces.push(Piece {
+                expr: Expr::Str(std::mem::take(bytes)),
+                dollar_curly: false,
+            });
+        }
+        pieces.push(Piece { expr, dollar_curly });
     }
 
     /// Whitespace and the three comment forms.
@@ -2216,7 +2319,9 @@ fn is_auto_global(name: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{BinaryOp, CastTo, Child, Element, Expr, Level, Read, Stmt, Target, Trouble};
+    use super::{
+        BinaryOp, CastTo, Child, Element, Expr, Level, Piece, Read, Stmt, Target, Trouble,
+    };
 
     /// The reader on a thread nothing holds to a limit.
     fn read(source: &[u8]) -> Result<Read, Trouble> {
@@ -2998,6 +3103,77 @@ mod tests {
                 1
             )]
         );
+    }
+
+    /// The interpolations php's `ST_DOUBLE_QUOTES` state cuts a string
+    /// at: `$a`, `{$a}` and `${a}` each a piece, the last marked as
+    /// written; a `$` or a `{` before anything else, and the byte after a
+    /// `\`, plain bytes; a string with no variable piece is a plain string.
+    /// A dimension, a property and an expression under the braces are
+    /// refused, not read as something else.
+    #[test]
+    fn an_interpolated_string_is_its_pieces_as_php_s_lexer_cuts_them() {
+        let piece = |expr: Expr| Piece {
+            expr,
+            dollar_curly: false,
+        };
+        let lit = |bytes: &[u8]| piece(Expr::Str(bytes.to_vec()));
+        let var = |name: &[u8]| piece(Expr::Var(name.to_vec()));
+        assert_eq!(
+            read(b"<?php echo \"a\\{$a}b\\$x{ $a}$ $1{$this}${b}$a-$b\", \"$\", \"{\";")
+                .unwrap_or_default(),
+            vec![(
+                Stmt::Echo(vec![
+                    Expr::Encaps(vec![
+                        lit(b"a\\{"),
+                        var(b"a"),
+                        lit(b"}b$x{ "),
+                        var(b"a"),
+                        lit(b"}$ $1"),
+                        piece(Expr::This),
+                        Piece {
+                            expr: Expr::Var(b"b".to_vec()),
+                            dollar_curly: true,
+                        },
+                        var(b"a"),
+                        lit(b"-"),
+                        var(b"b"),
+                    ]),
+                    Expr::Str(b"$".to_vec()),
+                    Expr::Str(b"{".to_vec()),
+                ]),
+                1
+            )]
+        );
+        for (source, what) in [
+            (
+                &b"<?php \"$a[0]\";"[..],
+                "a dimension or a property in a string this compiler cannot read yet",
+            ),
+            (
+                b"<?php \"$a->b\";",
+                "a dimension or a property in a string this compiler cannot read yet",
+            ),
+            (
+                b"<?php \"{$a->b}\";",
+                "an interpolated expression this compiler cannot read yet",
+            ),
+            (
+                b"<?php \"${a[0]}\";",
+                "an interpolated expression this compiler cannot read yet",
+            ),
+            (
+                b"<?php \"${f()}\";",
+                "an interpolated expression this compiler cannot read yet",
+            ),
+        ] {
+            assert_eq!(
+                read(source).err().map(|t| t.what),
+                Some(what.to_owned()),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
     }
 
     /// The cast spellings php's scanner takes, whatever their case and

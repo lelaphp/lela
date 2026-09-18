@@ -104,13 +104,18 @@ use php_unit::{
     frameless_table,
 };
 
-use crate::read::{Arm, BinaryOp, Case, CastTo, Class, Element, Expr, Read, Stmt, Target};
+use crate::read::{Arm, BinaryOp, Case, CastTo, Class, Element, Expr, Piece, Read, Stmt, Target};
 use crate::{CompileError, Options, StackLimit};
 
 /// `ZEND_FETCH_LOCAL` (`Z/Zend/zend_compile.h:1083`), the
 /// `extended_value` of a `FETCH_*` by name that is no auto-global, which
 /// the dump prints as `(local)`.
 const FETCH_LOCAL: u32 = 1 << 2;
+
+/// `sizeof(zval)`, sixteen bytes on php's every target, which
+/// `zend_compile_rope_finalize` divides a rope's string pointers into
+/// to reserve its temporaries.
+const ZVAL_SIZE: usize = 16;
 
 /// One op array under construction, and the home its constant strings
 /// are interned into (design §5.2): the engine's table when the unit is
@@ -666,7 +671,8 @@ impl Emit<'_> {
             | Expr::PostDec(_)
             | Expr::StaticCall { .. }
             | Expr::MethodCall { .. }
-            | Expr::Silence(_) => {
+            | Expr::Silence(_)
+            | Expr::Encaps(_) => {
                 Err(self.compile_error("Constant expression contains invalid operations"))
             }
             Expr::Cast { .. } | Expr::Match { .. } | Expr::New { .. } | Expr::Instanceof { .. } => {
@@ -1756,6 +1762,7 @@ impl Emit<'_> {
             Expr::Call { name, arguments } => self.call(name, arguments),
             Expr::Unary { minus, operand } => self.unary(*minus, operand),
             Expr::Silence(operand) => self.silence(operand),
+            Expr::Encaps(pieces) => self.encaps(pieces),
             Expr::Cast { to, operand } => self.cast(*to, operand),
             Expr::Binary { op, left, right } => self.binary(*op, left, right),
             // `zend_compile_simple_var` through `zend_try_compile_cv`: the
@@ -2206,6 +2213,184 @@ impl Emit<'_> {
         Ok(Where::Temporary(out))
     }
 
+    /// `zend_compile_encaps_list` (`Z/Zend/zend_compile.c:11221`): each
+    /// piece compiled in order; a constant piece is converted to a string,
+    /// dropped when empty, joined onto the constant before it
+    /// (`concat_function`), or held with a `NOP` reserved for the
+    /// `ROPE_ADD` it becomes once the next variable piece, or the end,
+    /// arrives; a variable piece is `zend_compile_rope_add`, `ROPE_INIT`
+    /// for the first element and `ROPE_ADD` after, the element's number
+    /// in `extended_value` and the rope's temporary unassigned until
+    /// [`Self::rope_finalize`]. `${a}` is `ZEND_ENCAPS_VAR_DOLLAR_CURLY`,
+    /// deprecated before its piece compiles. A list with no variable
+    /// piece is the joined constant, which the reader never hands here
+    /// since such a string is [`Expr::Str`].
+    fn encaps(&mut self, pieces: &[Piece]) -> Result<Where, CompileError> {
+        let mut last_const: Option<Zval> = None;
+        let mut reserved: Option<usize> = None;
+        let mut init_at: Option<usize> = None;
+        let mut count = 0u32;
+        for piece in pieces {
+            if piece.dollar_curly {
+                self.raise(
+                    Level::Deprecated,
+                    "Using ${var} in strings is deprecated, use {$var} instead",
+                );
+            }
+            let value = self.expr(&piece.expr)?;
+            if let Where::Constant(value) = value {
+                let value = self.stringified(value)?.unwrap_or(value);
+                if value.as_str().is_some_and(|s| s.bytes().is_empty()) {
+                    continue;
+                }
+                last_const = Some(if let Some(held) = last_const.take() {
+                    self.concat_fold(held, value)?.unwrap_or(value)
+                } else {
+                    reserved = Some(self.oplines.len());
+                    self.push(Opline::default());
+                    value
+                });
+                continue;
+            }
+            if count == 0 {
+                init_at = Some(match (&last_const, reserved) {
+                    (Some(_), Some(at)) => at,
+                    _ => self.oplines.len(),
+                });
+            }
+            if let (Some(held), Some(at)) = (last_const.take(), reserved) {
+                self.rope_add_at(at, count, Where::Constant(held));
+                count += 1;
+            }
+            let at = self.oplines.len();
+            self.push(Opline::default());
+            self.rope_add_at(at, count, value);
+            count += 1;
+        }
+        if count == 0 {
+            if let Some(at) = reserved {
+                self.oplines.truncate(at);
+            }
+            return Ok(Where::Constant(match last_const {
+                Some(held) => held,
+                None => self.string(b"")?,
+            }));
+        }
+        if let (Some(held), Some(at)) = (last_const.take(), reserved) {
+            self.rope_add_at(at, count, Where::Constant(held));
+            count += 1;
+        }
+        let Some(init_at) = init_at else {
+            return Err(self.fatal("a rope with elements and no first"));
+        };
+        Ok(self.rope_finalize(count, init_at))
+    }
+
+    /// The rope's temporary before `zend_compile_rope_finalize` assigns
+    /// it, php's `result->u.op.var = -1`.
+    const ROPE_UNASSIGNED: u32 = u32::MAX;
+
+    /// `zend_compile_rope_add_ex` over the opline at `at`: `ROPE_INIT`
+    /// for element 0 and `ROPE_ADD` over the rope's temporary after it,
+    /// the element in `op2`, the rope's temporary as what it leaves, and
+    /// the element's number in `extended_value`.
+    fn rope_add_at(&mut self, at: usize, num: u32, element: Where) {
+        let (op2_type, op2) = self.operand(element);
+        let Some(opline) = self.oplines.get_mut(at) else {
+            return;
+        };
+        if num == 0 {
+            opline.opcode = Opcode::RopeInit;
+        } else {
+            opline.opcode = Opcode::RopeAdd;
+            opline.op1_type = OperandKind::Tmp;
+            opline.op1 = Self::ROPE_UNASSIGNED;
+        }
+        opline.op2_type = op2_type;
+        opline.op2 = op2;
+        opline.out_type = OperandKind::Tmp;
+        opline.out = Self::ROPE_UNASSIGNED;
+        opline.extended_value = num;
+    }
+
+    /// `zend_compile_rope_finalize` (`Z/Zend/zend_compile.c:11186`) over
+    /// the `count` elements from the opline at `init_at` to the last:
+    /// one element is a `CAST (string)` of it into a temporary, the one
+    /// opline rewritten; two are `FAST_CONCAT` of the first over the
+    /// second's opline into a temporary, the first's opline made a `NOP`
+    /// (`MAKE_NOP`); more are the count in `ROPE_INIT`'s
+    /// `extended_value`, the last opline `ROPE_END` into a temporary
+    /// with the rope's temporary as its `op1`, `zend_make_tmp_result`
+    /// before `get_temporary_variable`, then one slot fewer than the
+    /// `zval`s the `count` string pointers fill, and every opline of the
+    /// rope given that temporary.
+    fn rope_finalize(&mut self, count: u32, init_at: usize) -> Where {
+        let last_at = self.oplines.len().saturating_sub(1);
+        if count == 1 {
+            let out = self.temporary();
+            if let Some(opline) = self.oplines.get_mut(last_at) {
+                opline.opcode = Opcode::Cast;
+                opline.extended_value = CastTo::Str.type_code();
+                opline.op1_type = opline.op2_type;
+                opline.op1 = opline.op2;
+                opline.op2_type = OperandKind::Unused;
+                opline.op2 = 0;
+                opline.out = out;
+            }
+            return Where::Temporary(out);
+        }
+        if count == 2 {
+            let out = self.temporary();
+            let (first_type, first) = self
+                .oplines
+                .get(init_at)
+                .map_or((OperandKind::Unused, 0), |init| (init.op2_type, init.op2));
+            if let Some(opline) = self.oplines.get_mut(last_at) {
+                opline.opcode = Opcode::FastConcat;
+                opline.extended_value = 0;
+                opline.op1_type = first_type;
+                opline.op1 = first;
+                opline.out = out;
+            }
+            if let Some(init) = self.oplines.get_mut(init_at) {
+                let lineno = init.lineno;
+                *init = Opline {
+                    lineno,
+                    ..Opline::default()
+                };
+            }
+            return Where::Temporary(out);
+        }
+        let out = self.temporary();
+        let rope = self.temporary();
+        let mut slots = (count as usize * size_of::<usize>()).div_ceil(ZVAL_SIZE);
+        while slots > 1 {
+            self.temporary();
+            slots -= 1;
+        }
+        if let Some(init) = self.oplines.get_mut(init_at) {
+            init.extended_value = count;
+        }
+        if let Some(opline) = self.oplines.get_mut(last_at) {
+            opline.opcode = Opcode::RopeEnd;
+            opline.out = out;
+            opline.op1 = rope;
+        }
+        for opline in self.oplines.iter_mut().take(last_at).skip(init_at) {
+            if opline.out == Self::ROPE_UNASSIGNED {
+                match opline.opcode {
+                    Opcode::RopeAdd => {
+                        opline.op1 = rope;
+                        opline.out = rope;
+                    }
+                    Opcode::RopeInit => opline.out = rope,
+                    _ => {}
+                }
+            }
+        }
+        Where::Temporary(out)
+    }
+
     /// `zend_compile_cast`: the operand compiled first, then `ZEND_BOOL`
     /// over it for `(bool)` and `ZEND_CAST` with the type in
     /// `extended_value` for the rest, into a temporary; nothing is folded,
@@ -2354,6 +2539,7 @@ impl Emit<'_> {
             | Expr::PostDec(_) => Err(self.fatal("a variable is no constant expression")),
             Expr::Match { .. } => Err(self.fatal("a match is no constant expression")),
             Expr::Silence(_) => Err(self.fatal("a silenced expression is no constant expression")),
+            Expr::Encaps(_) => Err(self.fatal("an interpolated string is no constant expression")),
             Expr::New { .. } | Expr::StaticCall { .. } | Expr::MethodCall { .. } => {
                 Err(self.fatal("a call is no constant expression"))
             }

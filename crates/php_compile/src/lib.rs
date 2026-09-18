@@ -2642,6 +2642,107 @@ mod tests {
         );
     }
 
+    /// #303's program under the oracle's `[regime.dump]`: a five-piece
+    /// interpolation as `zend_compile_encaps_list` shapes it, `ROPE_INIT`
+    /// with the count, three `ROPE_ADD` and `ROPE_END`, the rope's
+    /// temporary taken after the value's and two more slots reserved
+    /// for its five string pointers, and the `rope` live range from the
+    /// init to the end, read off a dump of the oracle's for the first
+    /// time.
+    #[test]
+    fn a_three_part_interpolation_is_php_s_op_array_ending_in_its_rope_live_range() {
+        let (unit, _strings) = unit_and_strings(b"<?php $a = 1; $b = 2; echo \"$a-$b-$a\";");
+        assert_eq!(
+            unit.dump(&[]),
+            main_dump(
+                9,
+                2,
+                6,
+                "0000 ASSIGN CV0($a) int(1)\n\
+                 0001 ASSIGN CV1($b) int(2)\n\
+                 0002 T5 = ROPE_INIT 5 CV0($a)\n\
+                 0003 T5 = ROPE_ADD 1 T5 string(\"-\")\n\
+                 0004 T5 = ROPE_ADD 2 T5 CV1($b)\n\
+                 0005 T5 = ROPE_ADD 3 T5 string(\"-\")\n\
+                 0006 T4 = ROPE_END 4 T5 CV0($a)\n\
+                 0007 ECHO T4\n\
+                 0008 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    5: 0002 - 0006 (rope)\n"
+            )
+        );
+    }
+
+    /// The rest of `zend_compile_encaps_list` and `zend_compile_rope_finalize`
+    /// against the oracle's dump: one piece is a `CAST (string)` and no
+    /// rope; two are a `FAST_CONCAT` over the `NOP` the first piece's
+    /// opline becomes, and no live range; a constant piece is folded onto
+    /// the constant before it, so the escaped `\{` and the plain `$`,
+    /// `{` and `}` are one string; `$this` is a `FETCH_THIS` piece; a
+    /// rope's value nothing reads is freed after its end; and `${a}` is
+    /// php's deprecation at compile time. In a class constant an
+    /// interpolation is php's `Constant expression contains invalid
+    /// operations`, since `zend_is_allowed_in_const_expr` has no
+    /// `ZEND_AST_ENCAPS_LIST`.
+    #[test]
+    fn one_and_two_piece_interpolations_are_a_cast_and_a_fast_concat_and_the_rest_a_rope() {
+        assert_eq!(
+            oplines_of(
+                b"<?php $x = \"{$a}\" . str_repeat(\"p$a\", \"$a$a\"); \"$a$b$c\"; \"x$a\"; echo \"a\\{$a}b\\$x{ $a}$ $1{$this}\";"
+            ),
+            "0000 T4 = CAST (string) CV1($a)\n\
+             0001 INIT_FCALL 2 112 string(\"str_repeat\")\n\
+             0002 NOP\n\
+             0003 T5 = FAST_CONCAT string(\"p\") CV1($a)\n\
+             0004 SEND_VAL T5 1\n\
+             0005 NOP\n\
+             0006 T6 = FAST_CONCAT CV1($a) CV1($a)\n\
+             0007 SEND_VAL T6 2\n\
+             0008 V7 = DO_ICALL\n\
+             0009 T8 = CONCAT T4 V7\n\
+             0010 ASSIGN CV0($x) T8\n\
+             0011 T11 = ROPE_INIT 3 CV1($a)\n\
+             0012 T11 = ROPE_ADD 1 T11 CV2($b)\n\
+             0013 T10 = ROPE_END 2 T11 CV3($c)\n\
+             0014 FREE T10\n\
+             0015 NOP\n\
+             0016 T13 = FAST_CONCAT string(\"x\") CV1($a)\n\
+             0017 FREE T13\n\
+             0018 T16 = ROPE_INIT 6 string(\"a\\\\{\")\n\
+             0019 T16 = ROPE_ADD 1 T16 CV1($a)\n\
+             0020 T16 = ROPE_ADD 2 T16 string(\"}b$x{ \")\n\
+             0021 T16 = ROPE_ADD 3 T16 CV1($a)\n\
+             0022 T16 = ROPE_ADD 4 T16 string(\"}$ $1\")\n\
+             0023 T14 = FETCH_THIS\n\
+             0024 T15 = ROPE_END 5 T16 T14\n\
+             0025 ECHO T15\n\
+             0026 RETURN int(1)\n\
+             LIVE RANGES:\n\
+             \x20    4: 0001 - 0009 (tmp/var)\n\
+             \x20    11: 0011 - 0013 (rope)\n\
+             \x20    16: 0018 - 0024 (rope)\n"
+        );
+        let (unit, _strings) = unit_and_strings(b"<?php\necho \"{$a}x${a}\";");
+        assert_eq!(
+            unit.diagnostics,
+            vec![Diagnostic {
+                level: Level::Deprecated,
+                line: 2,
+                message: "Using ${var} in strings is deprecated, use {$var} instead".into(),
+            }]
+        );
+        assert_eq!(
+            refused(b"<?php class C { const X = \"$a\"; }"),
+            Some(CompileError {
+                level: Level::CompileError,
+                message: "Constant expression contains invalid operations".into(),
+                line: 1,
+                raised: Vec::new(),
+            }),
+            "`zend_is_allowed_in_const_expr` has no `ZEND_AST_ENCAPS_LIST`"
+        );
+    }
+
     /// The oplines and the live-range table of one source's main op
     /// array, the header left off: what the oracle's dump prints after
     /// `; return  [] RANGE[0..0]`.
