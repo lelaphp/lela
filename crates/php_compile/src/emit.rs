@@ -870,6 +870,7 @@ impl Emit<'_> {
                 body,
             } => self.r#for(init, cond, step, body)?,
             Stmt::While { cond, body } => self.r#while(cond, body)?,
+            Stmt::DoWhile { body, cond, line } => self.do_while(body, cond, *line)?,
             Stmt::Foreach {
                 expr,
                 value,
@@ -2563,6 +2564,37 @@ impl Emit<'_> {
         let continue_at = self.next();
         self.line = line;
         self.update_jump_target_to_next(jump);
+        let cond = self.expr(cond)?;
+        self.emit_cond_jump(cond, start);
+        self.end_loop(continue_at);
+        Ok(())
+    }
+
+    /// `zend_compile_do_while` (`Z/Zend/zend_compile.c:6010`):
+    /// `zend_compile_while` without the `JMP` that carries the first
+    /// pass over the condition, so the body is the loop's first opline
+    /// and runs once before the condition is asked. The condition and
+    /// the `JMPNZ` back to the body's first opline are emitted at the
+    /// condition's own line, which is where php's node carries it; the
+    /// back-edge is numbered as every loop header's is (design §5.7).
+    ///
+    /// `break` and `continue` are the same loop stack's as a `while`'s,
+    /// so a `continue` lands on the condition and not on the body.
+    ///
+    /// ```php
+    /// $n = 0; do { $n = $n + 1; } while (false); var_dump($n);
+    /// $m = 0; do { $m = $m + 1; if ($m > 2) { break; } continue; } while ($m < 9); var_dump($m);
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(3)
+    /// ```
+    fn do_while(&mut self, body: &Read, cond: &Expr, line: u32) -> Result<(), CompileError> {
+        self.begin_loop(None, None, false);
+        let start = self.next();
+        self.statements(body)?;
+        let continue_at = self.next();
+        self.line = line;
         let cond = self.expr(cond)?;
         self.emit_cond_jump(cond, start);
         self.end_loop(continue_at);

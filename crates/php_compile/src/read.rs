@@ -71,6 +71,12 @@ pub(crate) enum Stmt {
     },
     /// `while (cond) body`, php's `ZEND_AST_WHILE`.
     While { cond: Expr, body: Read },
+    /// `do body while (cond);`, php's `ZEND_AST_DO_WHILE`: the body,
+    /// which runs before the condition is asked the first time, the
+    /// condition, and the line the condition stands on, which php takes
+    /// from the condition's own node and not from the `do` (the `while`
+    /// is written after the body, so the two are rarely the same line).
+    DoWhile { body: Read, cond: Expr, line: u32 },
     /// `foreach (expr as key => value) body`, php's `ZEND_AST_FOREACH`:
     /// the subject, the value target, the key target where one is
     /// written, and the body's statements.
@@ -1115,6 +1121,10 @@ impl Reader<'_> {
         if self.word_ahead(b"while") {
             self.bump(5);
             return self.r#while().map(Some);
+        }
+        if self.word_ahead(b"do") {
+            self.bump(2);
+            return self.do_while().map(Some);
         }
         if self.word_ahead(b"switch") {
             self.bump(6);
@@ -2235,6 +2245,29 @@ impl Reader<'_> {
         let mut body = Read::new();
         self.statements(&mut body, false, Until::AltIf)?;
         Ok(body)
+    }
+
+    /// `do body while (cond);`, the `do` read: php's
+    /// `T_DO statement T_WHILE '(' expr ')' ';'`, so the body is one
+    /// statement or a block as a `while`'s is, and the `;` php's
+    /// grammar puts after the parenthesis closes the statement. The
+    /// condition's line is kept beside it, since php compiles the
+    /// condition at the line its own node carries and the body stands
+    /// between it and the `do`.
+    fn do_while(&mut self) -> Result<Stmt, Trouble> {
+        let body = self.body()?;
+        self.skip_trivia();
+        if !self.word_ahead(b"while") {
+            return Err(self.trouble("a `do` with no `while` after its body"));
+        }
+        self.bump(5);
+        self.punctuation(b'(', "a `do` whose `while` has no parenthesis after it")?;
+        self.skip_trivia();
+        let line = self.line;
+        let cond = self.expr()?;
+        self.punctuation(b')', "a `do` whose parenthesis nothing closes")?;
+        self.end_of_statement()?;
+        Ok(Stmt::DoWhile { body, cond, line })
     }
 
     /// `while (cond) body`, the keyword read.
