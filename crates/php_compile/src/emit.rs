@@ -566,16 +566,22 @@ impl Emit<'_> {
     /// and no opline is emitted, since php binds such a class at
     /// compile time (`zend_hash_add_ptr(CG(class_table), …)` under
     /// `toplevel`), and the oracle's dump of `class M {} echo 1;` is the
-    /// `ECHO` and the `RETURN` alone. The name a second declaration of
-    /// the same file repeats fails that bind in php, which then emits a
-    /// `DECLARE_CLASS` for the runtime fatal; that opline is not emitted
-    /// here, so the repeat is refused as not yet read. The members are
+    /// `ECHO` and the `RETURN` alone. The class's name is
+    /// `zend_prefix_with_ns` over the written one: `A\M` for `class M`
+    /// under `namespace A;`, the name written where no namespace stands,
+    /// so a fetch [`Self::class_name`] resolves in the same namespace
+    /// names it, `__CLASS__` folds to it and php's fatals name it. The
+    /// name a second declaration of the same file repeats fails that
+    /// bind in php, which then emits a `DECLARE_CLASS` for the runtime
+    /// fatal; that opline is not emitted here, so the repeat is refused
+    /// as not yet read. The members are
     /// `zend_compile_prop_decl` and `zend_compile_class_const_decl`: a
     /// name declared twice is php's fatal in php's words, at the
     /// declarator's line, and a default or a value is kept as the
     /// constant expression it was written as (design §4.7).
     fn class(&mut self, class: &Class) -> Result<(), CompileError> {
-        let wanted = class.name.to_ascii_lowercase();
+        let name = self.prefix_with_ns(&class.name);
+        let wanted = name.to_ascii_lowercase();
         if self
             .classes
             .iter()
@@ -584,9 +590,8 @@ impl Emit<'_> {
             return Err(self.fatal("a class declared twice this compiler cannot read yet"));
         }
         let line = self.line;
-        let name = Name(class.name.clone().into_boxed_slice());
         let mut decl = ClassDecl {
-            name,
+            name: Name(name.clone().into_boxed_slice()),
             kind: ClassKind::Class,
             flags: ClassFlags::default(),
             parent: None,
@@ -602,13 +607,13 @@ impl Emit<'_> {
             line,
             end_line: class.end_line,
         };
-        self.active_class = Some(class.name.clone());
+        self.active_class = Some(name.clone());
         for constant in &class.constants {
             self.line = constant.line;
             if decl.constants.iter().any(|c| *c.name.0 == *constant.name) {
                 return Err(self.compile_error(format!(
                     "Cannot redefine class constant {}::{}",
-                    String::from_utf8_lossy(&class.name),
+                    String::from_utf8_lossy(&name),
                     String::from_utf8_lossy(&constant.name)
                 )));
             }
@@ -628,7 +633,7 @@ impl Emit<'_> {
             if decl.properties.iter().any(|p| *p.name.0 == *property.name) {
                 return Err(self.compile_error(format!(
                     "Cannot redeclare {}::${}",
-                    String::from_utf8_lossy(&class.name),
+                    String::from_utf8_lossy(&name),
                     String::from_utf8_lossy(&property.name)
                 )));
             }
@@ -3086,7 +3091,9 @@ impl Emit<'_> {
     /// the class named, one the engine declared ([`Options::classes`])
     /// or one this file has bound before the call, has a public method
     /// of the name; a private or protected one is compatible only from
-    /// inside the class, which nothing here is.
+    /// inside the class, which nothing here is. The name is resolved as
+    /// the fetch resolves it ([`Self::class_name`]), which is the name a
+    /// declaration of the file took under the same namespace.
     fn known_method(&self, class: &[u8], method: &[u8]) -> bool {
         let class = self.class_name(class).to_ascii_lowercase();
         let method = method.to_ascii_lowercase();
@@ -3152,6 +3159,19 @@ impl Emit<'_> {
     /// time.
     fn class_name(&self, name: &[u8]) -> Vec<u8> {
         self.function_name(name).0
+    }
+
+    /// `zend_prefix_with_ns`: the name a declaration takes, the current
+    /// namespace, a `\` and the name as written where a namespace
+    /// stands, and the name as written where none does.
+    fn prefix_with_ns(&self, name: &[u8]) -> Vec<u8> {
+        let Some(namespace) = &self.namespace else {
+            return name.to_vec();
+        };
+        let mut full = namespace.clone();
+        full.push(b'\\');
+        full.extend_from_slice(name);
+        full
     }
 
     /// `zend_compile_const` over `zend_resolve_const_name` and
@@ -3995,5 +4015,92 @@ fn scalar(value: Zval, string: Option<&php_heap::Str>) -> Scalar<'_> {
         ZvalType::True => Scalar::Bool(true),
         ZvalType::False => Scalar::Bool(false),
         _ => Scalar::Null,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use php_unit::decl::MethodDecl;
+
+    /// `zend_get_compatible_func_or_null` over a class this file bound
+    /// under `namespace A;` (#322): the class stands in the table as
+    /// `A\M`, and `M::f` written in the same namespace resolves to that
+    /// name, so its public `f` is a known callee, where the same fetch
+    /// written outside the namespace or with a leading `\` names the
+    /// global `M` the table has not. The methods a file declares are
+    /// #309's to read, so the declaration here carries one directly.
+    #[test]
+    fn a_known_method_is_found_on_a_class_the_file_declared_in_a_namespace() {
+        let mut strings = php_heap::Strings::new();
+        let options = Options::default();
+        let mut emit = Emit {
+            strings: &mut strings,
+            precision: options.precision,
+            persistent: &options.persistent,
+            functions: &options.functions,
+            known_classes: &options.classes,
+            frameless: Vec::new(),
+            namespace: Some(b"A".to_vec()),
+            active_class: None,
+            active_property: None,
+            in_jmp_frameless_branch: false,
+            statements_seen: 0,
+            stack: options.stack,
+            oplines: Vec::new(),
+            constants: Vec::new(),
+            vars: Vec::new(),
+            safepoints: Vec::new(),
+            temporaries: 0,
+            cache_slots: 0,
+            line: 1,
+            diagnostics: Vec::new(),
+            classes: Vec::new(),
+            filename: options.filename.clone(),
+            loops: Vec::new(),
+            current_loop: None,
+            breaks: Vec::new(),
+        };
+        let read = Class {
+            name: b"M".to_vec(),
+            doc_comment: None,
+            properties: Vec::new(),
+            constants: Vec::new(),
+            end_line: 1,
+        };
+        assert!(emit.class(&read).is_ok());
+        assert_eq!(emit.classes[0].name.0.as_ref(), b"A\\M".as_slice());
+        emit.classes[0].methods.push(MethodDecl {
+            function: FunctionDecl {
+                name: Name(b"f".as_slice().into()),
+                parameters: Vec::new(),
+                return_type: None,
+                returns_by_ref: false,
+                attributes: Vec::new(),
+                doc_comment: None,
+                file: Name(Box::new([])),
+                line: 0,
+                frameless: Vec::new(),
+            },
+            visibility: Visibility::Public,
+            is_instance: false,
+            is_abstract: false,
+            is_final: false,
+            tentative_return: false,
+        });
+        assert!(emit.known_method(b"M", b"f"), "M under namespace A is A\\M");
+        assert!(emit.known_method(b"m", b"F"), "matched whatever the case");
+        assert!(emit.known_method(b"namespace\\M", b"f"));
+        assert!(emit.known_method(b"\\A\\M", b"f"));
+        assert!(
+            !emit.known_method(b"\\M", b"f"),
+            "the global M is not declared"
+        );
+        emit.namespace = None;
+        assert!(
+            !emit.known_method(b"M", b"f"),
+            "outside the namespace M is the global one"
+        );
+        assert!(emit.known_method(b"A\\M", b"f"));
     }
 }

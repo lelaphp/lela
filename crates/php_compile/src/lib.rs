@@ -3164,6 +3164,144 @@ mod tests {
         );
     }
 
+    /// `zend_compile_class_decl` names a class `zend_prefix_with_ns` over
+    /// the written name, so `class M` under `namespace A;` declares
+    /// `A\M`, the name `zend_resolve_class_name` gives `new M` and `M::K`
+    /// in the same namespace (#322). The dump is the oracle's under
+    /// `[regime.dump]` at 8.5.9 of this program, `NEW 0 string("A\M")`
+    /// with its `DO_FCALL` and `FREE` (a class constant fetch, `M::K`,
+    /// is not read yet, so #322's `echo M::K` stands aside); a file written
+    /// under `opcache.file_update_protection`'s two seconds before the
+    /// oracle reads it prints no dump at all, which is the empty dump
+    /// #322 measured, and not the class. `__CLASS__` in the body folds
+    /// to the prefixed name, and a fatal names it as php's does.
+    #[test]
+    fn a_class_declared_in_a_namespace_takes_the_namespace_on_its_name() {
+        let source: &[u8] = b"<?php namespace A; class M {} new M;";
+        let (unit, _strings) = unit_and_strings(source);
+        assert_eq!(
+            unit.dump(&[]),
+            main_dump(
+                4,
+                0,
+                2,
+                "0000 V0 = NEW 0 string(\"A\\\\M\")\n\
+                 0001 DO_FCALL\n\
+                 0002 FREE V0\n\
+                 0003 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    0: 0001 - 0002 (new)\n"
+            )
+        );
+        let names: Vec<&[u8]> = unit.classes.iter().map(|c| c.name.0.as_ref()).collect();
+        assert_eq!(
+            names,
+            [b"A\\M".as_slice()],
+            "declared as A\\M, got {names:?}"
+        );
+
+        let (unit, _strings) =
+            unit_and_strings(b"<?php namespace A; class M { const C = __CLASS__; }");
+        let names: Vec<&[u8]> = unit.classes.iter().map(|c| c.name.0.as_ref()).collect();
+        assert_eq!(names, [b"A\\M".as_slice()]);
+        assert_eq!(
+            unit.classes[0].constants[0].value,
+            ConstExpr::Str(b"A\\M".as_slice().into())
+        );
+        let mut strings = php_heap::Strings::new();
+        let refused = compile(
+            &php_syntax::parse(
+                b"<?php namespace A;\nclass M { const K = 1;\n const K = 2; }",
+                &php_syntax::Options::default(),
+            ),
+            &bundled(),
+            &mut strings,
+        )
+        .err()
+        .map(|e| (e.level, e.message, e.line));
+        assert_eq!(
+            refused,
+            Some((
+                Level::CompileError,
+                "Cannot redefine class constant A\\M::K".to_string(),
+                3
+            ))
+        );
+    }
+
+    /// `zend_get_compatible_func_or_null` under a namespace (#322): the
+    /// callee is known by the name the fetch resolves to, so `M::f(1)`
+    /// under `namespace A;` finds the public `f` of the `A\M` the engine
+    /// declared and sends `SEND_VAL`, where `\M::f(1)` names the global
+    /// `M` the table has not.
+    #[test]
+    fn a_method_of_a_namespaced_class_is_a_known_callee_in_its_namespace() {
+        use php_unit::decl::{ClassDecl, ClassFlags, ClassKind, EnumBacking, MethodDecl};
+        let options = Options {
+            classes: vec![ClassDecl {
+                name: Name(b"A\\M".as_slice().into()),
+                kind: ClassKind::Class,
+                flags: ClassFlags::default(),
+                parent: None,
+                interfaces: Vec::new(),
+                traits: Vec::new(),
+                backing: EnumBacking::Pure,
+                constants: Vec::new(),
+                properties: Vec::new(),
+                methods: vec![MethodDecl {
+                    function: FunctionDecl {
+                        name: Name(b"f".as_slice().into()),
+                        parameters: Vec::new(),
+                        return_type: None,
+                        returns_by_ref: false,
+                        attributes: Vec::new(),
+                        doc_comment: None,
+                        file: Name(Box::new([])),
+                        line: 0,
+                        frameless: Vec::new(),
+                    },
+                    visibility: Visibility::Public,
+                    is_instance: false,
+                    is_abstract: false,
+                    is_final: false,
+                    tentative_return: false,
+                }],
+                attributes: Vec::new(),
+                doc_comment: None,
+                file: Name(Box::new([])),
+                line: 0,
+                end_line: 0,
+            }],
+            ..Options::default()
+        };
+        let mut strings = php_heap::Strings::new();
+        let dump = compile(
+            &php_syntax::parse(
+                b"<?php namespace A; M::f(1); \\M::f(1);",
+                &php_syntax::Options::default(),
+            ),
+            &options,
+            &mut strings,
+        )
+        .unwrap_or_default()
+        .dump(&[]);
+        assert_eq!(
+            dump,
+            main_dump(
+                7,
+                0,
+                2,
+                "0000 INIT_STATIC_METHOD_CALL 1 string(\"A\\\\M\") string(\"f\")\n\
+                 0001 SEND_VAL int(1) 1\n\
+                 0002 DO_FCALL\n\
+                 0003 INIT_STATIC_METHOD_CALL 1 string(\"M\") string(\"f\")\n\
+                 0004 SEND_VAL_EX int(1) 1\n\
+                 0005 DO_FCALL\n\
+                 0006 RETURN int(1)\n"
+            )
+        );
+    }
+
     /// `zend_compile_class_decl` for the class the doc-comment witness
     /// of `php_syntax` declares (#257): bound at compile time with no
     /// opline, so the main op array is the oracle's `ECHO` and `RETURN`
