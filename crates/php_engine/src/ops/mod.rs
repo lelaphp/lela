@@ -2369,6 +2369,136 @@ pub(crate) fn array_offset(
     }
 }
 
+/// `ZEND_UNSET_DIM`'s body over an array (`Z/Zend/zend_vm_def.h:6735`,
+/// the `unset_dim_array` label): `zend_hash_del` or
+/// `zend_hash_index_del` at the key the offset makes, over the array the
+/// container holds, which the handler separated first
+/// (`SEPARATE_ARRAY`). The ladder is the `offset_again` chain: a string
+/// key, made a long where it is a canonical decimal and no constant,
+/// since a constant one the compiler already made a long
+/// (`zend_handle_numeric_dim`); a long as itself; a reference followed;
+/// `null` and a slot nothing wrote the key `""`, with no deprecation,
+/// which is where this differs from a write (`ZEND_HANDLE_NUMERIC` is
+/// not reached and `zend_hash_del` takes the empty string);  a float
+/// `zend_dval_to_lval_safe` with its deprecation; `false` and `true` 0
+/// and 1; a resource its id with php's warning; and an array or an
+/// object the `TypeError` `zend_illegal_array_offset_unset` throws,
+/// naming an object by its class. A key nothing holds is no error and
+/// no warning, as `zend_hash_del` is silent over one.
+///
+/// php holds the table alive across the float's deprecation, since a
+/// user handler may unset the container the array hangs from
+/// (`GC_TRY_ADDREF`/`GC_DELREF` around it); the same guard stands here,
+/// and a handler that took the last owner ends the opline with the
+/// element still there, as php's `break` does.
+///
+/// ```php
+/// $a = [1, 2, 'k' => 3, '' => 4, 5 => 'five'];
+/// $i = 1; $s = 'k'; $n = null; $t = true; $d = '5';
+/// unset($a[0], $a[$i], $a[$s], $a[$n], $a[$d], $a['nope']);
+/// var_dump($a);
+/// ```
+/// ```expect
+/// array(0) {
+/// }
+/// ```
+///
+/// A float offset is truncated under php's deprecation, and a resource
+/// is its id under php's warning.
+///
+/// ```php
+/// $a = [1 => 'a', 2 => 'b'];
+/// $f = 1.5;
+/// unset($a[$f]);
+/// var_dump($a);
+/// ```
+/// ```expect
+/// Deprecated: Implicit conversion from float 1.5 to int loses precision in %s on line 4
+/// array(1) {
+///   [2]=>
+///   string(1) "b"
+/// }
+/// ```
+///
+/// An array or an object as the offset is php's `TypeError`, whose words
+/// are the unset's own and not a read's.
+///
+/// ```php
+/// $a = [1]; $k = [0];
+/// unset($a[$k]);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: Cannot unset offset of type array on array in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+pub(crate) fn unset_dim(
+    req: &mut Request,
+    array: PhpArray,
+    offset: &Value,
+    constant: bool,
+) -> Result<(), Thrown> {
+    let a = array.heap();
+    let key = match offset.deref().as_ref() {
+        ValueRef::Str(s) if constant => php_heap::Key::Str(s.heap()),
+        ValueRef::Str(s) => Key::from_string(*s).heap(),
+        ValueRef::Int(n) => php_heap::Key::Long(n),
+        ValueRef::Bool(b) => php_heap::Key::Long(i64::from(b)),
+        ValueRef::Float(f) => {
+            // `GC_TRY_ADDREF(ht)` before the deprecation and `GC_DELREF`
+            // after it: a handler that unset the container took the last
+            // owner, and the table is destroyed here rather than
+            // deleted from.
+            let held = array.to_value();
+            req.addref(&held);
+            let n = double_to_long(req, f);
+            let alone = a.refcount() <= 1;
+            req.release(held);
+            if alone || req.is_pending() {
+                return Ok(());
+            }
+            php_heap::Key::Long(n)
+        }
+        ValueRef::Resource(r) => {
+            let id = r.id();
+            warning(
+                req,
+                &format!("Resource ID#{id} used as offset, casting to integer ({id})"),
+            );
+            php_heap::Key::Long(id)
+        }
+        // `ZSTR_EMPTY_ALLOC()`, the key a `null` offset and a slot
+        // nothing wrote both delete; the string is this function's to
+        // give back, since `zend_hash_del` takes no owner of its key.
+        ValueRef::Null | ValueRef::Undef => {
+            let empty = PhpString::new(req, b"")?;
+            req.array_del(a, php_heap::Key::Str(empty.heap()));
+            req.release(Value::string(empty));
+            return Ok(());
+        }
+        ValueRef::Array(_) => {
+            return Err(throw(
+                req,
+                "TypeError",
+                "Cannot unset offset of type array on array",
+            ));
+        }
+        ValueRef::Object(o) => {
+            let class = req.class_name(o.class());
+            return Err(throw(
+                req,
+                "TypeError",
+                &format!("Cannot unset offset of type {class} on array"),
+            ));
+        }
+        // `deref` followed the reference already.
+        ValueRef::Reference(_) => return Ok(()),
+    };
+    req.array_del(a, key);
+    Ok(())
+}
+
 /// `MAY_BE_RESOURCE`, `1 << IS_RESOURCE`: the one mask `ZEND_TYPE_CHECK`
 /// reads past the type byte.
 const MAY_BE_RESOURCE: u32 = 1 << (ZvalType::Resource as u32);

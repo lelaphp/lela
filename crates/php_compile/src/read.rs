@@ -96,6 +96,11 @@ pub(crate) enum Stmt {
     Class(Class),
     /// `function f(…) { … }`, php's `ZEND_AST_FUNC_DECL`.
     Function(Function),
+    /// `unset($a, $b[0], $c->p);`, php's `unset_variables`, which the
+    /// grammar reduces to one `ZEND_AST_UNSET` per operand in a
+    /// statement list; each is compiled by `zend_compile_unset` and
+    /// leaves one opline.
+    Unset(Vec<Unset>),
     /// `try { … } catch (…) { … } finally { … }`, php's `ZEND_AST_TRY`
     /// over three children: the body, the `catch` clauses, empty where
     /// none is written, and the `finally` block with the keyword's line,
@@ -117,6 +122,27 @@ pub(crate) struct Catch {
     pub(crate) var: Option<Vec<u8>>,
     pub(crate) body: Read,
     pub(crate) line: u32,
+}
+
+/// One operand of `unset`, php's `unset_variable`, which is a
+/// `variable` production: the three forms `zend_compile_unset` has an
+/// opcode for and this reader takes, a plain variable, one element of
+/// one and one property of one. A chain under either, `$a[0][1]` and
+/// `$a->b->c`, is php's `FETCH_DIM_UNSET` and `FETCH_OBJ_UNSET` under
+/// the last fetch and is not read; neither is a property of a class,
+/// `unset(C::$p)`, whose arm is `UNSET_STATIC_PROP`, nor
+/// `$GLOBALS['k']`.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Unset {
+    /// `unset($a)`, php's `ZEND_AST_VAR` arm: `UNSET_CV` over the CV.
+    Var(Vec<u8>),
+    /// `unset($a[$k])`, php's `ZEND_AST_DIM` arm: `UNSET_DIM` over the
+    /// CV and the element's offset.
+    Dim { var: Vec<u8>, dim: Child },
+    /// `unset($o->p)`, php's `ZEND_AST_PROP` arm: `UNSET_OBJ` over the
+    /// receiver and the property's name as written. The receiver is a
+    /// variable or `$this`.
+    Prop { object: Expr, name: Vec<u8> },
 }
 
 /// The nine magic constants, php's `T_LINE` through `T_PROPERTY_C`: the
@@ -867,6 +893,10 @@ impl Reader<'_> {
         if self.word_ahead(b"return") {
             self.bump(6);
             return self.depth().map(|value| Some(Stmt::Return(value)));
+        }
+        if self.word_ahead(b"unset") {
+            self.bump(5);
+            return self.unset_stmt().map(Some);
         }
         if self.word_ahead(b"while") {
             self.bump(5);
@@ -2655,6 +2685,124 @@ impl Reader<'_> {
         })
     }
 
+    /// `unset(` read at the keyword, php's
+    /// `T_UNSET '(' unset_variables possible_comma ')' ';'`: one
+    /// operand at least, the trailing comma php's `possible_comma`
+    /// allows, and each operand a `variable` production, so an
+    /// expression there is a parse error and not a value unset.
+    /// `unset($this)` is `zend_compile_unset`'s own compile error.
+    fn unset_stmt(&mut self) -> Result<Stmt, Trouble> {
+        self.skip_trivia();
+        if self.byte(0) != Some(b'(') {
+            return Err(self.trouble("an `unset` this compiler cannot read yet"));
+        }
+        self.bump(1);
+        let mut targets = vec![self.unset_operand()?];
+        loop {
+            self.skip_trivia();
+            if self.byte(0) != Some(b',') {
+                break;
+            }
+            self.bump(1);
+            self.skip_trivia();
+            // `possible_comma`: `unset($a,)` is php's, and the comma
+            // before the closer ends the list.
+            if self.byte(0) == Some(b')') {
+                break;
+            }
+            targets.push(self.unset_operand()?);
+        }
+        self.skip_trivia();
+        if self.byte(0) != Some(b')') {
+            return Err(self.trouble("an `unset` this compiler cannot read yet"));
+        }
+        self.bump(1);
+        self.end_of_statement()?;
+        Ok(Stmt::Unset(targets))
+    }
+
+    /// One `unset_variable`: a plain variable, one element of one or one
+    /// property of one, which are the three arms of `zend_compile_unset`
+    /// this compiler emits. `unset($this)` is php's compile error,
+    /// raised here where php raises it, before anything is emitted.
+    fn unset_operand(&mut self) -> Result<Unset, Trouble> {
+        self.skip_trivia();
+        if self.byte(0) != Some(b'$') {
+            return Err(
+                self.trouble("an `unset` over what is no variable this compiler cannot read yet")
+            );
+        }
+        let var = self.variable()?;
+        self.skip_trivia();
+        if self.byte(0) == Some(b'[') {
+            let Expr::Dim { container, index } = self.dimension(var)? else {
+                return Err(self.trouble("a dimension that is no dimension"));
+            };
+            let Expr::Var(name) = &*container else {
+                return Err(self
+                    .trouble("an `unset` over an element of $this this compiler cannot read yet"));
+            };
+            // `zend_delayed_compile_dim` under `BP_VAR_UNSET`: the
+            // append has no element to name.
+            let Some(dim) = index else {
+                return Err(Trouble {
+                    level: Level::CompileError,
+                    what: String::from("Cannot use [] for unsetting"),
+                    line: self.line,
+                });
+            };
+            let name = name.clone();
+            self.no_chain("an element")?;
+            return Ok(Unset::Dim { var: name, dim });
+        }
+        if self.byte(0) == Some(b'-') && self.byte(1) == Some(b'>') {
+            self.bump(2);
+            self.skip_trivia();
+            let name = self.label();
+            if name.is_empty() {
+                return Err(
+                    self.trouble("a property named at run time this compiler cannot read yet")
+                );
+            }
+            self.skip_trivia();
+            if self.byte(0) == Some(b'(') {
+                return Err(self
+                    .trouble("an `unset` over what is no variable this compiler cannot read yet"));
+            }
+            self.no_chain("a property")?;
+            return Ok(Unset::Prop { object: var, name });
+        }
+        match var {
+            // `zend_compile_unset`'s `is_this_fetch` arm
+            // (`Z/Zend/zend_compile.c:5580`).
+            Expr::This => Err(Trouble {
+                level: Level::CompileError,
+                what: String::from("Cannot unset $this"),
+                line: self.line,
+            }),
+            Expr::Var(name) => Ok(Unset::Var(name)),
+            _ => {
+                Err(self
+                    .trouble("an `unset` over what is no variable this compiler cannot read yet"))
+            }
+        }
+    }
+
+    /// What may not follow the one fetch an `unset` operand is here: a
+    /// second `[` or `->` is php's chain, whose fetches under the last
+    /// are `FETCH_DIM_UNSET` and `FETCH_OBJ_UNSET`, and neither is
+    /// served yet.
+    fn no_chain(&mut self, what: &str) -> Result<(), Trouble> {
+        self.skip_trivia();
+        if self.byte(0) == Some(b'[') || (self.byte(0) == Some(b'-') && self.byte(1) == Some(b'>'))
+        {
+            return Err(self.trouble(format!(
+                "an `unset` over {what} of {what} this compiler cannot read yet"
+            )));
+        }
+        Ok(())
+    }
+
     /// `isset(` or `empty(` read, the parenthesis bumped: php's
     /// `isset_variables` and `expr` under `ZEND_AST_ISSET` and
     /// `ZEND_AST_EMPTY`, of which one plain variable is read. php's
@@ -3110,7 +3258,7 @@ fn is_auto_global(name: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        BinaryOp, CastTo, Child, Element, Expr, Level, Piece, Read, Stmt, Target, Trouble,
+        BinaryOp, CastTo, Child, Element, Expr, Level, Piece, Read, Stmt, Target, Trouble, Unset,
     };
 
     /// The reader on a thread nothing holds to a limit.
@@ -3853,6 +4001,48 @@ mod tests {
             b"<?php echo $1;".as_slice(),
             b"<?php 1 = 2;".as_slice(),
             b"<?php 1 + $a = 2;".as_slice(),
+        ] {
+            assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
+        }
+    }
+
+    #[test]
+    fn unset_reads_a_variable_an_element_and_a_property_and_refuses_a_chain() {
+        assert_eq!(
+            read(b"<?php unset($a, $b[0], $c->p,);").unwrap_or_default(),
+            vec![(
+                Stmt::Unset(vec![
+                    Unset::Var(b"a".to_vec()),
+                    Unset::Dim {
+                        var: b"b".to_vec(),
+                        dim: Child::new(Expr::Int(0))
+                    },
+                    Unset::Prop {
+                        object: Expr::Var(b"c".to_vec()),
+                        name: b"p".to_vec()
+                    },
+                ]),
+                1
+            )],
+            "one statement per `unset`, one operand per opline, php's trailing comma allowed"
+        );
+        assert_eq!(
+            read(b"<?php unset($this->p);").unwrap_or_default(),
+            vec![(
+                Stmt::Unset(vec![Unset::Prop {
+                    object: Expr::This,
+                    name: b"p".to_vec()
+                }]),
+                1
+            )],
+            "$this is a receiver, and only unsetting $this itself is php's compile error"
+        );
+        for source in [
+            b"<?php unset($a[0][1]);".as_slice(),
+            b"<?php unset($a->b->c);".as_slice(),
+            b"<?php unset($a->m());".as_slice(),
+            b"<?php unset();".as_slice(),
+            b"<?php unset($this);".as_slice(),
         ] {
             assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
         }

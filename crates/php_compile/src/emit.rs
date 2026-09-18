@@ -107,7 +107,7 @@ use php_unit::{
 
 use crate::read::{
     Arm, BinaryOp, Case, CastTo, Catch, Class, Element, Expr, Function, Magic, Method, Piece, Read,
-    Stmt, Target,
+    Stmt, Target, Unset,
 };
 use crate::{CompileError, Options, StackLimit};
 
@@ -797,6 +797,70 @@ impl Emit<'_> {
                 catches,
                 finally,
             } => self.r#try(body, catches, finally.as_ref())?,
+            Stmt::Unset(targets) => {
+                for target in targets {
+                    self.unset(target)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `zend_compile_unset` (`Z/Zend/zend_compile.c:5555`), one operand:
+    /// the fetch php compiles under `BP_VAR_UNSET` with its opcode
+    /// overwritten, which for the three arms this reads is one opline
+    /// leaving no value. A plain variable is `UNSET_CV` over the CV
+    /// (`zend_try_compile_cv`); an element is `zend_compile_dim` under
+    /// `BP_VAR_UNSET`, whose `FETCH_DIM_UNSET` becomes `UNSET_DIM`, with
+    /// `zend_handle_numeric_dim` over a constant offset; a property is
+    /// `zend_compile_prop`, whose `FETCH_OBJ_UNSET` becomes `UNSET_OBJ`,
+    /// with the name as one constant in `op2` and three cache slots in
+    /// `extended_value` (`zend_alloc_cache_slots(3)`).
+    ///
+    /// The constant offset goes through [`Self::numeric_dim`], the one
+    /// `zend_handle_numeric_dim` every dimension is held to; the second
+    /// constant php keeps beside the long for an `ArrayAccess` offset is
+    /// #438, and nothing reaches it while an object dimension is not
+    /// served.
+    fn unset(&mut self, target: &Unset) -> Result<(), CompileError> {
+        match target {
+            Unset::Var(name) => {
+                let cv = self.lookup_cv(name);
+                self.push(Opline {
+                    opcode: Opcode::UnsetCv,
+                    op1_type: OperandKind::Cv,
+                    op1: cv,
+                    ..Opline::default()
+                });
+            }
+            Unset::Dim { var, dim } => {
+                let cv = self.lookup_cv(var);
+                let dim = self.expr(dim)?;
+                let (op2_type, op2) = self.operand(Self::numeric_dim(dim));
+                self.push(Opline {
+                    opcode: Opcode::UnsetDim,
+                    op1_type: OperandKind::Cv,
+                    op1: cv,
+                    op2_type,
+                    op2,
+                    ..Opline::default()
+                });
+            }
+            Unset::Prop { object, name } => {
+                let (op1_type, op1) = self.receiver(object)?;
+                let name = self.string(name)?;
+                let name_at = self.literal(name);
+                let slots = self.cache_slots(3);
+                self.push(Opline {
+                    opcode: Opcode::UnsetObj,
+                    op1_type,
+                    op1,
+                    op2_type: OperandKind::Const,
+                    op2: name_at,
+                    extended_value: slots,
+                    ..Opline::default()
+                });
+            }
         }
         Ok(())
     }

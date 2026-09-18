@@ -3755,6 +3755,276 @@ const ARRAY_ELEMENT_REF: u32 = 1 << 0;
 const ARRAY_NOT_PACKED: u32 = 1 << 1;
 const ARRAY_SIZE_SHIFT: u32 = 2;
 
+/// `ZEND_UNSET_CV` (`Z/Zend/zend_vm_def.h:6627`), what `unset($a)`
+/// compiles to: the CV left `IS_UNDEF` and what it held given up after
+/// it (`ZVAL_UNDEF(var)` then `GC_DTOR(garbage)`, in that order, so a
+/// destructor that reads the variable finds it already unset). The
+/// variable is no less declared for it: a read of it warns as a read of
+/// one nothing ever wrote warns, and `isset` says `false`.
+///
+/// ```php
+/// $a = 1; unset($a); var_dump(isset($a)); echo $a;
+/// ```
+/// ```expect
+/// bool(false)
+///
+/// Warning: Undefined variable $a in %s on line 2
+/// ```
+///
+/// The value is given up where the opline stands, which a destructor
+/// says: php's order is the CV emptied first and the object released
+/// after.
+///
+/// ```php
+/// class C { public $n; function __construct($n) { $this->n = $n; } function __destruct() { echo "gone ", $this->n, "\n"; } }
+/// $x = new C(1); $y = $x; echo "before\n"; unset($x); echo "one name left\n"; unset($y); echo "after\n";
+/// ```
+/// ```expect
+/// before
+/// one name left
+/// gone 1
+/// after
+/// ```
+pub(crate) fn unset_cv<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    _: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let garbage = req.take_slot(frame, op.op1);
+    req.release(garbage);
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_UNSET_DIM` (`Z/Zend/zend_vm_def.h:6735`), what `unset($a[$k])`
+/// compiles to: the container read as a write fetch reads it
+/// (`GET_OP1_OBJ_ZVAL_PTR_PTR_UNDEF(BP_VAR_UNSET)`), a reference
+/// followed, and an array separated where more than one name holds it
+/// (`SEPARATE_ARRAY`, which writes the copy back where the container
+/// stands) before [`crate::ops::unset_dim`] deletes at the offset.
+/// Everything else is the ladder after the `do`: an object through its
+/// handler table's `unset_dimension`, `offsetUnset` on an `ArrayAccess`;
+/// a string php's `Error` `Cannot unset string offsets`; a `true`, a
+/// number or a resource php's `Cannot unset offset in a non-array
+/// variable`; a `false` php's deprecation for the array it would have
+/// been made into; and `null`, or a variable nothing wrote, nothing at
+/// all, with the warning a read of that variable raises.
+///
+/// ```php
+/// $a = [1, 2, 3]; $b = $a; unset($b[1]); var_dump($a, $b);
+/// ```
+/// ```expect
+/// array(3) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+///   [2]=>
+///   int(3)
+/// }
+/// array(2) {
+///   [0]=>
+///   int(1)
+///   [2]=>
+///   int(3)
+/// }
+/// ```
+///
+/// A name bound to the array reaches the same table, so the delete is
+/// seen through both.
+///
+/// ```php
+/// $a = [1, 2]; $r = &$a; unset($r[0]); var_dump($a);
+/// ```
+/// ```expect
+/// array(1) {
+///   [1]=>
+///   int(2)
+/// }
+/// ```
+///
+/// What is no array is php's `Error`, and what is `null` is nothing.
+///
+/// ```php
+/// $n = null; unset($n[0]); unset($u[0]); var_dump($n);
+/// $s = "ab";
+/// unset($s[0]);
+/// ```
+/// ```expect exit=255
+/// Warning: Undefined variable $u in %s on line 2
+/// NULL
+///
+/// Fatal error: Uncaught Error: Cannot unset string offsets in %s:4
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 4
+/// ```
+pub(crate) fn unset_dim<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let offset = exec::operand_undef(req, frame, code, op.op2_type, op.op2);
+    let Some(place) = write_place(req, frame, code, op.op1_type, op.op1) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_UNSET_DIM over a constant or a temporary, which php compiles no write over",
+        )));
+    };
+    // `if (Z_ISREF_P(container)) container = Z_REFVAL_P(container)`:
+    // followed once, since no reference holds a reference, and the
+    // separation below lands in the cell and not in the name of it.
+    let held = exec::value_of(place.read());
+    let place = match held.as_php_ref() {
+        Some(cell) => cell.heap().val_ref(),
+        None => place,
+    };
+    let held = exec::value_of(place.read());
+    let unset = if let Some(array) = held.as_array().copied() {
+        // `SEPARATE_ARRAY(container)`, the half of [`write_array`] an
+        // unset takes: this one makes no array out of what is none.
+        let separated = match req.array_separate(array.heap()) {
+            Ok(separated) => separated,
+            Err(thrown) => return threw(req, frame, &thrown),
+        };
+        if !separated.is_same(array.heap()) {
+            place.write(php_heap::Zval::array(separated));
+        }
+        let constant = op.op2_type == OperandKind::Const;
+        crate::ops::unset_dim(req, PhpArray::of(separated), &offset, constant)
+    } else {
+        // The two reads php raises a warning for stand here, after the
+        // array arm and before the rest (`ZVAL_UNDEFINED_OP1`,
+        // `ZVAL_UNDEFINED_OP2`).
+        let container = exec::operand(req, frame, code, op.op1_type, op.op1);
+        let offset = exec::operand(req, frame, code, op.op2_type, op.op2);
+        unset_container(req, &container.deref(), &offset)
+    };
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    if let Err(thrown) = unset {
+        return threw(req, frame, &thrown);
+    }
+    Ok(advance(req, frame))
+}
+
+/// `UNSET_DIM`'s ladder for a container that is no array: an object
+/// through `unset_dimension`, a string, a `true`, a number or a resource
+/// php's `Error`, a `false` php's deprecation, and `null` or a variable
+/// nothing wrote nothing at all.
+fn unset_container(req: &mut Request, container: &Value, offset: &Value) -> Result<(), Thrown> {
+    match container.as_ref() {
+        ValueRef::Object(object) => {
+            let table = req.object_handlers(object.heap());
+            table.unset_dimension(req, *object, offset)
+        }
+        ValueRef::Str(_) => Err(crate::api::raising::throw(
+            req,
+            "Error",
+            "Cannot unset string offsets",
+        )),
+        ValueRef::Bool(false) => {
+            // `zend_false_to_array_deprecated`, the one this handler
+            // raises without making the array.
+            crate::api::raising::deprecated(
+                req,
+                "Automatic conversion of false to array is deprecated",
+            );
+            if req.is_pending() {
+                return Err(Thrown::of(None));
+            }
+            Ok(())
+        }
+        ValueRef::Undef | ValueRef::Null => Ok(()),
+        _ => Err(crate::api::raising::throw(
+            req,
+            "Error",
+            "Cannot unset offset in a non-array variable",
+        )),
+    }
+}
+
+/// `ZEND_UNSET_OBJ` (`Z/Zend/zend_vm_def.h:6837`), what `unset($o->p)`
+/// compiles to: the receiver read as a write fetch reads it, a reference
+/// followed, and the object's handler table's `unset_property` over the
+/// name `op2` names, `zend_std_unset_property` at `Std`
+/// ([`Request::unset_property`]): a declared slot the scope may reach
+/// left `IS_UNDEF` and a dynamic entry removed. A receiver that is no
+/// object is nothing at all, no warning and no error, which is php's
+/// `break` out of the `do`.
+///
+/// A declared slot emptied is not a property removed: it stands in the
+/// class and reads as one nothing wrote, so `foreach` steps over it as
+/// php steps over an `IS_UNDEF` bucket.
+///
+/// ```php
+/// class C { public $p = 1; public $q = 2; }
+/// $c = new C; unset($c->p); unset($c->nope); unset($u->p);
+/// foreach ($c as $k => $v) echo "$k=$v ";
+/// ```
+/// ```expect
+/// q=2
+/// ```
+///
+/// An untyped slot emptied reads as a dynamic name that was never
+/// written does, so `var_dump` prints neither it nor a placeholder for
+/// it.
+///
+/// ```php
+/// class C { public $p = 1; public $q = 2; }
+/// $c = new C; unset($c->p); var_dump($c);
+/// ```
+/// ```expect
+/// object(C)#1 (1) {
+///   ["q"]=>
+///   int(2)
+/// }
+/// ```
+///
+/// A dynamic property is removed from the table, and one a class did not
+/// declare is gone from `var_dump` with it.
+///
+/// ```php
+/// $o = new stdClass; $o->a = 1; $o->b = 2; unset($o->a); var_dump($o);
+/// ```
+/// ```expect
+/// object(stdClass)#1 (1) {
+///   ["b"]=>
+///   int(2)
+/// }
+/// ```
+pub(crate) fn unset_obj<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let name = match op.op2_type {
+        OperandKind::Const => exec::constant(code, ConstIdx(op.op2)),
+        _ => {
+            return Err(Fatal::Error(String::from(
+                "InternalError: ZEND_UNSET_OBJ over a property named at run time",
+            )));
+        }
+    };
+    let container =
+        exec::container(req, frame, code, op.op1_type, op.op1, "ZEND_UNSET_OBJ")?.deref();
+    let unset = match container.as_object().copied() {
+        Some(object) => {
+            let bytes = name.as_str_bytes().unwrap_or_default();
+            let table = req.object_handlers(object.heap());
+            table.unset_property(req, object, bytes)
+        }
+        None => Ok(()),
+    };
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    if let Err(thrown) = unset {
+        return threw(req, frame, &thrown);
+    }
+    Ok(advance(req, frame))
+}
+
 /// `ZEND_INIT_ARRAY` (`Z/Zend/zend_vm_def.h:6473`), the first opline of
 /// an array expression `zend_try_ct_eval_array` left to the request:
 /// `zend_new_array` sized for the count `extended_value` carries above
