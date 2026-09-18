@@ -264,6 +264,15 @@ fn hold_lock(
             list(&diff.stale, 8)
         ));
     }
+    // The one order a lock's lines stand in (`lock`, #403), read off the
+    // committed file: what `--write` would rewrite even where every line
+    // is the right one, which is the churn a write taken for another seam
+    // carried into a commit.
+    if let Some(disorder) = committed.disorder() {
+        problems.push(format!(
+            "{shown} is not in the order `xtask api-check --write` renders: {disorder}"
+        ));
+    }
     Ok(problems)
 }
 

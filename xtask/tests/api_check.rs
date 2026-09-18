@@ -94,6 +94,35 @@ fn a_public_item_without_a_lock_line_fails_naming_the_lock_file() {
     assert_eq!(failures(&readings).len(), 1);
 }
 
+/// One order for a lock's lines (#403): `--write` renders them ascending
+/// and a check that read the set alone accepted a file it would rewrite,
+/// which is how `crates/php_heap/heap.lock` carried `Arr::live_from`
+/// before `Arr::len` into every commit whose write was taken for another
+/// seam. The `lock-order` fixture has a line for every item and the two
+/// lines the wrong way round, so nothing is missing and nothing is stale;
+/// what fails is the order, and the reading names both lines. The
+/// positive control is the `clean` fixture's own `heap.lock`, held by
+/// `the_clean_fixture_passes_every_rule`.
+#[test]
+fn a_lock_in_an_order_write_would_rewrite_fails_naming_the_line_and_its_place() {
+    let readings = readings("lock-order");
+    let heap = of(&readings, "heap");
+    assert_eq!(heap.status, Status::Fail, "{}", heap.message);
+    assert!(
+        heap.message
+            .contains("crates/php_heap/heap.lock is not in the order")
+            && heap.message.contains("alloc stands where Arena is written"),
+        "{}",
+        heap.message
+    );
+    assert!(
+        !heap.message.contains("have no line") && !heap.message.contains("name no"),
+        "every item has its line: {}",
+        heap.message
+    );
+    assert_eq!(failures(&readings).len(), 1);
+}
+
 /// The `ceiling` fixture is one item past `[budget] api_items` whatever the
 /// tracked manifest carries (#338): the fixture directory holds the
 /// crate's `Cargo.toml`, and the items and their lock lines are laid down
