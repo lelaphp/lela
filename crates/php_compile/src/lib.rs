@@ -1218,11 +1218,11 @@ mod tests {
         assert_eq!(
             unit.main.safepoints.as_ref(),
             &[OplineIdx(0), OplineIdx(4), OplineIdx(5)],
-            "the entry, the back-edge, the return"
+            "the entry, the header the back-edge lands on, which is itself, the return"
         );
         assert_eq!(
             unit.main.oplines[4].out, 1,
-            "the back-edge's safepoint number"
+            "the back-edge carries the header's number"
         );
         assert_eq!(unit.main.oplines[5].out, 2, "the return's");
     }
@@ -1298,6 +1298,62 @@ mod tests {
         assert_eq!(
             unit.main.oplines[4].out, 2,
             "the comparison's, which the JMPNZ tests"
+        );
+        assert_eq!(
+            unit.main.safepoints.as_ref(),
+            &[OplineIdx(0), OplineIdx(2), OplineIdx(6)],
+            "the entry, the body's first opline as the header, the return"
+        );
+        assert_eq!(
+            unit.main.oplines[5].out, 1,
+            "the JMPNZ carries the header's number, not its own opline's"
+        );
+    }
+
+    /// One rule for `OpArray.safepoints` whatever the loop (#353): the
+    /// entry a backward jump names holds the opline it lands on. A
+    /// `while`'s `JMPNZ` lands on the body's first opline and a
+    /// `foreach`'s `JMP`, and the `continue` inside it, land on the
+    /// `FE_FETCH_R`; each entry is that header and never the jump.
+    #[test]
+    fn a_while_and_a_foreach_with_a_continue_number_their_headers_under_one_rule() {
+        let (unit, _strings) = unit_and_strings(b"<?php while ($a) { echo 1; }");
+        assert_eq!(
+            unit.main.oplines[2].opcode,
+            Opcode::Jmpnz,
+            "the condition is the back-edge"
+        );
+        assert_eq!(
+            unit.main.oplines[2].op2, 1,
+            "landing on the body's first opline"
+        );
+        assert_eq!(
+            unit.main.safepoints.as_ref(),
+            &[OplineIdx(0), OplineIdx(1), OplineIdx(3)],
+            "the entry, the header at the ECHO, the return"
+        );
+        assert_eq!(
+            unit.main.oplines[2].out, 1,
+            "the JMPNZ carries the header's number"
+        );
+
+        let (unit, _strings) = unit_and_strings(b"<?php foreach ($a as $v) { continue; }");
+        assert_eq!(
+            unit.main.safepoints.as_ref(),
+            &[OplineIdx(0), OplineIdx(1), OplineIdx(5)],
+            "the entry, the header at the FE_FETCH_R, the return"
+        );
+        let back_edges: Vec<(Opcode, u32, u32)> = [2, 3]
+            .iter()
+            .map(|&at| {
+                let op = unit.main.oplines[at];
+                (op.opcode, op.op1, op.out)
+            })
+            .collect();
+        assert_eq!(
+            back_edges,
+            vec![(Opcode::Jmp, 1, 1), (Opcode::Jmp, 1, 1)],
+            "the continue and the loop's own JMP land on the header and carry its one number"
         );
     }
 

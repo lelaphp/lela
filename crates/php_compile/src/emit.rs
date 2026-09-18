@@ -351,6 +351,7 @@ pub(crate) fn unit(
     }
     emit.final_return();
     emit.resolve_breaks();
+    headers_numbered(&emit.oplines, &emit.safepoints)?;
     swap_commutative(&mut emit.oplines);
     let live_ranges = crate::live::live_ranges(&mut emit.oplines, emit.temporaries);
     let num_cvs = u32::try_from(emit.vars.len()).unwrap_or(u32::MAX);
@@ -373,6 +374,46 @@ pub(crate) fn unit(
         classes: emit.classes,
         ..Unit::default()
     })
+}
+
+/// Design §5.7's assertion over one op array, before it is a unit:
+/// every backward jump other than `FAST_RET`, a jump whose target is at
+/// or before itself, is an opcode with a `safepoint` column, and the
+/// entry of `safepoints` its `out` names is its target. The failure is
+/// this compiler's and never php's, so it is an `InternalError` fatal
+/// with the opline in its message (design §10), not a panic.
+fn headers_numbered(oplines: &[Opline], safepoints: &[OplineIdx]) -> Result<(), CompileError> {
+    for (at, op) in oplines.iter().enumerate() {
+        if op.opcode == Opcode::FastRet {
+            continue;
+        }
+        let Some(target) = op.jump_target() else {
+            continue;
+        };
+        if target.0 as usize > at {
+            continue;
+        }
+        let refused = |what: &str| CompileError {
+            level: Level::Error,
+            message: format!(
+                "InternalError: {} at opline {at} jumps back to {:04} {what}",
+                op.opcode.name().trim_start_matches("ZEND_"),
+                target.0
+            ),
+            line: op.lineno,
+            raised: Vec::new(),
+        };
+        if !op.opcode.is_safepoint_site() {
+            return Err(refused("with no safepoint column for its number"));
+        }
+        if safepoints.get(op.out as usize) != Some(&target) {
+            return Err(refused(&format!(
+                "carrying safepoint {}, which is not that header",
+                op.out
+            )));
+        }
+    }
+    Ok(())
 }
 
 impl Emit<'_> {
@@ -1782,12 +1823,18 @@ impl Emit<'_> {
 
     /// `zend_emit_cond_jump(ZEND_JMPNZ, ...)`: the condition tested and
     /// the jump to `target` taken when it holds, the target in `op2`. A
-    /// target at or before the opline is a back-edge, and carries its
-    /// safepoint number as [`Self::final_return`]'s carries its own.
+    /// target at or before the opline is a back-edge, and the opline
+    /// carries the number of its target, the loop's header, numbered
+    /// here since a `for` and a `while` have this one backward jump
+    /// (design §5.7: headers are numbered, not back-edges).
     fn emit_cond_jump(&mut self, cond: Where, target: u32) {
         let (op1_type, op1) = self.operand(cond);
         let at = self.next();
-        let out = if target <= at { self.safepoint(at) } else { 0 };
+        let out = if target <= at {
+            self.safepoint(target)
+        } else {
+            0
+        };
         self.push(Opline {
             opcode: Opcode::Jmpnz,
             op1_type,
@@ -4102,5 +4149,63 @@ mod tests {
             "outside the namespace M is the global one"
         );
         assert!(emit.known_method(b"A\\M", b"f"));
+    }
+
+    /// Design §5.7's assertion, on an op array laid down by hand (#353):
+    /// a backward `JMP` whose `out` names no entry of `safepoints` is
+    /// refused, as is one whose entry is another opline; a `FAST_RET`
+    /// to an earlier index and a forward jump are not read; a backward
+    /// jump whose entry is its target passes.
+    #[test]
+    fn a_backward_jump_whose_number_names_no_header_is_refused() {
+        let jump = |opcode: Opcode, op1: u32, out: u32| Opline {
+            opcode,
+            op1,
+            out,
+            ..Opline::default()
+        };
+        let entry = [OplineIdx(0), OplineIdx(1)];
+        let refused = |oplines: &[Opline]| {
+            headers_numbered(oplines, &entry)
+                .err()
+                .map(|refused| (refused.level, refused.message))
+        };
+        assert_eq!(
+            refused(&[jump(Opcode::Nop, 0, 0), jump(Opcode::Jmp, 0, 2)]),
+            Some((
+                Level::Error,
+                "InternalError: JMP at opline 1 jumps back to 0000 carrying safepoint 2, which is not that header"
+                    .to_string()
+            )),
+            "a JMP back to 0000 numbered 2, past the table"
+        );
+        assert_eq!(
+            refused(&[jump(Opcode::Nop, 0, 0), jump(Opcode::Jmp, 0, 1)]),
+            Some((
+                Level::Error,
+                "InternalError: JMP at opline 1 jumps back to 0000 carrying safepoint 1, which is not that header"
+                    .to_string()
+            )),
+            "a JMP back to 0000 numbered 1, whose entry is 0001"
+        );
+        assert_eq!(
+            refused(&[jump(Opcode::Nop, 0, 0), jump(Opcode::Jmp, 0, 0)]),
+            None,
+            "a JMP back to 0000 numbered 0, whose entry is 0000"
+        );
+        assert_eq!(
+            refused(&[jump(Opcode::Jmp, 1, 0), jump(Opcode::FastRet, 0, 0)]),
+            None,
+            "a forward JMP and a FAST_RET are no back-edges"
+        );
+        assert_eq!(
+            refused(&[jump(Opcode::Nop, 0, 0), jump(Opcode::JmpNull, 0, 0)]),
+            Some((
+                Level::Error,
+                "InternalError: JMP_NULL at opline 1 jumps back to 0000 with no safepoint column for its number"
+                    .to_string()
+            )),
+            "JMP_NULL has no safepoint column"
+        );
     }
 }

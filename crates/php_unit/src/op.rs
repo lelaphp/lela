@@ -181,6 +181,33 @@ impl Default for Opline {
     }
 }
 
+impl Opline {
+    /// The opline the jump lands on, read from the one field whose shape
+    /// is `JMP_ADDR` in `zend_vm_opcodes_flags`: `op1` for a `JMP`, `op2`
+    /// for a conditional jump, a `FE_RESET_*` or a `CATCH`, and
+    /// `extended_value` for a `FE_FETCH_*` or a `SWITCH_*`'s default.
+    /// `None` for an opline that jumps nowhere. A `JMP_ADDR` operand
+    /// that holds a zval, a `CATCH` with no next catch, is no target.
+    #[must_use]
+    pub fn jump_target(&self) -> Option<OplineIdx> {
+        use crate::dump::{LAST_CATCH, ext, op};
+        let flags = self.opcode.flags();
+        if flags & op::MASK == op::JMP_ADDR && self.op1_type == OperandKind::Unused {
+            return Some(OplineIdx(self.op1));
+        }
+        if (flags >> 8) & op::MASK == op::JMP_ADDR && self.op2_type == OperandKind::Unused {
+            if self.opcode == Opcode::Catch && self.extended_value & LAST_CATCH != 0 {
+                return None;
+            }
+            return Some(OplineIdx(self.op2));
+        }
+        if flags & ext::MASK == ext::JMP_ADDR {
+            return Some(OplineIdx(self.extended_value));
+        }
+        None
+    }
+}
+
 /// One `try`/`catch`/`finally` range of an op array (`zend_try_catch_element`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TryCatch {
@@ -225,7 +252,12 @@ pub struct LiveRange {
 
 /// One op array with its tables (design §5.7). `safepoints` is the entry,
 /// the loop headers and the returns, the entry number zero; the site
-/// opcodes carry their number in `out`, php's `result`.
+/// opcodes carry their number in `out`, php's `result`. One rule for
+/// every loop: the entry a backward jump's number names holds the
+/// opline the jump lands on, its header, the `FE_FETCH_*` of a
+/// `foreach` and the body's first opline of a `for` or a `while`, never
+/// the jump's own opline; two backward jumps to one header carry one
+/// number. A return's entry holds the `RETURN*` itself.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct OpArray {
     pub oplines: Box<[Opline]>,

@@ -18,6 +18,7 @@ OpArray
 Opcode
 OperandKind
 Opline
+Opline::jump_target
 OplineIdx
 TryCatch
 Unit

@@ -53,7 +53,7 @@ impl Opcode {
 
 /// `ZEND_VM_OP_MASK` and its values: the shape of an operand field that
 /// holds no zval.
-mod op {
+pub(crate) mod op {
     pub const MASK: u32 = 0x00f0;
     pub const NUM: u32 = 0x0010;
     pub const JMP_ADDR: u32 = 0x0020;
@@ -68,7 +68,7 @@ mod op {
 
 /// `ZEND_VM_EXT_*`: the seven bits read one by one and, under
 /// `ZEND_VM_EXT_MASK`, the shape of `extended_value`.
-mod ext {
+pub(crate) mod ext {
     pub const VAR_FETCH: u32 = 0x0001_0000;
     pub const ISSET: u32 = 0x0002_0000;
     pub const ARRAY_INIT: u32 = 0x0008_0000;
@@ -86,7 +86,7 @@ mod ext {
 }
 
 /// `ZEND_LAST_CATCH`, on a `CATCH`'s `extended_value`.
-const LAST_CATCH: u32 = 1;
+pub(crate) const LAST_CATCH: u32 = 1;
 /// `ZEND_FREE_ON_RETURN`, on a `FREE`'s `extended_value`.
 const FREE_ON_RETURN: u32 = 1;
 /// `IS_CONSTANT_UNQUALIFIED_IN_NAMESPACE`, on a `FETCH_CONSTANT`'s `op1`.
