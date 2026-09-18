@@ -363,6 +363,7 @@ values::PhpObject
 values::PhpObject::as_value
 values::PhpObject::class
 values::PhpObject::closure
+values::PhpObject::closure_bound
 values::PhpObject::entries
 values::PhpObject::index
 values::PhpObject::instance_of

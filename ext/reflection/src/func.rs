@@ -7,17 +7,18 @@
 //!
 //! What stands beside `stub::unbuilt` still: `isGenerator` and
 //! `getStaticVariables`, whose facts the declaration model has no field
-//! for (#420); `getEndLine`, which is #376's; the four closure
-//! accessors and `getClosure`, which wait on a closure's declaration
-//! reaching an extension (#415); `invoke` and `invokeArgs`, which wait
-//! on `api::call::call`; `setAccessible` and `ReflectionFunction`'s
-//! `isDisabled`, which the stub marks `#[\Deprecated]` and the engine
-//! does not raise the deprecation of yet (#412).
+//! for (#420); `getEndLine`, which is #376's; `getClosureCalledClass`,
+//! whose `called_scope` the payload does not carry, and `getClosure`,
+//! which waits on `api::call::closure_from_callable`; `invoke` and
+//! `invokeArgs`, which wait on `api::call::call`; `setAccessible` and
+//! `ReflectionFunction`'s `isDisabled`, which the stub marks
+//! `#[\Deprecated]` and the engine does not raise the deprecation of
+//! yet (#412).
 
 use php_ext::decl::{FunctionDecl, MethodDecl, Visibility};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, PhpArray, Value};
+use php_ext::values::{ClassId, Key, PhpArray, Value};
 
 use super::signature::{FunctionRef, this_function, type_factory};
 use super::{
@@ -470,6 +471,9 @@ fn function_extension_name(req: &mut Request) -> Result<Option<String>, Thrown> 
         return Ok(None);
     }
     match function {
+        // A closure is a user function, which `is_internal` answered
+        // for above, so nothing reaches here.
+        FunctionRef::Closure(_) => Ok(None),
         FunctionRef::Method(class, _) => Ok(req.class_extension_name(class).map(str::to_owned)),
         FunctionRef::Global(name) => {
             let found = super::lookup_function(req, &name);
@@ -481,35 +485,151 @@ fn function_extension_name(req: &mut Request) -> Result<Option<String>, Thrown> 
     }
 }
 
-/// `ReflectionFunctionAbstract::isClosure()`: `ZEND_ACC_CLOSURE`. No
-/// reflector here holds a closure yet (#415), so the answer is php's
-/// for every function that is not one.
+/// `ReflectionFunctionAbstract::isClosure()`: `ZEND_ACC_CLOSURE`,
+/// which a reflector answers yes to when it keeps a closure, php's
+/// `intern->obj`.
 ///
 /// ```php
 /// var_dump((new ReflectionFunction('json_encode'))->isClosure());
+/// var_dump((new ReflectionFunction(function () {}))->isClosure());
 /// ```
 /// ```expect
 /// bool(false)
+/// bool(true)
 /// ```
 pub(super) fn reflection_function_is_closure(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
-    this_function(req)?;
-    Ok(Value::bool(false))
+    let (function, _) = this_function(req)?;
+    Ok(Value::bool(matches!(function, FunctionRef::Closure(_))))
 }
 
 /// `ReflectionFunction::isAnonymous()`: `ZEND_ACC_CLOSURE` again, on
-/// the subclass; the same answer and the same wait (#415).
+/// the subclass.
 ///
 /// ```php
 /// var_dump((new ReflectionFunction('json_encode'))->isAnonymous());
+/// var_dump((new ReflectionFunction(fn () => 1))->isAnonymous());
 /// ```
 /// ```expect
 /// bool(false)
+/// bool(true)
 /// ```
 pub(super) fn reflection_function_is_anonymous(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
-    this_function(req)?;
-    Ok(Value::bool(false))
+    let (function, _) = this_function(req)?;
+    Ok(Value::bool(matches!(function, FunctionRef::Closure(_))))
+}
+
+/// `ReflectionFunctionAbstract::getClosureThis()`: the receiver the
+/// closure was bound to, `zend_get_closure_this_ptr` over
+/// `intern->obj`, one more owner for the caller; `null` for a closure
+/// with none and for a reflector that keeps no closure.
+///
+/// ```php
+/// class C { public $p = 7; function m() { return function () { return $this->p; }; } }
+/// $bound = (new C)->m();
+/// var_dump((new ReflectionFunction($bound))->getClosureThis());
+/// var_dump((new ReflectionFunction(function () {}))->getClosureThis());
+/// var_dump((new ReflectionFunction('strlen'))->getClosureThis());
+/// ```
+/// ```expect
+/// object(C)#1 (1) {
+///   ["p"]=>
+///   int(7)
+/// }
+/// NULL
+/// NULL
+/// ```
+pub(super) fn reflection_function_get_closure_this(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let (function, _) = this_function(req)?;
+    let FunctionRef::Closure(closure) = function else {
+        return Ok(Value::null());
+    };
+    let Some(this) = closure.closure(req).and_then(|info| info.this) else {
+        return Ok(Value::null());
+    };
+    let value = this.as_value();
+    req.addref(&value);
+    Ok(value)
+}
+
+/// `ReflectionFunctionAbstract::getClosureScopeClass()`:
+/// `closure_func->common.scope` as a `ReflectionClass`, which is the
+/// class whose body the closure was written in; `null` for one written
+/// outside a class and for a reflector that keeps no closure.
+///
+/// ```php
+/// class C { function m() { return function () { return 1; }; } }
+/// $in = (new C)->m();
+/// var_dump((new ReflectionFunction($in))->getClosureScopeClass()->getName());
+/// var_dump((new ReflectionFunction(function () {}))->getClosureScopeClass());
+/// var_dump((new ReflectionFunction('strlen'))->getClosureScopeClass());
+/// ```
+/// ```expect
+/// string(1) "C"
+/// NULL
+/// NULL
+/// ```
+pub(super) fn reflection_function_get_closure_scope_class(
+    req: &mut Request,
+) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let (function, _) = this_function(req)?;
+    let FunctionRef::Closure(closure) = function else {
+        return Ok(Value::null());
+    };
+    let Some(scope) = closure.closure(req).and_then(|info| info.scope) else {
+        return Ok(Value::null());
+    };
+    let object = reflection_class_factory(req, scope)?;
+    Ok(object.as_value())
+}
+
+/// `ReflectionFunctionAbstract::getClosureUsedVariables()`: what the
+/// closure bound, by name, in the order the table holds them, which is
+/// [`php_ext::values::PhpObject::closure_bound`]; the empty array for
+/// a reflector that keeps no closure. An arrow function's captures are
+/// in it as a `use` list's are, since both are one table.
+///
+/// A name bound by reference stands for the cell, as php's bucket
+/// does, and php's `var_dump` prints such an element with a `&` before
+/// its value; this engine's dereferences first and prints no `&`
+/// (#449), so what a witness here can pin is the binding by value.
+///
+/// ```php
+/// $b = 1;
+/// $f = function () use ($b) { return $b; };
+/// var_dump((new ReflectionFunction($f))->getClosureUsedVariables());
+/// var_dump((new ReflectionFunction(fn () => $b))->getClosureUsedVariables());
+/// var_dump((new ReflectionFunction('strlen'))->getClosureUsedVariables());
+/// ```
+/// ```expect
+/// array(1) {
+///   ["b"]=>
+///   int(1)
+/// }
+/// array(1) {
+///   ["b"]=>
+///   int(1)
+/// }
+/// array(0) {
+/// }
+/// ```
+pub(super) fn reflection_function_get_closure_used_variables(
+    req: &mut Request,
+) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let (function, _) = this_function(req)?;
+    let mut used = PhpArray::new(req)?;
+    let FunctionRef::Closure(closure) = function else {
+        return Ok(Value::array(used));
+    };
+    for (name, value) in closure.closure_bound(req)? {
+        req.addref(&value);
+        used.set(req, Key::Str(name), value)?;
+    }
+    Ok(Value::array(used))
 }
 
 /// `ReflectionFunctionAbstract::getAttributes(?string $name = null,

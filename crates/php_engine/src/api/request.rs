@@ -1483,6 +1483,29 @@ impl Request {
         rows
     }
 
+    /// `ZEND_MAP_PTR_GET(closure->func.op_array.static_variables_ptr)`
+    /// beside the names the op array carries: what the closure bound,
+    /// name and value, in the order the table took them, with a slot
+    /// nothing filled left out. Empty for an object that is no closure
+    /// and for a closure whose op array binds nothing.
+    pub(crate) fn closure_bound(&self, object: PhpObject) -> Vec<(Vec<u8>, Value)> {
+        let Some(closure) = object.closure(self) else {
+            return Vec::new();
+        };
+        let Some(user) = self.user_function(closure.function) else {
+            return Vec::new();
+        };
+        let Some(code) = exec::body_of(&user.unit, user.body) else {
+            return Vec::new();
+        };
+        code.bound_vars
+            .iter()
+            .zip(closure.bound.iter())
+            .filter(|(_, value)| value.tag() != TypeTag::Undef)
+            .map(|(name, value)| (name.0.to_vec(), *value))
+            .collect()
+    }
+
     /// `func->common.scope` of a closure's own copy of its function: the
     /// class the closure was written in, which a backtrace names before
     /// the closure's own name. None where the call stands on no closure

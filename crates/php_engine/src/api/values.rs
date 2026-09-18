@@ -620,6 +620,24 @@ impl PhpObject {
         self.native::<ClosureInfo>(req)
     }
 
+    /// The variables a closure bound, by the names its declaration
+    /// wrote, in the order the table holds them, which is what
+    /// `ReflectionFunctionAbstract::getClosureUsedVariables` walks the
+    /// `BIND_STATIC` prologue for: a name whose slot nothing filled is
+    /// left out, php's `Z_ISUNDEF(bucket->val)`, and a name bound by
+    /// reference stands for the cell, as php's bucket holds one. Empty
+    /// for an object that is no closure and for a closure that bound
+    /// nothing. The values are views, no owner taken; the `Err` is the
+    /// memory limit refusing a name.
+    pub fn closure_bound(&self, req: &mut Request) -> Result<Vec<(PhpString, Value)>, Thrown> {
+        let bound = req.closure_bound(*self);
+        let mut out = Vec::with_capacity(bound.len());
+        for (name, value) in bound {
+            out.push((PhpString::new(req, &name)?, value));
+        }
+        Ok(out)
+    }
+
     /// The declared and dynamic properties in declaration order,
     /// `get_object_vars` from inside the class: views, no owner taken.
     /// A declared name is the interned string php's is, so the `Err` is

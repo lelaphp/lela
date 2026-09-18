@@ -137,6 +137,8 @@ const REFLECTORS: &[&[u8]] = &[
     b"ReflectionObject",
     b"ReflectionMethod",
     b"ReflectionProperty",
+    b"ReflectionFunction",
+    b"ReflectionParameter",
 ];
 
 /// php's `reflection_object` beside the `name` and `class` properties
@@ -206,6 +208,28 @@ fn keep(req: &mut Request, this: PhpObject, ce: ClassId, object: Option<PhpObjec
     if let Some(released) = released {
         req.release(released.as_value());
     }
+}
+
+/// `intern->obj` alone, as `ReflectionFunction::__construct` writes it
+/// for a closure (`php_reflection.c`'s `is_closure` arm): the object
+/// one more owner, the class left as it stands, since a closure names
+/// none.
+fn keep_closure(req: &mut Request, this: PhpObject, object: PhpObject) {
+    req.addref(&object.as_value());
+    let released = match this.native_mut::<Reflected>(req) {
+        Some(reflected) => reflected.object.replace(object),
+        None => Some(object),
+    };
+    if let Some(released) = released {
+        req.release(released.as_value());
+    }
+}
+
+/// `intern->obj` where it holds a `Closure`, which is what a reflector
+/// over a closure keeps: none for every other reflector.
+fn kept_closure(req: &Request, this: PhpObject) -> Option<PhpObject> {
+    let kept = kept_object(req, this)?;
+    kept.closure(req).map(|_| kept)
 }
 
 /// `intern->ce`, the class the reflector was asked about; `None` for a
@@ -1092,8 +1116,42 @@ fn reflection_function_is_deprecated(req: &mut Request) -> Result<Value, Thrown>
 /// `ReflectionFunction::__construct(Closure|string $function)`: the
 /// function under the lowered name, a leading `\` dropped, its declared
 /// name kept as `$name`; a name the tables have not is php's
-/// `ReflectionException`, the name as given. A `Closure` is not a
-/// class here yet, so an object is the type error.
+/// `ReflectionException`, the name as given. A `Closure` is
+/// `zend_get_closure_method_def` over the object, which the reflector
+/// keeps as php keeps `intern->obj`, and `$name` is the
+/// `{closure:file:line}` the compiler built for it; an object of any
+/// other class is the type error.
+///
+/// ```php
+/// $r = new ReflectionFunction(function ($a, $b = 1) {});
+/// var_dump($r->isClosure(), $r->getNumberOfParameters(), $r->getNumberOfRequiredParameters(), $r->isUserDefined());
+/// echo $r, "\n";
+/// ```
+/// ```expect
+/// bool(true)
+/// int(2)
+/// int(1)
+/// bool(true)
+/// Closure [ <user> function {closure:%s:2} ] {
+///   @@ %s 2 - 2
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> $a ]
+///     Parameter #1 [ <optional> $b = 1 ]
+///   }
+/// }
+/// ```
+///
+/// ```php
+/// new ReflectionFunction(new stdClass);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: ReflectionFunction::__construct(): Argument #1 ($function) must be of type Closure|string, stdClass given in %s:2
+/// Stack trace:
+/// #0 %s(2): ReflectionFunction->__construct(Object(stdClass))
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
 ///
 /// ```php
 /// new ReflectionFunction('nope');
@@ -1109,6 +1167,17 @@ fn reflection_function_construct(req: &mut Request) -> Result<Value, Thrown> {
     if let Some(given) = req.argument(1)
         && let ValueRef::Object(object) = given.deref().as_ref()
     {
+        let object = *object;
+        // php's `IS_OBJECT` arm: `zend_get_closure_method_def` and
+        // `intern->obj` holding the closure, `$name` the declaration's
+        // own, which is the `{closure:…}` the compiler built.
+        if let Some(decl) = signature::closure_decl(req, object) {
+            if let Some(this) = req.this() {
+                set_name(req, this, &decl.name.0)?;
+                keep_closure(req, this, object);
+            }
+            return Ok(Value::null());
+        }
         let class = req.class_decl(object.class()).map_or_else(
             || String::from("object"),
             |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
@@ -1157,7 +1226,13 @@ fn reflection_function_construct(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// ```
 fn reflection_function_to_string(req: &mut Request) -> Result<Value, Thrown> {
-    let (_, name) = this_name(req, "ReflectionFunction")?;
+    let (this, name) = this_name(req, "ReflectionFunction")?;
+    if let Some(closure) = kept_closure(req, this)
+        && let Some(function) = closure.closure(req).map(|info| info.function)
+    {
+        let text = function_string(req, function, "");
+        return Ok(Value::string(PhpString::new(req, text.as_bytes())?));
+    }
     let Some(function) = lookup_function(req, &name) else {
         return Err(throw(
             req,
@@ -3839,8 +3914,16 @@ fn function_header(
         out.push('\n');
     }
     out.push_str(indent);
+    // `fptr->common.fn_flags & ZEND_ACC_CLOSURE ? "Closure [ " :
+    // (fptr->common.scope ? "Method [ " : "Function [ ")`
+    // (`Z/ext/reflection/php_reflection.c:905`). The flag is the
+    // declaration's name here: `zend_begin_func_decl` names every
+    // closure `{closure:…}` and no other name php compiles can be
+    // written that way.
     out.push_str(if method.is_some() {
         "Method [ "
+    } else if decl.name.0.starts_with(b"{closure:") {
+        "Closure [ "
     } else {
         "Function [ "
     });

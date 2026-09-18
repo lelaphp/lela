@@ -4676,7 +4676,7 @@ fn reflection_function_abstract() -> Declared {
             ),
             (
                 tentative(method(b"getClosureThis", &[], Some(nullable(Type::Object)))),
-                unbuilt as Entry,
+                super::func::reflection_function_get_closure_this as Entry,
             ),
             (
                 tentative(method(
@@ -4684,7 +4684,7 @@ fn reflection_function_abstract() -> Declared {
                     &[],
                     Some(nullable(named(b"ReflectionClass"))),
                 )),
-                unbuilt as Entry,
+                super::func::reflection_function_get_closure_scope_class as Entry,
             ),
             (
                 tentative(method(
@@ -4696,7 +4696,7 @@ fn reflection_function_abstract() -> Declared {
             ),
             (
                 method(b"getClosureUsedVariables", &[], Some(Type::Array)),
-                unbuilt as Entry,
+                super::func::reflection_function_get_closure_used_variables as Entry,
             ),
             (
                 tentative(method(

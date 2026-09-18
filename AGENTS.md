@@ -83,7 +83,7 @@ third-engine-design.md
 | heap | heap.lock | 211 |  | pass |
 | unit | unit.lock | 47 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 426 | 480 | pass |
+| api | api.lock | 427 | 480 | pass |
 | sapi | sapi.lock | 6 |  | pass |
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 317 |  | pass |

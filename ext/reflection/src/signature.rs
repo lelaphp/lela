@@ -31,11 +31,14 @@ use super::{
 
 /// The function a `ReflectionParameter` reflects, `param->fptr` as a
 /// name this engine can look the declaration up with again: a global
-/// function, or a method with the class that declared it.
+/// function, a method with the class that declared it, or a closure,
+/// whose `{closure:…}` name no table holds, so what stands for it is
+/// the object itself, as php's `intern->obj` does.
 #[derive(Clone)]
 pub(super) enum FunctionRef {
     Global(Vec<u8>),
     Method(ClassId, Vec<u8>),
+    Closure(PhpObject),
 }
 
 /// php's `parameter_reference`: the function, the offset in its
@@ -343,6 +346,7 @@ pub(super) fn reflection_union_type_get_types(req: &mut Request) -> Result<Value
 /// again as every reflector here looks its subject up again.
 fn function_decl_of(req: &mut Request, function: &FunctionRef) -> Option<FunctionDecl> {
     match function {
+        FunctionRef::Closure(object) => closure_decl(req, *object),
         FunctionRef::Global(name) => {
             let found = lookup_function(req, name)?;
             req.function_decl(found).cloned()
@@ -358,11 +362,24 @@ fn function_decl_of(req: &mut Request, function: &FunctionRef) -> Option<Functio
 }
 
 /// `param->fptr->common.scope`.
-fn scope_of(function: &FunctionRef) -> Option<ClassId> {
+fn scope_of(req: &Request, function: &FunctionRef) -> Option<ClassId> {
     match function {
         FunctionRef::Global(_) => None,
         FunctionRef::Method(class, _) => Some(*class),
+        // A closure declared in a method carries that class as its
+        // scope, and `zend_get_closure_method_def` hands the
+        // declaration back whatever the scope is, so the scope a
+        // parameter's `declaringClass` reads is the closure's own.
+        FunctionRef::Closure(object) => object.closure(req)?.scope,
     }
+}
+
+/// `zend_get_closure_method_def`: the declaration behind a `Closure`,
+/// which is the op array the `DECLARE_LAMBDA_FUNCTION` that made it
+/// named; none for an object that is no closure.
+pub(super) fn closure_decl(req: &mut Request, object: PhpObject) -> Option<FunctionDecl> {
+    let function = object.closure(req)?.function;
+    req.function_decl(function).cloned()
 }
 
 /// One `ReflectionParameter` over `offset` of `function`, php's
@@ -427,8 +444,26 @@ fn this_parameter(req: &mut Request) -> Result<(ParameterRef, FunctionDecl, Para
 /// parameter the stub names: the function found as php finds it, a string
 /// being `zend_fetch_function` with a leading `\` dropped and an array
 /// being `array($class, $method)`, then the parameter by name or by
-/// offset. A `Closure` needs the closure's declaration, which no seam
-/// hands an extension yet (#415), so an object is the argument error.
+/// offset. A `Closure` is `zend_get_closure_method_def` over the
+/// object, which the reflector keeps as php keeps `intern->obj`, so
+/// the parameter it reflects is the closure's own; an object of any
+/// other class is the argument error.
+///
+/// ```php
+/// $p = new ReflectionParameter(function ($a, int $b = 2) {}, 0);
+/// var_dump($p->getName(), $p->getPosition(), $p->isOptional());
+/// $q = new ReflectionParameter(fn (int $n) => $n, 'n');
+/// var_dump($q->getName(), $q->getType()->getName());
+/// echo $p, "\n";
+/// ```
+/// ```expect
+/// string(1) "a"
+/// int(0)
+/// bool(false)
+/// string(1) "n"
+/// string(3) "int"
+/// Parameter #0 [ <required> $a ]
+/// ```
 ///
 /// ```php
 /// $p = new ReflectionParameter('str_repeat', 1); var_dump($p->getName(), $p->getPosition());
@@ -522,15 +557,23 @@ fn construct_function(req: &mut Request) -> Result<FunctionRef, Thrown> {
             };
             FunctionRef::Method(found.scope, found.decl.function.name.0.to_vec())
         }
-        ValueRef::Object(_) => {
-            return Err(arg_type_error(
-                req,
-                1,
-                &format!(
-                    "be a string, an array(class, method), or a callable object, {} given",
-                    first.type_name()
-                ),
-            ));
+        // php's `IS_OBJECT` arm: `zend_get_closure_method_def` where
+        // the object is a `Closure`, and the argument error for any
+        // other object, since no class here declares `__invoke` that
+        // php would reach through `zend_std_get_closure`.
+        ValueRef::Object(object) => {
+            let object = *object;
+            if closure_decl(req, object).is_none() {
+                return Err(arg_type_error(
+                    req,
+                    1,
+                    &format!(
+                        "be a string, an array(class, method), or a callable object, {} given",
+                        first.type_name()
+                    ),
+                ));
+            }
+            FunctionRef::Closure(object)
         }
         _ => {
             let name = super::string_argument(req, 1)?;
@@ -623,6 +666,12 @@ pub(super) fn reflection_parameter_construct(req: &mut Request) -> Result<Value,
     };
     if let Some(this) = req.this() {
         set_name(req, this, &name)?;
+        // `intern->obj`: a parameter of a closure keeps the closure, as
+        // php's does, so the row's `FunctionRef::Closure` names an
+        // object that stands for as long as the reflector does.
+        if let FunctionRef::Closure(closure) = reference.function {
+            super::keep_closure(req, this, closure);
+        }
         req.state::<State>()
             .parameters
             .insert(this.index(), reference);
@@ -861,6 +910,17 @@ pub(super) fn reflection_parameter_get_declaring_function(
             set_name(req, object, &decl.name.0)?;
             object
         }
+        // php's `reflection_function_factory` over the closure itself,
+        // which is `intern->obj` again, so the reflector it hands back
+        // reflects the closure and not a name no table holds.
+        FunctionRef::Closure(closure) => {
+            let closure = *closure;
+            let class = class_named(req, b"ReflectionFunction")?;
+            let object = new_object(req, class)?;
+            set_name(req, object, &decl.name.0)?;
+            super::keep_closure(req, object, closure);
+            object
+        }
         FunctionRef::Method(scope, name) => {
             let class = class_named(req, b"ReflectionMethod")?;
             let object = new_object(req, class)?;
@@ -891,7 +951,7 @@ pub(super) fn reflection_parameter_get_declaring_function(
 pub(super) fn reflection_parameter_get_declaring_class(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
     let (reference, _, _) = this_parameter(req)?;
-    let Some(scope) = scope_of(&reference.function) else {
+    let Some(scope) = scope_of(req, &reference.function) else {
         return Ok(Value::null());
     };
     let object = reflection_class_factory(req, scope)?;
@@ -965,7 +1025,7 @@ pub(super) fn reflection_parameter_get_default_value(req: &mut Request) -> Resul
     let Some(expr) = parameter_default(&parameter).cloned() else {
         return Err(no_default(req));
     };
-    let scope = scope_of(&reference.function);
+    let scope = scope_of(req, &reference.function);
     eval_const_expr(req, &expr, scope)
 }
 
@@ -1061,8 +1121,49 @@ pub(super) fn reflection_parameter_get_attributes(req: &mut Request) -> Result<V
 /// `GET_REFLECTION_OBJECT_PTR(fptr)`: `$class` and `$name` for a
 /// `ReflectionMethod`, `$name` alone for a `ReflectionFunction`,
 /// since the reflector keeps the names and not php's `intern->ptr`.
+/// Every accessor of a reflector over a closure reads that
+/// declaration, so what a closure was written as is what they answer:
+/// its parameters, its site, its short name, and the class its
+/// parameters name as the one that declared them.
+///
+/// ```php
+/// class C { public $p = 1; function m() { return function ($x) { return $this->p + $x; }; } }
+/// $f = (new C)->m();
+/// $r = new ReflectionFunction($f);
+/// var_dump($r->getNumberOfParameters(), $r->isStatic(), $r->isUserDefined(), $r->isInternal(), $r->inNamespace(), $r->getShortName());
+/// var_dump($r->getStartLine(), $r->getParameters());
+/// $p = new ReflectionParameter($f, 0);
+/// var_dump($p->getDeclaringFunction()->isClosure(), $p->getDeclaringClass()->getName(), $p->isDefaultValueAvailable());
+/// ```
+/// ```expect
+/// int(1)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// string(18) "{closure:C::m():2}"
+/// int(2)
+/// array(1) {
+///   [0]=>
+///   object(ReflectionParameter)#4 (1) {
+///     ["name"]=>
+///     string(1) "x"
+///   }
+/// }
+/// bool(true)
+/// string(1) "C"
+/// bool(false)
+/// ```
 pub(super) fn this_function(req: &mut Request) -> Result<(FunctionRef, FunctionDecl), Thrown> {
     let (this, name) = this_name(req, "ReflectionFunctionAbstract")?;
+    // `intern->obj`, which a reflector over a closure keeps: php reads
+    // the declaration back off it with `zend_get_closure_method_def`,
+    // since the `{closure:…}` name is in no table to look up.
+    if let Some(closure) = super::kept_closure(req, this)
+        && let Some(decl) = closure_decl(req, closure)
+    {
+        return Ok((FunctionRef::Closure(closure), decl));
+    }
     let scope = this
         .prop(req, b"class")
         .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
