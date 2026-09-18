@@ -4639,15 +4639,15 @@ fn reflection_function_abstract() -> Declared {
         vec![
             (
                 private(method(b"__clone", &[], Some(Type::Void))),
-                unbuilt as Entry,
+                super::func::reflection_clone as Entry,
             ),
             (
                 tentative(method(b"inNamespace", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::func::reflection_function_in_namespace as Entry,
             ),
             (
                 tentative(method(b"isClosure", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::func::reflection_function_is_closure as Entry,
             ),
             (
                 tentative(method(b"isDeprecated", &[], Some(Type::Bool))),
@@ -4655,11 +4655,11 @@ fn reflection_function_abstract() -> Declared {
             ),
             (
                 tentative(method(b"isInternal", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::func::reflection_function_is_internal as Entry,
             ),
             (
                 tentative(method(b"isUserDefined", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::func::reflection_function_is_user_defined as Entry,
             ),
             (
                 tentative(method(b"isGenerator", &[], Some(Type::Bool))),
@@ -4667,11 +4667,11 @@ fn reflection_function_abstract() -> Declared {
             ),
             (
                 tentative(method(b"isVariadic", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::func::reflection_function_is_variadic as Entry,
             ),
             (
                 tentative(method(b"isStatic", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::func::reflection_function_is_static as Entry,
             ),
             (
                 tentative(method(b"getClosureThis", &[], Some(nullable(Type::Object)))),
@@ -4703,7 +4703,7 @@ fn reflection_function_abstract() -> Declared {
                     &[],
                     Some(union(&[Type::String, Type::False])),
                 )),
-                unbuilt as Entry,
+                super::func::reflection_function_get_doc_comment as Entry,
             ),
             (
                 tentative(method(
@@ -4719,7 +4719,7 @@ fn reflection_function_abstract() -> Declared {
                     &[],
                     Some(nullable(named(b"ReflectionExtension"))),
                 )),
-                unbuilt as Entry,
+                super::func::reflection_function_get_extension as Entry,
             ),
             (
                 tentative(method(
@@ -4727,7 +4727,7 @@ fn reflection_function_abstract() -> Declared {
                     &[],
                     Some(union(&[Type::String, Type::False])),
                 )),
-                unbuilt as Entry,
+                super::func::reflection_function_get_extension_name as Entry,
             ),
             (
                 tentative(method(
@@ -4735,15 +4735,15 @@ fn reflection_function_abstract() -> Declared {
                     &[],
                     Some(union(&[Type::String, Type::False])),
                 )),
-                unbuilt as Entry,
+                super::func::reflection_function_get_file_name as Entry,
             ),
             (
                 tentative(method(b"getName", &[], Some(Type::String))),
-                unbuilt as Entry,
+                super::func::reflection_function_get_name as Entry,
             ),
             (
                 tentative(method(b"getNamespaceName", &[], Some(Type::String))),
-                unbuilt as Entry,
+                super::func::reflection_function_get_namespace_name as Entry,
             ),
             (
                 tentative(method(b"getNumberOfParameters", &[], Some(Type::Int))),
@@ -4763,7 +4763,7 @@ fn reflection_function_abstract() -> Declared {
             ),
             (
                 tentative(method(b"getShortName", &[], Some(Type::String))),
-                unbuilt as Entry,
+                super::func::reflection_function_get_short_name as Entry,
             ),
             (
                 tentative(method(
@@ -4771,7 +4771,7 @@ fn reflection_function_abstract() -> Declared {
                     &[],
                     Some(union(&[Type::Int, Type::False])),
                 )),
-                unbuilt as Entry,
+                super::func::reflection_function_get_start_line as Entry,
             ),
             (
                 tentative(method(b"getStaticVariables", &[], Some(Type::Array))),
@@ -4779,11 +4779,11 @@ fn reflection_function_abstract() -> Declared {
             ),
             (
                 tentative(method(b"returnsReference", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::func::reflection_function_returns_reference as Entry,
             ),
             (
                 tentative(method(b"hasReturnType", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::func::reflection_function_has_return_type as Entry,
             ),
             (
                 tentative(method(
@@ -4791,11 +4791,11 @@ fn reflection_function_abstract() -> Declared {
                     &[],
                     Some(nullable(named(b"ReflectionType"))),
                 )),
-                unbuilt as Entry,
+                super::func::reflection_function_get_return_type as Entry,
             ),
             (
                 method(b"hasTentativeReturnType", &[], Some(Type::Bool)),
-                unbuilt as Entry,
+                super::func::reflection_function_has_tentative_return_type as Entry,
             ),
             (
                 method(
@@ -4803,7 +4803,7 @@ fn reflection_function_abstract() -> Declared {
                     &[],
                     Some(nullable(named(b"ReflectionType"))),
                 ),
-                unbuilt as Entry,
+                super::func::reflection_function_get_tentative_return_type as Entry,
             ),
             (
                 method(
@@ -4814,7 +4814,7 @@ fn reflection_function_abstract() -> Declared {
                     ],
                     Some(Type::Array),
                 ),
-                unbuilt as Entry,
+                super::func::reflection_function_get_attributes as Entry,
             ),
         ],
     )
@@ -4849,7 +4849,7 @@ fn reflection_function() -> Declared {
             ),
             (
                 method(b"isAnonymous", &[], Some(Type::Bool)),
-                unbuilt as Entry,
+                super::func::reflection_function_is_anonymous as Entry,
             ),
             (
                 deprecated(
@@ -4983,7 +4983,7 @@ fn reflection_method() -> Declared {
                     &[parameter(b"method", Type::String)],
                     Some(Type::CalledClass),
                 )),
-                unbuilt as Entry,
+                super::func::reflection_method_create_from_method_name as Entry,
             ),
             (
                 method(b"__toString", &[], Some(Type::String)),
@@ -4991,31 +4991,31 @@ fn reflection_method() -> Declared {
             ),
             (
                 tentative(method(b"isPublic", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::func::reflection_method_is_public as Entry,
             ),
             (
                 tentative(method(b"isPrivate", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::func::reflection_method_is_private as Entry,
             ),
             (
                 tentative(method(b"isProtected", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::func::reflection_method_is_protected as Entry,
             ),
             (
                 tentative(method(b"isAbstract", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::func::reflection_method_is_abstract as Entry,
             ),
             (
                 tentative(method(b"isFinal", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::func::reflection_method_is_final as Entry,
             ),
             (
                 tentative(method(b"isConstructor", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::func::reflection_method_is_constructor as Entry,
             ),
             (
                 tentative(method(b"isDestructor", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::func::reflection_method_is_destructor as Entry,
             ),
             (
                 tentative(method(
@@ -5031,7 +5031,7 @@ fn reflection_method() -> Declared {
             ),
             (
                 tentative(method(b"getModifiers", &[], Some(Type::Int))),
-                unbuilt as Entry,
+                super::func::reflection_method_get_modifiers as Entry,
             ),
             (
                 tentative(method(
@@ -5061,7 +5061,7 @@ fn reflection_method() -> Declared {
                     &[],
                     Some(named(b"ReflectionClass")),
                 )),
-                unbuilt as Entry,
+                super::func::reflection_method_get_declaring_class as Entry,
             ),
             (
                 tentative(method(
@@ -5069,11 +5069,11 @@ fn reflection_method() -> Declared {
                     &[],
                     Some(named(b"ReflectionMethod")),
                 )),
-                unbuilt as Entry,
+                super::func::reflection_method_get_prototype as Entry,
             ),
             (
                 method(b"hasPrototype", &[], Some(Type::Bool)),
-                unbuilt as Entry,
+                super::func::reflection_method_has_prototype as Entry,
             ),
             (
                 deprecated(
@@ -5109,7 +5109,7 @@ fn reflection_class() -> Declared {
         vec![
             (
                 private(method(b"__clone", &[], Some(Type::Void))),
-                unbuilt as Entry,
+                super::func::reflection_clone as Entry,
             ),
             (
                 method(
@@ -5643,7 +5643,7 @@ fn reflection_property() -> Declared {
         vec![
             (
                 private(method(b"__clone", &[], Some(Type::Void))),
-                unbuilt as Entry,
+                super::func::reflection_clone as Entry,
             ),
             (
                 method(
@@ -5916,7 +5916,7 @@ fn reflection_class_constant() -> Declared {
         vec![
             (
                 private(method(b"__clone", &[], Some(Type::Void))),
-                unbuilt as Entry,
+                super::func::reflection_clone as Entry,
             ),
             (
                 method(
@@ -6012,7 +6012,7 @@ fn reflection_parameter() -> Declared {
         vec![
             (
                 private(method(b"__clone", &[], Some(Type::Void))),
-                unbuilt as Entry,
+                super::func::reflection_clone as Entry,
             ),
             (
                 method(
@@ -6165,7 +6165,7 @@ fn reflection_type() -> Declared {
         vec![
             (
                 private(method(b"__clone", &[], Some(Type::Void))),
-                unbuilt as Entry,
+                super::func::reflection_clone as Entry,
             ),
             (
                 tentative(method(b"allowsNull", &[], Some(Type::Bool))),
@@ -6228,7 +6228,7 @@ fn reflection_extension() -> Declared {
         vec![
             (
                 private(method(b"__clone", &[], Some(Type::Void))),
-                unbuilt as Entry,
+                super::func::reflection_clone as Entry,
             ),
             (
                 method(b"__construct", &[parameter(b"name", Type::String)], None),
@@ -6296,7 +6296,7 @@ fn reflection_zend_extension() -> Declared {
         vec![
             (
                 private(method(b"__clone", &[], Some(Type::Void))),
-                unbuilt as Entry,
+                super::func::reflection_clone as Entry,
             ),
             (
                 method(b"__construct", &[parameter(b"name", Type::String)], None),
@@ -6394,7 +6394,7 @@ fn reflection_attribute() -> Declared {
             ),
             (
                 private(method(b"__clone", &[], Some(Type::Void))),
-                unbuilt as Entry,
+                super::func::reflection_clone as Entry,
             ),
             (private(method(b"__construct", &[], None)), unbuilt as Entry),
         ],
