@@ -1,20 +1,18 @@
 //! How one witness is judged: the per-item judge `witness` contributes to
 //! the tally. The snippet runs under the oracle, whose status is what
-//! `--accept` captures onto a bare `exit`; then under the engine, its own
-//! binary where one is built and the linked engine in this process where
-//! none is, the oracle's run standing in only where neither can; and the two streams and
-//! the status are held to what the fences pin through [`oracle::verdict`],
-//! so the registry decides what a difference means (harness §4.3).
+//! `--accept` captures onto a bare `exit`; then under the engine linked
+//! into this process, the one adapter this lane has and never the engine's
+//! own binary (harness §7, revision 48; #401); and the two streams and the
+//! status are held to what the fences pin through [`oracle::verdict`], so
+//! the registry decides what a difference means (harness §4.3).
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use super::fence::{Exit, Witness};
 use super::{Ask, Captured, Judged, Judgement, fence};
 use crate::divergence::Registry;
 use crate::oracle::expect::Expectation;
-use crate::oracle::{
-    self, Invocation, Observation, Oracle, Pin, Program, Runner, Verdict as Compared, linked,
-};
+use crate::oracle::{self, Observation, Oracle, Pin, Program, Verdict as Compared, linked};
 
 /// A verdict on one witness, placed where it stands and at the item it
 /// documents, which is what the printed line says after the id.
@@ -30,31 +28,33 @@ fn judged(witness: &Witness, judgement: Judgement, note: impl Into<String>) -> J
 
 /// One witness, end to end: the oracle's run, the status `--accept` may
 /// capture from it, the run of record, and the verdict. What `--accept`
-/// captures goes onto `captured`; the write is the caller's.
+/// captures goes onto `captured`; the write is the caller's. Every way
+/// this can go wrong is a judgement the witness carries, the oracle's
+/// trouble and the linked engine's included, so there is nothing here for
+/// an `Err` to say.
 pub(super) fn one(
     oracle: &Oracle<'_>,
     registry: &Registry,
-    runner: &Runner,
     ask: &Ask,
     witness: &Witness,
     captured: &mut Vec<Captured>,
-) -> Result<Judged> {
+) -> Judged {
     let oracle_out = match oracle.run(Program::Snippet(&witness.snippet), None) {
         Ok(out) => out,
         Err(trouble) => {
-            return Ok(judged(
+            return judged(
                 witness,
                 Judgement::Bork,
                 format!("the oracle did not run it: {trouble:#}"),
-            ));
+            );
         }
     };
     let Some(status) = oracle_out.exit else {
-        return Ok(judged(
+        return judged(
             witness,
             Judgement::Bork,
             "the oracle ended on a signal, so there is no status to pin",
-        ));
+        );
     };
 
     // The bare `exit` is the opt-in, and the only thing `--accept` writes:
@@ -72,42 +72,36 @@ pub(super) fn one(
         exit = Exit::Pinned(status);
     }
     if exit == Exit::Bare {
-        return Ok(judged(
+        return judged(
             witness,
             Judgement::Unpinned,
             format!(
                 "the fence's `exit` is bare and the oracle exits {status}; `xtask witness --accept` writes it, and nothing else does"
             ),
-        ));
+        );
     }
 
-    let ran = match runner {
-        Runner::Engine(binary) => oracle
-            .run_under(&Invocation::new(binary, Program::Snippet(&witness.snippet)))
-            .with_context(|| format!("running {} through {}", witness.at(), binary.display()))?,
-        // The engine linked into the harness, which needs no binary and is
-        // the run of record all the same (design §8; #119). A panic inside
-        // is trouble the witness borks on, never the lane's end.
-        Runner::Linked => match linked::serve(&oracle.pin().recipe, &witness.snippet) {
-            Ok(out) => out,
-            Err(trouble) => {
-                return Ok(judged(
-                    witness,
-                    Judgement::Bork,
-                    format!("the linked engine did not serve it: {trouble:#}"),
-                ));
-            }
-        },
-        _ => oracle_out,
+    // The engine linked into the harness, which needs no binary and is
+    // the run of record (design §8; #119, #401). A panic inside is trouble
+    // the witness borks on, never the lane's end.
+    let ran = match linked::serve(&oracle.pin().recipe, &witness.snippet) {
+        Ok(out) => out,
+        Err(trouble) => {
+            return judged(
+                witness,
+                Judgement::Bork,
+                format!("the linked engine did not serve it: {trouble:#}"),
+            );
+        }
     };
     let met = match met(oracle.pin(), witness, exit, &ran) {
         Ok(met) => met,
         Err(trouble) => {
-            return Ok(judged(
+            return judged(
                 witness,
                 Judgement::Bork,
                 format!("the pinned stream is not one this engine can match: {trouble:#}"),
-            ));
+            );
         }
     };
     let id = witness.id();
@@ -121,17 +115,15 @@ pub(super) fn one(
         &String::from_utf8_lossy(&ran.stderr),
         ran.exit,
     );
-    Ok(
-        match oracle::verdict(registry, &id, met, &expected, &actual) {
-            Compared::Same => judged(witness, Judgement::Pass, ""),
-            Compared::Diverged(row) => judged(witness, Judgement::Diverged, row.reason),
-            Compared::Differs(difference) => judged(
-                witness,
-                Judgement::Fail,
-                format!("what the fences pin is not what ran:\n{difference}"),
-            ),
-        },
-    )
+    match oracle::verdict(registry, &id, met, &expected, &actual) {
+        Compared::Same => judged(witness, Judgement::Pass, ""),
+        Compared::Diverged(row) => judged(witness, Judgement::Diverged, row.reason),
+        Compared::Differs(difference) => judged(
+            witness,
+            Judgement::Fail,
+            format!("what the fences pin is not what ran:\n{difference}"),
+        ),
+    }
 }
 
 /// Whether a run meets what the fences pin: the two streams as the phpt

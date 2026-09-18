@@ -5,14 +5,13 @@
 //! the instrument's `run` and reads what it wrote; how one witness is
 //! judged, the notes and the digest, is held beside the judge.
 //!
-//! The tests that run a snippet through the engine's own binary run the
-//! pinned oracle behind a shell file standing where that binary would,
-//! since the binary that will be measured does not exist yet; the tests of
-//! the rung below it build no binary at all and are served by the engine
-//! linked into the harness (#119). They say so on stderr and return when
-//! the pinned binary is not on this machine, unless the machine promised
-//! it (#38); the rest, the coverage half and the readings of a run with
-//! nothing to run, run anywhere.
+//! Every snippet here is served by the engine linked into the harness,
+//! which is what the lane serves every witness through and the one thing a
+//! binary in the tree does not change (harness §7, revision 48; #401,
+//! #119). The tests that run one return when the pinned oracle is not on
+//! this machine, unless the machine promised it (#38); the rest, the
+//! coverage half and the readings of a run with nothing to run, run
+//! anywhere.
 
 use std::fs;
 use std::io::Write;
@@ -59,18 +58,22 @@ fn registry(text: &str) -> Registry {
     Registry::parse(text).unwrap()
 }
 
+/// What php writes on the first stream for an uncaught error at line 2,
+/// which the engine writes with it, opted in to the status `--accept`
+/// captures. The path is `%s`, since the oracle runs the snippet in a
+/// scratch directory and the linked engine as `witness.php` (#293).
+const FATAL: &str = "/// ```expect exit\n/// Fatal error: Uncaught Error: Call to undefined function nope() in %s:2\n/// Stack trace:\n/// #0 {main}\n///   thrown in %s on line 2\n/// ```\n";
+
 /// A block whose snippet prints `1` and whose fences pin what `fences` says.
 fn block(fences: &str) -> String {
     format!("/// ```php\n/// echo 1;\n/// ```\n{fences}pub fn native() {{}}\n")
 }
 
 /// A workspace of this test's own: a git repository holding the tracked
-/// manifest, and one crate `ext/fixture` whose `src/lib.rs` is `text`.
-/// With `engine`, a shell file at `target/debug/php` that hands every call
-/// to the pinned oracle stands where the engine's binary would, so the
-/// runner is an engine and not the oracle's own control; without it, no
-/// engine is built here.
-fn scratch(name: &str, text: &str, engine: bool) -> Tree {
+/// manifest, and one crate `ext/fixture` whose `src/lib.rs` is `text`. No
+/// binary stands in it; the one test that lays one down is the one that
+/// holds the lane to serving its witnesses without it.
+fn scratch(name: &str, text: &str) -> Tree {
     let root = Tree::new(&format!("witness-{name}")).unwrap();
     scratch_workspace(workspace(), &root).unwrap();
     fs::create_dir_all(root.join("ext/fixture/src")).unwrap();
@@ -80,24 +83,17 @@ fn scratch(name: &str, text: &str, engine: bool) -> Tree {
     )
     .unwrap();
     fs::write(root.join("ext/fixture/src/lib.rs"), text).unwrap();
-    if engine {
-        stand_in_engine(&root);
-    }
     root
 }
 
-/// The shell file at `target/debug/php` that runs the pinned oracle; its
-/// bytes are not the oracle's, so the runner reads it as the engine.
-fn stand_in_engine(root: &Path) {
-    let binary = oracle().unwrap();
+/// A shell file at `target/debug/php` that writes bytes no fence pins and
+/// ends on 7: what the lane would read if it resolved a binary, and what
+/// it must not read.
+fn a_binary_where_the_engine_s_would_be(root: &Path) {
     let dir = root.join("target/debug");
     fs::create_dir_all(&dir).unwrap();
     let file = dir.join("php");
-    fs::write(
-        &file,
-        format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", binary.display()),
-    )
-    .unwrap();
+    fs::write(&file, "#!/bin/sh\necho 'not the engine'\nexit 7\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -162,7 +158,7 @@ fn a_witness_whose_bytes_are_the_oracle_s_passes() {
     if oracle().is_none() {
         return;
     }
-    let root = scratch("pass", &block("/// ```expect\n/// 1\n/// ```\n"), true);
+    let root = scratch("pass", &block("/// ```expect\n/// 1\n/// ```\n"));
     let reading = run(&root, &registry(""), false);
     assert_eq!(reading.status, Status::Pass, "{reading:#?}");
     assert_eq!(count(&reading, "run"), 1);
@@ -176,7 +172,7 @@ fn a_witness_that_differs_is_a_difference_the_registry_can_accept() {
     if oracle().is_none() {
         return;
     }
-    let root = scratch("differs", &block("/// ```expect\n/// 2\n/// ```\n"), true);
+    let root = scratch("differs", &block("/// ```expect\n/// 2\n/// ```\n"));
     let reading = run(&root, &registry(""), false);
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
     assert_eq!(count(&reading, "failed"), 1);
@@ -206,9 +202,13 @@ fn a_bare_exit_fails_the_run_and_accept_is_what_writes_it() {
     if oracle().is_none() {
         return;
     }
-    let text =
-        "/// ```php\n/// exit(3);\n/// ```\n/// ```expect exit\n/// ```\npub fn native() {}\n";
-    let root = scratch("accept", text, true);
+    // php's uncaught error, which the engine writes byte for byte and both
+    // it and the oracle end 255 on: a status of the snippet's own, where
+    // `exit(3)` is a construct the compiler does not read yet and so is
+    // not one the run of record can serve.
+    let text = format!("/// ```php\n/// nope();\n/// ```\n{FATAL}pub fn native() {{}}\n");
+    let text = text.as_str();
+    let root = scratch("accept", text);
     let file = root.join("ext/fixture/src/lib.rs");
 
     let reading = run(&root, &registry(""), false);
@@ -226,12 +226,12 @@ fn a_bare_exit_fails_the_run_and_accept_is_what_writes_it() {
     assert_eq!(count(&reading, "accepted"), 1);
     let written = fs::read_to_string(&file).unwrap();
     assert!(
-        written.contains("```expect exit=3"),
+        written.contains("```expect exit=255"),
         "the oracle's status is on the fence line: {written}"
     );
     // Nothing else of the file moved.
     assert_eq!(written.lines().count(), text.lines().count());
-    assert!(written.contains("/// exit(3);"), "{written}");
+    assert!(written.contains("/// nope();"), "{written}");
 
     // The witness now pins the status, so a second run accepts nothing.
     let again = run(&root, &registry(""), true);
@@ -253,7 +253,7 @@ fn accept_writes_the_bare_opt_in_alone_and_never_repins_a_status() {
         ("repin-absent", "/// ```expect\n/// ```\n".to_owned()),
     ] {
         let text = format!("/// ```php\n/// exit(3);\n/// ```\n{fences}pub fn native() {{}}\n");
-        let root = scratch(name, &text, true);
+        let root = scratch(name, &text);
         let reading = run(&root, &registry(""), true);
         assert_eq!(reading.status, Status::Fail, "{reading:#?}");
         assert_eq!(count(&reading, "failed"), 1);
@@ -335,11 +335,7 @@ fn a_kernel_or_native_without_a_witness_is_missing_and_fails_the_crate() {
 /// is a skip that counts what did not run (#65). Green would be a claim.
 #[test]
 fn a_crate_whose_witnesses_cannot_run_for_want_of_the_oracle_is_a_skip_never_a_pass() {
-    let root = scratch(
-        "witness-absent",
-        &block("/// ```expect\n/// 1\n/// ```\n"),
-        false,
-    );
+    let root = scratch("witness-absent", &block("/// ```expect\n/// 1\n/// ```\n"));
     let mut manifest = fixture_manifest();
     manifest.pin.oracle.path = root.join("no-php-here");
     let readings = witness::run(
@@ -373,7 +369,7 @@ fn the_reading_carries_run_failed_and_missing_and_is_scoped_to_the_crate() {
     if oracle().is_none() {
         return;
     }
-    let root = scratch("scoped", &block("/// ```expect\n/// 1\n/// ```\n"), true);
+    let root = scratch("scoped", &block("/// ```expect\n/// 1\n/// ```\n"));
     let reading = run(&root, &registry(""), false);
     assert_eq!(reading.instrument, "witness");
     assert_eq!(reading.scope, "ext/fixture");
@@ -394,7 +390,7 @@ fn with_no_binary_built_the_linked_engine_serves_the_witness() {
     if oracle().is_none() {
         return;
     }
-    let root = scratch("linked", &block("/// ```expect\n/// 1\n/// ```\n"), false);
+    let root = scratch("linked", &block("/// ```expect\n/// 1\n/// ```\n"));
     for profile in ["release", "debug"] {
         let binary = root.join("target").join(profile).join("php");
         assert!(!binary.is_file(), "{} stands", binary.display());
@@ -411,6 +407,26 @@ fn with_no_binary_built_the_linked_engine_serves_the_witness() {
     );
 }
 
+/// And a binary standing at `target/debug/php` is not what serves a
+/// witness: the lane resolves none, so the reading is what the linked
+/// engine wrote whether or not one is built (harness §7, revision 48;
+/// #401). The stand-in writes bytes no fence pins and ends on 7, so a lane
+/// that ran it would read a fail here.
+#[test]
+fn a_binary_in_the_tree_is_not_what_serves_a_witness() {
+    if oracle().is_none() {
+        return;
+    }
+    let root = scratch("binary-stands", &block("/// ```expect\n/// 1\n/// ```\n"));
+    a_binary_where_the_engine_s_would_be(&root);
+    assert!(root.join("target/debug/php").is_file());
+    let reading = run(&root, &registry(""), false);
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    assert_eq!(count(&reading, "run"), 1);
+    assert_eq!(count(&reading, "passed"), 1);
+    assert_eq!(count(&reading, "failed"), 0);
+}
+
 /// And a fail is a fail there: what the linked engine wrote is held to
 /// what the fences pin, with no binary standing anywhere (#119).
 #[test]
@@ -418,11 +434,7 @@ fn with_no_binary_built_a_witness_the_linked_engine_misses_fails() {
     if oracle().is_none() {
         return;
     }
-    let root = scratch(
-        "linked-differs",
-        &block("/// ```expect\n/// 2\n/// ```\n"),
-        false,
-    );
+    let root = scratch("linked-differs", &block("/// ```expect\n/// 2\n/// ```\n"));
     let reading = run(&root, &registry(""), false);
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
     assert_eq!(count(&reading, "failed"), 1);
@@ -444,11 +456,7 @@ fn with_no_binary_built_a_crate_behind_a_feature_is_held_to_its_witnesses() {
     if oracle().is_none() {
         return;
     }
-    let root = scratch(
-        "linked-feature",
-        &block("/// ```expect\n/// 2\n/// ```\n"),
-        false,
-    );
+    let root = scratch("linked-feature", &block("/// ```expect\n/// 2\n/// ```\n"));
     let mut manifest = fixture_manifest();
     manifest.crates[0] = manifest.crates[0].clone().with_feature("curl");
     let readings = witness::run(&root, &manifest, &registry(""), &Ask::default()).unwrap();
@@ -481,7 +489,6 @@ fn with_no_binary_built_the_linked_engine_carries_each_feature_extension() {
             &format!(
                 "/// ```php\n/// var_dump(extension_loaded('{name}'));\n/// ```\n/// ```expect\n/// bool(true)\n/// ```\npub fn native() {{}}\n"
             ),
-            false,
         );
         let mut manifest = fixture_manifest();
         manifest.crates[0] = manifest.crates[0].clone().with_feature(name);
@@ -548,7 +555,7 @@ fn a_crate_with_no_witness_and_nothing_that_needs_one_passes_with_the_oracle() {
     if oracle().is_none() {
         return;
     }
-    let root = scratch("nothing", "pub fn native() {}\n", false);
+    let root = scratch("nothing", "pub fn native() {}\n");
     let reading = run(&root, &registry(""), false);
     assert_eq!(reading.status, Status::Pass, "{reading:#?}");
     assert_eq!(count(&reading, "run"), 0);
@@ -561,7 +568,7 @@ fn a_crate_with_no_witness_and_nothing_that_needs_one_passes_with_the_oracle() {
 
 #[test]
 fn a_crate_with_no_witness_and_the_oracle_absent_is_a_skip_that_says_so() {
-    let root = scratch("nothing-absent", "pub fn native() {}\n", false);
+    let root = scratch("nothing-absent", "pub fn native() {}\n");
     let mut manifest = fixture_manifest();
     manifest.pin.oracle.path = root.join("no-php-here");
     let readings = witness::run(
@@ -599,7 +606,7 @@ fn a_crate_with_no_witness_under_a_drifted_oracle_refuses_the_run() {
     if oracle().is_none() {
         return;
     }
-    let root = scratch("nothing-drifted", "pub fn native() {}\n", false);
+    let root = scratch("nothing-drifted", "pub fn native() {}\n");
     let mut manifest = fixture_manifest();
     manifest.pin.oracle.md5 = "0".repeat(32);
     let err = witness::run(
@@ -622,7 +629,7 @@ fn a_crate_with_no_witness_under_a_drifted_oracle_refuses_the_run() {
 /// a pin whose binary is not at the path (#60, #65).
 #[test]
 fn a_kernel_without_a_witness_fails_whether_or_not_the_oracle_is_here() {
-    let root = scratch("uncovered-absent", "pub fn native() {}\n", false);
+    let root = scratch("uncovered-absent", "pub fn native() {}\n");
     let mut manifest = fixture_manifest();
     manifest.rules = self::manifest().rules;
     manifest.pin.oracle.path = root.join("no-php-here");
@@ -657,7 +664,6 @@ fn a_block_the_grammar_cannot_read_fails_the_crate_where_it_stands() {
     let root = scratch(
         "unread-block",
         "/// ```php\n/// echo 1;\n/// ```\n/// prose\npub fn native() {}\n",
-        false,
     );
     let reading = run(&root, &registry(""), false);
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
@@ -788,7 +794,7 @@ fn a_crate_whose_sources_cannot_be_read_fails_and_names_the_crate() {
 /// touched, as `clippy --staged` answers.
 #[test]
 fn staged_narrows_the_run_to_the_crates_with_a_staged_change() {
-    let root = scratch("staged", "pub fn native() {}\n", false);
+    let root = scratch("staged", "pub fn native() {}\n");
     let staged = |crates: Vec<String>| {
         witness::run(
             &root,

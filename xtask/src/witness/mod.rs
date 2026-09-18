@@ -8,23 +8,26 @@
 //! `witness`, with `run`, `failed` and `missing` in `numbers`, which is
 //! what `done` reads as its conditions 1 and 2.
 //!
-//! **What runs the snippet.** The seam `phpt` names (design §8's
-//! `ScriptExec`) has two adapters, and a witness stands on either. The
-//! engine's own binary through [`oracle::Runner`] is one, a process per
-//! witness under the recipe the oracle runs under; the engine linked into
-//! the harness is the other, [`oracle::linked`], one fresh engine per
-//! snippet over the `Capture` sink and no binary needed. Until
-//! `crates/php` reaches `serve` there is none, and the linked engine is
-//! what the lane stands on: it is the engine either way, so the reading is
-//! a pass or a fail on its own merits and `done` holds the crate to it
-//! (#119). The oracle runs beside whichever served the snippet, because
-//! the status a fence pins is the oracle's and `--accept` is where it is
-//! captured; the pinned oracle standing in *for* the engine, which a named
-//! binary whose digest is the pin's is, is a control and reads as a skip
-//! whatever the fences say. `phpt` has no second adapter yet and keeps its
-//! own rung in `done`, since nothing stands in for a corpus (#132). A
-//! reading with nothing judged, `run == 0`, is the run the pinned oracle
-//! was absent for, and is a skip that says so.
+//! **What runs the snippet.** The engine linked into this process,
+//! [`oracle::linked`], one fresh engine per snippet over the `Capture`
+//! sink, and never the engine's own binary (harness §7, revision 48;
+//! #401). The seam `phpt` names (design §8's `ScriptExec`) has two
+//! adapters and this lane stands on one of them by decision: the linked
+//! engine carries every extension feature (revision 43, #314) where
+//! `target/*/php` is php's default build, so under a lane that resolved a
+//! binary the same fence beside `ext/curl` read pass or fail by which rung
+//! happened to run, which is a reading that says nothing. A witness is a
+//! snippet served in this process beside the code it exercises; the
+//! binary's job is the corpus and the CLI's own behaviour, which is
+//! `phpt`'s, `compile-identity`'s and `crosscheck`'s, and they keep it.
+//! What it gives up: a witness never crosses the process boundary, so a
+//! defect that appears only through the binary's startup is not a
+//! witness's to catch. `phpt` has no second adapter and keeps its own rung
+//! in `done`, since nothing stands in for a corpus (#132). The oracle runs
+//! beside the linked engine, because the status a fence pins is the
+//! oracle's and `--accept` is where it is captured. A reading with nothing
+//! judged, `run == 0`, is the run the pinned oracle was absent for, and is
+//! a skip that says so.
 //!
 //! **What a feature row reads.** Nothing here. The bundle the harness
 //! links carries every extension feature `php_bundle` declares, so a crate
@@ -188,7 +191,6 @@ pub(crate) fn reading(
     root: &Path,
     krate: &Crate,
     rule: Option<&Rule>,
-    runner: &Runner,
 ) -> Result<Reading> {
     let name = &krate.name;
     let run = &tally.witnesses;
@@ -197,7 +199,9 @@ pub(crate) fn reading(
     } else if run.judged.is_empty() {
         run.complete(tally.oracle_absent.as_deref())
     } else {
-        run.outcome(runner)
+        // The ladder's one rung here: the lane is the linked engine, so
+        // the reading is a pass or a fail on what the engine wrote.
+        run.outcome(&Runner::Linked)
     };
     // What did not run for want of the oracle, as a message's tail.
     let unrun = match (&tally.oracle_absent, run.not_run()) {
@@ -247,19 +251,16 @@ pub(crate) fn reading(
             run.judged.len(),
             tally.subjects
         ),
-        // Every witness met what it pins, and whether that is a reading of
-        // the engine is the runner's to say: without the engine's own
-        // binary the pinned oracle ran them, which measures the fences and
-        // the oracle, and a green line must not stand where the engine's
-        // belongs.
+        // The ladder's two rungs for a lane that resolves a binary, which
+        // this one does not (harness §7, revision 48): the words are here
+        // so the match is over every rung, and a reading that carries them
+        // is this lane standing on a runner it never chooses.
         Outcome::Control(binary) => format!(
-            "{name}: {} witnesses agree with {}, the pinned oracle; a control of the fences, not a reading of the engine",
-            run.judged.len(),
+            "{name}: the witness lane serves every snippet through the linked engine and chose {}, the pinned oracle; it resolves no binary",
             binary.display()
         ),
         Outcome::Absent(why) => format!(
-            "{name}: {} witnesses agree with the pinned oracle, and the engine ran none; {why}",
-            run.judged.len()
+            "{name}: the witness lane serves every snippet through the linked engine and chose a runner that is absent; {why}"
         ),
         // A witness that met nothing counts against the crate, so this
         // rung is one the ladder has and this lane's pre-rung reaches
@@ -342,12 +343,6 @@ pub fn run(
         ask.crates.clone()
     };
     let rule = coverage_rule(manifest);
-    // The ladder's rung below the binary is the linked engine, which a
-    // snippet needs no binary for (#119).
-    let runner = Runner::resolve(root, &manifest.pin, None)?.or_linked();
-    if runner == Runner::Linked {
-        println!("witness: no engine binary is built; the linked engine serves each snippet");
-    }
     // One oracle for the run: the digest is asserted before the first
     // snippet and never per witness or per crate (harness §4.3).
     let oracle = manifest.pin.oracle();
@@ -388,7 +383,7 @@ pub fn run(
         for problem in &found.problems {
             println!("bork {}", problem.at_line());
         }
-        let tally = judge(&oracle, registry, &runner, ask, &found)?;
+        let tally = judge(&oracle, registry, ask, &found)?;
         for missing in &tally.missing {
             println!("missing {missing}");
         }
@@ -418,7 +413,7 @@ pub fn run(
                 tally.witnesses.judged.len()
             );
         }
-        readings.push(reading(&tally, root, krate, rule, &runner)?);
+        readings.push(reading(&tally, root, krate, rule)?);
     }
     Ok(readings)
 }
@@ -458,7 +453,6 @@ fn covered(rule: Option<&Rule>, path: &Path) -> bool {
 pub(crate) fn judge(
     oracle: &Oracle<'_>,
     registry: &Registry,
-    runner: &Runner,
     ask: &Ask,
     found: &Extracted,
 ) -> Result<Tally> {
@@ -481,7 +475,7 @@ pub(crate) fn judge(
     } else {
         tally::Tally::judge(&found.witnesses, |witness| {
             wall += witness.wall.unwrap_or_default();
-            judge::one(oracle, registry, runner, ask, witness, &mut captured)
+            Ok(judge::one(oracle, registry, ask, witness, &mut captured))
         })?
     };
     Ok(Tally {

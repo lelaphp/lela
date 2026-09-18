@@ -3,9 +3,10 @@
 //! `--accept` captures. What a run of the instrument writes is held in
 //! `tests/witness.rs`, through `run`.
 //!
-//! The tests that run a snippet run the pinned oracle standing in for the
-//! engine, since the engine that will be measured does not exist yet. They
-//! say so on stderr and return when the pinned binary is not on this
+//! The tests that run a snippet run it through the engine linked into the
+//! harness, which is what the lane serves every witness through (harness
+//! §7, revision 48; #401), with the pinned oracle beside it for the status
+//! a fence pins. They return when the pinned binary is not on this
 //! machine, unless the machine promised it (#38).
 
 use std::fs;
@@ -15,7 +16,7 @@ use super::fence;
 use super::{Ask, Judgement, Tally, capture, judge};
 use crate::divergence::Registry;
 use crate::manifest::Manifest;
-use crate::oracle::{Promise, Runner};
+use crate::oracle::Promise;
 use crate::scratch::Tree;
 
 fn workspace() -> PathBuf {
@@ -49,34 +50,16 @@ fn registry(text: &str) -> Registry {
     Registry::parse(text).unwrap()
 }
 
-/// The witnesses of one text, judged with the pinned oracle standing in for
-/// the engine.
+/// The witnesses of one text, judged as the lane judges them.
 fn judge_text(text: &str, registry: &Registry) -> Tally {
     judged(Path::new("ext/fixture/src/lib.rs"), text, registry, false)
 }
 
 /// Judging decides and writes nothing; `--accept` is the caller's write, as
-/// it is in the instrument. The root is the workspace, which leaves a file
-/// named by an absolute path where it stands.
+/// it is in the instrument. The run of record is the engine linked into the
+/// harness, the lane's one adapter. The root is the workspace, which leaves
+/// a file named by an absolute path where it stands.
 fn judged(file: &Path, text: &str, registry: &Registry, accept: bool) -> Tally {
-    judged_under(
-        &Runner::Engine(oracle().unwrap()),
-        file,
-        text,
-        registry,
-        accept,
-    )
-}
-
-/// The same judging with the run of record served by `runner`: the pinned
-/// oracle standing in for the engine, or the engine linked into the harness.
-fn judged_under(
-    runner: &Runner,
-    file: &Path,
-    text: &str,
-    registry: &Registry,
-    accept: bool,
-) -> Tally {
     let found = fence::extract(file, text);
     let ask = Ask {
         crates: Vec::new(),
@@ -84,7 +67,7 @@ fn judged_under(
         staged: false,
     };
     let manifest = manifest();
-    let tally = judge(&manifest.pin.oracle(), registry, runner, &ask, &found).unwrap();
+    let tally = judge(&manifest.pin.oracle(), registry, &ask, &found).unwrap();
     if accept {
         capture(&workspace(), &tally.captured).unwrap();
     }
@@ -96,6 +79,12 @@ fn only(tally: &Tally) -> (Judgement, String) {
     let judged = &tally.witnesses.judged[0];
     (judged.judgement, judged.note.clone())
 }
+
+/// What php writes on the first stream for an uncaught error at line 2,
+/// which the engine writes with it, opted in to the status `--accept`
+/// captures. The path is `%s`, since the oracle runs the snippet in a
+/// scratch directory and the linked engine as `witness.php` (#293).
+const FATAL: &str = "/// ```expect exit\n/// Fatal error: Uncaught Error: Call to undefined function nope() in %s:2\n/// Stack trace:\n/// #0 {main}\n///   thrown in %s on line 2\n/// ```\n";
 
 /// A block whose snippet prints `1` and whose fences pin what `fences` says.
 fn block(fences: &str) -> String {
@@ -115,18 +104,10 @@ fn the_digest_is_asserted_once_over_a_run_of_three_witnesses() {
     let text = format!("{}{}{}", one(1), one(2), one(3));
     let found = fence::extract(Path::new("ext/fixture/src/lib.rs"), &text);
     assert_eq!(found.witnesses.len(), 3, "{found:#?}");
-    let binary = oracle().unwrap();
     let manifest = manifest();
     assert_eq!(manifest.pin.digests_asserted(), 0);
     let oracle = manifest.pin.oracle();
-    let tally = judge(
-        &oracle,
-        &registry(""),
-        &Runner::Engine(binary),
-        &Ask::default(),
-        &found,
-    )
-    .unwrap();
+    let tally = judge(&oracle, &registry(""), &Ask::default(), &found).unwrap();
     assert_eq!(tally.witnesses.judged.len(), 3, "{tally:#?}");
     assert!(
         tally
@@ -155,14 +136,7 @@ fn an_absent_oracle_leaves_the_coverage_half_judged_and_the_witness_unrun() {
     let mut manifest = manifest();
     manifest.pin.oracle.path = PathBuf::from("/no-php-here");
     let oracle = manifest.pin.oracle();
-    let tally = judge(
-        &oracle,
-        &registry(""),
-        &Runner::Absent("no engine".to_owned()),
-        &Ask::default(),
-        &found,
-    )
-    .unwrap();
+    let tally = judge(&oracle, &registry(""), &Ask::default(), &found).unwrap();
     assert!(tally.failed(), "{tally:#?}");
     assert_eq!(tally.missing.len(), 1, "{tally:#?}");
     assert!(tally.witnesses.judged.is_empty(), "{tally:#?}");
@@ -196,7 +170,6 @@ fn a_digest_mismatch_refuses_the_run_and_is_not_a_bork_per_witness() {
     let err = judge(
         &manifest.pin.oracle(),
         &registry(""),
-        &Runner::Absent("no engine".to_owned()),
         &Ask::default(),
         &found,
     )
@@ -212,28 +185,21 @@ fn the_snippet_runs_as_witness_php_with_the_code_on_line_two() {
     }
     // php's own error text names the file and the line, which is what the
     // recipe's preamble is for (design §8). The oracle runs the snippet as
-    // `%SCRATCH%/witness.php` and the linked engine names it `witness.php`
-    // (#293), and `%s` is one character at least (run-tests.php's
-    // `[^\r\n]+`), so the pin that both adapters meet is `%s 2`, the one
-    // the witness beside `magic_const` in php_compile writes (#364).
+    // `%SCRATCH%/witness.php` and the linked engine, which serves the run
+    // of record, names it `witness.php` (#293), and `%s` is one character
+    // at least (run-tests.php's `[^\r\n]+`), so the pin both meet is
+    // `%s 2`, the one the witness beside `magic_const` in php_compile
+    // writes (#364).
     let text = format!(
         "/// ```php\n/// echo __FILE__, ' ', __LINE__;\n/// ```\n{}pub fn native() {{}}\n",
         "/// ```expect\n/// %s 2\n/// ```\n"
     );
-    let tally = judge_text(&text, &registry(""));
-    assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
-    let file = Path::new("ext/fixture/src/lib.rs");
-    let linked = judged_under(&Runner::Linked, file, &text, &registry(""), false);
-    let (judgement, note) = only(&linked);
-    assert_eq!(
-        judgement,
-        Judgement::Pass,
-        "under the linked engine: {note}"
-    );
+    let (judgement, note) = only(&judge_text(&text, &registry("")));
+    assert_eq!(judgement, Judgement::Pass, "{note}");
 }
 
 #[test]
-fn the_linked_engine_names_the_snippet_witness_php_as_the_recipe_does() {
+fn the_snippet_is_named_witness_php_as_the_recipe_names_it() {
     if oracle().is_none() {
         return;
     }
@@ -242,12 +208,12 @@ fn the_linked_engine_names_the_snippet_witness_php_as_the_recipe_does() {
     // the fresh-process adapter runs it as, and not `Standard input
     // code`, `serve_capture`'s name for a piped source (#293). The name
     // is pinned literally, where every witness in the tree writes `%s`.
+    let file = Path::new("ext/fixture/src/lib.rs");
     let text = format!(
         "/// ```php\n/// ini_set('display_errors', 'stderr');\n/// echo $u, 'to the first';\n/// ```\n{}pub fn native() {{}}\n",
         "/// ```expect\n/// to the first\n/// ```\n/// ```stderr\n/// Warning: Undefined variable $u in witness.php on line 3\n/// ```\n"
     );
-    let file = Path::new("ext/fixture/src/lib.rs");
-    let tally = judged_under(&Runner::Linked, file, &text, &registry(""), false);
+    let tally = judged(file, &text, &registry(""), false);
     let (judgement, note) = only(&tally);
     assert_eq!(judgement, Judgement::Pass, "{note}");
 }
@@ -275,45 +241,28 @@ fn a_witness_that_differs_notes_the_difference_and_an_accepted_row_notes_its_rea
 }
 
 #[test]
-fn the_pinned_second_stream_and_the_status_are_held_apart_from_the_first() {
-    if oracle().is_none() {
-        return;
-    }
-    let text = format!(
-        "/// ```php\n/// fwrite(STDERR, 'to the second');\n/// echo 'to the first';\n/// ```\n{}pub fn native() {{}}\n",
-        "/// ```expect\n/// to the first\n/// ```\n/// ```stderr\n/// to the second\n/// ```\n"
-    );
-    assert_eq!(only(&judge_text(&text, &registry(""))).0, Judgement::Pass);
-    // The same run against a fence that pins no second stream: an absent
-    // `stderr` fence asserts an empty one.
-    let without = text.replace("/// ```stderr\n/// to the second\n/// ```\n", "");
-    let (judgement, note) = only(&judge_text(&without, &registry("")));
-    assert_eq!(judgement, Judgement::Fail, "{note}");
-    assert!(note.contains("to the second"), "{note}");
-}
-
-#[test]
-fn the_linked_engine_hands_over_its_second_stream_and_a_fence_is_held_to_it() {
+fn the_second_stream_is_handed_over_and_a_fence_is_held_apart_to_it() {
     if oracle().is_none() {
         return;
     }
     // A snippet whose diagnostic goes to the error stream under the
     // linked engine, which is `Capture`'s `stderr` handed over as the
     // fresh-process adapter hands php's fd 2 over (#248): a fence pinning
-    // it passes, and one pinning nothing there fails on what was written.
+    // it passes, and one pinning nothing there fails on what was written,
+    // an absent `stderr` fence asserting an empty second stream.
     let text = format!(
         "/// ```php\n/// ini_set('display_errors', 'stderr');\n/// echo $u, 'to the first';\n/// ```\n{}pub fn native() {{}}\n",
         "/// ```expect\n/// to the first\n/// ```\n/// ```stderr\n/// Warning: Undefined variable $u in %s on line 3\n/// ```\n"
     );
     let file = Path::new("ext/fixture/src/lib.rs");
-    let tally = judged_under(&Runner::Linked, file, &text, &registry(""), false);
+    let tally = judged(file, &text, &registry(""), false);
     let (judgement, note) = only(&tally);
     assert_eq!(judgement, Judgement::Pass, "{note}");
     let without = text.replace(
         "/// ```stderr\n/// Warning: Undefined variable $u in %s on line 3\n/// ```\n",
         "",
     );
-    let tally = judged_under(&Runner::Linked, file, &without, &registry(""), false);
+    let tally = judged(file, &without, &registry(""), false);
     let (judgement, note) = only(&tally);
     assert_eq!(judgement, Judgement::Fail, "{note}");
     assert!(note.contains("Undefined variable $u"), "{note}");
@@ -324,8 +273,12 @@ fn a_bare_exit_is_unpinned_until_accept_captures_the_status() {
     if oracle().is_none() {
         return;
     }
-    let text =
-        "/// ```php\n/// exit(3);\n/// ```\n/// ```expect exit\n/// ```\npub fn native() {}\n";
+    // A snippet the engine ends on a status of its own: php's uncaught
+    // error, which the engine writes byte for byte and both end 255 on
+    // (`exit` is a construct the compiler does not read yet, so the
+    // snippet that ended 3 is one the run of record cannot serve).
+    let text = format!("/// ```php\n/// nope();\n/// ```\n{FATAL}pub fn native() {{}}\n");
+    let text = text.as_str();
     let (_tree, file) = source("accept", text);
 
     let (judgement, note) = only(&judged(&file, text, &registry(""), false));
@@ -342,7 +295,7 @@ fn a_bare_exit_is_unpinned_until_accept_captures_the_status() {
     assert_eq!(tally.captured.len(), 1, "{tally:#?}");
     let written = fs::read_to_string(&file).unwrap();
     assert!(
-        written.contains(&format!("```expect exit={}", 3)),
+        written.contains("```expect exit=255"),
         "the oracle's status is on the fence line: {written}"
     );
 
@@ -374,7 +327,6 @@ fn a_block_the_grammar_cannot_read_fails_the_crate_where_it_stands() {
     let tally = judge(
         &manifest().pin.oracle(),
         &Registry::default(),
-        &Runner::Absent("no engine".to_owned()),
         &Ask::default(),
         &found,
     )
