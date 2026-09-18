@@ -3605,19 +3605,30 @@ impl Request {
     /// over `EG(zend_constants)`: the names of the constants an
     /// extension declared through `ExtensionBuilder::constants`, in the
     /// order it declared them, each one `api::call::constant` reads the
-    /// value of; empty for an extension that declares none.
+    /// value of; empty for an extension that declares none. The table
+    /// holds the engine's own constants first, as
+    /// `zend_register_standard_constants` runs before any `MINIT`, then
+    /// each extension's in bundle order (`Engine::build`), the layout
+    /// [`Request::extension_functions`] reads too.
     #[must_use]
     pub fn extension_constants(&self, extension: ExtensionId) -> Vec<Name> {
         let Some(at) = usize::try_from(extension.0).ok() else {
             return Vec::new();
         };
+        let all: usize = self
+            .shared
+            .extensions
+            .iter()
+            .map(|e| e.constants.len())
+            .sum();
+        let own = self.shared.declared().constants.len().saturating_sub(all);
         let start: usize = self
             .shared
             .extensions
             .iter()
             .take(at)
             .map(|e| e.constants.len())
-            .sum();
+            .fold(own, usize::saturating_add);
         let count = self
             .extension_of(extension)
             .map_or(0, |e| e.constants.len());
