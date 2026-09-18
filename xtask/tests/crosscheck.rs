@@ -107,13 +107,20 @@ fn count(reading: &Reading, key: &str) -> i64 {
     }
 }
 
+/// The extensions the engine renders as the oracle does, so far: ctype
+/// (#271) and json (#272). The row for the next one ported is added
+/// here with the commit that makes it pass.
+const PORTED: [&str; 2] = ["ext/ctype", "ext/json"];
+
 /// Design §11 days 1–2, the two halves met (#269): every extension of
 /// the default set is rendered by the oracle and by the linked engine,
-/// ctype reads pass, and every other reads fail naming the engine's
-/// rendering as the cause, the first differing line or the engine's own
-/// words for rendering nothing; the oracle's bytes are kept for each.
+/// the ported ones read pass, and every other reads fail naming the
+/// engine's rendering as the cause, the first differing line or the
+/// engine's own words for rendering nothing; the oracle's bytes are kept
+/// for each.
 #[test]
-fn ctype_reads_pass_and_every_other_default_extension_reads_fail_naming_the_engines_rendering() {
+fn the_ported_extensions_read_pass_and_every_other_default_extension_reads_fail_naming_the_engines_rendering()
+ {
     if oracle().is_none() {
         return;
     }
@@ -133,7 +140,7 @@ fn ctype_reads_pass_and_every_other_default_extension_reads_fail_naming_the_engi
         assert_eq!(reading.instrument, "crosscheck");
         assert!(reading.message.contains("--re"), "{}", reading.message);
         assert!(count(reading, "bytes") > 0, "{reading:#?}");
-        if reading.scope == "ext/ctype" {
+        if PORTED.contains(&reading.scope.as_str()) {
             assert_eq!(reading.status, Status::Pass, "{reading:#?}");
             assert!(
                 reading
