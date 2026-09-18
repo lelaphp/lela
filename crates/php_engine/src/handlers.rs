@@ -3830,9 +3830,19 @@ fn no_table(opcode: &str) -> Fatal {
     ))
 }
 
-/// `ZEND_VM_NEXT_OPCODE`: the same frame, at the opline after this one.
+/// `ZEND_VM_NEXT_OPCODE`: the same frame, at the opline after this one,
+/// and the `Threw` edge where the opline left a throwable pending,
+/// which is `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION`. php has the two
+/// macros and spends the test only in the handlers that can raise; this
+/// is one rule for both, because nothing is pending after a handler php
+/// gives the unchecked macro to, and the release a handler makes last
+/// is where a destructor is served (design §5.10), which is PHP code
+/// between this opline and the next.
 fn advance(req: &mut Request, frame: FrameRef) -> Stepped {
     req.vm_mut().advance(frame);
+    if req.is_pending() {
+        return Stepped::Threw(frame);
+    }
     Stepped::Same(frame)
 }
 

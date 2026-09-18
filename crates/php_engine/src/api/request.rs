@@ -966,33 +966,14 @@ impl Request {
         function: Function,
         written: &[u8],
     ) -> Result<(), Thrown> {
-        let Some(class) = self.method_class(function) else {
-            return Ok(());
-        };
-        let Some(decl) = self.method_decl(function) else {
-            return Ok(());
-        };
-        let visibility = decl.visibility;
-        let scope = self.executed_scope();
-        let allowed = match visibility {
-            Visibility::Public => true,
-            _ if scope == Some(class) => true,
-            Visibility::Private => false,
-            Visibility::Protected => self.check_protected(class, scope),
-        };
-        if allowed {
+        if self.method_accessible(function) {
             return Ok(());
         }
-        let shown = match visibility {
-            Visibility::Public => "public",
-            Visibility::Protected => "protected",
-            Visibility::Private => "private",
-        };
-        let class = self.class_name(class);
-        let from = match scope {
-            Some(scope) => format!("scope {}", self.class_name(scope)),
-            None => String::from("global scope"),
-        };
+        let shown = visibility_string(self.method_visibility(function));
+        let class = self
+            .method_class(function)
+            .map_or_else(|| String::from("object"), |class| self.class_name(class));
+        let from = self.scope_phrase();
         Err(crate::api::raising::throw(
             self,
             "Error",
@@ -1001,6 +982,40 @@ impl Request {
                 String::from_utf8_lossy(written)
             ),
         ))
+    }
+
+    /// `zend_check_method_accessible` (`Z/Zend/zend_execute.h:399`): a
+    /// public method is anyone's, a private one is its own class's
+    /// scope alone, and a protected one is a scope
+    /// `zend_check_protected` relates to it. A function that is no
+    /// method, and one the tables have no declaration for, is anyone's.
+    fn method_accessible(&self, function: Function) -> bool {
+        let Some(class) = self.method_class(function) else {
+            return true;
+        };
+        let scope = self.executed_scope();
+        match self.method_visibility(function) {
+            Visibility::Public => true,
+            _ if scope == Some(class) => true,
+            Visibility::Private => false,
+            Visibility::Protected => self.check_protected(class, scope),
+        }
+    }
+
+    /// `fn_flags & (ZEND_ACC_PUBLIC|ZEND_ACC_PROTECTED|ZEND_ACC_PRIVATE)`:
+    /// how a method was declared, public for a function that is none.
+    fn method_visibility(&self, function: Function) -> Visibility {
+        self.method_decl(function)
+            .map_or(Visibility::Public, |decl| decl.visibility)
+    }
+
+    /// `scope ? "scope " : "global scope"` with the scope's name after
+    /// it, the tail php's bad-call texts end in.
+    fn scope_phrase(&self) -> String {
+        match self.executed_scope() {
+            Some(scope) => format!("scope {}", self.class_name(scope)),
+            None => String::from("global scope"),
+        }
     }
 
     /// `object_init_ex`'s refusals: an interface, a trait, an enum or an
@@ -1596,6 +1611,16 @@ impl Request {
     /// it. The message-id table, the user handler, `EH_THROW` and the
     /// `@` scope are the rest of that branch and are not read yet.
     pub(crate) fn note_error(&mut self, level: Level, message: &str) {
+        // `zend_error_va_list`'s site (`Z/Zend/zend.c:1633-1651`): the
+        // executing frame's file and line, and, where nothing is
+        // executing and nothing compiling, no file at all, which
+        // `php_error_cb` is handed as `Unknown` at line zero
+        // (`ZEND_STR_UNKNOWN_CAPITALIZED`). A destructor the shutdown
+        // walk refuses to serve raises there.
+        if !self.executing() {
+            self.note_error_in(level, message, b"Unknown", 0);
+            return;
+        }
         let line = self.current_line();
         self.note_error_at(level, message, line);
     }
@@ -2667,18 +2692,86 @@ impl Request {
     /// after
     /// ```
     pub(crate) fn destruct(&mut self, object: PhpObject) {
-        let destructor: Option<Box<[u8]>> = self.class_decl(object.class()).and_then(|decl| {
-            decl.methods
-                .iter()
-                .find(|m| m.function.name.0.eq_ignore_ascii_case(b"__destruct"))
-                .map(|m| m.function.name.0.clone())
-        });
-        let Some(destructor) = destructor else {
+        let class = object.class();
+        let Some(destructor) = self.method_named(class, b"__destruct") else {
             return;
         };
-        if let Err(thrown) = crate::api::call::call_method(self, &object, &destructor, &[]) {
+        if !self.destructor_reachable(object, destructor) {
+            return;
+        }
+        if let Err(thrown) = self.serve_method(destructor, Some(object), class, &[]) {
             self.leave_pending(&thrown);
         }
+    }
+
+    /// `zend_objects_destroy_object`'s visibility branch: a public
+    /// `__destruct` is served from anywhere, and a private or a
+    /// protected one is held to `zend_check_method_accessible` from the
+    /// executed scope while a frame stands, php's `Error` naming the
+    /// visibility, the object's class and the scope the release came
+    /// from. With no frame standing, which is the store's shutdown walk
+    /// ([`Request::call_destructors`]) and php's `EG(current_execute_data)`
+    /// being null, there is no scope to check and the destructor is
+    /// skipped with a warning instead.
+    ///
+    /// ```php
+    /// class A { private function __destruct() { echo "never\n"; } }
+    /// $a = new A();
+    /// $a = 1;
+    /// echo "after\n";
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught Error: Call to private A::__destruct() from global scope in %s:4
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 4
+    /// ```
+    ///
+    /// ```php
+    /// class A { public $self; private function __destruct() { echo "never\n"; } }
+    /// $a = new A();
+    /// $a->self = $a;
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// end
+    ///
+    /// Warning: Call to private A::__destruct() from global scope during shutdown ignored in Unknown on line 0
+    /// ```
+    fn destructor_reachable(&mut self, object: PhpObject, destructor: Function) -> bool {
+        let visibility = self.method_visibility(destructor);
+        if visibility == Visibility::Public {
+            return true;
+        }
+        let shown = visibility_string(visibility);
+        let class = self.class_name(object.class());
+        if !self.executing() {
+            crate::api::raising::warning(
+                self,
+                &format!(
+                    "Call to {shown} {class}::__destruct() from global scope during shutdown ignored"
+                ),
+            );
+            return false;
+        }
+        if self.method_accessible(destructor) {
+            return true;
+        }
+        let from = self.scope_phrase();
+        let thrown = crate::api::raising::throw(
+            self,
+            "Error",
+            &format!("Call to {shown} {class}::__destruct() from {from}"),
+        );
+        self.leave_pending(&thrown);
+        false
+    }
+
+    /// `EG(current_execute_data)`: whether a frame or a native's call
+    /// stands, which is every release inside a serving and none of the
+    /// releases `php_request_shutdown` makes after the main frame popped.
+    fn executing(&self) -> bool {
+        self.vm.innermost().is_some() || self.vm.serving_call().is_some()
     }
 
     /// `zend_objects_store_call_destructors`, the second step of
@@ -5090,6 +5183,16 @@ fn ini_atol(value: &[u8]) -> i64 {
         };
     }
     n
+}
+
+/// `zend_visibility_string` (`Z/Zend/zend_compile.c:1063`): the word
+/// php's bad-call texts name a method's visibility by.
+fn visibility_string(visibility: Visibility) -> &'static str {
+    match visibility {
+        Visibility::Public => "public",
+        Visibility::Protected => "protected",
+        Visibility::Private => "private",
+    }
 }
 
 /// One string property of a throwable, empty where there is none.
