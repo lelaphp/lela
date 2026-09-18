@@ -402,6 +402,7 @@ fn closure_methods() -> Vec<(MethodDecl, Entry)> {
         doc_comment: None,
         file: Name(Box::new([])),
         line: 0,
+        end_line: 0,
         frameless: Vec::new(),
     };
     let parameter = |name: &[u8], ty: Type, variadic: bool| Parameter {
@@ -564,6 +565,7 @@ fn throwable_method(name: &[u8], parameters: &[Parameter], returns: Option<Type>
             doc_comment: None,
             file: Name(Box::new([])),
             line: 0,
+            end_line: 0,
             frameless: Vec::new(),
         },
         visibility: Visibility::Public,

@@ -723,6 +723,7 @@ mod tests {
             doc_comment: None,
             file: Name::from("a.php"),
             line: 4,
+            end_line: 6,
             frameless: Vec::new(),
         };
         let function = OpArray {
@@ -764,6 +765,7 @@ mod tests {
             doc_comment: None,
             file: Name::from("a.php"),
             line: 4,
+            end_line: 0,
             frameless: Vec::new(),
         };
         let method = |name: &str, parameters: usize| MethodDecl {

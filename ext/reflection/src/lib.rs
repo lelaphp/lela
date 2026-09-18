@@ -39,8 +39,7 @@
 //! every method the stub has, so `php --re reflection` renders whole.
 //! An extension's `INI` block, `_extension_ini_string`, a closure's
 //! `Bound Variables`, an object's `Dynamic properties` and
-//! `<iterateable>` are not rendered yet (#375), and a user function's
-//! `@@` line waits on the compiler (#376).
+//! `<iterateable>` are not rendered yet (#375).
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -3648,9 +3647,29 @@ fn function_header(
     let _ = writeln!(out, "{} ] {{", String::from_utf8_lossy(&decl.name.0));
 }
 
-/// The rest of `_function_string`: the parameters, the return row and
-/// the closing brace. A user function's `@@ file start - end` line
-/// waits on the end line the declaration model does not carry (#376).
+/// The rest of `_function_string`: a user function's `@@ file start -
+/// end` line, the parameters, the return row and the closing brace.
+/// php writes the `@@` row for a `ZEND_USER_FUNCTION` alone, off
+/// `op_array.filename`, `line_start` and `line_end`, which are the file
+/// and the lines of the `function` keyword and of the closing brace;
+/// a native's file is empty and it carries no row, as
+/// `_class_string` does for a class.
+///
+/// ```php
+/// function f($a) {
+///   return $a;
+/// }
+/// echo new ReflectionFunction('f');
+/// ```
+/// ```expect
+/// Function [ <user> function f ] {
+///   @@ %s 2 - 4
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> $a ]
+///   }
+/// }
+/// ```
 fn function_body(
     req: &mut Request,
     out: &mut String,
@@ -3658,6 +3677,15 @@ fn function_body(
     tentative: bool,
     indent: &str,
 ) {
+    if !decl.file.0.is_empty() {
+        let _ = writeln!(
+            out,
+            "{indent}  @@ {} {} - {}",
+            String::from_utf8_lossy(&decl.file.0),
+            decl.line,
+            decl.end_line
+        );
+    }
     let param_indent = format!("{indent}  ");
     function_parameter_string(req, out, decl, &param_indent);
     if let Some(returns) = &decl.return_type {

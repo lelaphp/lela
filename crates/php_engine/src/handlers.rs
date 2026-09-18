@@ -5262,6 +5262,7 @@ mod tests {
             doc_comment: None,
             file: Name::default(),
             line: 0,
+            end_line: 0,
             frameless: vec![0],
         };
         let extension = ExtensionBuilder::default()

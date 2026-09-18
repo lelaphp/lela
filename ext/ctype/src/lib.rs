@@ -103,6 +103,7 @@ fn declared(name: &[u8]) -> FunctionDecl {
         doc_comment: None,
         file: Name(Box::new([])),
         line: 0,
+        end_line: 0,
         frameless: Vec::new(),
     }
 }

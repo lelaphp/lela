@@ -329,6 +329,7 @@ mod tests {
             doc_comment: None,
             file: Name(Box::new([])),
             line: 0,
+            end_line: 0,
             frameless,
         })
         .collect()
@@ -354,6 +355,7 @@ mod tests {
                     doc_comment: None,
                     file: Name(Box::new([])),
                     line: 0,
+                    end_line: 0,
                     frameless: Vec::new(),
                 })
                 .chain(frameless_natives())
@@ -3430,6 +3432,7 @@ mod tests {
                         doc_comment: None,
                         file: Name(Box::new([])),
                         line: 0,
+                        end_line: 0,
                         frameless: Vec::new(),
                     },
                     visibility: Visibility::Public,
@@ -4385,6 +4388,7 @@ class C {
                 doc_comment: None,
                 file: Name(Box::new([])),
                 line: 0,
+                end_line: 0,
                 frameless: Vec::new(),
             },
             visibility,

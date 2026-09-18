@@ -51,6 +51,7 @@ mod tests {
             doc_comment: None,
             file: Name::default(),
             line: 0,
+            end_line: 0,
             frameless: frameless.to_vec(),
         }
     }

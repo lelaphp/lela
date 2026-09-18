@@ -216,6 +216,12 @@ pub struct Parameter {
 /// A function's declaration: its signature, doc comment and site; the
 /// body is the unit's op array of the same index.
 ///
+/// `line` and `end_line` are `op_array.line_start` and `line_end`, the
+/// lines of the `function` keyword and of the closing brace, and zero
+/// on a native, whose `file` is empty. Reflection's `_function_string`
+/// prints the pair as the `@@ file start - end` row it writes for a
+/// user function alone.
+///
 /// `frameless` is a native's `zend_frameless_function_info` list
 /// (`Z/Zend/zend_frameless_function.h`): the arities it serves without
 /// a call frame, in the order php's `frameless_function_infos_*` table
@@ -236,6 +242,7 @@ pub struct FunctionDecl {
     pub doc_comment: Option<Box<[u8]>>,
     pub file: Name,
     pub line: u32,
+    pub end_line: u32,
     pub frameless: Vec<u32>,
 }
 
