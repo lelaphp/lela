@@ -2689,9 +2689,12 @@ impl Request {
     /// class's `__destruct` served on the object, which the store holds
     /// at one owner meanwhile (`zend_objects_store_del` holds the count
     /// there, where php's `GC_ADDREF` and `OBJ_RELEASE` around the call
-    /// hold it). A class with none serves nothing. The visibility check
-    /// and the pending-throwable rules arrive with the branches under
-    /// them.
+    /// hold it). A class with none serves nothing, and so does a lazy
+    /// object, which is the first test php makes after finding the
+    /// destructor (`zend_object_is_lazy`); this engine makes none,
+    /// `newLazyGhost` and `newLazyProxy` being what does, so that branch
+    /// is php's sentence and no code here. The visibility check and the
+    /// pending-throwable rules are the branches under this one.
     ///
     /// An array gives its elements up in element order
     /// (`zend_array_destroy` over `i_zval_ptr_dtor`), so the
@@ -5525,6 +5528,44 @@ mod tests {
             "Error",
             "the destructor was served",
         ))
+    }
+
+    /// The same entry, serving: what a native class's `__destruct` is,
+    /// a Rust body on the request that served it.
+    fn writes_d(req: &mut Request) -> Result<crate::api::values::Value, super::Thrown> {
+        let text = crate::api::values::PhpString::new(req, b"d\n")?;
+        req.write(text.as_bytes());
+        Ok(crate::api::values::Value::null())
+    }
+
+    /// Design §5.10 and seam 1: a native class's `__destruct` is served
+    /// at the last release like a user class's, through the same
+    /// `Request::destruct` and the native branch of `serve_call`. No
+    /// witness can hold this one, because the class an extension of
+    /// this engine declares is no class of the oracle's, so the
+    /// `ASSIGN` the witness beside `handlers::assign` pins is served
+    /// here over a class whose body is Rust.
+    #[test]
+    fn a_native_classs_destructor_is_served_at_the_last_release() {
+        let decl = destructible();
+        let Some(method) = decl.methods.first().cloned() else {
+            return;
+        };
+        let destructible = crate::api::abi::ExtensionBuilder::default()
+            .classes(vec![(
+                decl,
+                vec![(method, writes_d as crate::api::abi::Entry)],
+            )])
+            .build("destructible");
+        let engine = Engine::builder().extensions(&[destructible]).build();
+
+        let served = engine.serve_capture(
+            "<?php $a = new Destructible(); $a = 1; echo \"after\\n\";",
+            crate::test::Capture::default(),
+        );
+
+        assert_eq!(String::from_utf8_lossy(&served.stdout), "d\nafter\n");
+        assert_eq!(served.fatal, None);
     }
 
     /// `zend_objects_destroy_object`'s `E_CORE_ERROR`
