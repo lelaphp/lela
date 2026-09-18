@@ -4747,7 +4747,7 @@ fn reflection_function_abstract() -> Declared {
             ),
             (
                 tentative(method(b"getNumberOfParameters", &[], Some(Type::Int))),
-                unbuilt as Entry,
+                super::signature::reflection_function_get_number_of_parameters as Entry,
             ),
             (
                 tentative(method(
@@ -4755,11 +4755,11 @@ fn reflection_function_abstract() -> Declared {
                     &[],
                     Some(Type::Int),
                 )),
-                unbuilt as Entry,
+                super::signature::reflection_function_get_number_of_required_parameters as Entry,
             ),
             (
                 tentative(method(b"getParameters", &[], Some(Type::Array))),
-                unbuilt as Entry,
+                super::signature::reflection_function_get_parameters as Entry,
             ),
             (
                 tentative(method(b"getShortName", &[], Some(Type::String))),
@@ -6023,23 +6023,23 @@ fn reflection_parameter() -> Declared {
                     ],
                     None,
                 ),
-                unbuilt as Entry,
+                super::signature::reflection_parameter_construct as Entry,
             ),
             (
                 method(b"__toString", &[], Some(Type::String)),
-                unbuilt as Entry,
+                super::signature::reflection_parameter_to_string as Entry,
             ),
             (
                 tentative(method(b"getName", &[], Some(Type::String))),
-                unbuilt as Entry,
+                super::signature::reflection_parameter_get_name as Entry,
             ),
             (
                 tentative(method(b"isPassedByReference", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::signature::reflection_parameter_is_passed_by_reference as Entry,
             ),
             (
                 tentative(method(b"canBePassedByValue", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::signature::reflection_parameter_can_be_passed_by_value as Entry,
             ),
             (
                 tentative(method(
@@ -6047,7 +6047,7 @@ fn reflection_parameter() -> Declared {
                     &[],
                     Some(named(b"ReflectionFunctionAbstract")),
                 )),
-                unbuilt as Entry,
+                super::signature::reflection_parameter_get_declaring_function as Entry,
             ),
             (
                 tentative(method(
@@ -6055,7 +6055,7 @@ fn reflection_parameter() -> Declared {
                     &[],
                     Some(nullable(named(b"ReflectionClass"))),
                 )),
-                unbuilt as Entry,
+                super::signature::reflection_parameter_get_declaring_class as Entry,
             ),
             (
                 deprecated(
@@ -6071,7 +6071,7 @@ fn reflection_parameter() -> Declared {
             ),
             (
                 tentative(method(b"hasType", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::signature::reflection_parameter_has_type as Entry,
             ),
             (
                 tentative(method(
@@ -6079,7 +6079,7 @@ fn reflection_parameter() -> Declared {
                     &[],
                     Some(nullable(named(b"ReflectionType"))),
                 )),
-                unbuilt as Entry,
+                super::signature::reflection_parameter_get_type as Entry,
             ),
             (
                 deprecated(
@@ -6099,27 +6099,27 @@ fn reflection_parameter() -> Declared {
             ),
             (
                 tentative(method(b"allowsNull", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::signature::reflection_parameter_allows_null as Entry,
             ),
             (
                 tentative(method(b"getPosition", &[], Some(Type::Int))),
-                unbuilt as Entry,
+                super::signature::reflection_parameter_get_position as Entry,
             ),
             (
                 tentative(method(b"isOptional", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::signature::reflection_parameter_is_optional as Entry,
             ),
             (
                 tentative(method(b"isDefaultValueAvailable", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::signature::reflection_parameter_is_default_value_available as Entry,
             ),
             (
                 tentative(method(b"getDefaultValue", &[], Some(Type::Mixed))),
-                unbuilt as Entry,
+                super::signature::reflection_parameter_get_default_value as Entry,
             ),
             (
                 tentative(method(b"isDefaultValueConstant", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::signature::reflection_parameter_is_default_value_constant as Entry,
             ),
             (
                 tentative(method(
@@ -6127,15 +6127,15 @@ fn reflection_parameter() -> Declared {
                     &[],
                     Some(nullable(Type::String)),
                 )),
-                unbuilt as Entry,
+                super::signature::reflection_parameter_get_default_value_constant_name as Entry,
             ),
             (
                 tentative(method(b"isVariadic", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::signature::reflection_parameter_is_variadic as Entry,
             ),
             (
                 method(b"isPromoted", &[], Some(Type::Bool)),
-                unbuilt as Entry,
+                super::signature::reflection_parameter_is_promoted as Entry,
             ),
             (
                 method(
@@ -6146,7 +6146,7 @@ fn reflection_parameter() -> Declared {
                     ],
                     Some(Type::Array),
                 ),
-                unbuilt as Entry,
+                super::signature::reflection_parameter_get_attributes as Entry,
             ),
         ],
     )
@@ -6169,11 +6169,11 @@ fn reflection_type() -> Declared {
             ),
             (
                 tentative(method(b"allowsNull", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::signature::reflection_type_allows_null as Entry,
             ),
             (
                 method(b"__toString", &[], Some(Type::String)),
-                unbuilt as Entry,
+                super::signature::reflection_type_to_string as Entry,
             ),
         ],
     )
@@ -6186,11 +6186,11 @@ fn reflection_named_type() -> Declared {
         vec![
             (
                 tentative(method(b"getName", &[], Some(Type::String))),
-                unbuilt as Entry,
+                super::signature::reflection_named_type_get_name as Entry,
             ),
             (
                 tentative(method(b"isBuiltin", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::signature::reflection_named_type_is_builtin as Entry,
             ),
         ],
     )
@@ -6202,7 +6202,7 @@ fn reflection_union_type() -> Declared {
         class(b"ReflectionUnionType", Some(b"ReflectionType"), &[]),
         vec![(
             method(b"getTypes", &[], Some(Type::Array)),
-            unbuilt as Entry,
+            super::signature::reflection_union_type_get_types as Entry,
         )],
     )
 }
@@ -6213,7 +6213,7 @@ fn reflection_intersection_type() -> Declared {
         class(b"ReflectionIntersectionType", Some(b"ReflectionType"), &[]),
         vec![(
             method(b"getTypes", &[], Some(Type::Array)),
-            unbuilt as Entry,
+            super::signature::reflection_union_type_get_types as Entry,
         )],
     )
 }

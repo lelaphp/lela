@@ -54,8 +54,10 @@
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+mod signature;
 mod stub;
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use php_ext::abi::{DependencyKind, Extension, ExtensionBuilder};
@@ -64,7 +66,7 @@ use php_ext::call::{
 };
 use php_ext::decl::{
     ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, MethodDecl, Name,
-    PropertyDecl, Type, Visibility,
+    Parameter, PropertyDecl, Type, Visibility,
 };
 use php_ext::raising::{Thrown, arg_count_error, arg_type_error, deprecated, throw};
 use php_ext::request::{ExtensionId, PHP_VERSION, Request};
@@ -72,8 +74,16 @@ use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, Value
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
+///
+/// The two tables are php's `intern->ptr` for the reflectors whose
+/// subject is not a name they can look up again, a `ReflectionParameter`
+/// and the four type reflectors, keyed by the object's store index as php
+/// keys them by the object itself (see [`signature`]).
 #[derive(Default)]
-struct State {}
+struct State {
+    parameters: HashMap<u32, signature::ParameterRef>,
+    types: HashMap<u32, signature::TypeRef>,
+}
 
 /// The extension value (design §7.1): declarations paired with entries,
 /// and the state declared on it.
@@ -3473,44 +3483,59 @@ fn function_body(out: &mut String, decl: &FunctionDecl, tentative: bool, indent:
     let _ = writeln!(out, "{indent}}}");
 }
 
-/// `_function_parameter_string`: `- Parameters [N] {` and one
-/// `_parameter_string` line per parameter, a required one being every
-/// parameter before the first with a default or the variadic one.
-fn function_parameter_string(out: &mut String, decl: &FunctionDecl, indent: &str) {
-    let required = decl
-        .parameters
+/// `required_num_args`: every parameter before the first with a
+/// default or the variadic one.
+fn required_parameters(decl: &FunctionDecl) -> usize {
+    decl.parameters
         .iter()
         .position(|p| p.default.is_some() || p.variadic)
-        .unwrap_or(decl.parameters.len());
+        .unwrap_or(decl.parameters.len())
+}
+
+/// `_parameter_string`: one `Parameter #N [ ... ]` row, the modifier
+/// word, the type where the declaration has one, `&` for a by-reference
+/// parameter, `...` for the variadic one, the name, and the default
+/// after `=` where the row is optional and not variadic. php passes an
+/// indent it does not write, so the row carries none.
+fn parameter_string(parameter: &Parameter, offset: usize, required: bool) -> String {
+    let mut out = format!("Parameter #{offset} [ ");
+    out.push_str(if required {
+        "<required> "
+    } else {
+        "<optional> "
+    });
+    if let Some(ty) = &parameter.ty {
+        let _ = write!(out, "{} ", type_to_string(ty));
+    }
+    if parameter.by_ref {
+        out.push('&');
+    }
+    if parameter.variadic {
+        out.push_str("...");
+    }
+    let _ = write!(out, "${}", String::from_utf8_lossy(&parameter.name.0));
+    if !required && !parameter.variadic {
+        out.push_str(" = ");
+        out.push_str(
+            &parameter
+                .default
+                .as_ref()
+                .map_or_else(|| String::from("<default>"), const_expr_string),
+        );
+    }
+    out.push_str(" ]");
+    out
+}
+
+/// `_function_parameter_string`: `- Parameters [N] {` and one
+/// [`parameter_string`] line per parameter.
+fn function_parameter_string(out: &mut String, decl: &FunctionDecl, indent: &str) {
+    let required = required_parameters(decl);
     out.push('\n');
     let _ = writeln!(out, "{indent}- Parameters [{}] {{", decl.parameters.len());
     for (offset, parameter) in decl.parameters.iter().enumerate() {
-        let _ = write!(out, "{indent}  Parameter #{offset} [ ");
-        out.push_str(if offset < required {
-            "<required> "
-        } else {
-            "<optional> "
-        });
-        if let Some(ty) = &parameter.ty {
-            let _ = write!(out, "{} ", type_to_string(ty));
-        }
-        if parameter.by_ref {
-            out.push('&');
-        }
-        if parameter.variadic {
-            out.push_str("...");
-        }
-        let _ = write!(out, "${}", String::from_utf8_lossy(&parameter.name.0));
-        if offset >= required && !parameter.variadic {
-            out.push_str(" = ");
-            out.push_str(
-                &parameter
-                    .default
-                    .as_ref()
-                    .map_or_else(|| String::from("<default>"), const_expr_string),
-            );
-        }
-        out.push_str(" ]\n");
+        let row = parameter_string(parameter, offset, offset < required);
+        let _ = writeln!(out, "{indent}  {row}");
     }
     let _ = writeln!(out, "{indent}}}");
 }
