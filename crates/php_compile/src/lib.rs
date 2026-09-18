@@ -2951,6 +2951,30 @@ mod tests {
         }
     }
 
+    /// An expression the reader cannot take further inside parentheses:
+    /// the refusal names the expression, in the sentence the phpt lane
+    /// reads as a construct not read yet, where it named the parenthesis
+    /// before (#395). A parenthesis nothing closes is the scanner's own
+    /// refusal, raised before this reader runs.
+    #[test]
+    fn an_unread_expression_inside_parentheses_names_the_expression() {
+        let compiled = || CompileError {
+            level: Level::Parse,
+            message: String::from("compiled"),
+            line: 0,
+            raised: Vec::new(),
+        };
+        let error = refused(b"<?php\n$a = (1 and 2);\n").unwrap_or_else(compiled);
+        assert_eq!(error.level, Level::Parse);
+        assert_eq!(
+            error.message,
+            "an expression inside parentheses this compiler cannot read yet"
+        );
+        assert_eq!(error.line, 2);
+        let unclosed = refused(b"<?php\n$a = (1 + 2;\n").unwrap_or_else(compiled);
+        assert_eq!(unclosed.message, "syntax error, unexpected token \";\"");
+    }
+
     /// Five `long` cases, the default among them, are what
     /// `should_use_jumptable` asks for: a `SWITCH_LONG` over the table
     /// before the chain, its `extended_value` the default's target.

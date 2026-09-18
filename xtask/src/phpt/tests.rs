@@ -281,6 +281,37 @@ fn a_program_the_compiler_refused_is_unread_and_names_the_construct() {
     assert_eq!(unread("this compiler cannot read yet"), None);
 }
 
+/// The fixture at `xtask/fixtures/phpt/UnreadInParentheses.phpt` (#395):
+/// a program php runs and this compiler cannot read, the construct it
+/// cannot read standing inside parentheses. The refusal `php_compile`
+/// gives that program ends in the words [`adapter::unread`] reads, so
+/// the lane counts the test a construct not read yet; while the refusal
+/// named the parenthesis instead, the same program's refusal was no
+/// sentence the lane knew and the test counted as a failure. The engine
+/// here is the one linked into the harness, since the fixture holds one
+/// program and not a subset to run.
+#[test]
+fn the_refusal_for_an_unread_expression_inside_parentheses_is_read_as_unread() {
+    let pin = manifest().pin;
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
+    let phpt = file::Phpt::load(&fixture).unwrap();
+    let program = phpt.section("FILE").expect("the fixture has a --FILE--");
+    let snippet = String::from_utf8_lossy(program)
+        .strip_prefix("<?php\n")
+        .expect("the program opens with the tag the recipe's preamble writes")
+        .to_owned();
+    let served = crate::oracle::linked::serve(&pin.recipe, &snippet).unwrap();
+    assert_eq!(
+        adapter::unread(&served.stdout),
+        Some("an expression inside parentheses this compiler cannot read yet".to_owned()),
+        "{}",
+        String::from_utf8_lossy(&served.stdout)
+    );
+}
+
+/// The one fixture the test above reads.
+const FIXTURE: &str = "fixtures/phpt/UnreadInParentheses.phpt";
+
 #[test]
 fn a_skipif_that_says_skip_skips_with_its_reason() {
     if oracle().is_none() {

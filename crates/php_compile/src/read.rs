@@ -2632,7 +2632,18 @@ impl Reader<'_> {
                 let mut inner = self.expr()?;
                 self.skip_trivia();
                 if self.byte(0) != Some(b')') {
-                    return Err(self.trouble("a parenthesis no close parenthesis matches"));
+                    // A parenthesis nothing closes is the scanner's own
+                    // refusal, `Unclosed '(' on line %d`, and `compile`
+                    // returns it before this reader runs; what stands
+                    // here is a construct the expression was carried up
+                    // to and could not be taken past, so the refusal
+                    // names the expression in the sentence the phpt
+                    // lane reads as unread (harness §4.5). Naming the
+                    // parenthesis instead counted such a test a failure
+                    // (#395).
+                    return Err(self.trouble(
+                        "an expression inside parentheses this compiler cannot read yet",
+                    ));
                 }
                 self.bump(1);
                 // `'(' expr ')'` sets `ZEND_PARENTHESIZED_CONDITIONAL` on
