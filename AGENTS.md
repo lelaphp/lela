@@ -140,7 +140,7 @@ Commands:
   phpt               Run the pinned `.phpt` corpus through the engine and hold each test to its `--EXPECT*--` section; one reading per subset, scoped to the crate whose subset it is
   port-map           Join the Mahout census to `api.lock`: every item `same`, `renamed` or `gone`, the rows the port has not taken as the number. One reading, at the crate the lock lives with
   compile-identity   Compile a corpus under the oracle's dump recipe and under the engine, and hold every file to byte-identity; one reading per corpus, scoped to the corpus
-  crosscheck         Hold each default extension's rendering to the oracle's `php --re <name>` bytes, kept in the store; one reading per extension
+  crosscheck         Hold each default extension's rendering to the oracle's `php --re <name>` and `php --ri <name>` bytes, kept in the store; one reading per extension per flag
   unsafe-audit       Allow `unsafe` only in the homes the manifest's unsafe.homes rule names
   generate           Write the files the manifest's `generated` rules render (ext/clippy.toml)
   steer              Apply a proposal to one of the harness's own files, and only where it adds: one changed value writes nothing
@@ -153,7 +153,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=bfb0cd42c0797032127a77c59145ad35650c63ba0511e5296a341dab5388e3cd out=96d11a9ecf72837e00c6fd69cebc30b25fb33eda8288a272f24e73ed031f9f0c -->
+<!-- /computed in=bcfbd3463ed851e809a9e993af9b2831f83aeb8536abc4bcc69c2fd321411591 out=b77b9d5044c82addf11bbf1fc2f49da6430814452510b2783e63a891474bd922 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

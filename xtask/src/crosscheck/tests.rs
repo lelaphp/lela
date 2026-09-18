@@ -30,13 +30,19 @@ fn the_fixture_is_the_oracles_own_rendering_and_the_one_byte_apart_is_not_a_pass
         judge(
             &registry(""),
             "ctype",
+            Column::Re,
             &oracle,
             &Rendering::Bytes(oracle.clone())
         ),
         Judgement::Pass
     );
-    let Judgement::Fail(note) = judge(&registry(""), "ctype", &oracle, &Rendering::Bytes(engine))
-    else {
+    let Judgement::Fail(note) = judge(
+        &registry(""),
+        "ctype",
+        Column::Re,
+        &oracle,
+        &Rendering::Bytes(engine),
+    ) else {
         panic!("one byte apart is a pass")
     };
     assert!(
@@ -75,15 +81,110 @@ fn the_note_is_the_first_differing_line_and_the_count_of_all_of_them() {
     );
 }
 
-/// The engine's side is php's own cast: `echo` over a `ReflectionExtension`
-/// is `__toString()`, what `php --re` prints. A name is a PHP string
-/// literal whatever it holds.
+/// The engine's side is php's own call: `echo` over a `ReflectionExtension`
+/// is `__toString()`, what `php --re` prints, and `info()` is
+/// `php_info_print_module`, what `php --ri` prints. A name is a PHP
+/// string literal whatever it holds.
 #[test]
 fn the_program_is_echo_over_a_reflection_extension_and_the_name_is_a_literal() {
-    assert_eq!(program("ctype"), "echo new ReflectionExtension('ctype');");
     assert_eq!(
-        program("it's\\"),
+        Column::Re.program("ctype"),
+        "echo new ReflectionExtension('ctype');"
+    );
+    assert_eq!(
+        Column::Ri.program("ctype"),
+        "(new ReflectionExtension('ctype'))->info();"
+    );
+    assert_eq!(
+        Column::Re.program("it's\\"),
         "echo new ReflectionExtension('it\\'s\\\\');"
+    );
+    assert_eq!(
+        Column::Ri.program("it's\\"),
+        "(new ReflectionExtension('it\\'s\\\\'))->info();"
+    );
+}
+
+/// The `--ri` column (#273): php's own `--ri ctype` standing for the
+/// engine's is a pass, and the one a byte apart, `Enabled` for `enabled`
+/// on line 3, is not; the fixture carries no load number to renumber.
+#[test]
+fn the_ri_fixture_is_the_oracles_own_rendering_and_the_one_byte_apart_is_not_a_pass() {
+    let oracle = fs::read(fixtures().join("oracle.ri")).unwrap();
+    let engine = fs::read(fixtures().join("engine.ri")).unwrap();
+    assert_eq!(oracle.len(), engine.len(), "one byte, not a length");
+    assert_eq!(
+        oracle, b"ctype\n\nctype functions => enabled",
+        "php_info_print_module in text mode, trimmed"
+    );
+    assert_eq!(
+        judge(
+            &registry(""),
+            "ctype",
+            Column::Ri,
+            &oracle,
+            &Rendering::Bytes(oracle.clone())
+        ),
+        Judgement::Pass
+    );
+    let Judgement::Fail(note) = judge(
+        &registry(""),
+        "ctype",
+        Column::Ri,
+        &oracle,
+        &Rendering::Bytes(engine),
+    ) else {
+        panic!("one byte apart is a pass")
+    };
+    assert!(
+        note.starts_with(
+            "the engine's rendering differs from the oracle's at line 3, 2 lines in all:\n"
+        ) && note.contains("-ctype functions => enabled")
+            && note.contains("+ctype functions => Enabled"),
+        "{note}"
+    );
+}
+
+/// Each column has its flag, its kept extension, its scope and its
+/// divergence key: the `--re` reading keeps the crate's name, the scope
+/// `done` holds a default extension to, and the `--ri` one stands beside
+/// it under `/ri`; an accepted row for one column accepts nothing for the
+/// other.
+#[test]
+fn the_two_columns_have_their_own_flag_scope_and_key() {
+    assert_eq!(Column::ALL, [Column::Re, Column::Ri]);
+    assert_eq!(Column::Re.flag(), "--re");
+    assert_eq!(Column::Ri.flag(), "--ri");
+    assert_eq!(Column::Re.kept(), "re");
+    assert_eq!(Column::Ri.kept(), "ri");
+    assert_eq!(Column::Re.scope("ctype"), "ext/ctype");
+    assert_eq!(Column::Ri.scope("ctype"), "ext/ctype/ri");
+    assert_eq!(Column::Re.id("ctype"), "crosscheck:ctype");
+    assert_eq!(Column::Ri.id("ctype"), "crosscheck:ctype/ri");
+    let oracle = fs::read(fixtures().join("oracle.ri")).unwrap();
+    let engine = fs::read(fixtures().join("engine.ri")).unwrap();
+    let accepted = registry(
+        r#"
+[[divergence]]
+id = "crosscheck:ctype"
+kind = "crosscheck"
+reason = "the --re row (fixture)."
+status = "accepted"
+since = "2026-09-18"
+"#,
+    );
+    assert!(
+        matches!(
+            judge(
+                &accepted,
+                "ctype",
+                Column::Ri,
+                &oracle,
+                &Rendering::Bytes(engine)
+            ),
+            Judgement::Fail(_)
+        ),
+        "a row for the --re column accepts nothing for --ri"
     );
 }
 
@@ -116,6 +217,7 @@ fn the_renumbered_fixture_is_a_pass_under_the_row_and_not_without_it() {
         judge(
             &registry(""),
             "ctype",
+            Column::Re,
             &oracle::normalise(rules, oracle.clone()),
             &Rendering::Bytes(oracle::normalise(rules, engine.clone())),
         )
@@ -155,6 +257,7 @@ since = "2026-09-18"
     let judged = judge(
         &accepted,
         "ctype",
+        Column::Re,
         &oracle,
         &Rendering::Bytes(engine.clone()),
     );
@@ -167,6 +270,7 @@ since = "2026-09-18"
         judge(
             &accepted,
             "ctype",
+            Column::Re,
             &oracle,
             &Rendering::Bytes(oracle.clone())
         ),
@@ -178,6 +282,7 @@ since = "2026-09-18"
             judge(
                 &accepted,
                 "hash",
+                Column::Re,
                 &oracle,
                 &Rendering::Bytes(engine.clone())
             ),
@@ -190,6 +295,7 @@ since = "2026-09-18"
             judge(
                 &registry(&row("open")),
                 "ctype",
+                Column::Re,
                 &oracle,
                 &Rendering::Bytes(engine)
             ),
@@ -204,6 +310,7 @@ fn an_absent_rendering_fails_saying_the_engine_rendered_nothing() {
     let judged = judge(
         &registry(""),
         "ctype",
+        Column::Re,
         b"x",
         &Rendering::Absent("not built".to_owned()),
     );
@@ -228,15 +335,17 @@ fn the_default_set_is_every_ext_row_outside_a_feature_and_ext_names_one() {
         ..Ask::default()
     };
     assert_eq!(extensions(&manifest, &one), ["mbstring"]);
-    assert_eq!(scope("ctype"), "ext/ctype");
-    assert_eq!(id("ctype"), "crosscheck:ctype");
 }
 
 #[test]
 fn the_oracles_bytes_are_kept_under_the_scope_and_the_digest() {
     let store = Store::at("/store");
     assert_eq!(
-        kept(&store, "abc", "ctype"),
+        kept(&store, "abc", "ctype", Column::Re),
         PathBuf::from("/store/crosscheck/ext/ctype/abc.re")
+    );
+    assert_eq!(
+        kept(&store, "abc", "ctype", Column::Ri),
+        PathBuf::from("/store/crosscheck/ext/ctype/abc.ri")
     );
 }

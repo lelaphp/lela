@@ -29,6 +29,20 @@
 //! php's own rendering of `ctype` beside one that differs from it by one
 //! byte.
 //!
+//! **The `--ri` column.** php's fifth flag, `php --ri <name>`, is
+//! `php_info_print_module` in text mode (`sapi/cli/php_cli.c` at the
+//! tag): the module's name as a one-column table, then its `MINFO` table,
+//! the block `phpinfo()` shows per extension and the one thing `--re`
+//! does not hold, what the extension says of its own configuration. The
+//! lane renders it as a second [`Column`] beside `--re`, the oracle's
+//! bytes kept as `<digest>.ri` beside the `.re`, the engine's side `(new
+//! ReflectionExtension('<name>'))->info();`, which is the same
+//! `php_info_print_module` call (`Request::extension_info`), one reading
+//! per extension per column, the `--ri` one scoped `ext/<name>/ri`. An
+//! extension without a `MINFO` hook prints php's `Version` row and its
+//! ini entries on both sides, so the column grows with the ini system
+//! without changing shape.
+//!
 //! **The load number.** The first line, `Extension [ <persistent>
 //! extension #10 ctype version ... ]`, carries the module's load number,
 //! which is the oracle's build order and not the bundle's. The pin's
@@ -53,11 +67,76 @@ use crate::reading::{Reading, Status, Store, plural};
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "crosscheck";
-/// php's flag that prints one extension's rendering and runs nothing.
-pub(crate) const FLAG: &str = "--re";
-/// The file the oracle's bytes are kept in, under the store: what a run
-/// leaves for the day the engine renders.
-pub(crate) const KEPT: &str = "re";
+/// The two renderings the lane holds an extension to, one reading each:
+/// php's `--re` and `--ri` flags, which print one extension and run
+/// nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Column {
+    /// `php --re <name>`: `ReflectionExtension::__toString()`, every
+    /// declaration of the extension.
+    Re,
+    /// `php --ri <name>`: `php_info_print_module`, the extension's
+    /// `MINFO` table as `phpinfo()` shows it.
+    Ri,
+}
+
+impl Column {
+    /// Both columns, in the order a run writes them.
+    pub const ALL: [Column; 2] = [Column::Re, Column::Ri];
+
+    /// php's flag.
+    pub fn flag(self) -> &'static str {
+        match self {
+            Column::Re => "--re",
+            Column::Ri => "--ri",
+        }
+    }
+
+    /// The extension of the file the oracle's bytes are kept in under the
+    /// store, and of a rendering a test hands the lane: `re` or `ri`.
+    pub fn kept(self) -> &'static str {
+        match self {
+            Column::Re => "re",
+            Column::Ri => "ri",
+        }
+    }
+
+    /// The reading's scope for an extension: the crate's name in the
+    /// manifest for `--re`, the reading `done` holds a default extension
+    /// to, and `ext/<name>/ri` for `--ri`, so the store keeps both.
+    pub(crate) fn scope(self, name: &str) -> String {
+        match self {
+            Column::Re => format!("ext/{name}"),
+            Column::Ri => format!("ext/{name}/ri"),
+        }
+    }
+
+    /// The divergence key of one extension in this column:
+    /// `crosscheck:ctype` and `crosscheck:ctype/ri`, the registry kind's
+    /// prefix and the scope less its `ext/`, so an accepted row under it
+    /// is what `judge` reads as `Diverged` (harness §4.3).
+    pub(crate) fn id(self, name: &str) -> String {
+        let scope = self.scope(name);
+        let bare = scope.strip_prefix("ext/").unwrap_or(&scope);
+        format!("{}{bare}", Kind::Crosscheck.prefix())
+    }
+
+    /// The program whose first stream is the engine's rendering of
+    /// `name` in this column. `php --re <name>` prints `zend_print_zval`
+    /// over a `ReflectionExtension` (`sapi/cli/php_cli.c` at the tag),
+    /// which is `__toString()`, and `echo` casts the same way; `php --ri
+    /// <name>` calls `php_info_print_module`, which is what
+    /// `ReflectionExtension::info()` calls. The name is quoted as a PHP
+    /// string literal, so a name no extension could have is still a
+    /// program, refused by the engine in its own words.
+    pub(crate) fn program(self, name: &str) -> String {
+        let literal = name.replace('\\', "\\\\").replace('\'', "\\'");
+        match self {
+            Column::Re => format!("echo new ReflectionExtension('{literal}');"),
+            Column::Ri => format!("(new ReflectionExtension('{literal}'))->info();"),
+        }
+    }
+}
 
 /// What one `xtask crosscheck` run was asked for.
 #[derive(Debug, Clone, Default)]
@@ -65,8 +144,9 @@ pub struct Ask {
     /// The extensions, by their php names (`ctype`): `--ext <name>`,
     /// repeatable; the bundle's default set when none is named.
     pub ext: Vec<String>,
-    /// A directory of `<name>.re` files standing for the engine's
-    /// renderings, what a test hands the lane for the negative control;
+    /// A directory of `<name>.re` and `<name>.ri` files standing for the
+    /// engine's renderings, what a test hands the lane for the negative
+    /// control; a column whose file is absent rendered nothing;
     /// without it the engine's side is the linked engine's own rendering.
     pub renderings: Option<PathBuf>,
 }
@@ -101,27 +181,16 @@ impl Judgement {
     }
 }
 
-/// The reading's scope for an extension: the crate's name in the manifest.
-pub(crate) fn scope(name: &str) -> String {
-    format!("ext/{name}")
-}
-
-/// The divergence key of one extension: `crosscheck:ctype`, the registry
-/// kind's prefix and the extension's name, so an accepted row under it is
-/// what `judge` reads as `Diverged` (harness §4.3).
-pub(crate) fn id(name: &str) -> String {
-    format!("{}{name}", Kind::Crosscheck.prefix())
-}
-
-/// Where the oracle's bytes for `name` are kept: under the store, the
-/// instrument, the extension's scope and the oracle's digest, so a pin
-/// bump leaves the old rendering beside the new.
-pub fn kept(store: &Store, digest: &str, name: &str) -> PathBuf {
+/// Where the oracle's bytes for `name` in `column` are kept: under the
+/// store, the instrument, the extension's `--re` scope and the oracle's
+/// digest with the column's extension, `<digest>.re` beside
+/// `<digest>.ri`, so a pin bump leaves the old rendering beside the new.
+pub fn kept(store: &Store, digest: &str, name: &str, column: Column) -> PathBuf {
     store
         .root()
         .join(INSTRUMENT)
-        .join(scope(name))
-        .join(format!("{digest}.{KEPT}"))
+        .join(Column::Re.scope(name))
+        .join(format!("{digest}.{}", column.kept()))
 }
 
 /// The verdict on one extension: the engine's rendering held to the
@@ -129,12 +198,14 @@ pub fn kept(store: &Store, digest: &str, name: &str) -> PathBuf {
 pub(crate) fn judge(
     registry: &Registry,
     name: &str,
+    column: Column,
     oracle: &[u8],
     engine: &Rendering,
 ) -> Judgement {
     match engine {
         Rendering::Absent(why) => Judgement::Fail(format!("the engine rendered nothing: {why}")),
-        Rendering::Bytes(bytes) => match oracle::compare(registry, &id(name), oracle, bytes) {
+        Rendering::Bytes(bytes) => match oracle::compare(registry, &column.id(name), oracle, bytes)
+        {
             Verdict::Same => Judgement::Pass,
             Verdict::Diverged(row) => Judgement::Diverged(row.reason.clone()),
             Verdict::Differs(diff) => Judgement::Fail(first_difference(&diff)),
@@ -189,12 +260,13 @@ pub(crate) fn first_difference(diff: &str) -> String {
 /// engine renders empty is one hunk the size of the oracle's rendering.
 const HUNK: usize = 4;
 
-/// The oracle's rendering of `name`: `php --re <name>` under the recipe,
-/// through [`Oracle::run_under`] as every lane's oracle side runs. The
-/// recipe's program stands beside the flag, since php opens it before it
-/// prints, and prints without running it.
-pub(crate) fn render(oracle: &Oracle<'_>, name: &str) -> Result<Observation> {
-    let flags = [FLAG.to_owned(), name.to_owned()];
+/// The oracle's rendering of `name` in `column`: `php --re <name>` or
+/// `php --ri <name>` under the recipe, through [`Oracle::run_under`] as
+/// every lane's oracle side runs. The recipe's program stands beside the
+/// flag, since php opens it before it prints, and prints without running
+/// it.
+pub(crate) fn render(oracle: &Oracle<'_>, name: &str, column: Column) -> Result<Observation> {
+    let flags = [column.flag().to_owned(), name.to_owned()];
     oracle.run_under(&Invocation {
         flags: &flags,
         ..Invocation::new(&oracle.pin().oracle.path, Program::Snippet(""))
@@ -203,8 +275,12 @@ pub(crate) fn render(oracle: &Oracle<'_>, name: &str) -> Result<Observation> {
 
 /// The recipe as the reading names it: the invocation the oracle's bytes
 /// came from.
-pub(crate) fn recipe(manifest: &Manifest, name: &str) -> String {
-    format!("php {} {FLAG} {name}", manifest.pin.recipe.args.join(" "))
+pub(crate) fn recipe(manifest: &Manifest, name: &str, column: Column) -> String {
+    format!(
+        "php {} {} {name}",
+        manifest.pin.recipe.args.join(" "),
+        column.flag()
+    )
 }
 
 /// The extensions a run holds: the ones named, or the manifest's `ext/*`
@@ -223,8 +299,9 @@ pub(crate) fn extensions(manifest: &Manifest, ask: &Ask) -> Vec<String> {
         .collect()
 }
 
-/// Run what was asked for: one reading per extension, written by the
-/// caller through `record`, and the oracle's bytes kept in the store.
+/// Run what was asked for: one reading per extension per [`Column`],
+/// the `--re` one first, written by the caller through `record`, and the
+/// oracle's bytes kept in the store.
 pub fn run(
     root: &Path,
     manifest: &Manifest,
@@ -242,15 +319,16 @@ pub fn run(
     };
     extensions(manifest, ask)
         .iter()
-        .map(|name| {
-            let mut reading = reading_of(root, manifest, name)?;
-            let recipe = recipe(manifest, name);
+        .flat_map(|name| Column::ALL.iter().map(move |column| (name, *column)))
+        .map(|(name, column)| {
+            let mut reading = reading_of(root, manifest, name, column)?;
+            let recipe = recipe(manifest, name, column);
             if let Some(why) = &oracle_absent {
                 reading.status = Status::Skip;
                 reading.message = format!("{}: nothing rendered under `{recipe}`; {why}", reading.scope);
                 return Ok(reading);
             }
-            let observed = render(&oracle, name)?;
+            let observed = render(&oracle, name, column)?;
             if observed.exit != Some(0) {
                 reading.status = Status::Fail;
                 reading.message = format!(
@@ -260,14 +338,14 @@ pub fn run(
                 );
                 return Ok(reading);
             }
-            let path = kept(store, &manifest.pin.oracle.md5, name);
+            let path = kept(store, &manifest.pin.oracle.md5, name, column);
             if let Some(dir) = path.parent() {
                 fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
             }
             fs::write(&path, &observed.stdout)
                 .with_context(|| format!("keeping the oracle's rendering at {}", path.display()))?;
-            let engine = rendering(manifest, ask, name)?;
-            let judgement = judge(registry, name, &observed.stdout, &engine);
+            let engine = rendering(manifest, ask, name, column)?;
+            let judgement = judge(registry, name, column, &observed.stdout, &engine);
             reading.status = judgement.status();
             reading.count("bytes", observed.stdout.len() as u64)?;
             reading.count("lines", observed.stdout.split(|b| *b == b'\n').count() as u64)?;
@@ -293,36 +371,28 @@ pub fn run(
         .collect()
 }
 
-/// The program whose first stream is the engine's rendering of `name`:
-/// what `php --re <name>` prints, `zend_print_zval` over a
-/// `ReflectionExtension` (`sapi/cli/php_cli.c` at the tag), is
-/// `__toString()`, and `echo` casts the same way. The name is quoted as a
-/// PHP string literal, so a name no extension could have is still a
-/// program, refused by the engine in its own words.
-pub(crate) fn program(name: &str) -> String {
-    let literal = name.replace('\\', "\\\\").replace('\'', "\\'");
-    format!("echo new ReflectionExtension('{literal}');")
-}
-
-/// The engine's side for `name`: the file a test handed the lane, through
-/// the recipe's normalisation as the oracle's stream went, or the linked
-/// engine's own rendering of [`program`], which [`linked::serve`] answers
+/// The engine's side for `name` in `column`: the file a test handed the
+/// lane, through the recipe's normalisation as the oracle's stream went,
+/// or the linked engine's own rendering of [`Column::program`], which
+/// [`linked::serve`] answers
 /// normalised already. A request that did not end on zero rendered
 /// nothing, and the engine's words are why: under the recipe's
 /// `display_errors=1` what was thrown and not caught is on the first
 /// stream, and the trouble of a serve that did not run, a panic inside, is
 /// on neither.
-fn rendering(manifest: &Manifest, ask: &Ask, name: &str) -> Result<Rendering> {
+fn rendering(manifest: &Manifest, ask: &Ask, name: &str, column: Column) -> Result<Rendering> {
     let Some(dir) = &ask.renderings else {
-        return Ok(match linked::serve(&manifest.pin.recipe, &program(name)) {
-            Err(trouble) => {
-                Rendering::Absent(format!("the linked engine did not serve it: {trouble:#}"))
-            }
-            Ok(served) if served.exit != Some(0) => Rendering::Absent(said(&served)),
-            Ok(served) => Rendering::Bytes(served.stdout),
-        });
+        return Ok(
+            match linked::serve(&manifest.pin.recipe, &column.program(name)) {
+                Err(trouble) => {
+                    Rendering::Absent(format!("the linked engine did not serve it: {trouble:#}"))
+                }
+                Ok(served) if served.exit != Some(0) => Rendering::Absent(said(&served)),
+                Ok(served) => Rendering::Bytes(served.stdout),
+            },
+        );
     };
-    let path = dir.join(format!("{name}.{KEPT}"));
+    let path = dir.join(format!("{name}.{}", column.kept()));
     if !path.is_file() {
         return Ok(Rendering::Absent(format!(
             "no rendering at {}",
@@ -352,13 +422,14 @@ fn said(observed: &Observation) -> String {
     format!("the request ended on status {status}: {words}")
 }
 
-/// The reading of one extension, over the crate's sources where the
-/// manifest has a row for it, and over the workspace for a name it has
-/// not, which the oracle may still render or refuse.
-fn reading_of(root: &Path, manifest: &Manifest, name: &str) -> Result<Reading> {
-    let scope = scope(name);
-    match manifest.crate_named(&scope) {
-        Some(krate) => Reading::for_crate(INSTRUMENT, krate, root),
+/// The reading of one extension in one column, over the crate's sources
+/// where the manifest has a row for it, so both columns are stale
+/// together, and over the workspace for a name it has not, which the
+/// oracle may still render or refuse.
+fn reading_of(root: &Path, manifest: &Manifest, name: &str, column: Column) -> Result<Reading> {
+    let scope = column.scope(name);
+    match manifest.crate_named(&Column::Re.scope(name)) {
+        Some(krate) => Reading::stamped_over(INSTRUMENT, &scope, root, &krate.path()),
         None => Reading::stamped_over(INSTRUMENT, &scope, root, Path::new(".")),
     }
 }
