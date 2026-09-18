@@ -58,7 +58,7 @@ use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
-use crate::api::values::{PhpArray, TypeTag, Value, ValueRef};
+use crate::api::values::{ClosureInfo, PhpArray, TypeTag, Value, ValueRef};
 use crate::exec::{self, Cached, CallStage, CallState};
 use crate::ops::{Offset, Switched};
 use crate::tier::{SafepointIdx, Site, Stepped, Tier, continued};
@@ -67,6 +67,14 @@ use php_unit::Opcode;
 /// What one handler did to the frame chain, and the fatal that ends the
 /// request instead.
 pub(crate) type Edge = Result<Stepped, Fatal>;
+
+/// `ZEND_BIND_REF` (`Z/Zend/zend_compile.h:1194`): the bit a
+/// `BIND_LEXICAL`'s and a `BIND_STATIC`'s `extended_value` carries for
+/// a binding by reference, the slot standing above the three of them.
+const BIND_REF: u32 = 1;
+/// `ZEND_BIND_IMPLICIT`: an arrow function's capture, which raises no
+/// warning for a variable the scope has not.
+const BIND_IMPLICIT: u32 = 2;
 
 /// `ZEND_NOP`: nothing, and on to the opline after it.
 pub(crate) fn nop<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, _: &Opline) -> Edge {
@@ -220,6 +228,476 @@ pub(crate) fn declare_function<T: Tier>(
     }
 }
 
+/// `ZEND_DECLARE_LAMBDA_FUNCTION` (`Z/Zend/zend_vm_def.h:8343`):
+/// `zend_create_closure` over the op array the frame's
+/// `dynamic_func_defs` holds at `op2`, into the temporary `result`
+/// names. The scope is the enclosing op array's, the class a method
+/// whose body the closure stands in was declared in; the called scope
+/// is the receiver's class where the frame has one and the frame's own
+/// otherwise; and the receiver is bound unless the closure was written
+/// `static` or the frame has none. The closure carries its own table
+/// for the variables the `BIND_LEXICAL` oplines after it bind
+/// ([`ClosureInfo::bound`]), one slot per name of the op array's
+/// `bound_vars`, as `zend_create_closure_ex` gives every closure a
+/// `zend_array_dup` of the op array's.
+///
+/// ```php
+/// $f = function ($a) { return $a * 2; };
+/// var_dump($f(4), $f->__invoke(5), $f instanceof Closure);
+/// ```
+/// ```expect
+/// int(8)
+/// int(10)
+/// bool(true)
+/// ```
+///
+/// A closure written in a method is bound to the receiver, and one
+/// written `static` is not.
+///
+/// ```php
+/// class C {
+///     public $p = 7;
+///     function m() { return function () { return $this->p; }; }
+///     function s() { return static function () { return $this->p; }; }
+/// }
+/// $c = new C;
+/// $bound = $c->m();
+/// var_dump($bound());
+/// $free = $c->s();
+/// $free();
+/// ```
+/// ```expect exit=255
+/// int(7)
+///
+/// Fatal error: Uncaught Error: Using $this when not in object context in %s:5
+/// Stack trace:
+/// #0 %s(11): C::{closure:C::s():5}()
+/// #1 {main}
+///   thrown in %s on line 5
+/// ```
+/// What a closure leaves behind is nothing: the object, the variables
+/// it bound and the frame its call pushed are given up when the last
+/// owner lets go, so the heap stands where it stood.
+///
+/// ```php
+/// $before = memory_get_usage();
+/// $i = 0;
+/// while ($i < 3) {
+///     $f = function ($a) use ($i) { return $a + $i; };
+///     $f(1);
+///     $i = $i + 1;
+/// }
+/// $f = null;
+/// var_dump(memory_get_usage() - $before);
+/// ```
+/// ```expect
+/// int(0)
+/// ```
+pub(crate) fn declare_lambda_function<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let Some(serving) = req.vm().serving(frame) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a DECLARE_LAMBDA_FUNCTION on a frame serving no op array",
+        )));
+    };
+    let Some(at) = code.dynamic_func_defs.get(op.op2 as usize).copied() else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a DECLARE_LAMBDA_FUNCTION whose op2 names no dynamic function definition",
+        )));
+    };
+    let Some((_, body)) = serving.unit.dynamic.get(at as usize) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a DECLARE_LAMBDA_FUNCTION naming a definition the unit has not",
+        )));
+    };
+    let (slots, no_receiver) = (body.bound_vars.len(), body.no_receiver);
+    let Some(function) = req.closure_function(&serving.unit, at) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a DECLARE_LAMBDA_FUNCTION naming a definition the unit has not",
+        )));
+    };
+    let scope = req.frame_scope(frame);
+    let this = req
+        .vm()
+        .this(frame)
+        .filter(|_| !no_receiver && scope.is_some());
+    let closure = ClosureInfo {
+        function,
+        this,
+        scope,
+        bound: vec![Value::undef(); slots],
+        fake: false,
+    };
+    let Some(class) = req.class_named(b"closure") else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a DECLARE_LAMBDA_FUNCTION with no Closure class declared",
+        )));
+    };
+    // `ZVAL_OBJ_COPY(&closure->this_ptr, ...)`: the receiver the
+    // closure holds is one more owner, given back by
+    // `zend_closure_free_storage`.
+    if let Some(this) = this {
+        req.addref(&this.as_value());
+    }
+    let made = match req.new_object_with(class, closure) {
+        Ok(made) => made,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, made.as_value());
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
+/// `ZVAL_MAKE_REF_EX` over a CV (`Z/Zend/zend_vm_def.h:9112`, the
+/// by-reference arm of `BIND_LEXICAL`, and `zend_assign_to_variable_ref`
+/// under `ASSIGN_REF`): the cell the CV holds, or one made over what it
+/// holds and written back into it, the owner the slot had moving into
+/// the cell. The `Err` is the memory limit refusing the cell.
+fn cv_reference(
+    req: &mut Request,
+    frame: FrameRef,
+    at: u32,
+) -> Result<crate::api::values::PhpRef, Thrown> {
+    let held = req.slot(frame, at);
+    if let Some(cell) = held.as_php_ref() {
+        return Ok(*cell);
+    }
+    let cell = req.reference(held.undef_as_null())?;
+    // The owner the slot had of the value is the cell's now.
+    let _moved = req.set_slot(frame, at, cell.as_value());
+    Ok(cell)
+}
+
+/// `ZEND_BIND_LEXICAL` (`Z/Zend/zend_vm_def.h:9101`): one `use`
+/// variable of the closure the temporary in `op1` holds, from the CV in
+/// `op2` into the slot `extended_value` names of the closure's own
+/// table (`zend_closure_bind_var_ex`). By value the variable is
+/// dereferenced and copied, one more owner; by reference,
+/// `ZEND_BIND_REF`, the CV is made a reference where it is not one
+/// already and the closure holds that cell, so a write on either side
+/// is seen by the other. A variable the scope has not is the undefined
+/// warning, except under `ZEND_BIND_IMPLICIT`, an arrow function's
+/// capture, which php raises nothing for.
+///
+/// ```php
+/// $b = 1;
+/// $by_value = function () use ($b) { return $b; };
+/// $by_ref = function () use (&$b) { return $b; };
+/// $b = 2;
+/// var_dump($by_value(), $by_ref());
+/// ```
+/// ```expect
+/// int(1)
+/// int(2)
+/// ```
+///
+/// A closure's own write through a by-reference binding is the
+/// enclosing scope's too, and a by-value one is the closure's alone.
+///
+/// ```php
+/// $n = 1;
+/// $bump = function () use (&$n) { $n = $n + 1; };
+/// $copy = function () use ($n) { return $n; };
+/// $bump(); $bump();
+/// var_dump($n, $copy());
+/// ```
+/// ```expect
+/// int(3)
+/// int(1)
+/// ```
+///
+/// An explicit `use` of a variable nothing has written warns where the
+/// declaration stands, and binds the `null` the warning put in its
+/// place; an arrow function's implicit capture of one warns nothing
+/// there and binds the undefined value, so the warning is the body's
+/// own read of it, at the body's line.
+///
+/// ```php
+/// $f = function () use ($gone) { return $gone; };
+/// $g = fn () => $missing;
+/// var_dump($f(), $g());
+/// ```
+/// ```expect
+/// Warning: Undefined variable $gone in %s on line 2
+///
+/// Warning: Undefined variable $missing in %s on line 3
+/// NULL
+/// NULL
+/// ```
+pub(crate) fn bind_lexical<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let closure = exec::operand(req, frame, code, op.op1_type, op.op1);
+    let Some(object) = closure.as_object().copied() else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a BIND_LEXICAL over what is no Closure",
+        )));
+    };
+    let slot = (op.extended_value >> 3) as usize;
+    let by_ref = op.extended_value & BIND_REF != 0;
+    let bound = if by_ref {
+        let cell = match cv_reference(req, frame, op.op2) {
+            Ok(cell) => cell,
+            Err(thrown) => return threw(req, frame, &thrown),
+        };
+        let bound = cell.as_value();
+        req.addref(&bound);
+        bound
+    } else {
+        // `ZVAL_UNDEFINED_OP2` unless `ZEND_BIND_IMPLICIT`, then
+        // `ZVAL_DEREF` and `Z_TRY_ADDREF_P`.
+        let held = if op.extended_value & BIND_IMPLICIT == 0 {
+            exec::operand(req, frame, code, OperandKind::Cv, op.op2)
+        } else {
+            // `GET_OP2_ZVAL_PTR_UNDEF` and no `ZVAL_UNDEFINED_OP2`: an
+            // implicit capture binds the undefined value as it stands,
+            // so the warning is the body's own read of it.
+            req.slot(frame, op.op2)
+        };
+        let held = held.deref();
+        req.addref(&held);
+        held
+    };
+    let Some(payload) = object.native_mut::<ClosureInfo>(req) else {
+        req.release(bound);
+        return Err(Fatal::Error(String::from(
+            "InternalError: a BIND_LEXICAL over an object that is no Closure",
+        )));
+    };
+    let Some(cell) = payload.bound.get_mut(slot) else {
+        req.release(bound);
+        return Err(Fatal::Error(String::from(
+            "InternalError: a BIND_LEXICAL naming a slot the closure has not",
+        )));
+    };
+    let previous = std::mem::replace(cell, bound);
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_BIND_STATIC` (`Z/Zend/zend_vm_def.h:9137`): the prologue of a
+/// closure's body, one opline per bound variable, which reads the slot
+/// `extended_value` names of the closure's table into the CV in `op1`.
+/// By value the slot's value is copied, one more owner; by reference
+/// the CV becomes the cell the slot holds, which is the one the
+/// enclosing scope's variable is. A `static` variable of a plain
+/// function shares the opcode and no compiler here emits one, so a
+/// frame that is no closure's is this engine's error.
+///
+/// ```php
+/// $b = 1;
+/// $f = function ($a) use ($b) { $b = $b + $a; return $b; };
+/// var_dump($f(1), $f(1), $b);
+/// ```
+/// ```expect
+/// int(2)
+/// int(2)
+/// int(1)
+/// ```
+///
+/// Every declaration of one closure makes one with a table of its
+/// own, so two closures of one `function` keyword bound by reference
+/// count apart.
+///
+/// ```php
+/// function counter() {
+///     $n = 0;
+///     return function () use (&$n) { $n = $n + 1; return $n; };
+/// }
+/// $a = counter();
+/// $b = counter();
+/// var_dump($a(), $a(), $b());
+/// ```
+/// ```expect
+/// int(1)
+/// int(2)
+/// int(1)
+/// ```
+pub(crate) fn bind_static<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    _: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let Some(object) = req.vm().at(frame).and_then(|state| state.closure) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a BIND_STATIC on a frame that is no closure's, and a static variable of a function is not served yet",
+        )));
+    };
+    let slot = (op.extended_value >> 3) as usize;
+    let by_ref = op.extended_value & BIND_REF != 0;
+    let held = match object
+        .closure(req)
+        .and_then(|closure| closure.bound.get(slot))
+    {
+        Some(held) => *held,
+        None => {
+            return Err(Fatal::Error(String::from(
+                "InternalError: a BIND_STATIC naming a slot the closure has not",
+            )));
+        }
+    };
+    let bound = if by_ref {
+        let cell = if let Some(cell) = held.as_php_ref() {
+            *cell
+        } else {
+            let cell = match req.reference(held.undef_as_null()) {
+                Ok(cell) => cell,
+                Err(thrown) => return threw(req, frame, &thrown),
+            };
+            // The owner the table's slot had is the cell's now.
+            if let Some(payload) = object.native_mut::<ClosureInfo>(req)
+                && let Some(at) = payload.bound.get_mut(slot)
+            {
+                *at = cell.as_value();
+            }
+            cell
+        };
+        let bound = cell.as_value();
+        req.addref(&bound);
+        bound
+    } else {
+        req.addref(&held);
+        held
+    };
+    let previous = req.set_slot(frame, op.op1, bound);
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_INIT_DYNAMIC_CALL` (`Z/Zend/zend_vm_def.h:3899`): the call
+/// frame for a callee named as the program serves, `$f(…)`. A
+/// `Closure` is `zend_init_closure_call`, the payload's function with
+/// its receiver, its scope and the closure itself on the call, so the
+/// body's `BIND_STATIC` prologue finds what it bound; a string is the
+/// function of that name, `zend_hash_find_ptr(EG(function_table))` over
+/// its lowered form, and a name nothing declares is php's `Error`
+/// naming it as written. What is neither is php's `Error` for a value
+/// that is not callable.
+///
+/// ```php
+/// $f = function () { return 1; };
+/// $name = 'strlen';
+/// var_dump($f(), $name('abc'));
+/// ```
+/// ```expect
+/// int(1)
+/// int(3)
+/// ```
+///
+/// A closure is a value, so one passed to a function is called through
+/// the parameter that holds it, and a closure's own body calls the one
+/// its parameter holds the same way.
+///
+/// ```php
+/// function apply($f, $x) { return $f($x); }
+/// $add = function ($n) { return $n + 1; };
+/// var_dump(apply($add, 1), apply(fn ($n) => $n * 3, 2));
+/// $twice = function ($f, $x) { return $f($f($x)); };
+/// var_dump($twice($add, 1));
+/// ```
+/// ```expect
+/// int(2)
+/// int(6)
+/// int(3)
+/// ```
+///
+/// ```php
+/// $nope = 'nope';
+/// $nope();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Call to undefined function nope() in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+///
+/// ```php
+/// $n = 1;
+/// $n();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Value of type int is not callable in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+pub(crate) fn init_dynamic_call<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let callee = exec::operand(req, frame, code, op.op2_type, op.op2);
+    let count = usize::try_from(op.extended_value).unwrap_or(0);
+    let call = if let Some(object) = callee.deref().as_object().copied()
+        && let Some(closure) = object.closure(req).cloned()
+    {
+        req.addref(&object.as_value());
+        if let Some(this) = closure.this {
+            req.addref(&this.as_value());
+        }
+        CallState {
+            function: closure.function,
+            name: None,
+            arguments: Vec::new(),
+            count,
+            this: closure.this,
+            called_scope: closure.scope,
+            closure: Some(object),
+            stage: CallStage::Building,
+            frameless: false,
+            coerced: Vec::new(),
+        }
+    } else if let Some(name) = callee.deref().as_str_bytes().map(<[u8]>::to_vec) {
+        let Some(function) = exec::find_function(req, &name.to_ascii_lowercase()) else {
+            let thrown = crate::api::raising::throw(
+                req,
+                "Error",
+                &format!(
+                    "Call to undefined function {}()",
+                    String::from_utf8_lossy(&name)
+                ),
+            );
+            return threw(req, frame, &thrown);
+        };
+        CallState {
+            function,
+            name: None,
+            arguments: Vec::new(),
+            count,
+            this: None,
+            called_scope: None,
+            closure: None,
+            stage: CallStage::Building,
+            frameless: false,
+            coerced: Vec::new(),
+        }
+    } else {
+        let thrown = crate::api::raising::throw(
+            req,
+            "Error",
+            &format!(
+                "Value of type {} is not callable",
+                callee.deref().type_name()
+            ),
+        );
+        return threw(req, frame, &thrown);
+    };
+    req.vm_mut().push_call(call);
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    Ok(advance(req, frame))
+}
+
 /// `ZEND_ECHO`: the operand as a string (`zval_get_string`), written to
 /// the request's body, the string given up after the write and the
 /// operand freed (`zend_string_release_ex`, `FREE_OP1`).
@@ -370,6 +848,7 @@ fn init_call(
         count,
         this: None,
         called_scope: None,
+        closure: None,
         stage: CallStage::Building,
         frameless: false,
         coerced: Vec::new(),
@@ -1551,6 +2030,7 @@ pub(crate) fn new<T: Tier>(
         count,
         this,
         called_scope: constructor.map(|_| class),
+        closure: None,
         stage: CallStage::Building,
         frameless: false,
         coerced: Vec::new(),
@@ -1766,6 +2246,7 @@ fn static_call_frame(
         count: usize::try_from(op.extended_value).unwrap_or(0),
         this: None,
         called_scope: Some(class),
+        closure: None,
         stage: CallStage::Building,
         frameless: false,
         coerced: Vec::new(),
@@ -1907,6 +2388,7 @@ pub(crate) fn init_method_call<T: Tier>(
         count: usize::try_from(op.extended_value).unwrap_or(0),
         this,
         called_scope: Some(class),
+        closure: None,
         stage: CallStage::Building,
         frameless: false,
         coerced: Vec::new(),
@@ -3128,6 +3610,7 @@ fn frameless_call(
         arguments: values,
         this: None,
         called_scope: None,
+        closure: None,
         stage: CallStage::Serving,
         frameless: true,
         coerced: Vec::new(),

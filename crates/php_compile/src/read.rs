@@ -276,6 +276,34 @@ pub(crate) struct Method {
     pub(crate) is_final: bool,
 }
 
+/// One closure as written, php's `ZEND_AST_CLOSURE` and its
+/// `ZEND_AST_ARROW_FUNC`: the function itself, whose `name` is empty
+/// because `zend_begin_func_decl` builds `{closure:...}` from where it
+/// stands; the `use` list as written, empty for an arrow
+/// function, whose captures are found in its body
+/// (`find_implicit_binds`); and whether `static` stands before the
+/// keyword, php's `ZEND_ACC_STATIC`, which keeps `$this` out of the
+/// body.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Closure {
+    pub(crate) function: Function,
+    pub(crate) uses: Vec<Use>,
+    pub(crate) is_static: bool,
+    pub(crate) is_arrow: bool,
+}
+
+/// One `use` variable of a closure, php's `lexical_var`: the name
+/// without its `$`, whether an `&` stands before it
+/// (`ZEND_BIND_REF`), and the line the name is written on, which
+/// `zend_compile_closure_binding` sets `CG(zend_lineno)` to before the
+/// `BIND_LEXICAL` it emits.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Use {
+    pub(crate) name: Vec<u8>,
+    pub(crate) by_ref: bool,
+    pub(crate) line: u32,
+}
+
 /// One property declarator, php's `ZEND_AST_PROP_ELEM` with the group's
 /// modifiers beside it: `public $x`, `static $y = 1`. Its doc comment is
 /// what was pending after its last token, php's `property: T_VARIABLE
@@ -493,6 +521,17 @@ pub(crate) enum Expr {
     Instanceof {
         expr: Child,
         class: Vec<u8>,
+    },
+    /// `function (…) use (…) {…}`, `fn (…) => e` and either with
+    /// `static` before it, php's `ZEND_AST_CLOSURE` and
+    /// `ZEND_AST_ARROW_FUNC`.
+    Closure(Box<Closure>),
+    /// `$f(args)`, php's `ZEND_AST_CALL` over a variable rather than a
+    /// name, which `zend_compile_dynamic_call` compiles: the callee as
+    /// an expression and the arguments.
+    CallVar {
+        callee: Child,
+        arguments: Vec<Expr>,
     },
     /// `throw expr`, php's `ZEND_AST_THROW`: an expression since 8.0,
     /// which `throw expr;` is the statement of, so the grammar's
@@ -1138,6 +1177,205 @@ impl Reader<'_> {
             }
         }
         self.byte(at) == Some(b'(')
+    }
+
+    /// Whether the keyword here opens a closure, php's
+    /// `expr: T_STATIC inline_function` and its `arrow_function`,
+    /// rather than standing where a class's own property or a
+    /// late-bound class name does.
+    fn closure_after_static(&self) -> bool {
+        let mut at = 6;
+        while self
+            .byte(at)
+            .is_some_and(|b| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r')
+        {
+            at += 1;
+        }
+        let word = self.taken_ahead(at, 8);
+        if word.eq_ignore_ascii_case(b"function") {
+            return self.closure_ahead(at + 8);
+        }
+        self.taken_ahead(at, 2).eq_ignore_ascii_case(b"fn")
+            && !self
+                .byte(at + 2)
+                .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
+    }
+
+    /// `function (parameters) use (vars) : type { body }`, the keyword
+    /// read: php's `inline_function`, whose declaration carries no name
+    /// because `zend_begin_func_decl` builds `{closure:...}` for it out
+    /// of where it stands. `&` before the parameters is `returns_ref`,
+    /// the `use` list is `lexical_vars`, and the doc comment is taken
+    /// after the `&`, `backup_doc_comment` where the grammar reduces
+    /// it. `is_static` is the `static` php's `T_STATIC inline_function`
+    /// read before the keyword, `ZEND_ACC_STATIC` on the op array.
+    fn inline_function(&mut self, is_static: bool) -> Result<Expr, Trouble> {
+        let line = self.line;
+        self.skip_trivia();
+        let by_ref = self.byte(0) == Some(b'&');
+        if by_ref {
+            self.bump(1);
+        }
+        let doc_comment = self.doc_comment.take();
+        self.skip_trivia();
+        self.punctuation(b'(', "a closure with no parenthesis after its keyword")?;
+        let parameters = self.parameters()?;
+        self.skip_trivia();
+        let uses = if self.word_ahead(b"use") {
+            self.bump(3);
+            self.lexical_vars()?
+        } else {
+            Vec::new()
+        };
+        self.skip_trivia();
+        let return_type = if self.byte(0) == Some(b':') {
+            self.bump(1);
+            Some(self.type_expr()?)
+        } else {
+            None
+        };
+        self.skip_trivia();
+        if self.byte(0) != Some(b'{') {
+            return Err(self.trouble("a closure whose body is no block"));
+        }
+        self.bump(1);
+        let mut body = Read::new();
+        self.statements(&mut body, false, true)?;
+        // `close_brace` stepped over the `}` alone, so the line is its,
+        // which is the declaration's `end_lineno`.
+        let end_line = self.line;
+        Ok(Expr::Closure(Box::new(Closure {
+            function: Function {
+                name: Vec::new(),
+                parameters,
+                return_type,
+                by_ref,
+                body,
+                doc_comment,
+                line,
+                end_line,
+            },
+            uses,
+            is_static,
+            is_arrow: false,
+        })))
+    }
+
+    /// `fn (parameters) : type => expr`, the keyword read: php's
+    /// `arrow_function`, one expression for a body, which
+    /// `zend_compile_func_decl` wraps in a `ZEND_AST_RETURN` before it
+    /// compiles the body, so the `Read` here is that one `return`. Its
+    /// captures are written nowhere: the emitter finds them in the body
+    /// as `find_implicit_binds` does.
+    fn arrow_function(&mut self, is_static: bool) -> Result<Expr, Trouble> {
+        let line = self.line;
+        self.skip_trivia();
+        let by_ref = self.byte(0) == Some(b'&');
+        if by_ref {
+            self.bump(1);
+        }
+        let doc_comment = self.doc_comment.take();
+        self.skip_trivia();
+        self.punctuation(
+            b'(',
+            "an arrow function with no parenthesis after its keyword",
+        )?;
+        let parameters = self.parameters()?;
+        self.skip_trivia();
+        let return_type = if self.byte(0) == Some(b':') {
+            self.bump(1);
+            Some(self.type_expr()?)
+        } else {
+            None
+        };
+        self.skip_trivia();
+        if !self.starts_with(b"=>") {
+            return Err(self.trouble("an arrow function with no `=>` after its parameters"));
+        }
+        self.bump(2);
+        self.skip_trivia();
+        let returned = self.line;
+        let value = self.expr()?;
+        let end_line = self.line;
+        let body = vec![(Stmt::Return(Some(value)), returned)];
+        Ok(Expr::Closure(Box::new(Closure {
+            function: Function {
+                name: Vec::new(),
+                parameters,
+                return_type,
+                by_ref,
+                body,
+                doc_comment,
+                line,
+                end_line,
+            },
+            uses: Vec::new(),
+            is_static,
+            is_arrow: true,
+        })))
+    }
+
+    /// `use (` a list of variables `)`, the keyword read: php's
+    /// `lexical_vars` over `lexical_var`, each a `T_VARIABLE` with
+    /// `ZEND_BIND_REF` where an `&` stands before it, a trailing comma
+    /// allowed (`possible_comma`).
+    fn lexical_vars(&mut self) -> Result<Vec<Use>, Trouble> {
+        self.skip_trivia();
+        self.punctuation(b'(', "a closure `use` with no parenthesis after it")?;
+        let mut uses = Vec::new();
+        loop {
+            self.skip_trivia();
+            if self.byte(0) == Some(b')') {
+                self.bump(1);
+                return Ok(uses);
+            }
+            let by_ref = self.byte(0) == Some(b'&');
+            if by_ref {
+                self.bump(1);
+                self.skip_trivia();
+            }
+            let line = self.line;
+            if self.byte(0) != Some(b'$') {
+                return Err(self.trouble("a closure `use` of what is no variable"));
+            }
+            self.bump(1);
+            let name = self.label();
+            if name.is_empty() {
+                return Err(self.trouble("a closure `use` of what is no variable"));
+            }
+            uses.push(Use { name, by_ref, line });
+            self.skip_trivia();
+            match self.byte(0) {
+                Some(b',') => self.bump(1),
+                Some(b')') => {
+                    self.bump(1);
+                    return Ok(uses);
+                }
+                _ => return Err(self.trouble("a closure `use` list nothing closes")),
+            }
+        }
+    }
+
+    /// `$f(args)` and the chain of calls after it, php's
+    /// `callable_expr` over a `callable_variable`: a `(` where a
+    /// variable has just been read opens a call whose callee is that
+    /// variable, `zend_compile_dynamic_call`.
+    fn dynamic_calls(&mut self, mut callee: Expr) -> Result<Expr, Trouble> {
+        loop {
+            if !matches!(callee, Expr::Var(_) | Expr::CallVar { .. }) {
+                return Ok(callee);
+            }
+            self.skip_trivia();
+            if self.byte(0) != Some(b'(') {
+                return Ok(callee);
+            }
+            self.bump(1);
+            let arguments = self.arguments()?;
+            callee = Expr::CallVar {
+                callee: Child::new(callee),
+                arguments,
+            };
+        }
     }
 
     /// `function name(parameters) { body }`, the keyword read: php's
@@ -2284,6 +2522,7 @@ impl Reader<'_> {
             Some(b'"') => self.double_quoted(),
             Some(b'$') => {
                 let receiver = self.incremented()?;
+                let receiver = self.dynamic_calls(receiver)?;
                 self.member_calls(receiver)
             }
             // php's `T_INC variable` and `T_DEC variable`: the variable is
@@ -2319,6 +2558,29 @@ impl Reader<'_> {
                 }
                 self.bump(1);
                 self.member_calls(inner)
+            }
+            // `inline_function` and `arrow_function` where an
+            // expression stands, php's `expr: inline_function` and
+            // `T_STATIC inline_function`: the `function` a name follows
+            // is a declaration and is read as a statement, so only a
+            // closure's reaches here.
+            Some(b'f' | b'F') if self.word_ahead(b"function") && self.closure_ahead(8) => {
+                self.bump(8);
+                self.inline_function(false)
+            }
+            Some(b'f' | b'F') if self.word_ahead(b"fn") => {
+                self.bump(2);
+                self.arrow_function(false)
+            }
+            Some(b's' | b'S') if self.word_ahead(b"static") && self.closure_after_static() => {
+                self.bump(6);
+                self.skip_trivia();
+                if self.word_ahead(b"fn") {
+                    self.bump(2);
+                    return self.arrow_function(true);
+                }
+                self.bump(8);
+                self.inline_function(true)
             }
             Some(b'm' | b'M') if self.word_ahead(b"match") => {
                 self.bump(5);
@@ -3241,7 +3503,7 @@ fn is_reserved_class_name(name: &[u8]) -> bool {
 
 /// `zend_is_auto_global`: the names `php_startup_auto_globals` and
 /// `zend_startup` register, which no CV holds.
-fn is_auto_global(name: &[u8]) -> bool {
+pub(crate) fn is_auto_global(name: &[u8]) -> bool {
     matches!(
         name,
         b"GLOBALS"

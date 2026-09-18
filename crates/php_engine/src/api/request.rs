@@ -357,11 +357,16 @@ pub struct Request {
 }
 
 /// One row of a backtrace before it is an array: the callee, its
-/// receiver, its arguments, and the file and line of its call site,
-/// which a call a native made has none of.
+/// receiver, the scope it was called in where the callee is a closure,
+/// its arguments, and the file and line of its call site, which a call
+/// a native made has none of. php reads the scope off
+/// `func->common.scope` of the closure's own copy of the function; the
+/// copy here is the `Closure` object the call stands on, so the scope
+/// travels beside the callee.
 type TraceRow = (
     Function,
     Option<PhpObject>,
+    Option<ClassId>,
     Vec<Value>,
     Option<(Vec<u8>, i64)>,
 );
@@ -525,6 +530,7 @@ impl Request {
             decl.parameters.iter().filter(|p| !p.variadic).count()
         });
         let num_args = u32::try_from(call.arguments.len()).unwrap_or(u32::MAX);
+        let closure = call.closure;
         let frame = self.stack.push_frame(slots);
         self.vm.push_body(
             unit,
@@ -547,6 +553,7 @@ impl Request {
         }
         if let Some(state) = self.vm.at_mut(frame) {
             state.extra_args = extra;
+            state.closure = closure;
         }
         if let Some(name) = call.name {
             self.release(Value::string(name));
@@ -574,6 +581,9 @@ impl Request {
         if let Some(state) = self.vm.pop() {
             if let Some(this) = state.this {
                 self.release(this.as_value());
+            }
+            if let Some(closure) = state.closure {
+                self.release(closure.as_value());
             }
             for extra in state.extra_args {
                 self.release(extra);
@@ -644,6 +654,9 @@ impl Request {
             if let Some(this) = call.this {
                 self.release(this.as_value());
             }
+            if let Some(closure) = call.closure {
+                self.release(closure.as_value());
+            }
         }
     }
 
@@ -658,7 +671,36 @@ impl Request {
         called_scope: ClassId,
         arguments: &[Value],
     ) -> Result<Value, Thrown> {
-        self.serve_call(function, this, Some(called_scope), arguments)
+        self.serve_call(function, this, Some(called_scope), None, arguments)
+    }
+
+    /// `zend_call_known_fcc` over a `Closure`, which is what
+    /// `Closure::__invoke` serves: the payload's function on the
+    /// payload's receiver and scope, with the closure itself on the
+    /// call so the body's `BIND_STATIC` prologue finds the variables it
+    /// bound (`ZEND_CALL_CLOSURE`). The closure is one more owner for
+    /// the span of the call, as php's `zend_init_func_execute_data`
+    /// takes one.
+    pub(crate) fn serve_closure(
+        &mut self,
+        object: PhpObject,
+        arguments: &[Value],
+    ) -> Result<Value, Thrown> {
+        let Some(closure) = object.closure(self).cloned() else {
+            return Err(crate::api::raising::throw(
+                self,
+                "Error",
+                "Closure object cannot have properties",
+            ));
+        };
+        self.addref(&object.as_value());
+        self.serve_call(
+            closure.function,
+            closure.this,
+            closure.scope,
+            Some(object),
+            arguments,
+        )
     }
 
     /// `zend_call_function` over a native function: [`Request::serve_method`]
@@ -669,7 +711,7 @@ impl Request {
         function: Function,
         arguments: &[Value],
     ) -> Result<Value, Thrown> {
-        self.serve_call(function, None, None, arguments)
+        self.serve_call(function, None, None, None, arguments)
     }
 
     fn serve_call(
@@ -677,6 +719,7 @@ impl Request {
         function: Function,
         this: Option<PhpObject>,
         called_scope: Option<ClassId>,
+        closure: Option<PhpObject>,
         arguments: &[Value],
     ) -> Result<Value, Thrown> {
         let name = self.declared_name(function);
@@ -694,6 +737,7 @@ impl Request {
             count: arguments.len(),
             this,
             called_scope,
+            closure,
             stage: CallStage::Serving,
             frameless: false,
             coerced: Vec::new(),
@@ -1319,10 +1363,10 @@ impl Request {
         let ignore_arguments = self.exception_ignore_args();
         let links = self.trace_chain();
         let mut trace = PhpArray::new(self)?;
-        for (function, this, arguments, site) in links {
+        for (function, this, scope, arguments, site) in links {
             let mut row = PhpArray::new(self)?;
             let name = self.declared_name(function);
-            let method = self.method_class(function).map(|class| {
+            let method = self.method_class(function).or(scope).map(|class| {
                 let class = self.class_name(class);
                 (class, if this.is_some() { "->" } else { "::" })
             });
@@ -1417,14 +1461,34 @@ impl Request {
                         .map(|slot| self.slot(frame, u32::try_from(slot).unwrap_or(u32::MAX)))
                         .collect();
                     arguments.extend(state.extra_args.iter().copied());
-                    rows.push((function, state.this, arguments, site));
+                    rows.push((
+                        function,
+                        state.this,
+                        self.closure_scope(state.closure),
+                        arguments,
+                        site,
+                    ));
                 }
                 Link::Call(call) => {
-                    rows.push((call.function, call.this, call.arguments.clone(), site));
+                    rows.push((
+                        call.function,
+                        call.this,
+                        self.closure_scope(call.closure),
+                        call.arguments.clone(),
+                        site,
+                    ));
                 }
             }
         }
         rows
+    }
+
+    /// `func->common.scope` of a closure's own copy of its function: the
+    /// class the closure was written in, which a backtrace names before
+    /// the closure's own name. None where the call stands on no closure
+    /// or the closure was made outside a class.
+    fn closure_scope(&self, closure: Option<PhpObject>) -> Option<ClassId> {
+        closure?.closure(self)?.scope
     }
 
     /// `zend_hash_str_update` on a row: `value` at the string key `name`,
@@ -3746,6 +3810,8 @@ impl Request {
             function,
             this: Some(object),
             scope: Some(object.class()),
+            bound: Vec::new(),
+            fake: true,
         })
     }
 
@@ -4373,6 +4439,42 @@ impl Request {
             body: exec::Body::Dynamic(at),
         });
         Ok(())
+    }
+
+    /// The `Function` a closure's op array is reached by, made where
+    /// the request has not named it yet: php copies the whole
+    /// `zend_function` into every `Closure` it creates
+    /// (`zend_create_closure_ex`'s `memcpy`), and an op array here is
+    /// immutable and shared, so one name stands for the declaration
+    /// and what differs between two closures of it — the receiver, the
+    /// scope and the bound variables — is the object's payload. The
+    /// name is no entry of the function table under a callable name: a
+    /// closure is reached through its object and never by name.
+    pub(crate) fn closure_function(&mut self, unit: &Arc<Unit>, at: u32) -> Option<Function> {
+        unit.dynamic.get(usize::try_from(at).ok()?)?;
+        let body = exec::Body::Dynamic(at);
+        if let Some(position) = self
+            .user_functions
+            .iter()
+            .position(|user| user.body == body && Arc::ptr_eq(&user.unit, unit))
+        {
+            return self.user_function_id(position);
+        }
+        self.user_functions.push(UserFunction {
+            unit: Arc::clone(unit),
+            body,
+        });
+        self.user_function_id(self.user_functions.len() - 1)
+    }
+
+    /// `EX(func)->common.scope` of a frame, the class whose body the op
+    /// array it serves was written in: what `zend_create_closure` is
+    /// handed as the scope of a closure declared there, and none in a
+    /// function or the main op array. Read off the frame and not off
+    /// [`Request::executed_scope`], which answers for the native being
+    /// served where one is.
+    pub(crate) fn frame_scope(&self, frame: FrameRef) -> Option<ClassId> {
+        self.method_class(self.vm.at(frame)?.function?)
     }
 
     pub(crate) fn declare_functions(&mut self, unit: &Arc<Unit>) {

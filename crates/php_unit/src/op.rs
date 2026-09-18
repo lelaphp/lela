@@ -281,6 +281,21 @@ pub struct OpArray {
     /// [`crate::Unit::dynamic`], and the entry is its index there, so
     /// no part of a unit points into another.
     pub dynamic_func_defs: Box<[u32]>,
+    /// `op_array->static_variables` (`Z/Zend/zend_compile.h:534`): the
+    /// names of the variables the op array binds through
+    /// `BIND_STATIC`, in the order `zend_compile_static_var_common`
+    /// added them to the table, which is what a `BIND_LEXICAL`'s and a
+    /// `BIND_STATIC`'s `extended_value` names. A closure's are its
+    /// `use` variables, written or implied; php's table holds a value
+    /// per name and the engine holds those per closure, so what stands
+    /// in the unit is the shape alone.
+    pub bound_vars: Box<[Name]>,
+    /// `ZEND_ACC_STATIC` on the op array (`Z/Zend/zend_compile.h:283`):
+    /// a closure written `static function` or `static fn`, which
+    /// `ZEND_DECLARE_LAMBDA_FUNCTION` reads to bind it no receiver. A
+    /// method's own is its [`crate::decl::MethodDecl::is_instance`],
+    /// which the linker reads; nothing but a closure sets this.
+    pub no_receiver: bool,
 }
 
 #[cfg(test)]

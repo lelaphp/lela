@@ -60,6 +60,13 @@ impl ObjectHandlers for ClosureHandlers {
     /// `zend_closure_free_storage`: the bound `$this` given back; the
     /// payload's drop is the heap's.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        let bound = object
+            .native_mut::<ClosureInfo>(req)
+            .map(|closure| std::mem::take(&mut closure.bound))
+            .unwrap_or_default();
+        for value in bound {
+            req.release(value);
+        }
         if let Some(this) = object
             .native_mut::<ClosureInfo>(req)
             .and_then(|closure| closure.this.take())
@@ -74,9 +81,18 @@ impl ObjectHandlers for ClosureHandlers {
         Some(closure_clone)
     }
 
-    /// `zend_closure_get_gc`: the bound `$this`, where there is one.
+    /// `zend_closure_get_gc`: the bound `$this` where there is one, and
+    /// the variables the closure bound, which php reaches through
+    /// `ZEND_MAP_PTR_GET(closure->func.op_array.static_variables_ptr)`.
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
-        if let Some(this) = object.closure(req).and_then(|closure| closure.this) {
+        let Some(closure) = object.closure(req) else {
+            return;
+        };
+        let this = closure.this;
+        for bound in closure.bound.clone() {
+            visit(bound);
+        }
+        if let Some(this) = this {
             visit(this.as_value());
         }
     }
@@ -86,10 +102,32 @@ impl ObjectHandlers for ClosureHandlers {
         object.closure(req).cloned()
     }
 
-    /// `zend_closure_compare`: two closures are equal when they carry
-    /// one function, one receiver and one scope, and uncomparable
-    /// otherwise; a side that is no closure is
+    /// `zend_closure_compare` (`Z/Zend/zend_closures.c:120`): two fake
+    /// closures are equal when they carry one function, one receiver
+    /// and one scope; any other pair is uncomparable, a closure the
+    /// program declared included, so two of them are equal only where
+    /// `zend_compare` found one object on both sides before the
+    /// handler was reached. A side that is no closure is
     /// `ZEND_COMPARE_OBJECTS_FALLBACK`, `zend_std_compare_objects`.
+    ///
+    /// ```php
+    /// $f = function () { return 1; };
+    /// $g = function () { return 1; };
+    /// $h = $f;
+    /// var_dump($f == $f, $f == $g, $f == $h, $f === $h, $f == clone $f);
+    /// $s = Closure::fromCallable('strlen');
+    /// $t = Closure::fromCallable('strlen');
+    /// var_dump($s == $t, $s == $f);
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// ```
     fn compare(
         &self,
         req: &mut Request,
@@ -102,6 +140,9 @@ impl ObjectHandlers for ClosureHandlers {
         let (Some(x), Some(y)) = (a.closure(req), b.closure(req)) else {
             return req.compare_objects(left, right);
         };
+        if !(x.fake && y.fake) {
+            return Ok(None);
+        }
         let same = x.function == y.function && x.this == y.this && x.scope == y.scope;
         Ok(same.then_some(Ordering::Equal))
     }
@@ -118,6 +159,13 @@ fn closure_clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
     };
     if let Some(this) = closure.this {
         req.addref(&this.as_value());
+    }
+    // `zend_array_dup` of the bound variables in
+    // `zend_create_closure_ex`: the clone's table is its own and each
+    // value in it one more owner, a reference shared with the original
+    // as php shares one.
+    for bound in &closure.bound {
+        req.addref(bound);
     }
     req.clone_with_payload(object, closure)
 }
@@ -524,6 +572,8 @@ fn closure_from_callable(req: &mut Request) -> Result<Value, Thrown> {
             function,
             this: None,
             scope: None,
+            bound: Vec::new(),
+            fake: true,
         },
     )?;
     Ok(closure.as_value())
@@ -542,16 +592,10 @@ fn closure_invoke(req: &mut Request) -> Result<Value, Thrown> {
             "Closure::__invoke called with no receiver",
         ));
     };
-    let Some(closure) = this.closure(req).cloned() else {
-        return Err(throw(req, "Error", "Closure object cannot have properties"));
-    };
     let arguments: Vec<Value> = (1..=u32::try_from(req.argument_count()).unwrap_or(u32::MAX))
         .filter_map(|position| req.argument(position))
         .collect();
-    match (closure.this, closure.scope) {
-        (this, Some(scope)) => req.serve_method(closure.function, this, scope, &arguments),
-        (_, None) => req.serve_function(closure.function, &arguments),
-    }
+    req.serve_closure(this, &arguments)
 }
 
 /// `private function __clone(): void {}`, as `Exception` and `Error`

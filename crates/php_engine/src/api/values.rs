@@ -535,12 +535,29 @@ impl Iterator for ArrayIter {
     }
 }
 
-/// What a `Closure` object carries (design §5.5).
+/// What a `Closure` object carries (design §5.5), php's `zend_closure`
+/// past its object header: the function, the receiver bound to it and
+/// the scope it was made in.
 #[derive(Debug, Clone)]
 pub struct ClosureInfo {
     pub function: Function,
     pub this: Option<PhpObject>,
     pub scope: Option<ClassId>,
+    /// The closure's own copy of the op array's `static_variables`,
+    /// which `zend_create_closure` makes with `zend_array_dup` and
+    /// `ZEND_MAP_PTR_INIT`: one slot per name of
+    /// [`php_unit::OpArray::bound_vars`], every one undefined until a
+    /// `BIND_LEXICAL` beside the declaration fills it, and what the
+    /// `BIND_STATIC` prologue of the body reads back. A clone of this
+    /// value is a view of them and takes no owner, as `this` is.
+    pub bound: Vec<Value>,
+    /// `ZEND_ACC_FAKE_CLOSURE`: whether the closure was made of a
+    /// function that already had a name, `zend_create_fake_closure`,
+    /// which `Closure::fromCallable` and `Closure::fromCallable`'s kin
+    /// make and a closure written in the program never does. `zend_closure_compare`
+    /// compares two fake closures and holds every other pair
+    /// uncomparable.
+    pub fake: bool,
 }
 
 /// An object (design §5.4): php's `zend_object *`, one allocation of

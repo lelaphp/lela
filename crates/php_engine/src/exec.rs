@@ -76,6 +76,14 @@ pub(crate) struct FrameState {
     /// The called scope, `static`; none for the main op array or a
     /// function.
     pub(crate) called_scope: Option<ClassId>,
+    /// The `Closure` object whose call pushed the frame, one owner the
+    /// frame holds until it is popped (`ZEND_CALL_CLOSURE`,
+    /// `zend_vm_stack_free_call_frame`'s `OBJ_RELEASE`): what php
+    /// reaches through `EX(func)->op_array.static_variables_ptr`, since
+    /// the op array a closure serves is the closure's own copy. The
+    /// `BIND_STATIC` prologue of the body reads its bound variables off
+    /// this and nothing else does; none for every other frame.
+    pub(crate) closure: Option<PhpObject>,
     /// `ZEND_CALL_NUM_ARGS`: how many arguments the call that pushed the
     /// frame placed, which the `RECV*` prologue reads.
     pub(crate) num_args: u32,
@@ -202,6 +210,11 @@ pub(crate) struct CallState {
     /// which is the receiver's for an instance call and the one named
     /// for a call on the class; none for a function.
     pub(crate) called_scope: Option<ClassId>,
+    /// `ZEND_CALL_CLOSURE`: the `Closure` object an
+    /// `INIT_DYNAMIC_CALL` or a `Closure::__invoke` found the callee
+    /// on, one owner the call holds, which the frame it becomes takes
+    /// over; none for every other call.
+    pub(crate) closure: Option<PhpObject>,
     /// Where the call stands.
     pub(crate) stage: CallStage,
     /// Whether the call is a `FRAMELESS_ICALL_*`'s, whose arguments are
@@ -299,6 +312,7 @@ impl Vm {
             returns_to,
             this,
             called_scope,
+            closure: None,
             num_args,
             extra_args: Vec::new(),
             calls_below,

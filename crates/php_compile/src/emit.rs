@@ -105,9 +105,10 @@ use php_unit::{
     TryCatch, Unit, frameless_table,
 };
 
+use crate::read;
 use crate::read::{
     Arm, BinaryOp, Case, CastTo, Catch, Class, Element, Expr, Function, Magic, Method, Piece, Read,
-    Stmt, Target, Unset,
+    Stmt, Target, Unset, is_auto_global,
 };
 use crate::{CompileError, Options, StackLimit};
 
@@ -254,6 +255,27 @@ pub(crate) struct Emit<'a> {
     /// `CG(context).try_catch_offset`: which element of [`Emit::try_catch`]
     /// the oplines being emitted stand in, `-1` outside every `try`.
     try_catch_offset: Option<u32>,
+    /// `op_array->static_variables`: the names the op array being
+    /// compiled binds through `BIND_STATIC`, in the order
+    /// `zend_compile_static_var_common` added them, which is what a
+    /// `BIND_LEXICAL`'s and a `BIND_STATIC`'s `extended_value` names.
+    static_vars: Vec<Name>,
+    /// `op_array->fn_flags` of the op array being compiled, the bits
+    /// this compiler reads back.
+    fn_flags: FnFlags,
+}
+
+/// `op_array->fn_flags` (`Z/Zend/zend_compile.h:283-296`), the two bits
+/// the compiler sets and reads: `ZEND_ACC_CLOSURE`, which
+/// `zend_begin_func_decl` reads to name a closure written inside
+/// another one after its enclosing closure and not after a
+/// `{closure:…}()` of its own, and `ZEND_ACC_STATIC`, which a closure
+/// written `static function` or `static fn` carries and
+/// `ZEND_DECLARE_LAMBDA_FUNCTION` reads to leave `$this` unbound.
+#[derive(Clone, Copy, Default)]
+struct FnFlags {
+    closure: bool,
+    is_static: bool,
 }
 
 /// One entry of `CG(loop_var_stack)` a `finally` puts there
@@ -485,6 +507,8 @@ pub(crate) fn unit(
         functions_declared: Vec::new(),
         dynamic: Vec::new(),
         dynamic_func_defs: Vec::new(),
+        static_vars: Vec::new(),
+        fn_flags: FnFlags::default(),
         methods: Vec::new(),
         filename: options.filename.clone(),
         loops: Vec::new(),
@@ -552,6 +576,8 @@ struct Saved {
     return_type: Option<Type>,
     returns_by_ref: bool,
     dynamic_func_defs: Vec<u32>,
+    static_vars: Vec<Name>,
+    fn_flags: FnFlags,
 }
 
 /// `pass_two`'s `ZEND_FAST_CALL` arm (`Z/Zend/zend_opcode.c:1150`):
@@ -1157,6 +1183,191 @@ impl Emit<'_> {
         Ok(())
     }
 
+    /// `zend_compile_func_decl` over a closure as written, php's
+    /// `ZEND_AST_CLOSURE` and `ZEND_AST_ARROW_FUNC`: the op array takes
+    /// the next `zend_add_dynamic_func_def` offset of the enclosing one,
+    /// as a nested function does ([`Self::nested_function_decl`]), and
+    /// `zend_begin_func_decl`'s closure arm emits
+    /// `ZEND_DECLARE_LAMBDA_FUNCTION` into a temporary instead of
+    /// `ZEND_DECLARE_FUNCTION`, that temporary being where the `Closure`
+    /// the engine makes of the op array lands. The name is
+    /// [`Self::closure_name`], the binds are
+    /// `zend_compile_closure_binding`'s `BIND_LEXICAL` per `use`
+    /// variable — `find_implicit_binds` and
+    /// `compile_implicit_lexical_binds` for an arrow function, whose
+    /// captures are written nowhere — each at the line its name stands
+    /// on, and the body reads them back with the `BIND_STATIC` prologue
+    /// [`Self::closure_uses`] emits.
+    fn closure(&mut self, closure: &read::Closure) -> Result<Where, CompileError> {
+        let name = self.closure_name(closure.function.line);
+        let at = u32::try_from(self.dynamic.len()).unwrap_or(u32::MAX);
+        self.dynamic.push(None);
+        let offset = u32::try_from(self.dynamic_func_defs.len()).unwrap_or(u32::MAX);
+        self.dynamic_func_defs.push(at);
+        let out = self.temporary();
+        self.push(Opline {
+            opcode: Opcode::DeclareLambdaFunction,
+            out_type: OperandKind::Tmp,
+            out,
+            op2: offset,
+            ..Opline::default()
+        });
+        let binds = self.closure_binds(closure)?;
+        let written = self.line;
+        for bind in &binds {
+            // `CG(zend_lineno) = zend_ast_get_lineno(var_name_ast)`.
+            self.line = bind.line;
+            let op2 = self.lookup_cv(&bind.name);
+            self.push(Opline {
+                opcode: Opcode::BindLexical,
+                op1_type: OperandKind::Tmp,
+                op1: out,
+                op2_type: OperandKind::Cv,
+                op2,
+                extended_value: bind.slot_and_mode(false),
+                ..Opline::default()
+            });
+        }
+        self.line = written;
+        let this_in_scope = self.this_in_scope && !closure.is_static;
+        let flags = FnFlags {
+            closure: true,
+            is_static: closure.is_static,
+        };
+        let saved = self.begin_body(&name, this_in_scope, flags);
+        let outcome = self.parameters_and_body(&closure.function, &name, None, &binds);
+        self.end_body(saved);
+        if let Some(slot) = self.dynamic.get_mut(at as usize) {
+            *slot = Some(outcome?);
+        }
+        Ok(Where::Temporary(out))
+    }
+
+    /// `zend_begin_func_decl`'s closure arm
+    /// (`Z/Zend/zend_compile.c:8349-8385`): the name php builds for a
+    /// closure, `{closure:%S%S%S%s:%u}` over the class, the separator,
+    /// the function and the parentheses. In the main op array, which has
+    /// no function name, the function is the file; inside a function or
+    /// a method it is that name with `()` after it and the class and
+    /// `::` before it; and inside another closure it is that closure's
+    /// whole name with nothing added, so the chain does not grow a pair
+    /// of parentheses per level. The number is the declaration's first
+    /// line.
+    fn closure_name(&self, line: u32) -> Vec<u8> {
+        let mut name = b"{closure:".to_vec();
+        match &self.active_function {
+            Some(enclosing) if self.fn_flags.closure => name.extend_from_slice(enclosing),
+            Some(enclosing) => {
+                if let Some(class) = &self.active_class {
+                    name.extend_from_slice(class);
+                    name.extend_from_slice(b"::");
+                }
+                name.extend_from_slice(enclosing);
+                name.extend_from_slice(b"()");
+            }
+            None => name.extend_from_slice(&self.filename.0),
+        }
+        name.extend_from_slice(format!(":{line}}}").as_bytes());
+        name
+    }
+
+    /// The variables a closure binds, in the order they land in
+    /// `op_array->static_variables`: the `use` list as written for a
+    /// closure (`zend_compile_closure_binding`), and for an arrow
+    /// function the variables its body reads that its parameters do not
+    /// declare (`find_implicit_binds`). php's three compile errors are
+    /// raised here, where `zend_hash_add` and the two name tests raise
+    /// them.
+    fn closure_binds(&mut self, closure: &read::Closure) -> Result<Vec<Bind>, CompileError> {
+        if closure.is_arrow {
+            return Ok(Self::implicit_binds(&closure.function));
+        }
+        let mut binds: Vec<Bind> = Vec::new();
+        for used in &closure.uses {
+            if used.name == b"this" {
+                return Err(self.compile_error("Cannot use $this as lexical variable"));
+            }
+            if is_auto_global(&used.name) {
+                return Err(self.compile_error("Cannot use auto-global as lexical variable"));
+            }
+            if binds.iter().any(|bind| bind.name == used.name) {
+                return Err(self.compile_error(format!(
+                    "Cannot use variable ${} twice",
+                    String::from_utf8_lossy(&used.name)
+                )));
+            }
+            binds.push(Bind {
+                slot: u32::try_from(binds.len()).unwrap_or(u32::MAX),
+                name: used.name.clone(),
+                by_ref: used.by_ref,
+                implicit: false,
+                line: used.line,
+            });
+        }
+        Ok(binds)
+    }
+
+    /// `find_implicit_binds` (`Z/Zend/zend_compile.c:8089-8135`): the
+    /// variables an arrow function's body reads, in the order it reads
+    /// them, less its own parameters, `$this` and the names
+    /// `zend_is_auto_global` answers for, which need no import. A closure written inside it contributes its
+    /// `use` list and not its body; an arrow function inside it
+    /// contributes its body. Every one is bound by value and implicitly,
+    /// so a variable the enclosing scope has not is no warning.
+    fn implicit_binds(function: &Function) -> Vec<Bind> {
+        let mut names: Vec<Vec<u8>> = Vec::new();
+        for (statement, _) in &function.body {
+            if let Stmt::Return(Some(value)) = statement {
+                implicit_uses(&mut names, value);
+            }
+        }
+        names.retain(|name| {
+            !function
+                .parameters
+                .iter()
+                .any(|parameter| parameter.name == *name)
+        });
+        names
+            .into_iter()
+            .enumerate()
+            .map(|(slot, name)| Bind {
+                name,
+                slot: u32::try_from(slot).unwrap_or(u32::MAX),
+                by_ref: false,
+                implicit: true,
+                line: function.line,
+            })
+            .collect()
+    }
+
+    /// `zend_compile_closure_uses` and `zend_compile_implicit_closure_uses`
+    /// (`Z/Zend/zend_compile.c:8007-8037`): the `BIND_STATIC` prologue
+    /// of a closure's own op array, one opline per bound variable, which
+    /// reads the value the `BIND_LEXICAL` beside the declaration put in
+    /// the closure's table into the body's CV. php refuses a lexical
+    /// variable a parameter already declares, `zend_compile_closure_uses`'
+    /// walk over `op_array->vars`.
+    fn closure_uses(&mut self, binds: &[Bind]) -> Result<(), CompileError> {
+        for bind in binds {
+            if !bind.implicit && self.vars.iter().any(|held| *held.0 == *bind.name) {
+                return Err(self.compile_error(format!(
+                    "Cannot use lexical variable ${} as a parameter name",
+                    String::from_utf8_lossy(&bind.name)
+                )));
+            }
+            self.static_vars.push(Name(bind.name.as_slice().into()));
+            let op1 = self.lookup_cv(&bind.name);
+            self.push(Opline {
+                opcode: Opcode::BindStatic,
+                op1_type: OperandKind::Cv,
+                op1,
+                extended_value: bind.slot_and_mode(true),
+                ..Opline::default()
+            });
+        }
+        Ok(())
+    }
+
     /// `zend_declare_typed_property` for each promoted parameter of a
     /// constructor (`zend_compile_params`): the property carries the
     /// parameter's visibility, its `readonly` bit and its declared type,
@@ -1285,8 +1496,8 @@ impl Emit<'_> {
         scope: Option<&[u8]>,
         is_static: bool,
     ) -> Result<(FunctionDecl, OpArray), CompileError> {
-        let saved = self.begin_body(name, scope.is_some() && !is_static);
-        let outcome = self.parameters_and_body(function, name, scope);
+        let saved = self.begin_body(name, scope.is_some() && !is_static, FnFlags::default());
+        let outcome = self.parameters_and_body(function, name, scope, &[]);
         self.end_body(saved);
         outcome
     }
@@ -1296,6 +1507,7 @@ impl Emit<'_> {
         function: &Function,
         name: &[u8],
         scope: Option<&[u8]>,
+        binds: &[Bind],
     ) -> Result<(FunctionDecl, OpArray), CompileError> {
         let line = function.line;
         self.line = line;
@@ -1312,6 +1524,7 @@ impl Emit<'_> {
             *first = OplineIdx(entry);
         }
         self.promotions(function)?;
+        self.closure_uses(binds)?;
         self.statements(&function.body)?;
         self.line = function.end_line;
         let body = self.finish(false, line, function.end_line)?;
@@ -1516,7 +1729,7 @@ impl Emit<'_> {
     /// `CG(active_op_array)`: the state of the one being compiled set
     /// aside, and the emitter over an empty one whose entry safepoint
     /// stands at opline zero until the prologue is known.
-    fn begin_body(&mut self, name: &[u8], this_in_scope: bool) -> Saved {
+    fn begin_body(&mut self, name: &[u8], this_in_scope: bool, fn_flags: FnFlags) -> Saved {
         Saved {
             return_type: self.return_type.take(),
             returns_by_ref: std::mem::take(&mut self.returns_by_ref),
@@ -1536,6 +1749,8 @@ impl Emit<'_> {
             active_function: self.active_function.replace(name.to_vec()),
             this_in_scope: std::mem::replace(&mut self.this_in_scope, this_in_scope),
             dynamic_func_defs: std::mem::take(&mut self.dynamic_func_defs),
+            static_vars: std::mem::take(&mut self.static_vars),
+            fn_flags: std::mem::replace(&mut self.fn_flags, fn_flags),
         }
     }
 
@@ -1560,6 +1775,8 @@ impl Emit<'_> {
         self.return_type = saved.return_type;
         self.returns_by_ref = saved.returns_by_ref;
         self.dynamic_func_defs = saved.dynamic_func_defs;
+        self.static_vars = saved.static_vars;
+        self.fn_flags = saved.fn_flags;
     }
 
     /// The op array the emitter holds, finished as `zend_compile` and
@@ -1598,6 +1815,8 @@ impl Emit<'_> {
             line_end,
             cache_size: self.cache_slots,
             dynamic_func_defs: std::mem::take(&mut self.dynamic_func_defs).into_boxed_slice(),
+            bound_vars: std::mem::take(&mut self.static_vars).into_boxed_slice(),
+            no_receiver: self.fn_flags.is_static,
         })
     }
 
@@ -2001,6 +2220,8 @@ impl Emit<'_> {
             | Expr::Silence(_)
             | Expr::Throw(_)
             | Expr::Isset { .. }
+            | Expr::CallVar { .. }
+            | Expr::Closure(_)
             | Expr::Encaps(_) => {
                 Err(self.compile_error("Constant expression contains invalid operations"))
             }
@@ -3388,6 +3609,8 @@ impl Emit<'_> {
             Expr::Array(elements) => self.array(elements),
             Expr::Throw(operand) => self.throw(operand),
             Expr::Isset { var, empty } => Ok(self.isset_or_empty(var, *empty)),
+            Expr::Closure(closure) => self.closure(closure),
+            Expr::CallVar { callee, arguments } => self.call_var(callee, arguments),
             known => Ok(Where::Constant(self.constant_expr(known)?)),
         }
     }
@@ -4390,6 +4613,8 @@ impl Emit<'_> {
             // `zend_compile_isset_or_empty` emits an opline over the CV;
             // `zend_eval_const_expr` folds nothing here.
             Expr::Isset { .. } => Err(self.fatal("an `isset` is no constant expression")),
+            Expr::Closure(_) => Err(self.fatal("a closure is no constant expression")),
+            Expr::CallVar { .. } => Err(self.fatal("a call is no constant expression")),
         }
     }
 
@@ -4680,6 +4905,29 @@ impl Emit<'_> {
         });
         self.args(arguments, false, &[])?;
         Ok(self.call_op(Opcode::DoFcallByName))
+    }
+
+    /// `zend_compile_dynamic_call` over a callee that is no constant
+    /// string (`Z/Zend/zend_compile.c:4044`): `INIT_DYNAMIC_CALL` with
+    /// the callee in `op2` and the number of arguments in
+    /// `extended_value`, no cache slot, since nothing about the callee
+    /// is known until the opline runs; then the arguments sent for a
+    /// callee nothing is known of and `DO_FCALL`, which is what
+    /// `zend_get_call_op` picks with `fbc` null over an opline that is
+    /// no `INIT_FCALL_BY_NAME`.
+    fn call_var(&mut self, callee: &Expr, arguments: &[Expr]) -> Result<Where, CompileError> {
+        let value = self.expr(callee)?;
+        let (op2_type, op2) = self.operand(value);
+        let count = u32::try_from(arguments.len()).unwrap_or(0);
+        self.push(Opline {
+            opcode: Opcode::InitDynamicCall,
+            op2_type,
+            op2,
+            extended_value: count,
+            ..Opline::default()
+        });
+        self.args(arguments, false, &[])?;
+        Ok(self.call_op(Opcode::DoFcall))
     }
 
     /// `zend_compile_new` for a class named as written: `NEW` with the
@@ -5609,6 +5857,184 @@ impl Emit<'_> {
     }
 }
 
+/// One variable a closure binds: its name, its slot in the closure's
+/// `op_array->static_variables`, whether an `&` stood before it and
+/// whether it is an arrow function's implicit capture. php holds the
+/// two modes and the slot in one `extended_value`
+/// ([`Bind::slot_and_mode`]).
+struct Bind {
+    name: Vec<u8>,
+    slot: u32,
+    by_ref: bool,
+    implicit: bool,
+    line: u32,
+}
+
+impl Bind {
+    /// The `extended_value` of a `BIND_LEXICAL` or a `BIND_STATIC`: the
+    /// slot in the low bits above the three binding bits php reserves,
+    /// `ZEND_BIND_REF`, `ZEND_BIND_IMPLICIT` and `ZEND_BIND_EXPLICIT`
+    /// (`Z/Zend/zend_compile.h:1193-1196`), which every reader masks
+    /// off with `~(REF|IMPLICIT|EXPLICIT)`. php's slot is the bound
+    /// value's byte offset in the table's `arData`, a multiple of the
+    /// bucket size and so clear of those bits; nothing observes the
+    /// number itself, so the slot stands where the offset stood.
+    /// `ZEND_BIND_EXPLICIT` is the `BIND_STATIC`'s alone, which is
+    /// `in_body`: `zend_compile_closure_binding` passes the `use`
+    /// list's own attribute and `zend_compile_closure_uses` adds the
+    /// bit.
+    fn slot_and_mode(&self, in_body: bool) -> u32 {
+        let mut mode = 0;
+        if self.by_ref {
+            mode |= 1;
+        }
+        if self.implicit {
+            mode |= 2;
+        }
+        if in_body && !self.implicit {
+            mode |= 4;
+        }
+        (self.slot << 3) | mode
+    }
+}
+
+/// `find_implicit_binds_recursively` (`Z/Zend/zend_compile.c:8089`):
+/// every variable `expr` reads, in the order it reads them, each name
+/// once. `$this` and the names `zend_is_auto_global` answers for need
+/// no import and are left out;
+/// a closure written inside contributes its `use` list and not its
+/// body, since its own body binds through that list; an arrow function
+/// inside contributes what its body reads.
+fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Expr) {
+    match expr {
+        Expr::Var(name) => note(names, name),
+        Expr::Closure(closure) => implicit_uses_of_closure(names, closure),
+        Expr::Unary { operand, .. } | Expr::Cast { operand, .. } | Expr::Silence(operand) => {
+            implicit_uses(names, operand);
+        }
+        Expr::Binary { left, right, .. } => {
+            implicit_uses(names, left);
+            implicit_uses(names, right);
+        }
+        Expr::Assign { var, value } => {
+            note(names, var);
+            implicit_uses(names, value);
+        }
+        Expr::AssignRef { target, source } => {
+            implicit_uses(names, target);
+            implicit_uses(names, source);
+        }
+        Expr::AssignProp {
+            object,
+            name: _,
+            value,
+        } => {
+            implicit_uses(names, object);
+            implicit_uses(names, value);
+        }
+        Expr::PreInc(var) | Expr::PostInc(var) | Expr::PreDec(var) | Expr::PostDec(var) => {
+            note(names, var);
+        }
+        // `ZEND_AST_ISSET` and `ZEND_AST_EMPTY` are no special node, so
+        // the walk reaches the `ZEND_AST_VAR` under them and an arrow
+        // function captures what its `isset` names.
+        Expr::Isset { var, .. } => note(names, var),
+        Expr::Prop { object, .. } => implicit_uses(names, object),
+        Expr::Dim { container, index } => {
+            implicit_uses(names, container);
+            if let Some(index) = index {
+                implicit_uses(names, index);
+            }
+        }
+        Expr::AssignDim { target, value } => {
+            implicit_uses(names, target);
+            implicit_uses(names, value);
+        }
+        Expr::Call { arguments, .. }
+        | Expr::New { arguments, .. }
+        | Expr::StaticCall { arguments, .. } => {
+            for argument in arguments {
+                implicit_uses(names, argument);
+            }
+        }
+        Expr::MethodCall {
+            object, arguments, ..
+        } => {
+            implicit_uses(names, object);
+            for argument in arguments {
+                implicit_uses(names, argument);
+            }
+        }
+        Expr::CallVar { callee, arguments } => {
+            implicit_uses(names, callee);
+            for argument in arguments {
+                implicit_uses(names, argument);
+            }
+        }
+        Expr::Array(elements) => {
+            for element in elements {
+                if let Some(key) = &element.key {
+                    implicit_uses(names, key);
+                }
+                implicit_uses(names, &element.value);
+            }
+        }
+        Expr::Encaps(pieces) => {
+            for piece in pieces {
+                implicit_uses(names, &piece.expr);
+            }
+        }
+        Expr::Instanceof { expr, .. } => implicit_uses(names, expr),
+        Expr::Throw(operand) => implicit_uses(names, operand),
+        Expr::Match { expr, arms, .. } => {
+            implicit_uses(names, expr);
+            for arm in arms {
+                for (cond, _) in arm.conds.iter().flatten() {
+                    implicit_uses(names, cond);
+                }
+                implicit_uses(names, &arm.body);
+            }
+        }
+        Expr::Null
+        | Expr::Bool(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Str(_)
+        | Expr::Constant(_)
+        | Expr::Magic { .. }
+        | Expr::This
+        | Expr::ClassConst { .. }
+        | Expr::StaticProp { .. } => {}
+    }
+}
+
+/// `zend_hash_add_empty_element(&info->uses, name)`: the name once, in
+/// the order it was first read, which is the order the table hands its
+/// keys back and so the order the slots are taken in.
+fn note(names: &mut Vec<Vec<u8>>, name: &[u8]) {
+    if !names.iter().any(|held| held == name) {
+        names.push(name.to_vec());
+    }
+}
+
+/// `find_implicit_binds_recursively`'s two closure arms: a closure
+/// written inside an arrow function contributes its `use` list, since
+/// its own body binds through that list alone, and an arrow function
+/// inside it contributes what its body reads.
+fn implicit_uses_of_closure(names: &mut Vec<Vec<u8>>, closure: &read::Closure) {
+    if !closure.is_arrow {
+        for used in &closure.uses {
+            note(names, &used.name);
+        }
+        return;
+    }
+    for (statement, _) in &closure.function.body {
+        if let Stmt::Return(Some(value)) = statement {
+            implicit_uses(names, value);
+        }
+    }
+}
+
 /// Whether a constant expression names a constant, which
 /// `zend_compile_params` leaves unsubstituted in a parameter's default:
 /// a constant by name or a class constant, anywhere in the tree. `true`,
@@ -6028,19 +6454,12 @@ mod tests {
     use super::*;
     use php_unit::decl::MethodDecl;
 
-    /// `zend_get_compatible_func_or_null` over a class this file bound
-    /// under `namespace A;` (#322): the class stands in the table as
-    /// `A\M`, and `M::f` written in the same namespace resolves to that
-    /// name, so its public `f` is a known callee, where the same fetch
-    /// written outside the namespace or with a leading `\` names the
-    /// global `M` the table has not. The methods a file declares are
-    /// #309's to read, so the declaration here carries one directly.
-    #[test]
-    fn a_known_method_is_found_on_a_class_the_file_declared_in_a_namespace() {
-        let mut strings = php_heap::Strings::new();
-        let options = Options::default();
-        let mut emit = Emit {
-            strings: &mut strings,
+    /// An emitter as [`unit`] builds one, in namespace `A` and at the
+    /// file's own statement list, which is where a class binds at
+    /// compile time.
+    fn in_namespace<'a>(strings: &'a mut php_heap::Strings, options: &'a Options) -> Emit<'a> {
+        Emit {
+            strings,
             precision: options.precision,
             persistent: &options.persistent,
             functions: &options.functions,
@@ -6071,6 +6490,8 @@ mod tests {
             functions_declared: Vec::new(),
             dynamic: Vec::new(),
             dynamic_func_defs: Vec::new(),
+            static_vars: Vec::new(),
+            fn_flags: FnFlags::default(),
             methods: Vec::new(),
             filename: options.filename.clone(),
             loops: Vec::new(),
@@ -6080,7 +6501,21 @@ mod tests {
             unwind: Vec::new(),
             fast_call_var: None,
             try_catch_offset: None,
-        };
+        }
+    }
+
+    /// `zend_get_compatible_func_or_null` over a class this file bound
+    /// under `namespace A;` (#322): the class stands in the table as
+    /// `A\M`, and `M::f` written in the same namespace resolves to that
+    /// name, so its public `f` is a known callee, where the same fetch
+    /// written outside the namespace or with a leading `\` names the
+    /// global `M` the table has not. The methods a file declares are
+    /// #309's to read, so the declaration here carries one directly.
+    #[test]
+    fn a_known_method_is_found_on_a_class_the_file_declared_in_a_namespace() {
+        let mut strings = php_heap::Strings::new();
+        let options = Options::default();
+        let mut emit = in_namespace(&mut strings, &options);
         let read = Class {
             name: b"M".to_vec(),
             kind: ClassKind::Class,
