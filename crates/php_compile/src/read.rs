@@ -14,7 +14,8 @@
 //! statement, the `foreach` over any expression with a variable as its
 //! value and one as its key, either by reference, a `return` with or
 //! without a value, a
-//! `switch` with its cases between braces, `break` and `continue` with
+//! `switch` with its cases between braces, an `if` with its `elseif`,
+//! `else if` and `else` arms in either syntax, `break` and `continue` with
 //! or without a depth, a top-level `class` with no parent, interface,
 //! attribute or modifier whose members are untyped properties and
 //! constants, each declarator taking the pending doc comment as php's
@@ -110,6 +111,25 @@ pub(crate) enum Stmt {
         catches: Vec<Catch>,
         finally: Option<(Read, u32)>,
     },
+    /// `if (cond) stmt elseif (cond) stmt else stmt`, php's
+    /// `ZEND_AST_IF`: the arms in the order they are written, one
+    /// `ZEND_AST_IF_ELEM` each.
+    If(Vec<IfArm>),
+}
+
+/// One arm of an `if`, php's `ZEND_AST_IF_ELEM`: a condition and the
+/// statements under it. The `else` arm carries no condition and is the
+/// last, which `zend_compile_if` asserts. The line is the one
+/// `zend_compile_if` sets `CG(zend_lineno)` to before an arm past the
+/// first compiles its condition, and before the `JMP` that leaves an
+/// arm another follows: `elem_ast->lineno`, which `zend_ast_create`
+/// takes from the arm's first child, so where the condition stands, and
+/// where the statement stands for the arm that has none.
+#[derive(Debug, PartialEq)]
+pub(crate) struct IfArm {
+    pub(crate) cond: Option<Expr>,
+    pub(crate) body: Read,
+    pub(crate) line: u32,
 }
 
 /// One `catch (A|B $e) { … }`, php's `ZEND_AST_CATCH`: the class names
@@ -775,6 +795,21 @@ impl CastTo {
 /// The line each statement stands on, beside it.
 pub(crate) type Read = Vec<(Stmt, u32)>;
 
+/// Where a list of statements ends: at the close tag or the end of the
+/// source, at the `}` of a block, or at the keyword that closes an arm
+/// of the alternative syntax, which php's `inner_statement_list` reduces
+/// at `elseif`, `else` or `endif` and which is left standing for
+/// [`Reader::r#if`] to read.
+#[derive(Clone, Copy, PartialEq)]
+enum Until {
+    /// `top_statement_list`, to `?>` or the end of the source.
+    Tag,
+    /// The statements of a block, to its `}`.
+    Brace,
+    /// One arm of `if (…): … endif;`.
+    AltIf,
+}
+
 /// A place in the source, and php's line number for it.
 struct Reader<'a> {
     source: &'a [u8],
@@ -812,7 +847,7 @@ pub(crate) fn read(source: &[u8], stack: StackLimit) -> Result<Read, Trouble> {
             return Ok(out);
         }
         let short = reader.open_tag();
-        reader.statements(&mut out, short, false)?;
+        reader.statements(&mut out, short, Until::Tag)?;
     }
 }
 
@@ -900,27 +935,37 @@ impl Reader<'_> {
         false
     }
 
-    /// Every statement up to the close tag or the end of the source, or
-    /// inside a block up to its close brace. `short` is `<?=`, whose
-    /// first statement php reads as an `echo`.
-    fn statements(&mut self, out: &mut Read, short: bool, in_block: bool) -> Result<(), Trouble> {
+    /// Every statement up to where `until` says the list ends: the
+    /// close tag or the end of the source, a block's close brace, or
+    /// the keyword that closes an arm of the alternative syntax, which
+    /// is left standing. `short` is `<?=`, whose first statement php
+    /// reads as an `echo`.
+    fn statements(&mut self, out: &mut Read, short: bool, until: Until) -> Result<(), Trouble> {
         let mut short = short;
         loop {
             self.skip_trivia();
             if self.at >= self.source.len() {
-                if in_block {
-                    return Err(self.trouble("a block no brace closes"));
-                }
+                return match until {
+                    Until::Tag => Ok(()),
+                    Until::Brace => Err(self.trouble("a block no brace closes")),
+                    Until::AltIf => Err(self.trouble("an `if` no `endif` closes")),
+                };
+            }
+            if until == Until::Brace && self.byte(0) == Some(b'}') {
+                self.close_brace();
                 return Ok(());
             }
-            if in_block && self.byte(0) == Some(b'}') {
-                self.close_brace();
+            if until == Until::AltIf
+                && (self.word_ahead(b"elseif")
+                    || self.word_ahead(b"else")
+                    || self.word_ahead(b"endif"))
+            {
                 return Ok(());
             }
             if self.starts_with(b"?>") {
                 // php reads text between the tags inside a block as an
                 // `echo`; this does not yet.
-                if in_block {
+                if until != Until::Tag {
                     return Err(
                         self.trouble("a close tag inside a block this compiler cannot read yet")
                     );
@@ -984,12 +1029,16 @@ impl Reader<'_> {
         if self.byte(0) == Some(b'{') {
             self.bump(1);
             let mut body = Read::new();
-            self.statements(&mut body, false, true)?;
+            self.statements(&mut body, false, Until::Brace)?;
             return Ok(Some(Stmt::Block(body)));
         }
         if self.word_ahead(b"echo") {
             self.bump(4);
             return Ok(Some(Stmt::Echo(self.echoed()?)));
+        }
+        if self.word_ahead(b"if") {
+            self.bump(2);
+            return self.r#if().map(Some);
         }
         if self.word_ahead(b"foreach") {
             self.bump(7);
@@ -1499,7 +1548,7 @@ impl Reader<'_> {
         }
         self.bump(1);
         let mut body = Read::new();
-        self.statements(&mut body, false, true)?;
+        self.statements(&mut body, false, Until::Brace)?;
         // `close_brace` stepped over the `}` alone, so the line is its,
         // which is the declaration's `end_lineno`.
         let end_line = self.line;
@@ -1676,7 +1725,7 @@ impl Reader<'_> {
         }
         self.bump(1);
         let mut body = Read::new();
-        self.statements(&mut body, false, true)?;
+        self.statements(&mut body, false, Until::Brace)?;
         // `close_brace` stepped over the `}` alone, so the line is its.
         let end_line = self.line;
         Ok(Function {
@@ -2036,6 +2085,102 @@ impl Reader<'_> {
         })
     }
 
+    /// `if (cond) stmt`, the keyword read: php's `if_stmt` and
+    /// `alt_if_stmt`, which reduce to one `ZEND_AST_IF` over an
+    /// `ZEND_AST_IF_ELEM` per arm. `elseif` adds an arm to the same
+    /// list; `else if` is php's `T_ELSE statement` over an `if` of its
+    /// own, which is what [`Self::body`] makes of it by reading one
+    /// statement; the `else` arm carries no condition and is the last,
+    /// which php's grammar has no other place for. The alternative
+    /// syntax, `if (cond): … elseif (cond): … else: … endif;`, reduces
+    /// into the same arms, each arm an `inner_statement_list` up to the
+    /// keyword that closes it.
+    fn r#if(&mut self) -> Result<Stmt, Trouble> {
+        self.check_stack()?;
+        let (cond, line) = self.if_condition("if")?;
+        self.skip_trivia();
+        let alt = self.byte(0) == Some(b':');
+        if alt {
+            self.bump(1);
+        }
+        let body = self.arm_body(alt)?;
+        let mut arms = vec![IfArm {
+            cond: Some(cond),
+            body,
+            line,
+        }];
+        loop {
+            self.skip_trivia();
+            if self.word_ahead(b"elseif") {
+                self.bump(6);
+                let (cond, line) = self.if_condition("elseif")?;
+                if alt {
+                    self.punctuation(b':', "an `elseif` of an `if (…):` with no `:` after it")?;
+                }
+                let body = self.arm_body(alt)?;
+                arms.push(IfArm {
+                    cond: Some(cond),
+                    body,
+                    line,
+                });
+                continue;
+            }
+            if self.word_ahead(b"else") {
+                self.bump(4);
+                if alt {
+                    self.punctuation(b':', "an `else` of an `if (…):` with no `:` after it")?;
+                }
+                self.skip_trivia();
+                let line = self.line;
+                let body = self.arm_body(alt)?;
+                arms.push(IfArm {
+                    cond: None,
+                    body,
+                    line,
+                });
+            }
+            break;
+        }
+        if alt {
+            self.skip_trivia();
+            if !self.word_ahead(b"endif") {
+                return Err(self.trouble("an `if (…):` no `endif` closes"));
+            }
+            self.bump(5);
+            self.end_of_statement()?;
+        }
+        Ok(Stmt::If(arms))
+    }
+
+    /// The `'(' expr ')'` of an `if` or an `elseif`, and the line the
+    /// condition stands on, which is the arm's `elem_ast->lineno`.
+    fn if_condition(&mut self, what: &str) -> Result<(Expr, u32), Trouble> {
+        self.punctuation(
+            b'(',
+            format!("an `{what}` with no parenthesis after it").as_str(),
+        )?;
+        self.skip_trivia();
+        let line = self.line;
+        let cond = self.expr()?;
+        self.punctuation(
+            b')',
+            format!("an `{what}` whose parenthesis nothing closes").as_str(),
+        )?;
+        Ok((cond, line))
+    }
+
+    /// One arm's statements: php's `statement`, a block or one of them,
+    /// or its `inner_statement_list` where the arm is written in the
+    /// alternative syntax and ends at the keyword that closes it.
+    fn arm_body(&mut self, alt: bool) -> Result<Read, Trouble> {
+        if !alt {
+            return self.body();
+        }
+        let mut body = Read::new();
+        self.statements(&mut body, false, Until::AltIf)?;
+        Ok(body)
+    }
+
     /// `while (cond) body`, the keyword read.
     fn r#while(&mut self) -> Result<Stmt, Trouble> {
         self.punctuation(b'(', "a `while` with no parenthesis after it")?;
@@ -2242,7 +2387,7 @@ impl Reader<'_> {
     fn braced(&mut self, what: &str) -> Result<Read, Trouble> {
         self.punctuation(b'{', what)?;
         let mut body = Read::new();
-        self.statements(&mut body, false, true)?;
+        self.statements(&mut body, false, Until::Brace)?;
         Ok(body)
     }
 
@@ -2386,7 +2531,7 @@ impl Reader<'_> {
         let mut body = Read::new();
         if self.byte(0) == Some(b'{') {
             self.bump(1);
-            self.statements(&mut body, false, true)?;
+            self.statements(&mut body, false, Until::Brace)?;
             return Ok(body);
         }
         let line = self.line;
@@ -3894,12 +4039,102 @@ pub(crate) fn is_auto_global(name: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        BinaryOp, CastTo, Child, Element, Expr, Level, Piece, Read, Stmt, Target, Trouble, Unset,
+        BinaryOp, CastTo, Child, Element, Expr, IfArm, Level, Piece, Read, Stmt, Target, Trouble,
+        Unset,
     };
 
     /// The reader on a thread nothing holds to a limit.
     fn read(source: &[u8]) -> Result<Read, Trouble> {
         super::read(source, crate::StackLimit::UNCHECKED)
+    }
+
+    /// One arm over `$name`, its body one `echo` of `echoed`, all on
+    /// line 1.
+    fn arm(name: Option<&[u8]>, echoed: i64) -> IfArm {
+        IfArm {
+            cond: name.map(|name| Expr::Var(name.to_vec())),
+            body: vec![(Stmt::Echo(vec![Expr::Int(echoed)]), 1)],
+            line: 1,
+        }
+    }
+
+    /// The arms php's grammar reduces each spelling into: `elseif` adds
+    /// an arm to the same `ZEND_AST_IF`, and the alternative syntax
+    /// reduces into that same list of arms.
+    #[test]
+    fn an_elseif_is_an_arm_of_the_same_if_in_either_syntax() {
+        let braced = read(b"<?php if ($a) echo 1; elseif ($b) echo 2; else echo 3;");
+        let arms = vec![arm(Some(b"a"), 1), arm(Some(b"b"), 2), arm(None, 3)];
+        assert_eq!(
+            braced.unwrap_or_default(),
+            vec![(Stmt::If(arms), 1)],
+            "the braced syntax",
+        );
+        let alternative = read(b"<?php if ($a): echo 1; elseif ($b): echo 2; else: echo 3; endif;");
+        let arms = vec![arm(Some(b"a"), 1), arm(Some(b"b"), 2), arm(None, 3)];
+        assert_eq!(
+            alternative.unwrap_or_default(),
+            vec![(Stmt::If(arms), 1)],
+            "the alternative syntax",
+        );
+    }
+
+    /// `else if` is php's `T_ELSE statement` over an `if` of its own,
+    /// not an arm of the outer one: the `else` arm's body is the one
+    /// statement that follows it.
+    #[test]
+    fn an_else_if_is_an_if_of_its_own_under_the_else_arm() {
+        let read = read(b"<?php if ($a) echo 1; else if ($b) echo 2;").unwrap_or_default();
+        let inner = Stmt::If(vec![arm(Some(b"b"), 2)]);
+        assert_eq!(
+            read,
+            vec![(
+                Stmt::If(vec![
+                    arm(Some(b"a"), 1),
+                    IfArm {
+                        cond: None,
+                        body: vec![(inner, 1)],
+                        line: 1,
+                    },
+                ]),
+                1
+            )]
+        );
+    }
+
+    /// An arm of either syntax takes a block, and the alternative one
+    /// ends at the keyword that closes it, so an `if` nested in an arm
+    /// does not take the `endif` for its own.
+    #[test]
+    fn an_arm_takes_a_block_and_an_alternative_arm_runs_to_its_keyword() {
+        let read = read(b"<?php if ($a): if ($b) { echo 1; } endif;").unwrap_or_default();
+        let inner = Stmt::If(vec![IfArm {
+            cond: Some(Expr::Var(b"b".to_vec())),
+            body: vec![(Stmt::Echo(vec![Expr::Int(1)]), 1)],
+            line: 1,
+        }]);
+        assert_eq!(
+            read,
+            vec![(
+                Stmt::If(vec![IfArm {
+                    cond: Some(Expr::Var(b"a".to_vec())),
+                    body: vec![(inner, 1)],
+                    line: 1,
+                }]),
+                1
+            )]
+        );
+    }
+
+    /// The alternative syntax with no `endif` is refused where its
+    /// statements end, not read as an `if` that closes itself.
+    #[test]
+    fn an_alternative_if_with_no_endif_is_refused() {
+        let refused = read(b"<?php if ($a): echo 1;");
+        assert_eq!(
+            refused.err().map(|trouble| trouble.what),
+            Some("an `if` no `endif` closes".to_string())
+        );
     }
 
     #[test]

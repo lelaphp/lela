@@ -108,8 +108,8 @@ use php_unit::{
 
 use crate::read;
 use crate::read::{
-    Arm, BinaryOp, Case, CastTo, Catch, Class, Element, Expr, Function, Magic, Method, Piece,
-    Property, Read, Stmt, Target, Unset, is_auto_global,
+    Arm, BinaryOp, Case, CastTo, Catch, Class, Element, Expr, Function, IfArm, Magic, Method,
+    Piece, Property, Read, Stmt, Target, Unset, is_auto_global,
 };
 use crate::{CompileError, Options, StackLimit};
 
@@ -888,6 +888,7 @@ impl Emit<'_> {
                     self.unset(target)?;
                 }
             }
+            Stmt::If(arms) => self.r#if(arms)?,
         }
         Ok(())
     }
@@ -2491,6 +2492,48 @@ impl Emit<'_> {
         let cond = self.expr_list(cond)?;
         self.emit_cond_jump(cond, start);
         self.end_loop(continue_at);
+        Ok(())
+    }
+
+    /// `zend_compile_if` (`Z/Zend/zend_compile.c:6186`): one pass over
+    /// the arms, each condition compiled and left to a `JMPZ` forward,
+    /// the arm's statements after it, and a `JMP` to the end of the
+    /// whole statement where another arm follows; the `JMPZ` is then
+    /// aimed at the opline about to be emitted, which is the next arm's
+    /// first. The `else` arm has no condition, so it emits its
+    /// statements and nothing else, and every `JMP` collected is aimed
+    /// past it at the end.
+    ///
+    /// `CG(zend_lineno)` is the arm's own line before a condition past
+    /// the first, and before the `JMP`, which php sets so a line of the
+    /// arm's body is not reported as covered by the jump that leaves it.
+    /// Nothing is folded: `zend_compile_if` compiles the condition of
+    /// `if (1)` and `if (0)` like any other, and the `JMPZ` over a
+    /// constant stands in the dump before the optimizer runs.
+    fn r#if(&mut self, arms: &[IfArm]) -> Result<(), CompileError> {
+        let last = arms.len().saturating_sub(1);
+        let mut jumps = Vec::new();
+        for (index, arm) in arms.iter().enumerate() {
+            let Some(cond) = arm.cond.as_ref() else {
+                // php asserts the arm with no condition is the last.
+                self.statements(&arm.body)?;
+                continue;
+            };
+            if index > 0 {
+                self.line = arm.line;
+            }
+            let cond = self.expr(cond)?;
+            let opnum_jmpz = self.cond_jump_forward(Opcode::Jmpz, cond);
+            self.statements(&arm.body)?;
+            if index != last {
+                self.line = arm.line;
+                jumps.push(self.jump_forward());
+            }
+            self.update_jump_target_to_next(opnum_jmpz);
+        }
+        for jump in jumps {
+            self.update_jump_target_to_next(jump);
+        }
         Ok(())
     }
 
