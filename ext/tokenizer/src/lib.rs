@@ -71,13 +71,20 @@ struct State {}
 /// int(411)
 /// ```
 pub fn extension() -> Extension {
-    let mut constants = vec![constant(b"TOKEN_PARSE", TOKEN_PARSE)];
+    // `tokenizer_data.stub.php`'s order, which `php --re tokenizer`
+    // prints: the `T_*` by number with `T_PAAMAYIM_NEKUDOTAYIM` at 402's
+    // place and `T_DOUBLE_COLON` last, then `TOKEN_PARSE` from
+    // `tokenizer.stub.php`, registered after them.
+    let mut constants = Vec::new();
     for (name, id) in names::TOKENS {
         constants.push(constant(name.as_bytes(), id));
-        if name == "T_DOUBLE_COLON" {
+        if name == "T_CURLY_OPEN"
+            && let Some(id) = names::id_of("T_DOUBLE_COLON")
+        {
             constants.push(constant(b"T_PAAMAYIM_NEKUDOTAYIM", id));
         }
     }
+    constants.push(constant(b"TOKEN_PARSE", TOKEN_PARSE));
     ExtensionBuilder::default()
         .functions(vec![
             (
@@ -85,7 +92,10 @@ pub fn extension() -> Extension {
                     b"token_get_all",
                     &[
                         parameter(b"code", Type::String),
-                        parameter(b"flags", Type::Int),
+                        Parameter {
+                            default: Some(ConstExpr::Long(0)),
+                            ..parameter(b"flags", Type::Int)
+                        },
                     ],
                     Type::Array,
                 ),
