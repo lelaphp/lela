@@ -374,11 +374,45 @@ pub(crate) enum Where {
     Cv(u32),
 }
 
+/// `ZEND_FETCH_DIM_REF` (`Z/Zend/zend_compile.h:1095`), on the last
+/// `FETCH_DIM_W` of a by-reference write: what php's string-offset error
+/// reads to say `Cannot create references to/from string offsets`.
+const FETCH_DIM_REF: u32 = 1;
+
+/// `ZEND_FETCH_DIM_DIM` (`Z/Zend/zend_compile.h:1096`), on a
+/// `FETCH_DIM_W` that has a dimension over it: `Cannot use string offset
+/// as an array` the same way.
+const FETCH_DIM_DIM: u32 = 2;
+
+/// One link of a dimension chain as `zend_delayed_compile_dim` leaves
+/// it: the dimension's operand, `UNUSED` for the `[]` of an append, and
+/// the `VAR` or temporary the opline writes.
+struct DimLink {
+    kind: OperandKind,
+    at: u32,
+    out: u32,
+}
+
 /// What a magic constant folds to: `__LINE__`'s number, or the string
 /// every other one is.
 enum Folded {
     Line(i64),
     Text(Vec<u8>),
+}
+
+/// The `ConstExpr` a folded constant is, which a declaration carries in
+/// the written form `zend_eval_const_expr` left it; `None` for a value
+/// no constant expression of the unit format holds.
+fn folded_const_expr(folded: Zval) -> Option<ConstExpr> {
+    Some(match folded.kind() {
+        ZvalType::Null => ConstExpr::Null,
+        ZvalType::False => ConstExpr::Bool(false),
+        ZvalType::True => ConstExpr::Bool(true),
+        ZvalType::Long => ConstExpr::Long(folded.as_long()?),
+        ZvalType::Double => ConstExpr::Double(folded.as_double()?),
+        ZvalType::String => ConstExpr::Str(folded.as_str()?.bytes().into()),
+        _ => return None,
+    })
 }
 
 /// `zend_dirname` (`Z/Zend/zend_compile.c:2176`) on a path that is no
@@ -1867,28 +1901,9 @@ impl Emit<'_> {
             }
             Expr::Unary { .. } | Expr::Binary { .. } => {
                 if let Some(folded) = self.constant_of(expr)? {
-                    match folded.kind() {
-                        ZvalType::Null => return Ok(ConstExpr::Null),
-                        ZvalType::False => return Ok(ConstExpr::Bool(false)),
-                        ZvalType::True => return Ok(ConstExpr::Bool(true)),
-                        ZvalType::Long => {
-                            if let Some(n) = folded.as_long() {
-                                return Ok(ConstExpr::Long(n));
-                            }
-                        }
-                        ZvalType::Double => {
-                            if let Some(f) = folded.as_double() {
-                                return Ok(ConstExpr::Double(f));
-                            }
-                        }
-                        ZvalType::String => {
-                            if let Some(s) = folded.as_str() {
-                                return Ok(ConstExpr::Str(s.bytes().into()));
-                            }
-                        }
-                        _ => {}
-                    }
-                    return Err(self.fatal("a constant expression this compiler cannot read yet"));
+                    return folded_const_expr(folded).ok_or_else(|| {
+                        self.fatal("a constant expression this compiler cannot read yet")
+                    });
                 }
                 match expr {
                     Expr::Unary { minus, operand } => Ok(ConstExpr::Unary {
@@ -1906,7 +1921,9 @@ impl Emit<'_> {
             Expr::Var(_)
             | Expr::This
             | Expr::Prop { .. }
+            | Expr::Dim { .. }
             | Expr::Assign { .. }
+            | Expr::AssignDim { .. }
             | Expr::AssignProp { .. }
             | Expr::AssignRef { .. }
             | Expr::Call { .. }
@@ -3279,7 +3296,11 @@ impl Emit<'_> {
                 name,
                 value,
             } => self.assign_prop(object, name, value),
-            Expr::AssignRef { var, source } => Ok(self.assign_ref(var, source)),
+            Expr::AssignDim { target, value } => self.assign_dim(target, value),
+            Expr::AssignRef { target, source } => self.assign_ref(target, source),
+            // `zend_delayed_compile_dim` under `BP_VAR_R`, which is
+            // `FETCH_DIM_R` and no handler of this engine serves yet.
+            Expr::Dim { .. } => Err(self.fatal("a dimension read this compiler cannot read yet")),
             Expr::PreInc(var) => Ok(self.incdec(var, Opcode::PreInc)),
             Expr::PostInc(var) => Ok(self.incdec(var, Opcode::PostInc)),
             Expr::PreDec(var) => Ok(self.incdec(var, Opcode::PreDec)),
@@ -3377,21 +3398,200 @@ impl Emit<'_> {
     /// them: php emits one only where the source is neither a CV nor
     /// bound for a plain variable. [`Self::do_free`] marks the `VAR`
     /// `UNUSED` where nothing reads it, as it marks a call's.
-    fn assign_ref(&mut self, var: &[u8], source: &[u8]) -> Where {
-        let target = self.lookup_cv(var);
+    ///
+    /// A dimension as the target, `$a[] = &$x`, is the whole chain
+    /// fetched for writing, the last link carried by `ZEND_FETCH_DIM_REF`
+    /// where a plain write carries nothing, and `ASSIGN_REF` over the
+    /// `VAR` it left: php turns the last delayed opline into an
+    /// `ASSIGN_*_REF` only for a property and a class's own property,
+    /// and leaves a dimension's fetch standing.
+    fn assign_ref(&mut self, target: &Expr, source: &[u8]) -> Result<Where, CompileError> {
+        let (op1_type, op1) = match target {
+            Expr::Var(name) => (OperandKind::Cv, self.lookup_cv(name)),
+            Expr::Dim { .. } => {
+                let (container, links) = self.dim_chain(target)?;
+                let Some((last, fetches)) = links.split_last() else {
+                    return Err(self.fatal("a dimension with no dimension"));
+                };
+                let (kind, at) = self.dim_fetches(container, fetches);
+                self.push(Opline {
+                    opcode: Opcode::FetchDimW,
+                    op1_type: kind,
+                    op1: at,
+                    op2_type: last.kind,
+                    op2: last.at,
+                    out_type: OperandKind::Var,
+                    out: last.out,
+                    extended_value: FETCH_DIM_REF,
+                    ..Opline::default()
+                });
+                (OperandKind::Var, last.out)
+            }
+            _ => {
+                return Err(self.fatal(
+                    "a by-reference assignment to what is no variable this compiler cannot read yet",
+                ));
+            }
+        };
         let source = self.lookup_cv(source);
         let out = self.temporary();
         self.push(Opline {
             opcode: Opcode::AssignRef,
-            op1_type: OperandKind::Cv,
-            op1: target,
+            op1_type,
+            op1,
             op2_type: OperandKind::Cv,
             op2: source,
             out_type: OperandKind::Var,
             out,
             ..Opline::default()
         });
-        Where::Returned(out)
+        Ok(Where::Returned(out))
+    }
+
+    /// `zend_compile_assign`, the `ZEND_AST_DIM` arm: the chain of
+    /// dimensions compiled delayed (`zend_delayed_compile_dim` under
+    /// `BP_VAR_W`), the value after it, the delayed oplines laid down at
+    /// `zend_delayed_compile_end` with the last of them turned into
+    /// `ASSIGN_DIM` writing a temporary, and `OP_DATA` carrying the value
+    /// (`zend_emit_op_data`), which is why the handler steps over two
+    /// oplines. Each link but the last is `FETCH_DIM_W` into a `VAR`
+    /// carrying `ZEND_FETCH_DIM_DIM`, the bit that names the dimension
+    /// under a dimension in php's string-offset error; the `[]` of an
+    /// append is an `UNUSED` `op2`, which the dump prints as `NEXT`.
+    fn assign_dim(&mut self, target: &Expr, value: &Expr) -> Result<Where, CompileError> {
+        let (container, links) = self.dim_chain(target)?;
+        let value = self.assigned_value(target, value)?;
+        let (data_type, data) = self.operand(value);
+        let Some((last, fetches)) = links.split_last() else {
+            return Err(self.fatal("a dimension assignment with no dimension"));
+        };
+        let (op1_type, op1) = self.dim_fetches(container, fetches);
+        self.push(Opline {
+            opcode: Opcode::AssignDim,
+            op1_type,
+            op1,
+            op2_type: last.kind,
+            op2: last.at,
+            out_type: OperandKind::Tmp,
+            out: last.out,
+            ..Opline::default()
+        });
+        self.push(Opline {
+            opcode: Opcode::OpData,
+            op1_type: data_type,
+            op1: data,
+            ..Opline::default()
+        });
+        Ok(Where::Temporary(last.out))
+    }
+
+    /// `zend_delayed_compile_dim` over a chain of dimensions under a
+    /// write: the container's CV, looked up before anything else, and one
+    /// link per dimension from the innermost out. Each link's dimension
+    /// is compiled where it stands, before the next link and before the
+    /// value, and its `VAR` is numbered after it, which is the order
+    /// `zend_delayed_emit_op` numbers php's. A container that is no plain
+    /// variable, a property or a call under the chain, is not read yet.
+    fn dim_chain(&mut self, target: &Expr) -> Result<(u32, Vec<DimLink>), CompileError> {
+        let mut dimensions = Vec::new();
+        let mut base = target;
+        while let Expr::Dim { container, index } = base {
+            dimensions.push(index);
+            base = container;
+        }
+        let Expr::Var(name) = base else {
+            return Err(
+                self.fatal("a dimension over what is no variable this compiler cannot read yet")
+            );
+        };
+        let container = self.lookup_cv(name);
+        let mut links = Vec::with_capacity(dimensions.len());
+        for index in dimensions.iter().rev() {
+            let (kind, at) = match index {
+                Some(index) => {
+                    let value = self.expr(index)?;
+                    let value = Emit::numeric_dim(value);
+                    self.operand(value)
+                }
+                None => (OperandKind::Unused, 0),
+            };
+            links.push(DimLink {
+                kind,
+                at,
+                out: self.temporary(),
+            });
+        }
+        Ok((container, links))
+    }
+
+    /// The `FETCH_DIM_W` oplines under the last link, each the container
+    /// of the next, and the operand the last link's own opline reads.
+    fn dim_fetches(&mut self, container: u32, fetches: &[DimLink]) -> (OperandKind, u32) {
+        let (mut op1_type, mut op1) = (OperandKind::Cv, container);
+        for link in fetches {
+            self.push(Opline {
+                opcode: Opcode::FetchDimW,
+                op1_type,
+                op1,
+                op2_type: link.kind,
+                op2: link.at,
+                out_type: OperandKind::Var,
+                out: link.out,
+                extended_value: FETCH_DIM_DIM,
+                ..Opline::default()
+            });
+            op1_type = OperandKind::Var;
+            op1 = link.out;
+        }
+        (op1_type, op1)
+    }
+
+    /// `zend_handle_numeric_dim`: a constant dimension whose string is a
+    /// canonical decimal integer is that integer, so `$a["10"]` and
+    /// `$a[10]` are one key and the handler needs no numeric test over a
+    /// constant. php keeps the string as a second constant beside it for
+    /// an `ArrayAccess` offset (bug #63217); an object container is not
+    /// served yet, and nothing here reads that one.
+    fn numeric_dim(value: Where) -> Where {
+        let Where::Constant(constant) = value else {
+            return value;
+        };
+        let Some(bytes) = constant.as_str() else {
+            return value;
+        };
+        match php_heap::canonical_int(bytes.bytes()) {
+            Some(n) => Where::Constant(Zval::long(n)),
+            None => value,
+        }
+    }
+
+    /// `zend_compile_expr_with_potential_assign_to_self`: `$a[0] = $a`
+    /// evaluates the right `$a` first, through a `QM_ASSIGN` into a
+    /// temporary, since the write to the left one may move what the
+    /// right one named. php compares the written names of the chain's
+    /// base and of the value, so `$a[0][1] = $a` is one too.
+    fn assigned_value(&mut self, target: &Expr, value: &Expr) -> Result<Where, CompileError> {
+        let Expr::Var(name) = value else {
+            return self.expr(value);
+        };
+        let mut base = target;
+        while let Expr::Dim { container, .. } = base {
+            base = container;
+        }
+        if !matches!(base, Expr::Var(written) if written == name) {
+            return self.expr(value);
+        }
+        let cv = self.lookup_cv(name);
+        let out = self.temporary();
+        self.push(Opline {
+            opcode: Opcode::QmAssign,
+            op1_type: OperandKind::Cv,
+            op1: cv,
+            out_type: OperandKind::Tmp,
+            out,
+            ..Opline::default()
+        });
+        Ok(Where::Temporary(out))
     }
 
     /// `zend_compile_assign`, the `ZEND_AST_PROP` arm: the property
@@ -4053,7 +4253,9 @@ impl Emit<'_> {
             Expr::Var(_)
             | Expr::This
             | Expr::Prop { .. }
+            | Expr::Dim { .. }
             | Expr::Assign { .. }
+            | Expr::AssignDim { .. }
             | Expr::AssignProp { .. }
             | Expr::AssignRef { .. }
             | Expr::PreInc(_)

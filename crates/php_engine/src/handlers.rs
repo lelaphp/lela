@@ -58,7 +58,7 @@ use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
-use crate::api::values::{TypeTag, Value};
+use crate::api::values::{PhpArray, TypeTag, Value, ValueRef};
 use crate::exec::{self, Cached, CallStage, CallState};
 use crate::ops::{Offset, Switched};
 use crate::tier::{SafepointIdx, Site, Stepped, Tier, continued};
@@ -1839,6 +1839,203 @@ pub(crate) fn fetch_obj_w<T: Tier>(
     Ok(advance(req, frame))
 }
 
+/// The place a dimension write lands in, php's
+/// `GET_OP1_ZVAL_PTR_PTR_UNDEF(BP_VAR_W)` (`_get_zval_ptr_ptr_var`,
+/// `Z/Zend/zend_execute.c:167`): a CV's own slot, or a `VAR` read
+/// through the `IS_INDIRECT` a `FETCH_DIM_W` or a `FETCH_OBJ_W` left
+/// there and as it stands otherwise. A `CONST` or a `TMP` is no
+/// container php compiles a write over, and is `None`.
+fn write_place(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    kind: OperandKind,
+    field: u32,
+) -> Option<php_heap::ZvalRef> {
+    match kind {
+        OperandKind::Cv => req.slot_ptr(frame, field),
+        OperandKind::Var => {
+            let at = req.slot_ptr(frame, exec::temporary_slot(code, field))?;
+            Some(at.read().as_indirect().unwrap_or(at))
+        }
+        OperandKind::Const | OperandKind::Tmp | OperandKind::Unused => None,
+    }
+}
+
+/// `zend_fetch_dimension_address`'s walk to the array a dimension write
+/// lands in (`Z/Zend/zend_execute.c:2903`), which `ASSIGN_DIM` walks
+/// too: an array is `SEPARATE_ARRAY`, one owner of it from here and the
+/// copy written back into the place where the array was shared; a
+/// reference is followed once, since no reference holds a reference;
+/// and `null`, an unwritten variable and `false` become a new array in
+/// place (`array_init`), `false` with php's 8.1 deprecation before it
+/// (`zend_false_to_array_deprecated`). What is left is php's `Error`
+/// `Cannot use a scalar value as an array` (`zend_use_scalar_as_array`)
+/// for a number, `true` and a resource; a string offset and an object's
+/// `offsetSet` are the internal-error fatals naming the gap, since
+/// `zend_assign_to_string_offset` and `zend_assign_to_object_dim` are
+/// not served yet.
+fn write_array(
+    req: &mut Request,
+    place: php_heap::ZvalRef,
+    opcode: &str,
+) -> Result<Result<PhpArray, Thrown>, Fatal> {
+    let mut at = place;
+    let mut held = exec::value_of(at.read());
+    if let Some(cell) = held.as_php_ref() {
+        at = cell.heap().val_ref();
+        held = exec::value_of(at.read());
+    }
+    if let Some(array) = held.as_array() {
+        let separated = match req.array_separate(array.heap()) {
+            Ok(separated) => separated,
+            Err(thrown) => return Ok(Err(thrown)),
+        };
+        if !separated.is_same(array.heap()) {
+            at.write(php_heap::Zval::array(separated));
+        }
+        return Ok(Ok(PhpArray::of(separated)));
+    }
+    if matches!(
+        held.as_ref(),
+        ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false)
+    ) {
+        if held.as_bool() == Some(false) {
+            crate::api::raising::deprecated(
+                req,
+                "Automatic conversion of false to array is deprecated",
+            );
+            if req.is_pending() {
+                return Ok(Err(Thrown::of(None)));
+            }
+        }
+        let array = match req.array() {
+            Ok(array) => array,
+            Err(thrown) => return Ok(Err(thrown)),
+        };
+        at.write(php_heap::Zval::array(array.heap()));
+        return Ok(Ok(array));
+    }
+    if held.as_php_string().is_some() {
+        return Err(Fatal::Error(format!(
+            "InternalError: {opcode} over a string offset, which zend_assign_to_string_offset is not serving yet"
+        )));
+    }
+    if held.as_object().is_some() {
+        return Err(Fatal::Error(format!(
+            "InternalError: {opcode} over an object, whose offsetSet is not served yet"
+        )));
+    }
+    Ok(Err(crate::api::raising::throw(
+        req,
+        "Error",
+        "Cannot use a scalar value as an array",
+    )))
+}
+
+/// The entry a dimension write lands in, php's
+/// `zend_fetch_dimension_address_inner` under `BP_VAR_W`
+/// (`Z/Zend/zend_execute.c:2802`): the entry at the key in place, laid
+/// down holding `null` where the table has none (`zend_hash_lookup`), or
+/// one appended for the `UNUSED` dimension of `$a[]`
+/// (`zend_hash_next_index_insert`). The key is the ladder
+/// [`crate::ops::array_offset`] holds for every array write, a `CONST`
+/// string taken as it is since the compiler applied
+/// `zend_handle_numeric_dim` to it. `None` is the next index taken at
+/// `ZEND_LONG_MAX`, `zend_cannot_add_element`'s `Error` at the site.
+fn write_entry(
+    req: &mut Request,
+    array: PhpArray,
+    dim: Option<&Value>,
+    constant: bool,
+) -> Result<Result<Option<php_heap::ZvalRef>, Thrown>, Fatal> {
+    let Some(dim) = dim else {
+        return Ok(req.array_next_entry(array.heap()));
+    };
+    let key = match crate::ops::array_offset(req, dim, constant) {
+        Ok(key) => key,
+        Err(thrown) => return Ok(Err(thrown)),
+    };
+    Ok(req.array_lookup(array.heap(), key))
+}
+
+/// `ZEND_FETCH_DIM_W` (`Z/Zend/zend_vm_def.h:1968`), the link under a
+/// dimension write the compiler delays: the container walked to the
+/// array it names ([`write_array`]), the entry at the dimension laid
+/// down ([`write_entry`]), and an `IS_INDIRECT` naming it into the
+/// opline's `VAR`, which is what the `ASSIGN_DIM`, the `ASSIGN_REF` or
+/// the next `FETCH_DIM_W` over it writes through. The dimension is read
+/// as `BP_VAR_R` reads it, so an undefined variable warns where php's
+/// `slow_index_convert_w` warns; then `FREE_OP2` and, for a `VAR`
+/// container, `FREE_OP1`, which frees nothing while the `IS_INDIRECT`
+/// stands there. A throw leaves the `VAR` `UNDEF`, php's
+/// `ZVAL_UNDEF(result)`.
+///
+/// A chain of dimensions builds the arrays under it as it goes, each
+/// link's entry `null` until the link over it writes through it.
+///
+/// ```php
+/// $a[1][2] = 3;
+/// $a[1][] = 4;
+/// var_dump($a);
+/// ```
+/// ```expect
+/// array(1) {
+///   [1]=>
+///   array(2) {
+///     [2]=>
+///     int(3)
+///     [3]=>
+///     int(4)
+///   }
+/// }
+/// ```
+pub(crate) fn fetch_dim_w<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let out = exec::temporary_slot(code, op.out);
+    let Some(place) = write_place(req, frame, code, op.op1_type, op.op1) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_FETCH_DIM_W over a constant or a temporary, which php compiles no write over",
+        )));
+    };
+    let entry = match write_array(req, place, "ZEND_FETCH_DIM_W")? {
+        Ok(array) => {
+            let dim = (op.op2_type != OperandKind::Unused)
+                .then(|| exec::operand(req, frame, code, op.op2_type, op.op2));
+            let written = write_entry(req, array, dim.as_ref(), op.op2_type == OperandKind::Const)?;
+            match written {
+                Ok(Some(entry)) => Ok(entry),
+                Ok(None) => Err(crate::api::raising::throw(
+                    req,
+                    "Error",
+                    "Cannot add element to the array as the next element is already occupied",
+                )),
+                Err(thrown) => Err(thrown),
+            }
+        }
+        Err(thrown) => Err(thrown),
+    };
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    let previous = req.take_slot(frame, out);
+    req.release(previous);
+    let entry = match entry {
+        Ok(entry) => entry,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let Some(var) = req.slot_ptr(frame, out) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_FETCH_DIM_W writes a VAR the frame does not have",
+        )));
+    };
+    var.write(php_heap::Zval::indirect(entry));
+    Ok(advance(req, frame))
+}
+
 /// `ZEND_CLONE` (`Z/Zend/zend_vm_def.h:6010`), what the compiler emits
 /// for `clone $o` and a one-argument `clone($o)`: the operand read as
 /// `GET_OP1_OBJ_ZVAL_PTR_UNDEF` reads it, a reference followed, an
@@ -2557,12 +2754,13 @@ pub(crate) fn assign<T: Tier>(
         let previous = req.set_slot(frame, slot, value);
         req.release(previous);
     }
-    if let Some(r) = req.slot(frame, op.op1).as_php_ref() {
-        req.reference_set(r.heap(), value);
-    } else {
-        let garbage = req.set_slot(frame, op.op1, value);
-        req.release(garbage);
-    }
+    let Some(at) = req.slot_ptr(frame, op.op1) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ASSIGN over a CV the frame does not have",
+        )));
+    };
+    let garbage = assign_to_place(at, value);
+    req.release(garbage);
     Ok(advance(req, frame))
 }
 
@@ -2578,12 +2776,29 @@ pub(crate) fn assign<T: Tier>(
 /// `result` names is one more owner again under `RETURN_VALUE_USED`
 /// (`ZVAL_COPY`), and it is the cell, which the `ASSIGN` or the `ECHO`
 /// that reads the `VAR` follows; what the target held is given up
-/// last (`GC_DTOR(garbage)`). Two names of one cell, `$a = &$a` over a
-/// CV that holds one, are left as they stand. A `VAR` operand is what a
-/// `FETCH_*_W` leaves, `Cannot assign by reference to an array
-/// dimension of an object` over one holding no `IS_INDIRECT`, and is
-/// not served until a dimension or a property is a source; `MAKE_REF`
-/// and `ZEND_RETURNS_FUNCTION` land with it.
+/// last (`GC_DTOR(garbage)`). Two names of one cell, `$a = &$a`, are
+/// left as they stand, which php reads off the two places being one
+/// (`variable_ptr == value_ptr`) and not off the two operands. A `VAR`
+/// target is what a `FETCH_DIM_W` left for `$a[] = &$x`, written
+/// through the `IS_INDIRECT` in it; one holding no `IS_INDIRECT` is an
+/// object's dimension, php's `Error` `Cannot assign by reference to an
+/// array dimension of an object`. A `VAR` source is `MAKE_REF` and
+/// `ZEND_RETURNS_FUNCTION`, which land with a call as the source.
+///
+/// A dimension bound by `&` is one cell the array's entry and the CV
+/// both hold, so a write through either is read through both, and an
+/// array that holds a reference to itself is php's `*RECURSION*`.
+///
+/// ```php
+/// $a[] = &$x; $x = 1; var_dump($a); $a[0] = 2; var_dump($x);
+/// ```
+/// ```expect
+/// array(1) {
+///   [0]=>
+///   &int(1)
+/// }
+/// int(2)
+/// ```
 ///
 /// One cell, two names: a write through either is read through both,
 /// and a plain assignment from one of them copies the value, not the
@@ -2629,34 +2844,63 @@ pub(crate) fn assign_ref<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    if op.op1_type != OperandKind::Cv || op.op2_type != OperandKind::Cv {
+    if op.op2_type != OperandKind::Cv {
         return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_REF over a VAR, which no FETCH_*_W leaves yet",
+            "InternalError: ZEND_ASSIGN_REF over a source that is no CV, which MAKE_REF and ZEND_RETURNS_FUNCTION land with",
         )));
     }
-    let source = req.slot(frame, op.op2);
-    let cell = match source.as_php_ref() {
-        Some(cell) if op.op1 == op.op2 => {
+    let Some(source) = req.slot_ptr(frame, op.op2) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ASSIGN_REF over a CV the frame does not have",
+        )));
+    };
+    let target = match op.op1_type {
+        OperandKind::Cv => req.slot_ptr(frame, op.op1),
+        OperandKind::Var => {
+            let at = req.slot_ptr(frame, exec::temporary_slot(code, op.op1));
+            let Some(entry) = at.and_then(|at| at.read().as_indirect()) else {
+                let thrown = crate::api::raising::throw(
+                    req,
+                    "Error",
+                    "Cannot assign by reference to an array dimension of an object",
+                );
+                exec::free_operand(req, frame, code, op.op1_type, op.op1);
+                return threw(req, frame, &thrown);
+            };
+            Some(entry)
+        }
+        OperandKind::Const | OperandKind::Tmp | OperandKind::Unused => None,
+    };
+    let Some(target) = target else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ASSIGN_REF over a target php compiles no write over",
+        )));
+    };
+    let held = exec::value_of(source.read());
+    let cell = match held.as_php_ref() {
+        Some(cell) if target == source => {
             write_out(req, frame, code, op, &cell.as_value());
             return Ok(advance(req, frame));
         }
         Some(cell) => *cell,
         None => {
-            let held = source.undef_as_null();
+            let held = held.undef_as_null();
             let cell = match req.reference(held) {
                 Ok(cell) => cell,
                 Err(thrown) => return threw(req, frame, &thrown),
             };
             // The owner the slot had of `held` is the cell's now.
-            let _moved = req.set_slot(frame, op.op2, cell.as_value());
+            source.write(cell.as_value().to_zval());
             cell
         }
     };
     let bound = cell.as_value();
     req.addref(&bound);
-    let garbage = req.set_slot(frame, op.op1, bound);
+    let garbage = exec::value_of(target.read());
+    target.write(bound.to_zval());
     write_out(req, frame, code, op, &bound);
     req.release(garbage);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
     Ok(advance(req, frame))
 }
 
@@ -2881,6 +3125,191 @@ fn assign_property(
             Ok(table.write_property(req, object, key, value))
         }
     }
+}
+
+/// `zend_assign_to_variable` (`Z/Zend/zend_execute.h:171`) over a place:
+/// a reference standing there is followed and the write lands in the
+/// cell, as `ASSIGN` over a CV bound by `&` lands there; the value is
+/// written first and what the place held is handed back for the caller
+/// to release last, after the `result` is copied, which is where a
+/// destructor is served (design §5.10).
+fn assign_to_place(at: php_heap::ZvalRef, value: Value) -> Value {
+    let mut at = at;
+    let mut held = exec::value_of(at.read());
+    if let Some(cell) = held.as_php_ref() {
+        at = cell.heap().val_ref();
+        held = exec::value_of(at.read());
+    }
+    at.write(value.to_zval());
+    held
+}
+
+/// `ZEND_ASSIGN_DIM` (`Z/Zend/zend_vm_def.h:2657`), `$a[k] = v` and
+/// `$a[] = v`, two oplines: this one names the container and the
+/// dimension and the `OP_DATA` after it carries the value, so the
+/// handler steps over both (`ZEND_VM_NEXT_OPCODE_EX(1, 2)`). The
+/// container is walked to the array it names ([`write_array`]), which is
+/// where a `null` or an unwritten variable becomes one; then the two
+/// arms php has. The append, an `UNUSED` dimension, reads the value
+/// first and `zend_hash_next_index_insert`s it, php's `Error` `Cannot
+/// add element to the array as the next element is already occupied`
+/// where the next index is taken. A dimension is read first instead, so
+/// an undefined variable in the dimension warns before one in the value
+/// does, the entry is laid down ([`write_entry`]) and the value written
+/// through it as `zend_assign_to_variable` writes one
+/// ([`assign_to_place`]): a reference in the entry is followed, so a
+/// write through `$a[0]` bound by `&` reaches what it is bound to. The
+/// temporary `out` names is one more owner of the value under
+/// `RETURN_VALUE_USED` and `null` where the write raised
+/// (`assign_dim_error`); what the entry held is released last.
+///
+/// ```php
+/// $a = [1];
+/// $a[0] = 2;
+/// $a[] = 3;
+/// $a['k'] = 4;
+/// $a['10'] = 5;
+/// var_dump($a, $b[] = 6, $b);
+/// ```
+/// ```expect
+/// array(4) {
+///   [0]=>
+///   int(2)
+///   [1]=>
+///   int(3)
+///   ["k"]=>
+///   int(4)
+///   [10]=>
+///   int(5)
+/// }
+/// int(6)
+/// array(1) {
+///   [0]=>
+///   int(6)
+/// }
+/// ```
+///
+/// A dimension is read before the value, so php's two diagnostics over
+/// an unwritten variable come in that order, and `null` as an offset is
+/// the empty string.
+///
+/// ```php
+/// $a[$k] = $v;
+/// var_dump($a);
+/// ```
+/// ```expect
+/// Warning: Undefined variable $k in %s on line 2
+///
+/// Deprecated: Using null as an array offset is deprecated, use an empty string instead in %s on line 2
+///
+/// Warning: Undefined variable $v in %s on line 2
+/// array(1) {
+///   [""]=>
+///   NULL
+/// }
+/// ```
+///
+/// A write through an entry bound by `&` reaches what it is bound to,
+/// and `false` becomes an array with php's deprecation where `null`
+/// becomes one with none.
+///
+/// ```php
+/// $a[0] = &$b;
+/// $a[0] = 7;
+/// $c = false;
+/// $c[] = 1;
+/// var_dump($b, $c);
+/// ```
+/// ```expect
+/// Deprecated: Automatic conversion of false to array is deprecated in %s on line 5
+/// int(7)
+/// array(1) {
+///   [0]=>
+///   int(1)
+/// }
+/// ```
+///
+/// A scalar is php's `Error`, and the array the write did not reach
+/// stands as it was.
+///
+/// ```php
+/// $a = 1;
+/// $a[0] = 2;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Cannot use a scalar value as an array in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+pub(crate) fn assign_dim<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let at = req.vm().opline(frame);
+    let Some(data) = exec::opline_at(code, at.saturating_add(1))
+        .filter(|next| next.opcode == php_unit::Opcode::OpData)
+    else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ASSIGN_DIM with no OP_DATA after it",
+        )));
+    };
+    let data = *data;
+    let Some(place) = write_place(req, frame, code, op.op1_type, op.op1) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ASSIGN_DIM over a constant or a temporary, which php compiles no write over",
+        )));
+    };
+    let written = match write_array(req, place, "ZEND_ASSIGN_DIM")? {
+        Ok(array) if op.op2_type == OperandKind::Unused => {
+            let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
+            match req.array_append(array.heap(), value) {
+                Ok(true) => {
+                    write_out(req, frame, code, op, &value);
+                    Ok(())
+                }
+                Ok(false) => Err(crate::api::raising::throw(
+                    req,
+                    "Error",
+                    "Cannot add element to the array as the next element is already occupied",
+                )),
+                Err(thrown) => Err(thrown),
+            }
+        }
+        Ok(array) => {
+            let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
+            let entry = write_entry(req, array, Some(&dim), op.op2_type == OperandKind::Const)?;
+            match entry {
+                Ok(Some(entry)) => {
+                    let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
+                    let garbage = assign_to_place(entry, value);
+                    write_out(req, frame, code, op, &value);
+                    req.release(garbage);
+                    Ok(())
+                }
+                Ok(None) => Err(crate::api::raising::throw(
+                    req,
+                    "Error",
+                    "Cannot add element to the array as the next element is already occupied",
+                )),
+                Err(thrown) => Err(thrown),
+            }
+        }
+        Err(thrown) => Err(thrown),
+    };
+    if op.op2_type != OperandKind::Unused {
+        exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    }
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    if let Err(thrown) = written {
+        exec::free_operand(req, frame, code, data.op1_type, data.op1);
+        write_out(req, frame, code, op, &Value::null());
+        return threw(req, frame, &thrown);
+    }
+    req.vm_mut().jump(frame, at.saturating_add(2));
+    Ok(Stepped::Same(frame))
 }
 
 /// `if (RETURN_VALUE_USED(opline)) ZVAL_COPY(EX_VAR(opline->result.var), value)`:

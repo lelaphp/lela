@@ -46,7 +46,9 @@ Heap::array
 Heap::array_append
 Heap::array_del
 Heap::array_dup
+Heap::array_lookup
 Heap::array_mixed
+Heap::array_next_entry
 Heap::array_sized
 Heap::array_sort
 Heap::array_update
@@ -131,6 +133,7 @@ Ref::addref
 Ref::is_same
 Ref::refcount
 Ref::val
+Ref::val_ref
 Res
 Res::addref
 Res::id
@@ -199,6 +202,7 @@ ZvalRef::write
 ZvalType
 call_stack_bounds
 call_stack_default_size
+canonical_int
 compare
 double_to_string
 identical

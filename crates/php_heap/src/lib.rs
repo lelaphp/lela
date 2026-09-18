@@ -47,7 +47,7 @@ mod stack;
 mod string;
 mod zval;
 
-pub use array::{Arr, ArrIter, Key};
+pub use array::{Arr, ArrIter, Key, canonical_int};
 pub use block::Block;
 pub use call_stack::{CallStack, call_stack_bounds, call_stack_default_size};
 pub use compare::{Scalar, compare, identical};

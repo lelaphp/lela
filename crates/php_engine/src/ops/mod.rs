@@ -2261,10 +2261,36 @@ pub(crate) fn add_array_element(
     req.array_update(a, key, value)
 }
 
-/// The key an `ADD_ARRAY_ELEMENT` offset makes, the `add_again` ladder
-/// of its handler; the `""` of a `null` and of an unwritten slot is the
-/// interned empty string, `ZSTR_EMPTY_ALLOC`, nobody's to release.
-fn array_offset(
+/// The key an array offset makes, the `add_again` ladder of
+/// `ADD_ARRAY_ELEMENT`'s handler, which `slow_index_convert_w` is over
+/// the same set for a dimension write: a `bool` is zero or one, a float
+/// is truncated with php's precision deprecation, a resource is its id
+/// with php's warning, and an array or an object is php's `TypeError`.
+/// The `""` of a `null` and of an unwritten slot is the interned empty
+/// string, `ZSTR_EMPTY_ALLOC`, nobody's to release, and `null` carries
+/// php's 8.1 deprecation. A `CONST` string is the key as written, since
+/// `zend_handle_numeric_dim` made the compiler's constant a long
+/// already; any other string is `ZEND_HANDLE_NUMERIC_STR` here.
+///
+/// ```php
+/// $a[true] = 1; $a[2.5] = 2; $a[null] = 3; $a["7"] = 4; var_dump($a);
+/// ```
+/// ```expect
+/// Deprecated: Implicit conversion from float 2.5 to int loses precision in %s on line 2
+///
+/// Deprecated: Using null as an array offset is deprecated, use an empty string instead in %s on line 2
+/// array(4) {
+///   [1]=>
+///   int(1)
+///   [2]=>
+///   int(2)
+///   [""]=>
+///   int(3)
+///   [7]=>
+///   int(4)
+/// }
+/// ```
+pub(crate) fn array_offset(
     req: &mut Request,
     offset: &Value,
     constant: bool,

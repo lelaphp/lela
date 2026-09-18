@@ -21,7 +21,7 @@ use std::ptr::NonNull;
 
 use crate::gc::{self, Refcounted};
 use crate::hooks::{Fatal, HeapHooks};
-use crate::{Heap, Zval, ZvalType};
+use crate::{Heap, Zval, ZvalRef, ZvalType};
 
 /// `zend_reference`: thirty-two bytes, php's own order.
 #[repr(C)]
@@ -104,6 +104,17 @@ impl Ref {
     #[must_use]
     pub fn val(&self) -> Zval {
         self.header().val.get()
+    }
+
+    /// `Z_REFVAL_P`: the zval held in place, the `zval *` php writes a
+    /// dimension through where a reference stands in the container
+    /// (`zend_fetch_dimension_address`'s `IS_REFERENCE` arm). The cell
+    /// keeps it alive, as php's cell keeps its `val`.
+    #[must_use]
+    pub fn val_ref(&self) -> ZvalRef {
+        // `val` is a `Cell<Zval>`, which is `repr(transparent)` over the
+        // zval it holds, so this is php's `&ref->val` and reads nothing.
+        ZvalRef::new(NonNull::from(&self.header().val).cast())
     }
 
     /// Write the zval held as it stands, no owner touched.

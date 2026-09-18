@@ -206,7 +206,7 @@ impl Key {
     /// php's `zend_symtable_update` is handed a `zend_string *`.
     #[must_use]
     pub fn from_string(s: PhpString) -> Key {
-        match canonical_int(s.as_bytes()) {
+        match php_heap::canonical_int(s.as_bytes()) {
             Some(n) => Key::Int(n),
             None => Key::Str(s),
         }
@@ -220,25 +220,6 @@ impl Key {
             Key::Str(s) => Ok(*s),
         }
     }
-}
-
-/// `ZEND_HANDLE_NUMERIC_STR`: an optional minus, no leading zero unless
-/// the number is zero, digits only, and in `i64` range.
-fn canonical_int(bytes: &[u8]) -> Option<i64> {
-    let (negative, digits) = match bytes {
-        [b'-', rest @ ..] => (true, rest),
-        _ => (false, bytes),
-    };
-    if digits.is_empty()
-        || digits.len() > 19
-        || !digits.iter().all(u8::is_ascii_digit)
-        || (digits.len() > 1 && digits[0] == b'0')
-        || (negative && digits == b"0")
-    {
-        return None;
-    }
-    let text = std::str::from_utf8(bytes).ok()?;
-    text.parse().ok()
 }
 
 /// A PHP array: php's `zend_array *`, one allocation of the request's
@@ -1272,17 +1253,6 @@ impl Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn keys_normalise_as_php_does() {
-        assert_eq!(canonical_int(b"12"), Some(12));
-        assert_eq!(canonical_int(b"-1"), Some(-1));
-        assert_eq!(canonical_int(b"012"), None);
-        assert_eq!(canonical_int(b"-0"), None);
-        assert_eq!(canonical_int(b""), None);
-        assert_eq!(canonical_int(b"9223372036854775807"), Some(i64::MAX));
-        assert_eq!(canonical_int(b"9223372036854775808"), None);
-    }
 
     /// The array is the heap's: it keeps php's order and its
     /// `nNextFreeElement`, a read is a view, and `count()` falls with

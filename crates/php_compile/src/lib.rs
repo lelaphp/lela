@@ -4297,6 +4297,134 @@ class C {
         }
     }
 
+    /// `$a[k] = v`, `$a[] = v` and `$a[] = &$x` as the oracle dumps them
+    /// (`zend_compile_assign`'s and `zend_compile_assign_ref`'s
+    /// `ZEND_AST_DIM` arms): the value's oplines, then `ASSIGN_DIM` over
+    /// the container with the dimension in `op2` and `OP_DATA` carrying
+    /// the value, the append an `UNUSED` `op2` the dump prints as `NEXT`;
+    /// a chain is `FETCH_DIM_W` into a `VAR` per link but the last, each
+    /// `VAR` numbered after its own dimension and before the value's
+    /// temporaries; a constant string dimension that is a canonical
+    /// decimal integer is that integer (`zend_handle_numeric_dim`); the
+    /// temporary `ASSIGN_DIM` writes is marked unused where nothing reads
+    /// it and kept where an assignment does; `$a[0] = $a` reads the right
+    /// `$a` first through a `QM_ASSIGN`; and a by-reference write leaves
+    /// the last link a `FETCH_DIM_W` with `ASSIGN_REF` over its `VAR`.
+    #[test]
+    fn a_dimension_assignment_compiles_to_assign_dim_as_php_emits_it() {
+        let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+            (
+                b"<?php $a[0] = 2;",
+                3,
+                1,
+                1,
+                "0000 ASSIGN_DIM CV0($a) int(0)\n\
+                 0001 OP_DATA int(2)\n\
+                 0002 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $a[] = 3;",
+                3,
+                1,
+                1,
+                "0000 ASSIGN_DIM CV0($a) NEXT\n\
+                 0001 OP_DATA int(3)\n\
+                 0002 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $a[\"10\"] = 1;",
+                3,
+                1,
+                1,
+                "0000 ASSIGN_DIM CV0($a) int(10)\n\
+                 0001 OP_DATA int(1)\n\
+                 0002 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $x = $a[$k] = $v;",
+                4,
+                4,
+                2,
+                "0000 T4 = ASSIGN_DIM CV1($a) CV2($k)\n\
+                 0001 OP_DATA CV3($v)\n\
+                 0002 ASSIGN CV0($x) T4\n\
+                 0003 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    4: 0001 - 0002 (tmp/var)\n",
+            ),
+            (
+                b"<?php $a[1][2] = 3;",
+                4,
+                1,
+                2,
+                "0000 V1 = FETCH_DIM_W CV0($a) int(1)\n\
+                 0001 ASSIGN_DIM V1 int(2)\n\
+                 0002 OP_DATA int(3)\n\
+                 0003 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $a[0] = $a;",
+                4,
+                1,
+                2,
+                "0000 T2 = QM_ASSIGN CV0($a)\n\
+                 0001 ASSIGN_DIM CV0($a) int(0)\n\
+                 0002 OP_DATA T2\n\
+                 0003 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $a[] = &$a;",
+                3,
+                1,
+                2,
+                "0000 V1 = FETCH_DIM_W CV0($a) NEXT\n\
+                 0001 ASSIGN_REF V1 CV0($a)\n\
+                 0002 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $a[0][] = &$b;",
+                4,
+                2,
+                3,
+                "0000 V2 = FETCH_DIM_W CV0($a) int(0)\n\
+                 0001 V3 = FETCH_DIM_W V2 NEXT\n\
+                 0002 ASSIGN_REF V3 CV1($b)\n\
+                 0003 RETURN int(1)\n",
+            ),
+        ];
+        for (source, lines, vars, tmps, oplines) in cases {
+            assert_eq!(
+                dump_of(source),
+                main_dump(*lines, *vars, *tmps, oplines),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
+
+    /// What a dimension write refuses: a dimension read, which
+    /// `FETCH_DIM_R` serves and no handler of this engine has, php's
+    /// `Cannot use [] for reading` among them; and a container under the
+    /// chain that is no plain variable, which php fetches by
+    /// `FETCH_OBJ_W` with `ZEND_FETCH_DIM_WRITE`, by `SEPARATE` over a
+    /// call's `VAR`, or refuses outright for `$this`.
+    #[test]
+    fn a_dimension_this_compiler_cannot_read_yet_is_refused() {
+        for source in [
+            b"<?php $a[] = $b[];".as_slice(),
+            b"<?php echo $a[0];".as_slice(),
+            b"<?php $o->p[0] = 1;".as_slice(),
+            b"<?php f()[0] = 1;".as_slice(),
+            b"<?php $this[0] = 1;".as_slice(),
+        ] {
+            assert!(
+                refused(source).is_some(),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
+
     /// `$o->p = v` as the oracle dumps it (`zend_compile_assign`, the
     /// `ZEND_AST_PROP` arm): the value's oplines, then `ASSIGN_OBJ` over
     /// the receiver with the name as one constant and `OP_DATA` carrying

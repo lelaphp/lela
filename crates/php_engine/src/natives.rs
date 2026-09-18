@@ -744,6 +744,22 @@ fn defined(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// ```
 ///
+/// The array half of the guard is `GC_PROTECTED` on the array itself,
+/// which a program reaches by binding an entry to the variable that
+/// holds the array (`$a[] = &$a`): the entry is the cell the CV holds,
+/// the cell holds the array, and the array is the one the walk is
+/// already inside.
+///
+/// ```php
+/// $a = []; $a[] = &$a; var_dump($a);
+/// ```
+/// ```expect
+/// array(1) {
+///   [0]=>
+///   *RECURSION*
+/// }
+/// ```
+///
 /// A throwable is the same arm over the seven properties
 /// `zend_register_default_exception` declares on `Exception` and
 /// `Error`, the constructor's `message` and `code` in their slots, the
@@ -800,20 +816,27 @@ fn var_dump(req: &mut Request) -> Result<Value, Thrown> {
 /// itself is unbounded recursion, which is a panic reaching a request
 /// (design §10).
 fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) {
+    // `COMMON`: php's `&` stands before the value a shared cell holds and
+    // before nothing else, so a cell one name holds prints as the value
+    // does; a cell is never in a cell, so this is read once.
+    let common = match value.as_ref() {
+        ValueRef::Reference(cell) if cell.heap().refcount() > 1 => "&",
+        _ => "",
+    };
     let value = &value.deref();
     if level > 1 {
         out.extend(std::iter::repeat_n(b' ', level - 1));
     }
     if let Some(b) = value.as_bool() {
-        out.extend_from_slice(format!("bool({b})\n").as_bytes());
+        out.extend_from_slice(format!("{common}bool({b})\n").as_bytes());
     } else if let Some(n) = value.as_int() {
-        out.extend_from_slice(format!("int({n})\n").as_bytes());
+        out.extend_from_slice(format!("{common}int({n})\n").as_bytes());
     } else if let Some(f) = value.as_float() {
         // `php_var_dump` prints a float with `%.*H` at `serialize_precision`.
         let text = php_heap::double_to_string(f, req.serialize_precision());
-        out.extend_from_slice(format!("float({text})\n").as_bytes());
+        out.extend_from_slice(format!("{common}float({text})\n").as_bytes());
     } else if let Some(s) = value.as_php_string() {
-        out.extend_from_slice(format!("string({}) \"", s.len()).as_bytes());
+        out.extend_from_slice(format!("{common}string({}) \"", s.len()).as_bytes());
         out.extend_from_slice(s.as_bytes());
         out.extend_from_slice(b"\"\n");
     } else if let Some(array) = value.as_array() {
@@ -826,7 +849,7 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) {
             return;
         }
         array.protect();
-        out.extend_from_slice(format!("array({}) {{\n", array.len()).as_bytes());
+        out.extend_from_slice(format!("{common}array({}) {{\n", array.len()).as_bytes());
         for (key, element) in array {
             out.extend(std::iter::repeat_n(b' ', level + 1));
             match key {
@@ -845,9 +868,9 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) {
         }
         out.extend_from_slice(b"}\n");
     } else if let Some(object) = value.as_object() {
-        dump_object(req, out, *object, level);
+        dump_object(req, out, common, *object, level);
     } else {
-        out.extend_from_slice(b"NULL\n");
+        out.extend_from_slice(format!("{common}NULL\n").as_bytes());
     }
 }
 
@@ -866,6 +889,7 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) {
 fn dump_object(
     req: &mut Request,
     out: &mut Vec<u8>,
+    common: &str,
     object: crate::api::values::PhpObject,
     level: usize,
 ) {
@@ -916,7 +940,11 @@ fn dump_object(
     let count = rows.iter().filter(|(_, value, _)| value.is_some()).count();
     let class_name = req.class_name(class);
     out.extend_from_slice(
-        format!("object({class_name})#{} ({count}) {{\n", object.index()).as_bytes(),
+        format!(
+            "{common}object({class_name})#{} ({count}) {{\n",
+            object.index()
+        )
+        .as_bytes(),
     );
     for (shown, value, ty) in rows {
         out.extend(std::iter::repeat_n(b' ', level + 1));

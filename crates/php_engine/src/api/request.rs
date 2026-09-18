@@ -5725,6 +5725,26 @@ impl Request {
         self.fatal_of(appended)
     }
 
+    /// `zend_hash_lookup` over `a`, which has one owner: the entry at
+    /// `key` in place, laid down holding `null` where the table has none,
+    /// which is what a `FETCH_DIM_W` and an `ASSIGN_DIM` write through.
+    pub(crate) fn array_lookup(
+        &mut self,
+        a: Arr,
+        key: php_heap::Key,
+    ) -> Result<Option<ZvalRef>, Thrown> {
+        let entry = self.heap.array_lookup(a, key);
+        self.fatal_of(entry)
+    }
+
+    /// `zend_hash_next_index_insert` of `null` over `a`, which has one
+    /// owner: the entry appended, in place; `None` when the next element
+    /// is taken.
+    pub(crate) fn array_next_entry(&mut self, a: Arr) -> Result<Option<ZvalRef>, Thrown> {
+        let entry = self.heap.array_next_entry(a);
+        self.fatal_of(entry)
+    }
+
     /// `zend_hash_del` over `a`, which has one owner: `true` when the key
     /// was there, its value released.
     pub(crate) fn array_del(&mut self, a: Arr, key: php_heap::Key) -> bool {

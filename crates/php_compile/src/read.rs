@@ -373,9 +373,25 @@ pub(crate) enum Expr {
         object: Child,
         name: Vec<u8>,
     },
+    /// `$a[k]` and `$a[]`, php's `ZEND_AST_DIM` over a container and a
+    /// dimension, the dimension `None` for the append php's grammar
+    /// writes as an empty pair of brackets and reads as a write alone
+    /// (`optional_expr`, `Cannot use [] for reading`). The chain nests
+    /// through `container`, so `$a[1][2]` is the dimension `2` over the
+    /// dimension `1` over `$a`.
+    Dim {
+        container: Child,
+        index: Option<Child>,
+    },
     /// `$a = expr`, php's `ZEND_AST_ASSIGN` to a variable.
     Assign {
         var: Vec<u8>,
+        value: Child,
+    },
+    /// `$a[k] = expr` and `$a[] = expr`, php's `ZEND_AST_ASSIGN` to a
+    /// `ZEND_AST_DIM`: the dimension written, and the value.
+    AssignDim {
+        target: Child,
         value: Child,
     },
     /// `$o->p = expr`, php's `ZEND_AST_ASSIGN` to a `ZEND_AST_PROP`:
@@ -385,12 +401,12 @@ pub(crate) enum Expr {
         name: Vec<u8>,
         value: Child,
     },
-    /// `$b = &$a`, php's `ZEND_AST_ASSIGN_REF` over two variables, the
-    /// target and the source, each a name written as is. php's grammar
-    /// puts a variable and nothing else after the `&`; a property, a
-    /// dimension or a call there is not read yet.
+    /// `$b = &$a` and `$a[] = &$x`, php's `ZEND_AST_ASSIGN_REF`: the
+    /// target, a variable or a dimension, and the source, a name written
+    /// as is. php's grammar puts a variable and nothing else after the
+    /// `&`; a property, a dimension or a call there is not read yet.
     AssignRef {
-        var: Vec<u8>,
+        target: Child,
         source: Vec<u8>,
     },
     /// `++$a`, php's `ZEND_AST_PRE_INC`, whose grammar puts a variable
@@ -510,6 +526,15 @@ impl Drop for Child {
                     drop(value);
                     object.take()
                 }
+                Expr::Dim { container, index } => {
+                    drop(index);
+                    container.take()
+                }
+                Expr::AssignDim { target, value } => {
+                    drop(value);
+                    target.take()
+                }
+                Expr::AssignRef { target, .. } => target.take(),
                 _ => return,
             };
         }
@@ -1888,10 +1913,24 @@ impl Reader<'_> {
                 self.skip_trivia();
                 if self.byte(0) == Some(b'&') {
                     self.bump(1);
-                    return self.assign_ref(var);
+                    return self.assign_ref(Expr::Var(var));
                 }
                 Ok(Expr::Assign {
                     var,
+                    value: Child::new(self.expr()?),
+                })
+            }
+            // `zend_compile_assign`'s `ZEND_AST_DIM` arm, and
+            // `zend_compile_assign_ref`'s where an `&` follows the `=`.
+            target @ Expr::Dim { .. } => {
+                self.bump(1);
+                self.skip_trivia();
+                if self.byte(0) == Some(b'&') {
+                    self.bump(1);
+                    return self.assign_ref(target);
+                }
+                Ok(Expr::AssignDim {
+                    target: Child::new(target),
                     value: Child::new(self.expr()?),
                 })
             }
@@ -1916,7 +1955,7 @@ impl Reader<'_> {
     /// is refused here by what follows. `$this`, `$_GET` and its kin are
     /// refused as [`Self::variable`] refuses them, and a property, a
     /// dimension or a call as the source is not read yet.
-    fn assign_ref(&mut self, var: Vec<u8>) -> Result<Expr, Trouble> {
+    fn assign_ref(&mut self, target: Expr) -> Result<Expr, Trouble> {
         self.skip_trivia();
         if self.byte(0) != Some(b'$') {
             return Err(self.trouble(
@@ -1924,7 +1963,10 @@ impl Reader<'_> {
             ));
         }
         match self.variable()? {
-            Expr::Var(source) => Ok(Expr::AssignRef { var, source }),
+            Expr::Var(source) => Ok(Expr::AssignRef {
+                target: Child::new(target),
+                source,
+            }),
             _ => {
                 Err(self
                     .trouble("a by-reference assignment from $this this compiler cannot read yet"))
@@ -2520,15 +2562,20 @@ impl Reader<'_> {
         self.member_calls(Expr::New { class, arguments })
     }
 
-    /// `receiver->m(args)`, `receiver->p` and the chain of them, php's
-    /// `callable_variable T_OBJECT_OPERATOR property_name argument_list`
-    /// and `T_OBJECT_OPERATOR property_name` with no list after it, each
+    /// `receiver->m(args)`, `receiver->p`, `receiver[k]` and the chain of
+    /// them, php's `callable_variable T_OBJECT_OPERATOR property_name
+    /// argument_list`, `T_OBJECT_OPERATOR property_name` with no list
+    /// after it, and `callable_variable '[' optional_expr ']'`, each
     /// member the receiver of the next. A property named by what is no
-    /// label, `$o->$p` and `$o->{'p'}`, is not read yet; `?->` is left
-    /// where it stands.
+    /// label, `$o->$p` and `$o->{'p'}`, is not read yet; `?->` and `{`
+    /// are left where they stand.
     fn member_calls(&mut self, mut receiver: Expr) -> Result<Expr, Trouble> {
         loop {
             self.skip_trivia();
+            if self.byte(0) == Some(b'[') {
+                receiver = self.dimension(receiver)?;
+                continue;
+            }
             if !(self.byte(0) == Some(b'-') && self.byte(1) == Some(b'>')) {
                 return Ok(receiver);
             }
@@ -2556,6 +2603,30 @@ impl Reader<'_> {
                 arguments,
             };
         }
+    }
+
+    /// `[k]` and `[]` after a receiver, php's `'[' optional_expr ']'`:
+    /// the dimension, or none for the append, which php's grammar takes
+    /// wherever a dimension stands and `zend_delayed_compile_dim`
+    /// refuses in a read (`Cannot use [] for reading`). The `{k}`
+    /// spelling php removed in 8.0 is no dimension and is not read.
+    fn dimension(&mut self, receiver: Expr) -> Result<Expr, Trouble> {
+        self.bump(1);
+        self.skip_trivia();
+        let index = if self.byte(0) == Some(b']') {
+            None
+        } else {
+            Some(Child::new(self.expr()?))
+        };
+        self.skip_trivia();
+        if self.byte(0) != Some(b']') {
+            return Err(self.trouble("a dimension no bracket closes"));
+        }
+        self.bump(1);
+        Ok(Expr::Dim {
+            container: Child::new(receiver),
+            index,
+        })
     }
 
     /// Whether a name, php's `T_STRING` or `T_NAME_*`, starts here.
@@ -3560,7 +3631,7 @@ mod tests {
                 read(source).unwrap_or_default(),
                 vec![(
                     Stmt::Effect(Expr::AssignRef {
-                        var: b"b".to_vec(),
+                        target: Child::new(Expr::Var(b"b".to_vec())),
                         source: b"a".to_vec(),
                     }),
                     1

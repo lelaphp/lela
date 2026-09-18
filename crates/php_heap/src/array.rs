@@ -318,6 +318,30 @@ pub enum Key {
     Str(Str),
 }
 
+/// `ZEND_HANDLE_NUMERIC_STR` itself (`_zend_handle_numeric_str_ex`,
+/// `Z/Zend/zend_hash.h:377`): the integer a string key stands for where
+/// its bytes are a canonical decimal integer in range, a `-` and no
+/// leading zero, and nothing for any other string. The rule in one
+/// place: the engine reads it for a key while a program is served and
+/// the compiler for a constant dimension (`zend_handle_numeric_dim`).
+#[must_use]
+pub fn canonical_int(bytes: &[u8]) -> Option<i64> {
+    let (negative, digits) = match bytes {
+        [b'-', rest @ ..] => (true, rest),
+        _ => (false, bytes),
+    };
+    if digits.is_empty()
+        || digits.len() > 19
+        || !digits.iter().all(u8::is_ascii_digit)
+        || (digits.len() > 1 && digits[0] == b'0')
+        || (negative && digits == b"0")
+    {
+        return None;
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    text.parse().ok()
+}
+
 /// One array: php's `zend_array *`. Naming one does not keep it alive,
 /// exactly as php's pointer does not; the engine's kernels take and give
 /// up owners through [`crate::Heap::addref`] and [`crate::Heap::release`].
@@ -1224,6 +1248,37 @@ impl crate::Heap {
         Ok(self.array_write_long(a, a.next_free(), z, Write::Next)? != Written::Refused)
     }
 
+    /// `zend_hash_lookup` (`Z/Zend/zend_hash.c:1004`), what
+    /// `zend_fetch_dimension_address_inner` under `BP_VAR_W` reads: the
+    /// entry at `key` in place, laid down holding `null` where the table
+    /// has none, which is why an unwritten `$a['k']` is `NULL` after
+    /// `$a['k'][0] = 1`. The array has one owner, which the engine's
+    /// `SEPARATE_ARRAY` made sure of, and the name is one until the next
+    /// write, as [`Arr::value_ref`] says.
+    pub fn array_lookup(&mut self, a: Arr, key: Key) -> Result<Option<ZvalRef>, Fatal> {
+        if a.find(key).is_none() {
+            match key {
+                Key::Long(n) => self.array_write_long(a, n, Zval::null(), Write::Update)?,
+                Key::Str(s) => self.array_write_str(a, s, Zval::null())?,
+            };
+        }
+        Ok(a.value_ref(key))
+    }
+
+    /// `zend_hash_next_index_insert` of `EG(uninitialized_zval)`, what
+    /// `zend_fetch_dimension_address` does for `$a[]` in a write: the
+    /// entry appended, in place, holding `null`; `None` where
+    /// `nNextFreeElement` is `ZEND_LONG_MAX` and taken, which is
+    /// `zend_cannot_add_element`'s `Error` at the site.
+    pub fn array_next_entry(&mut self, a: Arr) -> Result<Option<ZvalRef>, Fatal> {
+        let index = a.next_free();
+        let index = if index == i64::MIN { 0 } else { index };
+        if self.array_write_long(a, index, Zval::null(), Write::Next)? == Written::Refused {
+            return Ok(None);
+        }
+        Ok(a.value_ref(Key::Long(index)))
+    }
+
     /// `_zend_hash_index_add_or_update_i`: what it did, the value it
     /// replaced handed back for the caller to release once the heap is
     /// let go of.
@@ -1544,6 +1599,22 @@ enum Written {
 
 #[cfg(test)]
 mod tests {
+    use super::canonical_int;
+
+    /// `ZEND_HANDLE_NUMERIC_STR`: a canonical decimal integer in range
+    /// and nothing else, which the engine reads for a key and the
+    /// compiler for a constant dimension.
+    #[test]
+    fn keys_normalise_as_php_does() {
+        assert_eq!(canonical_int(b"12"), Some(12));
+        assert_eq!(canonical_int(b"-1"), Some(-1));
+        assert_eq!(canonical_int(b"012"), None);
+        assert_eq!(canonical_int(b"-0"), None);
+        assert_eq!(canonical_int(b""), None);
+        assert_eq!(canonical_int(b"9223372036854775807"), Some(i64::MAX));
+        assert_eq!(canonical_int(b"9223372036854775808"), None);
+    }
+
     #[test]
     fn a_constant_array_is_immutable_in_either_home_and_finds_its_keys() {
         use crate::{Intern, Strings};
