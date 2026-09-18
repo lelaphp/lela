@@ -130,7 +130,7 @@ Commands:
   done               The definition of done: print the conditions unmet for the changes since the base and exit 1 while any is; the Stop hook, pre-push and CI read the same list
   track              Say which track the branch is on, the commit `done` measures since, the track's store root, the branch's ticket and the track's model; as text or as one object. Writes no reading
   worktree           A track's worktrees: `add` lays one down under .claude/worktrees/<branch>, `retire` appends its log into the track's store and removes it. Writes no reading
-  ticket             A ticket, one GitHub issue: `read <n>` holds it to its acceptance criteria and writes the reading; `close <n>` does the same and then closes it, naming what the work opened
+  ticket             A ticket, one GitHub issue: `read <n>` holds it to its acceptance criteria, `close <n>` closes it naming what it opened, `parent <n>` says whether a chart sheet is at the cap
   usage              What a session spent, per turn from the plugin: `record` reads the `SessionUsage` object on stdin and writes one `usage` reading under the branch's ticket, or the session id
   regions            Render the named files' regions with `computed run` and say what it did, one line per file, for pre-commit to re-stage. Writes no reading
   bench              Measure one bar under the measurement protocol: paired reps with the A/A control, the load average recorded, one reading per bar, and the exit 0 whatever the reading says
@@ -153,7 +153,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=bcfbd3463ed851e809a9e993af9b2831f83aeb8536abc4bcc69c2fd321411591 out=b77b9d5044c82addf11bbf1fc2f49da6430814452510b2783e63a891474bd922 -->
+<!-- /computed in=10cc2d106260526c1bec4c61c85314984d9818d9d2bff062783662f601ac21c4 out=61da392a23ffd98faceaf334c37191699fc7318a1a7cc61623e3bc4381b59c40 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

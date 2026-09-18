@@ -232,16 +232,23 @@ pub(crate) fn record(store: &Store, readings: &[Reading]) -> Result<()> {
     store.record(readings)?.exit()
 }
 
-/// `xtask ticket read` and `close`: the ticket named or the branch's, read
-/// through the `gh` on `PATH`, one reading recorded; a close names what it
-/// opened before anything is fetched, and the branch's track, read once
-/// here, says which label its successors carry.
+/// `xtask ticket read`, `close` and `parent`: the ticket named or the
+/// branch's, read through the `gh` on `PATH`, one reading recorded; a
+/// close names what it opened before anything is fetched, and the
+/// branch's track, read once here, says which label its successors carry.
+/// `parent` measures a sheet against the cap and reads no criteria, so it
+/// answers above the two that do.
 fn ticket_command(
     root: &Path,
     manifest: &Manifest,
     store: &Store,
     command: TicketCommand,
 ) -> Result<()> {
+    if let TicketCommand::Parent { number, session_id } = command {
+        let sheet = ticket::ticket_of(root, Some(number))?;
+        let reading = ticket::parent(root, &ticket::Gh::on_path(), sheet, session_id.as_deref())?;
+        return record(store, std::slice::from_ref(&reading));
+    }
     let (act, ticket, session_id) = match command {
         TicketCommand::Read { number, session_id } => (
             ticket::Act::Read,
@@ -260,6 +267,7 @@ fn ticket_command(
             let successors = ticket::Successors::named(ticket, &opens, opens_nothing)?;
             (ticket::Act::Close(verdict, successors), ticket, session_id)
         }
+        TicketCommand::Parent { .. } => bail!("ticket parent: answered above"),
     };
     let reading = ticket::run(
         root,

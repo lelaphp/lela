@@ -228,6 +228,7 @@ test::run_staged
 ticket::Act
 ticket::BlockedBy
 ticket::Blocker
+ticket::CAP
 ticket::Criteria
 ticket::Criteria::count
 ticket::Criteria::met
@@ -246,11 +247,14 @@ ticket::Open
 ticket::Open::blocked
 ticket::Open::label_names
 ticket::State
+ticket::SubIssues
 ticket::Successors
 ticket::Successors::named
 ticket::Verdict
 ticket::Verdict::given
 ticket::denied
+ticket::parent
+ticket::parent_scope
 ticket::run
 ticket::ticket_of
 track::Base

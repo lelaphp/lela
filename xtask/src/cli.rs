@@ -141,8 +141,13 @@ pub(crate) enum Command {
         command: WorktreeCommand,
     },
     /// A ticket, one GitHub issue: `read <n>` holds it to its acceptance
-    /// criteria and writes the reading; `close <n>` does the same and then
-    /// closes it, naming what the work opened.
+    /// criteria, `close <n>` closes it naming what it opened, `parent <n>`
+    /// says whether a chart sheet is at the cap.
+    ///
+    /// `read <n>` writes the reading of the boxes under the ticket's
+    /// `## Acceptance criteria` heading, and `parent <n>` the reading of
+    /// one chart sheet's sub-issues against GitHub's cap of 100, before a
+    /// ticket is filed against it.
     ///
     /// `read <n>` fetches the issue through `gh`, holds it to the boxes
     /// under its `## Acceptance criteria` heading and writes a reading of
@@ -515,6 +520,21 @@ pub(crate) enum TicketCommand {
         /// done is not a withdrawal.
         #[arg(long = "withdrawn", value_name = "REASON")]
         withdrawn: Option<String>,
+    },
+    /// Say how many sub-issues one chart sheet holds and whether the
+    /// tracker will take another, before a ticket is filed against it;
+    /// exit 1 at GitHub's cap of 100 and for a sheet that is closed.
+    ///
+    /// The count is `gh issue view --json subIssuesSummary`, written as a
+    /// reading of instrument `ticket` under the scope `parent/<n>`.
+    /// Nothing at the tracker is asked to change.
+    Parent {
+        /// The sheet's issue number.
+        number: u64,
+        /// The session the reading carries, the way a `permit` reading
+        /// carries the hook's `session_id`; empty when none is named.
+        #[arg(long = "session-id", value_name = "ID")]
+        session_id: Option<String>,
     },
 }
 

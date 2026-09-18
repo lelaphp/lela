@@ -12,7 +12,7 @@ use std::path::Path;
 use xtask::manifest::Manifest;
 use xtask::reading::Status;
 use xtask::scratch::Tree;
-use xtask::ticket::{Act, Gh, Successors, Verdict, run};
+use xtask::ticket::{Act, CAP, Gh, Successors, Verdict, parent, run};
 use xtask::track::Ticket;
 
 fn workspace() -> &'static Path {
@@ -82,6 +82,26 @@ impl Recorded {
             "url": format!("https://example.invalid/issues/{number}"),
             "labels": labels.iter().map(|name| serde_json::json!({"name": name})).collect::<Vec<_>>(),
             "blocking": {"nodes": blocking.iter().map(|n| serde_json::json!({"number": n, "state": "OPEN"})).collect::<Vec<_>>()},
+        });
+        fs::write(
+            self.dir.join(format!("issues/{number}.json")),
+            issue.to_string(),
+        )
+        .unwrap();
+    }
+
+    /// A chart sheet as the tracker answers it: an issue holding `total`
+    /// sub-issues, the count the cap is measured against (#448).
+    fn sheet(&self, number: u64, state: &str, total: u64) {
+        let issue = serde_json::json!({
+            "number": number,
+            "title": format!("Chart: a track at a row, sheet {number}"),
+            "body": "## Destination\n\na row\n",
+            "state": state,
+            "url": format!("https://example.invalid/issues/{number}"),
+            "labels": [{"name": "frontier:chart"}],
+            "blocking": {"nodes": []},
+            "subIssuesSummary": {"total": total, "completed": 0, "percentCompleted": 0},
         });
         fs::write(
             self.dir.join(format!("issues/{number}.json")),
@@ -939,4 +959,82 @@ fn a_withdrawal_of_a_ticket_with_a_box_ticked_is_refused_and_changes_nothing() {
         reading.message
     );
     assert!(recorded.calls().is_empty(), "{:?}", recorded.calls());
+}
+
+/// The cap before the ticket is filed and not the tracker's refusal after
+/// (#448): a sheet at 100 sub-issues fails naming what
+/// `gh issue create --parent` would answer, one under it passes naming the
+/// room, and a closed sheet fails whatever it holds. The scope is the
+/// sheet's own, `parent/<n>`, so a reading here never stands over the one
+/// `read` wrote of that issue's criteria, and nothing at the tracker is
+/// asked to change.
+#[test]
+fn a_sheet_at_the_cap_fails_before_a_ticket_is_filed_against_it_and_one_with_room_passes() {
+    let recorded = Recorded::lay("parent");
+    recorded.sheet(447, "OPEN", CAP);
+    recorded.sheet(460, "OPEN", 91);
+    recorded.sheet(97, "CLOSED", 12);
+
+    let full = parent(workspace(), &recorded.gh(), Ticket::new(447), None).unwrap();
+    assert_eq!(full.status, Status::Fail, "{}", full.message);
+    assert_eq!(full.scope, "parent/447");
+    assert_eq!(full.numbers["subissues"], 100.into(), "{full:#?}");
+    assert_eq!(full.numbers["cap"], 100.into(), "{full:#?}");
+    assert_eq!(full.numbers["room"], 0.into(), "{full:#?}");
+    assert!(
+        full.message
+            .contains("#447 holds 100 of GitHub's cap of 100 sub-issues"),
+        "{}",
+        full.message
+    );
+    assert!(
+        full.message.contains("`gh issue create --parent 447`")
+            && full
+                .message
+                .contains("Parent cannot have more than 100 sub-issues"),
+        "what the tracker would refuse: {}",
+        full.message
+    );
+    assert!(
+        full.message
+            .contains("continued by a sheet at the same row"),
+        "what is done instead: {}",
+        full.message
+    );
+
+    let room = parent(workspace(), &recorded.gh(), Ticket::new(460), None).unwrap();
+    assert_eq!(room.status, Status::Pass, "{}", room.message);
+    assert_eq!(room.scope, "parent/460");
+    assert_eq!(room.numbers["room"], 9.into(), "{room:#?}");
+    assert!(
+        room.message
+            .contains("#460 holds 91 of GitHub's cap of 100 sub-issues, room for 9 more"),
+        "{}",
+        room.message
+    );
+
+    let closed = parent(workspace(), &recorded.gh(), Ticket::new(97), None).unwrap();
+    assert_eq!(closed.status, Status::Fail, "{}", closed.message);
+    assert_eq!(closed.numbers["room"], 88.into(), "{closed:#?}");
+    assert!(
+        closed.message.contains("is closed"),
+        "a closed sheet indexes nothing filed under it: {}",
+        closed.message
+    );
+
+    assert!(recorded.calls().is_empty(), "{:?}", recorded.calls());
+}
+
+/// An issue the tracker answered without the count, which every recorded
+/// transcript beside this one is, reads as holding none: the field is the
+/// one the fetch asks for now, and a reading is not owed a panic for an
+/// answer that predates it.
+#[test]
+fn an_issue_answered_without_the_count_holds_no_sub_issues() {
+    let recorded = Recorded::lay("parent-absent");
+    recorded.issue(13, "OPEN", "## Acceptance criteria\n\n- [x] one\n");
+    let reading = parent(workspace(), &recorded.gh(), Ticket::new(13), Some("s1")).unwrap();
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    assert_eq!(reading.numbers["subissues"], 0.into(), "{reading:#?}");
+    assert_eq!(reading.session, "s1");
 }

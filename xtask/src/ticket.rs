@@ -141,6 +141,20 @@
 //! asked, so nothing under `cargo test` reaches the network. The
 //! judgement is [`Criteria::parse`], a function of the body alone.
 //!
+//! A chart sheet holds at most 100 sub-issues, GitHub's cap on the parent
+//! of a sub-issue relation, and a session learnt that from the refusal
+//! `gh issue create --parent <n>` gave after its ticket was filed: four
+//! sessions of one run left a ticket no chart indexes (#448). `parent <n>`
+//! is the same fact before the call, measured where the criteria are: the
+//! sheet's sub-issue count as the tracker answers it, `subIssuesSummary`,
+//! against [`CAP`], as a reading of instrument `ticket` under the scope
+//! [`parent_scope`] and never the sheet's own number, which `read` writes
+//! the sheet's criteria under. It passes while there is room, saying how
+//! much, and fails at the cap and for a sheet that is closed, naming what
+//! the tracker would refuse and what the frontier says instead: a chart
+//! that fills is continued by a sheet at the same row, never widened, and
+//! the close of the full one is a person's (CONTEXT.md, Chart).
+//!
 //! What the seam does not cover, written down rather than pretended: the
 //! rule is judged by `permit`, whose tools are `Edit`, `Write` and `Bash`,
 //! so a GitHub MCP server attached later would close a ticket unjudged.
@@ -167,6 +181,10 @@ pub(crate) const STAMPED_OVER: &str = ".";
 /// The heading whose boxes are the acceptance criteria, matched without
 /// regard to case at level two.
 const HEADING: &str = "acceptance criteria";
+/// How many sub-issues GitHub holds under one parent, the number the
+/// tracker refuses the next against. Not a bound this harness chose, so
+/// `seams.toml` carries nothing about it.
+pub const CAP: u64 = 100;
 
 /// What `xtask ticket` does: read the criteria, or read them and close
 /// under a verdict, naming what the work opened.
@@ -585,6 +603,20 @@ pub struct Issue {
     /// tracker has is not set again, since it refuses a second one.
     #[serde(default)]
     pub blocking: BlockedBy,
+    /// How many sub-issues stand under it, which a chart sheet is held to
+    /// [`CAP`] by (#448); zero for an issue the tracker answered before
+    /// the field was asked for.
+    #[serde(default, rename = "subIssuesSummary")]
+    pub sub_issues: SubIssues,
+}
+
+/// What the tracker counts under one parent: the sub-issues it holds and
+/// how many of them are closed, as `gh issue view --json subIssuesSummary`
+/// answers it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub struct SubIssues {
+    pub total: u64,
+    pub completed: u64,
 }
 
 /// One open issue as `gh issue list` answers it: what the frontier is
@@ -688,7 +720,7 @@ impl Gh {
                 "view",
                 &number,
                 "--json",
-                "number,title,body,state,url,labels,blocking",
+                "number,title,body,state,url,labels,blocking,subIssuesSummary",
             ],
         )
         .with_context(|| format!("{ticket} could not be read from the tracker"))?;
@@ -842,6 +874,59 @@ fn steerable(rows: &[&Denied]) -> String {
 /// `done` reads it back by.
 pub(crate) fn scope(ticket: Ticket) -> String {
     ticket.number().to_string()
+}
+
+/// The scope one sheet's cap reading is written under, `parent/<n>`:
+/// beside the ticket readings and never over one, since the reading under
+/// the sheet's own number is what `read` wrote of its criteria.
+pub fn parent_scope(sheet: Ticket) -> String {
+    format!("parent/{}", sheet.number())
+}
+
+/// `xtask ticket parent <n>`: how many sub-issues one chart sheet holds
+/// and whether the tracker will take another, as one reading, so a
+/// session knows before it files and not from the refusal after (#448).
+/// Pass while there is room, naming how much; fail at [`CAP`], and fail
+/// for a sheet that is closed, which indexes nothing filed under it. The
+/// tracker is read and nothing there is asked to change.
+pub fn parent(root: &Path, gh: &Gh, sheet: Ticket, session_id: Option<&str>) -> Result<Reading> {
+    let issue = gh.view(root, sheet)?;
+    let held = issue.sub_issues.total;
+    let spare = CAP.saturating_sub(held);
+    let mut reading = Reading::stamped_over(
+        INSTRUMENT,
+        &parent_scope(sheet),
+        root,
+        Path::new(STAMPED_OVER),
+    )?;
+    reading.count("subissues", held)?;
+    reading.count("cap", CAP)?;
+    reading.count("room", spare)?;
+    session_id
+        .unwrap_or_default()
+        .clone_into(&mut reading.session);
+    let holds = format!("{sheet} holds {held} of GitHub's cap of {CAP} sub-issues");
+    let (status, message) = if issue.state == State::Closed {
+        (
+            Status::Fail,
+            format!(
+                "{holds} and is closed; a ticket filed under a closed sheet is indexed by no open chart, so file it against the sheet that continues this one"
+            ),
+        )
+    } else if spare == 0 {
+        (
+            Status::Fail,
+            format!(
+                "{holds}: `gh issue create --parent {}` is refused with `Parent cannot have more than {CAP} sub-issues (addSubIssue)`; a chart that fills is continued by a sheet at the same row and never widened, and the close of the full one is a person's (CONTEXT.md, Chart)",
+                sheet.number()
+            ),
+        )
+    } else {
+        (Status::Pass, format!("{holds}, room for {spare} more"))
+    };
+    reading.status = status;
+    reading.message = message;
+    Ok(reading)
 }
 
 /// The ticket named, or the branch's; a branch that records none is a
