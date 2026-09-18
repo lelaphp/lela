@@ -82,6 +82,55 @@ pub enum Type {
     Intersection(Vec<Type>),
 }
 
+impl Type {
+    /// `MAY_BE_ANY` (`Z/Zend/zend_type_info.h:35`): the bit of every
+    /// `IS_*` a value can be, which is the mask a parameter with no
+    /// declared type carries in a `RECV`'s `op2`.
+    pub const MAY_BE_ANY: u32 = 0x3fe;
+
+    /// `ZEND_TYPE_PURE_MASK` (`Z/Zend/zend_types.h:284`): the `1 <<
+    /// IS_*` of every builtin this type accepts, which a `RECV`'s `op2`
+    /// carries so the handler's fast path is one test against the
+    /// argument's type. A class name contributes no bit, so an object
+    /// argument takes the slow path and is checked against the name;
+    /// `mixed` is every bit and `iterable` is `array` beside the bit of
+    /// `Traversable`'s name.
+    #[must_use]
+    pub fn mask(&self) -> u32 {
+        match self {
+            Type::Mixed => Type::MAY_BE_ANY,
+            Type::Void => 1 << 14,
+            Type::Never => 1 << 17,
+            Type::Null => 1 << 1,
+            Type::Bool => (1 << 2) | (1 << 3),
+            Type::False => 1 << 2,
+            Type::True => 1 << 3,
+            Type::Int => 1 << 4,
+            Type::Float => 1 << 5,
+            Type::String => 1 << 6,
+            // `iterable` is `array` beside `Traversable`, whose bit is
+            // the name's and not the mask's.
+            Type::Array | Type::Iterable => 1 << 7,
+            Type::Object => 1 << 8,
+            Type::Callable => 1 << 12,
+            Type::CalledClass => 1 << 15,
+            // A class name, and an intersection, which is names alone,
+            // contribute no bit: the check reads the name.
+            Type::SelfClass | Type::ParentClass | Type::Named(_) | Type::Intersection(_) => 0,
+            Type::Nullable(inner) => inner.mask() | (1 << 1),
+            Type::Union(members) => members.iter().fold(0, |mask, ty| mask | ty.mask()),
+        }
+    }
+
+    /// Whether a value of this `IS_*` code satisfies the type without a
+    /// coercion: `ZEND_TYPE_CONTAINS_CODE` over the pure mask, which
+    /// `zend_check_type` tries before anything else.
+    #[must_use]
+    pub fn contains_code(&self, code: u8) -> bool {
+        self.mask() & (1u32 << u32::from(code)) != 0
+    }
+}
+
 /// An unevaluated constant expression: Zend's `zend_ast` for constant
 /// expressions, evaluated by the engine on first use and kept as written
 /// for Reflection. A closure or a first-class callable is an index into
