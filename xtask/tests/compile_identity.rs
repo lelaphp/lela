@@ -234,8 +234,13 @@ fn a_compiler_that_emits_nothing_is_red_on_every_file_with_the_denominator() {
 /// are the compiler's reach on the fixture corpus and move with it
 /// (#235): `plain.php`, one assignment and an `echo`, reached identity
 /// with `Unit::dump` in php's format (0c80b02) and `INIT_FCALL`'s op1
-/// (535cdd6); `identity.phpt` calls a user function and differs still,
-/// which is what keeps the lane's red branch exercised here.
+/// (535cdd6); `identity.phpt` calls a user function and reached it with
+/// the op array a function body compiles to (6043007), which is what
+/// moves this rung's reading from red to green. The red branch of the
+/// same rung is held by
+/// `a_compiler_that_emits_nothing_is_red_on_every_file_with_the_denominator`,
+/// the compiler that dumps nothing at all, and is exercised there while
+/// the corpus stands green here.
 #[test]
 fn the_linked_compiler_dumps_where_no_engine_binary_is_built() {
     if oracle().is_none() {
@@ -249,19 +254,23 @@ fn the_linked_compiler_dumps_where_no_engine_binary_is_built() {
             ..Ask::default()
         },
     );
-    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
     assert_eq!(reading.scope, "corpus");
     // The same four files the binary of a compiler that emits nothing is
-    // held to: two php dumps an op array for, of which the linked
-    // compiler has come to one byte for byte, and two it dumps nothing
-    // for.
+    // held to: two php dumps an op array for, both of which the linked
+    // compiler has come to byte for byte, and two it dumps nothing for.
     assert_eq!(count(&reading, "files"), 4);
-    assert_eq!(count(&reading, "identical"), 1);
-    assert_eq!(count(&reading, "differ"), 1);
+    assert_eq!(count(&reading, "identical"), 2);
+    assert_eq!(count(&reading, "differ"), 0);
     assert_eq!(count(&reading, "skipped"), 2);
+    // Nothing differs, so the message names no file and says the
+    // denominator, the two php dumped nothing for skipped beside it.
     assert!(
-        reading.message.contains("1 of 4 files differ")
-            && reading.message.contains("identity.phpt")
+        reading
+            .message
+            .contains("2 of 4 files dump byte-identical to the oracle's")
+            && reading.message.contains("2 skipped")
+            && !reading.message.contains("identity.phpt")
             && !reading.message.contains("plain.php"),
         "{}",
         reading.message
