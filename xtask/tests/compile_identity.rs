@@ -193,6 +193,31 @@ fn count(reading: &Reading, key: &str) -> i64 {
     }
 }
 
+/// The floor: the files of the fixture corpus the linked compiler has
+/// come to byte for byte, which is both of the two php dumps an op array
+/// for (6043007). It is a floor and not the reach: `php_compile`
+/// advancing moves `identical` up and this number is raised beside such a
+/// commit or not at all, where the constant it replaces (#235) was a
+/// number the next advance made wrong (harness-design.md §7, ledger 49;
+/// #389).
+const REACHED: i64 = 2;
+
+/// The reach of one corpus reading against the floor, the number named
+/// on both sides: a file the compiler had come to that no longer dumps
+/// identical is the regression this holds, and a file it has newly come
+/// to is not.
+fn below_the_floor(reading: &Reading) -> Result<(), String> {
+    let identical = count(reading, "identical");
+    if identical >= REACHED {
+        Ok(())
+    } else {
+        Err(format!(
+            "below the floor: {identical} of the corpus's files dump byte-identical \
+             to the oracle's where {REACHED} did"
+        ))
+    }
+}
+
 /// Design §11 row 1–2: the instrument ships before the compiler it
 /// measures, and against a compiler that emits nothing every file of the
 /// corpus reads red. The reading states the denominator, which is what
@@ -230,14 +255,18 @@ fn a_compiler_that_emits_nothing_is_red_on_every_file_with_the_denominator() {
 /// engine's own, with the denominator stated: red while any file php
 /// dumped an op array for differs, and the count of the files the
 /// compiler has come to byte for byte. A skip for want of a binary would
-/// say nothing about how far the compiler has to come. The numbers here
-/// are the compiler's reach on the fixture corpus and move with it
-/// (#235): `plain.php`, one assignment and an `echo`, reached identity
-/// with `Unit::dump` in php's format (0c80b02) and `INIT_FCALL`'s op1
-/// (535cdd6); `identity.phpt` calls a user function and reached it with
-/// the op array a function body compiles to (6043007), which is what
-/// moves this rung's reading from red to green. The red branch of the
-/// same rung is held by
+/// say nothing about how far the compiler has to come. The reach is read
+/// off the reading and not pinned here (#389, #235): `plain.php`, one
+/// assignment and an `echo`, reached identity with `Unit::dump` in php's
+/// format (0c80b02) and `INIT_FCALL`'s op1 (535cdd6); `identity.phpt`
+/// calls a user function and reached it with the op array a function body
+/// compiles to (6043007), and the commit that pinned the reach at one of
+/// the two left this test red from the second onwards. What is held is
+/// the corpus's own shape, the denominator and the oracle's two skips,
+/// both of them this crate's fixtures and the pin's; the message from the
+/// counts; and `REACHED`, the floor a file the compiler has come to may
+/// not fall back through (harness-design.md §7, ledger 49). The red
+/// branch of the same rung is held by
 /// `a_compiler_that_emits_nothing_is_red_on_every_file_with_the_denominator`,
 /// the compiler that dumps nothing at all, and is exercised there while
 /// the corpus stands green here.
@@ -254,27 +283,78 @@ fn the_linked_compiler_dumps_where_no_engine_binary_is_built() {
             ..Ask::default()
         },
     );
-    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
     assert_eq!(reading.scope, "corpus");
     // The same four files the binary of a compiler that emits nothing is
-    // held to: two php dumps an op array for, both of which the linked
-    // compiler has come to byte for byte, and two it dumps nothing for.
+    // held to: two php dumps an op array for and two it dumps nothing
+    // for. Both counts are the corpus's and the oracle's, so neither
+    // moves with the compiler.
     assert_eq!(count(&reading, "files"), 4);
-    assert_eq!(count(&reading, "identical"), 2);
-    assert_eq!(count(&reading, "differ"), 0);
     assert_eq!(count(&reading, "skipped"), 2);
-    // Nothing differs, so the message names no file and says the
-    // denominator, the two php dumped nothing for skipped beside it.
-    assert!(
-        reading
-            .message
-            .contains("2 of 4 files dump byte-identical to the oracle's")
-            && reading.message.contains("2 skipped")
-            && !reading.message.contains("identity.phpt")
-            && !reading.message.contains("plain.php"),
-        "{}",
-        reading.message
+    let identical = count(&reading, "identical");
+    let differ = count(&reading, "differ");
+    assert_eq!(identical + differ, 2, "{reading:#?}");
+    if let Err(why) = below_the_floor(&reading) {
+        panic!("{why}: {reading:#?}");
+    }
+    // The verdict is the differing files, so the message names each of
+    // them and the reading is red while there is one; with none it says
+    // the denominator, the two php dumped nothing for skipped beside it.
+    assert_eq!(
+        reading.status,
+        if differ == 0 {
+            Status::Pass
+        } else {
+            Status::Fail
+        },
+        "{reading:#?}"
     );
+    if differ == 0 {
+        assert!(
+            reading.message.contains(&format!(
+                "{identical} of 4 files dump byte-identical to the oracle's"
+            )) && reading.message.contains("2 skipped")
+                && !reading.message.contains("identity.phpt")
+                && !reading.message.contains("plain.php"),
+            "{}",
+            reading.message
+        );
+    } else {
+        assert!(
+            reading
+                .message
+                .contains(&format!("{differ} of 4 files differ")),
+            "{}",
+            reading.message
+        );
+    }
+}
+
+/// The floor is a sensor and not a comment (#389, harness-design.md §7,
+/// ledger 49): the reading of a compiler that emits nothing is below it
+/// and the failure names both numbers, and the linked compiler's is not
+/// below it. So a commit that carries `php_compile` further through the
+/// corpus leaves the harness's own suite green and one that carries it
+/// back does not.
+#[test]
+fn a_reach_under_the_floor_is_named_and_the_linked_compilers_is_not() {
+    if oracle().is_none() {
+        return;
+    }
+    let scratch = Scratch::new("floor");
+    let nothing = scratch.run(&registry(""), &scratch.emits_nothing());
+    let why = below_the_floor(&nothing).unwrap_err();
+    assert!(
+        why.contains("0 of") && why.contains(&REACHED.to_string()),
+        "{why}"
+    );
+    let linked = scratch.ask(
+        &registry(""),
+        &Ask {
+            corpus: Some(scratch.corpus.clone()),
+            ..Ask::default()
+        },
+    );
+    assert_eq!(below_the_floor(&linked), Ok(()), "{linked:#?}");
 }
 
 /// The lane's plumbing, measured: php's dump against php's dump is

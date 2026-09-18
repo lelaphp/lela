@@ -116,38 +116,68 @@ fn count(reading: &Reading, key: &str) -> i64 {
     }
 }
 
-/// The extensions the engine renders as the oracle does under `--re`, so
-/// far: ctype (#271), json (#272), reflection, whose twenty-six classes
-/// render whole from the commit that declared them (d8bc96d), and
+/// The floor: the scopes whose rendering is the oracle's and may not stop
+/// being, one entry per column (harness-design.md §7, ledger 49; #389).
+/// Under `--re`: ctype (#271), json (#272), reflection, whose twenty-six
+/// classes render whole from the commit that declared them (d8bc96d), and
 /// tokenizer, whose constants and signatures reached php's order in
-/// 2f23e89. The row for the next one ported is added here
-/// with the commit that makes it pass.
-const PORTED: [&str; 4] = ["ext/ctype", "ext/json", "ext/reflection", "ext/tokenizer"];
-
-/// The extensions whose `MINFO` table the engine writes as php's does, so
-/// far (#273): the `--ri` column's ported rows, which are the `--re`
-/// column's and `random` beside them, whose whole table is the `Version`
-/// line every extension's header carries (a3c01d0 wrote tokenizer's).
-const PORTED_RI: [&str; 5] = [
+/// 2f23e89. Under `--ri` (#273): those four and `random` beside them,
+/// whose whole table is the `Version` line every extension's header
+/// carries (a3c01d0 wrote tokenizer's).
+///
+/// It is a floor and not the set of what passes. An extension outside it
+/// reads whatever the port has reached, held to the shape of its message
+/// and not to a status, so a commit to `ext/<name>` that carries a
+/// rendering to the oracle's bytes moves this lane's readings and leaves
+/// the harness's own suite green. Raising it is one line beside such a
+/// commit and nothing forces it; a scope in it that stops passing is the
+/// regression this test is here for.
+const FLOOR: [&str; 9] = [
+    "ext/ctype",
     "ext/ctype/ri",
+    "ext/json",
     "ext/json/ri",
     "ext/random/ri",
+    "ext/reflection",
     "ext/reflection/ri",
+    "ext/tokenizer",
     "ext/tokenizer/ri",
 ];
+
+/// Every reading of `FLOOR` that is not a pass, named: what turns the
+/// harness's own suite red is a rendering that went backwards, and an
+/// extension the port has not reached yet is not one (#389). A scope
+/// absent from `readings` is not read here, so the caller that runs the
+/// whole default set holds the floor's presence beside this.
+fn below_the_floor(readings: &[Reading]) -> Result<(), String> {
+    let short: Vec<&str> = readings
+        .iter()
+        .filter(|r| FLOOR.contains(&r.scope.as_str()) && r.status != Status::Pass)
+        .map(|r| r.scope.as_str())
+        .collect();
+    if short.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "below the floor, the rendering no longer the oracle's at: {}",
+            short.join(", ")
+        ))
+    }
+}
 
 /// Design §11 days 1–2, the two halves met (#269) and the second column
 /// beside them (#273): every extension of the default set is rendered by
 /// the oracle and by the linked engine under `--re` and under `--ri`, two
-/// readings each, the `--ri` one scoped `ext/<name>/ri`. The ported ones
-/// read pass in each column and every other `--re` row reads fail; an
-/// extension whose table the engine has not written, hash, fails under
-/// `--ri` too. Every fail names the engine's rendering as the cause, the
-/// first differing line or the engine's own words for rendering nothing;
-/// the oracle's bytes are kept for each column.
+/// readings each, the `--ri` one scoped `ext/<name>/ri`. What each row
+/// reads is the port's reach and is read off the run rather than pinned
+/// here (#389): a pass says the engine's rendering is the oracle's, a
+/// fail names the engine's rendering as the cause, the first differing
+/// line or the engine's own words for rendering nothing, and `FLOOR` is
+/// what may not go backwards. The oracle's bytes are kept for each
+/// column, and the section renders every row with the status its reading
+/// carries.
 #[test]
-fn the_ported_extensions_read_pass_and_every_other_default_extension_reads_fail_naming_the_engines_rendering()
- {
+fn every_default_extension_reads_the_ports_reach_in_both_columns_and_the_floor_holds() {
     if oracle().is_none() {
         return;
     }
@@ -169,7 +199,9 @@ fn the_ported_extensions_read_pass_and_every_other_default_extension_reads_fail_
         .flat_map(|name| [(*name).to_owned(), format!("{name}/ri")])
         .collect();
     assert_eq!(scopes, expected);
-    let fails: &[&str] = &["ext/hash", "ext/hash/ri"];
+    for scope in FLOOR {
+        assert!(scopes.contains(&scope), "the floor's {scope} is run");
+    }
     for reading in &readings {
         assert_eq!(reading.instrument, "crosscheck");
         let flag = if reading.scope.ends_with("/ri") {
@@ -179,30 +211,27 @@ fn the_ported_extensions_read_pass_and_every_other_default_extension_reads_fail_
         };
         assert!(reading.message.contains(flag), "{}", reading.message);
         assert!(count(reading, "bytes") > 0, "{reading:#?}");
-        if PORTED.contains(&reading.scope.as_str()) || PORTED_RI.contains(&reading.scope.as_str()) {
-            assert_eq!(reading.status, Status::Pass, "{reading:#?}");
-            assert!(
+        match reading.status {
+            Status::Pass => assert!(
                 reading
                     .message
                     .contains("the engine's rendering is the oracle's"),
                 "{}",
                 reading.message
-            );
-            continue;
-        }
-        if fails.contains(&reading.scope.as_str()) || flag == "--re" {
-            assert_eq!(reading.status, Status::Fail, "{reading:#?}");
-        }
-        if reading.status == Status::Fail {
-            assert!(
+            ),
+            Status::Fail => assert!(
                 reading
                     .message
                     .contains("the engine's rendering differs from the oracle's at line")
                     || reading.message.contains("the engine rendered nothing"),
                 "{}",
                 reading.message
-            );
+            ),
+            Status::Skip => panic!("a rendering is a pass or a fail: {reading:#?}"),
         }
+    }
+    if let Err(why) = below_the_floor(&readings) {
+        panic!("{why}");
     }
     let kept_ri = crosscheck::kept(
         &scratch.store,
@@ -245,11 +274,47 @@ fn the_ported_extensions_read_pass_and_every_other_default_extension_reads_fail_
         None,
     )
     .unwrap();
-    assert!(rendered.contains("| ext/ctype | pass |"), "{rendered}");
-    assert!(rendered.contains("| ext/ctype/ri | pass |"), "{rendered}");
-    assert!(rendered.contains("| ext/json/ri | pass |"), "{rendered}");
-    assert!(rendered.contains("| ext/hash | fail |"), "{rendered}");
-    assert!(rendered.contains("| ext/hash/ri | fail |"), "{rendered}");
+    // Every row the run wrote, with the status its reading carries: the
+    // section renders what the lane read and never a set pinned here
+    // (#389).
+    for reading in &readings {
+        let row = format!("| {} | {} |", reading.scope, reading.status.as_str());
+        assert!(rendered.contains(&row), "{row} in {rendered}");
+    }
+}
+
+/// The floor is a sensor and not a comment (#389, harness-design.md §7,
+/// ledger 49). `ext/ctype`'s `--re` rendering carried one byte off the
+/// oracle's is below the floor and the failure names that scope alone,
+/// its `--ri` column beside it untouched; an extension outside the floor
+/// failing in both columns is not below it. So what leaves `cargo test -p
+/// xtask` red is a rendering that went backwards, and the port advancing
+/// somewhere else is not.
+#[test]
+fn a_scope_of_the_floor_that_stops_passing_is_below_it_and_one_outside_it_is_not() {
+    if oracle().is_none() {
+        return;
+    }
+    let scratch = Scratch::new("floor");
+    let apart = Ask {
+        renderings: Some(scratch.renderings("engine.re", "oracle.ri")),
+        ..one("ctype")
+    };
+    let (re, ri) = scratch.two(&apart);
+    assert_eq!(re.status, Status::Fail, "{re:#?}");
+    assert_eq!(ri.status, Status::Pass, "{ri:#?}");
+    let why = below_the_floor(&[re, ri]).unwrap_err();
+    assert!(
+        why.contains("ext/ctype") && !why.contains("ext/ctype/ri"),
+        "{why}"
+    );
+
+    let outside = scratch.run(&one("nosuch"));
+    assert!(
+        outside.iter().all(|r| r.status == Status::Fail),
+        "{outside:#?}"
+    );
+    assert_eq!(below_the_floor(&outside), Ok(()), "{outside:#?}");
 }
 
 /// `--ext <name>` is the on-request form (harness §7): one extension, two
