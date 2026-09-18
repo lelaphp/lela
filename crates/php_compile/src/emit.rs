@@ -97,8 +97,9 @@ use php_heap::{
     Fatal, Intern, Key, Number, Scalar, Zval, ZvalType, double_to_string, numeric_prefix,
 };
 use php_unit::decl::{
-    ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr, EnumBacking,
-    FunctionDecl, MethodDecl, Name, Parameter, PropertyDecl, Type, Visibility,
+    Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstDecl,
+    ConstExpr, EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, PropertyDecl, Type,
+    Visibility,
 };
 use php_unit::{
     ConstIdx, Diagnostic, FramelessEntry, Level, MethodBody, OpArray, Opcode, OperandKind, Opline,
@@ -1992,7 +1993,7 @@ impl Emit<'_> {
             constants: Vec::new(),
             properties: Vec::new(),
             methods: Vec::new(),
-            attributes: Vec::new(),
+            attributes: self.class_attributes(class, &name)?,
             doc_comment: class.doc_comment.clone().map(Vec::into_boxed_slice),
             file: self.filename.clone(),
             line,
@@ -2052,6 +2053,50 @@ impl Emit<'_> {
             });
         }
         Ok(())
+    }
+
+    /// `zend_compile_attributes` for a class declaration
+    /// (`Z/Zend/zend_compile.c`): each attribute's name resolved as a
+    /// `FETCH_CLASS` of the same file resolves it
+    /// ([`Self::class_name`]), and each argument evaluated no further
+    /// than `zend_const_expr_to_zval` leaves it, the constant
+    /// expression the declaration keeps for `ReflectionAttribute` to
+    /// read (design §4.7). The attribute is a marker php never
+    /// instantiates on its own, so a name no class answers is no error
+    /// here, as it is none in php.
+    ///
+    /// `#[\AllowDynamicProperties]` is the one attribute the compiler
+    /// itself reads, `ZEND_ACC_ALLOW_DYNAMIC_PROPERTIES` on the class,
+    /// and it is refused as not yet read rather than kept as a marker
+    /// that does nothing.
+    fn class_attributes(
+        &mut self,
+        class: &Class,
+        class_name: &[u8],
+    ) -> Result<Vec<Attribute>, CompileError> {
+        let mut out = Vec::new();
+        for attribute in &class.attributes {
+            self.line = attribute.line;
+            let name = self.class_name(&attribute.name);
+            if name.eq_ignore_ascii_case(b"AllowDynamicProperties") {
+                return Err(self.fatal(format!(
+                    "the #[\\AllowDynamicProperties] of {} this compiler cannot read yet",
+                    String::from_utf8_lossy(class_name)
+                )));
+            }
+            let mut arguments = Vec::new();
+            for argument in &attribute.arguments {
+                arguments.push(AttributeArgument {
+                    name: None,
+                    value: self.const_expr(argument)?,
+                });
+            }
+            out.push(Attribute {
+                name: Name(name.into_boxed_slice()),
+                arguments,
+            });
+        }
+        Ok(out)
     }
 
     /// `zend_compile_prop_decl`, the same one declarator at a time,
@@ -7072,6 +7117,7 @@ mod tests {
             kind: ClassKind::Class,
             parent: None,
             interfaces: Vec::new(),
+            attributes: Vec::new(),
             doc_comment: None,
             properties: Vec::new(),
             constants: Vec::new(),

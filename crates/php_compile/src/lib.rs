@@ -3684,6 +3684,7 @@ mod tests {
     /// compiler does not read yet, refused as such rather than compiled
     /// to something else.
     #[test]
+    #[allow(clippy::too_many_lines)] // one assertion per refusal: the table is the test
     fn what_php_s_compiler_refuses_in_a_class_is_refused_in_its_words() {
         let refused = |source: &[u8]| {
             let mut strings = php_heap::Strings::new();
@@ -3762,6 +3763,35 @@ mod tests {
         assert_eq!(
             refused(b"<?php\nclass M { function f() {} function F() {} }"),
             compile_error("Cannot redeclare M::F()", 2)
+        );
+        assert_eq!(refused(b"<?php\n#[A] #[B(1), C] class M {}"), None);
+        assert_eq!(
+            refused(b"<?php\n#[A(x: 1)] class M {}"),
+            not_yet(
+                "an attribute's named argument this compiler cannot read yet",
+                2
+            )
+        );
+        assert_eq!(
+            refused(b"<?php\n#[\\AllowDynamicProperties] class M {}"),
+            not_yet(
+                "the #[\\AllowDynamicProperties] of M this compiler cannot read yet",
+                2
+            )
+        );
+        assert_eq!(
+            refused(b"<?php\n#[A] function f() {}"),
+            not_yet(
+                "an attribute before this declaration this compiler cannot read yet",
+                2
+            )
+        );
+        assert_eq!(
+            refused(b"<?php\nclass M { #[A] public $x; }"),
+            not_yet(
+                "an attribute before a class member this compiler cannot read yet",
+                2
+            )
         );
     }
 

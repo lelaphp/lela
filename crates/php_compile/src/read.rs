@@ -217,12 +217,25 @@ pub(crate) struct Class {
     pub(crate) kind: ClassKind,
     pub(crate) parent: Option<Vec<u8>>,
     pub(crate) interfaces: Vec<Vec<u8>>,
+    pub(crate) attributes: Vec<Attr>,
     pub(crate) doc_comment: Option<Vec<u8>>,
     pub(crate) properties: Vec<Property>,
     pub(crate) constants: Vec<Constant>,
     pub(crate) methods: Vec<Method>,
     /// The line of the closing brace, `ce->info.user.line_end`.
     pub(crate) end_line: u32,
+}
+
+/// One attribute as written, php's `ZEND_AST_ATTRIBUTE`: the class name
+/// before it is resolved, and the arguments of its list, still
+/// expressions. `zend_compile_attributes` is what turns a group of
+/// these into a declaration's, so a group is not a thing that outlives
+/// the reader: `#[A] #[B]` and `#[A, B]` are the same two attributes.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Attr {
+    pub(crate) name: Vec<u8>,
+    pub(crate) arguments: Vec<Expr>,
+    pub(crate) line: u32,
 }
 
 /// One function declaration, php's `zend_ast_decl` for a function or a
@@ -935,10 +948,38 @@ impl Reader<'_> {
     }
 
     /// One statement, or nothing for the empty statement `;`.
+    ///
+    /// php's `attributed_statement` is a declaration with one or more
+    /// `#[ ... ]` groups before it; the class declaration is the home
+    /// this reads, and every other declaration php lets an attribute
+    /// stand before is refused as not yet read.
+    ///
+    /// ```php
+    /// #[A] #[B(1), C] class M { public $x = 1; }
+    /// var_dump((new M)->x);
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// ```
     fn statement(&mut self) -> Result<Option<Stmt>, Trouble> {
         if self.byte(0) == Some(b';') {
             self.bump(1);
             return Ok(None);
+        }
+        if self.starts_with(b"#[") {
+            let attributes = self.attributes()?;
+            self.skip_trivia();
+            if self.word_ahead(b"class") {
+                self.bump(5);
+                return self.class_decl(ClassKind::Class, attributes).map(Some);
+            }
+            if self.word_ahead(b"interface") {
+                self.bump(9);
+                return self.class_decl(ClassKind::Interface, attributes).map(Some);
+            }
+            return Err(
+                self.trouble("an attribute before this declaration this compiler cannot read yet")
+            );
         }
         if self.byte(0) == Some(b'{') {
             self.bump(1);
@@ -988,11 +1029,11 @@ impl Reader<'_> {
         }
         if self.word_ahead(b"class") {
             self.bump(5);
-            return self.class_decl(ClassKind::Class).map(Some);
+            return self.class_decl(ClassKind::Class, Vec::new()).map(Some);
         }
         if self.word_ahead(b"interface") {
             self.bump(9);
-            return self.class_decl(ClassKind::Interface).map(Some);
+            return self.class_decl(ClassKind::Interface, Vec::new()).map(Some);
         }
         if self.word_ahead(b"function") && !self.closure_ahead(8) {
             self.bump(8);
@@ -1007,6 +1048,121 @@ impl Reader<'_> {
         let expr = self.expr()?;
         self.end_of_statement()?;
         Ok(Some(Stmt::Effect(expr)))
+    }
+
+    /// `zend_compile_attributes` over php's `attributes: attribute_group
+    /// | attributes attribute_group`: one or more `#[ ... ]` groups,
+    /// each a comma-separated list of `class_name` with an optional
+    /// argument list after it, a trailing comma allowed in the group
+    /// and in the list alike. The groups are one sequence in the
+    /// declaration's order, which is what `zend_ast_list` leaves, so
+    /// `#[A] #[B]` and `#[A, B]` are the same two attributes. A named
+    /// argument is refused as not yet read; so is a group with nothing
+    /// in it, which is php's own parse error.
+    fn attributes(&mut self) -> Result<Vec<Attr>, Trouble> {
+        let mut out = Vec::new();
+        loop {
+            self.skip_trivia();
+            if !self.starts_with(b"#[") {
+                return Ok(out);
+            }
+            self.bump(2);
+            let opened = out.len();
+            loop {
+                self.skip_trivia();
+                if self.byte(0) == Some(b']') {
+                    if out.len() == opened {
+                        return Err(self.trouble("an attribute this compiler cannot read yet"));
+                    }
+                    self.bump(1);
+                    break;
+                }
+                let line = self.line;
+                let name = self.name();
+                if name.is_empty() {
+                    return Err(self.trouble("an attribute this compiler cannot read yet"));
+                }
+                let arguments = self.attribute_arguments()?;
+                out.push(Attr {
+                    name,
+                    arguments,
+                    line,
+                });
+                self.skip_trivia();
+                match self.byte(0) {
+                    Some(b',') => self.bump(1),
+                    Some(b']') => {
+                        self.bump(1);
+                        break;
+                    }
+                    _ => {
+                        return Err(
+                            self.trouble("an attribute group this compiler cannot read yet")
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// One attribute's `argument_list`, none where no `(` stands here:
+    /// the arguments as written, which `zend_const_expr_to_zval` holds
+    /// to a constant expression at the declaration (design §4.7). A
+    /// named argument, php's `identifier ":" expr`, is refused as not
+    /// yet read; so is the spread `...`, which php refuses in an
+    /// attribute itself.
+    fn attribute_arguments(&mut self) -> Result<Vec<Expr>, Trouble> {
+        self.skip_trivia();
+        if self.byte(0) != Some(b'(') {
+            return Ok(Vec::new());
+        }
+        self.bump(1);
+        let mut out = Vec::new();
+        loop {
+            self.skip_trivia();
+            if self.byte(0) == Some(b')') {
+                self.bump(1);
+                return Ok(out);
+            }
+            if self.named_argument_ahead() {
+                return Err(
+                    self.trouble("an attribute's named argument this compiler cannot read yet")
+                );
+            }
+            out.push(self.expr()?);
+            self.skip_trivia();
+            match self.byte(0) {
+                Some(b',') => self.bump(1),
+                Some(b')') => {
+                    self.bump(1);
+                    return Ok(out);
+                }
+                _ => {
+                    return Err(
+                        self.trouble("an attribute's argument list this compiler cannot read yet")
+                    );
+                }
+            }
+        }
+    }
+
+    /// Whether a named argument stands here, php's `identifier ":"`
+    /// where the `:` is not the `::` of a class member.
+    fn named_argument_ahead(&self) -> bool {
+        let mut at = 0;
+        while self
+            .byte(at)
+            .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            at += 1;
+        }
+        if at == 0 {
+            return false;
+        }
+        while self.byte(at).is_some_and(|b| b.is_ascii_whitespace()) {
+            at += 1;
+        }
+        self.byte(at) == Some(b':') && self.byte(at + 1) != Some(b':')
     }
 
     /// `class M extends P implements I, J { members }` and `interface I
@@ -1025,7 +1181,7 @@ impl Reader<'_> {
     /// it. The members are property groups and constant groups; a
     /// method, a typed property or constant, a trait `use`, an enum
     /// case, an accessor list or an attribute is refused the same way.
-    fn class_decl(&mut self, kind: ClassKind) -> Result<Stmt, Trouble> {
+    fn class_decl(&mut self, kind: ClassKind, attributes: Vec<Attr>) -> Result<Stmt, Trouble> {
         self.skip_trivia();
         let name = self.name();
         if name.is_empty() || name.contains(&b'\\') {
@@ -1072,6 +1228,7 @@ impl Reader<'_> {
             kind,
             parent,
             interfaces,
+            attributes,
             doc_comment,
             properties: Vec::new(),
             constants: Vec::new(),
@@ -1156,6 +1313,11 @@ impl Reader<'_> {
     /// ```
     fn member(&mut self, class: &mut Class) -> Result<(), Trouble> {
         let line = self.line;
+        if self.starts_with(b"#[") {
+            return Err(
+                self.trouble("an attribute before a class member this compiler cannot read yet")
+            );
+        }
         let mut visibility = None;
         let mut set_visibility = None;
         let mut is_static = false;
