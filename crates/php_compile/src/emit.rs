@@ -105,7 +105,9 @@ use php_unit::{
     frameless_table,
 };
 
-use crate::read::{Arm, BinaryOp, Case, CastTo, Class, Element, Expr, Piece, Read, Stmt, Target};
+use crate::read::{
+    Arm, BinaryOp, Case, CastTo, Class, Element, Expr, Magic, Piece, Read, Stmt, Target,
+};
 use crate::{CompileError, Options, StackLimit};
 
 /// `ZEND_FETCH_LOCAL` (`Z/Zend/zend_compile.h:1083`), the
@@ -140,6 +142,12 @@ pub(crate) struct Emit<'a> {
     /// `FC(current_namespace)`: the namespace a `namespace` statement
     /// put what follows it in, and none before one.
     namespace: Option<Vec<u8>>,
+    /// `CG(active_class_entry)`: the class whose members are being
+    /// compiled, by name, and none outside a class body.
+    active_class: Option<Vec<u8>>,
+    /// `CG(context).active_property_info_name`: the property whose
+    /// default is being compiled, which `__PROPERTY__` folds to.
+    active_property: Option<Vec<u8>>,
     /// `CG(context).in_jmp_frameless_branch`: whether a
     /// `JMP_FRAMELESS` branch is being compiled, in which no call takes
     /// a branch of its own.
@@ -261,6 +269,44 @@ pub(crate) enum Where {
     Cv(u32),
 }
 
+/// What a magic constant folds to: `__LINE__`'s number, or the string
+/// every other one is.
+enum Folded {
+    Line(i64),
+    Text(Vec<u8>),
+}
+
+/// `zend_dirname` (`Z/Zend/zend_compile.c:2176`) on a path that is no
+/// Windows one: trailing slashes stripped, then the last component,
+/// then the slashes before it; `/` for a path of slashes alone, `.` for
+/// one with no slash in it.
+fn dirname(path: &[u8]) -> Vec<u8> {
+    let mut end = path.len();
+    while end > 0 && path[end - 1] == b'/' {
+        end -= 1;
+    }
+    if end == 0 {
+        return if path.is_empty() {
+            Vec::new()
+        } else {
+            b"/".to_vec()
+        };
+    }
+    while end > 0 && path[end - 1] != b'/' {
+        end -= 1;
+    }
+    if end == 0 {
+        return b".".to_vec();
+    }
+    while end > 0 && path[end - 1] == b'/' {
+        end -= 1;
+    }
+    if end == 0 {
+        return b"/".to_vec();
+    }
+    path[..end].to_vec()
+}
+
 /// The unit of one source file: its main op array, the statements and
 /// then php's implicit final `RETURN 1` (`zend_emit_final_return`, with
 /// `extended_value` at -1), and the diagnostics raised on the way.
@@ -278,6 +324,8 @@ pub(crate) fn unit(
         known_classes: &options.classes,
         frameless: frameless_table(&options.functions),
         namespace: None,
+        active_class: None,
+        active_property: None,
         in_jmp_frameless_branch: false,
         statements_seen: 0,
         stack: options.stack,
@@ -554,6 +602,7 @@ impl Emit<'_> {
             line,
             end_line: class.end_line,
         };
+        self.active_class = Some(class.name.clone());
         for constant in &class.constants {
             self.line = constant.line;
             if decl.constants.iter().any(|c| *c.name.0 == *constant.name) {
@@ -583,10 +632,12 @@ impl Emit<'_> {
                     String::from_utf8_lossy(&property.name)
                 )));
             }
+            self.active_property = Some(property.name.clone());
             let default = match &property.default {
                 Some(expr) => Some(self.const_expr(expr)?),
                 None => None,
             };
+            self.active_property = None;
             decl.properties.push(PropertyDecl {
                 name: Name(property.name.clone().into_boxed_slice()),
                 visibility: property.visibility,
@@ -598,6 +649,7 @@ impl Emit<'_> {
                 doc_comment: property.doc_comment.clone().map(Vec::into_boxed_slice),
             });
         }
+        self.active_class = None;
         self.line = line;
         self.classes.push(decl);
         Ok(())
@@ -632,6 +684,13 @@ impl Emit<'_> {
             Expr::Float(f) => Ok(ConstExpr::Double(*f)),
             Expr::Str(bytes) => Ok(ConstExpr::Str(bytes.clone().into_boxed_slice())),
             Expr::Constant(name) => Ok(ConstExpr::Constant(Name(name.clone().into_boxed_slice()))),
+            // `zend_eval_const_expr` folds a magic constant as
+            // `zend_compile_expr` does; the one it leaves,
+            // `__CLASS__` in a trait, is not read yet (a trait is not).
+            Expr::Magic { which, line } => Ok(match self.magic_const(*which, *line) {
+                Folded::Line(n) => ConstExpr::Long(n),
+                Folded::Text(text) => ConstExpr::Str(text.into_boxed_slice()),
+            }),
             // `ZEND_AST_ARRAY` in a constant expression stays the tree
             // it was written as, each element's key and value.
             Expr::Array(elements) => {
@@ -2505,6 +2564,10 @@ impl Emit<'_> {
             Expr::Constant(name) => self
                 .const_name(name)?
                 .ok_or_else(|| self.fatal("a constant this compiler cannot read yet")),
+            Expr::Magic { which, line } => match self.magic_const(*which, *line) {
+                Folded::Line(n) => Ok(Zval::long(n)),
+                Folded::Text(text) => self.string(&text),
+            },
             // `zend_try_ct_eval_unary_pm`: php folds unary `-` and `+` as
             // the multiplication by -1 and by 1 it would otherwise emit.
             Expr::Unary { minus, operand } => {
@@ -3099,6 +3162,152 @@ impl Emit<'_> {
     /// nothing declares, so php fetches it as the program serves and
     /// falls back to the global one then; outside a namespace it is
     /// the persistent table's.
+    /// `zend_try_ct_eval_magic_const` (`Z/Zend/zend_compile.c:9830`),
+    /// which `zend_compile_magic_const` sends every magic constant
+    /// through and takes the `IS_CONST` operand it answers: `__LINE__`
+    /// is the token's line, `__FILE__` `CG(compiled_filename)`,
+    /// `__DIR__` its `zend_dirname`, which is the working directory
+    /// where the name has no directory in it, `__NAMESPACE__`
+    /// `FC(current_namespace)` and the empty string before one,
+    /// `__CLASS__` and `__TRAIT__` the active class's name where one is
+    /// and the empty string where none is, `__PROPERTY__` the property
+    /// whose default is being compiled, `__FUNCTION__` and `__METHOD__`
+    /// the active op array's name, which is the empty string in the main
+    /// op array and directly inside a class body, the two this compiler
+    /// reads. A function, a method, a closure and a trait are not read
+    /// yet, so the arms `__CLASS__` in a trait takes, the one answer
+    /// `zend_try_ct_eval_magic_const` refuses and `ZEND_FETCH_CLASS_NAME`
+    /// serves as the program runs, and `Class::method` are not reached.
+    ///
+    /// `__FILE__` is the request's name and `__LINE__` the token's:
+    ///
+    /// ```php
+    /// echo __FILE__, ' ', __LINE__;
+    /// ```
+    /// ```expect exit=0
+    /// %s 2
+    /// ```
+    ///
+    /// The line is the token's own and not the statement's, `ast->lineno`
+    /// of the `ZEND_AST_MAGIC_CONST` node:
+    ///
+    /// ```php
+    /// echo
+    /// __LINE__, ' ', __line__,
+    /// ' ', __LINE__;
+    /// ```
+    /// ```expect exit=0
+    /// 3 3 4
+    /// ```
+    ///
+    /// `__DIR__` under the recipe: `witness.php` has no directory in
+    /// its name, so `zend_dirname` answers `.` and the constant is the
+    /// working directory, which `%s` stands for since the oracle's is
+    /// its scratch directory and the linked engine's the harness's:
+    ///
+    /// ```php
+    /// echo __DIR__, "\n";
+    /// var_dump(str_contains(__DIR__, '/'));
+    /// ```
+    /// ```expect exit=0
+    /// %s
+    /// bool(true)
+    /// ```
+    ///
+    /// `__NAMESPACE__` is the namespace in force, and the empty string
+    /// before any:
+    ///
+    /// ```php
+    /// echo '[', __NAMESPACE__, ']';
+    /// ```
+    /// ```expect exit=0
+    /// []
+    /// ```
+    ///
+    /// ```php
+    /// namespace A\B;
+    /// echo __NAMESPACE__;
+    /// ```
+    /// ```expect exit=0
+    /// A\B
+    /// ```
+    ///
+    /// The scope's five are the empty string in the main op array, where
+    /// there is no class and no function:
+    ///
+    /// ```php
+    /// echo '[', __CLASS__, ']';
+    /// ```
+    /// ```expect exit=0
+    /// []
+    /// ```
+    ///
+    /// ```php
+    /// echo '[', __FUNCTION__, ']';
+    /// ```
+    /// ```expect exit=0
+    /// []
+    /// ```
+    ///
+    /// ```php
+    /// echo '[', __METHOD__, ']';
+    /// ```
+    /// ```expect exit=0
+    /// []
+    /// ```
+    ///
+    /// ```php
+    /// echo '[', __TRAIT__, ']';
+    /// ```
+    /// ```expect exit=0
+    /// []
+    /// ```
+    ///
+    /// ```php
+    /// echo '[', __PROPERTY__, ']';
+    /// ```
+    /// ```expect exit=0
+    /// []
+    /// ```
+    ///
+    /// Inside a class body, `__CLASS__` is the class's name, `__PROPERTY__`
+    /// the property whose default is being compiled and `__METHOD__` the
+    /// empty string, since php reads a member's constant expression as
+    /// standing directly inside the class and not in a function:
+    ///
+    /// ```php
+    /// class M { public $p = __CLASS__ . '::' . __PROPERTY__ . '|' . __METHOD__ . '|' . __TRAIT__; }
+    /// $o = new M;
+    /// echo $o->p;
+    /// ```
+    /// ```expect exit=0
+    /// M::p||
+    /// ```
+    fn magic_const(&self, which: Magic, line: u32) -> Folded {
+        let text = match which {
+            Magic::Line => return Folded::Line(i64::from(line)),
+            Magic::File => self.filename.0.to_vec(),
+            Magic::Dir => {
+                let dirname = dirname(&self.filename.0);
+                if dirname == b"." {
+                    std::env::current_dir()
+                        .map(|cwd| cwd.to_string_lossy().into_owned().into_bytes())
+                        .unwrap_or(dirname)
+                } else {
+                    dirname
+                }
+            }
+            Magic::Namespace => self.namespace.clone().unwrap_or_default(),
+            Magic::Class => self.active_class.clone().unwrap_or_default(),
+            Magic::Property => self.active_property.clone().unwrap_or_default(),
+            // The main op array has no `function_name`, and a member's
+            // constant expression stands directly inside the class; a
+            // trait is not read yet, so `__TRAIT__` names none.
+            Magic::Function | Magic::Method | Magic::Trait => Vec::new(),
+        };
+        Folded::Text(text)
+    }
+
     fn const_name(&mut self, name: &[u8]) -> Result<Option<Zval>, CompileError> {
         if self.namespace.is_some() && !name.starts_with(b"\\") {
             return Ok(None);

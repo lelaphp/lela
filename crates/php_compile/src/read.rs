@@ -23,7 +23,8 @@
 //! inside an expression a `match`, an array expression `[k => v, w]` with
 //! no `...` and no `&`, a number, a single-quoted string, a double-quoted
 //! string with `$a`, `{$a}` and `${a}` interpolated as php's lexer takes
-//! them, `true`, `false`, `null`, a constant by name, a call of
+//! them, `true`, `false`, `null`, a constant by name, a magic constant
+//! at the line its token stands on, a call of
 //! a named function, a parenthesised expression, a variable `$a` that is
 //! a CV, an assignment `$a = expr` to one, `$a++` and `++$a` on one,
 //! unary `-` and `+`, `@` over an expression, a cast to a scalar type in
@@ -38,6 +39,7 @@
 use std::fmt;
 use std::ops::Deref;
 
+use php_syntax::magic_const_name;
 use php_unit::Level;
 use php_unit::decl::Visibility;
 
@@ -92,6 +94,42 @@ pub(crate) enum Stmt {
     Continue(Option<Expr>),
     /// `class M { … }` at the top level, php's `ZEND_AST_CLASS`.
     Class(Class),
+}
+
+/// The nine magic constants, php's `T_LINE` through `T_PROPERTY_C`: the
+/// lexer's tokens, matched whatever their case, so `__file__` is
+/// `__FILE__`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Magic {
+    Line,
+    File,
+    Dir,
+    Function,
+    Class,
+    Trait,
+    Method,
+    Namespace,
+    Property,
+}
+
+impl Magic {
+    /// The magic constant this spelling is, by the token name
+    /// `php_syntax` gives it; none for any other name, `\__FILE__`
+    /// included, which php reads as a constant of that name.
+    fn of(name: &[u8]) -> Option<Magic> {
+        Some(match magic_const_name(name) {
+            "T_LINE" => Magic::Line,
+            "T_FILE" => Magic::File,
+            "T_DIR" => Magic::Dir,
+            "T_FUNC_C" => Magic::Function,
+            "T_CLASS_C" => Magic::Class,
+            "T_TRAIT_C" => Magic::Trait,
+            "T_METHOD_C" => Magic::Method,
+            "T_NS_C" => Magic::Namespace,
+            "T_PROPERTY_C" => Magic::Property,
+            _ => return None,
+        })
+    }
 }
 
 /// One target of a `foreach`, php's `foreach_variable`: the expression
@@ -203,6 +241,13 @@ pub(crate) enum Expr {
     Array(Vec<Element>),
     /// A constant named as written, php's `ZEND_AST_CONST`.
     Constant(Vec<u8>),
+    /// `__LINE__` and its kin, php's `ZEND_AST_MAGIC_CONST` with the
+    /// token in `attr` and the token's own line in `lineno`, which is
+    /// what `__LINE__` folds to and not the statement's.
+    Magic {
+        which: Magic,
+        line: u32,
+    },
     /// `-$a` and `+$a`, php's `ZEND_AST_UNARY_MINUS` and
     /// `ZEND_AST_UNARY_PLUS`.
     Unary {
@@ -1688,11 +1733,12 @@ impl Reader<'_> {
     }
 
     /// A name: `true`, `false` and `null`, which php reads whatever their
-    /// case, another constant by name, a call, or a call on a class,
+    /// case, a magic constant, another constant by name, a call, or a call on a class,
     /// `C::m()`, php's `class_name T_PAAMAYIM_NEKUDOTAYIM member_name
     /// argument_list`. What else stands after a `::`, a class constant,
     /// a property of the class or `::class`, is not read yet.
     fn named(&mut self) -> Result<Expr, Trouble> {
+        let line = self.line;
         let name = self.name();
         self.skip_trivia();
         if self.byte(0) == Some(b':') && self.byte(1) == Some(b':') {
@@ -1733,7 +1779,10 @@ impl Reader<'_> {
                 b"true" => Ok(Expr::Bool(true)),
                 b"false" => Ok(Expr::Bool(false)),
                 b"null" => Ok(Expr::Null),
-                _ => Ok(Expr::Constant(name)),
+                _ => Ok(match Magic::of(&name) {
+                    Some(which) => Expr::Magic { which, line },
+                    None => Expr::Constant(name),
+                }),
             };
         }
         self.bump(1);
