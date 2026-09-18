@@ -41,7 +41,7 @@ use std::ops::Deref;
 
 use php_syntax::magic_const_name;
 use php_unit::Level;
-use php_unit::decl::Visibility;
+use php_unit::decl::{Name, Type, Visibility};
 
 use crate::StackLimit;
 
@@ -170,25 +170,44 @@ pub(crate) struct Class {
 }
 
 /// One function declaration, php's `zend_ast_decl` for a function or a
-/// method: the name as written, the parameters, the body, the doc
+/// method: the name as written, the parameters, the return type where
+/// one is written after the `)`, whether an `&` before the name returns
+/// it by reference (`ZEND_ACC_RETURN_REFERENCE`), the body, the doc
 /// comment taken before the `function` keyword, and the lines of the
 /// keyword and of the closing brace, `start_lineno` and `end_lineno`.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Function {
     pub(crate) name: Vec<u8>,
     pub(crate) parameters: Vec<Parameter>,
+    pub(crate) return_type: Option<Type>,
+    pub(crate) by_ref: bool,
     pub(crate) body: Read,
     pub(crate) doc_comment: Option<Vec<u8>>,
     pub(crate) line: u32,
     pub(crate) end_line: u32,
 }
 
-/// One parameter, php's `ZEND_AST_PARAM` with no type, no `&`, no `...`
-/// and no modifier: the name and the default, if one is written.
+/// One parameter, php's `ZEND_AST_PARAM`: the declared type where one is
+/// written, `ZEND_PARAM_REF` for an `&` and `ZEND_PARAM_VARIADIC` for a
+/// `...` before the variable, the name, the default, and the modifiers
+/// that promote it to a property in a constructor.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Parameter {
     pub(crate) name: Vec<u8>,
+    pub(crate) ty: Option<Type>,
+    pub(crate) by_ref: bool,
+    pub(crate) variadic: bool,
     pub(crate) default: Option<Expr>,
+    pub(crate) promote: Option<Promoted>,
+}
+
+/// The modifiers that make a constructor's parameter a property,
+/// php's `promotion_flags` in `zend_compile_params`: the visibility and
+/// the `readonly` bit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Promoted {
+    pub(crate) visibility: Visibility,
+    pub(crate) is_readonly: bool,
 }
 
 /// One method, php's `ZEND_AST_METHOD`: a function with the group's
@@ -957,19 +976,20 @@ impl Reader<'_> {
     /// `function name(parameters) { body }`, the keyword read: php's
     /// `function_declaration_statement` and the `method` member alike,
     /// with the doc comment taken before the keyword
-    /// (`backup_doc_comment` reduces where `function` is). A `&` for a
-    /// return by reference, a return type after the parameters and a
-    /// body that is no block (an abstract method's `;`) are refused as
-    /// not yet read. The name is php's `identifier`, so a reserved word
-    /// serves: `function readonly()`.
+    /// (`backup_doc_comment` reduces where `function` is). An `&` before
+    /// the name is `returns_ref`, php's `ZEND_ACC_RETURN_REFERENCE`, and
+    /// a `:` after the parameters is `return_type`,
+    /// `zend_compile_return_type`'s `type_expr`. A body that is no block
+    /// (an abstract method's `;`) is refused as not yet read. The name is
+    /// php's `identifier`, so a reserved word serves: `function readonly()`.
     fn function(&mut self) -> Result<Function, Trouble> {
         let line = self.line;
         let doc_comment = self.doc_comment.take();
         self.skip_trivia();
-        if self.byte(0) == Some(b'&') {
-            return Err(
-                self.trouble("a function returning by reference this compiler cannot read yet")
-            );
+        let by_ref = self.byte(0) == Some(b'&');
+        if by_ref {
+            self.bump(1);
+            self.skip_trivia();
         }
         let name = self.label();
         if name.is_empty() {
@@ -978,9 +998,13 @@ impl Reader<'_> {
         self.punctuation(b'(', "a function with no parenthesis after its name")?;
         let parameters = self.parameters()?;
         self.skip_trivia();
-        if self.byte(0) == Some(b':') {
-            return Err(self.trouble("a function with a return type this compiler cannot read yet"));
-        }
+        let return_type = if self.byte(0) == Some(b':') {
+            self.bump(1);
+            Some(self.type_expr()?)
+        } else {
+            None
+        };
+        self.skip_trivia();
         if self.byte(0) != Some(b'{') {
             return Err(
                 self.trouble("a function whose body is no block this compiler cannot read yet")
@@ -994,6 +1018,8 @@ impl Reader<'_> {
         Ok(Function {
             name,
             parameters,
+            return_type,
+            by_ref,
             body,
             doc_comment,
             line,
@@ -1001,11 +1027,109 @@ impl Reader<'_> {
         })
     }
 
-    /// php's `parameter_list` up to and over the `)`: each a variable,
-    /// with a default after `=` where one is written, separated by
-    /// commas and a trailing comma allowed. A type, an attribute, a `&`,
-    /// a `...` or a promoting modifier before the variable is refused as
-    /// not yet read.
+    /// php's `type_expr`: an optional `?`, then one type, or a union of
+    /// types written with `|`, or an intersection written with `&`. The
+    /// scanner tells an intersection's `&` from a by-reference
+    /// parameter's by what follows it
+    /// (`T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG`), which is what
+    /// [`Self::amp_before_variable`] reads. A parenthesised member, php's
+    /// DNF type, is refused as not yet read.
+    fn type_expr(&mut self) -> Result<Type, Trouble> {
+        self.skip_trivia();
+        if self.byte(0) == Some(b'?') {
+            self.bump(1);
+            self.skip_trivia();
+            return Ok(Type::Nullable(Box::new(self.type_name()?)));
+        }
+        let first = self.type_name()?;
+        self.skip_trivia();
+        if self.byte(0) == Some(b'|') {
+            let mut members = vec![first];
+            while self.byte(0) == Some(b'|') {
+                self.bump(1);
+                self.skip_trivia();
+                members.push(self.type_name()?);
+                self.skip_trivia();
+            }
+            return Ok(Type::Union(members));
+        }
+        if self.byte(0) == Some(b'&') && !self.amp_before_variable() {
+            let mut members = vec![first];
+            while self.byte(0) == Some(b'&') && !self.amp_before_variable() {
+                self.bump(1);
+                self.skip_trivia();
+                members.push(self.type_name()?);
+                self.skip_trivia();
+            }
+            return Ok(Type::Intersection(members));
+        }
+        Ok(first)
+    }
+
+    /// One member of a type: php's `type_without_static`, `static`, and
+    /// the scalar names its scanner reads as `T_ARRAY` and `T_CALLABLE`
+    /// or `zend_compile_typename` maps by name, whatever their case. Any
+    /// other name is a class, resolved here as written with the leading
+    /// `\` of a fully qualified one dropped, as `zend_resolve_class_name`
+    /// leaves it. A `(` is php's DNF type, refused as not yet read.
+    fn type_name(&mut self) -> Result<Type, Trouble> {
+        self.skip_trivia();
+        if self.byte(0) == Some(b'(') {
+            return Err(self.trouble("a DNF type this compiler cannot read yet"));
+        }
+        let name = self.name();
+        if name.is_empty() {
+            return Err(self.trouble("a type this compiler cannot read yet"));
+        }
+        let lowered = name.to_ascii_lowercase();
+        Ok(match lowered.as_slice() {
+            b"mixed" => Type::Mixed,
+            b"void" => Type::Void,
+            b"never" => Type::Never,
+            b"null" => Type::Null,
+            b"bool" => Type::Bool,
+            b"false" => Type::False,
+            b"true" => Type::True,
+            b"int" => Type::Int,
+            b"float" => Type::Float,
+            b"string" => Type::String,
+            b"array" => Type::Array,
+            b"object" => Type::Object,
+            b"iterable" => Type::Iterable,
+            b"callable" => Type::Callable,
+            b"static" => Type::CalledClass,
+            b"self" => Type::SelfClass,
+            b"parent" => Type::ParentClass,
+            _ => Type::Named(Name(name.strip_prefix(b"\\").unwrap_or(&name).into())),
+        })
+    }
+
+    /// Whether the `&` here is a by-reference parameter's and not an
+    /// intersection type's: php's scanner reads
+    /// `T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG` where a `$` or a `...`
+    /// stands after the whitespace that follows it.
+    fn amp_before_variable(&self) -> bool {
+        let mut at = 1;
+        while self
+            .byte(at)
+            .is_some_and(|b| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r')
+        {
+            at += 1;
+        }
+        self.byte(at) == Some(b'$')
+            || (self.byte(at) == Some(b'.')
+                && self.byte(at + 1) == Some(b'.')
+                && self.byte(at + 2) == Some(b'.'))
+    }
+
+    /// php's `parameter_list` up to and over the `)`, one `parameter` at
+    /// a time: `optional_parameter_modifiers`, which promote it to a
+    /// property, then the type where one is written, then `&` for
+    /// `ZEND_PARAM_REF` and `...` for `ZEND_PARAM_VARIADIC`, the
+    /// variable, and a default after `=`. Commas separate them and a
+    /// trailing comma is allowed. An attribute before a parameter, an
+    /// asymmetric visibility (`public(set)`) and a `{ get; set; }` after
+    /// one are refused as not yet read.
     fn parameters(&mut self) -> Result<Vec<Parameter>, Trouble> {
         let mut parameters = Vec::new();
         loop {
@@ -1013,6 +1137,30 @@ impl Reader<'_> {
             if self.byte(0) == Some(b')') {
                 self.bump(1);
                 return Ok(parameters);
+            }
+            if self.byte(0) == Some(b'#') {
+                return Err(self.trouble("an attribute this compiler cannot read yet"));
+            }
+            let promote = self.parameter_modifiers()?;
+            self.skip_trivia();
+            let ty = if self.byte(0) == Some(b'$')
+                || self.byte(0) == Some(b'&')
+                || self.byte(0) == Some(b'.')
+            {
+                None
+            } else {
+                Some(self.type_expr()?)
+            };
+            self.skip_trivia();
+            let by_ref = self.byte(0) == Some(b'&');
+            if by_ref {
+                self.bump(1);
+                self.skip_trivia();
+            }
+            let variadic = self.starts_with(b"...");
+            if variadic {
+                self.bump(3);
+                self.skip_trivia();
             }
             if self.byte(0) != Some(b'$') {
                 return Err(self.trouble("a parameter this compiler cannot read yet"));
@@ -1029,7 +1177,14 @@ impl Reader<'_> {
             } else {
                 None
             };
-            parameters.push(Parameter { name, default });
+            parameters.push(Parameter {
+                name,
+                ty,
+                by_ref,
+                variadic,
+                default,
+                promote,
+            });
             self.skip_trivia();
             match self.byte(0) {
                 Some(b',') => self.bump(1),
@@ -1037,9 +1192,63 @@ impl Reader<'_> {
                     self.bump(1);
                     return Ok(parameters);
                 }
+                Some(b'{') => {
+                    return Err(
+                        self.trouble("a property accessor list this compiler cannot read yet")
+                    );
+                }
                 _ => return Err(self.trouble("a parameter list nothing closes")),
             }
         }
+    }
+
+    /// php's `optional_parameter_modifiers`: the visibility and
+    /// `readonly` that promote a constructor's parameter to a property,
+    /// none where no modifier stands here. A second visibility is php's
+    /// own words from `zend_add_member_modifier`, and `public(set)`, the
+    /// asymmetric visibility, is refused as not yet read.
+    fn parameter_modifiers(&mut self) -> Result<Option<Promoted>, Trouble> {
+        let mut visibility = None;
+        let mut is_readonly = false;
+        loop {
+            self.skip_trivia();
+            let seen = if self.word_ahead(b"public") {
+                Some((Visibility::Public, 6))
+            } else if self.word_ahead(b"protected") {
+                Some((Visibility::Protected, 9))
+            } else if self.word_ahead(b"private") {
+                Some((Visibility::Private, 7))
+            } else {
+                None
+            };
+            if let Some((seen, len)) = seen {
+                if visibility.is_some() {
+                    return Err(Trouble {
+                        level: Level::CompileError,
+                        what: String::from("Multiple access type modifiers are not allowed"),
+                        line: self.line,
+                    });
+                }
+                self.bump(len);
+                if self.byte(0) == Some(b'(') {
+                    return Err(
+                        self.trouble("an asymmetric visibility this compiler cannot read yet")
+                    );
+                }
+                visibility = Some(seen);
+                continue;
+            }
+            if self.word_ahead(b"readonly") {
+                self.bump(8);
+                is_readonly = true;
+                continue;
+            }
+            break;
+        }
+        Ok((visibility.is_some() || is_readonly).then(|| Promoted {
+            visibility: visibility.unwrap_or_default(),
+            is_readonly,
+        }))
     }
 
     /// `const A = 1, B = 2;` with the group's modifiers already read:

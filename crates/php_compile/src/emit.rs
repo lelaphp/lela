@@ -98,7 +98,7 @@ use php_heap::{
 };
 use php_unit::decl::{
     ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr, EnumBacking,
-    FunctionDecl, MethodDecl, Name, Parameter, PropertyDecl, Visibility,
+    FunctionDecl, MethodDecl, Name, Parameter, PropertyDecl, Type, Visibility,
 };
 use php_unit::{
     Diagnostic, FramelessEntry, Level, MethodBody, OpArray, Opcode, OperandKind, Opline, OplineIdx,
@@ -115,6 +115,21 @@ use crate::{CompileError, Options, StackLimit};
 /// `extended_value` of a `FETCH_*` by name that is no auto-global, which
 /// the dump prints as `(local)`.
 const FETCH_LOCAL: u32 = 1 << 2;
+
+/// `IS_VOID` (`Z/Zend/zend_types.h:637`), the type code `void` carries
+/// in a declared type's mask.
+const VOID_CODE: u8 = 14;
+
+/// `IS_NEVER` (`Z/Zend/zend_types.h:640`).
+const NEVER_CODE: u8 = 17;
+
+/// `ZEND_RETURNS_FUNCTION` (`Z/Zend/zend_compile.h:1198`), on a
+/// `RETURN_BY_REF` returning what a call returned.
+const RETURNS_FUNCTION: u32 = 1 << 0;
+
+/// `ZEND_RETURNS_VALUE` (`Z/Zend/zend_compile.h:1199`), on a
+/// `RETURN_BY_REF` returning what is no variable.
+const RETURNS_VALUE: u32 = 1 << 1;
 
 /// `sizeof(zval)`, sixteen bytes on php's every target, which
 /// `zend_compile_rope_finalize` divides a rope's string pointers into
@@ -154,6 +169,15 @@ pub(crate) struct Emit<'a> {
     /// an instance method's, whose `$this` is the frame's own and needs
     /// no `FETCH_THIS` as a receiver.
     this_in_scope: bool,
+    /// `CG(active_op_array)->arg_info[-1]` under `ZEND_ACC_HAS_RETURN_TYPE`:
+    /// the return type written after the parameters, which every
+    /// `return` in the body is checked against, and none where the
+    /// function declares one.
+    return_type: Option<Type>,
+    /// `ZEND_ACC_RETURN_REFERENCE`: whether the op array being compiled
+    /// was written `function &f()`, which makes every `return` in it a
+    /// `RETURN_BY_REF`.
+    returns_by_ref: bool,
     /// How many statement lists stand open: one inside the file's own,
     /// which is where `zend_compile_top_stmt` binds a function at compile
     /// time; more inside a block, a loop or a body.
@@ -348,6 +372,8 @@ pub(crate) fn unit(
         active_class: None,
         active_function: None,
         this_in_scope: false,
+        return_type: None,
+        returns_by_ref: false,
         depth: 0,
         active_property: None,
         in_jmp_frameless_branch: false,
@@ -403,6 +429,8 @@ struct Saved {
     breaks: Vec<Pending>,
     active_function: Option<Vec<u8>>,
     this_in_scope: bool,
+    return_type: Option<Type>,
+    returns_by_ref: bool,
 }
 
 /// Design §5.7's assertion over one op array, before it is a unit:
@@ -676,6 +704,61 @@ impl Emit<'_> {
         Ok(())
     }
 
+    /// `zend_declare_typed_property` for each promoted parameter of a
+    /// constructor (`zend_compile_params`): the property carries the
+    /// parameter's visibility, its `readonly` bit and its declared type,
+    /// and no explicit default, which for a typed one is uninitialized
+    /// and for an untyped one the implicit `null`. A name the class
+    /// already declares is php's `Cannot redeclare C::$p`, and a
+    /// `readonly` promotion with no type is php's own refusal.
+    fn promoted_properties(
+        &mut self,
+        class: usize,
+        class_name: &[u8],
+        function: &Function,
+    ) -> Result<(), CompileError> {
+        for parameter in &function.parameters {
+            let Some(promoted) = parameter.promote else {
+                continue;
+            };
+            if self
+                .classes
+                .get(class)
+                .is_some_and(|decl| decl.properties.iter().any(|p| *p.name.0 == *parameter.name))
+            {
+                return Err(self.compile_error(format!(
+                    "Cannot redeclare {}::${}",
+                    String::from_utf8_lossy(class_name),
+                    String::from_utf8_lossy(&parameter.name)
+                )));
+            }
+            if promoted.is_readonly && parameter.ty.is_none() {
+                return Err(self.compile_error(format!(
+                    "Readonly property {}::${} must have type",
+                    String::from_utf8_lossy(class_name),
+                    String::from_utf8_lossy(&parameter.name)
+                )));
+            }
+            let default = parameter.ty.is_none().then_some(ConstExpr::Null);
+            let Some(decl) = self.classes.get_mut(class) else {
+                return Err(
+                    self.fatal("InternalError: a promoted property of a class the unit has not")
+                );
+            };
+            decl.properties.push(PropertyDecl {
+                name: Name(parameter.name.clone().into_boxed_slice()),
+                visibility: promoted.visibility,
+                is_instance: true,
+                is_readonly: promoted.is_readonly,
+                ty: parameter.ty.clone(),
+                default,
+                attributes: Vec::new(),
+                doc_comment: None,
+            });
+        }
+        Ok(())
+    }
+
     /// `zend_compile_func_decl` for a method of the class being
     /// compiled, at `class` in the unit's classes: the body compiles to
     /// an op array of its own, and the declaration goes into the class's
@@ -704,6 +787,7 @@ impl Emit<'_> {
         }
         let (function, body) =
             self.body(&method.function, &name, Some(&class_name), method.is_static)?;
+        self.promoted_properties(class, &class_name, &method.function)?;
         let Some(decl) = self.classes.get_mut(class) else {
             return Err(self.fatal("InternalError: a method of a class the unit has not"));
         };
@@ -762,78 +846,28 @@ impl Emit<'_> {
     ) -> Result<(FunctionDecl, OpArray), CompileError> {
         let line = function.line;
         self.line = line;
-        let mut parameters = Vec::with_capacity(function.parameters.len());
-        for (at, parameter) in function.parameters.iter().enumerate() {
-            let number = u32::try_from(at).unwrap_or(u32::MAX);
-            let cv = self.lookup_cv(&parameter.name);
-            if cv != number {
-                return Err(self.compile_error(format!(
-                    "Redefinition of parameter ${}",
-                    String::from_utf8_lossy(&parameter.name)
-                )));
-            }
-            let default = if let Some(expr) = &parameter.default {
-                {
-                    // `zend_compile_params` folds a default under
-                    // `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`,
-                    // so one naming a constant stays an
-                    // `IS_CONSTANT_AST` literal for the engine and for
-                    // Reflection, which this table has no zval for yet.
-                    if names_a_constant(expr) {
-                        return Err(self.fatal(
-                            "a parameter default naming a constant this compiler cannot read yet",
-                        ));
-                    }
-                    let Some(folded) = self.constant_of(expr)? else {
-                        return Err(self.fatal("a parameter default this compiler cannot read yet"));
-                    };
-                    let slot = self.constant(folded);
-                    self.push(Opline {
-                        opcode: Opcode::RecvInit,
-                        op1: number.saturating_add(1),
-                        op2_type: OperandKind::Const,
-                        op2: slot,
-                        out_type: OperandKind::Cv,
-                        out: cv,
-                        ..Opline::default()
-                    });
-                    Some(self.const_expr(expr)?)
-                }
-            } else {
-                self.push(Opline {
-                    opcode: Opcode::Recv,
-                    op1: number.saturating_add(1),
-                    out_type: OperandKind::Cv,
-                    out: cv,
-                    ..Opline::default()
-                });
-                None
-            };
-            parameters.push(Parameter {
-                name: Name(parameter.name.clone().into_boxed_slice()),
-                ty: None,
-                by_ref: false,
-                variadic: false,
-                default,
-                attributes: Vec::new(),
-            });
-        }
+        self.returns_by_ref = function.by_ref;
+        self.return_type.clone_from(&function.return_type);
+        let is_ctor = scope.is_some() && name.eq_ignore_ascii_case(b"__construct");
+        let parameters = self.recv_prologue(function, is_ctor)?;
         // The entry safepoint is the opline after the prologue (design
-        // §5.7), which `begin_body` numbered zero at opline zero.
+        // §5.7), which `begin_body` numbered zero at opline zero; the
+        // assignments a promoted parameter makes stand after it, as
+        // `zend_compile_params` emits them after every `RECV*`.
         let entry = self.next();
         if let Some(first) = self.safepoints.first_mut() {
             *first = OplineIdx(entry);
         }
+        self.promotions(function)?;
         self.statements(&function.body)?;
         self.line = function.end_line;
         let body = self.finish(false, line, function.end_line)?;
-        let _ = scope;
         Ok((
             FunctionDecl {
                 name: Name(name.into()),
                 parameters,
-                return_type: None,
-                returns_by_ref: false,
+                return_type: function.return_type.clone(),
+                returns_by_ref: function.by_ref,
                 attributes: Vec::new(),
                 doc_comment: function.doc_comment.clone().map(Vec::into_boxed_slice),
                 file: self.filename.clone(),
@@ -844,12 +878,194 @@ impl Emit<'_> {
         ))
     }
 
+    /// `zend_compile_params`' first pass, the `RECV*` prologue: one
+    /// opline per declared parameter into its CV, which `lookup_cv` must
+    /// find as the next one (`Redefinition of parameter $x` where it does
+    /// not). `RECV_VARIADIC` for a `...`, `RECV_INIT` with the default
+    /// folded into a constant, and `RECV` otherwise, carrying the pure
+    /// mask of the declared type in `op2` so the handler's first test is
+    /// one `&`, `MAY_BE_ANY` where no type is written. A default that
+    /// folds to no constant, which php keeps as an `IS_CONSTANT_AST`, is
+    /// not read yet.
+    ///
+    /// Two rewrites php makes on the way: a default of `null` under a
+    /// written type is its PHP 5 spelling of `?T`
+    /// (`zend_compile_typename_ex`'s `force_nullable`), and an optional
+    /// parameter written before a required one becomes a required one
+    /// with no default whatever it was written as, which is why the last
+    /// required parameter is found before any opline is emitted.
+    fn recv_prologue(
+        &mut self,
+        function: &Function,
+        is_ctor: bool,
+    ) -> Result<Vec<Parameter>, CompileError> {
+        let last_required = function
+            .parameters
+            .iter()
+            .rposition(|parameter| parameter.default.is_none() && !parameter.variadic);
+        let mut parameters = Vec::with_capacity(function.parameters.len());
+        let mut variadic_seen = false;
+        for (at, parameter) in function.parameters.iter().enumerate() {
+            let number = u32::try_from(at).unwrap_or(u32::MAX);
+            let cv = self.lookup_cv(&parameter.name);
+            if cv != number {
+                return Err(self.compile_error(format!(
+                    "Redefinition of parameter ${}",
+                    String::from_utf8_lossy(&parameter.name)
+                )));
+            }
+            self.parameter_refused(parameter, variadic_seen, is_ctor)?;
+            variadic_seen = parameter.variadic;
+            // `zend_compile_params` folds a default under
+            // `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`, so one
+            // naming a constant stays an `IS_CONSTANT_AST` literal for
+            // the engine and for Reflection, which this table has no
+            // zval for yet.
+            let folded = match &parameter.default {
+                Some(expr) => {
+                    if names_a_constant(expr) {
+                        return Err(self.fatal(
+                            "a parameter default naming a constant this compiler cannot read yet",
+                        ));
+                    }
+                    let Some(folded) = self.constant_of(expr)? else {
+                        return Err(self.fatal("a parameter default this compiler cannot read yet"));
+                    };
+                    Some(folded)
+                }
+                None => None,
+            };
+            let implicitly_nullable = parameter.promote.is_none()
+                && folded
+                    .as_ref()
+                    .is_some_and(|zval| zval.kind() == ZvalType::Null)
+                && parameter
+                    .ty
+                    .as_ref()
+                    .is_some_and(|ty| !ty.contains_code(ZvalType::Null as u8));
+            let ty = match (&parameter.ty, implicitly_nullable) {
+                (Some(ty), true) => Some(Type::Nullable(Box::new(ty.clone()))),
+                (ty, _) => ty.clone(),
+            };
+            let keeps_default = !parameter.variadic
+                && (implicitly_nullable || last_required.is_none_or(|last| at > last));
+            let default = if let (Some(folded), true) = (folded, keeps_default) {
+                let slot = self.constant(folded);
+                self.push(Opline {
+                    opcode: Opcode::RecvInit,
+                    op1: number.saturating_add(1),
+                    op2_type: OperandKind::Const,
+                    op2: slot,
+                    out_type: OperandKind::Cv,
+                    out: cv,
+                    ..Opline::default()
+                });
+                parameter
+                    .default
+                    .as_ref()
+                    .map(|expr| self.const_expr(expr))
+                    .transpose()?
+            } else {
+                self.push(Opline {
+                    opcode: if parameter.variadic {
+                        Opcode::RecvVariadic
+                    } else {
+                        Opcode::Recv
+                    },
+                    op1: number.saturating_add(1),
+                    op2: if parameter.variadic {
+                        0
+                    } else {
+                        ty.as_ref().map_or(Type::MAY_BE_ANY, Type::mask)
+                    },
+                    out_type: OperandKind::Cv,
+                    out: cv,
+                    ..Opline::default()
+                });
+                None
+            };
+            parameters.push(Parameter {
+                name: Name(parameter.name.clone().into_boxed_slice()),
+                ty,
+                by_ref: parameter.by_ref,
+                variadic: parameter.variadic,
+                default,
+                attributes: Vec::new(),
+            });
+        }
+        Ok(parameters)
+    }
+
+    /// What `zend_compile_params` refuses about one parameter, in php's
+    /// words: a second variadic, a variadic with a default, and a
+    /// promotion outside a constructor or on a variadic.
+    fn parameter_refused(
+        &self,
+        parameter: &crate::read::Parameter,
+        variadic_seen: bool,
+        is_ctor: bool,
+    ) -> Result<(), CompileError> {
+        if variadic_seen {
+            return Err(self.compile_error("Only the last parameter can be variadic"));
+        }
+        if parameter.variadic && parameter.default.is_some() {
+            return Err(self.compile_error("Variadic parameter cannot have a default value"));
+        }
+        if parameter.promote.is_some() {
+            if !is_ctor {
+                return Err(
+                    self.compile_error("Cannot declare promoted property outside a constructor")
+                );
+            }
+            if parameter.variadic {
+                return Err(self.compile_error("Cannot declare variadic promoted property"));
+            }
+        }
+        Ok(())
+    }
+
+    /// `zend_compile_params`' second pass: `$this->p = $p` for every
+    /// promoted parameter, `ASSIGN_OBJ` over the name with three cache
+    /// slots and the CV as its `OP_DATA`, or `ASSIGN_OBJ_REF` where the
+    /// parameter is by reference.
+    fn promotions(&mut self, function: &Function) -> Result<(), CompileError> {
+        for parameter in &function.parameters {
+            if parameter.promote.is_none() {
+                continue;
+            }
+            let name = self.string(&parameter.name)?;
+            let slot = self.literal(name);
+            let slots = self.cache_slots(3);
+            self.push(Opline {
+                opcode: if parameter.by_ref {
+                    Opcode::AssignObjRef
+                } else {
+                    Opcode::AssignObj
+                },
+                op2_type: OperandKind::Const,
+                op2: slot,
+                extended_value: slots,
+                ..Opline::default()
+            });
+            let cv = self.lookup_cv(&parameter.name);
+            self.push(Opline {
+                opcode: Opcode::OpData,
+                op1_type: OperandKind::Cv,
+                op1: cv,
+                ..Opline::default()
+            });
+        }
+        Ok(())
+    }
+
     /// `zend_oparray_context_begin` with a fresh op array as
     /// `CG(active_op_array)`: the state of the one being compiled set
     /// aside, and the emitter over an empty one whose entry safepoint
     /// stands at opline zero until the prologue is known.
     fn begin_body(&mut self, name: &[u8], this_in_scope: bool) -> Saved {
         Saved {
+            return_type: self.return_type.take(),
+            returns_by_ref: std::mem::take(&mut self.returns_by_ref),
             oplines: std::mem::take(&mut self.oplines),
             constants: std::mem::take(&mut self.constants),
             vars: std::mem::take(&mut self.vars),
@@ -878,6 +1094,8 @@ impl Emit<'_> {
         self.breaks = saved.breaks;
         self.active_function = saved.active_function;
         self.this_in_scope = saved.this_in_scope;
+        self.return_type = saved.return_type;
+        self.returns_by_ref = saved.returns_by_ref;
     }
 
     /// The op array the emitter holds, finished as `zend_compile` and
@@ -893,7 +1111,7 @@ impl Emit<'_> {
         line_start: u32,
         line_end: u32,
     ) -> Result<OpArray, CompileError> {
-        self.final_return(return_one);
+        self.final_return(return_one)?;
         self.resolve_breaks();
         headers_numbered(&self.oplines, &self.safepoints)?;
         swap_commutative(&mut self.oplines);
@@ -1396,19 +1614,46 @@ impl Emit<'_> {
         }
     }
 
-    /// `zend_compile_return` (`Z/Zend/zend_compile.c:5694`) in the main
-    /// op array, which has no return type and no `finally`: the value,
-    /// or the constant `null` where none is written; every open loop's
-    /// variable freed innermost first (`zend_handle_loops_and_finally`,
-    /// which takes every loop on the stack); then `RETURN` over the
-    /// value, carrying its safepoint number as [`Self::final_return`]'s
-    /// carries its own, `extended_value` zero since the main op array
-    /// returns nothing by reference.
+    /// `zend_compile_return` (`Z/Zend/zend_compile.c:5694`): the value,
+    /// or the constant `null` where none is written; the return type
+    /// check where the op array declares one
+    /// ([`Self::return_type_check`]); every open loop's variable freed
+    /// innermost first (`zend_handle_loops_and_finally`, which takes
+    /// every loop on the stack); then `RETURN` over the value, or
+    /// `RETURN_BY_REF` where the function was written `function &f`,
+    /// carrying its safepoint number as [`Self::final_return`]'s carries
+    /// its own. `extended_value` is `ZEND_RETURNS_FUNCTION` where a
+    /// by-reference return returns a call's value and `ZEND_RETURNS_VALUE`
+    /// where it returns what is no variable; zero otherwise, which is
+    /// every return of the main op array, that returns nothing by
+    /// reference.
     fn r#return(&mut self, value: Option<&Expr>) -> Result<(), CompileError> {
-        let value = match value {
+        let by_ref = self.returns_by_ref;
+        if by_ref
+            && value.is_some_and(|expr| {
+                matches!(
+                    expr,
+                    Expr::Prop { .. } | Expr::StaticProp { .. } | Expr::This
+                )
+            })
+        {
+            return Err(self.fatal(
+                "a return by reference of what is no variable this compiler cannot read yet",
+            ));
+        }
+        let extended_value = match value {
+            Some(_) if !by_ref => 0,
+            Some(Expr::Call { .. } | Expr::MethodCall { .. } | Expr::StaticCall { .. }) => {
+                RETURNS_FUNCTION
+            }
+            Some(Expr::Var(_)) | None => 0,
+            Some(_) => RETURNS_VALUE,
+        };
+        let compiled = match value {
             Some(expr) => self.expr(expr)?,
             None => Where::Constant(Zval::null()),
         };
+        let compiled = self.return_type_check(compiled, value.is_some(), false)?;
         let mut at = self.current_loop;
         while let Some(index) = at {
             let Some((var, parent)) = self.loops.get(index).map(|open| (open.var, open.parent))
@@ -1420,17 +1665,105 @@ impl Emit<'_> {
             }
             at = parent;
         }
-        let (op1_type, op1) = self.operand(value);
+        let (op1_type, op1) = self.operand(compiled);
         let at = self.next();
         let number = self.safepoint(at);
         self.push(Opline {
-            opcode: Opcode::Return,
+            opcode: if by_ref {
+                Opcode::ReturnByRef
+            } else {
+                Opcode::Return
+            },
             op1_type,
             op1,
             out: number,
+            extended_value,
             ..Opline::default()
         });
         Ok(())
+    }
+
+    /// `zend_emit_return_type_check` (`Z/Zend/zend_compile.c:2623`): the
+    /// `VERIFY_RETURN_TYPE` before a `RETURN`, where the op array
+    /// declares a return type the value is not already known to satisfy.
+    /// `void` needs no check and refuses a value in php's words; `never`
+    /// refuses a `return` written at all, and its implicit case is
+    /// [`Self::final_return`]'s `VERIFY_NEVER_TYPE`; `mixed` and a
+    /// constant of a type the declaration accepts need no check either.
+    /// What is checked reads the value in `op1`, and a constant is moved
+    /// into a temporary the opline writes, which the `RETURN` then
+    /// returns.
+    fn return_type_check(
+        &mut self,
+        value: Where,
+        written: bool,
+        implicit: bool,
+    ) -> Result<Where, CompileError> {
+        let Some(ty) = self.return_type.clone() else {
+            return Ok(value);
+        };
+        let what = if self.active_class.is_some() {
+            "method"
+        } else {
+            "function"
+        };
+        if ty.contains_code(VOID_CODE) {
+            if written {
+                return Err(self.compile_error(match value {
+                    Where::Constant(zval) if zval.kind() == ZvalType::Null => format!(
+                        "A void {what} must not return a value (did you mean \"return;\" instead of \"return null;\"?)"
+                    ),
+                    _ => format!("A void {what} must not return a value"),
+                }));
+            }
+            return Ok(value);
+        }
+        if ty.contains_code(NEVER_CODE) {
+            return Err(self.compile_error(format!("A never-returning {what} must not return")));
+        }
+        if !written && !implicit {
+            return Err(self.compile_error(
+                if ty.contains_code(ZvalType::Null as u8) {
+                    format!(
+                        "A {what} with return type must return a value (did you mean \"return null;\" instead of \"return;\"?)"
+                    )
+                } else {
+                    format!("A {what} with return type must return a value")
+                },
+            ));
+        }
+        if written && ty.mask() & Type::MAY_BE_ANY == Type::MAY_BE_ANY {
+            return Ok(value);
+        }
+        if let (true, Where::Constant(zval)) = (written, value)
+            && ty.contains_code(zval.kind() as u8)
+        {
+            return Ok(value);
+        }
+        let (op1_type, op1) = if written {
+            self.operand(value)
+        } else {
+            (OperandKind::Unused, 0)
+        };
+        let constant = op1_type == OperandKind::Const;
+        let out = if constant { self.temporary() } else { 0 };
+        self.push(Opline {
+            opcode: Opcode::VerifyReturnType,
+            op1_type,
+            op1,
+            out_type: if constant {
+                OperandKind::Tmp
+            } else {
+                OperandKind::Unused
+            },
+            out,
+            ..Opline::default()
+        });
+        Ok(if constant {
+            Where::Temporary(out)
+        } else {
+            value
+        })
     }
 
     /// `zend_begin_loop`: one more element of `brk_cont_array`, the
@@ -4141,10 +4474,25 @@ impl Emit<'_> {
         Where::Returned(out)
     }
 
-    /// `zend_emit_final_return`: the main op array returns the constant
-    /// `1` and a function `null`, `extended_value` at -1 on both, and
-    /// the return carries its safepoint number.
-    fn final_return(&mut self, return_one: bool) {
+    /// `zend_emit_final_return` (`Z/Zend/zend_compile.c:2688`): a
+    /// return type of `never` is `VERIFY_NEVER_TYPE` and nothing after
+    /// it; every other declared one is the implicit return type check
+    /// ([`Self::return_type_check`] with no value). Then the main op
+    /// array returns the constant `1` and a function `null`,
+    /// `extended_value` at -1 on both, by reference where the function
+    /// was written `function &f`, and the return carries its safepoint
+    /// number.
+    fn final_return(&mut self, return_one: bool) -> Result<(), CompileError> {
+        if let Some(ty) = self.return_type.clone() {
+            if ty.contains_code(NEVER_CODE) {
+                self.push(Opline {
+                    opcode: Opcode::VerifyNeverType,
+                    ..Opline::default()
+                });
+                return Ok(());
+            }
+            self.return_type_check(Where::Constant(Zval::null()), false, true)?;
+        }
         let value = self.constant(if return_one {
             Zval::long(1)
         } else {
@@ -4153,13 +4501,18 @@ impl Emit<'_> {
         let at = self.next();
         let number = self.safepoint(at);
         self.push(Opline {
-            opcode: Opcode::Return,
+            opcode: if self.returns_by_ref {
+                Opcode::ReturnByRef
+            } else {
+                Opcode::Return
+            },
             op1_type: OperandKind::Const,
             op1: value,
             out: number,
             extended_value: u32::MAX,
             ..Opline::default()
         });
+        Ok(())
     }
 }
 
@@ -4604,6 +4957,8 @@ mod tests {
             active_class: None,
             active_function: None,
             this_in_scope: false,
+            return_type: None,
+            returns_by_ref: false,
             depth: 0,
             active_property: None,
             in_jmp_frameless_branch: false,

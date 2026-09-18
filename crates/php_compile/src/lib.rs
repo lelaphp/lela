@@ -3629,11 +3629,12 @@ mod tests {
             not_yet("a class member this compiler cannot read yet", 2)
         );
         assert_eq!(
-            refused(b"<?php\nclass M { function f(): int {} }"),
-            not_yet(
-                "a function with a return type this compiler cannot read yet",
-                2
-            )
+            refused(b"<?php\nclass M { function f(): (A&B)|C {} }"),
+            not_yet("a DNF type this compiler cannot read yet", 2)
+        );
+        assert_eq!(
+            refused(b"<?php\nclass M { function f(public int $p) {} }"),
+            compile_error("Cannot declare promoted property outside a constructor", 2)
         );
         assert_eq!(
             refused(b"<?php\nclass M { function f() {} function F() {} }"),
@@ -3808,6 +3809,109 @@ echo f(1), C::s(), $o->m(1), $o->p;
             vec![true, false, true]
         );
         assert_eq!(unit.methods.len(), 3);
+    }
+
+    /// `zend_compile_params` and `zend_compile_return_type` as the
+    /// oracle at 8.5.9 dumps them under
+    /// `opcache.opt_debug_level=0x10000` (#385): a typed parameter is a
+    /// `RECV` still, one with a default a `RECV_INIT`, and a `...` a
+    /// `RECV_VARIADIC` numbered after the rest and left out of `args`;
+    /// a declared return type is a `VERIFY_RETURN_TYPE` before each
+    /// `RETURN` that needs one and before php's implicit final return,
+    /// `void` needs none, and `function &g` returns by reference, whose
+    /// implicit return carries `-1` and prints `(function)`; a promoted
+    /// parameter is the `ASSIGN_OBJ`/`OP_DATA` pair after the prologue.
+    #[test]
+    fn typed_parameters_and_a_return_type_compile_to_php_s_op_arrays() {
+        let source: &[u8] = b"<?php
+function f(int $a, ?string $b = null, float ...$rest): int {
+    return $a;
+}
+function &g(array &$x) { return $x; }
+function h(): void {}
+class C {
+    public function __construct(public int $p, protected readonly string $q = \"s\") {}
+}
+";
+        let header = |name: &str, lines: u32, args: u32, vars: u32, tmps: u32, span: &str| {
+            format!(
+                "\n{name}:\n     ; (lines={lines}, args={args}, vars={vars}, tmps={tmps})\n\
+                 \x20    ; (before optimizer)\n     ; :{span}\n     ; return  [] RANGE[0..0]\n"
+            )
+        };
+        let expected = format!(
+            "{}{}{}{}{}{}{}{}{}{}",
+            header("$_main", 1, 0, 0, 0, "1-10"),
+            "0000 RETURN int(1)\n",
+            header("f", 7, 2, 3, 0, "2-4"),
+            "0000 CV0($a) = RECV 1\n\
+             0001 CV1($b) = RECV_INIT 2 null\n\
+             0002 CV2($rest) = RECV_VARIADIC 3\n\
+             0003 VERIFY_RETURN_TYPE CV0($a)\n\
+             0004 RETURN CV0($a)\n\
+             0005 VERIFY_RETURN_TYPE\n\
+             0006 RETURN null\n",
+            header("g", 3, 1, 1, 0, "5-5"),
+            "0000 CV0($x) = RECV 1\n\
+             0001 RETURN_BY_REF CV0($x)\n\
+             0002 RETURN_BY_REF (function) null\n",
+            header("h", 1, 0, 0, 0, "6-6"),
+            "0000 RETURN null\n",
+            header("C::__construct", 7, 2, 2, 0, "8-8"),
+            "0000 CV0($p) = RECV 1\n\
+             0001 CV1($q) = RECV_INIT 2 string(\"s\")\n\
+             0002 ASSIGN_OBJ THIS string(\"p\")\n\
+             0003 OP_DATA CV0($p)\n\
+             0004 ASSIGN_OBJ THIS string(\"q\")\n\
+             0005 OP_DATA CV1($q)\n\
+             0006 RETURN null\n",
+        );
+        assert_eq!(dump_of(source), expected);
+        let (unit, _strings) = unit_and_strings(source);
+        let f = &unit.functions[0].0;
+        assert_eq!(f.return_type, Some(Type::Int));
+        assert!(!f.returns_by_ref);
+        assert_eq!(
+            f.parameters
+                .iter()
+                .map(|p| (p.ty.clone(), p.by_ref, p.variadic, p.default.is_some()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Some(Type::Int), false, false, false),
+                (
+                    Some(Type::Nullable(Box::new(Type::String))),
+                    false,
+                    false,
+                    true
+                ),
+                (Some(Type::Float), false, true, false),
+            ],
+            "the implicit `?string` of a default of null, and the variadic's own type"
+        );
+        let g = &unit.functions[1].0;
+        assert!(g.returns_by_ref, "`function &g` returns by reference");
+        assert!(g.parameters[0].by_ref, "`&$x` is taken by reference");
+        assert_eq!(
+            unit.functions[0].1.safepoints.first(),
+            Some(&OplineIdx(3)),
+            "the entry safepoint stands after the whole RECV prologue"
+        );
+        assert_eq!(
+            unit.classes[0]
+                .properties
+                .iter()
+                .map(|p| (
+                    String::from_utf8_lossy(&p.name.0).into_owned(),
+                    p.visibility,
+                    p.is_readonly
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("p".to_owned(), Visibility::Public, false),
+                ("q".to_owned(), Visibility::Protected, true),
+            ],
+            "a promoted parameter is a declared property of the class"
+        );
     }
 
     /// The two `INIT_*_METHOD_CALL`s, read as
