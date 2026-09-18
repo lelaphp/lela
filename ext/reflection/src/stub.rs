@@ -6253,15 +6253,15 @@ fn reflection_extension() -> Declared {
             ),
             (
                 tentative(method(b"getVersion", &[], Some(nullable(Type::String)))),
-                unbuilt as Entry,
+                super::reflection_extension_get_version as Entry,
             ),
             (
                 tentative(method(b"getFunctions", &[], Some(Type::Array))),
-                unbuilt as Entry,
+                super::reflection_extension_get_functions as Entry,
             ),
             (
                 tentative(method(b"getConstants", &[], Some(Type::Array))),
-                unbuilt as Entry,
+                super::reflection_extension_get_constants as Entry,
             ),
             (
                 tentative(method(b"getINIEntries", &[], Some(Type::Array))),

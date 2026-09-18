@@ -777,6 +777,100 @@ fn reflection_class_factory(req: &mut Request, class: ClassId) -> Result<PhpObje
     Ok(object)
 }
 
+/// `ReflectionExtension::getVersion()`: `module->version`, and `null`
+/// for `NO_VERSION_YET`. Every extension compiled in here carries
+/// `PHP_VERSION`, as `PHP_CTYPE_VERSION` and its kin do, which is what
+/// `_extension_string`'s header prints.
+///
+/// ```php
+/// var_dump((new ReflectionExtension('json'))->getVersion());
+/// ```
+/// ```expect
+/// string(5) "8.5.9"
+/// ```
+fn reflection_extension_get_version(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    this_extension(req)?;
+    string_value(req, PHP_VERSION.as_bytes())
+}
+
+/// `ReflectionExtension::getFunctions()`: one `ReflectionFunction` per
+/// native the extension declared, keyed by
+/// `fptr->common.function_name`, which for a native is the lowered
+/// name php registered it under.
+///
+/// ```php
+/// var_dump((new ReflectionExtension('json'))->getFunctions());
+/// ```
+/// ```expect
+/// array(5) {
+///   ["json_encode"]=>
+///   object(ReflectionFunction)#2 (1) {
+///     ["name"]=>
+///     string(11) "json_encode"
+///   }
+///   ["json_decode"]=>
+///   object(ReflectionFunction)#3 (1) {
+///     ["name"]=>
+///     string(11) "json_decode"
+///   }
+///   ["json_validate"]=>
+///   object(ReflectionFunction)#4 (1) {
+///     ["name"]=>
+///     string(13) "json_validate"
+///   }
+///   ["json_last_error"]=>
+///   object(ReflectionFunction)#5 (1) {
+///     ["name"]=>
+///     string(15) "json_last_error"
+///   }
+///   ["json_last_error_msg"]=>
+///   object(ReflectionFunction)#6 (1) {
+///     ["name"]=>
+///     string(19) "json_last_error_msg"
+///   }
+/// }
+/// ```
+fn reflection_extension_get_functions(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let extension = this_extension(req)?;
+    let reflector = class_named(req, b"ReflectionFunction")?;
+    let mut functions = PhpArray::new(req)?;
+    for function in req.extension_functions(extension) {
+        let Some(name) = req.function_decl(function).map(|decl| decl.name.0.to_vec()) else {
+            continue;
+        };
+        let object = new_object(req, reflector)?;
+        set_name(req, object, &name)?;
+        let key = Key::Str(PhpString::new(req, &name)?);
+        functions.set(req, key, object.as_value())?;
+    }
+    Ok(Value::array(functions))
+}
+
+/// `ReflectionExtension::getConstants()`: the constants the extension
+/// declared, keyed by name, each value the constant's.
+///
+/// ```php
+/// var_dump((new ReflectionExtension('ctype'))->getConstants());
+/// ```
+/// ```expect
+/// array(0) {
+/// }
+/// ```
+fn reflection_extension_get_constants(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let extension = this_extension(req)?;
+    let mut constants = PhpArray::new(req)?;
+    for declared in req.extension_constants(extension) {
+        let name = declared.0.to_vec();
+        let value = constant(req, &name)?.unwrap_or_default();
+        let key = Key::Str(PhpString::new(req, &name)?);
+        constants.set(req, key, value)?;
+    }
+    Ok(Value::array(constants))
+}
+
 /// `ReflectionExtension::getDependencies()`: `module->deps` walked into
 /// an array keyed by the other extension's name, each value the kind,
 /// `Required`, `Conflicts` or `Optional`, then the row's `rel` and
