@@ -693,6 +693,57 @@ fn defined(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// ```
 ///
+/// A value that holds itself is php's recursion guard, not an
+/// unbounded walk: `php_var_dump` marks the object it is inside and
+/// prints `*RECURSION*` where the mark is already set, so the cycle
+/// `ext/json`'s `004.phpt` opens with is one line and not a stack
+/// overflow.
+///
+/// ```php
+/// $a = new stdClass; $a->prop = $a; var_dump($a);
+/// ```
+/// ```expect
+/// object(stdClass)#1 (1) {
+///   ["prop"]=>
+///   *RECURSION*
+/// }
+/// ```
+///
+/// The mark is cleared on the way out, so the second of two objects
+/// reached side by side is printed in full and only a second visit down
+/// one path is `*RECURSION*`; an array the walk passes through carries
+/// the same guard on its own entry.
+///
+/// ```php
+/// $a = new stdClass; $b = new stdClass; $b->v = 1; $a->prop = $a; $a->x = $b; $a->y = $b; var_dump($a);
+/// $o = new stdClass; $o->a = [$o, 1]; var_dump($o);
+/// ```
+/// ```expect
+/// object(stdClass)#1 (3) {
+///   ["prop"]=>
+///   *RECURSION*
+///   ["x"]=>
+///   object(stdClass)#2 (1) {
+///     ["v"]=>
+///     int(1)
+///   }
+///   ["y"]=>
+///   object(stdClass)#2 (1) {
+///     ["v"]=>
+///     int(1)
+///   }
+/// }
+/// object(stdClass)#3 (1) {
+///   ["a"]=>
+///   array(2) {
+///     [0]=>
+///     *RECURSION*
+///     [1]=>
+///     int(1)
+///   }
+/// }
+/// ```
+///
 /// A throwable is the same arm over the seven properties
 /// `zend_register_default_exception` declares on `Exception` and
 /// `Error`, the constructor's `message` and `code` in their slots, the
@@ -739,6 +790,15 @@ fn var_dump(req: &mut Request) -> Result<Value, Thrown> {
 /// `level - 1` blanks before it past the first level, and an array's
 /// elements each through `php_array_element_dump`, the key at `level + 1`
 /// and the value at `level + 2`.
+///
+/// The array and the object arms carry php's recursion guard: the walk
+/// marks what it is inside with `Z_PROTECT_RECURSION_P` and clears the
+/// mark on the way out, and a value already marked is `*RECURSION*` in
+/// place of its contents, printed after the indent this level already
+/// wrote and before the `&` a reference would have carried, since php
+/// returns there ahead of `COMMON`. Without it a value that holds
+/// itself is unbounded recursion, which is a panic reaching a request
+/// (design §10).
 fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) {
     let value = &value.deref();
     if level > 1 {
@@ -757,6 +817,15 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) {
         out.extend_from_slice(s.as_bytes());
         out.extend_from_slice(b"\"\n");
     } else if let Some(array) = value.as_array() {
+        // `GC_IS_RECURSIVE` and `GC_PROTECT_RECURSION`, which php takes
+        // only where the array is refcounted; an immutable one is marked
+        // by neither, here and there, since nothing can make one hold
+        // itself.
+        if array.is_recursive() {
+            out.extend_from_slice(b"*RECURSION*\n");
+            return;
+        }
+        array.protect();
         out.extend_from_slice(format!("array({}) {{\n", array.len()).as_bytes());
         for (key, element) in array {
             out.extend(std::iter::repeat_n(b' ', level + 1));
@@ -770,6 +839,7 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) {
             }
             dump(req, out, &element, level + 2);
         }
+        array.unprotect();
         if level > 1 {
             out.extend(std::iter::repeat_n(b' ', level - 1));
         }
@@ -788,12 +858,22 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) {
 /// typed one nothing has written as `uninitialized(type)`, which is in
 /// the listing and not in the count (`zend_array_count` over a table
 /// with an empty `IS_INDIRECT`); then the dynamic ones.
+///
+/// php marks the object before it reads its properties and clears the
+/// mark after the last one, so an object reached twice down one path is
+/// `*RECURSION*` the second time and an object reached twice side by
+/// side is printed in full both times.
 fn dump_object(
     req: &mut Request,
     out: &mut Vec<u8>,
     object: crate::api::values::PhpObject,
     level: usize,
 ) {
+    if object.heap().is_recursive() {
+        out.extend_from_slice(b"*RECURSION*\n");
+        return;
+    }
+    object.heap().protect();
     let class = object.class();
     let declared: Vec<(Vec<u8>, Visibility, Option<Type>)> = req
         .class_decl(class)
@@ -858,6 +938,7 @@ fn dump_object(
             out.extend_from_slice(format!("uninitialized({ty})\n").as_bytes());
         }
     }
+    object.heap().unprotect();
     if level > 1 {
         out.extend(std::iter::repeat_n(b' ', level - 1));
     }
