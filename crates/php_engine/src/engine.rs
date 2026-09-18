@@ -644,6 +644,30 @@ impl Engine {
     /// Fatal error: The (unset) cast is no longer supported in %s on line 3
     /// ```
     pub fn serve(&self, description: RequestDescription, sink: &mut dyn OutputSink) -> Observables {
+        self.transaction(description, sink, true)
+    }
+
+    /// `php_lint_script` under the CLI's `-l` (`Z/main/main.c:2779-2798`,
+    /// `Z/sapi/cli/php_cli.c:955-960`): the request started, the program
+    /// compiled as [`Engine::serve`] compiles it, what the compiler raised
+    /// rendered where `serve` renders it, and the request shut down with
+    /// no frame pushed. The exit is `serve`'s for a compile that was
+    /// refused, php's status for a parse error, and 0 for one that was
+    /// not, whatever the compiler warned of; the two sentences `do_cli`
+    /// prints around it are the host's, read off that status.
+    pub fn lint(&self, description: RequestDescription, sink: &mut dyn OutputSink) -> Observables {
+        self.transaction(description, sink, false)
+    }
+
+    /// The one transaction behind [`Engine::serve`] and [`Engine::lint`]:
+    /// `run` says whether the compiled unit is served on a frame or, as
+    /// `php_lint_script` does, dropped once compiled.
+    fn transaction(
+        &self,
+        description: RequestDescription,
+        sink: &mut dyn OutputSink,
+        run: bool,
+    ) -> Observables {
         let source = description.source.clone();
         let script = description
             .script_name
@@ -678,7 +702,10 @@ impl Engine {
             None => self.shared.cached(&script, req.stack_limit()),
         };
         match compiled {
-            Some(Ok(unit)) => serve_unit(&mut req, &unit, self.shared.entry),
+            Some(Ok(unit)) if run => serve_unit(&mut req, &unit, self.shared.entry),
+            // `php_lint_script` compiles and drops the op array, and what
+            // the compiler warned of it rendered as it compiled.
+            Some(Ok(unit)) => note_compiled(&mut req, &unit),
             // `php_error_cb` renders it where it renders every
             // diagnostic, at the level the compiler refused at, and the
             // request ends before a frame is pushed.
@@ -776,10 +803,7 @@ fn compile(
     php_compile::compile_source(source, &options, strings).map(Arc::new)
 }
 
-/// The unit's main op array served on a fresh entry frame; the loop's
-/// fatal, if any, ends the request.
-///
-/// What compiling the unit raised is raised first, each through the
+/// What compiling the unit raised, raised now, each through the
 /// path a runtime diagnostic takes and at the unit's own file and the
 /// compiler's line, which is `zend_emit_recorded_errors_ex` over a
 /// cached `persistent_script`'s `warnings`
@@ -827,7 +851,7 @@ fn compile(
 /// Deprecated: Non-canonical cast (boolean) is deprecated, use the (bool) cast instead in %s on line 2
 /// 7|7|7 apples|1
 /// ```
-fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
+fn note_compiled(req: &mut Request, unit: &Arc<Unit>) {
     for raised in &unit.diagnostics {
         req.note_error_in(
             raised.level,
@@ -836,6 +860,12 @@ fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
             raised.line,
         );
     }
+}
+
+/// The unit's main op array served on a fresh entry frame, what it
+/// compiled to raised first; the loop's fatal, if any, ends the request.
+fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
+    note_compiled(req, unit);
     if !req.declare_classes(unit) {
         return;
     }
