@@ -132,6 +132,19 @@ fn repository(name: &str, registry: &Path) -> Tree {
     root
 }
 
+/// Mark one crate's `[[crate]]` row `porting = true` in the scratch
+/// repository's manifest, the key a person adds through `xtask steer`
+/// (harness §4.5 condition 1, §11). The tracked manifest is the
+/// workspace's, copied in by `repository`, and a test writes its own row
+/// rather than standing on what the tracked file happens to carry.
+fn mark_porting(root: &Path, name: &str) {
+    let text = std::fs::read_to_string(root.join("seams.toml")).unwrap();
+    let row = format!("name = \"{name}\"\n");
+    assert_eq!(text.matches(&row).count(), 1, "{name} names one row");
+    let marked = text.replace(&row, &format!("{row}porting = true\n"));
+    std::fs::write(root.join("seams.toml"), marked).unwrap();
+}
+
 fn judge(root: &Path) -> Verdict {
     judge_since(root, Some("HEAD"))
 }
@@ -655,6 +668,117 @@ fn a_default_extension_with_a_red_ri_crosscheck_reading_is_unmet_and_with_both_g
         verdict.unmet,
         ["crosscheck: no reading for ext/pcre/ri"],
         "{verdict:#?}"
+    );
+}
+
+/// A crate the manifest marks `porting = true` has its `crosscheck` and
+/// its `phpt` readings read as the port's meter and not as a condition of
+/// done (harness §4.5 condition 1, ledger 47; #383): a touched extension
+/// with both red is met, the same extension without the key is unmet at
+/// all three scopes, and the key excuses those two readings alone — a red
+/// `budget` of the marked crate is unmet as it is for any other. The
+/// readings are still asked for: one missing is unmet whatever the key
+/// says, so the meter is taken every time and `xtask status` renders it.
+#[test]
+fn a_porting_crates_crosscheck_and_phpt_readings_are_the_ports_meter() {
+    let root = scratch("porting");
+    write(
+        &root,
+        "ext/standard/Cargo.toml",
+        "[package]\nname = \"php_ext_standard\"\n",
+    );
+    write(&root, "ext/standard/src/lib.rs", "pub fn str_repeat() {}\n");
+    mark_porting(&root, "ext/standard");
+    commit(&root, "ext/standard, its port partial");
+    assert!(
+        Manifest::load(&root)
+            .unwrap()
+            .crate_named("ext/standard")
+            .unwrap()
+            .porting
+    );
+
+    // The diff: one line of the marked crate, with every reading it is
+    // asked for fresh and passing.
+    write(
+        &root,
+        "ext/standard/src/lib.rs",
+        "pub fn str_repeat() {}\npub fn implode() {}\n",
+    );
+    let store = Store::of_workspace(&root);
+    record_asked(&store, &root, "ext/standard");
+    assert!(judge(&root).met(), "{:#?}", judge(&root));
+
+    // The port's two lanes, red: the rendering is not the oracle's and
+    // 753 of the subset fail. Both are met, and the numbers stand.
+    let red = |instrument: &str, scope: &str, message: &str| {
+        let mut reading = fresh(&root, instrument, scope);
+        reading.status = Status::Fail;
+        reading.message = message.to_owned();
+        store.record(std::slice::from_ref(&reading)).unwrap();
+    };
+    red(
+        "crosscheck",
+        "ext/standard",
+        "ext/standard: 4758 lines against 312",
+    );
+    red(
+        "crosscheck",
+        "ext/standard/ri",
+        "ext/standard/ri: the oracle rendered 40 bytes",
+    );
+    red("phpt", "ext/standard", "ext/standard: 753 of 3821 failed");
+    let verdict = judge(&root);
+    assert!(verdict.met(), "{verdict:#?}");
+
+    // A reading the key does not excuse is unmet as it is for any crate.
+    red(
+        "budget",
+        "ext/standard",
+        "ext/standard: 31000 lines over the ceiling of 30000",
+    );
+    assert_eq!(
+        judge(&root).unmet,
+        ["budget: ext/standard fail: ext/standard: 31000 lines over the ceiling of 30000"],
+        "{:#?}",
+        judge(&root)
+    );
+    store
+        .record(&[fresh(&root, "budget", "ext/standard")])
+        .unwrap();
+
+    // The meter is asked for: a missing one is unmet whatever the key says.
+    std::fs::remove_file(store.path("phpt", "ext/standard").unwrap()).unwrap();
+    assert_eq!(
+        judge(&root).unmet,
+        ["phpt: no reading for ext/standard"],
+        "{:#?}",
+        judge(&root)
+    );
+    store
+        .record(&[fresh(&root, "phpt", "ext/standard")])
+        .unwrap();
+
+    // The same three readings of a crate the manifest does not mark are
+    // unmet, which is where every extension stood before the key.
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    record_asked(&store, &root, "ext/pcre");
+    red("crosscheck", "ext/pcre", "ext/pcre: 200 lines against 12");
+    red(
+        "crosscheck",
+        "ext/pcre/ri",
+        "ext/pcre/ri: the oracle rendered 40 bytes",
+    );
+    red("phpt", "ext/pcre", "ext/pcre: 7 of 900 failed");
+    assert_eq!(
+        judge(&root).unmet,
+        [
+            "phpt: ext/pcre fail: ext/pcre: 7 of 900 failed",
+            "crosscheck: ext/pcre fail: ext/pcre: 200 lines against 12",
+            "crosscheck: ext/pcre/ri fail: ext/pcre/ri: the oracle rendered 40 bytes",
+        ],
+        "{:#?}",
+        judge(&root)
     );
 }
 

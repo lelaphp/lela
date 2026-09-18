@@ -166,6 +166,16 @@ pub struct Crate {
     /// not asked for a phpt reading.
     #[serde(default)]
     pub phpt: Vec<String>,
+    /// Whether this extension's port is not finished, so that its
+    /// `crosscheck` and `phpt` readings are the port's meter and not a
+    /// condition of done: `done` prints their numbers and holds the row
+    /// met, the way it holds the skip the missing engine binary causes
+    /// (harness §4.5 condition 1, §7; #383). Every other instrument holds
+    /// the crate as it holds any other. A crate without the key is held to
+    /// both readings the day it is created, and the key's deletion, a
+    /// person's act, is the port's completion certificate.
+    #[serde(default)]
+    pub porting: bool,
 }
 
 impl Crate {
@@ -182,6 +192,7 @@ impl Crate {
             feature: None,
             targets: Vec::new(),
             phpt: Vec::new(),
+            porting: false,
         }
     }
 
