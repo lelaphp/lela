@@ -109,7 +109,24 @@ pub fn extension() -> Extension {
         .classes(vec![php_token_class()])
         .constants(constants)
         .request_state::<State>()
+        .info(tokenizer_info)
         .build("tokenizer")
+}
+
+/// `PHP_MINFO_FUNCTION(tokenizer)`: the one-row table `Tokenizer
+/// Support => enabled`, what `phpinfo()`, `php --ri tokenizer` and
+/// `ReflectionExtension::info` print for the extension.
+///
+/// ```php
+/// (new ReflectionExtension('tokenizer'))->info();
+/// ```
+/// ```expect
+/// tokenizer
+///
+/// Tokenizer Support => enabled
+/// ```
+fn tokenizer_info(req: &mut Request) {
+    req.info_table(&[&["Tokenizer Support", "enabled"]]);
 }
 
 /// `PhpToken` as `register_class_PhpToken` declares it from
