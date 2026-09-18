@@ -1197,6 +1197,28 @@ impl Request {
     ///   thrown in %s on line 2
     /// ```
     ///
+    /// The rows are the frame chain as it stands at the raise, and
+    /// `{main}` is the line every trace ends on whether or not the main
+    /// frame still does. A destructor the shutdown walk serves stands
+    /// with that frame already popped, so it is the outermost row and
+    /// php gives it no file: `[internal function]`, the site of a frame
+    /// no opline called.
+    ///
+    /// ```php
+    /// class A { function __destruct() { nope(); } }
+    /// $a = new A;
+    /// echo "end\n";
+    /// ```
+    /// ```expect exit=255
+    /// end
+    ///
+    /// Fatal error: Uncaught Error: Call to undefined function nope() in %s:2
+    /// Stack trace:
+    /// #0 [internal function]: A->__destruct()
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    ///
     /// A `ParseError` or a `CompileError`, the class itself and not a
     /// child, is the branch before that one: its message alone, as
     /// `E_PARSE` or `E_COMPILE_ERROR` at the site the throwable recorded,
@@ -1398,9 +1420,14 @@ impl Request {
     }
 
     /// `EG(current_execute_data)` and its `prev_execute_data` chain,
-    /// innermost first and the entry frame left out: one row per link,
-    /// the function it serves, its receiver, its arguments, and the site
-    /// of the link below it.
+    /// innermost first: one row per link, the function it serves, its
+    /// receiver, its arguments, and the site of the link below it. The
+    /// main op array's frame is the link that serves no function and
+    /// makes no row of its own, since `zend_trace_to_string` closes
+    /// every trace with `{main}` whether or not that frame still
+    /// stands; every other outermost link is a row with no site, php's
+    /// `[internal function]`, which is what a shutdown function or a
+    /// destructor served after the main frame popped is.
     ///
     /// php holds one chain; this engine holds two stacks, the user
     /// frames and the calls it is serving, and a frame's `calls_below`
@@ -1443,11 +1470,11 @@ impl Request {
             taken += 1;
         }
         let mut rows = Vec::new();
-        for at in (1..chain.len()).rev() {
-            let site = match &chain[at - 1] {
-                Link::Frame(_, below) => exec::body_of(&below.unit, below.body)
+        for at in (0..chain.len()).rev() {
+            let site = match at.checked_sub(1).map(|below| &chain[below]) {
+                Some(Link::Frame(_, below)) => exec::body_of(&below.unit, below.body)
                     .map(|code| (code.filename.0.to_vec(), i64::from(exec::line_of(below)))),
-                Link::Call(_) => None,
+                Some(Link::Call(_)) | None => None,
             };
             match &chain[at] {
                 Link::Frame(place, state) => {
