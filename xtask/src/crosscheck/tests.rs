@@ -68,6 +68,11 @@ fn the_note_is_the_first_differing_line_and_the_count_of_all_of_them() {
         "the engine's rendering differs from the oracle's at line 2, 1 line in all:\n+engine only"
     );
     assert!(first_difference(" same\n").contains("no line shows"));
+    let long = " head\n-a\n-b\n-c\n-d\n-e\n-f\n same\n";
+    assert_eq!(
+        first_difference(long),
+        "the engine's rendering differs from the oracle's at line 2, 6 lines in all:\n-a\n-b\n-c\n-d\n… and 2 more lines of this hunk"
+    );
 }
 
 /// The engine's side is php's own cast: `echo` over a `ReflectionExtension`

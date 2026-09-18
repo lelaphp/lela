@@ -167,12 +167,27 @@ pub(crate) fn first_difference(diff: &str) -> String {
         .take_while(|line| changed(line))
         .copied()
         .collect();
+    let shown = hunk
+        .iter()
+        .take(HUNK)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let rest = hunk.len().saturating_sub(HUNK);
+    let more = if rest == 0 {
+        String::new()
+    } else {
+        format!("\n… and {rest} more line{} of this hunk", plural(rest))
+    };
     format!(
-        "the engine's rendering differs from the oracle's at line {at}, {differ} line{} in all:\n{}",
-        plural(differ),
-        hunk.join("\n")
+        "the engine's rendering differs from the oracle's at line {at}, {differ} line{} in all:\n{shown}{more}",
+        plural(differ)
     )
 }
+
+/// How many lines of the first hunk the note shows: an extension the
+/// engine renders empty is one hunk the size of the oracle's rendering.
+const HUNK: usize = 4;
 
 /// The oracle's rendering of `name`: `php --re <name>` under the recipe,
 /// through [`Oracle::run_under`] as every lane's oracle side runs. The
