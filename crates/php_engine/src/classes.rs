@@ -204,7 +204,137 @@ pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
         ),
         (closure_class(), closure_methods(), Some(&CLOSURE)),
         (std_class(), Vec::new(), None),
+        (unit_enum(), Vec::new(), None),
+        (backed_enum(), Vec::new(), None),
     ]
+}
+
+/// `interface UnitEnum` as `zend_enum.stub.php` declares it and
+/// `zend_register_enum_ce` registers it: `public static function
+/// cases(): array;`, abstract as every interface method is. What every
+/// enum implements and what gives its `cases` its prototype. The engine
+/// serves no enum value yet; the interface is declared so a native enum
+/// links and renders, `PropertyHookType` being the first.
+///
+/// ```php
+/// echo new ReflectionClass('UnitEnum');
+/// ```
+/// ```expect
+/// Interface [ <internal:Core> interface UnitEnum ] {
+///
+///   - Constants [0] {
+///   }
+///
+///   - Static properties [0] {
+///   }
+///
+///   - Static methods [1] {
+///     Method [ <internal:Core> abstract static public method cases ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ array ]
+///     }
+///   }
+///
+///   - Properties [0] {
+///   }
+///
+///   - Methods [0] {
+///   }
+/// }
+/// ```
+fn unit_enum() -> ClassDecl {
+    ClassDecl {
+        methods: vec![abstract_static_method(b"cases", &[], Some(Type::Array))],
+        ..declared(b"UnitEnum", ClassKind::Interface, None)
+    }
+}
+
+/// `interface BackedEnum extends UnitEnum`: `from` and `tryFrom`, each
+/// over `int|string $value`, one returning the called class and the
+/// other it or null, then `cases` inherited, which is the order
+/// `php --re` prints its table in.
+///
+/// ```php
+/// echo new ReflectionClass('BackedEnum');
+/// ```
+/// ```expect
+/// Interface [ <internal:Core> interface BackedEnum extends UnitEnum ] {
+///
+///   - Constants [0] {
+///   }
+///
+///   - Static properties [0] {
+///   }
+///
+///   - Static methods [3] {
+///     Method [ <internal:Core> abstract static public method from ] {
+///
+///       - Parameters [1] {
+///         Parameter #0 [ <required> string|int $value ]
+///       }
+///       - Return [ static ]
+///     }
+///
+///     Method [ <internal:Core> abstract static public method tryFrom ] {
+///
+///       - Parameters [1] {
+///         Parameter #0 [ <required> string|int $value ]
+///       }
+///       - Return [ ?static ]
+///     }
+///
+///     Method [ <internal:Core, inherits UnitEnum> abstract static public method cases ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ array ]
+///     }
+///   }
+///
+///   - Properties [0] {
+///   }
+///
+///   - Methods [0] {
+///   }
+/// }
+/// ```
+fn backed_enum() -> ClassDecl {
+    let value = || Parameter {
+        name: Name::from("value"),
+        ty: Some(Type::Union(vec![Type::Int, Type::String])),
+        by_ref: false,
+        variadic: false,
+        default: None,
+        attributes: Vec::new(),
+    };
+    ClassDecl {
+        interfaces: vec![Name::from("UnitEnum")],
+        methods: vec![
+            abstract_static_method(b"from", &[value()], Some(Type::CalledClass)),
+            abstract_static_method(
+                b"tryFrom",
+                &[value()],
+                Some(Type::Nullable(Box::new(Type::CalledClass))),
+            ),
+        ],
+        ..declared(b"BackedEnum", ClassKind::Interface, None)
+    }
+}
+
+/// `public static function name(...): returns;` on an interface:
+/// abstract and not an instance member.
+fn abstract_static_method(
+    name: &[u8],
+    parameters: &[Parameter],
+    returns: Option<Type>,
+) -> MethodDecl {
+    MethodDecl {
+        is_abstract: true,
+        is_instance: false,
+        ..throwable_method(name, parameters, returns)
+    }
 }
 
 /// `class stdClass` as `zend_register_standard_class` declares it
