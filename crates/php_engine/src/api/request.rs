@@ -4536,7 +4536,7 @@ impl Request {
     // `Value` that is still in hand after this call names what may be
     // freed.
     #[allow(clippy::needless_pass_by_value)]
-    pub(crate) fn release(&mut self, value: Value) {
+    pub fn release(&mut self, value: Value) {
         Heap::release(&mut Hooks(self), value.to_zval());
     }
 

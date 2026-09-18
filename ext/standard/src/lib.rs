@@ -20,7 +20,9 @@
 //! call of the wrong count of arguments until dynamic calls land, for
 //! `count` the two-argument call, and for `chr` and `ord` an argument
 //! not written as a value. The `ob_*` natives are `output`'s and the
-//! header natives `head`'s, each over the engine's layer.
+//! header natives `head`'s, each over the engine's layer; `sleep` is
+//! `basic_functions.c`'s, and `array_unique` with the `SORT_*`
+//! constants is `array`'s.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -34,6 +36,7 @@
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+mod array;
 mod head;
 mod output;
 
@@ -122,12 +125,18 @@ pub fn extension() -> Extension {
             (type_check_declared(b"is_scalar"), is_scalar),
         ])
         .functions(string_natives())
+        .functions(array::natives())
         .functions(output::natives())
         .functions(head::natives())
+        .functions(vec![(
+            declared(b"sleep", &[parameter(b"seconds", Type::Int)], Type::Int),
+            sleep,
+        )])
         .constants(vec![
             constant(b"COUNT_NORMAL", COUNT_NORMAL),
             constant(b"COUNT_RECURSIVE", COUNT_RECURSIVE),
         ])
+        .constants(array::constants())
         .request_state::<State>()
         .build("standard")
 }
@@ -556,6 +565,40 @@ fn one_argument(req: &mut Request) -> Result<Value, Thrown> {
         return Err(wrong_argument_count(req, 1, count));
     }
     Ok(req.argument(1).unwrap_or_default())
+}
+
+/// `sleep(int $seconds): int`, php's `PHP_FUNCTION(sleep)`
+/// (`Z/ext/standard/basic_functions.c:1122`): php's `ValueError` for a
+/// negative count, then `php_sleep`, which is the CLI's `sleep(3)`, and
+/// its answer, the seconds left unslept, zero when nothing woke it.
+///
+/// ```php
+/// var_dump(sleep(0), sleep("0"), sleep(false));
+/// ```
+/// ```expect
+/// int(0)
+/// int(0)
+/// int(0)
+/// ```
+///
+/// ```php
+/// sleep(-1);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ValueError: sleep(): Argument #1 ($seconds) must be greater than or equal to 0 in %s:2
+/// Stack trace:
+/// #0 %s(2): sleep(-1)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+fn sleep(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 1)?;
+    let seconds = long_argument(req, 1)?;
+    let Ok(seconds) = u64::try_from(seconds) else {
+        return Err(arg_value_error(req, 1, "be greater than or equal to 0"));
+    };
+    std::thread::sleep(std::time::Duration::from_secs(seconds));
+    Ok(Value::int(0))
 }
 
 /// `is_*(mixed $value): bool`, the declaration every native of the
