@@ -327,6 +327,12 @@ pub struct Request {
     /// php's `EG(exception)`: the throwable a handler left pending, which
     /// the loop reads at the `Threw` edge.
     pending: Option<PhpObject>,
+    /// `zend_objects_store_mark_destructed`: every object behind the
+    /// request, set where `shutdown_destructors` catches the
+    /// `zend_bailout` a destructor's raise ends the walk with
+    /// (`Z/Zend/zend_execute_API.c:258-266`). No destructor is served
+    /// once it stands.
+    marked_destructed: bool,
     /// What the entry frame of the innermost serving returned.
     returned: Value,
     /// The interrupt, shared with whatever thread sets it (design §5.8).
@@ -436,6 +442,7 @@ impl Request {
             streams: 0,
             strict_types: false,
             pending: None,
+            marked_destructed: false,
             returned: Value::null(),
             interrupt: Interrupt::default(),
             timer: None,
@@ -3182,6 +3189,9 @@ impl Request {
     /// after
     /// ```
     pub(crate) fn destruct(&mut self, object: PhpObject) {
+        if self.marked_destructed {
+            return;
+        }
         let class = object.class();
         let Some(destructor) = self.method_named(class, b"__destruct") else {
             return;
@@ -3195,8 +3205,83 @@ impl Request {
         }
         if let Err(thrown) = self.serve_method(destructor, Some(object), class, &[]) {
             self.leave_pending(&thrown);
+            if !self.executing() {
+                self.end_the_walk();
+                return;
+            }
         }
         self.restore_pending(saved);
+    }
+
+    /// `zend_call_function`'s tail (`Z/Zend/zend_execute_API.c:1069-1076`)
+    /// where a destructor left a throwable pending and nothing is
+    /// executing: php calls `zend_throw_exception_internal(NULL)`, which
+    /// renders the uncaught fatal there and `zend_bailout`s
+    /// (`Z/Zend/zend_exceptions.c:203-222`); `shutdown_destructors`
+    /// catches that `zend_bailout` and calls
+    /// `zend_objects_store_mark_destructed`, so neither walk serves
+    /// another destructor. The fatal is rendered here rather than left
+    /// for the end of the walk, which is what keeps it one throwable
+    /// with no `Next` (design §5.10).
+    ///
+    /// The rule is `zend_call_function`'s and not the walk's: a raise
+    /// inside a serving has a frame to land in and is the pending
+    /// throwable of that frame, which is the branch above this one.
+    ///
+    /// ```php
+    /// class A {
+    ///     public $n;
+    ///     public $self;
+    ///     function __construct($n) { $this->n = $n; }
+    ///     function __destruct() { echo "d", $this->n, "\n"; nope(); }
+    /// }
+    /// $a = new A(1);
+    /// $a->self = $a;
+    /// $b = new A(2);
+    /// $b->self = $b;
+    /// echo "end\n";
+    /// ```
+    /// ```expect exit=255
+    /// end
+    /// d1
+    ///
+    /// Fatal error: Uncaught Error: Call to undefined function nope() in %s:6
+    /// Stack trace:
+    /// #0 [internal function]: A->__destruct()
+    /// #1 {main}
+    ///   thrown in %s on line 6
+    /// ```
+    ///
+    /// The symbol table's walk ends the same way, and it runs first, so
+    /// a raise there leaves the store's walk nothing to serve: `$b` is
+    /// deleted before `$a`, as `zend_hash_reverse_apply` takes them, and
+    /// `$a`'s destructor is never served.
+    ///
+    /// ```php
+    /// class A {
+    ///     public $n;
+    ///     function __construct($n) { $this->n = $n; }
+    ///     function __destruct() { echo "d", $this->n, "\n"; nope(); }
+    /// }
+    /// $a = new A(1);
+    /// $b = new A(2);
+    /// echo "end\n";
+    /// ```
+    /// ```expect exit=255
+    /// end
+    /// d2
+    ///
+    /// Fatal error: Uncaught Error: Call to undefined function nope() in %s:5
+    /// Stack trace:
+    /// #0 [internal function]: A->__destruct()
+    /// #1 {main}
+    ///   thrown in %s on line 5
+    /// ```
+    fn end_the_walk(&mut self) {
+        self.marked_destructed = true;
+        if let Err(fatal) = self.uncaught() {
+            self.end_in(&fatal);
+        }
     }
 
     /// The first half of `zend_objects_destroy_object`'s protection of
@@ -3489,7 +3574,7 @@ impl Request {
         loop {
             let symbols = self.symbols.len();
             let mut at = self.symbols.len();
-            while at > 0 {
+            while at > 0 && !self.marked_destructed {
                 at -= 1;
                 let alone = self
                     .symbols
@@ -3500,7 +3585,7 @@ impl Request {
                     self.release(value);
                 }
             }
-            if symbols == self.symbols.len() {
+            if symbols == self.symbols.len() || self.marked_destructed {
                 break;
             }
         }
@@ -3521,11 +3606,14 @@ impl Request {
 
     /// `zend_objects_store_call_destructors`, the second half of
     /// `zend_call_destructors` (design §5.10): every live object's
-    /// destructor not yet served, in store order, and what one leaves
-    /// pending rendered as the uncaught fatal, as `zend_call_function`
-    /// renders it with no frame to throw into. What the symbol table
+    /// destructor not yet served, in store order, until one leaves a
+    /// throwable pending, which [`Request::end_the_walk`] renders where
+    /// php renders it and ends both walks with. What the symbol table
     /// owned alone was served before this by
-    /// [`Request::shutdown_destructors`].
+    /// [`Request::shutdown_destructors`]. The store's walk still marks
+    /// every object it passes, as php's `zend_objects_store_mark_destructed`
+    /// marks them behind the `zend_bailout`, so nothing is served after
+    /// it either.
     ///
     /// An object a variable no longer names alone outlives that walk,
     /// so the store's is what serves it: each of these holds itself,
