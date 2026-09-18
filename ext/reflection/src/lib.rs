@@ -2776,11 +2776,27 @@ fn extension_string(req: &mut Request, extension: ExtensionId, indent: &str) -> 
 fn const_string(req: &mut Request, name: &[u8], indent: &str) -> String {
     let value = constant(req, name).ok().flatten().unwrap_or_default();
     let shown = value_string(req, &value);
+    let words = if constant_is_persistent(req, name) {
+        "<persistent> "
+    } else {
+        ""
+    };
     format!(
-        "{indent}Constant [ <persistent> {} {} ] {{ {shown} }}\n",
+        "{indent}Constant [ {words}{} {} ] {{ {shown} }}\n",
         value.type_name(),
         String::from_utf8_lossy(name)
     )
+}
+
+/// `CONST_PERSISTENT`: the bit every constant an extension registered
+/// at startup carries and one a running program defined does not,
+/// which is `get_defined_constants()`'s own list here.
+fn constant_is_persistent(req: &mut Request, name: &[u8]) -> bool {
+    let Ok(key) = PhpString::new(req, name) else {
+        return true;
+    };
+    let defined = req.constants().map(|table| table.contains(&Key::Str(key)));
+    !defined.unwrap_or(false)
 }
 
 /// `zval_get_string` for a constant's value as `_const_string` and
@@ -3448,7 +3464,7 @@ fn function_string(req: &mut Request, function: Function, indent: &str) -> Strin
         .map(str::to_owned);
     let mut out = String::new();
     function_header(&mut out, &decl, module.as_deref(), None, indent);
-    function_body(&mut out, &decl, false, indent);
+    function_body(req, &mut out, &decl, false, indent);
     out
 }
 
@@ -3494,6 +3510,7 @@ fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: 
         indent,
     );
     function_body(
+        req,
         &mut out,
         &method.decl.function,
         method.decl.tentative_return,
@@ -3566,9 +3583,15 @@ fn function_header(
 /// The rest of `_function_string`: the parameters, the return row and
 /// the closing brace. A user function's `@@ file start - end` line
 /// waits on the end line the declaration model does not carry (#376).
-fn function_body(out: &mut String, decl: &FunctionDecl, tentative: bool, indent: &str) {
+fn function_body(
+    req: &mut Request,
+    out: &mut String,
+    decl: &FunctionDecl,
+    tentative: bool,
+    indent: &str,
+) {
     let param_indent = format!("{indent}  ");
-    function_parameter_string(out, decl, &param_indent);
+    function_parameter_string(req, out, decl, &param_indent);
     if let Some(returns) = &decl.return_type {
         let word = if tentative {
             "Tentative return"
@@ -3594,7 +3617,13 @@ fn required_parameters(decl: &FunctionDecl) -> usize {
 /// parameter, `...` for the variadic one, the name, and the default
 /// after `=` where the row is optional and not variadic. php passes an
 /// indent it does not write, so the row carries none.
-fn parameter_string(parameter: &Parameter, offset: usize, required: bool) -> String {
+fn parameter_string(
+    req: &mut Request,
+    parameter: &Parameter,
+    offset: usize,
+    required: bool,
+    internal: bool,
+) -> String {
     let mut out = format!("Parameter #{offset} [ ");
     out.push_str(if required {
         "<required> "
@@ -3611,14 +3640,22 @@ fn parameter_string(parameter: &Parameter, offset: usize, required: bool) -> Str
         out.push_str("...");
     }
     let _ = write!(out, "${}", String::from_utf8_lossy(&parameter.name.0));
-    if !required && !parameter.variadic {
-        out.push_str(" = ");
-        out.push_str(
-            &parameter
-                .default
-                .as_ref()
-                .map_or_else(|| String::from("<default>"), const_expr_string),
-        );
+    // A native's default is the text `gen_stub.php` wrote into the arg
+    // info; a user function's is the zval `RECV_INIT` holds, which
+    // `format_default_value` prints and `NULL` is the spelling of.
+    match (&parameter.default, internal) {
+        (Some(expr), false) => {
+            let _ = write!(out, " = {}", default_value_string(req, expr));
+        }
+        (default, _) if !required && !parameter.variadic => {
+            out.push_str(" = ");
+            out.push_str(
+                &default
+                    .as_ref()
+                    .map_or_else(|| String::from("<default>"), const_expr_string),
+            );
+        }
+        _ => {}
     }
     out.push_str(" ]");
     out
@@ -3626,12 +3663,18 @@ fn parameter_string(parameter: &Parameter, offset: usize, required: bool) -> Str
 
 /// `_function_parameter_string`: `- Parameters [N] {` and one
 /// [`parameter_string`] line per parameter.
-fn function_parameter_string(out: &mut String, decl: &FunctionDecl, indent: &str) {
+fn function_parameter_string(
+    req: &mut Request,
+    out: &mut String,
+    decl: &FunctionDecl,
+    indent: &str,
+) {
     let required = required_parameters(decl);
+    let internal = decl.file.0.is_empty();
     out.push('\n');
     let _ = writeln!(out, "{indent}- Parameters [{}] {{", decl.parameters.len());
-    for (offset, parameter) in decl.parameters.iter().enumerate() {
-        let row = parameter_string(parameter, offset, offset < required);
+    for (offset, parameter) in decl.parameters.clone().iter().enumerate() {
+        let row = parameter_string(req, parameter, offset, offset < required, internal);
         let _ = writeln!(out, "{indent}  {row}");
     }
     let _ = writeln!(out, "{indent}}}");

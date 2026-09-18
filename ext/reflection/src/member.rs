@@ -132,11 +132,25 @@ pub(super) fn reflection_property_get_name(req: &mut Request) -> Result<Value, T
 /// Property [ public string $name ]
 /// Property [ protected $message = '' ]
 /// ```
+///
+/// ```php
+/// $o = new stdClass; $o->x = 1;
+/// echo new ReflectionProperty($o, 'x');
+/// ```
+/// ```expect
+/// Property [ <dynamic> public $x ]
+/// ```
 pub(super) fn reflection_property_to_string(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
-    let (_, _, found) = this_declared(req)?;
+    let (_, name, found) = this_declared(req)?;
     let Some((_, decl)) = found else {
-        return string_value(req, b"");
+        // `_property_string` with no property info: php's dynamic row,
+        // which carries no modifier but `public` and no default.
+        let text = format!(
+            "Property [ <dynamic> public ${} ]\n",
+            String::from_utf8_lossy(&name)
+        );
+        return string_value(req, text.as_bytes());
     };
     let text = property_string(req, &decl, "");
     string_value(req, text.as_bytes())
@@ -883,6 +897,14 @@ fn constant_extension_name(req: &mut Request) -> Result<Option<String>, Thrown> 
 /// ```
 /// ```expect
 /// Constant [ <persistent> int PHP_INT_SIZE ] { 8 }
+/// ```
+///
+/// ```php
+/// define('DEMO', 1);
+/// echo new ReflectionConstant('DEMO');
+/// ```
+/// ```expect
+/// Constant [ int DEMO ] { 1 }
 /// ```
 pub(super) fn reflection_constant_to_string(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;

@@ -640,10 +640,25 @@ pub(super) fn reflection_parameter_construct(req: &mut Request) -> Result<Value,
 /// ```expect
 /// Parameter #1 [ <required> int $times ]
 /// ```
+///
+/// ```php
+/// function f($a, $b = null) {}
+/// echo new ReflectionParameter('f', 1), "\n";
+/// ```
+/// ```expect
+/// Parameter #1 [ <optional> $b = NULL ]
+/// ```
 pub(super) fn reflection_parameter_to_string(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
-    let (reference, _, parameter) = this_parameter(req)?;
-    let text = parameter_string(&parameter, reference.offset, reference.required);
+    let (reference, decl, parameter) = this_parameter(req)?;
+    let internal = decl.file.0.is_empty();
+    let text = parameter_string(
+        req,
+        &parameter,
+        reference.offset,
+        reference.required,
+        internal,
+    );
     string_value(req, text.as_bytes())
 }
 
