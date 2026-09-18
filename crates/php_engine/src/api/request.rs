@@ -2696,6 +2696,75 @@ impl Request {
         false
     }
 
+    /// `ZEND_FE_RESET_R`'s separation of a shared property table
+    /// (`Z/Zend/zend_vm_def.h:6903`): the loop walks the object's own
+    /// table, so one a cast shares is duplicated first and the object
+    /// takes the copy, php's `zend_array_dup` under
+    /// `GC_REFCOUNT(zobj->properties) > 1`. An object that has no table
+    /// has nothing to separate and is given none, as php's arm is under
+    /// `Z_OBJ_P(array_ptr)->properties` being there at all.
+    pub(crate) fn separate_object_properties(&mut self, object: PhpObject) -> Result<(), Thrown> {
+        let o = object.heap();
+        let Some(table) = o.properties() else {
+            return Ok(());
+        };
+        let table = self.array_separate(table)?;
+        self.heap.object_set_properties(o, table);
+        Ok(())
+    }
+
+    /// `zend_fe_fetch_object_helper` (`Z/Zend/zend_vm_def.h:7315`) over
+    /// an object whose class has no `get_iterator`: the first property
+    /// at or past `from` the executing scope may see, with the position
+    /// it sits at, its key and a view of its value. The order is
+    /// `Z_OBJPROP`'s, which is [`Request::object_entries`]' order: the
+    /// class's declared instance properties in declaration order, then
+    /// the dynamic table. A slot nothing has written is stepped over as
+    /// php steps over an `IS_UNDEF` bucket, and one the executing scope
+    /// may not reach is stepped over as php steps over a mangled key
+    /// `zend_check_property_access` refuses. `None` is nothing left,
+    /// which is the fetch's jump past the loop. The `Err` is the memory
+    /// limit refusing the intern of a declared name; php's key is
+    /// interned already and takes no allocation.
+    pub(crate) fn object_property_from(
+        &mut self,
+        object: PhpObject,
+        from: u32,
+    ) -> Result<Option<(u32, php_heap::Key, Value)>, Thrown> {
+        let o = object.heap();
+        let class = object.class();
+        let declared: Vec<(Box<[u8]>, Visibility)> = self
+            .class_decl(class)
+            .map(|decl| {
+                decl.properties
+                    .iter()
+                    .filter(|p| p.is_instance)
+                    .map(|p| (p.name.0.clone(), p.visibility))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut at = from as usize;
+        while let Some((name, visibility)) = declared.get(at) {
+            let z = o.slot(u32::try_from(at).unwrap_or(u32::MAX));
+            if !z.is_undef() && self.may_access(class, *visibility) {
+                let interned = self.heap.intern(name);
+                let key = self.fatal_of(interned).map(php_heap::Key::Str)?;
+                let at = u32::try_from(at).unwrap_or(u32::MAX);
+                return Ok(Some((at, key, Value::of_zval(z))));
+            }
+            at = at.saturating_add(1);
+        }
+        let Some(table) = o.properties() else {
+            return Ok(None);
+        };
+        let skipped = at.saturating_sub(declared.len());
+        let Some((key, z)) = (&table).into_iter().nth(skipped) else {
+            return Ok(None);
+        };
+        let at = u32::try_from(declared.len().saturating_add(skipped)).unwrap_or(u32::MAX);
+        Ok(Some((at, key, Value::of_zval(z))))
+    }
+
     /// `zend_std_get_property_ptr_ptr`'s dynamic arm under `BP_VAR_W`
     /// (`Z/Zend/zend_object_handlers.c:1491`): the dynamic table
     /// separated where a cast shares it and the name looked up in it;

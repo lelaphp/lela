@@ -2992,10 +2992,49 @@ fn add_element(
 /// freed (`FREE_OP1_IF_VAR`) and the next opline is the `FE_FETCH_R`.
 /// An operand that is neither array nor object is php's warning, the
 /// `VAR` left `UNDEF`, the operand freed (`FREE_OP1`) and the jump
-/// `op2` names, to the `FE_FREE` past the loop. An object, which php
-/// walks through its property table or its `get_iterator`, is not
-/// served yet and is an internal error rather than a loop that runs
-/// wrong (#367).
+/// `op2` names, to the `FE_FREE` past the loop.
+///
+/// An object whose class has no `get_iterator` is copied the same way
+/// and walks its property table: the table separated where a cast
+/// shares it ([`Request::separate_object_properties`]), and the
+/// position of the walk, php's `Z_FE_ITER` off `zend_hash_iterator_add`
+/// and this engine's `Z_FE_POS`, at the first property. php's iterator
+/// list (`EG(ht_iterators)`), which follows a table its loop rehashes,
+/// is not in the heap yet (#434); the position is the array loop's and
+/// the `FE_FREE` has no iterator to delete. No class declares a
+/// `get_iterator`, `Traversable` not being declared yet, so the other
+/// arm, `zend_fe_reset_iterator`, is unreachable (#367).
+///
+/// The properties an object walks are the ones the executing scope may
+/// see: a private or a protected one read from outside the class is
+/// stepped over, as `zend_check_property_access` steps over its mangled
+/// key, and the key is the name unmangled.
+///
+/// ```php
+/// class P { public $a = 1; private $b = 2; public $c = 3; }
+/// foreach (new P as $k => $v) echo "$k=$v ";
+/// ```
+/// ```expect
+/// a=1 c=3
+/// ```
+///
+/// An object of no properties runs the body no time; a property
+/// declared with no default is the `null` php's
+/// `default_properties_table` put there and is walked like any other. A
+/// slot that holds nothing at all is stepped over as php steps over an
+/// `IS_UNDEF` bucket; the two that make one, `unset` over a property
+/// (#435) and a typed property with no default (#407), are not compiled
+/// yet, so nothing in a program reaches that arm and #435's witness is
+/// what will hold it.
+///
+/// ```php
+/// foreach (new stdClass as $v) echo 'no';
+/// class U { public $kept = 2; public $null; }
+/// foreach (new U as $k => $v) echo $k, ' ';
+/// ```
+/// ```expect
+/// kept null
+/// ```
 ///
 /// A packed array, a hash with string keys and an empty one: the loop
 /// over the second runs its body no time, and the third's key and
@@ -3054,10 +3093,24 @@ pub(crate) fn fe_reset_r<T: Tier>(
         }
         return Ok(advance(req, frame));
     }
-    if subject.as_object().is_some() {
-        return Err(Fatal::Error(String::from(
-            "InternalError: FE_RESET_R over an object, which is not served yet",
-        )));
+    if let Some(object) = subject.as_object() {
+        if let Err(thrown) = req.separate_object_properties(*object) {
+            return threw(req, frame, &thrown);
+        }
+        if op.op1_type != OperandKind::Tmp {
+            req.addref(&subject);
+        }
+        let previous = req.set_slot(frame, slot, subject);
+        req.release(previous);
+        if let Some(cell) = req.slot_ptr(frame, slot) {
+            let mut held = cell.read();
+            held.set_fe_pos(0);
+            cell.write(held);
+        }
+        if op.op1_type == OperandKind::Var {
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+        }
+        return Ok(advance(req, frame));
     }
     crate::api::raising::warning(
         req,
@@ -3098,6 +3151,22 @@ pub(crate) fn fe_reset_r<T: Tier>(
 /// ```expect
 /// 0:10;1:20;2:30;b:1;5:2;c:3;6:4;
 /// ```
+///
+/// A `VAR` holding an object is `zend_fe_fetch_object_helper`
+/// (`Z/Zend/zend_vm_def.h:7315`) instead: the property at the position
+/// or the first one past it the executing scope may see
+/// ([`Request::object_property_from`]), its unmangled name as the key,
+/// and the same jump where nothing is left. The value is the property's
+/// with a reference followed, one more owner, as an array element's is.
+///
+/// ```php
+/// class C { public $n = 1; protected $p = 2; public $s = 'x'; private $q = 3; public function all() { foreach ($this as $k => $v) echo "$k=$v "; } }
+/// $c = new C; foreach ($c as $k => $v) echo "$k=$v ";
+/// $c->all();
+/// ```
+/// ```expect
+/// n=1 s=x n=1 p=2 s=x q=3
+/// ```
 pub(crate) fn fe_fetch_r<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -3111,12 +3180,21 @@ pub(crate) fn fe_fetch_r<T: Tier>(
         )));
     };
     let mut held = at.read();
-    let Some(array) = held.as_arr() else {
+    let found = if let Some(object) = Value::of_zval(held).as_object() {
+        match req.object_property_from(*object, held.fe_pos()) {
+            Ok(found) => found,
+            Err(thrown) => return threw(req, frame, &thrown),
+        }
+    } else if let Some(array) = held.as_arr() {
+        array
+            .live_from(held.fe_pos())
+            .map(|(pos, key, value)| (pos, key, exec::value_of(value)))
+    } else {
         return Err(Fatal::Error(String::from(
-            "InternalError: FE_FETCH_R over a VAR holding no array",
+            "InternalError: FE_FETCH_R over a VAR holding neither array nor object",
         )));
     };
-    let Some((pos, key, value)) = array.live_from(held.fe_pos()) else {
+    let Some((pos, key, value)) = found else {
         req.vm_mut().jump(frame, op.extended_value);
         return Ok(Stepped::Same(frame));
     };
@@ -3135,7 +3213,7 @@ pub(crate) fn fe_fetch_r<T: Tier>(
         let previous = req.set_slot(frame, out, key);
         req.release(previous);
     }
-    let value = exec::value_of(value).deref();
+    let value = value.deref();
     req.addref(&value);
     if let Some(r) = req.slot(frame, op.op2).as_php_ref() {
         req.reference_set(r.heap(), value);
@@ -3147,10 +3225,14 @@ pub(crate) fn fe_fetch_r<T: Tier>(
 }
 
 /// `ZEND_FE_FREE` (`Z/Zend/zend_vm_def.h:3260`): the `VAR` the
-/// `FE_RESET_R` filled given up where the loop ends, the array's owner
-/// released (`zval_ptr_dtor_nogc`), and nothing over the `UNDEF` a
-/// warned-on reset left. The `FE_FETCH_R` before it jumps here, and a
-/// `break` out of the loop lands here too.
+/// `FE_RESET_R` filled given up where the loop ends, the array's or the
+/// object's owner released (`zval_ptr_dtor_nogc`), and nothing over the
+/// `UNDEF` a warned-on reset left. The `FE_FETCH_R` before it jumps
+/// here, and a `break` out of the loop lands here too. php deletes the
+/// hash iterator its object loop took as well
+/// (`zend_hash_iterator_del`); this engine's object loop keeps the
+/// position in the `VAR` and takes no iterator, so there is none to
+/// delete (#434).
 ///
 /// The array the `INIT_ARRAY` built is given back here and the string
 /// it held stays with `$s` alone, 3072 bytes in the bin php puts it in,
@@ -5757,5 +5839,68 @@ mod tests {
         );
         req.release(cell.as_value());
         assert_eq!(req.memory_usage(false), start - 40 - 32);
+    }
+
+    /// #367, the first acceptance: a `foreach` by value over a plain
+    /// object walks the properties the scope may see, the private one
+    /// stepped over from outside the class, the key the name as
+    /// written. The witness beside [`fe_reset_r`] pins the same line
+    /// against the oracle; this holds the engine to it.
+    #[test]
+    fn a_foreach_over_an_object_walks_the_properties_the_scope_may_see() {
+        let served = Engine::builder().build().serve_capture(
+            "<?php class P { public $a = 1; private $b = 2; public $c = 3; } foreach (new P as $k => $v) echo \"$k=$v \";",
+            crate::test::Capture::default(),
+        );
+        assert_eq!(served.stdout, b"a=1 c=3 ");
+        assert_eq!(served.fatal, None);
+    }
+
+    /// The same loop from inside the class sees every property, as
+    /// `zend_check_property_access` lets the declaring scope through.
+    #[test]
+    fn a_foreach_over_this_walks_the_private_properties_too() {
+        let served = Engine::builder().build().serve_capture(
+            "<?php class C { public $n = 1; protected $p = 2; public $s = 'x'; private $q = 3; public function all() { foreach ($this as $k => $v) echo \"$k=$v \"; } } $c = new C; foreach ($c as $k => $v) echo \"$k=$v \"; $c->all();",
+            crate::test::Capture::default(),
+        );
+        assert_eq!(served.stdout, b"n=1 s=x n=1 p=2 s=x q=3 ");
+        assert_eq!(served.fatal, None);
+    }
+
+    /// #367, the second acceptance: an object of no properties runs the
+    /// body no time, and a property declared with no default is the
+    /// `null` `default_properties_table` put there, walked like any
+    /// other.
+    #[test]
+    fn a_foreach_over_an_object_of_no_properties_runs_its_body_no_time() {
+        let served = Engine::builder().build().serve_capture(
+            "<?php foreach (new stdClass as $v) echo 'no'; class U { public $kept = 2; public $null; } foreach (new U as $k => $v) echo $k, ' ';",
+            crate::test::Capture::default(),
+        );
+        assert_eq!(served.stdout, b"kept null ");
+        assert_eq!(served.fatal, None);
+    }
+
+    /// The walk itself: every property `Exception` declares is
+    /// protected or private, so the global scope may see none of them
+    /// and `zend_fe_fetch_object_helper` steps over the whole table,
+    /// which is the jump past the loop.
+    #[test]
+    fn the_walk_over_an_object_of_properties_the_scope_may_not_see_finds_nothing() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let named = req.class_named(b"exception");
+        assert!(named.is_some(), "the engine declares Exception");
+        let class = named.unwrap_or(ClassId(u32::MAX));
+        let made = crate::api::call::new_object(&mut req, class);
+        assert!(made.is_ok(), "Exception is instantiable");
+        if let Ok(object) = made {
+            assert!(
+                matches!(req.object_property_from(object, 0), Ok(None)),
+                "the global scope sees none of Exception's properties"
+            );
+            req.release(object.as_value());
+        }
     }
 }
