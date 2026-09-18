@@ -376,6 +376,13 @@ impl Callable {
         self.name.clone()
     }
 
+    /// The value the callable came from, a view and no owner taken:
+    /// what a native addrefs where php's `zend_fcc_addref` does, to
+    /// hold the callable past the call frame it was read off.
+    pub(crate) const fn value(&self) -> Value {
+        self.value
+    }
+
     pub(crate) fn into_value(self) -> Value {
         self.value
     }

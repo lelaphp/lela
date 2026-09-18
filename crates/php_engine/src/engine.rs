@@ -856,19 +856,23 @@ impl Engine {
             }
             None => {}
         }
-        // `php_request_shutdown`'s order (design §5.10): the destructors
-        // of what is still live, which is `zend_call_destructors`, the
-        // symbol table walked in reverse and the object store walked
-        // after it; then every output handler popped
-        // (`php_output_end_all`), before the extensions' `rshutdown`, in
-        // reverse bundle order; the output layer deactivated after
-        // them, with the header block committed if nothing had; then
-        // `shutdown_executor`, which closes the open resources first,
-        // destroys the symbol table after them
-        // (`zend_shutdown_executor_values`) and frees the object
-        // storage last. The globals stand through all of it, as php's
-        // `EG(symbol_table)` does, so the shutdown functions and an
-        // extension's `rshutdown` read a request that still has them.
+        // `php_request_shutdown`'s order (design §5.10): the shutdown
+        // functions first, which is `php_call_shutdown_functions`; then
+        // the destructors of what is still live, which is
+        // `zend_call_destructors`, the symbol table walked in reverse
+        // and the object store walked after it; then every output
+        // handler popped (`php_output_end_all`), before the extensions'
+        // `rshutdown`, in reverse bundle order; the output layer
+        // deactivated after them, with the header block committed if
+        // nothing had, and the shutdown entries freed behind it
+        // (`php_free_shutdown_functions`); then `shutdown_executor`,
+        // which closes the open resources first, destroys the symbol
+        // table after them (`zend_shutdown_executor_values`) and frees
+        // the object storage last. The globals stand through all of it,
+        // as php's `EG(symbol_table)` does, so the shutdown functions
+        // and an extension's `rshutdown` read a request that still has
+        // them.
+        crate::natives::call_shutdown_functions(&mut req);
         req.shutdown_destructors();
         req.call_destructors();
         crate::output::end_all(&mut req);
@@ -878,6 +882,7 @@ impl Engine {
             }
         }
         crate::output::deactivate(&mut req);
+        req.free_shutdown_functions();
         req.close_resources();
         req.destroy_symbol_table();
         req.free_object_storage();

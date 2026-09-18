@@ -3,7 +3,7 @@
 //! keeps in `ext/standard` and this engine keeps here, so an engine with
 //! no extensions serves a program that uses Zend alone (design §4.10).
 //!
-//! Twelve of them are here: the two the first witness of a loop needs,
+//! Thirteen of them are here: the two the first witness of a loop needs,
 //! the three that read what `php_heap::mm` accounts, so the allocator's
 //! numbers are php's numbers under a witness and not under a terminal
 //! session a person typed once, `ini_get` and `ini_set`, which read and
@@ -13,16 +13,18 @@
 //! the two of `zend_builtin_functions.c` whose calls php's compiler
 //! serves itself (#219): the compiler emits `ZEND_STRLEN` and
 //! `ZEND_DEFINED` over their kernels where it reads the name, and reads
-//! it only where the bundle declares the native; and `class_exists` and
-//! `get_class`, which read the linked table (#259). Each is declared and
-//! paired with its entry exactly as an extension's are, so there is one
-//! shape for a native and not two.
+//! it only where the bundle declares the native; `class_exists` and
+//! `get_class`, which read the linked table (#259); and
+//! `register_shutdown_function`, whose entries the request holds and
+//! [`call_shutdown_functions`] serves at `php_request_shutdown`'s first
+//! step (#404). Each is declared and paired with its entry exactly as an
+//! extension's are, so there is one shape for a native and not two.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use php_unit::decl::{ClassKind, ConstExpr, FunctionDecl, Name, Parameter, Type, Visibility};
 
-use crate::api::abi::Entry;
+use crate::api::abi::{Callable, Entry};
 use crate::api::coerce::{coerce_param, to_string};
 use crate::api::raising::{
     Thrown, arg_count_error, arg_null_deprecated, arg_type_error, deprecated, throw,
@@ -197,6 +199,17 @@ fn zend_natives() -> Vec<(FunctionDecl, Entry)> {
                 Some(Type::Int),
             ),
             strlen as Entry,
+        ),
+        (
+            declared(
+                b"register_shutdown_function",
+                &[
+                    parameter(b"callback", Some(Type::Callable), false),
+                    parameter(b"args", Some(Type::Mixed), true),
+                ],
+                Some(Type::Void),
+            ),
+            register_shutdown_function as Entry,
         ),
     ]
 }
@@ -1262,6 +1275,185 @@ fn set_time_limit(req: &mut Request) -> Result<Value, Thrown> {
     }
     let seconds = long_argument(req, 1)?;
     Ok(Value::bool(req.set_time_limit(seconds)))
+}
+
+/// `register_shutdown_function(callable $callback, mixed ...$args): void`,
+/// php's `PHP_FUNCTION(register_shutdown_function)`
+/// (`Z/ext/standard/basic_functions.c:1738`) over
+/// `append_user_shutdown_function`: the callback resolved here, where
+/// php's `"F*"` resolves it, and not where it is served, so a name no
+/// function table has raises at the registration; the entry is one more
+/// owner of the callback and of every extra argument, `zend_fcc_addref`
+/// and the `ZVAL_COPY` loop over `entry.params`. The entries are the
+/// request's from here and [`call_shutdown_functions`] serves them at
+/// `php_request_shutdown`'s first step (design §5.10).
+///
+/// The registration order is the serving order, and each entry's extra
+/// arguments are handed to its callback as they were passed:
+///
+/// ```php
+/// function one() { echo "one\n"; }
+/// function two($x, $y) { echo "two ", $x, $y, "\n"; }
+/// register_shutdown_function('one');
+/// register_shutdown_function('two', 5, "!");
+/// echo "end\n";
+/// ```
+/// ```expect
+/// end
+/// one
+/// two 5!
+/// ```
+///
+/// The walk stands before the first destructor of the shutdown walk, so
+/// a shutdown function is served while a global still holds its object
+/// and its destructor is served after:
+///
+/// ```php
+/// class A { function __destruct() { echo "d\n"; } }
+/// function bye() { echo "bye\n"; }
+/// register_shutdown_function('bye');
+/// $a = new A;
+/// echo "end\n";
+/// ```
+/// ```expect
+/// end
+/// bye
+/// d
+/// ```
+///
+/// A callback that names nothing is php's `TypeError` at the
+/// registration, worded as `zend_parse_arg_func` words the two misses,
+/// and no argument at all is php's `ArgumentCountError`:
+///
+/// ```php
+/// register_shutdown_function('nope');
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: register_shutdown_function(): Argument #1 ($callback) must be a valid callback, function "nope" not found or invalid function name in %s:2
+/// Stack trace:
+/// #0 %s(2): register_shutdown_function('nope')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// register_shutdown_function();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: register_shutdown_function() expects at least 1 argument, 0 given in %s:2
+/// Stack trace:
+/// #0 %s(2): register_shutdown_function()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+fn register_shutdown_function(req: &mut Request) -> Result<Value, Thrown> {
+    let count = req.argument_count();
+    if count == 0 {
+        return Err(too_few_arguments(req, 1, 0));
+    }
+    let callback = callable_argument(req, 1)?;
+    req.addref(&callback.value());
+    let mut arguments = Vec::new();
+    for position in 2..=u32::try_from(count).unwrap_or(u32::MAX) {
+        let value = req.argument(position).unwrap_or_default();
+        req.addref(&value);
+        arguments.push(value);
+    }
+    req.register_shutdown_function(callback, arguments);
+    Ok(Value::null())
+}
+
+/// `php_call_shutdown_functions` (`Z/ext/standard/basic_functions.c:1650`),
+/// step 1 of `php_request_shutdown` and so the first thing the request
+/// does once the loop has returned (design §5.10): `zend_hash_apply`
+/// over the entries `register_shutdown_function` appended, each served
+/// through `zend_call_known_fcc` in the order they were appended. The
+/// walk reads the list's length again on every turn, as php's reads
+/// `nNumUsed`, so an entry a shutdown function appends is served by the
+/// same walk.
+///
+/// The main op array's variables are the request's here, the symbol
+/// table [`Request::detach_symbol_table`] left behind, and
+/// [`Request::shutdown_destructors`] has not walked it yet. So a
+/// shutdown function reads what the top level wrote and
+/// `memory_get_usage()` still counts what those variables own, which is
+/// the half of #280 that waited on this one: a three-megabyte string a
+/// top-level variable holds is still out at the walk, where a request
+/// that had released that variable with the frame would read the
+/// baseline back.
+///
+/// ```php
+/// function show($b) { var_dump(memory_get_usage() - $b > 2900000); }
+/// $b = memory_get_usage();
+/// $s = str_repeat("x", 3000000);
+/// register_shutdown_function('show', $b);
+/// echo "end\n";
+/// ```
+/// ```expect
+/// end
+/// bool(true)
+/// ```
+///
+/// What one leaves pending ends the walk, as the `zend_bailout`
+/// `zend_exception_error` raises leaves the `zend_try` php wraps the
+/// walk in: the throwable is rendered as the uncaught fatal at the
+/// boundary `zend_trace_to_string` names `[internal function]`, and the
+/// entries behind it are not served.
+///
+/// ```php
+/// function boom() { echo "boom\n"; throw new Exception("x"); }
+/// function after() { echo "after\n"; }
+/// register_shutdown_function('boom');
+/// register_shutdown_function('after');
+/// echo "end\n";
+/// ```
+/// ```expect exit=255
+/// end
+/// boom
+///
+/// Fatal error: Uncaught Exception: x in %s:2
+/// Stack trace:
+/// #0 [internal function]: boom()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn call_shutdown_functions(req: &mut Request) {
+    let mut at = 0;
+    while let Some((callback, arguments)) = req.shutdown_function(at) {
+        at += 1;
+        match crate::api::call::call(req, &callback, &arguments) {
+            Ok(value) => req.release(value),
+            Err(thrown) => {
+                req.leave_pending(&thrown);
+                if let Err(fatal) = req.uncaught() {
+                    req.end_in(&fatal);
+                }
+                return;
+            }
+        }
+    }
+}
+
+/// One `Z_PARAM_FUNC` of a native, php's `"F"`: the argument at
+/// `position` resolved into the callee it names, `zend_parse_arg_func`
+/// over `zend_is_callable_ex`, so a callback is held to being one where
+/// it is taken and not where it is served. The two texts are php's two,
+/// the name no function table has and the value that is no name at all;
+/// a `[$object, 'method']` pair is neither, and until the request
+/// resolves one it takes the second text.
+fn callable_argument(req: &mut Request, position: u32) -> Result<Callable, Thrown> {
+    let given = req.argument(position).unwrap_or_default().deref();
+    if let Some(callable) = req.callable_of(&given) {
+        return Ok(callable);
+    }
+    let tail = match given.as_str_bytes() {
+        Some(name) => format!(
+            "be a valid callback, function \"{}\" not found or invalid function name",
+            String::from_utf8_lossy(name)
+        ),
+        None => "be a valid callback, no array or string given".to_owned(),
+    };
+    Err(arg_type_error(req, position, &tail))
 }
 
 /// One `Z_PARAM_LONG` of a native, the argument at `position` read off

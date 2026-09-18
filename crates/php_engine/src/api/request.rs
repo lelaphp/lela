@@ -5660,9 +5660,37 @@ impl Request {
             .is_ok_and(|previous| previous.is_some())
     }
 
-    /// `register_shutdown_function()`.
+    /// `register_shutdown_function()`, `append_user_shutdown_function`
+    /// (`Z/ext/standard/basic_functions.c:1726`): one entry appended at
+    /// the end of the list, which is the order
+    /// [`crate::natives::call_shutdown_functions`] serves them in. The
+    /// callback and the arguments are the entry's owners from here,
+    /// given up by [`Request::free_shutdown_functions`].
     pub fn register_shutdown_function(&mut self, callback: Callable, arguments: Vec<Value>) {
         self.shutdown_functions.push((callback, arguments));
+    }
+
+    /// The registered entry at `at`, as `zend_hash_apply` reaches it:
+    /// the callback and its arguments as views, the list keeping its
+    /// owners, so the walk serves what it reads and an entry appended
+    /// while it runs is reached by the same walk. `None` past the end
+    /// is what ends it.
+    pub(crate) fn shutdown_function(&self, at: usize) -> Option<(Callable, Vec<Value>)> {
+        self.shutdown_functions.get(at).cloned()
+    }
+
+    /// `php_free_shutdown_functions` (`Z/ext/standard/basic_functions.c:1660`),
+    /// step 7 of `php_request_shutdown`, behind step 6 and its
+    /// `php_output_deactivate`: every entry's callback and argument
+    /// released, which is `user_shutdown_function_dtor` over the
+    /// destroyed table.
+    pub(crate) fn free_shutdown_functions(&mut self) {
+        for (callback, arguments) in std::mem::take(&mut self.shutdown_functions) {
+            self.release(callback.into_value());
+            for value in arguments {
+                self.release(value);
+            }
+        }
     }
 
     /// `register_tick_function()`.
