@@ -179,12 +179,39 @@ fn activated<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fat
     answered(req, flow, frame)
 }
 
+/// What a serving does with a throwable its entry frame did not catch:
+/// the outermost serving renders it as the uncaught fatal, where php's
+/// `zend_execute_scripts` calls `zend_exception_error`, and a serving
+/// another serving is inside leaves it pending for its caller to read,
+/// where php's `zend_call_function` returns with `EG(exception)` set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unhandled {
+    Render,
+    Pending,
+}
+
 /// The dispatch loop over `frame` until the entry frame returns, asking
 /// `T` at the safepoints. `Ok(())` exactly when the entry frame has
 /// returned; `Err` carries the fatal.
 pub fn execute<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal> {
+    serving::<T>(req, frame, Unhandled::Render)
+}
+
+/// `zend_call_function` over a user function: the same loop on a frame
+/// pushed inside a serving that is already standing, for a native or a
+/// destructor calling back into PHP ([`Request::serve_user`]). What its
+/// entry frame did not catch stays pending and `Ok(())` says the
+/// serving is over, not that the frame returned; the caller reads the
+/// pending slot, as php's caller reads `EG(exception)`.
+pub(crate) fn reenter<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal> {
+    serving::<T>(req, frame, Unhandled::Pending)
+}
+
+/// One serving: the entry slot pushed, the loop, the entry slot popped
+/// on the fatal path as on the normal one.
+fn serving<T: Tier>(req: &mut Request, frame: FrameRef, unhandled: Unhandled) -> Result<(), Fatal> {
     let guard = req.stack_mut().push_entry(frame);
-    let outcome = serve::<T>(req, frame);
+    let outcome = serve::<T>(req, frame, unhandled);
     req.stack_mut().pop_entry(guard);
     outcome
 }
@@ -192,7 +219,7 @@ pub fn execute<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal>
 /// The loop itself, with the entry slot standing. `execute` activates
 /// its own entry frame whatever the caller is, where php installs its
 /// own site (design §4.3 seam 8).
-fn serve<T: Tier>(req: &mut Request, entry: FrameRef) -> Result<(), Fatal> {
+fn serve<T: Tier>(req: &mut Request, entry: FrameRef, unhandled: Unhandled) -> Result<(), Fatal> {
     let mut frame = entry;
     let mut stepped = activated::<T>(req, frame)?;
     loop {
@@ -203,7 +230,12 @@ fn serve<T: Tier>(req: &mut Request, entry: FrameRef) -> Result<(), Fatal> {
                 stepped = activated::<T>(req, frame)?;
                 continue;
             }
-            Stepped::Threw(_) => return req.uncaught(),
+            Stepped::Threw(_) => {
+                return match unhandled {
+                    Unhandled::Render => req.uncaught(),
+                    Unhandled::Pending => Ok(()),
+                };
+            }
             Stepped::Done => return Ok(()),
         }
         let serving = standing(req, frame)?;

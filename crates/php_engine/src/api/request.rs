@@ -643,7 +643,7 @@ impl Request {
         if let Some(this) = this {
             self.addref(&this.as_value());
         }
-        self.vm.push_call(CallState {
+        let call = CallState {
             function,
             name: Some(name),
             arguments: arguments.to_vec(),
@@ -653,10 +653,68 @@ impl Request {
             stage: CallStage::Serving,
             frameless: false,
             coerced: Vec::new(),
-        });
+        };
+        if self.user_function(function).is_some() {
+            return self.serve_user(function, call);
+        }
+        self.vm.push_call(call);
         let served = self.serve_native(function);
         self.pop_call();
         served
+    }
+
+    /// `zend_call_function` over a user function, the branch that calls
+    /// `zend_execute_ex` (design §5.6): the frame the call reached
+    /// pushed as `DO_UCALL`'s `enter` pushes it, with no caller slot to
+    /// return into, and the engine's loop entered on it once more,
+    /// bound to the same tier as the serving that is already standing.
+    /// Every frame the serving left behind is popped after it, its own
+    /// last, since a throwable unwinds to here and not through the
+    /// frames it passed.
+    ///
+    /// What the body returned is the caller's, one owner; what it left
+    /// pending is the `Err`, the throwable's one owner with it, so a
+    /// native reads a callback's raise the way it reads its own
+    /// ([`Request::leave_pending`] puts it back).
+    fn serve_user(&mut self, function: Function, call: CallState) -> Result<Value, Thrown> {
+        let standing = self.vm.frames().len();
+        let passed = call.arguments.len();
+        let Some(frame) = self.push_user_frame(function, call, None) else {
+            return self
+                .fatal_of::<()>(Err(Fatal::Error(String::from(
+                    "InternalError: a user function whose body the unit has not",
+                ))))
+                .map(|()| Value::null());
+        };
+        // `enter`'s rule, so a body reached from here stands where a body
+        // reached from `DO_UCALL` stands: a call that filled every
+        // parameter starts at the entry safepoint, past the prologue,
+        // and one that did not runs the `RECV*` oplines before it.
+        let parameters = self
+            .function_decl(function)
+            .map_or(0, |decl| decl.parameters.len());
+        if passed >= parameters {
+            let entry = self
+                .vm
+                .serving(frame)
+                .and_then(|serving| {
+                    serving
+                        .code()
+                        .and_then(|code| code.safepoints.first().copied())
+                })
+                .map_or(0, |at| at.0);
+            self.vm.jump(frame, entry);
+        }
+        let reenter = self.shared.reenter;
+        let served = reenter(self, frame);
+        while self.vm.frames().len() > standing {
+            self.pop_frame();
+        }
+        self.fatal_of(served)?;
+        match self.pending.take() {
+            Some(pending) => Err(Thrown::of(Some(pending))),
+            None => Ok(std::mem::replace(&mut self.returned, Value::null())),
+        }
     }
 
     /// The entry a `Function` names: one of the natives, or a native
@@ -2560,10 +2618,54 @@ impl Request {
 
     /// `zend_objects_destroy_object` (`Z/Zend/zend_objects.c:114`): the
     /// class's `__destruct` served on the object, which the store holds
-    /// at one owner meanwhile. A class with none serves nothing, which
-    /// is every class the tables hold until a method can be declared;
-    /// the visibility check, the pending-throwable rules and the
-    /// shutdown warning arrive with the first destructor.
+    /// at one owner meanwhile (`zend_objects_store_del` holds the count
+    /// there, where php's `GC_ADDREF` and `OBJ_RELEASE` around the call
+    /// hold it). A class with none serves nothing. The visibility check
+    /// and the pending-throwable rules arrive with the branches under
+    /// them.
+    ///
+    /// An array gives its elements up in element order
+    /// (`zend_array_destroy` over `i_zval_ptr_dtor`), so the
+    /// destructors of the objects it held are served in that order, and
+    /// the array is gone before the statement after it runs.
+    ///
+    /// ```php
+    /// class A {
+    ///     public $n;
+    ///     function __construct($n) { $this->n = $n; }
+    ///     function __destruct() { echo "d", $this->n, "\n"; }
+    /// }
+    /// $a = [new A(1), new A(2)];
+    /// $a = 0;
+    /// echo "after\n";
+    /// ```
+    /// ```expect
+    /// d1
+    /// d2
+    /// after
+    /// ```
+    ///
+    /// A destructor that takes an owner of its object resurrects it:
+    /// the release that served it finds a count above zero and frees
+    /// nothing, and the object is never served again, because
+    /// `IS_OBJ_DESTRUCTOR_CALLED` stands on it for the rest of the
+    /// request.
+    ///
+    /// ```php
+    /// class A {
+    ///     public $n;
+    ///     public $self;
+    ///     function __construct($n) { $this->n = $n; }
+    ///     function __destruct() { echo "d", $this->n, "\n"; $this->self = $this; }
+    /// }
+    /// $a = new A(1);
+    /// $a = 0;
+    /// echo "after\n";
+    /// ```
+    /// ```expect
+    /// d1
+    /// after
+    /// ```
     pub(crate) fn destruct(&mut self, object: PhpObject) {
         let destructor: Option<Box<[u8]>> = self.class_decl(object.class()).and_then(|decl| {
             decl.methods
@@ -2586,6 +2688,31 @@ impl Request {
     /// renders it with no frame to throw into. The symbol table php
     /// walks in reverse before this is the main frame's CVs here, given
     /// up when it popped (#280).
+    ///
+    /// An object a variable no longer names alone outlives that walk,
+    /// so the store's is what serves it: each of these holds itself,
+    /// so their destructors are served after the last statement, and in
+    /// the order the store made them, which is not the order the
+    /// variables were written.
+    ///
+    /// ```php
+    /// class A {
+    ///     public $n;
+    ///     public $self;
+    ///     function __construct($n) { $this->n = $n; }
+    ///     function __destruct() { echo "d", $this->n, "\n"; }
+    /// }
+    /// $a = new A(1);
+    /// $a->self = $a;
+    /// $b = new A(2);
+    /// $b->self = $b;
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// end
+    /// d1
+    /// d2
+    /// ```
     pub(crate) fn call_destructors(&mut self) {
         Heap::call_destructors(&mut Hooks(self));
         if let Err(fatal) = self.uncaught() {
@@ -4452,13 +4579,6 @@ impl Request {
     /// interned here and are gone when the request ends.
     pub(crate) fn heap_mut(&mut self) -> &mut Heap {
         &mut self.heap
-    }
-
-    /// The request's heap, read: what the store holds, for a test that
-    /// asks after an object's bucket.
-    #[cfg(test)]
-    pub(crate) fn heap(&self) -> &Heap {
-        &self.heap
     }
 
     /// A string of `bytes` out of this request's heap, what

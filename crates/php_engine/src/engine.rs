@@ -26,7 +26,7 @@ use crate::api::abi::{Cache, Entry, Extension, ObjectHandlers, StartupIni};
 use crate::api::request::{Aside, Ending, Request};
 use crate::api::values::{ClassId, Value};
 use crate::exec;
-use crate::tier::{Nop, Tier, execute};
+use crate::tier::{Nop, Tier, execute, reenter};
 
 /// Everything a host knows about one request before it starts (design
 /// §4.3 seam 4): one plain `Send` value, handed over once.
@@ -137,6 +137,11 @@ pub(crate) struct Shared {
     /// a request reading one allocates nothing and counts nothing.
     constant_values: Vec<(Box<[u8]>, Zval)>,
     entry: Loop,
+    /// The same loop for a serving inside a serving, `zend_call_function`
+    /// over a user function: what [`Request::serve_user`] enters a
+    /// destructor's or a callback's frame through, bound to the same
+    /// tier as `entry`.
+    pub(crate) reenter: Loop,
     /// The unit cache (design §6.3): what a file compiled to, held for
     /// every request that asks for the same file unchanged. A source the
     /// host handed over is not in it, because php caches neither `-r`
@@ -407,6 +412,7 @@ pub struct EngineBuilder {
     extensions: Vec<Extension>,
     ini: Vec<(Vec<u8>, Vec<u8>)>,
     entry: Loop,
+    reenter: Loop,
     tier_extension: Option<Extension>,
 }
 
@@ -432,6 +438,7 @@ impl EngineBuilder {
     #[must_use]
     pub fn tier<T: Tier>(mut self) -> EngineBuilder {
         self.entry = execute::<T>;
+        self.reenter = reenter::<T>;
         self.tier_extension = T::extension();
         self
     }
@@ -533,6 +540,7 @@ impl EngineBuilder {
                 ini,
                 constant_values,
                 entry: self.entry,
+                reenter: self.reenter,
                 units: Cache::new(MAX_ACCELERATED_FILES),
                 strings: Mutex::new(strings),
             }),
@@ -555,6 +563,7 @@ impl Engine {
             extensions: Vec::new(),
             ini: Vec::new(),
             entry: execute::<Nop>,
+            reenter: reenter::<Nop>,
             tier_extension: Nop::extension(),
         }
     }
