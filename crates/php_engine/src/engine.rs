@@ -181,28 +181,41 @@ impl Shared {
 
     /// The engine's own constants, php's `zend_register_standard_constants`
     /// and `main.c`'s `PHP_VERSION` and `PHP_EOL`: the ones a program
-    /// reaches with no extension loaded, their strings interned into
-    /// `strings` at build.
-    fn zend_constants(strings: &mut Strings) -> Vec<(&'static str, Zval)> {
-        let mut values = Vec::new();
-        for (name, text) in [
-            ("PHP_VERSION", crate::api::request::PHP_VERSION),
-            ("PHP_EOL", "\n"),
-        ] {
-            if let Ok(interned) = strings.intern(text.as_bytes()) {
-                values.push((name, Zval::string(interned)));
-            }
-        }
-        values.extend([
-            ("PHP_INT_MAX", Zval::long(i64::MAX)),
-            ("PHP_INT_MIN", Zval::long(i64::MIN)),
-            ("PHP_INT_SIZE", Zval::long(8)),
-            ("E_ALL", Zval::long(32767)),
-        ]);
+    /// reaches with no extension loaded, as `ConstDecl`s the compiler
+    /// folds where they stand (`zend_try_ct_eval_const`, design §6.1)
+    /// and the request table reads while a program executes, both from
+    /// one row.
+    ///
+    /// ```php
+    /// echo PHP_VERSION, PHP_EOL;
+    /// var_dump(PHP_INT_SIZE, E_ALL, PHP_INT_MAX, PHP_INT_MIN);
+    /// var_dump(PHP_OUTPUT_HANDLER_STDFLAGS, \PHP_EOL === "\n");
+    /// ```
+    /// ```expect
+    /// 8.5.9
+    /// int(8)
+    /// int(32767)
+    /// int(9223372036854775807)
+    /// int(-9223372036854775808)
+    /// int(112)
+    /// bool(true)
+    /// ```
+    fn zend_constants() -> Vec<ConstDecl> {
+        let mut decls = vec![
+            (
+                "PHP_VERSION",
+                ConstExpr::Str(crate::api::request::PHP_VERSION.as_bytes().into()),
+            ),
+            ("PHP_EOL", ConstExpr::Str(b"\n".as_slice().into())),
+            ("PHP_INT_MAX", ConstExpr::Long(i64::MAX)),
+            ("PHP_INT_MIN", ConstExpr::Long(i64::MIN)),
+            ("PHP_INT_SIZE", ConstExpr::Long(8)),
+            ("E_ALL", ConstExpr::Long(32767)),
+        ];
         // `main/main.stub.php:260-328`: the output layer's constants,
         // the operation `ob_start`'s callback is handed and the flags
         // it is started with (`Z/main/php_output.h:23-45`).
-        values.extend(
+        decls.extend(
             [
                 ("PHP_OUTPUT_HANDLER_START", 0x01),
                 ("PHP_OUTPUT_HANDLER_WRITE", 0x00),
@@ -219,9 +232,15 @@ impl Shared {
                 ("PHP_OUTPUT_HANDLER_DISABLED", 0x2000),
                 ("PHP_OUTPUT_HANDLER_PROCESSED", 0x4000),
             ]
-            .map(|(name, value)| (name, Zval::long(value))),
+            .map(|(name, value)| (name, ConstExpr::Long(value))),
         );
-        values
+        decls
+            .into_iter()
+            .map(|(name, value)| ConstDecl {
+                name: Name::from(name),
+                value,
+            })
+            .collect()
     }
 
     /// One source compiled with its constant strings interned into the
@@ -476,9 +495,11 @@ impl EngineBuilder {
             }
             classes.push(decl);
         }
-        let constants: Vec<ConstDecl> = extensions
-            .iter()
-            .flat_map(|e| e.constants.iter().cloned())
+        // Zend's own constants stand before the bundle's, as
+        // `zend_register_standard_constants` runs before any `MINIT`.
+        let constants: Vec<ConstDecl> = Shared::zend_constants()
+            .into_iter()
+            .chain(extensions.iter().flat_map(|e| e.constants.iter().cloned()))
             .collect();
         // `zend_register_constant` at `MINIT`: a string constant's value
         // is interned into the engine's table once, before any request,
@@ -498,9 +519,6 @@ impl EngineBuilder {
                 _ => continue,
             };
             constant_values.push((decl.name.0.clone(), value));
-        }
-        for (name, value) in Shared::zend_constants(&mut strings) {
-            constant_values.push((Box::from(name.as_bytes()), value));
         }
         Engine {
             shared: Arc::new(Shared {
