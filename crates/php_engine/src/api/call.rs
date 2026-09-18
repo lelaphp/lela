@@ -1,16 +1,17 @@
 //! The calling-back group (design §4.4): re-entry from a native into PHP
-//! code, always through `&mut Request` (principle 9, ADR-0002). The
-//! skeleton has no loop to re-enter, so every item that would serve user
-//! code reports php's `Error` for an undefined function or class, and the
-//! items that only read the linked tables answer from what the request
-//! holds.
+//! code, always through `&mut Request` (principle 9, ADR-0002). A
+//! callable is served here, a native through its entry and a user
+//! function by entering the engine's one loop again on the callee's
+//! frame; the items that only read the linked tables answer from what
+//! the request holds, and the rest still raise php's `Error` for an
+//! undefined function or class.
 
 use php_unit::decl::ConstExpr;
 
 use crate::api::abi::Callable;
-use crate::api::raising::{Thrown, throw};
+use crate::api::raising::{Thrown, fatal, throw};
 use crate::api::request::Request;
-use crate::api::values::{ClassId, PhpObject, PhpString, Value};
+use crate::api::values::{ClassId, PhpObject, PhpString, Value, ValueRef};
 
 /// A linked function: user or native, by identity. A native method is
 /// one too, numbered past the functions.
@@ -63,21 +64,181 @@ fn no_loop(req: &mut Request, what: &str) -> Thrown {
     )
 }
 
-/// `zend_call_function`.
-pub fn call(req: &mut Request, callable: &Callable, arguments: &[Value]) -> Result<Value, Thrown> {
-    let _ = arguments;
-    Err(no_loop(req, &callable.name()))
+/// The callee a `Callable` names, `zend_is_callable_ex` at the top of
+/// `zend_call_function` (`Z/Zend/zend_execute_API.c:824`): the function
+/// table's entry under the name the `Callable` carries, which is how
+/// `zend_fcall_info_init` spelled it. A name the table has not is php's
+/// `Error` for an invalid callback, worded as `zend_is_callable_ex`
+/// words a string's miss; the callables the request hands out are
+/// resolved when they are made, so only one made before its function
+/// was declared reaches it.
+fn function_of(req: &mut Request, callable: &Callable) -> Result<Function, Thrown> {
+    let name = callable.name();
+    match req.function_named(name.as_bytes()) {
+        Some(function) => Ok(function),
+        None => Err(throw(
+            req,
+            "Error",
+            &format!(
+                "Invalid callback {name}, function \"{name}\" not found or invalid function name"
+            ),
+        )),
+    }
 }
 
-/// `zend_call_function` with named arguments after the positional ones.
+/// `zend_call_function` (`Z/Zend/zend_execute_API.c:806`): the callee
+/// the callable names served on a call frame of its own, as
+/// `zend_vm_stack_push_call_frame` and the loop over `fci->params`
+/// build one. Each argument is one more owner the frame holds and is
+/// released with it, so the caller keeps what it passed; the return is
+/// the caller's, one owner; and what the callee left pending is the
+/// `Err`, the frame popped before it is handed back, so a native reads
+/// a callback's raise the way it reads its own.
+///
+/// A native is served through its entry, php's
+/// `func->internal_function.handler` branch. A user function is served
+/// by entering the engine's loop once more on the callee's frame,
+/// php's `zend_execute_ex` branch (design §5.6, "Native→PHP re-entry
+/// ... recurses via `execute(frame)` on the Rust stack"), which is the
+/// same dispatch loop the call came from and the same tier.
+///
+/// The buffering layer is what calls a handler here
+/// (`Z/main/output.c:944`), with the buffer and the
+/// `PHP_OUTPUT_HANDLER_*` bits: two arguments,
+/// so a native of one arity serves and one of another raises where php
+/// raises.
+///
+/// ```php
+/// ob_start('trim'); echo " abc ";
+/// ```
+/// ```expect
+/// abc
+/// ```
+///
+/// A user function serving as the handler: the buffer crosses into the
+/// body, the body's return crosses back, and what it returned is what
+/// comes out.
+///
+/// ```php
+/// function shout($buffer, $mode) { return strtoupper($buffer); }
+/// ob_start('shout');
+/// echo "abc";
+/// ```
+/// ```expect
+/// ABC
+/// ```
+///
+/// A throwable the body leaves pending crosses the boundary the other
+/// way: the handler is disabled and its buffer comes out whole
+/// (`php_output_handler_op`'s `Failure`), the `ob_end_flush()` that
+/// called it hands the throwable on, and the trace names the boundary
+/// `[internal function]`, as `zend_trace_to_string` does for a frame no
+/// opline called.
+///
+/// ```php
+/// function boom($buffer, $mode) { return strtoupper(); }
+/// ob_start('boom');
+/// echo "abc";
+/// ob_end_flush();
+/// echo "after\n";
+/// ```
+/// ```expect exit=255
+/// abc
+/// Fatal error: Uncaught ArgumentCountError: strtoupper() expects exactly 1 argument, 0 given in %s:2
+/// Stack trace:
+/// #0 %s(2): strtoupper()
+/// #1 [internal function]: boom('abc', 9)
+/// #2 %s(5): ob_end_flush()
+/// #3 {main}
+///   thrown in %s on line 2
+/// ```
+pub fn call(req: &mut Request, callable: &Callable, arguments: &[Value]) -> Result<Value, Thrown> {
+    let function = function_of(req, callable)?;
+    req.serve_function(function, arguments)
+}
+
+/// `zend_call_function` with named arguments after the positional ones,
+/// as its walk of `fci->named_params` places them
+/// (`Z/Zend/zend_execute_API.c:894`): each one at the offset the callee
+/// declares that name at, the slots between left `UNDEF` for the
+/// prologue to fill, which is `zend_handle_named_arg`
+/// (`Z/Zend/zend_execute.c:5518`). A name the callee declares no
+/// parameter for is php's `Error` for an unknown named parameter, and a
+/// name a positional argument already filled is php's other one.
 pub fn call_named(
     req: &mut Request,
     callable: &Callable,
     arguments: &[Value],
     named: &[(PhpString, Value)],
 ) -> Result<Value, Thrown> {
-    let _ = (arguments, named);
-    Err(no_loop(req, &callable.name()))
+    let function = function_of(req, callable)?;
+    if named.is_empty() {
+        return req.serve_function(function, arguments);
+    }
+    let placed = place_named(req, function, arguments, named)?;
+    req.serve_function(function, &placed)
+}
+
+/// `zend_get_arg_offset_by_name` and `zend_handle_named_arg` over one
+/// call's named arguments (`Z/Zend/zend_execute.c:5450`): the
+/// positional arguments as passed, then each named one at the offset of
+/// the parameter of that name, the slots it skipped `UNDEF`. php
+/// collects a name a variadic callee does not declare into
+/// `extra_named_params`, which no call frame here carries, so that one
+/// is an `InternalError` and not a wrong placement.
+fn place_named(
+    req: &mut Request,
+    function: Function,
+    arguments: &[Value],
+    named: &[(PhpString, Value)],
+) -> Result<Vec<Value>, Thrown> {
+    let parameters: Vec<(Vec<u8>, bool)> = req
+        .function_decl(function)
+        .map(|decl| {
+            decl.parameters
+                .iter()
+                .map(|parameter| (parameter.name.0.to_vec(), parameter.variadic))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut placed = arguments.to_vec();
+    for (name, value) in named {
+        let wanted = name.as_bytes();
+        let spelled = String::from_utf8_lossy(wanted).into_owned();
+        let Some(at) = parameters
+            .iter()
+            .position(|(declared, variadic)| !variadic && declared == wanted)
+        else {
+            if parameters.iter().any(|(_, variadic)| *variadic) {
+                return Err(fatal(
+                    req,
+                    &format!(
+                        "InternalError: the named argument ${spelled} a variadic parameter collects"
+                    ),
+                ));
+            }
+            return Err(throw(
+                req,
+                "Error",
+                &format!("Unknown named parameter ${spelled}"),
+            ));
+        };
+        if placed
+            .get(at)
+            .is_some_and(|held| !matches!(held.as_ref(), ValueRef::Undef))
+        {
+            return Err(throw(
+                req,
+                "Error",
+                &format!("Named parameter ${spelled} overwrites previous argument"),
+            ));
+        }
+        if placed.len() <= at {
+            placed.resize(at + 1, Value::undef());
+        }
+        placed[at] = *value;
+    }
+    Ok(placed)
 }
 
 /// `zend_call_method` on `object`: the method looked up on the
