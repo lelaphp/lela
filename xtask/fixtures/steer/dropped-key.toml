@@ -1,0 +1,17 @@
+[budget]
+workspace = 272500
+
+[[crate]]
+name = "ext/standard"
+
+[[crate]]
+name = "ext/json"
+budget = 1500
+
+[[rule]]
+id = "witness.exit-authored"
+deny_pattern = "exit="
+
+[[rule]]
+id = "lanes.nightly"
+deny_pattern = "xtask fuzz"

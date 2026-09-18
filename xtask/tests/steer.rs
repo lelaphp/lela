@@ -16,8 +16,13 @@ use xtask::steer;
 /// A scratch workspace carrying one of the harness's own files, a git
 /// repository with one commit so that a reading can be stamped.
 fn scratch(name: &str, pin: &str) -> Tree {
+    scratch_at(name, "oracle.toml", pin)
+}
+
+/// The same, for a workspace whose steerable file is another of the three.
+fn scratch_at(name: &str, file: &str, body: &str) -> Tree {
     let dir = Tree::new(&format!("steer-{name}")).expect("the scratch workspace");
-    fs::write(dir.join("oracle.toml"), pin).expect("the pin");
+    fs::write(dir.join(file), body).expect("the tracked file");
     let who = ["-c", "user.name=x", "-c", "user.email=x@x"];
     for args in [
         &["init", "-q"][..],
@@ -122,6 +127,75 @@ fn every_steerable_file_is_one_permit_denies() {
         assert!(
             extension.is_some_and(|ext| ext.eq_ignore_ascii_case("toml")),
             "{file} is judged as TOML, so it must be TOML"
+        );
+    }
+}
+
+/// One of the proposals under `xtask/fixtures/steer/`, beside the
+/// `tracked.toml` every one of them is judged against.
+fn fixture(name: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/steer")
+        .join(name);
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("the fixture {}: {e}", path.display()))
+}
+
+#[test]
+fn a_key_added_to_a_rule_row_the_file_carries_is_written_and_named() {
+    // The widening the maintainer settled on #387 with its risk named:
+    // `exempt` on a `[[rule]]` row is an addition, so it lands, and the
+    // reading is where a person reads that it did (ledger 51).
+    let tracked = fixture("tracked.toml");
+    let root = scratch_at("added-key", "seams.toml", &tracked);
+    let proposal = root.join("proposed.toml");
+    let added = fixture("added-key.toml");
+    fs::write(&proposal, &added).expect("the proposal");
+
+    let reading = steer::run(&root, "seams.toml", &proposal, false).expect("the instrument runs");
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    assert!(
+        reading
+            .message
+            .contains("rule[witness.exit-authored].exempt"),
+        "the reading names the key it added: {}",
+        reading.message
+    );
+    assert_eq!(reading.numbers["added"], 1.into());
+    assert_eq!(
+        fs::read_to_string(root.join("seams.toml")).expect("the manifest"),
+        added,
+        "the proposal is the file now"
+    );
+}
+
+#[test]
+fn every_negative_control_is_refused_at_the_path_it_moved_and_writes_nothing() {
+    // The four shapes the widening does not admit, one fixture each, each
+    // named by the path the refusal prints (xtask/fixtures/steer/README.md).
+    let controls = [
+        ("changed-value.toml", "crate[ext/standard].budget"),
+        ("dropped-key.toml", "crate[ext/standard].budget"),
+        ("dropped-row.toml", "rule[lanes.nightly] dropped"),
+        ("moved-row.toml", "rule[lanes.nightly] moved"),
+    ];
+    let tracked = fixture("tracked.toml");
+    for (name, path) in controls {
+        let root = scratch_at(name.trim_end_matches(".toml"), "seams.toml", &tracked);
+        let proposal = root.join("proposed.toml");
+        fs::write(&proposal, fixture(name)).expect("the proposal");
+
+        let reading =
+            steer::run(&root, "seams.toml", &proposal, false).expect("the instrument runs");
+        assert_eq!(reading.status, Status::Fail, "{name}: {}", reading.message);
+        assert!(
+            reading.message.contains(path),
+            "{name} is refused at {path}: {}",
+            reading.message
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("seams.toml")).expect("the manifest"),
+            tracked,
+            "{name}: a refused proposal writes nothing"
         );
     }
 }

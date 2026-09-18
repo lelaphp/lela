@@ -10,13 +10,28 @@
 //! What that reasoning forbids is a *change to what already binds*, and
 //! not every write to the file. A `[[crate]]` row for a crate that does
 //! not exist yet brings one under a ceiling; a `[regime.dump]` block the
-//! pin has never carried adds a recipe beside the ones it has. Neither can
-//! loosen anything, because nothing stands on them. So this instrument
-//! applies a proposed file only when it is **additive**: every table, key,
-//! value and array-of-tables row the tracked file carries stands unchanged
-//! in the proposal, and what the proposal adds beside them is new. One
-//! changed ceiling, one widened `to`, one deleted rule, one edited `ini`
+//! pin has never carried adds a recipe beside the ones it has; a
+//! `porting = true` on a row that carries a name and a budget says one
+//! thing more about that crate and moves neither. None of the three can
+//! loosen what stands, because nothing stood on them. So this instrument
+//! applies a proposed file only when it is **additive**: every value the
+//! tracked file carries stands unchanged in the proposal, at the path it
+//! stood at and in the order it stood in, and what the proposal adds
+//! beside them is new. One changed ceiling, one widened `to`, one deleted
+//! rule, one edited `ini`, one dropped key, one row moved past another,
 //! and the whole proposal is refused, named at the path that changed.
+//!
+//! A key added to a row the file already carries is an addition like any
+//! other (harness-design.md ledger 51): an array-of-tables row recurses
+//! key by key exactly as a table does, so `porting = true` on `[[crate]]`
+//! `ext/standard` lands the way `[regime.dump]` lands. What that widens
+//! is stated rather than hidden: 20 of the 22 `[[rule]]` rows carry no
+//! `exempt`, so an agent may propose one on the rule that denies it, and
+//! a `feature` added to an extension's row takes that extension out of
+//! the per-commit lane. Both are additions here, and both are named — in
+//! the reading, in what this instrument prints and in the commit's diff —
+//! so a rule that gains an exemption is as visible as one that loses it,
+//! and a person reads about it in the same commit.
 //!
 //! The judge is the whole of the safety, since nothing else stands between
 //! an agent and these files: `permit` judges tool calls, and an instrument
@@ -153,9 +168,9 @@ struct Walk {
 
 impl Walk {
     /// One value of the tracked file against the proposal's at the same
-    /// path. A table recurses key by key, an array of tables holds every
-    /// row it carries and admits new ones beside them, and every other
-    /// value must be what it was.
+    /// path. A table recurses key by key, an array of tables recurses into
+    /// every row it carries and admits new ones beside them, and every
+    /// other value must be what it was.
     fn value(&mut self, at: &str, old: &Value, new: &Value) {
         match (old, new) {
             (Value::Table(old), Value::Table(new)) => self.table(at, old, new),
@@ -178,9 +193,15 @@ impl Walk {
     }
 
     /// An array of tables: every row the tracked file carries must stand
-    /// in the proposal unchanged, named by its identity, and a row the
-    /// proposal adds must not carry the identity of one already there,
-    /// two rows of one name being how a row is shadowed rather than added.
+    /// in the proposal, named by its identity, holding every key it
+    /// carried at the value it carried and standing in the order it stood
+    /// in; a key it did not carry is an addition, as it is in a table. A
+    /// row the proposal adds must not carry the identity of one already
+    /// there, two rows of one name being how a row is shadowed rather than
+    /// added. A row whose identity is the row itself, carrying none of
+    /// `IDENTITY`, has no key to recurse under, so a key added to one of
+    /// those reads as the row dropped and another added, which is the
+    /// blunt half this instrument keeps.
     fn rows(&mut self, at: &str, old: &[Value], new: &[Value]) {
         let named = |rows: &[Value], name: &str| rows.iter().any(|r| identity(r) == name);
         for (n, row) in new.iter().enumerate() {
@@ -189,11 +210,17 @@ impl Walk {
                 self.refused.push(format!("{at}[{name}] twice"));
             }
         }
+        let mut behind = None;
         for row in old {
             let name = identity(row);
-            match new.iter().find(|r| identity(r) == name) {
-                Some(proposed) if proposed == row => {}
-                Some(_) => self.refused.push(format!("{at}[{name}]")),
+            match new.iter().position(|r| identity(r) == name) {
+                Some(n) if behind.is_some_and(|last| n < last) => {
+                    self.refused.push(format!("{at}[{name}] moved"));
+                }
+                Some(n) => {
+                    behind = Some(n);
+                    self.value(&format!("{at}[{name}]"), row, &new[n]);
+                }
                 None => self.refused.push(format!("{at}[{name}] dropped")),
             }
         }
@@ -265,7 +292,7 @@ mod tests {
         let widened = "[[edge]]\nfrom = \"xtask\"\nto = [\"php_bundle\", \"php_unit\"]\n";
         assert_eq!(
             verdict(old, widened),
-            Verdict::Refused(vec!["edge[xtask]".to_owned()])
+            Verdict::Refused(vec!["edge[xtask].to".to_owned()])
         );
     }
 
@@ -310,12 +337,54 @@ mod tests {
     }
 
     #[test]
-    fn an_exempt_added_to_a_rule_that_binds_is_refused() {
+    fn a_key_a_row_does_not_carry_is_an_addition_and_a_key_it_does_is_not() {
+        let old = "[[crate]]\nname = \"ext/standard\"\nbudget = 30000\n";
+        let marked = format!("{old}porting = true\n");
+        assert_eq!(
+            verdict(old, &marked),
+            Verdict::Additive(vec!["crate[ext/standard].porting".to_owned()])
+        );
+        let raised = "[[crate]]\nname = \"ext/standard\"\nbudget = 40000\n";
+        assert_eq!(
+            verdict(old, raised),
+            Verdict::Refused(vec!["crate[ext/standard].budget".to_owned()])
+        );
+        let dropped = "[[crate]]\nname = \"ext/standard\"\n";
+        assert_eq!(
+            verdict(old, dropped),
+            Verdict::Refused(vec!["crate[ext/standard].budget".to_owned()])
+        );
+    }
+
+    #[test]
+    fn an_exempt_added_to_a_rule_that_binds_is_an_addition_the_reading_names() {
+        // The widening the maintainer accepted with its risk named (#387,
+        // ledger 51): the exemption lands and every reader sees it.
         let old = "[[rule]]\nid = \"witness.exit-authored\"\ndeny_pattern = \"exit=\"\n";
         let exempted = format!("{old}exempt = [\"crates/php_engine/**\"]\n");
         assert_eq!(
             verdict(old, &exempted),
-            Verdict::Refused(vec!["rule[witness.exit-authored]".to_owned()])
+            Verdict::Additive(vec!["rule[witness.exit-authored].exempt".to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_row_moved_past_another_is_refused_however_much_the_proposal_adds() {
+        let rules = "[[rule]]\nid = \"harness.self\"\ndeny = true\n\n\
+                     [[rule]]\nid = \"lanes.nightly\"\ndeny = true\n";
+        let swapped = "[[rule]]\nid = \"lanes.nightly\"\ndeny = true\n\n\
+                       [[rule]]\nid = \"harness.self\"\ndeny = true\nexempt = [\"x\"]\n";
+        assert_eq!(
+            verdict(rules, swapped),
+            Verdict::Refused(vec!["rule[lanes.nightly] moved".to_owned()])
+        );
+        let between = "[[rule]]\nid = \"harness.self\"\ndeny = true\n\n\
+                       [[rule]]\nid = \"ticket.close\"\ndeny_argv = \"x\"\n\n\
+                       [[rule]]\nid = \"lanes.nightly\"\ndeny = true\n";
+        assert_eq!(
+            verdict(rules, between),
+            Verdict::Additive(vec!["rule[ticket.close]".to_owned()]),
+            "a row inserted between two that keep their order is an addition"
         );
     }
 }

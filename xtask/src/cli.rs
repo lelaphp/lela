@@ -288,11 +288,13 @@ pub(crate) enum Command {
     /// adds: one changed value writes nothing.
     ///
     /// The files are the ones `permit` denies the agent, and the judgement is
-    /// that every table, key, value and array-of-tables row the tracked file
-    /// carries stands unchanged in the proposal; one changed ceiling, one
-    /// widened edge, one dropped rule and nothing is written. What a new row
-    /// should say is a person's, settled on a ticket; this is how a settled
-    /// row reaches the file.
+    /// that every value the tracked file carries stands unchanged in the
+    /// proposal, at the path and in the order it stood in; one changed
+    /// ceiling, one widened edge, one dropped rule, one dropped key, one row
+    /// moved past another and nothing is written. A key a table or an
+    /// array-of-tables row does not carry is an addition, and every addition
+    /// is named in the reading. What a new row should say is a person's,
+    /// settled on a ticket; this is how a settled row reaches the file.
     Steer {
         /// The file to write, relative to the workspace root: seams.toml,
         /// oracle.toml or docs/divergence.toml.
