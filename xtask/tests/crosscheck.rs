@@ -117,13 +117,24 @@ fn count(reading: &Reading, key: &str) -> i64 {
 }
 
 /// The extensions the engine renders as the oracle does under `--re`, so
-/// far: ctype (#271) and json (#272). The row for the next one ported is
-/// added here with the commit that makes it pass.
-const PORTED: [&str; 2] = ["ext/ctype", "ext/json"];
+/// far: ctype (#271), json (#272), reflection, whose twenty-six classes
+/// render whole from the commit that declared them (d8bc96d), and
+/// tokenizer, whose constants and signatures reached php's order in
+/// 2f23e89. The row for the next one ported is added here
+/// with the commit that makes it pass.
+const PORTED: [&str; 4] = ["ext/ctype", "ext/json", "ext/reflection", "ext/tokenizer"];
 
 /// The extensions whose `MINFO` table the engine writes as php's does, so
-/// far (#273): the `--ri` column's ported rows.
-const PORTED_RI: [&str; 2] = ["ext/ctype/ri", "ext/json/ri"];
+/// far (#273): the `--ri` column's ported rows, which are the `--re`
+/// column's and `random` beside them, whose whole table is the `Version`
+/// line every extension's header carries (a3c01d0 wrote tokenizer's).
+const PORTED_RI: [&str; 5] = [
+    "ext/ctype/ri",
+    "ext/json/ri",
+    "ext/random/ri",
+    "ext/reflection/ri",
+    "ext/tokenizer/ri",
+];
 
 /// Design §11 days 1–2, the two halves met (#269) and the second column
 /// beside them (#273): every extension of the default set is rendered by
