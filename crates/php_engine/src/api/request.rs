@@ -3023,7 +3023,7 @@ impl Request {
     /// itself, takes its owner back instead, since php refuses to make
     /// a cycle. A chain is a path through live objects, so the store's
     /// count is a length no walk of it passes.
-    fn set_previous(&mut self, throwable: PhpObject, previous: PhpObject) {
+    pub(crate) fn set_previous(&mut self, throwable: PhpObject, previous: PhpObject) {
         let mut at = throwable;
         for _ in 0..=self.heap.objects() {
             if at.index() == previous.index() {
@@ -3902,6 +3902,20 @@ impl Request {
     /// `Flow::Resume` (`jit-design.md` §2.2).
     pub(crate) fn is_pending(&self) -> bool {
         self.pending.is_some()
+    }
+
+    /// The pending throwable as a view, no owner taken: what `CATCH`
+    /// tests its class against and what the unwinder chains onto.
+    pub(crate) fn pending(&self) -> Option<PhpObject> {
+        self.pending
+    }
+
+    /// The pending throwable out, the slot left empty and its one owner
+    /// the caller's: php's `EG(exception) = NULL` beside the object it
+    /// took, which is what a matching `CATCH` and an unwind into a
+    /// `finally` block do with it.
+    pub(crate) fn take_pending(&mut self) -> Option<PhpObject> {
+        self.pending.take()
     }
 
     fn ini_number(&self, name: &[u8], default: i32) -> i32 {

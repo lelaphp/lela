@@ -96,6 +96,27 @@ pub(crate) enum Stmt {
     Class(Class),
     /// `function f(…) { … }`, php's `ZEND_AST_FUNC_DECL`.
     Function(Function),
+    /// `try { … } catch (…) { … } finally { … }`, php's `ZEND_AST_TRY`
+    /// over three children: the body, the `catch` clauses, empty where
+    /// none is written, and the `finally` block with the keyword's line,
+    /// which `CG(zend_lineno)` is set to before the block's oplines.
+    Try {
+        body: Read,
+        catches: Vec<Catch>,
+        finally: Option<(Read, u32)>,
+    },
+}
+
+/// One `catch (A|B $e) { … }`, php's `ZEND_AST_CATCH`: the class names
+/// as written, one at least; the variable the throwable binds to, and
+/// none where the clause names none; the body; and the `catch` keyword's
+/// line, which `CG(zend_lineno)` is set to before the clause's oplines.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Catch {
+    pub(crate) types: Vec<Vec<u8>>,
+    pub(crate) var: Option<Vec<u8>>,
+    pub(crate) body: Read,
+    pub(crate) line: u32,
 }
 
 /// The nine magic constants, php's `T_LINE` through `T_PROPERTY_C`: the
@@ -421,6 +442,10 @@ pub(crate) enum Expr {
         expr: Child,
         class: Vec<u8>,
     },
+    /// `throw expr`, php's `ZEND_AST_THROW`: an expression since 8.0,
+    /// which `throw expr;` is the statement of, so the grammar's
+    /// `expr: T_THROW expr` is read wherever a full expression stands.
+    Throw(Child),
 }
 
 /// One child of an expression, php's `zend_ast.child[i]`: the expression
@@ -802,6 +827,10 @@ impl Reader<'_> {
         if self.word_ahead(b"switch") {
             self.bump(6);
             return self.switch().map(Some);
+        }
+        if self.word_ahead(b"try") {
+            self.bump(3);
+            return self.r#try().map(Some);
         }
         if self.word_ahead(b"break") {
             self.bump(5);
@@ -1490,6 +1519,92 @@ impl Reader<'_> {
         }
     }
 
+    /// `try { … } catch (A|B $e) { … } finally { … }`, the keyword read:
+    /// php's `try_statement`, whose three parts are each a braced block
+    /// and nothing else (`'{' inner_statement_list '}'` in the grammar,
+    /// so `try foo();` is a parse error and not a one-statement body).
+    /// A `catch` names one class or several separated by `|`, and binds
+    /// the throwable to a variable or to nothing. A `try` with neither a
+    /// `catch` nor a `finally` is php's compile error, raised by the
+    /// emitter where `zend_compile_try` raises it.
+    fn r#try(&mut self) -> Result<Stmt, Trouble> {
+        let body = self.braced("a `try` this compiler cannot read yet")?;
+        let mut catches = Vec::new();
+        loop {
+            self.skip_trivia();
+            if !self.word_ahead(b"catch") {
+                break;
+            }
+            let line = self.line;
+            self.bump(5);
+            self.punctuation(b'(', "a `catch` with no parenthesis after it")?;
+            let mut types = vec![self.catch_type()?];
+            loop {
+                self.skip_trivia();
+                if self.byte(0) != Some(b'|') {
+                    break;
+                }
+                self.bump(1);
+                types.push(self.catch_type()?);
+            }
+            self.skip_trivia();
+            let var = if self.byte(0) == Some(b'$') {
+                self.bump(1);
+                let name = self.name();
+                if name.is_empty() || name.contains(&b'\\') {
+                    return Err(self.trouble("a `catch` variable this compiler cannot read yet"));
+                }
+                Some(name)
+            } else {
+                None
+            };
+            self.punctuation(b')', "a `catch` whose parenthesis nothing closes")?;
+            let body = self.braced("a `catch` this compiler cannot read yet")?;
+            catches.push(Catch {
+                types,
+                var,
+                body,
+                line,
+            });
+        }
+        self.skip_trivia();
+        let finally = if self.word_ahead(b"finally") {
+            let line = self.line;
+            self.bump(7);
+            Some((
+                self.braced("a `finally` this compiler cannot read yet")?,
+                line,
+            ))
+        } else {
+            None
+        };
+        Ok(Stmt::Try {
+            body,
+            catches,
+            finally,
+        })
+    }
+
+    /// One class name of a `catch` clause, php's `catch_name_list`
+    /// element, which `zend_is_const_default_class_ref` holds to a name
+    /// written at compile time.
+    fn catch_type(&mut self) -> Result<Vec<u8>, Trouble> {
+        self.skip_trivia();
+        if !self.name_ahead() {
+            return Err(self.trouble("Bad class name in the catch statement"));
+        }
+        Ok(self.name())
+    }
+
+    /// A `{ … }` where php's grammar puts a braced statement list and
+    /// nothing else; `what` is what anything else is refused as.
+    fn braced(&mut self, what: &str) -> Result<Read, Trouble> {
+        self.punctuation(b'{', what)?;
+        let mut body = Read::new();
+        self.statements(&mut body, false, true)?;
+        Ok(body)
+    }
+
     /// What follows a `break` or a `continue`: nothing, or the
     /// expression php's grammar reads before the `;`.
     fn depth(&mut self) -> Result<Option<Expr>, Trouble> {
@@ -1677,6 +1792,14 @@ impl Reader<'_> {
     /// than read as the other grouping.
     fn expr(&mut self) -> Result<Expr, Trouble> {
         self.check_stack()?;
+        // `expr: T_THROW expr` since 8.0: the operand is a full
+        // expression, so `throw $a = new E` is php's `throw ($a = new E)`
+        // and `f(throw new E)` is the argument php reads it as.
+        self.skip_trivia();
+        if self.word_ahead(b"throw") {
+            self.bump(5);
+            return Ok(Expr::Throw(Child::new(self.expr()?)));
+        }
         let left = self.equality()?;
         self.assignment(left)
     }

@@ -89,6 +89,14 @@ pub(crate) struct FrameState {
     /// a frame a native re-entered the loop on counts the native that
     /// entered it too, and so stands above it.
     pub(crate) calls_below: u32,
+    /// php's fast-call temporaries, one per `finally` block of the op
+    /// array a `FAST_CALL` or an unwind has entered. php keeps two
+    /// fields in the one zval at `EX_VAR(opline->result.var)`,
+    /// `Z_OPLINE_NUM_P` and `Z_OBJ_P`, which no zval of this engine
+    /// holds together, so the cell stands here and the temporary itself
+    /// is left `UNDEF`. Nothing but `FAST_CALL`, `FAST_RET`,
+    /// `DISCARD_EXCEPTION` and the unwinder reads it.
+    fast_calls: Vec<FastCall>,
     /// The op array's runtime cache, `EX(run_time_cache)`: one slot per
     /// `sizeof(void *)` of `cache_size`, every one [`Cached::Unprimed`]
     /// when the frame is pushed (`memset(run_time_cache, 0, cache_size)`
@@ -98,6 +106,22 @@ pub(crate) struct FrameState {
     /// a frame serves is a unit's main, served once, the frame's life is
     /// the request's and the two read the same.
     cache: Box<[Cached]>,
+}
+
+/// One `FAST_CALL`'s temporary while the `finally` block it entered
+/// runs (`Z/Zend/zend_vm_def.h:8647`): the two fields php keeps in one
+/// zval there, held apart.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FastCall {
+    /// Which temporary of the frame, the `FAST_CALL`'s `result`.
+    var: u32,
+    /// `Z_OPLINE_NUM_P`: the `FAST_CALL` the block is to return past,
+    /// and none where an unwind entered it, php's `(uint32_t)-1`.
+    pub(crate) from: Option<u32>,
+    /// `Z_OBJ_P`: the throwable an unwind delayed while the block runs,
+    /// one owner held here until a `FAST_RET` makes it pending again, a
+    /// `DISCARD_EXCEPTION` gives it up, or the unwinder chains it.
+    pub(crate) delayed: Option<PhpObject>,
 }
 
 /// One slot of the runtime cache, the `void *` at `CACHE_ADDR(num)`,
@@ -244,6 +268,7 @@ impl Vm {
             num_args,
             extra_args: Vec::new(),
             calls_below,
+            fast_calls: Vec::new(),
             cache: vec![Cached::Unprimed; slots].into_boxed_slice(),
         });
     }
@@ -387,6 +412,22 @@ impl Vm {
         self.calls
             .last()
             .filter(|call| call.stage == CallStage::Serving)
+    }
+
+    /// The fast-call cell of `frame`'s temporary `var`, made where the
+    /// frame has none yet: php's zval is the temporary itself and is
+    /// always there, so a first read makes the cell php would have read.
+    pub(crate) fn fast_call(&mut self, frame: FrameRef, var: u32) -> Option<&mut FastCall> {
+        let state = self.at_mut(frame)?;
+        if let Some(at) = state.fast_calls.iter().position(|cell| cell.var == var) {
+            return state.fast_calls.get_mut(at);
+        }
+        state.fast_calls.push(FastCall {
+            var,
+            from: None,
+            delayed: None,
+        });
+        state.fast_calls.last_mut()
     }
 
     /// Every call on the stack, outermost first, each one's place among

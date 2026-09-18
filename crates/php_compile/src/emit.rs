@@ -102,12 +102,12 @@ use php_unit::decl::{
 };
 use php_unit::{
     Diagnostic, FramelessEntry, Level, MethodBody, OpArray, Opcode, OperandKind, Opline, OplineIdx,
-    Unit, frameless_table,
+    TryCatch, Unit, frameless_table,
 };
 
 use crate::read::{
-    Arm, BinaryOp, Case, CastTo, Class, Element, Expr, Function, Magic, Method, Piece, Read, Stmt,
-    Target,
+    Arm, BinaryOp, Case, CastTo, Catch, Class, Element, Expr, Function, Magic, Method, Piece, Read,
+    Stmt, Target,
 };
 use crate::{CompileError, Options, StackLimit};
 
@@ -227,6 +227,51 @@ pub(crate) struct Emit<'a> {
     /// into the `JMP` each is once every loop's end is known: the opline,
     /// the loop it was written in, its depth and whether it breaks.
     breaks: Vec<Pending>,
+    /// `op_array->try_catch_array`: every `try` of the op array in the
+    /// order `zend_add_try_element` added them, which is the order their
+    /// `try_op`s stand in.
+    try_catch: Vec<TryCatch>,
+    /// `CG(loop_var_stack)`, the finally half: what a `return` out of
+    /// here must emit before the `RETURN`, innermost last
+    /// (`zend_handle_loops_and_finally_ex`). The loop half is [`Emit::loops`],
+    /// pushed and popped beside it, so an entry records how many loops
+    /// stood open under it and the walk interleaves the two again.
+    unwind: Vec<Unwind>,
+    /// `CG(context).fast_call_var`: the temporary the innermost
+    /// `finally` keeps its return address and its delayed throwable in,
+    /// and none outside one.
+    fast_call_var: Option<u32>,
+    /// `CG(context).try_catch_offset`: which element of [`Emit::try_catch`]
+    /// the oplines being emitted stand in, `-1` outside every `try`.
+    try_catch_offset: Option<u32>,
+}
+
+/// One entry of `CG(loop_var_stack)` a `finally` puts there
+/// (`zend_compile_try`): the `FAST_CALL` that stands while the `try` and
+/// its `catch`es compile, and the `DISCARD_EXCEPTION` that stands while
+/// the `finally` block itself does. `loops` is how many loops of this op
+/// array stood open when it was pushed, which is where it falls among
+/// them on the way out.
+#[derive(Clone, Copy)]
+enum Unwind {
+    FastCall {
+        var: u32,
+        try_catch_offset: u32,
+        loops: u32,
+    },
+    DiscardException {
+        var: u32,
+        loops: u32,
+    },
+}
+
+impl Unwind {
+    /// How many loops stood open under this entry.
+    fn loops(self) -> u32 {
+        match self {
+            Unwind::FastCall { loops, .. } | Unwind::DiscardException { loops, .. } => loops,
+        }
+    }
 }
 
 /// `zend_brk_cont_element`: one loop or `switch`, the loop it stands in,
@@ -300,6 +345,11 @@ const ARRAY_SIZE_SHIFT: u32 = 2;
 /// `ZEND_FREE_SWITCH`, the bit `zend_compile.h` sets on the `FREE` of a
 /// `switch` or `match` subject at its end.
 const FREE_SWITCH: u32 = 1 << 1;
+
+/// `ZEND_LAST_CATCH` (`Z/Zend/zend_compile.h`): the bit
+/// `zend_compile_try` sets on the last `CATCH` of a `try`, beside the
+/// cache slot, which is a byte offset and so never has it.
+const LAST_CATCH: u32 = 1 << 0;
 
 /// Where an expression left its value, php's `znode`: the value itself
 /// for a constant, which reaches the table only when the opline that
@@ -394,6 +444,10 @@ pub(crate) fn unit(
         loops: Vec::new(),
         current_loop: None,
         breaks: Vec::new(),
+        try_catch: Vec::new(),
+        unwind: Vec::new(),
+        fast_call_var: None,
+        try_catch_offset: None,
     };
     // A fatal leaves the file with what `zend_error` had raised before
     // it already rendered, so those travel with it.
@@ -427,10 +481,29 @@ struct Saved {
     loops: Vec<Loop>,
     current_loop: Option<usize>,
     breaks: Vec<Pending>,
+    try_catch: Vec<TryCatch>,
+    unwind: Vec<Unwind>,
+    fast_call_var: Option<u32>,
+    try_catch_offset: Option<u32>,
     active_function: Option<Vec<u8>>,
     this_in_scope: bool,
     return_type: Option<Type>,
     returns_by_ref: bool,
+}
+
+/// `pass_two`'s `ZEND_FAST_CALL` arm (`Z/Zend/zend_opcode.c:1150`):
+/// every `FAST_CALL` carries the number of its `try_catch_array`
+/// element in `op1` until here, and the first opline of that element's
+/// `finally` block from here, which is where the handler jumps.
+fn resolve_fast_calls(oplines: &mut [Opline], try_catch: &[TryCatch]) {
+    for op in oplines {
+        if op.opcode != Opcode::FastCall {
+            continue;
+        }
+        if let Some(element) = try_catch.get(op.op1 as usize) {
+            op.op1 = element.finally_op.0;
+        }
+    }
 }
 
 /// Design §5.7's assertion over one op array, before it is a unit:
@@ -656,8 +729,224 @@ impl Emit<'_> {
             Stmt::Continue(depth) => self.break_continue(depth.as_ref(), false)?,
             Stmt::Class(class) => self.class(class)?,
             Stmt::Function(function) => self.function_decl(function)?,
+            Stmt::Try {
+                body,
+                catches,
+                finally,
+            } => self.r#try(body, catches, finally.as_ref())?,
         }
         Ok(())
+    }
+
+    /// `zend_compile_try` (`Z/Zend/zend_compile.c:6735`): one element of
+    /// `try_catch_array` opened at the body's first opline; the body;
+    /// a `JMP` over the `catch` clauses where any stands; one `CATCH` per
+    /// class named, each clause's last `CATCH` jumping to the next
+    /// clause's first, and the last clause's carrying `ZEND_LAST_CATCH`
+    /// and jumping nowhere, which is where the throwable is rethrown;
+    /// then, where a `finally` is written, the `FAST_CALL` into the
+    /// block, the `JMP` over it, the block between `finally_op` and
+    /// `finally_end`, and the `FAST_RET` that ends it.
+    ///
+    /// `try` with neither a `catch` nor a `finally` is php's compile
+    /// error in php's words.
+    ///
+    /// ```php
+    /// try { throw new Exception("x"); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// try { echo "a\n"; } finally { echo "b\n"; }
+    /// try { throw new TypeError("t"); } catch (ValueError $e) { echo "no\n"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; } finally { echo "f\n"; }
+    /// ```
+    /// ```expect
+    /// x
+    /// a
+    /// b
+    /// t
+    /// f
+    /// ```
+    fn r#try(
+        &mut self,
+        body: &Read,
+        catches: &[Catch],
+        finally: Option<&(Read, u32)>,
+    ) -> Result<(), CompileError> {
+        if catches.is_empty() && finally.is_none() {
+            return Err(self.compile_error("Cannot use try without catch or finally"));
+        }
+        let offset = u32::try_from(self.try_catch.len()).unwrap_or(u32::MAX);
+        self.try_catch.push(TryCatch {
+            try_op: OplineIdx(self.next()),
+            ..TryCatch::default()
+        });
+        let saved_fast_call = self.fast_call_var;
+        let saved_offset = self.try_catch_offset;
+        if finally.is_some() {
+            let var = self.temporary();
+            self.fast_call_var = Some(var);
+            self.unwind.push(Unwind::FastCall {
+                var,
+                try_catch_offset: offset,
+                loops: self.loops_open(),
+            });
+        }
+        self.try_catch_offset = Some(offset);
+        self.statements(body)?;
+        let mut over_catches = Vec::new();
+        if !catches.is_empty() {
+            over_catches.push(self.jump_forward());
+        }
+        for (i, clause) in catches.iter().enumerate() {
+            let last_catch = i + 1 == catches.len();
+            self.line = clause.line;
+            if i == 0 {
+                let at = OplineIdx(self.next());
+                if let Some(element) = self.try_catch.get_mut(offset as usize) {
+                    element.catch_op = at;
+                }
+            }
+            let opnum_catch = self.catch_clause(clause, last_catch)?;
+            self.statements(&clause.body)?;
+            if !last_catch {
+                over_catches.push(self.jump_forward());
+                let next = self.next();
+                if let Some(op) = self.oplines.get_mut(opnum_catch as usize) {
+                    op.op2 = next;
+                }
+            }
+        }
+        for jump in over_catches {
+            self.update_jump_target_to_next(jump);
+        }
+        if let Some((block, line)) = finally {
+            self.finally_block(block, *line, offset, saved_offset)?;
+            self.fast_call_var = saved_fast_call;
+        }
+        self.try_catch_offset = saved_offset;
+        Ok(())
+    }
+
+    /// One `catch (A|B $e)` clause's `CATCH` oplines, `zend_compile_try`'s
+    /// inner loop: one per class named, each with the class's constant
+    /// pair in `op1` and a cache slot in `extended_value`, the throwable
+    /// bound into the clause's CV where one is written and released where
+    /// none is (`RETURN_VALUE_USED`). A `CATCH` that is not the last
+    /// class of its clause jumps over the rest to the clause's body.
+    /// Returns the clause's last `CATCH`, whose `op2` is the next
+    /// clause's first and is left unset on the last clause of the `try`.
+    fn catch_clause(&mut self, clause: &Catch, last_catch: bool) -> Result<u32, CompileError> {
+        if let Some(name) = &clause.var
+            && name == b"this"
+        {
+            return Err(self.compile_error("Cannot re-assign $this"));
+        }
+        let mut multicatch = Vec::new();
+        let mut opnum_catch = self.next();
+        let count = clause.types.len();
+        for (j, class) in clause.types.iter().enumerate() {
+            let last_class = j + 1 == count;
+            let class_at = self.class_name_literal(class)?;
+            let slot = self.cache_slot();
+            let (out_type, out) = match &clause.var {
+                Some(name) => (OperandKind::Cv, self.lookup_cv(name)),
+                None => (OperandKind::Unused, u32::MAX),
+            };
+            let extended = if last_catch && last_class {
+                slot | LAST_CATCH
+            } else {
+                slot
+            };
+            opnum_catch = self.push(Opline {
+                opcode: Opcode::Catch,
+                op1_type: OperandKind::Const,
+                op1: class_at,
+                out_type,
+                out,
+                extended_value: extended,
+                ..Opline::default()
+            });
+            if !last_class {
+                multicatch.push(self.jump_forward());
+                let next = self.next();
+                if let Some(op) = self.oplines.get_mut(opnum_catch as usize) {
+                    op.op2 = next;
+                }
+            }
+        }
+        for jump in multicatch {
+            self.update_jump_target_to_next(jump);
+        }
+        Ok(opnum_catch)
+    }
+
+    /// `zend_compile_try`'s `finally` half: the `FAST_CALL` into the
+    /// block, whose `result` is the fast-call temporary and whose `op1`
+    /// `pass_two` turns from the element's number into the block's first
+    /// opline; the `JMP` over the block; the block between `finally_op`
+    /// and `finally_end`; and the `FAST_RET` that returns to whoever
+    /// called it, carrying the enclosing `try`'s number in `op2`. The
+    /// `DISCARD_EXCEPTION` marker stands on the unwind stack while the
+    /// block compiles, in the `FAST_CALL`'s place.
+    fn finally_block(
+        &mut self,
+        block: &Read,
+        line: u32,
+        offset: u32,
+        enclosing: Option<u32>,
+    ) -> Result<(), CompileError> {
+        let Some(var) = self.fast_call_var else {
+            return Err(self.fatal("InternalError: a `finally` with no fast-call temporary"));
+        };
+        self.unwind.pop();
+        self.unwind.push(Unwind::DiscardException {
+            var,
+            loops: self.loops_open(),
+        });
+        self.line = line;
+        self.push(Opline {
+            opcode: Opcode::FastCall,
+            op1: offset,
+            out_type: OperandKind::Tmp,
+            out: var,
+            ..Opline::default()
+        });
+        let opnum_fast_call = self.next().saturating_sub(1);
+        let over = self.jump_forward();
+        self.statements(block)?;
+        let finally_op = OplineIdx(opnum_fast_call.saturating_add(2));
+        let finally_end = OplineIdx(self.next());
+        if let Some(element) = self.try_catch.get_mut(offset as usize) {
+            element.finally_op = finally_op;
+            element.finally_end = finally_end;
+        }
+        self.push(Opline {
+            opcode: Opcode::FastRet,
+            op1_type: OperandKind::Tmp,
+            op1: var,
+            op2: enclosing.unwrap_or(u32::MAX),
+            ..Opline::default()
+        });
+        self.update_jump_target_to_next(over);
+        self.unwind.pop();
+        Ok(())
+    }
+
+    /// `zend_emit_jump(0)`: a `JMP` whose target is learnt later.
+    fn jump_forward(&mut self) -> u32 {
+        self.push(Opline {
+            opcode: Opcode::Jmp,
+            ..Opline::default()
+        })
+    }
+
+    /// How many loops of this op array stand open, which is where an
+    /// unwind entry pushed now falls among them.
+    fn loops_open(&self) -> u32 {
+        let mut count = 0;
+        let mut at = self.current_loop;
+        while let Some(index) = at {
+            count += 1;
+            at = self.loops.get(index).and_then(|open| open.parent);
+        }
+        count
     }
 
     /// `zend_compile_func_decl` for a function at the top level of the
@@ -1075,6 +1364,10 @@ impl Emit<'_> {
             loops: std::mem::take(&mut self.loops),
             current_loop: self.current_loop.take(),
             breaks: std::mem::take(&mut self.breaks),
+            try_catch: std::mem::take(&mut self.try_catch),
+            unwind: std::mem::take(&mut self.unwind),
+            fast_call_var: self.fast_call_var.take(),
+            try_catch_offset: self.try_catch_offset.take(),
             active_function: self.active_function.replace(name.to_vec()),
             this_in_scope: std::mem::replace(&mut self.this_in_scope, this_in_scope),
         }
@@ -1092,6 +1385,10 @@ impl Emit<'_> {
         self.loops = saved.loops;
         self.current_loop = saved.current_loop;
         self.breaks = saved.breaks;
+        self.try_catch = saved.try_catch;
+        self.unwind = saved.unwind;
+        self.fast_call_var = saved.fast_call_var;
+        self.try_catch_offset = saved.try_catch_offset;
         self.active_function = saved.active_function;
         self.this_in_scope = saved.this_in_scope;
         self.return_type = saved.return_type;
@@ -1113,6 +1410,7 @@ impl Emit<'_> {
     ) -> Result<OpArray, CompileError> {
         self.final_return(return_one)?;
         self.resolve_breaks();
+        resolve_fast_calls(&mut self.oplines, &self.try_catch);
         headers_numbered(&self.oplines, &self.safepoints)?;
         swap_commutative(&mut self.oplines);
         let mut oplines = std::mem::take(&mut self.oplines);
@@ -1125,7 +1423,7 @@ impl Emit<'_> {
             vars: vars.into_boxed_slice(),
             num_cvs,
             num_tmps: self.temporaries,
-            try_catch: Box::new([]),
+            try_catch: std::mem::take(&mut self.try_catch).into_boxed_slice(),
             live_ranges,
             safepoints: std::mem::take(&mut self.safepoints).into_boxed_slice(),
             filename: self.filename.clone(),
@@ -1361,6 +1659,7 @@ impl Emit<'_> {
             | Expr::MethodCall { .. }
             | Expr::StaticProp { .. }
             | Expr::Silence(_)
+            | Expr::Throw(_)
             | Expr::Encaps(_) => {
                 Err(self.compile_error("Constant expression contains invalid operations"))
             }
@@ -1615,18 +1914,31 @@ impl Emit<'_> {
     }
 
     /// `zend_compile_return` (`Z/Zend/zend_compile.c:5694`): the value,
-    /// or the constant `null` where none is written; the return type
-    /// check where the op array declares one
-    /// ([`Self::return_type_check`]); every open loop's variable freed
-    /// innermost first (`zend_handle_loops_and_finally`, which takes
-    /// every loop on the stack); then `RETURN` over the value, or
-    /// `RETURN_BY_REF` where the function was written `function &f`,
-    /// carrying its safepoint number as [`Self::final_return`]'s carries
-    /// its own. `extended_value` is `ZEND_RETURNS_FUNCTION` where a
-    /// by-reference return returns a call's value and `ZEND_RETURNS_VALUE`
-    /// where it returns what is no variable; zero otherwise, which is
-    /// every return of the main op array, that returns nothing by
-    /// reference.
+    /// or the constant `null` where none is written; the value copied
+    /// into a temporary where a `finally` stands between here and the
+    /// `RETURN` ([`Self::copied_past_finally`]); the return type check
+    /// where the op array declares one ([`Self::return_type_check`]);
+    /// every open loop's variable freed and every open `finally` called,
+    /// innermost first ([`Self::unwind_to_return`]); then `RETURN` over
+    /// the value, or `RETURN_BY_REF` where the function was written
+    /// `function &f`, carrying its safepoint number as
+    /// [`Self::final_return`]'s carries its own. `extended_value` is
+    /// `ZEND_RETURNS_FUNCTION` where a by-reference return returns a
+    /// call's value and `ZEND_RETURNS_VALUE` where it returns what is no
+    /// variable; zero otherwise, which is every return of the main op
+    /// array, that returns nothing by reference.
+    ///
+    /// ```php
+    /// function f() { try { return "t"; } finally { echo "f\n"; } }
+    /// function g() { try { throw new Exception("x"); } catch (Exception $e) { return $e->getMessage(); } finally { echo "g\n"; } }
+    /// echo f(), "\n", g(), "\n";
+    /// ```
+    /// ```expect
+    /// f
+    /// t
+    /// g
+    /// x
+    /// ```
     fn r#return(&mut self, value: Option<&Expr>) -> Result<(), CompileError> {
         let by_ref = self.returns_by_ref;
         if by_ref
@@ -1653,18 +1965,9 @@ impl Emit<'_> {
             Some(expr) => self.expr(expr)?,
             None => Where::Constant(Zval::null()),
         };
+        let compiled = self.copied_past_finally(compiled, by_ref)?;
         let compiled = self.return_type_check(compiled, value.is_some(), false)?;
-        let mut at = self.current_loop;
-        while let Some(index) = at {
-            let Some((var, parent)) = self.loops.get(index).map(|open| (open.var, open.parent))
-            else {
-                break;
-            };
-            if let Some(var) = var {
-                self.free_on_return(var);
-            }
-            at = parent;
-        }
+        self.unwind_to_return(compiled);
         let (op1_type, op1) = self.operand(compiled);
         let at = self.next();
         let number = self.safepoint(at);
@@ -1796,6 +2099,119 @@ impl Emit<'_> {
         }
     }
 
+    /// `zend_compile_return`'s copy into a temporary: a returned CV is
+    /// moved into a `QM_ASSIGN` where the op array has a `finally` block
+    /// and one stands between here and the `RETURN` (`zend_has_finally`),
+    /// so code in the `finally` cannot write the value out from under
+    /// the return. A constant or a temporary is already nobody else's.
+    fn copied_past_finally(&mut self, value: Where, by_ref: bool) -> Result<Where, CompileError> {
+        // `zend_has_finally`: a `FAST_CALL` stands on the stack, which
+        // is a `finally` between here and the `RETURN`; inside a
+        // `finally` block its own marker is a `DISCARD_EXCEPTION` and
+        // the copy is not made.
+        if !self
+            .unwind
+            .iter()
+            .any(|marker| matches!(marker, Unwind::FastCall { .. }))
+        {
+            return Ok(value);
+        }
+        if by_ref {
+            // php makes a `MAKE_REF` of a `VAR` here and checks the
+            // return type again past the block, neither of which this
+            // compiler emits yet.
+            return Err(self.fatal(
+                "a return by reference out of a `try` with a `finally` this compiler cannot read yet",
+            ));
+        }
+        let Where::Cv(cv) = value else {
+            return Ok(value);
+        };
+        let out = self.temporary();
+        self.push(Opline {
+            opcode: Opcode::QmAssign,
+            op1_type: OperandKind::Cv,
+            op1: cv,
+            out_type: OperandKind::Tmp,
+            out,
+            ..Opline::default()
+        });
+        Ok(Where::Temporary(out))
+    }
+
+    /// `zend_handle_loops_and_finally` on the way to a `RETURN`: every
+    /// entry of `CG(loop_var_stack)` innermost first, with no depth to
+    /// stop at, so every open loop's variable is freed and every open
+    /// `finally` is called. The two stacks are one in php; here the
+    /// loops hang off [`Emit::current_loop`] and the `finally` markers
+    /// off [`Emit::unwind`], each marker recording how many loops stood
+    /// under it, which puts them back in one order.
+    ///
+    /// A `FAST_CALL` emitted here carries the value being returned in
+    /// `op2`, which is what a `DISCARD_EXCEPTION` or an unwind through
+    /// the block gives up when the return never happens.
+    fn unwind_to_return(&mut self, value: Where) {
+        let (value_type, value_at) = match value {
+            Where::Temporary(at) => (OperandKind::Tmp, at),
+            Where::Returned(at) => (OperandKind::Var, at),
+            Where::Constant(_) | Where::Cv(_) => (OperandKind::Unused, 0),
+        };
+        let mut loops = self.current_loop;
+        let mut open = self.loops_open();
+        let mut markers = self.unwind.len();
+        loop {
+            let under = markers
+                .checked_sub(1)
+                .and_then(|last| self.unwind.get(last))
+                .map(|marker| marker.loops());
+            match under {
+                // The marker was pushed with this many loops under it,
+                // so it stands above every loop still open once that
+                // many are left, and is emitted first.
+                Some(under) if under >= open => {
+                    markers -= 1;
+                    match self.unwind.get(markers).copied() {
+                        Some(Unwind::FastCall {
+                            var,
+                            try_catch_offset,
+                            ..
+                        }) => self.push(Opline {
+                            opcode: Opcode::FastCall,
+                            op1: try_catch_offset,
+                            op2_type: value_type,
+                            op2: value_at,
+                            out_type: OperandKind::Tmp,
+                            out: var,
+                            ..Opline::default()
+                        }),
+                        Some(Unwind::DiscardException { var, .. }) => self.push(Opline {
+                            opcode: Opcode::DiscardException,
+                            op1_type: OperandKind::Tmp,
+                            op1: var,
+                            ..Opline::default()
+                        }),
+                        None => break,
+                    };
+                }
+                _ => {
+                    let Some(index) = loops else {
+                        break;
+                    };
+                    let Some((var, parent)) =
+                        self.loops.get(index).map(|one| (one.var, one.parent))
+                    else {
+                        break;
+                    };
+                    if let Some(var) = var {
+                        self.free_on_return(var);
+                    }
+                    loops = parent;
+                    open = open.saturating_sub(1);
+                }
+            }
+        }
+    }
+
     /// One opline of `zend_handle_loops_and_finally_ex`: the loop's
     /// variable freed by the loop's own opcode, flagged
     /// `ZEND_FREE_ON_RETURN`, which the live-range walk splits the
@@ -1844,6 +2260,20 @@ impl Emit<'_> {
                 self.compile_error(format!("'{word}' not in the 'loop' or 'switch' context"))
             );
         };
+        // `zend_handle_loops_and_finally_ex` emits the `FAST_CALL` of
+        // every `finally` the jump leaves, and `zend_check_finally_breakout`
+        // refuses the jump that leaves one it cannot; neither is read
+        // yet, so a jump that would cross a marker is refused rather
+        // than emitted without its `finally`.
+        if self
+            .unwind
+            .last()
+            .is_some_and(|marker| marker.loops() >= self.loops_open().saturating_sub(depth))
+        {
+            return Err(self.fatal(format!(
+                "a `{word}` out of a `try` with a `finally` this compiler cannot read yet"
+            )));
+        }
         // `zend_handle_loops_and_finally_ex`: the loops inside the target
         // are left, each `switch` subject among them freed on the way.
         let mut left = 0;
@@ -2611,8 +3041,28 @@ impl Emit<'_> {
             Expr::ClassConst { class, name } => self.class_const(class, name),
             Expr::StaticProp { class, name } => self.static_prop(class, name),
             Expr::Array(elements) => self.array(elements),
+            Expr::Throw(operand) => self.throw(operand),
             known => Ok(Where::Constant(self.constant_expr(known)?)),
         }
+    }
+
+    /// `zend_compile_throw` (`Z/Zend/zend_compile.c:5795`): the operand,
+    /// then `ZEND_THROW` over it with nothing in `result`. The value the
+    /// expression leaves is the constant `true`, php's `ZVAL_TRUE` for
+    /// an expression `throw`; nothing downstream reads it, since the
+    /// opline leaves a throwable pending whatever stands after it, and
+    /// `zend_do_free` over it is what leaves `throw new E;` its one
+    /// opline.
+    fn throw(&mut self, operand: &Expr) -> Result<Where, CompileError> {
+        let value = self.expr(operand)?;
+        let (op1_type, op1) = self.operand(value);
+        self.push(Opline {
+            opcode: Opcode::Throw,
+            op1_type,
+            op1,
+            ..Opline::default()
+        });
+        Ok(Where::Constant(Zval::bool(true)))
     }
 
     /// `zend_compile_pre_incdec` and `zend_compile_post_incdec`, the
@@ -3367,6 +3817,9 @@ impl Emit<'_> {
             // expression's walk does (`zend_eval_const_expr`), and none is
             // read yet.
             Expr::Cast { .. } => Err(self.fatal("a cast is no constant expression here")),
+            // `zend_compile_throw` emits an opline whatever stands
+            // around it, so a `throw` folds to nothing.
+            Expr::Throw(_) => Err(self.fatal("a `throw` is no constant expression")),
         }
     }
 
@@ -4979,6 +5432,10 @@ mod tests {
             loops: Vec::new(),
             current_loop: None,
             breaks: Vec::new(),
+            try_catch: Vec::new(),
+            unwind: Vec::new(),
+            fast_call_var: None,
+            try_catch_offset: None,
         };
         let read = Class {
             name: b"M".to_vec(),

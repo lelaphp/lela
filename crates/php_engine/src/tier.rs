@@ -230,11 +230,16 @@ fn serve<T: Tier>(req: &mut Request, entry: FrameRef, unhandled: Unhandled) -> R
                 stepped = activated::<T>(req, frame)?;
                 continue;
             }
-            Stepped::Threw(_) => {
-                return match unhandled {
-                    Unhandled::Render => req.uncaught(),
-                    Unhandled::Pending => Ok(()),
-                };
+            Stepped::Threw(at) => {
+                let unwound = unwind::<T>(req, at)?;
+                if unwound == Stepped::Threw(at) {
+                    return match unhandled {
+                        Unhandled::Render => req.uncaught(),
+                        Unhandled::Pending => Ok(()),
+                    };
+                }
+                stepped = unwound;
+                continue;
             }
             Stepped::Done => return Ok(()),
         }
@@ -243,6 +248,22 @@ fn serve<T: Tier>(req: &mut Request, entry: FrameRef, unhandled: Unhandled) -> R
         let op = *at_opline(req, frame, code)?;
         stepped = dispatch::dispatch::<T>(req, frame, code, &op)?;
     }
+}
+
+/// The unwinder over one frame (design §5.9): php replaces the frame's
+/// opline with its `exception_op`, whose handler is
+/// `ZEND_HANDLE_EXCEPTION`, and reads the opline that raised back out
+/// of `EG(opline_before_exception)`; that opline is still where the
+/// frame stands here, so the handler is called on it directly. It
+/// answers the same frame where it landed at a `catch` or a `finally`,
+/// the caller where it left the frame, and this frame again where the
+/// serving's entry frame caught nothing, which is where the serving
+/// ends.
+fn unwind<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
+    let serving = standing(req, frame)?;
+    let code = code_of(&serving, frame)?;
+    let op = *at_opline(req, frame, code)?;
+    crate::handlers::handle_exception::<T>(req, frame, code, &op)
 }
 
 /// Exactly one handler, the one at the frame's opline, with `Nop` at the

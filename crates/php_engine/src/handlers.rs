@@ -4176,6 +4176,483 @@ fn send(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge
     Ok(advance(req, frame))
 }
 
+/// `ZEND_LAST_CATCH` (`Z/Zend/zend_compile.h`): the bit beside the cache
+/// slot on the `extended_value` of the last `CATCH` of a `try`, the one
+/// that rethrows rather than jumping to a clause after it.
+const LAST_CATCH: u32 = 1 << 0;
+
+/// `ZEND_FREE_ON_RETURN`: the bit on the `FREE` or `FE_FREE` a `return`,
+/// a `break` or a `continue` emits for a loop variable it leaves behind,
+/// which moves where a throwable those oplines raise is held to have
+/// been raised.
+const FREE_ON_RETURN: u32 = 1 << 0;
+
+/// `ZEND_THROW` (`Z/Zend/zend_vm_def.h:4777`): the operand made pending,
+/// `zend_throw_exception_object`, with one more owner for the pending
+/// slot before the operand is freed (`Z_TRY_ADDREF_P`, `FREE_OP1`). A
+/// reference is followed; a value that is no object is php's `Error`
+/// saying only objects are thrown, and an object of a class that does
+/// not implement `Throwable` php's `Error` saying so.
+///
+/// php saves and restores `EG(exception)` around the raise
+/// (`zend_exception_save`), which chains a throwable already pending as
+/// the new one's `previous`; nothing is ever pending at a `THROW` in
+/// this loop, which reports [`Stepped::Threw`] at the opline that
+/// raised, so the save and the restore are both nothing here.
+///
+/// ```php
+/// try { throw new Exception("boom", 7); } catch (Exception $e) { var_dump($e->getMessage(), $e->getCode()); }
+/// try { throw new stdClass; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { $n = 1; throw $n; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(4) "boom"
+/// int(7)
+/// Cannot throw objects that do not implement Throwable
+/// Can only throw objects
+/// ```
+pub(crate) fn throw<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let value = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
+    let thrown = thrown_value(req, &value);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    threw(req, frame, &thrown)
+}
+
+/// `zend_throw_exception_object` (`Z/Zend/zend_exceptions.c`): the object
+/// pending where it implements `Throwable`, and php's `Error` in php's
+/// words where the value is no object or its class implements nothing.
+fn thrown_value(req: &mut Request, value: &Value) -> Thrown {
+    let Some(object) = value.as_object() else {
+        return crate::api::raising::throw(req, "Error", "Can only throw objects");
+    };
+    let throwable = req.class_named(b"throwable");
+    if !throwable.is_some_and(|of| req.instance_of(object.class(), of)) {
+        return crate::api::raising::throw(
+            req,
+            "Error",
+            "Cannot throw objects that do not implement Throwable",
+        );
+    }
+    crate::api::raising::throw_value(req, value)
+}
+
+/// `ZEND_CATCH` (`Z/Zend/zend_vm_def.h:4812`): nothing pending is the
+/// fall-through of a `try` that did not throw, and jumps past the
+/// clause; otherwise the class named by the lowered half of the
+/// constant pair in `op1`, looked up silently and without autoloading,
+/// against the throwable's own (`instanceof_function`). A clause that
+/// does not match jumps to the next `CATCH`, and the last of the `try`,
+/// which carries `ZEND_LAST_CATCH` and names no next, leaves the
+/// throwable pending for the unwinder to take further out
+/// (`zend_rethrow_exception`). A clause that matches takes the
+/// throwable off the pending slot and binds it to the CV `result`
+/// names, a reference the CV holds written through, and gives it up
+/// where the clause names no variable.
+///
+/// php primes the cache slot `extended_value` carries with the class it
+/// resolved; the lookup is made on every pass here, which is the
+/// reading a program never given the slot would have had.
+///
+/// ```php
+/// function f() { try { throw new TypeError("t"); } catch (ValueError $e) { echo "no\n"; } }
+/// try { f(); } catch (TypeError $e) { echo "outer ", $e->getMessage(), "\n"; }
+/// try { throw new TypeError("m"); } catch (ValueError|TypeError $e) { echo get_class($e), " ", $e->getMessage(), "\n"; }
+/// try { throw new Exception("u"); } catch (Exception) { echo "bare\n"; }
+/// ```
+/// ```expect
+/// outer t
+/// TypeError m
+/// bare
+/// ```
+pub(crate) fn catch<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let Some(pending) = req.pending() else {
+        return jump_to(req, frame, op.op2);
+    };
+    let matched = exec::constant(code, ConstIdx(op.op1.saturating_add(1)))
+        .as_str_bytes()
+        .and_then(|lowered| req.class_named(lowered))
+        .is_some_and(|of| req.instance_of(pending.class(), of));
+    if !matched {
+        if op.extended_value & LAST_CATCH != 0 {
+            return Ok(Stepped::Threw(frame));
+        }
+        return jump_to(req, frame, op.op2);
+    }
+    let Some(caught) = req.take_pending() else {
+        return Ok(advance(req, frame));
+    };
+    if op.out_type == OperandKind::Cv {
+        let value = caught.as_value();
+        if let Some(cell) = req.slot(frame, op.out).as_php_ref() {
+            req.reference_set(cell.heap(), value);
+        } else {
+            let garbage = req.set_slot(frame, op.out, value);
+            req.release(garbage);
+        }
+    } else {
+        req.release(caught.as_value());
+    }
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_FAST_CALL` (`Z/Zend/zend_vm_def.h:8647`): the cell of the
+/// temporary `result` names records the opline to return past and no
+/// delayed throwable, and the frame jumps into the `finally` block
+/// `op1` names, which `pass_two` wrote there over the number of the
+/// `try` element.
+///
+/// ```php
+/// function f() { try { return "t"; } finally { echo "f\n"; } }
+/// echo f(), "\n";
+/// try { echo "a\n"; } finally { echo "b\n"; }
+/// ```
+/// ```expect
+/// f
+/// t
+/// a
+/// b
+/// ```
+pub(crate) fn fast_call<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    _: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let at = req.vm().opline(frame);
+    let left = req.vm_mut().fast_call(frame, op.out).and_then(|cell| {
+        cell.from = Some(at);
+        cell.delayed.take()
+    });
+    // php's temporary is dead at every `FAST_CALL` and holds no object;
+    // a cell this engine kept from an earlier pass is given up rather
+    // than written over.
+    if let Some(object) = left {
+        req.release(object.as_value());
+    }
+    jump_to(req, frame, op.op1)
+}
+
+/// `ZEND_FAST_RET` (`Z/Zend/zend_vm_def.h:8658`): where the cell records
+/// a `FAST_CALL`, the frame goes on at the opline after it; where it
+/// records none the block was entered by an unwind, so the throwable it
+/// delayed is pending again and the unwind goes on from here, at the
+/// `try` element `op2` names, php's `orig_try_catch_offset` and
+/// `(uint32_t)-1` outside every `try`.
+///
+/// ```php
+/// function f() { try { throw new Exception("x"); } finally { echo "f\n"; } }
+/// try { f(); } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// f
+/// caught x
+/// ```
+pub(crate) fn fast_ret<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let cell = req.vm_mut().fast_call(frame, op.op1).map(|cell| {
+        let from = cell.from.take();
+        let delayed = cell.delayed.take();
+        (from, delayed)
+    });
+    let (from, delayed) = cell.unwrap_or((None, None));
+    if let Some(from) = from {
+        return jump_to(req, frame, from.saturating_add(1));
+    }
+    if let Some(object) = delayed {
+        req.leave_pending(&Thrown::of(Some(object)));
+    }
+    let at = req.vm().opline(frame);
+    let enclosing = (op.op2 != u32::MAX).then_some(op.op2);
+    unwind_from::<T>(req, frame, code, enclosing, at)
+}
+
+/// `ZEND_DISCARD_EXCEPTION` (`Z/Zend/zend_vm_def.h:8620`): the opline a
+/// `return` out of a `finally` block emits for the block it leaves. The
+/// value a `FAST_CALL` was carrying past the block is given up, since
+/// the return it belonged to never happened, and so is the throwable
+/// the cell delayed.
+///
+/// ```php
+/// function f() { try { throw new Exception("x"); } finally { return "r"; } }
+/// echo f(), "\n";
+/// ```
+/// ```expect
+/// r
+/// ```
+pub(crate) fn discard_exception<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let cell = req.vm_mut().fast_call(frame, op.op1).map(|cell| {
+        let from = cell.from;
+        (from, cell.delayed.take())
+    });
+    let (from, delayed) = cell.unwrap_or((None, None));
+    if let Some(from) = from {
+        free_carried_value(req, frame, code, from);
+    }
+    if let Some(object) = delayed {
+        req.release(object.as_value());
+    }
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_HANDLE_EXCEPTION` (`Z/Zend/zend_vm_def.h:8176`), the unwinder:
+/// what the loop runs at the opline a handler left a throwable pending
+/// at, php's `EG(opline_before_exception)`. The innermost `try` element
+/// the opline stands in is found, the calls the frame was still
+/// building are given up (`cleanup_unfinished_calls`), the temporary
+/// the throwing opline was to write is given up, and the elements are
+/// walked outwards ([`unwind_from`]).
+///
+/// php reaches this by replacing the frame's opline with its
+/// `exception_op`; the loop here calls it on the [`Stepped::Threw`]
+/// edge with the throwing opline still standing, which is the same
+/// opline php reads back out of `EG(opline_before_exception)`.
+///
+/// ```php
+/// function f() { try { throw new Exception("x"); } catch (TypeError $e) { echo "no\n"; } }
+/// try { f(); } catch (Exception $e) { echo "outer ", $e->getMessage(), "\n"; } finally { echo "f\n"; }
+/// ```
+/// ```expect
+/// outer x
+/// f
+/// ```
+pub(crate) fn handle_exception<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let mut op_num = req.vm().opline(frame);
+    // A throwable a loop variable's destruction raised on the way out of
+    // a `foreach` is held to have been raised at the last of the frees,
+    // which is where the `try` element covering it is looked for.
+    if matches!(op.opcode, Opcode::Free | Opcode::FeFree) && op.extended_value & FREE_ON_RETURN != 0
+    {
+        let moved = op_num.saturating_add(op.op2);
+        cleanup_live_vars(req, frame, code, op_num, moved);
+        op_num = moved;
+    }
+    let mut current = None;
+    for (at, element) in code.try_catch.iter().enumerate() {
+        if element.try_op.0 > op_num {
+            break;
+        }
+        if op_num < element.catch_op.0 || op_num < element.finally_end.0 {
+            current = u32::try_from(at).ok();
+        }
+    }
+    cleanup_unfinished_calls(req, frame);
+    free_throwing_result(req, frame, code, op);
+    unwind_from::<T>(req, frame, code, current, op_num)
+}
+
+/// `zend_dispatch_try_catch_finally_helper` (`Z/Zend/zend_vm_def.h:8100`):
+/// the `try` elements from `from` outwards, each answered by where
+/// `op_num` stands in it. Before its `catch_op` with a throwable
+/// pending, the frame lands at the clause. Before its `finally_op`, the
+/// throwable is delayed in the element's fast-call cell and the frame
+/// lands at the block, which will end in a `FAST_RET` that takes the
+/// unwind up again. Inside the block already, the value a `return` was
+/// carrying is given up and the throwable the block delayed is chained
+/// under the one being unwound (`zend_exception_set_previous`) or
+/// becomes it.
+///
+/// Nothing left to answer is php's uncaught path: the frame's live
+/// temporaries are given up and the frame is left, its caller reading
+/// the throwable at the call opline as php's `zend_leave_helper` leaves
+/// it. The entry frame of a serving is not left; the loop renders the
+/// uncaught fatal there, or leaves the throwable pending for the native
+/// that entered it.
+fn unwind_from<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    from: Option<u32>,
+    op_num: u32,
+) -> Edge {
+    let mut at = from;
+    while let Some(offset) = at {
+        let Some(element) = code.try_catch.get(offset as usize).copied() else {
+            break;
+        };
+        if op_num < element.catch_op.0 && req.is_pending() {
+            cleanup_live_vars(req, frame, code, op_num, element.catch_op.0);
+            return jump_to(req, frame, element.catch_op.0);
+        }
+        if op_num < element.finally_op.0 {
+            let Some(var) = fast_call_var(code, element) else {
+                return Err(Fatal::Error(String::from(
+                    "InternalError: a try element whose finally_end names no FAST_RET",
+                )));
+            };
+            cleanup_live_vars(req, frame, code, op_num, element.finally_op.0);
+            let delayed = req.take_pending();
+            if let Some(cell) = req.vm_mut().fast_call(frame, var) {
+                cell.delayed = delayed;
+                cell.from = None;
+            }
+            return jump_to(req, frame, element.finally_op.0);
+        }
+        if op_num < element.finally_end.0 {
+            let Some(var) = fast_call_var(code, element) else {
+                return Err(Fatal::Error(String::from(
+                    "InternalError: a try element whose finally_end names no FAST_RET",
+                )));
+            };
+            let carried = req
+                .vm_mut()
+                .fast_call(frame, var)
+                .and_then(|cell| cell.from);
+            if let Some(from) = carried {
+                free_carried_value(req, frame, code, from);
+            }
+            let delayed = req
+                .vm_mut()
+                .fast_call(frame, var)
+                .and_then(|cell| cell.delayed.take());
+            if let Some(delayed) = delayed {
+                match req.pending() {
+                    Some(pending) => req.set_previous(pending, delayed),
+                    None => req.leave_pending(&Thrown::of(Some(delayed))),
+                }
+            }
+        }
+        at = offset.checked_sub(1);
+    }
+    cleanup_live_vars(req, frame, code, op_num, 0);
+    if req.stack_mut().entry() == frame {
+        return Ok(Stepped::Threw(frame));
+    }
+    let returns_to = req.vm().returns_to(frame);
+    req.pop_frame();
+    let caller = req.stack_mut().current();
+    // `zend_leave_helper`: the callee wrote no return value, so the
+    // caller's temporary for the call is left undefined, and the caller
+    // stands at the call opline, not past it, for the unwind to go on
+    // from there.
+    if let Some((at, slot)) = returns_to {
+        let garbage = req.take_slot(at, slot);
+        req.release(garbage);
+    }
+    Ok(Stepped::Threw(caller))
+}
+
+/// `EX(func)->op_array.opcodes[try_catch->finally_end].op1.var`: the
+/// fast-call temporary of one `try` element, which its `FAST_RET` names.
+fn fast_call_var(code: &OpArray, element: php_unit::TryCatch) -> Option<u32> {
+    exec::opline_at(code, element.finally_end.0).map(|op| op.op1)
+}
+
+/// The value a `FAST_CALL` emitted by a `return` was carrying past the
+/// `finally` block in its `op2`, given up where the return never
+/// happened.
+fn free_carried_value(req: &mut Request, frame: FrameRef, code: &OpArray, from: u32) {
+    let Some(op) = exec::opline_at(code, from) else {
+        return;
+    };
+    if !matches!(op.op2_type, OperandKind::Tmp | OperandKind::Var) {
+        return;
+    }
+    let slot = exec::temporary_slot(code, op.op2);
+    let garbage = req.take_slot(frame, slot);
+    req.release(garbage);
+}
+
+/// `ZEND_HANDLE_EXCEPTION`'s free of the throwing opline's `result`: a
+/// temporary the opline was to write and did not. php leaves the four
+/// opcodes that build a structure to their live ranges, and the two
+/// whose `result` is a class rather than a value to nobody; a smart
+/// branch may never have written its temporary, which reads `UNDEF`
+/// here and is nobody's either.
+fn free_throwing_result(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) {
+    if !matches!(op.out_type, OperandKind::Tmp | OperandKind::Var) {
+        return;
+    }
+    if matches!(
+        op.opcode,
+        Opcode::AddArrayElement
+            | Opcode::AddArrayUnpack
+            | Opcode::RopeInit
+            | Opcode::RopeAdd
+            | Opcode::FetchClass
+            | Opcode::DeclareAnonClass
+    ) {
+        return;
+    }
+    let slot = exec::temporary_slot(code, op.out);
+    let garbage = req.take_slot(frame, slot);
+    req.release(garbage);
+}
+
+/// `cleanup_live_vars` (`Z/Zend/zend_execute.c`): every live range the
+/// unwind leaves, given up. A range is left when it is open at `op_num`
+/// and the opline being landed on is outside it; `catch_op` of zero is
+/// php's "landing nowhere", the walk out of the frame, where every open
+/// range is left.
+///
+/// php frees each kind by what it holds; every kind here is one value in
+/// one temporary, freed the same way, and the one that is not,
+/// `ZEND_LIVE_SILENCE`, holds the saved `error_reporting`, which is an
+/// integer nobody owns and whose restore arrives with `BEGIN_SILENCE`.
+fn cleanup_live_vars(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op_num: u32,
+    catch_op: u32,
+) {
+    for range in &code.live_ranges {
+        if range.start.0 > op_num {
+            break;
+        }
+        if op_num >= range.end.0 {
+            continue;
+        }
+        if catch_op != 0 && catch_op >= range.start.0 && catch_op < range.end.0 {
+            continue;
+        }
+        let slot = exec::temporary_slot(code, range.var);
+        let garbage = req.take_slot(frame, slot);
+        req.release(garbage);
+    }
+}
+
+/// `cleanup_unfinished_calls` (`Z/Zend/zend_execute.c`): the calls the
+/// frame was still building or serving when the throwable was raised,
+/// given up innermost first. A frame records how many calls stood below
+/// it, which is where its own begin.
+fn cleanup_unfinished_calls(req: &mut Request, frame: FrameRef) {
+    let below = req.vm().at(frame).map_or(0, |state| state.calls_below);
+    while u32::try_from(req.vm().calls().len()).unwrap_or(0) > below {
+        req.pop_call();
+    }
+}
+
+/// `ZEND_VM_JMP_EX(target, 0)`: the frame at `at`, with neither the
+/// interrupt test nor the pending test the loop's own jumps make.
+fn jump_to(req: &mut Request, frame: FrameRef, at: u32) -> Edge {
+    req.vm_mut().jump(frame, at);
+    Ok(Stepped::Same(frame))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

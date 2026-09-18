@@ -4848,4 +4848,121 @@ class C {
             "ZEND_ARRAY_NOT_PACKED on the two with a constant string key"
         );
     }
+    /// #399's program under the oracle's `[regime.dump]`, whose dump of
+    /// `try { throw new Exception("x"); } catch (ValueError $e) { echo 1; }
+    /// catch (TypeError|Error $e) { echo 2; }` and
+    /// `function f() { try { return 1; } finally { echo 2; } }` is:
+    ///
+    /// ```text
+    /// 0000 V1 = NEW 1 string("Exception")
+    /// 0001 SEND_VAL_EX string("x") 1
+    /// 0002 DO_FCALL
+    /// 0003 THROW V1
+    /// 0004 JMP 0012
+    /// 0005 CV0($e) = CATCH string("ValueError") 0008
+    /// 0006 ECHO int(1)
+    /// 0007 JMP 0012
+    /// 0008 CV0($e) = CATCH string("TypeError") 0010
+    /// 0009 JMP 0011
+    /// 0010 CV0($e) = CATCH string("Error")
+    /// 0011 ECHO int(2)
+    /// 0012 RETURN int(1)
+    /// LIVE RANGES:
+    ///      1: 0001 - 0003 (new)
+    /// EXCEPTION TABLE:
+    ///      0000, 0005, -, -
+    ///
+    /// f:
+    ///      ; (lines=7, args=0, vars=0, tmps=1)
+    /// 0000 T0 = FAST_CALL 0004
+    /// 0001 RETURN int(1)
+    /// 0002 T0 = FAST_CALL 0004
+    /// 0003 JMP 0006
+    /// 0004 ECHO int(2)
+    /// 0005 FAST_RET T0
+    /// 0006 RETURN null
+    /// EXCEPTION TABLE:
+    ///      0000, -, 0004, 0005
+    /// ```
+    ///
+    /// The clause with two classes is two `CATCH`es, the first jumping
+    /// to the clause's body; the last `CATCH` of the `try` names no next
+    /// and carries `ZEND_LAST_CATCH`. The `return` inside a `try` with a
+    /// `finally` calls the block before the `RETURN`, so `f` carries two
+    /// `FAST_CALL`s into one block.
+    #[test]
+    fn a_try_is_phps_catch_chain_and_a_finally_is_its_fast_call_and_fast_ret() {
+        let source = b"<?php\ntry { throw new Exception(\"x\"); } catch (ValueError $e) { echo 1; } catch (TypeError|Error $e) { echo 2; }\n";
+        let (unit, _strings) = unit_and_strings(source);
+        assert_eq!(
+            unit.dump(&[]),
+            "\n$_main:\n     ; (lines=13, args=0, vars=1, tmps=2)\n\
+             \x20    ; (before optimizer)\n     ; :1-3\n     ; return  [] RANGE[0..0]\n\
+             0000 V1 = NEW 1 string(\"Exception\")\n\
+             0001 SEND_VAL_EX string(\"x\") 1\n\
+             0002 DO_FCALL\n\
+             0003 THROW V1\n\
+             0004 JMP 0012\n\
+             0005 CV0($e) = CATCH string(\"ValueError\") 0008\n\
+             0006 ECHO int(1)\n\
+             0007 JMP 0012\n\
+             0008 CV0($e) = CATCH string(\"TypeError\") 0010\n\
+             0009 JMP 0011\n\
+             0010 CV0($e) = CATCH string(\"Error\")\n\
+             0011 ECHO int(2)\n\
+             0012 RETURN int(1)\n\
+             LIVE RANGES:\n\
+             \x20    1: 0001 - 0003 (new)\n\
+             EXCEPTION TABLE:\n\
+             \x20    0000, 0005, -, -\n"
+        );
+        let last = unit.main.oplines[10];
+        assert_eq!(
+            last.extended_value & 1,
+            1,
+            "ZEND_LAST_CATCH on the last CATCH of the try"
+        );
+        assert_eq!(
+            unit.main.oplines[5].extended_value & 1,
+            0,
+            "and on no earlier one"
+        );
+        assert_eq!(
+            unit.main.try_catch[0].try_op.0, 0,
+            "the element opens at the body's first opline"
+        );
+        assert_eq!(unit.main.try_catch[0].catch_op.0, 5);
+    }
+
+    #[test]
+    fn a_return_inside_a_try_with_a_finally_calls_the_block_before_the_return() {
+        let (unit, _strings) =
+            unit_and_strings(b"<?php\nfunction f() { try { return 1; } finally { echo 2; } }\n");
+        assert_eq!(
+            unit.dump(&[]),
+            "\n$_main:\n     ; (lines=1, args=0, vars=0, tmps=0)\n\
+             \x20    ; (before optimizer)\n     ; :1-3\n     ; return  [] RANGE[0..0]\n\
+             0000 RETURN int(1)\n\
+             \nf:\n     ; (lines=7, args=0, vars=0, tmps=1)\n\
+             \x20    ; (before optimizer)\n     ; :2-2\n     ; return  [] RANGE[0..0]\n\
+             0000 T0 = FAST_CALL 0004\n\
+             0001 RETURN int(1)\n\
+             0002 T0 = FAST_CALL 0004\n\
+             0003 JMP 0006\n\
+             0004 ECHO int(2)\n\
+             0005 FAST_RET T0\n\
+             0006 RETURN null\n\
+             EXCEPTION TABLE:\n\
+             \x20    0000, -, 0004, 0005\n"
+        );
+    }
+
+    #[test]
+    fn a_try_with_neither_a_catch_nor_a_finally_is_phps_compile_error() {
+        let refused = refused(b"<?php\ntry { echo 1; }\n");
+        assert_eq!(
+            refused.map(|e| e.message),
+            Some(String::from("Cannot use try without catch or finally"))
+        );
+    }
 }
