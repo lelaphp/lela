@@ -9,16 +9,25 @@
 //! and holds the engine's rendering to them byte for byte through
 //! [`oracle::compare`], one reading per extension scoped `ext/<name>`.
 //!
-//! **The oracle half.** No engine renders an extension yet: `ext/reflection`
-//! and the linked tables are design §11's later days, so the engine's side
-//! is [`Rendering::Absent`] and every reading fails saying so, which is the
-//! shape `compile-identity` shipped in against a compiler that emitted
-//! nothing. What a run leaves behind is the oracle's bytes, so the day the
-//! engine renders, the diff is one file against another. A test hands the
-//! lane a directory of renderings standing for the engine's
-//! ([`Ask::renderings`]), which is how the fixture under
-//! `xtask/fixtures/crosscheck/` is measurable: php's own rendering of
-//! `ctype` beside one that differs from it by one byte.
+//! **The engine half.** The engine's rendering is the same
+//! `ReflectionExtension::__toString()` the witness on `ext/reflection`
+//! runs, `echo new ReflectionExtension('<name>');` served through the
+//! linked adapter, [`oracle::linked`], one fresh engine of `php_bundle`
+//! with every extension feature on (harness §7, revision 43) under the
+//! recipe's preamble, ini and normalisation, which is the seam the `php`
+//! binary's `--re` flag calls once the hosts exist (design §7.1). A
+//! request that ends on a status other than zero rendered nothing, and
+//! the engine's own words for why, `ReflectionException: Extension "x"
+//! does not exist` or a fatal, are the reading's cause
+//! ([`Rendering::Absent`]); one that rendered is held byte for byte
+//! ([`Rendering::Bytes`]), and the first differing line is in the
+//! message. So the per-extension row is the port's progress meter: ctype
+//! reads `pass`, and an extension whose declarations are not the oracle's
+//! reads `fail` naming the line. A test hands the lane a directory of
+//! renderings standing for the engine's ([`Ask::renderings`]), which is
+//! how the fixture under `xtask/fixtures/crosscheck/` is measurable:
+//! php's own rendering of `ctype` beside one that differs from it by one
+//! byte.
 //!
 //! **The load number.** The first line, `Extension [ <persistent>
 //! extension #10 ctype version ... ]`, carries the module's load number,
@@ -39,8 +48,8 @@ use anyhow::{Context, Result};
 
 use crate::divergence::{Kind, Registry};
 use crate::manifest::Manifest;
-use crate::oracle::{self, Invocation, Observation, Oracle, Program, Verdict};
-use crate::reading::{Reading, Status, Store};
+use crate::oracle::{self, Invocation, Observation, Oracle, Program, Verdict, linked};
+use crate::reading::{Reading, Status, Store, plural};
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "crosscheck";
@@ -57,8 +66,8 @@ pub struct Ask {
     /// repeatable; the bundle's default set when none is named.
     pub ext: Vec<String>,
     /// A directory of `<name>.re` files standing for the engine's
-    /// renderings, what a test hands the lane while no engine renders;
-    /// without it the engine's side is absent and every reading fails.
+    /// renderings, what a test hands the lane for the negative control;
+    /// without it the engine's side is the linked engine's own rendering.
     pub renderings: Option<PathBuf>,
 }
 
@@ -128,11 +137,41 @@ pub(crate) fn judge(
         Rendering::Bytes(bytes) => match oracle::compare(registry, &id(name), oracle, bytes) {
             Verdict::Same => Judgement::Pass,
             Verdict::Diverged(row) => Judgement::Diverged(row.reason.clone()),
-            Verdict::Differs(diff) => Judgement::Fail(format!(
-                "the engine's rendering differs from the oracle's:\n{diff}"
-            )),
+            Verdict::Differs(diff) => Judgement::Fail(first_difference(&diff)),
         },
     }
+}
+
+/// The note on a rendering that differs: the first differing line by its
+/// number in the oracle's rendering, the oracle's lines as `-` and the
+/// engine's as `+` up to the next line the two share, and how many lines
+/// differ in all. The whole diff of an extension is the size of the
+/// extension, `standard`'s a hundred and fifty kilobytes, and a reading is
+/// a line a person reads and a row the store keeps; the two files are in
+/// the store for the rest.
+pub(crate) fn first_difference(diff: &str) -> String {
+    let changed = |line: &str| line.starts_with('-') || line.starts_with('+');
+    let lines: Vec<&str> = diff.lines().collect();
+    let Some(first) = lines.iter().position(|line| changed(line)) else {
+        return "the engine's rendering differs from the oracle's in bytes no line shows"
+            .to_owned();
+    };
+    let at = lines[..first]
+        .iter()
+        .filter(|line| !line.starts_with('+'))
+        .count()
+        + 1;
+    let differ = lines.iter().filter(|line| changed(line)).count();
+    let hunk: Vec<&str> = lines[first..]
+        .iter()
+        .take_while(|line| changed(line))
+        .copied()
+        .collect();
+    format!(
+        "the engine's rendering differs from the oracle's at line {at}, {differ} line{} in all:\n{}",
+        plural(differ),
+        hunk.join("\n")
+    )
 }
 
 /// The oracle's rendering of `name`: `php --re <name>` under the recipe,
@@ -198,18 +237,11 @@ pub fn run(
             }
             let observed = render(&oracle, name)?;
             if observed.exit != Some(0) {
-                // php's own words: under the recipe's `display_errors=1`
-                // the uncaught exception is on the first stream, and a
-                // refusal before that on the second.
-                let said = [&observed.stderr, &observed.stdout]
-                    .into_iter()
-                    .find(|stream| !stream.is_empty())
-                    .map(|stream| String::from_utf8_lossy(stream).trim().to_owned())
-                    .unwrap_or_default();
                 reading.status = Status::Fail;
                 reading.message = format!(
-                    "{}: the oracle has no such extension under `{recipe}`: {said}",
-                    reading.scope
+                    "{}: the oracle has no such extension under `{recipe}`; {}",
+                    reading.scope,
+                    said(&observed)
                 );
                 return Ok(reading);
             }
@@ -246,14 +278,34 @@ pub fn run(
         .collect()
 }
 
+/// The program whose first stream is the engine's rendering of `name`:
+/// what `php --re <name>` prints, `zend_print_zval` over a
+/// `ReflectionExtension` (`sapi/cli/php_cli.c` at the tag), is
+/// `__toString()`, and `echo` casts the same way. The name is quoted as a
+/// PHP string literal, so a name no extension could have is still a
+/// program, refused by the engine in its own words.
+pub(crate) fn program(name: &str) -> String {
+    let literal = name.replace('\\', "\\\\").replace('\'', "\\'");
+    format!("echo new ReflectionExtension('{literal}');")
+}
+
 /// The engine's side for `name`: the file a test handed the lane, through
-/// the recipe's normalisation as the oracle's stream went, or absent,
-/// since no engine renders an extension yet.
+/// the recipe's normalisation as the oracle's stream went, or the linked
+/// engine's own rendering of [`program`], which [`linked::serve`] answers
+/// normalised already. A request that did not end on zero rendered
+/// nothing, and the engine's words are why: under the recipe's
+/// `display_errors=1` what was thrown and not caught is on the first
+/// stream, and the trouble of a serve that did not run, a panic inside, is
+/// on neither.
 fn rendering(manifest: &Manifest, ask: &Ask, name: &str) -> Result<Rendering> {
     let Some(dir) = &ask.renderings else {
-        return Ok(Rendering::Absent(
-            "no engine renders an extension yet; `ReflectionExtension::__toString()` over the linked tables is ext/reflection's, not built (design §7.1, §11)".to_owned(),
-        ));
+        return Ok(match linked::serve(&manifest.pin.recipe, &program(name)) {
+            Err(trouble) => {
+                Rendering::Absent(format!("the linked engine did not serve it: {trouble:#}"))
+            }
+            Ok(served) if served.exit != Some(0) => Rendering::Absent(said(&served)),
+            Ok(served) => Rendering::Bytes(served.stdout),
+        });
     };
     let path = dir.join(format!("{name}.{KEPT}"));
     if !path.is_file() {
@@ -267,6 +319,22 @@ fn rendering(manifest: &Manifest, ask: &Ask, name: &str) -> Result<Rendering> {
         &manifest.pin.recipe.normalise,
         bytes,
     )))
+}
+
+/// php's own words for a request that did not end on zero: under the
+/// recipe's `display_errors=1` what was thrown and not caught is on the
+/// first stream, and a refusal before that on the second; the status
+/// closes it.
+fn said(observed: &Observation) -> String {
+    let words = [&observed.stderr, &observed.stdout]
+        .into_iter()
+        .find(|stream| !stream.is_empty())
+        .map(|stream| String::from_utf8_lossy(stream).trim().to_owned())
+        .unwrap_or_default();
+    let status = observed
+        .exit
+        .map_or_else(|| "a signal".to_owned(), |code| code.to_string());
+    format!("the request ended on status {status}: {words}")
 }
 
 /// The reading of one extension, over the crate's sources where the

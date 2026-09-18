@@ -107,11 +107,13 @@ fn count(reading: &Reading, key: &str) -> i64 {
     }
 }
 
-/// Design §11 days 1–2: the instrument ships before the engine renders,
-/// and every extension of the default set reads red saying the engine
-/// rendered nothing, with the oracle's bytes kept for the day it does.
+/// Design §11 days 1–2, the two halves met (#269): every extension of
+/// the default set is rendered by the oracle and by the linked engine,
+/// ctype reads pass, and every other reads fail naming the engine's
+/// rendering as the cause, the first differing line or the engine's own
+/// words for rendering nothing; the oracle's bytes are kept for each.
 #[test]
-fn every_default_extension_reads_fail_and_the_oracles_bytes_are_kept() {
+fn ctype_reads_pass_and_every_other_default_extension_reads_fail_naming_the_engines_rendering() {
     if oracle().is_none() {
         return;
     }
@@ -129,14 +131,28 @@ fn every_default_extension_reads_fail_and_the_oracles_bytes_are_kept() {
     assert_eq!(scopes, default);
     for reading in &readings {
         assert_eq!(reading.instrument, "crosscheck");
+        assert!(reading.message.contains("--re"), "{}", reading.message);
+        assert!(count(reading, "bytes") > 0, "{reading:#?}");
+        if reading.scope == "ext/ctype" {
+            assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+            assert!(
+                reading
+                    .message
+                    .contains("the engine's rendering is the oracle's"),
+                "{}",
+                reading.message
+            );
+            continue;
+        }
         assert_eq!(reading.status, Status::Fail, "{reading:#?}");
         assert!(
-            reading.message.contains("the engine rendered nothing")
-                && reading.message.contains("--re"),
+            reading
+                .message
+                .contains("the engine's rendering differs from the oracle's at line")
+                || reading.message.contains("the engine rendered nothing"),
             "{}",
             reading.message
         );
-        assert!(count(reading, "bytes") > 0, "{reading:#?}");
     }
     let kept = crosscheck::kept(&scratch.store, &scratch.manifest.pin.oracle.md5, "ctype");
     // The fixture is php's own bytes; what is kept is what a run compares,
@@ -162,20 +178,24 @@ fn every_default_extension_reads_fail_and_the_oracles_bytes_are_kept() {
         None,
     )
     .unwrap();
-    assert!(rendered.contains("| ext/ctype | fail |"), "{rendered}");
+    assert!(rendered.contains("| ext/ctype | pass |"), "{rendered}");
+    assert!(rendered.contains("| ext/hash | fail |"), "{rendered}");
 }
 
 /// `--ext <name>` is the on-request form (harness §7): one extension, one
-/// reading.
+/// reading, the engine's side rendered through the linked adapter, which
+/// is what a pass means with no directory of renderings handed in.
 #[test]
-fn ext_names_one_extension_and_writes_one_reading() {
+fn ext_names_one_extension_rendered_through_the_linked_adapter_and_writes_one_reading() {
     if oracle().is_none() {
         return;
     }
     let scratch = Scratch::new("one");
-    let reading = scratch.one(&one("ctype"));
+    let ask = one("ctype");
+    assert!(ask.renderings.is_none(), "the linked engine renders");
+    let reading = scratch.one(&ask);
     assert_eq!(reading.scope, "ext/ctype");
-    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
     assert!(
         reading.message.contains("php -n --re ctype"),
         "{}",
@@ -216,7 +236,8 @@ fn an_extension_the_oracle_does_not_have_fails_with_phps_own_words() {
 }
 
 /// The negative control (harness §14 item 4): php's own rendering standing
-/// for the engine's is a pass, and the one a byte apart is not.
+/// for the engine's is a pass, and the one a byte apart is not, the
+/// reading naming the line.
 #[test]
 fn the_fixture_through_run_is_a_pass_and_the_one_byte_apart_is_not() {
     if oracle().is_none() {
@@ -237,9 +258,10 @@ fn the_fixture_through_run_is_a_pass_and_the_one_byte_apart_is_not() {
     let reading = scratch.one(&apart);
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
     assert!(
-        reading
-            .message
-            .contains("-    Function [ <internal:ctype> function ctype_alnum ] {")
+        reading.message.contains("at line 4, 2 lines in all")
+            && reading
+                .message
+                .contains("-    Function [ <internal:ctype> function ctype_alnum ] {")
             && reading
                 .message
                 .contains("+    Function [ <internal:ctype> function ctype_alnun ] {"),

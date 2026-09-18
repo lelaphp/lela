@@ -40,12 +40,45 @@ fn the_fixture_is_the_oracles_own_rendering_and_the_one_byte_apart_is_not_a_pass
         panic!("one byte apart is a pass")
     };
     assert!(
-        note.contains("-    Function [ <internal:ctype> function ctype_alnum ] {"),
+        note.starts_with(
+            "the engine's rendering differs from the oracle's at line 4, 2 lines in all:\n"
+        ),
         "{note}"
     );
     assert!(
-        note.contains("+    Function [ <internal:ctype> function ctype_alnun ] {"),
+        note.contains("-    Function [ <internal:ctype> function ctype_alnum ] {")
+            && note.contains("+    Function [ <internal:ctype> function ctype_alnun ] {"),
         "{note}"
+    );
+}
+
+/// The note names the first differing line and the hunk there, not the
+/// whole diff: a line the oracle has and the engine lacks is `-` alone,
+/// and the count is over every changed line, later hunks included.
+#[test]
+fn the_note_is_the_first_differing_line_and_the_count_of_all_of_them() {
+    let diff = " same\n same\n-oracle only\n same\n-theirs\n+ours\n";
+    assert_eq!(
+        first_difference(diff),
+        "the engine's rendering differs from the oracle's at line 3, 3 lines in all:\n-oracle only"
+    );
+    let added = " same\n+engine only\n same\n";
+    assert_eq!(
+        first_difference(added),
+        "the engine's rendering differs from the oracle's at line 2, 1 line in all:\n+engine only"
+    );
+    assert!(first_difference(" same\n").contains("no line shows"));
+}
+
+/// The engine's side is php's own cast: `echo` over a `ReflectionExtension`
+/// is `__toString()`, what `php --re` prints. A name is a PHP string
+/// literal whatever it holds.
+#[test]
+fn the_program_is_echo_over_a_reflection_extension_and_the_name_is_a_literal() {
+    assert_eq!(program("ctype"), "echo new ReflectionExtension('ctype');");
+    assert_eq!(
+        program("it's\\"),
+        "echo new ReflectionExtension('it\\'s\\\\');"
     );
 }
 

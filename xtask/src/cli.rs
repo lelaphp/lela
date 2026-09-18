@@ -261,8 +261,11 @@ pub(crate) enum Command {
     ///
     /// The oracle's bytes are kept at
     /// `target/harness/crosscheck/ext/<name>/<digest>.re`; the reading is
-    /// scoped `ext/<name>` and names the invocation. No engine renders an
-    /// extension yet, so every reading fails saying so.
+    /// scoped `ext/<name>` and names the invocation. The engine's side is
+    /// `echo new ReflectionExtension('<name>');` through the linked
+    /// engine, so an extension whose declarations are not the oracle's
+    /// fails naming the first differing line, and one the engine cannot
+    /// render fails in the engine's own words.
     Crosscheck {
         /// One extension by its php name, repeatable; default the
         /// bundle's default set.
