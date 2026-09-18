@@ -18,8 +18,10 @@ use php_heap::{
     Arr, Fatal, FrameRef, Heap, HeapHooks, Intern, MapTable, Obj, Ref, Res, ResourceType, Slot,
     VmStack, Zval, ZvalRef,
 };
-use php_unit::decl::{ClassDecl, ClassKind, FunctionDecl, MethodDecl, Name, Visibility};
-use php_unit::{FramelessEntry, Unit};
+use php_unit::decl::{
+    ClassConstDecl, ClassDecl, ClassKind, FunctionDecl, MethodDecl, Name, Visibility,
+};
+use php_unit::{FramelessEntry, Opcode, Unit};
 
 use crate::api::abi::{
     Callable, Dependency, Extension, IniVerdict, ObjectHandlers, PropertyTest, Std,
@@ -2350,6 +2352,48 @@ impl Request {
         }
     }
 
+    /// `CE_CONSTANTS_TABLE(ce)` as `zend_do_inheritance` leaves it, read
+    /// by walking the declarations instead of copying them: the class's
+    /// own constants, then its parent's and its interfaces', and a
+    /// parent's private constant left out, which is
+    /// `do_inherit_class_constant`'s skip. The answer is the class that
+    /// declared it, which is the scope the expression is evaluated in
+    /// and the scope its visibility is checked against, and the
+    /// declaration itself.
+    fn class_constant_of(
+        &self,
+        class: ClassId,
+        name: &[u8],
+        depth: u32,
+    ) -> Option<(ClassId, ClassConstDecl)> {
+        if depth > 64 {
+            return None;
+        }
+        let decl = self.class_decl(class)?;
+        if let Some(constant) = decl
+            .constants
+            .iter()
+            .find(|c| *c.name.0 == *name && (depth == 0 || c.visibility != Visibility::Private))
+        {
+            return Some((class, constant.clone()));
+        }
+        let sources: Vec<Name> = decl
+            .parent
+            .iter()
+            .chain(decl.interfaces.iter())
+            .cloned()
+            .collect();
+        for source in sources {
+            let Some(source) = self.class_named(&source.0) else {
+                continue;
+            };
+            if let Some(found) = self.class_constant_of(source, name, depth.saturating_add(1)) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
     /// `zend_fetch_class_constant`'s lookup (`Z/Zend/zend_constants.c:355`):
     /// the constant `name` of `class` from the declaration's table,
     /// `Undefined constant C::A` where it has none, `Cannot access
@@ -2360,10 +2404,7 @@ impl Request {
     pub(crate) fn class_constant(&mut self, class: ClassId, name: &[u8]) -> Result<Value, Thrown> {
         let class_name = self.class_name(class);
         let shown = String::from_utf8_lossy(name).into_owned();
-        let Some(constant) = self
-            .class_decl(class)
-            .and_then(|decl| decl.constants.iter().find(|c| *c.name.0 == *name))
-        else {
+        let Some((declaring, constant)) = self.class_constant_of(class, name, 0) else {
             return Err(crate::api::raising::throw(
                 self,
                 "Error",
@@ -2371,7 +2412,8 @@ impl Request {
             ));
         };
         let visibility = constant.visibility;
-        let value = constant.value.clone();
+        let value = constant.value;
+        let class = declaring;
         if !self.may_access(class, visibility) {
             let word = match visibility {
                 Visibility::Public => "public",
@@ -3951,29 +3993,40 @@ impl Request {
             .map(ClassId)
     }
 
-    /// `do_bind_class` for every class the unit declares, before its
-    /// main op array runs: php binds a top-level class with no parent
-    /// at compile time and the compiler emitted no opline for it, so
-    /// the request's table takes it here. A name already declared is
-    /// `zend_class_redeclaration_error`, `E_COMPILE_ERROR` in php's two
-    /// wordings, the site of the earlier declaration named when it was
-    /// a user class, and the request ends before the frame is pushed;
-    /// php runs nothing of a file whose class fails to bind.
+    /// `do_bind_class` for every class the unit declares that php bound
+    /// while the file compiled, before its main op array runs: a
+    /// top-level class implementing no interface, with no parent or one
+    /// the table already held, is early bound and the compiler emitted
+    /// no opline for it, so the request's table takes it here. Every
+    /// other class carries a `ZEND_DECLARE_CLASS` where it was written
+    /// and is bound as the program serves ([`Request::bind_class`]), so
+    /// the ones named by one of those oplines are passed over here. A
+    /// name already declared is `zend_class_redeclaration_error`,
+    /// `E_COMPILE_ERROR` in php's two wordings, the site of the earlier
+    /// declaration named when it was a user class, and the request ends
+    /// before the frame is pushed; php runs nothing of a file whose
+    /// class fails to bind.
     pub(crate) fn declare_classes(&mut self, unit: &Arc<Unit>) -> bool {
+        let at_run_time: Vec<Vec<u8>> = unit
+            .main
+            .oplines
+            .iter()
+            .filter(|op| op.opcode == Opcode::DeclareClass)
+            .filter_map(|op| {
+                unit.main
+                    .literals
+                    .get(usize::try_from(op.op1).ok()?)
+                    .and_then(|value| value.as_str())
+                    .map(|name| name.bytes().to_vec())
+            })
+            .collect();
         for (at, decl) in unit.classes.iter().enumerate() {
+            let lowered = decl.name.0.to_ascii_lowercase();
+            if at_run_time.contains(&lowered) {
+                continue;
+            }
             if let Some(existing) = self.class_named(&decl.name.0) {
-                let message = match self.class_decl(existing) {
-                    Some(earlier) if !earlier.file.0.is_empty() => format!(
-                        "Cannot redeclare class {} (previously declared in {}:{})",
-                        String::from_utf8_lossy(&decl.name.0),
-                        String::from_utf8_lossy(&earlier.file.0),
-                        earlier.line
-                    ),
-                    _ => format!(
-                        "Cannot redeclare class {}",
-                        String::from_utf8_lossy(&decl.name.0)
-                    ),
-                };
+                let message = self.redeclaration(existing, &decl.name.0);
                 let file = decl.file.0.to_vec();
                 self.end_in_compile_time(Level::CompileError, &message, &file, decl.line);
                 return false;
@@ -3981,18 +4034,159 @@ impl Request {
             let Ok(at) = u32::try_from(at) else {
                 return false;
             };
-            self.declared.push((Arc::clone(unit), at));
-            for method in 0..decl.methods.len() {
-                self.user_functions.push(UserFunction {
-                    unit: Arc::clone(unit),
-                    body: exec::Body::Method {
-                        class: at,
-                        method: u32::try_from(method).unwrap_or(u32::MAX),
-                    },
-                });
-            }
+            self.bind_declared(unit, at);
         }
         true
+    }
+
+    /// `zend_class_redeclaration_error`'s two wordings: the site of the
+    /// earlier declaration named when it was a user class.
+    fn redeclaration(&self, existing: ClassId, name: &[u8]) -> String {
+        match self.class_decl(existing) {
+            Some(earlier) if !earlier.file.0.is_empty() => format!(
+                "Cannot redeclare class {} (previously declared in {}:{})",
+                String::from_utf8_lossy(name),
+                String::from_utf8_lossy(&earlier.file.0),
+                earlier.line
+            ),
+            _ => format!("Cannot redeclare class {}", String::from_utf8_lossy(name)),
+        }
+    }
+
+    /// The class at `at` of `unit` into the request's table, with its
+    /// methods into the function table beside it, which is the whole of
+    /// what binding a class is here: the parent chain is walked from the
+    /// declaration on every lookup, so nothing is copied.
+    fn bind_declared(&mut self, unit: &Arc<Unit>, at: u32) {
+        self.declared.push((Arc::clone(unit), at));
+        let methods = unit
+            .classes
+            .get(usize::try_from(at).unwrap_or(usize::MAX))
+            .map_or(0, |decl| decl.methods.len());
+        for method in 0..methods {
+            self.user_functions.push(UserFunction {
+                unit: Arc::clone(unit),
+                body: exec::Body::Method {
+                    class: at,
+                    method: u32::try_from(method).unwrap_or(u32::MAX),
+                },
+            });
+        }
+    }
+
+    /// `zend_bind_class` at a `ZEND_DECLARE_CLASS`, `zend_do_link_class`
+    /// over the declaration the opline's lowered name finds in the unit:
+    /// the parent resolved first and then each interface, which is the
+    /// order php's messages come in. A name nothing declares is php's
+    /// `Error`, `Class "P" not found` for a parent and `Interface "I"
+    /// not found` for an interface; a parent that is an interface, an
+    /// interface list naming something that is not one, and the same
+    /// interface twice are `zend_do_inheritance`'s and
+    /// `zend_do_implement_interface`'s `E_ERROR`, which ends the request
+    /// where it stands.
+    ///
+    /// Linking copies nothing: an inherited constant, property or
+    /// method is found by walking `parent` from the declaration, so what
+    /// this adds is the class's own row and its methods.
+    ///
+    /// The bind stands where the class was written, so what it refuses
+    /// is refused after what the file has already printed, which is
+    /// what tells this apart from the early bind:
+    ///
+    /// ```php
+    /// echo "before\n";
+    /// class C implements Nope {}
+    /// ```
+    /// ```expect exit=255
+    /// before
+    ///
+    /// Fatal error: Uncaught Error: Interface "Nope" not found in %s:3
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class P {}
+    /// class C implements P {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: C cannot implement P - it is not an interface in %s on line 3
+    /// ```
+    pub(crate) fn bind_class(&mut self, unit: &Arc<Unit>, lowered: &[u8]) -> Result<(), Thrown> {
+        let Some(at) = unit
+            .classes
+            .iter()
+            .position(|decl| decl.name.0.to_ascii_lowercase() == lowered)
+        else {
+            return Err(crate::api::raising::fatal(
+                self,
+                "InternalError: a DECLARE_CLASS names a class the unit does not declare",
+            ));
+        };
+        let Some(decl) = unit.classes.get(at).cloned() else {
+            return Err(crate::api::raising::fatal(
+                self,
+                "InternalError: a DECLARE_CLASS names a class the unit does not declare",
+            ));
+        };
+        let name = String::from_utf8_lossy(&decl.name.0).into_owned();
+        if let Some(existing) = self.class_named(&decl.name.0) {
+            let message = self.redeclaration(existing, &decl.name.0);
+            return Err(crate::api::raising::fatal(self, &message));
+        }
+        if let Some(parent) = &decl.parent {
+            let Some(found) = self.class_named(&parent.0) else {
+                return Err(crate::api::raising::throw(
+                    self,
+                    "Error",
+                    &format!("Class \"{}\" not found", String::from_utf8_lossy(&parent.0)),
+                ));
+            };
+            if self.class_decl(found).map(|p| p.kind) == Some(ClassKind::Interface) {
+                let message = format!(
+                    "Class {name} cannot extend interface {}",
+                    self.class_name(found)
+                );
+                return Err(crate::api::raising::fatal(self, &message));
+            }
+        }
+        let mut implemented: Vec<ClassId> = Vec::new();
+        for interface in &decl.interfaces {
+            let Some(found) = self.class_named(&interface.0) else {
+                return Err(crate::api::raising::throw(
+                    self,
+                    "Error",
+                    &format!(
+                        "Interface \"{}\" not found",
+                        String::from_utf8_lossy(&interface.0)
+                    ),
+                ));
+            };
+            if self.class_decl(found).map(|i| i.kind) != Some(ClassKind::Interface) {
+                let message = format!(
+                    "{name} cannot implement {} - it is not an interface",
+                    self.class_name(found)
+                );
+                return Err(crate::api::raising::fatal(self, &message));
+            }
+            if implemented.contains(&found) {
+                let message = format!(
+                    "Class {name} cannot implement previously implemented interface {}",
+                    self.class_name(found)
+                );
+                return Err(crate::api::raising::fatal(self, &message));
+            }
+            implemented.push(found);
+        }
+        let Ok(at) = u32::try_from(at) else {
+            return Err(crate::api::raising::fatal(
+                self,
+                "InternalError: a unit declares more classes than can be numbered",
+            ));
+        };
+        self.bind_declared(unit, at);
+        Ok(())
     }
 
     /// `zend_hash_find(EG(function_table), lcname)`: the native of that

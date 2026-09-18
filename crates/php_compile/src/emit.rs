@@ -1433,12 +1433,20 @@ impl Emit<'_> {
         })
     }
 
-    /// `zend_compile_class_decl` for a top-level class with no parent
-    /// and no interface: the declaration goes into the unit's classes
-    /// and no opline is emitted, since php binds such a class at
+    /// `zend_compile_class_decl` for a top-level class: the declaration
+    /// goes into the unit's classes, and whether an opline is emitted
+    /// beside it is php's early-binding question. php binds a class at
     /// compile time (`zend_hash_add_ptr(CG(class_table), …)` under
-    /// `toplevel`), and the oracle's dump of `class M {} echo 1;` is the
-    /// `ECHO` and the `RETURN` alone. The class's name is
+    /// `toplevel`) when it implements no interface and either has no
+    /// parent or names one `CG(class_table)` already holds, which
+    /// `zend_try_early_bind` then links; the oracle's dump of
+    /// `class M {} echo 1;` is the `ECHO` and the `RETURN` alone, and so
+    /// is `class P {} class C extends P {} echo 1;`. Everything else
+    /// carries a `ZEND_DECLARE_CLASS` opline where it was written, which
+    /// binds the class as the program serves
+    /// ([`Self::declare_class`]): `class C extends P {} class P {}`
+    /// dumps `DECLARE_CLASS string("c") string("p")` and works, because
+    /// `P` went into the table while the file compiled. The class's name is
     /// `zend_prefix_with_ns` over the written one: `A\M` for `class M`
     /// under `namespace A;`, the name written where no namespace stands,
     /// so a fetch [`Self::class_name`] resolves in the same namespace
@@ -1446,12 +1454,46 @@ impl Emit<'_> {
     /// name a second declaration of the same file repeats fails that
     /// bind in php, which then emits a `DECLARE_CLASS` for the runtime
     /// fatal; that opline is not emitted here, so the repeat is refused
-    /// as not yet read. The members are
+    /// as not yet read. A class declared inside a block or a body is
+    /// refused as [`Self::function_decl`] refuses a function there: php
+    /// emits its `DECLARE_CLASS` in whatever op array it stands in, and
+    /// the engine reads only the main one's. The members are
     /// `zend_compile_prop_decl` and `zend_compile_class_const_decl`: a
     /// name declared twice is php's fatal in php's words, at the
     /// declarator's line, and a default or a value is kept as the
     /// constant expression it was written as (design §4.7).
+    ///
+    /// A parent the table already holds is the early bind, which links
+    /// the class before anything runs:
+    ///
+    /// ```php
+    /// class P { const K = 'p'; public $x = 1; }
+    /// class C extends P {}
+    /// $c = new C;
+    /// var_dump(C::K, $c instanceof P);
+    /// ```
+    /// ```expect
+    /// string(1) "p"
+    /// bool(true)
+    /// ```
+    ///
+    /// An interface list is never early bound, so the class is declared
+    /// by the `DECLARE_CLASS` where it was written:
+    ///
+    /// ```php
+    /// interface I { const J = 3; }
+    /// class C implements I {}
+    /// var_dump(C::J, (new C) instanceof I);
+    /// ```
+    /// ```expect
+    /// int(3)
+    /// bool(true)
+    /// ```
     fn class(&mut self, class: &Class) -> Result<(), CompileError> {
+        if self.depth != 1 {
+            return Err(self
+                .fatal("a class declared inside a block or a body this compiler cannot read yet"));
+        }
         let name = self.prefix_with_ns(&class.name);
         let wanted = name.to_ascii_lowercase();
         if self
@@ -1462,12 +1504,34 @@ impl Emit<'_> {
             return Err(self.fatal("a class declared twice this compiler cannot read yet"));
         }
         let line = self.line;
+        let parent = match &class.parent {
+            Some(written) => Some(self.inherited_name(written)?),
+            None => None,
+        };
+        let mut interfaces = Vec::with_capacity(class.interfaces.len());
+        for written in &class.interfaces {
+            interfaces.push(self.inherited_name(written)?);
+        }
+        // `zend_lookup_class_ex(ce->parent_name, NULL,
+        // ZEND_FETCH_CLASS_NO_AUTOLOAD)` stands before the class itself
+        // goes into the table, so a class naming itself as its parent
+        // finds nothing and binds as the program serves.
+        let early = interfaces.is_empty()
+            && match &parent {
+                None => true,
+                Some(parent) => self.known_class(parent).is_some(),
+            };
         let mut decl = ClassDecl {
             name: Name(name.clone().into_boxed_slice()),
-            kind: ClassKind::Class,
+            kind: class.kind,
             flags: ClassFlags::default(),
-            parent: None,
-            interfaces: Vec::new(),
+            parent: parent
+                .as_ref()
+                .map(|parent| Name(parent.clone().into_boxed_slice())),
+            interfaces: interfaces
+                .iter()
+                .map(|i| Name(i.clone().into_boxed_slice()))
+                .collect(),
             traits: Vec::new(),
             backing: EnumBacking::Pure,
             constants: Vec::new(),
@@ -1480,12 +1544,44 @@ impl Emit<'_> {
             end_line: class.end_line,
         };
         self.active_class = Some(name.clone());
+        self.class_constants(&mut decl, class, &name)?;
+        self.class_properties(&mut decl, class, &name)?;
+        let at = self.classes.len();
+        self.classes.push(decl);
+        for method in &class.methods {
+            self.line = method.function.line;
+            self.method_decl(at, method)?;
+        }
+        self.active_class = None;
+        self.line = line;
+        if early {
+            // `zend_try_early_bind`, which links the class here: what
+            // `zend_do_inheritance` refuses is php's `E_ERROR` while the
+            // file compiles, so nothing of the file runs.
+            if let Some(parent) = &parent {
+                self.inherit_at_compile_time(&name, parent)?;
+            }
+            return Ok(());
+        }
+        self.declare_class(&name, parent.as_deref())
+    }
+
+    /// `zend_compile_class_const_decl`: one declarator at a time, at its
+    /// own line, its value kept as the constant expression it was
+    /// written as (design §4.7), and a name the group declares twice
+    /// php's fatal in php's words.
+    fn class_constants(
+        &mut self,
+        decl: &mut ClassDecl,
+        class: &Class,
+        name: &[u8],
+    ) -> Result<(), CompileError> {
         for constant in &class.constants {
             self.line = constant.line;
             if decl.constants.iter().any(|c| *c.name.0 == *constant.name) {
                 return Err(self.compile_error(format!(
                     "Cannot redefine class constant {}::{}",
-                    String::from_utf8_lossy(&name),
+                    String::from_utf8_lossy(name),
                     String::from_utf8_lossy(&constant.name)
                 )));
             }
@@ -1500,12 +1596,24 @@ impl Emit<'_> {
                 doc_comment: constant.doc_comment.clone().map(Vec::into_boxed_slice),
             });
         }
+        Ok(())
+    }
+
+    /// `zend_compile_prop_decl`, the same one declarator at a time,
+    /// with `CG(context).active_property_info_name` set over the
+    /// default so `__PROPERTY__` folds to the declarator's name.
+    fn class_properties(
+        &mut self,
+        decl: &mut ClassDecl,
+        class: &Class,
+        name: &[u8],
+    ) -> Result<(), CompileError> {
         for property in &class.properties {
             self.line = property.line;
             if decl.properties.iter().any(|p| *p.name.0 == *property.name) {
                 return Err(self.compile_error(format!(
                     "Cannot redeclare {}::${}",
-                    String::from_utf8_lossy(&name),
+                    String::from_utf8_lossy(name),
                     String::from_utf8_lossy(&property.name)
                 )));
             }
@@ -1526,14 +1634,95 @@ impl Emit<'_> {
                 doc_comment: property.doc_comment.clone().map(Vec::into_boxed_slice),
             });
         }
-        let at = self.classes.len();
-        self.classes.push(decl);
-        for method in &class.methods {
-            self.line = method.function.line;
-            self.method_decl(at, method)?;
+        Ok(())
+    }
+
+    /// `zend_resolve_class_name` over a name written after `extends` or
+    /// `implements`: the name a `FETCH_CLASS` of the same file resolves
+    /// to ([`Self::class_name`]). `self`, `parent` and `static` are what
+    /// php's parser refuses there, and are refused here as not yet read.
+    fn inherited_name(&mut self, written: &[u8]) -> Result<Vec<u8>, CompileError> {
+        let name = self.class_name(written);
+        if name.eq_ignore_ascii_case(b"self")
+            || name.eq_ignore_ascii_case(b"parent")
+            || name.eq_ignore_ascii_case(b"static")
+        {
+            return Err(self.fatal("a class reference of the scope this compiler cannot read yet"));
         }
-        self.active_class = None;
-        self.line = line;
+        Ok(name)
+    }
+
+    /// `zend_lookup_class_ex` over `CG(class_table)`: the declaration of
+    /// the class of that name, one the engine declared
+    /// ([`Options::classes`]) or one this file has bound before this
+    /// point.
+    fn known_class(&self, name: &[u8]) -> Option<&ClassDecl> {
+        let wanted = name.to_ascii_lowercase();
+        self.known_classes
+            .iter()
+            .chain(self.classes.iter())
+            .find(|decl| decl.name.0.to_ascii_lowercase() == wanted)
+    }
+
+    /// What `zend_do_inheritance` refuses at the early bind, which is
+    /// `E_ERROR` while the file compiles and so runs nothing of it: a
+    /// parent that is an interface. The rest of inheritance is the
+    /// engine's, since a class this cannot link here it declares with a
+    /// `DECLARE_CLASS` instead. The refusal stands while the file
+    /// compiles, so nothing of it runs:
+    ///
+    /// ```php
+    /// echo "before\n";
+    /// interface I {}
+    /// class C extends I {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class C cannot extend interface I in %s on line 4
+    /// ```
+    fn inherit_at_compile_time(&mut self, name: &[u8], parent: &[u8]) -> Result<(), CompileError> {
+        let Some(found) = self.known_class(parent) else {
+            return Ok(());
+        };
+        if found.kind != ClassKind::Interface {
+            return Ok(());
+        }
+        let parent = String::from_utf8_lossy(&found.name.0).into_owned();
+        Err(CompileError {
+            level: Level::Error,
+            message: format!(
+                "Class {} cannot extend interface {parent}",
+                String::from_utf8_lossy(name)
+            ),
+            line: self.line,
+            raised: Vec::new(),
+        })
+    }
+
+    /// `ZEND_DECLARE_CLASS`, what php emits for a class it did not early
+    /// bind: the class's lowered name in `op1` and, where it has a
+    /// parent, the parent's lowered name in `op2`, which is what
+    /// `zend_bind_class` looks both up by. php adds the runtime
+    /// definition key to the constant table after `op1` and keys
+    /// `CG(class_table)` by it; the unit carries one declaration per
+    /// class under its own name, so the key is not modelled.
+    fn declare_class(&mut self, name: &[u8], parent: Option<&[u8]>) -> Result<(), CompileError> {
+        let lowered = self.string(&name.to_ascii_lowercase())?;
+        let op1 = self.literal(lowered);
+        let (op2_type, op2) = match parent {
+            Some(parent) => {
+                let lowered = self.string(&parent.to_ascii_lowercase())?;
+                (OperandKind::Const, self.literal(lowered))
+            }
+            None => (OperandKind::Unused, 0),
+        };
+        self.push(Opline {
+            opcode: Opcode::DeclareClass,
+            op1_type: OperandKind::Const,
+            op1,
+            op2_type,
+            op2,
+            ..Opline::default()
+        });
         Ok(())
     }
 
@@ -5412,7 +5601,9 @@ mod tests {
             this_in_scope: false,
             return_type: None,
             returns_by_ref: false,
-            depth: 0,
+            // `zend_compile_top_stmt`'s `toplevel`, which is where a
+            // class binds at compile time.
+            depth: 1,
             active_property: None,
             in_jmp_frameless_branch: false,
             statements_seen: 0,
@@ -5439,6 +5630,9 @@ mod tests {
         };
         let read = Class {
             name: b"M".to_vec(),
+            kind: ClassKind::Class,
+            parent: None,
+            interfaces: Vec::new(),
             doc_comment: None,
             properties: Vec::new(),
             constants: Vec::new(),

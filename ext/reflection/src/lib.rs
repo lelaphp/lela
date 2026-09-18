@@ -1936,6 +1936,44 @@ fn reflection_class_get_attributes(req: &mut Request) -> Result<Value, Thrown> {
 ///   }
 /// }
 /// ```
+///
+/// A user class with a parent and an interface renders the same way,
+/// with no `getParentClass()` asked for it (#388): the header carries
+/// `extends P implements I`, the class's own constants and properties
+/// come before the ones it inherits, and an interface's constant is in
+/// the table too.
+///
+/// ```php
+/// interface I { const J = 3; }
+/// class P { const A = 1; public $x = 1; }
+/// class C extends P implements I { const B = 2; public $y = 2; }
+/// echo new ReflectionClass('C');
+/// ```
+/// ```expect
+/// Class [ <user> class C extends P implements I ] {
+///   @@ %s 4-4
+///
+///   - Constants [3] {
+///     Constant [ public int B ] { 2 }
+///     Constant [ public int A ] { 1 }
+///     Constant [ public int J ] { 3 }
+///   }
+///
+///   - Static properties [0] {
+///   }
+///
+///   - Static methods [0] {
+///   }
+///
+///   - Properties [2] {
+///     Property [ public $y = 2 ]
+///     Property [ public $x = 1 ]
+///   }
+///
+///   - Methods [0] {
+///   }
+/// }
+/// ```
 fn reflection_class_to_string(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
     let class = this_class(req)?;
@@ -2530,6 +2568,22 @@ fn reflection_property_get_doc_comment(req: &mut Request) -> Result<Value, Throw
 /// string(18) "ReflectionProperty"
 /// ```
 ///
+/// A parent's private constant is not in the child's table, so the
+/// child is not where it is found (#257, #388):
+///
+/// ```php
+/// class P { private const R = 2; }
+/// class C extends P {}
+/// new ReflectionClassConstant('C', 'R');
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ReflectionException: Constant C::R does not exist in %s:4
+/// Stack trace:
+/// #0 %s(4): ReflectionClassConstant->__construct('C', 'R')
+/// #1 {main}
+///   thrown in %s on line 4
+/// ```
+///
 /// ```php
 /// class M { const A = 1; } new ReflectionClassConstant('M', 'Z');
 /// ```
@@ -2625,6 +2679,20 @@ fn this_class_constant(req: &mut Request) -> Result<Option<ClassConstDecl>, Thro
 /// ```expect
 /// string(15) "ReflectionClass"
 /// bool(false)
+/// ```
+///
+/// An inherited constant is the parent's declaration, so the comment is
+/// the parent's and `$class` is the parent (#257, #388):
+///
+/// ```php
+/// class P { /** R */ protected const R = 2; }
+/// class C extends P {}
+/// $r = new ReflectionClassConstant('C', 'R');
+/// var_dump($r->class, $r->getDocComment());
+/// ```
+/// ```expect
+/// string(1) "P"
+/// string(8) "/** R */"
 /// ```
 fn reflection_class_constant_get_doc_comment(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;

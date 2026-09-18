@@ -3618,11 +3618,25 @@ mod tests {
             not_yet("a class declared twice this compiler cannot read yet", 3)
         );
         assert_eq!(
-            refused(b"<?php\nclass M extends N {}"),
+            refused(b"<?php\nclass M extends N {} class N {}"),
+            None,
+            "a parent bound later in the file is the DECLARE_CLASS at the class's line"
+        );
+        assert_eq!(
+            refused(b"<?php\nclass M extends self {}"),
             not_yet(
-                "a class with a parent, an interface or an attribute this compiler cannot read yet",
+                "a class reference of the scope this compiler cannot read yet",
                 2
             )
+        );
+        assert_eq!(
+            refused(b"<?php\ninterface I {}\nclass M extends I {}"),
+            Some((
+                Level::Error,
+                String::from("Class M cannot extend interface I"),
+                3
+            )),
+            "the early bind links the class, so what zend_do_inheritance refuses is the file's"
         );
         assert_eq!(
             refused(b"<?php\nclass M { abstract function f(); }"),

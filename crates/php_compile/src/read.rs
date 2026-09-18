@@ -41,7 +41,7 @@ use std::ops::Deref;
 
 use php_syntax::magic_const_name;
 use php_unit::Level;
-use php_unit::decl::{Name, Type, Visibility};
+use php_unit::decl::{ClassKind, Name, Type, Visibility};
 
 use crate::StackLimit;
 
@@ -179,9 +179,18 @@ pub(crate) struct Element {
 /// members as php's `ZEND_AST_PROP_GROUP` and `ZEND_AST_CLASS_CONST_GROUP`
 /// hold them, one declarator each so the doc comment and the line are
 /// the declarator's own.
+///
+/// `extends_from` is the parent of a class, `child[0]`; `implements_list`
+/// is `child[1]`, and an interface's own `extends` list is the same
+/// child, since `interface_declaration_statement` hands its
+/// `interface_extends_list` to `zend_ast_create_decl` where a class
+/// hands its `implements_list`.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Class {
     pub(crate) name: Vec<u8>,
+    pub(crate) kind: ClassKind,
+    pub(crate) parent: Option<Vec<u8>>,
+    pub(crate) interfaces: Vec<Vec<u8>>,
     pub(crate) doc_comment: Option<Vec<u8>>,
     pub(crate) properties: Vec<Property>,
     pub(crate) constants: Vec<Constant>,
@@ -842,7 +851,11 @@ impl Reader<'_> {
         }
         if self.word_ahead(b"class") {
             self.bump(5);
-            return self.class().map(Some);
+            return self.class_decl(ClassKind::Class).map(Some);
+        }
+        if self.word_ahead(b"interface") {
+            self.bump(9);
+            return self.class_decl(ClassKind::Interface).map(Some);
         }
         if self.word_ahead(b"function") && !self.closure_ahead(8) {
             self.bump(8);
@@ -859,16 +872,23 @@ impl Reader<'_> {
         Ok(Some(Stmt::Effect(expr)))
     }
 
-    /// `class M { members }`, the keyword read: php's
-    /// `class_declaration_statement` with no modifier, no `extends`, no
-    /// `implements` and no attribute, which are refused as what this
-    /// cannot read yet rather than read as a class without them. The
-    /// name is what `zend_assert_valid_class_name` refuses when it is a
-    /// reserved one, php's text at php's level. The doc comment is taken
-    /// before the `{`. The members are property groups and constant
-    /// groups; a method, a typed property or constant, a trait `use`,
-    /// an enum case, an accessor list or an attribute is refused the same way.
-    fn class(&mut self) -> Result<Stmt, Trouble> {
+    /// `class M extends P implements I, J { members }` and `interface I
+    /// extends A, B { members }`, the keyword read: php's
+    /// `class_declaration_statement` and `interface_declaration_statement`,
+    /// which are one `zend_compile_class_decl` over one
+    /// `zend_ast_decl`, with no modifier and no attribute, which are
+    /// refused as what this cannot read yet rather than read as a class
+    /// without them. The name is what `zend_assert_valid_class_name`
+    /// refuses when it is a reserved one, php's text at php's level,
+    /// naming the kind it was written as. `extends_from` is one name
+    /// for a class and `implements_list` a list; an interface writes
+    /// its own list after `extends` and php puts it in the same child,
+    /// so both land in `interfaces`. The doc comment is taken after the
+    /// lists and before the `{`, `backup_doc_comment` where php reduces
+    /// it. The members are property groups and constant groups; a
+    /// method, a typed property or constant, a trait `use`, an enum
+    /// case, an accessor list or an attribute is refused the same way.
+    fn class_decl(&mut self, kind: ClassKind) -> Result<Stmt, Trouble> {
         self.skip_trivia();
         let name = self.name();
         if name.is_empty() || name.contains(&b'\\') {
@@ -878,22 +898,43 @@ impl Reader<'_> {
             return Err(Trouble {
                 level: Level::CompileError,
                 what: format!(
-                    "Cannot use \"{}\" as a class name as it is reserved",
-                    String::from_utf8_lossy(&name)
+                    "Cannot use \"{}\" as {} as it is reserved",
+                    String::from_utf8_lossy(&name),
+                    match kind {
+                        ClassKind::Interface => "an interface name",
+                        _ => "a class name",
+                    }
                 ),
                 line: self.line,
             });
         }
         self.skip_trivia();
+        let mut parent = None;
+        let mut interfaces = Vec::new();
+        if self.word_ahead(b"extends") {
+            self.bump(7);
+            if kind == ClassKind::Interface {
+                interfaces = self.class_name_list()?;
+            } else {
+                parent = Some(self.one_class_name()?);
+            }
+            self.skip_trivia();
+        }
+        if self.word_ahead(b"implements") {
+            self.bump(10);
+            interfaces = self.class_name_list()?;
+            self.skip_trivia();
+        }
         if self.byte(0) != Some(b'{') {
-            return Err(self.trouble(
-                "a class with a parent, an interface or an attribute this compiler cannot read yet",
-            ));
+            return Err(self.trouble("a class with an attribute this compiler cannot read yet"));
         }
         let doc_comment = self.doc_comment.take();
         self.bump(1);
         let mut class = Class {
             name,
+            kind,
+            parent,
+            interfaces,
             doc_comment,
             properties: Vec::new(),
             constants: Vec::new(),
@@ -911,6 +952,34 @@ impl Reader<'_> {
                 return Err(self.trouble("a class no brace closes"));
             }
             self.member(&mut class)?;
+        }
+    }
+
+    /// `extends_from: T_EXTENDS class_name`, one name as written, which
+    /// `zend_compile_class_decl` resolves with `zend_resolve_class_name`
+    /// and keeps on `ce->parent_name`.
+    fn one_class_name(&mut self) -> Result<Vec<u8>, Trouble> {
+        self.skip_trivia();
+        let name = self.name();
+        if name.is_empty() {
+            return Err(self.trouble("a class this compiler cannot read yet"));
+        }
+        Ok(name)
+    }
+
+    /// `class_name_list: class_name | class_name_list ',' class_name`,
+    /// what follows `implements` on a class and `extends` on an
+    /// interface. php's grammar has no trailing comma here, so one is
+    /// refused as the name it stands in place of.
+    fn class_name_list(&mut self) -> Result<Vec<Vec<u8>>, Trouble> {
+        let mut names = vec![self.one_class_name()?];
+        loop {
+            self.skip_trivia();
+            if self.byte(0) != Some(b',') {
+                return Ok(names);
+            }
+            self.bump(1);
+            names.push(self.one_class_name()?);
         }
     }
 

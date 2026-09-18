@@ -95,6 +95,56 @@ pub(crate) fn free<T: Tier>(
     Ok(advance(req, frame))
 }
 
+/// `ZEND_DECLARE_CLASS`: `zend_bind_class` for the class the opline's
+/// lowered name finds in the frame's unit, which is what php emits for
+/// every class it did not early bind — one with an interface list, one
+/// whose parent `CG(class_table)` did not yet hold, and one written
+/// inside a block or a body (`zend_compile_class_decl`'s tail). php
+/// finds its declaration by the runtime definition key beside `op1` and
+/// its parent by `op2`; the unit carries one declaration per class, so
+/// both are the declaration the name finds, and `op2` is not read.
+/// Linking is [`Request::bind_class`], whose refusals are php's:
+/// `Error` for a parent or an interface nothing declares, `E_ERROR` for
+/// a parent that is an interface or an interface list that names
+/// something else.
+///
+/// ```php
+/// class C extends P {}
+/// class P { const K = 'p'; }
+/// var_dump(C::K, (new C) instanceof P);
+/// ```
+/// ```expect
+/// string(1) "p"
+/// bool(true)
+/// ```
+pub(crate) fn declare_class<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let Some(serving) = req.vm().serving(frame) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a DECLARE_CLASS on a frame serving no op array",
+        )));
+    };
+    let Some(lowered) = exec::constant(code, ConstIdx(op.op1))
+        .as_str_bytes()
+        .map(<[u8]>::to_vec)
+    else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a DECLARE_CLASS whose op1 is no class name",
+        )));
+    };
+    match req.bind_class(&serving.unit, &lowered) {
+        Ok(()) => Ok(advance(req, frame)),
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            Ok(Stepped::Threw(frame))
+        }
+    }
+}
+
 /// `ZEND_ECHO`: the operand as a string (`zval_get_string`), written to
 /// the request's body, the string given up after the write and the
 /// operand freed (`zend_string_release_ex`, `FREE_OP1`).
