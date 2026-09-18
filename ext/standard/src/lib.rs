@@ -41,7 +41,7 @@ mod array;
 mod head;
 mod output;
 
-use php_ext::abi::{Extension, ExtensionBuilder};
+use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
 use php_ext::coerce::{coerce_param, is_type};
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, Type};
 use php_ext::raising::{
@@ -56,13 +56,23 @@ use php_ext::values::{PhpArray, PhpString, TypeTag, Value, ValueRef};
 struct State {}
 
 /// The extension value (design §7.1): declarations paired with entries,
-/// and the state declared on it.
+/// the state declared on it, and the `deps` table `standard_deps`
+/// declares (`Z/ext/standard/basic_functions.c:143`), `uri` required
+/// and `session` optional, in php's order and with no `rel` or
+/// `version`, which is what `ReflectionExtension::getDependencies`
+/// reads.
 ///
 /// ```php
-/// var_dump(extension_loaded('standard'));
+/// var_dump(extension_loaded('standard'), (new ReflectionExtension('standard'))->getDependencies());
 /// ```
 /// ```expect
 /// bool(true)
+/// array(2) {
+///   ["uri"]=>
+///   string(8) "Required"
+///   ["session"]=>
+///   string(8) "Optional"
+/// }
 /// ```
 pub fn extension() -> Extension {
     let countable = || {
@@ -138,6 +148,20 @@ pub fn extension() -> Extension {
             constant(b"COUNT_RECURSIVE", COUNT_RECURSIVE),
         ])
         .constants(array::constants())
+        .dependencies(vec![
+            Dependency {
+                name: String::from("uri"),
+                kind: DependencyKind::Required,
+                rel: None,
+                version: None,
+            },
+            Dependency {
+                name: String::from("session"),
+                kind: DependencyKind::Optional,
+                rel: None,
+                version: None,
+            },
+        ])
         .request_state::<State>()
         .build("standard")
 }
