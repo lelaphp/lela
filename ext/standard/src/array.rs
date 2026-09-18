@@ -55,15 +55,21 @@ pub(crate) fn constants() -> Vec<ConstDecl> {
     ]
 }
 
-/// The natives declared here, paired with their entries.
+/// The natives declared here, paired with their entries, each with
+/// php's arity and parameter names, so `ReflectionFunction::__toString`
+/// renders it as the oracle does.
 ///
 /// ```php
-/// var_dump(array_unique([1, 1]));
+/// echo new ReflectionFunction('array_unique');
 /// ```
 /// ```expect
-/// array(1) {
-///   [0]=>
-///   int(1)
+/// Function [ <internal:standard> function array_unique ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> array $array ]
+///     Parameter #1 [ <optional> int $flags = SORT_STRING ]
+///   }
+///   - Return [ array ]
 /// }
 /// ```
 pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
