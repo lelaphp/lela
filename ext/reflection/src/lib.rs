@@ -5,7 +5,8 @@
 //!
 //! What is here reads the linked tables through `api` and nothing else
 //! (design §12): `ReflectionClass`, `ReflectionObject`,
-//! `ReflectionProperty` and `ReflectionConstant` with the accessors
+//! `ReflectionProperty`, `ReflectionClassConstant` and
+//! `ReflectionConstant` with the accessors
 //! `php_reflection.c` answers off the class entry, the property info
 //! and the constant (the section below `ReflectionClass`), and
 //! `ReflectionExtension` and `ReflectionFunction`, each
@@ -2362,6 +2363,168 @@ fn reflection_property_set_value(req: &mut Request) -> Result<Value, Thrown> {
     let key = PhpString::new(req, &name)?;
     object.set_prop(req, key, value)?;
     Ok(Value::null())
+}
+
+/// `ReflectionProperty::getDocComment()`: `prop->doc_comment`, or
+/// `false` where the declaration carries none and where there is no
+/// declaration at all, php's `ref->prop && ref->prop->doc_comment`, a
+/// dynamic property being the second case. A declarator takes the
+/// comment that stands before the declaration only when it is the
+/// first, `backup_doc_comment` reducing at each `property:`, so
+/// `/** P */ public $x, $y;` gives it to `$x` alone.
+///
+/// ```php
+/// class M { /** P */ public $x, $y; } var_dump((new ReflectionProperty('M', 'x'))->getDocComment(), (new ReflectionProperty('M', 'y'))->getDocComment(), (new ReflectionProperty('Exception', 'message'))->getDocComment());
+/// ```
+/// ```expect
+/// string(8) "/** P */"
+/// bool(false)
+/// bool(false)
+/// ```
+///
+/// ```php
+/// class M { public $x; } (new ReflectionProperty('M', 'x'))->getDocComment(1);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: ReflectionProperty::getDocComment() expects exactly 0 arguments, 1 given in %s:2
+/// Stack trace:
+/// #0 %s(2): ReflectionProperty->getDocComment(1)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+fn reflection_property_get_doc_comment(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let (_, _, declared) = this_property(req)?;
+    match declared.and_then(|decl| decl.doc_comment) {
+        Some(doc) => string_value(req, &doc),
+        None => Ok(Value::bool(false)),
+    }
+}
+
+// -------------------------------------------------- ReflectionClassConstant
+
+/// `ReflectionClassConstant::__construct(object|string $class, string
+/// $constant)`: the constant `zend_hash_find_ptr(CE_CONSTANTS_TABLE(ce),
+/// constname)` finds, else php's `ReflectionException`; `$name` is the
+/// name as given and `$class` is `constant->ce->name`, the class that
+/// declared it, which for an inherited constant is the parent. A
+/// parent's private constant is not in the table and so is a miss.
+///
+/// ```php
+/// class M { /** K */ const A = 1, B = 2; } var_dump(new ReflectionClassConstant('M', 'A'), (new ReflectionClassConstant('ReflectionProperty', 'IS_PUBLIC'))->class);
+/// ```
+/// ```expect
+/// object(ReflectionClassConstant)#1 (2) {
+///   ["name"]=>
+///   string(1) "A"
+///   ["class"]=>
+///   string(1) "M"
+/// }
+/// string(18) "ReflectionProperty"
+/// ```
+///
+/// ```php
+/// class M { const A = 1; } new ReflectionClassConstant('M', 'Z');
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ReflectionException: Constant M::Z does not exist in %s:2
+/// Stack trace:
+/// #0 %s(2): ReflectionClassConstant->__construct('M', 'Z')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// new ReflectionClassConstant('Nope', 'A');
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ReflectionException: Class "Nope" does not exist in %s:2
+/// Stack trace:
+/// #0 %s(2): ReflectionClassConstant->__construct('Nope', 'A')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// new ReflectionClassConstant('Exception');
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: ReflectionClassConstant::__construct() expects exactly 2 arguments, 1 given in %s:2
+/// Stack trace:
+/// #0 %s(2): ReflectionClassConstant->__construct('Exception')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+fn reflection_class_constant_construct(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 2)?;
+    let (class, _) = class_argument(req, 1)?;
+    let name = string_argument(req, 2)?;
+    let Some((declaring, _)) = class_constant_named(req, class, &name) else {
+        let class = class_name_of(req, class);
+        return Err(throw(
+            req,
+            "ReflectionException",
+            &format!(
+                "Constant {}::{} does not exist",
+                String::from_utf8_lossy(&class),
+                String::from_utf8_lossy(&name)
+            ),
+        ));
+    };
+    let declaring = class_name_of(req, declaring);
+    if let Some(this) = req.this() {
+        set_name(req, this, &name)?;
+        set_string_prop(req, this, b"class", &declaring)?;
+    }
+    Ok(Value::null())
+}
+
+/// The constant a `ReflectionClassConstant` reflects, looked up again
+/// in the class `$class` names as php's `intern->ptr` points at the
+/// entry it found: `None` for a name the table no longer has.
+fn this_class_constant(req: &mut Request) -> Result<Option<ClassConstDecl>, Thrown> {
+    let (this, name) = this_name(req, "ReflectionClassConstant")?;
+    let Some(class) = this
+        .prop(req, b"class")
+        .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
+    else {
+        return Err(throw(
+            req,
+            "Error",
+            "Typed property ReflectionClassConstant::$class must not be accessed before initialization",
+        ));
+    };
+    let class = class_named(req, &class)?;
+    Ok(class_constant_named(req, class, &name).map(|(_, decl)| decl))
+}
+
+/// `ReflectionClassConstant::getDocComment()`: `ref->doc_comment`, or
+/// `false` where the declaration carries none. The constant
+/// declarators take the comment as the property declarators do, the
+/// first alone.
+///
+/// ```php
+/// class M { /** K */ const A = 1, B = 2; } var_dump((new ReflectionClassConstant('M', 'A'))->getDocComment(), (new ReflectionClassConstant('M', 'B'))->getDocComment(), (new ReflectionClassConstant('ReflectionProperty', 'IS_PUBLIC'))->getDocComment());
+/// ```
+/// ```expect
+/// string(8) "/** K */"
+/// bool(false)
+/// bool(false)
+/// ```
+///
+/// ```php
+/// var_dump((new ReflectionClassConstant('ReflectionObject', 'IS_FINAL'))->class, (new ReflectionClassConstant('ReflectionObject', 'IS_FINAL'))->getDocComment());
+/// ```
+/// ```expect
+/// string(15) "ReflectionClass"
+/// bool(false)
+/// ```
+fn reflection_class_constant_get_doc_comment(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    match this_class_constant(req)?.and_then(|decl| decl.doc_comment) {
+        Some(doc) => string_value(req, &doc),
+        None => Ok(Value::bool(false)),
+    }
 }
 
 // -------------------------------------------------- ReflectionConstant

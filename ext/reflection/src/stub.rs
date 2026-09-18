@@ -5815,7 +5815,7 @@ fn reflection_property() -> Declared {
                     &[],
                     Some(union(&[Type::String, Type::False])),
                 )),
-                unbuilt as Entry,
+                super::reflection_property_get_doc_comment as Entry,
             ),
             (
                 deprecated(
@@ -5927,7 +5927,7 @@ fn reflection_class_constant() -> Declared {
                     ],
                     None,
                 ),
-                unbuilt as Entry,
+                super::reflection_class_constant_construct as Entry,
             ),
             (
                 method(b"__toString", &[], Some(Type::String)),
@@ -5972,7 +5972,7 @@ fn reflection_class_constant() -> Declared {
                     &[],
                     Some(union(&[Type::String, Type::False])),
                 )),
-                unbuilt as Entry,
+                super::reflection_class_constant_get_doc_comment as Entry,
             ),
             (
                 method(

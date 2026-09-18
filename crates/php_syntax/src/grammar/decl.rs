@@ -411,9 +411,18 @@ fn class_member(p: &mut Parser<'_>) {
 /// $x, $y;` gives P to `$x` alone, `public $z /** P3 */;` P3 to `$z`,
 /// `public $w = 1 /** P4 */;` P4 to `$w`). The constant declarators of
 /// [`const_declarators`] take the same way; `tests/doc_comment.rs` holds
-/// both to the measurement, and the witness on
-/// `ReflectionProperty::getDocComment()` stands here once the engine
-/// serves a class (#257).
+/// both to the measurement and the witness below holds the engine to
+/// it end to end.
+///
+/// ```php
+/// class M { /** P */ public $x, $y; /** K */ const A = 1, B = 2; } foreach (['x', 'y'] as $p) var_dump((new ReflectionProperty('M', $p))->getDocComment()); foreach (['A', 'B'] as $c) var_dump((new ReflectionClassConstant('M', $c))->getDocComment());
+/// ```
+/// ```expect
+/// string(8) "/** P */"
+/// bool(false)
+/// string(8) "/** K */"
+/// bool(false)
+/// ```
 fn property_tail(p: &mut Parser<'_>, m: Marker) {
     loop {
         let d = p.start();
