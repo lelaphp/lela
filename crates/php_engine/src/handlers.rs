@@ -1629,16 +1629,60 @@ pub(crate) fn new<T: Tier>(
 /// #0 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// The class and the callee are resolved on the first pass alone, which
+/// a call inside a loop is where php's cache earns its slots; what runs
+/// is what ran before it.
+///
+/// ```php
+/// class S { static function m($n) { echo "m$n\n"; } }
+/// $i = 0;
+/// while ($i < 3) { S::m($i); $i = $i + 1; }
+/// ```
+/// ```expect
+/// m0
+/// m1
+/// m2
+/// ```
 pub(crate) fn init_static_method_call<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let class = match class_operand(req, frame, code, op.op1_type, op.op1, None) {
-        Ok(class) => class,
-        Err(thrown) => return threw(req, frame, &thrown),
+    let slot = CacheSlot(op.out);
+    let primed = req.vm().cached(frame, slot);
+    let class = match primed {
+        Cached::Class(class) | Cached::ClassAndCallee { class, .. } => class,
+        _ => {
+            let class = match class_operand(req, frame, code, op.op1_type, op.op1, None) {
+                Ok(class) => class,
+                Err(thrown) => return threw(req, frame, &thrown),
+            };
+            // `if (OP2_TYPE != IS_CONST) { CACHE_PTR(opline->result.num, ce); }`:
+            // where the callee is named as the program serves, or not
+            // named at all, the class alone is what the slot holds, and
+            // where it is a constant the pair below writes both.
+            if op.op2_type != OperandKind::Const {
+                req.vm_mut().prime(frame, slot, Cached::Class(class));
+            }
+            class
+        }
     };
+    let cached_callee = match (op.op2_type, primed) {
+        (
+            OperandKind::Const,
+            Cached::ClassAndCallee {
+                class: held,
+                function,
+            },
+        ) if held == class => Some(function),
+        _ => None,
+    };
+    if let Some(function) = cached_callee {
+        let written = exec::constant(code, ConstIdx(op.op2));
+        return static_call_frame(req, frame, op, class, function, Some(written));
+    }
     let (function, name) = match op.op2_type {
         OperandKind::Unused => {
             let Some(constructor) = req.method_named(class, b"__construct") else {
@@ -1670,6 +1714,34 @@ pub(crate) fn init_static_method_call<T: Tier>(
             )));
         }
     };
+    // `CACHE_POLYMORPHIC_PTR(opline->result.num, ce, fbc)`, where the
+    // callee was named by a constant: after the lookup and its access
+    // rule, and before the rule that the callee is no instance method,
+    // which php applies on the cached pass too. php holds the write off
+    // a callee reached through a trampoline, one marked
+    // `ZEND_ACC_NEVER_CACHE` and one a trait declared; this engine has
+    // none of the three, so the write stands whenever the name was a
+    // constant.
+    if op.op2_type == OperandKind::Const {
+        req.vm_mut()
+            .prime(frame, slot, Cached::ClassAndCallee { class, function });
+    }
+    static_call_frame(req, frame, op, class, function, name)
+}
+
+/// What `INIT_STATIC_METHOD_CALL` does once it has its class and its
+/// callee, whether the slot answered or the tables did: php's
+/// `!(fbc->common.fn_flags & ZEND_ACC_STATIC)` rule, which is applied
+/// on every pass and not only the one that resolved, and the call frame
+/// over the class as its called scope.
+fn static_call_frame(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    class: crate::api::values::ClassId,
+    function: Function,
+    written: Option<Value>,
+) -> Edge {
     if req
         .method_decl(function)
         .is_some_and(|decl| decl.is_instance)
@@ -1677,7 +1749,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
         let thrown = non_static_method_call(req, function);
         return threw(req, frame, &thrown);
     }
-    let name = match name {
+    let name = match written {
         Some(written) => match crate::ops::to_string(req, &written) {
             Ok(name) => name,
             Err(thrown) => return threw(req, frame, &thrown),
@@ -2612,8 +2684,8 @@ pub(crate) fn instanceof<T: Tier>(
 ///
 /// No slot is [`init_static_method_call`]'s: php primes that one with
 /// the class alone only where `op2` is no constant, and with the class
-/// and the callee together where it is (`CACHE_POLYMORPHIC_PTR`), a
-/// pair this cache has no variant for (#433).
+/// and the callee together where it is (`CACHE_POLYMORPHIC_PTR`), so it
+/// reads and writes [`Cached::ClassAndCallee`] off the slot itself.
 fn cached_class(
     req: &mut Request,
     frame: FrameRef,
@@ -2813,7 +2885,10 @@ pub(crate) fn jmp_frameless<T: Tier>(
     let answer = match req.vm().cached(frame, slot) {
         Cached::Hit => Cached::Hit,
         Cached::Miss => Cached::Miss,
-        Cached::Unprimed | Cached::Function(_) | Cached::Class(_) => {
+        Cached::Unprimed
+        | Cached::Function(_)
+        | Cached::Class(_)
+        | Cached::ClassAndCallee { .. } => {
             let name = exec::constant(code, ConstIdx(op.op1));
             let found = name
                 .as_str_bytes()
@@ -6695,6 +6770,125 @@ mod tests {
             assert!(
                 matches!(req.vm().cached(frame, CacheSlot(0)), Cached::Class(class) if Some(class) == error),
                 "the clause's class is in the slot after pass {pass}"
+            );
+        }
+    }
+
+    /// A unit whose main op array is one `INIT_STATIC_METHOD_CALL` over
+    /// the class's constant pair at the head of the table and, where
+    /// `method` is given, the method's pair after it, with the two cache
+    /// slots the compiler reserves in `result` at byte zero. `method`
+    /// left out is php's `CONSTRUCTOR` operand, the `C::__construct()`
+    /// form, whose `op2` is `UNUSED`.
+    fn static_method_call(
+        strings: &mut php_heap::Strings,
+        class: (&[u8], &[u8]),
+        method: Option<(&[u8], &[u8])>,
+    ) -> Arc<Unit> {
+        let (op2_type, op2) = match method {
+            Some(_) => (OperandKind::Const, 2),
+            None => (OperandKind::Unused, 0),
+        };
+        let mut literals = vec![interned(strings, class.0), interned(strings, class.1)];
+        if let Some((written, lowered)) = method {
+            literals.push(interned(strings, written));
+            literals.push(interned(strings, lowered));
+        }
+        Arc::new(Unit {
+            main: OpArray {
+                oplines: vec![Opline {
+                    opcode: Opcode::InitStaticMethodCall,
+                    op1_type: OperandKind::Const,
+                    op1: 0,
+                    op2_type,
+                    op2,
+                    out: 0,
+                    ..Opline::default()
+                }]
+                .into_boxed_slice(),
+                literals: literals.into_boxed_slice(),
+                cache_size: 16,
+                ..OpArray::default()
+            },
+            ..Unit::default()
+        })
+    }
+
+    /// `ZEND_INIT_STATIC_METHOD_CALL` over two constants, twice, which
+    /// is what a call on a class inside a loop is: the first pass finds its
+    /// slot unprimed, looks the class up once and writes the class and
+    /// the callee together, `CACHE_POLYMORPHIC_PTR(opline->result.num,
+    /// ce, fbc)`; the second reads the pair back and looks nothing up
+    /// and resolves no method.
+    #[test]
+    fn a_static_call_over_two_constants_resolves_its_class_and_callee_once() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let mut strings = php_heap::Strings::new();
+        let unit = static_method_call(
+            &mut strings,
+            (b"Closure", b"closure"),
+            Some((b"fromCallable", b"fromcallable")),
+        );
+        let frame = req.push_frame(Arc::clone(&unit));
+        let code = crate::exec::code_of(&unit);
+        let op = code.oplines.first().copied().unwrap_or_default();
+        let closure = req.class_named(b"closure");
+        assert!(closure.is_some(), "the engine declares Closure");
+        let callee = closure.and_then(|class| req.method_named(class, b"fromcallable"));
+        assert!(callee.is_some(), "Closure::fromCallable is a static method");
+        assert_eq!(req.vm().cached(frame, CacheSlot(0)), Cached::Unprimed);
+
+        for pass in 1..=2 {
+            req.vm_mut().jump(frame, 0);
+            assert_eq!(
+                init_static_method_call::<Nop>(&mut req, frame, code, &op),
+                Ok(Stepped::Same(frame)),
+                "the call frame is pushed on pass {pass}"
+            );
+            assert_eq!(req.vm().lookups, 1, "one lookup over {pass} pass(es)");
+            assert!(
+                matches!(
+                    req.vm().cached(frame, CacheSlot(0)),
+                    Cached::ClassAndCallee { class, function }
+                        if Some(class) == closure && Some(function) == callee
+                ),
+                "the class and the callee are in the slot after pass {pass}"
+            );
+        }
+    }
+
+    /// php writes the class alone into the first slot only where `op2`
+    /// is no constant, `if (OP2_TYPE != IS_CONST) CACHE_PTR(...)`: the
+    /// `C::__construct()` form, whose `op2` is `UNUSED`, primes the
+    /// class on its first pass and looks nothing up on the next, though
+    /// the opline ends in php's `Error` for an instance method called
+    /// on the class either way.
+    #[test]
+    fn a_static_call_naming_no_method_primes_the_class_alone() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let mut strings = php_heap::Strings::new();
+        let unit = static_method_call(&mut strings, (b"Exception", b"exception"), None);
+        let frame = req.push_frame(Arc::clone(&unit));
+        let code = crate::exec::code_of(&unit);
+        let op = code.oplines.first().copied().unwrap_or_default();
+        let exception = req.class_named(b"exception");
+        assert!(exception.is_some(), "the engine declares Exception");
+
+        for pass in 1..=2 {
+            req.vm_mut().jump(frame, 0);
+            assert_eq!(
+                init_static_method_call::<Nop>(&mut req, frame, code, &op),
+                Ok(Stepped::Threw(frame)),
+                "a constructor is an instance method on pass {pass}"
+            );
+            assert!(req.take_pending().is_some(), "it threw on pass {pass}");
+            assert_eq!(req.vm().lookups, 1, "one lookup over {pass} pass(es)");
+            assert!(
+                matches!(req.vm().cached(frame, CacheSlot(0)), Cached::Class(class)
+                    if Some(class) == exception),
+                "the class alone is in the slot after pass {pass}"
             );
         }
     }

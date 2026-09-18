@@ -150,6 +150,16 @@ pub(crate) enum Cached {
     /// stays in the table for the life of the request, so a slot this
     /// primed answers every pass after.
     Class(ClassId),
+    /// The class and the callee an `INIT_STATIC_METHOD_CALL` over two
+    /// constants resolved together on its first pass,
+    /// `CACHE_POLYMORPHIC_PTR(opline->result.num, ce, fbc)`: php writes
+    /// the class into the slot the opline names and the callee into the
+    /// one after it, and reads the callee back only where the class it
+    /// resolved is the one written (`CACHED_FCC_CE`,
+    /// `CACHED_FCC_FUNCTION`, `Z/Zend/zend_vm_def.h:3738`). One variant
+    /// holds both, so the pair is written and read as one, and the
+    /// second slot the compiler reserves stands as php's dump has it.
+    ClassAndCallee { class: ClassId, function: Function },
     /// `ZEND_JMP_FL_MISS`: the table has the name in the namespace, so
     /// the jump is not taken and the call by name after it runs.
     Miss,
