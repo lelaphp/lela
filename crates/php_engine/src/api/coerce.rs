@@ -388,6 +388,97 @@ pub fn coerce_param(
     coerce_typed(req, value, ty, position, false)
 }
 
+/// `MAY_BE_FALSE`, `MAY_BE_TRUE`, `MAY_BE_LONG`, `MAY_BE_DOUBLE` and
+/// `MAY_BE_STRING` (`Z/Zend/zend_type_info.h:26-32`): the bits of a
+/// declared type's mask this coercion reads.
+const MAY_BE_BOOL: u32 = (1 << 2) | (1 << 3);
+const MAY_BE_LONG: u32 = 1 << 4;
+const MAY_BE_DOUBLE: u32 = 1 << 5;
+const MAY_BE_STRING: u32 = 1 << 6;
+
+/// `zend_verify_scalar_type_hint` (`Z/Zend/zend_execute.c:817`) over a
+/// declared type's mask, for an argument of a *user* function, which is
+/// what a `RECV` checks: under `strict_types` nothing converts but a
+/// long where the type accepts a float, and under the weak rule the
+/// preference order `zend_verify_weak_scalar_type_hint` walks, int then
+/// float then string then bool, with a string read by
+/// `is_numeric_str_function` where the type accepts both int and float.
+/// `null` never converts here, since php allows that for an internal
+/// parameter alone; what does not convert is `None`, and the caller
+/// raises the `TypeError`.
+pub(crate) fn scalar_type_hint(
+    req: &mut Request,
+    value: &Value,
+    mask: u32,
+    strict: bool,
+) -> Result<Option<Value>, Thrown> {
+    let value = value.deref();
+    if strict {
+        // The one exception php makes under `strict_types`: an int
+        // where a float is accepted, converted.
+        return Ok(match (mask & MAY_BE_DOUBLE != 0, value.as_ref()) {
+            (true, ValueRef::Int(n)) => Some(Value::float(n as f64)),
+            _ => None,
+        });
+    }
+    if matches!(value.as_ref(), ValueRef::Null | ValueRef::Undef) {
+        return Ok(None);
+    }
+    if mask & MAY_BE_LONG != 0 {
+        if mask & MAY_BE_DOUBLE != 0
+            && let ValueRef::Str(s) = value.as_ref()
+        {
+            match numeric_string(s.as_bytes()).as_ref().map(Value::as_ref) {
+                Some(ValueRef::Int(n)) => return Ok(Some(Value::int(n))),
+                Some(ValueRef::Float(d)) => return Ok(Some(Value::float(d))),
+                _ => {}
+            }
+        } else if let ValueRef::Bool(b) = value.as_ref() {
+            return Ok(Some(Value::int(i64::from(b))));
+        } else if let Some(n) = crate::ops::arg_long_weak(req, &value) {
+            return Ok(Some(Value::int(n)));
+        }
+    }
+    if mask & MAY_BE_DOUBLE != 0 {
+        match value.as_ref() {
+            ValueRef::Int(n) => return Ok(Some(Value::float(n as f64))),
+            ValueRef::Bool(b) => return Ok(Some(Value::float(f64::from(u8::from(b))))),
+            ValueRef::Str(s) => {
+                if let Some(number) = numeric_string(s.as_bytes()) {
+                    return Ok(Some(Value::float(to_double(req, &number)?)));
+                }
+            }
+            _ => {}
+        }
+    }
+    if mask & MAY_BE_STRING != 0
+        && matches!(
+            value.as_ref(),
+            ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_)
+        )
+    {
+        // `crate::ops::to_string`, the kernel that copies
+        // `zend_double_to_str`, and not this module's `float_format`,
+        // which prints a float at a fixed number of places (#408).
+        return Ok(Some(Value::string(crate::ops::to_string(req, &value)?)));
+    }
+    if mask & MAY_BE_BOOL == MAY_BE_BOOL
+        && matches!(
+            value.as_ref(),
+            ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Str(_)
+        )
+    {
+        return Ok(Some(Value::bool(truthy(req, &value))));
+    }
+    Ok(None)
+}
+
+/// The declared type as `zend_type_to_string` writes it, through the
+/// face: what a `TypeError` for a parameter names the type as.
+pub(crate) fn type_name(ty: &Type) -> String {
+    declared_type_name(ty)
+}
+
 /// `zend_parse_arg_*_weak` on `null` for a scalar parameter that is
 /// not nullable: the value `null` coerces to under the 8.1 rule,
 /// `false`, `0`, `0.0` or the empty string, and none for a type php

@@ -1036,6 +1036,27 @@ impl Value {
         }
     }
 
+    /// `Z_TYPE`, the zval's type byte as `Z/Zend/zend_types.h:621-629`
+    /// numbers it: what a declared type's mask is indexed by, so
+    /// `false` and `true` are two codes where [`Value::tag`] has one
+    /// `Bool`. A reference is the code of what it holds, as
+    /// `zend_check_type` reads it through `Z_REFVAL_P`.
+    pub(crate) fn type_code(&self) -> u8 {
+        match &self.inner {
+            Inner::Undef => 0,
+            Inner::Null => 1,
+            Inner::Bool(false) => 2,
+            Inner::Bool(true) => 3,
+            Inner::Int(_) => 4,
+            Inner::Float(_) => 5,
+            Inner::Str(_) => 6,
+            Inner::Array(_) => 7,
+            Inner::Object(_) => 8,
+            Inner::Resource(_) => 9,
+            Inner::Reference(r) => r.get().type_code(),
+        }
+    }
+
     /// php's `zend_zval_type_name`: the name `gettype`'s cousin prints in
     /// error text (`int`, `float`, `string`, `array`, `null`, `bool`).
     #[must_use]

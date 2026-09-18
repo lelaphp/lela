@@ -525,12 +525,26 @@ fn enter(
         )));
     };
     let entry = body.safepoints.first().map_or(0, |at| at.0);
-    let parameters = req
-        .function_decl(function)
-        .map_or(0, |decl| decl.parameters.len());
-    if passed >= parameters {
-        req.vm_mut().jump(callee, entry);
-        return Ok(Stepped::Pushed(callee));
+    // `i_init_func_execute_data` (`Z/Zend/zend_execute.c:4426-4437`)
+    // skips the `RECV*` oplines of the arguments a call passed, and only
+    // where the function declares no type: `ZEND_ACC_HAS_TYPE_HINTS`
+    // keeps every one of them, since each is a type check. The design's
+    // entry safepoint stands after the last of them either way (§5.6,
+    // the accepted `trace:entry-counter-typed-recv` row).
+    let (parameters, typed) = req.function_decl(function).map_or((0, false), |decl| {
+        (
+            u32::try_from(decl.parameters.iter().filter(|p| !p.variadic).count())
+                .unwrap_or(u32::MAX),
+            decl.parameters.iter().any(|p| p.ty.is_some()),
+        )
+    });
+    let passed = u32::try_from(passed).unwrap_or(u32::MAX);
+    if passed <= parameters && !typed {
+        // `opline += num_args`: the `RECV*` of each argument the call
+        // passed is skipped and the ones after it still run, so a
+        // parameter the call left out still reaches its `RECV` and its
+        // `ArgumentCountError`.
+        req.vm_mut().jump(callee, passed.min(entry));
     }
     while req.vm().opline(callee) < entry {
         let Some(prologue) = exec::opline_at(body, req.vm().opline(callee)) else {
@@ -541,7 +555,7 @@ fn enter(
             Opcode::RecvInit => recv_init::<crate::tier::Nop>(req, callee, body, prologue)?,
             other => {
                 return Err(Fatal::Error(format!(
-                    "InternalError: {} stands before the entry safepoint, where only RECV* may",
+                    "InternalError: {} stands before the entry safepoint, and this engine serves no handler for it yet",
                     other.name()
                 )));
             }
@@ -587,13 +601,188 @@ fn enter(
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// A parameter with a declared type the argument does not satisfy and
+/// does not coerce into is `zend_verify_arg_error`'s `TypeError`, whose
+/// sentence names the call site and whose own site is the function's:
+///
+/// ```php
+/// function f(int $a) { var_dump($a); }
+/// f("nope");
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: f(): Argument #1 ($a) must be of type int, string given, called in %s on line 3 and defined in %s:2
+/// Stack trace:
+/// #0 %s(3): f('nope')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// Outside `strict_types` a scalar argument is converted where php
+/// converts it (`zend_verify_weak_scalar_type_hint`), and what the
+/// conversion made is what the parameter holds and what a trace prints:
+///
+/// ```php
+/// function f(int $a, string $b, float $c, bool $d) { var_dump($a, $b, $c, $d); }
+/// f("5", 7, 2, 1);
+/// f(true, 1.5, "2.5", "x");
+/// ```
+/// ```expect
+/// int(5)
+/// string(1) "7"
+/// float(2)
+/// bool(true)
+/// int(1)
+/// string(3) "1.5"
+/// float(2.5)
+/// bool(true)
+/// ```
+///
+/// A class named as a type is `instanceof_function` over the argument's
+/// class, and the type error names the class as the declaration wrote
+/// it:
+///
+/// ```php
+/// class C { public $p = 1; }
+/// function f(C $c) { var_dump($c->p); }
+/// f(new C);
+/// f(1);
+/// ```
+/// ```expect exit=255
+/// int(1)
+///
+/// Fatal error: Uncaught TypeError: f(): Argument #1 ($c) must be of type C, int given, called in %s on line 5 and defined in %s:3
+/// Stack trace:
+/// #0 %s(5): f(1)
+/// #1 {main}
+///   thrown in %s on line 3
+/// ```
 pub(crate) fn recv<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, op: &Opline) -> Edge {
     let passed = req.vm().at(frame).map_or(0, |state| state.num_args);
-    if op.op1 <= passed {
+    if op.op1 > passed {
+        let thrown = missing_argument(req, frame, passed);
+        return threw(req, frame, &thrown);
+    }
+    // `opline->op2.num & (1u << Z_TYPE_P(param))`: the mask the compiler
+    // put in `op2` is the whole check for an argument of a type the
+    // declaration names outright, and `MAY_BE_ANY` where no type is
+    // written, so a parameter with none never leaves this line.
+    let argument = req.slot(frame, op.out).deref();
+    if op.op2 & (1u32 << u32::from(argument.type_code())) != 0 {
         return Ok(advance(req, frame));
     }
-    let thrown = missing_argument(req, frame, passed);
-    threw(req, frame, &thrown)
+    if let Err(thrown) = verify_arg_type(req, frame, op.op1, op.out) {
+        return threw(req, frame, &thrown);
+    }
+    Ok(advance(req, frame))
+}
+
+/// `zend_verify_recv_arg_type` (`Z/Zend/zend_execute.c:1241`) over the
+/// parameter numbered `number`, whose argument stands in the CV `slot`:
+/// `zend_check_type`, which is the declared type's own mask, then an
+/// object against a class the type names (`instanceof_function`), then
+/// `zend_verify_scalar_type_hint` under the caller's `strict_types`
+/// ([`crate::api::coerce::scalar_type_hint`]). A coercion replaces the
+/// argument where it stands, as php converts the zval in the frame; what
+/// does not convert is `zend_verify_arg_error`, the `TypeError` naming
+/// the function, the parameter, the declared type, the value's kind and,
+/// where the caller is user code, its file and line.
+fn verify_arg_type(
+    req: &mut Request,
+    frame: FrameRef,
+    number: u32,
+    slot: u32,
+) -> Result<(), Thrown> {
+    let function = req.vm().at(frame).and_then(|state| state.function);
+    let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
+    let Some(ty) = function
+        .and_then(|function| req.function_decl(function))
+        .and_then(|decl| decl.parameters.get(at))
+        .and_then(|parameter| parameter.ty.clone())
+    else {
+        return Ok(());
+    };
+    let argument = req.slot(frame, slot).deref();
+    if ty.contains_code(argument.type_code()) {
+        return Ok(());
+    }
+    if let Some(object) = argument.as_object()
+        && named_types(&ty).any(|name| {
+            req.class_named(&name.0)
+                .is_some_and(|of| req.instance_of(object.class(), of))
+        })
+    {
+        return Ok(());
+    }
+    let strict = req.caller_strict_types();
+    if let Some(coerced) = crate::api::coerce::scalar_type_hint(req, &argument, ty.mask(), strict)?
+    {
+        let previous = req.set_slot(frame, slot, coerced);
+        req.release(previous);
+        return Ok(());
+    }
+    let thrown = arg_type_error(req, frame, number, &ty, &argument);
+    Err(thrown)
+}
+
+/// Every class name a declared type holds, in the order it was written:
+/// the one name of a class type, and each member of a union or an
+/// intersection that is one, which `zend_check_type_slow` walks with
+/// `ZEND_TYPE_LIST_FOREACH`.
+fn named_types(ty: &php_unit::decl::Type) -> Box<dyn Iterator<Item = &php_unit::decl::Name> + '_> {
+    use php_unit::decl::Type;
+    match ty {
+        Type::Named(name) => Box::new(std::iter::once(name)),
+        Type::Nullable(inner) => named_types(inner),
+        Type::Union(members) | Type::Intersection(members) => {
+            Box::new(members.iter().flat_map(named_types))
+        }
+        _ => Box::new(std::iter::empty()),
+    }
+}
+
+/// `zend_verify_arg_error` (`Z/Zend/zend_execute.c:707`): the `TypeError`
+/// a user function's argument of the wrong type raises. The sentence is
+/// `zend_argument_type_error`'s, `{fn}(): Argument #N ($name) must be of
+/// type {declared}, {given} given`, with `, called in {file} on line {n}`
+/// where the frame below is user code, which php's uncaught rendering
+/// then closes with ` and defined`
+/// ([`Request::throwable_to_string`]). The throwable's own site is the
+/// callee's, where the loop stands.
+fn arg_type_error(
+    req: &mut Request,
+    frame: FrameRef,
+    number: u32,
+    ty: &php_unit::decl::Type,
+    argument: &Value,
+) -> Thrown {
+    let function = req.vm().at(frame).and_then(|state| state.function);
+    let name = function.map_or_else(String::new, |function| req.qualified_name_of(function));
+    let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
+    let parameter = function
+        .and_then(|function| req.function_decl(function))
+        .and_then(|decl| decl.parameters.get(at))
+        .map(|parameter| String::from_utf8_lossy(&parameter.name.0).into_owned())
+        .unwrap_or_default();
+    let declared = crate::api::coerce::type_name(ty);
+    let given = crate::ops::value_name(req, &argument.undef_as_null());
+    let caller = req.vm().frames().iter().rev().nth(1).map(|caller| {
+        (
+            exec::body_of(&caller.unit, caller.body)
+                .map(|code| String::from_utf8_lossy(&code.filename.0).into_owned())
+                .unwrap_or_default(),
+            exec::line_of(caller),
+        )
+    });
+    let message = match caller {
+        Some((file, line)) => format!(
+            "{name}(): Argument #{number} (${parameter}) must be of type {declared}, {given} given, called in {file} on line {line}"
+        ),
+        None => format!(
+            "{name}(): Argument #{number} (${parameter}) must be of type {declared}, {given} given"
+        ),
+    };
+    crate::api::raising::throw(req, "TypeError", &message)
 }
 
 /// `zend_missing_arg_error` (`Z/Zend/zend_execute.c`): the caller is
@@ -669,6 +858,25 @@ fn missing_argument(req: &mut Request, frame: FrameRef, passed: u32) -> Thrown {
 /// int(2)
 /// int(3)
 /// ```
+///
+/// A default is never type-checked and an argument that was passed
+/// always is, which is php's `recv_init_check_type` label:
+///
+/// ```php
+/// function f(int $a = 1) { var_dump($a); }
+/// f(); f("2");
+/// f([]);
+/// ```
+/// ```expect exit=255
+/// int(1)
+/// int(2)
+///
+/// Fatal error: Uncaught TypeError: f(): Argument #1 ($a) must be of type int, array given, called in %s on line 4 and defined in %s:2
+/// Stack trace:
+/// #0 %s(4): f(Array)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
 pub(crate) fn recv_init<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -681,6 +889,14 @@ pub(crate) fn recv_init<T: Tier>(
         req.addref(&default);
         let previous = req.set_slot(frame, op.out, default);
         req.release(previous);
+        return Ok(advance(req, frame));
+    }
+    // php checks the type of an argument that was passed and never of
+    // the default it copied, and only where the function has one to
+    // check (`ZEND_ACC_HAS_TYPE_HINTS`, the `recv_init_check_type`
+    // label).
+    if let Err(thrown) = verify_arg_type(req, frame, op.op1, op.out) {
+        return threw(req, frame, &thrown);
     }
     Ok(advance(req, frame))
 }

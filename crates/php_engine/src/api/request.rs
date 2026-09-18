@@ -1205,7 +1205,17 @@ impl Request {
     /// trace:`.
     fn rendering_of(&self, throwable: PhpObject) -> String {
         let class = self.class_name_of(throwable);
-        let message = string_prop(self, throwable, b"message");
+        let mut message = string_prop(self, throwable, b"message");
+        // `Z/Zend/zend_exceptions.c:740`: a `TypeError` or an
+        // `ArgumentCountError` whose message names the call site is
+        // closed with ` and defined`, so the site the rendering puts
+        // after it reads as the function's own. php compares the class
+        // itself and not what it descends from.
+        if (class == "TypeError" || class == "ArgumentCountError")
+            && message.contains(", called in ")
+        {
+            message.push_str(" and defined");
+        }
         let (file, line) = self.throw_site(throwable);
         let file = String::from_utf8_lossy(&file);
         let trace = self.trace_string_of(throwable);
