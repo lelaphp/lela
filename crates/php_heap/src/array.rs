@@ -1512,9 +1512,23 @@ impl crate::Heap {
         Ok(target)
     }
 
-    /// `SEPARATE_ARRAY`: `a` itself while it has one owner, else a copy
-    /// with one owner and `a` with one fewer, which is what a write to a
-    /// shared array does before it writes (design §5.3).
+    /// `SEPARATE_ARRAY` (`Z/Zend/zend_execute.c`): `a` itself while it
+    /// has one owner, else a copy with one owner and `a` with one fewer,
+    /// which is what a write to a shared array does before it writes
+    /// (design §5.3).
+    ///
+    /// php's macro gives up an owner only where the zval it separates is
+    /// refcounted, `if (Z_REFCOUNTED_P(__zv)) GC_DELREF(_arr)`, and an
+    /// immutable array is the one that is not: [`Zval::array`] gives it
+    /// neither `IS_TYPE_REFCOUNTED` nor `IS_TYPE_COLLECTABLE`, because a
+    /// constant array of a published unit is shared by every thread and
+    /// nobody owns it. The guard is one level down here, in
+    /// [`Arr::delref`] and [`Arr::addref`], where `zend_array_refcount`
+    /// puts it: an immutable array reads as one owner, takes none and
+    /// gives none up, so no request writes the `Cell` inside a value the
+    /// unit published, and this copies where php copies without the
+    /// second test. `a_separated_immutable_array_keeps_the_count_it_was_published_with`
+    /// holds it.
     pub fn separate(&mut self, a: Arr) -> Result<Arr, Fatal> {
         if a.refcount() == 1 && !a.is_immutable() {
             return Ok(a);
@@ -1679,6 +1693,47 @@ mod tests {
         fn free_resource(&mut self, _: crate::Res, _: crate::ResourceType) {}
         fn out_of_memory(&mut self, bytes: usize) -> Fatal {
             Fatal::OutOfMemory(bytes)
+        }
+    }
+
+    /// `SEPARATE_ARRAY` over an immutable array, the constant array a
+    /// published unit shares with every thread (design §5.3, §5.14): a
+    /// copy, and the array itself untouched. php's macro gives up an
+    /// owner only under `Z_REFCOUNTED_P`, and an immutable array is not
+    /// refcounted; here [`Arr::delref`] is what refuses to write, so the
+    /// header's own count reads after what it read before and the
+    /// `Cell`s of a value the unit published are never written. #442
+    /// asked whether the count went to zero; it does not.
+    #[test]
+    fn a_separated_immutable_array_keeps_the_count_it_was_published_with() {
+        let _alone = alone();
+        let mut nothing = Nothing::new();
+        let Ok(a) = nothing
+            .heap
+            .constant_array(&[(Key::Long(0), Zval::long(1))])
+        else {
+            return;
+        };
+        assert!(a.is_immutable());
+        assert!(!Zval::array(a).is_refcounted());
+        let published = a.header().gc.refcount();
+        for _ in 0..3 {
+            let Ok(copy) = nothing.heap.separate(a) else {
+                return;
+            };
+            assert!(
+                !copy.is_same(a),
+                "an immutable array is copied, never written"
+            );
+            assert!(!copy.is_immutable());
+            assert_eq!(copy.refcount(), 1);
+            assert_eq!(copy.get(Key::Long(0)).and_then(Zval::as_long), Some(1));
+            assert_eq!(
+                a.header().gc.refcount(),
+                published,
+                "the published array's count is as it was found"
+            );
+            Heap::release(&mut nothing, Zval::array(copy));
         }
     }
 
