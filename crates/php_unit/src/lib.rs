@@ -33,4 +33,4 @@ pub use op::{
     TryCatch,
 };
 pub use opcode::Opcode;
-pub use unit::{Diagnostic, Level, Unit};
+pub use unit::{Diagnostic, Level, MethodBody, Unit};

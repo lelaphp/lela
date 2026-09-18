@@ -94,6 +94,8 @@ pub(crate) enum Stmt {
     Continue(Option<Expr>),
     /// `class M { … }` at the top level, php's `ZEND_AST_CLASS`.
     Class(Class),
+    /// `function f(…) { … }`, php's `ZEND_AST_FUNC_DECL`.
+    Function(Function),
 }
 
 /// The nine magic constants, php's `T_LINE` through `T_PROPERTY_C`: the
@@ -162,8 +164,41 @@ pub(crate) struct Class {
     pub(crate) doc_comment: Option<Vec<u8>>,
     pub(crate) properties: Vec<Property>,
     pub(crate) constants: Vec<Constant>,
+    pub(crate) methods: Vec<Method>,
     /// The line of the closing brace, `ce->info.user.line_end`.
     pub(crate) end_line: u32,
+}
+
+/// One function declaration, php's `zend_ast_decl` for a function or a
+/// method: the name as written, the parameters, the body, the doc
+/// comment taken before the `function` keyword, and the lines of the
+/// keyword and of the closing brace, `start_lineno` and `end_lineno`.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Function {
+    pub(crate) name: Vec<u8>,
+    pub(crate) parameters: Vec<Parameter>,
+    pub(crate) body: Read,
+    pub(crate) doc_comment: Option<Vec<u8>>,
+    pub(crate) line: u32,
+    pub(crate) end_line: u32,
+}
+
+/// One parameter, php's `ZEND_AST_PARAM` with no type, no `&`, no `...`
+/// and no modifier: the name and the default, if one is written.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Parameter {
+    pub(crate) name: Vec<u8>,
+    pub(crate) default: Option<Expr>,
+}
+
+/// One method, php's `ZEND_AST_METHOD`: a function with the group's
+/// modifiers beside it.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Method {
+    pub(crate) function: Function,
+    pub(crate) visibility: Visibility,
+    pub(crate) is_static: bool,
+    pub(crate) is_final: bool,
 }
 
 /// One property declarator, php's `ZEND_AST_PROP_ELEM` with the group's
@@ -332,6 +367,12 @@ pub(crate) enum Expr {
     New {
         class: Vec<u8>,
         arguments: Vec<Expr>,
+    },
+    /// `C::A`, php's `ZEND_AST_CLASS_CONST` over a class and a constant
+    /// both named as written; `C::class` is not read.
+    ClassConst {
+        class: Vec<u8>,
+        name: Vec<u8>,
     },
     /// `C::m(args)`, php's `ZEND_AST_STATIC_CALL` over a class and a
     /// method both named as written.
@@ -747,6 +788,12 @@ impl Reader<'_> {
             self.bump(5);
             return self.class().map(Some);
         }
+        if self.word_ahead(b"function") && !self.closure_ahead(8) {
+            self.bump(8);
+            return self
+                .function()
+                .map(|function| Some(Stmt::Function(function)));
+        }
         if self.word_ahead(b"namespace") && self.byte(9) != Some(b'\\') {
             self.bump(9);
             return self.namespace().map(Some);
@@ -794,6 +841,7 @@ impl Reader<'_> {
             doc_comment,
             properties: Vec::new(),
             constants: Vec::new(),
+            methods: Vec::new(),
             end_line: 0,
         };
         loop {
@@ -864,7 +912,126 @@ impl Reader<'_> {
         if self.byte(0) == Some(b'$') && !is_final {
             return self.properties(class, visibility, is_static, line);
         }
+        if self.word_ahead(b"function") {
+            self.bump(8);
+            let function = self.function()?;
+            class.methods.push(Method {
+                function,
+                visibility,
+                is_static,
+                is_final,
+            });
+            return Ok(());
+        }
         Err(self.trouble("a class member this compiler cannot read yet"))
+    }
+
+    /// Whether what follows a `function` keyword `ahead` bytes on is a
+    /// closure's, `function (` or `function &(`, rather than a name:
+    /// php's `inline_function` against its `function_declaration_statement`.
+    fn closure_ahead(&self, ahead: usize) -> bool {
+        let mut at = ahead;
+        while self
+            .byte(at)
+            .is_some_and(|b| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r')
+        {
+            at += 1;
+        }
+        if self.byte(at) == Some(b'&') {
+            at += 1;
+            while self.byte(at).is_some_and(|b| b == b' ') {
+                at += 1;
+            }
+        }
+        self.byte(at) == Some(b'(')
+    }
+
+    /// `function name(parameters) { body }`, the keyword read: php's
+    /// `function_declaration_statement` and the `method` member alike,
+    /// with the doc comment taken before the keyword
+    /// (`backup_doc_comment` reduces where `function` is). A `&` for a
+    /// return by reference, a return type after the parameters and a
+    /// body that is no block (an abstract method's `;`) are refused as
+    /// not yet read. The name is php's `identifier`, so a reserved word
+    /// serves: `function readonly()`.
+    fn function(&mut self) -> Result<Function, Trouble> {
+        let line = self.line;
+        let doc_comment = self.doc_comment.take();
+        self.skip_trivia();
+        if self.byte(0) == Some(b'&') {
+            return Err(
+                self.trouble("a function returning by reference this compiler cannot read yet")
+            );
+        }
+        let name = self.label();
+        if name.is_empty() {
+            return Err(self.trouble("a function this compiler cannot read yet"));
+        }
+        self.punctuation(b'(', "a function with no parenthesis after its name")?;
+        let parameters = self.parameters()?;
+        self.skip_trivia();
+        if self.byte(0) == Some(b':') {
+            return Err(self.trouble("a function with a return type this compiler cannot read yet"));
+        }
+        if self.byte(0) != Some(b'{') {
+            return Err(
+                self.trouble("a function whose body is no block this compiler cannot read yet")
+            );
+        }
+        self.bump(1);
+        let mut body = Read::new();
+        self.statements(&mut body, false, true)?;
+        // `close_brace` stepped over the `}` alone, so the line is its.
+        let end_line = self.line;
+        Ok(Function {
+            name,
+            parameters,
+            body,
+            doc_comment,
+            line,
+            end_line,
+        })
+    }
+
+    /// php's `parameter_list` up to and over the `)`: each a variable,
+    /// with a default after `=` where one is written, separated by
+    /// commas and a trailing comma allowed. A type, an attribute, a `&`,
+    /// a `...` or a promoting modifier before the variable is refused as
+    /// not yet read.
+    fn parameters(&mut self) -> Result<Vec<Parameter>, Trouble> {
+        let mut parameters = Vec::new();
+        loop {
+            self.skip_trivia();
+            if self.byte(0) == Some(b')') {
+                self.bump(1);
+                return Ok(parameters);
+            }
+            if self.byte(0) != Some(b'$') {
+                return Err(self.trouble("a parameter this compiler cannot read yet"));
+            }
+            self.bump(1);
+            let name = self.label();
+            if name.is_empty() {
+                return Err(self.trouble("a parameter this compiler cannot read yet"));
+            }
+            self.skip_trivia();
+            let default = if self.byte(0) == Some(b'=') {
+                self.bump(1);
+                Some(self.expr()?)
+            } else {
+                None
+            };
+            parameters.push(Parameter { name, default });
+            self.skip_trivia();
+            match self.byte(0) {
+                Some(b',') => self.bump(1),
+                Some(b')') => {
+                    self.bump(1);
+                    return Ok(parameters);
+                }
+                _ => return Err(self.trouble("a parameter list nothing closes")),
+            }
+        }
     }
 
     /// `const A = 1, B = 2;` with the group's modifiers already read:
@@ -1746,10 +1913,16 @@ impl Reader<'_> {
             self.skip_trivia();
             let method = self.label();
             self.skip_trivia();
-            if method.is_empty() || self.byte(0) != Some(b'(') {
+            if method.is_empty() || method.eq_ignore_ascii_case(b"class") {
                 return Err(self.trouble(
                     "a class constant or a static property this compiler cannot read yet",
                 ));
+            }
+            if self.byte(0) != Some(b'(') {
+                return self.member_calls(Expr::ClassConst {
+                    class: name,
+                    name: method,
+                });
             }
             self.bump(1);
             let arguments = self.arguments()?;

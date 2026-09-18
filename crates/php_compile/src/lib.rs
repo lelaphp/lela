@@ -3509,8 +3509,19 @@ mod tests {
             )
         );
         assert_eq!(
-            refused(b"<?php\nclass M { public function f() {} }"),
+            refused(b"<?php\nclass M { abstract function f(); }"),
             not_yet("a class member this compiler cannot read yet", 2)
+        );
+        assert_eq!(
+            refused(b"<?php\nclass M { function f(): int {} }"),
+            not_yet(
+                "a function with a return type this compiler cannot read yet",
+                2
+            )
+        );
+        assert_eq!(
+            refused(b"<?php\nclass M { function f() {} function F() {} }"),
+            compile_error("Cannot redeclare M::F()", 2)
         );
         assert_eq!(
             refused(b"<?php\nclass M { public int $x; }"),
@@ -3583,6 +3594,104 @@ mod tests {
             unit.main.cache_size, 16,
             "NEW and INSTANCEOF take one cache slot each, eight bytes a slot"
         );
+    }
+
+    /// `zend_compile_func_decl` as the oracle at 8.5.9 dumps it under
+    /// `opcache.opt_debug_level=0x10000` (#309): a function and a
+    /// class's methods each an op array of its own after the main one,
+    /// named `f` and `C::m`, with `RECV` and `RECV_INIT` for the
+    /// parameters, the body, and php's implicit `RETURN null` on the
+    /// closing brace's line; a call to a function the file has declared
+    /// is `INIT_FCALL` with `zend_vm_calc_used_stack`'s number and
+    /// `DO_UCALL`, a call on the class to a method it has is `DO_UCALL`
+    /// too, and a method call is `DO_FCALL` still; `$this` inside an
+    /// instance method is the frame's own, `THIS`, where it is a
+    /// receiver, and `FETCH_THIS` where it is read.
+    #[test]
+    fn a_function_and_a_method_compile_to_their_own_op_arrays() {
+        let source: &[u8] = b"<?php
+function f($a, $b = 2) {
+    echo $a;
+    return $a + $b;
+}
+class C {
+    public $p = 1;
+    public function m($x) {
+        echo $this->p;
+        return $this->m2();
+    }
+    public static function s() { return 3; }
+    private function m2() {}
+}
+$o = new C;
+echo f(1), C::s(), $o->m(1), $o->p;
+";
+        let header = |name: &str, lines: u32, args: u32, vars: u32, tmps: u32, span: &str| {
+            format!(
+                "\n{name}:\n     ; (lines={lines}, args={args}, vars={vars}, tmps={tmps})\n\
+                 \x20    ; (before optimizer)\n     ; :{span}\n     ; return  [] RANGE[0..0]\n"
+            )
+        };
+        let expected = format!(
+            "{}{}{}{}{}{}{}{}{}{}",
+            header("$_main", 17, 0, 1, 7, "1-17"),
+            "0000 V1 = NEW 0 string(\"C\")\n\
+             0001 DO_FCALL\n\
+             0002 ASSIGN CV0($o) V1\n\
+             0003 INIT_FCALL 1 128 string(\"f\")\n\
+             0004 SEND_VAL int(1) 1\n\
+             0005 V4 = DO_UCALL\n\
+             0006 ECHO V4\n\
+             0007 INIT_STATIC_METHOD_CALL 0 string(\"C\") string(\"s\")\n\
+             0008 V5 = DO_UCALL\n\
+             0009 ECHO V5\n\
+             0010 INIT_METHOD_CALL 1 CV0($o) string(\"m\")\n\
+             0011 SEND_VAL_EX int(1) 1\n\
+             0012 V6 = DO_FCALL\n\
+             0013 ECHO V6\n\
+             0014 T7 = FETCH_OBJ_R CV0($o) string(\"p\")\n\
+             0015 ECHO T7\n\
+             0016 RETURN int(1)\n\
+             LIVE RANGES:\n\
+             \x20    1: 0001 - 0002 (new)\n",
+            header("f", 6, 2, 2, 1, "2-5"),
+            "0000 CV0($a) = RECV 1\n\
+             0001 CV1($b) = RECV_INIT 2 int(2)\n\
+             0002 ECHO CV0($a)\n\
+             0003 T2 = ADD CV0($a) CV1($b)\n\
+             0004 RETURN T2\n\
+             0005 RETURN null\n",
+            header("C::m", 7, 1, 1, 2, "8-11"),
+            "0000 CV0($x) = RECV 1\n\
+             0001 T1 = FETCH_OBJ_R THIS string(\"p\")\n\
+             0002 ECHO T1\n\
+             0003 INIT_METHOD_CALL 0 THIS string(\"m2\")\n\
+             0004 V2 = DO_FCALL\n\
+             0005 RETURN V2\n\
+             0006 RETURN null\n",
+            header("C::s", 2, 0, 0, 0, "12-12"),
+            "0000 RETURN int(3)\n\
+             0001 RETURN null\n",
+            header("C::m2", 1, 0, 0, 0, "13-13"),
+            "0000 RETURN null\n",
+        );
+        assert_eq!(dump_of(source), expected);
+        let (unit, _strings) = unit_and_strings(source);
+        assert_eq!(
+            unit.functions[0].1.safepoints.first(),
+            Some(&OplineIdx(2)),
+            "the entry safepoint stands after the RECV prologue"
+        );
+        assert_eq!(unit.functions[0].0.parameters.len(), 2);
+        assert_eq!(
+            unit.classes[0]
+                .methods
+                .iter()
+                .map(|m| m.is_instance)
+                .collect::<Vec<_>>(),
+            vec![true, false, true]
+        );
+        assert_eq!(unit.methods.len(), 3);
     }
 
     /// The two `INIT_*_METHOD_CALL`s, read as
@@ -4136,7 +4245,11 @@ mod tests {
             Some("a `new` of what is no class name this compiler cannot read yet")
         );
         assert_eq!(
-            refused(b"<?php echo E::A;").as_deref(),
+            refused(b"<?php echo E::$a;").as_deref(),
+            Some("a class constant or a static property this compiler cannot read yet")
+        );
+        assert_eq!(
+            refused(b"<?php echo E::class;").as_deref(),
             Some("a class constant or a static property this compiler cannot read yet")
         );
         assert_eq!(

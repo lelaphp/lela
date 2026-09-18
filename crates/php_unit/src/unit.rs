@@ -6,13 +6,20 @@ use crate::op::OpArray;
 
 /// A compiled PHP program: the main op array, the functions with their
 /// bodies at the same index, the classes and the constants declared,
-/// and the diagnostics compiling it raised.
+/// the bodies of the classes' methods, and the diagnostics compiling it
+/// raised.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Unit {
     pub main: OpArray,
     pub functions: Vec<(FunctionDecl, OpArray)>,
     pub classes: Vec<ClassDecl>,
     pub constants: Vec<ConstDecl>,
+    /// The op array of each method a class of `classes` declares with a
+    /// body, php's `ce->function_table` laid beside the declaration
+    /// model rather than inside it: a `MethodDecl` is what a native
+    /// declares too, and a native's body is Rust. In the order
+    /// `zend_compile_class_decl` compiled them, class by class.
+    pub methods: Vec<MethodBody>,
     /// What `zend_error` raised while the file compiled, in the order
     /// it raised them: a coercion warning from a fold, a deprecation on
     /// a declaration. Kept beside the unit as opcache keeps a
@@ -23,6 +30,15 @@ pub struct Unit {
     /// and opcache replays them on a hit (`zend_emit_recorded_errors_ex`,
     /// `Z/ext/opcache/ZendAccelerator.c:1939`).
     pub diagnostics: Vec<Diagnostic>,
+}
+
+/// One method's body: which class of [`Unit::classes`] and which of its
+/// `methods` the op array is the body of, by index.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MethodBody {
+    pub class: u32,
+    pub method: u32,
+    pub body: OpArray,
 }
 
 /// php's error levels, `E_*`: what a diagnostic is raised at, and what
@@ -85,7 +101,8 @@ impl Unit {
     /// The op arrays in php's dump format, what `zend_dump_op_array`
     /// prints under `opcache.opt_debug_level=0x10000` and what
     /// `compile-identity` compares with the oracle's (design §6.1):
-    /// one block per op array, the header's four lines, one line per
+    /// one block per op array, the main one, the functions and then each
+    /// class's methods, the header's four lines, one line per
     /// opline with the operand `result` names opening it, `T1 = `, when its
     /// kind is `TMP`, `VAR` or `CV`, its constants, variables and jump
     /// targets printed as php prints them, then the live-range table and

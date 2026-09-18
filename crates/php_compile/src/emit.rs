@@ -98,15 +98,16 @@ use php_heap::{
 };
 use php_unit::decl::{
     ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr, EnumBacking,
-    FunctionDecl, Name, PropertyDecl, Visibility,
+    FunctionDecl, MethodDecl, Name, Parameter, PropertyDecl, Visibility,
 };
 use php_unit::{
-    Diagnostic, FramelessEntry, Level, OpArray, Opcode, OperandKind, Opline, OplineIdx, Unit,
-    frameless_table,
+    Diagnostic, FramelessEntry, Level, MethodBody, OpArray, Opcode, OperandKind, Opline, OplineIdx,
+    Unit, frameless_table,
 };
 
 use crate::read::{
-    Arm, BinaryOp, Case, CastTo, Class, Element, Expr, Magic, Piece, Read, Stmt, Target,
+    Arm, BinaryOp, Case, CastTo, Class, Element, Expr, Function, Magic, Method, Piece, Read, Stmt,
+    Target,
 };
 use crate::{CompileError, Options, StackLimit};
 
@@ -145,6 +146,18 @@ pub(crate) struct Emit<'a> {
     /// `CG(active_class_entry)`: the class whose members are being
     /// compiled, by name, and none outside a class body.
     active_class: Option<Vec<u8>>,
+    /// `CG(active_op_array)->function_name`: the function or method whose
+    /// body is being compiled, by name, and none in the main op array,
+    /// which `__FUNCTION__` and `__METHOD__` fold to.
+    active_function: Option<Vec<u8>>,
+    /// `this_guaranteed_exists`: whether the op array being compiled is
+    /// an instance method's, whose `$this` is the frame's own and needs
+    /// no `FETCH_THIS` as a receiver.
+    this_in_scope: bool,
+    /// How many statement lists stand open: one inside the file's own,
+    /// which is where `zend_compile_top_stmt` binds a function at compile
+    /// time; more inside a block, a loop or a body.
+    depth: u32,
     /// `CG(context).active_property_info_name`: the property whose
     /// default is being compiled, which `__PROPERTY__` folds to.
     active_property: Option<Vec<u8>>,
@@ -168,8 +181,16 @@ pub(crate) struct Emit<'a> {
     /// What `zend_error` raised so far, [`Unit::diagnostics`].
     diagnostics: Vec<Diagnostic>,
     /// The classes the file declares, [`Unit::classes`], in the order
-    /// `zend_compile_class_decl` bound them.
+    /// `zend_compile_class_decl` bound them; the last is the one whose
+    /// body is being compiled while `active_class` names it.
     classes: Vec<ClassDecl>,
+    /// The functions the file declares with their bodies,
+    /// [`Unit::functions`]: `CG(function_table)` past the natives, each
+    /// entry landing once its body has compiled, which is when php's
+    /// `ZEND_ACC_DONE_PASS_TWO` lets a call site know it.
+    functions_declared: Vec<(FunctionDecl, OpArray)>,
+    /// The method bodies of `classes`, [`Unit::methods`].
+    methods: Vec<MethodBody>,
     /// The file's name, [`Options::filename`], what a declaration
     /// records as its site.
     filename: Name,
@@ -325,6 +346,9 @@ pub(crate) fn unit(
         frameless: frameless_table(&options.functions),
         namespace: None,
         active_class: None,
+        active_function: None,
+        this_in_scope: false,
+        depth: 0,
         active_property: None,
         in_jmp_frameless_branch: false,
         statements_seen: 0,
@@ -338,6 +362,8 @@ pub(crate) fn unit(
         line: 1,
         diagnostics: Vec::new(),
         classes: Vec::new(),
+        functions_declared: Vec::new(),
+        methods: Vec::new(),
         filename: options.filename.clone(),
         loops: Vec::new(),
         current_loop: None,
@@ -349,31 +375,34 @@ pub(crate) fn unit(
         refused.raised = emit.diagnostics;
         return Err(refused);
     }
-    emit.final_return();
-    emit.resolve_breaks();
-    headers_numbered(&emit.oplines, &emit.safepoints)?;
-    swap_commutative(&mut emit.oplines);
-    let live_ranges = crate::live::live_ranges(&mut emit.oplines, emit.temporaries);
-    let num_cvs = u32::try_from(emit.vars.len()).unwrap_or(u32::MAX);
+    let main = emit.finish(true, 1, lines.max(1))?;
     Ok(Unit {
-        main: OpArray {
-            oplines: emit.oplines.into_boxed_slice(),
-            literals: emit.constants.into_boxed_slice(),
-            vars: emit.vars.into_boxed_slice(),
-            num_cvs,
-            num_tmps: emit.temporaries,
-            try_catch: Box::new([]),
-            live_ranges,
-            safepoints: emit.safepoints.into_boxed_slice(),
-            filename: options.filename.clone(),
-            line_start: 1,
-            line_end: lines.max(1),
-            cache_size: emit.cache_slots,
-        },
+        main,
+        functions: emit.functions_declared,
+        methods: emit.methods,
         diagnostics: emit.diagnostics,
         classes: emit.classes,
         ..Unit::default()
     })
+}
+
+/// The state of one op array under construction, what `zend_oparray_context_begin`
+/// and `CG(active_op_array)` switch: taken off the emitter while a
+/// function's body compiles and put back after it, so the body's
+/// oplines, constants, variables, safepoints, temporaries, cache slots
+/// and loops are its own.
+struct Saved {
+    oplines: Vec<Opline>,
+    constants: Vec<Zval>,
+    vars: Vec<Name>,
+    safepoints: Vec<OplineIdx>,
+    temporaries: u32,
+    cache_slots: u32,
+    loops: Vec<Loop>,
+    current_loop: Option<usize>,
+    breaks: Vec<Pending>,
+    active_function: Option<Vec<u8>>,
+    this_in_scope: bool,
 }
 
 /// Design §5.7's assertion over one op array, before it is a unit:
@@ -598,8 +627,294 @@ impl Emit<'_> {
             Stmt::Break(depth) => self.break_continue(depth.as_ref(), true)?,
             Stmt::Continue(depth) => self.break_continue(depth.as_ref(), false)?,
             Stmt::Class(class) => self.class(class)?,
+            Stmt::Function(function) => self.function_decl(function)?,
         }
         Ok(())
+    }
+
+    /// `zend_compile_func_decl` for a function at the top level of the
+    /// file, `toplevel` in `zend_compile_top_stmt`: its body compiles to
+    /// an op array of its own and the declaration goes into the unit's
+    /// functions, since php binds such a function at compile time
+    /// (`zend_begin_func_decl`'s `zend_hash_add_ptr(CG(function_table), …)`)
+    /// and emits no opline for it. The name is `zend_prefix_with_ns`
+    /// over the written one. A name the table holds is
+    /// `do_bind_function_error`, php's `E_COMPILE_ERROR` in its two
+    /// wordings, the earlier declaration's file and first line named
+    /// when it was a user function. A function declared inside a block,
+    /// a loop or another body is bound as the program serves, by a
+    /// `DECLARE_FUNCTION` opline this compiler does not emit, and is
+    /// refused as not yet read.
+    fn function_decl(&mut self, function: &Function) -> Result<(), CompileError> {
+        if self.depth != 1 {
+            return Err(self.fatal(
+                "a function declared inside a block or a body this compiler cannot read yet",
+            ));
+        }
+        let name = self.prefix_with_ns(&function.name);
+        let lowered = name.to_ascii_lowercase();
+        if let Some((earlier, body)) = self
+            .functions_declared
+            .iter()
+            .find(|(decl, _)| decl.name.0.to_ascii_lowercase() == lowered)
+        {
+            return Err(self.compile_error(format!(
+                "Cannot redeclare function {} (previously declared in {}:{})",
+                String::from_utf8_lossy(&name) + "()",
+                String::from_utf8_lossy(&earlier.file.0),
+                body.line_start
+            )));
+        }
+        if self.native_index(&lowered).is_some() {
+            return Err(self.compile_error(format!(
+                "Cannot redeclare function {}()",
+                String::from_utf8_lossy(&name)
+            )));
+        }
+        let declared = self.body(function, &name, None, false)?;
+        self.functions_declared.push(declared);
+        Ok(())
+    }
+
+    /// `zend_compile_func_decl` for a method of the class being
+    /// compiled, at `class` in the unit's classes: the body compiles to
+    /// an op array of its own, and the declaration goes into the class's
+    /// methods, where `zend_begin_method_decl` adds it to
+    /// `ce->function_table`. A name the class already has is php's
+    /// `Cannot redeclare C::m()`, `E_COMPILE_ERROR`, spelled as the
+    /// second declaration spells it. An instance method's body has
+    /// `$this` as its frame's own (`this_guaranteed_exists`).
+    fn method_decl(&mut self, class: usize, method: &Method) -> Result<(), CompileError> {
+        let class_name = self
+            .classes
+            .get(class)
+            .map(|decl| decl.name.0.to_vec())
+            .unwrap_or_default();
+        let name = method.function.name.clone();
+        if self.classes.get(class).is_some_and(|decl| {
+            decl.methods
+                .iter()
+                .any(|m| m.function.name.0.eq_ignore_ascii_case(&name))
+        }) {
+            return Err(self.compile_error(format!(
+                "Cannot redeclare {}::{}()",
+                String::from_utf8_lossy(&class_name),
+                String::from_utf8_lossy(&name)
+            )));
+        }
+        let (function, body) =
+            self.body(&method.function, &name, Some(&class_name), method.is_static)?;
+        let Some(decl) = self.classes.get_mut(class) else {
+            return Err(self.fatal("InternalError: a method of a class the unit has not"));
+        };
+        let at = u32::try_from(decl.methods.len()).unwrap_or(u32::MAX);
+        decl.methods.push(MethodDecl {
+            function,
+            visibility: method.visibility,
+            is_instance: !method.is_static,
+            is_abstract: false,
+            is_final: method.is_final,
+            tentative_return: false,
+        });
+        self.methods.push(MethodBody {
+            class: u32::try_from(class).unwrap_or(u32::MAX),
+            method: at,
+            body,
+        });
+        Ok(())
+    }
+
+    /// The body of one function or method as its own op array, what
+    /// `zend_compile_func_decl` does between `zend_oparray_context_begin`
+    /// and `zend_oparray_context_end`: the emitter's op array state set
+    /// aside, `zend_compile_params` as the `RECV*` prologue, the entry
+    /// safepoint numbered after it, the statements, php's implicit
+    /// `RETURN null` at the closing brace's line
+    /// (`zend_emit_final_return(0)` under `CG(zend_lineno) =
+    /// decl->end_lineno`), and `pass_two`. `scope` is the class a method
+    /// belongs to, none for a function; `$this` is in scope in an
+    /// instance method's body and nowhere else. The declaration keeps
+    /// each parameter's default as the constant expression it was
+    /// written as, and the op array is `zend_compile_params`' prologue:
+    /// `RECV` numbered from one, or `RECV_INIT` with the default folded
+    /// into a constant where one is written, each into the parameter's
+    /// CV, which `lookup_cv` must find as the next one (`Redefinition of
+    /// parameter $x` where it does not). A default that folds to no
+    /// constant, which php keeps as an `IS_CONSTANT_AST`, is not read yet.
+    fn body(
+        &mut self,
+        function: &Function,
+        name: &[u8],
+        scope: Option<&[u8]>,
+        is_static: bool,
+    ) -> Result<(FunctionDecl, OpArray), CompileError> {
+        let saved = self.begin_body(name, scope.is_some() && !is_static);
+        let outcome = self.parameters_and_body(function, name, scope);
+        self.end_body(saved);
+        outcome
+    }
+
+    fn parameters_and_body(
+        &mut self,
+        function: &Function,
+        name: &[u8],
+        scope: Option<&[u8]>,
+    ) -> Result<(FunctionDecl, OpArray), CompileError> {
+        let line = function.line;
+        self.line = line;
+        let mut parameters = Vec::with_capacity(function.parameters.len());
+        for (at, parameter) in function.parameters.iter().enumerate() {
+            let number = u32::try_from(at).unwrap_or(u32::MAX);
+            let cv = self.lookup_cv(&parameter.name);
+            if cv != number {
+                return Err(self.compile_error(format!(
+                    "Redefinition of parameter ${}",
+                    String::from_utf8_lossy(&parameter.name)
+                )));
+            }
+            let default = if let Some(expr) = &parameter.default {
+                {
+                    // `zend_compile_params` folds a default under
+                    // `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`,
+                    // so one naming a constant stays an
+                    // `IS_CONSTANT_AST` literal for the engine and for
+                    // Reflection, which this table has no zval for yet.
+                    if names_a_constant(expr) {
+                        return Err(self.fatal(
+                            "a parameter default naming a constant this compiler cannot read yet",
+                        ));
+                    }
+                    let Some(folded) = self.constant_of(expr)? else {
+                        return Err(self.fatal("a parameter default this compiler cannot read yet"));
+                    };
+                    let slot = self.constant(folded);
+                    self.push(Opline {
+                        opcode: Opcode::RecvInit,
+                        op1: number.saturating_add(1),
+                        op2_type: OperandKind::Const,
+                        op2: slot,
+                        out_type: OperandKind::Cv,
+                        out: cv,
+                        ..Opline::default()
+                    });
+                    Some(self.const_expr(expr)?)
+                }
+            } else {
+                self.push(Opline {
+                    opcode: Opcode::Recv,
+                    op1: number.saturating_add(1),
+                    out_type: OperandKind::Cv,
+                    out: cv,
+                    ..Opline::default()
+                });
+                None
+            };
+            parameters.push(Parameter {
+                name: Name(parameter.name.clone().into_boxed_slice()),
+                ty: None,
+                by_ref: false,
+                variadic: false,
+                default,
+                attributes: Vec::new(),
+            });
+        }
+        // The entry safepoint is the opline after the prologue (design
+        // §5.7), which `begin_body` numbered zero at opline zero.
+        let entry = self.next();
+        if let Some(first) = self.safepoints.first_mut() {
+            *first = OplineIdx(entry);
+        }
+        self.statements(&function.body)?;
+        self.line = function.end_line;
+        let body = self.finish(false, line, function.end_line)?;
+        let _ = scope;
+        Ok((
+            FunctionDecl {
+                name: Name(name.into()),
+                parameters,
+                return_type: None,
+                returns_by_ref: false,
+                attributes: Vec::new(),
+                doc_comment: function.doc_comment.clone().map(Vec::into_boxed_slice),
+                file: self.filename.clone(),
+                line,
+                frameless: Vec::new(),
+            },
+            body,
+        ))
+    }
+
+    /// `zend_oparray_context_begin` with a fresh op array as
+    /// `CG(active_op_array)`: the state of the one being compiled set
+    /// aside, and the emitter over an empty one whose entry safepoint
+    /// stands at opline zero until the prologue is known.
+    fn begin_body(&mut self, name: &[u8], this_in_scope: bool) -> Saved {
+        Saved {
+            oplines: std::mem::take(&mut self.oplines),
+            constants: std::mem::take(&mut self.constants),
+            vars: std::mem::take(&mut self.vars),
+            safepoints: std::mem::replace(&mut self.safepoints, vec![OplineIdx(0)]),
+            temporaries: std::mem::take(&mut self.temporaries),
+            cache_slots: std::mem::take(&mut self.cache_slots),
+            loops: std::mem::take(&mut self.loops),
+            current_loop: self.current_loop.take(),
+            breaks: std::mem::take(&mut self.breaks),
+            active_function: self.active_function.replace(name.to_vec()),
+            this_in_scope: std::mem::replace(&mut self.this_in_scope, this_in_scope),
+        }
+    }
+
+    /// `zend_oparray_context_end`: the enclosing op array's state back
+    /// on the emitter.
+    fn end_body(&mut self, saved: Saved) {
+        self.oplines = saved.oplines;
+        self.constants = saved.constants;
+        self.vars = saved.vars;
+        self.safepoints = saved.safepoints;
+        self.temporaries = saved.temporaries;
+        self.cache_slots = saved.cache_slots;
+        self.loops = saved.loops;
+        self.current_loop = saved.current_loop;
+        self.breaks = saved.breaks;
+        self.active_function = saved.active_function;
+        self.this_in_scope = saved.this_in_scope;
+    }
+
+    /// The op array the emitter holds, finished as `zend_compile` and
+    /// `zend_compile_func_decl` finish one: php's implicit final return
+    /// (`zend_emit_final_return`, `1` for the main op array and `null`
+    /// for a function), `pass_two` over the `BRK` and `CONT` oplines,
+    /// design §5.7's assertion over the headers, the commutative swap
+    /// and the live ranges. The emitter's op array state is spent by
+    /// this and read by nothing after it.
+    fn finish(
+        &mut self,
+        return_one: bool,
+        line_start: u32,
+        line_end: u32,
+    ) -> Result<OpArray, CompileError> {
+        self.final_return(return_one);
+        self.resolve_breaks();
+        headers_numbered(&self.oplines, &self.safepoints)?;
+        swap_commutative(&mut self.oplines);
+        let mut oplines = std::mem::take(&mut self.oplines);
+        let live_ranges = crate::live::live_ranges(&mut oplines, self.temporaries);
+        let vars = std::mem::take(&mut self.vars);
+        let num_cvs = u32::try_from(vars.len()).unwrap_or(u32::MAX);
+        Ok(OpArray {
+            oplines: oplines.into_boxed_slice(),
+            literals: std::mem::take(&mut self.constants).into_boxed_slice(),
+            vars: vars.into_boxed_slice(),
+            num_cvs,
+            num_tmps: self.temporaries,
+            try_catch: Box::new([]),
+            live_ranges,
+            safepoints: std::mem::take(&mut self.safepoints).into_boxed_slice(),
+            filename: self.filename.clone(),
+            line_start,
+            line_end,
+            cache_size: self.cache_slots,
+        })
     }
 
     /// `zend_compile_class_decl` for a top-level class with no parent
@@ -695,9 +1010,14 @@ impl Emit<'_> {
                 doc_comment: property.doc_comment.clone().map(Vec::into_boxed_slice),
             });
         }
+        let at = self.classes.len();
+        self.classes.push(decl);
+        for method in &class.methods {
+            self.line = method.function.line;
+            self.method_decl(at, method)?;
+        }
         self.active_class = None;
         self.line = line;
-        self.classes.push(decl);
         Ok(())
     }
 
@@ -730,6 +1050,26 @@ impl Emit<'_> {
             Expr::Float(f) => Ok(ConstExpr::Double(*f)),
             Expr::Str(bytes) => Ok(ConstExpr::Str(bytes.clone().into_boxed_slice())),
             Expr::Constant(name) => Ok(ConstExpr::Constant(Name(name.clone().into_boxed_slice()))),
+            // `zend_compile_const_expr_class_const`: the class named as
+            // written, resolved in the namespace, and the constant's
+            // name, kept as the tree for the engine to fetch on first
+            // use; `self`, `parent` and `static` are refused as
+            // `class_name_literal` refuses them.
+            Expr::ClassConst { class, name } => {
+                let class = self.class_name(class);
+                if class.eq_ignore_ascii_case(b"self")
+                    || class.eq_ignore_ascii_case(b"parent")
+                    || class.eq_ignore_ascii_case(b"static")
+                {
+                    return Err(
+                        self.fatal("a class reference of the scope this compiler cannot read yet")
+                    );
+                }
+                Ok(ConstExpr::ClassConstant {
+                    class: Name(class.into_boxed_slice()),
+                    name: Name(name.clone().into_boxed_slice()),
+                })
+            }
             // `zend_eval_const_expr` folds a magic constant as
             // `zend_compile_expr` does; the one it leaves,
             // `__CLASS__` in a trait, is not read yet (a trait is not).
@@ -827,10 +1167,12 @@ impl Emit<'_> {
 
     /// `zend_compile_stmt_list`: each statement at its own line.
     fn statements(&mut self, body: &Read) -> Result<(), CompileError> {
+        self.depth = self.depth.saturating_add(1);
         for (statement, line) in body {
             self.line = *line;
             self.statement(statement)?;
         }
+        self.depth = self.depth.saturating_sub(1);
         Ok(())
     }
 
@@ -1932,6 +2274,7 @@ impl Emit<'_> {
                 arguments,
             } => self.method_call(object, method, arguments),
             Expr::Instanceof { expr, class } => self.instance_of(expr, class),
+            Expr::ClassConst { class, name } => self.class_const(class, name),
             Expr::Array(elements) => self.array(elements),
             known => Ok(Where::Constant(self.constant_expr(known)?)),
         }
@@ -2042,8 +2385,7 @@ impl Emit<'_> {
                 "a property assignment over what is no variable this compiler cannot read yet",
             ));
         }
-        let receiver = self.receiver(base)?;
-        let (mut op1_type, mut op1) = self.operand(receiver);
+        let (mut op1_type, mut op1) = self.receiver(base)?;
         let mut links = Vec::with_capacity(names.len());
         for name in names.iter().rev() {
             let name = self.string(name)?;
@@ -2681,6 +3023,10 @@ impl Emit<'_> {
                 Err(self.fatal("a call is no constant expression"))
             }
             Expr::Instanceof { .. } => Err(self.fatal("an instanceof is no constant expression")),
+            // `zend_try_ct_eval_class_const` folds nothing under
+            // `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`, which opcache
+            // sets, so a class constant is fetched as the program serves.
+            Expr::ClassConst { .. } => Err(self.fatal("a class constant is fetched at run time")),
             // `zend_compile_expr` folds no cast; only a constant
             // expression's walk does (`zend_eval_const_expr`), and none is
             // read yet.
@@ -2873,22 +3219,28 @@ impl Emit<'_> {
             return self.ns_call(&resolved, arguments);
         }
         let lowered = resolved.to_ascii_lowercase();
-        let Some(index) = self.native_index(&lowered) else {
-            return self.dynamic_call(&resolved, arguments);
+        let count = u32::try_from(arguments.len()).unwrap_or(0);
+        let (stack, call_op) = match self.native_index(&lowered) {
+            Some(index) => {
+                if let Some(served) = self.special(&lowered, arguments)? {
+                    return Ok(served);
+                }
+                if let Some(served) = self.frameless_icall(index, arguments, None)? {
+                    return Ok(served);
+                }
+                (used_stack(count, None), Opcode::DoIcall)
+            }
+            None => match self.declared_function(&lowered) {
+                Some(body) => (used_stack(count, Some(body)), Opcode::DoUcall),
+                None => return self.dynamic_call(&resolved, arguments),
+            },
         };
-        if let Some(served) = self.special(&lowered, arguments)? {
-            return Ok(served);
-        }
-        if let Some(served) = self.frameless_icall(index, arguments, None)? {
-            return Ok(served);
-        }
         let lowered = self.string(&lowered)?;
         let lowered = self.constant(lowered);
-        let count = u32::try_from(arguments.len()).unwrap_or(0);
         let slot = self.cache_slot();
         self.push(Opline {
             opcode: Opcode::InitFcall,
-            op1: used_stack(count),
+            op1: stack,
             op2_type: OperandKind::Const,
             op2: lowered,
             out: slot,
@@ -2896,7 +3248,21 @@ impl Emit<'_> {
             ..Opline::default()
         });
         self.args(arguments, true)?;
-        Ok(self.call_op(Opcode::DoIcall))
+        Ok(self.call_op(call_op))
+    }
+
+    /// `zend_hash_find_ptr(CG(function_table), lcname)` over the
+    /// functions this file has declared so far, with `fbc_is_finalized`
+    /// folded in: a body that has compiled, whose `used_stack` a call
+    /// site can write; none for a native, which [`Self::native_index`]
+    /// answers, and none for the function whose own body is being
+    /// compiled, which is in php's table without `ZEND_ACC_DONE_PASS_TWO`
+    /// and so compiles a call to itself by name.
+    fn declared_function(&self, lowered: &[u8]) -> Option<&OpArray> {
+        self.functions_declared
+            .iter()
+            .find(|(decl, _)| decl.name.0.to_ascii_lowercase() == lowered)
+            .map(|(_, body)| body)
     }
 
     /// `zend_compile_dynamic_call` for a name written as a constant
@@ -2970,6 +3336,11 @@ impl Emit<'_> {
         arguments: &[Expr],
     ) -> Result<Where, CompileError> {
         let known = self.known_method(class, method);
+        let call_op = match known {
+            Some(Known::User) => Opcode::DoUcall,
+            Some(Known::Native) | None => Opcode::DoFcall,
+        };
+        let known = known.is_some();
         let class_at = self.class_name_literal(class)?;
         let count = u32::try_from(arguments.len()).unwrap_or(0);
         let opline = if method.eq_ignore_ascii_case(b"__construct") {
@@ -2996,7 +3367,7 @@ impl Emit<'_> {
         };
         self.push(opline);
         self.args(arguments, known)?;
-        Ok(self.call_op(Opcode::DoFcall))
+        Ok(self.call_op(call_op))
     }
 
     /// `zend_compile_method_call`: the receiver compiled,
@@ -3010,8 +3381,7 @@ impl Emit<'_> {
         method: &[u8],
         arguments: &[Expr],
     ) -> Result<Where, CompileError> {
-        let receiver = self.receiver(object)?;
-        let (op1_type, op1) = self.operand(receiver);
+        let (op1_type, op1) = self.receiver(object)?;
         let method_at = self.func_name_literal(method)?;
         let count = u32::try_from(arguments.len()).unwrap_or(0);
         let slot = self.cache_slots(2);
@@ -3034,11 +3404,43 @@ impl Emit<'_> {
     /// `zend_compile_method_call`, where `this_guaranteed_exists` is
     /// false outside a method's body, which is everywhere this compiler
     /// reads); anything else is the expression itself.
-    fn receiver(&mut self, object: &Expr) -> Result<Where, CompileError> {
+    fn receiver(&mut self, object: &Expr) -> Result<(OperandKind, u32), CompileError> {
         match object {
-            Expr::This => Ok(self.fetch_this(OperandKind::Var)),
-            other => self.expr(other),
+            Expr::This if self.this_in_scope => Ok((OperandKind::Unused, 0)),
+            Expr::This => {
+                let this = self.fetch_this(OperandKind::Var);
+                Ok(self.operand(this))
+            }
+            other => {
+                let value = self.expr(other)?;
+                Ok(self.operand(value))
+            }
         }
+    }
+
+    /// `zend_compile_class_const` under `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`,
+    /// which opcache sets, so nothing folds: `FETCH_CLASS_CONSTANT` with
+    /// the class's constant pair in `op1` (`zend_set_class_name_op1`),
+    /// the constant's name in `op2` and two cache slots in
+    /// `extended_value`, into a temporary.
+    fn class_const(&mut self, class: &[u8], name: &[u8]) -> Result<Where, CompileError> {
+        let class_at = self.class_name_literal(class)?;
+        let name = self.string(name)?;
+        let name_at = self.literal(name);
+        let out = self.temporary();
+        let slots = self.cache_slots(2);
+        self.push(Opline {
+            opcode: Opcode::FetchClassConstant,
+            op1_type: OperandKind::Const,
+            op1: class_at,
+            op2_type: OperandKind::Const,
+            op2: name_at,
+            out_type: OperandKind::Tmp,
+            out,
+            extended_value: slots,
+            ..Opline::default()
+        });
+        Ok(Where::Temporary(out))
     }
 
     /// `zend_emit_op(result, ZEND_FETCH_THIS, NULL, NULL)`: `$this` into
@@ -3064,8 +3466,7 @@ impl Emit<'_> {
     /// `extended_value` (`zend_alloc_cache_slots(3)`), written into a
     /// temporary (`zend_adjust_for_fetch_type`).
     fn prop(&mut self, object: &Expr, name: &[u8]) -> Result<Where, CompileError> {
-        let receiver = self.receiver(object)?;
-        let (op1_type, op1) = self.operand(receiver);
+        let (op1_type, op1) = self.receiver(object)?;
         let name = self.string(name)?;
         let name_at = self.literal(name);
         let out = self.temporary();
@@ -3141,19 +3542,38 @@ impl Emit<'_> {
     /// inside the class, which nothing here is. The name is resolved as
     /// the fetch resolves it ([`Self::class_name`]), which is the name a
     /// declaration of the file took under the same namespace.
-    fn known_method(&self, class: &[u8], method: &[u8]) -> bool {
+    fn known_method(&self, class: &[u8], method: &[u8]) -> Option<Known> {
         let class = self.class_name(class).to_ascii_lowercase();
         let method = method.to_ascii_lowercase();
-        self.known_classes
+        let own = self
+            .active_class
+            .as_ref()
+            .is_some_and(|active| active.to_ascii_lowercase() == class);
+        if let Some(decl) = self
+            .known_classes
             .iter()
-            .chain(self.classes.iter())
             .find(|decl| decl.name.0.to_ascii_lowercase() == class)
-            .is_some_and(|decl| {
-                decl.methods.iter().any(|m| {
+        {
+            return decl
+                .methods
+                .iter()
+                .any(|m| {
                     m.function.name.0.to_ascii_lowercase() == method
                         && m.visibility == Visibility::Public
                 })
+                .then_some(Known::Native);
+        }
+        let decl = self
+            .classes
+            .iter()
+            .find(|decl| decl.name.0.to_ascii_lowercase() == class)?;
+        decl.methods
+            .iter()
+            .any(|m| {
+                m.function.name.0.to_ascii_lowercase() == method
+                    && (m.visibility == Visibility::Public || own)
             })
+            .then_some(Known::User)
     }
 
     /// `zend_add_func_name_literal`: the name as written and its lowered
@@ -3367,10 +3787,24 @@ impl Emit<'_> {
             Magic::Namespace => self.namespace.clone().unwrap_or_default(),
             Magic::Class => self.active_class.clone().unwrap_or_default(),
             Magic::Property => self.active_property.clone().unwrap_or_default(),
-            // The main op array has no `function_name`, and a member's
-            // constant expression stands directly inside the class; a
-            // trait is not read yet, so `__TRAIT__` names none.
-            Magic::Function | Magic::Method | Magic::Trait => Vec::new(),
+            // `zend_compile_func_decl` names the op array; the main one
+            // has no `function_name`, and a member's constant expression
+            // stands directly inside the class.
+            Magic::Function => self.active_function.clone().unwrap_or_default(),
+            // `__METHOD__` is `Class::method` inside a method and the
+            // function's name inside a function (`zend_compile_const`).
+            Magic::Method => match (&self.active_class, &self.active_function) {
+                (Some(class), Some(function)) => {
+                    let mut text = class.clone();
+                    text.extend_from_slice(b"::");
+                    text.extend_from_slice(function);
+                    text
+                }
+                (None, Some(function)) => function.clone(),
+                (_, None) => Vec::new(),
+            },
+            // A trait is not read yet, so `__TRAIT__` names none.
+            Magic::Trait => Vec::new(),
         };
         Folded::Text(text)
     }
@@ -3674,21 +4108,51 @@ impl Emit<'_> {
         Where::Returned(out)
     }
 
-    /// `zend_emit_final_return(true)`: the main op array returns the
-    /// constant `1`, and the return carries its safepoint number.
-    fn final_return(&mut self) {
-        let one = self.constant(Zval::long(1));
+    /// `zend_emit_final_return`: the main op array returns the constant
+    /// `1` and a function `null`, `extended_value` at -1 on both, and
+    /// the return carries its safepoint number.
+    fn final_return(&mut self, return_one: bool) {
+        let value = self.constant(if return_one {
+            Zval::long(1)
+        } else {
+            Zval::null()
+        });
         let at = self.next();
         let number = self.safepoint(at);
         self.push(Opline {
             opcode: Opcode::Return,
             op1_type: OperandKind::Const,
-            op1: one,
+            op1: value,
             out: number,
             extended_value: u32::MAX,
             ..Opline::default()
         });
     }
+}
+
+/// Whether a constant expression names a constant, which
+/// `zend_compile_params` leaves unsubstituted in a parameter's default:
+/// a constant by name or a class constant, anywhere in the tree. `true`,
+/// `false` and `null` are the reader's own values and name none.
+fn names_a_constant(expr: &Expr) -> bool {
+    match expr {
+        Expr::Constant(_) | Expr::ClassConst { .. } => true,
+        Expr::Unary { operand, .. } => names_a_constant(operand),
+        Expr::Binary { left, right, .. } => names_a_constant(left) || names_a_constant(right),
+        Expr::Array(elements) => elements.iter().any(|element| {
+            element.key.as_ref().is_some_and(names_a_constant) || names_a_constant(&element.value)
+        }),
+        _ => false,
+    }
+}
+
+/// What a call site knows of its callee once the table has it
+/// (`zend_get_call_op`): a native, served by `DO_ICALL` or `DO_FCALL`,
+/// or a user function of this file, served by `DO_UCALL`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Known {
+    Native,
+    User,
 }
 
 /// `zend_is_call`: a call by name, a call on a class or a method call,
@@ -3729,21 +4193,36 @@ fn numeric_key(key: &[u8]) -> Option<i64> {
     Some(n)
 }
 
-/// `zend_vm_calc_used_stack` for a native callee, the number
+/// `zend_vm_calc_used_stack` (`Z/Zend/zend_execute.h:362`), the number
 /// `zend_compile_call_common` writes into an `INIT_FCALL`'s `op1`
 /// (`Z/Zend/zend_compile.c:3983`): the frame header's slots
 /// (`ZEND_CALL_FRAME_SLOT`, five zvals on a 64-bit build), one slot per
 /// argument, and the callee's temporaries, of which a native has none
-/// while nothing observes it (`Z/Zend/zend_API.c:2988-2995`), in bytes.
-/// php's own VM sizes its stack by this number; here it is what the
-/// dump prints, `INIT_FCALL 1 96 string("set_time_limit")`, and the
-/// engine's stack is sized by the engine.
-fn used_stack(arguments: u32) -> u32 {
+/// while nothing observes it (`Z/Zend/zend_API.c:2988-2995`); for a
+/// user callee, its CVs too, less the parameters the arguments fill, in
+/// bytes. php's own VM sizes its stack by this number; here it is what
+/// the dump prints, `INIT_FCALL 1 96 string("set_time_limit")` and
+/// `INIT_FCALL 1 128 string("f")`, and the engine's stack is sized by
+/// the engine.
+fn used_stack(arguments: u32, callee: Option<&OpArray>) -> u32 {
     const CALL_FRAME_SLOT: u32 = 5;
     let zval = u32::try_from(std::mem::size_of::<Zval>()).unwrap_or(16);
-    CALL_FRAME_SLOT
-        .saturating_add(arguments)
-        .saturating_mul(zval)
+    let mut slots = CALL_FRAME_SLOT.saturating_add(arguments);
+    if let Some(body) = callee {
+        // `func->common.T`, then the callee's CVs less the parameters the
+        // arguments already fill (`op_array.last_var - MIN(num_args, …)`).
+        let parameters = body
+            .oplines
+            .iter()
+            .take_while(|op| matches!(op.opcode, Opcode::Recv | Opcode::RecvInit))
+            .count();
+        let parameters = u32::try_from(parameters).unwrap_or(u32::MAX);
+        slots = slots
+            .saturating_add(body.num_tmps)
+            .saturating_add(body.num_cvs)
+            .saturating_sub(parameters.min(arguments));
+    }
+    slots.saturating_mul(zval)
 }
 
 impl Emit<'_> {
@@ -4090,6 +4569,9 @@ mod tests {
             frameless: Vec::new(),
             namespace: Some(b"A".to_vec()),
             active_class: None,
+            active_function: None,
+            this_in_scope: false,
+            depth: 0,
             active_property: None,
             in_jmp_frameless_branch: false,
             statements_seen: 0,
@@ -4103,6 +4585,8 @@ mod tests {
             line: 1,
             diagnostics: Vec::new(),
             classes: Vec::new(),
+            functions_declared: Vec::new(),
+            methods: Vec::new(),
             filename: options.filename.clone(),
             loops: Vec::new(),
             current_loop: None,
@@ -4113,6 +4597,7 @@ mod tests {
             doc_comment: None,
             properties: Vec::new(),
             constants: Vec::new(),
+            methods: Vec::new(),
             end_line: 1,
         };
         assert!(emit.class(&read).is_ok());
@@ -4135,20 +4620,31 @@ mod tests {
             is_final: false,
             tentative_return: false,
         });
-        assert!(emit.known_method(b"M", b"f"), "M under namespace A is A\\M");
-        assert!(emit.known_method(b"m", b"F"), "matched whatever the case");
-        assert!(emit.known_method(b"namespace\\M", b"f"));
-        assert!(emit.known_method(b"\\A\\M", b"f"));
-        assert!(
-            !emit.known_method(b"\\M", b"f"),
+        let user = Some(Known::User);
+        assert_eq!(
+            emit.known_method(b"M", b"f"),
+            user,
+            "M under namespace A is A\\M"
+        );
+        assert_eq!(
+            emit.known_method(b"m", b"F"),
+            user,
+            "matched whatever the case"
+        );
+        assert_eq!(emit.known_method(b"namespace\\M", b"f"), user);
+        assert_eq!(emit.known_method(b"\\A\\M", b"f"), user);
+        assert_eq!(
+            emit.known_method(b"\\M", b"f"),
+            None,
             "the global M is not declared"
         );
         emit.namespace = None;
-        assert!(
-            !emit.known_method(b"M", b"f"),
+        assert_eq!(
+            emit.known_method(b"M", b"f"),
+            None,
             "outside the namespace M is the global one"
         );
-        assert!(emit.known_method(b"A\\M", b"f"));
+        assert_eq!(emit.known_method(b"A\\M", b"f"), user);
     }
 
     /// Design §5.7's assertion, on an op array laid down by hand (#353):

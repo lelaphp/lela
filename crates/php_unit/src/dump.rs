@@ -92,10 +92,11 @@ const FREE_ON_RETURN: u32 = 1;
 /// `IS_CONSTANT_UNQUALIFIED_IN_NAMESPACE`, on a `FETCH_CONSTANT`'s `op1`.
 const UNQUALIFIED_IN_NAMESPACE: u32 = 0x800;
 
-/// Every op array of the unit, one block each, in php's order: the main
-/// op array, then the functions as declared. `frameless` is
-/// `zend_flf_functions` by name, what a `FRAMELESS_ICALL_*`'s
-/// `extended_value` indexes.
+/// Every op array of the unit, one block each, in php's order
+/// (`zend_foreach_op_array`): the main op array, then the functions as
+/// declared, then each class's methods as declared, named
+/// `Class::method`. `frameless` is `zend_flf_functions` by name, what a
+/// `FRAMELESS_ICALL_*`'s `extended_value` indexes.
 pub(crate) fn unit(unit: &Unit, frameless: &[Name]) -> String {
     let mut out = String::new();
     op_array(&mut out, "$_main", 0, &unit.main, frameless);
@@ -105,6 +106,26 @@ pub(crate) fn unit(unit: &Unit, frameless: &[Name]) -> String {
             &String::from_utf8_lossy(&decl.name.0),
             num_args(decl),
             body,
+            frameless,
+        );
+    }
+    for method in &unit.methods {
+        let Some(class) = unit.classes.get(method.class as usize) else {
+            continue;
+        };
+        let Some(decl) = class.methods.get(method.method as usize) else {
+            continue;
+        };
+        let name = format!(
+            "{}::{}",
+            String::from_utf8_lossy(&class.name.0),
+            String::from_utf8_lossy(&decl.function.name.0)
+        );
+        op_array(
+            &mut out,
+            &name,
+            num_args(&decl.function),
+            &method.body,
             frameless,
         );
     }
@@ -613,8 +634,11 @@ mod tests {
     use php_heap::Intern as _;
 
     use super::*;
-    use crate::decl::{Name, Parameter};
+    use crate::decl::{
+        ClassDecl, ClassFlags, ClassKind, EnumBacking, MethodDecl, Name, Parameter, Visibility,
+    };
     use crate::op::{LiveRange, OplineIdx, TryCatch};
+    use crate::unit::MethodBody;
 
     /// A constant string interned into a fresh table.
     fn text(strings: &mut php_heap::Strings, bytes: &[u8]) -> Zval {
@@ -714,6 +738,99 @@ mod tests {
         assert!(unit.dump(&[]).ends_with(
             "\nf:\n     ; (lines=0, args=2, vars=0, tmps=0)\n     ; (before optimizer)\n     ; a.php:4-6\n     ; return  [] RANGE[0..0]\n"
         ));
+    }
+
+    /// `zend_foreach_op_array` reaches a class's methods after the
+    /// functions, and each is named `Class::method` with its own
+    /// parameter count; a body naming a class or a method the unit has
+    /// not is nobody's and prints nothing.
+    #[test]
+    fn a_method_prints_after_the_functions_under_its_class_s_name() {
+        let function = |name: &str, parameters: usize| FunctionDecl {
+            name: Name::from(name),
+            parameters: (0..parameters)
+                .map(|_| Parameter {
+                    name: Name::from("x"),
+                    ty: None,
+                    by_ref: false,
+                    variadic: false,
+                    default: None,
+                    attributes: Vec::new(),
+                })
+                .collect(),
+            return_type: None,
+            returns_by_ref: false,
+            attributes: Vec::new(),
+            doc_comment: None,
+            file: Name::from("a.php"),
+            line: 4,
+            frameless: Vec::new(),
+        };
+        let method = |name: &str, parameters: usize| MethodDecl {
+            function: function(name, parameters),
+            visibility: Visibility::Public,
+            is_instance: true,
+            is_abstract: false,
+            is_final: false,
+            tentative_return: false,
+        };
+        let class = ClassDecl {
+            name: Name::from("C"),
+            kind: ClassKind::Class,
+            flags: ClassFlags::default(),
+            parent: None,
+            interfaces: Vec::new(),
+            traits: Vec::new(),
+            backing: EnumBacking::Pure,
+            constants: Vec::new(),
+            properties: Vec::new(),
+            methods: vec![method("m", 1), method("n", 0)],
+            attributes: Vec::new(),
+            doc_comment: None,
+            file: Name::from("a.php"),
+            line: 3,
+            end_line: 9,
+        };
+        let at = |line_start: u32| OpArray {
+            line_start,
+            line_end: line_start,
+            ..body(vec![], vec![])
+        };
+        let unit = Unit {
+            main: body(vec![], vec![]),
+            functions: vec![(function("f", 0), at(2))],
+            classes: vec![class],
+            methods: vec![
+                MethodBody {
+                    class: 0,
+                    method: 0,
+                    body: at(4),
+                },
+                MethodBody {
+                    class: 0,
+                    method: 1,
+                    body: at(6),
+                },
+                MethodBody {
+                    class: 1,
+                    method: 0,
+                    body: at(8),
+                },
+            ],
+            ..Unit::default()
+        };
+        let dump = unit.dump(&[]);
+        let header = |name: &str, args: usize, line: u32| {
+            format!(
+                "\n{name}:\n     ; (lines=0, args={args}, vars=0, tmps=0)\n     ; (before optimizer)\n     ; a.php:{line}-{line}\n     ; return  [] RANGE[0..0]\n"
+            )
+        };
+        assert!(dump.ends_with(&format!(
+            "{}{}{}",
+            header("f", 0, 2),
+            header("C::m", 1, 4),
+            header("C::n", 0, 6)
+        )));
     }
 
     /// `zend_dump_const`: each type of constant printed as the value and
