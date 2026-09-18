@@ -70,6 +70,7 @@ use std::fmt::Write as _;
 use php_ext::abi::{CloneObj, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers};
 use php_ext::call::{
     Function, constant, eval_const_expr, lookup_class, lookup_function, new_object,
+    read_static_prop, write_static_prop,
 };
 use php_ext::decl::{
     ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, MethodDecl, Name,
@@ -2582,9 +2583,22 @@ fn this_property(req: &mut Request) -> Result<(ClassId, Vec<u8>, Option<Property
 /// properties, so the default is evaluated in its stead, and a typed
 /// property with none is php's `Error` for a read before
 /// initialization. A `static` property is
-/// `zend_read_static_property_ex`, which needs the `static` table
-/// `api::call::read_static_prop` does not link yet, so the answer is a
-/// `ReflectionException` naming that and not a value.
+/// `zend_read_static_property_ex` over the class the reflector was
+/// asked about (`intern->ce`), whose fake scope is that class, and the
+/// argument is neither read nor required; php parses the argument
+/// before it looks at the property, so what is no object is a
+/// `TypeError` either way.
+///
+/// ```php
+/// class P { public static $s = 1; } class C extends P {}
+/// $r = new ReflectionProperty('C', 's');
+/// var_dump($r->class, $r->getValue(), $r->getValue(null));
+/// ```
+/// ```expect
+/// string(1) "P"
+/// int(1)
+/// int(1)
+/// ```
 ///
 /// ```php
 /// class T { protected $p = 2; } $o = new T; var_dump((new ReflectionProperty($o, 'p'))->getValue($o), (new ReflectionProperty('Exception', 'message'))->getValue(new ReflectionException), (new ReflectionProperty('Exception', 'code'))->getValue(new Exception));
@@ -2629,6 +2643,17 @@ fn this_property(req: &mut Request) -> Result<(ClassId, Vec<u8>, Option<Property
 /// ```
 fn reflection_property_get_value(req: &mut Request) -> Result<Value, Thrown> {
     at_most_arguments(req, 1)?;
+    let given = req.argument(1).unwrap_or_default().deref();
+    if !matches!(
+        given.as_ref(),
+        ValueRef::Object(_) | ValueRef::Null | ValueRef::Undef
+    ) {
+        return Err(arg_type_error(
+            req,
+            1,
+            &format!("be of type ?object, {} given", given.type_name()),
+        ));
+    }
     let (class, name, declared) = this_property(req)?;
     // `instanceof_function(Z_OBJCE_P(object), intern->ce)`: the object
     // is held to the class the reflector was asked about, which is the
@@ -2639,25 +2664,14 @@ fn reflection_property_get_value(req: &mut Request) -> Result<Value, Thrown> {
         .and_then(|this| kept_class(req, this))
         .unwrap_or(class);
     if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
-        return Err(static_property_unlinked(req, class, &name));
+        return read_static_prop(req, asked, &name);
     }
-    let given = req.argument(1).unwrap_or_default().deref();
-    let object = match given.as_ref() {
-        ValueRef::Object(object) => object,
-        ValueRef::Null | ValueRef::Undef => {
-            return Err(arg_type_error(
-                req,
-                1,
-                "be provided for instance properties",
-            ));
-        }
-        _ => {
-            return Err(arg_type_error(
-                req,
-                1,
-                &format!("be of type ?object, {} given", given.type_name()),
-            ));
-        }
+    let ValueRef::Object(object) = given.as_ref() else {
+        return Err(arg_type_error(
+            req,
+            1,
+            "be provided for instance properties",
+        ));
     };
     if !object.instance_of(req, asked) {
         return Err(throw(
@@ -2694,28 +2708,36 @@ fn reflection_property_get_value(req: &mut Request) -> Result<Value, Thrown> {
     }
 }
 
-/// The `ReflectionException` a `static` property's value is until the
-/// `static` table is linked: php reads `ce->default_static_members_table`
-/// here and this engine has none to read (`bug30146.phpt` waits on it).
-fn static_property_unlinked(req: &mut Request, class: ClassId, name: &[u8]) -> Thrown {
-    let class = class_name_of(req, class);
-    throw(
-        req,
-        "ReflectionException",
-        &format!(
-            "Static property {}::${} has no value to read: static properties are not linked yet",
-            String::from_utf8_lossy(&class),
-            String::from_utf8_lossy(name)
-        ),
-    )
-}
-
 /// `ReflectionProperty::setValue(mixed $objectOrValue, mixed $value)`:
 /// an instance property written on the object given through
 /// `write_property` under `fake_scope`, one more owner of the value
 /// taken for the slot. A `static` property takes php's two 8.3
-/// deprecations for the one-argument and the non-object forms and
-/// then, as `getValue` does, the `ReflectionException` for the table not linked.
+/// deprecations, the one for a single argument and the one for a first
+/// argument that is neither `null` nor an object, and is then
+/// `zend_update_static_property_ex` over the class the reflector was
+/// asked about; the value is the last argument either way.
+///
+/// ```php
+/// class T { public static $s = 1; } $r = new ReflectionProperty('T', 's'); var_dump($r->getValue()); $r->setValue(null, 2); var_dump($r->getValue());
+/// ```
+/// ```expect
+/// int(1)
+/// int(2)
+/// ```
+///
+/// The single-argument form, php's 8.3 deprecation, whose value is the
+/// one argument:
+///
+/// ```php
+/// class T { public static $s = 1; }
+/// $r = new ReflectionProperty('T', 's');
+/// $r->setValue(3);
+/// var_dump(T::$s);
+/// ```
+/// ```expect
+/// Deprecated: Calling ReflectionProperty::setValue() with a single argument is deprecated in %s on line 4
+/// int(3)
+/// ```
 ///
 /// ```php
 /// class T { public $p = 1; } $o = new T; $r = new ReflectionProperty($o, 'p'); $r->setValue($o, 'two'); var_dump($r->getValue($o), $o->p);
@@ -2750,11 +2772,12 @@ fn reflection_property_set_value(req: &mut Request) -> Result<Value, Thrown> {
     let (class, name, declared) = this_property(req)?;
     if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
         let count = req.argument_count();
-        if count == 1 {
+        let at = if count == 1 {
             deprecated(
                 req,
                 "Calling ReflectionProperty::setValue() with a single argument is deprecated",
             );
+            1
         } else {
             exactly_arguments(req, 2)?;
             let first = req.argument(1).unwrap_or_default().deref();
@@ -2764,8 +2787,16 @@ fn reflection_property_set_value(req: &mut Request) -> Result<Value, Thrown> {
                     "Calling ReflectionProperty::setValue() with a 1st argument which is not null or an object is deprecated",
                 );
             }
-        }
-        return Err(static_property_unlinked(req, class, &name));
+            2
+        };
+        let asked = req
+            .this()
+            .and_then(|this| kept_class(req, this))
+            .unwrap_or(class);
+        let value = req.argument(at).unwrap_or_default().deref();
+        req.addref(&value);
+        write_static_prop(req, asked, &name, value)?;
+        return Ok(Value::null());
     }
     exactly_arguments(req, 2)?;
     let given = req.argument(1).unwrap_or_default().deref();

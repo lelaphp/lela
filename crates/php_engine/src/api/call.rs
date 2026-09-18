@@ -569,31 +569,30 @@ pub fn write_prop(
     object.set_prop(req, name, value)
 }
 
-/// Read a `static` property of `class`.
+/// Read a `static` property of `class`, `zend_read_static_property_ex`
+/// (`Z/Zend/zend_API.c`): the slot of the `static` members table that
+/// `name` names, one more owner of the value taken for the caller. php
+/// sets `EG(fake_scope)` to the class it was asked about for the length
+/// of the read, so the visibility check
+/// `zend_std_get_static_property_with_info` does is measured against
+/// `class` and not against whatever scope the extension was called
+/// from; a property a class above declared private is still php's
+/// `Error`.
 pub fn read_static_prop(req: &mut Request, class: ClassId, name: &[u8]) -> Result<Value, Thrown> {
-    let _ = class;
-    Err(throw(
-        req,
-        "Error",
-        &format!(
-            "Access to undeclared static property ::${}",
-            String::from_utf8_lossy(name)
-        ),
-    ))
+    req.static_property(class, name, Some(class))
 }
 
-/// Write a `static` property of `class`. The value is the property's
-/// from here; the skeleton has no property to keep it, so it is given
-/// up once the read has raised what it raises.
+/// Write a `static` property of `class`,
+/// `zend_update_static_property_ex`: the value is the slot's from here
+/// and what the slot held is given up. The fake scope is
+/// [`read_static_prop`]'s.
 pub fn write_static_prop(
     req: &mut Request,
     class: ClassId,
     name: &[u8],
     value: Value,
 ) -> Result<(), Thrown> {
-    read_static_prop(req, class, name)?;
-    req.release(value);
-    Ok(())
+    req.set_static_property(class, name, Some(class), value)
 }
 
 /// `ReflectionClass::newLazyGhost`.

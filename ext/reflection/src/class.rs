@@ -8,8 +8,9 @@
 //!
 //! What stands beside `stub::unbuilt` still: `getTraitAliases`, whose
 //! `use ... as ...` list the declaration model does not carry; the
-//! three `static` property accessors, which wait on the members table
-//! `read_static_prop` does not link yet (#332); and the eight lazy-object entries, each of which takes
+//! three `static` property accessors, which have the members table
+//! `read_static_prop` reads to read since #332 and are #471; and the
+//! eight lazy-object entries, each of which takes
 //! a `Closure` (#415).
 
 use php_ext::call::{eval_const_expr, instantiate};

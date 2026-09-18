@@ -19,7 +19,7 @@ use php_heap::{
     VmStack, Zval, ZvalRef,
 };
 use php_unit::decl::{
-    ClassConstDecl, ClassDecl, ClassKind, FunctionDecl, MethodDecl, Name, Visibility,
+    ClassConstDecl, ClassDecl, ClassKind, FunctionDecl, MethodDecl, Name, PropertyDecl, Visibility,
 };
 use php_unit::{FramelessEntry, Opcode, Unit};
 
@@ -318,6 +318,17 @@ pub struct Request {
     /// and immutable and an object is neither, so the slot is the
     /// request's and the cases go with it.
     enum_cases: Vec<((ClassId, Vec<u8>), PhpObject)>,
+    /// `CE_STATIC_MEMBERS(ce)` (`Z/Zend/zend_object_handlers.c:2094`):
+    /// one slot per declared `static` property, keyed by the class that
+    /// declared it and by the property's name. php gives every class a
+    /// table of its own whose inherited rows are `IS_INDIRECT` into the
+    /// parent's, so a child and its parent read and write one cell; the
+    /// declaring class is that cell's name here. A slot is laid down on
+    /// first use from the default the declaration carries,
+    /// `zend_class_init_statics`, and a typed property with no default
+    /// is laid down `IS_UNDEF`. php's table hangs off a map pointer and
+    /// is the request's; so is this one.
+    statics: Vec<((ClassId, Vec<u8>), Value)>,
     wrappers: Vec<StreamWrapper>,
     filters: Vec<StreamFilter>,
     error_handlers: Vec<Option<Callable>>,
@@ -449,6 +460,7 @@ impl Request {
             symbols: Vec::new(),
             constants: Vec::new(),
             enum_cases: Vec::new(),
+            statics: Vec::new(),
             wrappers: Vec::new(),
             filters: Vec::new(),
             error_handlers: Vec::new(),
@@ -2697,6 +2709,172 @@ impl Request {
         self.enum_cases.push(((class, name.to_vec()), case));
         self.addref(&case.as_value());
         Ok(case)
+    }
+
+    /// `zend_hash_find_ptr(&ce->properties_info, name)` over the table
+    /// `zend_do_inheritance` left: the class's own declaration of
+    /// `name`, then each parent's, since a parent's entries are
+    /// appended into the child's `properties_info` and one of the same
+    /// name the child declares hides the parent's. The answer names the
+    /// class that declared it, which for a `static` property is the
+    /// class whose slot the value sits in (php's `IS_INDIRECT` into the
+    /// parent's table) and the scope its visibility is measured
+    /// against. An instance property is found here too, as php finds
+    /// one in the same table and rejects it after the access check.
+    fn property_info_of(&self, class: ClassId, name: &[u8]) -> Option<(ClassId, PropertyDecl)> {
+        let mut at = Some(class);
+        for _ in 0..64 {
+            let here = at?;
+            let decl = self.class_decl(here)?;
+            if let Some(property) = decl.properties.iter().find(|p| &*p.name.0 == name) {
+                return Some((here, property.clone()));
+            }
+            at = self.class_parent(here);
+        }
+        None
+    }
+
+    /// `zend_std_get_static_property_with_info`
+    /// (`Z/Zend/zend_object_handlers.c:2118`): the slot of the `static`
+    /// property `name` on `class`, named by the class that declared it,
+    /// with the declaration beside it. The access check is php's and
+    /// comes first, so a private property of another class is `Cannot
+    /// access private property C::$p` and not the undeclared text; a
+    /// name no class of the chain declares, and one declared as an
+    /// instance property, are `Access to undeclared static property
+    /// C::$p`, both naming the class asked about. `scope` is
+    /// `get_fake_or_executed_scope()`: the executed scope at an opline,
+    /// the class itself where an extension reads through
+    /// `zend_read_static_property_ex`, which sets the fake scope to it.
+    /// The slot is laid down here on its first use,
+    /// `zend_class_init_statics`, from the default the declaration
+    /// carries, evaluated in the declaring scope; a typed property
+    /// with no default is laid down `IS_UNDEF`, which is what php's
+    /// read of one before initialization refuses.
+    fn static_slot(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+        scope: Option<ClassId>,
+    ) -> Result<(ClassId, PropertyDecl), Thrown> {
+        let found = self.property_info_of(class, name);
+        if let Some((declaring, property)) = found.as_ref()
+            && property.visibility != Visibility::Public
+            && Some(*declaring) != scope
+            && (property.visibility == Visibility::Private
+                || !self.check_protected(*declaring, scope))
+        {
+            let visibility = property.visibility;
+            return Err(self.inaccessible_property(class, visibility, name));
+        }
+        let Some((declaring, property)) = found.filter(|(_, p)| !p.is_instance) else {
+            let class = self.class_name(class);
+            return Err(crate::api::raising::throw(
+                self,
+                "Error",
+                &format!(
+                    "Access to undeclared static property {class}::${}",
+                    String::from_utf8_lossy(name)
+                ),
+            ));
+        };
+        if !self
+            .statics
+            .iter()
+            .any(|((held, under), _)| *held == declaring && under == name)
+        {
+            let value = match property.default.as_ref() {
+                Some(expr) => {
+                    let expr = expr.clone();
+                    crate::api::call::eval_const_expr(self, &expr, Some(declaring))?
+                }
+                None if property.ty.is_some() => Value::undef(),
+                None => Value::null(),
+            };
+            self.statics.push(((declaring, name.to_vec()), value));
+        }
+        Ok((declaring, property))
+    }
+
+    /// `zend_read_static_property_ex` (`Z/Zend/zend_API.c`): the value
+    /// of a `static` property, one more owner taken for the caller and
+    /// the slot keeping its own (`RETURN_COPY_DEREF`), a reference
+    /// followed. A typed slot nothing has written is php's `Error` for
+    /// a `static` property read before initialization, which names the
+    /// declaring class and not the one asked about.
+    pub(crate) fn static_property(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+        scope: Option<ClassId>,
+    ) -> Result<Value, Thrown> {
+        let (declaring, property) = self.static_slot(class, name, scope)?;
+        let held = self
+            .statics
+            .iter()
+            .find(|((at, under), _)| *at == declaring && under == name)
+            .map(|(_, value)| *value)
+            .unwrap_or_default();
+        if held.tag() == TypeTag::Undef {
+            if property.ty.is_some() {
+                let declaring = self.class_name(declaring);
+                return Err(crate::api::raising::throw(
+                    self,
+                    "Error",
+                    &format!(
+                        "Typed static property {declaring}::${} must not be accessed before initialization",
+                        String::from_utf8_lossy(name)
+                    ),
+                ));
+            }
+            return Ok(Value::null());
+        }
+        let held = held.deref();
+        self.addref(&held);
+        Ok(held)
+    }
+
+    /// `zend_update_static_property_ex` (`Z/Zend/zend_API.c`): the value
+    /// is the slot's from here, and what the slot held is given up. A
+    /// slot holding a reference is written through
+    /// (`ZEND_TRY_ASSIGN_COPY_PROP`), so a name bound to it sees the
+    /// write.
+    pub(crate) fn set_static_property(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+        scope: Option<ClassId>,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let (declaring, _) = match self.static_slot(class, name, scope) {
+            Ok(slot) => slot,
+            Err(thrown) => {
+                self.release(value);
+                return Err(thrown);
+            }
+        };
+        let held = self
+            .statics
+            .iter()
+            .position(|((at, under), _)| *at == declaring && under == name);
+        let Some(at) = held else {
+            self.release(value);
+            return Ok(());
+        };
+        if let Some(ValueRef::Reference(cell)) = self.statics.get(at).map(|(_, v)| v.as_ref()) {
+            let cell = *cell;
+            let previous = cell.get();
+            cell.set(self, value);
+            self.release(previous);
+            return Ok(());
+        }
+        let previous = self
+            .statics
+            .get_mut(at)
+            .map(|(_, slot)| std::mem::replace(slot, value))
+            .unwrap_or_default();
+        self.release(previous);
+        Ok(())
     }
 
     /// `zend_bad_property_access`: php's `Error` for a property the

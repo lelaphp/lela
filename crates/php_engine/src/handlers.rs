@@ -2600,6 +2600,97 @@ pub(crate) fn fetch_class_constant<T: Tier>(
     Ok(advance(req, frame))
 }
 
+/// `ZEND_FETCH_STATIC_PROP_R` (`Z/Zend/zend_vm_def.h`, handler 172)
+/// over a property and a class both named at compile time, which is
+/// what `zend_compile_static_prop` emits for `C::$p`:
+/// `zend_fetch_static_property_address_ex`
+/// (`Z/Zend/zend_execute.c:3715`) with the property's name in `op1` and
+/// the class's constant pair in `op2`. The class is `Class "X" not
+/// found` where nothing declares it; the slot is
+/// `zend_std_get_static_property_with_info`'s
+/// ([`Request::static_property`]), which lays it down from the
+/// declaration's default on first use, holds the read to the executed
+/// scope, and refuses a typed slot nothing has written. What is read is
+/// a temporary with one more owner of the value, a reference followed.
+///
+/// php reserves three cache slots here and, where `op1` is a constant,
+/// leaves the first empty and primes the second with the address of the
+/// slot itself (`CACHE_POLYMORPHIC_PTR`). This engine's table names a
+/// slot by its class and its name rather than by an address, so nothing
+/// is cached and the lookup is made on every pass, which nothing
+/// observes.
+///
+/// ```php
+/// class A { public static $p = 1; protected static $q = 2; private static $r = 3; static function all() { return A::$p + A::$q + A::$r; } }
+/// class B extends A {}
+/// var_dump(A::$p, B::$p, A::all());
+/// ```
+/// ```expect
+/// int(1)
+/// int(1)
+/// int(6)
+/// ```
+///
+/// ```php
+/// class A { private static $r = 3; }
+/// echo A::$r;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Cannot access private property A::$r in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+///
+/// ```php
+/// class A { public $p = 1; }
+/// echo A::$p;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Access to undeclared static property A::$p in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+///
+/// ```php
+/// class A { public static int $n; }
+/// var_dump(A::$n);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Typed static property A::$n must not be accessed before initialization in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+pub(crate) fn fetch_static_prop_r<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    if op.op1_type != OperandKind::Const {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_FETCH_STATIC_PROP_R over a property named at run time",
+        )));
+    }
+    let class = match class_operand(req, frame, code, op.op2_type, op.op2, None) {
+        Ok(class) => class,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let name = exec::constant(code, ConstIdx(op.op1));
+    let name = name.as_str_bytes().unwrap_or_default().to_vec();
+    let scope = req.executed_scope();
+    let value = match req.static_property(class, &name, scope) {
+        Ok(value) => value,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, value);
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
 /// `ZEND_FETCH_OBJ_R` (`Z/Zend/zend_vm_def.h:2069`) over a property
 /// named at compile time: the container read as
 /// `GET_OP1_OBJ_ZVAL_PTR_UNDEF` reads it, a reference followed, an
