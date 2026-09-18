@@ -34,7 +34,7 @@ mod tokens;
 use std::collections::HashMap;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
-use php_ext::call::{new_object, write_prop};
+use php_ext::call::new_object;
 use php_ext::coerce::coerce_param;
 use php_ext::decl::{
     ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr, EnumBacking, FunctionDecl, MethodDecl,
@@ -393,7 +393,17 @@ fn token_tokenize(req: &mut Request) -> Result<Value, Thrown> {
 }
 
 /// `ZVAL_LONG(OBJ_PROP_NUM(obj, 0), ...)` and the three after it: the
-/// four properties written, `text` the object's from here.
+/// four properties written by slot, no name in hand, `text` the
+/// object's from here. What a token costs is what php's costs: the
+/// object and its slots, and the text where [`Texts`] has no owner of
+/// it yet, which the peak reads.
+///
+/// ```php
+/// $b = memory_get_peak_usage(); PhpToken::tokenize('<?php echo 1; echo 2;'); var_dump(memory_get_peak_usage() - $b);
+/// ```
+/// ```expect
+/// int(1560)
+/// ```
 fn fill_token(
     req: &mut Request,
     object: PhpObject,
@@ -402,10 +412,10 @@ fn fill_token(
     line: i64,
     pos: i64,
 ) -> Result<(), Thrown> {
-    write_prop(req, &object, b"id", Value::int(id))?;
-    write_prop(req, &object, b"text", text)?;
-    write_prop(req, &object, b"line", Value::int(line))?;
-    write_prop(req, &object, b"pos", Value::int(pos))
+    object.set_slot(req, 0, Value::int(id))?;
+    object.set_slot(req, 1, text)?;
+    object.set_slot(req, 2, Value::int(line))?;
+    object.set_slot(req, 3, Value::int(pos))
 }
 
 /// `PhpToken::__construct(int $id, string $text, int $line = -1, int $pos = -1)`,

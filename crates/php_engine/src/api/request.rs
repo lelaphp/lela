@@ -2076,6 +2076,30 @@ impl Request {
         }
     }
 
+    /// `OBJ_PROP_NUM(obj, i)` written with no name in hand, what a
+    /// native that laid the object down does (`add_token`): the slot is
+    /// `value`'s from here and what it held is released last, as
+    /// [`Heap::object_set_slot`] does. An index past the declared count
+    /// is the internal-error fatal naming the class and the index, the
+    /// value released, since no slot is there to take it.
+    pub(crate) fn write_declared_slot(
+        &mut self,
+        o: Obj,
+        i: u32,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        if i >= o.slots() {
+            self.release(value);
+            let class = self.class_name(ClassId(o.class()));
+            let slots = o.slots();
+            return self.fatal_of(Err(Fatal::Error(format!(
+                "InternalError: slot {i} written on an object of class {class}, which declares {slots}"
+            ))));
+        }
+        Heap::object_set_slot(&mut Hooks(self), o, i, value.into_zval());
+        Ok(())
+    }
+
     /// `zend_std_write_property`, the `Std` slot: into the declared
     /// slot, what it held released last, or into the dynamic table,
     /// materialised on the first write and separated when a cast shares

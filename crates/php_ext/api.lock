@@ -368,6 +368,8 @@ values::PhpObject::native_mut
 values::PhpObject::prop
 values::PhpObject::props
 values::PhpObject::set_prop
+values::PhpObject::set_slot
+values::PhpObject::slot
 values::PhpRef
 values::PhpRef::as_value
 values::PhpRef::get

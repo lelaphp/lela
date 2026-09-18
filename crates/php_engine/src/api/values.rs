@@ -660,6 +660,32 @@ impl PhpObject {
         table.write_property(req, *self, name, value)
     }
 
+    /// One declared property by slot, `OBJ_PROP_NUM(obj, index)` by
+    /// index among the class's declared instance properties, in
+    /// declaration order: a view, no owner taken, and `None` for an
+    /// index past the declared count or a slot nothing has written.
+    #[must_use]
+    pub fn slot(&self, index: u32) -> Option<Value> {
+        if index >= self.0.slots() {
+            return None;
+        }
+        let z = self.0.slot(index);
+        (!z.is_undef()).then(|| Value::of_zval(z))
+    }
+
+    /// Write one declared property by slot, `OBJ_PROP_NUM(obj, index)`
+    /// with no name in hand, what php's `add_token` does over a fresh
+    /// `PhpToken`: no handler, no name interned, no scan of the
+    /// declaration. The value is the slot's from here and what the slot
+    /// held is released last, after the write, which is where a
+    /// destructor is served (`zend_assign_to_variable`). An index past
+    /// the declared count is refused as the internal-error fatal, the
+    /// value released; a native that knows its class's layout never
+    /// reaches it.
+    pub fn set_slot(&self, req: &mut Request, index: u32, value: Value) -> Result<(), Thrown> {
+        req.write_declared_slot(self.0, index, value)
+    }
+
     /// The native payload, as `T`, borrowed for as long as the request
     /// is: `None` for an object of another payload or of none.
     #[must_use]
