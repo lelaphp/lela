@@ -605,12 +605,24 @@ impl Emit<'_> {
 
     /// A constant expression as a declaration keeps it (design §4.7):
     /// `zend_const_expr_to_zval` folds what `zend_eval_const_expr` can,
-    /// so `1 + 2` is `3` and a number or a string as written is itself, and what names a
+    /// so `1 + 2` is `3`, `'a' . 'b'` is `'ab'` and a number or a string as written is itself, and what names a
     /// constant stays the tree it was written as, for the engine to
     /// evaluate on first use. `zend_is_allowed_in_const_expr` refuses a
     /// variable, a call, an assignment and an increment in php's words;
     /// a cast or a `match`, which php allows or refuses on its own
     /// terms, is not read yet.
+    ///
+    /// A concatenation of two strings in a property's default is the
+    /// one string it folds to, kept as a declaration keeps a string:
+    ///
+    /// ```php
+    /// class M { public $p = 'a' . 'b' . 1; }
+    /// $o = new M;
+    /// echo $o->p;
+    /// ```
+    /// ```expect exit=0
+    /// ab1
+    /// ```
     fn const_expr(&mut self, expr: &Expr) -> Result<ConstExpr, CompileError> {
         self.check_stack()?;
         match expr {
@@ -647,6 +659,11 @@ impl Emit<'_> {
                         ZvalType::Double => {
                             if let Some(f) = folded.as_double() {
                                 return Ok(ConstExpr::Double(f));
+                            }
+                        }
+                        ZvalType::String => {
+                            if let Some(s) = folded.as_str() {
+                                return Ok(ConstExpr::Str(s.bytes().into()));
                             }
                         }
                         _ => {}
