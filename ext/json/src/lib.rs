@@ -487,6 +487,33 @@ fn depth_within(req: &mut Request, depth: i64, position: u32) -> Result<(), Thro
 /// int(1)
 /// string(28) "Maximum stack depth exceeded"
 /// ```
+/// The three options that need a second one beside them, `%s` standing
+/// for the bitwise or the compiler does not read yet: 2304 is
+/// `JSON_UNESCAPED_UNICODE` with `JSON_UNESCAPED_LINE_TERMINATORS`, the
+/// pair that leaves U+2028 and U+2029 as they stand.
+///
+/// ```php
+/// var_dump(json_encode("a\x9fb", JSON_INVALID_UTF8_SUBSTITUTE), json_encode("a\x9fb", JSON_INVALID_UTF8_IGNORE), json_encode("\xe2\x80\xa8", JSON_UNESCAPED_UNICODE), json_encode("\xe2\x80\xa8", 2304));
+/// ```
+/// ```expect
+/// string(10) ""a\ufffdb""
+/// string(4) ""ab""
+/// string(8) ""\u2028""
+/// string(5) "" ""
+/// ```
+///
+/// An object that holds itself is `JSON_ERROR_RECURSION`, and `null`
+/// in its place under `JSON_PARTIAL_OUTPUT_ON_ERROR`.
+///
+/// ```php
+/// $a = new stdClass; $a->prop = $a; var_dump(json_encode($a), json_last_error(), json_last_error_msg(), json_encode($a, JSON_PARTIAL_OUTPUT_ON_ERROR));
+/// ```
+/// ```expect
+/// bool(false)
+/// int(6)
+/// string(18) "Recursion detected"
+/// string(13) "{"prop":null}"
+/// ```
 fn json_encode(req: &mut Request) -> Result<Value, Thrown> {
     arguments_between(req, 1, 3)?;
     let value = req.argument(1).unwrap_or_default();
@@ -574,6 +601,16 @@ fn json_encode(req: &mut Request) -> Result<Value, Thrown> {
 /// #0 %s(2): json_decode('[1', false, 512, 4194304)
 /// #1 {main}
 ///   thrown in %s on line 2
+/// ```
+/// The two `INVALID_UTF8_*` options inside a string, which the scanner
+/// answers where the encoder answers them outside one.
+///
+/// ```php
+/// var_dump(json_decode("\"a\x9fb\"", false, 512, JSON_INVALID_UTF8_SUBSTITUTE), json_decode("\"a\x9fb\"", false, 512, JSON_INVALID_UTF8_IGNORE));
+/// ```
+/// ```expect
+/// string(5) "a�b"
+/// string(2) "ab"
 /// ```
 fn json_decode(req: &mut Request) -> Result<Value, Thrown> {
     arguments_between(req, 1, 4)?;
