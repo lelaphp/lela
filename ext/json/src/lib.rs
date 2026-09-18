@@ -8,11 +8,15 @@
 //! `JSON_*` constants `PHP_MINIT_FUNCTION(json)` registers, in its
 //! order, the five functions, the `JsonSerializable` interface whose
 //! `jsonSerialize` carries the tentative `mixed`, and `JsonException`
-//! under `Exception`. `json_last_error` and `json_last_error_msg` read
-//! the request state, `JSON_G(error_code)`; the bodies of `json_encode`,
-//! `json_decode` and `json_validate`, `php_json_encode_zval` and
-//! `php_json_parser`, are #358, and until it lands each throws `Error`
-//! naming that, since a wrong value is worse than a loud gap.
+//! under `Exception`.
+//!
+//! The bodies are `json.c`'s: `encode` is `php_json_encode_zval` over
+//! `json_encoder.c` and `decode` is `php_json_parser` over
+//! `json_parser.y` and `json_scanner.re`, each with what it copies
+//! exactly written at its head. What they leave behind is the request
+//! state's `error_code`, `JSON_G(error_code)`, which `json_last_error`
+//! and `json_last_error_msg` answer and `JSON_THROW_ON_ERROR` raises as
+//! `JsonException` instead.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -26,14 +30,58 @@
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+mod decode;
+mod encode;
+
 use php_ext::abi::{Extension, ExtensionBuilder};
+use php_ext::coerce::coerce_param;
 use php_ext::decl::{
     ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr, EnumBacking, FunctionDecl, MethodDecl,
     Name, Parameter, Type, Visibility,
 };
-use php_ext::raising::{Thrown, throw};
+use php_ext::raising::{Thrown, arg_count_error, arg_value_error, new_throwable, throw_value};
 use php_ext::request::Request;
 use php_ext::values::{PhpString, Value};
+
+/// `json_encode()` options, `php_json.h`.
+const HEX_TAG: i64 = 1 << 0;
+const HEX_AMP: i64 = 1 << 1;
+const HEX_APOS: i64 = 1 << 2;
+const HEX_QUOT: i64 = 1 << 3;
+const FORCE_OBJECT: i64 = 1 << 4;
+const NUMERIC_CHECK: i64 = 1 << 5;
+const UNESCAPED_SLASHES: i64 = 1 << 6;
+const PRETTY_PRINT: i64 = 1 << 7;
+const UNESCAPED_UNICODE: i64 = 1 << 8;
+const PARTIAL_OUTPUT_ON_ERROR: i64 = 1 << 9;
+const PRESERVE_ZERO_FRACTION: i64 = 1 << 10;
+const UNESCAPED_LINE_TERMINATORS: i64 = 1 << 11;
+
+/// `json_decode()` options.
+const OBJECT_AS_ARRAY: i64 = 1 << 0;
+const BIGINT_AS_STRING: i64 = 1 << 1;
+
+/// What more than one of the three reads.
+const INVALID_UTF8_IGNORE: i64 = 1 << 20;
+const INVALID_UTF8_SUBSTITUTE: i64 = 1 << 21;
+const THROW_ON_ERROR: i64 = 1 << 22;
+
+/// `php_json_error_code`, in its order.
+const ERROR_NONE: i64 = 0;
+const ERROR_DEPTH: i64 = 1;
+const ERROR_STATE_MISMATCH: i64 = 2;
+const ERROR_CTRL_CHAR: i64 = 3;
+const ERROR_SYNTAX: i64 = 4;
+const ERROR_UTF8: i64 = 5;
+const ERROR_RECURSION: i64 = 6;
+const ERROR_INF_OR_NAN: i64 = 7;
+const ERROR_UNSUPPORTED_TYPE: i64 = 8;
+const ERROR_INVALID_PROPERTY_NAME: i64 = 9;
+const ERROR_UTF16: i64 = 10;
+const ERROR_NON_BACKED_ENUM: i64 = 11;
+
+/// `PHP_JSON_PARSER_DEFAULT_DEPTH`.
+const DEFAULT_DEPTH: i64 = 512;
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
@@ -67,7 +115,7 @@ pub fn extension() -> Extension {
                     &[
                         parameter(b"value", Type::Mixed),
                         int(b"flags", Type::Int, 0),
-                        int(b"depth", Type::Int, 512),
+                        int(b"depth", Type::Int, DEFAULT_DEPTH),
                     ],
                     Type::Union(vec![Type::String, Type::False]),
                 ),
@@ -82,7 +130,7 @@ pub fn extension() -> Extension {
                             default: Some(ConstExpr::Null),
                             ..parameter(b"associative", Type::Nullable(Box::new(Type::Bool)))
                         },
-                        int(b"depth", Type::Int, 512),
+                        int(b"depth", Type::Int, DEFAULT_DEPTH),
                         int(b"flags", Type::Int, 0),
                     ],
                     Type::Mixed,
@@ -94,7 +142,7 @@ pub fn extension() -> Extension {
                     b"json_validate",
                     &[
                         parameter(b"json", Type::String),
-                        int(b"depth", Type::Int, 512),
+                        int(b"depth", Type::Int, DEFAULT_DEPTH),
                         int(b"flags", Type::Int, 0),
                     ],
                     Type::Bool,
@@ -142,35 +190,41 @@ type Entry = fn(&mut Request) -> Result<Value, Thrown>;
 /// ```
 fn constants() -> Vec<ConstDecl> {
     let rows: [(&[u8], i64); 29] = [
-        (b"JSON_HEX_TAG", 1 << 0),
-        (b"JSON_HEX_AMP", 1 << 1),
-        (b"JSON_HEX_APOS", 1 << 2),
-        (b"JSON_HEX_QUOT", 1 << 3),
-        (b"JSON_FORCE_OBJECT", 1 << 4),
-        (b"JSON_NUMERIC_CHECK", 1 << 5),
-        (b"JSON_UNESCAPED_SLASHES", 1 << 6),
-        (b"JSON_PRETTY_PRINT", 1 << 7),
-        (b"JSON_UNESCAPED_UNICODE", 1 << 8),
-        (b"JSON_PARTIAL_OUTPUT_ON_ERROR", 1 << 9),
-        (b"JSON_PRESERVE_ZERO_FRACTION", 1 << 10),
-        (b"JSON_UNESCAPED_LINE_TERMINATORS", 1 << 11),
-        (b"JSON_OBJECT_AS_ARRAY", 1 << 0),
-        (b"JSON_BIGINT_AS_STRING", 1 << 1),
-        (b"JSON_INVALID_UTF8_IGNORE", 1 << 20),
-        (b"JSON_INVALID_UTF8_SUBSTITUTE", 1 << 21),
-        (b"JSON_THROW_ON_ERROR", 1 << 22),
-        (b"JSON_ERROR_NONE", 0),
-        (b"JSON_ERROR_DEPTH", 1),
-        (b"JSON_ERROR_STATE_MISMATCH", 2),
-        (b"JSON_ERROR_CTRL_CHAR", 3),
-        (b"JSON_ERROR_SYNTAX", 4),
-        (b"JSON_ERROR_UTF8", 5),
-        (b"JSON_ERROR_RECURSION", 6),
-        (b"JSON_ERROR_INF_OR_NAN", 7),
-        (b"JSON_ERROR_UNSUPPORTED_TYPE", 8),
-        (b"JSON_ERROR_INVALID_PROPERTY_NAME", 9),
-        (b"JSON_ERROR_UTF16", 10),
-        (b"JSON_ERROR_NON_BACKED_ENUM", 11),
+        (b"JSON_HEX_TAG", HEX_TAG),
+        (b"JSON_HEX_AMP", HEX_AMP),
+        (b"JSON_HEX_APOS", HEX_APOS),
+        (b"JSON_HEX_QUOT", HEX_QUOT),
+        (b"JSON_FORCE_OBJECT", FORCE_OBJECT),
+        (b"JSON_NUMERIC_CHECK", NUMERIC_CHECK),
+        (b"JSON_UNESCAPED_SLASHES", UNESCAPED_SLASHES),
+        (b"JSON_PRETTY_PRINT", PRETTY_PRINT),
+        (b"JSON_UNESCAPED_UNICODE", UNESCAPED_UNICODE),
+        (b"JSON_PARTIAL_OUTPUT_ON_ERROR", PARTIAL_OUTPUT_ON_ERROR),
+        (b"JSON_PRESERVE_ZERO_FRACTION", PRESERVE_ZERO_FRACTION),
+        (
+            b"JSON_UNESCAPED_LINE_TERMINATORS",
+            UNESCAPED_LINE_TERMINATORS,
+        ),
+        (b"JSON_OBJECT_AS_ARRAY", OBJECT_AS_ARRAY),
+        (b"JSON_BIGINT_AS_STRING", BIGINT_AS_STRING),
+        (b"JSON_INVALID_UTF8_IGNORE", INVALID_UTF8_IGNORE),
+        (b"JSON_INVALID_UTF8_SUBSTITUTE", INVALID_UTF8_SUBSTITUTE),
+        (b"JSON_THROW_ON_ERROR", THROW_ON_ERROR),
+        (b"JSON_ERROR_NONE", ERROR_NONE),
+        (b"JSON_ERROR_DEPTH", ERROR_DEPTH),
+        (b"JSON_ERROR_STATE_MISMATCH", ERROR_STATE_MISMATCH),
+        (b"JSON_ERROR_CTRL_CHAR", ERROR_CTRL_CHAR),
+        (b"JSON_ERROR_SYNTAX", ERROR_SYNTAX),
+        (b"JSON_ERROR_UTF8", ERROR_UTF8),
+        (b"JSON_ERROR_RECURSION", ERROR_RECURSION),
+        (b"JSON_ERROR_INF_OR_NAN", ERROR_INF_OR_NAN),
+        (b"JSON_ERROR_UNSUPPORTED_TYPE", ERROR_UNSUPPORTED_TYPE),
+        (
+            b"JSON_ERROR_INVALID_PROPERTY_NAME",
+            ERROR_INVALID_PROPERTY_NAME,
+        ),
+        (b"JSON_ERROR_UTF16", ERROR_UTF16),
+        (b"JSON_ERROR_NON_BACKED_ENUM", ERROR_NON_BACKED_ENUM),
     ];
     rows.into_iter()
         .map(|(name, value)| ConstDecl {
@@ -273,80 +327,368 @@ fn parameter(name: &[u8], ty: Type) -> Parameter {
     }
 }
 
-/// The `Error` a body #358 ports throws meanwhile: the native's name
-/// and the number, never a value php would not answer.
-fn not_ported(req: &mut Request, native: &str) -> Thrown {
-    throw(
+/// `ZEND_PARSE_PARAMETERS_START(min, max)`'s count check:
+/// `zend_wrong_parameters_count_error`'s sentence for a count outside
+/// the range.
+fn arguments_between(req: &mut Request, min: usize, max: usize) -> Result<(), Thrown> {
+    let given = req.argument_count();
+    if (min..=max).contains(&given) {
+        return Ok(());
+    }
+    let (word, bound) = if min == max {
+        ("exactly", min)
+    } else if given < min {
+        ("at least", min)
+    } else {
+        ("at most", max)
+    };
+    let plural = if bound == 1 { "" } else { "s" };
+    Err(arg_count_error(
         req,
-        "Error",
-        &format!("{native}() is not served by this engine yet (#358)"),
-    )
+        &format!("{word} {bound} argument{plural}, {given} given"),
+    ))
+}
+
+/// One `Z_PARAM_STRING`: the argument coerced as php coerces a string
+/// parameter, the 8.1 deprecation for `null` raised by the coercion.
+fn string_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown> {
+    let given = req.argument(position).unwrap_or_default();
+    let coerced = coerce_param(req, &given, &Type::String, position)?;
+    match coerced.deref().as_php_string() {
+        Some(s) => Ok(*s),
+        None => PhpString::new(req, b""),
+    }
+}
+
+/// One `Z_PARAM_OPTIONAL Z_PARAM_LONG`: the argument coerced as php
+/// coerces an int parameter, and `absent` where the call gave none.
+fn long_argument(req: &mut Request, position: u32, absent: i64) -> Result<i64, Thrown> {
+    let Some(given) = req.argument(position) else {
+        return Ok(absent);
+    };
+    let coerced = coerce_param(req, &given, &Type::Int, position)?;
+    Ok(coerced.deref().as_int().unwrap_or(0))
+}
+
+/// `php_json_get_error_msg`: the twelve messages of `json.c` and
+/// `Unknown error` past them.
+fn error_message(code: i64) -> &'static str {
+    match code {
+        ERROR_NONE => "No error",
+        ERROR_DEPTH => "Maximum stack depth exceeded",
+        ERROR_STATE_MISMATCH => "State mismatch (invalid or malformed JSON)",
+        ERROR_CTRL_CHAR => "Control character error, possibly incorrectly encoded",
+        ERROR_SYNTAX => "Syntax error",
+        ERROR_UTF8 => "Malformed UTF-8 characters, possibly incorrectly encoded",
+        ERROR_RECURSION => "Recursion detected",
+        ERROR_INF_OR_NAN => "Inf and NaN cannot be JSON encoded",
+        ERROR_UNSUPPORTED_TYPE => "Type is not supported",
+        ERROR_INVALID_PROPERTY_NAME => "The decoded property name is invalid",
+        ERROR_UTF16 => "Single unpaired UTF-16 surrogate in unicode escape",
+        ERROR_NON_BACKED_ENUM => "Non-backed enums have no default serialization",
+        _ => "Unknown error",
+    }
+}
+
+/// `zend_throw_exception(php_json_exception_ce, msg, error_code)`: the
+/// message `json_last_error_msg` would have answered, under the code
+/// `json_last_error` would have, which is what `getCode()` reads.
+fn throw_json(req: &mut Request, code: i64) -> Thrown {
+    let made = new_throwable(req, "JsonException", error_message(code));
+    let value = match made {
+        Ok(value) => value,
+        Err(thrown) => return thrown,
+    };
+    if let Some(object) = value.as_object().copied() {
+        let written = PhpString::new(req, b"code")
+            .and_then(|name| object.set_prop(req, name, Value::int(code)));
+        if let Err(thrown) = written {
+            req.release(value);
+            return thrown;
+        }
+    }
+    let thrown = throw_value(req, &value);
+    req.release(value);
+    thrown
+}
+
+/// The request's `JSON_G(error_code)`, written where php writes it.
+fn set_error(req: &mut Request, code: i64) {
+    req.state::<State>().error_code = code;
+}
+
+/// The two `zend_argument_value_error`s the decoders raise over their
+/// depth, whose parameter number differs between them.
+fn depth_within(req: &mut Request, depth: i64, position: u32) -> Result<(), Thrown> {
+    if depth <= 0 {
+        return Err(arg_value_error(req, position, "be greater than 0"));
+    }
+    if depth > i64::from(i32::MAX) {
+        return Err(arg_value_error(
+            req,
+            position,
+            &format!("be less than {}", i32::MAX),
+        ));
+    }
+    Ok(())
 }
 
 /// `json_encode(mixed $value, int $flags = 0, int $depth = 512):
-/// string|false`, declared as the stub has it; the body is #358. The
-/// witness pins the declaration, which is what this crate renders.
+/// string|false`, `PHP_FUNCTION(json_encode)` over
+/// `php_json_encode_zval`: the text, or `false` with the code in
+/// `json_last_error` once anything refused it.
 ///
 /// ```php
-/// echo new ReflectionFunction('json_encode');
+/// var_dump(json_encode([1, 2, 3]), json_encode(['a' => 1]), json_encode([1 => 'x']), json_encode([]), json_encode(null), json_encode(1.5), json_encode("a/b<&'\">"), json_encode("\xc3\xa9"));
 /// ```
 /// ```expect
-/// Function [ <internal:json> function json_encode ] {
+/// string(7) "[1,2,3]"
+/// string(7) "{"a":1}"
+/// string(9) "{"1":"x"}"
+/// string(2) "[]"
+/// string(4) "null"
+/// string(3) "1.5"
+/// string(12) ""a\/b<&'\">""
+/// string(8) ""\u00e9""
+/// ```
 ///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> mixed $value ]
-///     Parameter #1 [ <optional> int $flags = 0 ]
-///     Parameter #2 [ <optional> int $depth = 512 ]
-///   }
-///   - Return [ string|false ]
-/// }
+/// ```php
+/// var_dump(json_encode([], JSON_FORCE_OBJECT), json_encode("a/b", JSON_UNESCAPED_SLASHES), json_encode("<>", JSON_HEX_TAG), json_encode("&", JSON_HEX_AMP), json_encode("'", JSON_HEX_APOS), json_encode('"', JSON_HEX_QUOT), json_encode("\xc3\xa9", JSON_UNESCAPED_UNICODE), json_encode(1.0, JSON_PRESERVE_ZERO_FRACTION), json_encode("12", JSON_NUMERIC_CHECK), json_encode([1, [2]], JSON_PRETTY_PRINT));
+/// ```
+/// ```expect
+/// string(2) "{}"
+/// string(5) ""a/b""
+/// string(14) ""\u003C\u003E""
+/// string(8) ""\u0026""
+/// string(8) ""\u0027""
+/// string(8) ""\u0022""
+/// string(4) ""é""
+/// string(3) "1.0"
+/// string(2) "12"
+/// string(32) "[
+///     1,
+///     [
+///         2
+///     ]
+/// ]"
+/// ```
+///
+/// ```php
+/// var_dump(json_encode(INF), json_encode(INF, JSON_PARTIAL_OUTPUT_ON_ERROR), json_last_error(), json_last_error_msg(), json_encode("\x9f"), json_last_error(), json_encode([[1]], 0, 1), json_last_error(), json_last_error_msg());
+/// ```
+/// ```expect
+/// bool(false)
+/// string(1) "0"
+/// int(7)
+/// string(34) "Inf and NaN cannot be JSON encoded"
+/// bool(false)
+/// int(5)
+/// bool(false)
+/// int(1)
+/// string(28) "Maximum stack depth exceeded"
 /// ```
 fn json_encode(req: &mut Request) -> Result<Value, Thrown> {
-    Err(not_ported(req, "json_encode"))
+    arguments_between(req, 1, 3)?;
+    let value = req.argument(1).unwrap_or_default();
+    let options = long_argument(req, 2, 0)?;
+    let depth = long_argument(req, 3, DEFAULT_DEPTH)?;
+    let mut encoder = encode::Encoder::new(req, depth)?;
+    let mut buffer = Vec::new();
+    encode::encode(req, &mut buffer, &value, options, &mut encoder)?;
+    let partial = options & PARTIAL_OUTPUT_ON_ERROR != 0;
+    if options & THROW_ON_ERROR == 0 || partial {
+        set_error(req, encoder.error_code);
+        if encoder.error_code != ERROR_NONE && !partial {
+            return Ok(Value::bool(false));
+        }
+    } else if encoder.error_code != ERROR_NONE {
+        return Err(throw_json(req, encoder.error_code));
+    }
+    Ok(Value::string(PhpString::new(req, &buffer)?))
 }
 
 /// `json_decode(string $json, ?bool $associative = null, int $depth =
-/// 512, int $flags = 0): mixed`, declared as the stub has it; the body
-/// is #358.
+/// 512, int $flags = 0): mixed`, `PHP_FUNCTION(json_decode)` over
+/// `php_json_decode_ex`: the value, or `null` with the code in
+/// `json_last_error`. The `bool` overrides `JSON_OBJECT_AS_ARRAY` where
+/// it is given, and the empty string is a syntax error before the depth
+/// is read at all.
 ///
 /// ```php
-/// echo new ReflectionFunction('json_decode');
+/// var_dump(json_decode('{"a":[1,2],"b":null}'), json_decode('{"a":1}', true), json_decode('"\u00e9\ud834\udd1e"'), json_decode('123456789012345678901234567890'), json_decode('123456789012345678901234567890', false, 512, JSON_BIGINT_AS_STRING));
 /// ```
 /// ```expect
-/// Function [ <internal:json> function json_decode ] {
-///
-///   - Parameters [4] {
-///     Parameter #0 [ <required> string $json ]
-///     Parameter #1 [ <optional> ?bool $associative = null ]
-///     Parameter #2 [ <optional> int $depth = 512 ]
-///     Parameter #3 [ <optional> int $flags = 0 ]
+/// object(stdClass)#1 (2) {
+///   ["a"]=>
+///   array(2) {
+///     [0]=>
+///     int(1)
+///     [1]=>
+///     int(2)
 ///   }
-///   - Return [ mixed ]
+///   ["b"]=>
+///   NULL
 /// }
+/// array(1) {
+///   ["a"]=>
+///   int(1)
+/// }
+/// string(6) "é𝄞"
+/// float(1.2345678901234568E+29)
+/// string(30) "123456789012345678901234567890"
+/// ```
+///
+/// ```php
+/// foreach (['', '.', '[1}', '[[1]]', '"\ud834"', "\"\x01\"", '{"\u0000":1}'] as $text) { var_dump(json_decode($text, false, 2), json_last_error(), json_last_error_msg()); }
+/// ```
+/// ```expect
+/// NULL
+/// int(4)
+/// string(12) "Syntax error"
+/// NULL
+/// int(4)
+/// string(12) "Syntax error"
+/// NULL
+/// int(2)
+/// string(42) "State mismatch (invalid or malformed JSON)"
+/// NULL
+/// int(1)
+/// string(28) "Maximum stack depth exceeded"
+/// NULL
+/// int(10)
+/// string(50) "Single unpaired UTF-16 surrogate in unicode escape"
+/// NULL
+/// int(3)
+/// string(53) "Control character error, possibly incorrectly encoded"
+/// NULL
+/// int(9)
+/// string(36) "The decoded property name is invalid"
+/// ```
+///
+/// ```php
+/// json_decode('[1', false, 512, JSON_THROW_ON_ERROR);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught JsonException: Syntax error in %s:2
+/// Stack trace:
+/// #0 %s(2): json_decode('[1', false, 512, 4194304)
+/// #1 {main}
+///   thrown in %s on line 2
 /// ```
 fn json_decode(req: &mut Request) -> Result<Value, Thrown> {
-    Err(not_ported(req, "json_decode"))
+    arguments_between(req, 1, 4)?;
+    let text = string_argument(req, 1)?;
+    let associative = match req.argument(2) {
+        None => None,
+        Some(given) => {
+            let ty = Type::Nullable(Box::new(Type::Bool));
+            coerce_param(req, &given, &ty, 2)?.deref().as_bool()
+        }
+    };
+    let depth = long_argument(req, 3, DEFAULT_DEPTH)?;
+    let mut options = long_argument(req, 4, 0)?;
+    let throwing = options & THROW_ON_ERROR != 0;
+    if !throwing {
+        set_error(req, ERROR_NONE);
+    }
+    if text.is_empty() {
+        if throwing {
+            return Err(throw_json(req, ERROR_SYNTAX));
+        }
+        set_error(req, ERROR_SYNTAX);
+        return Ok(Value::null());
+    }
+    depth_within(req, depth, 3)?;
+    // For BC reasons the bool overrides the option bit, either way.
+    match associative {
+        Some(true) => options |= OBJECT_AS_ARRAY,
+        Some(false) => options &= !OBJECT_AS_ARRAY,
+        None => {}
+    }
+    match decode::decode(req, text.as_bytes(), options, depth)? {
+        Ok(value) => Ok(value),
+        Err(code) => {
+            if throwing {
+                return Err(throw_json(req, code));
+            }
+            set_error(req, code);
+            Ok(Value::null())
+        }
+    }
 }
 
 /// `json_validate(string $json, int $depth = 512, int $flags = 0):
-/// bool`, declared as the stub has it; the body is #358.
+/// bool`, `PHP_FUNCTION(json_validate)` over `php_json_validate_ex`:
+/// the scanner and the grammar with nothing built under them, so the
+/// answer is what `json_decode` would have managed and the code it
+/// leaves is the same. `JSON_INVALID_UTF8_IGNORE` is the one option it takes.
 ///
 /// ```php
-/// echo new ReflectionFunction('json_validate');
+/// foreach (['{"a":1}', '[]', '"x"', '1', '-', '', '[1}'] as $text) { var_dump(json_validate($text), json_last_error()); }
 /// ```
 /// ```expect
-/// Function [ <internal:json> function json_validate ] {
+/// bool(true)
+/// int(0)
+/// bool(true)
+/// int(0)
+/// bool(true)
+/// int(0)
+/// bool(true)
+/// int(0)
+/// bool(false)
+/// int(4)
+/// bool(false)
+/// int(4)
+/// bool(false)
+/// int(2)
+/// ```
 ///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> string $json ]
-///     Parameter #1 [ <optional> int $depth = 512 ]
-///     Parameter #2 [ <optional> int $flags = 0 ]
-///   }
-///   - Return [ bool ]
-/// }
+/// ```php
+/// var_dump(json_validate("\"a\xb0b\""), json_last_error(), json_validate("\"a\xb0b\"", 512, JSON_INVALID_UTF8_IGNORE), json_validate('[[1]]', 2), json_last_error_msg());
+/// ```
+/// ```expect
+/// bool(false)
+/// int(5)
+/// bool(true)
+/// bool(false)
+/// string(28) "Maximum stack depth exceeded"
+/// ```
+///
+/// ```php
+/// json_validate('1', 512, JSON_THROW_ON_ERROR);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ValueError: json_validate(): Argument #3 ($flags) must be a valid flag (allowed flags: JSON_INVALID_UTF8_IGNORE) in %s:2
+/// Stack trace:
+/// #0 %s(2): json_validate('1', 512, 4194304)
+/// #1 {main}
+///   thrown in %s on line 2
 /// ```
 fn json_validate(req: &mut Request) -> Result<Value, Thrown> {
-    Err(not_ported(req, "json_validate"))
+    arguments_between(req, 1, 3)?;
+    let text = string_argument(req, 1)?;
+    let depth = long_argument(req, 2, DEFAULT_DEPTH)?;
+    let options = long_argument(req, 3, 0)?;
+    if options != 0 && options != INVALID_UTF8_IGNORE {
+        return Err(arg_value_error(
+            req,
+            3,
+            "be a valid flag (allowed flags: JSON_INVALID_UTF8_IGNORE)",
+        ));
+    }
+    if text.is_empty() {
+        set_error(req, ERROR_SYNTAX);
+        return Ok(Value::bool(false));
+    }
+    set_error(req, ERROR_NONE);
+    depth_within(req, depth, 2)?;
+    match decode::validate(req, text.as_bytes(), options, depth)? {
+        Ok(_) => Ok(Value::bool(true)),
+        Err(code) => {
+            set_error(req, code);
+            Ok(Value::bool(false))
+        }
+    }
 }
 
 /// `PHP_FUNCTION(json_last_error)`: `JSON_G(error_code)`,
@@ -359,32 +701,20 @@ fn json_validate(req: &mut Request) -> Result<Value, Thrown> {
 /// int(0)
 /// string(8) "No error"
 /// ```
-#[allow(clippy::unnecessary_wraps)] // the shape of an `Entry`
 fn json_last_error(req: &mut Request) -> Result<Value, Thrown> {
+    arguments_between(req, 0, 0)?;
     Ok(Value::int(req.state::<State>().error_code))
 }
 
 /// `PHP_FUNCTION(json_last_error_msg)`: `php_json_get_error_msg` over
-/// `JSON_G(error_code)`, the twelve messages of `json.c` and `Unknown
-/// error` past them. The witness is `json_last_error`'s.
+/// `JSON_G(error_code)`. The witness is `json_last_error`'s.
 fn json_last_error_msg(req: &mut Request) -> Result<Value, Thrown> {
+    arguments_between(req, 0, 0)?;
     let code = req.state::<State>().error_code;
-    let message = match code {
-        0 => "No error",
-        1 => "Maximum stack depth exceeded",
-        2 => "State mismatch (invalid or malformed JSON)",
-        3 => "Control character error, possibly incorrectly encoded",
-        4 => "Syntax error",
-        5 => "Malformed UTF-8 characters, possibly incorrectly encoded",
-        6 => "Recursion detected",
-        7 => "Inf and NaN cannot be JSON encoded",
-        8 => "Type is not supported",
-        9 => "The decoded property name is invalid",
-        10 => "Single unpaired UTF-16 surrogate in unicode escape",
-        11 => "Non-backed enums have no default serialization",
-        _ => "Unknown error",
-    };
-    Ok(Value::string(PhpString::new(req, message.as_bytes())?))
+    Ok(Value::string(PhpString::new(
+        req,
+        error_message(code).as_bytes(),
+    )?))
 }
 
 /// `PHP_MINFO_FUNCTION(json)`: the one-row table `json support =>
