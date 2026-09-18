@@ -17,8 +17,17 @@ sha1_smol.workspace = true          # the digest of seams.toml this build is com
 # The in-process adapter of design §8's `ScriptExec` seam (§4.2: the harness
 # reaches the engine through the bundle): the enabled set, the tier's name and
 # a fresh engine of them over the `Capture` sink, which `witness` serves a
-# snippet through where no binary is built.
-php_bundle = { path = "../crates/php_bundle", features = ["test"] }
+# snippet through where no binary is built. Every extension feature the
+# bundle declares is on, so the linked engine carries the twenty extensions
+# the oracle has and a crate the manifest marks `feature =` is held to its
+# witnesses on its merits (harness §7, revision 43); the `feature =` rows
+# name php's default build for the binary and the phpt lane alone.
+php_bundle = { path = "../crates/php_bundle", features = [
+    "test",
+    "standard", "spl", "date", "reflection", "pcre", "mbstring", "session",
+    "pdo", "dom", "random", "pdo_mysql", "filter", "tokenizer", "json",
+    "openssl", "curl", "iconv", "pdo_sqlite", "ctype", "hash",
+] }
 
 anyhow.workspace = true
 clap.workspace = true

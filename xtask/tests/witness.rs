@@ -433,13 +433,14 @@ fn with_no_binary_built_a_witness_the_linked_engine_misses_fails() {
     );
 }
 
-/// A crate the manifest marks `feature =` is one the linked bundle was
-/// not built with, so its witness is not run and the reading is a skip
-/// naming the feature, the way the lane table has it nightly's (harness
-/// §7; #292): the fence here pins what the linked engine would miss, and
-/// no fail is read.
+/// A crate the manifest marks `feature =` is held to its witnesses under
+/// the linked runner as any crate is: the linked engine carries every
+/// extension feature, so a fence that pins what the engine misses reads a
+/// fail on its merits, no `unlinked` number and no skip naming the feature
+/// (harness §7, revision 43; #314). This is the reading #292's skip stood
+/// in place of.
 #[test]
-fn with_no_binary_built_a_crate_behind_a_feature_the_linked_bundle_lacks_skips() {
+fn with_no_binary_built_a_crate_behind_a_feature_is_held_to_its_witnesses() {
     if oracle().is_none() {
         return;
     }
@@ -449,41 +450,93 @@ fn with_no_binary_built_a_crate_behind_a_feature_the_linked_bundle_lacks_skips()
         false,
     );
     let mut manifest = fixture_manifest();
-    manifest.crates[0] = manifest.crates[0].clone().with_feature("fixture");
+    manifest.crates[0] = manifest.crates[0].clone().with_feature("curl");
     let readings = witness::run(&root, &manifest, &registry(""), &Ask::default()).unwrap();
     assert_eq!(readings.len(), 1, "{readings:#?}");
     let reading = &readings[0];
-    assert_eq!(reading.status, Status::Skip, "{reading:#?}");
-    assert_eq!(count(reading, "unlinked"), 1);
-    assert!(!reading.numbers.contains_key("run"), "{reading:#?}");
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert!(!reading.numbers.contains_key("unlinked"), "{reading:#?}");
+    assert_eq!(count(reading, "run"), 1);
+    assert_eq!(count(reading, "failed"), 1);
     assert!(
-        reading.message.contains("behind feature fixture"),
+        !reading.message.contains("behind feature"),
         "{}",
         reading.message
     );
     assert!(!reading.tree().is_empty(), "{reading:#?}");
 }
 
-/// And a feature the linked bundle does carry is run as any crate is: the
-/// row says the crate is outside php's default build, and the bundle is
-/// what says whether it is linked here.
+/// And the four extensions outside php's default build are in the linked
+/// engine: the one line each of their crates' witnesses asks,
+/// `extension_loaded('<name>')`, reads `bool(true)` from the engine and
+/// from the oracle, so the reading is a pass and not the fail #292 read.
 #[test]
-fn with_no_binary_built_a_crate_behind_a_feature_the_linked_bundle_carries_runs() {
+fn with_no_binary_built_the_linked_engine_carries_each_feature_extension() {
     if oracle().is_none() {
         return;
     }
-    let root = scratch(
-        "linked-feature-on",
-        &block("/// ```expect\n/// 1\n/// ```\n"),
-        false,
-    );
-    let mut manifest = fixture_manifest();
-    manifest.crates[0] = manifest.crates[0].clone().with_feature("standard");
-    let readings = witness::run(&root, &manifest, &registry(""), &Ask::default()).unwrap();
-    assert_eq!(readings.len(), 1, "{readings:#?}");
-    let reading = &readings[0];
-    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
-    assert_eq!(count(reading, "run"), 1);
+    for name in ["mbstring", "pdo_mysql", "openssl", "curl"] {
+        let root = scratch(
+            &format!("linked-feature-{name}"),
+            &format!(
+                "/// ```php\n/// var_dump(extension_loaded('{name}'));\n/// ```\n/// ```expect\n/// bool(true)\n/// ```\npub fn native() {{}}\n"
+            ),
+            false,
+        );
+        let mut manifest = fixture_manifest();
+        manifest.crates[0] = manifest.crates[0].clone().with_feature(name);
+        let readings = witness::run(&root, &manifest, &registry(""), &Ask::default()).unwrap();
+        assert_eq!(readings.len(), 1, "{readings:#?}");
+        let reading = &readings[0];
+        assert_eq!(reading.status, Status::Pass, "{name}: {reading:#?}");
+        assert_eq!(count(reading, "run"), 1, "{name}");
+        assert_eq!(count(reading, "passed"), 1, "{name}");
+        assert!(
+            !reading.numbers.contains_key("unlinked"),
+            "{name}: {reading:#?}"
+        );
+    }
+}
+
+/// What makes the two above true, held where it is written: `xtask`'s
+/// `Cargo.toml` links `php_bundle` with every extension feature the bundle
+/// declares, so the linked engine is the twenty extensions the oracle has
+/// and not the default sixteen (harness §7, revision 43). A feature the
+/// bundle gains and xtask does not name is this test red.
+#[test]
+fn xtask_links_the_bundle_with_every_extension_feature() {
+    let bundle: toml::Value = toml::from_str(
+        &fs::read_to_string(workspace().join("crates/php_bundle/Cargo.toml")).unwrap(),
+    )
+    .unwrap();
+    let declared: Vec<&str> = bundle["features"]
+        .as_table()
+        .unwrap()
+        .iter()
+        .filter(|(_, on)| {
+            on.as_array().is_some_and(|on| {
+                on.iter()
+                    .any(|dep| dep.as_str().is_some_and(|d| d.starts_with("dep:php_ext_")))
+            })
+        })
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert!(declared.len() >= 20, "{declared:?}");
+    let xtask: toml::Value =
+        toml::from_str(&fs::read_to_string(workspace().join("xtask/Cargo.toml")).unwrap()).unwrap();
+    let linked: Vec<&str> = xtask["dependencies"]["php_bundle"]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f.as_str().unwrap())
+        .collect();
+    for feature in &declared {
+        assert!(
+            linked.contains(feature),
+            "xtask/Cargo.toml does not name {feature}: {linked:?}"
+        );
+    }
+    assert!(linked.contains(&"test"), "{linked:?}");
 }
 
 /// Nothing to run is complete only with the pinned oracle here to have

@@ -26,15 +26,16 @@
 //! reading with nothing judged, `run == 0`, is the run the pinned oracle
 //! was absent for, and is a skip that says so.
 //!
-//! **What a feature row reads.** The bundle the harness links is
-//! `php_bundle`'s default set, so a crate the manifest marks `feature =`
-//! is one the linked engine cannot have, and under [`Runner::Linked`] its
-//! reading is a skip naming the feature, its witnesses not run: the lane
-//! table has the per-commit lane over the default extensions and the
-//! nightly lane over the rest (harness §7; #292). The linked bundle is
-//! asked, through [`oracle::linked::loads`], and not a `cfg` copied here.
-//! The binary runner takes no such rung: a built `crates/php` carries
-//! whatever it was built with.
+//! **What a feature row reads.** Nothing here. The bundle the harness
+//! links carries every extension feature `php_bundle` declares, so a crate
+//! the manifest marks `feature =` is held to its witnesses under
+//! [`Runner::Linked`] as any other crate is, pass or fail on its merits
+//! (harness §7, revision 43; #314). The rows name what stands outside
+//! php's default build, which is the binary's and the phpt lane's concern:
+//! a witness is a claim about a kernel or native, and a claim the harness
+//! cannot run is not a reading. The skip #292 gave the lane, `unlinked`,
+//! went with the reason for it; a reading carrying that number is the
+//! check revision 43 names, failing.
 //!
 //! **What `--accept` writes.** The `expect` fence line, and nothing else:
 //! the oracle's status in place of a bare `exit` or a stale one, so the
@@ -367,23 +368,6 @@ pub fn run(
         }
         if !sources::exists(root, krate) {
             unrun.message = format!("{}: {}", krate.name, sources::NOT_YET_CREATED);
-            readings.push(unrun);
-            continue;
-        }
-        // A crate behind a feature the linked bundle was not built with:
-        // its witness cannot pass here and is not run, the way the lane
-        // table has the nightly lane run it (harness §7; #292). A built
-        // binary carries what it was built with and takes no such rung.
-        if runner == Runner::Linked
-            && let Some(feature) = &krate.feature
-            && !crate::oracle::linked::loads(feature)
-        {
-            unrun.message = format!(
-                "{}: behind feature {feature}, which the linked bundle was not built with; its witnesses are the nightly lane's, or a binary's built with the feature",
-                krate.name
-            );
-            unrun.count("unlinked", 1)?;
-            println!("witness: {}", unrun.message);
             readings.push(unrun);
             continue;
         }
