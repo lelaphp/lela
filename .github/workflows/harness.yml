@@ -162,6 +162,14 @@ jobs:
       # here; the pin is a person's. `phpt` stays out until a crate's
       # subset has a home (#18).
       - run: cargo xtask witness
+      # The rendering diff `done`'s condition 1 asks a default extension
+      # for (§4.5, §7: per commit over the default set, every feature
+      # nightly). A red row is an extension not yet ported and `done`
+      # holds a touched one to it, so the step writes the readings and
+      # fails the job for nothing; without the pinned php here it reads
+      # `skip` as `witness` does, until the oracle is at the pin's path.
+      - run: cargo xtask crosscheck
+        continue-on-error: true
       # A push is judged since the branch's track, which `done` reads off
       # the branch it stands on. A pull request's checkout is a detached
       # merge commit, on no branch and so on no track, so the base is the

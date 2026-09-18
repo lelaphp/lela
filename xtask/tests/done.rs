@@ -19,10 +19,11 @@ use xtask::track::Base;
 
 /// What condition 1 asks of `ext/pcre`, the crate most of these tests
 /// change: [`FRESH`] less `port-map`, which is asked of the crate
-/// `api.lock` lives with and of no other (§4.5 condition 1, #148). That
-/// this is [`FRESH`] less that one row is asserted in
+/// `api.lock` lives with and of no other (§4.5 condition 1, #148), and
+/// with `crosscheck`, asked of a default extension (#269). That this is
+/// [`FRESH`] less that one row is asserted in
 /// `the_crate_the_lock_lives_with_is_asked_for_a_port_map_reading_and_no_other_crate_is`.
-const ASKED: [&str; 7] = [
+const ASKED: [&str; 8] = [
     "clippy",
     "test",
     "witness",
@@ -30,6 +31,7 @@ const ASKED: [&str; 7] = [
     "budget",
     "unsafe-audit",
     "phpt",
+    "crosscheck",
 ];
 
 fn workspace() -> &'static Path {
@@ -226,7 +228,11 @@ fn with_no_readings_every_instrument_of_the_touched_crate_is_unmet_and_the_exit_
     assert_eq!(code, 1, "{out}{err}");
     assert!(out.contains("unmet:"), "{out}");
     assert!(out.contains("- phpt: no reading for ext/pcre"), "{out}");
-    assert!(err.contains("7 conditions of done unmet"), "{err}");
+    assert!(
+        out.contains("- crosscheck: no reading for ext/pcre"),
+        "{out}"
+    );
+    assert!(err.contains("8 conditions of done unmet"), "{err}");
 }
 
 /// `port-map` writes exactly one reading, at the crate `api.lock` lives
@@ -843,11 +849,11 @@ fn every_verdict_is_one_reading_of_done_over_the_workspace() {
     let store = Store::of_workspace(&root);
     let reading = store.read("done", "workspace").unwrap().unwrap();
     assert_eq!(reading.status, Status::Fail);
-    assert_eq!(reading.numbers["unmet"], 7.into());
+    assert_eq!(reading.numbers["unmet"], 8.into());
     assert_eq!(reading.numbers["crates"], 1.into());
     assert_eq!(reading.numbers["changed"], 1.into());
     assert!(
-        reading.message.starts_with("7 unmet since "),
+        reading.message.starts_with("8 unmet since "),
         "{}",
         reading.message
     );
@@ -939,6 +945,7 @@ fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
         "xtask budget",
         "xtask unsafe-audit",
         "xtask vocab",
+        "xtask crosscheck",
         "xtask done",
         "status --section permits",
     ] {

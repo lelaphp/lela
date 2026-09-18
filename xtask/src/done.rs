@@ -16,7 +16,9 @@
 //!    no reading for, one that owns no subset or that the manifest marks
 //!    `feature =` and so stands outside the default build (#133), and less
 //!    `port-map` for every crate but the one `api.lock` lives with, which
-//!    is the only scope that instrument writes a reading at (#148). Fresh
+//!    is the only scope that instrument writes a reading at (#148), and
+//!    with `crosscheck` for an `ext/*` crate of the default set, the
+//!    rendering diff the per-commit lane writes per extension (#269). Fresh
 //!    means the reading's `tree` is the content hash over the crate's
 //!    sources now (§13 D.18), the hash every instrument stamps; an
 //!    instrument that does not exist yet has written no reading, so its
@@ -116,10 +118,12 @@ pub(crate) const WORKSPACE: &str = "workspace";
 /// crate's than "every touched one": `phpt`'s is the reading over the
 /// subsets the crate's `[[crate]]` row owns, written under the crate's
 /// name, `witness` is no crate's without a kernel or a native, and
-/// `port-map` is the one crate `api.lock` lives with alone. `test` is
-/// narrowed for nobody: the harness has tests as every crate has, and it
-/// is asked the way `clippy` is (#191).
-pub const FRESH: [&str; 8] = [
+/// `port-map` is the one crate `api.lock` lives with alone, and
+/// `crosscheck` is an extension's of the default set, the ones the
+/// per-commit lane renders (#269). `test` is narrowed for nobody: the
+/// harness has tests as every crate has, and it is asked the way `clippy`
+/// is (#191).
+pub const FRESH: [&str; 9] = [
     "clippy",
     "test",
     "witness",
@@ -128,6 +132,7 @@ pub const FRESH: [&str; 8] = [
     "unsafe-audit",
     "phpt",
     "port-map",
+    "crosscheck",
 ];
 
 /// The harness crate; it has no kernel and no native.
@@ -150,6 +155,11 @@ pub(crate) const HARNESS: &str = "xtask";
 /// reading nothing ever writes; that crate is the one asked because the
 /// lock is in its tree, and a change to the lock is what makes a row of
 /// the join matched or unmatched (harness §4.5 condition 1, #148).
+/// `crosscheck` is asked of an `ext/*` crate outside every feature: the
+/// lane renders the default set per commit and every feature nightly
+/// (harness §7), the same line `phpt` stands on, and the reading is the
+/// port's progress meter, so an extension whose rendering is not the
+/// oracle's is not done (design §7.1, #269).
 pub(crate) fn instruments_of(
     krate: &Crate,
     lock_home: Option<&str>,
@@ -157,10 +167,12 @@ pub(crate) fn instruments_of(
     let harness = krate.name == HARNESS;
     let measured_by_the_lane = !krate.subsets().is_empty() && !krate.optional();
     let home_of_the_lock = lock_home == Some(krate.name.as_str());
+    let default_extension = krate.name.starts_with("ext/") && !krate.optional();
     FRESH.into_iter().filter(move |i| match *i {
         "witness" => !harness,
         "phpt" => measured_by_the_lane,
         "port-map" => home_of_the_lock,
+        "crosscheck" => default_extension,
         _ => true,
     })
 }
@@ -725,9 +737,10 @@ mod tests {
     /// for `ASKED_OF_EVERY_OTHER_CRATE` at most.
     const HOME: Option<&str> = Some("php_ext");
 
-    /// [`FRESH`] less `port-map`: what a crate that is not the lock's
-    /// home is asked, before the two narrowings of its own. That it is
-    /// [`FRESH`] less the one row is asserted below and not trusted here.
+    /// [`FRESH`] less `port-map` and `crosscheck`: what an engine crate
+    /// that is not the lock's home is asked, before the two narrowings of
+    /// its own. That it is [`FRESH`] less the two rows is asserted below
+    /// and not trusted here.
     const ASKED_OF_EVERY_OTHER_CRATE: [&str; 7] = [
         "clippy",
         "test",
@@ -738,6 +751,18 @@ mod tests {
         "phpt",
     ];
 
+    /// What a default extension is asked: the seven and `crosscheck`.
+    const ASKED_OF_A_DEFAULT_EXTENSION: [&str; 8] = [
+        "clippy",
+        "test",
+        "witness",
+        "api-check",
+        "budget",
+        "unsafe-audit",
+        "phpt",
+        "crosscheck",
+    ];
+
     #[test]
     fn the_harness_crate_is_asked_for_clippy_test_api_check_budget_and_unsafe_audit_only() {
         let asked: Vec<&str> = instruments_of(&Crate::named("xtask"), HOME).collect();
@@ -746,7 +771,23 @@ mod tests {
             ["clippy", "test", "api-check", "budget", "unsafe-audit"]
         );
         let asked: Vec<&str> = instruments_of(&Crate::named("ext/pcre"), HOME).collect();
-        assert_eq!(asked, ASKED_OF_EVERY_OTHER_CRATE);
+        assert_eq!(asked, ASKED_OF_A_DEFAULT_EXTENSION);
+    }
+
+    /// `crosscheck` renders the default set per commit (harness §7), so an
+    /// `ext/*` crate outside every feature is asked for its reading, a
+    /// `feature =` one is not, and no engine crate is (#269).
+    #[test]
+    fn a_default_extension_is_asked_for_a_crosscheck_reading_and_nobody_else_is() {
+        let asked: Vec<&str> = instruments_of(&Crate::named("ext/ctype"), HOME).collect();
+        assert!(asked.contains(&"crosscheck"), "{asked:?}");
+        let row = Crate::named("ext/mbstring").with_feature("mbstring");
+        let asked: Vec<&str> = instruments_of(&row, HOME).collect();
+        assert!(!asked.contains(&"crosscheck"), "{asked:?}");
+        for other in ["php_engine", "php_ext", "xtask"] {
+            let asked: Vec<&str> = instruments_of(&Crate::named(other), HOME).collect();
+            assert!(!asked.contains(&"crosscheck"), "{other}: {asked:?}");
+        }
     }
 
     /// An engine crate the manifest gives no subset is not asked for a
@@ -793,7 +834,7 @@ mod tests {
             ]
         );
         let asked: Vec<&str> = instruments_of(&Crate::named("ext/mbstring"), HOME).collect();
-        assert_eq!(asked, ASKED_OF_EVERY_OTHER_CRATE);
+        assert_eq!(asked, ASKED_OF_A_DEFAULT_EXTENSION);
     }
 
     /// `port-map` writes exactly one reading, at the crate `api.lock`
@@ -803,7 +844,10 @@ mod tests {
     /// said, not `done`.
     #[test]
     fn the_crate_the_lock_lives_with_is_the_one_asked_for_a_port_map_reading() {
-        let rest: Vec<&str> = FRESH.into_iter().filter(|i| *i != "port-map").collect();
+        let rest: Vec<&str> = FRESH
+            .into_iter()
+            .filter(|i| *i != "port-map" && *i != "crosscheck")
+            .collect();
         assert_eq!(rest, ASKED_OF_EVERY_OTHER_CRATE);
         let asked: Vec<&str> = instruments_of(&Crate::named("php_ext"), HOME).collect();
         assert_eq!(

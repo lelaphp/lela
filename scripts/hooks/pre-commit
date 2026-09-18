@@ -4,6 +4,9 @@
 # on the crates with a staged change, api-check, budget, unsafe-audit,
 # vocab and witness on the crates with a staged change, each a reading,
 # so `done` has the readings its condition 1 asks a touched crate for;
+# crosscheck over the default extensions writes its readings the same way
+# and refuses nothing here, since a red row is an extension not yet
+# ported and `done` is what holds a touched one to it (#269);
 # `permit --diff` judges every staged file as the Write of
 # its staged content and refuses the commit with the rule id on a denial
 # (the harness's own files are a note: a person commits those). Last,
@@ -90,6 +93,7 @@ step $X budget
 step $X unsafe-audit
 step $X vocab
 step $X witness --staged
+$X crosscheck || echo "pre-commit: crosscheck: a default extension's rendering is not the oracle's; done holds a touched one to its row" >&2
 step $X permit --diff
 
 regions='AGENTS.md ext/AGENTS.md data/INDEX.md docs/divergence.md'
