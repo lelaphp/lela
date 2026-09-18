@@ -80,6 +80,15 @@ pub(crate) struct FrameState {
     /// the temporaries (`zend_copy_extra_args`) for `func_get_args` to
     /// read; owned by the frame and given up with it.
     pub(crate) extra_args: Vec<Value>,
+    /// How many calls stood on the call stack when the frame was pushed,
+    /// which is where the frame sits among them: php's one
+    /// `prev_execute_data` chain is two stacks here, and this is what
+    /// interleaves them again for a backtrace. A `DO_UCALL` takes its
+    /// call off the stack before it pushes the frame, so a frame an
+    /// opline entered counts only the calls standing around its caller;
+    /// a frame a native re-entered the loop on counts the native that
+    /// entered it too, and so stands above it.
+    pub(crate) calls_below: u32,
     /// The op array's runtime cache, `EX(run_time_cache)`: one slot per
     /// `sizeof(void *)` of `cache_size`, every one [`Cached::Unprimed`]
     /// when the frame is pushed (`memset(run_time_cache, 0, cache_size)`
@@ -223,6 +232,7 @@ impl Vm {
     ) {
         let cache_size = body_of(&unit, body).map_or(0, |code| code.cache_size);
         let slots = usize::try_from(cache_size / SLOT_BYTES).unwrap_or(0);
+        let calls_below = u32::try_from(self.calls.len()).unwrap_or(u32::MAX);
         self.frames.push(FrameState {
             unit,
             body,
@@ -233,6 +243,7 @@ impl Vm {
             called_scope,
             num_args,
             extra_args: Vec::new(),
+            calls_below,
             cache: vec![Cached::Unprimed; slots].into_boxed_slice(),
         });
     }
@@ -378,15 +389,11 @@ impl Vm {
             .filter(|call| call.stage == CallStage::Serving)
     }
 
-    /// The calls being served, innermost first: what a backtrace walks
-    /// below the op array being served, `EG(current_execute_data)` and
-    /// its `prev_execute_data` chain with the frames being built left
-    /// out.
-    pub(crate) fn serving_calls(&self) -> impl Iterator<Item = &CallState> {
-        self.calls
-            .iter()
-            .rev()
-            .filter(|call| call.stage == CallStage::Serving)
+    /// Every call on the stack, outermost first, each one's place among
+    /// them what a frame's `calls_below` is counted against: what a
+    /// backtrace interleaves with the frames to walk php's one chain.
+    pub(crate) fn calls(&self) -> &[CallState] {
+        &self.calls
     }
 }
 

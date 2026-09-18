@@ -355,8 +355,14 @@ pub struct Request {
 }
 
 /// One row of a backtrace before it is an array: the callee, its
-/// receiver, its arguments, and the file and line of its call site.
-type TraceRow = (Function, Option<PhpObject>, Vec<Value>, Vec<u8>, i64);
+/// receiver, its arguments, and the file and line of its call site,
+/// which a call a native made has none of.
+type TraceRow = (
+    Function,
+    Option<PhpObject>,
+    Vec<Value>,
+    Option<(Vec<u8>, i64)>,
+);
 
 /// One user function or method a request declared: the unit and the
 /// body, from which the declaration and the op array are both read.
@@ -1261,47 +1267,34 @@ impl Request {
 
     /// `zend_fetch_debug_backtrace` (`Z/Zend/zend_builtin_functions.c`)
     /// with the options a throwable is built under, no `include_main`
-    /// and no `DEBUG_BACKTRACE_PROVIDE_OBJECT`: one row per call below
-    /// the op array being served, `file`, `line`, `function`, then
-    /// `class` and `type` for a method, then `args`, in the order php
-    /// adds the keys. php walks `EG(current_execute_data)`; the calls
-    /// this engine has below the op array are the natives it is serving,
-    /// read off the call frames still standing on [`Vm`], whose `file`
-    /// and `line` are the caller's, as php's frame for a native takes
-    /// them. The arguments are the frame's, each followed through a
-    /// reference and one more owner taken, `debug_backtrace_get_args`;
-    /// under `zend.exception_ignore_args` the row has no `args`,
+    /// and no `DEBUG_BACKTRACE_PROVIDE_OBJECT`: one row per link of the
+    /// chain below the op array being served, `file`, `line`,
+    /// `function`, then `class` and `type` for a method, then `args`, in
+    /// the order php adds the keys. The chain is
+    /// [`Request::trace_chain`]; a row whose link stands on a native
+    /// names no `file` and no `line`, which is the test php makes on
+    /// `prev->func` with `ZEND_USER_CODE`.
+    /// The arguments are the frame's, each followed through a reference
+    /// and one more owner taken, `debug_backtrace_get_args`; under
+    /// `zend.exception_ignore_args` the row has no `args`,
     /// `DEBUG_BACKTRACE_IGNORE_ARGS`. The `Err` is the memory limit
     /// refusing the rows.
     fn debug_backtrace(&mut self) -> Result<PhpArray, Thrown> {
-        let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
-        let line = i64::from(self.current_line());
         let ignore_arguments = self.exception_ignore_args();
-        let mut calls: Vec<TraceRow> = self
-            .vm
-            .serving_calls()
-            .map(|call| {
-                (
-                    call.function,
-                    call.this,
-                    call.arguments.clone(),
-                    file.clone(),
-                    line,
-                )
-            })
-            .collect();
-        calls.extend(self.user_frames_for_trace());
+        let links = self.trace_chain();
         let mut trace = PhpArray::new(self)?;
-        for (function, this, arguments, file, line) in calls {
+        for (function, this, arguments, site) in links {
             let mut row = PhpArray::new(self)?;
             let name = self.declared_name(function);
             let method = self.method_class(function).map(|class| {
                 let class = self.class_name(class);
                 (class, if this.is_some() { "->" } else { "::" })
             });
-            let file = Value::string(PhpString::new(self, &file)?);
-            self.set_string_key(&mut row, b"file", file)?;
-            self.set_string_key(&mut row, b"line", Value::int(line))?;
+            if let Some((file, line)) = site {
+                let file = Value::string(PhpString::new(self, &file)?);
+                self.set_string_key(&mut row, b"file", file)?;
+                self.set_string_key(&mut row, b"line", Value::int(line))?;
+            }
             let name = Value::string(PhpString::new(self, name.as_bytes())?);
             self.set_string_key(&mut row, b"function", name)?;
             if let Some((class, join)) = method {
@@ -1324,39 +1317,76 @@ impl Request {
         Ok(trace)
     }
 
-    /// The rows `zend_fetch_debug_backtrace` walks below the natives:
-    /// one per user frame standing, innermost first and the entry frame
-    /// left out, each the function it serves, its receiver, its
-    /// arguments as they stand (`debug_backtrace_get_args`: the
-    /// parameters' CVs up to the number passed, then the extra ones),
-    /// and the file and line of the frame that called it, which is the
-    /// opline that frame stands at, its `DO_*CALL`.
-    fn user_frames_for_trace(&self) -> Vec<TraceRow> {
+    /// `EG(current_execute_data)` and its `prev_execute_data` chain,
+    /// innermost first and the entry frame left out: one row per link,
+    /// the function it serves, its receiver, its arguments, and the site
+    /// of the link below it.
+    ///
+    /// php holds one chain; this engine holds two stacks, the user
+    /// frames and the calls it is serving, and a frame's `calls_below`
+    /// says where among the calls it was pushed, which walks them back
+    /// into one. A native that re-entered the loop stands below the
+    /// frame it entered, so that frame's site is the native's, which
+    /// names no file: `prev->func && ZEND_USER_CODE(...)` is php's
+    /// test, and a row with no `file` renders `[internal function]`.
+    ///
+    /// A user frame's arguments are its parameters' CVs up to the
+    /// number passed and then its extra ones
+    /// (`debug_backtrace_get_args`); a native's are the call's, as they
+    /// were placed. A call still being built is not on the chain, as
+    /// php's is a chain of activations.
+    fn trace_chain(&self) -> Vec<TraceRow> {
+        enum Link<'a> {
+            Frame(usize, &'a exec::FrameState),
+            Call(&'a exec::CallState),
+        }
         let frames = self.vm.frames();
+        let calls = self.vm.calls();
+        let mut chain: Vec<Link> = Vec::new();
+        let mut taken = 0usize;
+        for (at, state) in frames.iter().enumerate() {
+            let below = usize::try_from(state.calls_below)
+                .unwrap_or(usize::MAX)
+                .min(calls.len());
+            while taken < below {
+                if calls[taken].stage == exec::CallStage::Serving {
+                    chain.push(Link::Call(&calls[taken]));
+                }
+                taken += 1;
+            }
+            chain.push(Link::Frame(at, state));
+        }
+        while taken < calls.len() {
+            if calls[taken].stage == exec::CallStage::Serving {
+                chain.push(Link::Call(&calls[taken]));
+            }
+            taken += 1;
+        }
         let mut rows = Vec::new();
-        for (at, state) in frames.iter().enumerate().skip(1).rev() {
-            let Some(function) = state.function else {
-                continue;
+        for at in (1..chain.len()).rev() {
+            let site = match &chain[at - 1] {
+                Link::Frame(_, below) => exec::body_of(&below.unit, below.body)
+                    .map(|code| (code.filename.0.to_vec(), i64::from(exec::line_of(below)))),
+                Link::Call(_) => None,
             };
-            let Some(caller) = frames.get(at - 1) else {
-                continue;
-            };
-            let frame = FrameRef(u32::try_from(at).unwrap_or(u32::MAX));
-            let passed = usize::try_from(state.num_args).unwrap_or(0);
-            let mut arguments: Vec<Value> = (0..passed.saturating_sub(state.extra_args.len()))
-                .map(|slot| self.slot(frame, u32::try_from(slot).unwrap_or(u32::MAX)))
-                .collect();
-            arguments.extend(state.extra_args.iter().copied());
-            let file = exec::body_of(&caller.unit, caller.body)
-                .map(|code| code.filename.0.to_vec())
-                .unwrap_or_default();
-            rows.push((
-                function,
-                state.this,
-                arguments,
-                file,
-                i64::from(exec::line_of(caller)),
-            ));
+            match &chain[at] {
+                Link::Frame(place, state) => {
+                    let Some(function) = state.function else {
+                        continue;
+                    };
+                    let frame = FrameRef(u32::try_from(*place).unwrap_or(u32::MAX));
+                    let passed = usize::try_from(state.num_args).unwrap_or(0);
+                    let mut arguments: Vec<Value> = (0..passed
+                        .saturating_sub(state.extra_args.len()))
+                        .map(|slot| self.slot(frame, u32::try_from(slot).unwrap_or(u32::MAX)))
+                        .collect();
+                    arguments.extend(state.extra_args.iter().copied());
+                    rows.push((function, state.this, arguments, site));
+                }
+                Link::Call(call) => {
+                    rows.push((call.function, call.this, call.arguments.clone(), site));
+                }
+            }
         }
         rows
     }
