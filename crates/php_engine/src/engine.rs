@@ -863,13 +863,19 @@ fn note_compiled(req: &mut Request, unit: &Arc<Unit>) {
 }
 
 /// The unit's main op array served on a fresh entry frame, what it
-/// compiled to raised first; the loop's fatal, if any, ends the request.
+/// compiled to raised first and `$argv` and `$argc` seeded into the
+/// frame's CVs ([`Request::seed_argv`]); the loop's fatal, if any, ends
+/// the request.
 fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
     note_compiled(req, unit);
     if !req.declare_classes(unit) {
         return;
     }
     let frame = req.push_frame(Arc::clone(unit));
+    if req.seed_argv(frame, unit).is_err() {
+        req.pop_frame();
+        return;
+    }
     if let Err(fatal) = entry(req, frame) {
         req.end_in(&fatal);
     }

@@ -68,12 +68,14 @@ impl Engine {
     }
 
     /// [`Engine::serve_capture`] with the request named `name`: what
-    /// `__FILE__`, `$_SERVER['SCRIPT_NAME']` and every diagnostic's `in %s`
-    /// read. The witness lane's linked adapter serves each snippet under
-    /// the recipe's `script_name` this way, as the fresh-process adapter
-    /// runs it as that file (#293).
+    /// `__FILE__`, `$_SERVER['SCRIPT_NAME']`, `$argv[0]` and every
+    /// diagnostic's `in %s` read. The witness lane's linked adapter serves
+    /// each snippet under the recipe's `script_name` this way, as the
+    /// fresh-process adapter runs it as that file (#293), which under the
+    /// CLI is `argv` of that one word.
     pub fn serve_capture_as(&self, name: &[u8], source: &str, mut sink: Capture) -> Served {
         let description = RequestDescription {
+            argv: vec![name.to_vec()],
             sapi_name: String::from("cli"),
             script_name: Some(name.to_vec()),
             source: Some(source.as_bytes().to_vec()),

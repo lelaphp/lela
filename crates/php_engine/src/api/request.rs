@@ -3962,6 +3962,61 @@ impl Request {
         self.superglobals.push((name.to_vec(), value));
     }
 
+    /// `php_build_argv` (`Z/main/php_variables.c:657-713`) under
+    /// `register_argc_argv`, which php's CLI forces on: `$argv` is the
+    /// host's `argv`, `php_self` first, as a list of strings, and
+    /// `$argc` its count, written into `EG(symbol_table)`, which for the
+    /// main op array is its CVs of those names (`zend_attach_symbol_table`
+    /// at its activation); a request the host describes with no `argv`
+    /// at all, php's web hosts, gets neither. `$_SERVER['argv']` and
+    /// `$_SERVER['argc']` wait on the superglobal fetch the compiler does
+    /// not read yet, and `global $argv` inside a function on the symbol
+    /// table (#280).
+    ///
+    /// ```php
+    /// var_dump($argc);
+    /// var_dump($argv);
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// array(1) {
+    ///   [0]=>
+    ///   string(%d) "%s"
+    /// }
+    /// ```
+    pub(crate) fn seed_argv(&mut self, frame: FrameRef, unit: &Unit) -> Result<(), Thrown> {
+        if self.description.argv.is_empty() {
+            return Ok(());
+        }
+        let argc = i64::try_from(self.description.argv.len()).unwrap_or(i64::MAX);
+        let names: Vec<(u32, bool)> = exec::code_of(unit)
+            .vars
+            .iter()
+            .enumerate()
+            .filter_map(|(at, name)| match name.0.as_ref() {
+                b"argv" => Some((at, true)),
+                b"argc" => Some((at, false)),
+                _ => None,
+            })
+            .filter_map(|(at, is_argv)| u32::try_from(at).ok().map(|at| (at, is_argv)))
+            .collect();
+        for (at, is_argv) in names {
+            let value = if is_argv {
+                let mut array = PhpArray::new(self)?;
+                for word in self.description.argv.clone() {
+                    let word = PhpString::new(self, &word)?;
+                    array.append(self, Value::string(word))?;
+                }
+                Value::array(array)
+            } else {
+                Value::int(argc)
+            };
+            let old = self.set_slot(frame, at, value);
+            self.release(old);
+        }
+        Ok(())
+    }
+
     /// `php_sapi_name()`: `sapi_module.name`.
     #[must_use]
     pub fn sapi_name(&self) -> &str {

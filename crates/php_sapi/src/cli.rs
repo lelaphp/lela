@@ -689,19 +689,21 @@ impl OutputSink for Process {
 }
 
 /// The request description for `program` as `do_cli` builds it: `argv`
-/// with `php_self` first, the process's environment and its working
-/// directory; the file's bytes are the engine's to read by name; `-r`'s
-/// code is served under the name `Command line code` with php's open
-/// tag before it on the same line, as `zend_eval_string` scans it in
-/// `ST_IN_SCRIPTING`; stdin is read whole and served as `Standard input
-/// code`. A file that cannot be opened is `cli_seek_file_begin`'s line
-/// on stderr and exit 1, before a request begins.
+/// with `php_self` first, which is the file's name, or `Standard input
+/// code` where no file was named, `-r` included; the process's
+/// environment and its working directory; the file's bytes are the
+/// engine's to read by name; `-r`'s code is served under the name
+/// `Command line code` with php's open tag before it on the same line,
+/// as `zend_eval_string` scans it in `ST_IN_SCRIPTING`; stdin is read
+/// whole and served as `Standard input code`. A file that cannot be
+/// opened is `cli_seek_file_begin`'s line on stderr and exit 1, before a
+/// request begins.
 ///
 /// What php's `-R`-family reads stdin lazily for is not here: nothing in
 /// the engine reads the request's body yet (design §4.3 seam 4, the
 /// body stream), so stdin is read only where it is the program.
 pub fn describe(program: &Program, arguments: &[OsString]) -> Result<RequestDescription, i32> {
-    let (php_self, source): (Vec<u8>, Option<Vec<u8>>) = match program {
+    let (php_self, script, source): (Vec<u8>, Vec<u8>, Option<Vec<u8>>) = match program {
         Program::File(path) => {
             if std::fs::File::open(path).is_err() {
                 let mut stderr = std::io::stderr().lock();
@@ -710,20 +712,26 @@ pub fn describe(program: &Program, arguments: &[OsString]) -> Result<RequestDesc
                 let _ = stderr.write_all(b"\n");
                 return Err(1);
             }
-            (path.as_os_str().as_encoded_bytes().to_vec(), None)
+            let name = path.as_os_str().as_encoded_bytes().to_vec();
+            (name.clone(), name, None)
         }
         Program::Direct(code) => {
             let mut source = b"<?php ".to_vec();
             source.extend_from_slice(code);
-            (b"Command line code".to_vec(), Some(source))
+            (
+                b"Standard input code".to_vec(),
+                b"Command line code".to_vec(),
+                Some(source),
+            )
         }
         Program::Stdin => {
             let mut source = Vec::new();
             let _ = std::io::stdin().lock().read_to_end(&mut source);
-            (b"Standard input code".to_vec(), Some(source))
+            let name = b"Standard input code".to_vec();
+            (name.clone(), name, Some(source))
         }
     };
-    let mut argv = vec![php_self.clone()];
+    let mut argv = vec![php_self];
     argv.extend(arguments.iter().map(|a| a.as_encoded_bytes().to_vec()));
     Ok(RequestDescription {
         argv,
@@ -732,7 +740,7 @@ pub fn describe(program: &Program, arguments: &[OsString]) -> Result<RequestDesc
             .collect(),
         cwd: std::env::current_dir().unwrap_or_default(),
         sapi_name: String::from(NAME),
-        script_name: Some(php_self),
+        script_name: Some(script),
         source,
         ..RequestDescription::default()
     })
