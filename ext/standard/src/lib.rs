@@ -21,8 +21,9 @@
 //! `count` the two-argument call, and for `chr` and `ord` an argument
 //! not written as a value. The `ob_*` natives are `output`'s and the
 //! header natives `head`'s, each over the engine's layer; `sleep` is
-//! `basic_functions.c`'s, and `array_unique` with the `SORT_*`
-//! constants is `array`'s.
+//! `basic_functions.c`'s, `strtoupper` and `strtolower` are `string.c`'s
+//! beside `trim`, and `array_unique` with the `SORT_*` constants is
+//! `array`'s.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -175,6 +176,22 @@ fn string_natives() -> Vec<(FunctionDecl, output::Entry)> {
                 &[2],
             ),
             str_contains,
+        ),
+        (
+            declared(
+                b"strtoupper",
+                &[parameter(b"string", Type::String)],
+                Type::String,
+            ),
+            strtoupper,
+        ),
+        (
+            declared(
+                b"strtolower",
+                &[parameter(b"string", Type::String)],
+                Type::String,
+            ),
+            strtolower,
         ),
         (
             frameless(
@@ -744,6 +761,101 @@ fn str_repeat(req: &mut Request) -> Result<Value, Thrown> {
         }
     })?;
     Ok(Value::string(repeated))
+}
+
+/// `strtoupper(string $string): string`, php's `PHP_FUNCTION(strtoupper)`
+/// (`Z/ext/standard/string.c:1207`) over `zend_string_toupper`
+/// (`Z/Zend/zend_operators.c:3194`): ASCII only since 8.2, the bytes
+/// walked to the first that `toupper` would change, and the string
+/// handed back as it is, one more owner (`zend_string_copy`), when no
+/// byte would; otherwise one new string of the request's, the bytes
+/// before that one copied and the rest mapped. A byte past ASCII is
+/// left as it is.
+///
+/// ```php
+/// $s = str_repeat("AB1", 20); $b = memory_get_usage(); $t = strtoupper($s); var_dump($t === $s, memory_get_usage() - $b, strtoupper("abc Z1"), strtoupper("\xe9") === "\xe9", strtoupper(12), strtoupper(""));
+/// ```
+/// ```expect
+/// bool(true)
+/// int(0)
+/// string(6) "ABC Z1"
+/// bool(true)
+/// string(2) "12"
+/// string(0) ""
+/// ```
+///
+/// A string with a byte to change is a copy, `zend_string_alloc` of the
+/// same length, and the request's heap reads the copy after the call.
+///
+/// ```php
+/// $s = str_repeat("ab1", 20); $b = memory_get_usage(); $t = strtoupper($s); var_dump(memory_get_usage() - $b, $t);
+/// ```
+/// ```expect
+/// int(96)
+/// string(60) "AB1AB1AB1AB1AB1AB1AB1AB1AB1AB1AB1AB1AB1AB1AB1AB1AB1AB1AB1AB1"
+/// ```
+///
+/// Declared, the name is one `ob_start()` accepts as a handler and
+/// `ob_get_status()` reports under `name`. What php then does with it
+/// is call it with the buffer and the `PHP_OUTPUT_HANDLER_*` bits, two
+/// arguments to a native of one, so the oracle ends in `ArgumentCountError` at the first
+/// handler call with the buffer lost; the `ob_*` layer's call of a
+/// native handler is #288's, and the witness for it stands there.
+fn strtoupper(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 1)?;
+    let string = string_argument(req, 1)?;
+    cased(req, string, u8::to_ascii_uppercase)
+}
+
+/// `strtolower(string $string): string`, php's `PHP_FUNCTION(strtolower)`
+/// (`Z/ext/standard/string.c:1220`) over `zend_string_tolower`
+/// (`Z/Zend/zend_operators.c:3162`), `strtoupper`'s mirror: the string
+/// itself with one more owner when no byte is an ASCII capital, a copy
+/// with each one lowered otherwise.
+///
+/// ```php
+/// $s = str_repeat("ab1", 20); $b = memory_get_usage(); $t = strtolower($s); var_dump($t === $s, memory_get_usage() - $b, strtolower("ABC z1"), strtolower("\xc9") === "\xc9", strtolower(true), strtolower(""));
+/// ```
+/// ```expect
+/// bool(true)
+/// int(0)
+/// string(6) "abc z1"
+/// bool(true)
+/// string(1) "1"
+/// string(0) ""
+/// ```
+///
+/// ```php
+/// $s = str_repeat("AB1", 20); $b = memory_get_usage(); $t = strtolower($s); var_dump(memory_get_usage() - $b, $t);
+/// ```
+/// ```expect
+/// int(96)
+/// string(60) "ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1"
+/// ```
+fn strtolower(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 1)?;
+    let string = string_argument(req, 1)?;
+    cased(req, string, u8::to_ascii_lowercase)
+}
+
+/// `zend_string_toupper_ex` and `zend_string_tolower_ex`'s one shape
+/// over `map`: the argument with one more owner when `map` changes no
+/// byte, else a new string of the request's with the bytes before the
+/// first changed one copied and every byte from it mapped.
+fn cased(req: &mut Request, string: PhpString, map: fn(&u8) -> u8) -> Result<Value, Thrown> {
+    let bytes = string.as_bytes();
+    let Some(first) = bytes.iter().position(|b| map(b) != *b) else {
+        let value = Value::string(string);
+        req.addref(&value);
+        return Ok(value);
+    };
+    let mapped = PhpString::filled(req, bytes.len(), |out| {
+        out[..first].copy_from_slice(&bytes[..first]);
+        for (o, b) in out[first..].iter_mut().zip(&bytes[first..]) {
+            *o = map(b);
+        }
+    })?;
+    Ok(Value::string(mapped))
 }
 
 /// The characters `trim` strips when given none, `php_trim_int`'s
