@@ -6596,6 +6596,54 @@ pub(crate) fn jmp_set<T: Tier>(
     Ok(Stepped::Same(frame))
 }
 
+/// `ZEND_COALESCE`: the left side of `a ?? b`, read as
+/// `GET_OP1_ZVAL_PTR(BP_VAR_IS)` reads it, which is the silent read: an
+/// undefined CV is `null` and no warning stands. A reference is
+/// followed. What php's `Z_TYPE_P(value) > IS_NULL` answers true for,
+/// anything that is neither undefined nor `null`, is the operator's
+/// value: it goes into the temporary `result` names, taken as
+/// [`qm_assign`] takes one, and the jump in `op2` is taken past the
+/// right side. Otherwise the operand is freed and the opline after it
+/// compiles the right side into that same temporary.
+///
+/// The jump is forward always, since php's compiler emits this opcode
+/// only over a right side it has yet to compile, and `result` carries a
+/// temporary where a back-edge would carry its safepoint number, so
+/// there is no site here to raise.
+///
+/// ```php
+/// function f() { echo "f"; return "r"; }
+/// echo $undefined ?? "u", "\n";
+/// echo f() ?? "b", "\n";
+/// $a = null; $b = 0;
+/// echo $a ?? "n", $b ?? "z", "\n";
+/// echo $undefined ?? $alsoUndefined ?? "both", "\n";
+/// ```
+/// ```expect
+/// u
+/// fr
+/// n0
+/// both
+/// ```
+pub(crate) fn coalesce<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let value = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
+    if matches!(value.tag(), TypeTag::Undef | TypeTag::Null) {
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+        return Ok(advance(req, frame));
+    }
+    let taken = exec::take_operand(req, frame, code, op.op1_type, op.op1);
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, taken);
+    req.release(previous);
+    req.vm_mut().jump(frame, op.op2);
+    Ok(Stepped::Same(frame))
+}
+
 /// `ZEND_SWITCH_LONG`: [`crate::ops::switch_long`] over the subject,
 /// read as `GET_OP1_ZVAL_PTR_UNDEF` reads it, and the jump table in
 /// `op2`; the frame at the target or at the default in

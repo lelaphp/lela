@@ -2432,6 +2432,7 @@ impl Emit<'_> {
             Expr::Match { .. }
             | Expr::New { .. }
             | Expr::Instanceof { .. }
+            | Expr::Coalesce { .. }
             | Expr::Ternary { .. } => {
                 Err(self.fatal("a constant expression this compiler cannot read yet"))
             }
@@ -3864,6 +3865,7 @@ impl Emit<'_> {
                 otherwise,
                 ..
             } => self.conditional(cond, then.as_deref(), otherwise),
+            Expr::Coalesce { left, right } => self.coalesce(left, right),
             known => Ok(Where::Constant(self.constant_expr(known)?)),
         }
     }
@@ -4011,6 +4013,68 @@ impl Emit<'_> {
         });
         self.update_jump_target_to_next(opnum_jmp);
         Ok(Where::Temporary(out))
+    }
+
+    /// `zend_compile_coalesce` (`Z/Zend/zend_compile.c:10565`),
+    /// `a ?? b`: the left side compiled under `BP_VAR_IS`
+    /// ([`Self::silent_read`]), then `COALESCE` over it into a
+    /// temporary with the jump target learnt after the right side, then
+    /// the right side's `QM_ASSIGN` into that same temporary. php
+    /// allocates no temporary for the `QM_ASSIGN`, which
+    /// `zend_emit_op_tmp` does only where it is handed a `znode` to fill,
+    /// and writes the coalesce's own into the opline instead
+    /// (`SET_NODE(opline->result, ...)`).
+    ///
+    /// `zend_eval_const_expr` folds neither side, so `1 ?? 2` is the
+    /// two oplines any other pair is.
+    fn coalesce(&mut self, left: &Expr, right: &Expr) -> Result<Where, CompileError> {
+        let held = self.silent_read(left)?;
+        let (op1_type, op1) = self.operand(held);
+        let out = self.temporary();
+        let opnum = self.push(Opline {
+            opcode: Opcode::Coalesce,
+            op1_type,
+            op1,
+            out_type: OperandKind::Tmp,
+            out,
+            ..Opline::default()
+        });
+        let otherwise = self.expr(right)?;
+        let (op1_type, op1) = self.operand(otherwise);
+        self.push(Opline {
+            opcode: Opcode::QmAssign,
+            op1_type,
+            op1,
+            out_type: OperandKind::Tmp,
+            out,
+            ..Opline::default()
+        });
+        self.update_jump_target_to_next(opnum);
+        Ok(Where::Temporary(out))
+    }
+
+    /// `zend_compile_var` under `BP_VAR_IS`
+    /// (`Z/Zend/zend_compile.c:12009`), the read that raises nothing
+    /// where what it reads is not there. A `ZEND_AST_VAR` is the CV
+    /// itself, whatever the type, and everything below the four
+    /// variable nodes is `zend_compile_expr`, which is what a call, a
+    /// number as written or an operator is; so what is left to do is the three
+    /// nodes with a fetch of their own, `FETCH_DIM_IS`, `FETCH_OBJ_IS`
+    /// and `FETCH_STATIC_PROP_IS`, and each is refused here rather than
+    /// compiled as the read that warns.
+    fn silent_read(&mut self, expr: &Expr) -> Result<Where, CompileError> {
+        match expr {
+            Expr::Dim { .. } => {
+                Err(self.fatal("a `??` over an element this compiler cannot read yet"))
+            }
+            Expr::Prop { .. } => {
+                Err(self.fatal("a `??` over a property this compiler cannot read yet"))
+            }
+            Expr::StaticProp { .. } => {
+                Err(self.fatal("a `??` over a property of a class this compiler cannot read yet"))
+            }
+            read => self.expr(read),
+        }
     }
 
     /// `zend_compile_shorthand_conditional`
@@ -5107,6 +5171,9 @@ impl Emit<'_> {
             // `zend_eval_const_expr` that takes the branch a constant
             // condition picks is not read yet (#437).
             Expr::Ternary { .. } => Err(self.fatal("a conditional is no constant expression here")),
+            // `zend_compile_coalesce` emits two oplines whatever stands
+            // on either side, and `zend_eval_const_expr` folds neither.
+            Expr::Coalesce { .. } => Err(self.fatal("a `??` is no constant expression")),
             // `zend_compile_throw` emits an opline whatever stands
             // around it, so a `throw` folds to nothing.
             Expr::Throw(_) => Err(self.fatal("a `throw` is no constant expression")),
@@ -6431,7 +6498,10 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Expr) {
         Expr::Unary { operand, .. } | Expr::Cast { operand, .. } | Expr::Silence(operand) => {
             implicit_uses(names, operand);
         }
-        Expr::Binary { left, right, .. } => {
+        // `ZEND_AST_COALESCE` is no special node either: the walk
+        // reaches both children, so an arrow function captures what
+        // either side reads.
+        Expr::Binary { left, right, .. } | Expr::Coalesce { left, right } => {
             implicit_uses(names, left);
             implicit_uses(names, right);
         }

@@ -33,7 +33,9 @@
 //! and `**` at php's precedence levels: `<` under `.` under the shifts
 //! under the additive level under the multiplicative one, `<` not
 //! associating and the rest left to right, and `**` right to left above
-//! unary `-`, with `=` below them all and read right to left.
+//! unary `-`, with `??` right to left below the comparisons, the
+//! conditional below that, and `=` below them all and read right to
+//! left.
 //! Anything else is a [`crate::CompileError`], so what this cannot read is
 //! refused rather than silently compiled to something else.
 
@@ -599,6 +601,16 @@ pub(crate) enum Expr {
         otherwise: Child,
         parenthesised: bool,
     },
+    /// `a ?? b`, php's `ZEND_AST_COALESCE` over two children, read at a
+    /// level of its own, right to left, above the conditional and below
+    /// `||` (`%right T_COALESCE`). The left side is compiled under
+    /// `BP_VAR_IS`, the silent read, so an undefined variable on it
+    /// raises nothing. `??=`, php's `T_COALESCE_EQUAL`, is the
+    /// assignment form of the same shape and is not read.
+    Coalesce {
+        left: Child,
+        right: Child,
+    },
 }
 
 /// One child of an expression, php's `zend_ast.child[i]`: the expression
@@ -645,7 +657,7 @@ impl Drop for Child {
                 Expr::Unary { operand, .. }
                 | Expr::Cast { operand, .. }
                 | Expr::Silence(operand) => operand.take(),
-                Expr::Binary { left, right, .. } => {
+                Expr::Binary { left, right, .. } | Expr::Coalesce { left, right } => {
                     drop(right);
                     left.take()
                 }
@@ -2629,8 +2641,28 @@ impl Reader<'_> {
             self.bump(5);
             return Ok(Expr::Throw(Child::new(self.expr()?)));
         }
-        let left = self.equality()?;
+        let left = self.coalesce()?;
         self.assignment(left)
+    }
+
+    /// php's `%right T_COALESCE`, the level between the conditional
+    /// below it and the equality above: the left side, then `??` and the
+    /// right side read at this level again, so `a ?? b ?? c` is
+    /// `a ?? (b ?? c)`. `??=` stands at the assignment level and is left
+    /// where it is, so what follows refuses it rather than reading `??`
+    /// out of it.
+    fn coalesce(&mut self) -> Result<Expr, Trouble> {
+        self.check_stack()?;
+        let left = self.equality()?;
+        self.skip_trivia();
+        if !self.starts_with(b"??") || self.byte(2) == Some(b'=') {
+            return Ok(left);
+        }
+        self.bump(2);
+        Ok(Expr::Coalesce {
+            left: Child::new(left),
+            right: Child::new(self.coalesce()?),
+        })
     }
 
     /// Whether a `?` that opens a conditional stands here: `??` is the
@@ -4058,6 +4090,56 @@ mod tests {
         }
     }
 
+    /// php's `%right T_COALESCE`: `??` reads right to left, and the
+    /// level stands above the conditional and below the equality, so
+    /// `$a ?? $b ?? 2` is `$a ?? ($b ?? 2)` and `$a ?? 1 ?: 2` is the
+    /// conditional over the coalesce.
+    #[test]
+    fn a_coalesce_reads_right_to_left_below_the_conditional() {
+        let chain = read(b"<?php echo $a ?? $b ?? 2;").unwrap_or_default();
+        assert_eq!(
+            chain,
+            vec![(
+                Stmt::Echo(vec![Expr::Coalesce {
+                    left: Child::new(Expr::Var(b"a".to_vec())),
+                    right: Child::new(Expr::Coalesce {
+                        left: Child::new(Expr::Var(b"b".to_vec())),
+                        right: Child::new(Expr::Int(2)),
+                    }),
+                }]),
+                1
+            )]
+        );
+        let shorthand = read(b"<?php echo $a ?? 1 ?: 2;").unwrap_or_default();
+        assert_eq!(
+            shorthand,
+            vec![(
+                Stmt::Echo(vec![Expr::Ternary {
+                    cond: Child::new(Expr::Coalesce {
+                        left: Child::new(Expr::Var(b"a".to_vec())),
+                        right: Child::new(Expr::Int(1)),
+                    }),
+                    then: None,
+                    otherwise: Child::new(Expr::Int(2)),
+                    parenthesised: false,
+                }]),
+                1
+            )]
+        );
+    }
+
+    /// `??=` is php's `T_COALESCE_EQUAL`, one token at the assignment
+    /// level: the coalescing level leaves it where it stands rather than
+    /// reading a `??` out of it.
+    #[test]
+    fn a_coalescing_assignment_is_not_read_as_a_coalesce() {
+        let refused = read(b"<?php $a ??= 1;");
+        assert_eq!(
+            refused.err().map(|trouble| trouble.what),
+            Some("a statement this compiler cannot read yet".to_string())
+        );
+    }
+
     /// The arms php's grammar reduces each spelling into: `elseif` adds
     /// an arm to the same `ZEND_AST_IF`, and the alternative syntax
     /// reduces into that same list of arms.
@@ -4367,7 +4449,7 @@ mod tests {
     fn an_operator_this_does_not_read_is_refused_rather_than_taken_for_another() {
         for source in [
             b"<?php echo 'a' .= 'b';".as_slice(),
-            b"<?php echo 1 ?? 2;".as_slice(),
+            b"<?php echo 1 ??= 2;".as_slice(),
             b"<?php echo 1 | 2;".as_slice(),
         ] {
             assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
