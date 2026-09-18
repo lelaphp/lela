@@ -620,14 +620,15 @@ fn usage(exit_code: i32) -> Refused {
 }
 
 /// `php_get_version` for this host: `PHP <version> (cli) (built: <date>)
-/// (NTS)`, the one line upstream's test runner and a person read. php follows
-/// it with its copyright lines and the Zend engine's; this engine is not
-/// php and prints neither.
+/// (NTS)`, the one line upstream's test runner and a person read, the
+/// date stamped by this crate's `build.rs` as `__DATE__ " " __TIME__`
+/// stamps php's. php follows it with its copyright lines and the Zend
+/// engine's; this engine is not php and prints neither.
 #[must_use]
 pub fn version() -> String {
     format!(
         "PHP {PHP_VERSION} ({NAME}) (built: {}) (NTS)\n",
-        option_env!("PHP_BUILD_DATE").unwrap_or("unknown")
+        env!("PHP_BUILD_DATE")
     )
 }
 
