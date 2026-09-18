@@ -517,9 +517,13 @@ impl Request {
         };
         let code = exec::body_of(&unit, body)?;
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
-        let parameters = self
-            .function_decl(function)
-            .map_or(0, |decl| decl.parameters.len());
+        // The declared parameters, which is php's `common.num_args` and
+        // excludes a variadic: an argument from the variadic's position
+        // on is an extra one, where php leaves it on the stack for
+        // `RECV_VARIADIC` to collect.
+        let parameters = self.function_decl(function).map_or(0, |decl| {
+            decl.parameters.iter().filter(|p| !p.variadic).count()
+        });
         let num_args = u32::try_from(call.arguments.len()).unwrap_or(u32::MAX);
         let frame = self.stack.push_frame(slots);
         self.vm.push_body(

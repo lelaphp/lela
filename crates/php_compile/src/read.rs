@@ -401,13 +401,14 @@ pub(crate) enum Expr {
         name: Vec<u8>,
         value: Child,
     },
-    /// `$b = &$a` and `$a[] = &$x`, php's `ZEND_AST_ASSIGN_REF`: the
-    /// target, a variable or a dimension, and the source, a name written
-    /// as is. php's grammar puts a variable and nothing else after the
-    /// `&`; a property, a dimension or a call there is not read yet.
+    /// `$b = &$a`, `$a[] = &$x` and `$b = &f()`, php's
+    /// `ZEND_AST_ASSIGN_REF`: the target, a variable or a dimension, and
+    /// the source, a variable or a call (`zend_is_call`, which php marks
+    /// `ZEND_RETURNS_FUNCTION`). php's grammar puts a `variable` after
+    /// the `&`; a property or a dimension there is not read yet.
     AssignRef {
         target: Child,
-        source: Vec<u8>,
+        source: Child,
     },
     /// `++$a`, php's `ZEND_AST_PRE_INC`, whose grammar puts a variable
     /// and nothing else after the `++`.
@@ -534,7 +535,10 @@ impl Drop for Child {
                     drop(value);
                     target.take()
                 }
-                Expr::AssignRef { target, .. } => target.take(),
+                Expr::AssignRef { target, source } => {
+                    drop(source);
+                    target.take()
+                }
                 _ => return,
             };
         }
@@ -1957,21 +1961,27 @@ impl Reader<'_> {
     /// dimension or a call as the source is not read yet.
     fn assign_ref(&mut self, target: Expr) -> Result<Expr, Trouble> {
         self.skip_trivia();
-        if self.byte(0) != Some(b'$') {
+        let source = match self.byte(0) {
+            Some(b'$') => self.variable()?,
+            // `zend_is_call`: a call is the one source php marks
+            // `ZEND_RETURNS_FUNCTION`, and its arguments are read here
+            // as any call's.
+            Some(b) if b.is_ascii_alphabetic() || b == b'_' || b == b'\\' => self.named()?,
+            _ => {
+                return Err(self.trouble(
+                    "a by-reference assignment from what is no variable this compiler cannot read yet",
+                ));
+            }
+        };
+        if !matches!(source, Expr::Var(_) | Expr::Call { .. }) {
             return Err(self.trouble(
                 "a by-reference assignment from what is no variable this compiler cannot read yet",
             ));
         }
-        match self.variable()? {
-            Expr::Var(source) => Ok(Expr::AssignRef {
-                target: Child::new(target),
-                source,
-            }),
-            _ => {
-                Err(self
-                    .trouble("a by-reference assignment from $this this compiler cannot read yet"))
-            }
-        }
+        Ok(Expr::AssignRef {
+            target: Child::new(target),
+            source: Child::new(source),
+        })
     }
 
     /// `==`, `!=`, `<>`, `===`, `!==` and `<=>`, php's non-associative
@@ -3632,7 +3642,7 @@ mod tests {
                 vec![(
                     Stmt::Effect(Expr::AssignRef {
                         target: Child::new(Expr::Var(b"b".to_vec())),
-                        source: b"a".to_vec(),
+                        source: Child::new(Expr::Var(b"a".to_vec())),
                     }),
                     1
                 )],

@@ -404,6 +404,12 @@ impl Vm {
         self.calls.last_mut()
     }
 
+    /// The callee of the call being built, which a `SEND_*_EX` reads the
+    /// parameter's by-reference bit off (`ARG_MUST_BE_SENT_BY_REF`).
+    pub(crate) fn building_call_function(&self) -> Option<Function> {
+        self.calls.last().map(|call| call.function)
+    }
+
     /// The call being served, for a coercion that writes an argument
     /// back into the frame as php's `Z_PARAM_*` do.
     pub(crate) fn serving_call_mut(&mut self) -> Option<&mut CallState> {

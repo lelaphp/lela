@@ -4282,10 +4282,24 @@ class C {
                 String::from_utf8_lossy(source)
             );
         }
+        // `zend_is_call`: a call is the source php marks
+        // `ZEND_RETURNS_FUNCTION`, and the name it resolves as the
+        // program serves is `INIT_FCALL_BY_NAME`.
+        assert_eq!(
+            dump_of(b"<?php $b = &f();"),
+            main_dump(
+                4,
+                1,
+                2,
+                "0000 INIT_FCALL_BY_NAME 0 string(\"f\")\n\
+                 0001 V1 = DO_FCALL_BY_NAME\n\
+                 0002 ASSIGN_REF (function) CV0($b) V1\n\
+                 0003 RETURN int(1)\n"
+            )
+        );
         for source in [
             b"<?php $b = &$a = 1;".as_slice(),
             b"<?php $b = &$o->p;".as_slice(),
-            b"<?php $b = &f();".as_slice(),
             b"<?php $b = &$this;".as_slice(),
             b"<?php $b = &&$a;".as_slice(),
         ] {
@@ -4295,6 +4309,79 @@ class C {
                 String::from_utf8_lossy(source)
             );
         }
+    }
+
+    /// An argument the callee the table has declares by reference, as the
+    /// oracle dumps it (`zend_compile_args` under
+    /// `ARG_SHOULD_BE_SENT_BY_REF`): `SEND_REF` over the variable's CV,
+    /// the variadic's bit for every argument past the declared ones, and
+    /// `SEND_VAL_EX` for an argument that is no variable, which php
+    /// leaves to the handler to refuse. A by-reference return is
+    /// `RETURN_BY_REF` at each `return` and at the end of the body, and
+    /// `$b = &f($a)` is `ASSIGN_REF` over the call's `VAR` carrying
+    /// `ZEND_RETURNS_FUNCTION`.
+    #[test]
+    fn a_by_reference_parameter_is_sent_by_ref_as_php_emits_it() {
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"<?php function f(&$x) {} $a = 1; f($a);",
+                "0000 ASSIGN CV0($a) int(1)\n\
+                 0001 INIT_FCALL 1 96 string(\"f\")\n\
+                 0002 SEND_REF CV0($a) 1\n\
+                 0003 DO_UCALL\n\
+                 0004 RETURN int(1)\n",
+            ),
+            (
+                b"<?php function f(&...$r) {} $a = 1; f($a, $a);",
+                "0000 ASSIGN CV0($a) int(1)\n\
+                 0001 INIT_FCALL 2 128 string(\"f\")\n\
+                 0002 SEND_REF CV0($a) 1\n\
+                 0003 SEND_REF CV0($a) 2\n\
+                 0004 DO_UCALL\n\
+                 0005 RETURN int(1)\n",
+            ),
+            (
+                b"<?php function f(&$x) {} f(1);",
+                "0000 INIT_FCALL 1 96 string(\"f\")\n\
+                 0001 SEND_VAL_EX int(1) 1\n\
+                 0002 DO_UCALL\n\
+                 0003 RETURN int(1)\n",
+            ),
+            (
+                b"<?php function &f(&$x) { return $x; } $a = 1; $b = &f($a);",
+                "0000 ASSIGN CV0($a) int(1)\n\
+                 0001 INIT_FCALL 1 96 string(\"f\")\n\
+                 0002 SEND_REF CV0($a) 1\n\
+                 0003 V3 = DO_UCALL\n\
+                 0004 ASSIGN_REF (function) CV1($b) V3\n\
+                 0005 RETURN int(1)\n",
+            ),
+        ];
+        for (source, oplines) in cases {
+            let dumped = dump_of(source);
+            let main = dumped.split("\n\nf:").next().unwrap_or_default();
+            assert!(
+                main.trim_end().ends_with(oplines.trim_end()),
+                "{}\n{dumped}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
+
+    /// The body of a function written `function &f`: `RETURN_BY_REF` at
+    /// each `return` and the one `zend_emit_final_return` closes it with,
+    /// which carries `ZEND_RETURNS_FUNCTION` as php's does.
+    #[test]
+    fn a_by_reference_return_is_return_by_ref_as_php_emits_it() {
+        let dumped = dump_of(b"<?php function &f(&$x) { return $x; }");
+        assert!(
+            dumped.trim_end().ends_with(
+                "0000 CV0($x) = RECV 1\n\
+                 0001 RETURN_BY_REF CV0($x)\n\
+                 0002 RETURN_BY_REF (function) null"
+            ),
+            "{dumped}"
+        );
     }
 
     /// `$a[k] = v`, `$a[] = v` and `$a[] = &$x` as the oracle dumps them

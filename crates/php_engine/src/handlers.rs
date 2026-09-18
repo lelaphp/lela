@@ -400,15 +400,110 @@ pub(crate) fn send_var<T: Tier>(
     send(req, frame, code, op)
 }
 
-/// `ZEND_SEND_VAL_EX`: `SEND_VAL` for a callee the compiler knew nothing
-/// of, which reads the parameter's by-reference bit off the callee the
-/// `INIT` resolved and raises `Cannot pass parameter %d by reference`
-/// where it is set. By value here, since nothing declares a by-reference
-/// parameter yet, so the body is `SEND_VAL`'s. The engine's compiler is
-/// handed the bundle's whole function table, so a program reaches this
-/// opline only through a table the program grows, which nothing does
-/// yet; the test beside the handlers holds it meanwhile, and the
-/// witness pins that the `INIT` before it has already raised.
+/// `ZEND_SEND_REF` (`Z/Zend/zend_vm_def.h:5087`), the argument a call
+/// site whose callee the table has places for a by-reference parameter:
+/// the variable is made a reference where it holds none
+/// (`ZVAL_MAKE_REF_EX(varptr, 2)`, the cell taking the variable's owner
+/// and the argument's at once), and the cell is what the call frame
+/// holds. The callee's CV is that cell, so a write through the parameter
+/// is a write to the caller's variable, and a `null` is what an
+/// unwritten variable is bound to (`BP_VAR_W` warns of nothing).
+///
+/// ```php
+/// function f(&$x, &$u) { $x = 2; $u = 3; }
+/// $a = 1;
+/// f($a, $b);
+/// var_dump($a, $b);
+/// ```
+/// ```expect
+/// int(2)
+/// int(3)
+/// ```
+pub(crate) fn send_ref<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let Some(at) = write_place(req, frame, code, op.op1_type, op.op1) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_SEND_REF over an operand php compiles no write over",
+        )));
+    };
+    let held = exec::value_of(at.read());
+    let cell = if let Some(cell) = held.as_php_ref() {
+        *cell
+    } else {
+        let cell = match req.reference(held.undef_as_null()) {
+            Ok(cell) => cell,
+            Err(thrown) => return threw(req, frame, &thrown),
+        };
+        // The owner the variable had of what it held is the cell's.
+        at.write(cell.as_value().to_zval());
+        cell
+    };
+    let bound = cell.as_value();
+    req.addref(&bound);
+    place_argument(req, frame, op, bound)
+}
+
+/// `ARG_MUST_BE_SENT_BY_REF` (`Z/Zend/zend_compile.h:1137`) over the
+/// callee the `INIT` resolved: whether the parameter numbered `number`
+/// takes its argument by reference, the variadic's bit for every
+/// argument past the declared ones.
+fn must_be_sent_by_ref(req: &Request, number: u32) -> bool {
+    let Some(function) = req.vm().building_call_function() else {
+        return false;
+    };
+    let Some(decl) = req.function_decl(function) else {
+        return false;
+    };
+    let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
+    let variadic = decl.parameters.last().filter(|last| last.variadic);
+    decl.parameters
+        .get(at)
+        .filter(|parameter| !parameter.variadic)
+        .or(variadic)
+        .is_some_and(|parameter| parameter.by_ref)
+}
+
+/// `zend_cannot_pass_by_reference` (`Z/Zend/zend_execute.c`): the
+/// `Error` an argument that is no variable raises where the parameter
+/// takes one by reference, which php delays from the compiler to this
+/// opline.
+fn cannot_pass_by_reference(req: &mut Request, number: u32) -> Thrown {
+    let function = req.vm().building_call_function();
+    let name = function.map_or_else(String::new, |function| req.qualified_name_of(function));
+    let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
+    let parameter = function
+        .and_then(|function| req.function_decl(function))
+        .and_then(|decl| decl.parameters.get(at).cloned())
+        .map(|parameter| format!(" (${})", String::from_utf8_lossy(&parameter.name.0)))
+        .unwrap_or_default();
+    let message =
+        format!("{name}(): Argument #{number}{parameter} could not be passed by reference");
+    crate::api::raising::throw(req, "Error", &message)
+}
+
+/// `ZEND_SEND_VAL_EX`: `SEND_VAL` for an argument that is no variable,
+/// which reads the parameter's by-reference bit off the callee the
+/// `INIT` resolved (`ARG_MUST_BE_SENT_BY_REF`) and raises php's `Error`
+/// where it is set, since a constant has no place for a reference to
+/// point at. The compiler emits it for an argument it read as a value
+/// where the callee it knows takes one by reference, which is why the
+/// error is raised here and not where the argument is written, and for
+/// every argument of a callee it knows nothing of.
+///
+/// ```php
+/// function f(&$x) {}
+/// f(1);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: f(): Argument #1 ($x) could not be passed by reference in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
 ///
 /// ```php
 /// echo nope('x', 1);
@@ -425,14 +520,32 @@ pub(crate) fn send_val_ex<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if must_be_sent_by_ref(req, op.op2) {
+        let thrown = cannot_pass_by_reference(req, op.op2);
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+        return threw(req, frame, &thrown);
+    }
     send(req, frame, code, op)
 }
 
-/// `ZEND_SEND_VAR_EX`: `SEND_VAR` for a callee the compiler knew nothing
-/// of, which reads the parameter's by-reference bit off the callee the
-/// `INIT` resolved and sends a reference where it is set. By value here,
-/// since nothing declares a by-reference parameter yet, so the body is
-/// `SEND_VAR`'s; reached as [`send_val_ex`] is.
+/// `ZEND_SEND_VAR_EX`: `SEND_VAR` for a variable sent to a callee the
+/// compiler knew nothing of, which reads the parameter's by-reference
+/// bit off the callee the `INIT` resolved
+/// (`ARG_SHOULD_BE_SENT_BY_REF`) and dispatches to [`send_ref`] where it
+/// is set. A method call is where a program reaches it: the compiler
+/// knows a function's declaration at its call site and a method's only
+/// through the receiver, which it does not follow, so `$o->m($a)` is
+/// this opline and the by-reference binding is read here.
+///
+/// ```php
+/// class C { function m(&$x) { $x = 2; } }
+/// $o = new C;
+/// $o->m($a);
+/// var_dump($a);
+/// ```
+/// ```expect
+/// int(2)
+/// ```
 ///
 /// ```php
 /// $a = 'x';
@@ -450,6 +563,9 @@ pub(crate) fn send_var_ex<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    if must_be_sent_by_ref(req, op.op2) {
+        return send_ref::<T>(req, frame, code, op);
+    }
     send(req, frame, code, op)
 }
 
@@ -678,6 +794,7 @@ fn enter(
         let stepped = match prologue.opcode {
             Opcode::Recv => recv::<crate::tier::Nop>(req, callee, body, prologue)?,
             Opcode::RecvInit => recv_init::<crate::tier::Nop>(req, callee, body, prologue)?,
+            Opcode::RecvVariadic => recv_variadic::<crate::tier::Nop>(req, callee, body, prologue)?,
             other => {
                 return Err(Fatal::Error(format!(
                     "InternalError: {} stands before the entry safepoint, and this engine serves no handler for it yet",
@@ -818,18 +935,39 @@ fn verify_arg_type(
     number: u32,
     slot: u32,
 ) -> Result<(), Thrown> {
-    let function = req.vm().at(frame).and_then(|state| state.function);
     let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
+    let argument = req.slot(frame, slot).deref();
+    if let Some(coerced) = verified_arg(req, frame, number, at, &argument)? {
+        let previous = req.set_slot(frame, slot, coerced);
+        req.release(previous);
+    }
+    Ok(())
+}
+
+/// The body of [`verify_arg_type`] over a value rather than a slot,
+/// which is what a variadic's arguments are: the declared type is the
+/// parameter numbered `at`, the variadic's own for every argument it
+/// collects, while `number` is the argument's own position, which is
+/// what php's error says. `Some` is the value the coercion outside
+/// `strict_types` made of it, which the caller writes where the value
+/// stood; `None` is a value the type contains as it is.
+fn verified_arg(
+    req: &mut Request,
+    frame: FrameRef,
+    number: u32,
+    at: usize,
+    argument: &Value,
+) -> Result<Option<Value>, Thrown> {
+    let function = req.vm().at(frame).and_then(|state| state.function);
     let Some(ty) = function
         .and_then(|function| req.function_decl(function))
         .and_then(|decl| decl.parameters.get(at))
         .and_then(|parameter| parameter.ty.clone())
     else {
-        return Ok(());
+        return Ok(None);
     };
-    let argument = req.slot(frame, slot).deref();
     if ty.contains_code(argument.type_code()) {
-        return Ok(());
+        return Ok(None);
     }
     if let Some(object) = argument.as_object()
         && named_types(&ty).any(|name| {
@@ -837,17 +975,13 @@ fn verify_arg_type(
                 .is_some_and(|of| req.instance_of(object.class(), of))
         })
     {
-        return Ok(());
+        return Ok(None);
     }
     let strict = req.caller_strict_types();
-    if let Some(coerced) = crate::api::coerce::scalar_type_hint(req, &argument, ty.mask(), strict)?
-    {
-        let previous = req.set_slot(frame, slot, coerced);
-        req.release(previous);
-        return Ok(());
+    if let Some(coerced) = crate::api::coerce::scalar_type_hint(req, argument, ty.mask(), strict)? {
+        return Ok(Some(coerced));
     }
-    let thrown = arg_type_error(req, frame, number, &ty, &argument);
-    Err(thrown)
+    Err(arg_type_error(req, frame, number, at, &ty, argument))
 }
 
 /// Every class name a declared type holds, in the order it was written:
@@ -866,6 +1000,278 @@ fn named_types(ty: &php_unit::decl::Type) -> Box<dyn Iterator<Item = &php_unit::
     }
 }
 
+/// `ZEND_RECV_VARIADIC` (`Z/Zend/zend_vm_def.h:5773`): the arguments
+/// from the one numbered `op1` on, collected into a packed array in the
+/// variadic parameter's CV. The arguments past the declared parameters
+/// are the frame's extra ones ([`exec::FrameState::extra_args`]), where
+/// php leaves them on its stack past the temporaries, and they stay
+/// there: each is one more owner in the array (`Z_ADDREF_P`) and the
+/// frame gives its own up when it is popped
+/// (`ZEND_CALL_FREE_EXTRA_ARGS`), so `func_get_args()` and a backtrace
+/// read what the call passed after this opline as before it. A declared
+/// type on the variadic is checked over each of them
+/// (`zend_verify_variadic_arg_type`), the coercion outside
+/// `strict_types` replacing the argument where it stands as `RECV`'s
+/// replaces one; the `TypeError`
+/// names the argument's own number and no parameter name, since php has
+/// a name for the declared ones alone. A call that passed nothing from
+/// here on leaves the empty array.
+///
+/// ```php
+/// function f(int ...$r) { var_dump($r); }
+/// f(1, 2);
+/// f();
+/// f("5");
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+/// }
+/// array(0) {
+/// }
+/// array(1) {
+///   [0]=>
+///   int(5)
+/// }
+/// ```
+///
+/// The declared parameters before it take theirs, and the collected
+/// array is the CV's own: writing through it leaves the arguments the
+/// frame still holds as they were.
+///
+/// ```php
+/// function f($a, ...$r) { $r[] = 4; var_dump($a, $r); }
+/// f(1, 2, 3);
+/// ```
+/// ```expect
+/// int(1)
+/// array(3) {
+///   [0]=>
+///   int(2)
+///   [1]=>
+///   int(3)
+///   [2]=>
+///   int(4)
+/// }
+/// ```
+///
+/// The type error is the variadic's, numbered by the argument and named
+/// by nothing.
+///
+/// ```php
+/// function f(int ...$r) { var_dump($r); }
+/// f(1, "x");
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: f(): Argument #2 must be of type int, string given, called in %s on line 3 and defined in %s:2
+/// Stack trace:
+/// #0 %s(3): f(1, 'x')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn recv_variadic<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    _: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let first = op.op1;
+    let at = usize::try_from(first.saturating_sub(1)).unwrap_or(usize::MAX);
+    let count = req.vm().at(frame).map_or(0, |state| state.extra_args.len());
+    let collected = match req.array_sized(u32::try_from(count).unwrap_or(u32::MAX), true) {
+        Ok(collected) => collected,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let previous = req.set_slot(frame, op.out, collected.to_value());
+    req.release(previous);
+    for step in 0..count {
+        let Some(argument) = req
+            .vm()
+            .at(frame)
+            .and_then(|state| state.extra_args.get(step).copied())
+        else {
+            break;
+        };
+        let number = first.saturating_add(u32::try_from(step).unwrap_or(0));
+        let argument = match verified_arg(req, frame, number, at, &argument) {
+            Ok(None) => argument,
+            Ok(Some(coerced)) => {
+                if let Some(state) = req.vm_mut().at_mut(frame)
+                    && let Some(place) = state.extra_args.get_mut(step)
+                {
+                    let previous = std::mem::replace(place, coerced);
+                    req.release(previous);
+                }
+                coerced
+            }
+            Err(thrown) => return threw(req, frame, &thrown),
+        };
+        req.addref(&argument);
+        if let Err(thrown) = req.array_append(collected.heap(), argument) {
+            return threw(req, frame, &thrown);
+        }
+    }
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_VERIFY_RETURN_TYPE` (`Z/Zend/zend_vm_def.h:4431`), which the
+/// compiler puts before every `RETURN` of a function with a declared
+/// return type and once more, with an `UNUSED` operand, at the end of
+/// its body: the value the `RETURN` after it will hand back, held to the
+/// declared type as an argument is held to a parameter's
+/// (`zend_check_type` and the coercion beside it, which php reads the
+/// *callee's* file's `strict_types` for where this reads the request's
+/// one setting, the file's being #411's), and `zend_verify_return_error`'s
+/// `TypeError`,
+/// `{fn}(): Return value must be of type {declared}, {given} returned`,
+/// where it does not hold. The `UNUSED` operand is
+/// `zend_verify_missing_return_type`, the same error over `none`, which
+/// is what control falling off the end of a typed function is. A
+/// coercion is written back where the value stood, so the `RETURN` after
+/// this hands back what the type asked for.
+///
+/// ```php
+/// function f(): int { $x = "5"; return $x; }
+/// var_dump(f());
+/// ```
+/// ```expect
+/// int(5)
+/// ```
+///
+/// ```php
+/// function f(): int { $x = "s"; return $x; }
+/// f();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: f(): Return value must be of type int, string returned in %s:2
+/// Stack trace:
+/// #0 %s(3): f()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// function f(): int { }
+/// f();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: f(): Return value must be of type int, none returned in %s:2
+/// Stack trace:
+/// #0 %s(3): f()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn verify_return_type<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let Some(ty) = req
+        .vm()
+        .at(frame)
+        .and_then(|state| state.function)
+        .and_then(|function| req.function_decl(function))
+        .and_then(|decl| decl.return_type.clone())
+    else {
+        return Ok(advance(req, frame));
+    };
+    if op.op1_type == OperandKind::Unused {
+        let thrown = return_type_error(req, frame, &ty, None);
+        return threw(req, frame, &thrown);
+    }
+    let returned = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
+    if ty.contains_code(returned.type_code()) {
+        return Ok(advance(req, frame));
+    }
+    if let Some(object) = returned.as_object()
+        && named_types(&ty).any(|name| {
+            req.class_named(&name.0)
+                .is_some_and(|of| req.instance_of(object.class(), of))
+        })
+    {
+        return Ok(advance(req, frame));
+    }
+    let strict = req.caller_strict_types();
+    let coerced = match crate::api::coerce::scalar_type_hint(req, &returned, ty.mask(), strict) {
+        Ok(coerced) => coerced,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let Some(coerced) = coerced else {
+        let thrown = return_type_error(req, frame, &ty, Some(&returned));
+        return threw(req, frame, &thrown);
+    };
+    let slot = if op.op1_type == OperandKind::Cv {
+        op.op1
+    } else {
+        exec::temporary_slot(code, op.op1)
+    };
+    let previous = req.set_slot(frame, slot, coerced);
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
+/// `zend_verify_return_error` (`Z/Zend/zend_execute.c:1421`): the
+/// `TypeError` over a return, `{fn}(): Return value must be of type
+/// {declared}, {given} returned`, with `none` for the end of a body that
+/// returned nothing. Its site is the function's own, where the loop
+/// stands, as an argument's is.
+fn return_type_error(
+    req: &mut Request,
+    frame: FrameRef,
+    ty: &php_unit::decl::Type,
+    returned: Option<&Value>,
+) -> Thrown {
+    let function = req.vm().at(frame).and_then(|state| state.function);
+    let name = function.map_or_else(String::new, |function| req.qualified_name_of(function));
+    let declared = crate::api::coerce::type_name(ty);
+    let given = match returned {
+        Some(returned) => crate::ops::value_name(req, &returned.undef_as_null()),
+        None => String::from("none"),
+    };
+    let message = format!("{name}(): Return value must be of type {declared}, {given} returned");
+    crate::api::raising::throw(req, "TypeError", &message)
+}
+
+/// `ZEND_VERIFY_NEVER_TYPE` (`Z/Zend/zend_vm_def.h:4501`), the opline
+/// that closes a `never`-returning function's body: control reaching it
+/// is `zend_verify_never_error`'s `TypeError`, since a `never` function
+/// may leave only by a throw or by ending the request.
+///
+/// ```php
+/// function f(): never { echo "a\n"; }
+/// f();
+/// ```
+/// ```expect exit=255
+/// a
+///
+/// Fatal error: Uncaught TypeError: f(): never-returning function must not implicitly return in %s:2
+/// Stack trace:
+/// #0 %s(3): f()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn verify_never_type<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    _: &OpArray,
+    _: &Opline,
+) -> Edge {
+    let function = req.vm().at(frame).and_then(|state| state.function);
+    let name = function.map_or_else(String::new, |function| req.qualified_name_of(function));
+    let kind = if req.vm().at(frame).is_some_and(|state| state.this.is_some()) {
+        "method"
+    } else {
+        "function"
+    };
+    let message = format!("{name}(): never-returning {kind} must not implicitly return");
+    let thrown = crate::api::raising::throw(req, "TypeError", &message);
+    threw(req, frame, &thrown)
+}
+
 /// `zend_verify_arg_error` (`Z/Zend/zend_execute.c:707`): the `TypeError`
 /// a user function's argument of the wrong type raises. The sentence is
 /// `zend_argument_type_error`'s, `{fn}(): Argument #N ($name) must be of
@@ -878,16 +1284,23 @@ fn arg_type_error(
     req: &mut Request,
     frame: FrameRef,
     number: u32,
+    at: usize,
     ty: &php_unit::decl::Type,
     argument: &Value,
 ) -> Thrown {
     let function = req.vm().at(frame).and_then(|state| state.function);
     let name = function.map_or_else(String::new, |function| req.qualified_name_of(function));
-    let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
-    let parameter = function
-        .and_then(|function| req.function_decl(function))
-        .and_then(|decl| decl.parameters.get(at))
-        .map(|parameter| String::from_utf8_lossy(&parameter.name.0).into_owned())
+    // `get_function_arg_name`: php has a name for an argument up to the
+    // declared count alone, which excludes the variadic, so the error
+    // over an argument a variadic collected is `Argument #2` bare.
+    let decl = function.and_then(|function| req.function_decl(function));
+    let named = decl
+        .as_ref()
+        .is_some_and(|decl| at < decl.parameters.iter().filter(|p| !p.variadic).count());
+    let parameter = decl
+        .filter(|_| named)
+        .and_then(|decl| decl.parameters.get(at).cloned())
+        .map(|parameter| format!(" (${})", String::from_utf8_lossy(&parameter.name.0)))
         .unwrap_or_default();
     let declared = crate::api::coerce::type_name(ty);
     let given = crate::ops::value_name(req, &argument.undef_as_null());
@@ -901,10 +1314,10 @@ fn arg_type_error(
     });
     let message = match caller {
         Some((file, line)) => format!(
-            "{name}(): Argument #{number} (${parameter}) must be of type {declared}, {given} given, called in {file} on line {line}"
+            "{name}(): Argument #{number}{parameter} must be of type {declared}, {given} given, called in {file} on line {line}"
         ),
         None => format!(
-            "{name}(): Argument #{number} (${parameter}) must be of type {declared}, {given} given"
+            "{name}(): Argument #{number}{parameter} must be of type {declared}, {given} given"
         ),
     };
     crate::api::raising::throw(req, "TypeError", &message)
@@ -2844,14 +3257,9 @@ pub(crate) fn assign_ref<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    if op.op2_type != OperandKind::Cv {
+    let Some(source) = write_place(req, frame, code, op.op2_type, op.op2) else {
         return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_REF over a source that is no CV, which MAKE_REF and ZEND_RETURNS_FUNCTION land with",
-        )));
-    }
-    let Some(source) = req.slot_ptr(frame, op.op2) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_REF over a CV the frame does not have",
+            "InternalError: ZEND_ASSIGN_REF over a source php compiles no write over",
         )));
     };
     let target = match op.op1_type {
@@ -2877,6 +3285,16 @@ pub(crate) fn assign_ref<T: Tier>(
         )));
     };
     let held = exec::value_of(source.read());
+    // `ZEND_RETURNS_FUNCTION`: the source is a call, and a call that
+    // returned by value has no cell to bind, which is php's notice and a
+    // cell of its own over the value
+    // (`zend_wrong_assign_to_variable_reference`).
+    if op.extended_value & RETURNS_FUNCTION != 0 && held.as_php_ref().is_none() {
+        crate::api::raising::notice(req, "Only variables should be assigned by reference");
+        if req.is_pending() {
+            return Ok(Stepped::Threw(frame));
+        }
+    }
     let cell = match held.as_php_ref() {
         Some(cell) if target == source => {
             write_out(req, frame, code, op, &cell.as_value());
@@ -3323,6 +3741,11 @@ fn write_out(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, va
     let previous = req.set_slot(frame, exec::temporary_slot(code, op.out), *value);
     req.release(previous);
 }
+
+/// `ZEND_RETURNS_FUNCTION` (`Z/Zend/zend_compile.h:1198`), on an
+/// `ASSIGN_REF` whose source is a call: what the handler reads to raise
+/// php's notice where the call returned by value.
+const RETURNS_FUNCTION: u32 = 1 << 0;
 
 /// `ZEND_ARRAY_ELEMENT_REF`, `ZEND_ARRAY_NOT_PACKED` and
 /// `ZEND_ARRAY_SIZE_SHIFT` (`Z/Zend/zend_compile.h:1201`): the bits of
@@ -4633,6 +5056,19 @@ pub(crate) fn r#return<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let returned = exec::take_operand(req, frame, code, op.op1_type, op.op1);
+    returned_to_caller::<T>(req, frame, op, returned)
+}
+
+/// The half of `RETURN` that leaves the frame, which `RETURN_BY_REF`
+/// shares: the return safepoint, the frame popped, and `returned` into
+/// the `VAR` the call opline named, or released where the caller reads
+/// nothing.
+fn returned_to_caller<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    returned: Value,
+) -> Edge {
     if req.stack_mut().entry() == frame {
         req.set_returned(returned);
         return Ok(Stepped::Done);
@@ -4832,6 +5268,13 @@ fn advance(req: &mut Request, frame: FrameRef) -> Stepped {
 /// (`ZVAL_COPY_VALUE`).
 fn send(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let value = exec::take_operand(req, frame, code, op.op1_type, op.op1);
+    place_argument(req, frame, op, value)
+}
+
+/// The placing half of [`send`]: `value` into the call frame being
+/// built, at the argument number `op2` names, the frame owning it from
+/// here.
+fn place_argument(req: &mut Request, frame: FrameRef, op: &Opline, value: Value) -> Edge {
     let at = usize::try_from(op.op2.saturating_sub(1)).unwrap_or(usize::MAX);
     let Some(call) = req.vm_mut().building_call() else {
         return Err(Fatal::Error(String::from(
@@ -5347,6 +5790,74 @@ fn cleanup_unfinished_calls(req: &mut Request, frame: FrameRef) {
 fn jump_to(req: &mut Request, frame: FrameRef, at: u32) -> Edge {
     req.vm_mut().jump(frame, at);
     Ok(Stepped::Same(frame))
+}
+
+/// `ZEND_RETURN_BY_REF` (`Z/Zend/zend_vm_def.h:4586`), what a function
+/// written `function &f` returns by: the variable is made a reference
+/// where it holds none (`ZVAL_MAKE_REF_EX`, as `SEND_REF` makes one),
+/// and the caller's `VAR` holds that cell, so the `ASSIGN_REF` after the
+/// call binds a name to what the callee named. A constant or a temporary
+/// is php's notice `Only variable references should be returned by
+/// reference` and a fresh cell over the value, which is the arm
+/// `ZEND_RETURNS_VALUE` names; the frame is left as [`r#return`] leaves
+/// it.
+///
+/// ```php
+/// function &f(&$x) { return $x; }
+/// $a = 1;
+/// $b = &f($a);
+/// $b = 2;
+/// var_dump($a);
+/// ```
+/// ```expect
+/// int(2)
+/// ```
+///
+/// ```php
+/// function &f() { return 1; }
+/// $b = &f();
+/// var_dump($b);
+/// ```
+/// ```expect
+/// Notice: Only variable references should be returned by reference in %s on line 2
+/// int(1)
+/// ```
+pub(crate) fn return_by_ref<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let returned = if let Some(at) = write_place(req, frame, code, op.op1_type, op.op1) {
+        let held = exec::value_of(at.read());
+        let cell = if let Some(cell) = held.as_php_ref() {
+            req.addref(&held);
+            *cell
+        } else {
+            let cell = match req.reference(held.undef_as_null()) {
+                Ok(cell) => cell,
+                Err(thrown) => return threw(req, frame, &thrown),
+            };
+            at.write(cell.as_value().to_zval());
+            req.addref(&cell.as_value());
+            cell
+        };
+        cell.as_value()
+    } else {
+        // `ZEND_RETURNS_VALUE`: a constant or a temporary is no
+        // variable, so php raises its notice and wraps the value in a
+        // cell of its own.
+        crate::api::raising::notice(
+            req,
+            "Only variable references should be returned by reference",
+        );
+        let value = exec::take_operand(req, frame, code, op.op1_type, op.op1);
+        match req.reference(value) {
+            Ok(cell) => cell.as_value(),
+            Err(thrown) => return threw(req, frame, &thrown),
+        }
+    };
+    returned_to_caller::<T>(req, frame, op, returned)
 }
 
 #[cfg(test)]

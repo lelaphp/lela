@@ -3405,7 +3405,7 @@ impl Emit<'_> {
     /// `VAR` it left: php turns the last delayed opline into an
     /// `ASSIGN_*_REF` only for a property and a class's own property,
     /// and leaves a dimension's fetch standing.
-    fn assign_ref(&mut self, target: &Expr, source: &[u8]) -> Result<Where, CompileError> {
+    fn assign_ref(&mut self, target: &Expr, source: &Expr) -> Result<Where, CompileError> {
         let (op1_type, op1) = match target {
             Expr::Var(name) => (OperandKind::Cv, self.lookup_cv(name)),
             Expr::Dim { .. } => {
@@ -3433,16 +3433,33 @@ impl Emit<'_> {
                 ));
             }
         };
-        let source = self.lookup_cv(source);
+        // `zend_compile_var(BP_VAR_W, 1)` over the source, and
+        // `ZEND_RETURNS_FUNCTION` where it is a call
+        // (`zend_is_call`), which is the bit the handler reads to
+        // raise php's notice over a call that returned by value.
+        let (op2_type, op2, flags) = match source {
+            Expr::Var(name) => (OperandKind::Cv, self.lookup_cv(name), 0),
+            call @ Expr::Call { .. } => {
+                let returned = self.expr(call)?;
+                let (op2_type, op2) = self.operand(returned);
+                (op2_type, op2, RETURNS_FUNCTION)
+            }
+            _ => {
+                return Err(self.fatal(
+                    "a by-reference assignment from what is no variable this compiler cannot read yet",
+                ));
+            }
+        };
         let out = self.temporary();
         self.push(Opline {
             opcode: Opcode::AssignRef,
             op1_type,
             op1,
-            op2_type: OperandKind::Cv,
-            op2: source,
+            op2_type,
+            op2,
             out_type: OperandKind::Var,
             out,
+            extended_value: flags,
             ..Opline::default()
         });
         Ok(Where::Returned(out))
@@ -4469,6 +4486,7 @@ impl Emit<'_> {
             return self.ns_call(&resolved, arguments);
         }
         let lowered = resolved.to_ascii_lowercase();
+        let lowered_name = lowered.clone();
         let count = u32::try_from(arguments.len()).unwrap_or(0);
         let (stack, call_op) = match self.native_index(&lowered) {
             Some(index) => {
@@ -4497,8 +4515,40 @@ impl Emit<'_> {
             extended_value: count,
             ..Opline::default()
         });
-        self.args(arguments, true)?;
+        let by_ref = self.send_modes(&lowered_name, arguments.len());
+        self.args(arguments, true, &by_ref)?;
         Ok(self.call_op(call_op))
+    }
+
+    /// `ARG_SHOULD_BE_SENT_BY_REF` (`Z/Zend/zend_compile.h:1141`) over
+    /// the callee the table has, one answer per argument: the
+    /// parameter's own by-reference bit, and the variadic's for every
+    /// argument past the declared ones, since a variadic collects them
+    /// all. A name the table has not is every argument by value, which
+    /// is what the `_EX` sends read off the callee as the program
+    /// serves.
+    fn send_modes(&self, lowered: &[u8], count: usize) -> Vec<bool> {
+        let parameters = match self.native_index(lowered) {
+            Some(index) => self.functions.get(index).map(|decl| &decl.parameters),
+            None => self
+                .functions_declared
+                .iter()
+                .find(|(decl, _)| decl.name.0.to_ascii_lowercase() == lowered)
+                .map(|(decl, _)| &decl.parameters),
+        };
+        let Some(parameters) = parameters else {
+            return Vec::new();
+        };
+        let variadic = parameters.last().filter(|last| last.variadic);
+        (0..count)
+            .map(|at| {
+                parameters
+                    .get(at)
+                    .filter(|parameter| !parameter.variadic)
+                    .or(variadic)
+                    .is_some_and(|parameter| parameter.by_ref)
+            })
+            .collect()
     }
 
     /// `zend_hash_find_ptr(CG(function_table), lcname)` over the
@@ -4536,7 +4586,7 @@ impl Emit<'_> {
             extended_value: count,
             ..Opline::default()
         });
-        self.args(arguments, false)?;
+        self.args(arguments, false, &[])?;
         Ok(self.call_op(Opcode::DoFcallByName))
     }
 
@@ -4564,7 +4614,7 @@ impl Emit<'_> {
             extended_value: count,
             ..Opline::default()
         });
-        self.args(arguments, false)?;
+        self.args(arguments, false, &[])?;
         let served = self.call_op(Opcode::DoFcall);
         self.do_free(served);
         Ok(Where::Returned(out))
@@ -4616,7 +4666,7 @@ impl Emit<'_> {
             }
         };
         self.push(opline);
-        self.args(arguments, known)?;
+        self.args(arguments, known, &[])?;
         Ok(self.call_op(call_op))
     }
 
@@ -4645,7 +4695,7 @@ impl Emit<'_> {
             extended_value: count,
             ..Opline::default()
         });
-        self.args(arguments, false)?;
+        self.args(arguments, false, &[])?;
         Ok(self.call_op(Opcode::DoFcall))
     }
 
@@ -5276,7 +5326,7 @@ impl Emit<'_> {
             extended_value: count,
             ..Opline::default()
         });
-        self.args(arguments, false)?;
+        self.args(arguments, false, &[])?;
         let returned = self.call_op(Opcode::DoFcallByName);
         if let Some((jmp_fl, index)) = branch
             && let Where::Returned(var) = returned
@@ -5331,9 +5381,46 @@ impl Emit<'_> {
     /// `$this` sent to a callee nothing is known of is `FETCH_THIS` into
     /// a `VAR` and `SEND_VAR_EX`; a property fetch sent to one is php's
     /// `CHECK_FUNC_ARG` and `FETCH_OBJ_FUNC_ARG`, not read yet.
-    fn args(&mut self, arguments: &[Expr], known: bool) -> Result<(), CompileError> {
+    fn args(
+        &mut self,
+        arguments: &[Expr],
+        known: bool,
+        by_ref: &[bool],
+    ) -> Result<(), CompileError> {
         for (at, argument) in arguments.iter().enumerate() {
             let number = u32::try_from(at).unwrap_or(0) + 1;
+            // `ARG_SHOULD_BE_SENT_BY_REF` at a call site whose callee the
+            // table has: a variable is compiled under `BP_VAR_W` and sent
+            // by `SEND_REF`; anything else is sent by the `_EX` opcode
+            // its operand asks for, which php delays the error to, since
+            // `Only variables can be passed by reference` is raised where
+            // the argument is placed and not where it is written.
+            if by_ref.get(at).copied().unwrap_or(false) {
+                let (opcode, op1_type, op1) = match argument {
+                    Expr::Var(name) => (Opcode::SendRef, OperandKind::Cv, self.lookup_cv(name)),
+                    other => {
+                        let value = self.expr(other)?;
+                        let (op1_type, op1) = self.operand(value);
+                        let opcode = match op1_type {
+                            OperandKind::Var => Opcode::SendVarNoRefEx,
+                            OperandKind::Cv => Opcode::SendVarEx,
+                            OperandKind::Const | OperandKind::Tmp | OperandKind::Unused => {
+                                Opcode::SendValEx
+                            }
+                        };
+                        (opcode, op1_type, op1)
+                    }
+                };
+                self.push(Opline {
+                    opcode,
+                    op1_type,
+                    op1,
+                    op2: number,
+                    out: number - 1,
+                    ..Opline::default()
+                });
+                continue;
+            }
             let value = match argument {
                 Expr::This if !known => {
                     let this = self.fetch_this(OperandKind::Var);
