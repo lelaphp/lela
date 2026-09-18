@@ -5140,15 +5140,15 @@ fn reflection_class() -> Declared {
             ),
             (
                 tentative(method(b"isAnonymous", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::class::reflection_class_is_anonymous as Entry,
             ),
             (
                 tentative(method(b"isInstantiable", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::class::reflection_class_is_instantiable as Entry,
             ),
             (
                 tentative(method(b"isCloneable", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::class::reflection_class_is_cloneable as Entry,
             ),
             (
                 tentative(method(
@@ -5180,7 +5180,7 @@ fn reflection_class() -> Declared {
                     &[],
                     Some(union(&[Type::String, Type::False])),
                 )),
-                unbuilt as Entry,
+                super::class::reflection_class_get_doc_comment as Entry,
             ),
             (
                 tentative(method(
@@ -5188,7 +5188,7 @@ fn reflection_class() -> Declared {
                     &[],
                     Some(nullable(named(b"ReflectionMethod"))),
                 )),
-                unbuilt as Entry,
+                super::class::reflection_class_get_constructor as Entry,
             ),
             (
                 tentative(method(
@@ -5196,7 +5196,7 @@ fn reflection_class() -> Declared {
                     &[parameter(b"name", Type::String)],
                     Some(Type::Bool),
                 )),
-                unbuilt as Entry,
+                super::class::reflection_class_has_method as Entry,
             ),
             (
                 tentative(method(
@@ -5204,7 +5204,7 @@ fn reflection_class() -> Declared {
                     &[parameter(b"name", Type::String)],
                     Some(named(b"ReflectionMethod")),
                 )),
-                unbuilt as Entry,
+                super::class::reflection_class_get_method as Entry,
             ),
             (
                 tentative(method(
@@ -5216,7 +5216,7 @@ fn reflection_class() -> Declared {
                     )],
                     Some(Type::Array),
                 )),
-                unbuilt as Entry,
+                super::class::reflection_class_get_methods as Entry,
             ),
             (
                 tentative(method(
@@ -5232,7 +5232,7 @@ fn reflection_class() -> Declared {
                     &[parameter(b"name", Type::String)],
                     Some(named(b"ReflectionProperty")),
                 )),
-                unbuilt as Entry,
+                super::class::reflection_class_get_property as Entry,
             ),
             (
                 tentative(method(
@@ -5244,7 +5244,7 @@ fn reflection_class() -> Declared {
                     )],
                     Some(Type::Array),
                 )),
-                unbuilt as Entry,
+                super::class::reflection_class_get_properties as Entry,
             ),
             (
                 tentative(method(
@@ -5264,7 +5264,7 @@ fn reflection_class() -> Declared {
                     )],
                     Some(Type::Array),
                 )),
-                unbuilt as Entry,
+                super::class::reflection_class_get_constants as Entry,
             ),
             (
                 tentative(method(
@@ -5276,7 +5276,7 @@ fn reflection_class() -> Declared {
                     )],
                     Some(Type::Array),
                 )),
-                unbuilt as Entry,
+                super::class::reflection_class_get_reflection_constants as Entry,
             ),
             (
                 tentative(method(
@@ -5292,27 +5292,27 @@ fn reflection_class() -> Declared {
                     &[parameter(b"name", Type::String)],
                     Some(union(&[named(b"ReflectionClassConstant"), Type::False])),
                 )),
-                unbuilt as Entry,
+                super::class::reflection_class_get_reflection_constant as Entry,
             ),
             (
                 tentative(method(b"getInterfaces", &[], Some(Type::Array))),
-                unbuilt as Entry,
+                super::class::reflection_class_get_interfaces as Entry,
             ),
             (
                 tentative(method(b"getInterfaceNames", &[], Some(Type::Array))),
-                unbuilt as Entry,
+                super::class::reflection_class_get_interface_names as Entry,
             ),
             (
                 tentative(method(b"isInterface", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::class::reflection_class_is_interface as Entry,
             ),
             (
                 tentative(method(b"getTraits", &[], Some(Type::Array))),
-                unbuilt as Entry,
+                super::class::reflection_class_get_traits as Entry,
             ),
             (
                 tentative(method(b"getTraitNames", &[], Some(Type::Array))),
-                unbuilt as Entry,
+                super::class::reflection_class_get_trait_names as Entry,
             ),
             (
                 tentative(method(b"getTraitAliases", &[], Some(Type::Array))),
@@ -5320,24 +5320,27 @@ fn reflection_class() -> Declared {
             ),
             (
                 tentative(method(b"isTrait", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::class::reflection_class_is_trait as Entry,
             ),
-            (method(b"isEnum", &[], Some(Type::Bool)), unbuilt as Entry),
+            (
+                method(b"isEnum", &[], Some(Type::Bool)),
+                super::class::reflection_class_is_enum as Entry,
+            ),
             (
                 tentative(method(b"isAbstract", &[], Some(Type::Bool))),
                 unbuilt as Entry,
             ),
             (
                 tentative(method(b"isFinal", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::class::reflection_class_is_final as Entry,
             ),
             (
                 method(b"isReadOnly", &[], Some(Type::Bool)),
-                unbuilt as Entry,
+                super::class::reflection_class_is_read_only as Entry,
             ),
             (
                 tentative(method(b"getModifiers", &[], Some(Type::Int))),
-                unbuilt as Entry,
+                super::class::reflection_class_get_modifiers as Entry,
             ),
             (
                 tentative(method(
@@ -5345,7 +5348,7 @@ fn reflection_class() -> Declared {
                     &[parameter(b"object", Type::Object)],
                     Some(Type::Bool),
                 )),
-                unbuilt as Entry,
+                super::class::reflection_class_is_instance as Entry,
             ),
             (
                 tentative(method(
@@ -5353,7 +5356,7 @@ fn reflection_class() -> Declared {
                     &[variadic(b"args", Type::Mixed)],
                     Some(Type::Object),
                 )),
-                unbuilt as Entry,
+                super::class::reflection_class_new_instance as Entry,
             ),
             (
                 tentative(method(
@@ -5361,7 +5364,7 @@ fn reflection_class() -> Declared {
                     &[],
                     Some(Type::Object),
                 )),
-                unbuilt as Entry,
+                super::class::reflection_class_new_instance_without_constructor as Entry,
             ),
             (
                 tentative(method(
@@ -5373,7 +5376,7 @@ fn reflection_class() -> Declared {
                     )],
                     Some(nullable(Type::Object)),
                 )),
-                unbuilt as Entry,
+                super::class::reflection_class_new_instance_args as Entry,
             ),
             (
                 method(
@@ -5459,7 +5462,7 @@ fn reflection_class() -> Declared {
                     &[],
                     Some(union(&[named(b"ReflectionClass"), Type::False])),
                 )),
-                unbuilt as Entry,
+                super::class::reflection_class_get_parent_class as Entry,
             ),
             (
                 tentative(method(
@@ -5504,11 +5507,11 @@ fn reflection_class() -> Declared {
             ),
             (
                 tentative(method(b"isIterable", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::class::reflection_class_is_iterable as Entry,
             ),
             (
                 tentative(method(b"isIterateable", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::class::reflection_class_is_iterable as Entry,
             ),
             (
                 tentative(method(
@@ -5519,7 +5522,7 @@ fn reflection_class() -> Declared {
                     )],
                     Some(Type::Bool),
                 )),
-                unbuilt as Entry,
+                super::class::reflection_class_implements_interface as Entry,
             ),
             (
                 tentative(method(
