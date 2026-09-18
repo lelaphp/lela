@@ -28,19 +28,22 @@ fn main() -> ExitCode {
     let options = match Options::parse(&argv) {
         Ok(options) => options,
         Err(refused) => {
-            if refused.on_stderr {
-                let _ = std::io::stderr()
-                    .lock()
-                    .write_all(refused.message.as_bytes());
-            } else {
-                let _ = std::io::stdout()
-                    .lock()
-                    .write_all(refused.message.as_bytes());
-            }
+            let _ = std::io::stderr()
+                .lock()
+                .write_all(refused.stderr.as_bytes());
+            let _ = std::io::stdout()
+                .lock()
+                .write_all(refused.stdout.as_bytes());
             return code(refused.exit_code);
         }
     };
     match &options.ask {
+        Ask::Usage => {
+            let _ = std::io::stdout()
+                .lock()
+                .write_all(php_sapi::cli::usage_text().as_bytes());
+            code(0)
+        }
         Ask::Version => {
             let _ = std::io::stdout()
                 .lock()
@@ -63,6 +66,25 @@ fn main() -> ExitCode {
         Ask::Serve(program, arguments) => {
             let engine = engine(&options);
             code(php_sapi::cli::serve(&engine, program, arguments))
+        }
+        // `do_cli`'s lint loop: the status starts at 0, a lint that fails
+        // sets 255 and a file that cannot be opened sets 1, each as it
+        // comes, and one that passes changes nothing.
+        Ask::Lint { programs, refused } => {
+            let mut status = 0;
+            if let Some(sentence) = refused {
+                let _ = std::io::stdout().lock().write_all(sentence.as_bytes());
+                status = 1;
+            }
+            let engine = engine(&options);
+            let mut sink = php_sapi::cli::Process;
+            for program in programs {
+                match php_sapi::cli::lint(&engine, program, &mut sink) {
+                    0 => {}
+                    ended => status = ended,
+                }
+            }
+            code(status)
         }
     }
 }
