@@ -1018,7 +1018,14 @@ pub(crate) fn new<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let class = match class_operand(req, code, op.op1_type, op.op1) {
+    let class = match class_operand(
+        req,
+        frame,
+        code,
+        op.op1_type,
+        op.op1,
+        Some(CacheSlot(op.op2)),
+    ) {
         Ok(class) => class,
         Err(thrown) => return threw(req, frame, &thrown),
     };
@@ -1140,7 +1147,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let class = match class_operand(req, code, op.op1_type, op.op1) {
+    let class = match class_operand(req, frame, code, op.op1_type, op.op1, None) {
         Ok(class) => class,
         Err(thrown) => return threw(req, frame, &thrown),
     };
@@ -1455,7 +1462,14 @@ pub(crate) fn fetch_class_constant<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let class = match class_operand(req, code, op.op1_type, op.op1) {
+    let class = match class_operand(
+        req,
+        frame,
+        code,
+        op.op1_type,
+        op.op1,
+        Some(CacheSlot(op.extended_value)),
+    ) {
         Ok(class) => class,
         Err(thrown) => return threw(req, frame, &thrown),
     };
@@ -1884,10 +1898,8 @@ pub(crate) fn instanceof<T: Tier>(
     let value = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
     let answer = match (value.as_object(), op.op2_type) {
         (Some(object), OperandKind::Const) => {
-            let lowered = exec::constant(code, ConstIdx(op.op2.saturating_add(1)));
-            lowered
-                .as_str_bytes()
-                .and_then(|lowered| req.class_named(lowered))
+            let slot = Some(CacheSlot(op.extended_value));
+            cached_class(req, frame, code, op.op2, slot)
                 .is_some_and(|class| req.instance_of(object.class(), class))
         }
         (Some(_), _) => {
@@ -1904,15 +1916,51 @@ pub(crate) fn instanceof<T: Tier>(
     Ok(advance(req, frame))
 }
 
+/// `CACHED_PTR(slot)`, else `zend_lookup_class_ex` under
+/// `ZEND_FETCH_CLASS_NO_AUTOLOAD` over the lowered half of the constant
+/// pair at `at` and `CACHE_PTR(slot, ce)` over what it found: the
+/// silent resolution `ZEND_CATCH` and `ZEND_INSTANCEOF` make, and the
+/// lookup half of the throwing one, [`class_operand`]. A name nothing
+/// declares primes nothing — php's `CATCH` writes the null it found and
+/// reads it back as unprimed, and the other three throw before
+/// `CACHE_PTR` — so a class declared after a pass is found by the next.
+///
+/// No slot is [`init_static_method_call`]'s: php primes that one with
+/// the class alone only where `op2` is no constant, and with the class
+/// and the callee together where it is (`CACHE_POLYMORPHIC_PTR`), a
+/// pair this cache has no variant for (#433).
+fn cached_class(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    at: u32,
+    slot: Option<CacheSlot>,
+) -> Option<crate::api::values::ClassId> {
+    if let Some(Cached::Class(class)) = slot.map(|slot| req.vm().cached(frame, slot)) {
+        return Some(class);
+    }
+    let lowered = exec::constant(code, ConstIdx(at.saturating_add(1)));
+    let found = lowered
+        .as_str_bytes()
+        .and_then(|lowered| exec::find_class(req, lowered));
+    if let (Some(slot), Some(class)) = (slot, found) {
+        req.vm_mut().prime(frame, slot, Cached::Class(class));
+    }
+    found
+}
+
 /// `zend_fetch_class_by_name` with `ZEND_FETCH_CLASS_EXCEPTION` over a
-/// class's constant pair: the class under the lowered name in the slot
-/// after `at`, and php's `Error` naming the one as written where
-/// nothing declares it. A class named as the program serves is not served yet.
+/// class's constant pair: the class the opline's cache slot holds or
+/// [`cached_class`] looks up under the lowered name in the slot after
+/// `at`, and php's `Error` naming the one as written where nothing
+/// declares it. A class named as the program serves is not served yet.
 fn class_operand(
     req: &mut Request,
+    frame: FrameRef,
     code: &OpArray,
     kind: OperandKind,
     at: u32,
+    slot: Option<CacheSlot>,
 ) -> Result<crate::api::values::ClassId, Thrown> {
     if kind != OperandKind::Const {
         return Err(crate::api::raising::fatal(
@@ -1920,11 +1968,7 @@ fn class_operand(
             "InternalError: a class named at run time is not served",
         ));
     }
-    let lowered = exec::constant(code, ConstIdx(at.saturating_add(1)));
-    if let Some(class) = lowered
-        .as_str_bytes()
-        .and_then(|lowered| req.class_named(lowered))
-    {
+    if let Some(class) = cached_class(req, frame, code, at, slot) {
         return Ok(class);
     }
     let written = exec::constant(code, ConstIdx(at));
@@ -2084,7 +2128,7 @@ pub(crate) fn jmp_frameless<T: Tier>(
     let answer = match req.vm().cached(frame, slot) {
         Cached::Hit => Cached::Hit,
         Cached::Miss => Cached::Miss,
-        Cached::Unprimed | Cached::Function(_) => {
+        Cached::Unprimed | Cached::Function(_) | Cached::Class(_) => {
             let name = exec::constant(code, ConstIdx(op.op1));
             let found = name
                 .as_str_bytes()
@@ -4304,9 +4348,12 @@ fn thrown_value(req: &mut Request, value: &Value) -> Thrown {
 /// names, a reference the CV holds written through, and gives it up
 /// where the clause names no variable.
 ///
-/// php primes the cache slot `extended_value` carries with the class it
-/// resolved; the lookup is made on every pass here, which is the
-/// reading a program never given the slot would have had.
+/// The class is resolved once: the slot `extended_value` carries beside
+/// `ZEND_LAST_CATCH` holds it after the first pass, and every pass after
+/// reads it back, `CACHE_PTR(opline->extended_value & ~ZEND_LAST_CATCH,
+/// catch_ce)` over [`cached_class`]. A clause naming a class nothing
+/// declares primes nothing, so it looks the table up on every pass, as
+/// php's does over the null it cached.
 ///
 /// ```php
 /// function f() { try { throw new TypeError("t"); } catch (ValueError $e) { echo "no\n"; } }
@@ -4319,6 +4366,20 @@ fn thrown_value(req: &mut Request, value: &Value) -> Thrown {
 /// TypeError m
 /// bare
 /// ```
+///
+/// The slot is the frame's, so every iteration of a loop reads the one
+/// the first pass primed, and the clause answers the same each time.
+///
+/// ```php
+/// for ($i = 0; $i < 3; $i++) {
+///   try { throw new TypeError("t$i"); } catch (ValueError $e) { echo "no\n"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// t0
+/// t1
+/// t2
+/// ```
 pub(crate) fn catch<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -4328,9 +4389,8 @@ pub(crate) fn catch<T: Tier>(
     let Some(pending) = req.pending() else {
         return jump_to(req, frame, op.op2);
     };
-    let matched = exec::constant(code, ConstIdx(op.op1.saturating_add(1)))
-        .as_str_bytes()
-        .and_then(|lowered| req.class_named(lowered))
+    let slot = Some(CacheSlot(op.extended_value & !LAST_CATCH));
+    let matched = cached_class(req, frame, code, op.op1, slot)
         .is_some_and(|of| req.instance_of(pending.class(), of));
     if !matched {
         if op.extended_value & LAST_CATCH != 0 {
@@ -4711,6 +4771,7 @@ mod tests {
     use php_unit::{Opcode, OperandKind, Unit};
 
     use super::*;
+    use crate::api::values::{ClassId, PhpObject};
     use crate::engine::{Engine, RequestDescription};
     use crate::probe::{Asked, Probe};
     use crate::tier::Nop;
@@ -5156,6 +5217,213 @@ mod tests {
             assert_eq!(req.vm().cached(frame, CacheSlot(0)), Cached::Unprimed);
             assert!(matches!(req.uncaught(), Err(Fatal::Error(_))));
         }
+    }
+
+    /// A unit whose main op array is one `CATCH` of the class the pair
+    /// `written`/`lowered` names, the last clause of its `try`
+    /// (`ZEND_LAST_CATCH`), naming no variable, its cache slot at byte
+    /// zero and its jump to the `NOP` after it.
+    fn catching(strings: &mut php_heap::Strings, written: &[u8], lowered: &[u8]) -> Arc<Unit> {
+        Arc::new(Unit {
+            main: OpArray {
+                oplines: vec![
+                    Opline {
+                        opcode: Opcode::Catch,
+                        op1_type: OperandKind::Const,
+                        op1: 0,
+                        op2: 1,
+                        out_type: OperandKind::Unused,
+                        extended_value: LAST_CATCH,
+                        ..Opline::default()
+                    },
+                    Opline::default(),
+                ]
+                .into_boxed_slice(),
+                literals: vec![interned(strings, written), interned(strings, lowered)]
+                    .into_boxed_slice(),
+                cache_size: 8,
+                ..OpArray::default()
+            },
+            ..Unit::default()
+        })
+    }
+
+    /// `ZEND_CATCH` over two passes of one opline, which is what a
+    /// `catch` inside a loop is: the first finds its cache slot
+    /// unprimed, looks the class up once and writes the clause's
+    /// class into the slot the `extended_value` carries beside
+    /// `ZEND_LAST_CATCH`, `CACHE_PTR(opline->extended_value &
+    /// ~ZEND_LAST_CATCH, catch_ce)`; the second reads it back and looks
+    /// nothing up.
+    #[test]
+    fn a_catch_looks_the_class_up_once_and_reads_its_slot_after() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let mut strings = php_heap::Strings::new();
+        let unit = catching(&mut strings, b"Error", b"error");
+        let frame = req.push_frame(Arc::clone(&unit));
+        let code = crate::exec::code_of(&unit);
+        let clause = code.oplines.first().copied().unwrap_or_default();
+        let error = req.class_named(b"error");
+        assert!(error.is_some(), "the engine declares Error");
+        assert_eq!(req.vm().cached(frame, CacheSlot(0)), Cached::Unprimed);
+
+        for pass in 1..=2 {
+            let thrown = crate::api::raising::throw(&mut req, "Error", "e");
+            req.leave_pending(&thrown);
+            req.vm_mut().jump(frame, 0);
+            assert_eq!(
+                catch::<Nop>(&mut req, frame, code, &clause),
+                Ok(Stepped::Same(frame))
+            );
+            assert!(
+                req.pending().is_none(),
+                "the clause caught it on pass {pass}"
+            );
+            assert_eq!(req.vm().lookups, 1, "one lookup over {pass} pass(es)");
+            assert!(
+                matches!(req.vm().cached(frame, CacheSlot(0)), Cached::Class(class) if Some(class) == error),
+                "the clause's class is in the slot after pass {pass}"
+            );
+        }
+    }
+
+    /// A clause naming a class nothing declares primes nothing, as
+    /// php's caches the null `zend_lookup_class_ex` gave it and reads it
+    /// back as unprimed: the table is looked up on every pass, and the
+    /// throwable the clause does not match is left pending by the
+    /// `ZEND_LAST_CATCH` for the unwinder.
+    #[test]
+    fn a_catch_of_no_class_primes_no_slot() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let mut strings = php_heap::Strings::new();
+        let unit = catching(&mut strings, b"NoPe", b"nope");
+        let frame = req.push_frame(Arc::clone(&unit));
+        let code = crate::exec::code_of(&unit);
+        let clause = code.oplines.first().copied().unwrap_or_default();
+        let thrown = crate::api::raising::throw(&mut req, "Error", "e");
+        req.leave_pending(&thrown);
+
+        for pass in 1..=2 {
+            req.vm_mut().jump(frame, 0);
+            assert_eq!(
+                catch::<Nop>(&mut req, frame, code, &clause),
+                Ok(Stepped::Threw(frame))
+            );
+            assert_eq!(req.vm().lookups, pass, "looked up again on pass {pass}");
+            assert_eq!(req.vm().cached(frame, CacheSlot(0)), Cached::Unprimed);
+        }
+        assert!(matches!(req.uncaught(), Err(Fatal::Error(_))));
+    }
+
+    /// The other three handlers that resolve a class off a constant
+    /// pair read the slot their opline names, `NEW`'s in `op2` and
+    /// `INSTANCEOF`'s and `FETCH_CLASS_CONSTANT`'s in `extended_value`:
+    /// a slot primed with `stdClass` answers all three over a pair that
+    /// names `NoPe`, which nothing declares, so a handler that looked
+    /// the table up would throw `Class "NoPe" not found` instead. The
+    /// class constant is one `stdClass` has not, so what it throws
+    /// names the class the slot held.
+    #[test]
+    fn new_instanceof_and_a_class_constant_read_the_class_off_their_slot() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let mut strings = php_heap::Strings::new();
+        let unit = Arc::new(Unit {
+            main: OpArray {
+                oplines: vec![
+                    Opline {
+                        opcode: Opcode::New,
+                        op1_type: OperandKind::Const,
+                        op1: 0,
+                        op2: 0,
+                        out_type: OperandKind::Var,
+                        out: 0,
+                        ..Opline::default()
+                    },
+                    Opline {
+                        opcode: Opcode::DoFcall,
+                        ..Opline::default()
+                    },
+                    Opline {
+                        opcode: Opcode::Instanceof,
+                        op1_type: OperandKind::Var,
+                        op1: 0,
+                        op2_type: OperandKind::Const,
+                        op2: 0,
+                        out_type: OperandKind::Tmp,
+                        out: 1,
+                        extended_value: 8,
+                        ..Opline::default()
+                    },
+                    Opline {
+                        opcode: Opcode::FetchClassConstant,
+                        op1_type: OperandKind::Const,
+                        op1: 0,
+                        op2_type: OperandKind::Const,
+                        op2: 2,
+                        out_type: OperandKind::Tmp,
+                        out: 2,
+                        extended_value: 16,
+                        ..Opline::default()
+                    },
+                ]
+                .into_boxed_slice(),
+                literals: vec![
+                    interned(&mut strings, b"NoPe"),
+                    interned(&mut strings, b"nope"),
+                    interned(&mut strings, b"NOPE"),
+                ]
+                .into_boxed_slice(),
+                num_tmps: 3,
+                cache_size: 24,
+                ..OpArray::default()
+            },
+            ..Unit::default()
+        });
+        let frame = req.push_frame(Arc::clone(&unit));
+        let code = crate::exec::code_of(&unit);
+        let named = req.class_named(b"stdclass");
+        assert!(named.is_some(), "the engine declares stdClass");
+        let class = named.unwrap_or(ClassId(u32::MAX));
+        for slot in [0, 8, 16] {
+            req.vm_mut()
+                .prime(frame, CacheSlot(slot), Cached::Class(class));
+        }
+
+        let new_op = code.oplines.first().copied().unwrap_or_default();
+        assert_eq!(
+            new::<Nop>(&mut req, frame, code, &new_op),
+            Ok(Stepped::Same(frame))
+        );
+        assert_eq!(
+            req.slot(frame, 0).as_object().map(PhpObject::class),
+            Some(class),
+            "NEW took its class off op2's slot"
+        );
+
+        let instanceof_op = code.oplines.get(2).copied().unwrap_or_default();
+        assert_eq!(
+            instanceof::<Nop>(&mut req, frame, code, &instanceof_op),
+            Ok(Stepped::Same(frame))
+        );
+        assert_eq!(
+            req.slot(frame, 1).as_bool(),
+            Some(true),
+            "INSTANCEOF took its class off extended_value's slot"
+        );
+
+        let constant_op = code.oplines.get(3).copied().unwrap_or_default();
+        assert_eq!(
+            fetch_class_constant::<Nop>(&mut req, frame, code, &constant_op),
+            Ok(Stepped::Threw(frame))
+        );
+        assert!(
+            matches!(req.uncaught(), Err(Fatal::Error(message)) if message.contains("Undefined constant stdClass::NOPE")),
+            "FETCH_CLASS_CONSTANT took its class off extended_value's slot"
+        );
+        assert_eq!(req.vm().lookups, 0, "no handler looked the table up");
     }
 
     /// A unit whose main op array is `JMP_FRAMELESS` over `name`, its

@@ -126,12 +126,13 @@ pub(crate) struct FastCall {
 
 /// One slot of the runtime cache, the `void *` at `CACHE_ADDR(num)`,
 /// named by what the opline that owns the slot writes into it:
-/// `CACHE_PTR(opline->result.num, fbc)` from the `INIT_*` handlers, and
-/// `zend_jmp_fl_result` from `JMP_FRAMELESS`, whose three values are
-/// `ZEND_JMP_FL_UNPRIMED = 0`, `ZEND_JMP_FL_MISS = 1` and
-/// `ZEND_JMP_FL_HIT = 2` (`Z/Zend/zend_frameless_function.h:126`). Zero
-/// is what the fresh cache holds, so the first pass of either finds
-/// `Unprimed` and looks the table up once.
+/// `CACHE_PTR(opline->result.num, fbc)` from the `INIT_*` handlers,
+/// `CACHE_PTR(..., ce)` from the handlers that resolve a class off a
+/// constant pair, and `zend_jmp_fl_result` from `JMP_FRAMELESS`, whose
+/// three values are `ZEND_JMP_FL_UNPRIMED = 0`, `ZEND_JMP_FL_MISS = 1`
+/// and `ZEND_JMP_FL_HIT = 2` (`Z/Zend/zend_frameless_function.h:126`).
+/// Zero is what the fresh cache holds, so the first pass of any of them
+/// finds `Unprimed` and looks the table up once.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum Cached {
     /// Nothing written yet: the table is looked up on this pass.
@@ -140,6 +141,12 @@ pub(crate) enum Cached {
     /// The callee an `INIT_FCALL`, `INIT_FCALL_BY_NAME` or
     /// `INIT_NS_FCALL_BY_NAME` resolved on its first pass.
     Function(Function),
+    /// The class a `CATCH`, `NEW`, `INSTANCEOF` or
+    /// `FETCH_CLASS_CONSTANT` resolved off its constant pair on its
+    /// first pass, `CACHE_PTR(..., ce)`. A class the linker has placed
+    /// stays in the table for the life of the request, so a slot this
+    /// primed answers every pass after.
+    Class(ClassId),
     /// `ZEND_JMP_FL_MISS`: the table has the name in the namespace, so
     /// the jump is not taken and the call by name after it runs.
     Miss,
@@ -210,9 +217,9 @@ pub(crate) enum CallStage {
 pub(crate) struct Vm {
     frames: Vec<FrameState>,
     calls: Vec<CallState>,
-    /// How many times a kernel has looked a name up in the function
-    /// table, which is what a primed cache slot spares: the tests count
-    /// it across two passes of one opline.
+    /// How many times a kernel has looked a name up among the linked
+    /// functions or the linked classes, which is what a primed cache
+    /// slot spares: the tests count it across two passes of one opline.
     #[cfg(test)]
     pub(crate) lookups: u32,
 }
@@ -226,6 +233,20 @@ pub(crate) fn find_function(req: &mut Request, name: &[u8]) -> Option<Function> 
         req.vm_mut().lookups = req.vm_mut().lookups.saturating_add(1);
     }
     req.function_named(name)
+}
+
+/// `zend_lookup_class_ex(name, NULL, ZEND_FETCH_CLASS_NO_AUTOLOAD)`
+/// from a kernel whose opline owns a cache slot: the linked classes'
+/// half of [`find_function`], made here and nowhere else so the tests
+/// count what a primed slot spares. The lowered name is what the lookup
+/// is keyed by, so it is the half of the constant pair a caller hands
+/// over.
+pub(crate) fn find_class(req: &mut Request, lowered: &[u8]) -> Option<ClassId> {
+    #[cfg(test)]
+    {
+        req.vm_mut().lookups = req.vm_mut().lookups.saturating_add(1);
+    }
+    req.class_named(lowered)
 }
 
 impl Vm {
