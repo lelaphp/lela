@@ -13,6 +13,7 @@ Arr::is_packed
 Arr::is_recursive
 Arr::is_same
 Arr::iter
+Arr::live_from
 Arr::len
 Arr::next_free
 Arr::position
@@ -176,6 +177,7 @@ Zval::as_resource
 Zval::as_str
 Zval::bool
 Zval::double
+Zval::fe_pos
 Zval::indirect
 Zval::is_refcounted
 Zval::is_undef
@@ -185,6 +187,7 @@ Zval::null
 Zval::object
 Zval::reference
 Zval::resource
+Zval::set_fe_pos
 Zval::string
 ZvalRef
 ZvalRef::read

@@ -747,6 +747,18 @@ impl Arr {
         Some((self.key_at(pos), z))
     }
 
+    /// The scan `ZEND_FE_FETCH_R` runs from a position: the first live
+    /// position at or after `pos`, with its key and value, or `None`
+    /// when only tombstones stand between `pos` and `nNumUsed`. The
+    /// value is copied and no owner taken. The key of a packed array's
+    /// element is its position, as `ZVAL_LONG(result, pos)` reads it.
+    #[must_use]
+    pub fn live_from(&self, pos: u32) -> Option<(u32, Key, Zval)> {
+        let pos = self.valid_pos(pos);
+        let (key, z) = self.entry_at(pos)?;
+        Some((pos, key, z))
+    }
+
     /// `zend_hash_internal_pointer_reset`, `reset()`.
     pub fn reset(&self) {
         self.header().internal_pointer.set(self.valid_pos(0));

@@ -37,7 +37,8 @@
 //! namespace, `ZEND_JMP_FRAMELESS` and `ZEND_INIT_NS_FCALL_BY_NAME`;
 //! and `ZEND_CLONE`, the class's `clone_obj` through its handler table
 //! (#281); and `ZEND_ASSIGN_REF`, which binds two CVs to one cell
-//! (#286).
+//! (#286); and the three a `foreach` over an array compiles to (#305):
+//! `ZEND_FE_RESET_R`, `ZEND_FE_FETCH_R` and `ZEND_FE_FREE`.
 
 // Every handler is generic over the tier and hands back the same edge, so
 // the generated dispatch calls them all the same way; the ones that raise a
@@ -2198,6 +2199,202 @@ fn add_element(
         Ok(()) => Ok(advance(req, frame)),
         Err(thrown) => threw(req, frame, &thrown),
     }
+}
+
+/// `ZEND_FE_RESET_R` (`Z/Zend/zend_vm_def.h:6882`), the first opline of
+/// a `foreach` by value: the subject read under `BP_VAR_R` with a
+/// reference followed (`GET_OP1_ZVAL_PTR_DEREF`), so a CV nothing wrote
+/// is the undefined-variable warning and `null`. An array is copied
+/// into the `VAR` the opline's `result` names (`ZVAL_COPY_VALUE`) with
+/// one more owner taken unless the operand is a `TMP`, whose owner
+/// moves; the position `Z_FE_POS` starts at zero; a `VAR` operand is
+/// freed (`FREE_OP1_IF_VAR`) and the next opline is the `FE_FETCH_R`.
+/// An operand that is neither array nor object is php's warning, the
+/// `VAR` left `UNDEF`, the operand freed (`FREE_OP1`) and the jump
+/// `op2` names, to the `FE_FREE` past the loop. An object, which php
+/// walks through its property table or its `get_iterator`, is not
+/// served yet and is an internal error rather than a loop that runs
+/// wrong (#367).
+///
+/// A packed array, a hash with string keys and an empty one: the loop
+/// over the third runs its body no time. The key and the value are
+/// echoed apart until the rope an interpolated string compiles to is
+/// served (#355).
+///
+/// ```php
+/// foreach (['x', 'y'] as $p) echo $p; foreach ([] as $v) echo 'no'; foreach (['k' => 1] as $k => $v) echo $k, '=', $v;
+/// ```
+/// ```expect
+/// xyk=1
+/// ```
+///
+/// The warning names the value as `zend_zval_value_name` names it,
+/// and the request runs on past the loop.
+///
+/// ```php
+/// foreach (1 as $v) {} echo "on";
+/// ```
+/// ```expect
+/// Warning: foreach() argument must be of type array|object, int given in %s on line 2
+/// on
+/// ```
+///
+/// The loop reads the array it copied, so an assignment to the subject
+/// inside the body changes nothing the loop sees, and the copy takes no
+/// element of its own: one more owner, released by the `FE_FREE`. The
+/// delta is read before anything is printed, as `ASSIGN`'s are.
+///
+/// ```php
+/// $a = [1, 2, 3]; $b = memory_get_usage(); $n = 0;
+/// foreach ($a as $v) { $a = []; $n = $n * 10 + $v; }
+/// $d = memory_get_usage() - $b; var_dump($n, $a, $d);
+/// ```
+/// ```expect
+/// int(123)
+/// array(0) {
+/// }
+/// int(0)
+/// ```
+pub(crate) fn fe_reset_r<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let subject = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
+    let slot = exec::temporary_slot(code, op.out);
+    if subject.as_array().is_some() {
+        if op.op1_type != OperandKind::Tmp {
+            req.addref(&subject);
+        }
+        let previous = req.set_slot(frame, slot, subject);
+        req.release(previous);
+        if op.op1_type == OperandKind::Var {
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+        }
+        return Ok(advance(req, frame));
+    }
+    if subject.as_object().is_some() {
+        return Err(Fatal::Error(String::from(
+            "InternalError: FE_RESET_R over an object, which is not served yet",
+        )));
+    }
+    crate::api::raising::warning(
+        req,
+        &format!(
+            "foreach() argument must be of type array|object, {} given",
+            crate::ops::value_name(req, &subject)
+        ),
+    );
+    let previous = req.set_slot(frame, slot, Value::undef());
+    req.release(previous);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    req.vm_mut().jump(frame, op.op2);
+    Ok(Stepped::Same(frame))
+}
+
+/// `ZEND_FE_FETCH_R` (`Z/Zend/zend_vm_def.h:7176`): the array in the
+/// `VAR` `op1` names, read in place so its `Z_FE_POS` is the position
+/// the last fetch left; the first live bucket from there
+/// ([`php_heap::Arr::live_from`], the `while` over `IS_UNDEF`), or the
+/// jump to the opline `extended_value` names when none is left. The
+/// position moves one past the bucket, the key is written to the
+/// `result` temporary when the opline has one (`RETURN_VALUE_USED`): the
+/// position of a packed array's element, the bucket's `h` or its string
+/// with one more owner (`ZVAL_STR_COPY`) for a hash. The value goes to
+/// the CV `op2` names through `zend_assign_to_variable`, which is what
+/// [`assign`] does: one more owner of the value with a reference
+/// followed, written through the cell the CV holds or over what it held,
+/// which is released after the write.
+///
+/// The key temporary is what the `ASSIGN` after the fetch moves into the
+/// key variable: the position for a packed array, the bucket's key for
+/// a hash, the integer one `nNextFreeElement` gave included.
+///
+/// ```php
+/// foreach ([10, 20, 30] as $k => $v) echo $k, ':', $v, ';';
+/// foreach (['b' => 1, 5 => 2, 'c' => 3, 4] as $k => $v) echo $k, ':', $v, ';';
+/// ```
+/// ```expect
+/// 0:10;1:20;2:30;b:1;5:2;c:3;6:4;
+/// ```
+pub(crate) fn fe_fetch_r<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let slot = exec::temporary_slot(code, op.op1);
+    let Some(at) = req.slot_ptr(frame, slot) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: FE_FETCH_R over a VAR the frame does not have",
+        )));
+    };
+    let mut held = at.read();
+    let Some(array) = held.as_arr() else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: FE_FETCH_R over a VAR holding no array",
+        )));
+    };
+    let Some((pos, key, value)) = array.live_from(held.fe_pos()) else {
+        req.vm_mut().jump(frame, op.extended_value);
+        return Ok(Stepped::Same(frame));
+    };
+    held.set_fe_pos(pos.saturating_add(1));
+    at.write(held);
+    if op.out_type != OperandKind::Unused {
+        let key = match key {
+            php_heap::Key::Long(n) => Value::int(n),
+            php_heap::Key::Str(s) => {
+                let s = Value::string(crate::api::values::PhpString::of(s));
+                req.addref(&s);
+                s
+            }
+        };
+        let out = exec::temporary_slot(code, op.out);
+        let previous = req.set_slot(frame, out, key);
+        req.release(previous);
+    }
+    let value = exec::value_of(value).deref();
+    req.addref(&value);
+    if let Some(r) = req.slot(frame, op.op2).as_php_ref() {
+        req.reference_set(r.heap(), value);
+    } else {
+        let garbage = req.set_slot(frame, op.op2, value);
+        req.release(garbage);
+    }
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_FE_FREE` (`Z/Zend/zend_vm_def.h:3260`): the `VAR` the
+/// `FE_RESET_R` filled given up where the loop ends, the array's owner
+/// released (`zval_ptr_dtor_nogc`), and nothing over the `UNDEF` a
+/// warned-on reset left. The `FE_FETCH_R` before it jumps here, and a
+/// `break` out of the loop lands here too.
+///
+/// The array the `INIT_ARRAY` built is given back here and the string
+/// it held stays with `$s` alone, 3072 bytes in the bin php puts it in,
+/// given back when `$s` lets go; the deltas are read before anything is
+/// printed, as `ASSIGN`'s are.
+///
+/// ```php
+/// $b = memory_get_usage();
+/// foreach ([str_repeat('a', 3000)] as $s) { $n = strlen($s); break; }
+/// $held = memory_get_usage() - $b; $s = 1; $after = memory_get_usage() - $b; var_dump($n, $held, $after);
+/// ```
+/// ```expect
+/// int(3000)
+/// int(3072)
+/// int(0)
+/// ```
+pub(crate) fn fe_free<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    Ok(advance(req, frame))
 }
 
 /// `ZEND_ADD`: [`crate::ops::add`] over the two operands, into the

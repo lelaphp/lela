@@ -249,6 +249,21 @@ impl Zval {
         self.u2 = next;
     }
 
+    /// `Z_FE_POS`: the same `u2` word read as a `foreach`'s position in
+    /// the array the zval holds, which `FE_RESET_R` leaves at zero in
+    /// the `VAR` it fills and `FE_FETCH_R` moves one past each element it
+    /// fetched. Zero on every zval built here, so a copied value starts
+    /// a loop at the beginning.
+    #[must_use]
+    pub const fn fe_pos(self) -> u32 {
+        self.u2
+    }
+
+    /// Write `Z_FE_POS`.
+    pub const fn set_fe_pos(&mut self, pos: u32) {
+        self.u2 = pos;
+    }
+
     /// The payload of a `Long`, else `None`.
     #[must_use]
     pub const fn as_long(self) -> Option<i64> {
