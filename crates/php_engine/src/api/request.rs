@@ -827,6 +827,34 @@ impl Request {
     /// pending is the `Err`, the throwable's one owner with it, so a
     /// native reads a callback's raise the way it reads its own
     /// ([`Request::leave_pending`] puts it back).
+    /// A callback with a declared parameter type is held to it here as
+    /// it is held to it under `DO_UCALL`, since one
+    /// [`crate::exec::parameter_prologue`] serves both: a typed
+    /// parameter reaches its `RECV` whatever the call filled, so the
+    /// coercion a scalar argument carries outside `strict_types` is
+    /// served and the `TypeError` for what does not convert is raised,
+    /// with the boundary named `[internal function]` as
+    /// `zend_trace_to_string` names a frame no opline called.
+    ///
+    /// ```php
+    /// function f(int $a) { var_dump($a); }
+    /// register_shutdown_function('f', "5");
+    /// ```
+    /// ```expect
+    /// int(5)
+    /// ```
+    ///
+    /// ```php
+    /// function f(int $a) { var_dump($a); }
+    /// register_shutdown_function('f', []);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught TypeError: f(): Argument #1 ($a) must be of type int, array given in %s:2
+    /// Stack trace:
+    /// #0 [internal function]: f(Array)
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
     fn serve_user(&mut self, function: Function, call: CallState) -> Result<Value, Thrown> {
         let standing = self.vm.frames().len();
         let passed = call.arguments.len();
