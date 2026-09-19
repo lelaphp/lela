@@ -2820,6 +2820,11 @@ mod tests {
             .map_or(dump.clone(), |(_, rest)| rest.to_owned())
     }
 
+    /// The message one source refuses with, or nothing.
+    fn refused_message(source: &[u8]) -> Option<String> {
+        refused(source).map(|e| e.message)
+    }
+
     /// The compile error one source refuses with, or nothing.
     fn refused(source: &[u8]) -> Option<CompileError> {
         let mut strings = php_heap::Strings::new();
@@ -3810,6 +3815,91 @@ mod tests {
                  0013 T15 = ASSIGN_OP (ADD) CV0($a) int(2)\n\
                  0014 ASSIGN CV1($b) T15\n\
                  0015 RETURN int(1)\n"
+            )
+        );
+    }
+
+    /// `zend_delayed_compile_var` as the base of a chain of dimensions
+    /// (#451), the oracle's dump under `[regime.dump]` at 8.5.9: a
+    /// property is the one fetch php holds back, so its `FETCH_OBJ_R`
+    /// stands after the oplines of whatever the dimension compiled to,
+    /// which is what puts `f`'s call before the fetch of `p` in
+    /// `$o->p[f()]` while the fetch keeps the lower temporary; under a
+    /// write it is `FETCH_OBJ_W` carrying `ZEND_FETCH_DIM_WRITE`, the
+    /// bit the dump prints as `(dim write)`. A call is compiled where
+    /// it stands and takes `SEPARATE` over its own `VAR` under a write
+    /// (`zend_separate_if_call_and_write`), which the dump prints into
+    /// the same `VAR` it reads.
+    #[test]
+    fn the_base_of_a_chain_of_dimensions_is_the_oracle_s_delayed_fetch() {
+        let source: &[u8] = b"<?php $o = new stdClass; $x = $o->p[0]; $o->p[1] = 2; \
+                              $y = f()[0]; f()[1] = 3; $z = $o->p[f()]; function f() { return [1]; }";
+        assert_eq!(
+            dump_of(source),
+            main_dump(
+                24,
+                4,
+                17,
+                "0000 V4 = NEW 0 string(\"stdClass\")\n\
+                 0001 DO_FCALL\n\
+                 0002 ASSIGN CV0($o) V4\n\
+                 0003 T7 = FETCH_OBJ_R CV0($o) string(\"p\")\n\
+                 0004 T8 = FETCH_DIM_R T7 int(0)\n\
+                 0005 ASSIGN CV1($x) T8\n\
+                 0006 V10 = FETCH_OBJ_W (dim write) CV0($o) string(\"p\")\n\
+                 0007 ASSIGN_DIM V10 int(1)\n\
+                 0008 OP_DATA int(2)\n\
+                 0009 INIT_FCALL_BY_NAME 0 string(\"f\")\n\
+                 0010 V12 = DO_FCALL_BY_NAME\n\
+                 0011 T13 = FETCH_DIM_R V12 int(0)\n\
+                 0012 ASSIGN CV2($y) T13\n\
+                 0013 INIT_FCALL_BY_NAME 0 string(\"f\")\n\
+                 0014 V15 = DO_FCALL_BY_NAME\n\
+                 0015 V15 = SEPARATE V15\n\
+                 0016 ASSIGN_DIM V15 int(1)\n\
+                 0017 OP_DATA int(3)\n\
+                 0018 INIT_FCALL_BY_NAME 0 string(\"f\")\n\
+                 0019 V18 = DO_FCALL_BY_NAME\n\
+                 0020 T17 = FETCH_OBJ_R CV0($o) string(\"p\")\n\
+                 0021 T19 = FETCH_DIM_R T17 V18\n\
+                 0022 ASSIGN CV3($z) T19\n\
+                 0023 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    4: 0001 - 0002 (new)\n\
+                 \x20    15: 0015 - 0016 (tmp/var)\n\
+                 \x20    18: 0020 - 0021 (tmp/var)\n"
+            ) + "\nf:\n     ; (lines=2, args=0, vars=0, tmps=0)\n\
+                 \x20    ; (before optimizer)\n     ; :1-1\n     ; return  [] RANGE[0..0]\n\
+                 0000 RETURN array(...)\n\
+                 0001 RETURN null\n"
+        );
+    }
+
+    /// The bases php refuses under a write, `zend_compile_var`'s
+    /// default arm and `zend_separate_if_call_and_write`: a temporary
+    /// expression and a call php answered in one, each php's own
+    /// compile error; and the one this compiler has not, a `static`
+    /// property under a write, whose fetch is `FETCH_STATIC_PROP_W`
+    /// (#507).
+    #[test]
+    fn a_base_no_write_can_stand_on_is_php_s_compile_error() {
+        let refused = |source: &[u8]| refused_message(source);
+        assert_eq!(
+            refused(b"<?php (new C)[0] = 1;").as_deref(),
+            Some("Cannot use temporary expression in write context")
+        );
+        assert_eq!(
+            refused(b"<?php \"ab\"[0] = 1;").as_deref(),
+            Some("Cannot use temporary expression in write context")
+        );
+        assert_eq!(
+            refused(b"<?php strlen(\"a\")[0] = 1;").as_deref(),
+            Some("Cannot use result of built-in function in write context")
+        );
+        assert_eq!(
+            refused(b"<?php C::$s[0] = 1;").as_deref(),
+            Some(
+                "a dimension written over a `static` property, whose fetch is `FETCH_STATIC_PROP_W`, this compiler cannot read yet"
             )
         );
     }
@@ -5308,25 +5398,22 @@ class C {
     }
 
     /// What a dimension refuses: `[]` where a value is wanted, php's
-    /// `Cannot use [] for reading`; a property and a `static` property
-    /// as the base, the two `zend_delayed_compile_var` delays, which
-    /// wait on #451; and, under a write, any base that is no plain
-    /// variable, which php fetches by `FETCH_OBJ_W` with
-    /// `ZEND_FETCH_DIM_WRITE`, by `SEPARATE` over a call's `VAR`, or
-    /// refuses outright. Under a read the bases php compiles where they
-    /// stand are compiled (#482).
+    /// `Cannot use [] for reading`; under a write the bases php
+    /// refuses outright, a temporary expression and a call answered in
+    /// one; and the two bases this compiler has not under a write,
+    /// `$this` and a `static` property, whose fetches are `FETCH_THIS`
+    /// and `FETCH_STATIC_PROP_W` (#507). A property and a call under a
+    /// write, and every base php compiles where it stands under a
+    /// read, compile since #451.
     #[test]
     fn a_dimension_this_compiler_cannot_read_yet_is_refused() {
         for source in [
             b"<?php $a[] = $b[];".as_slice(),
             b"<?php echo $a[];".as_slice(),
-            b"<?php $o->p[0] = 1;".as_slice(),
-            b"<?php f()[0] = 1;".as_slice(),
             b"<?php $this[0] = 1;".as_slice(),
             b"<?php \"ab\"[0] = 1;".as_slice(),
             b"<?php [1, 2][0] = 1;".as_slice(),
-            b"<?php echo $o->p[0];".as_slice(),
-            b"<?php echo C::$p[0];".as_slice(),
+            b"<?php C::$p[0] = 1;".as_slice(),
         ] {
             assert!(
                 refused(source).is_some(),

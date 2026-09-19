@@ -459,6 +459,37 @@ enum Fetch {
     Is,
 }
 
+/// `ZEND_FETCH_DIM_WRITE` (`Z/Zend/zend_compile.h:1096`), the bit
+/// `zend_delayed_compile_dim` puts on the delayed `FETCH_OBJ_W` or
+/// `FETCH_STATIC_PROP_W` under it: what the handler reads to know the
+/// place it hands out is written through rather than written to.
+const FETCH_DIM_WRITE: u32 = 2;
+
+/// What a chain of dimensions stands on, php's
+/// `zend_delayed_compile_var` over the node under the innermost `[`: an
+/// operand settled where the base was written, which is a variable's CV
+/// and what a call and every expression php compiles in place leave;
+/// or one of the two fetches php delays, a property's and a `static`
+/// property's, whose opline is laid down after the dimensions have
+/// compiled, so `$o->p[f()]` calls `f` before it fetches `p`.
+#[derive(Clone, Copy)]
+enum Base {
+    Settled((OperandKind, u32)),
+    Prop {
+        op1_type: OperandKind,
+        op1: u32,
+        name_at: u32,
+        out: u32,
+        slots: u32,
+    },
+    StaticProp {
+        name_at: u32,
+        class_at: u32,
+        out: u32,
+        slots: u32,
+    },
+}
+
 /// One link of a chain compiled under `BP_VAR_IS`, the opline
 /// `zend_delayed_emit_op` holds back while the rest of the chain
 /// compiles: the fetch's opcode, the operands settled where the link
@@ -5059,7 +5090,7 @@ impl Emit<'_> {
         &mut self,
         target: &Child,
         fetch: Fetch,
-    ) -> Result<((OperandKind, u32), Vec<DimLink>), CompileError> {
+    ) -> Result<(Base, Vec<DimLink>), CompileError> {
         let mut dimensions = Vec::new();
         let mut base = target;
         while let Expr::Dim { container, index } = &**base {
@@ -5067,21 +5098,84 @@ impl Emit<'_> {
             base = container;
         }
         let container = match (&**base, fetch) {
-            (Expr::Var(name), _) => (OperandKind::Cv, self.lookup_cv(name)),
-            // `zend_delayed_compile_var` delays these two and nothing
-            // else a chain can stand on (#451).
-            (Expr::Prop { .. } | Expr::StaticProp { .. }, _) => {
+            (Expr::Var(name), _) => Base::Settled((OperandKind::Cv, self.lookup_cv(name))),
+            // `zend_delayed_compile_prop`: the receiver is compiled
+            // where it stands and the fetch itself is held back, its
+            // temporary, its name and its three cache slots taken here
+            // and its opline laid down by [`Self::dim_fetches`].
+            (Expr::Prop { object, name }, _) => {
+                let (op1_type, op1) = self.receiver(object)?;
+                let name = self.string(name)?;
+                let name_at = self.literal(name);
+                let out = self.temporary();
+                let slots = self.cache_slots(3);
+                Base::Prop {
+                    op1_type,
+                    op1,
+                    name_at,
+                    out,
+                    slots,
+                }
+            }
+            // `zend_compile_static_prop` with `delayed`, the other
+            // fetch php holds back: the name, the class's constant
+            // pair and three slots taken here.
+            (Expr::StaticProp { class, name }, Fetch::Read | Fetch::Is) => {
+                let name = self.string(name)?;
+                let name_at = self.literal(name);
+                let out = self.temporary();
+                let slots = self.cache_slots(3);
+                let class_at = self.class_name_literal(class)?;
+                Base::StaticProp {
+                    name_at,
+                    class_at,
+                    out,
+                    slots,
+                }
+            }
+            (Expr::StaticProp { .. }, _) => {
                 return Err(self.fatal(
-                    "a dimension over a property whose fetch php delays this compiler cannot read yet",
+                    "a dimension written over a `static` property, whose fetch is `FETCH_STATIC_PROP_W`, this compiler cannot read yet",
                 ));
             }
             (_, Fetch::Read | Fetch::Is) => {
                 let value = self.expr(base)?;
-                self.operand(value)
+                Base::Settled(self.operand(value))
             }
-            _ => {
-                return Err(self
-                    .fatal("a dimension over what is no variable this compiler cannot read yet"));
+            // `zend_separate_if_call_and_write`: a call under a write
+            // is `SEPARATE` over the `VAR` it returned into, so the
+            // write lands in a value of the request's own and not in
+            // one the callee still holds; a call php answered in a
+            // temporary has no `VAR` to separate.
+            (_, Fetch::Write) if is_call(base) => {
+                let returned = self.expr(base)?;
+                let Where::Returned(at) = returned else {
+                    return Err(self
+                        .compile_error("Cannot use result of built-in function in write context"));
+                };
+                self.push(Opline {
+                    opcode: Opcode::Separate,
+                    op1_type: OperandKind::Var,
+                    op1: at,
+                    out_type: OperandKind::Var,
+                    out: at,
+                    ..Opline::default()
+                });
+                Base::Settled((OperandKind::Var, at))
+            }
+            // php compiles `$this` under a write too, `FETCH_THIS` into
+            // a `VAR` that `zend_compile_simple_var` leaves, and fails
+            // at run time where no object is in scope; the receiver
+            // this emitter hands a property fetch is `UNUSED` inside a
+            // method, which no dimension can stand on.
+            (Expr::This, Fetch::Write) => {
+                return Err(self.fatal(
+                    "a dimension written over `$this`, whose fetch is `FETCH_THIS`, this compiler cannot read yet",
+                ));
+            }
+            // `zend_compile_var`'s default arm under a write.
+            (_, Fetch::Write) => {
+                return Err(self.compile_error("Cannot use temporary expression in write context"));
             }
         };
         let mut links = Vec::with_capacity(dimensions.len());
@@ -5113,7 +5207,7 @@ impl Emit<'_> {
     /// into a temporary under a read.
     fn dim_fetches(
         &mut self,
-        container: (OperandKind, u32),
+        container: Base,
         fetches: &[DimLink],
         fetch: Fetch,
     ) -> (OperandKind, u32) {
@@ -5122,7 +5216,7 @@ impl Emit<'_> {
             Fetch::Write => (Opcode::FetchDimW, OperandKind::Var, FETCH_DIM_DIM),
             Fetch::Is => (Opcode::FetchDimIs, OperandKind::Tmp, 0),
         };
-        let (mut op1_type, mut op1) = container;
+        let (mut op1_type, mut op1) = self.base_fetch(container, fetch);
         for link in fetches {
             self.push(Opline {
                 opcode,
@@ -5139,6 +5233,79 @@ impl Emit<'_> {
             op1 = link.out;
         }
         (op1_type, op1)
+    }
+
+    /// The base's own opline, laid down at `zend_delayed_compile_end`
+    /// before the chain's own: nothing where the base settled where it
+    /// stood, and the one fetch php delayed where it did. Under a write
+    /// the fetch is the `_W` opcode into a `VAR` carrying
+    /// `ZEND_FETCH_DIM_WRITE`, the bit `zend_delayed_compile_dim` adds
+    /// to the cache slots; under a read it is the `_R` opcode into a
+    /// temporary (`zend_adjust_for_fetch_type`).
+    fn base_fetch(&mut self, container: Base, fetch: Fetch) -> (OperandKind, u32) {
+        let write = matches!(fetch, Fetch::Write);
+        let out_type = if write {
+            OperandKind::Var
+        } else {
+            OperandKind::Tmp
+        };
+        let extended_value = |slots: u32| {
+            if write {
+                slots | FETCH_DIM_WRITE
+            } else {
+                slots
+            }
+        };
+        match container {
+            Base::Settled(pair) => pair,
+            Base::Prop {
+                op1_type,
+                op1,
+                name_at,
+                out,
+                slots,
+            } => {
+                self.push(Opline {
+                    opcode: match fetch {
+                        Fetch::Read => Opcode::FetchObjR,
+                        Fetch::Write => Opcode::FetchObjW,
+                        Fetch::Is => Opcode::FetchObjIs,
+                    },
+                    op1_type,
+                    op1,
+                    op2_type: OperandKind::Const,
+                    op2: name_at,
+                    out_type,
+                    out,
+                    extended_value: extended_value(slots),
+                    ..Opline::default()
+                });
+                (out_type, out)
+            }
+            Base::StaticProp {
+                name_at,
+                class_at,
+                out,
+                slots,
+            } => {
+                self.push(Opline {
+                    opcode: match fetch {
+                        Fetch::Read => Opcode::FetchStaticPropR,
+                        Fetch::Write => Opcode::FetchStaticPropW,
+                        Fetch::Is => Opcode::FetchStaticPropIs,
+                    },
+                    op1_type: OperandKind::Const,
+                    op1: name_at,
+                    op2_type: OperandKind::Const,
+                    op2: class_at,
+                    out_type,
+                    out,
+                    extended_value: extended_value(slots),
+                    ..Opline::default()
+                });
+                (out_type, out)
+            }
+        }
     }
 
     /// `zend_compile_dim` under `BP_VAR_R`, `$a[k]` where a value is
@@ -5374,6 +5541,11 @@ impl Emit<'_> {
         let [last] = links.as_slice() else {
             return Err(self.fatal(
                 "a compound assignment to a dimension under a dimension, whose links are `FETCH_DIM_RW`, this compiler cannot read yet",
+            ));
+        };
+        let Base::Settled(container) = container else {
+            return Err(self.fatal(
+                "a compound assignment to a dimension over a property, whose fetch is `FETCH_OBJ_RW`, this compiler cannot read yet",
             ));
         };
         // `zend_delayed_emit_op` stamped the fetch's line where the

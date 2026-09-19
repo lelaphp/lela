@@ -6809,6 +6809,46 @@ pub(crate) fn assign_dim<T: Tier>(
     Ok(Stepped::Same(frame))
 }
 
+/// `ZEND_SEPARATE` (`Z/Zend/zend_vm_def.h:8370`), the opline
+/// `zend_separate_if_call_and_write` puts after a call whose `VAR` a
+/// write is about to land in: a cell nothing else holds is unwrapped in
+/// place (`ZVAL_UNREF`), so the write reaches the value and not the
+/// cell, and a cell more than one name holds is left standing, which is
+/// how `g()[0] = 7` over a function returning by reference still writes
+/// through to what `g` returned.
+///
+/// ```php
+/// function f() { return [5, 6]; }
+/// f()[0] = 9;
+/// echo "written and gone\n";
+/// ```
+/// ```expect
+/// written and gone
+/// ```
+pub(crate) fn separate<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let slot = exec::temporary_slot(code, op.op1);
+    let held = req.slot(frame, slot);
+    let Some(cell) = held.as_php_ref().copied() else {
+        return Ok(advance(req, frame));
+    };
+    if cell.heap().refcount() != 1 {
+        return Ok(advance(req, frame));
+    }
+    // The value the cell held is the slot's from here, and the cell is
+    // given up after the write, which is what frees it: one owner is
+    // taken for the slot before the cell lets its own go.
+    let inner = cell.get();
+    req.addref(&inner);
+    let previous = req.set_slot(frame, slot, inner);
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
 /// The two oplines a compound assignment to a place is, and the kernel
 /// its operator names: what every arm of `ASSIGN_DIM_OP` and
 /// `ASSIGN_OBJ_OP` is handed beside the request and the frame.
@@ -7062,7 +7102,7 @@ fn stepped_entry(
     let computed = kernel(req, &held, &value);
     exec::free_operand(req, frame, code, data.op1_type, data.op1);
     let stepped = computed?;
-    let strict = req.caller_strict_types();
+    let strict = req.caller_strict_types(frame);
     let (landed, garbage) = assign_to_place(req, entry, stepped, strict)?;
     write_out(req, frame, code, op, &landed);
     req.release(garbage);
@@ -7273,7 +7313,7 @@ fn step_property(
             "InternalError: ZEND_ASSIGN_OBJ_OP placed the typed property ${shown}, whose declared type the class does not carry"
         )));
     };
-    let strict = req.caller_strict_types();
+    let strict = req.caller_strict_types(frame);
     let landed =
         match crate::ops::verify_property_type(req, &stepped, &ty, declaring, &bytes, strict) {
             Ok(None) => stepped,
