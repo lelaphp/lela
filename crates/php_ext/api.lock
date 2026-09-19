@@ -59,6 +59,7 @@ abi::OrFalse
 abi::Out
 abi::Out::set
 abi::PropertyPurpose
+abi::PropertyRead
 abi::PropertyTest
 abi::StartupIni
 abi::Std

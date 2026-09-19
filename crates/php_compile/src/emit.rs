@@ -441,6 +441,30 @@ enum Fetch {
     Is,
 }
 
+/// One link of a chain compiled under `BP_VAR_IS`, the opline
+/// `zend_delayed_emit_op` holds back while the rest of the chain
+/// compiles: the fetch's opcode, the operands settled where the link
+/// was made, the temporary it writes, and its cache slots. `op1` is
+/// `None` where the link reads the one under it.
+struct IsLink {
+    opcode: Opcode,
+    op1: Option<(OperandKind, u32)>,
+    op2_type: OperandKind,
+    op2: u32,
+    out: u32,
+    extended_value: u32,
+}
+
+/// What stands under one link of a `BP_VAR_IS` chain.
+enum Under {
+    /// The link before it, whose temporary the fetch reads.
+    Link,
+    /// `$this` inside a method, php's `IS_UNUSED` receiver.
+    This,
+    /// The value the chain is read off.
+    Value(Where),
+}
+
 /// What a magic constant folds to: `__LINE__`'s number, or the string
 /// every other one is.
 enum Folded {
@@ -4290,22 +4314,146 @@ impl Emit<'_> {
     /// where what it reads is not there. A `ZEND_AST_VAR` is the CV
     /// itself, whatever the type, and everything below the four
     /// variable nodes is `zend_compile_expr`, which is what a call, a
-    /// number as written or an operator is; so what is left to do is the three
-    /// nodes with a fetch of their own, `FETCH_DIM_IS`, `FETCH_OBJ_IS`
-    /// and `FETCH_STATIC_PROP_IS`, and each is refused here rather than
-    /// compiled as the read that warns.
+    /// number as written or an operator is; the three nodes with a
+    /// fetch of their own are `FETCH_DIM_IS`, `FETCH_OBJ_IS` and
+    /// `FETCH_STATIC_PROP_IS`, one per link of the chain.
+    ///
+    /// php holds each fetch back while the rest of the chain compiles
+    /// (`zend_delayed_compile_var`) and flushes them in written order
+    /// after it, so `$a[f()][g()] ?? 1` calls both natives and then
+    /// fetches twice. The links are collected here and pushed at the
+    /// end for the same reason; each link's operands are settled where
+    /// the link is made, since that is where `SET_NODE` puts a
+    /// constant into the table.
     fn silent_read(&mut self, expr: &Expr) -> Result<Where, CompileError> {
+        if !matches!(
+            expr,
+            Expr::Dim { .. } | Expr::Prop { .. } | Expr::StaticProp { .. }
+        ) {
+            return self.expr(expr);
+        }
+        let mut delayed = Vec::new();
+        self.silent_link(expr, &mut delayed)?;
+        let mut last = None;
+        for link in delayed {
+            let (op1_type, op1) = link
+                .op1
+                .or_else(|| last.map(|out| (OperandKind::Tmp, out)))
+                .unwrap_or((OperandKind::Unused, 0));
+            self.push(Opline {
+                opcode: link.opcode,
+                op1_type,
+                op1,
+                op2_type: link.op2_type,
+                op2: link.op2,
+                out_type: OperandKind::Tmp,
+                out: link.out,
+                extended_value: link.extended_value,
+                ..Opline::default()
+            });
+            last = Some(link.out);
+        }
+        match last {
+            Some(out) => Ok(Where::Temporary(out)),
+            None => Err(self.fatal("a `??` over a chain with no link")),
+        }
+    }
+
+    /// One link of a `BP_VAR_IS` chain and every link under it, each
+    /// pushed onto `delayed` in written order: `zend_delayed_compile_dim`,
+    /// `zend_delayed_compile_prop` and `zend_delayed_compile_static_prop`,
+    /// which each compile what stands under them, then the dimension or
+    /// the property's name, and only then settle the fetch's operands.
+    fn silent_link(&mut self, expr: &Expr, delayed: &mut Vec<IsLink>) -> Result<(), CompileError> {
         match expr {
-            Expr::Dim { .. } => {
-                Err(self.fatal("a `??` over an element this compiler cannot read yet"))
+            Expr::Dim { container, index } => {
+                let under = self.silent_under(container, delayed)?;
+                let Some(index) = index else {
+                    return Err(self.compile_error("Cannot use [] for reading"));
+                };
+                let value = self.expr(index)?;
+                let op1 = self.settled(&under);
+                let (op2_type, op2) = self.dim_operand(value);
+                let out = self.temporary();
+                delayed.push(IsLink {
+                    opcode: Opcode::FetchDimIs,
+                    op1,
+                    op2_type,
+                    op2,
+                    out,
+                    extended_value: 0,
+                });
+                Ok(())
             }
-            Expr::Prop { .. } => {
-                Err(self.fatal("a `??` over a property this compiler cannot read yet"))
+            Expr::Prop { object, name } => {
+                let under = self.silent_under(object, delayed)?;
+                let op1 = self.settled(&under);
+                let name = self.string(name)?;
+                let op2 = self.literal(name);
+                let out = self.temporary();
+                let extended_value = self.cache_slots(3);
+                delayed.push(IsLink {
+                    opcode: Opcode::FetchObjIs,
+                    op1,
+                    op2_type: OperandKind::Const,
+                    op2,
+                    out,
+                    extended_value,
+                });
+                Ok(())
             }
-            Expr::StaticProp { .. } => {
-                Err(self.fatal("a `??` over a property of a class this compiler cannot read yet"))
+            // `zend_compile_static_prop` names the property in `op1` and
+            // the class in `op2`, so the link stands under nothing and
+            // is always the first of its chain.
+            Expr::StaticProp { class, name } => {
+                let name = self.string(name)?;
+                let name_at = self.literal(name);
+                let out = self.temporary();
+                let extended_value = self.cache_slots(3);
+                let op2 = self.class_name_literal(class)?;
+                delayed.push(IsLink {
+                    opcode: Opcode::FetchStaticPropIs,
+                    op1: Some((OperandKind::Const, name_at)),
+                    op2_type: OperandKind::Const,
+                    op2,
+                    out,
+                    extended_value,
+                });
+                Ok(())
             }
-            read => self.expr(read),
+            other => Err(self.fatal(format!("a `??` over {other:?}, which is no variable node"))),
+        }
+    }
+
+    /// What stands under one link: the link before it where the node is
+    /// one of the three php delays, `$this` as the `IS_UNUSED` receiver
+    /// `zend_delayed_compile_prop` gives it inside a method, and
+    /// otherwise the value `zend_compile_expr` leaves, which is the read
+    /// that warns as php reads it there.
+    fn silent_under(
+        &mut self,
+        expr: &Expr,
+        delayed: &mut Vec<IsLink>,
+    ) -> Result<Under, CompileError> {
+        match expr {
+            Expr::Dim { .. } | Expr::Prop { .. } | Expr::StaticProp { .. } => {
+                self.silent_link(expr, delayed)?;
+                Ok(Under::Link)
+            }
+            Expr::This if self.this_in_scope => Ok(Under::This),
+            Expr::This => Ok(Under::Value(self.fetch_this(OperandKind::Var))),
+            other => Ok(Under::Value(self.expr(other)?)),
+        }
+    }
+
+    /// The `op1` a link carries: nothing where it reads the link under
+    /// it, and the operand pair otherwise, settled here because this is
+    /// where `SET_NODE` would add a constant to the table.
+    fn settled(&mut self, under: &Under) -> Option<(OperandKind, u32)> {
+        match *under {
+            Under::Link => None,
+            Under::This => Some((OperandKind::Unused, 0)),
+            Under::Value(value) => Some(self.operand(value)),
         }
     }
 

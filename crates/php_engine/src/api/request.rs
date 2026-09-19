@@ -24,7 +24,8 @@ use php_unit::decl::{
 use php_unit::{FramelessEntry, Opcode, Unit};
 
 use crate::api::abi::{
-    Callable, Dependency, Extension, IniVerdict, NativeNew, ObjectHandlers, PropertyTest, Std,
+    Callable, Dependency, Extension, IniVerdict, NativeNew, ObjectHandlers, PropertyRead,
+    PropertyTest, Std,
 };
 use crate::api::call::{Function, Target};
 use crate::api::raising::{Level, Thrown};
@@ -2996,8 +2997,8 @@ impl Request {
         )
     }
 
-    /// `zend_std_read_property` under `BP_VAR_R`, the handler
-    /// `FETCH_OBJ_R` calls: `zend_get_property_offset` places the name,
+    /// `zend_std_read_property`, the handler `FETCH_OBJ_R` and
+    /// `FETCH_OBJ_IS` call: `zend_get_property_offset` places the name,
     /// a declared property's slot where the scope may see it, php's
     /// `Error` `Cannot access private property C::$p` where it may not
     /// (`zend_bad_property_access`), and the dynamic table for a name
@@ -3008,16 +3009,28 @@ impl Request {
     /// is `null`. What is read is one more owner of the value
     /// (`ZVAL_COPY_DEREF`), a reference followed. A `__get` would be
     /// served between the slot and the warning; no class here has one.
+    ///
+    /// Under [`PropertyRead::Silent`], php's `BP_VAR_IS`, each of the
+    /// three is `null` instead: `zend_get_property_offset` returns the
+    /// wrong-offset marker rather than raising for a property the scope
+    /// may not reach, the uninitialized typed slot is `ZVAL_NULL`, and
+    /// the warning is the one line php guards with `type != BP_VAR_IS`.
+    /// A `__isset` would be served there; no class here has one.
     pub(crate) fn read_property(
         &mut self,
         object: PhpObject,
         name: &[u8],
+        read: PropertyRead,
     ) -> Result<Value, Thrown> {
+        let silent = read == PropertyRead::Silent;
         let o = object.heap();
         let class = object.class();
         let shown = String::from_utf8_lossy(name).into_owned();
         if let Some(placed) = self.declared_slot(class, name) {
             if !self.may_access(placed.declaring, placed.visibility) {
+                if silent {
+                    return Ok(Value::null());
+                }
                 return Err(self.inaccessible_property(class, placed.visibility, name));
             }
             let z = o.slot(placed.slot);
@@ -3027,6 +3040,9 @@ impl Request {
                 return Ok(value);
             }
             if placed.typed {
+                if silent {
+                    return Ok(Value::null());
+                }
                 let class = self.class_name(class);
                 return Err(crate::api::raising::throw(
                     self,
@@ -3048,8 +3064,10 @@ impl Request {
             self.addref(&value);
             return Ok(value);
         }
-        let class = self.class_name(class);
-        crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
+        if !silent {
+            let class = self.class_name(class);
+            crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
+        }
         Ok(Value::null())
     }
 

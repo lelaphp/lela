@@ -482,6 +482,17 @@ pub enum PropertyTest {
     Exists,
 }
 
+/// Which read `read_property` is serving, php's `type` argument to the
+/// slot: `BP_VAR_R`, the read that warns of a property nothing holds
+/// and refuses one the scope may not reach, and `BP_VAR_IS`, the read
+/// an `isset`, an `empty` or a `??` makes, which raises none of the
+/// three and answers `null`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyRead {
+    Warning,
+    Silent,
+}
+
 /// What `get_properties_for` is asked for, php's `zend_prop_purpose`:
 /// the five readers of an object's properties that a class may answer
 /// each in its own way.
@@ -548,15 +559,18 @@ pub trait ObjectHandlers: Send + Sync {
         Some(Request::clone_members_with)
     }
 
-    /// `read_property` under `BP_VAR_R`, `zend_std_read_property` at
-    /// `Std`: one more owner of the value read, a reference followed.
+    /// `read_property`, `zend_std_read_property` at `Std`: one more
+    /// owner of the value read, a reference followed. `read` is php's
+    /// `type` argument, `BP_VAR_R` or the `BP_VAR_IS` an `isset`, an
+    /// `empty` or a `??` reads through.
     fn read_property(
         &self,
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
+        read: PropertyRead,
     ) -> Result<Value, Thrown> {
-        req.read_property(object, name)
+        req.read_property(object, name, read)
     }
 
     /// `write_property`, `zend_std_write_property` at `Std`: `value` is

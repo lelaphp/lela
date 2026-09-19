@@ -55,6 +55,7 @@
 use php_heap::{Fatal, FrameRef};
 use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
 
+use crate::api::abi::PropertyRead;
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
@@ -2777,6 +2778,83 @@ pub(crate) fn fetch_obj_r<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    fetch_obj(req, frame, code, op, PropertyRead::Warning)
+}
+
+/// `ZEND_FETCH_OBJ_IS` (`Z/Zend/zend_vm_def.h:2276`), a link of a chain
+/// an `isset` or a `??` reads: [`fetch_obj_r`]'s body under
+/// `BP_VAR_IS` ([`PropertyRead::Silent`]), which reads `null` where the
+/// read that warns would have warned or thrown. A container that is no
+/// object is `null` with nothing raised, and so is a property the class
+/// has not got, one the scope may not reach, and a typed slot nothing
+/// has written.
+///
+/// ```php
+/// class C { public $p = 1; private $q = 2; protected $r = 3; public $n = null; }
+/// $o = new C; $i = 5; $u = null; $a = ['k' => 7];
+/// var_dump($o->p ?? 'd', $o->q ?? 'd', $o->r ?? 'd', $o->n ?? 'd', $o->missing ?? 'd');
+/// var_dump($i->p ?? 'd', $u->p ?? 'd', $a->p ?? 'd', $undef->p ?? 'd', $o->p->q ?? 'd');
+/// var_dump($a['k'] ?? 'd', $a['missing'] ?? 'd', $a['k']['z'] ?? 'd');
+/// ```
+/// ```expect
+/// int(1)
+/// string(1) "d"
+/// string(1) "d"
+/// string(1) "d"
+/// string(1) "d"
+/// string(1) "d"
+/// string(1) "d"
+/// string(1) "d"
+/// string(1) "d"
+/// string(1) "d"
+/// int(7)
+/// string(1) "d"
+/// string(1) "d"
+/// ```
+///
+/// The read that warns raises four diagnostics over the same program,
+/// which is what the silent chain is for.
+///
+/// ```php
+/// class C { public $p = 1; }
+/// $o = new C; $i = 5; $a = ['k' => 7];
+/// var_dump($o->missing);
+/// var_dump($i->p);
+/// var_dump($a['missing']);
+/// ```
+/// ```expect
+/// Warning: Undefined property: C::$missing in %s on line 4
+/// NULL
+///
+/// Warning: Attempt to read property "p" on int in %s on line 5
+/// NULL
+///
+/// Warning: Undefined array key "missing" in %s on line 6
+/// NULL
+/// ```
+pub(crate) fn fetch_obj_is<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    fetch_obj(req, frame, code, op, PropertyRead::Silent)
+}
+
+/// The body `FETCH_OBJ_R` and `FETCH_OBJ_IS` share, which is php's one
+/// handler under two fetch types: the property's name off the constant
+/// table, the container read as the fetch type reads it, the
+/// `read_property` slot over an object and, over anything else, the
+/// warning `BP_VAR_R` raises and `BP_VAR_IS` does not; the container
+/// freed after it (`FREE_OP1`) and `null` or the value written into the
+/// temporary.
+fn fetch_obj(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    fetch: PropertyRead,
+) -> Edge {
     let name = match op.op2_type {
         OperandKind::Const => exec::constant(code, ConstIdx(op.op2)),
         _ => {
@@ -2786,19 +2864,28 @@ pub(crate) fn fetch_obj_r<T: Tier>(
         }
     };
     let name = name.as_str_bytes().unwrap_or_default().to_vec();
-    let container = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
+    // `GET_OP1_OBJ_ZVAL_PTR(BP_VAR_R)` warns of a variable nothing
+    // wrote; the `BP_VAR_IS` reader takes the same slot as the `UNDEF`
+    // it is and says nothing.
+    let container = match fetch {
+        PropertyRead::Warning => exec::operand(req, frame, code, op.op1_type, op.op1),
+        PropertyRead::Silent => exec::operand_undef(req, frame, code, op.op1_type, op.op1),
+    }
+    .deref();
     let read = if let Some(object) = container.as_object().copied() {
         let table = req.object_handlers(object.heap());
-        table.read_property(req, object, &name)
+        table.read_property(req, object, &name, fetch)
     } else {
-        crate::api::raising::warning(
-            req,
-            &format!(
-                "Attempt to read property \"{}\" on {}",
-                String::from_utf8_lossy(&name),
-                crate::ops::value_name(req, &container)
-            ),
-        );
+        if fetch == PropertyRead::Warning {
+            crate::api::raising::warning(
+                req,
+                &format!(
+                    "Attempt to read property \"{}\" on {}",
+                    String::from_utf8_lossy(&name),
+                    crate::ops::value_name(req, &container)
+                ),
+            );
+        }
         Ok(Value::null())
     };
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
