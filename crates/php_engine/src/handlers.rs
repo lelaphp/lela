@@ -2604,6 +2604,67 @@ pub(crate) fn fetch_class_constant<T: Tier>(
 /// `ZEND_FETCH_STATIC_PROP_R` (`Z/Zend/zend_vm_def.h`, handler 172)
 /// over a property and a class both named at compile time, which is
 /// what `zend_compile_static_prop` emits for `C::$p`:
+/// `ZEND_FETCH_STATIC_PROP_IS` (`Z/Zend/zend_vm_def.h:1928`), which
+/// dispatches to `zend_fetch_static_prop_helper` with `BP_VAR_IS`, a
+/// link of a chain an `isset` or a `??` reads: [`fetch_static_prop_r`]'s
+/// body under [`PropertyRead::Silent`], which answers `null` where the
+/// read that raises would have thrown. A property no class of the chain
+/// declares, one declared as an instance property, one the scope may
+/// not reach and a typed slot nothing has written are each `null` with
+/// nothing thrown, the four lines php guards with `type != BP_VAR_IS`.
+///
+/// The class is fetched `ZEND_FETCH_CLASS_EXCEPTION` whatever the type,
+/// so a class nothing declares is still php's `Error` here.
+///
+/// ```php
+/// class C { public static $s = 1; private static $q = 2; protected static $r = 3; public $i = 4; public static $n = null; public static int $t; }
+/// var_dump(C::$s ?? 'd', C::$q ?? 'd', C::$r ?? 'd', C::$i ?? 'd', C::$nope ?? 'd', C::$n ?? 'd', C::$t ?? 'd');
+/// ```
+/// ```expect
+/// int(1)
+/// string(1) "d"
+/// string(1) "d"
+/// string(1) "d"
+/// string(1) "d"
+/// string(1) "d"
+/// string(1) "d"
+/// ```
+///
+/// The read that raises throws over the same class, which is what the
+/// silent one is for.
+///
+/// ```php
+/// class C { public static $s = 1; }
+/// var_dump(C::$s);
+/// var_dump(C::$nope);
+/// ```
+/// ```expect exit=255
+/// int(1)
+///
+/// Fatal error: Uncaught Error: Access to undeclared static property C::$nope in %s:4
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 4
+/// ```
+///
+/// ```php
+/// var_dump(Missing::$x ?? 'd');
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Class "Missing" not found in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn fetch_static_prop_is<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    fetch_static_prop(req, frame, code, op, PropertyRead::Silent)
+}
+
 /// `zend_fetch_static_property_address_ex`
 /// (`Z/Zend/zend_execute.c:3715`) with the property's name in `op1` and
 /// the class's constant pair in `op2`. The class is `Class "X" not
@@ -2670,6 +2731,21 @@ pub(crate) fn fetch_static_prop_r<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    fetch_static_prop(req, frame, code, op, PropertyRead::Warning)
+}
+
+/// The body `FETCH_STATIC_PROP_R` and `FETCH_STATIC_PROP_IS` share,
+/// which is php's one body under two fetch types: the class off the
+/// constant pair in `op2`, the property's name off `op1`, and
+/// [`Request::static_property`] over the executed scope under the fetch
+/// type given.
+fn fetch_static_prop(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    fetch: PropertyRead,
+) -> Edge {
     if op.op1_type != OperandKind::Const {
         return Err(Fatal::Error(String::from(
             "InternalError: ZEND_FETCH_STATIC_PROP_R over a property named at run time",
@@ -2682,7 +2758,7 @@ pub(crate) fn fetch_static_prop_r<T: Tier>(
     let name = exec::constant(code, ConstIdx(op.op1));
     let name = name.as_str_bytes().unwrap_or_default().to_vec();
     let scope = req.executed_scope();
-    let value = match req.static_property(class, &name, scope) {
+    let value = match req.static_property(class, &name, scope, fetch) {
         Ok(value) => value,
         Err(thrown) => return threw(req, frame, &thrown),
     };

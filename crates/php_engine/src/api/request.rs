@@ -2849,12 +2849,20 @@ impl Request {
     /// carries, evaluated in the declaring scope; a typed property
     /// with no default is laid down `IS_UNDEF`, which is what php's
     /// read of one before initialization refuses.
+    ///
+    /// Under [`PropertyRead::Silent`], php's `BP_VAR_IS`, neither the
+    /// access check nor the undeclared text raises: both are the lines
+    /// php guards with `type != BP_VAR_IS`, and the answer is `None`,
+    /// with no slot laid down, since php returns before
+    /// `zend_class_init_statics`.
     fn static_slot(
         &mut self,
         class: ClassId,
         name: &[u8],
         scope: Option<ClassId>,
-    ) -> Result<(ClassId, PropertyDecl), Thrown> {
+        read: PropertyRead,
+    ) -> Result<Option<(ClassId, PropertyDecl)>, Thrown> {
+        let silent = read == PropertyRead::Silent;
         let found = self.property_info_of(class, name);
         if let Some((declaring, property)) = found.as_ref()
             && property.visibility != Visibility::Public
@@ -2862,10 +2870,16 @@ impl Request {
             && (property.visibility == Visibility::Private
                 || !self.check_protected(*declaring, scope))
         {
+            if silent {
+                return Ok(None);
+            }
             let visibility = property.visibility;
             return Err(self.inaccessible_property(class, visibility, name));
         }
         let Some((declaring, property)) = found.filter(|(_, p)| !p.is_instance) else {
+            if silent {
+                return Ok(None);
+            }
             let class = self.class_name(class);
             return Err(crate::api::raising::throw(
                 self,
@@ -2891,7 +2905,7 @@ impl Request {
             };
             self.statics.push(((declaring, name.to_vec()), value));
         }
-        Ok((declaring, property))
+        Ok(Some((declaring, property)))
     }
 
     /// `zend_read_static_property_ex` (`Z/Zend/zend_API.c`): the value
@@ -2900,13 +2914,23 @@ impl Request {
     /// followed. A typed slot nothing has written is php's `Error` for
     /// a `static` property read before initialization, which names the
     /// declaring class and not the one asked about.
+    ///
+    /// `read` is php's `type`, the `silent` argument of
+    /// `zend_read_static_property_ex` under another name: under
+    /// [`PropertyRead::Silent`] the property nothing declares, the one
+    /// the scope may not reach and the typed slot nothing has written
+    /// are each `null`, the last because php guards that throw with
+    /// `type == BP_VAR_R || type == BP_VAR_RW`.
     pub(crate) fn static_property(
         &mut self,
         class: ClassId,
         name: &[u8],
         scope: Option<ClassId>,
+        read: PropertyRead,
     ) -> Result<Value, Thrown> {
-        let (declaring, property) = self.static_slot(class, name, scope)?;
+        let Some((declaring, property)) = self.static_slot(class, name, scope, read)? else {
+            return Ok(Value::null());
+        };
         let held = self
             .statics
             .iter()
@@ -2914,7 +2938,7 @@ impl Request {
             .map(|(_, value)| *value)
             .unwrap_or_default();
         if held.tag() == TypeTag::Undef {
-            if property.ty.is_some() {
+            if property.ty.is_some() && read == PropertyRead::Warning {
                 let declaring = self.class_name(declaring);
                 return Err(crate::api::raising::throw(
                     self,
@@ -2944,8 +2968,14 @@ impl Request {
         scope: Option<ClassId>,
         value: Value,
     ) -> Result<(), Thrown> {
-        let (declaring, _) = match self.static_slot(class, name, scope) {
-            Ok(slot) => slot,
+        let (declaring, _) = match self.static_slot(class, name, scope, PropertyRead::Warning) {
+            Ok(Some(slot)) => slot,
+            // A write is never `BP_VAR_IS`, so the silent miss cannot
+            // stand here; the value is given up as a raising one is.
+            Ok(None) => {
+                self.release(value);
+                return Ok(());
+            }
             Err(thrown) => {
                 self.release(value);
                 return Err(thrown);

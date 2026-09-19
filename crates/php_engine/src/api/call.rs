@@ -8,7 +8,7 @@
 
 use php_unit::decl::ConstExpr;
 
-use crate::api::abi::Callable;
+use crate::api::abi::{Callable, PropertyRead};
 use crate::api::raising::{Thrown, fatal, throw};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, PhpObject, PhpString, Value, ValueRef};
@@ -578,9 +578,10 @@ pub fn write_prop(
 /// `zend_std_get_static_property_with_info` does is measured against
 /// `class` and not against whatever scope the extension was called
 /// from; a property a class above declared private is still php's
-/// `Error`.
+/// `Error`, since this is `zend_read_static_property_ex`'s
+/// `silent = false`, php's `BP_VAR_R`.
 pub fn read_static_prop(req: &mut Request, class: ClassId, name: &[u8]) -> Result<Value, Thrown> {
-    req.static_property(class, name, Some(class))
+    req.static_property(class, name, Some(class), PropertyRead::Warning)
 }
 
 /// Write a `static` property of `class`,
