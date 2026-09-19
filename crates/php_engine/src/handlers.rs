@@ -5441,6 +5441,49 @@ fn assign_property(
 ///   thrown in %s on line 3
 /// ```
 ///
+/// Which of the two rules the write is held under is the one the file
+/// this frame's op array was compiled from declared (#411): the weak
+/// one converts `"5"` where the declared type is `int`, and a file that
+/// declares `strict_types=1` raises over the same write.
+///
+/// ```php
+/// class C { public static int $n = 1; }
+/// C::$n = "5";
+/// var_dump(C::$n);
+/// ```
+/// ```expect
+/// int(5)
+/// ```
+///
+/// ```php
+/// declare(strict_types=1);
+/// class C { public static int $n = 1; }
+/// C::$n = "5";
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: Cannot assign string to property C::$n of type int in %s:4
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 4
+/// ```
+///
+/// A write to a typed declared property of an object is the same
+/// verify from the same frame, `zend_assign_to_typed_prop` over
+/// `ZEND_ASSIGN_OBJ`.
+///
+/// ```php
+/// declare(strict_types=1);
+/// class C { public int $n = 1; }
+/// $c = new C;
+/// $c->n = "5";
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: Cannot assign string to property C::$n of type int in %s:5
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 5
+/// ```
+///
 /// ```php
 /// class T { public static $a = 1; }
 /// var_dump(T::$a);
