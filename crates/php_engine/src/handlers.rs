@@ -5231,10 +5231,35 @@ fn assign_property(
 /// pass, which nothing observes. The address is taken under
 /// [`PropertyRead::Warning`], php's `BP_VAR_W` as far as the slot is
 /// concerned, so the silent miss [`Request::static_slot`] answers under
-/// `BP_VAR_IS` cannot stand here. A typed slot's coercion
-/// (`zend_assign_to_typed_prop`) is not served, as `ASSIGN_OBJ`'s is
-/// not, so a write to one is the internal-error fatal naming the gap
-/// rather than a value of the wrong type in the slot.
+/// `BP_VAR_IS` cannot stand here. A typed slot is
+/// `zend_assign_to_typed_prop` under this frame's
+/// `EX_USES_STRICT_TYPES()`, served by the write itself
+/// ([`Request::set_static_property`]): the value the declared type
+/// accepts, the weak rule's coercion where the file is not strict, and
+/// php's `TypeError` where it is neither.
+///
+/// ```php
+/// class C { public static int $n = 1; }
+/// C::$n = 5;
+/// var_dump(C::$n);
+/// C::$n = "7";
+/// var_dump(C::$n);
+/// ```
+/// ```expect
+/// int(5)
+/// int(7)
+/// ```
+///
+/// ```php
+/// class C { public static int $n = 1; }
+/// C::$n = "x";
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: Cannot assign string to property C::$n of type int in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
 ///
 /// ```php
 /// class T { public static $a = 1; }
@@ -5330,20 +5355,23 @@ pub(crate) fn assign_static_prop<T: Tier>(
             return threw(req, frame, &thrown);
         }
     };
-    let Some((class, property)) = placed else {
+    let Some((class, _)) = placed else {
         exec::free_operand(req, frame, code, data_type, data_at);
         req.vm_mut().jump(frame, at.saturating_add(2));
         return Ok(Stepped::Same(frame));
     };
-    if property.ty.is_some() {
-        return Err(Fatal::Error(format!(
-            "InternalError: ZEND_ASSIGN_STATIC_PROP over the typed static property ${}, whose coercion is not served yet",
-            String::from_utf8_lossy(&name)
-        )));
-    }
     let value = exec::take_operand(req, frame, code, data_type, data_at);
     write_out(req, frame, code, op, &value);
-    if let Err(thrown) = req.set_static_property(class, &name, scope, value) {
+    // `zend_assign_to_typed_prop` under this frame's
+    // `EX_USES_STRICT_TYPES()`, which the write itself serves
+    // ([`Request::set_static_property`]): a typed slot takes the value
+    // the declared type accepts, coerced by the weak rule where the file
+    // is not strict, and php's `TypeError` where it neither satisfies
+    // nor coerces. The temporary already names the value php's
+    // `RETURN_VALUE_USED` copies, which php writes before the verify
+    // too.
+    let strict = req.caller_strict_types();
+    if let Err(thrown) = req.set_static_property(class, &name, scope, value, strict) {
         return threw(req, frame, &thrown);
     }
     req.vm_mut().jump(frame, at.saturating_add(2));

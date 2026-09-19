@@ -611,14 +611,17 @@ pub fn read_class_prop_silent(
 /// Write a `static` property of `class`,
 /// `zend_update_static_property_ex`: the value is the slot's from here
 /// and what the slot held is given up. The fake scope is
-/// [`read_static_prop`]'s.
+/// [`read_static_prop`]'s, and a property with a declared type is held
+/// to it under that function's own `strict = 0`, so what an extension
+/// writes is coerced by the weak rule however the file that called it
+/// was declared.
 pub fn write_static_prop(
     req: &mut Request,
     class: ClassId,
     name: &[u8],
     value: Value,
 ) -> Result<(), Thrown> {
-    req.set_static_property(class, name, Some(class), value)
+    req.set_static_property(class, name, Some(class), value, false)
 }
 
 /// `ReflectionClass::newLazyGhost`.

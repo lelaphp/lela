@@ -1200,6 +1200,27 @@ pub(super) fn reflection_class_get_static_property_value(
 /// }
 /// ```
 ///
+/// A property with a declared type is held to it, the write being
+/// `zend_update_static_property_ex`'s: the weak rule's coercion however
+/// the file was declared, and php's `TypeError` for a value that
+/// neither satisfies the type nor coerces.
+///
+/// ```php
+/// class T { public static int $n = 1; }
+/// $r = new ReflectionClass('T');
+/// $r->setStaticPropertyValue('n', "9"); var_dump($r->getStaticPropertyValue('n'));
+/// $r->setStaticPropertyValue('n', "x");
+/// ```
+/// ```expect exit=255
+/// int(9)
+///
+/// Fatal error: Uncaught TypeError: Cannot assign string to property T::$n of type int in %s:5
+/// Stack trace:
+/// #0 %s(5): ReflectionClass->setStaticPropertyValue('n', 'x')
+/// #1 {main}
+///   thrown in %s on line 5
+/// ```
+///
 /// ```php
 /// class A { public $i = 1; }
 /// (new ReflectionClass('A'))->setStaticPropertyValue('i', 2);

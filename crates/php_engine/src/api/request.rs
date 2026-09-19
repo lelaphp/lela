@@ -3014,12 +3014,21 @@ impl Request {
     /// slot holding a reference is written through
     /// (`ZEND_TRY_ASSIGN_COPY_PROP`), so a name bound to it sees the
     /// write.
+    ///
+    /// A property with a declared type is held to it here
+    /// ([`crate::ops::verify_property_type`]) under the regime the call
+    /// site asks for, since php's two entries ask for different ones:
+    /// `ZEND_ASSIGN_STATIC_PROP` verifies under the frame's
+    /// `EX_USES_STRICT_TYPES()` and `zend_update_static_property_ex`,
+    /// the entry Reflection reaches, under `strict = 0` whatever the
+    /// file that called it declared (`Z/Zend/zend_API.c:1585`).
     pub(crate) fn set_static_property(
         &mut self,
         class: ClassId,
         name: &[u8],
         scope: Option<ClassId>,
         mut value: Value,
+        strict: bool,
     ) -> Result<(), Thrown> {
         let (declaring, property) =
             match self.static_slot(class, name, scope, PropertyRead::Warning) {
@@ -3035,12 +3044,12 @@ impl Request {
                     return Err(thrown);
                 }
             };
-        // `zend_verify_property_type` under this function's own
-        // `strict = 0`: what Reflection writes is held to the declared
-        // type and coerced by the weak rule however the file that called
-        // it was declared (`Z/Zend/zend_API.c:1585`).
+        // `zend_verify_property_type`: the value held to the declared
+        // type and coerced by the weak rule where the writer's regime is
+        // not strict, and php's `TypeError` where it neither satisfies
+        // nor coerces, the value given up as php gives it up.
         if let Some(ty) = property.ty.clone() {
-            match crate::ops::verify_property_type(self, &value, &ty, declaring, name, false) {
+            match crate::ops::verify_property_type(self, &value, &ty, declaring, name, strict) {
                 Ok(None) => {}
                 Ok(Some(coerced)) => {
                     self.release(value);
