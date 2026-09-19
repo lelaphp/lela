@@ -24,7 +24,8 @@
 //! judge that `done` and pre-commit's `--diff` read one verdict from. Each
 //! is one file under this one, with the call and its path resolution in
 //! [`call`], the rules in [`rules`], the region-body rule in [`region`],
-//! the `unless` qualifier's sensor in [`unless`], the adapters and the
+//! the `unless` qualifier's sensor in [`unless`], the `exempt_label`
+//! qualifier's in [`label`], the adapters and the
 //! recording in [`adapters`], the diff judge in [`diff`] and the bench of
 //! §4.4's cost bar in [`bench`]. The ids a reading
 //! carries and the predicate `status` renders the rules by are here, since
@@ -34,6 +35,7 @@ mod adapters;
 mod bench;
 mod call;
 mod diff;
+mod label;
 mod region;
 mod rules;
 mod unless;

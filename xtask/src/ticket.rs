@@ -153,7 +153,10 @@
 //! much, and fails at the cap and for a sheet that is closed, naming what
 //! the tracker would refuse and what the frontier says instead: a chart
 //! that fills is continued by a sheet at the same row, never widened, and
-//! the close of the full one is a person's (CONTEXT.md, Chart).
+//! the filled one is then closed with a comment naming the sheet that
+//! continues it, which is a session's own act since `ticket.close` does
+//! not judge the close of an issue labelled `frontier:chart` (CONTEXT.md,
+//! Chart; harness-design.md ledger 53).
 //!
 //! What the seam does not cover, written down rather than pretended: the
 //! rule is judged by `permit`, whose tools are `Edit`, `Write` and `Bash`,
@@ -917,7 +920,7 @@ pub fn parent(root: &Path, gh: &Gh, sheet: Ticket, session_id: Option<&str>) -> 
         (
             Status::Fail,
             format!(
-                "{holds}: `gh issue create --parent {}` is refused with `Parent cannot have more than {CAP} sub-issues (addSubIssue)`; a chart that fills is continued by a sheet at the same row and never widened, and the close of the full one is a person's (CONTEXT.md, Chart)",
+                "{holds}: `gh issue create --parent {}` is refused with `Parent cannot have more than {CAP} sub-issues (addSubIssue)`; a chart that fills is continued by a sheet at the same row and never widened, and the filled one is closed with a comment naming the sheet that continues it (CONTEXT.md, Chart)",
                 sheet.number()
             ),
         )

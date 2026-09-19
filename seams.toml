@@ -374,6 +374,7 @@ id = "ticket.close"
 tool = "Bash"
 deny_argv = ["close", "reopen"]
 with = "gh issue"
+exempt_label = ["frontier:chart"] # a chart sheet carries no acceptance criteria, so the close of a filled one is the frontier skill's bookkeeping (#341)
 text = "A ticket closes through `xtask ticket close`, the instrument that read its acceptance criteria; `gh issue close` and `gh issue reopen` are not available to agents."
 
 [[rule]]

@@ -688,6 +688,102 @@ fn an_edit_inside_a_computed_region_body_is_denied_and_one_beside_it_allowed() {
     );
 }
 
+/// The label a rule does not judge (#341, harness-design.md ledger 52).
+/// `ticket.close` denies `gh issue close` so that nothing closes a ticket
+/// but the instrument that read its acceptance criteria; a chart sheet
+/// carries none, so the row names `frontier:chart` and the close of a
+/// filled sheet is not the act the rule is for. The label is the
+/// tracker's fact, so permit asks the tracker, here a recorded `gh` first
+/// on `PATH` and never the network: the sheet's close is let through, the
+/// same call on a ticket carrying no such label is denied as before, and
+/// a tracker that will not answer leaves the denial standing.
+#[test]
+fn a_close_is_denied_unless_the_tracker_says_the_issue_carries_the_exempt_label() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = scratch("exempt-label");
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let issue = |number: u64, labels: &str| {
+        serde_json::json!({
+            "number": number,
+            "title": format!("issue {number}"),
+            "body": "",
+            "state": "OPEN",
+            "url": format!("https://example.invalid/issues/{number}"),
+            "labels": labels
+                .split_whitespace()
+                .map(|name| serde_json::json!({ "name": name }))
+                .collect::<Vec<_>>(),
+            "blocking": { "nodes": [] },
+        })
+        .to_string()
+    };
+    std::fs::write(
+        bin.join("460.json"),
+        issue(460, "frontier:chart track:t-opus-5"),
+    )
+    .unwrap();
+    std::fs::write(bin.join("28.json"), issue(28, "ready-for-agent")).unwrap();
+    let gh = bin.join("gh");
+    std::fs::write(
+        &gh,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = issue ] && [ \"$2\" = view ] && [ -f '{0}/'\"$3\"'.json' ]; then cat '{0}/'\"$3\"'.json'; exit 0; fi\nexit 1\n",
+            bin.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let judged = |command: &str| -> Option<String> {
+        let stdin = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": command, "description": "close" }
+        })
+        .to_string();
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut child = Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .arg("--root")
+            .arg(&*root)
+            .arg("permit")
+            .env("PATH", path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(&mut child.stdin.take().unwrap(), stdin.as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "permit decides with its JSON");
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let text = stdout.trim();
+        if text.is_empty() {
+            return None;
+        }
+        let got: serde_json::Value = serde_json::from_str(text).unwrap();
+        Some(
+            got["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        )
+    };
+
+    assert_eq!(
+        judged("gh issue close 460 --comment 'sheet 7 continues this'"),
+        None,
+        "the sheet carries the label the rule does not judge"
+    );
+    let ticket = judged("gh issue close 28 --comment 'done'").expect("a ticket is denied");
+    assert!(ticket.contains("ticket.close"), "{ticket}");
+    let unknown = judged("gh issue close 9001").expect("an issue the tracker will not answer for");
+    assert!(unknown.contains("ticket.close"), "{unknown}");
+}
+
 fn permit(root: &Path, stdin: &str, args: &[&str]) -> (i32, String, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_xtask"))
         .arg("--root")

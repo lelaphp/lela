@@ -12,6 +12,7 @@ use regex_lite::Regex;
 use serde_json::{Value, json};
 
 use super::call::Call;
+use super::label;
 use super::region::region_body;
 use super::unless;
 use crate::manifest::{Manifest, OneOrMany, Rule, scope_matches};
@@ -196,6 +197,15 @@ fn evaluate(
     } else {
         return Ok(None);
     };
+    // A call the rule fired on that names an issue carrying one of its
+    // `exempt_label` labels is one the rule does not judge ([`label`]).
+    if fired
+        && !rule.exempt_label.is_empty()
+        && let Some(line) = call.command()
+        && label::exempted(root, rule, &commands(line))
+    {
+        return Ok(None);
+    }
     Ok(fired.then(|| Finding::of(Kind::of(rule), rule)))
 }
 
@@ -206,7 +216,7 @@ fn is_rust_source(path: &Path) -> bool {
 /// The tokens of each simple command in a shell line, split on unquoted
 /// whitespace and on `;`, `&&`, `||`, `|`, `&` and newlines, with quotes
 /// stripped. Conservative: what a shell can hide is pre-commit's to find.
-fn commands(line: &str) -> Vec<Vec<String>> {
+pub(super) fn commands(line: &str) -> Vec<Vec<String>> {
     let mut commands = vec![Vec::new()];
     let mut token = String::new();
     let mut quoted = false;
@@ -299,7 +309,7 @@ fn names_the_tree(path: &str) -> bool {
 /// between them: `git add` is `git -C dir add` and `git --no-pager add`,
 /// and is not `git log --grep add`, whose `log` is neither an option nor
 /// the value of one. One word is that word wherever it stands.
-fn carries_a_phrase(tokens: &[String], with: &OneOrMany) -> bool {
+pub(super) fn carries_a_phrase(tokens: &[String], with: &OneOrMany) -> bool {
     with.is_empty()
         || with.iter().any(|phrase| {
             let words: Vec<&str> = phrase.split_whitespace().collect();
@@ -337,7 +347,7 @@ fn follows(tokens: &[String], words: &[&str]) -> bool {
     true
 }
 
-fn flag_matches(denied: &str, token: &str) -> bool {
+pub(super) fn flag_matches(denied: &str, token: &str) -> bool {
     if token == denied {
         return true;
     }

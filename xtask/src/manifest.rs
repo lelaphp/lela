@@ -328,7 +328,10 @@ impl Edge {
 /// rule does not judge, in `scope`'s grammar: `permit` reads it for every
 /// predicate it judges (#23), so `xtask/src/witness/fence.rs`, the parser
 /// of the fence grammar `witness.exit-authored` denies, can carry the
-/// shape it parses.
+/// shape it parses. `exempt_label` is the same idea for a call that names
+/// an issue rather than a file: the tracker's labels under which the rule
+/// does not judge the call (#341), which only a rule `permit` judges over
+/// a command may carry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -340,6 +343,8 @@ pub struct Rule {
     pub tool: OneOrMany,
     #[serde(default)]
     pub exempt: Vec<String>,
+    #[serde(default)]
+    pub exempt_label: Vec<String>,
     #[serde(default)]
     pub adr: OneOrMany,
     pub text: String,
@@ -489,6 +494,7 @@ impl Rule {
             scope: OneOrMany::One(scope.to_owned()),
             tool: OneOrMany::None,
             exempt: Vec::new(),
+            exempt_label: Vec::new(),
             adr: OneOrMany::None,
             text: id.to_owned(),
             predicate: Predicates {
@@ -732,6 +738,13 @@ impl Manifest {
                 bail!(
                     "rule \"{}\" has an empty `with` phrase; a phrase is a word or a command and its subcommand",
                     rule.id
+                );
+            }
+            if !rule.exempt_label.is_empty() && !rule.predicate.describes_a_call() {
+                bail!(
+                    "rule \"{}\" has `exempt_label` beside `{}`; a label is read off the issue a command names, so `exempt_label` qualifies a rule permit judges at the call",
+                    rule.id,
+                    named[0]
                 );
             }
             if let Some(qualifier) = rule.predicate.orphaned_qualifier() {
