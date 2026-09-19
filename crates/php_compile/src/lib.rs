@@ -2568,7 +2568,7 @@ mod tests {
     fn what_the_reader_cannot_read_is_a_compile_error_at_its_line() {
         let mut strings = php_heap::Strings::new();
         let trouble = compile(
-            &php_syntax::parse(b"<?php\n$x . ~1;", &php_syntax::Options::default()),
+            &php_syntax::parse(b"<?php\n$x . `ls`;", &php_syntax::Options::default()),
             &Options::default(),
             &mut strings,
         )
@@ -3518,6 +3518,50 @@ mod tests {
                  0011 SEND_VAL T8 1\n\
                  0012 DO_ICALL\n\
                  0013 RETURN int(1)\n"
+            )
+        );
+    }
+
+    /// `zend_compile_unary_op` for `ZEND_BW_NOT` (#478): one `BW_NOT`
+    /// where the operand is no constant, and
+    /// `zend_try_ct_eval_unary_op` where it is one php's
+    /// `zend_unary_op_produces_error` lets through. `~1` and `~1.0` are
+    /// `int(-2)` in the op array, `~"ab"` the bytes negated, and `~1.5`
+    /// the opline over `float(1.5)`, which the guard refuses to fold
+    /// because the long conversion loses something. `-~$a` is the
+    /// `MUL` by -1 `zend_compile_unary_pm` emits over the `BW_NOT`, and
+    /// `~$a instanceof C` is the `INSTANCEOF` over it, since `~` binds
+    /// tighter. The dump is the oracle's under `[regime.dump]` at
+    /// 8.5.9.
+    #[test]
+    fn a_bitwise_not_is_the_oracle_s_opline_or_its_fold() {
+        assert_eq!(
+            dump_of(
+                b"<?php $a = 6; $b = ~$a; $c = ~1; $d = ~\"ab\"; $e = ~1.5; $f = ~~$a; \
+                  $g = -~$a; $h = ~$a instanceof C; $i = ~1.0;"
+            ),
+            main_dump(
+                18,
+                9,
+                17,
+                "0000 ASSIGN CV0($a) int(6)\n\
+                 0001 T10 = BW_NOT CV0($a)\n\
+                 0002 ASSIGN CV1($b) T10\n\
+                 0003 ASSIGN CV2($c) int(-2)\n\
+                 0004 ASSIGN CV3($d) string(\"\\x9E\\x9D\")\n\
+                 0005 T14 = BW_NOT float(1.5)\n\
+                 0006 ASSIGN CV4($e) T14\n\
+                 0007 T16 = BW_NOT CV0($a)\n\
+                 0008 T17 = BW_NOT T16\n\
+                 0009 ASSIGN CV5($f) T17\n\
+                 0010 T19 = BW_NOT CV0($a)\n\
+                 0011 T20 = MUL T19 int(-1)\n\
+                 0012 ASSIGN CV6($g) T20\n\
+                 0013 T22 = BW_NOT CV0($a)\n\
+                 0014 T23 = INSTANCEOF T22 string(\"C\")\n\
+                 0015 ASSIGN CV7($h) T23\n\
+                 0016 ASSIGN CV8($i) int(-2)\n\
+                 0017 RETURN int(1)\n"
             )
         );
     }

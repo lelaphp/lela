@@ -2366,6 +2366,38 @@ impl Emit<'_> {
     /// ```expect exit=0
     /// ab1
     /// ```
+    /// The operators `zend_eval_const_expr` folds where it can and
+    /// leaves as the tree it was written as where it cannot: the fold
+    /// first, since php's own walk evaluates the node before the
+    /// constant expression is kept, and the node's own shape after it,
+    /// each child a constant expression of its own.
+    fn const_expr_operation(&mut self, expr: &Child) -> Result<ConstExpr, CompileError> {
+        if let Some(folded) = self.constant_of(expr)? {
+            return folded_const_expr(folded)
+                .ok_or_else(|| self.fatal("a constant expression this compiler cannot read yet"));
+        }
+        match &**expr {
+            Expr::Unary { minus, operand } => Ok(ConstExpr::Unary {
+                op: Name(if *minus { b"-".as_slice() } else { b"+" }.into()),
+                operand: Box::new(self.const_expr(operand)?),
+            }),
+            Expr::Not(operand) => Ok(ConstExpr::Unary {
+                op: Name(b"!".as_slice().into()),
+                operand: Box::new(self.const_expr(operand)?),
+            }),
+            Expr::BwNot(operand) => Ok(ConstExpr::Unary {
+                op: Name(b"~".as_slice().into()),
+                operand: Box::new(self.const_expr(operand)?),
+            }),
+            Expr::Binary { op, left, right } => Ok(ConstExpr::Binary {
+                op: Name(op.spelling().as_bytes().into()),
+                lhs: Box::new(self.const_expr(left)?),
+                rhs: Box::new(self.const_expr(right)?),
+            }),
+            _ => Err(self.fatal("a constant expression this compiler cannot read yet")),
+        }
+    }
+
     fn const_expr(&mut self, expr: &Child) -> Result<ConstExpr, CompileError> {
         self.check_stack()?;
         match &**expr {
@@ -2415,29 +2447,11 @@ impl Emit<'_> {
                 }
                 Ok(ConstExpr::Array(items))
             }
-            Expr::Unary { .. } | Expr::Not(_) | Expr::Binary { .. } | Expr::Cast { .. } => {
-                if let Some(folded) = self.constant_of(expr)? {
-                    return folded_const_expr(folded).ok_or_else(|| {
-                        self.fatal("a constant expression this compiler cannot read yet")
-                    });
-                }
-                match &**expr {
-                    Expr::Unary { minus, operand } => Ok(ConstExpr::Unary {
-                        op: Name(if *minus { b"-".as_slice() } else { b"+" }.into()),
-                        operand: Box::new(self.const_expr(operand)?),
-                    }),
-                    Expr::Not(operand) => Ok(ConstExpr::Unary {
-                        op: Name(b"!".as_slice().into()),
-                        operand: Box::new(self.const_expr(operand)?),
-                    }),
-                    Expr::Binary { op, left, right } => Ok(ConstExpr::Binary {
-                        op: Name(op.spelling().as_bytes().into()),
-                        lhs: Box::new(self.const_expr(left)?),
-                        rhs: Box::new(self.const_expr(right)?),
-                    }),
-                    _ => Err(self.fatal("a constant expression this compiler cannot read yet")),
-                }
-            }
+            Expr::Unary { .. }
+            | Expr::Not(_)
+            | Expr::BwNot(_)
+            | Expr::Binary { .. }
+            | Expr::Cast { .. } => self.const_expr_operation(expr),
             Expr::Var(_)
             | Expr::This
             | Expr::Prop { .. }
@@ -4020,6 +4034,7 @@ impl Emit<'_> {
             Expr::Call { name, arguments } => self.call(name, arguments),
             Expr::Unary { minus, operand } => self.unary(*minus, operand),
             Expr::Not(operand) => self.bool_not(operand),
+            Expr::BwNot(operand) => self.bw_not(operand),
             Expr::Silence(operand) => self.silence(operand),
             Expr::Encaps(pieces) => self.encaps(pieces),
             Expr::Cast { to, operand } => self.cast(*to, operand),
@@ -5612,6 +5627,62 @@ impl Emit<'_> {
         Ok(self.emit_unary(Opcode::BoolNot, operand, 0))
     }
 
+    /// `zend_compile_unary_op` for `ZEND_BW_NOT`: the operand compiled,
+    /// `zend_try_ct_eval_unary_op` over it where it is a constant, and
+    /// `zend_emit_op_tmp` otherwise.
+    ///
+    /// The fold is `zend_unary_op_produces_error`'s `ZEND_BW_NOT` arm
+    /// (`Z/Zend/zend_compile.c:10041`): a string is folded as it stands,
+    /// since `~` over one is the bytes negated and no number is read out
+    /// of it; `null`, `false` and `true` are refused, php's `Z_TYPE_P(op)
+    /// <= IS_TRUE`; and everything else is folded only where
+    /// `zend_is_op_long_compatible` says the long conversion loses
+    /// nothing, so `~1.0` is `int(-2)` in the op array and `~1.5` is the
+    /// opline over `float(1.5)`, which raises php's deprecation where it
+    /// runs. An array reaches none of those arms and is the opline too,
+    /// which throws.
+    ///
+    /// The fold's own value is php's, which is what a program reads
+    /// where no opline stands; the string arm is byte-wise and its
+    /// bytes are what this pins, since they are no text.
+    ///
+    /// ```php
+    /// var_dump(~6, ~"ab" === "\x9e\x9d", ~1.0, ~"a" === "\x9e");
+    /// ```
+    /// ```expect
+    /// int(-7)
+    /// bool(true)
+    /// int(-2)
+    /// bool(true)
+    /// ```
+    fn bw_not(&mut self, operand: &Child) -> Result<Where, CompileError> {
+        if let Some(value) = self.constant_of(operand)?
+            && let Some(folded) = self.bw_not_fold(value)?
+        {
+            return Ok(Where::Constant(folded));
+        }
+        let operand = self.expr(operand)?;
+        Ok(self.emit_unary(Opcode::BwNot, operand, 0))
+    }
+
+    /// `bitwise_not_function` over a constant php's
+    /// `zend_unary_op_produces_error` lets through: a long negated, a
+    /// string negated byte by byte, and a double through the long it is
+    /// exactly worth. Nothing for a constant the guard refuses.
+    fn bw_not_fold(&mut self, value: Zval) -> Result<Option<Zval>, CompileError> {
+        if let Some(s) = value.as_str() {
+            let negated: Vec<u8> = s.bytes().iter().map(|b| !b).collect();
+            return self.string(&negated).map(Some);
+        }
+        if let Some(n) = value.as_long() {
+            return Ok(Some(Zval::long(!n)));
+        }
+        if let Some(d) = value.as_double() {
+            return Ok(long_compatible(Number::Double(d)).map(|l| Zval::long(!l)));
+        }
+        Ok(None)
+    }
+
     /// `zend_compile_silence` (`Z/Zend/zend_compile.c:10896`):
     /// `BEGIN_SILENCE` into a temporary (`zend_emit_op_tmp`), the
     /// expression, and `END_SILENCE` over that temporary with nothing
@@ -5967,6 +6038,15 @@ impl Emit<'_> {
                     return Err(self.fatal("a `!` over a float is left to its opcode"));
                 }
                 Ok(Zval::bool(!truth(value)))
+            }
+            // The same arm for `ZEND_BW_NOT`, whose
+            // `zend_unary_op_produces_error` refuses `null`, `false`,
+            // `true` and a double the long conversion would lose
+            // something of, and folds a string as it stands.
+            Expr::BwNot(operand) => {
+                let value = self.constant_expr(operand)?;
+                self.bw_not_fold(value)?
+                    .ok_or_else(|| self.fatal("a `~` over this constant is left to its opcode"))
             }
             Expr::Binary { op, left, right } => self.binary_constant(*op, left, right),
             Expr::Call { name, arguments } => {
@@ -7422,6 +7502,7 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Child) {
         Expr::Unary { operand, .. }
         | Expr::Cast { operand, .. }
         | Expr::Not(operand)
+        | Expr::BwNot(operand)
         | Expr::Silence(operand) => {
             implicit_uses(names, operand);
         }

@@ -453,6 +453,12 @@ pub(crate) enum Expr {
     /// below it and `T_INSTANCEOF` above, and it nests: `!!$a` is two of
     /// them.
     Not(Child),
+    /// `~$a`, php's `ZEND_AST_UNARY_OP` with `ZEND_BW_NOT` in `attr`,
+    /// the same node as [`Expr::Not`] at another of php's levels:
+    /// `%precedence '~'`, which unary `-`, the casts and `@` share, so
+    /// it binds tighter than `instanceof` and looser than `**`, and it
+    /// nests: `~~$a` is two of them.
+    BwNot(Child),
     /// `@$a`, php's `ZEND_AST_SILENCE` over the expression the
     /// diagnostics of are held: at the level of unary `-` and the casts,
     /// so `@$a + 1` is php's `(@$a) + 1` and `@$a ** 2` php's
@@ -775,6 +781,7 @@ impl Drop for Child {
                 Expr::Unary { operand, .. }
                 | Expr::Cast { operand, .. }
                 | Expr::Not(operand)
+                | Expr::BwNot(operand)
                 | Expr::Silence(operand) => operand.take(),
                 Expr::Binary { left, right, .. }
                 | Expr::Coalesce { left, right }
@@ -3498,8 +3505,9 @@ impl Reader<'_> {
         }
     }
 
-    /// `-$a`, `+$a` and `@$a`, which bind tighter than either level and
-    /// nest, php's one `%precedence` line for `'~'`, the casts and `'@'`.
+    /// `-$a`, `+$a`, `~$a` and `@$a`, which bind tighter than either
+    /// level and nest, php's one `%precedence` line for `'~'`, the casts
+    /// and `'@'`.
     /// `**` binds tighter still, so `-2 ** 2` is php's `-(2 ** 2)`. The
     /// grammar's `'@' expr` shifts an `=` after the operand rather than
     /// reducing, so `@$a = 1` is `@($a = 1)`, and the assignment is read
@@ -3523,6 +3531,14 @@ impl Reader<'_> {
                 let operand = self.unary()?;
                 let silenced = self.assignment(operand)?;
                 return Ok(Child::at(silenced.line(), Expr::Silence(silenced)));
+            }
+            // `'~' expr`, the fourth operator of php's one `%precedence`
+            // line: the same level as `-`, `+`, the casts and `@`, so it
+            // nests with them and with itself.
+            (Some(b'~'), _) => {
+                self.bump(1);
+                let operand = self.unary()?;
+                return Ok(Child::at(operand.line(), Expr::BwNot(operand)));
             }
             _ => return self.power(),
         };
@@ -4768,6 +4784,41 @@ mod tests {
         );
     }
 
+    /// `~` stands on php's one `%precedence` line with unary `-`, `+`,
+    /// the casts and `@`: `**` binds tighter, so `~$a ** 2` is
+    /// `~($a ** 2)`; every level below binds looser, so `~$a * 2` is
+    /// `(~$a) * 2` and `~$a instanceof C` is `(~$a) instanceof C`; and
+    /// the level nests, with itself and with the `!` the grammar
+    /// reaches by shifting.
+    #[test]
+    fn a_bitwise_not_stands_at_the_level_unary_minus_and_the_casts_share() {
+        assert_eq!(
+            shape(b"<?php $x = ~$a ** 2;"),
+            shape(b"<?php $x = ~($a ** 2);"),
+            "`**` binds tighter than `~`"
+        );
+        assert_eq!(
+            shape(b"<?php $x = ~$a * 2;"),
+            shape(b"<?php $x = (~$a) * 2;"),
+            "`*` binds looser than `~`"
+        );
+        assert_eq!(
+            shape(b"<?php $x = ~$a instanceof C;"),
+            shape(b"<?php $x = (~$a) instanceof C;"),
+            "`instanceof` binds looser than `~`"
+        );
+        assert_eq!(
+            shape(b"<?php $x = ~!$a;"),
+            shape(b"<?php $x = ~(!$a);"),
+            "a `!` where this level's operand stands is the level below"
+        );
+        assert_eq!(
+            shape(b"<?php $x = -~~$a;"),
+            shape(b"<?php $x = -(~(~$a));"),
+            "the level nests, with itself and with unary `-`"
+        );
+    }
+
     /// The twelve `T_*_EQUAL` tokens stand at php's `%precedence '='`
     /// with the `=` beside them: they read right to left, every level
     /// above them binds tighter, and the three word operators below
@@ -5136,7 +5187,7 @@ mod tests {
     fn an_operator_this_does_not_read_is_refused_rather_than_taken_for_another() {
         for source in [
             b"<?php echo 'a' .= 'b';".as_slice(),
-            b"<?php echo ~1;".as_slice(),
+            b"<?php echo 1 **= 2;".as_slice(),
             b"<?php echo 1 |= 2;".as_slice(),
         ] {
             assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
@@ -5697,7 +5748,7 @@ mod tests {
 
     #[test]
     fn what_it_cannot_read_is_refused_at_its_line() {
-        let trouble = read(b"<?php\n$x . ~1;").err();
+        let trouble = read(b"<?php\n$x . `ls`;").err();
         assert_eq!(trouble.map(|t| t.line), Some(2));
     }
 

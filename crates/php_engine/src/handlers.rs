@@ -7793,6 +7793,32 @@ pub(crate) fn bool<T: Tier>(
     })
 }
 
+/// `ZEND_BW_NOT` (`Z/Zend/zend_vm_def.h:947`), what `~` compiles to:
+/// [`crate::ops::bitwise_not`] over the one operand, into the
+/// temporary, with the operand freed after it. php's compiler folds the
+/// operator over every constant `zend_unary_op_produces_error` lets
+/// through, so what reaches this handler is a variable, a call's value,
+/// or a constant of the kinds the fold refuses: `null`, `false`, `true`,
+/// an array and a double the long conversion would lose something of.
+///
+/// ```php
+/// $x = 6 * extension_loaded('Core');
+/// var_dump(~$x, ~~$x, -~$x);
+/// ```
+/// ```expect
+/// int(-7)
+/// int(6)
+/// int(7)
+/// ```
+pub(crate) fn bw_not<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    unary(req, frame, code, op, crate::ops::bitwise_not)
+}
+
 /// `ZEND_BW_OR` (`Z/Zend/zend_vm_def.h:824`), what `|` compiles to:
 /// [`crate::ops::bitwise_or`] over both operands, into the temporary,
 /// with both freed after it.

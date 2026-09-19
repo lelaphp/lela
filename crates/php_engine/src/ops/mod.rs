@@ -1845,6 +1845,86 @@ pub(crate) fn bitwise_and(req: &mut Request, left: &Value, right: &Value) -> Res
     bitwise(req, Bitwise::And, left, right)
 }
 
+/// `bitwise_not_function` (`Zend/zend_operators.c:1637`), what `~`
+/// comes to: a long negated; a double through the long
+/// `zend_dval_to_lval_safe` makes of it ([`double_to_long`]), so a
+/// fraction is negated over the truncation and carries php's
+/// deprecation; a string negated byte by byte, with php's `ZVAL_CHAR`
+/// where it is one byte, and never a number read out of it; and php's
+/// `TypeError` for everything else, `Cannot perform bitwise not on %s`
+/// over `zend_zval_value_name`.
+///
+/// php's compiler folds the operator over a constant it can
+/// (`zend_try_ct_eval_unary_op`), so each fence calls a native to leave
+/// the opcode standing.
+///
+/// ```php
+/// $six = 6 * extension_loaded('Core');
+/// $ab = substr("xabx", 1, 2);
+/// $one = 1.0 * extension_loaded('Core');
+/// var_dump(~$six, ~-$six, ~$ab === "\x9e\x9d", ~substr($ab, 0, 1) === "\x9e", ~$one);
+/// ```
+/// ```expect
+/// int(-7)
+/// int(5)
+/// bool(true)
+/// bool(true)
+/// int(-2)
+/// ```
+///
+/// A double the long conversion loses something of is php's deprecation
+/// and the long it was truncated to; `null`, `false`, `true`, an array
+/// and an object are the `TypeError`, which names the value as
+/// `zend_zval_value_name` names it.
+///
+/// ```php
+/// $half = 1.5 * extension_loaded('Core');
+/// var_dump(~$half);
+/// $n = null;
+/// try { echo ~$n; } catch (TypeError $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// echo ~[];
+/// ```
+/// ```expect exit=255
+///
+/// Deprecated: Implicit conversion from float 1.5 to int loses precision in %s on line 3
+/// int(-2)
+/// TypeError: Cannot perform bitwise not on null
+///
+/// Fatal error: Uncaught TypeError: Cannot perform bitwise not on array in %s:6
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 6
+/// ```
+pub(crate) fn bitwise_not(req: &mut Request, value: &Value) -> Result<Value, Thrown> {
+    let value = value.deref();
+    if let Some(n) = value.as_int() {
+        return Ok(Value::int(!n));
+    }
+    if let Some(d) = value.as_float() {
+        return Ok(Value::int(!double_to_long(req, d)));
+    }
+    if let Some(s) = value.as_php_string() {
+        let bytes = s.as_bytes();
+        // php's own fast case: one byte is the interned one-character
+        // string, `ZVAL_CHAR`.
+        if let [byte] = *bytes {
+            return Ok(Value::string(req.string(&[!byte])?));
+        }
+        let negated = PhpString::filled(req, bytes.len(), |out| {
+            for (out, b) in out.iter_mut().zip(bytes) {
+                *out = !*b;
+            }
+        })?;
+        return Ok(Value::string(negated));
+    }
+    let name = value_name(req, &value);
+    Err(throw(
+        req,
+        "TypeError",
+        &format!("Cannot perform bitwise not on {name}"),
+    ))
+}
+
 /// `concat_function` (`Zend/zend_operators.c:2017`): both sides as the
 /// strings [`to_string`] makes of them, the left one first, and the
 /// bytes of one after the other; the side that is empty leaves the other
