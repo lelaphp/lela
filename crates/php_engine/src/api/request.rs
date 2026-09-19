@@ -822,24 +822,35 @@ impl Request {
                 ))))
                 .map(|()| Value::null());
         };
-        // `enter`'s rule, so a body reached from here stands where a body
-        // reached from `DO_UCALL` stands: a call that filled every
-        // parameter starts at the entry safepoint, past the prologue,
-        // and one that did not runs the `RECV*` oplines before it.
-        let parameters = self
-            .function_decl(function)
-            .map_or(0, |decl| decl.parameters.len());
-        if passed >= parameters {
-            let entry = self
-                .vm
-                .serving(frame)
-                .and_then(|serving| {
-                    serving
-                        .code()
-                        .and_then(|code| code.safepoints.first().copied())
-                })
-                .map_or(0, |at| at.0);
-            self.vm.jump(frame, entry);
+        // `enter`'s own prologue, so a body reached from here stands
+        // where a body reached from `DO_UCALL` stands: every `RECV*`
+        // php runs is run, which is where a declared parameter type is
+        // checked and a scalar argument coerced, and the entry
+        // safepoint is raised after them by the loop below.
+        let serving = self.vm.serving(frame);
+        let raised = match serving.as_ref().and_then(crate::exec::Serving::code) {
+            Some(body) => crate::exec::parameter_prologue(self, frame, body, function, passed),
+            None => Err(Fatal::Error(String::from(
+                "InternalError: the frame just pushed names a body the unit has not",
+            ))),
+        };
+        let raised = match self.fatal_of(raised) {
+            Ok(raised) => raised,
+            Err(thrown) => {
+                while self.vm.frames().len() > standing {
+                    self.pop_frame();
+                }
+                return Err(thrown);
+            }
+        };
+        if raised.is_some() {
+            while self.vm.frames().len() > standing {
+                self.pop_frame();
+            }
+            return match self.pending.take() {
+                Some(pending) => Err(Thrown::of(Some(pending))),
+                None => Ok(Value::null()),
+            };
         }
         let reenter = self.shared.reenter;
         let served = reenter(self, frame);

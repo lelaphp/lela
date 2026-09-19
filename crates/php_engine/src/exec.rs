@@ -727,6 +727,85 @@ pub(crate) fn opline_at(code: &OpArray, at: u32) -> Option<&Opline> {
     code.oplines.get(at as usize)
 }
 
+/// `i_init_func_execute_data`'s parameter prologue over a frame just
+/// pushed (`Z/Zend/zend_execute.c:4426-4437`): the `RECV*` oplines up to
+/// the entry safepoint, each placing a parameter and each running the
+/// type check the declaration carries, with the ones php skips skipped.
+/// php skips the `RECV*` of the arguments a call passed, and only where
+/// the function declares no type: `ZEND_ACC_HAS_TYPE_HINTS` keeps every
+/// one of them, since each is a check. The design's entry safepoint
+/// stands after the last of them either way (§5.6, the accepted
+/// `trace:entry-counter-typed-recv` row), which is why this runs before
+/// the loop is asked for the frame's activation.
+///
+/// `Some` is the frame a `RECV` raised on, whose throwable is pending;
+/// the caller decides what a raise before the activation means to it.
+/// Every call a user function is reached by crosses this: the one an
+/// opline pushed ([`enter`]) and the one a native served
+/// ([`Request::serve_user`]), so a `ReflectionMethod::invoke` verifies
+/// what `DO_UCALL` verifies, and the coercion a scalar parameter
+/// carries outside `strict_types` is served there too:
+///
+/// ```php
+/// function f(int $a, float $b, string $c) { var_dump($a, $b, $c); }
+/// (new ReflectionFunction("f"))->invoke("5", "2.5", 7);
+/// ```
+/// ```expect
+/// int(5)
+/// float(2.5)
+/// string(1) "7"
+/// ```
+pub(crate) fn parameter_prologue(
+    req: &mut Request,
+    callee: FrameRef,
+    body: &OpArray,
+    function: Function,
+    passed: usize,
+) -> Result<Option<FrameRef>, php_heap::Fatal> {
+    let entry = body.safepoints.first().map_or(0, |at| at.0);
+    let (parameters, typed) = req.function_decl(function).map_or((0, false), |decl| {
+        (
+            u32::try_from(decl.parameters.iter().filter(|p| !p.variadic).count())
+                .unwrap_or(u32::MAX),
+            decl.parameters.iter().any(|p| p.ty.is_some()),
+        )
+    });
+    let passed = u32::try_from(passed).unwrap_or(u32::MAX);
+    if passed <= parameters && !typed {
+        // `opline += num_args`: the `RECV*` of each argument the call
+        // passed is skipped and the ones after it still run, so a
+        // parameter the call left out still reaches its `RECV` and its
+        // `ArgumentCountError`.
+        req.vm_mut().jump(callee, passed.min(entry));
+    }
+    while req.vm().opline(callee) < entry {
+        let Some(prologue) = opline_at(body, req.vm().opline(callee)) else {
+            break;
+        };
+        let stepped = match prologue.opcode {
+            php_unit::Opcode::Recv => {
+                crate::handlers::recv::<crate::tier::Nop>(req, callee, body, prologue)?
+            }
+            php_unit::Opcode::RecvInit => {
+                crate::handlers::recv_init::<crate::tier::Nop>(req, callee, body, prologue)?
+            }
+            php_unit::Opcode::RecvVariadic => {
+                crate::handlers::recv_variadic::<crate::tier::Nop>(req, callee, body, prologue)?
+            }
+            other => {
+                return Err(php_heap::Fatal::Error(format!(
+                    "InternalError: {} stands before the entry safepoint, and this engine serves no handler for it yet",
+                    other.name()
+                )));
+            }
+        };
+        if let crate::tier::Stepped::Threw(at) = stepped {
+            return Ok(Some(at));
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

@@ -1245,46 +1245,8 @@ fn enter(
             "InternalError: the frame just pushed names a body the unit has not",
         )));
     };
-    let entry = body.safepoints.first().map_or(0, |at| at.0);
-    // `i_init_func_execute_data` (`Z/Zend/zend_execute.c:4426-4437`)
-    // skips the `RECV*` oplines of the arguments a call passed, and only
-    // where the function declares no type: `ZEND_ACC_HAS_TYPE_HINTS`
-    // keeps every one of them, since each is a type check. The design's
-    // entry safepoint stands after the last of them either way (§5.6,
-    // the accepted `trace:entry-counter-typed-recv` row).
-    let (parameters, typed) = req.function_decl(function).map_or((0, false), |decl| {
-        (
-            u32::try_from(decl.parameters.iter().filter(|p| !p.variadic).count())
-                .unwrap_or(u32::MAX),
-            decl.parameters.iter().any(|p| p.ty.is_some()),
-        )
-    });
-    let passed = u32::try_from(passed).unwrap_or(u32::MAX);
-    if passed <= parameters && !typed {
-        // `opline += num_args`: the `RECV*` of each argument the call
-        // passed is skipped and the ones after it still run, so a
-        // parameter the call left out still reaches its `RECV` and its
-        // `ArgumentCountError`.
-        req.vm_mut().jump(callee, passed.min(entry));
-    }
-    while req.vm().opline(callee) < entry {
-        let Some(prologue) = exec::opline_at(body, req.vm().opline(callee)) else {
-            break;
-        };
-        let stepped = match prologue.opcode {
-            Opcode::Recv => recv::<crate::tier::Nop>(req, callee, body, prologue)?,
-            Opcode::RecvInit => recv_init::<crate::tier::Nop>(req, callee, body, prologue)?,
-            Opcode::RecvVariadic => recv_variadic::<crate::tier::Nop>(req, callee, body, prologue)?,
-            other => {
-                return Err(Fatal::Error(format!(
-                    "InternalError: {} stands before the entry safepoint, and this engine serves no handler for it yet",
-                    other.name()
-                )));
-            }
-        };
-        if let Stepped::Threw(at) = stepped {
-            return Ok(Stepped::Threw(at));
-        }
+    if let Some(at) = exec::parameter_prologue(req, callee, body, function, passed)? {
+        return Ok(Stepped::Threw(at));
     }
     Ok(Stepped::Pushed(callee))
 }
@@ -1758,10 +1720,42 @@ pub(crate) fn verify_never_type<T: Tier>(
 /// a user function's argument of the wrong type raises. The sentence is
 /// `zend_argument_type_error`'s, `{fn}(): Argument #N ($name) must be of
 /// type {declared}, {given} given`, with `, called in {file} on line {n}`
-/// where the frame below is user code, which php's uncaught rendering
-/// then closes with ` and defined`
+/// where the frame that pushed the call is user code, which php's
+/// uncaught rendering then closes with ` and defined`
 /// ([`Request::throwable_to_string`]). The throwable's own site is the
 /// callee's, where the loop stands.
+///
+/// The clause is picked by [`call_site`], `EX(prev_execute_data)` as
+/// php reads it, and not by the frame standing under this one on the
+/// request's stack: a call a native served has no user frame that
+/// pushed it, so php names no call site there, where the frame below is
+/// whatever user code happened to call the native.
+///
+/// ```php
+/// class C { function m(int $a) { var_dump($a); } }
+/// (new ReflectionMethod("C","m"))->invoke(new C, "nope");
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: C::m(): Argument #1 ($a) must be of type int, string given in %s:2
+/// Stack trace:
+/// #0 [internal function]: C->m('nope')
+/// #1 %s(3): ReflectionMethod->invoke(Object(C), 'nope')
+/// #2 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// The same argument through the two paths, the clause on the one an
+/// opline pushed and none on the one a native served:
+///
+/// ```php
+/// function f(int $a) {}
+/// try { f("x"); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { (new ReflectionFunction("f"))->invoke("x"); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// f(): Argument #1 ($a) must be of type int, string given, called in %s on line 3
+/// f(): Argument #1 ($a) must be of type int, string given
+/// ```
 fn arg_type_error(
     req: &mut Request,
     frame: FrameRef,
@@ -1786,14 +1780,7 @@ fn arg_type_error(
         .unwrap_or_default();
     let declared = crate::api::coerce::type_name(ty);
     let given = crate::ops::value_name(req, &argument.undef_as_null());
-    let caller = req.vm().frames().iter().rev().nth(1).map(|caller| {
-        (
-            exec::body_of(&caller.unit, caller.body)
-                .map(|code| String::from_utf8_lossy(&code.filename.0).into_owned())
-                .unwrap_or_default(),
-            exec::line_of(caller),
-        )
-    });
+    let caller = call_site(req, frame);
     let message = match caller {
         Some((file, line)) => format!(
             "{name}(): Argument #{number}{parameter} must be of type {declared}, {given} given, called in {file} on line {line}"
