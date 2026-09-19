@@ -664,10 +664,24 @@ impl PhpObject {
     }
 
     /// The properties as array entries, mangled names and all, what
-    /// `(array)` produces: views, no owner taken.
+    /// `(array)` produces: [`PhpObject::props_for`] under
+    /// [`PropertyPurpose::ArrayCast`], so the class's
+    /// `get_properties_for` slot is asked and a declared name carries
+    /// the prefix `zend_mangle_property_name` puts before it, `\0*\0p`
+    /// for a protected property and `\0C\0p` for a private one, which
+    /// is how `crate::ops::to_array` keys the same rows. A caller that
+    /// wants the names as declared, `get_object_vars` from inside the
+    /// class, wants [`PhpObject::props`] instead. Views, no owner
+    /// taken; the `Err` is the memory limit refusing the intern of a
+    /// mangled name.
+    ///
+    /// Nothing in the engine or the extensions calls this yet, so the
+    /// mangling it promises is the one `crate::ops::properties_for`
+    /// carries the witness for, `print_r` over a class whose parent
+    /// declares a private property of the same name.
     pub fn entries(&self, req: &mut Request) -> Result<Vec<(Key, Value)>, Thrown> {
         Ok(self
-            .props(req)?
+            .props_for(req, PropertyPurpose::ArrayCast)?
             .into_iter()
             .map(|(name, value)| (Key::from_string(name), value))
             .collect())
