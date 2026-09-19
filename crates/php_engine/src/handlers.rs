@@ -7366,7 +7366,28 @@ fn step_property(
 /// the arm a class that hands out no place takes: `read_property` under
 /// `BP_VAR_R`, the kernel over what it answered and the value, and
 /// `write_property` with what it made, which is what the temporary takes
-/// under `RETURN_VALUE_USED`.
+/// under `RETURN_VALUE_USED`. A class serving the name with `__get` and
+/// `__set` is read once and written once, and nothing lands on the
+/// object but what the setter puts there.
+///
+/// ```php
+/// class O {
+///     public function __get($k) { echo "get $k\n"; return 4; }
+///     public function __set($k, $v) { echo "set $k=$v\n"; }
+/// }
+/// $o = new O;
+/// $o->p |= 3;
+/// var_dump($o->p);
+/// var_dump($o);
+/// ```
+/// ```expect
+/// get p
+/// set p=7
+/// get p
+/// int(4)
+/// object(O)#1 (0) {
+/// }
+/// ```
 fn overloaded_property_step(
     req: &mut Request,
     frame: FrameRef,
