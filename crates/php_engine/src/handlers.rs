@@ -617,6 +617,35 @@ pub(crate) fn bind_lexical<T: Tier>(
 /// int(2)
 /// int(1)
 /// ```
+///
+/// The cell the CV becomes is the one the enclosing variable is, so a
+/// step written through either name is read by both, and the closure
+/// that counts a shared number down reaches its bottom.
+///
+/// ```php
+/// $i = 3;
+/// $f = function () use (&$i) { echo $i--, "|"; };
+/// $f(); $f(); $f();
+/// echo "\n", $i, "\n";
+/// ```
+/// ```expect
+/// 3|2|1|
+/// 0
+/// ```
+///
+/// A by-value `use` is the copy it was, rebound from the table at every
+/// call, so the same closure written without the `&` counts nowhere.
+///
+/// ```php
+/// $j = 3;
+/// $g = function () use ($j) { echo $j--, "|"; };
+/// $g(); $g(); $g();
+/// echo "\n", $j, "\n";
+/// ```
+/// ```expect
+/// 3|3|3|
+/// 3
+/// ```
 pub(crate) fn bind_static<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -9000,6 +9029,22 @@ pub(crate) fn spaceship<T: Tier>(
 /// Deprecated: Increment on non-numeric string is deprecated, use str_increment() instead in %s on line 2
 /// yz
 /// ```
+///
+/// The step of a variable holding a reference is written inside the
+/// cell, and the temporary takes the dereferenced value, so `++$m`
+/// reads as the number and not as the cell.
+///
+/// ```php
+/// $n = 1;
+/// $m = &$n;
+/// var_dump(++$m, $n, $m++, $n);
+/// ```
+/// ```expect
+/// int(2)
+/// int(2)
+/// int(2)
+/// int(3)
+/// ```
 pub(crate) fn pre_inc<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -9064,6 +9109,21 @@ pub(crate) fn pre_dec<T: Tier>(
 /// 98
 /// Deprecated: Decrement on empty string is deprecated as non-numeric in %s on line 2
 /// |-1
+/// ```
+///
+/// A variable holding a reference is stepped inside the cell, so the
+/// step is read by every other name bound to it: a by-reference
+/// parameter and a `&` binding alike.
+///
+/// ```php
+/// function step(&$x) { $x--; }
+/// $a = 1; step($a); var_dump($a);
+/// $b = 1; $r = &$b; $r--; var_dump($b, $r);
+/// ```
+/// ```expect
+/// int(0)
+/// int(0)
+/// int(0)
 /// ```
 pub(crate) fn post_dec<T: Tier>(
     req: &mut Request,
@@ -10135,6 +10195,16 @@ fn unary(
 /// `zend_do_free` turns one nothing reads into the `PRE_*`. A kernel
 /// that threw leaves the throwable pending and the variable as it was,
 /// which is the `Threw` edge the loop reads.
+///
+/// Where the slot holds a reference, the four helpers
+/// (`zend_pre_inc_helper` and its three neighbours,
+/// `Z/Zend/zend_vm_def.h:1546-1683`) step `Z_REFVAL_P(var_ptr)` and not
+/// the slot: `var_ptr = Z_REFVAL_P(var_ptr)` before
+/// `increment_function`, so the step is written inside the cell and
+/// every name bound to it reads it, and the temporary takes the
+/// dereferenced value. Writing the stepped value over the slot instead
+/// would drop the binding, which is what a closure's `use (&$x)` and a
+/// by-reference parameter are.
 fn incdec(
     req: &mut Request,
     frame: FrameRef,
@@ -10147,20 +10217,31 @@ fn incdec(
         OperandKind::Cv => op.op1,
         _ => exec::temporary_slot(code, op.op1),
     };
-    let held = exec::operand(req, frame, code, op.op1_type, op.op1);
+    let named = exec::operand(req, frame, code, op.op1_type, op.op1);
+    // `if (Z_TYPE_P(var_ptr) == IS_REFERENCE) { var_ptr = Z_REFVAL_P(var_ptr); }`.
+    let cell = named.as_php_ref().copied();
+    let held = named.deref();
     match kernel(req, &held) {
         Ok(stepped) => {
             if op.out_type != OperandKind::Unused {
+                // `ZVAL_COPY(EX_VAR(opline->result.var), var_ptr)`,
+                // before the step for a `POST_*` and after it for a
+                // `PRE_*`; one more owner either way.
                 let out = exec::temporary_slot(code, op.out);
-                let value = if post {
-                    held
-                } else {
-                    req.addref(&stepped);
-                    stepped
-                };
-                req.set_slot(frame, out, value);
+                let value = if post { held } else { stepped };
+                req.addref(&value);
+                let previous = req.set_slot(frame, out, value);
+                req.release(previous);
             }
-            req.set_slot(frame, slot, stepped);
+            // The kernel's one owner of the stepped value is the
+            // variable's from here, and what stood there is released,
+            // which is what the in-place step does.
+            if let Some(cell) = cell {
+                cell.set(req, stepped);
+            } else {
+                let previous = req.set_slot(frame, slot, stepped);
+                req.release(previous);
+            }
             Ok(advance(req, frame))
         }
         Err(thrown) => {

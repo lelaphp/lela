@@ -2522,8 +2522,10 @@ fn compare_entries(req: &mut Request, left: PhpArray, right: PhpArray) -> Result
 /// empty string to `'1'`, behind the deprecation 8.3 raises for one; a
 /// bool is php's warning and no change; and an array, a resource or an
 /// object is `TypeError`, naming what it could not increment. The value
-/// is handed back rather than written in place: a reference the
-/// variable holds is followed with the memory model (design §11, Lane A).
+/// is handed back rather than written in place, and it carries one
+/// owner in every arm, the arms that step nothing included, so the
+/// caller writes it where php's in-place step wrote and releases what
+/// stood there.
 ///
 /// ```php
 /// $i = 1; $i++; $d = 1.5; $d++; $m = 9223372036854775807; $m++; $n = null; $n++; $t = "9"; $t++; $f = "1.5"; $f++; $e = "9223372036854775807"; $e++;
@@ -2616,6 +2618,10 @@ pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Throw
                 req,
                 "Increment on type bool has no effect, this will change in the next major version of PHP",
             );
+            // php steps nothing here, so the variable keeps what it
+            // holds; the value handed back is a second owner of it,
+            // which the caller's write-back gives the variable again.
+            req.addref(value);
             Ok(*value)
         }
         ValueRef::Array(_)
@@ -2640,7 +2646,7 @@ pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Throw
 /// warning and no change, null having no `-1` where `++` has its `1`;
 /// and an array, a resource or an object is `TypeError`, naming what it
 /// could not decrement. The value is handed back rather than written in
-/// place, as [`increment`]'s is.
+/// place and carries one owner, as [`increment`]'s does.
 ///
 /// ```php
 /// $i = 1; $i--; $d = 1.5; $d--; $m = -9223372036854775807-1; $m--; $n = null; $n--; $t = "9"; $t--; $f = "1.5"; $f--; $e = "-9223372036854775807-1"; $g = "-9223372036854775808"; $g--;
@@ -2712,6 +2718,10 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
                     req,
                     "Decrement on non-numeric string has no effect and is deprecated",
                 );
+                // As [`increment`]'s bool arm: nothing is stepped, and
+                // the value handed back is a second owner of the string
+                // the variable holds.
+                req.addref(value);
                 Ok(*value)
             }
         },
@@ -2728,6 +2738,7 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
                 req,
                 "Decrement on type bool has no effect, this will change in the next major version of PHP",
             );
+            req.addref(value);
             Ok(*value)
         }
         ValueRef::Array(_)
