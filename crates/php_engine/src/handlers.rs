@@ -3387,7 +3387,10 @@ pub(crate) fn fetch_obj_w<T: Tier>(
                 )));
             };
             req.addref(&name_value);
-            match req.dynamic_property_ref(object, key) {
+            // `zend_std_get_property_ptr_ptr` under `BP_VAR_W`, which
+            // lays the entry down with the creation's diagnostics and
+            // no read's warning.
+            match req.dynamic_property_ref(object, key, PropertyRead::Silent) {
                 Ok(Some(at)) => at,
                 Ok(None) => {
                     return Err(Fatal::Error(format!(
@@ -7311,10 +7314,54 @@ fn step_property(
                 "InternalError: ZEND_ASSIGN_OBJ_OP over a property whose name is no string",
             )));
         };
-        return Ok(overloaded_property_step(
-            req, frame, code, step, object, key,
-        ));
+        // `zend_std_get_property_ptr_ptr`'s two answers for a name no
+        // class declared: a class with a `__get` the guard is not
+        // holding hands out no place and the overloaded pair takes the
+        // site; every other class takes the place, which is the dynamic
+        // entry laid down here.
+        if req.overloaded_place(object, &bytes) {
+            return Ok(overloaded_property_step(
+                req, frame, code, step, object, key,
+            ));
+        }
+        return Ok(dynamic_property_step(req, frame, code, step, object, key));
     };
+    // `zend_std_get_property_ptr_ptr`'s valid-offset arm
+    // (`Z/Zend/zend_object_handlers.c:1429`): a slot nothing has
+    // written is the read's own diagnostic under `BP_VAR_RW`, raised
+    // before the value is read, and then `ZVAL_NULL` over the slot. A
+    // `__get` the guard is not holding serves an untyped one instead,
+    // its class handing out no place at all; a typed slot takes the
+    // uninitialised-access error whatever the class serves, which is
+    // php's `prop_info && (Z_PROP_FLAG_P(retval) & IS_PROP_UNINIT)`.
+    if object.heap().slot(slot).is_undef() {
+        let shown = String::from_utf8_lossy(&bytes).into_owned();
+        if typed {
+            let class = req.class_name(object.class());
+            let thrown = crate::api::raising::throw(
+                req,
+                "Error",
+                &format!(
+                    "Typed property {class}::${shown} must not be accessed before initialization"
+                ),
+            );
+            exec::free_operand(req, frame, code, data.op1_type, data.op1);
+            write_out(req, frame, code, op, &Value::null());
+            return Ok(Err(thrown));
+        }
+        if req.overloaded_place(object, &bytes) {
+            let Some(key) = name.as_php_string().copied() else {
+                return Err(Fatal::Error(String::from(
+                    "InternalError: ZEND_ASSIGN_OBJ_OP over a property whose name is no string",
+                )));
+            };
+            return Ok(overloaded_property_step(
+                req, frame, code, step, object, key,
+            ));
+        }
+        let class = req.class_name(object.class());
+        crate::api::raising::warning(req, &format!("Undefined property: {class}::${shown}"));
+    }
     let value = exec::operand(req, frame, code, data.op1_type, data.op1);
     let held = exec::value_of(object.heap().slot(slot))
         .deref()
@@ -7360,6 +7407,93 @@ fn step_property(
     write_out(req, frame, code, op, &landed);
     req.assign_declared_slot(object.heap(), slot, landed);
     Ok(Ok(()))
+}
+
+/// `ZEND_ASSIGN_OBJ_OP` over the place `zend_std_get_property_ptr_ptr`
+/// hands out for a name no class declared: the dynamic entry, taken
+/// before the value is read ([`Request::dynamic_property_ref`]) and so
+/// created with php's deprecation before the read's `Undefined
+/// property` warning, which is the order the pair of handlers raises
+/// them in the other way round.
+///
+/// php runs the kernel over that place, `zend_binary_op(zptr, zptr,
+/// value)`. Here the place is taken and then read and written by the
+/// same pair the overloaded arm uses: with the entry standing, the read
+/// finds it and raises nothing, and the write lands in it and raises
+/// nothing, so what the two do to the object is what the one kernel
+/// over the cell does.
+///
+/// ```php
+/// class C { public $p = 1; public $u; public int $t; }
+/// $o = new C;
+/// $o->fresh += 5;
+/// var_dump($o->fresh);
+/// unset($o->u);
+/// $o->u .= "x";
+/// var_dump($o->u);
+/// try { $o->t += 1; } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// var_dump($o);
+/// ```
+/// ```expect
+///
+/// Deprecated: Creation of dynamic property C::$fresh is deprecated in %s on line 4
+///
+/// Warning: Undefined property: C::$fresh in %s on line 4
+/// int(5)
+///
+/// Warning: Undefined property: C::$u in %s on line 7
+/// string(1) "x"
+/// Error: Typed property C::$t must not be accessed before initialization
+/// object(C)#1 (3) {
+///   ["p"]=>
+///   int(1)
+///   ["u"]=>
+///   string(1) "x"
+///   ["t"]=>
+///   uninitialized(int)
+///   ["fresh"]=>
+///   int(5)
+/// }
+/// ```
+///
+/// A class that allows the dynamic property raises the read's warning
+/// alone, the creation having nothing to say:
+///
+/// ```php
+/// #[\AllowDynamicProperties]
+/// class D { }
+/// $d = new D;
+/// $d->fresh += 5;
+/// var_dump($d->fresh);
+/// $s = new stdClass;
+/// $s->n .= "a";
+/// var_dump($s->n);
+/// ```
+/// ```expect
+///
+/// Warning: Undefined property: D::$fresh in %s on line 5
+/// int(5)
+///
+/// Warning: Undefined property: stdClass::$n in %s on line 8
+/// string(1) "a"
+/// ```
+fn dynamic_property_step(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    step: Compound<'_>,
+    object: PhpObject,
+    name: crate::api::values::PhpString,
+) -> Result<(), Thrown> {
+    req.addref(&Value::string(name));
+    let place = req.dynamic_property_ref(object, name, PropertyRead::Warning);
+    if let Err(thrown) = place {
+        let Compound { op, data, .. } = step;
+        exec::free_operand(req, frame, code, data.op1_type, data.op1);
+        write_out(req, frame, code, op, &Value::null());
+        return Err(thrown);
+    }
+    overloaded_property_step(req, frame, code, step, object, name)
 }
 
 /// `zend_assign_op_overloaded_property` (`Z/Zend/zend_execute.c:2429`),

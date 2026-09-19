@@ -288,6 +288,10 @@ pub(crate) struct Class {
     pub(crate) properties: Vec<Property>,
     pub(crate) constants: Vec<Constant>,
     pub(crate) methods: Vec<Method>,
+    /// The line the name is on, `ce->info.user.line_start`, which is
+    /// where php raises what `zend_compile_attributes` refuses and not
+    /// where the attribute itself was written.
+    pub(crate) line: u32,
     /// The line of the closing brace, `ce->info.user.line_end`.
     pub(crate) end_line: u32,
 }
@@ -1446,6 +1450,7 @@ impl Reader<'_> {
     /// case, an accessor list or an attribute is refused the same way.
     fn class_decl(&mut self, kind: ClassKind, attributes: Vec<Attr>) -> Result<Stmt, Trouble> {
         self.skip_trivia();
+        let declared_at = self.line;
         let name = self.name();
         if name.is_empty() || name.contains(&b'\\') {
             return Err(self.trouble("a class this compiler cannot read yet"));
@@ -1496,6 +1501,7 @@ impl Reader<'_> {
             properties: Vec::new(),
             constants: Vec::new(),
             methods: Vec::new(),
+            line: declared_at,
             end_line: 0,
         };
         loop {

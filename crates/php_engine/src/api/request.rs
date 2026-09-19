@@ -4019,10 +4019,20 @@ impl Request {
     /// until the table is written again ([`php_heap::Arr::value_ref`]);
     /// the one opline between this and the write through it is the
     /// `ASSIGN*` php pairs it with, which inserts nothing.
+    ///
+    /// `read` is php's `type`: under [`PropertyRead::Warning`], which is
+    /// `BP_VAR_RW` and `BP_VAR_R`, the `Undefined property` warning
+    /// stands between the creation's deprecation and the entry
+    /// (`Z/Zend/zend_object_handlers.c:1530`), which is the order php
+    /// raises the two in and the reverse of the order the pair
+    /// [`Request::read_property`] and [`Request::write_property`]
+    /// raises them in over the same name. A name the table already
+    /// holds raises neither, php returning before both.
     pub(crate) fn dynamic_property_ref(
         &mut self,
         object: PhpObject,
         name: PhpString,
+        read: PropertyRead,
     ) -> Result<Option<php_heap::ZvalRef>, Thrown> {
         let o = object.heap();
         let key = php_heap::Key::Str(name.heap());
@@ -4038,10 +4048,29 @@ impl Request {
         let table = self.array_separate(table)?;
         self.heap.object_set_properties(o, table);
         if !held {
+            if read == PropertyRead::Warning {
+                let class = self.class_name(object.class());
+                let shown = String::from_utf8_lossy(name.as_bytes()).into_owned();
+                crate::api::raising::warning(
+                    self,
+                    &format!("Undefined property: {class}::${shown}"),
+                );
+            }
             self.array_update(table, key, Value::null())?;
         }
         self.release(Value::string(name));
         Ok(table.value_ref(key))
+    }
+
+    /// `EXPECTED(!zobj->ce->__get) || UNEXPECTED((*zend_get_property_guard(zobj,
+    /// name)) & IN_GET)` (`Z/Zend/zend_object_handlers.c:1489`) read the
+    /// other way round: whether `zend_std_get_property_ptr_ptr` hands
+    /// out no place for `name` and leaves the site to `read_property`
+    /// and `write_property`, which is a class with a `__get` that the
+    /// guard is not already holding.
+    pub(crate) fn overloaded_place(&self, object: PhpObject, name: &[u8]) -> bool {
+        self.serves_accessor(object.class(), b"__get")
+            && self.guard_word(object, name) & IN_GET == 0
     }
 
     /// The properties in order, the declared slots that hold a value

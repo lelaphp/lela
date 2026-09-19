@@ -4290,10 +4290,12 @@ mod tests {
         );
         assert_eq!(
             refused(b"<?php\n#[\\AllowDynamicProperties] class M {}"),
-            not_yet(
-                "the #[\\AllowDynamicProperties] of M this compiler cannot read yet",
-                2
-            )
+            None,
+            "the one attribute the compiler reads is a bit on the class"
+        );
+        assert_eq!(
+            refused(b"<?php\n#[\\AllowDynamicProperties]\ninterface I {}"),
+            compile_error("Cannot apply #[\\AllowDynamicProperties] to interface I", 3)
         );
         assert_eq!(
             refused(b"<?php\n#[A] function f() {}"),

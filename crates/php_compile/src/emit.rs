@@ -98,8 +98,8 @@ use php_heap::{
 };
 use php_unit::decl::{
     Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstDecl,
-    ConstExpr, EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, PropertyDecl, Type,
-    Visibility,
+    ConstExpr, DynamicProperties, EnumBacking, FunctionDecl, MethodDecl, Name, Parameter,
+    PropertyDecl, Type, Visibility,
 };
 use php_unit::{
     ConstIdx, Diagnostic, FramelessEntry, Level, MethodBody, OpArray, Opcode, OperandKind, Opline,
@@ -2062,10 +2062,14 @@ impl Emit<'_> {
                 None => true,
                 Some(parent) => self.known_class(parent).is_some(),
             };
+        let (attributes, dynamic_properties) = self.class_attributes(class, &name, class.line)?;
         let mut decl = ClassDecl {
             name: Name(name.clone().into_boxed_slice()),
             kind: class.kind,
-            flags: ClassFlags::default(),
+            flags: ClassFlags {
+                dynamic_properties,
+                ..ClassFlags::default()
+            },
             parent: parent
                 .as_ref()
                 .map(|parent| Name(parent.clone().into_boxed_slice())),
@@ -2078,7 +2082,7 @@ impl Emit<'_> {
             constants: Vec::new(),
             properties: Vec::new(),
             methods: Vec::new(),
-            attributes: self.class_attributes(class, &name)?,
+            attributes,
             doc_comment: class.doc_comment.clone().map(Vec::into_boxed_slice),
             file: self.filename.clone(),
             line,
@@ -2151,23 +2155,43 @@ impl Emit<'_> {
     /// here, as it is none in php.
     ///
     /// `#[\AllowDynamicProperties]` is the one attribute the compiler
-    /// itself reads, `ZEND_ACC_ALLOW_DYNAMIC_PROPERTIES` on the class,
-    /// and it is refused as not yet read rather than kept as a marker
-    /// that does nothing.
+    /// itself reads: `validate_allow_dynamic_properties`
+    /// (`Z/Zend/zend_attributes.c:73`) sets
+    /// `ZEND_ACC_ALLOW_DYNAMIC_PROPERTIES` on the class it is written
+    /// on and is php's compile error on a trait, an interface or an
+    /// enum. php's fourth refusal, the readonly class, waits on a
+    /// compiler that reads one. The attribute is kept in the list
+    /// beside the bit, as php keeps it for `ReflectionClass`.
     fn class_attributes(
         &mut self,
         class: &Class,
         class_name: &[u8],
-    ) -> Result<Vec<Attribute>, CompileError> {
+        declared_at: u32,
+    ) -> Result<(Vec<Attribute>, DynamicProperties), CompileError> {
         let mut out = Vec::new();
+        let mut dynamic_properties = DynamicProperties::default();
         for attribute in &class.attributes {
             self.line = attribute.line;
             let name = self.class_name(&attribute.name);
             if name.eq_ignore_ascii_case(b"AllowDynamicProperties") {
-                return Err(self.fatal(format!(
-                    "the #[\\AllowDynamicProperties] of {} this compiler cannot read yet",
-                    String::from_utf8_lossy(class_name)
-                )));
+                let refused = match class.kind {
+                    ClassKind::Trait => Some("trait"),
+                    ClassKind::Interface => Some("interface"),
+                    ClassKind::Enum => Some("enum"),
+                    ClassKind::Class => None,
+                };
+                if let Some(word) = refused {
+                    // php raises the validator's message where the
+                    // class was written and not where the attribute was
+                    // (`zend_compile_attributes` runs at the class's
+                    // own line).
+                    self.line = declared_at;
+                    return Err(self.compile_error(format!(
+                        "Cannot apply #[\\AllowDynamicProperties] to {word} {}",
+                        String::from_utf8_lossy(class_name)
+                    )));
+                }
+                dynamic_properties = DynamicProperties::Allowed;
             }
             let mut arguments = Vec::new();
             for argument in &attribute.arguments {
@@ -2181,7 +2205,7 @@ impl Emit<'_> {
                 arguments,
             });
         }
-        Ok(out)
+        Ok((out, dynamic_properties))
     }
 
     /// `zend_compile_prop_decl`, the same one declarator at a time,
@@ -8942,6 +8966,7 @@ mod tests {
             properties: Vec::new(),
             constants: Vec::new(),
             methods: Vec::new(),
+            line: 1,
             end_line: 1,
         };
         assert!(emit.class(&read).is_ok());
