@@ -2446,6 +2446,7 @@ impl Emit<'_> {
             | Expr::AssignCoalesce { .. }
             | Expr::AssignDim { .. }
             | Expr::AssignProp { .. }
+            | Expr::AssignStaticProp { .. }
             | Expr::AssignRef { .. }
             | Expr::Call { .. }
             | Expr::PreInc(_)
@@ -3900,6 +3901,9 @@ impl Emit<'_> {
                 name,
                 value,
             } => self.assign_prop(object, name, value),
+            Expr::AssignStaticProp { class, name, value } => {
+                self.assign_static_prop(class, name, value)
+            }
             Expr::AssignDim { target, value } => self.assign_dim(target, value),
             Expr::AssignRef { target, source } => self.assign_ref(target, source),
             Expr::Dim { .. } => self.dim_read(expr),
@@ -4897,6 +4901,54 @@ impl Emit<'_> {
         Ok(Where::Temporary(out))
     }
 
+    /// `zend_compile_assign`, the `ZEND_AST_STATIC_PROP` arm
+    /// (`Z/Zend/zend_compile.c:3477`): the fetch compiled delayed
+    /// (`zend_delayed_compile_var` under `BP_VAR_W`, which is
+    /// [`Self::static_prop`]'s `zend_compile_static_prop` with
+    /// `delayed`), the value after it, and the one delayed opline laid
+    /// down at `zend_delayed_compile_end` with its opcode set to
+    /// `ASSIGN_STATIC_PROP` and its `result` to a temporary, then
+    /// `OP_DATA` carrying the value (`zend_emit_op_data`), which is why
+    /// the handler steps over two oplines. The property's name is one
+    /// constant in `op1`, the class's constant pair is `op2` and three
+    /// cache slots stand in `extended_value`, each taken where the
+    /// fetch is delayed and so before the value's own literals and
+    /// temporaries; [`Self::do_free`] marks the temporary `UNUSED`
+    /// where nothing reads it, which is why php's dump of
+    /// `T::$a = 5; var_dump(T::$a);` numbers the read's temporary `T1`.
+    fn assign_static_prop(
+        &mut self,
+        class: &[u8],
+        name: &[u8],
+        value: &Expr,
+    ) -> Result<Where, CompileError> {
+        let name = self.string(name)?;
+        let name_at = self.literal(name);
+        let out = self.temporary();
+        let slots = self.cache_slots(3);
+        let class_at = self.class_name_literal(class)?;
+        let value = self.expr(value)?;
+        let (data_type, data) = self.operand(value);
+        self.push(Opline {
+            opcode: Opcode::AssignStaticProp,
+            op1_type: OperandKind::Const,
+            op1: name_at,
+            op2_type: OperandKind::Const,
+            op2: class_at,
+            out_type: OperandKind::Tmp,
+            out,
+            extended_value: slots,
+            ..Opline::default()
+        });
+        self.push(Opline {
+            opcode: Opcode::OpData,
+            op1_type: data_type,
+            op1: data,
+            ..Opline::default()
+        });
+        Ok(Where::Temporary(out))
+    }
+
     /// `zend_compile_binary_op`: the value where
     /// `zend_try_ct_eval_binary_op` folds the operator over two constants,
     /// and the opcode into a temporary where it does not
@@ -5591,6 +5643,7 @@ impl Emit<'_> {
             | Expr::Assign { .. }
             | Expr::AssignDim { .. }
             | Expr::AssignProp { .. }
+            | Expr::AssignStaticProp { .. }
             | Expr::AssignRef { .. }
             | Expr::PreInc(_)
             | Expr::PostInc(_)
@@ -7040,6 +7093,10 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Expr) {
             implicit_uses(names, object);
             implicit_uses(names, value);
         }
+        // `C::$p = $v` names the class as written, so nothing under
+        // the target is a variable an arrow function captures; the
+        // value is.
+        Expr::AssignStaticProp { value, .. } => implicit_uses(names, value),
         Expr::PreInc(var) | Expr::PostInc(var) | Expr::PreDec(var) | Expr::PostDec(var) => {
             note(names, var);
         }

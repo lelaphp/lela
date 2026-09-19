@@ -509,6 +509,14 @@ pub(crate) enum Expr {
         name: Vec<u8>,
         value: Child,
     },
+    /// `C::$p = expr`, php's `ZEND_AST_ASSIGN` to a
+    /// `ZEND_AST_STATIC_PROP`: the class and the property both named as
+    /// written, and the value.
+    AssignStaticProp {
+        class: Vec<u8>,
+        name: Vec<u8>,
+        value: Child,
+    },
     /// `$b = &$a`, `$a[] = &$x` and `$b = &f()`, php's
     /// `ZEND_AST_ASSIGN_REF`: the target, a variable or a dimension, and
     /// the source, a variable or a call (`zend_is_call`, which php marks
@@ -3005,6 +3013,19 @@ impl Reader<'_> {
                 self.bump(1);
                 Ok(Expr::AssignProp {
                     object,
+                    name,
+                    value: Child::new(self.assigned()?),
+                })
+            }
+            // `zend_compile_assign`'s `ZEND_AST_STATIC_PROP` arm.
+            // `C::$p = &$x` is php's `ZEND_AST_ASSIGN_REF` over the same
+            // node, which `ASSIGN_STATIC_PROP_REF` serves and this does
+            // not read; the `&` is left where it stands and refused as
+            // the value.
+            Expr::StaticProp { class, name } => {
+                self.bump(1);
+                Ok(Expr::AssignStaticProp {
+                    class,
                     name,
                     value: Child::new(self.assigned()?),
                 })

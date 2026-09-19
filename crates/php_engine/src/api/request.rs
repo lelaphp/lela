@@ -2855,7 +2855,10 @@ impl Request {
     /// php guards with `type != BP_VAR_IS`, and the answer is `None`,
     /// with no slot laid down, since php returns before
     /// `zend_class_init_statics`.
-    fn static_slot(
+    ///
+    /// `ZEND_ASSIGN_STATIC_PROP` addresses the slot here before it
+    /// reads the value operand, which is why the handlers reach this.
+    pub(crate) fn static_slot(
         &mut self,
         class: ClassId,
         name: &[u8],

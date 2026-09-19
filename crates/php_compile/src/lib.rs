@@ -3457,6 +3457,32 @@ mod tests {
         );
     }
 
+    /// `zend_compile_assign`'s `ZEND_AST_STATIC_PROP` arm (#470): the
+    /// fetch's own opline turned into `ASSIGN_STATIC_PROP`, its
+    /// `result` a temporary and the value in the `OP_DATA` beside it.
+    /// The dump is the oracle's under `[regime.dump]` at 8.5.9; the
+    /// read's temporary is `T1` because `T0` is the write's, numbered
+    /// whether or not anything reads it and marked `UNUSED` here by
+    /// `zend_do_free`.
+    #[test]
+    fn a_static_property_write_is_assign_static_prop_over_the_op_data_beside_it() {
+        assert_eq!(
+            dump_of(b"<?php class T { public static $a = 1; } T::$a = 5; var_dump(T::$a);"),
+            main_dump(
+                7,
+                0,
+                3,
+                "0000 ASSIGN_STATIC_PROP string(\"a\") string(\"T\")\n\
+                 0001 OP_DATA int(5)\n\
+                 0002 INIT_FCALL 1 96 string(\"var_dump\")\n\
+                 0003 T1 = FETCH_STATIC_PROP_R string(\"a\") string(\"T\")\n\
+                 0004 SEND_VAL T1 1\n\
+                 0005 DO_ICALL\n\
+                 0006 RETURN int(1)\n"
+            )
+        );
+    }
+
     /// What stands beside a `C::$p` read and is not read yet is refused
     /// as such (#372): a write, an assignment and `++`, the property
     /// the program names as it serves, `self`, `parent` and `static`
@@ -3475,10 +3501,6 @@ mod tests {
             .err()
             .map(|e| e.message)
         };
-        assert_eq!(
-            refused(b"<?php C::$p = 1;").as_deref(),
-            Some("an assignment to what is no variable this compiler cannot read yet")
-        );
         assert_eq!(
             refused(b"<?php C::$p++;").as_deref(),
             Some("a statement this compiler cannot read yet")

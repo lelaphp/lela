@@ -5154,6 +5154,152 @@ fn assign_property(
     }
 }
 
+/// `ZEND_ASSIGN_STATIC_PROP` (`Z/Zend/zend_vm_def.h:2620`),
+/// `C::$p = v`, two oplines: this one names the property in `op1` and
+/// the class's constant pair in `op2`, and the `OP_DATA` after it
+/// carries the value (`GET_OP_DATA_ZVAL_PTR`), so the handler steps
+/// over both (`ZEND_VM_NEXT_OPCODE_EX(1, 2)`).
+///
+/// php addresses the slot before it reads the value
+/// (`zend_fetch_static_property_address` under `BP_VAR_W`, then
+/// `GET_OP_DATA_ZVAL_PTR`), and on a slot it cannot address gives the
+/// value operand up unread (`FREE_OP_DATA`), leaves the temporary
+/// undefined (`UNDEF_RESULT`) and throws. So an undeclared property
+/// written an undefined variable is php's `Error` alone: the warning
+/// the read would raise is never reached, which is the order pinned
+/// below. The slot is [`Request::static_slot`]'s, laid down from the
+/// declaration's default on first use and held to the executed scope;
+/// the write is `zend_update_static_property_ex`
+/// ([`Request::set_static_property`]), which writes through a slot
+/// holding a reference. The temporary `op` names is one more owner of
+/// the value under `RETURN_VALUE_USED` and is not written where the
+/// compiler marked it `UNUSED`.
+///
+/// php reserves three cache slots here as the fetch does, and this
+/// engine's table names a slot by its class and its name rather than by
+/// an address, so nothing is cached and the lookup is made on every
+/// pass, which nothing observes. The address is taken under
+/// [`PropertyRead::Warning`], php's `BP_VAR_W` as far as the slot is
+/// concerned, so the silent miss [`Request::static_slot`] answers under
+/// `BP_VAR_IS` cannot stand here. A typed slot's coercion
+/// (`zend_assign_to_typed_prop`) is not served, as `ASSIGN_OBJ`'s is
+/// not, so a write to one is the internal-error fatal naming the gap
+/// rather than a value of the wrong type in the slot.
+///
+/// ```php
+/// class T { public static $a = 1; }
+/// var_dump(T::$a);
+/// T::$a = 5;
+/// var_dump(T::$a);
+/// var_dump(T::$a = 7, T::$a);
+/// ```
+/// ```expect
+/// int(1)
+/// int(5)
+/// int(7)
+/// int(7)
+/// ```
+///
+/// The write lands on the class that declared the property, so a
+/// subclass and the parent name one slot.
+///
+/// ```php
+/// class A { public static $p = 1; }
+/// class B extends A {}
+/// B::$p = 2;
+/// var_dump(A::$p, B::$p);
+/// ```
+/// ```expect
+/// int(2)
+/// int(2)
+/// ```
+///
+/// A property no class of the chain declares is php's `Error`, and the
+/// value is given up unread: the undefined variable warns nothing.
+///
+/// ```php
+/// class C { public static $y = 1; }
+/// C::$x = $undef;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Access to undeclared static property C::$x in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+///
+/// A property the scope may not reach is php's `Error` before the
+/// undeclared text, as the read's is.
+///
+/// ```php
+/// class C { private static $p = 1; }
+/// C::$p = 2;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Cannot access private property C::$p in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+pub(crate) fn assign_static_prop<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    if op.op1_type != OperandKind::Const {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ASSIGN_STATIC_PROP over a property named at run time",
+        )));
+    }
+    let at = req.vm().opline(frame);
+    let Some(data) = exec::opline_at(code, at.saturating_add(1))
+        .filter(|next| next.opcode == php_unit::Opcode::OpData)
+    else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ASSIGN_STATIC_PROP with no OP_DATA after it",
+        )));
+    };
+    let (data_type, data_at) = (data.op1_type, data.op1);
+    let name = exec::constant(code, ConstIdx(op.op1));
+    let name = name.as_str_bytes().unwrap_or_default().to_vec();
+    let scope = req.executed_scope();
+    let addressed = match class_operand(req, frame, code, op.op2_type, op.op2, None) {
+        Ok(class) => req
+            .static_slot(class, &name, scope, PropertyRead::Warning)
+            .map(|placed| (class, placed)),
+        Err(thrown) => Err(thrown),
+    };
+    let placed = match addressed {
+        Ok((class, Some((_, property)))) => Some((class, property)),
+        // A write is never `BP_VAR_IS`, so the silent miss cannot stand
+        // here.
+        Ok((_, None)) => None,
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, data_type, data_at);
+            return threw(req, frame, &thrown);
+        }
+    };
+    let Some((class, property)) = placed else {
+        exec::free_operand(req, frame, code, data_type, data_at);
+        req.vm_mut().jump(frame, at.saturating_add(2));
+        return Ok(Stepped::Same(frame));
+    };
+    if property.ty.is_some() {
+        return Err(Fatal::Error(format!(
+            "InternalError: ZEND_ASSIGN_STATIC_PROP over the typed static property ${}, whose coercion is not served yet",
+            String::from_utf8_lossy(&name)
+        )));
+    }
+    let value = exec::take_operand(req, frame, code, data_type, data_at);
+    write_out(req, frame, code, op, &value);
+    if let Err(thrown) = req.set_static_property(class, &name, scope, value) {
+        return threw(req, frame, &thrown);
+    }
+    req.vm_mut().jump(frame, at.saturating_add(2));
+    Ok(Stepped::Same(frame))
+}
+
 /// `zend_assign_to_variable` (`Z/Zend/zend_execute.h:171`) over a place:
 /// a reference standing there is followed and the write lands in the
 /// cell, as `ASSIGN` over a CV bound by `&` lands there; the value is
