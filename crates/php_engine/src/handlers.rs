@@ -6929,6 +6929,22 @@ fn rw_entry(
 /// $a = [1];
 /// $a[0] += 2;
 /// $a[0] .= "x";
+/// var_dump($a);
+/// ```
+/// ```expect
+/// array(1) {
+///   [0]=>
+///   string(2) "3x"
+/// }
+/// ```
+///
+/// The append names no key, so it raises no warning and the entry it
+/// laid down holds nothing for the operator to read:
+///
+/// ```php
+/// $a = [1];
+/// $a[0] += 2;
+/// $a[0] .= "x";
 /// $a[] .= "z";
 /// var_dump($a);
 /// $b = [];
