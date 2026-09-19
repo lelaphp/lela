@@ -3904,19 +3904,23 @@ fn linked_properties(req: &mut Request, class: ClassId) -> Vec<(PropertyDecl, Cl
         };
         for property in &decl.properties {
             let at_index = table.iter().position(|(p, _)| p.name == property.name);
+            // A user class's own properties stand before the inherited
+            // ones, in the order the class declared them, since its
+            // table is compiled before `zend_do_inheritance` appends
+            // what the parent has and it does not: the place is after
+            // the ones this class has already put there, whether the
+            // name was inherited and is being redeclared or is new.
+            let own = table.iter().filter(|(_, d)| *d == class).count();
             match at_index {
                 // The child's declaration stands where the parent's was
-                // inherited; a user class puts its own before the rest.
+                // inherited.
                 Some(i) if internal => table[i] = (property.clone(), *at),
                 Some(i) => {
                     table.remove(i);
-                    table.insert(0, (property.clone(), *at));
+                    table.insert(own.min(table.len()), (property.clone(), *at));
                 }
                 None if internal || *at != class => table.push((property.clone(), *at)),
-                None => table.insert(
-                    table.iter().filter(|(_, d)| *d == class).count(),
-                    (property.clone(), *at),
-                ),
+                None => table.insert(own, (property.clone(), *at)),
             }
         }
     }
