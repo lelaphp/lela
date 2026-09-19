@@ -4708,36 +4708,78 @@ impl Request {
         }
     }
 
-    /// `zend_std_get_debug_info`: what `__debugInfo` returns, an array's
-    /// rows or none for `null`, and `E_ERROR` for anything else; the
-    /// properties for a class with no `__debugInfo`.
-    pub(crate) fn debug_info(
-        &mut self,
-        object: PhpObject,
-    ) -> Result<Vec<(PhpString, Value)>, Thrown> {
+    /// `zend_std_get_debug_info` (`Z/Zend/zend_object_handlers.c:2148`):
+    /// what `__debugInfo` returns, an array's rows, the empty set for
+    /// `null` and `E_ERROR` for anything else. `None` for a class that
+    /// declares none, which is php's `get_properties(object)` there: the
+    /// members themselves, left to the reader that asked. The rows the
+    /// method returned are the user's own and carry no mangling, so a
+    /// row named as a private property is shown under the name the
+    /// method gave it.
+    ///
+    /// ```php
+    /// class D { public $a = 1; public function __debugInfo(): array { return ['shown' => 2]; } }
+    /// print_r(new D);
+    /// var_dump(new D);
+    /// ```
+    /// ```expect
+    /// D Object
+    /// (
+    ///     [shown] => 2
+    /// )
+    /// object(D)#1 (1) {
+    ///   ["shown"]=>
+    ///   int(2)
+    /// }
+    /// ```
+    ///
+    /// ```php
+    /// class D { private $a = 1; public function __debugInfo(): array { return ['a' => 2, 5]; } }
+    /// print_r(new D);
+    /// var_dump(new D);
+    /// ```
+    /// ```expect
+    /// D Object
+    /// (
+    ///     [a] => 2
+    ///     [0] => 5
+    /// )
+    /// object(D)#1 (2) {
+    ///   ["a"]=>
+    ///   int(2)
+    ///   [0]=>
+    ///   int(5)
+    /// }
+    /// ```
+    ///
+    /// ```php
+    /// class E { public function __debugInfo() { return 1; } }
+    /// var_dump(new E);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: __debuginfo() must return an array in %s on line 3
+    /// ```
+    pub(crate) fn debug_info(&mut self, object: PhpObject) -> Result<Option<PhpArray>, Thrown> {
         if self.method_named(object.class(), b"__debuginfo").is_none() {
-            return self.object_entries(object.heap());
+            return Ok(None);
         }
         let value = crate::api::call::call_method(self, &object, b"__debugInfo", &[])?;
-        let rows = match value.as_array() {
-            Some(array) => {
-                let mut rows = Vec::new();
-                for (key, element) in array.snapshot() {
-                    rows.push((key.to_prop_name(self)?, element));
-                }
-                rows
+        match value.as_array() {
+            // The array the method returned, its one owner the caller's,
+            // which is php's `*is_temp = 1` over the same table.
+            Some(array) => Ok(Some(*array)),
+            None if value.tag() == TypeTag::Null => {
+                self.release(value);
+                PhpArray::new(self).map(Some)
             }
-            None if value.tag() == TypeTag::Null => Vec::new(),
             None => {
                 self.release(value);
-                return Err(crate::api::raising::fatal(
+                Err(crate::api::raising::fatal(
                     self,
                     "__debuginfo() must return an array",
-                ));
+                ))
             }
-        };
-        self.release(value);
-        Ok(rows)
+        }
     }
 
     /// `zend_std_get_closure`: the class's `__invoke` with the object as

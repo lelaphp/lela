@@ -731,16 +731,19 @@ pub trait ObjectHandlers: Send + Sync {
         Ok(None)
     }
 
-    /// `get_debug_info`: the rows `var_dump` and `print_r` show in place
-    /// of the properties; `zend_std_get_debug_info` at `Std`, what
-    /// `__debugInfo` returns, and the properties for a class with none.
-    /// `None` is php's null slot.
+    /// `get_debug_info`: the table `var_dump` and `print_r` show in
+    /// place of the properties, php's `*is_temp` one, with one owner,
+    /// the caller's. `zend_std_get_debug_info` at `Std`, which is what
+    /// `__debugInfo` returns. `None` is the members themselves, which
+    /// php's slot answers as the properties table it is handed
+    /// (`get_properties(object)`) and a reader here walks for itself, so
+    /// a typed property nothing has written still shows as one.
     fn get_debug_info(
         &self,
         req: &mut Request,
         object: PhpObject,
-    ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
-        req.debug_info(object).map(Some)
+    ) -> Result<Option<PhpArray>, Thrown> {
+        req.debug_info(object)
     }
 
     /// `get_closure`: the function a call on the object serves, with

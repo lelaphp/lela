@@ -1177,8 +1177,12 @@ pub(crate) fn properties_for(
     purpose: PropertyPurpose,
 ) -> Result<Vec<(PhpString, Value)>, Thrown> {
     let table = req.object_handlers(object.heap());
+    // What `get_properties_for` answers is the table php hands back as
+    // it stands, whose names are already what a reader shows; what
+    // `get_properties` answers is the members, whose names the slot
+    // carries unmangled here.
     let rows = match table.get_properties_for(req, object, purpose)? {
-        Some(rows) => rows,
+        Some(rows) => return Ok(rows),
         None => table.get_properties(req, object)?,
     };
     let mangled = mangled_names(req, object.class());

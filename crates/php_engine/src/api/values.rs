@@ -647,6 +647,19 @@ impl PhpObject {
         req.object_entries(self.0)
     }
 
+    /// `zend_get_properties_for(obj, ZEND_PROP_PURPOSE_DEBUG)`'s first
+    /// step, `zend_std_get_properties_for`'s call of the class's
+    /// `get_debug_info` (`Z/Zend/zend_object_handlers.c:2179`): the
+    /// table a class shows in place of its properties, with one owner,
+    /// the caller's, which is php's `*is_temp` one and is released once
+    /// the rows have been read. `None` for a class that shows its
+    /// members, which [`PhpObject::props_for`] answers under the same
+    /// purpose; a dumper asks this first and that second, so a typed
+    /// property nothing has written still shows as one.
+    pub fn debug_info(&self, req: &mut Request) -> Result<Option<PhpArray>, Thrown> {
+        req.object_handlers(self.0).get_debug_info(req, *self)
+    }
+
     /// The properties one reader of them sees, `zend_get_properties_for`
     /// under its purpose: the declared slots that hold a value in slot
     /// order and then the dynamic table, each name carrying the prefix

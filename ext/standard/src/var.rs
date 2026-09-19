@@ -326,14 +326,26 @@ fn render(
             out.extend_from_slice(b" *RECURSION*");
             return Ok(());
         }
-        let rows: Vec<(Key, Value)> = object
-            .props_for(req, PropertyPurpose::Debug)?
-            .into_iter()
-            .map(|(name, value)| (Key::from_string(name), value))
-            .collect();
+        // `zend_get_properties_for(struc, ZEND_PROP_PURPOSE_DEBUG)`: the
+        // table a class shows in place of its properties, which is what
+        // `__debugInfo` and a `Closure` show, and the members otherwise.
+        // The table has one owner and is given up once its rows are
+        // rendered, php's `zend_release_properties`.
+        let own = object.debug_info(req)?;
+        let rows: Vec<(Key, Value)> = match own {
+            Some(own) => own.snapshot(),
+            None => object
+                .props_for(req, PropertyPurpose::Debug)?
+                .into_iter()
+                .map(|(name, value)| (Key::from_string(name), value))
+                .collect(),
+        };
         object.protect();
         let rendered = hash(req, out, &rows, indent, true);
         object.unprotect();
+        if let Some(own) = own {
+            req.release(Value::array(own));
+        }
         return rendered;
     }
     // `zval_get_string_func`, whose string is the caller's to release:

@@ -27,7 +27,7 @@ use crate::api::abi::{CloneObj, Entry, NativeClassDecl, ObjectHandlers};
 use crate::api::coerce::coerce_param;
 use crate::api::raising::{Thrown, arg_count_error, arg_type_error, throw};
 use crate::api::request::Request;
-use crate::api::values::{ClosureInfo, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use crate::api::values::{ClosureInfo, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 /// `default_exception_handlers`: `clone_obj` null, so every throwable
 /// is uncloneable (`zend_register_default_exception`), and the rest
@@ -102,6 +102,147 @@ impl ObjectHandlers for ClosureHandlers {
         object.closure(req).cloned()
     }
 
+    /// `zend_closure_get_debug_info` (`Z/Zend/zend_closures.c:602`): the
+    /// table every dumper shows for a closure, in php's order. A closure
+    /// the program wrote shows `name`, the name the compiler gave it,
+    /// `file` and `line`, the op array's `line_start`; one
+    /// `zend_create_fake_closure` made shows `function` instead, the
+    /// function's own name, prefixed with its scope where it has one.
+    /// Then `static`, the variables the closure bound, left out where it
+    /// bound none; `this`, its receiver, where it has one; and
+    /// `parameter`, one row per declared parameter, `$name` with a `&`
+    /// before it for one taken by reference, against `<required>` up to
+    /// the first with a default and `<optional>` from there on, the
+    /// variadic among them.
+    ///
+    /// ```php
+    /// $f = function ($a, &$b, $c = 1, ...$r) {};
+    /// var_dump($f);
+    /// ```
+    /// ```expect
+    /// object(Closure)#1 (4) {
+    ///   ["name"]=>
+    ///   string(%d) "{closure:%s:2}"
+    ///   ["file"]=>
+    ///   string(%d) "%s"
+    ///   ["line"]=>
+    ///   int(2)
+    ///   ["parameter"]=>
+    ///   array(4) {
+    ///     ["$a"]=>
+    ///     string(10) "<required>"
+    ///     ["&$b"]=>
+    ///     string(10) "<required>"
+    ///     ["$c"]=>
+    ///     string(10) "<optional>"
+    ///     ["$r"]=>
+    ///     string(10) "<optional>"
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// ```php
+    /// class C { public $p = 1; public function m() { $n = 1; return function () use ($n) { return $this; }; } }
+    /// print_r((new C)->m());
+    /// ```
+    /// ```expect
+    /// Closure Object
+    /// (
+    ///     [name] => {closure:C::m():2}
+    ///     [file] => %s
+    ///     [line] => 2
+    ///     [static] => Array
+    ///         (
+    ///             [n] => 1
+    ///         )
+    ///
+    ///     [this] => C Object
+    ///         (
+    ///             [p] => 1
+    ///         )
+    ///
+    /// )
+    /// ```
+    ///
+    /// ```php
+    /// var_dump(Closure::fromCallable('strlen'));
+    /// ```
+    /// ```expect
+    /// object(Closure)#1 (2) {
+    ///   ["function"]=>
+    ///   string(6) "strlen"
+    ///   ["parameter"]=>
+    ///   array(1) {
+    ///     ["$string"]=>
+    ///     string(10) "<required>"
+    ///   }
+    /// }
+    /// ```
+    fn get_debug_info(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+    ) -> Result<Option<PhpArray>, Thrown> {
+        let Some(closure) = object.closure(req).cloned() else {
+            return Ok(None);
+        };
+        let Some(decl) = req.function_decl(closure.function).cloned() else {
+            return PhpArray::new(req).map(Some);
+        };
+        let mut out = PhpArray::new(req)?;
+        let written = String::from_utf8_lossy(&decl.name.0).into_owned();
+        if closure.fake {
+            let named = match closure.scope {
+                Some(scope) => format!("{}::{written}", req.class_name(scope)),
+                None => written,
+            };
+            let named = Value::string(PhpString::new(req, named.as_bytes())?);
+            set_row(req, &mut out, b"function", named)?;
+        } else {
+            let named = Value::string(PhpString::new(req, written.as_bytes())?);
+            set_row(req, &mut out, b"name", named)?;
+            let file = Value::string(PhpString::new(req, &decl.file.0)?);
+            set_row(req, &mut out, b"file", file)?;
+            set_row(req, &mut out, b"line", Value::int(i64::from(decl.line)))?;
+        }
+        let bound = object.closure_bound(req)?;
+        if !bound.is_empty() {
+            let mut statics = PhpArray::new(req)?;
+            for (name, value) in bound {
+                req.addref(&value);
+                statics.set(req, Key::from_string(name), value)?;
+            }
+            set_row(req, &mut out, b"static", Value::array(statics))?;
+        }
+        if let Some(this) = closure.this {
+            let this = this.as_value();
+            req.addref(&this);
+            set_row(req, &mut out, b"this", this)?;
+        }
+        if !decl.parameters.is_empty() {
+            let required = decl
+                .parameters
+                .iter()
+                .position(|p| p.default.is_some() || p.variadic)
+                .unwrap_or(decl.parameters.len());
+            let mut parameters = PhpArray::new(req)?;
+            for (at, parameter) in decl.parameters.iter().enumerate() {
+                let amp = if parameter.by_ref { "&" } else { "" };
+                let name = format!("{amp}${}", String::from_utf8_lossy(&parameter.name.0));
+                let stands = if at >= required {
+                    &b"<optional>"[..]
+                } else {
+                    b"<required>"
+                };
+                let stands = Value::string(PhpString::new(req, stands)?);
+                let key = Key::from_string(PhpString::new(req, name.as_bytes())?);
+                parameters.set(req, key, stands)?;
+            }
+            set_row(req, &mut out, b"parameter", Value::array(parameters))?;
+        }
+        Ok(Some(out))
+    }
+
     /// `zend_closure_compare` (`Z/Zend/zend_closures.c:120`): two fake
     /// closures are equal when they carry one function, one receiver
     /// and one scope; any other pair is uncomparable, a closure the
@@ -146,6 +287,19 @@ impl ObjectHandlers for ClosureHandlers {
         let same = x.function == y.function && x.this == y.this && x.scope == y.scope;
         Ok(same.then_some(Ordering::Equal))
     }
+}
+
+/// `zend_hash_update(debug_info, ZSTR_KNOWN(...), &val)`: one row of a
+/// closure's table, its key a string of the request's that the array
+/// takes and its value the array's from here.
+fn set_row(
+    req: &mut Request,
+    table: &mut PhpArray,
+    name: &[u8],
+    value: Value,
+) -> Result<(), Thrown> {
+    let key = Key::from_string(PhpString::new(req, name)?);
+    table.set(req, key, value)
 }
 
 static CLOSURE: ClosureHandlers = ClosureHandlers;

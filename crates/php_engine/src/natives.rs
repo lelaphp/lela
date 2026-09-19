@@ -932,6 +932,40 @@ fn dump_object(
         return;
     }
     object.heap().protect();
+    // `zend_get_properties_for(struc, ZEND_PROP_PURPOSE_DEBUG)`: a class
+    // that shows a table of its own shows it here, which is what
+    // `__debugInfo` and a `Closure` do. Every other class shows its
+    // members, which are the slots walked below, where a typed property
+    // nothing has written still shows as one.
+    let own = match object.debug_info(req) {
+        Ok(own) => own,
+        Err(thrown) => {
+            object.heap().unprotect();
+            req.leave_pending(&thrown);
+            return;
+        }
+    };
+    if let Some(own) = own {
+        dump_rows(req, out, common, object, own, level);
+    } else {
+        dump_members(req, out, common, object, level);
+    }
+    object.heap().unprotect();
+}
+
+/// `php_var_dump`'s object arm over the members themselves, which is
+/// what every class that shows no table of its own shows: the declared
+/// slots in `ce->properties_info_table` order, each name with the
+/// visibility php spells beside it, then the dynamic ones, and a typed
+/// slot nothing has written as `uninitialized(T)`, which is the row
+/// php's `prop_info` keeps for an `IS_UNDEF` value.
+fn dump_members(
+    req: &mut Request,
+    out: &mut Vec<u8>,
+    common: &str,
+    object: crate::api::values::PhpObject,
+    level: usize,
+) {
     let class = object.class();
     // `ce->properties_info_table` in slot order, which is what
     // `rebuild_object_properties_internal` walks: an inherited property
@@ -1000,7 +1034,48 @@ fn dump_object(
             out.extend_from_slice(format!("uninitialized({ty})\n").as_bytes());
         }
     }
-    object.heap().unprotect();
+    if level > 1 {
+        out.extend(std::iter::repeat_n(b' ', level - 1));
+    }
+    out.extend_from_slice(b"}\n");
+}
+
+/// `php_var_dump`'s object arm over the table a class showed in place
+/// of its properties: the header with the table's count, then each row
+/// as `php_object_property_dump` prints one, `[0]=>` for an integer key
+/// and `["name"]=>` for a string one, with the value under it. The keys
+/// are the class's own and carry no mangling, so none is unmangled
+/// here. The table has one owner and is given up last.
+fn dump_rows(
+    req: &mut Request,
+    out: &mut Vec<u8>,
+    common: &str,
+    object: crate::api::values::PhpObject,
+    rows: PhpArray,
+    level: usize,
+) {
+    let class_name = req.class_name(object.class());
+    out.extend_from_slice(
+        format!(
+            "{common}object({class_name})#{} ({}) {{\n",
+            object.index(),
+            rows.len()
+        )
+        .as_bytes(),
+    );
+    for (key, value) in rows.snapshot() {
+        out.extend(std::iter::repeat_n(b' ', level + 1));
+        match &key {
+            Key::Int(at) => out.extend_from_slice(format!("[{at}]=>\n").as_bytes()),
+            Key::Str(name) => {
+                out.extend_from_slice(b"[\"");
+                out.extend_from_slice(name.as_bytes());
+                out.extend_from_slice(b"\"]=>\n");
+            }
+        }
+        dump(req, out, &value, level + 2);
+    }
+    req.release(Value::array(rows));
     if level > 1 {
         out.extend(std::iter::repeat_n(b' ', level - 1));
     }
