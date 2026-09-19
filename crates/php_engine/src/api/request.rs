@@ -330,6 +330,19 @@ pub struct Request {
     /// is laid down `IS_UNDEF`. php's table hangs off a map pointer and
     /// is the request's; so is this one.
     statics: Vec<((ClassId, Vec<u8>), Value)>,
+    /// `zend_property_info_source_list` (`Z/Zend/zend_types.h:626`),
+    /// one row per reference a typed property's slot holds: the word
+    /// [`php_heap::Ref::set_sources`] carries names the row, and the row
+    /// lists the properties that type the cell. php hangs the list off
+    /// the cell itself; the cell is the heap's and a declared type is
+    /// the engine's, so the list is here and the cell carries its name.
+    /// A row is dropped by `zend_reference_destroy`, which reaches
+    /// [`HeapHooks::free_reference`].
+    ref_sources: Vec<(usize, Vec<RefSource>)>,
+    /// The next word [`Request::ref_add_type_source`] hands out, never
+    /// reused, so a cell freed and a cell laid down at its address are
+    /// never one row.
+    next_ref_source: usize,
     wrappers: Vec<StreamWrapper>,
     filters: Vec<StreamFilter>,
     error_handlers: Vec<Option<Callable>>,
@@ -465,6 +478,8 @@ impl Request {
             constants: Vec::new(),
             enum_cases: Vec::new(),
             statics: Vec::new(),
+            ref_sources: Vec::new(),
+            next_ref_source: 1,
             wrappers: Vec::new(),
             filters: Vec::new(),
             error_handlers: Vec::new(),
@@ -3072,20 +3087,33 @@ impl Request {
                 }
             }
         }
+        self.store_static_property(declaring, name, value);
+        Ok(())
+    }
+
+    /// The write half of [`Request::set_static_property`], php's
+    /// `ZEND_TRY_ASSIGN_COPY_PROP` over the slot the declaring class
+    /// owns: the value is the slot's from here and what it held is
+    /// given up after the write, and a slot holding a reference is
+    /// written *through*, so a name bound to it sees the write. A
+    /// handler that has already held the value to the declared type
+    /// reaches this one, since the verify raises a deprecation of its
+    /// own and php runs it once (`zend_binary_assign_op_typed_prop`).
+    pub(crate) fn store_static_property(&mut self, declaring: ClassId, name: &[u8], value: Value) {
         let held = self
             .statics
             .iter()
             .position(|((at, under), _)| *at == declaring && under == name);
         let Some(at) = held else {
             self.release(value);
-            return Ok(());
+            return;
         };
         if let Some(ValueRef::Reference(cell)) = self.statics.get(at).map(|(_, v)| v.as_ref()) {
             let cell = *cell;
             let previous = cell.get();
             cell.set(self, value);
             self.release(previous);
-            return Ok(());
+            return;
         }
         let previous = self
             .statics
@@ -3093,7 +3121,17 @@ impl Request {
             .map(|(_, slot)| std::mem::replace(slot, value))
             .unwrap_or_default();
         self.release(previous);
-        Ok(())
+    }
+
+    /// The cell the `static` property's slot holds, for the handler that
+    /// must know whether it is writing through a reference php would
+    /// have typed (`ZEND_REF_HAS_TYPE_SOURCES` at the top of
+    /// `ZEND_ASSIGN_STATIC_PROP_OP`); none where the slot holds a value.
+    pub(crate) fn static_slot_cell(&self, declaring: ClassId, name: &[u8]) -> Option<PhpRef> {
+        self.statics
+            .iter()
+            .find(|((at, under), _)| *at == declaring && under == name)
+            .and_then(|(_, value)| value.as_php_ref().copied())
     }
 
     /// `zend_assign_to_variable_reference` over a `static` property's
@@ -3135,6 +3173,97 @@ impl Request {
             .map(|(_, slot)| std::mem::replace(slot, bound))
             .unwrap_or_default();
         self.release(previous);
+        Ok(())
+    }
+
+    /// `ZEND_REF_ADD_TYPE_SOURCE` (`Z/Zend/zend_types.h:1082`): the
+    /// declared type of a property whose slot holds `cell` is put on the
+    /// cell, so every write through any name bound to it is held to the
+    /// type as well ([`Request::assign_to_reference`]). A cell typed by
+    /// nothing yet takes a row of its own, whose word the cell carries.
+    pub(crate) fn ref_add_type_source(&mut self, cell: Ref, source: RefSource) {
+        let word = cell.sources();
+        if word != 0
+            && let Some((_, sources)) = self.ref_sources.iter_mut().find(|(at, _)| *at == word)
+        {
+            sources.push(source);
+            return;
+        }
+        let word = self.next_ref_source;
+        self.next_ref_source = self.next_ref_source.saturating_add(1);
+        self.ref_sources.push((word, vec![source]));
+        cell.set_sources(word);
+    }
+
+    /// `ZEND_REF_DEL_TYPE_SOURCE`: the property is no longer one of the
+    /// cell's sources, because its slot now holds something else. The
+    /// row goes with the last source, and the cell's word with it.
+    pub(crate) fn ref_del_type_source(&mut self, cell: Ref, declaring: ClassId, name: &[u8]) {
+        let word = cell.sources();
+        if word == 0 {
+            return;
+        }
+        let Some(at) = self.ref_sources.iter().position(|(held, _)| *held == word) else {
+            return;
+        };
+        if let Some((_, sources)) = self.ref_sources.get_mut(at) {
+            if let Some(i) = sources
+                .iter()
+                .position(|s| s.declaring == declaring && s.name == name)
+            {
+                sources.remove(i);
+            }
+            if !sources.is_empty() {
+                return;
+            }
+        }
+        self.ref_sources.remove(at);
+        cell.set_sources(0);
+    }
+
+    /// `ZEND_REF_FOREACH_TYPE_SOURCES` as a slice: the properties whose
+    /// slots hold this cell, empty for a cell no typed property's slot
+    /// holds, which is `ZEND_REF_HAS_TYPE_SOURCES` reading false.
+    pub(crate) fn ref_type_sources(&self, cell: Ref) -> &[RefSource] {
+        let word = cell.sources();
+        if word == 0 {
+            return &[];
+        }
+        self.ref_sources
+            .iter()
+            .find(|(at, _)| *at == word)
+            .map_or(&[], |(_, sources)| sources.as_slice())
+    }
+
+    /// `zend_assign_to_typed_ref` (`Z/Zend/zend_execute.c:4070`): a
+    /// write through a cell, held first to every type its sources
+    /// declare ([`crate::ops::verify_ref_assignable`]) and coerced to
+    /// what they agree on. A cell no typed property's slot holds is
+    /// [`Request::reference_set`] and nothing else, which is what php's
+    /// `zend_assign_to_variable` does where `ZEND_REF_HAS_TYPE_SOURCES`
+    /// reads false. The value is given up with the `TypeError` and what
+    /// the cell held stands, as php gives up its copy.
+    pub(crate) fn assign_to_reference(
+        &mut self,
+        cell: Ref,
+        value: Value,
+        strict: bool,
+    ) -> Result<(), Thrown> {
+        if cell.sources() == 0 {
+            self.reference_set(cell, value);
+            return Ok(());
+        }
+        match crate::ops::verify_ref_assignable(self, cell, &value, strict) {
+            Ok(None) => self.reference_set(cell, value),
+            Ok(Some(coerced)) => {
+                self.release(value);
+                self.reference_set(cell, coerced);
+            }
+            Err(thrown) => {
+                self.release(value);
+                return Err(thrown);
+            }
+        }
         Ok(())
     }
 
@@ -7023,6 +7152,23 @@ impl Request {
 /// by re-reading `EG(objects_store)` after `dtor_obj`.
 struct Hooks<'a>(&'a mut Request);
 
+/// One `zend_property_info *` of a reference's source list
+/// (`Z/Zend/zend_types.h:626`): a typed property whose slot holds the
+/// cell, named by the class that declared it, the name the `TypeError`
+/// prints and the declared type the write is held to. php names the
+/// declaration itself; the linked tables here are shared and immutable,
+/// so the row carries what the check and the message read.
+pub(crate) struct RefSource {
+    /// The class that declared the property, which is the one php's
+    /// `prop->ce->name` prints.
+    pub(crate) declaring: ClassId,
+    /// The property's name, unmangled, as php's
+    /// `zend_get_unmangled_property_name` hands it over.
+    pub(crate) name: Vec<u8>,
+    /// `prop_info->type`.
+    pub(crate) ty: php_unit::decl::Type,
+}
+
 impl HeapHooks for Hooks<'_> {
     fn heap(&mut self) -> &mut Heap {
         &mut self.0.heap
@@ -7061,6 +7207,14 @@ impl HeapHooks for Hooks<'_> {
 
     fn out_of_memory(&mut self, bytes: usize) -> Fatal {
         Fatal::OutOfMemory(bytes)
+    }
+
+    /// `zend_free_source_list`: the row the cell's word names, dropped
+    /// with the cell. The heap has already read the word, so nothing
+    /// here reads the reference again.
+    fn free_reference(&mut self, r: Ref) {
+        let word = r.sources();
+        self.0.ref_sources.retain(|(at, _)| *at != word);
     }
 }
 

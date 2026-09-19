@@ -19,6 +19,7 @@
 use crate::Heap;
 use crate::Zval;
 use crate::object::Obj;
+use crate::reference::Ref;
 use crate::resource::{Res, ResourceType};
 
 /// What ends a request's PHP code short of a normal return (design
@@ -60,4 +61,13 @@ pub trait HeapHooks {
     fn free_resource(&mut self, res: Res, kind: ResourceType);
     /// The memory limit was hit asking for `bytes` more.
     fn out_of_memory(&mut self, bytes: usize) -> Fatal;
+    /// `zend_free_source_list` (`Z/Zend/zend_types.h:1093`): the
+    /// typed-property sources the engine hung on a reference by
+    /// [`Ref::set_sources`], given up as the cell is destroyed and
+    /// before the value it holds is released. A heap that hands no
+    /// reference to a typed property never sees this, so it has a body
+    /// of its own to do nothing.
+    fn free_reference(&mut self, r: Ref) {
+        let _ = r;
+    }
 }

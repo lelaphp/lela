@@ -32,9 +32,12 @@ pub(crate) struct RefHeader {
     /// `val`: the zval held.
     val: Cell<Zval>,
     /// `sources`: php's typed-property sources list, a pointer-sized
-    /// word; none until a typed property can be referenced, when
-    /// `zend_assign_to_typed_ref` reads it. Kept for the size.
-    _sources: usize,
+    /// word. php hangs a `zend_property_info *` or a list of them here;
+    /// the word is opaque to the heap, which reads it only to ask
+    /// [`HeapHooks::free_reference`] to give up what it names, and the
+    /// engine names its own source list by it
+    /// (`Request::ref_add_type_source`).
+    sources: Cell<usize>,
 }
 
 /// One reference: php's `zend_reference *`. Naming one does not keep it
@@ -94,7 +97,7 @@ impl Ref {
             header.as_ptr().write(RefHeader {
                 gc: Refcounted::new(ZvalType::Reference, gc::NOT_COLLECTABLE),
                 val: Cell::new(z),
-                _sources: 0,
+                sources: Cell::new(0),
             });
         }
         Ref(header)
@@ -120,6 +123,22 @@ impl Ref {
     /// Write the zval held as it stands, no owner touched.
     pub(crate) fn write_val(self, z: Zval) {
         self.header().val.set(z);
+    }
+
+    /// `ZEND_REF_HAS_TYPE_SOURCES` as one word: what the engine hung on
+    /// this cell to type it, zero for a cell no typed property's slot
+    /// holds. The heap never reads what it names.
+    #[must_use]
+    pub fn sources(&self) -> usize {
+        self.header().sources.get()
+    }
+
+    /// `ZEND_REF_ADD_TYPE_SOURCE` and `ZEND_REF_DEL_TYPE_SOURCE` as one
+    /// write: the engine's word, zero to say the cell is typed by
+    /// nothing. The engine gives up what the old word named before it
+    /// writes a new one, as php's `zend_ref_del_type_source` does.
+    pub fn set_sources(&self, word: usize) {
+        self.header().sources.set(word);
     }
 
     /// `GC_REFCOUNT`.
@@ -176,9 +195,15 @@ impl Heap {
     }
 
     /// `zend_reference_destroy` (`Z/Zend/zend_variables.c:71`): the
-    /// value held released, through the hooks since it may be the last
-    /// owner of an object, and the cell's bytes given back after it.
+    /// typed-property sources given up first, as php's
+    /// `zend_free_source_list` does; then the value held released,
+    /// through the hooks since it may be the last owner of an object,
+    /// and the cell's bytes given back after it.
     pub(crate) fn reference_destroy(hooks: &mut dyn HeapHooks, r: Ref) {
+        if r.sources() != 0 {
+            hooks.free_reference(r);
+            r.set_sources(0);
+        }
         let held = r.val();
         r.write_val(Zval::UNDEF);
         Heap::release(hooks, held);

@@ -4778,18 +4778,25 @@ pub(crate) fn assign<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let value = exec::take_operand(req, frame, code, op.op2_type, op.op2);
-    if op.out_type != OperandKind::Unused {
-        req.addref(&value);
-        let slot = exec::temporary_slot(code, op.out);
-        let previous = req.set_slot(frame, slot, value);
-        req.release(previous);
-    }
     let Some(at) = req.slot_ptr(frame, op.op1) else {
         return Err(Fatal::Error(String::from(
             "InternalError: ZEND_ASSIGN over a CV the frame does not have",
         )));
     };
-    let garbage = assign_to_place(at, value);
+    let strict = req.caller_strict_types();
+    // php copies into `result` what the write landed, which a typed
+    // cell may have converted, so the copy is after the write and not
+    // before it.
+    let (landed, garbage) = match assign_to_place(req, at, value, strict) {
+        Ok(pair) => pair,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    if op.out_type != OperandKind::Unused {
+        req.addref(&landed);
+        let slot = exec::temporary_slot(code, op.out);
+        let previous = req.set_slot(frame, slot, landed);
+        req.release(previous);
+    }
     req.release(garbage);
     Ok(advance(req, frame))
 }
@@ -5384,25 +5391,27 @@ fn static_place(
     let scope = req.executed_scope();
     let class = class_operand(req, frame, code, op.op2_type, op.op2, None)?;
     match req.static_slot(class, &name, scope, PropertyRead::Warning)? {
-        Some((_, property)) => Ok(Some(Placed {
+        Some((declaring, property)) => Ok(Some(Placed {
             class,
+            declaring,
             name,
             scope,
-            typed: property.ty.is_some(),
+            ty: property.ty.clone(),
         })),
         None => Ok(None),
     }
 }
 
 /// What [`static_place`] addressed: the class the opline named, the
-/// property's name, the scope the access was measured against, and
-/// whether the declaration carries a type, which is the coercion this
-/// engine does not serve yet.
+/// class that declared the property, the property's name, the scope the
+/// access was measured against, and the declared type the write is held
+/// to, which is php's `prop_info` beside the slot.
 struct Placed {
     class: crate::api::values::ClassId,
+    declaring: crate::api::values::ClassId,
     name: Vec<u8>,
     scope: Option<crate::api::values::ClassId>,
-    typed: bool,
+    ty: Option<php_unit::decl::Type>,
 }
 
 /// One kernel of two values, which is what `get_binary_op` hands php's
@@ -5480,6 +5489,39 @@ fn binary_op_of(extended_value: u32) -> Option<BinaryKernel> {
 /// #0 {main}
 ///   thrown in %s on line 3
 /// ```
+/// A slot with a declared type is `zend_binary_assign_op_typed_prop`
+/// (`Z/Zend/zend_execute.c:1693`): what the kernel made is held to the
+/// type, and the weak rule converts it where the frame is not strict,
+/// which is where the deprecation a lossy conversion raises comes from.
+/// The temporary takes the value that landed and not the one the kernel
+/// made.
+///
+/// ```php
+/// class C { public static int $n = 1; }
+/// var_dump(C::$n += 2);
+/// var_dump(C::$n .= "5");
+/// var_dump(C::$n /= 2);
+/// ```
+/// ```expect
+/// int(3)
+/// int(35)
+///
+/// Deprecated: Implicit conversion from float 17.5 to int loses precision in %s on line 5
+/// int(17)
+/// ```
+///
+/// What neither satisfies the type nor converts is php's `TypeError`,
+/// and the slot keeps what it held (`zval_ptr_dtor(&z_copy)`):
+///
+/// ```php
+/// class C { public static int $n = 1; }
+/// try { C::$n .= "x"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(C::$n);
+/// ```
+/// ```expect
+/// Cannot assign string to property C::$n of type int
+/// int(1)
+/// ```
 pub(crate) fn assign_static_prop_op<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -5515,21 +5557,16 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     };
     let Some(Placed {
         class,
+        declaring,
         name,
         scope,
-        typed,
+        ty,
     }) = placed
     else {
         exec::free_operand(req, frame, code, data_type, data_at);
         req.vm_mut().jump(frame, at.saturating_add(2));
         return Ok(Stepped::Same(frame));
     };
-    if typed {
-        return Err(Fatal::Error(format!(
-            "InternalError: ZEND_ASSIGN_STATIC_PROP_OP over the typed static property ${}, whose coercion is not served yet",
-            String::from_utf8_lossy(&name)
-        )));
-    }
     let value = exec::take_operand(req, frame, code, data_type, data_at);
     let held = match req.static_property(class, &name, scope, PropertyRead::Warning) {
         Ok(held) => held,
@@ -5545,16 +5582,53 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
         Ok(stepped) => stepped,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    write_out(req, frame, code, op, &stepped);
-    // The write verifies a declared type under the frame's own regime
-    // ([`Request::set_static_property`], #488); the typed slot this
-    // opcode reads back is the gap above.
     let strict = req.caller_strict_types();
-    if let Err(thrown) = req.set_static_property(class, &name, scope, stepped, strict) {
-        return threw(req, frame, &thrown);
-    }
+    let stepped = match ty {
+        None => stepped,
+        Some(ty) => match verified_op(req, &stepped, &ty, declaring, &name, strict) {
+            Ok(None) => stepped,
+            Ok(Some(coerced)) => {
+                req.release(stepped);
+                coerced
+            }
+            Err(thrown) => {
+                // php gives the operation's value up and the slot keeps
+                // what it held (`zval_ptr_dtor(&z_copy)`).
+                req.release(stepped);
+                return threw(req, frame, &thrown);
+            }
+        },
+    };
+    write_out(req, frame, code, op, &stepped);
+    // The value is already the declared type's, so the store is php's
+    // `ZVAL_COPY_VALUE(zptr, &z_copy)` and verifies nothing a second
+    // time: a weak conversion raises a deprecation and php raises it
+    // once.
+    req.store_static_property(declaring, &name, stepped);
     req.vm_mut().jump(frame, at.saturating_add(2));
     Ok(Stepped::Same(frame))
+}
+
+/// `zend_binary_assign_op_typed_prop` (`Z/Zend/zend_execute.c:1693`):
+/// the value the operation made, held to the declared type under the
+/// frame's regime before it lands in the slot. Where the slot holds a
+/// cell another name is bound to, php verifies against the cell's own
+/// sources instead (`zend_binary_assign_op_typed_ref`), which is the
+/// same type by a different sentence.
+fn verified_op(
+    req: &mut Request,
+    stepped: &Value,
+    ty: &php_unit::decl::Type,
+    declaring: crate::api::values::ClassId,
+    name: &[u8],
+    strict: bool,
+) -> Result<Option<Value>, Thrown> {
+    match req.static_slot_cell(declaring, name) {
+        Some(cell) if !req.ref_type_sources(cell.heap()).is_empty() => {
+            crate::ops::verify_ref_assignable(req, cell.heap(), stepped, strict)
+        }
+        _ => crate::ops::verify_property_type(req, stepped, ty, declaring, name, strict),
+    }
 }
 
 /// The body the four steps over a `static` property share: the slot
@@ -5562,14 +5636,27 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
 /// what it holds, the stepped value written back, and the temporary
 /// under `RETURN_VALUE_USED` taking the value before the step for a
 /// `POST_*` and the one after it for a `PRE_*`.
+///
+/// A typed slot is `zend_incdec_typed_prop`
+/// (`Z/Zend/zend_execute.c:2262`): the stepped value held to the
+/// declared type and coerced by it, the slot keeping what it held where
+/// the value neither satisfies nor coerces. An `int` slot php would
+/// have to step into a float is the one refusal that writes anyway,
+/// `zend_throw_incdec_prop_error`, and what it writes is php's own
+/// `ZEND_LONG_MAX` or `ZEND_LONG_MIN`.
 fn static_prop_step(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     post: bool,
-    kernel: fn(&mut Request, &Value) -> Result<Value, Thrown>,
+    increment: bool,
 ) -> Edge {
+    let kernel: fn(&mut Request, &Value) -> Result<Value, Thrown> = if increment {
+        crate::ops::increment
+    } else {
+        crate::ops::decrement
+    };
     if op.op1_type != OperandKind::Const {
         return Err(Fatal::Error(String::from(
             "InternalError: a step over a static property named at run time",
@@ -5581,19 +5668,14 @@ fn static_prop_step(
     };
     let Some(Placed {
         class,
+        declaring,
         name,
         scope,
-        typed,
+        ty,
     }) = placed
     else {
         return Ok(advance(req, frame));
     };
-    if typed {
-        return Err(Fatal::Error(format!(
-            "InternalError: a step over the typed static property ${}, whose coercion is not served yet",
-            String::from_utf8_lossy(&name)
-        )));
-    }
     let held = match req.static_property(class, &name, scope, PropertyRead::Warning) {
         Ok(held) => held,
         Err(thrown) => return threw(req, frame, &thrown),
@@ -5605,12 +5687,39 @@ fn static_prop_step(
             return threw(req, frame, &thrown);
         }
     };
+    let strict = req.caller_strict_types();
+    let stepped = match ty {
+        None => stepped,
+        Some(ty) if crate::ops::steps_past_int(&held, &stepped, &ty) => {
+            let (thrown, limit) =
+                crate::ops::incdec_prop_error(req, &ty, declaring, &name, increment);
+            req.release(held);
+            req.release(stepped);
+            // php writes the limit into the slot and raises beside it,
+            // so the slot stands at its maximal value after the catch.
+            req.store_static_property(declaring, &name, limit);
+            return threw(req, frame, &thrown);
+        }
+        Some(ty) => {
+            match crate::ops::verify_property_type(req, &stepped, &ty, declaring, &name, strict) {
+                Ok(None) => stepped,
+                Ok(Some(coerced)) => {
+                    req.release(stepped);
+                    coerced
+                }
+                Err(thrown) => {
+                    // `ZVAL_COPY_VALUE(var_ptr, copy)`: the slot keeps
+                    // what it held and the stepped value is given up.
+                    req.release(stepped);
+                    req.release(held);
+                    return threw(req, frame, &thrown);
+                }
+            }
+        }
+    };
     write_out(req, frame, code, op, if post { &held } else { &stepped });
     req.release(held);
-    let strict = req.caller_strict_types();
-    if let Err(thrown) = req.set_static_property(class, &name, scope, stepped, strict) {
-        return threw(req, frame, &thrown);
-    }
+    req.store_static_property(declaring, &name, stepped);
     Ok(advance(req, frame))
 }
 
@@ -5637,13 +5746,42 @@ fn static_prop_step(
 /// Deprecated: Increment on non-numeric string is deprecated, use str_increment() instead in %s on line 6
 /// string(1) "b"
 /// ```
+/// An `int` slot at `PHP_INT_MAX` is the one step php refuses rather
+/// than widen: `zend_throw_incdec_prop_error` raises the `TypeError`
+/// and the slot takes `ZEND_LONG_MAX`, so it stands at its maximal
+/// value after the catch. A slot whose type accepts a float is stepped
+/// into one.
+///
+/// ```php
+/// class C { public static int $n = PHP_INT_MAX; public static int|float $f = PHP_INT_MAX; }
+/// try { ++C::$n; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(C::$n);
+/// var_dump(++C::$f);
+/// ```
+/// ```expect
+/// Cannot increment property C::$n of type int past its maximal value
+/// int(9223372036854775807)
+/// float(9.223372036854776E+18)
+/// ```
+///
+/// A declared type the stepped value does not satisfy converts it where
+/// the weak rule can, so `++` over a `?string` holding null is php's
+/// `"1"` and not the int the kernel made:
+///
+/// ```php
+/// class C { public static ?string $s = null; }
+/// var_dump(++C::$s);
+/// ```
+/// ```expect
+/// string(1) "1"
+/// ```
 pub(crate) fn pre_inc_static_prop<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    static_prop_step(req, frame, code, op, false, crate::ops::increment)
+    static_prop_step(req, frame, code, op, false, true)
 }
 
 /// `ZEND_PRE_DEC_STATIC_PROP`, `--C::$p`: the same over
@@ -5667,7 +5805,7 @@ pub(crate) fn pre_dec_static_prop<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    static_prop_step(req, frame, code, op, false, crate::ops::decrement)
+    static_prop_step(req, frame, code, op, false, false)
 }
 
 /// `ZEND_POST_INC_STATIC_PROP`, `C::$p++` where the value is read: the
@@ -5688,7 +5826,7 @@ pub(crate) fn post_inc_static_prop<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    static_prop_step(req, frame, code, op, true, crate::ops::increment)
+    static_prop_step(req, frame, code, op, true, true)
 }
 
 /// `ZEND_POST_DEC_STATIC_PROP`, `C::$p--` where the value is read: the
@@ -5703,13 +5841,26 @@ pub(crate) fn post_inc_static_prop<T: Tier>(
 /// string(1) "9"
 /// int(8)
 /// ```
+/// An `int` slot at `PHP_INT_MIN` is the same refusal the other way,
+/// `past its minimal value`, and the temporary is never read because
+/// the `TypeError` stands where the expression did.
+///
+/// ```php
+/// class C { public static int $n = PHP_INT_MIN; }
+/// try { var_dump(C::$n--); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(C::$n);
+/// ```
+/// ```expect
+/// Cannot decrement property C::$n of type int past its minimal value
+/// int(-9223372036854775808)
+/// ```
 pub(crate) fn post_dec_static_prop<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    static_prop_step(req, frame, code, op, true, crate::ops::decrement)
+    static_prop_step(req, frame, code, op, true, false)
 }
 
 /// `ZEND_ASSIGN_STATIC_PROP_REF` (`Z/Zend/zend_vm_def.h:2648`),
@@ -5737,6 +5888,65 @@ pub(crate) fn post_dec_static_prop<T: Tier>(
 /// ```expect
 /// int(7)
 /// int(9)
+/// ```
+/// A slot with a declared type is `zend_assign_to_typed_property_reference`
+/// (`Z/Zend/zend_execute.c:583`): the source is held to the type before
+/// the bind and converted in the cell where the weak rule can, so both
+/// names read the converted value; then the type goes onto the cell
+/// (`ZEND_REF_ADD_TYPE_SOURCE`), so a later write through the other
+/// name is held to it too and raises php's `TypeError` naming the
+/// property that holds the cell.
+///
+/// ```php
+/// class C { public static int $n = 1; }
+/// $x = "5";
+/// C::$n = &$x;
+/// var_dump($x, C::$n);
+/// $x = "7";
+/// var_dump(C::$n);
+/// try { $x = "q"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($x, C::$n);
+/// ```
+/// ```expect
+/// int(5)
+/// int(5)
+/// int(7)
+/// Cannot assign string to reference held by property C::$n of type int
+/// int(7)
+/// int(7)
+/// ```
+///
+/// A source the type refuses outright is php's `TypeError` for the
+/// property and no bind at all:
+///
+/// ```php
+/// class C { public static int $n = 1; }
+/// $x = "q";
+/// C::$n = &$x;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: Cannot assign string to property C::$n of type int in %s:4
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 4
+/// ```
+///
+/// Two typed properties may hold one cell only where they agree on the
+/// value, which is `zend_throw_ref_type_error_type` where the second
+/// would have to convert what the first holds:
+///
+/// ```php
+/// class C { public static int $a = 1; public static string $b = "x"; }
+/// $x = 1;
+/// C::$a = &$x;
+/// try { C::$b = &$x; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($x, C::$a, C::$b);
+/// ```
+/// ```expect
+/// Reference with value of type int held by property C::$a of type int is not compatible with property C::$b of type string
+/// int(1)
+/// int(1)
+/// string(1) "x"
 /// ```
 pub(crate) fn assign_static_prop_ref<T: Tier>(
     req: &mut Request,
@@ -5767,28 +5977,24 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
     };
     let Some(Placed {
         class,
+        declaring,
         name,
         scope,
-        typed,
+        ty,
     }) = placed
     else {
         exec::free_operand(req, frame, code, data_type, data_at);
         req.vm_mut().jump(frame, at.saturating_add(2));
         return Ok(Stepped::Same(frame));
     };
-    if typed {
-        return Err(Fatal::Error(format!(
-            "InternalError: ZEND_ASSIGN_STATIC_PROP_REF over the typed static property ${}, whose reference binding is not served yet",
-            String::from_utf8_lossy(&name)
-        )));
-    }
     let Some(source) = write_place(req, frame, code, data_type, data_at) else {
         return Err(Fatal::Error(String::from(
             "InternalError: ZEND_ASSIGN_STATIC_PROP_REF over a source php compiles no write over",
         )));
     };
     let held = exec::value_of(source.read());
-    if op.extended_value & RETURNS_FUNCTION != 0 && held.as_php_ref().is_none() {
+    let returns_function = op.extended_value & RETURNS_FUNCTION != 0 && held.as_php_ref().is_none();
+    if returns_function {
         crate::api::raising::notice(req, "Only variables should be assigned by reference");
         if req.is_pending() {
             return Ok(Stepped::Threw(frame));
@@ -5806,11 +6012,50 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
         source.write(cell.as_value().to_zval());
         cell
     };
+    // `zend_assign_to_typed_property_reference`
+    // (`Z/Zend/zend_execute.c:583`): the cell is held to the declared
+    // type before it is bound, and the type goes onto the cell, so a
+    // write through any name bound to it is held to the type too. php
+    // takes this arm only where the source is a place; a call that
+    // returned by value is the notice and an assignment by value.
+    let typed = ty.filter(|_| !returns_function);
+    if let Some(ty) = typed.as_ref() {
+        let strict = req.caller_strict_types();
+        match crate::ops::verify_prop_assignable_by_ref(
+            req,
+            cell.heap(),
+            ty,
+            declaring,
+            &name,
+            strict,
+        ) {
+            Ok(None) => {}
+            // The conversion lands in the cell, so the name bound to it
+            // reads the converted value too.
+            Ok(Some(coerced)) => req.reference_set(cell.heap(), coerced),
+            Err(thrown) => return threw(req, frame, &thrown),
+        }
+    }
+    // `ZEND_REF_DEL_TYPE_SOURCE`: the cell the slot held is no longer
+    // typed by this property.
+    if let Some(old) = req.static_slot_cell(declaring, &name) {
+        req.ref_del_type_source(old.heap(), declaring, &name);
+    }
     let bound = cell.as_value();
     req.addref(&bound);
     write_out(req, frame, code, op, &bound);
     if let Err(thrown) = req.bind_static_property(class, &name, scope, bound) {
         return threw(req, frame, &thrown);
+    }
+    if let Some(ty) = typed {
+        req.ref_add_type_source(
+            cell.heap(),
+            crate::api::request::RefSource {
+                declaring,
+                name: name.clone(),
+                ty,
+            },
+        );
     }
     req.vm_mut().jump(frame, at.saturating_add(2));
     Ok(Stepped::Same(frame))
@@ -5822,15 +6067,32 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
 /// written first and what the place held is handed back for the caller
 /// to release last, after the `result` is copied, which is where a
 /// destructor is served (design §5.10).
-fn assign_to_place(at: php_heap::ZvalRef, value: Value) -> Value {
+///
+/// A cell a typed property's slot holds is php's one other arm,
+/// `ZEND_REF_HAS_TYPE_SOURCES` into `zend_assign_to_typed_ref`: the
+/// value is held to each type the cell carries and may be converted by
+/// them, so what landed is not always what was written. The pair is
+/// that value, a view the caller copies into `result`, and what the
+/// place held, which the caller releases last.
+fn assign_to_place(
+    req: &mut Request,
+    at: php_heap::ZvalRef,
+    value: Value,
+    strict: bool,
+) -> Result<(Value, Value), Thrown> {
     let mut at = at;
     let mut held = exec::value_of(at.read());
     if let Some(cell) = held.as_php_ref() {
+        let cell = *cell;
+        if !req.ref_type_sources(cell.heap()).is_empty() {
+            req.assign_to_reference(cell.heap(), value, strict)?;
+            return Ok((cell.get(), Value::default()));
+        }
         at = cell.heap().val_ref();
         held = exec::value_of(at.read());
     }
     at.write(value.to_zval());
-    held
+    Ok((value, held))
 }
 
 /// `zend_assign_to_object_dim` (`Z/Zend/zend_execute.c:1558`), the arm
@@ -6072,10 +6334,15 @@ pub(crate) fn assign_dim<T: Tier>(
             match entry {
                 Ok(Some(entry)) => {
                     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
-                    let garbage = assign_to_place(entry, value);
-                    write_out(req, frame, code, op, &value);
-                    req.release(garbage);
-                    Ok(())
+                    let strict = req.caller_strict_types();
+                    match assign_to_place(req, entry, value, strict) {
+                        Ok((landed, garbage)) => {
+                            write_out(req, frame, code, op, &landed);
+                            req.release(garbage);
+                            Ok(())
+                        }
+                        Err(thrown) => Err(thrown),
+                    }
                 }
                 Ok(None) => Err(crate::api::raising::throw(
                     req,

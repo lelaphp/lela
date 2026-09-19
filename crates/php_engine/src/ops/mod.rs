@@ -766,8 +766,47 @@ pub(crate) fn verify_property_type(
     strict: bool,
 ) -> Result<Option<Value>, Thrown> {
     let held = value.deref();
+    match type_assignable(req, &held, ty, strict) {
+        Assignable::Yes => Ok(None),
+        Assignable::Coerce => {
+            match crate::api::coerce::scalar_type_hint(req, &held, ty.mask(), strict)? {
+                Some(coerced) => Ok(Some(coerced)),
+                None => Err(property_type_error(req, &held, ty, declaring, name)),
+            }
+        }
+        Assignable::No => Err(property_type_error(req, &held, ty, declaring, name)),
+    }
+}
+
+/// What `i_zend_verify_type_assignable_zval`
+/// (`Z/Zend/zend_execute.c:3918`) answers with its `1`, `0` and `-1`:
+/// the value satisfies the type, it cannot satisfy it however it is
+/// converted, or the weak rule may still convert it. One reader tells
+/// the last two apart, `zend_verify_ref_assignable_zval`, which must
+/// know whether a source *needed* a conversion before it compares one
+/// source's conversion with another's.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Assignable {
+    /// php's `1`.
+    Yes,
+    /// php's `0`.
+    No,
+    /// php's `-1`.
+    Coerce,
+}
+
+/// `i_zend_verify_type_assignable_zval`: the declared type against the
+/// value, with no conversion made and nothing raised. The class arm is
+/// `zend_check_and_resolve_property_or_class_constant_class_type`, the
+/// named types of the declaration resolved and the object held to each.
+fn type_assignable(
+    req: &mut Request,
+    held: &Value,
+    ty: &php_unit::decl::Type,
+    strict: bool,
+) -> Assignable {
     if ty.contains_code(held.type_code()) {
-        return Ok(None);
+        return Assignable::Yes;
     }
     if let Some(object) = held.as_object()
         && named_types(ty).any(|named| {
@@ -775,13 +814,315 @@ pub(crate) fn verify_property_type(
                 .is_some_and(|of| req.instance_of(object.class(), of))
         })
     {
-        return Ok(None);
+        return Assignable::Yes;
     }
-    if let Some(coerced) = crate::api::coerce::scalar_type_hint(req, &held, ty.mask(), strict)? {
-        return Ok(Some(coerced));
+    let mask = ty.mask();
+    if strict {
+        // The one exception php makes under `strict_types`: an int
+        // where the type accepts a float, which is converted.
+        return match (mask & MAY_BE_DOUBLE != 0, held.as_ref()) {
+            (true, ValueRef::Int(_)) => Assignable::Coerce,
+            _ => Assignable::No,
+        };
+    }
+    // A nullable type has already been answered by `contains_code`, so a
+    // null here is one the type does not accept and no conversion makes
+    // acceptable.
+    if matches!(held.as_ref(), ValueRef::Null | ValueRef::Undef) {
+        return Assignable::No;
+    }
+    if mask & (MAY_BE_LONG | MAY_BE_DOUBLE | MAY_BE_STRING) == 0
+        && mask & MAY_BE_BOOL != MAY_BE_BOOL
+    {
+        return Assignable::No;
+    }
+    Assignable::Coerce
+}
+
+/// `zend_verify_ref_assignable_zval` (`Z/Zend/zend_execute.c:3959`):
+/// what a write through a cell a typed property's slot holds is held
+/// to. The value must satisfy *every* source's type, and where two
+/// sources convert it they must convert it to the same value; php's
+/// first source to need a conversion is the one the comparison is made
+/// against, and its conversion is what lands in the cell. `Ok(None)`
+/// says write the value as it stands, `Ok(Some)` says write this
+/// instead, and the `Err` is php's `TypeError`.
+///
+/// ```php
+/// class C { public static int $a = 1; public static int $b = 2; }
+/// $x = 1;
+/// C::$a = &$x;
+/// C::$b = &$x;
+/// $x = "7";
+/// var_dump($x, C::$a, C::$b);
+/// try { $x = []; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($x);
+/// ```
+/// ```expect
+/// int(7)
+/// int(7)
+/// int(7)
+/// Cannot assign array to reference held by property C::$a of type int
+/// int(7)
+/// ```
+pub(crate) fn verify_ref_assignable(
+    req: &mut Request,
+    cell: php_heap::Ref,
+    value: &Value,
+    strict: bool,
+) -> Result<Option<Value>, Thrown> {
+    let held = value.deref();
+    let sources = req.ref_type_sources(cell);
+    let listed: Vec<(crate::api::values::ClassId, Vec<u8>, php_unit::decl::Type)> = sources
+        .iter()
+        .map(|s| (s.declaring, s.name.clone(), s.ty.clone()))
+        .collect();
+    let mut first: Option<usize> = None;
+    let mut coerced: Option<Value> = None;
+    for (i, (declaring, name, ty)) in listed.iter().enumerate() {
+        let verdict = type_assignable(req, &held, ty, strict);
+        if verdict == Assignable::Coerce {
+            let made = crate::api::coerce::scalar_type_hint(req, &held, ty.mask(), strict)?;
+            let Some(made) = made else {
+                if let Some(old) = coerced {
+                    req.release(old);
+                }
+                return Err(ref_type_error(req, &held, ty, *declaring, name));
+            };
+            match (first, coerced) {
+                (None, _) => {
+                    first = Some(i);
+                    coerced = Some(made);
+                }
+                // A source before this one took the value as it stands,
+                // so the two cannot agree.
+                (Some(at), None) => {
+                    req.release(made);
+                    return Err(conflicting_coercion(req, &held, &listed, at, i));
+                }
+                (Some(at), Some(old)) => {
+                    let agrees = identical(&old, &made);
+                    req.release(made);
+                    if !agrees {
+                        req.release(old);
+                        return Err(conflicting_coercion(req, &held, &listed, at, i));
+                    }
+                    coerced = Some(old);
+                }
+            }
+        } else if verdict == Assignable::No {
+            if let Some(old) = coerced {
+                req.release(old);
+            }
+            return Err(ref_type_error(req, &held, ty, *declaring, name));
+        } else if first.is_none() {
+            first = Some(i);
+        } else if let Some(old) = coerced {
+            // A source before this one needed a conversion and this one
+            // does not, so the two cannot agree.
+            req.release(old);
+            let at = first.unwrap_or(i);
+            return Err(conflicting_coercion(req, &held, &listed, at, i));
+        }
+    }
+    Ok(coerced)
+}
+
+/// `zend_verify_prop_assignable_by_ref`
+/// (`Z/Zend/zend_execute.c:4121`): what a typed property's slot is held
+/// to before a cell is bound into it. A cell no typed property holds
+/// yet is the plain check, which converts the value *in the cell*, so
+/// `$x = "5"` bound into an `int` slot leaves both names holding
+/// `int(5)`; a cell another typed property already holds converts
+/// nothing, since a conversion would be one name's value changing under
+/// the other, and php names both properties in the refusal.
+/// `Ok(Some)` is the value the cell takes instead of what it holds.
+///
+/// ```php
+/// class C { public static int $n = 1; public static string $s = "x"; }
+/// $x = "5";
+/// C::$n = &$x;
+/// var_dump($x, C::$n);
+/// $y = 1;
+/// C::$n = &$y;
+/// try { C::$s = &$y; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(5)
+/// int(5)
+/// Reference with value of type int held by property C::$n of type int is not compatible with property C::$s of type string
+/// ```
+pub(crate) fn verify_prop_assignable_by_ref(
+    req: &mut Request,
+    cell: php_heap::Ref,
+    ty: &php_unit::decl::Type,
+    declaring: crate::api::values::ClassId,
+    name: &[u8],
+    strict: bool,
+) -> Result<Option<Value>, Thrown> {
+    let held = crate::api::values::PhpRef::of(cell).get().deref();
+    let first = req
+        .ref_type_sources(cell)
+        .first()
+        .map(|s| (s.declaring, s.name.clone(), s.ty.clone()));
+    let Some((first_at, first_name, first_ty)) = first else {
+        return verify_property_type(req, &held, ty, declaring, name, strict);
+    };
+    match type_assignable(req, &held, ty, strict) {
+        Assignable::Yes => return Ok(None),
+        Assignable::Coerce => {
+            // The value would convert, so what refuses the bind is the
+            // conversion itself: one name's value cannot change because
+            // the other was bound.
+            if let Some(made) = crate::api::coerce::scalar_type_hint(req, &held, ty.mask(), strict)?
+            {
+                req.release(made);
+                let class = req.class_name(first_at);
+                let two = req.class_name(declaring);
+                let one_declared = crate::api::coerce::type_name(&first_ty);
+                let two_declared = crate::api::coerce::type_name(ty);
+                let given = type_name(req, &held.undef_as_null());
+                return Err(throw(
+                    req,
+                    "TypeError",
+                    &format!(
+                        "Reference with value of type {given} held by property {class}::${} of type {one_declared} is not compatible with property {two}::${} of type {two_declared}",
+                        String::from_utf8_lossy(&first_name),
+                        String::from_utf8_lossy(name)
+                    ),
+                ));
+            }
+        }
+        Assignable::No => {}
     }
     Err(property_type_error(req, &held, ty, declaring, name))
 }
+
+/// `zend_throw_incdec_prop_error` (`Z/Zend/zend_execute.c:2211`): the
+/// `TypeError` a step raises where an `int` slot would have to hold the
+/// float it stepped into, and the value the slot takes instead, which
+/// is php's own `ZEND_LONG_MAX` or `ZEND_LONG_MIN`.
+///
+/// ```php
+/// class C { public static int $n = PHP_INT_MIN; }
+/// try { --C::$n; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(C::$n);
+/// ```
+/// ```expect
+/// Cannot decrement property C::$n of type int past its minimal value
+/// int(-9223372036854775808)
+/// ```
+pub(crate) fn incdec_prop_error(
+    req: &mut Request,
+    ty: &php_unit::decl::Type,
+    declaring: crate::api::values::ClassId,
+    name: &[u8],
+    increment: bool,
+) -> (Thrown, Value) {
+    let class = req.class_name(declaring);
+    let declared = crate::api::coerce::type_name(ty);
+    let (word, edge, limit) = if increment {
+        ("increment", "maximal", i64::MAX)
+    } else {
+        ("decrement", "minimal", i64::MIN)
+    };
+    let thrown = throw(
+        req,
+        "TypeError",
+        &format!(
+            "Cannot {word} property {class}::${} of type {declared} past its {edge} value",
+            String::from_utf8_lossy(name)
+        ),
+    );
+    (thrown, Value::int(limit))
+}
+
+/// Whether a step into a float is the one php refuses: the slot held an
+/// int, the step made a float and the declared type accepts no float,
+/// which is the check `zend_incdec_typed_prop` and the `IS_LONG` fast
+/// path beside it both make.
+///
+/// ```php
+/// class C { public static int $n = PHP_INT_MAX; public static float $f = PHP_INT_MAX; }
+/// var_dump(++C::$f);
+/// try { ++C::$n; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// float(9.223372036854776E+18)
+/// Cannot increment property C::$n of type int past its maximal value
+/// ```
+pub(crate) fn steps_past_int(held: &Value, stepped: &Value, ty: &php_unit::decl::Type) -> bool {
+    matches!(held.as_ref(), ValueRef::Int(_))
+        && matches!(stepped.as_ref(), ValueRef::Float(_))
+        && ty.mask() & MAY_BE_DOUBLE == 0
+}
+
+/// `zend_throw_ref_type_error_zval` (`Z/Zend/zend_execute.c:3891`): the
+/// `TypeError` a write through a cell raises, which names the property
+/// that holds the cell and not the name written through.
+fn ref_type_error(
+    req: &mut Request,
+    value: &Value,
+    ty: &php_unit::decl::Type,
+    declaring: crate::api::values::ClassId,
+    name: &[u8],
+) -> Thrown {
+    let class = req.class_name(declaring);
+    let declared = crate::api::coerce::type_name(ty);
+    let given = value_name(req, &value.undef_as_null());
+    throw(
+        req,
+        "TypeError",
+        &format!(
+            "Cannot assign {given} to reference held by property {class}::${} of type {declared}",
+            String::from_utf8_lossy(name)
+        ),
+    )
+}
+
+/// `zend_throw_conflicting_coercion_error`
+/// (`Z/Zend/zend_execute.c:3902`): two properties hold one cell and the
+/// value would land in it as two different values, which php refuses
+/// rather than pick one.
+fn conflicting_coercion(
+    req: &mut Request,
+    value: &Value,
+    listed: &[(crate::api::values::ClassId, Vec<u8>, php_unit::decl::Type)],
+    first: usize,
+    second: usize,
+) -> Thrown {
+    let Some((one_at, one_name, one_ty)) = listed.get(first) else {
+        return throw(req, "TypeError", "Cannot assign to reference");
+    };
+    let Some((two_at, two_name, two_ty)) = listed.get(second) else {
+        return throw(req, "TypeError", "Cannot assign to reference");
+    };
+    let one_class = req.class_name(*one_at);
+    let two_class = req.class_name(*two_at);
+    let one_declared = crate::api::coerce::type_name(one_ty);
+    let two_declared = crate::api::coerce::type_name(two_ty);
+    let given = value_name(req, &value.undef_as_null());
+    throw(
+        req,
+        "TypeError",
+        &format!(
+            "Cannot assign {given} to reference held by property {one_class}::${} of type {one_declared} and property {two_class}::${} of type {two_declared}, as this would result in an inconsistent type conversion",
+            String::from_utf8_lossy(one_name),
+            String::from_utf8_lossy(two_name)
+        ),
+    )
+}
+
+/// `MAY_BE_*` (`Z/Zend/zend_type_info.h:26-32`), the bits
+/// [`type_assignable`] reads of a declared type's mask to say whether a
+/// conversion could still land.
+const MAY_BE_BOOL: u32 = (1 << 2) | (1 << 3);
+/// `MAY_BE_LONG`.
+const MAY_BE_LONG: u32 = 1 << 4;
+/// `MAY_BE_DOUBLE`.
+const MAY_BE_DOUBLE: u32 = 1 << 5;
+/// `MAY_BE_STRING`.
+const MAY_BE_STRING: u32 = 1 << 6;
 
 /// `zend_verify_property_type_error` (`Z/Zend/zend_execute.c:961`): the
 /// `TypeError` naming the value, the class that declared the property,

@@ -95,6 +95,7 @@ Heap::string_with
 HeapHooks
 HeapHooks::destruct
 HeapHooks::free_native
+HeapHooks::free_reference
 HeapHooks::free_resource
 HeapHooks::gc_children
 HeapHooks::heap
@@ -132,6 +133,8 @@ Ref
 Ref::addref
 Ref::is_same
 Ref::refcount
+Ref::set_sources
+Ref::sources
 Ref::val
 Ref::val_ref
 Res
