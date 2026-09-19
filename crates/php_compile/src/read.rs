@@ -649,6 +649,29 @@ pub(crate) enum Expr {
         left: Child,
         right: Child,
     },
+    /// `C::$p op= expr`, php's `ZEND_AST_ASSIGN_OP` over a
+    /// `ZEND_AST_STATIC_PROP` with the operator in `attr`, which
+    /// `zend_compile_compound_assign` turns the fetch's own opline into
+    /// `ASSIGN_STATIC_PROP_OP` for. The other three targets php's
+    /// switch has, a variable, a dimension and a property, are not read
+    /// yet.
+    AssignStaticPropOp {
+        class: Vec<u8>,
+        name: Vec<u8>,
+        op: BinaryOp,
+        value: Child,
+    },
+    /// `++C::$p`, `--C::$p`, `C::$p++` and `C::$p--`, php's four
+    /// `ZEND_AST_{PRE,POST}_{INC,DEC}` over a `ZEND_AST_STATIC_PROP`,
+    /// which `zend_compile_pre_incdec` and `zend_compile_post_incdec`
+    /// turn the fetch's own opline into one of four opcodes for. The
+    /// step is a field here where php keeps it in the node's kind,
+    /// since the four differ in nothing else.
+    StaticPropStep {
+        class: Vec<u8>,
+        name: Vec<u8>,
+        step: Step,
+    },
     /// `$a ??= b`, php's `ZEND_AST_ASSIGN_COALESCE` over a target and a
     /// value: one token at the assignment level, read right to left,
     /// whose target is evaluated once and assigned only where what it
@@ -776,6 +799,21 @@ impl Drop for Child {
             };
         }
     }
+}
+
+/// Which of php's four step nodes stands over a target: whether the
+/// value the step leaves is the one before it (`POST`) or after it
+/// (`PRE`), and whether it counts up or down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Step {
+    /// `++$x`, php's `ZEND_AST_PRE_INC`
+    PreInc,
+    /// `--$x`, php's `ZEND_AST_PRE_DEC`
+    PreDec,
+    /// `$x++`, php's `ZEND_AST_POST_INC`
+    PostInc,
+    /// `$x--`, php's `ZEND_AST_POST_DEC`
+    PostDec,
 }
 
 /// The binary operators this reads, each the opcode php's
@@ -3051,6 +3089,14 @@ impl Reader<'_> {
                 },
             ));
         }
+        // `variable T_PLUS_EQUAL expr` and its eleven kin, php's
+        // `ZEND_AST_ASSIGN_OP`: one token at this level, whose value is
+        // read right to left as the `=` beside it is. Every level above
+        // leaves the token where it stands, since each guards its own
+        // operator against the `=` that follows it.
+        if let Some((op, width)) = self.compound_ahead() {
+            return self.compound(left, op, width);
+        }
         // `==` is the equality read above, and `=>` closes a `match`
         // arm's conditions.
         if self.byte(0) != Some(b'=') || matches!(self.byte(1), Some(b'=' | b'>')) {
@@ -3108,6 +3154,13 @@ impl Reader<'_> {
             // the value.
             Expr::StaticProp { class, name } => {
                 self.bump(1);
+                self.skip_trivia();
+                // `zend_compile_assign_ref`'s arm over the same node,
+                // which `ASSIGN_STATIC_PROP_REF` serves.
+                if self.byte(0) == Some(b'&') {
+                    self.bump(1);
+                    return self.assign_ref(Child::at(line, Expr::StaticProp { class, name }));
+                }
                 Ok(Child::at(
                     line,
                     Expr::AssignStaticProp {
@@ -3166,6 +3219,53 @@ impl Reader<'_> {
             return Err(self.trouble("an equality of an equality, which php does not read"));
         }
         Ok(Child::at(left.line(), Expr::Binary { op, left, right }))
+    }
+
+    /// One `variable op= expr`, the operator read: only a `static`
+    /// property is taken as its target so far, which is the one arm of
+    /// `zend_compile_compound_assign`'s switch this compiler emits; the
+    /// other three, a variable, a dimension and a property, are refused
+    /// where they stand.
+    fn compound(&mut self, left: Child, op: BinaryOp, width: usize) -> Result<Child, Trouble> {
+        let line = left.line();
+        let Expr::StaticProp { class, name } = left.take() else {
+            return Err(self.trouble(
+                "a compound assignment to what is no static property this compiler cannot read yet",
+            ));
+        };
+        self.bump(width);
+        Ok(Child::at(
+            line,
+            Expr::AssignStaticPropOp {
+                class,
+                name,
+                op,
+                value: self.assigned()?,
+            },
+        ))
+    }
+
+    /// The compound assignment operator standing here, and its width in
+    /// bytes: php's twelve `T_*_EQUAL` tokens, each the operator
+    /// `zend_compile_compound_assign` puts in the node's `attr`. The
+    /// scanner takes the longest, so `**=`, `<<=` and `>>=` are read
+    /// before the two-byte tokens inside them.
+    fn compound_ahead(&mut self) -> Option<(BinaryOp, usize)> {
+        Some(match (self.byte(0), self.byte(1), self.byte(2)) {
+            (Some(b'*'), Some(b'*'), Some(b'=')) => (BinaryOp::Pow, 3),
+            (Some(b'<'), Some(b'<'), Some(b'=')) => (BinaryOp::Sl, 3),
+            (Some(b'>'), Some(b'>'), Some(b'=')) => (BinaryOp::Sr, 3),
+            (Some(b'*'), Some(b'='), _) => (BinaryOp::Mul, 2),
+            (Some(b'+'), Some(b'='), _) => (BinaryOp::Add, 2),
+            (Some(b'-'), Some(b'='), _) => (BinaryOp::Sub, 2),
+            (Some(b'/'), Some(b'='), _) => (BinaryOp::Div, 2),
+            (Some(b'%'), Some(b'='), _) => (BinaryOp::Mod, 2),
+            (Some(b'.'), Some(b'='), _) => (BinaryOp::Concat, 2),
+            (Some(b'&'), Some(b'='), _) => (BinaryOp::BwAnd, 2),
+            (Some(b'|'), Some(b'='), _) => (BinaryOp::BwOr, 2),
+            (Some(b'^'), Some(b'='), _) => (BinaryOp::BwXor, 2),
+            _ => return None,
+        })
     }
 
     /// The operator of the equality level standing here, and its width
@@ -3441,22 +3541,36 @@ impl Reader<'_> {
                 self.bump(2);
                 self.skip_trivia();
                 let sign = if step == b'+' { "++" } else { "--" };
-                if self.byte(0) != Some(b'$') {
-                    return Err(self.trouble(format!("a `{sign}` before what is no variable")));
-                }
-                let var = self.variable()?;
-                let line = var.line();
-                let Expr::Var(name) = var.take() else {
-                    return Err(self.trouble(format!("a `{sign}` before what is no variable")));
+                // php's grammar puts a `variable` after the `++`, and a
+                // name a `::` follows is one of them.
+                let target = match self.byte(0) {
+                    Some(b'$') => self.variable()?,
+                    Some(b) if b.is_ascii_alphabetic() || b == b'_' || b == b'\\' => {
+                        self.named()?
+                    }
+                    _ => return Err(self.trouble(format!("a `{sign}` before what is no variable"))),
                 };
-                Ok(Child::at(
-                    line,
-                    if step == b'+' {
-                        Expr::PreInc(name)
-                    } else {
-                        Expr::PreDec(name)
-                    },
-                ))
+                let line = target.line();
+                let up = step == b'+';
+                match target.take() {
+                    Expr::Var(name) => Ok(Child::at(
+                        line,
+                        if up {
+                            Expr::PreInc(name)
+                        } else {
+                            Expr::PreDec(name)
+                        },
+                    )),
+                    Expr::StaticProp { class, name } => Ok(Child::at(
+                        line,
+                        Expr::StaticPropStep {
+                            class,
+                            name,
+                            step: if up { Step::PreInc } else { Step::PreDec },
+                        },
+                    )),
+                    _ => Err(self.trouble(format!("a `{sign}` before what is no variable"))),
+                }
             }
             Some(b) if b.is_ascii_digit() || (b == b'.' && self.digit_ahead(1)) => self.number(),
             Some(b'[') => {
@@ -3527,7 +3641,10 @@ impl Reader<'_> {
                 self.bump(5);
                 self.clone_expression()
             }
-            Some(b) if b.is_ascii_alphabetic() || b == b'_' || b == b'\\' => self.named(),
+            Some(b) if b.is_ascii_alphabetic() || b == b'_' || b == b'\\' => {
+                let named = self.named()?;
+                self.stepped(named)
+            }
             _ => Err(self.trouble("an expression this compiler cannot read yet")),
         }
     }
@@ -4104,6 +4221,29 @@ impl Reader<'_> {
         };
         self.bump(2);
         Ok(Child::at(line, step(name)))
+    }
+
+    /// php's `variable T_INC` and `variable T_DEC` over a `static`
+    /// property, which the name level above has just read: `C::$p++` is
+    /// one operand, as `$a++` is. Anything else a name opens is handed
+    /// back with the token where it stands, for whatever reads on to
+    /// refuse it as php's parse error refuses it.
+    fn stepped(&mut self, named: Child) -> Result<Child, Trouble> {
+        if !matches!(&*named, Expr::StaticProp { .. }) {
+            return Ok(named);
+        }
+        self.skip_trivia();
+        let step = match (self.byte(0), self.byte(1)) {
+            (Some(b'+'), Some(b'+')) => Step::PostInc,
+            (Some(b'-'), Some(b'-')) => Step::PostDec,
+            _ => return Ok(named),
+        };
+        let line = named.line();
+        let Expr::StaticProp { class, name } = named.take() else {
+            return Err(self.trouble("a `++` after what is no static property"));
+        };
+        self.bump(2);
+        Ok(Child::at(line, Expr::StaticPropStep { class, name, step }))
     }
 
     /// `$` and php's `LABEL`: a letter, `_` or a byte past ASCII, then

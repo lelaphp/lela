@@ -109,7 +109,7 @@ use php_unit::{
 use crate::read;
 use crate::read::{
     Arm, BinaryOp, Case, CastTo, Catch, Child, Class, Element, Expr, Function, IfArm, Magic,
-    Method, Piece, Property, Read, Stmt, Target, Unset, is_auto_global,
+    Method, Piece, Property, Read, Step, Stmt, Target, Unset, is_auto_global,
 };
 use crate::{CompileError, Options, StackLimit};
 
@@ -2447,6 +2447,8 @@ impl Emit<'_> {
             | Expr::AssignDim { .. }
             | Expr::AssignProp { .. }
             | Expr::AssignStaticProp { .. }
+            | Expr::AssignStaticPropOp { .. }
+            | Expr::StaticPropStep { .. }
             | Expr::AssignRef { .. }
             | Expr::Call { .. }
             | Expr::PreInc(_)
@@ -3962,6 +3964,13 @@ impl Emit<'_> {
             Expr::AssignStaticProp { class, name, value } => {
                 self.assign_static_prop(class, name, value)
             }
+            Expr::AssignStaticPropOp {
+                class,
+                name,
+                op,
+                value,
+            } => self.assign_static_prop_op(class, name, *op, value),
+            Expr::StaticPropStep { class, name, step } => self.static_prop_step(class, name, *step),
             Expr::AssignDim { target, value } => self.assign_dim(target, value),
             Expr::AssignRef { target, source } => self.assign_ref(target, source),
             Expr::Dim { .. } => self.dim_read(expr),
@@ -4630,6 +4639,9 @@ impl Emit<'_> {
     /// `ASSIGN_*_REF` only for a property and a class's own property,
     /// and leaves a dimension's fetch standing.
     fn assign_ref(&mut self, target: &Child, source: &Child) -> Result<Where, CompileError> {
+        if let Expr::StaticProp { class, name } = &**target {
+            return self.assign_static_prop_ref(class, name, source);
+        }
         let (op1_type, op1) = match &**target {
             Expr::Var(name) => (OperandKind::Cv, self.lookup_cv(name)),
             Expr::Dim { .. } => {
@@ -5022,6 +5034,145 @@ impl Emit<'_> {
             ..Opline::default()
         });
         Ok(Where::Temporary(out))
+    }
+
+    /// `zend_compile_compound_assign`, the `ZEND_AST_STATIC_PROP` arm
+    /// (`Z/Zend/zend_compile.c:3643`): the fetch compiled delayed under
+    /// `BP_VAR_RW`, the value after it, and the one delayed opline laid
+    /// down with its opcode set to `ASSIGN_STATIC_PROP_OP` and its
+    /// `result` a temporary. The operator takes the place the cache slot
+    /// held in `extended_value`, and the slot moves onto the `OP_DATA`
+    /// beside it (`opline = zend_emit_op_data(&expr_node);
+    /// opline->extended_value = cache_slot;`), which is where the
+    /// handler reads it from.
+    fn assign_static_prop_op(
+        &mut self,
+        class: &[u8],
+        name: &[u8],
+        op: BinaryOp,
+        value: &Child,
+    ) -> Result<Where, CompileError> {
+        let name = self.string(name)?;
+        let name_at = self.literal(name);
+        let out = self.temporary();
+        let slots = self.cache_slots(3);
+        let class_at = self.class_name_literal(class)?;
+        // The delayed fetch's line, as [`Self::assign_static_prop`]
+        // keeps it.
+        let line = self.line;
+        let value = self.expr(value)?;
+        let (data_type, data) = self.operand(value);
+        self.line = line;
+        self.push(Opline {
+            opcode: Opcode::AssignStaticPropOp,
+            op1_type: OperandKind::Const,
+            op1: name_at,
+            op2_type: OperandKind::Const,
+            op2: class_at,
+            out_type: OperandKind::Tmp,
+            out,
+            extended_value: u32::from(Self::opcode_of(op) as u8),
+            ..Opline::default()
+        });
+        self.push(Opline {
+            opcode: Opcode::OpData,
+            op1_type: data_type,
+            op1: data,
+            extended_value: slots,
+            ..Opline::default()
+        });
+        Ok(Where::Temporary(out))
+    }
+
+    /// `zend_compile_pre_incdec` and `zend_compile_post_incdec` over a
+    /// `ZEND_AST_STATIC_PROP` (`Z/Zend/zend_compile.c:10416`, `:10444`):
+    /// the fetch's own opline under `BP_VAR_RW`, its opcode set to one
+    /// of the four steps and its `result` a temporary, and nothing
+    /// beside it. The property's name is `op1`, the class's constant
+    /// pair `op2` and three cache slots stand in `extended_value`, as
+    /// the fetch left them. [`Self::do_free`] turns a `POST_*` nothing
+    /// reads into the `PRE_*` php's `zend_do_free` turns it into, which
+    /// is why `C::$p++` as a statement is `PRE_INC_STATIC_PROP`.
+    fn static_prop_step(
+        &mut self,
+        class: &[u8],
+        name: &[u8],
+        step: Step,
+    ) -> Result<Where, CompileError> {
+        let name = self.string(name)?;
+        let name_at = self.literal(name);
+        let out = self.temporary();
+        let slots = self.cache_slots(3);
+        let class_at = self.class_name_literal(class)?;
+        self.push(Opline {
+            opcode: match step {
+                Step::PreInc => Opcode::PreIncStaticProp,
+                Step::PreDec => Opcode::PreDecStaticProp,
+                Step::PostInc => Opcode::PostIncStaticProp,
+                Step::PostDec => Opcode::PostDecStaticProp,
+            },
+            op1_type: OperandKind::Const,
+            op1: name_at,
+            op2_type: OperandKind::Const,
+            op2: class_at,
+            out_type: OperandKind::Tmp,
+            out,
+            extended_value: slots,
+            ..Opline::default()
+        });
+        Ok(Where::Temporary(out))
+    }
+
+    /// `zend_compile_assign_ref`, the arm over the fetch it left
+    /// standing as `FETCH_STATIC_PROP_W` (`Z/Zend/zend_compile.c:3597`):
+    /// the opcode becomes `ASSIGN_STATIC_PROP_REF`, `ZEND_FETCH_REF`
+    /// comes off `extended_value` and `ZEND_RETURNS_FUNCTION` goes on
+    /// where the source is a call, and the source rides in the `OP_DATA`
+    /// beside it, so the handler steps over two oplines. What the
+    /// opline leaves is the fetch's `VAR`, which [`Self::do_free`]
+    /// marks `UNUSED` where nothing reads it.
+    fn assign_static_prop_ref(
+        &mut self,
+        class: &[u8],
+        name: &[u8],
+        source: &Child,
+    ) -> Result<Where, CompileError> {
+        let name = self.string(name)?;
+        let name_at = self.literal(name);
+        let out = self.temporary();
+        let slots = self.cache_slots(3);
+        let class_at = self.class_name_literal(class)?;
+        let (data_type, data, flags) = match &**source {
+            Expr::Var(name) => (OperandKind::Cv, self.lookup_cv(name), 0),
+            Expr::Call { .. } => {
+                let returned = self.expr(source)?;
+                let (kind, at) = self.operand(returned);
+                (kind, at, RETURNS_FUNCTION)
+            }
+            _ => {
+                return Err(self.fatal(
+                    "a by-reference assignment from what is no variable this compiler cannot read yet",
+                ));
+            }
+        };
+        self.push(Opline {
+            opcode: Opcode::AssignStaticPropRef,
+            op1_type: OperandKind::Const,
+            op1: name_at,
+            op2_type: OperandKind::Const,
+            op2: class_at,
+            out_type: OperandKind::Var,
+            out,
+            extended_value: slots | flags,
+            ..Opline::default()
+        });
+        self.push(Opline {
+            opcode: Opcode::OpData,
+            op1_type: data_type,
+            op1: data,
+            ..Opline::default()
+        });
+        Ok(Where::Returned(out))
     }
 
     /// `zend_compile_binary_op`: the value where
@@ -5724,6 +5875,8 @@ impl Emit<'_> {
             | Expr::AssignDim { .. }
             | Expr::AssignProp { .. }
             | Expr::AssignStaticProp { .. }
+            | Expr::AssignStaticPropOp { .. }
+            | Expr::StaticPropStep { .. }
             | Expr::AssignRef { .. }
             | Expr::PreInc(_)
             | Expr::PostInc(_)
@@ -7186,7 +7339,9 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Child) {
         // `C::$p = $v` names the class as written, so nothing under
         // the target is a variable an arrow function captures; the
         // value is.
-        Expr::AssignStaticProp { value, .. } => implicit_uses(names, value),
+        Expr::AssignStaticProp { value, .. } | Expr::AssignStaticPropOp { value, .. } => {
+            implicit_uses(names, value);
+        }
         Expr::PreInc(var) | Expr::PostInc(var) | Expr::PreDec(var) | Expr::PostDec(var) => {
             note(names, var);
         }
@@ -7271,6 +7426,9 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Child) {
         | Expr::Magic { .. }
         | Expr::This
         | Expr::ClassConst { .. }
+        // A step over a static property names no variable either: the
+        // class is written and the property is a name, not a variable.
+        | Expr::StaticPropStep { .. }
         | Expr::StaticProp { .. } => {}
     }
 }

@@ -3085,6 +3085,48 @@ impl Request {
         Ok(())
     }
 
+    /// `zend_assign_to_variable_reference` over a `static` property's
+    /// slot, which `ZEND_ASSIGN_STATIC_PROP_REF` runs: the cell itself
+    /// becomes what the slot holds, so the property and every name
+    /// bound to it are one value, and what the slot held is given up
+    /// after the write. This is not [`Request::set_static_property`],
+    /// which writes *through* a reference standing there; a bind
+    /// replaces it.
+    pub(crate) fn bind_static_property(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+        scope: Option<ClassId>,
+        bound: Value,
+    ) -> Result<(), Thrown> {
+        let (declaring, _) = match self.static_slot(class, name, scope, PropertyRead::Warning) {
+            Ok(Some(slot)) => slot,
+            Ok(None) => {
+                self.release(bound);
+                return Ok(());
+            }
+            Err(thrown) => {
+                self.release(bound);
+                return Err(thrown);
+            }
+        };
+        let held = self
+            .statics
+            .iter()
+            .position(|((at, under), _)| *at == declaring && under == name);
+        let Some(at) = held else {
+            self.release(bound);
+            return Ok(());
+        };
+        let previous = self
+            .statics
+            .get_mut(at)
+            .map(|(_, slot)| std::mem::replace(slot, bound))
+            .unwrap_or_default();
+        self.release(previous);
+        Ok(())
+    }
+
     /// `zend_bad_property_access`: php's `Error` for a property the
     /// scope may not reach.
     fn inaccessible_property(

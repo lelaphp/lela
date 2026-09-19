@@ -3483,6 +3483,45 @@ mod tests {
         );
     }
 
+    /// `zend_compile_compound_assign`, `zend_compile_pre_incdec`,
+    /// `zend_compile_post_incdec` and `zend_compile_assign_ref` over a
+    /// `ZEND_AST_STATIC_PROP` (#487): one opline each, the fetch's own
+    /// with its opcode set, the operator where the cache slot stood for
+    /// the compound form and the slot moved onto its `OP_DATA`. The
+    /// dump is the oracle's under `[regime.dump]` at 8.5.9; `C::$p++`
+    /// and `C::$p--` written as statements are the `PRE_*` opcodes,
+    /// since `zend_do_free` turns a step nothing reads into the one
+    /// that leaves the value after it, and the one `var_dump` reads is
+    /// `POST_INC_STATIC_PROP` into `T8`.
+    #[test]
+    fn the_compound_step_and_reference_writes_to_a_static_property_are_the_oracle_s_oplines() {
+        assert_eq!(
+            dump_of(
+                b"<?php class C { public static $p = 1; } C::$p += 2; ++C::$p; --C::$p; \
+                  C::$p++; C::$p--; $x = 1; C::$p = &$x; var_dump(C::$p++);"
+            ),
+            main_dump(
+                14,
+                1,
+                9,
+                "0000 ASSIGN_STATIC_PROP_OP (ADD) string(\"p\") string(\"C\")\n\
+                 0001 OP_DATA int(2)\n\
+                 0002 PRE_INC_STATIC_PROP string(\"p\") string(\"C\")\n\
+                 0003 PRE_DEC_STATIC_PROP string(\"p\") string(\"C\")\n\
+                 0004 PRE_INC_STATIC_PROP string(\"p\") string(\"C\")\n\
+                 0005 PRE_DEC_STATIC_PROP string(\"p\") string(\"C\")\n\
+                 0006 ASSIGN CV0($x) int(1)\n\
+                 0007 ASSIGN_STATIC_PROP_REF string(\"p\") string(\"C\")\n\
+                 0008 OP_DATA CV0($x)\n\
+                 0009 INIT_FCALL 1 96 string(\"var_dump\")\n\
+                 0010 T8 = POST_INC_STATIC_PROP string(\"p\") string(\"C\")\n\
+                 0011 SEND_VAL T8 1\n\
+                 0012 DO_ICALL\n\
+                 0013 RETURN int(1)\n"
+            )
+        );
+    }
+
     /// What stands beside a `C::$p` read and is not read yet is refused
     /// as such (#372): a write, an assignment and `++`, the property
     /// the program names as it serves, `self`, `parent` and `static`
@@ -3502,12 +3541,14 @@ mod tests {
             .map(|e| e.message)
         };
         assert_eq!(
-            refused(b"<?php C::$p++;").as_deref(),
+            refused(b"<?php C::$p = &$o->q;").as_deref(),
             Some("a statement this compiler cannot read yet")
         );
         assert_eq!(
-            refused(b"<?php ++C::$p;").as_deref(),
-            Some("a `++` before what is no variable")
+            refused(b"<?php $a += 1;").as_deref(),
+            Some(
+                "a compound assignment to what is no static property this compiler cannot read yet"
+            )
         );
         assert_eq!(
             refused(b"<?php C::$$p;").as_deref(),

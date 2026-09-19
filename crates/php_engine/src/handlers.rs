@@ -5378,6 +5378,452 @@ pub(crate) fn assign_static_prop<T: Tier>(
     Ok(Stepped::Same(frame))
 }
 
+/// The slot one of the five read-modify-write opcodes over a
+/// `static` property stands on, addressed as php addresses it before it reads
+/// anything else: `zend_fetch_static_property_address` under
+/// `BP_VAR_RW`, which is [`Request::static_slot`] under
+/// [`PropertyRead::Warning`], so a name no class declares and one the
+/// scope may not reach each throw where php's does. `None` is the miss
+/// that raised nothing, which a write can only meet where the class
+/// itself could not be addressed.
+fn static_place(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Result<Option<Placed>, Thrown> {
+    let name = exec::constant(code, ConstIdx(op.op1));
+    let name = name.as_str_bytes().unwrap_or_default().to_vec();
+    let scope = req.executed_scope();
+    let class = class_operand(req, frame, code, op.op2_type, op.op2, None)?;
+    match req.static_slot(class, &name, scope, PropertyRead::Warning)? {
+        Some((_, property)) => Ok(Some(Placed {
+            class,
+            name,
+            scope,
+            typed: property.ty.is_some(),
+        })),
+        None => Ok(None),
+    }
+}
+
+/// What [`static_place`] addressed: the class the opline named, the
+/// property's name, the scope the access was measured against, and
+/// whether the declaration carries a type, which is the coercion this
+/// engine does not serve yet.
+struct Placed {
+    class: crate::api::values::ClassId,
+    name: Vec<u8>,
+    scope: Option<crate::api::values::ClassId>,
+    typed: bool,
+}
+
+/// One kernel of two values, which is what `get_binary_op` hands php's
+/// compound assignment back.
+type BinaryKernel = fn(&mut Request, &Value, &Value) -> Result<Value, Thrown>;
+
+/// The binary operation `extended_value` names on an
+/// `ASSIGN_STATIC_PROP_OP`, which php reads with `get_binary_op` over
+/// the opcode `zend_compile_compound_assign` wrote there.
+fn binary_op_of(extended_value: u32) -> Option<BinaryKernel> {
+    let opcode = u8::try_from(extended_value)
+        .ok()
+        .and_then(Opcode::from_u8)?;
+    Some(match opcode {
+        Opcode::Add => crate::ops::add,
+        Opcode::Sub => crate::ops::sub,
+        Opcode::Mul => crate::ops::mul,
+        Opcode::Div => crate::ops::div,
+        Opcode::Mod => crate::ops::r#mod,
+        Opcode::Pow => crate::ops::pow,
+        Opcode::Sl => crate::ops::shift_left,
+        Opcode::Sr => crate::ops::shift_right,
+        Opcode::Concat => crate::ops::concat,
+        Opcode::BwOr => crate::ops::bitwise_or,
+        Opcode::BwXor => crate::ops::bitwise_xor,
+        Opcode::BwAnd => crate::ops::bitwise_and,
+        _ => return None,
+    })
+}
+
+/// `ZEND_ASSIGN_STATIC_PROP_OP` (`Z/Zend/zend_vm_def.h:2714`),
+/// `C::$p op= v`, two oplines: this one names the property in `op1`,
+/// the class's constant pair in `op2` and the operator in
+/// `extended_value`, and the `OP_DATA` after it carries the value and
+/// the cache slot the fetch's own `extended_value` held, so the handler
+/// steps over both.
+///
+/// php addresses the slot before it reads the value
+/// (`zend_fetch_static_property_address` under `BP_VAR_RW`, then
+/// `GET_OP_DATA_ZVAL_PTR_DEREF`) and on one it cannot address gives the
+/// value operand up unread, as `ZEND_ASSIGN_STATIC_PROP` does. The
+/// operation is php's own binary kernel over what the slot holds and
+/// the value (`binary_op(prop, prop, value)`), so `C::$p .= 1` and
+/// `C::$p / 0` raise exactly what `.` and `/` raise; the temporary
+/// takes what the slot now holds under `RETURN_VALUE_USED`.
+///
+/// ```php
+/// class C { public static $p = 1; }
+/// C::$p += 2;
+/// var_dump(C::$p);
+/// var_dump(C::$p .= "x");
+/// C::$p = 7;
+/// var_dump(C::$p **= 2, C::$p <<= 1, C::$p %= 5, C::$p |= 8);
+/// ```
+/// ```expect
+/// int(3)
+/// string(2) "3x"
+/// int(49)
+/// int(98)
+/// int(3)
+/// int(11)
+/// ```
+///
+/// A property nothing declares is php's `Error` and the value is never
+/// read, so the warning an undefined variable beside it would raise
+/// never stands:
+///
+/// ```php
+/// class C { public static $y = 1; }
+/// C::$x += $undef;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Access to undeclared static property C::$x in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+pub(crate) fn assign_static_prop_op<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    if op.op1_type != OperandKind::Const {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ASSIGN_STATIC_PROP_OP over a property named at run time",
+        )));
+    }
+    let Some(kernel) = binary_op_of(op.extended_value) else {
+        return Err(Fatal::Error(format!(
+            "InternalError: ZEND_ASSIGN_STATIC_PROP_OP over the operator {} , which is no binary operation",
+            op.extended_value
+        )));
+    };
+    let at = req.vm().opline(frame);
+    let Some(data) =
+        exec::opline_at(code, at.saturating_add(1)).filter(|next| next.opcode == Opcode::OpData)
+    else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ASSIGN_STATIC_PROP_OP with no OP_DATA after it",
+        )));
+    };
+    let (data_type, data_at) = (data.op1_type, data.op1);
+    let placed = match static_place(req, frame, code, op) {
+        Ok(placed) => placed,
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, data_type, data_at);
+            return threw(req, frame, &thrown);
+        }
+    };
+    let Some(Placed {
+        class,
+        name,
+        scope,
+        typed,
+    }) = placed
+    else {
+        exec::free_operand(req, frame, code, data_type, data_at);
+        req.vm_mut().jump(frame, at.saturating_add(2));
+        return Ok(Stepped::Same(frame));
+    };
+    if typed {
+        return Err(Fatal::Error(format!(
+            "InternalError: ZEND_ASSIGN_STATIC_PROP_OP over the typed static property ${}, whose coercion is not served yet",
+            String::from_utf8_lossy(&name)
+        )));
+    }
+    let value = exec::take_operand(req, frame, code, data_type, data_at);
+    let held = match req.static_property(class, &name, scope, PropertyRead::Warning) {
+        Ok(held) => held,
+        Err(thrown) => {
+            req.release(value);
+            return threw(req, frame, &thrown);
+        }
+    };
+    let computed = kernel(req, &held, &value);
+    req.release(held);
+    req.release(value);
+    let stepped = match computed {
+        Ok(stepped) => stepped,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    write_out(req, frame, code, op, &stepped);
+    if let Err(thrown) = req.set_static_property(class, &name, scope, stepped) {
+        return threw(req, frame, &thrown);
+    }
+    req.vm_mut().jump(frame, at.saturating_add(2));
+    Ok(Stepped::Same(frame))
+}
+
+/// The body the four steps over a `static` property share: the slot
+/// addressed as [`assign_static_prop_op`] addresses it, the kernel over
+/// what it holds, the stepped value written back, and the temporary
+/// under `RETURN_VALUE_USED` taking the value before the step for a
+/// `POST_*` and the one after it for a `PRE_*`.
+fn static_prop_step(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    post: bool,
+    kernel: fn(&mut Request, &Value) -> Result<Value, Thrown>,
+) -> Edge {
+    if op.op1_type != OperandKind::Const {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a step over a static property named at run time",
+        )));
+    }
+    let placed = match static_place(req, frame, code, op) {
+        Ok(placed) => placed,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let Some(Placed {
+        class,
+        name,
+        scope,
+        typed,
+    }) = placed
+    else {
+        return Ok(advance(req, frame));
+    };
+    if typed {
+        return Err(Fatal::Error(format!(
+            "InternalError: a step over the typed static property ${}, whose coercion is not served yet",
+            String::from_utf8_lossy(&name)
+        )));
+    }
+    let held = match req.static_property(class, &name, scope, PropertyRead::Warning) {
+        Ok(held) => held,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let stepped = match kernel(req, &held) {
+        Ok(stepped) => stepped,
+        Err(thrown) => {
+            req.release(held);
+            return threw(req, frame, &thrown);
+        }
+    };
+    write_out(req, frame, code, op, if post { &held } else { &stepped });
+    req.release(held);
+    if let Err(thrown) = req.set_static_property(class, &name, scope, stepped) {
+        return threw(req, frame, &thrown);
+    }
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_PRE_INC_STATIC_PROP` (`Z/Zend/zend_vm_def.h:6297`), `++C::$p`:
+/// [`crate::ops::increment`] over what the slot holds, written back,
+/// and the value after the step in the temporary under
+/// `RETURN_VALUE_USED`. `C::$p++` written as a statement is this
+/// opcode too, since `zend_do_free` turns a `POST_*` nothing reads into
+/// the `PRE_*` beside it.
+///
+/// ```php
+/// class C { public static $p = 1; public static $s = "a"; }
+/// var_dump(++C::$p);
+/// C::$p++;
+/// var_dump(C::$p, C::$p++, C::$p);
+/// var_dump(++C::$s);
+/// ```
+/// ```expect
+/// int(2)
+/// int(3)
+/// int(3)
+/// int(4)
+///
+/// Deprecated: Increment on non-numeric string is deprecated, use str_increment() instead in %s on line 6
+/// string(1) "b"
+/// ```
+pub(crate) fn pre_inc_static_prop<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    static_prop_step(req, frame, code, op, false, crate::ops::increment)
+}
+
+/// `ZEND_PRE_DEC_STATIC_PROP`, `--C::$p`: the same over
+/// [`crate::ops::decrement`], which leaves a null where `++` makes it
+/// `1` and warns as it does so.
+///
+/// ```php
+/// class C { public static $p = 1; public static $n; }
+/// var_dump(--C::$p);
+/// var_dump(--C::$n);
+/// ```
+/// ```expect
+/// int(0)
+///
+/// Warning: Decrement on type null has no effect, this will change in the next major version of PHP in %s on line 4
+/// NULL
+/// ```
+pub(crate) fn pre_dec_static_prop<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    static_prop_step(req, frame, code, op, false, crate::ops::decrement)
+}
+
+/// `ZEND_POST_INC_STATIC_PROP`, `C::$p++` where the value is read: the
+/// same step, with the value the slot held before it in the temporary.
+///
+/// ```php
+/// class C { public static $p = 1; }
+/// var_dump(C::$p++, C::$p--, C::$p);
+/// ```
+/// ```expect
+/// int(1)
+/// int(2)
+/// int(1)
+/// ```
+pub(crate) fn post_inc_static_prop<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    static_prop_step(req, frame, code, op, true, crate::ops::increment)
+}
+
+/// `ZEND_POST_DEC_STATIC_PROP`, `C::$p--` where the value is read: the
+/// same step over [`crate::ops::decrement`], the value before it in the
+/// temporary.
+///
+/// ```php
+/// class C { public static $p = "9"; }
+/// var_dump(C::$p--, C::$p);
+/// ```
+/// ```expect
+/// string(1) "9"
+/// int(8)
+/// ```
+pub(crate) fn post_dec_static_prop<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    static_prop_step(req, frame, code, op, true, crate::ops::decrement)
+}
+
+/// `ZEND_ASSIGN_STATIC_PROP_REF` (`Z/Zend/zend_vm_def.h:2648`),
+/// `C::$p = &$x`, two oplines: this one names the property in `op1` and
+/// the class's constant pair in `op2`, and the `OP_DATA` after it
+/// carries the source, so the handler steps over both. The slot is
+/// addressed before the source is read, as every write to one is, and
+/// binding is `zend_assign_to_variable_reference`: the source's own
+/// cell where it stands in one already, else a new cell over what it
+/// held, written back into the source so both names hold it
+/// ([`Request::bind_static_property`]). `ZEND_RETURNS_FUNCTION` on
+/// `extended_value`, beside the cache slot it shares the field with, is
+/// the source that is a call, and a call that returned by value is
+/// php's notice over a cell of its own.
+///
+/// ```php
+/// class C { public static $p = 1; }
+/// $x = 5;
+/// C::$p = &$x;
+/// $x = 7;
+/// var_dump(C::$p);
+/// C::$p = 9;
+/// var_dump($x);
+/// ```
+/// ```expect
+/// int(7)
+/// int(9)
+/// ```
+pub(crate) fn assign_static_prop_ref<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    if op.op1_type != OperandKind::Const {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ASSIGN_STATIC_PROP_REF over a property named at run time",
+        )));
+    }
+    let at = req.vm().opline(frame);
+    let Some(data) =
+        exec::opline_at(code, at.saturating_add(1)).filter(|next| next.opcode == Opcode::OpData)
+    else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ASSIGN_STATIC_PROP_REF with no OP_DATA after it",
+        )));
+    };
+    let (data_type, data_at) = (data.op1_type, data.op1);
+    let placed = match static_place(req, frame, code, op) {
+        Ok(placed) => placed,
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, data_type, data_at);
+            return threw(req, frame, &thrown);
+        }
+    };
+    let Some(Placed {
+        class,
+        name,
+        scope,
+        typed,
+    }) = placed
+    else {
+        exec::free_operand(req, frame, code, data_type, data_at);
+        req.vm_mut().jump(frame, at.saturating_add(2));
+        return Ok(Stepped::Same(frame));
+    };
+    if typed {
+        return Err(Fatal::Error(format!(
+            "InternalError: ZEND_ASSIGN_STATIC_PROP_REF over the typed static property ${}, whose reference binding is not served yet",
+            String::from_utf8_lossy(&name)
+        )));
+    }
+    let Some(source) = write_place(req, frame, code, data_type, data_at) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ASSIGN_STATIC_PROP_REF over a source php compiles no write over",
+        )));
+    };
+    let held = exec::value_of(source.read());
+    if op.extended_value & RETURNS_FUNCTION != 0 && held.as_php_ref().is_none() {
+        crate::api::raising::notice(req, "Only variables should be assigned by reference");
+        if req.is_pending() {
+            return Ok(Stepped::Threw(frame));
+        }
+    }
+    let cell = if let Some(cell) = held.as_php_ref() {
+        *cell
+    } else {
+        let held = held.undef_as_null();
+        let cell = match req.reference(held) {
+            Ok(cell) => cell,
+            Err(thrown) => return threw(req, frame, &thrown),
+        };
+        // The owner the source had of `held` is the cell's now.
+        source.write(cell.as_value().to_zval());
+        cell
+    };
+    let bound = cell.as_value();
+    req.addref(&bound);
+    write_out(req, frame, code, op, &bound);
+    if let Err(thrown) = req.bind_static_property(class, &name, scope, bound) {
+        return threw(req, frame, &thrown);
+    }
+    req.vm_mut().jump(frame, at.saturating_add(2));
+    Ok(Stepped::Same(frame))
+}
+
 /// `zend_assign_to_variable` (`Z/Zend/zend_execute.h:171`) over a place:
 /// a reference standing there is followed and the write lands in the
 /// cell, as `ASSIGN` over a CV bound by `&` lands there; the value is
