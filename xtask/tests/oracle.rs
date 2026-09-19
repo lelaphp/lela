@@ -8,11 +8,12 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, SystemTime};
 
 use xtask::divergence::Registry;
 use xtask::manifest::Manifest;
 use xtask::oracle::{
-    self, PROMISE_VARIABLE, Pin, Program, Promise, Promised, TREE_VARIABLE, Verdict,
+    self, PROMISE_VARIABLE, Pin, Program, Promise, Promised, Runner, TREE_VARIABLE, Verdict,
 };
 use xtask::scratch::Tree;
 
@@ -706,4 +707,97 @@ fn verdict_is_compare_with_the_callers_match_in_place_of_equal_bytes() {
         Verdict::Differs(diff) => assert!(diff.contains("-%d") && diff.contains("+x"), "{diff}"),
         other => panic!("{other:?}"),
     }
+}
+
+/// A stand-in for the engine's binary at `target/<profile>/php` under
+/// `root`, stamped `ago` seconds back, so a test says in one line whether
+/// the tree has moved past it (#475). The write time is set rather than
+/// slept for: the question is which of two files is newer, and a sleep
+/// would answer it by wall clock.
+fn built(root: &Path, profile: &str, ago: u64) -> PathBuf {
+    let path = root.join("target").join(profile).join("php");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, format!("the {profile} engine")).unwrap();
+    let at = SystemTime::now() - Duration::from_secs(ago);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(at)
+        .unwrap();
+    path
+}
+
+/// The engine's sources under `root`, written now: the tree a binary is
+/// held to.
+fn engine_sources(root: &Path) {
+    let src = root.join("crates/php_engine/src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("lib.rs"), "// the kernels\n").unwrap();
+}
+
+/// A release binary built once and never again was the lane's engine for
+/// every run after, however far the tree moved, since `release` is
+/// preferred over `debug` (#475). It is preferred among the binaries the
+/// tree has not moved past, and not over them: `cargo build -p php`
+/// writes the debug one, and that is what displaces it.
+#[test]
+fn a_binary_the_tree_has_moved_past_is_passed_over_for_one_it_has_not() {
+    let root = fixture_tree("stale-passed-over");
+    let stale = built(root.path(), "release", 3600);
+    engine_sources(root.path());
+    let fresh = built(root.path(), "debug", 0);
+    let pin = pin_with_path(root.path());
+    assert_eq!(
+        Runner::resolve(root.path(), &pin, None).unwrap(),
+        Runner::Engine(fresh),
+        "the debug binary the tree has not moved past is the lane's engine"
+    );
+    // And the release binary alone is the skip, not a silent engine.
+    std::fs::remove_file(root.path().join("target/debug/php")).unwrap();
+    let behind = Runner::resolve(root.path(), &pin, None).unwrap();
+    let Runner::Stale(why) = &behind else {
+        panic!("{behind:?}")
+    };
+    assert!(why.contains(&stale.display().to_string()), "{why}");
+    assert!(why.contains("crates/php_engine/src/lib.rs"), "{why}");
+    assert!(why.contains("cargo build -p php"), "{why}");
+    assert_eq!(behind.binary(), None, "nothing runs under it");
+    assert_eq!(behind.stamp(), None, "and no reading is stamped with it");
+}
+
+/// The engine's binary names itself on the reading that ran it, and a
+/// binary the tree has not moved past is the engine as it was before
+/// (#475).
+#[test]
+fn a_binary_the_tree_has_not_moved_past_is_the_engine_and_stamps_its_reading() {
+    let root = fixture_tree("fresh-binary");
+    engine_sources(root.path());
+    let fresh = built(root.path(), "release", 0);
+    let pin = pin_with_path(root.path());
+    let runner = Runner::resolve(root.path(), &pin, None).unwrap();
+    assert_eq!(runner, Runner::Engine(fresh.clone()));
+    assert_eq!(runner.binary(), Some(fresh.as_path()));
+    let stamp = runner.stamp().unwrap();
+    let (path, digest) = stamp
+        .split_once(" md5 ")
+        .unwrap_or_else(|| panic!("{stamp}"));
+    assert_eq!(path, fresh.display().to_string());
+    assert_eq!(digest.len(), 32, "{stamp}");
+    assert!(digest.bytes().all(|b| b.is_ascii_hexdigit()), "{stamp}");
+}
+
+/// A tree with no engine source in it is not one a binary can have fallen
+/// behind: the harness's own tests lay a workspace down without the
+/// crates, and a stand-in binary there is the lane's engine whatever its
+/// write time (#475).
+#[test]
+fn a_tree_with_no_engine_source_leaves_every_binary_the_engine() {
+    let root = fixture_tree("no-engine-source");
+    let old = built(root.path(), "release", 86_400);
+    let pin = pin_with_path(root.path());
+    assert_eq!(
+        Runner::resolve(root.path(), &pin, None).unwrap(),
+        Runner::Engine(old)
+    );
 }

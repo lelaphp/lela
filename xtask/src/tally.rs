@@ -12,7 +12,9 @@
 //! [`Runner::Control`] is the pinned oracle standing where the engine
 //! belongs: its reading is a skip whatever the items say, a control of the
 //! lane and never a reading of the engine. A [`Runner::Absent`] is a skip
-//! that says why. The engine alone is pass or fail, and it is the engine
+//! that says why, and so is a [`Runner::Stale`], the binary the tree has
+//! moved past, whose reading would otherwise be the engine of another tree
+//! stamped with this one (#475). The engine alone is pass or fail, and it is the engine
 //! whether the binary served the program in a process of its own or the
 //! linked engine served it in this one ([`Runner::Linked`]): the two are
 //! the adapters of one seam over one executor (design §8).
@@ -230,7 +232,10 @@ impl<J: Judgement> Tally<J> {
     /// without a witness, decides that before asking.
     pub fn outcome<'a>(&self, runner: &'a Runner) -> Outcome<'a> {
         match runner {
-            Runner::Absent(why) => Outcome::Absent(why),
+            // A binary the tree has moved past ran nothing, as an absent
+            // one did, and the reading's numbers say which of the two it
+            // was: `done` excuses the missing binary and not this (#475).
+            Runner::Absent(why) | Runner::Stale(why) => Outcome::Absent(why),
             Runner::Control(binary) => Outcome::Control(binary),
             Runner::Engine(_) | Runner::Linked if !self.against().is_empty() => Outcome::Failed,
             Runner::Engine(_) | Runner::Linked if self.met() == 0 => Outcome::NothingRan,

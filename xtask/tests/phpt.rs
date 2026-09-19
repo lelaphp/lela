@@ -15,6 +15,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, SystemTime};
 
 use xtask::divergence::Registry;
 use xtask::manifest::{Crate, Manifest};
@@ -600,4 +601,92 @@ fn a_program_runs_by_its_absolute_path_so_a_directory_before_its_name_is_matched
     assert_eq!(reading.status, Status::Pass, "{reading:#?}");
     assert_eq!(count(&reading, "passed"), 1);
     assert_eq!(count(&reading, "failed"), 0);
+}
+
+/// A file's write time, set: what makes a stand-in binary older or newer
+/// than the tree it stands over, without a sleep to answer by wall clock.
+fn written_at(path: &Path, at: SystemTime) {
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(at)
+        .unwrap();
+}
+
+/// A binary the tree has moved past runs no test at all, and the reading
+/// is a skip held to that cause: before this, whichever binary happened to
+/// stand in `target` was the lane's engine, and one unchanged tree carried
+/// two readings 37 tests apart (#475). It is not the absent binary `done`
+/// excuses, so `engine_absent` stays at nought and `engine_stale` is the
+/// number.
+#[test]
+fn a_binary_the_tree_has_moved_past_runs_nothing_and_the_skip_names_it() {
+    if oracle().is_none() {
+        return;
+    }
+    let scratch = Scratch::new(
+        "stale",
+        &[(
+            "pass.phpt",
+            "--TEST--\nEcho\n--FILE--\n<?php echo \"one\";\n--EXPECT--\none\n",
+        )],
+    );
+    written_at(&scratch.engine, SystemTime::now() - Duration::from_hours(1));
+    let reading = scratch.run(&registry(""), &scratch.engine);
+    assert_eq!(reading.status, Status::Skip, "{reading:#?}");
+    assert_eq!(count(&reading, "engine_stale"), 1);
+    assert_eq!(count(&reading, "engine_absent"), 0);
+    assert_eq!(count(&reading, "run"), 0, "no test ran under it");
+    assert_eq!(count(&reading, "passed"), 0);
+    assert!(
+        reading.message.contains("was built before"),
+        "{}",
+        reading.message
+    );
+    assert!(
+        reading
+            .message
+            .contains(&scratch.engine.display().to_string()),
+        "{}",
+        reading.message
+    );
+    assert!(
+        reading.message.contains("cargo build -p php"),
+        "{}",
+        reading.message
+    );
+}
+
+/// A binary the tree has not moved past is the lane's engine as before,
+/// and the reading names it: the path and the md5 of its bytes, so two
+/// readings of one tree can be told apart (#475).
+#[test]
+fn a_binary_the_tree_has_not_moved_past_writes_an_ordinary_reading_that_names_it() {
+    if oracle().is_none() {
+        return;
+    }
+    let scratch = Scratch::new(
+        "fresh",
+        &[(
+            "pass.phpt",
+            "--TEST--\nEcho\n--FILE--\n<?php echo \"one\";\n--EXPECT--\none\n",
+        )],
+    );
+    written_at(&scratch.engine, SystemTime::now());
+    let reading = scratch.run(&registry(""), &scratch.engine);
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    assert_eq!(count(&reading, "passed"), 1);
+    assert_eq!(count(&reading, "engine_stale"), 0);
+    let stamp = reading
+        .message
+        .split_once("; run by ")
+        .unwrap_or_else(|| panic!("{}", reading.message))
+        .1;
+    let (path, digest) = stamp
+        .split_once(" md5 ")
+        .unwrap_or_else(|| panic!("{stamp}"));
+    assert_eq!(path, scratch.engine.display().to_string());
+    assert_eq!(digest.len(), 32, "{stamp}");
+    assert!(digest.bytes().all(|b| b.is_ascii_hexdigit()), "{stamp}");
 }

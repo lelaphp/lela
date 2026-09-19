@@ -13,6 +13,14 @@
 //! what makes the two comparable. Until `crates/php` is built there is no
 //! binary and the reading is a skip that says so.
 //!
+//! **Which engine wrote the numbers.** The reading names the binary that
+//! ran it, its path and the md5 of its bytes, and a binary the tree has
+//! moved past runs nothing at all: its reading is a skip counting
+//! `engine_stale`, beside the `engine_absent` one `done` excuses. A
+//! reading is stamped with the tree, and before this one tree carried two
+//! readings 37 tests apart depending on which binary happened to stand in
+//! `target` (#475).
+//!
 //! **What a difference means.** Every verdict goes through
 //! [`oracle::verdict`], so the divergence registry is what decides whether
 //! a difference is accepted, here as everywhere (harness §4.3). The key is
@@ -454,6 +462,14 @@ pub(crate) fn reading(
             manifest.pin.source.tag
         )
     };
+    // Which engine wrote these numbers. The reading's own stamp is the
+    // tree's, and one tree had two binaries under it and two readings 37
+    // tests apart before this line, with nothing to tell them apart
+    // (#475); the binary's path and the md5 of its bytes are what does.
+    let message = match runner.stamp() {
+        Some(engine) => format!("{message}; run by {engine}"),
+        None => message,
+    };
     // Stamped through the manifest's scope mapping: the crate whose subset
     // it is, so `done` can tell a stale reading from a fresh one.
     let mut reading = tally.reading(
@@ -480,6 +496,15 @@ pub(crate) fn reading(
     reading.count(
         "engine_absent",
         u64::from(!uncreated && matches!(runner, Runner::Absent(_))),
+    )?;
+    // The other way nothing ran: a binary is built and the tree has moved
+    // past it, so running it would measure an engine this tree no longer
+    // describes. It is a skip of its own and not the absent binary `done`
+    // excuses, since the engine is there to be measured once it is rebuilt
+    // (#475).
+    reading.count(
+        "engine_stale",
+        u64::from(!uncreated && matches!(runner, Runner::Stale(_))),
     )?;
     // The burndown's number: what met its expectation, over the tests the
     // subset holds, so a `[[week]]` bar can read one figure.
@@ -539,7 +564,9 @@ pub fn run(
         );
     }
     let runner = Runner::resolve(root, &manifest.pin, ask.engine.as_deref())?;
-    if let Runner::Absent(why) = &runner {
+    // Nothing to run, or a binary the tree has moved past: either way the
+    // lane says so before the subsets rather than at the reading alone.
+    if let Runner::Absent(why) | Runner::Stale(why) = &runner {
         println!("phpt: {why}");
     }
     // One oracle for the run: the digest is asserted before the first

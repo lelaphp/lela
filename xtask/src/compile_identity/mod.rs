@@ -342,11 +342,16 @@ pub fn run(
         )
     })?;
     // The rung below the binary is the compiler linked into this process,
-    // which the lane needs no binary for (design §6.1).
-    let runner = Runner::resolve(root, &manifest.pin, ask.engine.as_deref())?.or_linked();
-    if runner == Runner::Linked {
-        println!("{INSTRUMENT}: no engine binary is built; the linked compiler dumps each file");
+    // which the lane needs no binary for (design §6.1). It is built from
+    // the tree the reading is stamped with, so a binary the tree has moved
+    // past falls to it here rather than to a skip, and the lane says which
+    // of the two it took (#475).
+    let found = Runner::resolve(root, &manifest.pin, ask.engine.as_deref())?;
+    if let Runner::Absent(why) | Runner::Stale(why) = &found {
+        println!("{INSTRUMENT}: {why}");
+        println!("{INSTRUMENT}: the linked compiler dumps each file");
     }
+    let runner = found.or_linked();
     // One oracle for the run: the digest is asserted before the first file
     // and never per file (harness §4.3). A binary that is not at the pin's
     // path refuses nothing: nothing is dumped, every file is counted as
@@ -427,7 +432,9 @@ fn compiler<'a>(oracle: &Oracle<'_>, runner: &'a Runner) -> Option<dump::Compile
                 .collect();
             Some(dump::Compiler::Linked(linked::engine(&ini)))
         }
-        Runner::Absent(_) => None,
+        // Neither reaches this lane: `or_linked` takes both rungs where
+        // nothing ran down to the linked compiler before the run begins.
+        Runner::Stale(_) | Runner::Absent(_) => None,
     }
 }
 

@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -637,13 +637,29 @@ pub enum Runner {
     /// lane itself and never a reading of the engine, so its reading is
     /// a skip whatever the programs say.
     Control(PathBuf),
+    /// A binary the tree has moved past, and why: built before the
+    /// engine's sources were last written, so what it would measure is an
+    /// engine this tree no longer describes while the reading is stamped
+    /// with the tree. Nothing runs under it and the reading is a skip held
+    /// to that cause, as `permit` refuses to judge on a build whose digest
+    /// is not the tree's (harness-design.md §4.4, #475).
+    Stale(String),
     /// Nothing to run, and why.
     Absent(String),
 }
 
 impl Runner {
     /// The binary to run: the one named, or the engine's where cargo puts
-    /// it. A binary whose digest is the pin's is the lane's control.
+    /// it. A binary whose digest is the pin's is the lane's control, and
+    /// the engine's own is held to the tree by [`against_the_tree`].
+    ///
+    /// A binary the tree has moved past is passed over for one it has not,
+    /// so `release` is preferred among the binaries that are the tree's
+    /// and not over them: before this, a release binary built once and
+    /// never again was the lane's engine for every run after, however far
+    /// the tree moved, and `cargo build -p php` could not displace it
+    /// (#475). Where every binary found is behind the tree, the first is
+    /// the one the skip names.
     pub fn resolve(root: &Path, pin: &Pin, named: Option<&Path>) -> Result<Runner> {
         if let Some(path) = named {
             if !path.is_file() {
@@ -653,16 +669,29 @@ impl Runner {
             let digest = format!("{:x}", md5::compute(bytes));
             let path = path.to_path_buf();
             return Ok(if digest == pin.oracle.md5 {
+                // The pinned oracle is a control and never this tree's
+                // engine, so when the tree was last written says nothing
+                // about it; the pin holds it by its digest instead.
                 Runner::Control(path)
             } else {
-                Runner::Engine(path)
+                against_the_tree(root, path)
             });
         }
+        let mut behind = None;
         for profile in ["release", "debug"] {
             let built = root.join("target").join(profile).join(ENGINE);
-            if built.is_file() {
-                return Ok(Runner::Engine(built));
+            if !built.is_file() {
+                continue;
             }
+            match against_the_tree(root, built) {
+                Runner::Stale(why) => {
+                    behind.get_or_insert(Runner::Stale(why));
+                }
+                found => return Ok(found),
+            }
+        }
+        if let Some(behind) = behind {
+            return Ok(behind);
         }
         Ok(Runner::Absent(format!(
             "the engine's binary is not built: no target/release/{ENGINE} and no target/debug/{ENGINE}; a CLI request reaches `serve` with php_engine (design §5)"
@@ -671,24 +700,121 @@ impl Runner {
 
     /// The rung below the binary, for a lane the linked engine can serve:
     /// [`Runner::Linked`] where [`resolve`](Runner::resolve) found no
-    /// binary, and what it found otherwise. A lane whose programs the
-    /// in-process adapter does not serve, a `.phpt` with its sections and
-    /// its own directory, does not take this rung and keeps the absence.
+    /// binary and where what it found is behind the tree, and what it
+    /// found otherwise. The linked engine is built from the tree the
+    /// reading is stamped with, so a stale binary falls to it rather than
+    /// to a skip. A lane whose programs the in-process adapter does not
+    /// serve, a `.phpt` with its sections and its own directory, does not
+    /// take this rung and keeps the absence.
     #[must_use]
     pub fn or_linked(self) -> Runner {
         match self {
-            Runner::Absent(_) => Runner::Linked,
+            Runner::Absent(_) | Runner::Stale(_) => Runner::Linked,
             found => found,
         }
     }
 
-    /// The binary, when there is one.
+    /// The binary, when there is one to run.
     pub fn binary(&self) -> Option<&Path> {
         match self {
             Runner::Engine(path) | Runner::Control(path) => Some(path),
-            Runner::Linked | Runner::Absent(_) => None,
+            Runner::Linked | Runner::Stale(_) | Runner::Absent(_) => None,
         }
     }
+
+    /// What a reading names the engine it ran by: the binary's path and
+    /// the md5 of its bytes, so two readings stamped with one tree can be
+    /// told apart when the binary under them is not the same (#475).
+    ///
+    /// A rung that is not the engine's own binary has none: the pinned
+    /// oracle standing in for it is a control and the lane's words name it
+    /// as one, the linked engine is the harness's own build of the tree
+    /// the reading is already stamped with, and the two rungs where
+    /// nothing ran carry why instead.
+    pub fn stamp(&self) -> Option<String> {
+        let Runner::Engine(path) = self else {
+            return None;
+        };
+        Some(match fs::read(path) {
+            Ok(bytes) => format!("{} md5 {:x}", path.display(), md5::compute(bytes)),
+            Err(why) => format!(
+                "{}, whose bytes this run could not read: {why}",
+                path.display()
+            ),
+        })
+    }
+}
+
+/// Where the engine's binary is built from: the crates that go into it
+/// (design §4.1). `xtask` is not among them, since the harness is not
+/// linked into `php`, and `target` is no source at all.
+const ENGINE_SOURCES: [&str; 2] = ["crates", "ext"];
+
+/// The newest source of the engine under `root`, and when it was written.
+/// `None` where the tree carries none, and then no binary is behind
+/// anything: a workspace of a test's own with no engine in it is not a
+/// tree a binary can have fallen behind.
+fn newest_source(root: &Path) -> Option<(PathBuf, SystemTime)> {
+    let mut found = Vec::new();
+    for dir in ENGINE_SOURCES {
+        let _ = crate::tally::files_under(&root.join(dir), &mut found);
+    }
+    found
+        .into_iter()
+        .filter(|path| is_engine_source(path.strip_prefix(root).unwrap_or(path)))
+        .filter_map(|path| {
+            let written = path.metadata().and_then(|at| at.modified()).ok()?;
+            Some((path, written))
+        })
+        .max_by_key(|(_, written)| *written)
+}
+
+/// Whether one file under [`ENGINE_SOURCES`], named relative to the root,
+/// is code the binary is built from: a `.rs` the crate is compiled from or
+/// a `.toml` its `build.rs` reads, and not one of the files
+/// [`crate::sources::rust`] leaves out of a crate's sources for the same
+/// reason. A test, a bench, an example or a fixture is not linked into
+/// `php`, so writing one moves no binary and leaves none behind the tree.
+fn is_engine_source(relative: &Path) -> bool {
+    relative
+        .extension()
+        .is_some_and(|kind| kind == "rs" || kind == "toml")
+        && !relative.components().any(|part| {
+            matches!(
+                part.as_os_str().to_str(),
+                Some("tests" | "tests.rs" | "benches" | "examples" | "fixtures")
+            )
+        })
+}
+
+/// One binary held to the tree a lane's reading is stamped with: itself
+/// where the engine's sources are no newer than it, and [`Runner::Stale`]
+/// where one of them is.
+///
+/// The engine's binary carries no digest of its own sources the way a
+/// build of the harness does (harness-design.md §4.4), so what says
+/// whether it is this tree's is when it was written, which is what cargo
+/// decides a rebuild by. A binary whose write time cannot be read, and a
+/// tree with no engine source in it, are left as the engine: this says a
+/// binary is behind the tree only where it measured that it is.
+fn against_the_tree(root: &Path, path: PathBuf) -> Runner {
+    let (Ok(built), Some((source, written))) = (
+        path.metadata().and_then(|at| at.modified()),
+        newest_source(root),
+    ) else {
+        return Runner::Engine(path);
+    };
+    if written <= built {
+        return Runner::Engine(path);
+    }
+    Runner::Stale(format!(
+        "the engine's binary at {} was built before {} was last written, so a lane running it \
+         would measure an engine this tree no longer describes while stamping the reading with \
+         the tree. Rebuild it: `cargo build -p {ENGINE}`, or `cargo build --release -p {ENGINE}` \
+         for the release binary a lane prefers.",
+        path.display(),
+        source.display()
+    ))
 }
 
 /// The program's stdin: a file holding what a test's `--STDIN--` gives,
