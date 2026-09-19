@@ -894,7 +894,7 @@ impl Emit<'_> {
                 body,
             } => self.r#for(init, cond, step, body)?,
             Stmt::While { cond, body } => self.r#while(cond, body)?,
-            Stmt::DoWhile { body, cond, line } => self.do_while(body, cond, *line)?,
+            Stmt::DoWhile { body, cond } => self.do_while(body, cond, cond.line())?,
             Stmt::Foreach {
                 expr,
                 value,
@@ -2616,6 +2616,26 @@ impl Emit<'_> {
     /// int(1)
     /// int(3)
     /// ```
+    /// The condition's own line and not the `do`'s, which the
+    /// condition's node carries: what php reports for a throw out of
+    /// the condition of a `do` whose `while` is written four lines
+    /// below it.
+    ///
+    /// ```php
+    /// $n = 0;
+    /// do {
+    ///     $n = $n + 1;
+    /// } while (
+    ///
+    ///     $n % 0
+    /// );
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught DivisionByZeroError: Modulo by zero in %s:7
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 7
+    /// ```
     fn do_while(&mut self, body: &Read, cond: &Child, line: u32) -> Result<(), CompileError> {
         self.begin_loop(None, None, false);
         let start = self.next();
@@ -3280,7 +3300,7 @@ impl Emit<'_> {
         });
         let mut has_default = false;
         for (case, jump) in cases.iter().zip(jumps) {
-            if let (Some((cond, _)), Some(jump)) = (&case.cond, jump) {
+            if let (Some(cond), Some(jump)) = (&case.cond, jump) {
                 self.update_jump_target_to_next(jump);
                 self.table_add(&mut table, cond)?;
             } else {
@@ -3307,6 +3327,24 @@ impl Emit<'_> {
     /// when the subject is a constant `false` or `true`; the default's
     /// one default clause refused as php refuses it. The jump of each
     /// case, none for the default.
+    /// Each case's condition at its own line, which its node carries
+    /// and the `case` keyword's line is not: a condition written below
+    /// its keyword is reported where it stands.
+    ///
+    /// ```php
+    /// $z = 0;
+    /// switch (9) {
+    ///     case
+    ///         1 % $z:
+    ///         echo "a";
+    /// }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught DivisionByZeroError: Modulo by zero in %s:5
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 5
+    /// ```
     fn switch_chain(
         &mut self,
         subject: Where,
@@ -3316,7 +3354,7 @@ impl Emit<'_> {
         let mut jumps = Vec::with_capacity(cases.len());
         let mut has_default = false;
         for case in cases {
-            let Some((cond, cond_line)) = &case.cond else {
+            let Some(cond) = &case.cond else {
                 if has_default {
                     self.line = case.line;
                     return Err(
@@ -3327,7 +3365,7 @@ impl Emit<'_> {
                 jumps.push(None);
                 continue;
             };
-            self.line = *cond_line;
+            self.line = cond.line();
             let cond = self.expr(cond)?;
             let jump = match subject {
                 Where::Constant(value) if value.kind() == ZvalType::False => {
@@ -3376,7 +3414,7 @@ impl Emit<'_> {
     fn switch_jumptable_type(&mut self, cases: &[Case]) -> Result<Option<ZvalType>, CompileError> {
         let mut common = None;
         for case in cases {
-            let Some((cond, _)) = &case.cond else {
+            let Some(cond) = &case.cond else {
                 continue;
             };
             let Some(value) = self.constant_of(cond)? else {
@@ -3508,15 +3546,15 @@ impl Emit<'_> {
     /// defined before it is freed; then the arms; the constant `null`
     /// for a `match` with no arm; and the subject freed when it is a
     /// temporary.
-    fn r#match(&mut self, expr: &Child, arms: &[Arm], line: u32) -> Result<Where, CompileError> {
-        self.line = line;
+    fn r#match(&mut self, expr: &Child, arms: &[Arm]) -> Result<Where, CompileError> {
+        self.line = expr.line();
         let subject = self.expr(expr)?;
         let case_node = self.temporary();
         let mut has_default = false;
         for arm in arms {
             if arm.conds.is_none() {
                 if has_default {
-                    self.line = arm.line;
+                    self.line = arm.body.line();
                     return Err(
                         self.compile_error("Match expressions may only contain one default arm")
                     );
@@ -3566,7 +3604,7 @@ impl Emit<'_> {
             let Some(conds) = &arm.conds else {
                 continue;
             };
-            for (cond, _) in conds {
+            for cond in conds {
                 count += 1;
                 let Some(value) = self.constant_of(cond)? else {
                     return Ok(false);
@@ -3582,6 +3620,24 @@ impl Emit<'_> {
     /// The chain of `zend_compile_match`: per condition, at its line, one
     /// `IS_IDENTICAL` (`CASE_STRICT` over a temporary subject) into the
     /// shared temporary and a `JMPNZ` forward. The jump of each condition.
+    /// Each condition at its own line, which its node carries: a
+    /// condition written a line below the arm's first is reported there
+    /// and not at the arm.
+    ///
+    /// ```php
+    /// $z = 0;
+    /// echo match (9) {
+    ///     1 % $z
+    ///         => "a",
+    ///     default => "b",
+    /// };
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught DivisionByZeroError: Modulo by zero in %s:4
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 4
+    /// ```
     fn match_chain(
         &mut self,
         subject: Where,
@@ -3589,8 +3645,8 @@ impl Emit<'_> {
         arms: &[Arm],
     ) -> Result<Vec<u32>, CompileError> {
         let mut jumps = Vec::new();
-        for (cond, cond_line) in arms.iter().filter_map(|arm| arm.conds.as_ref()).flatten() {
-            self.line = *cond_line;
+        for cond in arms.iter().filter_map(|arm| arm.conds.as_ref()).flatten() {
+            self.line = cond.line();
             let cond = self.expr(cond)?;
             let opcode = match subject {
                 Where::Temporary(_) | Where::Returned(_) => Opcode::CaseStrict,
@@ -3608,6 +3664,25 @@ impl Emit<'_> {
     /// into the one temporary, `zend_emit_op_tmp` allocating it at the
     /// first arm, and a `JMP` past the arms, every one aimed at the
     /// opline after the last. That temporary, none for no arm.
+    /// Each body at its own line, which its node carries: an arm whose
+    /// `=>` and body are written below its condition reports the body's
+    /// line and not the condition's.
+    ///
+    /// ```php
+    /// $z = 0;
+    /// echo match (1) {
+    ///     0 => "zero",
+    ///     1
+    ///         =>
+    ///             1 % $z,
+    /// };
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught DivisionByZeroError: Modulo by zero in %s:7
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 7
+    /// ```
     fn match_arms(
         &mut self,
         arms: &[Arm],
@@ -3620,7 +3695,7 @@ impl Emit<'_> {
         let mut jumps = jumps.iter().copied();
         for arm in arms {
             if let Some(conds) = &arm.conds {
-                for (cond, _) in conds {
+                for cond in conds {
                     if let Some(jump) = jumps.next() {
                         self.update_jump_target_to_next(jump);
                     }
@@ -3632,7 +3707,7 @@ impl Emit<'_> {
                 }
                 self.table_default_to_next(table.as_ref());
             }
-            self.line = arm.line;
+            self.line = arm.body.line();
             let body = self.expr(&arm.body)?;
             let (op1_type, op1) = self.operand(body);
             let out = *result.get_or_insert_with(|| self.temporary());
@@ -3978,7 +4053,7 @@ impl Emit<'_> {
             Expr::PostInc(var) => Ok(self.incdec(var, Opcode::PostInc)),
             Expr::PreDec(var) => Ok(self.incdec(var, Opcode::PreDec)),
             Expr::PostDec(var) => Ok(self.incdec(var, Opcode::PostDec)),
-            Expr::Match { expr, arms, line } => self.r#match(expr, arms, *line),
+            Expr::Match { expr, arms } => self.r#match(expr, arms),
             Expr::New { class, arguments } => self.new_expression(class, arguments),
             Expr::StaticCall {
                 class,
@@ -7411,7 +7486,7 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Child) {
         Expr::Match { expr, arms, .. } => {
             implicit_uses(names, expr);
             for arm in arms {
-                for (cond, _) in arm.conds.iter().flatten() {
+                for cond in arm.conds.iter().flatten() {
                     implicit_uses(names, cond);
                 }
                 implicit_uses(names, &arm.body);

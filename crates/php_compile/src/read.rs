@@ -72,11 +72,12 @@ pub(crate) enum Stmt {
     /// `while (cond) body`, php's `ZEND_AST_WHILE`.
     While { cond: Child, body: Read },
     /// `do body while (cond);`, php's `ZEND_AST_DO_WHILE`: the body,
-    /// which runs before the condition is asked the first time, the
-    /// condition, and the line the condition stands on, which php takes
-    /// from the condition's own node and not from the `do` (the `while`
-    /// is written after the body, so the two are rarely the same line).
-    DoWhile { body: Read, cond: Child, line: u32 },
+    /// which runs before the condition is asked the first time, and the
+    /// condition. php compiles the condition at the line its own node
+    /// carries and not at the `do`'s (the `while` is written after the
+    /// body, so the two are rarely the same line), which is
+    /// [`Child::line`] and nothing beside it.
+    DoWhile { body: Read, cond: Child },
     /// `foreach (expr as key => value) body`, php's `ZEND_AST_FOREACH`:
     /// the subject, the value target, the key target where one is
     /// written, and the body's statements.
@@ -128,12 +129,17 @@ pub(crate) enum Stmt {
 
 /// One arm of an `if`, php's `ZEND_AST_IF_ELEM`: a condition and the
 /// statements under it. The `else` arm carries no condition and is the
-/// last, which `zend_compile_if` asserts. The line is the one
+/// last, which `zend_compile_if` asserts.
+///
+/// `line` is the arm's own line, `elem_ast->lineno`: the one
 /// `zend_compile_if` sets `CG(zend_lineno)` to before an arm past the
-/// first compiles its condition, and before the `JMP` that leaves an
-/// arm another follows: `elem_ast->lineno`, which `zend_ast_create`
-/// takes from the arm's first child, so where the condition stands, and
-/// where the statement stands for the arm that has none.
+/// first compiles its condition and before the `JMP` that leaves an arm
+/// another follows. `zend_ast_create` takes it from the arm's first
+/// child, so for an arm with a condition it is where the condition
+/// stands and for the `else` arm it is where its statements start. It
+/// is the arm's and not a node's: the `else` arm has one and has no
+/// condition to read it from, so unlike a `Case`'s or an `Arm`'s it
+/// stays a field here.
 #[derive(Debug, PartialEq)]
 pub(crate) struct IfArm {
     pub(crate) cond: Option<Child>,
@@ -381,23 +387,24 @@ pub(crate) struct Constant {
 }
 
 /// One `case cond:` or `default:` of a `switch` with the statements
-/// under it, php's `ZEND_AST_SWITCH_CASE`: the condition at the line it
-/// starts on, which the opline over it carries, and the keyword's line.
+/// under it, php's `ZEND_AST_SWITCH_CASE`: the condition, which is
+/// compiled at the line its own node carries, and the keyword's line,
+/// which the `default:` with no node under it needs.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Case {
-    pub(crate) cond: Option<(Child, u32)>,
+    pub(crate) cond: Option<Child>,
     pub(crate) body: Read,
     pub(crate) line: u32,
 }
 
 /// One `cond, cond => body` or `default => body` of a `match`, php's
-/// `ZEND_AST_MATCH_ARM`: the conditions, none for the default arm, each
-/// at its own line, and the body at its.
+/// `ZEND_AST_MATCH_ARM`: the conditions, none for the default arm, and
+/// the body. Each is compiled at the line its own node carries
+/// ([`Child::line`]), so the arm carries no line of its own.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Arm {
-    pub(crate) conds: Option<Vec<(Child, u32)>>,
+    pub(crate) conds: Option<Vec<Child>>,
     pub(crate) body: Child,
-    pub(crate) line: u32,
 }
 
 /// One piece of an interpolated string, php's `encaps_var` or
@@ -536,12 +543,11 @@ pub(crate) enum Expr {
     /// `$a--`, php's `ZEND_AST_POST_DEC`.
     PostDec(Vec<u8>),
     /// `match (expr) { arms }`, php's `ZEND_AST_MATCH` over a
-    /// `ZEND_AST_MATCH_ARM_LIST`; `line` is the subject's, which the
-    /// `MATCH` and the chain over it are emitted at.
+    /// `ZEND_AST_MATCH_ARM_LIST`. The `MATCH` and the chain over it are
+    /// emitted at the subject's line, which the subject carries.
     Match {
         expr: Child,
         arms: Vec<Arm>,
-        line: u32,
     },
     /// `new C(args)`, php's `ZEND_AST_NEW` over a class named as
     /// written; `new $c`, `new static` and an anonymous class are not
@@ -2340,9 +2346,9 @@ impl Reader<'_> {
     /// `T_DO statement T_WHILE '(' expr ')' ';'`, so the body is one
     /// statement or a block as a `while`'s is, and the `;` php's
     /// grammar puts after the parenthesis closes the statement. The
-    /// condition's line is kept beside it, since php compiles the
-    /// condition at the line its own node carries and the body stands
-    /// between it and the `do`.
+    /// condition is compiled at the line its own node carries, which
+    /// the node has ([`Child::line`]), and the body stands between it
+    /// and the `do`.
     fn do_while(&mut self) -> Result<Stmt, Trouble> {
         let body = self.body()?;
         self.skip_trivia();
@@ -2352,11 +2358,10 @@ impl Reader<'_> {
         self.bump(5);
         self.punctuation(b'(', "a `do` whose `while` has no parenthesis after it")?;
         self.skip_trivia();
-        let line = self.line;
         let cond = self.expr()?;
         self.punctuation(b')', "a `do` whose parenthesis nothing closes")?;
         self.end_of_statement()?;
-        Ok(Stmt::DoWhile { body, cond, line })
+        Ok(Stmt::DoWhile { body, cond })
     }
 
     /// `while (cond) body`, the keyword read.
@@ -2444,8 +2449,7 @@ impl Reader<'_> {
             let cond = if self.word_ahead(b"case") {
                 self.bump(4);
                 self.skip_trivia();
-                let cond_line = self.line;
-                Some((self.expr()?, cond_line))
+                Some(self.expr()?)
             } else if self.word_ahead(b"default") {
                 self.bump(7);
                 None
@@ -2599,7 +2603,7 @@ impl Reader<'_> {
             self.skip_trivia();
             if self.byte(0) == Some(b'}') {
                 self.close_brace();
-                return Ok(Child::at(line, Expr::Match { expr, arms, line }));
+                return Ok(Child::at(line, Expr::Match { expr, arms }));
             }
             if !arms.is_empty() {
                 if self.byte(0) != Some(b',') {
@@ -2609,7 +2613,7 @@ impl Reader<'_> {
                 self.skip_trivia();
                 if self.byte(0) == Some(b'}') {
                     self.close_brace();
-                    return Ok(Child::at(line, Expr::Match { expr, arms, line }));
+                    return Ok(Child::at(line, Expr::Match { expr, arms }));
                 }
             }
             let conds = if self.word_ahead(b"default") {
@@ -2634,8 +2638,7 @@ impl Reader<'_> {
                             break;
                         }
                     }
-                    let line = self.line;
-                    conds.push((self.expr()?, line));
+                    conds.push(self.expr()?);
                 }
                 Some(conds)
             };
@@ -2645,13 +2648,8 @@ impl Reader<'_> {
             }
             self.bump(2);
             self.skip_trivia();
-            let body_line = self.line;
             let body = self.expr()?;
-            arms.push(Arm {
-                conds,
-                body,
-                line: body_line,
-            });
+            arms.push(Arm { conds, body });
         }
     }
 
