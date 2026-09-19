@@ -3570,11 +3570,26 @@ impl Reader<'_> {
 
     /// What an operator stands between: a number or a string as written, a name, a
     /// variable, with `++` or `--` before or after it, or a parenthesised expression.
+    ///
+    /// A string and an array written out are php's
+    /// `dereferenceable_scalar`, so each hands what it read to
+    /// [`Self::member_calls`] as the variable arm and the parenthesised
+    /// one do: `"ab"[0]` and `[1, 2][0]` are expressions.
     fn operand(&mut self) -> Result<Child, Trouble> {
         self.skip_trivia();
         match self.byte(0) {
-            Some(b'\'') => self.single_quoted(),
-            Some(b'"') => self.double_quoted(),
+            // php's `dereferenceable_scalar`: a string written out and
+            // an array written out are `array_object_dereferenceable`,
+            // so a dimension or a `->` behind either is the same
+            // production a variable's is ([`Self::member_calls`]).
+            Some(b'\'') => {
+                let written = self.single_quoted()?;
+                self.member_calls(written)
+            }
+            Some(b'"') => {
+                let written = self.double_quoted()?;
+                self.member_calls(written)
+            }
             Some(b'$') => {
                 let receiver = self.incremented()?;
                 let receiver = self.dynamic_calls(receiver)?;
@@ -3582,46 +3597,13 @@ impl Reader<'_> {
             }
             // php's `T_INC variable` and `T_DEC variable`: the variable is
             // the whole operand, so `++$a ** 2` is php's `(++$a) ** 2`.
-            Some(step @ (b'+' | b'-')) if self.byte(1) == Some(step) => {
-                self.bump(2);
-                self.skip_trivia();
-                let sign = if step == b'+' { "++" } else { "--" };
-                // php's grammar puts a `variable` after the `++`, and a
-                // name a `::` follows is one of them.
-                let target = match self.byte(0) {
-                    Some(b'$') => self.variable()?,
-                    Some(b) if b.is_ascii_alphabetic() || b == b'_' || b == b'\\' => {
-                        self.named()?
-                    }
-                    _ => return Err(self.trouble(format!("a `{sign}` before what is no variable"))),
-                };
-                let line = target.line();
-                let up = step == b'+';
-                match target.take() {
-                    Expr::Var(name) => Ok(Child::at(
-                        line,
-                        if up {
-                            Expr::PreInc(name)
-                        } else {
-                            Expr::PreDec(name)
-                        },
-                    )),
-                    Expr::StaticProp { class, name } => Ok(Child::at(
-                        line,
-                        Expr::StaticPropStep {
-                            class,
-                            name,
-                            step: if up { Step::PreInc } else { Step::PreDec },
-                        },
-                    )),
-                    _ => Err(self.trouble(format!("a `{sign}` before what is no variable"))),
-                }
-            }
+            Some(step @ (b'+' | b'-')) if self.byte(1) == Some(step) => self.pre_step(step),
             Some(b) if b.is_ascii_digit() || (b == b'.' && self.digit_ahead(1)) => self.number(),
             Some(b'[') => {
                 let line = self.line;
                 self.bump(1);
-                self.array(line)
+                let written = self.array(line)?;
+                self.member_calls(written)
             }
             Some(b'(') if self.cast_ahead().is_some() => self.cast(),
             Some(b'(') => {
@@ -3691,6 +3673,42 @@ impl Reader<'_> {
                 self.stepped(named)
             }
             _ => Err(self.trouble("an expression this compiler cannot read yet")),
+        }
+    }
+
+    /// `T_INC variable` and `T_DEC variable`, the operator read: php's
+    /// grammar puts a `variable` after it, and a name a `::` follows is
+    /// one of them, so a `static` property is the other target the four
+    /// steps take ([`Expr::StaticPropStep`]).
+    fn pre_step(&mut self, step: u8) -> Result<Child, Trouble> {
+        self.bump(2);
+        self.skip_trivia();
+        let sign = if step == b'+' { "++" } else { "--" };
+        let target = match self.byte(0) {
+            Some(b'$') => self.variable()?,
+            Some(b) if b.is_ascii_alphabetic() || b == b'_' || b == b'\\' => self.named()?,
+            _ => return Err(self.trouble(format!("a `{sign}` before what is no variable"))),
+        };
+        let line = target.line();
+        let up = step == b'+';
+        match target.take() {
+            Expr::Var(name) => Ok(Child::at(
+                line,
+                if up {
+                    Expr::PreInc(name)
+                } else {
+                    Expr::PreDec(name)
+                },
+            )),
+            Expr::StaticProp { class, name } => Ok(Child::at(
+                line,
+                Expr::StaticPropStep {
+                    class,
+                    name,
+                    step: if up { Step::PreInc } else { Step::PreDec },
+                },
+            )),
+            _ => Err(self.trouble(format!("a `{sign}` before what is no variable"))),
         }
     }
 

@@ -4989,11 +4989,51 @@ class C {
         );
     }
 
+    /// php's `dereferenceable_scalar` under a read (#482): a string
+    /// written out, an array written out, a chain over one, a
+    /// parenthesised expression and the `BP_VAR_IS` chain a `??` puts
+    /// over one. Nothing is folded -- `"ab"[0]` is the `FETCH_DIM_R`
+    /// over the constant string and never `string("a")` -- and the
+    /// concatenation inside the parentheses is folded where it stands,
+    /// so `("a" . "b")[0]` fetches over `string("ab")`. The dump is the
+    /// oracle's under `[regime.dump]` at 8.5.9.
+    #[test]
+    fn a_dimension_behind_a_literal_is_the_oracle_s_oplines() {
+        assert_eq!(
+            dump_of(
+                b"<?php $a = \"ab\"[0]; $b = [1, 2][0]; $c = [[1], 2][0][0]; \
+                  $d = \"ab\"[0] ?? \"d\"; $e = (\"a\" . \"b\")[0];"
+            ),
+            main_dump(
+                14,
+                5,
+                12,
+                "0000 T5 = FETCH_DIM_R string(\"ab\") int(0)\n\
+                 0001 ASSIGN CV0($a) T5\n\
+                 0002 T7 = FETCH_DIM_R array(...) int(0)\n\
+                 0003 ASSIGN CV1($b) T7\n\
+                 0004 T9 = FETCH_DIM_R array(...) int(0)\n\
+                 0005 T10 = FETCH_DIM_R T9 int(0)\n\
+                 0006 ASSIGN CV2($c) T10\n\
+                 0007 T12 = FETCH_DIM_IS string(\"ab\") int(0)\n\
+                 0008 T13 = COALESCE T12 0010\n\
+                 0009 T13 = QM_ASSIGN string(\"d\")\n\
+                 0010 ASSIGN CV3($d) T13\n\
+                 0011 T15 = FETCH_DIM_R string(\"ab\") int(0)\n\
+                 0012 ASSIGN CV4($e) T15\n\
+                 0013 RETURN int(1)\n"
+            )
+        );
+    }
+
     /// What a dimension refuses: `[]` where a value is wanted, php's
-    /// `Cannot use [] for reading`; and a container under the chain that
-    /// is no plain variable, which php fetches by `FETCH_OBJ_W` with
+    /// `Cannot use [] for reading`; a property and a `static` property
+    /// as the base, the two `zend_delayed_compile_var` delays, which
+    /// wait on #451; and, under a write, any base that is no plain
+    /// variable, which php fetches by `FETCH_OBJ_W` with
     /// `ZEND_FETCH_DIM_WRITE`, by `SEPARATE` over a call's `VAR`, or
-    /// refuses outright for `$this`.
+    /// refuses outright. Under a read the bases php compiles where they
+    /// stand are compiled (#482).
     #[test]
     fn a_dimension_this_compiler_cannot_read_yet_is_refused() {
         for source in [
@@ -5002,8 +5042,10 @@ class C {
             b"<?php $o->p[0] = 1;".as_slice(),
             b"<?php f()[0] = 1;".as_slice(),
             b"<?php $this[0] = 1;".as_slice(),
+            b"<?php \"ab\"[0] = 1;".as_slice(),
+            b"<?php [1, 2][0] = 1;".as_slice(),
             b"<?php echo $o->p[0];".as_slice(),
-            b"<?php echo f()[0];".as_slice(),
+            b"<?php echo C::$p[0];".as_slice(),
         ] {
             assert!(
                 refused(source).is_some(),

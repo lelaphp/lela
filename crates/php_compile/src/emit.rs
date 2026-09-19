@@ -4874,31 +4874,62 @@ impl Emit<'_> {
     }
 
     /// `zend_delayed_compile_dim` over a chain of dimensions under
-    /// `fetch`: the container's CV, looked up before anything else, and
-    /// one link per dimension from the innermost out. Each link's
-    /// dimension is compiled where it stands, before the next link and
-    /// before the value, and its `VAR` is numbered after it, which is the
-    /// order `zend_delayed_emit_op` numbers php's. A container that is no
-    /// plain variable, a property or a call under the chain, is not read
-    /// yet. `[]` with nothing in it is the append under a write and php's
-    /// `Cannot use [] for reading` under a read.
+    /// `fetch`: the container, compiled before anything else, and one
+    /// link per dimension from the innermost out. Each link's dimension
+    /// is compiled where it stands, before the next link and before the
+    /// value, and its `VAR` is numbered after it, which is the order
+    /// `zend_delayed_emit_op` numbers php's. `[]` with nothing in it is
+    /// the append under a write and php's `Cannot use [] for reading`
+    /// under a read.
+    ///
+    /// The container is a plain variable's CV, or, under a read, one of
+    /// the bases `zend_delayed_compile_var` compiles where it stands: a
+    /// string or an array written out, a parenthesised expression,
+    /// `$this`, a call. A property and a `static` property are the two
+    /// it delays, so their fetch stands after the dimensions'
+    /// oplines and not before them (`$o->p[f()]` calls `f` first); that
+    /// delay is #451's and both are refused here until it lands. Under a
+    /// write php's `zend_ensure_writable_variable` takes only a
+    /// variable, so everything else is refused there, which is where php
+    /// raises `Cannot use temporary expression in write context`.
+    ///
+    /// ```php
+    /// var_dump("ab"[0], [1, 2][1], "ab"[9] ?? 'd');
+    /// ```
+    /// ```expect
+    /// string(1) "a"
+    /// int(2)
+    /// string(1) "d"
+    /// ```
     fn dim_chain(
         &mut self,
         target: &Child,
         fetch: Fetch,
-    ) -> Result<(u32, Vec<DimLink>), CompileError> {
+    ) -> Result<((OperandKind, u32), Vec<DimLink>), CompileError> {
         let mut dimensions = Vec::new();
         let mut base = target;
         while let Expr::Dim { container, index } = &**base {
             dimensions.push(index);
             base = container;
         }
-        let Expr::Var(name) = &**base else {
-            return Err(
-                self.fatal("a dimension over what is no variable this compiler cannot read yet")
-            );
+        let container = match (&**base, fetch) {
+            (Expr::Var(name), _) => (OperandKind::Cv, self.lookup_cv(name)),
+            // `zend_delayed_compile_var` delays these two and nothing
+            // else a chain can stand on (#451).
+            (Expr::Prop { .. } | Expr::StaticProp { .. }, _) => {
+                return Err(self.fatal(
+                    "a dimension over a property whose fetch php delays this compiler cannot read yet",
+                ));
+            }
+            (_, Fetch::Read | Fetch::Is) => {
+                let value = self.expr(base)?;
+                self.operand(value)
+            }
+            _ => {
+                return Err(self
+                    .fatal("a dimension over what is no variable this compiler cannot read yet"));
+            }
         };
-        let container = self.lookup_cv(name);
         let mut links = Vec::with_capacity(dimensions.len());
         for index in dimensions.iter().rev() {
             let (kind, at) = match index {
@@ -4928,7 +4959,7 @@ impl Emit<'_> {
     /// into a temporary under a read.
     fn dim_fetches(
         &mut self,
-        container: u32,
+        container: (OperandKind, u32),
         fetches: &[DimLink],
         fetch: Fetch,
     ) -> (OperandKind, u32) {
@@ -4937,7 +4968,7 @@ impl Emit<'_> {
             Fetch::Write => (Opcode::FetchDimW, OperandKind::Var, FETCH_DIM_DIM),
             Fetch::Is => (Opcode::FetchDimIs, OperandKind::Tmp, 0),
         };
-        let (mut op1_type, mut op1) = (OperandKind::Cv, container);
+        let (mut op1_type, mut op1) = container;
         for link in fetches {
             self.push(Opline {
                 opcode,
