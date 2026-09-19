@@ -77,6 +77,12 @@ const BIND_REF: u32 = 1;
 /// warning for a variable the scope has not.
 const BIND_IMPLICIT: u32 = 2;
 
+/// `IS_CONSTANT_UNQUALIFIED_IN_NAMESPACE` (`Z/Zend/zend_types.h:637`),
+/// the one bit a `FETCH_CONSTANT`'s `op1` carries: the name was
+/// written unqualified inside a namespace, so the global spelling
+/// stands in the constant slot after the namespaced one.
+const UNQUALIFIED_IN_NAMESPACE: u32 = 0x800;
+
 /// `ZEND_NOP`: nothing, and on to the opline after it.
 pub(crate) fn nop<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, _: &Opline) -> Edge {
     Ok(advance(req, frame))
@@ -2757,6 +2763,121 @@ pub(crate) fn fetch_class_constant<T: Tier>(
     let previous = req.set_slot(frame, slot, value);
     req.release(previous);
     Ok(advance(req, frame))
+}
+
+/// `ZEND_FETCH_CONSTANT` (`Z/Zend/zend_vm_def.h:6075`), the opline
+/// `zend_compile_const` leaves for a name it could not substitute: the
+/// constant is looked up as the program serves and its value copied
+/// into the temporary `result` names.
+///
+/// The key is the constant slot after `op2` and never `op2` itself
+/// (`RT_CONSTANT(opline, opline->op2) + 1`, `zend_quick_get_constant`,
+/// `Z/Zend/zend_execute.c:5411`): php writes a constant into its table
+/// under the name with the namespace lowered
+/// (`zend_register_constant`), and that is the spelling the compiler
+/// put there. Where `op1` carries
+/// `IS_CONSTANT_UNQUALIFIED_IN_NAMESPACE` the name stood unqualified
+/// inside a namespace, and the slot after that one is the global
+/// spelling, which php tries when the namespaced name has no constant.
+/// The `Error` for a miss names the constant as the source wrote it
+/// resolved, which is `op2` itself.
+///
+/// php primes the opline's cache slot with the constant it found; this
+/// engine looks the name up on every pass, which nothing observes,
+/// since a deprecated constant is the one php never caches and the
+/// table it reads is the request's own.
+///
+/// ```php
+/// define("W", 1);
+/// var_dump(W, defined("W"));
+/// ```
+/// ```expect
+/// int(1)
+/// bool(true)
+/// ```
+///
+/// A name no table has is php's `Error`:
+///
+/// ```php
+/// var_dump(NOPE);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Undefined constant "NOPE" in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// An unqualified name inside a namespace is the namespace's own
+/// constant where one is defined and the global one where none is, and
+/// a name written with a leading `\` is the global one whatever the
+/// namespace:
+///
+/// ```php
+/// namespace n;
+/// define("n\\K", 2);
+/// define("G", 3);
+/// var_dump(K, G, \PHP_EOL === PHP_EOL, \G);
+/// ```
+/// ```expect
+/// int(2)
+/// int(3)
+/// bool(true)
+/// int(3)
+/// ```
+///
+/// A namespaced name the program never defined names itself in the
+/// `Error`, and the global fallback is not tried for a name written
+/// with its namespace:
+///
+/// ```php
+/// namespace n;
+/// define("Q", 1);
+/// var_dump(n\Q);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Undefined constant "n\n\Q" in %s:4
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 4
+/// ```
+pub(crate) fn fetch_constant<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    if op.op2_type != OperandKind::Const {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_FETCH_CONSTANT over a name no literal carries",
+        )));
+    }
+    let key = named(code, op.op2.saturating_add(1));
+    let mut found = req.constant_named(&key);
+    if found.is_none() && op.op1 & UNQUALIFIED_IN_NAMESPACE != 0 {
+        let global = named(code, op.op2.saturating_add(2));
+        found = req.constant_named(&global);
+    }
+    let Some(value) = found else {
+        let written = String::from_utf8_lossy(&named(code, op.op2)).into_owned();
+        let thrown =
+            crate::api::raising::throw(req, "Error", &format!("Undefined constant \"{written}\""));
+        return threw(req, frame, &thrown);
+    };
+    req.addref(&value);
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, value);
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
+/// The bytes of the constant at `at`, which is a name where the opline
+/// carries one.
+fn named(code: &OpArray, at: u32) -> Vec<u8> {
+    exec::constant(code, ConstIdx(at))
+        .as_str_bytes()
+        .unwrap_or_default()
+        .to_vec()
 }
 
 /// `ZEND_FETCH_STATIC_PROP_R` (`Z/Zend/zend_vm_def.h`, handler 172)

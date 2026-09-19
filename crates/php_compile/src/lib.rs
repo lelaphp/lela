@@ -599,14 +599,21 @@ mod tests {
             unit.main.literals[1].as_str().map(|s| s.bytes().to_vec()),
             Some(b"Darwin".to_vec())
         );
-        assert!(
-            compile(
-                &php_syntax::parse(b"<?php echo t_lnumber;", &php_syntax::Options::default()),
-                &options,
-                &mut strings
-            )
-            .is_err(),
-            "a constant's name is case-sensitive"
+        let lowered = compile(
+            &php_syntax::parse(b"<?php echo t_lnumber;", &php_syntax::Options::default()),
+            &options,
+            &mut strings,
+        );
+        assert!(lowered.is_ok(), "{lowered:?}");
+        assert_eq!(
+            lowered.unwrap_or_default().dump(&[]),
+            "\n$_main:\n     ; (lines=3, args=0, vars=0, tmps=1)\n\
+             \x20    ; (before optimizer)\n     ; :1-1\n     ; return  [] RANGE[0..0]\n\
+             0000 T0 = FETCH_CONSTANT string(\"t_lnumber\")\n\
+             0001 ECHO T0\n\
+             0002 RETURN int(1)\n",
+            "a constant's name is case-sensitive, so the lowered spelling folds to nothing \
+             and is fetched as the program serves"
         );
     }
 
@@ -1622,17 +1629,20 @@ mod tests {
         assert_eq!(lines, vec![2, 3, 2, 2, 2, 2, 2]);
     }
 
+    /// A constant no table here holds was refused until #380 and is now
+    /// `zend_compile_const`'s `FETCH_CONSTANT`, looked up as the program
+    /// serves. The oracle's dump under `[regime.dump]` at 8.5.9 over
+    /// `echo FOO;` is the same three oplines.
     #[test]
-    fn what_this_compiler_cannot_reach_is_refused_rather_than_mis_compiled() {
-        // A constant no table here holds.
-        let mut strings = php_heap::Strings::new();
-        assert!(
-            compile(
-                &php_syntax::parse(b"<?php echo FOO;", &php_syntax::Options::default()),
-                &Options::default(),
-                &mut strings
-            )
-            .is_err()
+    fn a_constant_no_table_holds_is_fetched_as_the_program_serves() {
+        let (unit, _strings) = unit_and_strings(b"<?php echo FOO;");
+        assert_eq!(
+            unit.dump(&[]),
+            "\n$_main:\n     ; (lines=3, args=0, vars=0, tmps=1)\n\
+             \x20    ; (before optimizer)\n     ; :1-1\n     ; return  [] RANGE[0..0]\n\
+             0000 T0 = FETCH_CONSTANT string(\"FOO\")\n\
+             0001 ECHO T0\n\
+             0002 RETURN int(1)\n"
         );
     }
 
@@ -3800,6 +3810,43 @@ mod tests {
                  0013 T15 = ASSIGN_OP (ADD) CV0($a) int(2)\n\
                  0014 ASSIGN CV1($b) T15\n\
                  0015 RETURN int(1)\n"
+            )
+        );
+    }
+
+    /// `zend_compile_const`'s second half (#380), the oracle's dump
+    /// under `[regime.dump]` at 8.5.9: a name `zend_try_ct_eval_const`
+    /// cannot fold is `FETCH_CONSTANT` into a temporary over the name
+    /// `zend_resolve_const_name` resolved. A bare name inside a
+    /// namespace is the namespace's spelling under the bit
+    /// `IS_CONSTANT_UNQUALIFIED_IN_NAMESPACE`, which the handler reads
+    /// to try the global spelling after the namespaced one; a name
+    /// written with a leading `\` is the global one and carries no
+    /// bit; and a name with a `\` in it takes the namespace before it,
+    /// so `n\Q` inside `n` is `n\n\Q`.
+    #[test]
+    fn a_constant_the_compiler_cannot_fold_is_the_oracle_s_fetch_constant() {
+        assert_eq!(
+            dump_of(b"<?php namespace n; define(\"n\\\\K\", 2); var_dump(K, \\W, n\\Q, NOPE);"),
+            main_dump(
+                15,
+                0,
+                6,
+                "0000 INIT_NS_FCALL_BY_NAME 2 string(\"n\\\\define\")\n\
+                 0001 SEND_VAL_EX string(\"n\\\\K\") 1\n\
+                 0002 SEND_VAL_EX int(2) 2\n\
+                 0003 DO_FCALL_BY_NAME\n\
+                 0004 INIT_NS_FCALL_BY_NAME 4 string(\"n\\\\var_dump\")\n\
+                 0005 T1 = FETCH_CONSTANT (unqualified-in-namespace) string(\"n\\\\K\")\n\
+                 0006 SEND_VAL_EX T1 1\n\
+                 0007 T2 = FETCH_CONSTANT string(\"W\")\n\
+                 0008 SEND_VAL_EX T2 2\n\
+                 0009 T3 = FETCH_CONSTANT string(\"n\\\\n\\\\Q\")\n\
+                 0010 SEND_VAL_EX T3 3\n\
+                 0011 T4 = FETCH_CONSTANT (unqualified-in-namespace) string(\"n\\\\NOPE\")\n\
+                 0012 SEND_VAL_EX T4 4\n\
+                 0013 DO_FCALL_BY_NAME\n\
+                 0014 RETURN int(1)\n"
             )
         );
     }

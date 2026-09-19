@@ -389,6 +389,12 @@ struct Table {
 /// leaves, which the live-range walk reads (`crate::live`).
 const FREE_ON_RETURN: u32 = 1 << 0;
 
+/// `IS_CONSTANT_UNQUALIFIED_IN_NAMESPACE`, the one bit a
+/// `FETCH_CONSTANT`'s `op1` carries: the name was written unqualified
+/// inside a namespace, so the global spelling stands in the constant
+/// slot after the namespaced one.
+const UNQUALIFIED_IN_NAMESPACE: u32 = 0x800;
+
 /// `ZEND_ARRAY_NOT_PACKED` and `ZEND_ARRAY_SIZE_SHIFT`
 /// (`Z/Zend/zend_compile.h:1202`): the bit `zend_compile_array` sets on
 /// an `INIT_ARRAY` once a constant string key is seen, and where above
@@ -4238,6 +4244,7 @@ impl Emit<'_> {
             Expr::AssignCoalesce { var, value } => self.assign_coalesce(var, value),
             Expr::And { left, right } => self.short_circuiting(false, left, right),
             Expr::Or { left, right } => self.short_circuiting(true, left, right),
+            Expr::Constant(name) => self.const_fetch(name),
             _ => Ok(Where::Constant(self.constant_expr(expr)?)),
         }
     }
@@ -7235,6 +7242,82 @@ impl Emit<'_> {
             return Ok(None);
         }
         self.persistent(name)
+    }
+
+    /// `zend_compile_const`'s second half (`Z/Zend/zend_compile.c:11048`),
+    /// the name [`Self::const_name`] cannot fold: `FETCH_CONSTANT` into a
+    /// temporary with the resolved name in `op2`, the bit
+    /// `IS_CONSTANT_UNQUALIFIED_IN_NAMESPACE` in `op1` where the name
+    /// stood unqualified inside a namespace, and the cache slot
+    /// `zend_alloc_cache_slot` takes in `extended_value`. The resolution
+    /// is [`Self::function_name`]'s, since `zend_resolve_const_name` and
+    /// `zend_resolve_function_name` are one `zend_resolve_non_class_name`
+    /// and no `use` is read by either here: a leading `\` and a `\`
+    /// inside the name are both fully qualified, and only a bare name in
+    /// a namespace waits for the program.
+    ///
+    /// ```php
+    /// define("W", 1);
+    /// var_dump(W);
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// ```
+    fn const_fetch(&mut self, name: &[u8]) -> Result<Where, CompileError> {
+        if let Some(value) = self.const_name(name)? {
+            return Ok(Where::Constant(value));
+        }
+        let (resolved, unqualified) = self.function_name(name);
+        let op2 = self.const_name_literal(&resolved, unqualified)?;
+        let extended_value = self.cache_slot();
+        let out = self.temporary();
+        self.push(Opline {
+            opcode: Opcode::FetchConstant,
+            op1: if unqualified {
+                UNQUALIFIED_IN_NAMESPACE
+            } else {
+                0
+            },
+            op2_type: OperandKind::Const,
+            op2,
+            out_type: OperandKind::Tmp,
+            out,
+            extended_value,
+            ..Opline::default()
+        });
+        Ok(Where::Temporary(out))
+    }
+
+    /// `zend_add_const_name_literal` (`Z/Zend/zend_compile.c:664`): the
+    /// resolved name, and after it the key php's constant table is
+    /// written under, the same name with its namespace lowered
+    /// (`zend_register_constant`), which is the one the handler looks
+    /// the constant up by. Where the name stood unqualified in a
+    /// namespace a third slot follows, the name without its namespace,
+    /// which is the global spelling the handler falls back to. A name
+    /// with no namespace in it takes its own spelling twice, so the slot
+    /// after `op2` is the key whatever the name was. The answer is the
+    /// slot of the name as resolved, which is the one the opline names
+    /// and the one php's error text reads.
+    fn const_name_literal(&mut self, name: &[u8], unqualified: bool) -> Result<u32, CompileError> {
+        let written = self.string(name)?;
+        let at = self.literal(written);
+        let Some(slash) = name.iter().rposition(|byte| *byte == b'\\') else {
+            let bare = self.string(name)?;
+            self.literal(bare);
+            return Ok(at);
+        };
+        let mut lowered = name.to_vec();
+        if let Some(namespace) = lowered.get_mut(..slash) {
+            namespace.make_ascii_lowercase();
+        }
+        let lowered = self.string(&lowered)?;
+        self.literal(lowered);
+        if unqualified {
+            let bare = self.string(name.get(slash.saturating_add(1)..).unwrap_or_default())?;
+            self.literal(bare);
+        }
+        Ok(at)
     }
 
     /// `find_frameless_function_info` (`Z/Zend/zend_compile.c:4649`): the
