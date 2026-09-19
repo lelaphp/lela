@@ -55,7 +55,7 @@
 use php_heap::{Fatal, FrameRef};
 use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
 
-use crate::api::abi::PropertyRead;
+use crate::api::abi::{PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
@@ -3363,7 +3363,12 @@ pub(crate) fn fetch_obj_w<T: Tier>(
         );
         return threw(req, frame, &thrown);
     };
-    let placed = req.declared_slot_for_write(object.class(), &name, "indirectly modify");
+    // php places the name here with `zend_std_get_property_ptr_ptr`,
+    // whose silence is `ce->__get != NULL`; the overloaded arm a class
+    // with a `__get` takes, php's `Indirect modification of overloaded
+    // property` notice, is not served yet (#513), so the placement is
+    // loud and a property the scope may not reach is the `Error`.
+    let placed = req.declared_slot_for_write(object.class(), &name, "indirectly modify", false);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     let at = match placed {
         Ok(Some((slot, _))) => {
@@ -5535,7 +5540,12 @@ fn assign_property(
 ) -> Result<Result<(), Thrown>, Fatal> {
     let bytes = name.as_str_bytes().unwrap_or_default();
     let shown_name = String::from_utf8_lossy(bytes).into_owned();
-    let placed = match req.declared_slot_for_write(object.class(), bytes, "modify") {
+    // `zend_get_property_offset(ce, name, ce->__set != NULL, ...)`:
+    // a class with a `__set` places the name quietly, so a property the
+    // scope may not reach reaches `write_property` and the accessor
+    // there, which is where php raises the `Error` if the guard stands.
+    let silent = req.serves_accessor(object.class(), b"__set");
+    let placed = match req.declared_slot_for_write(object.class(), bytes, "modify", silent) {
         Ok(placed) => placed,
         Err(thrown) => {
             req.release(value);
@@ -7176,12 +7186,11 @@ fn binary_assign_op_obj_dim(
 /// place (`zend_assign_op_overloaded_property`). Here a property the
 /// class declared is the slot in place, held to its declared type where
 /// it carries one (`zend_binary_assign_op_typed_prop`), and every other
-/// name is the pair of handlers, which is php's overloaded arm and
-/// serves `__get` and `__set` once this engine has them (#503). A name
-/// no class declared and no object holds yet is created by the write,
-/// so this engine raises its `Undefined property` warning before the
-/// deprecation for the dynamic property where php raises the
-/// deprecation first (#505).
+/// name is the pair of handlers, which is php's overloaded arm and is
+/// where `__get` and `__set` are served. A name no class declared and
+/// no object holds yet is created by the write, so this engine raises
+/// its `Undefined property` warning before the deprecation for the
+/// dynamic property where php raises the deprecation first (#505).
 ///
 /// ```php
 /// class C { public $p = 1; public int $n = 2; private $q = 3; }
@@ -7283,7 +7292,12 @@ fn step_property(
 ) -> Result<Result<(), Thrown>, Fatal> {
     let Compound { op, data, kernel } = step;
     let bytes = name.as_str_bytes().unwrap_or_default().to_vec();
-    let placed = match req.declared_slot_for_write(object.class(), &bytes, "modify") {
+    // `zend_std_get_property_ptr_ptr`, whose silence is
+    // `ce->__get != NULL`: a class with a `__get` hands out no place
+    // for a property the scope may not reach and takes the overloaded
+    // arm over it instead.
+    let silent = req.serves_accessor(object.class(), b"__get");
+    let placed = match req.declared_slot_for_write(object.class(), &bytes, "modify", silent) {
         Ok(placed) => placed,
         Err(thrown) => {
             exec::free_operand(req, frame, code, data.op1_type, data.op1);
@@ -8993,6 +9007,88 @@ pub(crate) fn isset_isempty_dim_obj<T: Tier>(
         isset_container(req, &container, &offset, empty)
     };
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    match answer {
+        Ok(answer) => {
+            write_out(req, frame, code, op, &Value::bool(answer));
+            Ok(advance(req, frame))
+        }
+        Err(thrown) => threw(req, frame, &thrown),
+    }
+}
+
+/// `ZEND_ISSET_ISEMPTY_PROP_OBJ` (`Z/Zend/zend_vm_def.h:7625`), what
+/// `isset($o->p)` and `empty($o->p)` compile to: the receiver read as
+/// `BP_VAR_IS` reads it, which says nothing of a variable nothing wrote,
+/// the property named by `op2`, and the object's handler table's
+/// `has_property` asked `ZEND_PROPERTY_ISSET` or, under `ZEND_ISEMPTY`,
+/// `ZEND_PROPERTY_NOT_EMPTY`, whose answer `empty` reads inverted
+/// (`result = (extended_value & ZEND_ISEMPTY) ^ has_property(...)`). A
+/// receiver that is no object is `false` under `isset` and `true` under
+/// `empty`, with nothing raised, which is php's `result =
+/// (opline->extended_value & ZEND_ISEMPTY)`.
+///
+/// php branches on the answer where a `JMPZ` or a `JMPNZ` follows
+/// (`ZEND_VM_SMART_BRANCH`); the temporary stands and the jump reads it,
+/// as it does for every `ISSET_ISEMPTY_*` here.
+///
+/// ```php
+/// class C { public $p = 1; public $n = null; private $q = 2; public int $t; }
+/// $c = new C;
+/// $c->dyn = 0;
+/// var_dump(isset($c->p), isset($c->n), isset($c->q), isset($c->t), isset($c->nope), isset($c->dyn));
+/// var_dump(empty($c->p), empty($c->n), empty($c->dyn), empty($c->nope));
+/// $u = null;
+/// var_dump(isset($u->p), empty($u->p), isset($nothing->p));
+/// ```
+/// ```expect
+///
+/// Deprecated: Creation of dynamic property C::$dyn is deprecated in %s on line 4
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// ```
+pub(crate) fn isset_isempty_prop_obj<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let empty = op.extended_value & ISEMPTY != 0;
+    let name = match op.op2_type {
+        OperandKind::Const => exec::constant(code, ConstIdx(op.op2)),
+        _ => {
+            return Err(Fatal::Error(String::from(
+                "InternalError: ZEND_ISSET_ISEMPTY_PROP_OBJ over a property named at run time",
+            )));
+        }
+    };
+    let name = name.as_str_bytes().unwrap_or_default().to_vec();
+    let container = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
+    let answer = match container.as_object().copied() {
+        Some(object) => {
+            let test = if empty {
+                PropertyTest::NotEmpty
+            } else {
+                PropertyTest::Isset
+            };
+            let table = req.object_handlers(object.heap());
+            table
+                .has_property(req, object, &name, test)
+                .map(|held| held != empty)
+        }
+        None => Ok(empty),
+    };
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     match answer {
         Ok(answer) => {

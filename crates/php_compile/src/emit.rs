@@ -4342,6 +4342,42 @@ impl Emit<'_> {
             });
             return Ok(Where::Temporary(out));
         }
+        // `zend_compile_prop(result, var_ast, BP_VAR_IS, 0)` with
+        // `opline->opcode = ZEND_ISSET_ISEMPTY_PROP_OBJ` over it: the
+        // fetch that would have read the property asks the object's
+        // `has_property` instead. The three cache slots stand in
+        // `extended_value` where `FETCH_OBJ_IS` left them, with
+        // `ZEND_ISEMPTY` in the bit below them, which is free because a
+        // slot is eight bytes wide.
+        if let Expr::Prop { object, name } = &**var {
+            // Every link under the last is `BP_VAR_IS` too, so a
+            // property or a dimension under this one is a `FETCH_OBJ_IS`
+            // or a `FETCH_DIM_IS` chain, which `zend_delayed_compile_var`
+            // builds and this arm does not; a receiver compiled where it
+            // stands would read where php says nothing.
+            if !matches!(&**object, Expr::Var(_) | Expr::This) {
+                return Err(self.fatal(
+                    "an `isset` over a property under a property or a dimension, whose links are `FETCH_OBJ_IS`, this compiler cannot read yet",
+                ));
+            }
+            let (op1_type, op1) = self.receiver(object)?;
+            let name = self.string(name)?;
+            let name_at = self.literal(name);
+            let out = self.temporary();
+            let slots = self.cache_slots(3);
+            self.push(Opline {
+                opcode: Opcode::IssetIsemptyPropObj,
+                op1_type,
+                op1,
+                op2_type: OperandKind::Const,
+                op2: name_at,
+                out_type: OperandKind::Tmp,
+                out,
+                extended_value: slots | extended_value,
+                ..Opline::default()
+            });
+            return Ok(Where::Temporary(out));
+        }
         if !matches!(&**var, Expr::Dim { .. }) {
             return Err(
                 self.fatal("an `isset` over what is no variable this compiler cannot read yet")

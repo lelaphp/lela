@@ -40,6 +40,18 @@ use crate::output::Output;
 /// php's version, what `PHP_VERSION` and `phpversion()` say.
 pub const PHP_VERSION: &str = "8.5.9";
 
+/// `IN_GET`, `IN_SET`, `IN_UNSET` and `IN_ISSET`
+/// (`Z/Zend/zend_object_handlers.c:43`, over
+/// `ZEND_GUARD_PROPERTY_*`): the bit each magic accessor takes in the
+/// property guard while it serves one name on one object, so that a
+/// `__get` reading the name it was called for finds the guard standing
+/// and falls through to the `Undefined property` warning instead of
+/// reaching itself.
+const IN_GET: u32 = 1 << 0;
+const IN_SET: u32 = 1 << 1;
+const IN_UNSET: u32 = 1 << 2;
+const IN_ISSET: u32 = 1 << 3;
+
 /// A path on the host's filesystem, absolute, after the request's `cwd`
 /// and `open_basedir` have been applied.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
@@ -330,6 +342,18 @@ pub struct Request {
     /// is laid down `IS_UNDEF`. php's table hangs off a map pointer and
     /// is the request's; so is this one.
     statics: Vec<((ClassId, Vec<u8>), Value)>,
+    /// `zend_get_property_guard` (`Z/Zend/zend_object_handlers.c:866`),
+    /// what stops a magic accessor reaching itself: one word per
+    /// property name per object, carrying `IN_GET`, `IN_SET`,
+    /// `IN_ISSET` or `IN_UNSET` while that accessor serves that name
+    /// on that object. php keeps the word on the object, in the slot
+    /// after its declared properties; an object here carries what the
+    /// heap lays down and nothing more, so the words are the request's,
+    /// named by `spl_object_id()` and the property's name. A row is
+    /// dropped the moment its word empties, which is before the object
+    /// can die, so an index the store gives out again is never one an
+    /// old row still names.
+    guards: Vec<((php_heap::ObjectId, Vec<u8>), u32)>,
     /// `zend_property_info_source_list` (`Z/Zend/zend_types.h:626`),
     /// one row per reference a typed property's slot holds: the word
     /// [`php_heap::Ref::set_sources`] carries names the row, and the row
@@ -476,6 +500,7 @@ impl Request {
             constants: Vec::new(),
             enum_cases: Vec::new(),
             statics: Vec::new(),
+            guards: Vec::new(),
             ref_sources: Vec::new(),
             next_ref_source: 1,
             wrappers: Vec::new(),
@@ -3315,6 +3340,115 @@ impl Request {
         )
     }
 
+    /// `zobj->ce->__get` and its three neighbours: the magic accessor
+    /// `lowered` names, which php resolves once at link time and holds
+    /// on the class entry as the pointer every handler tests. Each of
+    /// the four is public and takes a receiver, which
+    /// `zend_check_magic_method_implementation` refuses a class that
+    /// declares otherwise, so the scope that reached the property never
+    /// bars the call.
+    fn magic_accessor(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
+        self.method_named(class, lowered)
+    }
+
+    /// `zobj->ce->__set != NULL`, the test a handler makes before it
+    /// places a name: whether the class serves the magic accessor
+    /// `lowered` names, which is what makes a placement silent
+    /// ([`Request::declared_slot_for_write`]).
+    pub(crate) fn serves_accessor(&self, class: ClassId, lowered: &[u8]) -> bool {
+        self.magic_accessor(class, lowered).is_some()
+    }
+
+    /// `*zend_get_property_guard(zobj, name)`: the word `name` carries
+    /// on `object`, zero for a name no accessor is serving.
+    fn guard_word(&self, object: PhpObject, name: &[u8]) -> u32 {
+        let id = object.heap().id();
+        self.guards
+            .iter()
+            .find(|((held, under), _)| *held == id && under == name)
+            .map_or(0, |(_, word)| *word)
+    }
+
+    /// `(*guard) |= bit`, the row laid down by the first accessor to
+    /// take it.
+    fn guard_take(&mut self, object: PhpObject, name: &[u8], bit: u32) {
+        let id = object.heap().id();
+        if let Some((_, word)) = self
+            .guards
+            .iter_mut()
+            .find(|((held, under), _)| *held == id && under == name)
+        {
+            *word |= bit;
+            return;
+        }
+        self.guards.push(((id, name.to_vec()), bit));
+    }
+
+    /// `(*guard) &= ~bit`, and the row dropped once the word is empty.
+    /// php frees the word with the object; a row here is gone before
+    /// the accessor that took it returns, so an `spl_object_id()` the
+    /// store hands out again names no row of an object that has died.
+    fn guard_drop(&mut self, object: PhpObject, name: &[u8], bit: u32) {
+        let id = object.heap().id();
+        let at = self
+            .guards
+            .iter()
+            .position(|((held, under), _)| *held == id && under == name);
+        let Some(at) = at else {
+            return;
+        };
+        let Some((_, word)) = self.guards.get_mut(at) else {
+            return;
+        };
+        *word &= !bit;
+        if *word == 0 {
+            self.guards.swap_remove(at);
+        }
+    }
+
+    /// `zend_std_call_getter` and its three neighbours
+    /// (`Z/Zend/zend_object_handlers.c:836`): one magic accessor served
+    /// on the object with the property's name as its first argument and
+    /// `arguments` after it, under `bit` in the property guard, which is
+    /// taken before the call and given back after it whatever the call
+    /// did. The object is one more owner for the span of the call
+    /// (`GC_ADDREF`, `OBJ_RELEASE`), so an accessor that drops the last
+    /// other owner does not free the object under the handler.
+    fn call_accessor(
+        &mut self,
+        object: PhpObject,
+        accessor: Function,
+        bit: u32,
+        name: &[u8],
+        arguments: &[Value],
+    ) -> Result<Value, Thrown> {
+        self.guard_take(object, name, bit);
+        let served = self.serve_accessor(object, accessor, name, arguments);
+        self.guard_drop(object, name, bit);
+        served
+    }
+
+    /// [`Request::call_accessor`] without the guard, for the one site
+    /// that holds a bit across two calls: `zend_std_has_property` keeps
+    /// `IN_ISSET` standing while it asks the `__get` that `empty` reads
+    /// the truth of.
+    fn serve_accessor(
+        &mut self,
+        object: PhpObject,
+        accessor: Function,
+        name: &[u8],
+        arguments: &[Value],
+    ) -> Result<Value, Thrown> {
+        let interned = self.interned(name)?;
+        let mut sent = Vec::with_capacity(arguments.len().saturating_add(1));
+        sent.push(Value::string(interned));
+        sent.extend_from_slice(arguments);
+        self.addref(&object.as_value());
+        let served = self.serve_method(accessor, Some(object), object.class(), &sent);
+        self.release(object.as_value());
+        served
+    }
+
     /// `zend_std_read_property`, the handler `FETCH_OBJ_R` and
     /// `FETCH_OBJ_IS` call: `zend_get_property_offset` places the name,
     /// a declared property's slot where the scope may see it, php's
@@ -3325,15 +3459,62 @@ impl Request {
     /// untyped one that `unset` emptied reads as a dynamic name does,
     /// and a name neither holds warns `Undefined property: C::$p` and
     /// is `null`. What is read is one more owner of the value
-    /// (`ZVAL_COPY_DEREF`), a reference followed. A `__get` would be
-    /// served between the slot and the warning; no class here has one.
+    /// (`ZVAL_COPY_DEREF`), a reference followed.
+    ///
+    /// A class with a `__get` is served between the slot and the
+    /// warning, under `IN_GET` in the property guard: the placement is
+    /// silent where a `__get` may serve what it refuses
+    /// (`zend_get_property_offset(ce, name, (type == BP_VAR_IS) ||
+    /// (ce->__get != NULL), ...)`), so a property the scope may not
+    /// reach is the wrong-offset marker and reaches the accessor rather
+    /// than the `Error`; the uninitialised typed slot is the one arm
+    /// that skips `__get`, php's `IS_PROP_UNINIT`; and a `__get` that
+    /// reads the name it was called for finds the guard standing and
+    /// falls through to the warning, with the `Error` raised again
+    /// (`zend_wrong_offset`) where the placement was the one the scope
+    /// may not reach.
     ///
     /// Under [`PropertyRead::Silent`], php's `BP_VAR_IS`, each of the
     /// three is `null` instead: `zend_get_property_offset` returns the
     /// wrong-offset marker rather than raising for a property the scope
     /// may not reach, the uninitialized typed slot is `ZVAL_NULL`, and
     /// the warning is the one line php guards with `type != BP_VAR_IS`.
-    /// A `__isset` would be served there; no class here has one.
+    /// A class with a `__isset` serves it there before the `__get`, and
+    /// a falsy answer is the `null` with no `__get` called at all.
+    ///
+    /// ```php
+    /// class M { public function __get($k) { echo "get $k\n"; return 7; } }
+    /// $m = new M;
+    /// var_dump($m->z);
+    /// class P { private $secret = 5; public function __get($k) { echo "get $k\n"; return 9; } }
+    /// $p = new P;
+    /// var_dump($p->secret);
+    /// class T { public int $t; public function __get($k) { echo "get $k\n"; return 1; } }
+    /// $t = new T;
+    /// try { var_dump($t->t); } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// get z
+    /// int(7)
+    /// get secret
+    /// int(9)
+    /// Error: Typed property T::$t must not be accessed before initialization
+    /// ```
+    ///
+    /// The guard: a `__get` that reads the name it was called for finds
+    /// it standing and warns where the recursion would have been.
+    ///
+    /// ```php
+    /// class R { public function __get($k) { echo "in get $k\n"; return $this->a; } }
+    /// $r = new R;
+    /// var_dump($r->a);
+    /// ```
+    /// ```expect
+    /// in get a
+    ///
+    /// Warning: Undefined property: R::$a in %s on line 2
+    /// NULL
+    /// ```
     pub(crate) fn read_property(
         &mut self,
         object: PhpObject,
@@ -3344,43 +3525,86 @@ impl Request {
         let o = object.heap();
         let class = object.class();
         let shown = String::from_utf8_lossy(name).into_owned();
+        // `ZEND_WRONG_PROPERTY_OFFSET`: the placement found a property
+        // the scope may not reach and said so quietly, because a
+        // `__get` may serve it. php tests one pointer for that; the
+        // class is asked for the accessor only where the answer is
+        // read, so a slot that holds a value is placed and returned
+        // without a lookup.
+        let mut wrong = false;
         if let Some(placed) = self.declared_slot(class, name) {
-            if !self.may_access(placed.declaring, placed.visibility) {
-                if silent {
-                    return Ok(Value::null());
+            if self.may_access(placed.declaring, placed.visibility) {
+                let z = o.slot(placed.slot);
+                if !z.is_undef() {
+                    let value = Value::of_zval(z).deref();
+                    self.addref(&value);
+                    return Ok(value);
                 }
-                return Err(self.inaccessible_property(class, placed.visibility, name));
+                // `IS_PROP_UNINIT`: a typed slot nothing has written
+                // skips `__get` and is the uninitialised-access error.
+                if placed.typed {
+                    if silent {
+                        return Ok(Value::null());
+                    }
+                    let class = self.class_name(class);
+                    return Err(crate::api::raising::throw(
+                        self,
+                        "Error",
+                        &format!(
+                            "Typed property {class}::${shown} must not be accessed before initialization"
+                        ),
+                    ));
+                }
+            } else {
+                if !silent && !self.serves_accessor(class, b"__get") {
+                    return Err(self.inaccessible_property(class, placed.visibility, name));
+                }
+                wrong = true;
             }
-            let z = o.slot(placed.slot);
-            if !z.is_undef() {
-                let value = Value::of_zval(z).deref();
+        } else {
+            let dynamic = o
+                .properties()
+                .into_iter()
+                .flat_map(|table| table.iter().collect::<Vec<_>>())
+                .find(|(k, _)| matches!(k, php_heap::Key::Str(s) if s.bytes() == name))
+                .map(|(_, z)| Value::of_zval(z));
+            if let Some(value) = dynamic {
+                let value = value.deref();
                 self.addref(&value);
                 return Ok(value);
             }
-            if placed.typed {
-                if silent {
+        }
+        // `/* magic isset */`: under `BP_VAR_IS` a class with a
+        // `__isset` is asked first, and the `__get` after it only where
+        // it said yes.
+        let getter = self.magic_accessor(class, b"__get");
+        let issetter = silent
+            .then(|| self.magic_accessor(class, b"__isset"))
+            .flatten();
+        if let Some(issetter) = issetter {
+            if self.guard_word(object, name) & IN_ISSET == 0 {
+                let answered = self.call_accessor(object, issetter, IN_ISSET, name, &[])?;
+                let truthy = crate::api::coerce::truthy(self, &answered);
+                self.release(answered);
+                if !truthy {
                     return Ok(Value::null());
                 }
-                let class = self.class_name(class);
-                return Err(crate::api::raising::throw(
-                    self,
-                    "Error",
-                    &format!(
-                        "Typed property {class}::${shown} must not be accessed before initialization"
-                    ),
-                ));
             }
-        }
-        let dynamic = o
-            .properties()
-            .into_iter()
-            .flat_map(|table| table.iter().collect::<Vec<_>>())
-            .find(|(k, _)| matches!(k, php_heap::Key::Str(s) if s.bytes() == name))
-            .map(|(_, z)| Value::of_zval(z));
-        if let Some(value) = dynamic {
-            let value = value.deref();
-            self.addref(&value);
-            return Ok(value);
+            if let Some(getter) = getter
+                && self.guard_word(object, name) & IN_GET == 0
+            {
+                return self.call_accessor(object, getter, IN_GET, name, &[]);
+            }
+        } else if let Some(getter) = getter {
+            if self.guard_word(object, name) & IN_GET == 0 {
+                return self.call_accessor(object, getter, IN_GET, name, &[]);
+            }
+            // `zend_wrong_offset`: the guard stands and the placement
+            // was one the scope may not reach, so it is made again,
+            // loudly, and the `Error` it raises is the answer.
+            if wrong && let Some(placed) = self.declared_slot(class, name) {
+                return Err(self.inaccessible_property(class, placed.visibility, name));
+            }
         }
         if !silent {
             let class = self.class_name(class);
@@ -3399,6 +3623,13 @@ impl Request {
     /// ([`Request::has_set_access`]), which is the second check
     /// `zend_std_write_property` and `zend_std_get_property_ptr_ptr`
     /// make; `operation` is the word the site's error carries.
+    ///
+    /// `silent` is php's own argument to `zend_get_property_offset`: a
+    /// site whose class serves the accessor that may take the write
+    /// places the name quietly, so a property the scope may not reach
+    /// is `None`, the wrong-offset marker, and the handler goes on to
+    /// `write_property` or to the overloaded pair, where the `Error` is
+    /// raised again if no accessor takes it.
     ///
     /// ```php
     /// class Foo { public private(set) int $bar = 1; public protected(set) int $baz = 2; }
@@ -3451,11 +3682,15 @@ impl Request {
         class: ClassId,
         name: &[u8],
         operation: &str,
+        silent: bool,
     ) -> Result<Option<(u32, bool)>, Thrown> {
         let Some(placed) = self.declared_slot(class, name) else {
             return Ok(None);
         };
         if !self.may_access(placed.declaring, placed.visibility) {
+            if silent {
+                return Ok(None);
+            }
             return Err(self.inaccessible_property(class, placed.visibility, name));
         }
         if let Some(set) = placed.set_visibility
@@ -3521,7 +3756,108 @@ impl Request {
         Ok(())
     }
 
-    /// `zend_std_write_property`, the `Std` slot: into the declared
+    /// `zend_std_write_property`, the `Std` slot: the placement, then
+    /// the class's `__set` for a name it found nothing at, and
+    /// otherwise `write_std_property`
+    /// ([`Request::write_std_property`]).
+    ///
+    /// php places the name with `zend_get_property_offset(ce, name,
+    /// ce->__set != NULL, ...)` and reaches the setter where the
+    /// placement found no value to write over: a name no class declared
+    /// that the dynamic table does not hold, a declared untyped slot an
+    /// `unset` emptied, and a declared slot the scope may not reach,
+    /// which is the wrong-offset marker a `__set` makes quiet. A
+    /// declared typed slot nothing has written is the one arm that
+    /// bypasses `__set`, and so is every slot that holds a value. The
+    /// setter is served under `IN_SET` in the property guard, so a
+    /// `__set` writing the name it was called for lays the property
+    /// down instead of reaching itself; where the placement was the one
+    /// the scope may not reach, that second pass is the `Error`
+    /// (`zend_wrong_offset`) rather than a write.
+    ///
+    /// `value` is given up here whatever arm runs, as php's caller
+    /// gives it up, and so is `name`.
+    ///
+    /// ```php
+    /// class M { public $kept = 1; public function __set($k, $v) { echo "set $k=$v\n"; } }
+    /// $m = new M;
+    /// $m->y = 3;
+    /// $m->kept = 2;
+    /// var_dump($m);
+    /// class P { private $secret = 5; public function __set($k, $v) { echo "set $k=$v\n"; } }
+    /// $p = new P;
+    /// $p->secret = 8;
+    /// var_dump($p);
+    /// ```
+    /// ```expect
+    /// set y=3
+    /// object(M)#1 (1) {
+    ///   ["kept"]=>
+    ///   int(2)
+    /// }
+    /// set secret=8
+    /// object(P)#2 (1) {
+    ///   ["secret":"P":private]=>
+    ///   int(5)
+    /// }
+    /// ```
+    pub(crate) fn write_property(
+        &mut self,
+        object: PhpObject,
+        name: PhpString,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let class = object.class();
+        // `if (Z_TYPE_P(variable_ptr) != IS_UNDEF) goto found` and
+        // `if (Z_PROP_FLAG_P(variable_ptr) & IS_PROP_UNINIT) goto
+        // write_std_property`: a declared slot the scope may reach that
+        // holds a value, and a typed one nothing has written, are both
+        // the setter's business to stay out of, so neither asks the
+        // class for one.
+        let placed = self.declared_slot(class, name.as_bytes());
+        if let Some(p) = placed.as_ref()
+            && self.may_access(p.declaring, p.visibility)
+            && (!object.heap().slot(p.slot).is_undef() || p.typed)
+        {
+            return self.write_std_property(object, name, value);
+        }
+        let Some(setter) = self.magic_accessor(class, b"__set") else {
+            return self.write_std_property(object, name, value);
+        };
+        let bytes = name.as_bytes().to_vec();
+        let wrong = placed
+            .as_ref()
+            .is_some_and(|p| !self.may_access(p.declaring, p.visibility));
+        let held = placed.is_none()
+            && object
+                .heap()
+                .properties()
+                .is_some_and(|table| table.contains(php_heap::Key::Str(name.heap())));
+        if held {
+            return self.write_std_property(object, name, value);
+        }
+        if self.guard_word(object, &bytes) & IN_SET == 0 {
+            let served = self.call_accessor(object, setter, IN_SET, &bytes, &[value]);
+            self.release(value);
+            self.release(Value::string(name));
+            let answered = served?;
+            self.release(answered);
+            return Ok(());
+        }
+        // `zend_wrong_offset`: the guard stands, so the placement is
+        // made again and the `Error` it raises for a property the scope
+        // may not reach is the answer.
+        if wrong && let Some(placed) = self.declared_slot(class, &bytes) {
+            let thrown = self.inaccessible_property(class, placed.visibility, &bytes);
+            self.release(value);
+            self.release(Value::string(name));
+            return Err(thrown);
+        }
+        self.write_std_property(object, name, value)
+    }
+
+    /// `write_std_property`, `zend_std_write_property`'s label and what
+    /// a class with no `__set` is: into the declared
     /// slot, what it held released last, or into the dynamic table,
     /// materialised on the first write and separated when a cast shares
     /// it. The name is given up once the table has taken its own owner
@@ -3530,7 +3866,7 @@ impl Request {
     /// arms at `write_std_property`'s `else`; the value is given up with
     /// the `Error`, as `FREE_OP_DATA` gives it up. The typed-property
     /// coercion arrives with the kernel that writes one.
-    pub(crate) fn write_property(
+    fn write_std_property(
         &mut self,
         object: PhpObject,
         name: PhpString,
@@ -4483,33 +4819,117 @@ impl Request {
     /// reach it and it holds a value, else the dynamic table's entry;
     /// then what `test` asks of the value: that it is there, that it is
     /// not `null`, or that it is truthy. A slot the scope may not reach
-    /// or nothing wrote is `false`, as php answers with no `__isset`.
+    /// or nothing wrote is the class's `__isset`, whose answer's truth
+    /// is the answer; php places the name silently here whatever the
+    /// class declares (`zend_get_property_offset(ce, name, 1, ...)`),
+    /// so the property the scope may not reach reaches the accessor and
+    /// never the `Error`. Under [`PropertyTest::Exists`],
+    /// `property_exists()`'s `ZEND_PROPERTY_EXISTS`, no accessor is
+    /// called at all.
+    ///
+    /// Under [`PropertyTest::NotEmpty`], `empty($o->p)`, a `__isset`
+    /// that said yes is followed by `__get`, whose value's truth is the
+    /// answer, and a class with no `__get` answers `false`; both are
+    /// served under the guard the `__isset` still holds, so an
+    /// accessor that asks about its own name answers for itself.
+    ///
+    /// ```php
+    /// class M {
+    ///     public $kept = 1;
+    ///     public function __isset($k) { echo "isset $k\n"; return $k === "y"; }
+    ///     public function __get($k) { echo "get $k\n"; return 0; }
+    /// }
+    /// $m = new M;
+    /// var_dump(isset($m->kept), isset($m->y), isset($m->nope));
+    /// var_dump(empty($m->y), empty($m->nope));
+    /// ```
+    /// ```expect
+    /// isset y
+    /// isset nope
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// isset y
+    /// get y
+    /// isset nope
+    /// bool(true)
+    /// bool(true)
+    /// ```
     pub(crate) fn has_property(
         &mut self,
         object: PhpObject,
         name: &[u8],
         test: PropertyTest,
-    ) -> bool {
+    ) -> Result<bool, Thrown> {
         let class = object.class();
         let value = match self.declared_slot(class, name) {
             Some(placed) => {
-                if !self.may_access(placed.declaring, placed.visibility) {
-                    return false;
+                if self.may_access(placed.declaring, placed.visibility) {
+                    let z = object.heap().slot(placed.slot);
+                    (!z.is_undef()).then(|| Value::of_zval(z))
+                } else {
+                    None
                 }
-                let z = object.heap().slot(placed.slot);
-                (!z.is_undef()).then(|| Value::of_zval(z))
             }
             None => self.object_prop(object.heap(), name),
         };
-        let Some(value) = value else {
-            return false;
-        };
-        let value = value.deref();
-        match test {
-            PropertyTest::Exists => true,
-            PropertyTest::Isset => value.tag() != TypeTag::Null,
-            PropertyTest::NotEmpty => crate::api::coerce::truthy(self, &value),
+        if let Some(value) = value {
+            let value = value.deref();
+            return Ok(match test {
+                PropertyTest::Exists => true,
+                PropertyTest::Isset => value.tag() != TypeTag::Null,
+                PropertyTest::NotEmpty => crate::api::coerce::truthy(self, &value),
+            });
         }
+        let Some(issetter) = self
+            .magic_accessor(class, b"__isset")
+            .filter(|_| test != PropertyTest::Exists)
+        else {
+            return Ok(false);
+        };
+        if self.guard_word(object, name) & IN_ISSET != 0 {
+            return Ok(false);
+        }
+        // php holds `IN_ISSET` across both calls, so the `__get` the
+        // `empty` arm asks for runs with the `__isset`'s guard still
+        // standing.
+        self.guard_take(object, name, IN_ISSET);
+        let answered = self.serve_accessor(object, issetter, name, &[]);
+        let mut held = match answered {
+            Ok(answered) => {
+                let truthy = crate::api::coerce::truthy(self, &answered);
+                self.release(answered);
+                truthy
+            }
+            Err(thrown) => {
+                self.guard_drop(object, name, IN_ISSET);
+                return Err(thrown);
+            }
+        };
+        // `if (has_set_exists == ZEND_PROPERTY_NOT_EMPTY && result)`:
+        // `empty` asks the `__get` after the `__isset` and reads the
+        // truth of what it answered; a class with no `__get` is
+        // `result = false`, php's own `else`.
+        if test == PropertyTest::NotEmpty && held {
+            held = false;
+            if let Some(getter) = self.magic_accessor(class, b"__get")
+                && self.guard_word(object, name) & IN_GET == 0
+            {
+                let answered = self.call_accessor(object, getter, IN_GET, name, &[]);
+                match answered {
+                    Ok(answered) => {
+                        held = crate::api::coerce::truthy(self, &answered);
+                        self.release(answered);
+                    }
+                    Err(thrown) => {
+                        self.guard_drop(object, name, IN_ISSET);
+                        return Err(thrown);
+                    }
+                }
+            }
+        }
+        self.guard_drop(object, name, IN_ISSET);
+        Ok(held)
     }
 
     /// `zend_std_unset_property`: a declared slot the scope may reach is
@@ -4518,28 +4938,92 @@ impl Request {
     /// may not write, whose word here is `unset`
     /// (`Z/Zend/zend_object_handlers.c:1583`); a dynamic name is
     /// removed from the table, separated first where a cast shares it.
+    ///
+    /// A class with a `__unset` is served where the placement found
+    /// nothing to remove: a name no class declared that the table does
+    /// not hold, a declared untyped slot an `unset` already emptied,
+    /// and, since the placement is made silent by the accessor
+    /// (`zend_get_property_offset(ce, name, ce->__unset != NULL, ...)`),
+    /// a declared slot the scope may not reach. It is served under
+    /// `IN_UNSET`, so an `__unset` unsetting the name it was called for
+    /// removes nothing rather than reaching itself, and the `Error` for
+    /// the property the scope may not reach is raised on that second
+    /// pass (`zend_wrong_offset`).
+    ///
+    /// ```php
+    /// class M {
+    ///     public $kept = 1;
+    ///     public function __unset($k) { echo "unset $k\n"; }
+    /// }
+    /// $m = new M;
+    /// $m->dyn = 2;
+    /// unset($m->kept);
+    /// unset($m->dyn);
+    /// unset($m->nope);
+    /// var_dump($m);
+    /// class U { public function __unset($k) { echo "unset $k\n"; unset($this->w); } }
+    /// $u = new U;
+    /// unset($u->w);
+    /// ```
+    /// ```expect
+    ///
+    /// Deprecated: Creation of dynamic property M::$dyn is deprecated in %s on line 7
+    /// unset nope
+    /// object(M)#1 (0) {
+    /// }
+    /// unset w
+    /// ```
     pub(crate) fn unset_property(&mut self, object: PhpObject, name: &[u8]) -> Result<(), Thrown> {
         let class = object.class();
         let o = object.heap();
+        let unsetter = self.magic_accessor(class, b"__unset");
+        let mut wrong = false;
         if let Some(placed) = self.declared_slot(class, name) {
-            if !self.may_access(placed.declaring, placed.visibility) {
-                return Err(self.inaccessible_property(class, placed.visibility, name));
+            if self.may_access(placed.declaring, placed.visibility) {
+                let empty = o.slot(placed.slot).is_undef();
+                // `error = Z_TYPE_P(slot) != IS_UNDEF || (Z_PROP_FLAG_P(slot)
+                // & IS_PROP_UNINIT) || !zobj->ce->__unset`: a slot that
+                // holds a value, and a typed one nothing has written,
+                // are held to the set visibility here; an untyped slot
+                // an `unset` emptied is the `__unset`'s.
+                if !empty || placed.typed {
+                    if let Some(set) = placed.set_visibility
+                        && !self.has_set_access(placed.declaring, set)
+                    {
+                        return Err(self.set_inaccessible_property(class, set, name, "unset"));
+                    }
+                    if !empty {
+                        Heap::object_set_slot(&mut Hooks(self), o, placed.slot, Zval::UNDEF);
+                    }
+                    return Ok(());
+                }
+            } else {
+                if unsetter.is_none() {
+                    return Err(self.inaccessible_property(class, placed.visibility, name));
+                }
+                wrong = true;
             }
-            if let Some(set) = placed.set_visibility
-                && !self.has_set_access(placed.declaring, set)
-            {
-                return Err(self.set_inaccessible_property(class, set, name, "unset"));
+        } else if let Some(table) = o.properties() {
+            let key = self.interned(name)?;
+            let key = php_heap::Key::Str(key.heap());
+            if table.contains(key) {
+                let table = self.array_separate(table)?;
+                self.heap.object_set_properties(o, table);
+                self.array_del(table, key);
+                return Ok(());
             }
-            Heap::object_set_slot(&mut Hooks(self), o, placed.slot, Zval::UNDEF);
-            return Ok(());
         }
-        let Some(table) = o.properties() else {
+        let Some(unsetter) = unsetter else {
             return Ok(());
         };
-        let table = self.array_separate(table)?;
-        self.heap.object_set_properties(o, table);
-        let key = self.interned(name)?;
-        self.array_del(table, php_heap::Key::Str(key.heap()));
+        if self.guard_word(object, name) & IN_UNSET == 0 {
+            let answered = self.call_accessor(object, unsetter, IN_UNSET, name, &[])?;
+            self.release(answered);
+            return Ok(());
+        }
+        if wrong && let Some(placed) = self.declared_slot(class, name) {
+            return Err(self.inaccessible_property(class, placed.visibility, name));
+        }
         Ok(())
     }
 

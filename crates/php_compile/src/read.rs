@@ -4374,13 +4374,17 @@ impl Reader<'_> {
 
     /// `isset(` or `empty(` read, the parenthesis bumped: php's
     /// `isset_variables` and `expr` under `ZEND_AST_ISSET` and
-    /// `ZEND_AST_EMPTY`, of which a plain variable and a chain of
-    /// dimensions over one are read. php's `isset($a, $b)` is `$a && $b`
-    /// over a chain of jumps, `empty` over what is no variable is the
-    /// `!expr` `zend_compile_isset_or_empty` rewrites it to, and
-    /// `$this`, a property and a class's own property (php's
-    /// `ZEND_AST_STATIC_PROP`) each have an opcode of their own; none is
-    /// read yet.
+    /// `ZEND_AST_EMPTY`, of which a plain variable, a chain of
+    /// dimensions over one and a property of one are read, with `$this`
+    /// as the base of either. php's `isset($a, $b)` is `$a && $b` over a
+    /// chain of jumps, `empty` over what is no variable is the `!expr`
+    /// `zend_compile_isset_or_empty` rewrites it to, and `$this` alone
+    /// and a class's own property (php's `ZEND_AST_STATIC_PROP`) each
+    /// have an opcode of their own; neither is read yet.
+    ///
+    /// A `(` after the property's name is a method call, which is php's
+    /// `Cannot use isset() on the result of an expression` and is
+    /// refused here, where `unset_operand` refuses its own.
     fn isset_or_empty(&mut self, empty: bool) -> Result<Child, Trouble> {
         let word = if empty { "empty" } else { "isset" };
         self.skip_trivia();
@@ -4391,18 +4395,48 @@ impl Reader<'_> {
         }
         let read = self.variable()?;
         let line = read.line();
-        let Expr::Var(name) = read.take() else {
-            return Err(self.trouble(format!(
-                "an `{word}` over $this this compiler cannot read yet"
-            )));
+        let mut var = match read.take() {
+            Expr::Var(name) => Child::at(line, Expr::Var(name)),
+            Expr::This => Child::at(line, Expr::This),
+            _ => {
+                return Err(self.trouble(format!(
+                    "an `{word}` over what is no variable this compiler cannot read yet"
+                )));
+            }
         };
-        let mut var = Child::at(line, Expr::Var(name));
         loop {
             self.skip_trivia();
-            if self.byte(0) != Some(b'[') {
-                break;
+            if self.byte(0) == Some(b'[') {
+                var = self.dimension(var)?;
+                continue;
             }
-            var = self.dimension(var)?;
+            if self.byte(0) == Some(b'-') && self.byte(1) == Some(b'>') {
+                self.bump(2);
+                self.skip_trivia();
+                let name = self.label();
+                if name.is_empty() {
+                    return Err(
+                        self.trouble("a property named at run time this compiler cannot read yet")
+                    );
+                }
+                self.skip_trivia();
+                if self.byte(0) == Some(b'(') {
+                    return Err(self.trouble(format!(
+                        "an `{word}` over what is no variable this compiler cannot read yet"
+                    )));
+                }
+                var = Child::at(line, Expr::Prop { object: var, name });
+                continue;
+            }
+            break;
+        }
+        // `is_this_fetch(var_ast)`: `$this` with no link over it is
+        // `ISSET_ISEMPTY_THIS`, an opcode of its own that no handler
+        // serves yet.
+        if matches!(&*var, Expr::This) {
+            return Err(self.trouble(format!(
+                "an `{word}` over $this, whose opcode is `ISSET_ISEMPTY_THIS`, this compiler cannot read yet"
+            )));
         }
         self.skip_trivia();
         if self.byte(0) != Some(b')') {
@@ -6046,7 +6080,7 @@ mod tests {
     }
 
     #[test]
-    fn isset_and_empty_over_a_variable_and_a_dimension_are_read_and_nothing_else_is() {
+    fn isset_and_empty_over_a_variable_a_dimension_and_a_property_are_read_and_nothing_else_is() {
         assert_eq!(
             read(b"<?php isset($a); empty($a);").unwrap_or_default(),
             vec![
@@ -6084,9 +6118,24 @@ mod tests {
             )],
             "the chain under an `isset` is the `ZEND_AST_DIM` chain a read is"
         );
+        assert_eq!(
+            read(b"<?php isset($a->p);").unwrap_or_default(),
+            vec![(
+                Stmt::Effect(at(Expr::Isset {
+                    var: at(Expr::Prop {
+                        object: at(Expr::Var(b"a".to_vec())),
+                        name: b"p".to_vec(),
+                    }),
+                    empty: false
+                })),
+                1
+            )],
+            "a property under an `isset` is the `ZEND_AST_PROP` a read is"
+        );
         for source in [
             b"<?php isset($a, $b);".as_slice(),
-            b"<?php isset($a->p);".as_slice(),
+            b"<?php isset($a->p());".as_slice(),
+            b"<?php isset($this);".as_slice(),
             b"<?php empty(1);".as_slice(),
             b"<?php isset();".as_slice(),
         ] {

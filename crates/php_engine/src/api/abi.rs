@@ -626,15 +626,16 @@ pub trait ObjectHandlers: Send + Sync {
 
     /// `has_property`, `zend_std_has_property` at `Std`: whether the
     /// property is there, is set, or is not empty, as `test` asks. A
-    /// class with `__isset` would serve it here; the answer is a `bool`
-    /// until one is declared.
+    /// class with a `__isset` serves it here, and one with a `__get`
+    /// beside it is asked that too under `empty`, so the answer is what
+    /// a call left pending as much as what a slot holds.
     fn has_property(
         &self,
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
         test: PropertyTest,
-    ) -> bool {
+    ) -> Result<bool, Thrown> {
         req.has_property(object, name, test)
     }
 
