@@ -3457,6 +3457,94 @@ mod tests {
         );
     }
 
+    /// `zend_compile_const_decl` (#476): one `DECLARE_CONST` per
+    /// declarator, in written order, before anything else the file
+    /// does, the name prefixed with the namespace the statement stands
+    /// in and the value folded. The dumps are the oracle's under
+    /// `[regime.dump]` at 8.5.9.
+    #[test]
+    fn a_const_statement_is_one_declare_const_per_declarator_over_the_folded_value() {
+        assert_eq!(
+            dump_of(b"<?php const K = 1;"),
+            main_dump(
+                2,
+                0,
+                0,
+                "0000 DECLARE_CONST string(\"K\") int(1)\n0001 RETURN int(1)\n"
+            )
+        );
+        assert_eq!(
+            dump_of(b"<?php const K = 1, L = 2;"),
+            main_dump(
+                3,
+                0,
+                0,
+                "0000 DECLARE_CONST string(\"K\") int(1)\n\
+                 0001 DECLARE_CONST string(\"L\") int(2)\n\
+                 0002 RETURN int(1)\n"
+            )
+        );
+        assert_eq!(
+            dump_of(b"<?php const K = 1 + 2;"),
+            main_dump(
+                2,
+                0,
+                0,
+                "0000 DECLARE_CONST string(\"K\") int(3)\n0001 RETURN int(1)\n"
+            )
+        );
+        assert_eq!(
+            dump_of(b"<?php namespace A; const K = 1;"),
+            main_dump(
+                2,
+                0,
+                0,
+                "0000 DECLARE_CONST string(\"A\\\\K\") int(1)\n0001 RETURN int(1)\n"
+            )
+        );
+    }
+
+    /// What stands beside a `const` statement and is refused: php's
+    /// `zend_get_special_const` fatal over the three names no file may
+    /// redeclare, php's own parse error for the statement written where
+    /// its grammar has no `top_statement`, and what this compiler
+    /// cannot fold. Each sentence is the oracle's at 8.5.9.
+    #[test]
+    fn what_a_const_statement_refuses_is_what_php_refuses() {
+        let refused = |source: &[u8]| {
+            let mut strings = php_heap::Strings::new();
+            compile(
+                &php_syntax::parse(source, &php_syntax::Options::default()),
+                &bundled(),
+                &mut strings,
+            )
+            .err()
+            .map(|e| e.message)
+        };
+        assert_eq!(
+            refused(b"<?php const true = 1;").as_deref(),
+            Some("Cannot redeclare constant 'true'")
+        );
+        assert_eq!(
+            refused(b"<?php const NULL = 1;").as_deref(),
+            Some("Cannot redeclare constant 'NULL'")
+        );
+        assert_eq!(
+            refused(b"<?php if (1) { const K = 1; }").as_deref(),
+            Some("syntax error, unexpected token \"const\"")
+        );
+        assert_eq!(
+            refused(b"<?php function g() { const K = 1; }").as_deref(),
+            Some("syntax error, unexpected token \"const\"")
+        );
+        // The `;` php's grammar requires after the list, whose absence
+        // php's parser names and this one names the same way.
+        assert_eq!(
+            refused(b"<?php const K = 1").as_deref(),
+            Some("syntax error, unexpected end of file, expecting \",\" or \";\"")
+        );
+    }
+
     /// `zend_compile_declare` (#411): the statement leaves no opline,
     /// so the oracle's dump of a file that opens with one is the dump of
     /// the file without it, and `declare(strict_types=1)` shows in the

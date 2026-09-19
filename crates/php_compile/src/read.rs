@@ -132,19 +132,27 @@ pub(crate) enum Stmt {
     /// `zend_compile_declare` reads as the braced form where it is
     /// anything else. What each directive means is the emitter's.
     Declare {
-        directives: Vec<Directive>,
+        directives: Vec<ConstElem>,
         body: Option<Read>,
     },
+    /// `const K = 1, L = 2;`, php's `ZEND_AST_CONST_DECL` over its
+    /// declarators. php's grammar has it among the `top_statement`s and
+    /// not among the statements, so it stands at the file's own list and
+    /// nowhere else.
+    Const(Vec<ConstElem>),
 }
 
-/// One `name=value` of a `declare`, php's `ZEND_AST_CONST_ELEM` inside
-/// the list `zend_compile_declare` walks: the name as written, whose
-/// case php compares without (`zend_string_equals_literal_ci`), the
-/// value as written, which php requires to be a `ZEND_AST_ZVAL` and not
-/// an expression to fold, and the line the name stands on, which is
-/// where php's fatal over the directive is raised.
+/// One `name = value`, php's `ZEND_AST_CONST_ELEM`: the name as
+/// written, unqualified, the expression after the `=`, and the line the
+/// name stands on, which is where php's fatal over it is raised. php's
+/// grammar has one `const_list` rule and both its readers take this:
+/// `zend_compile_const_decl` over a `const` statement, and
+/// `zend_compile_declare` over the directives inside `declare(...)`,
+/// whose names it compares without case
+/// (`zend_string_equals_literal_ci`) and whose values it requires to be
+/// a `ZEND_AST_ZVAL` rather than an expression to fold.
 #[derive(Debug, PartialEq)]
-pub(crate) struct Directive {
+pub(crate) struct ConstElem {
     pub(crate) name: Vec<u8>,
     pub(crate) value: Child,
     pub(crate) line: u32,
@@ -1180,7 +1188,7 @@ impl Reader<'_> {
                 short = false;
                 Some(Stmt::Echo(self.echoed()?))
             } else {
-                self.statement()?
+                self.statement(until == Until::Tag)?
             };
             if let Some(statement) = statement {
                 out.push((statement, line));
@@ -1188,39 +1196,16 @@ impl Reader<'_> {
         }
     }
 
-    /// One statement, or nothing for the empty statement `;`.
-    ///
-    /// php's `attributed_statement` is a declaration with one or more
-    /// `#[ ... ]` groups before it; the class declaration is the home
-    /// this reads, and every other declaration php lets an attribute
-    /// stand before is refused as not yet read.
-    ///
-    /// ```php
-    /// #[A] #[B(1), C] class M { public $x = 1; }
-    /// var_dump((new M)->x);
-    /// ```
-    /// ```expect
-    /// int(1)
-    /// ```
-    fn statement(&mut self) -> Result<Option<Stmt>, Trouble> {
+    /// One statement, or nothing for the empty statement `;`. `top` is
+    /// whether it stands at the file's own list, which php's grammar
+    /// calls a `top_statement` and lets one more word begin.
+    fn statement(&mut self, top: bool) -> Result<Option<Stmt>, Trouble> {
         if self.byte(0) == Some(b';') {
             self.bump(1);
             return Ok(None);
         }
         if self.starts_with(b"#[") {
-            let attributes = self.attributes()?;
-            self.skip_trivia();
-            if self.word_ahead(b"class") {
-                self.bump(5);
-                return self.class_decl(ClassKind::Class, attributes).map(Some);
-            }
-            if self.word_ahead(b"interface") {
-                self.bump(9);
-                return self.class_decl(ClassKind::Interface, attributes).map(Some);
-            }
-            return Err(
-                self.trouble("an attribute before this declaration this compiler cannot read yet")
-            );
+            return self.attributed().map(Some);
         }
         if self.byte(0) == Some(b'{') {
             self.bump(1);
@@ -1297,6 +1282,10 @@ impl Reader<'_> {
         if self.word_ahead(b"declare") {
             self.bump(7);
             return self.declare().map(Some);
+        }
+        if self.word_ahead(b"const") {
+            self.bump(5);
+            return self.const_decl(top).map(Some);
         }
         let expr = self.expr()?;
         self.end_of_statement()?;
@@ -2525,7 +2514,7 @@ impl Reader<'_> {
                     );
                 }
                 let line = self.line;
-                if let Some(statement) = self.statement()? {
+                if let Some(statement) = self.statement(false)? {
                     body.push((statement, line));
                 }
             }
@@ -2739,7 +2728,7 @@ impl Reader<'_> {
             self.punctuation(b'=', "a `declare` directive with no `=` after its name")?;
             self.skip_trivia();
             let value = self.expr()?;
-            directives.push(Directive { name, value, line });
+            directives.push(ConstElem { name, value, line });
             self.skip_trivia();
             if self.byte(0) != Some(b',') {
                 break;
@@ -2754,8 +2743,73 @@ impl Reader<'_> {
             );
         }
         let line = self.line;
-        let body = self.statement()?.map(|statement| vec![(statement, line)]);
+        let body = self
+            .statement(false)?
+            .map(|statement| vec![(statement, line)]);
         Ok(Stmt::Declare { directives, body })
+    }
+
+    /// php's `attributed_statement`: the `#[ ... ]` groups and the
+    /// declaration after them. The class declaration is the home this
+    /// reads, and every other declaration php lets an attribute stand
+    /// before is refused as not yet read.
+    ///
+    /// ```php
+    /// #[A] #[B(1), C] class M { public $x = 1; }
+    /// var_dump((new M)->x);
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// ```
+    fn attributed(&mut self) -> Result<Stmt, Trouble> {
+        let attributes = self.attributes()?;
+        self.skip_trivia();
+        if self.word_ahead(b"class") {
+            self.bump(5);
+            return self.class_decl(ClassKind::Class, attributes);
+        }
+        if self.word_ahead(b"interface") {
+            self.bump(9);
+            return self.class_decl(ClassKind::Interface, attributes);
+        }
+        Err(self.trouble("an attribute before this declaration this compiler cannot read yet"))
+    }
+
+    /// php's `T_CONST const_list ';'`: one declarator per name, each an
+    /// identifier and a `=` and the expression after it, separated by
+    /// commas and closed by the `;`. The name is unqualified, php's
+    /// `identifier`, so a `\\` in it is php's parse error; what the
+    /// expression may be is `zend_compile_const_decl`'s and not read
+    /// here. An attribute before the list is refused as not yet read,
+    /// since only the last declarator may carry one. php's grammar has
+    /// the statement among the `top_statement`s alone, and `top` is
+    /// whether it stands at one.
+    fn const_decl(&mut self, top: bool) -> Result<Stmt, Trouble> {
+        // php's `const_decl` is a `top_statement` and no statement, so
+        // the parser refuses it under an `if`, a loop or a body before
+        // the compiler sees it.
+        if !top {
+            return Err(self.trouble("syntax error, unexpected token \"const\""));
+        }
+        let mut elements = Vec::new();
+        loop {
+            self.skip_trivia();
+            let line = self.line;
+            let name = self.name();
+            if name.is_empty() || name.contains(&b'\\') {
+                return Err(self.trouble("a `const` whose name is no identifier"));
+            }
+            self.punctuation(b'=', "a `const` declarator with no `=` after its name")?;
+            self.skip_trivia();
+            let value = self.expr()?;
+            elements.push(ConstElem { name, value, line });
+            self.skip_trivia();
+            if self.byte(0) != Some(b',') {
+                self.end_of_statement()?;
+                return Ok(Stmt::Const(elements));
+            }
+            self.bump(1);
+        }
     }
 
     /// One expected byte, or the trouble that names what was wanted.
@@ -2799,7 +2853,7 @@ impl Reader<'_> {
             return Ok(body);
         }
         let line = self.line;
-        if let Some(statement) = self.statement()? {
+        if let Some(statement) = self.statement(false)? {
             body.push((statement, line));
         }
         Ok(body)

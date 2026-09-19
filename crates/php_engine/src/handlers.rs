@@ -229,6 +229,95 @@ pub(crate) fn declare_function<T: Tier>(
     }
 }
 
+/// `ZEND_DECLARE_CONST` (`Z/Zend/zend_vm_def.h:8269`), the opline
+/// `zend_compile_const_decl` leaves for each declarator of a `const`
+/// statement: the name in `op1`, the value in `op2`, and
+/// `zend_register_constant` over them, which is the table `define()`
+/// writes into and `defined()` reads (`Z/Zend/zend_constants.c:511`).
+/// The name of a constant declared inside a namespace is stored with
+/// its namespace lowered and its own part as written, which is the same
+/// `strrchr` the native does, so `A\K` and `a\K` are the one name and
+/// `A\k` is another.
+///
+/// A name that stands already is no fatal: php warns and leaves the
+/// constant it had, `Constant %s already defined, this will be an error
+/// in PHP 9`, the same sentence `define()` raises from the same place.
+/// `__COMPILER_HALT_OFFSET__` and the three special constants take that
+/// path too, though the compiler refuses the latter three before the
+/// opline is reached.
+///
+/// ```php
+/// const K = 1;
+/// const L = 2, M = 3;
+/// var_dump(defined('K'), defined('L'), defined('M'), defined('NOPE'));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// ```
+///
+/// ```php
+/// const K = 1;
+/// const K = 2;
+/// var_dump(defined('K'));
+/// ```
+/// ```expect
+/// Warning: Constant K already defined, this will be an error in PHP 9 in %s on line 3
+/// bool(true)
+/// ```
+///
+/// ```php
+/// define('K', 1);
+/// const K = 2;
+/// ```
+/// ```expect
+/// Warning: Constant K already defined, this will be an error in PHP 9 in %s on line 3
+/// ```
+pub(crate) fn declare_const<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let Some(written) = exec::constant(code, ConstIdx(op.op1))
+        .as_str_bytes()
+        .map(<[u8]>::to_vec)
+    else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a DECLARE_CONST whose op1 is no constant name",
+        )));
+    };
+    let value = exec::constant(code, ConstIdx(op.op2));
+    // `zend_register_constant`'s key: the namespace lowered and the
+    // name itself as written.
+    let mut key = written;
+    if let Some(slash) = key.iter().rposition(|b| *b == b'\\') {
+        key[..slash].make_ascii_lowercase();
+    }
+    req.addref(&value);
+    match req.define_constant(&key, value) {
+        Ok(true) => Ok(advance(req, frame)),
+        Ok(false) => {
+            req.release(value);
+            crate::api::raising::warning(
+                req,
+                &format!(
+                    "Constant {} already defined, this will be an error in PHP 9",
+                    String::from_utf8_lossy(&key)
+                ),
+            );
+            Ok(advance(req, frame))
+        }
+        Err(thrown) => {
+            req.release(value);
+            req.leave_pending(&thrown);
+            Ok(Stepped::Threw(frame))
+        }
+    }
+}
+
 /// `ZEND_DECLARE_LAMBDA_FUNCTION` (`Z/Zend/zend_vm_def.h:8343`):
 /// `zend_create_closure` over the op array the frame's
 /// `dynamic_func_defs` holds at `op2`, into the temporary `result`

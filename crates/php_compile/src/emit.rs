@@ -108,7 +108,7 @@ use php_unit::{
 
 use crate::read;
 use crate::read::{
-    Arm, BinaryOp, Case, CastTo, Catch, Child, Class, Directive, Element, Expr, Function, IfArm,
+    Arm, BinaryOp, Case, CastTo, Catch, Child, Class, ConstElem, Element, Expr, Function, IfArm,
     Magic, Method, Piece, Property, Read, Step, Stmt, Target, Unset, is_auto_global,
 };
 use crate::{CompileError, Options, StackLimit};
@@ -876,6 +876,7 @@ impl Emit<'_> {
         self.statements_seen = self.statements_seen.saturating_add(1);
         match statement {
             Stmt::Namespace(_) | Stmt::Declare { .. } => {}
+            Stmt::Const(elements) => self.const_decl(elements)?,
             Stmt::Inline(text) => {
                 let text = self.string(text)?;
                 let at = self.constant(text);
@@ -2550,7 +2551,7 @@ impl Emit<'_> {
     /// name is php's `E_COMPILE_WARNING`, and the file compiles on.
     fn declare(
         &mut self,
-        directives: &[Directive],
+        directives: &[ConstElem],
         body: Option<&Read>,
     ) -> Result<(), CompileError> {
         for directive in directives {
@@ -2599,6 +2600,47 @@ impl Emit<'_> {
         }
         if let Some(body) = body {
             self.statements(body)?;
+        }
+        Ok(())
+    }
+
+    /// `zend_compile_const_decl` (`Z/Zend/zend_compile.c:9667`): one
+    /// `DECLARE_CONST` per declarator, in written order, its `op1` the
+    /// name `zend_prefix_with_ns` made of the written one and its `op2`
+    /// the value `zend_const_expr_to_zval` folded. `true`, `false` and
+    /// `null`, whatever their case, are `zend_get_special_const`'s
+    /// `Cannot redeclare constant '%s'`, raised before the name is
+    /// prefixed, so the sentence names the written one. Whether the name
+    /// stands already is the request's and not the compiler's, so
+    /// nothing else is refused here.
+    ///
+    /// php keeps a value it could not fold as an `IS_CONSTANT_AST` for
+    /// the opline to evaluate (`allow_dynamic`); this compiler folds
+    /// what it can fold and refuses the rest as not read yet.
+    fn const_decl(&mut self, elements: &[ConstElem]) -> Result<(), CompileError> {
+        for element in elements {
+            self.line = element.line;
+            let value = self.constant_expr(&element.value)?;
+            if [&b"true"[..], b"false", b"null"]
+                .iter()
+                .any(|special| element.name.eq_ignore_ascii_case(special))
+            {
+                return Err(self.compile_error(format!(
+                    "Cannot redeclare constant '{}'",
+                    String::from_utf8_lossy(&element.name)
+                )));
+            }
+            let name = self.string(&self.prefix_with_ns(&element.name))?;
+            let op1 = self.literal(name);
+            let op2 = self.literal(value);
+            self.push(Opline {
+                opcode: Opcode::DeclareConst,
+                op1_type: OperandKind::Const,
+                op1,
+                op2_type: OperandKind::Const,
+                op2,
+                ..Opline::default()
+            });
         }
         Ok(())
     }
