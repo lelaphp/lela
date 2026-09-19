@@ -5546,7 +5546,11 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
         Err(thrown) => return threw(req, frame, &thrown),
     };
     write_out(req, frame, code, op, &stepped);
-    if let Err(thrown) = req.set_static_property(class, &name, scope, stepped) {
+    // The write verifies a declared type under the frame's own regime
+    // ([`Request::set_static_property`], #488); the typed slot this
+    // opcode reads back is the gap above.
+    let strict = req.caller_strict_types();
+    if let Err(thrown) = req.set_static_property(class, &name, scope, stepped, strict) {
         return threw(req, frame, &thrown);
     }
     req.vm_mut().jump(frame, at.saturating_add(2));
@@ -5603,7 +5607,8 @@ fn static_prop_step(
     };
     write_out(req, frame, code, op, if post { &held } else { &stepped });
     req.release(held);
-    if let Err(thrown) = req.set_static_property(class, &name, scope, stepped) {
+    let strict = req.caller_strict_types();
+    if let Err(thrown) = req.set_static_property(class, &name, scope, stepped, strict) {
         return threw(req, frame, &thrown);
     }
     Ok(advance(req, frame))
