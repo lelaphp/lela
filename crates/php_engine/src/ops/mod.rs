@@ -594,23 +594,9 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
             };
             let mangled = mangled_names(req, o.class());
             let mut array = PhpArray::new(req)?;
-            // The rows are the declared slots in slot order and then the
-            // dynamic table, so the declared names are walked with a
-            // cursor rather than looked up: a class that declares `$p`
-            // over a parent's private `$p` has two slots of that name,
-            // and the second row is the second slot.
             let mut at = 0;
-            let mut prefix_of = |name: &PhpString| {
-                let found = mangled
-                    .iter()
-                    .skip(at)
-                    .position(|slot| &*slot.name == name.as_bytes())
-                    .map(|i| i + at)?;
-                at = found + 1;
-                mangled.get(found).and_then(|slot| slot.prefix.clone())
-            };
             for (name, entry) in rows {
-                let key = if let Some(prefix) = prefix_of(&name) {
+                let key = if let Some(prefix) = mangled_prefix(&mangled, &mut at, name) {
                     let bytes = [prefix.as_slice(), name.as_bytes()].concat();
                     Key::Str(PhpString::new(req, &bytes)?)
                 } else {
@@ -667,6 +653,70 @@ fn mangled_names(req: &Request, class: crate::api::values::ClassId) -> Vec<Mangl
             }
         })
         .collect()
+}
+
+/// The prefix the row named `name` carries, the declared names walked
+/// with a cursor rather than looked up: a class that declares `$p` over
+/// a parent's private `$p` has two slots of that name, and the second
+/// row is the second slot. `at` is the caller's place in that walk and
+/// stands where the row was found.
+fn mangled_prefix(mangled: &[MangledName], at: &mut usize, name: PhpString) -> Option<Vec<u8>> {
+    let found = mangled
+        .iter()
+        .skip(*at)
+        .position(|slot| &*slot.name == name.as_bytes())
+        .map(|i| i + *at)?;
+    *at = found + 1;
+    mangled.get(found).and_then(|slot| slot.prefix.clone())
+}
+
+/// `zend_get_properties_for(object, ZEND_PROP_PURPOSE_DEBUG)`, the rows
+/// a dumper reads: the class's `get_properties_for` first and
+/// `get_properties` where that slot is null, each declared name carrying
+/// the prefix `zend_mangle_property_name` puts before it, `\0*\0p` for a
+/// protected property and `\0C\0p` for a private one, so a reader
+/// unmangles the name as php's `print_hash` does and never asks the
+/// engine for a visibility beside it. Views, no owner taken, and a
+/// mangled name is interned as php's is, so a second walk of the same
+/// object allocates nothing.
+///
+/// ```php
+/// class A { public $a = 1; protected $b = 2; private $c = 3; }
+/// class B extends A { private $c = 4; }
+/// print_r(new B);
+/// ```
+/// ```expect
+/// B Object
+/// (
+///     [a] => 1
+///     [b:protected] => 2
+///     [c:A:private] => 3
+///     [c:B:private] => 4
+/// )
+/// ```
+pub(crate) fn debug_properties(
+    req: &mut Request,
+    object: PhpObject,
+) -> Result<Vec<(PhpString, Value)>, Thrown> {
+    let table = req.object_handlers(object.heap());
+    let rows = match table.get_properties_for(req, object, PropertyPurpose::Debug)? {
+        Some(rows) => rows,
+        None => table.get_properties(req, object)?,
+    };
+    let mangled = mangled_names(req, object.class());
+    let mut at = 0;
+    let mut out = Vec::with_capacity(rows.len());
+    for (name, entry) in rows {
+        let name = match mangled_prefix(&mangled, &mut at, name) {
+            Some(prefix) => {
+                let bytes = [prefix.as_slice(), name.as_bytes()].concat();
+                req.interned(&bytes)?
+            }
+            None => name,
+        };
+        out.push((name, entry));
+    }
+    Ok(out)
 }
 
 /// `zend_cast_zval_to_object` (`Z/Zend/zend_execute.h:225`) under the

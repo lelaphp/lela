@@ -141,29 +141,17 @@ pub fn to_double(req: &mut Request, value: &Value) -> Result<f64, Thrown> {
     }
 }
 
-/// `zval_get_string`: an object goes through its `__toString`, and one
-/// with none is php's `Error` for what could not be converted
-/// (`crate::ops::object_to_string`). The string handed back is the caller's to own, as `zval_get_string`'s
-/// is: a string value's own with one more owner (`zend_string_copy`),
-/// and a new string of the request's for everything else.
+/// `zval_get_string`, the kernel [`crate::ops::to_string`] through the
+/// face: an object goes through its `__toString`, and one with none is
+/// php's `Error` for what could not be converted; a float is
+/// `zend_double_to_str` at the request's `precision`, with php's
+/// warning where it converted a NAN; an array is php's warning and the
+/// word `Array`. The string handed back is the caller's to own, as
+/// `zval_get_string`'s is: a string value's own with one more owner
+/// (`zend_string_copy`), and a new string of the request's for
+/// everything else.
 pub fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, Thrown> {
-    match value.as_ref() {
-        ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) => PhpString::new(req, b""),
-        ValueRef::Bool(true) => PhpString::new(req, b"1"),
-        ValueRef::Int(n) => int_to_string(req, n),
-        ValueRef::Float(f) => float_to_string(req, f),
-        ValueRef::Str(s) => {
-            req.addref(value);
-            Ok(*s)
-        }
-        ValueRef::Array(_) => {
-            crate::api::raising::warning(req, "Array to string conversion");
-            PhpString::new(req, b"Array")
-        }
-        ValueRef::Resource(r) => PhpString::new(req, format!("Resource id #{}", r.id()).as_bytes()),
-        ValueRef::Object(o) => crate::ops::object_to_string(req, *o),
-        ValueRef::Reference(r) => to_string(req, &r.get()),
-    }
+    crate::ops::to_string(req, value)
 }
 
 /// `zval_get_number`: an `int` or a `float`.

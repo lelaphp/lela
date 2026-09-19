@@ -22,8 +22,9 @@
 //! not written as a value. The `ob_*` natives are `output`'s and the
 //! header natives `head`'s, each over the engine's layer; `sleep` is
 //! `basic_functions.c`'s, `strtoupper` and `strtolower` are `string.c`'s
-//! beside `trim`, and `array_unique` with the `SORT_*` constants is
-//! `array`'s.
+//! beside `trim`, `array_unique` with the `SORT_*` constants is
+//! `array`'s, and `print_r` is `var`'s, the one native so far over the
+//! renderer 8.5 keeps in Zend.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -40,6 +41,7 @@
 mod array;
 mod head;
 mod output;
+mod var;
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
 use php_ext::coerce::{coerce_param, is_type};
@@ -139,6 +141,7 @@ pub fn extension() -> Extension {
         .functions(array::natives())
         .functions(output::natives())
         .functions(head::natives())
+        .functions(var::natives())
         .functions(vec![(
             declared(b"sleep", &[parameter(b"seconds", Type::Int)], Type::Int),
             sleep,
@@ -1251,6 +1254,19 @@ fn long_argument(req: &mut Request, position: u32) -> Result<i64, Thrown> {
     }
     let coerced = coerce_param(req, &given, &Type::Int, position)?;
     Ok(coerced.as_int().unwrap_or(0))
+}
+
+/// One `Z_PARAM_BOOL` of a native, the argument at `position` read off
+/// the call frame: `null` is the 8.1 deprecation and then `false`, and
+/// what is there is coerced as php coerces a bool parameter.
+fn bool_argument(req: &mut Request, position: u32) -> Result<bool, Thrown> {
+    let given = req.argument(position).unwrap_or_default();
+    if matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
+        arg_null_deprecated(req, position, "bool");
+        return Ok(false);
+    }
+    let coerced = coerce_param(req, &given, &Type::Bool, position)?;
+    Ok(coerced.as_bool().unwrap_or(false))
 }
 
 /// One declared parameter, by value, with no default.

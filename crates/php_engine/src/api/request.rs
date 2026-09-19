@@ -1196,7 +1196,7 @@ impl Request {
     /// An interned string of this request's heap, never refcounted, for
     /// a name the engine holds as bytes; the `Err` is the memory limit
     /// refusing the intern.
-    fn interned(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
+    pub(crate) fn interned(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
         let interned = self.heap.intern(bytes);
         self.fatal_of(interned).map(PhpString::of)
     }

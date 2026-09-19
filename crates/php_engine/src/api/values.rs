@@ -646,6 +646,17 @@ impl PhpObject {
         req.object_entries(self.0)
     }
 
+    /// The properties a dumper reads, `zend_get_properties_for` under
+    /// `ZEND_PROP_PURPOSE_DEBUG`: the declared slots that hold a value
+    /// in slot order and then the dynamic table, each name carrying the
+    /// prefix `zend_mangle_property_name` puts before it, `\0*\0p` for a
+    /// protected property and `\0C\0p` for a private one. Views, no
+    /// owner taken, and a mangled name is interned as php's is; the
+    /// `Err` is the memory limit refusing the intern.
+    pub fn debug_props(&self, req: &mut Request) -> Result<Vec<(PhpString, Value)>, Thrown> {
+        crate::ops::debug_properties(req, *self)
+    }
+
     /// The properties as array entries, mangled names and all, what
     /// `(array)` produces: views, no owner taken.
     pub fn entries(&self, req: &mut Request) -> Result<Vec<(Key, Value)>, Thrown> {
@@ -700,6 +711,25 @@ impl PhpObject {
     /// reaches it.
     pub fn set_slot(&self, req: &mut Request, index: u32, value: Value) -> Result<(), Thrown> {
         req.write_declared_slot(self.0, index, value)
+    }
+
+    /// `GC_IS_RECURSIVE`: whether a walk is already inside this object,
+    /// which is what a dumper prints `*RECURSION*` for.
+    #[must_use]
+    pub fn is_recursive(&self) -> bool {
+        self.0.is_recursive()
+    }
+
+    /// `GC_PROTECT_RECURSION`: the mark a walk sets before it reads the
+    /// object's properties.
+    pub fn protect(&self) {
+        self.0.protect();
+    }
+
+    /// `GC_UNPROTECT_RECURSION`: the mark cleared on the way out, so an
+    /// object reached twice side by side is printed in full both times.
+    pub fn unprotect(&self) {
+        self.0.unprotect();
     }
 
     /// The native payload, as `T`, borrowed for as long as the request
