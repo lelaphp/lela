@@ -714,6 +714,26 @@ pub(crate) enum Expr {
         op: BinaryOp,
         value: Child,
     },
+    /// `$a[k] op= expr` and `$a[] op= expr`, php's `ZEND_AST_ASSIGN_OP`
+    /// over a `ZEND_AST_DIM` with the operator in `attr`, which
+    /// `zend_compile_compound_assign` turns the chain's last delayed
+    /// opline into `ASSIGN_DIM_OP` for. The target is the dimension
+    /// written, as [`Expr::AssignDim`] carries it.
+    AssignDimOp {
+        target: Child,
+        op: BinaryOp,
+        value: Child,
+    },
+    /// `$o->p op= expr`, php's `ZEND_AST_ASSIGN_OP` over a
+    /// `ZEND_AST_PROP` with the operator in `attr`, which
+    /// `zend_compile_compound_assign` turns the delayed fetch into
+    /// `ASSIGN_OBJ_OP` for, the cache slot moved onto the `OP_DATA`.
+    AssignObjOp {
+        object: Child,
+        name: Vec<u8>,
+        op: BinaryOp,
+        value: Child,
+    },
     /// `++C::$p`, `--C::$p`, `C::$p++` and `C::$p--`, php's four
     /// `ZEND_AST_{PRE,POST}_{INC,DEC}` over a `ZEND_AST_STATIC_PROP`,
     /// which `zend_compile_pre_incdec` and `zend_compile_post_incdec`
@@ -825,7 +845,8 @@ impl Drop for Child {
                 | Expr::AssignOp { value, .. }
                 | Expr::AssignCoalesce { value, .. } => value.take(),
                 Expr::Isset { var, .. } => var.take(),
-                Expr::AssignProp { object, value, .. } => {
+                Expr::AssignProp { object, value, .. }
+                | Expr::AssignObjOp { object, value, .. } => {
                     drop(value);
                     object.take()
                 }
@@ -833,7 +854,7 @@ impl Drop for Child {
                     drop(index);
                     container.take()
                 }
-                Expr::AssignDim { target, value } => {
+                Expr::AssignDim { target, value } | Expr::AssignDimOp { target, value, .. } => {
                     drop(value);
                     target.take()
                 }
@@ -3361,11 +3382,10 @@ impl Reader<'_> {
         Ok(Child::at(left.line(), Expr::Binary { op, left, right }))
     }
 
-    /// One `variable op= expr`, the operator read: a variable and a
-    /// `static` property are the two arms of
-    /// `zend_compile_compound_assign`'s switch this compiler emits; the
-    /// other two, a dimension and a property, are `ASSIGN_DIM_OP` and
-    /// `ASSIGN_OBJ_OP` and are refused where they stand.
+    /// One `variable op= expr`, the operator read: the four arms of
+    /// `zend_compile_compound_assign`'s switch, a variable, a `static`
+    /// property, a dimension and a property, each its own node here
+    /// where php keeps one `ZEND_AST_ASSIGN_OP` over four targets.
     ///
     /// php's `zend_ensure_writable_variable` refuses everything else
     /// before the switch is reached, and the grammar takes only a
@@ -3399,8 +3419,35 @@ impl Reader<'_> {
                     },
                 ))
             }
-            _ => Err(self
-                .trouble("a compound assignment to what is no variable or `static` property this compiler cannot read yet")),
+            // Its `ZEND_AST_DIM` arm.
+            dim @ Expr::Dim { .. } => {
+                self.bump(width);
+                Ok(Child::at(
+                    line,
+                    Expr::AssignDimOp {
+                        target: Child::at(line, dim),
+                        op,
+                        value: self.assigned()?,
+                    },
+                ))
+            }
+            // Its `ZEND_AST_PROP` arm. `ZEND_AST_NULLSAFE_PROP` shares
+            // it in php, `$o?->p += 1`, which this reader has not.
+            Expr::Prop { object, name } => {
+                self.bump(width);
+                Ok(Child::at(
+                    line,
+                    Expr::AssignObjOp {
+                        object,
+                        name,
+                        op,
+                        value: self.assigned()?,
+                    },
+                ))
+            }
+            _ => Err(self.trouble(
+                "a compound assignment to what is no variable this compiler cannot read yet",
+            )),
         }
     }
 

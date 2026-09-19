@@ -2484,7 +2484,9 @@ impl Emit<'_> {
             | Expr::AssignOp { .. }
             | Expr::AssignCoalesce { .. }
             | Expr::AssignDim { .. }
+            | Expr::AssignDimOp { .. }
             | Expr::AssignProp { .. }
+            | Expr::AssignObjOp { .. }
             | Expr::AssignStaticProp { .. }
             | Expr::AssignStaticPropOp { .. }
             | Expr::StaticPropStep { .. }
@@ -4206,6 +4208,13 @@ impl Emit<'_> {
                 op,
                 value,
             } => self.assign_static_prop_op(class, name, *op, value),
+            Expr::AssignDimOp { target, op, value } => self.assign_dim_op(target, *op, value),
+            Expr::AssignObjOp {
+                object,
+                name,
+                op,
+                value,
+            } => self.assign_obj_op(object, name, *op, value),
             Expr::StaticPropStep { class, name, step } => self.static_prop_step(class, name, *step),
             Expr::AssignDim { target, value } => self.assign_dim(target, value),
             Expr::AssignRef { target, source } => self.assign_ref(target, source),
@@ -5341,6 +5350,120 @@ impl Emit<'_> {
         Ok(Where::Temporary(out))
     }
 
+    /// `zend_compile_compound_assign`, the `ZEND_AST_DIM` arm
+    /// (`Z/Zend/zend_compile.c:3659`): the chain compiled delayed under
+    /// `BP_VAR_RW` (`zend_delayed_compile_dim`), the value after it with
+    /// `zend_compile_expr_with_potential_assign_to_self`, which the
+    /// plain variable arm does not use, and the one delayed opline laid
+    /// down with its opcode set to `ASSIGN_DIM_OP`, the operator in
+    /// `extended_value` and its `result` a temporary. The value follows
+    /// on an `OP_DATA` and carries no cache slot, since a dimension
+    /// fetch has none to move.
+    ///
+    /// A chain of more than one dimension is php's `FETCH_DIM_RW` for
+    /// every link but the last, which no handler serves yet, so it is
+    /// refused here rather than compiled to an opline the engine stops
+    /// on (#504).
+    fn assign_dim_op(
+        &mut self,
+        target: &Child,
+        op: BinaryOp,
+        value: &Child,
+    ) -> Result<Where, CompileError> {
+        let (container, links) = self.dim_chain(target, Fetch::Write)?;
+        let [last] = links.as_slice() else {
+            return Err(self.fatal(
+                "a compound assignment to a dimension under a dimension, whose links are `FETCH_DIM_RW`, this compiler cannot read yet",
+            ));
+        };
+        // `zend_delayed_emit_op` stamped the fetch's line where the
+        // fetch stood, as [`Self::assign_dim`] keeps it.
+        let line = self.line;
+        let value = self.assigned_value(target, value)?;
+        let (data_type, data) = self.operand(value);
+        let (op1_type, op1) = container;
+        self.line = line;
+        self.push(Opline {
+            opcode: Opcode::AssignDimOp,
+            op1_type,
+            op1,
+            op2_type: last.kind,
+            op2: last.at,
+            out_type: OperandKind::Tmp,
+            out: last.out,
+            extended_value: u32::from(Self::opcode_of(op) as u8),
+            ..Opline::default()
+        });
+        self.push(Opline {
+            opcode: Opcode::OpData,
+            op1_type: data_type,
+            op1: data,
+            ..Opline::default()
+        });
+        Ok(Where::Temporary(last.out))
+    }
+
+    /// `zend_compile_compound_assign`, the `ZEND_AST_PROP` arm
+    /// (`Z/Zend/zend_compile.c:3672`): the fetch compiled delayed under
+    /// `BP_VAR_RW` (`zend_delayed_compile_prop`), the value after it,
+    /// and the one delayed opline laid down with its opcode set to
+    /// `ASSIGN_OBJ_OP` and its `result` a temporary. The operator takes
+    /// the place the cache slot held in `extended_value` and the slot
+    /// moves onto the `OP_DATA`, as the `static` property arm moves it
+    /// ([`Self::assign_static_prop_op`]).
+    ///
+    /// A property under a property is php's `FETCH_OBJ_RW` for every
+    /// fetch but the last, which no handler serves yet, so it is
+    /// refused here rather than compiled to an opline the engine stops
+    /// on (#504).
+    fn assign_obj_op(
+        &mut self,
+        object: &Child,
+        name: &[u8],
+        op: BinaryOp,
+        value: &Child,
+    ) -> Result<Where, CompileError> {
+        if matches!(&**object, Expr::Prop { .. }) {
+            return Err(self.fatal(
+                "a compound assignment to a property under a property, whose fetch is `FETCH_OBJ_RW`, this compiler cannot read yet",
+            ));
+        }
+        if !matches!(&**object, Expr::Var(_) | Expr::This) {
+            return Err(self.fatal(
+                "a compound assignment to a property over what is no variable this compiler cannot read yet",
+            ));
+        }
+        let (op1_type, op1) = self.receiver(object)?;
+        let name = self.string(name)?;
+        let name_at = self.literal(name);
+        let out = self.temporary();
+        let slots = self.cache_slots(3);
+        // The delayed fetch's line, as [`Self::assign_prop`] keeps it.
+        let line = self.line;
+        let value = self.expr(value)?;
+        let (data_type, data) = self.operand(value);
+        self.line = line;
+        self.push(Opline {
+            opcode: Opcode::AssignObjOp,
+            op1_type,
+            op1,
+            op2_type: OperandKind::Const,
+            op2: name_at,
+            out_type: OperandKind::Tmp,
+            out,
+            extended_value: u32::from(Self::opcode_of(op) as u8),
+            ..Opline::default()
+        });
+        self.push(Opline {
+            opcode: Opcode::OpData,
+            op1_type: data_type,
+            op1: data,
+            extended_value: slots,
+            ..Opline::default()
+        });
+        Ok(Where::Temporary(out))
+    }
+
     /// `zend_compile_compound_assign`, the `ZEND_AST_STATIC_PROP` arm
     /// (`Z/Zend/zend_compile.c:3643`): the fetch compiled delayed under
     /// `BP_VAR_RW`, the value after it, and the one delayed opline laid
@@ -6244,7 +6367,9 @@ impl Emit<'_> {
             | Expr::Assign { .. }
             | Expr::AssignOp { .. }
             | Expr::AssignDim { .. }
+            | Expr::AssignDimOp { .. }
             | Expr::AssignProp { .. }
+            | Expr::AssignObjOp { .. }
             | Expr::AssignStaticProp { .. }
             | Expr::AssignStaticPropOp { .. }
             | Expr::StaticPropStep { .. }
@@ -7782,6 +7907,12 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Child) {
             object,
             name: _,
             value,
+        }
+        | Expr::AssignObjOp {
+            object,
+            name: _,
+            value,
+            ..
         } => {
             implicit_uses(names, object);
             implicit_uses(names, value);
@@ -7818,7 +7949,7 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Child) {
             implicit_uses_of_any(names, then.as_ref());
             implicit_uses(names, otherwise);
         }
-        Expr::AssignDim { target, value } => {
+        Expr::AssignDim { target, value } | Expr::AssignDimOp { target, value, .. } => {
             implicit_uses(names, target);
             implicit_uses(names, value);
         }

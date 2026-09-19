@@ -3814,6 +3814,42 @@ mod tests {
         );
     }
 
+    /// `zend_compile_compound_assign`, the `ZEND_AST_DIM` and
+    /// `ZEND_AST_PROP` arms (#498): the chain's last delayed opline and
+    /// the delayed property fetch, each with its opcode set to
+    /// `ASSIGN_DIM_OP` or `ASSIGN_OBJ_OP`, the operator where the
+    /// dimension has no cache slot and where the property's slot stood,
+    /// and an `OP_DATA` after it carrying the value; the property's
+    /// three slots move onto that `OP_DATA`, which the dump does not
+    /// print. `$a[] .= "x"` is the append, `NEXT` in the dump, and the
+    /// one the `$b` reads is the temporary `zend_do_free` leaves
+    /// standing. The dump is the oracle's under `[regime.dump]` at
+    /// 8.5.9.
+    #[test]
+    fn a_compound_assignment_to_a_dimension_and_to_a_property_are_the_oracle_s_oplines() {
+        assert_eq!(
+            dump_of(b"<?php $a = [1]; $a[0] += 1; $a[] .= \"x\"; $o->p |= 3; $b = $a[2] **= 2;"),
+            main_dump(
+                11,
+                3,
+                6,
+                "0000 ASSIGN CV0($a) array(...)\n\
+                 0001 ASSIGN_DIM_OP (ADD) CV0($a) int(0)\n\
+                 0002 OP_DATA int(1)\n\
+                 0003 ASSIGN_DIM_OP (CONCAT) CV0($a) NEXT\n\
+                 0004 OP_DATA string(\"x\")\n\
+                 0005 ASSIGN_OBJ_OP (BW_OR) CV1($o) string(\"p\")\n\
+                 0006 OP_DATA int(3)\n\
+                 0007 T7 = ASSIGN_DIM_OP (POW) CV0($a) int(2)\n\
+                 0008 OP_DATA int(2)\n\
+                 0009 ASSIGN CV2($b) T7\n\
+                 0010 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    7: 0008 - 0009 (tmp/var)\n"
+            )
+        );
+    }
+
     /// `zend_compile_const`'s second half (#380), the oracle's dump
     /// under `[regime.dump]` at 8.5.9: a name `zend_try_ct_eval_const`
     /// cannot fold is `FETCH_CONSTANT` into a temporary over the name
@@ -3874,10 +3910,8 @@ mod tests {
             Some("a statement this compiler cannot read yet")
         );
         assert_eq!(
-            refused(b"<?php $a[0] += 1;").as_deref(),
-            Some(
-                "a compound assignment to what is no variable or `static` property this compiler cannot read yet"
-            )
+            refused(b"<?php $this += 1;").as_deref(),
+            Some("a compound assignment to what is no variable this compiler cannot read yet")
         );
         assert_eq!(
             refused(b"<?php C::$$p;").as_deref(),

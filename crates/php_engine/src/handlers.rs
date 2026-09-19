@@ -6809,6 +6809,533 @@ pub(crate) fn assign_dim<T: Tier>(
     Ok(Stepped::Same(frame))
 }
 
+/// The two oplines a compound assignment to a place is, and the kernel
+/// its operator names: what every arm of `ASSIGN_DIM_OP` and
+/// `ASSIGN_OBJ_OP` is handed beside the request and the frame.
+#[derive(Clone, Copy)]
+struct Compound<'a> {
+    op: &'a Opline,
+    data: Opline,
+    kernel: BinaryKernel,
+}
+
+/// The entry a compound assignment to a dimension lands in, php's
+/// `zend_fetch_dimension_address_inner_RW` (`Z/Zend/zend_execute.c`):
+/// the entry at the key, laid down holding `null` where the table has
+/// none, and php's `Undefined array key` warning before it, which is
+/// the one thing the `BP_VAR_W` walk ([`write_entry`]) does not raise.
+/// The `UNUSED` dimension of `$a[] op= v` is an entry appended with
+/// nothing in it (`zend_hash_next_index_insert(ht,
+/// &EG(uninitialized_zval))`), which raises no warning at all.
+fn rw_entry(
+    req: &mut Request,
+    array: PhpArray,
+    dim: Option<&Value>,
+    constant: bool,
+) -> Result<Result<Option<php_heap::ZvalRef>, Thrown>, Fatal> {
+    let Some(dim) = dim else {
+        return Ok(req.array_next_entry(array.heap()));
+    };
+    let key = match crate::ops::array_offset(req, dim, constant) {
+        Ok(key) => key,
+        Err(thrown) => return Ok(Err(thrown)),
+    };
+    if array.heap().get(key).is_none() {
+        let message = match key {
+            php_heap::Key::Long(n) => format!("Undefined array key {n}"),
+            php_heap::Key::Str(s) => format!(
+                "Undefined array key \"{}\"",
+                String::from_utf8_lossy(s.bytes())
+            ),
+        };
+        crate::api::raising::warning(req, &message);
+        if req.is_pending() {
+            return Ok(Err(Thrown::of(None)));
+        }
+    }
+    Ok(req.array_lookup(array.heap(), key))
+}
+
+/// `ZEND_ASSIGN_DIM_OP` (`Z/Zend/zend_vm_def.h:1156`), `$a[k] op= v`
+/// and `$a[] op= v`, two oplines: this one names the container in
+/// `op1`, the dimension in `op2` and the operator in `extended_value`,
+/// and the `OP_DATA` after it carries the value, so the handler steps
+/// over both. A dimension fetch has no cache slot, so the `OP_DATA`
+/// carries none where `ASSIGN_OBJ_OP`'s carries one.
+///
+/// The container is walked as every dimension write walks it
+/// ([`write_container`]): a reference followed, an array separated,
+/// `null`, an unwritten variable and `false` made into a new array with
+/// php's deprecation for the `false`. The entry is [`rw_entry`]'s,
+/// which is the `BP_VAR_W` walk with php's `Undefined array key`
+/// warning before it, and the operation is php's own binary kernel over
+/// what the entry holds and the value, so `$a[0] /= 0` raises exactly
+/// what `/` raises and the entry keeps what it held. What landed is
+/// what the temporary takes under `RETURN_VALUE_USED`, which a cell
+/// carrying types may have made something else.
+///
+/// An object is `zend_binary_assign_op_obj_dim`
+/// (`Z/Zend/zend_execute.c:1638`): `offsetGet` under `BP_VAR_R`, the
+/// kernel over what it answered, and `offsetSet` with what it made, with
+/// php's `Error` `Cannot use object of type C as array` for a class
+/// that is no `ArrayAccess`. A string is
+/// `zend_binary_assign_op_dim_slow`: `Cannot use assign-op operators
+/// with string offsets` for a dimension and `[] operator not supported
+/// for strings` for the append. A number, `true` and a resource are
+/// `Cannot use a scalar value as an array`, which the walk itself
+/// raises.
+///
+/// ```php
+/// $a = [1];
+/// $a[0] += 2;
+/// $a[0] .= "x";
+/// $a[] .= "z";
+/// var_dump($a);
+/// $b = [];
+/// $b["k"] += 5;
+/// var_dump($b);
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   string(2) "3x"
+///   [1]=>
+///   string(1) "z"
+/// }
+///
+/// Warning: Undefined array key "k" in %s on line 8
+/// array(1) {
+///   ["k"]=>
+///   int(5)
+/// }
+/// ```
+///
+/// A variable nothing wrote becomes the array, which is the warning for
+/// the variable and then the one for the key; a `false` takes php's
+/// deprecation before both.
+///
+/// ```php
+/// $u[0] += 1;
+/// var_dump($u);
+/// $f = false;
+/// $f[0] += 1;
+/// var_dump($f);
+/// ```
+/// ```expect
+/// Warning: Undefined variable $u in %s on line 2
+///
+/// Warning: Undefined array key 0 in %s on line 2
+/// array(1) {
+///   [0]=>
+///   int(1)
+/// }
+///
+/// Deprecated: Automatic conversion of false to array is deprecated in %s on line 5
+///
+/// Warning: Undefined array key 0 in %s on line 5
+/// array(1) {
+///   [0]=>
+///   int(1)
+/// }
+/// ```
+///
+/// A string offset, an append over a string and a scalar are php's
+/// three `Error`s, and an `ArrayAccess` is `offsetGet` and then
+/// `offsetSet`:
+///
+/// ```php
+/// $s = "abc";
+/// try { $s[0] += 1; } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// try { $s[] .= "q"; } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// $n = 5;
+/// try { $n[0] += 1; } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// class A implements ArrayAccess {
+///     public function offsetExists($o): bool { return true; }
+///     public function offsetGet($o): mixed { echo "get $o\n"; return 1; }
+///     public function offsetSet($o, $v): void { echo "set $o = "; var_dump($v); }
+///     public function offsetUnset($o): void {}
+/// }
+/// $x = new A;
+/// $x[2] += 10;
+/// $o = new stdClass;
+/// try { $o[0] += 1; } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Error: Cannot use assign-op operators with string offsets
+/// Error: [] operator not supported for strings
+/// Error: Cannot use a scalar value as an array
+/// get 2
+/// set 2 = int(11)
+/// Error: Cannot use object of type stdClass as array
+/// ```
+pub(crate) fn assign_dim_op<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let Some(kernel) = binary_op_of(op.extended_value) else {
+        return Err(Fatal::Error(format!(
+            "InternalError: ZEND_ASSIGN_DIM_OP over the operator {}, which is no binary operation",
+            op.extended_value
+        )));
+    };
+    let at = req.vm().opline(frame);
+    let Some(data) =
+        exec::opline_at(code, at.saturating_add(1)).filter(|next| next.opcode == Opcode::OpData)
+    else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ASSIGN_DIM_OP with no OP_DATA after it",
+        )));
+    };
+    let data = *data;
+    let step = Compound { op, data, kernel };
+    let Some(place) = write_place(req, frame, code, op.op1_type, op.op1) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ASSIGN_DIM_OP over a constant or a temporary, which php compiles no write over",
+        )));
+    };
+    // `ZVAL_UNDEFINED_OP1()`: a CV nothing wrote is the warning php
+    // raises in the arm that makes the array, before the array is made
+    // and so before the key's own warning. `ZEND_ASSIGN_DIM` raises
+    // none, since a write alone creates.
+    if op.op1_type == OperandKind::Cv && req.slot(frame, op.op1).tag() == TypeTag::Undef {
+        let undefined = exec::operand(req, frame, code, OperandKind::Cv, op.op1);
+        req.release(undefined);
+    }
+    let written = match write_container(req, place) {
+        Ok(Container::Array(array)) => {
+            let dim = (op.op2_type != OperandKind::Unused)
+                .then(|| exec::operand(req, frame, code, op.op2_type, op.op2));
+            match rw_entry(req, array, dim.as_ref(), op.op2_type == OperandKind::Const)? {
+                Ok(Some(entry)) => stepped_entry(req, frame, code, step, entry),
+                Ok(None) => Err(crate::api::raising::throw(
+                    req,
+                    "Error",
+                    "Cannot add element to the array as the next element is already occupied",
+                )),
+                Err(thrown) => Err(thrown),
+            }
+        }
+        Ok(Container::Object(object)) => binary_assign_op_obj_dim(req, frame, code, step, object),
+        Ok(Container::Text(_)) => Err(crate::api::raising::throw(
+            req,
+            "Error",
+            if op.op2_type == OperandKind::Unused {
+                "[] operator not supported for strings"
+            } else {
+                "Cannot use assign-op operators with string offsets"
+            },
+        )),
+        Err(thrown) => Err(thrown),
+    };
+    if op.op2_type != OperandKind::Unused {
+        exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    }
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    if let Err(thrown) = written {
+        exec::free_operand(req, frame, code, data.op1_type, data.op1);
+        write_out(req, frame, code, op, &Value::null());
+        return threw(req, frame, &thrown);
+    }
+    req.vm_mut().jump(frame, at.saturating_add(2));
+    Ok(Stepped::Same(frame))
+}
+
+/// The kernel over what one place holds and the `OP_DATA`'s value, and
+/// the write back into that place: php's `zend_binary_op(var_ptr,
+/// var_ptr, value)` with the reference followed and the cell's types
+/// held to where it carries any ([`assign_to_place`], which is
+/// `zend_binary_assign_op_typed_ref`). What landed is what the
+/// temporary takes under `RETURN_VALUE_USED`, and the value operand is
+/// given up either way, as `FREE_OP_DATA` gives it up.
+fn stepped_entry(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    step: Compound<'_>,
+    entry: php_heap::ZvalRef,
+) -> Result<(), Thrown> {
+    let Compound { op, data, kernel } = step;
+    let value = exec::operand(req, frame, code, data.op1_type, data.op1);
+    let held = exec::value_of(entry.read()).deref();
+    let computed = kernel(req, &held, &value);
+    exec::free_operand(req, frame, code, data.op1_type, data.op1);
+    let stepped = computed?;
+    let strict = req.caller_strict_types();
+    let (landed, garbage) = assign_to_place(req, entry, stepped, strict)?;
+    write_out(req, frame, code, op, &landed);
+    req.release(garbage);
+    Ok(())
+}
+
+/// `zend_binary_assign_op_obj_dim` (`Z/Zend/zend_execute.c:1638`), the
+/// arm `ZEND_ASSIGN_DIM_OP` takes over an object: `offsetGet` with the
+/// dimension under `BP_VAR_R`, the kernel over what it answered and the
+/// value, and `offsetSet` with what it made. php's `Error` `Cannot use
+/// object of type C as array` is what a class that is no `ArrayAccess`
+/// raises, and the temporary takes what the operation made and
+/// never what `offsetSet` returned.
+fn binary_assign_op_obj_dim(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    step: Compound<'_>,
+    object: PhpObject,
+) -> Result<(), Thrown> {
+    let Compound { op, data, kernel } = step;
+    let dim = object_dim(req, frame, code, op);
+    let value = exec::operand(req, frame, code, data.op1_type, data.op1);
+    let read = req.read_dimension(object, dim.as_ref());
+    let held = match read {
+        Ok(held) => held,
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, data.op1_type, data.op1);
+            return Err(thrown);
+        }
+    };
+    let computed = kernel(req, &held, &value);
+    req.release(held);
+    exec::free_operand(req, frame, code, data.op1_type, data.op1);
+    let stepped = computed?;
+    let written = req.write_dimension(object, dim.as_ref(), stepped);
+    if let Err(thrown) = written {
+        req.release(stepped);
+        return Err(thrown);
+    }
+    write_out(req, frame, code, op, &stepped);
+    req.release(stepped);
+    Ok(())
+}
+
+/// `ZEND_ASSIGN_OBJ_OP` (`Z/Zend/zend_vm_def.h:1008`), `$o->p op= v`,
+/// two oplines: this one names the receiver in `op1`, the property in
+/// `op2` and the operator in `extended_value`, and the `OP_DATA` after
+/// it carries the value and the three cache slots the fetch's own
+/// `extended_value` held, so the handler steps over both.
+///
+/// php addresses the property through `get_property_ptr_ptr` under
+/// `BP_VAR_RW` and works over the slot in place, falling back to
+/// `read_property` and `write_property` where a class hands out no
+/// place (`zend_assign_op_overloaded_property`). Here a property the
+/// class declared is the slot in place, held to its declared type where
+/// it carries one (`zend_binary_assign_op_typed_prop`), and every other
+/// name is the pair of handlers, which is php's overloaded arm and
+/// serves `__get` and `__set` once this engine has them (#503). A name
+/// no class declared and no object holds yet is created by the write,
+/// so this engine raises its `Undefined property` warning before the
+/// deprecation for the dynamic property where php raises the
+/// deprecation first (#505).
+///
+/// ```php
+/// class C { public $p = 1; public int $n = 2; private $q = 3; }
+/// $o = new C;
+/// $o->p |= 3;
+/// $o->n += 1;
+/// var_dump($o->p, $o->n);
+/// try { $o->q .= "x"; } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// try { $o->n .= "zz"; } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// var_dump($o->n);
+/// ```
+/// ```expect
+/// int(3)
+/// int(3)
+/// Error: Cannot access private property C::$q
+/// TypeError: Cannot assign string to property C::$n of type int
+/// int(3)
+/// ```
+///
+/// A receiver that is no object is php's `Error`, the value never read:
+///
+/// ```php
+/// $u = null;
+/// try { $u->w += 1; } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// $i = 3;
+/// try { $i->w += 1; } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Error: Attempt to assign property "w" on null
+/// Error: Attempt to assign property "w" on int
+/// ```
+pub(crate) fn assign_obj_op<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let Some(kernel) = binary_op_of(op.extended_value) else {
+        return Err(Fatal::Error(format!(
+            "InternalError: ZEND_ASSIGN_OBJ_OP over the operator {}, which is no binary operation",
+            op.extended_value
+        )));
+    };
+    let name = match op.op2_type {
+        OperandKind::Const => exec::constant(code, ConstIdx(op.op2)),
+        _ => {
+            return Err(Fatal::Error(String::from(
+                "InternalError: ZEND_ASSIGN_OBJ_OP over a property named at run time",
+            )));
+        }
+    };
+    let at = req.vm().opline(frame);
+    let Some(data) =
+        exec::opline_at(code, at.saturating_add(1)).filter(|next| next.opcode == Opcode::OpData)
+    else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ASSIGN_OBJ_OP with no OP_DATA after it",
+        )));
+    };
+    let data = *data;
+    let step = Compound { op, data, kernel };
+    let container =
+        exec::container(req, frame, code, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?.deref();
+    let written = if let Some(object) = container.as_object().copied() {
+        step_property(req, frame, code, step, object, &name)?
+    } else {
+        let shown_name = String::from_utf8_lossy(name.as_str_bytes().unwrap_or_default());
+        let shown = crate::ops::value_name(req, &container.undef_as_null());
+        let thrown = crate::api::raising::throw(
+            req,
+            "Error",
+            &format!("Attempt to assign property \"{shown_name}\" on {shown}"),
+        );
+        exec::free_operand(req, frame, code, data.op1_type, data.op1);
+        write_out(req, frame, code, op, &Value::null());
+        Err(thrown)
+    };
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    if let Err(thrown) = written {
+        return threw(req, frame, &thrown);
+    }
+    req.vm_mut().jump(frame, at.saturating_add(2));
+    Ok(Stepped::Same(frame))
+}
+
+/// `ASSIGN_OBJ_OP`'s body over an object: a property the class declared
+/// is the slot in place, the kernel over what it holds and the value,
+/// and the write back through [`Request::assign_declared_slot`], held
+/// to the declared type where the slot carries one; every other name is
+/// `read_property` and `write_property`, php's
+/// `zend_assign_op_overloaded_property`.
+fn step_property(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    step: Compound<'_>,
+    object: PhpObject,
+    name: &Value,
+) -> Result<Result<(), Thrown>, Fatal> {
+    let Compound { op, data, kernel } = step;
+    let bytes = name.as_str_bytes().unwrap_or_default().to_vec();
+    let placed = match req.declared_slot_for_write(object.class(), &bytes, "modify") {
+        Ok(placed) => placed,
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, data.op1_type, data.op1);
+            write_out(req, frame, code, op, &Value::null());
+            return Ok(Err(thrown));
+        }
+    };
+    let Some((slot, typed)) = placed else {
+        let Some(key) = name.as_php_string().copied() else {
+            return Err(Fatal::Error(String::from(
+                "InternalError: ZEND_ASSIGN_OBJ_OP over a property whose name is no string",
+            )));
+        };
+        return Ok(overloaded_property_step(
+            req, frame, code, step, object, key,
+        ));
+    };
+    let value = exec::operand(req, frame, code, data.op1_type, data.op1);
+    let held = exec::value_of(object.heap().slot(slot))
+        .deref()
+        .undef_as_null();
+    let computed = kernel(req, &held, &value);
+    exec::free_operand(req, frame, code, data.op1_type, data.op1);
+    let stepped = match computed {
+        Ok(stepped) => stepped,
+        Err(thrown) => {
+            write_out(req, frame, code, op, &Value::null());
+            return Ok(Err(thrown));
+        }
+    };
+    if !typed {
+        write_out(req, frame, code, op, &stepped);
+        req.assign_declared_slot(object.heap(), slot, stepped);
+        return Ok(Ok(()));
+    }
+    // `zend_binary_assign_op_typed_prop`: what the kernel made is held
+    // to the declared type under this frame's own regime, and what
+    // landed is what the temporary takes.
+    let Some((declaring, ty)) = req.declared_property_type(object.class(), &bytes) else {
+        req.release(stepped);
+        let shown = String::from_utf8_lossy(&bytes);
+        return Err(Fatal::Error(format!(
+            "InternalError: ZEND_ASSIGN_OBJ_OP placed the typed property ${shown}, whose declared type the class does not carry"
+        )));
+    };
+    let strict = req.caller_strict_types();
+    let landed =
+        match crate::ops::verify_property_type(req, &stepped, &ty, declaring, &bytes, strict) {
+            Ok(None) => stepped,
+            Ok(Some(coerced)) => {
+                req.release(stepped);
+                coerced
+            }
+            Err(thrown) => {
+                req.release(stepped);
+                write_out(req, frame, code, op, &Value::null());
+                return Ok(Err(thrown));
+            }
+        };
+    write_out(req, frame, code, op, &landed);
+    req.assign_declared_slot(object.heap(), slot, landed);
+    Ok(Ok(()))
+}
+
+/// `zend_assign_op_overloaded_property` (`Z/Zend/zend_execute.c:2429`),
+/// the arm a class that hands out no place takes: `read_property` under
+/// `BP_VAR_R`, the kernel over what it answered and the value, and
+/// `write_property` with what it made, which is what the temporary takes
+/// under `RETURN_VALUE_USED`.
+fn overloaded_property_step(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    step: Compound<'_>,
+    object: PhpObject,
+    name: crate::api::values::PhpString,
+) -> Result<(), Thrown> {
+    let Compound { op, data, kernel } = step;
+    let value = exec::operand(req, frame, code, data.op1_type, data.op1);
+    let table = req.object_handlers(object.heap());
+    let held = match table.read_property(req, object, name.as_bytes(), PropertyRead::Warning) {
+        Ok(held) => held,
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, data.op1_type, data.op1);
+            write_out(req, frame, code, op, &Value::null());
+            return Err(thrown);
+        }
+    };
+    let computed = kernel(req, &held, &value);
+    req.release(held);
+    exec::free_operand(req, frame, code, data.op1_type, data.op1);
+    let stepped = match computed {
+        Ok(stepped) => stepped,
+        Err(thrown) => {
+            write_out(req, frame, code, op, &Value::null());
+            return Err(thrown);
+        }
+    };
+    write_out(req, frame, code, op, &stepped);
+    req.addref(&stepped);
+    let table = req.object_handlers(object.heap());
+    let written = table.write_property(req, object, name, stepped);
+    if written.is_err() {
+        req.release(stepped);
+    }
+    written
+}
+
 /// `if (RETURN_VALUE_USED(opline)) ZVAL_COPY(EX_VAR(opline->result.var), value)`:
 /// the temporary `out` names one more owner of `value`, and nothing
 /// where the compiler marked the temporary `UNUSED`.
