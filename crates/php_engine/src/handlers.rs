@@ -1468,7 +1468,7 @@ fn verified_arg(
         return Ok(None);
     }
     if let Some(object) = argument.as_object()
-        && named_types(&ty).any(|name| {
+        && crate::ops::named_types(&ty).any(|name| {
             req.class_named(&name.0)
                 .is_some_and(|of| req.instance_of(object.class(), of))
         })
@@ -1480,22 +1480,6 @@ fn verified_arg(
         return Ok(Some(coerced));
     }
     Err(arg_type_error(req, frame, number, at, &ty, argument))
-}
-
-/// Every class name a declared type holds, in the order it was written:
-/// the one name of a class type, and each member of a union or an
-/// intersection that is one, which `zend_check_type_slow` walks with
-/// `ZEND_TYPE_LIST_FOREACH`.
-fn named_types(ty: &php_unit::decl::Type) -> Box<dyn Iterator<Item = &php_unit::decl::Name> + '_> {
-    use php_unit::decl::Type;
-    match ty {
-        Type::Named(name) => Box::new(std::iter::once(name)),
-        Type::Nullable(inner) => named_types(inner),
-        Type::Union(members) | Type::Intersection(members) => {
-            Box::new(members.iter().flat_map(named_types))
-        }
-        _ => Box::new(std::iter::empty()),
-    }
 }
 
 /// `ZEND_RECV_VARIADIC` (`Z/Zend/zend_vm_def.h:5773`): the arguments
@@ -1686,7 +1670,7 @@ pub(crate) fn verify_return_type<T: Tier>(
         return Ok(advance(req, frame));
     }
     if let Some(object) = returned.as_object()
-        && named_types(&ty).any(|name| {
+        && crate::ops::named_types(&ty).any(|name| {
             req.class_named(&name.0)
                 .is_some_and(|of| req.instance_of(object.class(), of))
         })
@@ -5169,9 +5153,38 @@ fn assign_property(
         }
     };
     match placed {
-        Some((_, true)) => Err(Fatal::Error(format!(
-            "InternalError: ZEND_ASSIGN_OBJ over the typed property ${shown_name}, whose coercion is not served yet"
-        ))),
+        // `zend_assign_to_typed_prop`: the value held to the declared
+        // type, coerced by the weak rule where the file was not declared
+        // `strict_types`, and php's `TypeError` where it neither
+        // satisfies nor coerces, the value given up as `FREE_OP_DATA`
+        // gives it up. What is written to the slot, and what the
+        // temporary takes under `RETURN_VALUE_USED`, is the coercion
+        // where there was one, php's `tmp`.
+        Some((slot, true)) => {
+            let Some((declaring, ty)) = req.declared_property_type(object.class(), bytes) else {
+                req.release(value);
+                return Err(Fatal::Error(format!(
+                    "InternalError: ZEND_ASSIGN_OBJ placed the typed property ${shown_name}, whose declared type the class does not carry"
+                )));
+            };
+            let strict = req.caller_strict_types();
+            let value = match crate::ops::verify_property_type(
+                req, &value, &ty, declaring, bytes, strict,
+            ) {
+                Ok(None) => value,
+                Ok(Some(coerced)) => {
+                    req.release(value);
+                    coerced
+                }
+                Err(thrown) => {
+                    req.release(value);
+                    return Ok(Err(thrown));
+                }
+            };
+            write_out(req, frame, code, op, &value);
+            req.assign_declared_slot(object.heap(), slot, value);
+            Ok(Ok(()))
+        }
         Some((slot, false)) => {
             write_out(req, frame, code, op, &value);
             req.assign_declared_slot(object.heap(), slot, value);

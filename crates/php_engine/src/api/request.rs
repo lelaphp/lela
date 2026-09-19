@@ -3019,21 +3019,39 @@ impl Request {
         class: ClassId,
         name: &[u8],
         scope: Option<ClassId>,
-        value: Value,
+        mut value: Value,
     ) -> Result<(), Thrown> {
-        let (declaring, _) = match self.static_slot(class, name, scope, PropertyRead::Warning) {
-            Ok(Some(slot)) => slot,
-            // A write is never `BP_VAR_IS`, so the silent miss cannot
-            // stand here; the value is given up as a raising one is.
-            Ok(None) => {
-                self.release(value);
-                return Ok(());
+        let (declaring, property) =
+            match self.static_slot(class, name, scope, PropertyRead::Warning) {
+                Ok(Some(slot)) => slot,
+                // A write is never `BP_VAR_IS`, so the silent miss cannot
+                // stand here; the value is given up as a raising one is.
+                Ok(None) => {
+                    self.release(value);
+                    return Ok(());
+                }
+                Err(thrown) => {
+                    self.release(value);
+                    return Err(thrown);
+                }
+            };
+        // `zend_verify_property_type` under this function's own
+        // `strict = 0`: what Reflection writes is held to the declared
+        // type and coerced by the weak rule however the file that called
+        // it was declared (`Z/Zend/zend_API.c:1585`).
+        if let Some(ty) = property.ty.clone() {
+            match crate::ops::verify_property_type(self, &value, &ty, declaring, name, false) {
+                Ok(None) => {}
+                Ok(Some(coerced)) => {
+                    self.release(value);
+                    value = coerced;
+                }
+                Err(thrown) => {
+                    self.release(value);
+                    return Err(thrown);
+                }
             }
-            Err(thrown) => {
-                self.release(value);
-                return Err(thrown);
-            }
-        };
+        }
         let held = self
             .statics
             .iter()
@@ -3229,6 +3247,22 @@ impl Request {
             return Err(self.set_inaccessible_property(class, set, name, operation));
         }
         Ok(Some((placed.slot, placed.typed)))
+    }
+
+    /// `property_info->type` of the declared property `name` names,
+    /// with the class that declared it, which is what the `TypeError` of
+    /// a write that does not satisfy it names. Read only where
+    /// [`Request::declared_slot_for_write`] said the slot is typed, so
+    /// an untyped write pays nothing for it.
+    pub(crate) fn declared_property_type(
+        &self,
+        class: ClassId,
+        name: &[u8],
+    ) -> Option<(ClassId, php_unit::decl::Type)> {
+        let placed = self.placed_properties(class);
+        let at = placed.iter().rposition(|(_, p)| &*p.name.0 == name)?;
+        let (declaring, p) = placed.get(at)?;
+        p.ty.clone().map(|ty| (*declaring, ty))
     }
 
     /// `zend_assign_to_variable` over a declared slot, `ASSIGN_OBJ`'s

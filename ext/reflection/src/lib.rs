@@ -2754,6 +2754,28 @@ fn reflection_property_get_value(req: &mut Request) -> Result<Value, Thrown> {
 ///   thrown in %s on line 2
 /// ```
 ///
+/// A write into a `static` property with a declared type is held to it,
+/// `zend_update_static_property_ex` verifying the value and coercing it
+/// by the weak rule (`ops::verify_property_type`), so what Reflection
+/// puts in the slot is what the type accepts and never a value of
+/// another type.
+///
+/// ```php
+/// class T { public static int $n = 1; }
+/// $r = new ReflectionProperty('T', 'n');
+/// $r->setValue(null, "7"); var_dump($r->getValue());
+/// $r->setValue(null, [1]);
+/// ```
+/// ```expect exit=255
+/// int(7)
+///
+/// Fatal error: Uncaught TypeError: Cannot assign array to property T::$n of type int in %s:5
+/// Stack trace:
+/// #0 %s(5): ReflectionProperty->setValue(NULL, Array)
+/// #1 {main}
+///   thrown in %s on line 5
+/// ```
+///
 /// ```php
 /// (new ReflectionProperty('Exception', 'message'))->setValue(1, 2);
 /// ```

@@ -670,6 +670,142 @@ fn mangled_prefix(mangled: &[MangledName], at: &mut usize, name: PhpString) -> O
     mangled.get(found).and_then(|slot| slot.prefix.clone())
 }
 
+/// Every class name a declared type holds, in the order it was written:
+/// the one name of a class type, and each member of a union or an
+/// intersection that is one, which `zend_check_type_slow` walks with
+/// `ZEND_TYPE_LIST_FOREACH`. What reads it is every check of a value
+/// against a declared type that a class name can stand in: a return, a
+/// parameter and a property.
+///
+/// ```php
+/// class A {} class B extends A {}
+/// function f(): A { return new B; }
+/// class C { public A $a; }
+/// $c = new C; $c->a = new B;
+/// var_dump(f() instanceof B, $c->a instanceof B);
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// ```
+pub(crate) fn named_types(
+    ty: &php_unit::decl::Type,
+) -> Box<dyn Iterator<Item = &php_unit::decl::Name> + '_> {
+    use php_unit::decl::Type;
+    match ty {
+        Type::Named(name) => Box::new(std::iter::once(name)),
+        Type::Nullable(inner) => named_types(inner),
+        Type::Union(members) | Type::Intersection(members) => {
+            Box::new(members.iter().flat_map(named_types))
+        }
+        _ => Box::new(std::iter::empty()),
+    }
+}
+
+/// `zend_verify_property_type` (`Z/Zend/zend_object_handlers.c:1065`)
+/// under `zend_assign_to_typed_prop` (`Z/Zend/zend_execute.c:3583`):
+/// what a write to a property with a declared type is held to. Nothing
+/// where the value already satisfies the type (`zend_check_type_slow`);
+/// the converted value where the weak rule converts it, which is
+/// `zend_verify_weak_scalar_type_hint`, the one an argument takes, and
+/// nothing under `strict_types` but an int where a float is asked for;
+/// and php's `TypeError`, `Cannot assign %s to property %s::$%s of type
+/// %s`, where it neither satisfies nor converts. The value stays the
+/// caller's: `None` says write what it holds, `Some` says write this
+/// instead and give the old one up, which is php's `tmp` standing in
+/// for the value it copied.
+///
+/// The three writers share it: `ASSIGN_OBJ` over a declared slot,
+/// `ASSIGN_STATIC_PROP` over the class's own members table, and
+/// `Request::set_static_property`, the one Reflection reaches through,
+/// whose `strict` is php's `zend_update_static_property_ex`, false
+/// however the file was declared (`Z/Zend/zend_API.c:1585`).
+///
+/// ```php
+/// class C { public int $n = 1; public ?string $s = null; public float $f = 0.0; }
+/// $c = new C;
+/// $c->n = 5; var_dump($c->n);
+/// $c->n = "7"; var_dump($c->n);
+/// $c->n = true; var_dump($c->n);
+/// $c->f = 3; var_dump($c->f);
+/// $c->s = 5; var_dump($c->s);
+/// $c->s = null; var_dump($c->s);
+/// ```
+/// ```expect
+/// int(5)
+/// int(7)
+/// int(1)
+/// float(3)
+/// string(1) "5"
+/// NULL
+/// ```
+///
+/// ```php
+/// class C { public int $n = 1; }
+/// $c = new C;
+/// $c->n = "x";
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: Cannot assign string to property C::$n of type int in %s:4
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 4
+/// ```
+///
+/// Under `strict_types` the weak conversion is gone and the same write
+/// is the `TypeError`, save for the int a float type takes, which php
+/// converts there too. That arm is served and carries no witness: the
+/// compiler does not read a `declare` statement yet, so no snippet can
+/// ask for strict typing (#411).
+pub(crate) fn verify_property_type(
+    req: &mut Request,
+    value: &Value,
+    ty: &php_unit::decl::Type,
+    declaring: crate::api::values::ClassId,
+    name: &[u8],
+    strict: bool,
+) -> Result<Option<Value>, Thrown> {
+    let held = value.deref();
+    if ty.contains_code(held.type_code()) {
+        return Ok(None);
+    }
+    if let Some(object) = held.as_object()
+        && named_types(ty).any(|named| {
+            req.class_named(&named.0)
+                .is_some_and(|of| req.instance_of(object.class(), of))
+        })
+    {
+        return Ok(None);
+    }
+    if let Some(coerced) = crate::api::coerce::scalar_type_hint(req, &held, ty.mask(), strict)? {
+        return Ok(Some(coerced));
+    }
+    Err(property_type_error(req, &held, ty, declaring, name))
+}
+
+/// `zend_verify_property_type_error` (`Z/Zend/zend_execute.c:961`): the
+/// `TypeError` naming the value, the class that declared the property,
+/// the property and the declared type, in php's words.
+fn property_type_error(
+    req: &mut Request,
+    value: &Value,
+    ty: &php_unit::decl::Type,
+    declaring: crate::api::values::ClassId,
+    name: &[u8],
+) -> Thrown {
+    let class = req.class_name(declaring);
+    let declared = crate::api::coerce::type_name(ty);
+    let given = value_name(req, &value.undef_as_null());
+    throw(
+        req,
+        "TypeError",
+        &format!(
+            "Cannot assign {given} to property {class}::${} of type {declared}",
+            String::from_utf8_lossy(name)
+        ),
+    )
+}
+
 /// `zend_get_properties_for(object, purpose)`, the rows one reader of
 /// an object's properties sees: the class's `get_properties_for` first and
 /// `get_properties` where that slot is null, each declared name carrying
