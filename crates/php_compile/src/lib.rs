@@ -3457,6 +3457,118 @@ mod tests {
         );
     }
 
+    /// `zend_compile_declare` (#411): the statement leaves no opline,
+    /// so the oracle's dump of a file that opens with one is the dump of
+    /// the file without it, and `declare(strict_types=1)` shows in the
+    /// bit every op array of the file then carries. The dumps are the
+    /// oracle's under `[regime.dump]` at 8.5.9.
+    #[test]
+    fn a_declare_leaves_no_opline_and_strict_types_marks_every_op_array_of_the_file() {
+        assert_eq!(
+            dump_of(b"<?php declare(strict_types=1); echo 1;"),
+            main_dump(2, 0, 0, "0000 ECHO int(1)\n0001 RETURN int(1)\n")
+        );
+        assert_eq!(
+            dump_of(b"<?php declare(ticks=0, strict_types=1); echo 1;"),
+            main_dump(2, 0, 0, "0000 ECHO int(1)\n0001 RETURN int(1)\n")
+        );
+        let (unit, _strings) = unit_and_strings(b"<?php declare(strict_types=1); function f() {}");
+        assert!(unit.main.strict_types);
+        assert!(unit.functions.iter().all(|(_, code)| code.strict_types));
+        let (unit, _strings) = unit_and_strings(b"<?php declare(strict_types=0); function f() {}");
+        assert!(!unit.main.strict_types);
+        assert!(unit.functions.iter().all(|(_, code)| !code.strict_types));
+        let (unit, _strings) = unit_and_strings(b"<?php function f() {}");
+        assert!(!unit.main.strict_types);
+    }
+
+    /// What `zend_compile_declare` refuses, in php's words, and what it
+    /// warns about and compiles on from; each measured against the
+    /// oracle at 8.5.9. The value is held to `ZEND_AST_ZVAL` before the
+    /// name is looked at, so `1 + 0` and `true` are the same fatal as
+    /// each other and not a fold.
+    #[test]
+    fn what_a_declare_refuses_is_what_php_refuses() {
+        let refused = |source: &[u8]| {
+            let mut strings = php_heap::Strings::new();
+            compile(
+                &php_syntax::parse(source, &php_syntax::Options::default()),
+                &bundled(),
+                &mut strings,
+            )
+            .err()
+            .map(|e| e.message)
+        };
+        assert_eq!(
+            refused(b"<?php echo 1; declare(strict_types=1);").as_deref(),
+            Some("strict_types declaration must be the very first statement in the script")
+        );
+        assert_eq!(
+            refused(b"<?php namespace A; declare(strict_types=1);").as_deref(),
+            Some("strict_types declaration must be the very first statement in the script")
+        );
+        assert_eq!(
+            refused(b"<?php function g() { declare(strict_types=1); }").as_deref(),
+            Some("strict_types declaration must be the very first statement in the script")
+        );
+        assert_eq!(
+            refused(b"<?php declare(strict_types=1) { }").as_deref(),
+            Some("strict_types declaration must not use block mode")
+        );
+        assert_eq!(
+            refused(b"<?php declare(strict_types=1) echo 1;").as_deref(),
+            Some("strict_types declaration must not use block mode")
+        );
+        assert_eq!(
+            refused(b"<?php declare(strict_types=2);").as_deref(),
+            Some("strict_types declaration must have 0 or 1 as its value")
+        );
+        assert_eq!(
+            refused(b"<?php declare(strict_types=\"1\");").as_deref(),
+            Some("strict_types declaration must have 0 or 1 as its value")
+        );
+        assert_eq!(
+            refused(b"<?php declare(strict_types=1+0);").as_deref(),
+            Some("declare(strict_types) value must be a literal")
+        );
+        assert_eq!(
+            refused(b"<?php declare(strict_types=true);").as_deref(),
+            Some("declare(strict_types) value must be a literal")
+        );
+        assert_eq!(
+            refused(b"<?php declare(ticks=-1);").as_deref(),
+            Some("declare(ticks) value must be a literal")
+        );
+        // What php compiles and this compiler does not: a tick count php
+        // emits a `ZEND_TICKS` after every statement for, the encoding
+        // pragma the scanner answers, and the alternative syntax.
+        assert_eq!(
+            refused(b"<?php declare(ticks=1); echo 1;").as_deref(),
+            Some("a `declare(ticks)` of a count this compiler cannot read yet")
+        );
+        assert_eq!(
+            refused(b"<?php declare(encoding=\"UTF-8\");").as_deref(),
+            Some("a `declare(encoding)` this compiler cannot read yet")
+        );
+        assert_eq!(
+            refused(b"<?php declare(ticks=0): echo 1; enddeclare;").as_deref(),
+            Some("a `declare` in the alternative syntax this compiler cannot read yet")
+        );
+        // `E_COMPILE_WARNING` and the file compiles on, which is the
+        // diagnostic the unit carries for the engine to raise.
+        let (unit, _strings) = unit_and_strings(b"<?php declare(foo=1); echo 1;");
+        assert_eq!(
+            unit.diagnostics
+                .iter()
+                .map(|d| (d.level, d.message.to_string()))
+                .collect::<Vec<_>>(),
+            vec![(
+                Level::CompileWarning,
+                String::from("Unsupported declare 'foo'")
+            )]
+        );
+    }
+
     /// `zend_compile_assign`'s `ZEND_AST_STATIC_PROP` arm (#470): the
     /// fetch's own opline turned into `ASSIGN_STATIC_PROP`, its
     /// `result` a temporary and the value in the `OP_DATA` beside it.

@@ -2837,7 +2837,7 @@ pub(crate) fn strlen(req: &mut Request, value: &Value) -> Result<Value, Thrown> 
     if let Some(s) = value.as_php_string() {
         return Ok(Value::int(i64::try_from(s.len()).unwrap_or(i64::MAX)));
     }
-    if !req.caller_strict_types() {
+    if !req.strict_types() {
         match value.as_ref() {
             ValueRef::Undef | ValueRef::Null => {
                 deprecated(

@@ -554,7 +554,7 @@ fn coerce_typed(
     position: u32,
     nullable: bool,
 ) -> Result<Value, Thrown> {
-    let strict = req.caller_strict_types();
+    let strict = req.strict_types();
     let value = &value.deref();
     if !strict
         && !nullable

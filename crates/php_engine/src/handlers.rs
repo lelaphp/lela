@@ -1340,6 +1340,53 @@ fn enter(
 /// bool(true)
 /// ```
 ///
+/// Which of the two rules applies is the *caller's*
+/// `declare(strict_types=1)` and never the callee's:
+/// `ZEND_ARG_USES_STRICT_TYPES` (`Z/Zend/zend_compile.h:723`) reads
+/// `ZEND_ACC_STRICT_TYPES` off `prev_execute_data->func`, the op array
+/// the call was made from. The file above declares none, so every
+/// argument there
+/// converts; the same call in a file that declares it raises instead,
+/// and nothing converts but an int where a float is asked for
+/// (`zend_verify_scalar_type_hint`).
+///
+/// ```php
+/// declare(strict_types=1);
+/// function f(int $a) { var_dump($a); }
+/// f("5");
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: f(): Argument #1 ($a) must be of type int, string given, called in %s on line 4 and defined in %s:3
+/// Stack trace:
+/// #0 %s(4): f('5')
+/// #1 {main}
+///   thrown in %s on line 3
+/// ```
+///
+/// ```php
+/// declare(strict_types=1);
+/// function f(float $a) { var_dump($a); }
+/// f(5);
+/// ```
+/// ```expect
+/// float(5)
+/// ```
+///
+/// A frame no user opline pushed has no caller to read the bit off,
+/// and php's there is the native's own frame, which carries none:
+/// a callback a native calls converts its argument though the file the
+/// callback was written in is the strict one. That is the whole of the
+/// rule's caller half, measured.
+///
+/// ```php
+/// declare(strict_types=1);
+/// function f(int $a) { var_dump($a); }
+/// register_shutdown_function('f', "5");
+/// ```
+/// ```expect
+/// int(5)
+/// ```
+///
 /// A class named as a type is `instanceof_function` over the argument's
 /// class, and the type error names the class as the declaration wrote
 /// it:
@@ -1437,7 +1484,7 @@ fn verified_arg(
     {
         return Ok(None);
     }
-    let strict = req.caller_strict_types();
+    let strict = req.caller_strict_types(frame);
     if let Some(coerced) = crate::api::coerce::scalar_type_hint(req, argument, ty.mask(), strict)? {
         return Ok(Some(coerced));
     }
@@ -1566,9 +1613,10 @@ pub(crate) fn recv_variadic<T: Tier>(
 /// return type and once more, with an `UNUSED` operand, at the end of
 /// its body: the value the `RETURN` after it will hand back, held to the
 /// declared type as an argument is held to a parameter's
-/// (`zend_check_type` and the coercion beside it, which php reads the
-/// *callee's* file's `strict_types` for where this reads the request's
-/// one setting, the file's being #411's), and `zend_verify_return_error`'s
+/// (`zend_check_type` and the coercion beside it, read under
+/// `ZEND_RET_USES_STRICT_TYPES`, which is this frame's own function's
+/// `ZEND_ACC_STRICT_TYPES` and so the *callee's* file's, where an
+/// argument's is the caller's), and `zend_verify_return_error`'s
 /// `TypeError`,
 /// `{fn}(): Return value must be of type {declared}, {given} returned`,
 /// where it does not hold. The `UNUSED` operand is
@@ -1583,6 +1631,19 @@ pub(crate) fn recv_variadic<T: Tier>(
 /// ```
 /// ```expect
 /// int(5)
+/// ```
+///
+/// ```php
+/// declare(strict_types=1);
+/// function f(): int { $x = "5"; return $x; }
+/// var_dump(f());
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: f(): Return value must be of type int, string returned in %s:3
+/// Stack trace:
+/// #0 %s(4): f()
+/// #1 {main}
+///   thrown in %s on line 3
 /// ```
 ///
 /// ```php
@@ -1639,7 +1700,7 @@ pub(crate) fn verify_return_type<T: Tier>(
     {
         return Ok(advance(req, frame));
     }
-    let strict = req.caller_strict_types();
+    let strict = req.frame_strict_types(frame);
     let coerced = match crate::api::coerce::scalar_type_hint(req, &returned, ty.mask(), strict) {
         Ok(coerced) => coerced,
         Err(thrown) => return threw(req, frame, &thrown),
@@ -4783,7 +4844,7 @@ pub(crate) fn assign<T: Tier>(
             "InternalError: ZEND_ASSIGN over a CV the frame does not have",
         )));
     };
-    let strict = req.caller_strict_types();
+    let strict = req.frame_strict_types(frame);
     // php copies into `result` what the write landed, which a typed
     // cell may have converted, so the copy is after the write and not
     // before it.
@@ -4916,7 +4977,7 @@ pub(crate) fn assign_op<T: Tier>(
     // [`assign_to_place`] does under the frame's own regime (#496).
     // What landed is what `result` takes, so the copy is after the
     // write and not before it.
-    let strict = req.caller_strict_types();
+    let strict = req.frame_strict_types(frame);
     let (landed, garbage) = match assign_to_place(req, at, stepped, strict) {
         Ok(pair) => pair,
         Err(thrown) => return threw(req, frame, &thrown),
@@ -5286,7 +5347,7 @@ fn assign_property(
                     "InternalError: ZEND_ASSIGN_OBJ placed the typed property ${shown_name}, whose declared type the class does not carry"
                 )));
             };
-            let strict = req.caller_strict_types();
+            let strict = req.frame_strict_types(frame);
             let value = match crate::ops::verify_property_type(
                 req, &value, &ty, declaring, bytes, strict,
             ) {
@@ -5489,7 +5550,7 @@ pub(crate) fn assign_static_prop<T: Tier>(
     // nor coerces. The temporary already names the value php's
     // `RETURN_VALUE_USED` copies, which php writes before the verify
     // too.
-    let strict = req.caller_strict_types();
+    let strict = req.frame_strict_types(frame);
     if let Err(thrown) = req.set_static_property(class, &name, scope, value, strict) {
         return threw(req, frame, &thrown);
     }
@@ -5708,7 +5769,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
         Ok(stepped) => stepped,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let strict = req.caller_strict_types();
+    let strict = req.frame_strict_types(frame);
     let stepped = match ty {
         None => stepped,
         Some(ty) => match verified_op(req, &stepped, &ty, declaring, &name, strict) {
@@ -5813,7 +5874,7 @@ fn static_prop_step(
             return threw(req, frame, &thrown);
         }
     };
-    let strict = req.caller_strict_types();
+    let strict = req.frame_strict_types(frame);
     let stepped = match ty {
         None => stepped,
         Some(ty) if crate::ops::steps_past_int(&held, &stepped, &ty) => {
@@ -6146,7 +6207,7 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
     // returned by value is the notice and an assignment by value.
     let typed = ty.filter(|_| !returns_function);
     if let Some(ty) = typed.as_ref() {
-        let strict = req.caller_strict_types();
+        let strict = req.frame_strict_types(frame);
         match crate::ops::verify_prop_assignable_by_ref(
             req,
             cell.heap(),
@@ -6460,7 +6521,7 @@ pub(crate) fn assign_dim<T: Tier>(
             match entry {
                 Ok(Some(entry)) => {
                     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
-                    let strict = req.caller_strict_types();
+                    let strict = req.frame_strict_types(frame);
                     match assign_to_place(req, entry, value, strict) {
                         Ok((landed, garbage)) => {
                             write_out(req, frame, code, op, &landed);

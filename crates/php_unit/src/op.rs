@@ -302,6 +302,16 @@ pub struct OpArray {
     /// method's own is its [`crate::decl::MethodDecl::is_instance`],
     /// which the linker reads; nothing but a closure sets this.
     pub no_receiver: bool,
+    /// `ZEND_ACC_STRICT_TYPES` on the op array
+    /// (`Z/Zend/zend_compile.h:409`): the file the op array was compiled
+    /// from was declared `declare(strict_types=1)`, which
+    /// `zend_compile_declare` sets on the main op array and
+    /// `zend_compile_func_decl` copies to every op array compiled under
+    /// it (`Z/Zend/zend_compile.c:8465`). What php's
+    /// `ZEND_CALL_USES_STRICT_TYPES` asks of a frame's function: the
+    /// caller's decides an argument's coercion and the frame's own a
+    /// return's and a typed property's.
+    pub strict_types: bool,
     /// `zend_handle_numeric_dim`'s pairs (`Z/Zend/zend_compile.c:2788`):
     /// for every constant dimension whose written string was a canonical
     /// decimal integer, the slot of `literals` holding the integer php

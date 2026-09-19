@@ -355,8 +355,6 @@ pub struct Request {
     cwd: PathBuf,
     gc_enabled: bool,
     streams: u32,
-    /// The caller file's `declare(strict_types=1)`.
-    strict_types: bool,
     /// php's `EG(exception)`: the throwable a handler left pending, which
     /// the loop reads at the `Threw` edge.
     pending: Option<PhpObject>,
@@ -492,7 +490,6 @@ impl Request {
             cwd,
             gc_enabled: true,
             streams: 0,
-            strict_types: false,
             pending: None,
             marked_destructed: false,
             returned: Value::null(),
@@ -827,6 +824,7 @@ impl Request {
     /// pending is the `Err`, the throwable's one owner with it, so a
     /// native reads a callback's raise the way it reads its own
     /// ([`Request::leave_pending`] puts it back).
+    ///
     /// A callback with a declared parameter type is held to it here as
     /// it is held to it under `DO_UCALL`, since one
     /// [`crate::exec::parameter_prologue`] serves both: a typed
@@ -5093,8 +5091,39 @@ impl Request {
             .unwrap_or(default)
     }
 
-    pub(crate) fn caller_strict_types(&self) -> bool {
-        self.strict_types
+    /// `EX_USES_STRICT_TYPES()` (`Z/Zend/zend_compile.h:719`): whether
+    /// the op array the innermost frame serves was compiled under
+    /// `declare(strict_types=1)`. What a return's type check and a write
+    /// to a typed property read, and what a native's own argument
+    /// parsing reads too: a native holds no frame of this engine's, so
+    /// the frame standing while one runs is the caller php reaches
+    /// through the native's `prev_execute_data`.
+    pub(crate) fn strict_types(&self) -> bool {
+        self.vm
+            .innermost()
+            .is_some_and(crate::exec::strict_types_of)
+    }
+
+    /// [`Request::strict_types`] over one frame rather than the
+    /// innermost: the regime a write standing in `frame` verifies under,
+    /// which is what every opcode's handler asks, since a handler holds
+    /// its own frame and the innermost is only the same frame by luck.
+    pub(crate) fn frame_strict_types(&self, frame: FrameRef) -> bool {
+        self.vm.at(frame).is_some_and(crate::exec::strict_types_of)
+    }
+
+    /// `ZEND_ARG_USES_STRICT_TYPES()` (`Z/Zend/zend_compile.h:723`):
+    /// `ZEND_ACC_STRICT_TYPES` on the op array the call into `frame` was
+    /// made from, which is what an argument's type check reads and never
+    /// the entered op array's own. False where the frame has no caller,
+    /// which is the frame `serve` pushed and one a native re-entered the
+    /// loop on: php's there is the native's own frame, and no native
+    /// this engine declares carries the bit.
+    pub(crate) fn caller_strict_types(&self, frame: FrameRef) -> bool {
+        self.vm
+            .at(frame)
+            .and_then(|state| state.caller)
+            .is_some_and(|caller| self.frame_strict_types(caller))
     }
 
     /// `zend_is_callable_ex` (`Z/Zend/zend_API.c:4250`) without the

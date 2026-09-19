@@ -125,6 +125,29 @@ pub(crate) enum Stmt {
     /// `ZEND_AST_IF`: the arms in the order they are written, one
     /// `ZEND_AST_IF_ELEM` each.
     If(Vec<IfArm>),
+    /// `declare(strict_types=1);` and its kin, php's `ZEND_AST_DECLARE`
+    /// over a `ZEND_AST_CONST_DECL` list and the statement written after
+    /// it: the directives as written, and the statement, which php's
+    /// grammar leaves `NULL` for the `;` spelling and which
+    /// `zend_compile_declare` reads as the braced form where it is
+    /// anything else. What each directive means is the emitter's.
+    Declare {
+        directives: Vec<Directive>,
+        body: Option<Read>,
+    },
+}
+
+/// One `name=value` of a `declare`, php's `ZEND_AST_CONST_ELEM` inside
+/// the list `zend_compile_declare` walks: the name as written, whose
+/// case php compares without (`zend_string_equals_literal_ci`), the
+/// value as written, which php requires to be a `ZEND_AST_ZVAL` and not
+/// an expression to fold, and the line the name stands on, which is
+/// where php's fatal over the directive is raised.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Directive {
+    pub(crate) name: Vec<u8>,
+    pub(crate) value: Child,
+    pub(crate) line: u32,
 }
 
 /// One arm of an `if`, php's `ZEND_AST_IF_ELEM`: a condition and the
@@ -1270,6 +1293,10 @@ impl Reader<'_> {
         if self.word_ahead(b"namespace") && self.byte(9) != Some(b'\\') {
             self.bump(9);
             return self.namespace().map(Some);
+        }
+        if self.word_ahead(b"declare") {
+            self.bump(7);
+            return self.declare().map(Some);
         }
         let expr = self.expr()?;
         self.end_of_statement()?;
@@ -2687,6 +2714,48 @@ impl Reader<'_> {
         }
         self.end_of_statement()?;
         Ok(Stmt::Namespace(name))
+    }
+
+    /// php's `T_DECLARE '(' const_list ')' declare_statement`: the
+    /// directives, each an identifier and a `=` and the value written
+    /// after it, and the statement the grammar puts after the `)`, which
+    /// is `NULL` for the `;` spelling and any other statement otherwise.
+    /// Nothing here is judged: whether a name is one php knows, whether
+    /// its value is a `ZEND_AST_ZVAL` and whether a statement may stand
+    /// after it are all `zend_compile_declare`'s, so the reader takes
+    /// what php's
+    /// grammar takes and the emitter raises php's words. The
+    /// `: ... enddeclare;` spelling is refused as not yet read.
+    fn declare(&mut self) -> Result<Stmt, Trouble> {
+        self.punctuation(b'(', "a `declare` with no `(` after it")?;
+        let mut directives = Vec::new();
+        loop {
+            self.skip_trivia();
+            let line = self.line;
+            let name = self.name();
+            if name.is_empty() {
+                return Err(self.trouble("a `declare` whose directive names nothing"));
+            }
+            self.punctuation(b'=', "a `declare` directive with no `=` after its name")?;
+            self.skip_trivia();
+            let value = self.expr()?;
+            directives.push(Directive { name, value, line });
+            self.skip_trivia();
+            if self.byte(0) != Some(b',') {
+                break;
+            }
+            self.bump(1);
+        }
+        self.punctuation(b')', "a `declare` with no `)` after its directives")?;
+        self.skip_trivia();
+        if self.byte(0) == Some(b':') {
+            return Err(
+                self.trouble("a `declare` in the alternative syntax this compiler cannot read yet")
+            );
+        }
+        let line = self.line;
+        let body = self.statement()?.map(|statement| vec![(statement, line)]);
+        Ok(Stmt::Declare { directives, body })
     }
 
     /// One expected byte, or the trouble that names what was wanted.

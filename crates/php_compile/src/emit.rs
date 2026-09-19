@@ -108,8 +108,8 @@ use php_unit::{
 
 use crate::read;
 use crate::read::{
-    Arm, BinaryOp, Case, CastTo, Catch, Child, Class, Element, Expr, Function, IfArm, Magic,
-    Method, Piece, Property, Read, Step, Stmt, Target, Unset, is_auto_global,
+    Arm, BinaryOp, Case, CastTo, Catch, Child, Class, Directive, Element, Expr, Function, IfArm,
+    Magic, Method, Piece, Property, Read, Step, Stmt, Target, Unset, is_auto_global,
 };
 use crate::{CompileError, Options, StackLimit};
 
@@ -192,8 +192,20 @@ pub(crate) struct Emit<'a> {
     /// a branch of its own.
     in_jmp_frameless_branch: bool,
     /// How many statements have been compiled, which is what a first
-    /// `namespace` statement must find at zero.
+    /// `namespace` statement and a `strict_types` declaration must both
+    /// find at zero (`zend_is_first_statement`). A `declare` is not one
+    /// of them, since php's walk steps over every `ZEND_AST_DECLARE`
+    /// before the node it is asked about, and a `namespace` statement
+    /// is, since php's walk does not.
     statements_seen: u32,
+    /// `ZEND_ACC_STRICT_TYPES` on the file's main op array, which
+    /// `declare(strict_types=1)` sets and every op array compiled after
+    /// it takes a copy of (`Z/Zend/zend_compile.c:8465`): the emitter's
+    /// bodies nest inside the main one, so the bit is the file's and
+    /// [`Emit::begin_body`] does not save it. A caller's, which is what
+    /// `eval` and an `include` compile under, is
+    /// [`Options::strict_types`].
+    typing: Typing,
     /// The thread's stack limit, [`Options::stack`], held to where the
     /// emitter recurses.
     stack: StackLimit,
@@ -557,6 +569,7 @@ pub(crate) fn unit(
         active_property: None,
         in_jmp_frameless_branch: false,
         statements_seen: 0,
+        typing: Typing::of(options.strict_types),
         stack: options.stack,
         oplines: Vec::new(),
         constants: Vec::new(),
@@ -857,9 +870,12 @@ impl Emit<'_> {
         if let Stmt::Namespace(name) = statement {
             return self.namespace(name);
         }
+        if let Stmt::Declare { directives, body } = statement {
+            return self.declare(directives, body.as_ref());
+        }
         self.statements_seen = self.statements_seen.saturating_add(1);
         match statement {
-            Stmt::Namespace(_) => {}
+            Stmt::Namespace(_) | Stmt::Declare { .. } => {}
             Stmt::Inline(text) => {
                 let text = self.string(text)?;
                 let at = self.constant(text);
@@ -1915,6 +1931,7 @@ impl Emit<'_> {
             dynamic_func_defs: std::mem::take(&mut self.dynamic_func_defs).into_boxed_slice(),
             bound_vars: std::mem::take(&mut self.static_vars).into_boxed_slice(),
             no_receiver: self.fn_flags.is_static,
+            strict_types: self.typing == Typing::Strict,
             numeric_dims: std::mem::take(&mut self.numeric_dims).into_boxed_slice(),
         })
     }
@@ -2504,6 +2521,85 @@ impl Emit<'_> {
             ));
         }
         self.namespace = Some(name.to_vec());
+        // php's `zend_is_first_statement` steps over a `ZEND_AST_DECLARE`
+        // before the node it is asked about and over nothing else, so a
+        // `namespace` statement is one a later `strict_types` finds.
+        self.statements_seen = self.statements_seen.saturating_add(1);
+        Ok(())
+    }
+
+    /// `zend_compile_declare` (`Z/Zend/zend_compile.c:6982`): each
+    /// directive in written order, its value held to `ZEND_AST_ZVAL`
+    /// before its name is looked at, then the statement written after
+    /// the `)` where one is.
+    ///
+    /// `strict_types` is the one directive this compiler serves.
+    /// `zend_is_first_statement` with `allow_nop` holds it to the
+    /// file's own statement list with nothing but other `declare`s
+    /// before it, which is [`Emit::statements_seen`] at zero at
+    /// [`Emit::depth`] one; a statement after the `)` is the braced
+    /// form php refuses; and its value must be the integer 0 or 1.
+    /// A 1 sets [`Emit::typing`] to [`Typing::Strict`], which every op
+    /// array of the file then carries.
+    ///
+    /// `ticks` a count of zero is the declarable php's compiler ignores
+    /// and is taken as php takes it; a count php would emit a
+    /// `ZEND_TICKS` after every statement for is refused, since no
+    /// opcode here serves one. `encoding` is refused for the scanner's
+    /// own warning, which this compiler does not raise. Every other
+    /// name is php's `E_COMPILE_WARNING`, and the file compiles on.
+    fn declare(
+        &mut self,
+        directives: &[Directive],
+        body: Option<&Read>,
+    ) -> Result<(), CompileError> {
+        for directive in directives {
+            self.line = directive.line;
+            let name = String::from_utf8_lossy(&directive.name).into_owned();
+            // `(*value_ast_ptr)->kind != ZEND_AST_ZVAL`: the value is one
+            // token the scanner made a zval of, so `-1`, `true` and
+            // `1 + 0` are each the fatal and not a fold.
+            let Some(value) = literal_of(&directive.value) else {
+                return Err(self.compile_error(format!("declare({name}) value must be a literal")));
+            };
+            if directive.name.eq_ignore_ascii_case(b"strict_types") {
+                if self.depth != 1 || self.statements_seen > 0 {
+                    return Err(self.compile_error(
+                        "strict_types declaration must be the very first statement in the script",
+                    ));
+                }
+                if body.is_some() {
+                    return Err(
+                        self.compile_error("strict_types declaration must not use block mode")
+                    );
+                }
+                match value {
+                    Literal::Int(0) => {}
+                    Literal::Int(1) => self.typing = Typing::Strict,
+                    _ => {
+                        return Err(self.compile_error(
+                            "strict_types declaration must have 0 or 1 as its value",
+                        ));
+                    }
+                }
+            } else if directive.name.eq_ignore_ascii_case(b"ticks") {
+                if !matches!(value, Literal::Int(0)) {
+                    return Err(
+                        self.fatal("a `declare(ticks)` of a count this compiler cannot read yet")
+                    );
+                }
+            } else if directive.name.eq_ignore_ascii_case(b"encoding") {
+                return Err(self.fatal("a `declare(encoding)` this compiler cannot read yet"));
+            } else {
+                self.raise(
+                    Level::CompileWarning,
+                    &format!("Unsupported declare '{name}'"),
+                );
+            }
+        }
+        if let Some(body) = body {
+            self.statements(body)?;
+        }
         Ok(())
     }
 
@@ -8258,6 +8354,50 @@ fn scalar(value: Zval, string: Option<&php_heap::Str>) -> Scalar<'_> {
     }
 }
 
+/// `FC(declarables)`' half this compiler reads, which is php's
+/// `ZEND_ACC_STRICT_TYPES` by another name: which of the two typing
+/// rules the file the emitter is compiling was declared under. php's
+/// default, where the file declares nothing, is the weak one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Typing {
+    /// `zend_verify_weak_scalar_type_hint` decides an argument, a
+    /// return and a write to a typed property.
+    Weak,
+    /// `declare(strict_types=1)`: nothing converts but an int where a
+    /// float is asked for.
+    Strict,
+}
+
+impl Typing {
+    /// The rule a caller's `ZEND_ACC_STRICT_TYPES` names, which is what
+    /// `eval` and an `include` inherit ([`Options::strict_types`]).
+    fn of(strict: bool) -> Typing {
+        if strict { Typing::Strict } else { Typing::Weak }
+    }
+}
+
+/// What php's `ZEND_AST_ZVAL` is among the expressions the reader
+/// leaves: one token the scanner already made a zval of. `true`, `null`
+/// and `-1` are each a node of their own, which is why
+/// `zend_compile_declare` refuses them before it folds anything.
+enum Literal {
+    /// `T_LNUMBER`, the one a directive here reads the value of.
+    Int(i64),
+    /// `T_DNUMBER` and `T_CONSTANT_ENCAPSED_STRING`: one php takes,
+    /// whose value no directive this compiler serves reads.
+    Other,
+}
+
+/// The `ZEND_AST_ZVAL` an expression is, or nothing where php's node is
+/// another kind.
+fn literal_of(expr: &Child) -> Option<Literal> {
+    match &**expr {
+        Expr::Int(value) => Some(Literal::Int(*value)),
+        Expr::Float(_) | Expr::Str(_) => Some(Literal::Other),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8286,6 +8426,7 @@ mod tests {
             active_property: None,
             in_jmp_frameless_branch: false,
             statements_seen: 0,
+            typing: Typing::of(options.strict_types),
             stack: options.stack,
             oplines: Vec::new(),
             constants: Vec::new(),

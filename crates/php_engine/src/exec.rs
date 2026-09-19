@@ -524,6 +524,16 @@ pub(crate) fn body_of(unit: &Unit, body: Body) -> Option<&OpArray> {
     }
 }
 
+/// `ZEND_CALL_USES_STRICT_TYPES(call)` (`Z/Zend/zend_compile.h:716`):
+/// whether the op array `state` serves was compiled under
+/// `declare(strict_types=1)`, which the compiler sets on every op array
+/// of a file that declared it ([`OpArray::strict_types`]). False for a
+/// frame whose body the unit has not, which is this engine's error and
+/// never a program's.
+pub(crate) fn strict_types_of(state: &FrameState) -> bool {
+    body_of(&state.unit, state.body).is_some_and(|code| code.strict_types)
+}
+
 /// The line of the opline `state` stands at, `EX(opline)->lineno`; zero
 /// for a frame past its op array.
 pub(crate) fn line_of(state: &FrameState) -> u32 {
