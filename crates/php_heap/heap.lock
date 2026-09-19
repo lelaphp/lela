@@ -205,6 +205,7 @@ Zval::set_fe_pos
 Zval::string
 ZvalRef
 ZvalRef::read
+ZvalRef::set_fe_pos
 ZvalRef::write
 ZvalType
 call_stack_bounds

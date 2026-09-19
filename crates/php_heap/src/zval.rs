@@ -68,12 +68,59 @@ impl ZvalRef {
         unsafe { self.0.as_ptr().read() }
     }
 
-    /// Write `z` in place, what stood there overwritten and no owner
-    /// touched: the caller has read it and gives it up, as
-    /// `zend_assign_to_variable` gives up `garbage` after the write.
+    /// Write `z` in place as `ZVAL_COPY_VALUE` writes it, what stood
+    /// there overwritten and no owner touched: the caller has read it and
+    /// gives it up, as `zend_assign_to_variable` gives up `garbage` after
+    /// the write.
+    ///
+    /// The payload and the type info, and never the `u2` word. php's
+    /// `ZVAL_COPY_VALUE_EX` (`Z/Zend/zend_types.h:1000-1013`) assigns
+    /// `Z_COUNTED_P` and `Z_TYPE_INFO_P` and leaves `u2` where it stands,
+    /// because `u2` is not the value's: it belongs to whatever holds the
+    /// slot. Inside an array's bucket it is `Z_NEXT`, the next bucket of
+    /// the hash chain the bucket is linked into, and a value write that
+    /// carried a zero there left a chain pointing at bucket zero. A
+    /// single-bucket chain then named itself and `zend_hash_find_bucket`
+    /// walked it forever, which is what hung
+    /// `Zend/tests/ArrayAccess/bug63217.phpt` past the recipe's limit
+    /// with nothing printed (#491): `$a[123] = 1` wrote the value through
+    /// this slot after `link` had set the bucket's next, and `$a['abc']`
+    /// hashes to the same chain.
+    ///
+    /// ```php
+    /// $a = [];
+    /// $a[123] = 1;
+    /// $a['abc'] = 3;
+    /// var_dump($a);
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [123]=>
+    ///   int(1)
+    ///   ["abc"]=>
+    ///   int(3)
+    /// }
+    /// ```
+    ///
+    /// The `u2` word a slot does carry is written by
+    /// [`set_fe_pos`](ZvalRef::set_fe_pos) and by nothing else.
     pub fn write(self, z: Zval) {
+        let mut z = z;
+        z.u2 = self.read().u2;
         // SAFETY: as `read`; the slot is sixteen aligned bytes the frame
         // or the object laid down.
+        unsafe { self.0.as_ptr().write(z) };
+    }
+
+    /// `Z_FE_POS_P(z) = pos`: the slot's `u2` word alone, the value it
+    /// holds untouched. What `FE_RESET_R` sets to zero on the VAR it
+    /// fills after copying the array in, and what `FE_FETCH_R` moves one
+    /// past each element it fetched, which php writes through this word
+    /// and never through a value assignment.
+    pub fn set_fe_pos(self, pos: u32) {
+        let mut z = self.read();
+        z.set_fe_pos(pos);
+        // SAFETY: as `read`.
         unsafe { self.0.as_ptr().write(z) };
     }
 

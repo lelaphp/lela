@@ -7243,6 +7243,12 @@ pub(crate) fn fe_reset_r<T: Tier>(
         }
         let previous = req.set_slot(frame, slot, subject);
         req.release(previous);
+        if let Some(cell) = req.slot_ptr(frame, slot) {
+            // `Z_FE_POS_P(EX_VAR(opline->result.var)) = pos`, which php
+            // writes after the copy and not through it: the word is the
+            // slot's, not the value's (`ZvalRef::write`, #491).
+            cell.set_fe_pos(0);
+        }
         if op.op1_type == OperandKind::Var {
             exec::free_operand(req, frame, code, op.op1_type, op.op1);
         }
@@ -7258,9 +7264,10 @@ pub(crate) fn fe_reset_r<T: Tier>(
         let previous = req.set_slot(frame, slot, subject);
         req.release(previous);
         if let Some(cell) = req.slot_ptr(frame, slot) {
-            let mut held = cell.read();
-            held.set_fe_pos(0);
-            cell.write(held);
+            // `Z_FE_POS_P(EX_VAR(opline->result.var)) = 0`, the word php
+            // writes on its own after the copy: a value write leaves `u2`
+            // where it stands (`ZvalRef::write`, #491).
+            cell.set_fe_pos(0);
         }
         if op.op1_type == OperandKind::Var {
             exec::free_operand(req, frame, code, op.op1_type, op.op1);
@@ -7334,7 +7341,7 @@ pub(crate) fn fe_fetch_r<T: Tier>(
             "InternalError: FE_FETCH_R over a VAR the frame does not have",
         )));
     };
-    let mut held = at.read();
+    let held = at.read();
     let found = if let Some(object) = Value::of_zval(held).as_object() {
         match req.object_property_from(*object, held.fe_pos()) {
             Ok(found) => found,
@@ -7353,8 +7360,9 @@ pub(crate) fn fe_fetch_r<T: Tier>(
         req.vm_mut().jump(frame, op.extended_value);
         return Ok(Stepped::Same(frame));
     };
-    held.set_fe_pos(pos.saturating_add(1));
-    at.write(held);
+    // `Z_FE_POS_P(array) = pos + 1`: the word alone, since a value write
+    // is `ZVAL_COPY_VALUE` and leaves `u2` standing (#491).
+    at.set_fe_pos(pos.saturating_add(1));
     if op.out_type != OperandKind::Unused {
         let key = match key {
             php_heap::Key::Long(n) => Value::int(n),
