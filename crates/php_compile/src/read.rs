@@ -55,39 +55,39 @@ pub(crate) enum Stmt {
     /// Text outside the tags, which php echoes as it stands.
     Inline(Vec<u8>),
     /// `echo $a, $b;`
-    Echo(Vec<Expr>),
+    Echo(Vec<Child>),
     /// An expression served for its effect; its value is discarded.
-    Effect(Expr),
+    Effect(Child),
     /// `{ ... }`, php's `ZEND_AST_STMT_LIST`.
     Block(Read),
     /// `for (init; cond; step) body`, php's `ZEND_AST_FOR`: three
     /// expression lists, each empty where nothing is written between the
     /// semicolons, and the body's statements.
     For {
-        init: Vec<Expr>,
-        cond: Vec<Expr>,
-        step: Vec<Expr>,
+        init: Vec<Child>,
+        cond: Vec<Child>,
+        step: Vec<Child>,
         body: Read,
     },
     /// `while (cond) body`, php's `ZEND_AST_WHILE`.
-    While { cond: Expr, body: Read },
+    While { cond: Child, body: Read },
     /// `do body while (cond);`, php's `ZEND_AST_DO_WHILE`: the body,
     /// which runs before the condition is asked the first time, the
     /// condition, and the line the condition stands on, which php takes
     /// from the condition's own node and not from the `do` (the `while`
     /// is written after the body, so the two are rarely the same line).
-    DoWhile { body: Read, cond: Expr, line: u32 },
+    DoWhile { body: Read, cond: Child, line: u32 },
     /// `foreach (expr as key => value) body`, php's `ZEND_AST_FOREACH`:
     /// the subject, the value target, the key target where one is
     /// written, and the body's statements.
     Foreach {
-        expr: Expr,
+        expr: Child,
         value: Target,
         key: Option<Target>,
         body: Read,
     },
     /// `return;` or `return expr;`, php's `ZEND_AST_RETURN`.
-    Return(Option<Expr>),
+    Return(Option<Child>),
     /// `namespace A\B;`, php's `ZEND_AST_NAMESPACE` with no body: the
     /// name as written, in force for what follows it. The braced form
     /// and the global `namespace;` are refused as what this reader
@@ -95,13 +95,13 @@ pub(crate) enum Stmt {
     Namespace(Vec<u8>),
     /// `switch (expr) { case …: … default: … }`, php's `ZEND_AST_SWITCH`
     /// over a `ZEND_AST_SWITCH_LIST`.
-    Switch { expr: Expr, cases: Vec<Case> },
+    Switch { expr: Child, cases: Vec<Case> },
     /// `break;` or `break n;`, php's `ZEND_AST_BREAK` with the depth
     /// written after it, if one is; what it may be is the emitter's to
     /// refuse as `zend_compile_break_continue` refuses it.
-    Break(Option<Expr>),
+    Break(Option<Child>),
     /// `continue;` or `continue n;`, php's `ZEND_AST_CONTINUE`.
-    Continue(Option<Expr>),
+    Continue(Option<Child>),
     /// `class M { … }` at the top level, php's `ZEND_AST_CLASS`.
     Class(Class),
     /// `function f(…) { … }`, php's `ZEND_AST_FUNC_DECL`.
@@ -136,7 +136,7 @@ pub(crate) enum Stmt {
 /// where the statement stands for the arm that has none.
 #[derive(Debug, PartialEq)]
 pub(crate) struct IfArm {
-    pub(crate) cond: Option<Expr>,
+    pub(crate) cond: Option<Child>,
     pub(crate) body: Read,
     pub(crate) line: u32,
 }
@@ -171,7 +171,7 @@ pub(crate) enum Unset {
     /// `unset($o->p)`, php's `ZEND_AST_PROP` arm: `UNSET_OBJ` over the
     /// receiver and the property's name as written. The receiver is a
     /// variable or `$this`.
-    Prop { object: Expr, name: Vec<u8> },
+    Prop { object: Child, name: Vec<u8> },
 }
 
 /// The nine magic constants, php's `T_LINE` through `T_PROPERTY_C`: the
@@ -216,7 +216,7 @@ impl Magic {
 /// `zend_compile_foreach` refuses it.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Target {
-    pub(crate) expr: Expr,
+    pub(crate) expr: Child,
     pub(crate) by_ref: bool,
 }
 
@@ -224,8 +224,8 @@ pub(crate) struct Target {
 /// value, and the key where one is written before `=>`.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Element {
-    pub(crate) key: Option<Expr>,
-    pub(crate) value: Expr,
+    pub(crate) key: Option<Child>,
+    pub(crate) value: Child,
 }
 
 /// One class declaration, php's `zend_ast_decl` for a class: the name as
@@ -263,7 +263,7 @@ pub(crate) struct Class {
 #[derive(Debug, PartialEq)]
 pub(crate) struct Attr {
     pub(crate) name: Vec<u8>,
-    pub(crate) arguments: Vec<Expr>,
+    pub(crate) arguments: Vec<Child>,
     pub(crate) line: u32,
 }
 
@@ -295,7 +295,7 @@ pub(crate) struct Parameter {
     pub(crate) ty: Option<Type>,
     pub(crate) by_ref: bool,
     pub(crate) variadic: bool,
-    pub(crate) default: Option<Expr>,
+    pub(crate) default: Option<Child>,
     pub(crate) promote: Option<Promoted>,
 }
 
@@ -361,7 +361,7 @@ pub(crate) struct Property {
     pub(crate) set_visibility: Option<Visibility>,
     pub(crate) ty: Option<Type>,
     pub(crate) is_static: bool,
-    pub(crate) default: Option<Expr>,
+    pub(crate) default: Option<Child>,
     pub(crate) doc_comment: Option<Vec<u8>>,
     pub(crate) line: u32,
 }
@@ -375,7 +375,7 @@ pub(crate) struct Constant {
     pub(crate) name: Vec<u8>,
     pub(crate) visibility: Visibility,
     pub(crate) is_final: bool,
-    pub(crate) value: Expr,
+    pub(crate) value: Child,
     pub(crate) doc_comment: Option<Vec<u8>>,
     pub(crate) line: u32,
 }
@@ -385,7 +385,7 @@ pub(crate) struct Constant {
 /// starts on, which the opline over it carries, and the keyword's line.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Case {
-    pub(crate) cond: Option<(Expr, u32)>,
+    pub(crate) cond: Option<(Child, u32)>,
     pub(crate) body: Read,
     pub(crate) line: u32,
 }
@@ -395,8 +395,8 @@ pub(crate) struct Case {
 /// at its own line, and the body at its.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Arm {
-    pub(crate) conds: Option<Vec<(Expr, u32)>>,
-    pub(crate) body: Expr,
+    pub(crate) conds: Option<Vec<(Child, u32)>>,
+    pub(crate) body: Child,
     pub(crate) line: u32,
 }
 
@@ -406,7 +406,7 @@ pub(crate) struct Arm {
 /// `zend_compile_encaps_list` deprecates.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Piece {
-    pub(crate) expr: Expr,
+    pub(crate) expr: Child,
     pub(crate) dollar_curly: bool,
 }
 
@@ -465,7 +465,7 @@ pub(crate) enum Expr {
     },
     Call {
         name: Vec<u8>,
-        arguments: Vec<Expr>,
+        arguments: Vec<Child>,
     },
     /// `$a`, php's `ZEND_AST_VAR` over a name written as is, which
     /// `zend_try_compile_cv` makes a CV: not `$this`, which is [`Expr::This`],
@@ -548,7 +548,7 @@ pub(crate) enum Expr {
     /// read.
     New {
         class: Vec<u8>,
-        arguments: Vec<Expr>,
+        arguments: Vec<Child>,
     },
     /// `C::A`, php's `ZEND_AST_CLASS_CONST` over a class and a constant
     /// both named as written; `C::class` is not read.
@@ -569,14 +569,14 @@ pub(crate) enum Expr {
     StaticCall {
         class: Vec<u8>,
         method: Vec<u8>,
-        arguments: Vec<Expr>,
+        arguments: Vec<Child>,
     },
     /// `$o->m(args)`, php's `ZEND_AST_METHOD_CALL` over any expression
     /// and a method named as written.
     MethodCall {
         object: Child,
         method: Vec<u8>,
-        arguments: Vec<Expr>,
+        arguments: Vec<Child>,
     },
     /// `$o instanceof C`, php's `ZEND_AST_INSTANCEOF` over a class named
     /// as written.
@@ -593,7 +593,7 @@ pub(crate) enum Expr {
     /// an expression and the arguments.
     CallVar {
         callee: Child,
-        arguments: Vec<Expr>,
+        arguments: Vec<Child>,
     },
     /// `throw expr`, php's `ZEND_AST_THROW`: an expression since 8.0,
     /// which `throw expr;` is the statement of, so the grammar's
@@ -669,17 +669,38 @@ pub(crate) enum Expr {
 /// however long it is. A derived drop would recurse on both, and the
 /// chain the compiler refuses at its stack limit ([`StackLimit`]) would
 /// then take the thread down on the way out instead.
+///
+/// Beside the expression it carries the line php's `zend_ast.lineno`
+/// carries: the smallest line of the node's own children, and the line
+/// the reader stands on for a node with none (`zend_ast_create_from_va_list`,
+/// `Z/Zend/zend_ast.c:759-779`). `zend_compile_expr` sets
+/// `CG(zend_lineno)` from it before compiling the node, so an opline
+/// carries the line of the expression it came from and not the line its
+/// statement began on.
 #[derive(PartialEq)]
-pub(crate) struct Child(Box<Expr>);
+pub(crate) struct Child {
+    expr: Box<Expr>,
+    line: u32,
+}
 
 impl Child {
-    pub(crate) fn new(expr: Expr) -> Child {
-        Child(Box::new(expr))
+    /// One node at the line php's `zend_ast_create` would give it.
+    pub(crate) fn at(line: u32, expr: Expr) -> Child {
+        Child {
+            expr: Box::new(expr),
+            line,
+        }
+    }
+
+    /// The line `zend_compile_expr` sets `CG(zend_lineno)` to before
+    /// this node's oplines are emitted.
+    pub(crate) fn line(&self) -> u32 {
+        self.line
     }
 
     /// The expression out, `Null` left in its place for the drop to find.
     fn take(mut self) -> Expr {
-        std::mem::replace(&mut self.0, Expr::Null)
+        std::mem::replace(&mut self.expr, Expr::Null)
     }
 }
 
@@ -687,19 +708,29 @@ impl Deref for Child {
     type Target = Expr;
 
     fn deref(&self) -> &Expr {
-        &self.0
+        &self.expr
+    }
+}
+
+impl std::ops::DerefMut for Child {
+    fn deref_mut(&mut self) -> &mut Expr {
+        &mut self.expr
     }
 }
 
 impl fmt::Debug for Child {
+    /// The expression and the line it carries, since two nodes that
+    /// differ only in their line are one tree here and two to
+    /// [`PartialEq`].
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
+        self.expr.fmt(f)?;
+        write!(f, "@{}", self.line)
     }
 }
 
 impl Drop for Child {
     fn drop(&mut self) {
-        let mut first = std::mem::replace(&mut *self.0, Expr::Null);
+        let mut first = std::mem::replace(&mut *self.expr, Expr::Null);
         loop {
             first = match first {
                 Expr::Unary { operand, .. }
@@ -1243,7 +1274,7 @@ impl Reader<'_> {
     /// named argument, php's `identifier ":" expr`, is refused as not
     /// yet read; so is the spread `...`, which php refuses in an
     /// attribute itself.
-    fn attribute_arguments(&mut self) -> Result<Vec<Expr>, Trouble> {
+    fn attribute_arguments(&mut self) -> Result<Vec<Child>, Trouble> {
         self.skip_trivia();
         if self.byte(0) != Some(b'(') {
             return Ok(Vec::new());
@@ -1600,7 +1631,7 @@ impl Reader<'_> {
     /// after the `&`, `backup_doc_comment` where the grammar reduces
     /// it. `is_static` is the `static` php's `T_STATIC inline_function`
     /// read before the keyword, `ZEND_ACC_STATIC` on the op array.
-    fn inline_function(&mut self, is_static: bool) -> Result<Expr, Trouble> {
+    fn inline_function(&mut self, is_static: bool) -> Result<Child, Trouble> {
         let line = self.line;
         self.skip_trivia();
         let by_ref = self.byte(0) == Some(b'&');
@@ -1635,21 +1666,24 @@ impl Reader<'_> {
         // `close_brace` stepped over the `}` alone, so the line is its,
         // which is the declaration's `end_lineno`.
         let end_line = self.line;
-        Ok(Expr::Closure(Box::new(Closure {
-            function: Function {
-                name: Vec::new(),
-                parameters,
-                return_type,
-                by_ref,
-                body,
-                doc_comment,
-                line,
-                end_line,
-            },
-            uses,
-            is_static,
-            is_arrow: false,
-        })))
+        Ok(Child::at(
+            line,
+            Expr::Closure(Box::new(Closure {
+                function: Function {
+                    name: Vec::new(),
+                    parameters,
+                    return_type,
+                    by_ref,
+                    body,
+                    doc_comment,
+                    line,
+                    end_line,
+                },
+                uses,
+                is_static,
+                is_arrow: false,
+            })),
+        ))
     }
 
     /// `fn (parameters) : type => expr`, the keyword read: php's
@@ -1658,7 +1692,7 @@ impl Reader<'_> {
     /// compiles the body, so the `Read` here is that one `return`. Its
     /// captures are written nowhere: the emitter finds them in the body
     /// as `find_implicit_binds` does.
-    fn arrow_function(&mut self, is_static: bool) -> Result<Expr, Trouble> {
+    fn arrow_function(&mut self, is_static: bool) -> Result<Child, Trouble> {
         let line = self.line;
         self.skip_trivia();
         let by_ref = self.byte(0) == Some(b'&');
@@ -1689,21 +1723,24 @@ impl Reader<'_> {
         let value = self.expr()?;
         let end_line = self.line;
         let body = vec![(Stmt::Return(Some(value)), returned)];
-        Ok(Expr::Closure(Box::new(Closure {
-            function: Function {
-                name: Vec::new(),
-                parameters,
-                return_type,
-                by_ref,
-                body,
-                doc_comment,
-                line,
-                end_line,
-            },
-            uses: Vec::new(),
-            is_static,
-            is_arrow: true,
-        })))
+        Ok(Child::at(
+            line,
+            Expr::Closure(Box::new(Closure {
+                function: Function {
+                    name: Vec::new(),
+                    parameters,
+                    return_type,
+                    by_ref,
+                    body,
+                    doc_comment,
+                    line,
+                    end_line,
+                },
+                uses: Vec::new(),
+                is_static,
+                is_arrow: true,
+            })),
+        ))
     }
 
     /// `use (` a list of variables `)`, the keyword read: php's
@@ -1751,9 +1788,9 @@ impl Reader<'_> {
     /// `callable_expr` over a `callable_variable`: a `(` where a
     /// variable has just been read opens a call whose callee is that
     /// variable, `zend_compile_dynamic_call`.
-    fn dynamic_calls(&mut self, mut callee: Expr) -> Result<Expr, Trouble> {
+    fn dynamic_calls(&mut self, mut callee: Child) -> Result<Child, Trouble> {
         loop {
-            if !matches!(callee, Expr::Var(_) | Expr::CallVar { .. }) {
+            if !matches!(&*callee, Expr::Var(_) | Expr::CallVar { .. }) {
                 return Ok(callee);
             }
             self.skip_trivia();
@@ -1762,10 +1799,7 @@ impl Reader<'_> {
             }
             self.bump(1);
             let arguments = self.arguments()?;
-            callee = Expr::CallVar {
-                callee: Child::new(callee),
-                arguments,
-            };
+            callee = Child::at(callee.line(), Expr::CallVar { callee, arguments });
         }
     }
 
@@ -2237,7 +2271,7 @@ impl Reader<'_> {
 
     /// The `'(' expr ')'` of an `if` or an `elseif`, and the line the
     /// condition stands on, which is the arm's `elem_ast->lineno`.
-    fn if_condition(&mut self, what: &str) -> Result<(Expr, u32), Trouble> {
+    fn if_condition(&mut self, what: &str) -> Result<(Child, u32), Trouble> {
         self.punctuation(
             b'(',
             format!("an `{what}` with no parenthesis after it").as_str(),
@@ -2499,7 +2533,7 @@ impl Reader<'_> {
 
     /// What follows a `break` or a `continue`: nothing, or the
     /// expression php's grammar reads before the `;`.
-    fn depth(&mut self) -> Result<Option<Expr>, Trouble> {
+    fn depth(&mut self) -> Result<Option<Child>, Trouble> {
         self.skip_trivia();
         if self.byte(0) == Some(b';') || self.starts_with(b"?>") || self.at >= self.source.len() {
             self.end_of_statement()?;
@@ -2515,11 +2549,11 @@ impl Reader<'_> {
     /// conditions separated by commas with one allowed before the `=>`,
     /// or `default`, then the body; arms separated by commas, with one
     /// allowed before the closing brace.
-    fn r#match(&mut self) -> Result<Expr, Trouble> {
+    fn r#match(&mut self) -> Result<Child, Trouble> {
         self.punctuation(b'(', "a `match` with no parenthesis after it")?;
         self.skip_trivia();
         let line = self.line;
-        let expr = Child::new(self.expr()?);
+        let expr = self.expr()?;
         self.punctuation(b')', "a `match` whose parenthesis nothing closes")?;
         self.punctuation(b'{', "a `match` with no brace after it")?;
         let mut arms = Vec::new();
@@ -2527,7 +2561,7 @@ impl Reader<'_> {
             self.skip_trivia();
             if self.byte(0) == Some(b'}') {
                 self.close_brace();
-                return Ok(Expr::Match { expr, arms, line });
+                return Ok(Child::at(line, Expr::Match { expr, arms, line }));
             }
             if !arms.is_empty() {
                 if self.byte(0) != Some(b',') {
@@ -2537,7 +2571,7 @@ impl Reader<'_> {
                 self.skip_trivia();
                 if self.byte(0) == Some(b'}') {
                     self.close_brace();
-                    return Ok(Expr::Match { expr, arms, line });
+                    return Ok(Child::at(line, Expr::Match { expr, arms, line }));
                 }
             }
             let conds = if self.word_ahead(b"default") {
@@ -2612,7 +2646,7 @@ impl Reader<'_> {
 
     /// php's `for_exprs`: nothing, or expressions separated by commas,
     /// up to `close`, which is taken.
-    fn expr_list(&mut self, close: u8) -> Result<Vec<Expr>, Trouble> {
+    fn expr_list(&mut self, close: u8) -> Result<Vec<Child>, Trouble> {
         let mut exprs = Vec::new();
         loop {
             self.skip_trivia();
@@ -2649,7 +2683,7 @@ impl Reader<'_> {
 
     /// The expressions of an `echo`, which `<?=` has too, up to the end
     /// of the statement.
-    fn echoed(&mut self) -> Result<Vec<Expr>, Trouble> {
+    fn echoed(&mut self) -> Result<Vec<Child>, Trouble> {
         let mut parts = vec![self.expr()?];
         loop {
             self.skip_trivia();
@@ -2682,7 +2716,7 @@ impl Reader<'_> {
     /// below, each left to right. php's rule is `variable '=' expr`, so
     /// `1 + $a = 2` is php's `1 + ($a = 2)`; that is refused here rather
     /// than read as the other grouping.
-    fn expr(&mut self) -> Result<Expr, Trouble> {
+    fn expr(&mut self) -> Result<Child, Trouble> {
         self.check_stack()?;
         // `expr: T_THROW expr` since 8.0: the operand is a full
         // expression, so `throw $a = new E` is php's `throw ($a = new E)`
@@ -2690,7 +2724,8 @@ impl Reader<'_> {
         self.skip_trivia();
         if self.word_ahead(b"throw") {
             self.bump(5);
-            return Ok(Expr::Throw(Child::new(self.expr()?)));
+            let thrown = self.expr()?;
+            return Ok(Child::at(thrown.line(), Expr::Throw(thrown)));
         }
         self.logical_or()
     }
@@ -2700,7 +2735,7 @@ impl Reader<'_> {
     /// left to right, and every operand read at the `xor` level above
     /// it. `$a = 1 or 2` is php's `($a = 1) or 2`, which is the whole
     /// reason the three words have levels of their own.
-    fn logical_or(&mut self) -> Result<Expr, Trouble> {
+    fn logical_or(&mut self) -> Result<Child, Trouble> {
         self.check_stack()?;
         let mut left = self.logical_xor()?;
         loop {
@@ -2709,17 +2744,20 @@ impl Reader<'_> {
                 return Ok(left);
             }
             self.bump(2);
-            left = Expr::Or {
-                left: Child::new(left),
-                right: Child::new(self.logical_xor()?),
-            };
+            left = Child::at(
+                left.line(),
+                Expr::Or {
+                    left,
+                    right: self.logical_xor()?,
+                },
+            );
         }
     }
 
     /// php's `%left T_LOGICAL_XOR`, between `or` below it and `and`
     /// above: `ZEND_AST_BINARY_OP` with `ZEND_BOOL_XOR` in `attr`, which
     /// is the one spelling of the three with no jump under it.
-    fn logical_xor(&mut self) -> Result<Expr, Trouble> {
+    fn logical_xor(&mut self) -> Result<Child, Trouble> {
         self.check_stack()?;
         let mut left = self.logical_and()?;
         loop {
@@ -2728,11 +2766,14 @@ impl Reader<'_> {
                 return Ok(left);
             }
             self.bump(3);
-            left = Expr::Binary {
-                op: BinaryOp::BoolXor,
-                left: Child::new(left),
-                right: Child::new(self.logical_and()?),
-            };
+            left = Child::at(
+                left.line(),
+                Expr::Binary {
+                    op: BinaryOp::BoolXor,
+                    left,
+                    right: self.logical_and()?,
+                },
+            );
         }
     }
 
@@ -2740,7 +2781,7 @@ impl Reader<'_> {
     /// levels and still below `=`: the word spelling of `&&`, the same
     /// `ZEND_AST_AND` node, with every operand read at the assignment
     /// level above it.
-    fn logical_and(&mut self) -> Result<Expr, Trouble> {
+    fn logical_and(&mut self) -> Result<Child, Trouble> {
         self.check_stack()?;
         let mut left = self.conditional()?;
         loop {
@@ -2749,10 +2790,13 @@ impl Reader<'_> {
                 return Ok(left);
             }
             self.bump(3);
-            left = Expr::And {
-                left: Child::new(left),
-                right: Child::new(self.conditional()?),
-            };
+            left = Child::at(
+                left.line(),
+                Expr::And {
+                    left,
+                    right: self.conditional()?,
+                },
+            );
         }
     }
 
@@ -2763,7 +2807,7 @@ impl Reader<'_> {
     /// the else arm is read below this tier, so the level associates to
     /// the left and `a ? b : c ? d : e` is `(a ? b : c) ? d : e`, the
     /// grouping `zend_compile_conditional` refuses.
-    fn conditional(&mut self) -> Result<Expr, Trouble> {
+    fn conditional(&mut self) -> Result<Child, Trouble> {
         self.check_stack()?;
         let mut cond = self.below_conditional()?;
         while self.ternary_ahead() {
@@ -2772,15 +2816,18 @@ impl Reader<'_> {
             let then = if self.byte(0) == Some(b':') {
                 None
             } else {
-                Some(Child::new(self.expr()?))
+                Some(self.expr()?)
             };
             self.punctuation(b':', "a `?` whose arms no `:` stands between")?;
-            cond = Expr::Ternary {
-                cond: Child::new(cond),
-                then,
-                otherwise: Child::new(self.below_conditional()?),
-                parenthesised: false,
-            };
+            cond = Child::at(
+                cond.line(),
+                Expr::Ternary {
+                    cond,
+                    then,
+                    otherwise: self.below_conditional()?,
+                    parenthesised: false,
+                },
+            );
         }
         Ok(cond)
     }
@@ -2790,11 +2837,12 @@ impl Reader<'_> {
     /// the `=` php's grammar shifts after a variable, which binds inside
     /// an arm whatever stands around it (`a ? b : $c = 1` is php's
     /// `a ? b : ($c = 1)`).
-    fn below_conditional(&mut self) -> Result<Expr, Trouble> {
+    fn below_conditional(&mut self) -> Result<Child, Trouble> {
         self.skip_trivia();
         if self.word_ahead(b"throw") {
             self.bump(5);
-            return Ok(Expr::Throw(Child::new(self.expr()?)));
+            let thrown = self.expr()?;
+            return Ok(Child::at(thrown.line(), Expr::Throw(thrown)));
         }
         let left = self.coalesce()?;
         self.assignment(left)
@@ -2806,7 +2854,7 @@ impl Reader<'_> {
     /// `a ?? (b ?? c)`. `??=` is one token at the assignment level and
     /// is left where it stands, for [`Self::assignment`] to read, rather
     /// than having a `??` read out of it here.
-    fn coalesce(&mut self) -> Result<Expr, Trouble> {
+    fn coalesce(&mut self) -> Result<Child, Trouble> {
         self.check_stack()?;
         let left = self.boolean_or()?;
         self.skip_trivia();
@@ -2814,17 +2862,20 @@ impl Reader<'_> {
             return Ok(left);
         }
         self.bump(2);
-        Ok(Expr::Coalesce {
-            left: Child::new(left),
-            right: Child::new(self.coalesce()?),
-        })
+        Ok(Child::at(
+            left.line(),
+            Expr::Coalesce {
+                left,
+                right: self.coalesce()?,
+            },
+        ))
     }
 
     /// php's `%left T_BOOLEAN_OR`, the level between `??` below it and
     /// `&&` above: `||`, left to right, one `ZEND_AST_OR` per operator
     /// written, so `$a || $b || $c` is `($a || $b) || $c`. A single `|`
     /// is the bitwise level two below this one.
-    fn boolean_or(&mut self) -> Result<Expr, Trouble> {
+    fn boolean_or(&mut self) -> Result<Child, Trouble> {
         self.check_stack()?;
         let mut left = self.boolean_and()?;
         loop {
@@ -2833,10 +2884,13 @@ impl Reader<'_> {
                 return Ok(left);
             }
             self.bump(2);
-            left = Expr::Or {
-                left: Child::new(left),
-                right: Child::new(self.boolean_and()?),
-            };
+            left = Child::at(
+                left.line(),
+                Expr::Or {
+                    left,
+                    right: self.boolean_and()?,
+                },
+            );
         }
     }
 
@@ -2849,7 +2903,7 @@ impl Reader<'_> {
     /// `$a && $b = 1` is php's `$a && ($b = 1)`; that is the grouping
     /// [`Self::expr`] refuses rather than reads, as it refuses
     /// `1 + $a = 2`.
-    fn boolean_and(&mut self) -> Result<Expr, Trouble> {
+    fn boolean_and(&mut self) -> Result<Child, Trouble> {
         self.check_stack()?;
         let mut left = self.bitwise_or()?;
         loop {
@@ -2858,10 +2912,13 @@ impl Reader<'_> {
                 return Ok(left);
             }
             self.bump(2);
-            left = Expr::And {
-                left: Child::new(left),
-                right: Child::new(self.bitwise_or()?),
-            };
+            left = Child::at(
+                left.line(),
+                Expr::And {
+                    left,
+                    right: self.bitwise_or()?,
+                },
+            );
         }
     }
 
@@ -2869,7 +2926,7 @@ impl Reader<'_> {
     /// `&&` below it and `^` above: `|`, left to right, so `$a | $b | $c`
     /// is `($a | $b) | $c`. A `||` is the boolean level below and a `|=`
     /// assigns, neither of which this reads.
-    fn bitwise_or(&mut self) -> Result<Expr, Trouble> {
+    fn bitwise_or(&mut self) -> Result<Child, Trouble> {
         self.check_stack()?;
         let mut left = self.bitwise_xor()?;
         loop {
@@ -2878,17 +2935,20 @@ impl Reader<'_> {
                 return Ok(left);
             }
             self.bump(1);
-            left = Expr::Binary {
-                op: BinaryOp::BwOr,
-                left: Child::new(left),
-                right: Child::new(self.bitwise_xor()?),
-            };
+            left = Child::at(
+                left.line(),
+                Expr::Binary {
+                    op: BinaryOp::BwOr,
+                    left,
+                    right: self.bitwise_xor()?,
+                },
+            );
         }
     }
 
     /// php's `%left '^'`, between `|` below it and `&` above: `^`, left
     /// to right. A `^=` assigns and is not read.
-    fn bitwise_xor(&mut self) -> Result<Expr, Trouble> {
+    fn bitwise_xor(&mut self) -> Result<Child, Trouble> {
         self.check_stack()?;
         let mut left = self.bitwise_and()?;
         loop {
@@ -2897,11 +2957,14 @@ impl Reader<'_> {
                 return Ok(left);
             }
             self.bump(1);
-            left = Expr::Binary {
-                op: BinaryOp::BwXor,
-                left: Child::new(left),
-                right: Child::new(self.bitwise_and()?),
-            };
+            left = Child::at(
+                left.line(),
+                Expr::Binary {
+                    op: BinaryOp::BwXor,
+                    left,
+                    right: self.bitwise_and()?,
+                },
+            );
         }
     }
 
@@ -2918,7 +2981,7 @@ impl Reader<'_> {
     /// reaches here. An `&` where an operand would stand, a by-reference
     /// argument or array element, is refused where it stands, since this
     /// level reads its left side before it looks for the operator.
-    fn bitwise_and(&mut self) -> Result<Expr, Trouble> {
+    fn bitwise_and(&mut self) -> Result<Child, Trouble> {
         self.check_stack()?;
         let mut left = self.equality()?;
         loop {
@@ -2927,11 +2990,14 @@ impl Reader<'_> {
                 return Ok(left);
             }
             self.bump(1);
-            left = Expr::Binary {
-                op: BinaryOp::BwAnd,
-                left: Child::new(left),
-                right: Child::new(self.equality()?),
-            };
+            left = Child::at(
+                left.line(),
+                Expr::Binary {
+                    op: BinaryOp::BwAnd,
+                    left,
+                    right: self.equality()?,
+                },
+            );
         }
     }
 
@@ -2954,68 +3020,86 @@ impl Reader<'_> {
     /// left, since this level is where the second `=` is read again,
     /// and `$a = throw new E` is the `throw` the conditional's arm
     /// takes.
-    fn assigned(&mut self) -> Result<Expr, Trouble> {
+    fn assigned(&mut self) -> Result<Child, Trouble> {
         self.conditional()
     }
 
     /// The `=` php's grammar shifts after a variable, and what it
     /// assigns: `left` as it stands where no `=` follows.
-    fn assignment(&mut self, left: Expr) -> Result<Expr, Trouble> {
+    fn assignment(&mut self, left: Child) -> Result<Child, Trouble> {
         self.skip_trivia();
+        // `zend_compile_assign` sets `CG(zend_lineno)` back to the
+        // variable's line before it emits, so an assignment written over
+        // several lines carries the line its target stands on and not
+        // the line its value ends on (`Z/Zend/zend_compile.c:3474`).
+        let line = left.line();
         // `variable T_COALESCE_EQUAL expr`, one token at this level: the
         // coalescing level above left it where it stands rather than
         // reading a `??` out of it.
         if self.starts_with(b"??=") {
             self.bump(3);
-            let Expr::Var(var) = left else {
+            let Expr::Var(var) = left.take() else {
                 return Err(
                     self.trouble("a `??=` over what is no variable this compiler cannot read yet")
                 );
             };
-            return Ok(Expr::AssignCoalesce {
-                var,
-                value: Child::new(self.assigned()?),
-            });
+            return Ok(Child::at(
+                line,
+                Expr::AssignCoalesce {
+                    var,
+                    value: self.assigned()?,
+                },
+            ));
         }
         // `==` is the equality read above, and `=>` closes a `match`
         // arm's conditions.
         if self.byte(0) != Some(b'=') || matches!(self.byte(1), Some(b'=' | b'>')) {
             return Ok(left);
         }
-        match left {
+        match left.take() {
             Expr::Var(var) => {
                 self.bump(1);
                 self.skip_trivia();
                 if self.byte(0) == Some(b'&') {
                     self.bump(1);
-                    return self.assign_ref(Expr::Var(var));
+                    return self.assign_ref(Child::at(line, Expr::Var(var)));
                 }
-                Ok(Expr::Assign {
-                    var,
-                    value: Child::new(self.assigned()?),
-                })
+                Ok(Child::at(
+                    line,
+                    Expr::Assign {
+                        var,
+                        value: self.assigned()?,
+                    },
+                ))
             }
             // `zend_compile_assign`'s `ZEND_AST_DIM` arm, and
             // `zend_compile_assign_ref`'s where an `&` follows the `=`.
-            target @ Expr::Dim { .. } => {
+            dim @ Expr::Dim { .. } => {
                 self.bump(1);
                 self.skip_trivia();
+                let target = Child::at(line, dim);
                 if self.byte(0) == Some(b'&') {
                     self.bump(1);
                     return self.assign_ref(target);
                 }
-                Ok(Expr::AssignDim {
-                    target: Child::new(target),
-                    value: Child::new(self.assigned()?),
-                })
+                Ok(Child::at(
+                    line,
+                    Expr::AssignDim {
+                        target,
+                        value: self.assigned()?,
+                    },
+                ))
             }
             Expr::Prop { object, name } => {
                 self.bump(1);
-                Ok(Expr::AssignProp {
-                    object,
-                    name,
-                    value: Child::new(self.assigned()?),
-                })
+                Ok(Child::at(
+                    line,
+                    Expr::AssignProp {
+                        object,
+                        name,
+                        value: self.assigned()?,
+                    },
+                ))
             }
             // `zend_compile_assign`'s `ZEND_AST_STATIC_PROP` arm.
             // `C::$p = &$x` is php's `ZEND_AST_ASSIGN_REF` over the same
@@ -3024,11 +3108,14 @@ impl Reader<'_> {
             // the value.
             Expr::StaticProp { class, name } => {
                 self.bump(1);
-                Ok(Expr::AssignStaticProp {
-                    class,
-                    name,
-                    value: Child::new(self.assigned()?),
-                })
+                Ok(Child::at(
+                    line,
+                    Expr::AssignStaticProp {
+                        class,
+                        name,
+                        value: self.assigned()?,
+                    },
+                ))
             }
             _ => {
                 Err(self
@@ -3043,7 +3130,7 @@ impl Reader<'_> {
     /// is refused here by what follows. `$this`, `$_GET` and its kin are
     /// refused as [`Self::variable`] refuses them, and a property, a
     /// dimension or a call as the source is not read yet.
-    fn assign_ref(&mut self, target: Expr) -> Result<Expr, Trouble> {
+    fn assign_ref(&mut self, target: Child) -> Result<Child, Trouble> {
         self.skip_trivia();
         let source = match self.byte(0) {
             Some(b'$') => self.variable()?,
@@ -3057,21 +3144,18 @@ impl Reader<'_> {
                 ));
             }
         };
-        if !matches!(source, Expr::Var(_) | Expr::Call { .. }) {
+        if !matches!(&*source, Expr::Var(_) | Expr::Call { .. }) {
             return Err(self.trouble(
                 "a by-reference assignment from what is no variable this compiler cannot read yet",
             ));
         }
-        Ok(Expr::AssignRef {
-            target: Child::new(target),
-            source: Child::new(source),
-        })
+        Ok(Child::at(target.line(), Expr::AssignRef { target, source }))
     }
 
     /// `==`, `!=`, `<>`, `===`, `!==` and `<=>`, php's non-associative
     /// level below the comparisons: one equality, and a second operator
     /// of the level after it is php's parse error, refused here.
-    fn equality(&mut self) -> Result<Expr, Trouble> {
+    fn equality(&mut self) -> Result<Child, Trouble> {
         let left = self.comparison()?;
         let Some((op, width)) = self.equality_ahead() else {
             return Ok(left);
@@ -3081,11 +3165,7 @@ impl Reader<'_> {
         if self.equality_ahead().is_some() {
             return Err(self.trouble("an equality of an equality, which php does not read"));
         }
-        Ok(Expr::Binary {
-            op,
-            left: Child::new(left),
-            right: Child::new(right),
-        })
+        Ok(Child::at(left.line(), Expr::Binary { op, left, right }))
     }
 
     /// The operator of the equality level standing here, and its width
@@ -3108,7 +3188,7 @@ impl Reader<'_> {
     /// php's parse error, refused here. `<<` and `>>` are the shifts,
     /// which read `<<=` and `>>=` as theirs to refuse; `<>` and `<=>`
     /// are the level below.
-    fn comparison(&mut self) -> Result<Expr, Trouble> {
+    fn comparison(&mut self) -> Result<Child, Trouble> {
         let left = self.concat()?;
         let Some((op, width)) = self.comparison_ahead() else {
             return Ok(left);
@@ -3118,11 +3198,7 @@ impl Reader<'_> {
         if self.comparison_ahead().is_some() {
             return Err(self.trouble("a comparison of a comparison, which php does not read"));
         }
-        Ok(Expr::Binary {
-            op,
-            left: Child::new(left),
-            right: Child::new(right),
-        })
+        Ok(Child::at(left.line(), Expr::Binary { op, left, right }))
     }
 
     /// The operator of the comparison level standing here, and its
@@ -3146,7 +3222,7 @@ impl Reader<'_> {
     /// and a `...` unpacks, neither of which this reads; a `.` before a
     /// digit opens a number, which php's scanner takes first, so `'a' .5`
     /// is php's parse error and is refused here.
-    fn concat(&mut self) -> Result<Expr, Trouble> {
+    fn concat(&mut self) -> Result<Child, Trouble> {
         let mut left = self.shift()?;
         loop {
             self.skip_trivia();
@@ -3158,17 +3234,20 @@ impl Reader<'_> {
             }
             self.bump(1);
             let right = self.shift()?;
-            left = Expr::Binary {
-                op: BinaryOp::Concat,
-                left: Child::new(left),
-                right: Child::new(right),
-            };
+            left = Child::at(
+                left.line(),
+                Expr::Binary {
+                    op: BinaryOp::Concat,
+                    left,
+                    right,
+                },
+            );
         }
     }
 
     /// `<<` and `>>`, php's level below the arithmetic. A `<<<` opens a
     /// heredoc and a `<<=` or `>>=` assigns, none of which this reads.
-    fn shift(&mut self) -> Result<Expr, Trouble> {
+    fn shift(&mut self) -> Result<Child, Trouble> {
         let mut left = self.additive()?;
         loop {
             self.skip_trivia();
@@ -3181,16 +3260,12 @@ impl Reader<'_> {
             };
             self.bump(2);
             let right = self.additive()?;
-            left = Expr::Binary {
-                op,
-                left: Child::new(left),
-                right: Child::new(right),
-            };
+            left = Child::at(left.line(), Expr::Binary { op, left, right });
         }
     }
 
     /// `+` and `-`, php's lower arithmetic level.
-    fn additive(&mut self) -> Result<Expr, Trouble> {
+    fn additive(&mut self) -> Result<Child, Trouble> {
         let mut left = self.multiplicative()?;
         loop {
             self.skip_trivia();
@@ -3201,16 +3276,12 @@ impl Reader<'_> {
             };
             self.bump(1);
             let right = self.multiplicative()?;
-            left = Expr::Binary {
-                op,
-                left: Child::new(left),
-                right: Child::new(right),
-            };
+            left = Child::at(left.line(), Expr::Binary { op, left, right });
         }
     }
 
     /// `*`, `/` and `%`, php's higher arithmetic level.
-    fn multiplicative(&mut self) -> Result<Expr, Trouble> {
+    fn multiplicative(&mut self) -> Result<Child, Trouble> {
         let mut left = self.not()?;
         loop {
             self.skip_trivia();
@@ -3223,11 +3294,7 @@ impl Reader<'_> {
             };
             self.bump(1);
             let right = self.not()?;
-            left = Expr::Binary {
-                op,
-                left: Child::new(left),
-                right: Child::new(right),
-            };
+            left = Child::at(left.line(), Expr::Binary { op, left, right });
         }
     }
 
@@ -3243,13 +3310,14 @@ impl Reader<'_> {
     ///
     /// A `!` the scanner would take as `!=` or `!==` is the equality
     /// level's and never reaches here.
-    fn not(&mut self) -> Result<Expr, Trouble> {
+    fn not(&mut self) -> Result<Child, Trouble> {
         self.check_stack()?;
         if !self.not_ahead() {
             return self.instance_of();
         }
         self.bump(1);
-        Ok(Expr::Not(Child::new(self.not()?)))
+        let operand = self.not()?;
+        Ok(Child::at(operand.line(), Expr::Not(operand)))
     }
 
     /// Whether a `!` that is the operator stands here: php's scanner
@@ -3282,7 +3350,7 @@ impl Reader<'_> {
     /// The class is a name as written; `self`, `parent` and `static`
     /// are the emitter's to refuse, and a class held in a variable is
     /// not read.
-    fn instance_of(&mut self) -> Result<Expr, Trouble> {
+    fn instance_of(&mut self) -> Result<Child, Trouble> {
         let mut left = self.unary()?;
         loop {
             self.skip_trivia();
@@ -3297,10 +3365,7 @@ impl Reader<'_> {
                 ));
             }
             let class = self.name();
-            left = Expr::Instanceof {
-                expr: Child::new(left),
-                class,
-            };
+            left = Child::at(left.line(), Expr::Instanceof { expr: left, class });
         }
     }
 
@@ -3316,7 +3381,7 @@ impl Reader<'_> {
     /// reducing: `-!$a` is php's `-(!$a)` and `(int)!$a` php's
     /// `(int)(!$a)`, while `-$a instanceof C` stays `(-$a) instanceof C`
     /// because no `!` was written there.
-    fn unary(&mut self) -> Result<Expr, Trouble> {
+    fn unary(&mut self) -> Result<Child, Trouble> {
         self.check_stack()?;
         if self.not_ahead() {
             return self.not();
@@ -3327,21 +3392,20 @@ impl Reader<'_> {
             (Some(b'@'), _) => {
                 self.bump(1);
                 let operand = self.unary()?;
-                return Ok(Expr::Silence(Child::new(self.assignment(operand)?)));
+                let silenced = self.assignment(operand)?;
+                return Ok(Child::at(silenced.line(), Expr::Silence(silenced)));
             }
             _ => return self.power(),
         };
         self.bump(1);
-        Ok(Expr::Unary {
-            minus,
-            operand: Child::new(self.unary()?),
-        })
+        let operand = self.unary()?;
+        Ok(Child::at(operand.line(), Expr::Unary { minus, operand }))
     }
 
     /// `**`, php's own level above unary `-`, read right to left: its
     /// right side is a unary expression, so `2 ** -1` and `2 ** 3 ** 2`
     /// are php's.
-    fn power(&mut self) -> Result<Expr, Trouble> {
+    fn power(&mut self) -> Result<Child, Trouble> {
         let left = self.operand()?;
         self.skip_trivia();
         if !(self.byte(0) == Some(b'*') && self.byte(1) == Some(b'*') && self.byte(2) != Some(b'='))
@@ -3349,16 +3413,19 @@ impl Reader<'_> {
             return Ok(left);
         }
         self.bump(2);
-        Ok(Expr::Binary {
-            op: BinaryOp::Pow,
-            left: Child::new(left),
-            right: Child::new(self.unary()?),
-        })
+        Ok(Child::at(
+            left.line(),
+            Expr::Binary {
+                op: BinaryOp::Pow,
+                left,
+                right: self.unary()?,
+            },
+        ))
     }
 
     /// What an operator stands between: a number or a string as written, a name, a
     /// variable, with `++` or `--` before or after it, or a parenthesised expression.
-    fn operand(&mut self) -> Result<Expr, Trouble> {
+    fn operand(&mut self) -> Result<Child, Trouble> {
         self.skip_trivia();
         match self.byte(0) {
             Some(b'\'') => self.single_quoted(),
@@ -3377,19 +3444,25 @@ impl Reader<'_> {
                 if self.byte(0) != Some(b'$') {
                     return Err(self.trouble(format!("a `{sign}` before what is no variable")));
                 }
-                let Expr::Var(name) = self.variable()? else {
+                let var = self.variable()?;
+                let line = var.line();
+                let Expr::Var(name) = var.take() else {
                     return Err(self.trouble(format!("a `{sign}` before what is no variable")));
                 };
-                Ok(if step == b'+' {
-                    Expr::PreInc(name)
-                } else {
-                    Expr::PreDec(name)
-                })
+                Ok(Child::at(
+                    line,
+                    if step == b'+' {
+                        Expr::PreInc(name)
+                    } else {
+                        Expr::PreDec(name)
+                    },
+                ))
             }
             Some(b) if b.is_ascii_digit() || (b == b'.' && self.digit_ahead(1)) => self.number(),
             Some(b'[') => {
+                let line = self.line;
                 self.bump(1);
-                self.array()
+                self.array(line)
             }
             Some(b'(') if self.cast_ahead().is_some() => self.cast(),
             Some(b'(') => {
@@ -3414,7 +3487,7 @@ impl Reader<'_> {
                 // `'(' expr ')'` sets `ZEND_PARENTHESIZED_CONDITIONAL` on
                 // a conditional it stands around, which is what tells
                 // `(a ? b : c) ? d : e` from php's compile error.
-                if let Expr::Ternary { parenthesised, .. } = &mut inner {
+                if let Expr::Ternary { parenthesised, .. } = &mut *inner {
                     *parenthesised = true;
                 }
                 self.member_calls(inner)
@@ -3495,7 +3568,7 @@ impl Reader<'_> {
     /// `E_COMPILE_ERROR`, which php raises once the whole file has parsed
     /// and `Parsed::diagnostics` carries there; and `(real)` is the
     /// scanner's own parse error, carried there too.
-    fn cast(&mut self) -> Result<Expr, Trouble> {
+    fn cast(&mut self) -> Result<Child, Trouble> {
         let Some((word, len)) = self.cast_ahead() else {
             return Err(self.trouble("an expression this compiler cannot read yet"));
         };
@@ -3516,10 +3589,8 @@ impl Reader<'_> {
             _ => return Err(self.trouble("a cast this compiler cannot read yet")),
         };
         self.bump(len);
-        Ok(Expr::Cast {
-            to,
-            operand: Child::new(self.unary()?),
-        })
+        let operand = self.unary()?;
+        Ok(Child::at(operand.line(), Expr::Cast { to, operand }))
     }
 
     /// A name: `true`, `false` and `null`, which php reads whatever their
@@ -3528,7 +3599,7 @@ impl Reader<'_> {
     /// member_name argument_list`, a constant of a class, `C::K`, or the
     /// property `C::$p` names. What else stands after a `::`, `::class`
     /// and a member the program names as it serves, is not read yet.
-    fn named(&mut self) -> Result<Expr, Trouble> {
+    fn named(&mut self) -> Result<Child, Trouble> {
         let line = self.line;
         let name = self.name();
         self.skip_trivia();
@@ -3536,7 +3607,7 @@ impl Reader<'_> {
             self.bump(2);
             self.skip_trivia();
             if self.byte(0) == Some(b'$') {
-                return self.static_prop(name);
+                return self.static_prop(line, name);
             }
             let method = self.label();
             self.skip_trivia();
@@ -3546,18 +3617,24 @@ impl Reader<'_> {
                 ));
             }
             if self.byte(0) != Some(b'(') {
-                return self.member_calls(Expr::ClassConst {
-                    class: name,
-                    name: method,
-                });
+                return self.member_calls(Child::at(
+                    line,
+                    Expr::ClassConst {
+                        class: name,
+                        name: method,
+                    },
+                ));
             }
             self.bump(1);
             let arguments = self.arguments()?;
-            return self.member_calls(Expr::StaticCall {
-                class: name,
-                method,
-                arguments,
-            });
+            return self.member_calls(Child::at(
+                line,
+                Expr::StaticCall {
+                    class: name,
+                    method,
+                    arguments,
+                },
+            ));
         }
         // php's grammar reads `isset(` and `empty(` as its own
         // constructs, never as a call by that name.
@@ -3581,19 +3658,22 @@ impl Reader<'_> {
             )));
         }
         if self.byte(0) != Some(b'(') {
-            return match name.to_ascii_lowercase().as_slice() {
-                b"true" => Ok(Expr::Bool(true)),
-                b"false" => Ok(Expr::Bool(false)),
-                b"null" => Ok(Expr::Null),
-                _ => Ok(match Magic::of(&name) {
-                    Some(which) => Expr::Magic { which, line },
-                    None => Expr::Constant(name),
-                }),
-            };
+            return Ok(Child::at(
+                line,
+                match name.to_ascii_lowercase().as_slice() {
+                    b"true" => Expr::Bool(true),
+                    b"false" => Expr::Bool(false),
+                    b"null" => Expr::Null,
+                    _ => match Magic::of(&name) {
+                        Some(which) => Expr::Magic { which, line },
+                        None => Expr::Constant(name),
+                    },
+                },
+            ));
         }
         self.bump(1);
         let arguments = self.arguments()?;
-        self.member_calls(Expr::Call { name, arguments })
+        self.member_calls(Child::at(line, Expr::Call { name, arguments }))
     }
 
     /// `class_name T_PAAMAYIM_NEKUDOTAYIM simple_variable` after the
@@ -3604,7 +3684,7 @@ impl Reader<'_> {
     /// the property as the program serves and is not read yet; neither is
     /// `member_name: simple_variable`, `C::$p()`, whose method is named
     /// by the local `$p` and not by the property.
-    fn static_prop(&mut self, class: Vec<u8>) -> Result<Expr, Trouble> {
+    fn static_prop(&mut self, line: u32, class: Vec<u8>) -> Result<Child, Trouble> {
         if !self
             .byte(1)
             .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_' || b >= 0x80)
@@ -3621,7 +3701,7 @@ impl Reader<'_> {
                 "a static call whose method is named at run time this compiler cannot read yet",
             ));
         }
-        self.member_calls(Expr::StaticProp { class, name })
+        self.member_calls(Child::at(line, Expr::StaticProp { class, name }))
     }
 
     /// `array_pair_list` after its `[`: each element `expr` or
@@ -3629,13 +3709,13 @@ impl Reader<'_> {
     /// An element that is empty, unpacked with `...` or taken by
     /// reference with `&` is not read yet, php's `array(...)` spelling
     /// neither.
-    fn array(&mut self) -> Result<Expr, Trouble> {
+    fn array(&mut self, line: u32) -> Result<Child, Trouble> {
         let mut elements = Vec::new();
         loop {
             self.skip_trivia();
             if self.byte(0) == Some(b']') {
                 self.bump(1);
-                return Ok(Expr::Array(elements));
+                return Ok(Child::at(line, Expr::Array(elements)));
             }
             if !elements.is_empty() {
                 if self.byte(0) != Some(b',') {
@@ -3645,7 +3725,7 @@ impl Reader<'_> {
                 self.skip_trivia();
                 if self.byte(0) == Some(b']') {
                     self.bump(1);
-                    return Ok(Expr::Array(elements));
+                    return Ok(Child::at(line, Expr::Array(elements)));
                 }
             }
             if matches!(self.byte(0), Some(b',' | b'&')) || self.starts_with(b"...") {
@@ -3676,7 +3756,7 @@ impl Reader<'_> {
     /// `argument_list` after its `(`: each argument an expression, `,`
     /// between them, up to the `)`. A trailing `,`, a by-reference `&`,
     /// an unpacked `...` and a named argument are not read.
-    fn arguments(&mut self) -> Result<Vec<Expr>, Trouble> {
+    fn arguments(&mut self) -> Result<Vec<Child>, Trouble> {
         let mut arguments = Vec::new();
         loop {
             self.skip_trivia();
@@ -3702,16 +3782,20 @@ impl Reader<'_> {
     /// before the first one: an operand with its member calls, or, where
     /// a sign opens it, that unary expression, since nothing is reduced
     /// before the sign's operand is read.
-    fn clone_expression(&mut self) -> Result<Expr, Trouble> {
+    fn clone_expression(&mut self) -> Result<Child, Trouble> {
         self.skip_trivia();
+        let line = self.line;
         let operand = match (self.byte(0), self.byte(1)) {
             (Some(sign @ (b'-' | b'+')), next) if next != Some(sign) => self.unary()?,
             _ => self.operand()?,
         };
-        Ok(Expr::Call {
-            name: b"\\clone".to_vec(),
-            arguments: vec![operand],
-        })
+        Ok(Child::at(
+            line,
+            Expr::Call {
+                name: b"\\clone".to_vec(),
+                arguments: vec![operand],
+            },
+        ))
     }
 
     /// `new C(args)` and `new C`, the keyword read: php's `new_expr` over
@@ -3720,24 +3804,28 @@ impl Reader<'_> {
     /// A `->` after the arguments is 8.4's `new C()->m()`; without them
     /// it is php's parse error, and the receiver returned here ends the
     /// operand.
-    fn new_expression(&mut self) -> Result<Expr, Trouble> {
+    fn new_expression(&mut self) -> Result<Child, Trouble> {
         self.skip_trivia();
         if !self.name_ahead() {
             return Err(
                 self.trouble("a `new` of what is no class name this compiler cannot read yet")
             );
         }
+        let line = self.line;
         let class = self.name();
         self.skip_trivia();
         if self.byte(0) != Some(b'(') {
-            return Ok(Expr::New {
-                class,
-                arguments: Vec::new(),
-            });
+            return Ok(Child::at(
+                line,
+                Expr::New {
+                    class,
+                    arguments: Vec::new(),
+                },
+            ));
         }
         self.bump(1);
         let arguments = self.arguments()?;
-        self.member_calls(Expr::New { class, arguments })
+        self.member_calls(Child::at(line, Expr::New { class, arguments }))
     }
 
     /// `receiver->m(args)`, `receiver->p`, `receiver[k]` and the chain of
@@ -3747,7 +3835,7 @@ impl Reader<'_> {
     /// member the receiver of the next. A property named by what is no
     /// label, `$o->$p` and `$o->{'p'}`, is not read yet; `?->` and `{`
     /// are left where they stand.
-    fn member_calls(&mut self, mut receiver: Expr) -> Result<Expr, Trouble> {
+    fn member_calls(&mut self, mut receiver: Child) -> Result<Child, Trouble> {
         loop {
             self.skip_trivia();
             if self.byte(0) == Some(b'[') {
@@ -3767,19 +3855,25 @@ impl Reader<'_> {
             }
             self.skip_trivia();
             if self.byte(0) != Some(b'(') {
-                receiver = Expr::Prop {
-                    object: Child::new(receiver),
-                    name: member,
-                };
+                receiver = Child::at(
+                    receiver.line(),
+                    Expr::Prop {
+                        object: receiver,
+                        name: member,
+                    },
+                );
                 continue;
             }
             self.bump(1);
             let arguments = self.arguments()?;
-            receiver = Expr::MethodCall {
-                object: Child::new(receiver),
-                method: member,
-                arguments,
-            };
+            receiver = Child::at(
+                receiver.line(),
+                Expr::MethodCall {
+                    object: receiver,
+                    method: member,
+                    arguments,
+                },
+            );
         }
     }
 
@@ -3788,23 +3882,26 @@ impl Reader<'_> {
     /// wherever a dimension stands and `zend_delayed_compile_dim`
     /// refuses in a read (`Cannot use [] for reading`). The `{k}`
     /// spelling php removed in 8.0 is no dimension and is not read.
-    fn dimension(&mut self, receiver: Expr) -> Result<Expr, Trouble> {
+    fn dimension(&mut self, receiver: Child) -> Result<Child, Trouble> {
         self.bump(1);
         self.skip_trivia();
         let index = if self.byte(0) == Some(b']') {
             None
         } else {
-            Some(Child::new(self.expr()?))
+            Some(self.expr()?)
         };
         self.skip_trivia();
         if self.byte(0) != Some(b']') {
             return Err(self.trouble("a dimension no bracket closes"));
         }
         self.bump(1);
-        Ok(Expr::Dim {
-            container: Child::new(receiver),
-            index,
-        })
+        Ok(Child::at(
+            receiver.line(),
+            Expr::Dim {
+                container: receiver,
+                index,
+            },
+        ))
     }
 
     /// `unset(` read at the keyword, php's
@@ -3857,7 +3954,7 @@ impl Reader<'_> {
         let var = self.variable()?;
         self.skip_trivia();
         if self.byte(0) == Some(b'[') {
-            let Expr::Dim { container, index } = self.dimension(var)? else {
+            let Expr::Dim { container, index } = self.dimension(var)?.take() else {
                 return Err(self.trouble("a dimension that is no dimension"));
             };
             let Expr::Var(name) = &*container else {
@@ -3894,7 +3991,7 @@ impl Reader<'_> {
             self.no_chain("a property")?;
             return Ok(Unset::Prop { object: var, name });
         }
-        match var {
+        match var.take() {
             // `zend_compile_unset`'s `is_this_fetch` arm
             // (`Z/Zend/zend_compile.c:5580`).
             Expr::This => Err(Trouble {
@@ -3934,7 +4031,7 @@ impl Reader<'_> {
     /// `$this`, a property and a class's own property (php's
     /// `ZEND_AST_STATIC_PROP`) each have an opcode of their own; none is
     /// read yet.
-    fn isset_or_empty(&mut self, empty: bool) -> Result<Expr, Trouble> {
+    fn isset_or_empty(&mut self, empty: bool) -> Result<Child, Trouble> {
         let word = if empty { "empty" } else { "isset" };
         self.skip_trivia();
         if self.byte(0) != Some(b'$') {
@@ -3942,12 +4039,14 @@ impl Reader<'_> {
                 "an `{word}` over what is no variable this compiler cannot read yet"
             )));
         }
-        let Expr::Var(name) = self.variable()? else {
+        let read = self.variable()?;
+        let line = read.line();
+        let Expr::Var(name) = read.take() else {
             return Err(self.trouble(format!(
                 "an `{word}` over $this this compiler cannot read yet"
             )));
         };
-        let mut var = Expr::Var(name);
+        let mut var = Child::at(line, Expr::Var(name));
         loop {
             self.skip_trivia();
             if self.byte(0) != Some(b'[') {
@@ -3962,10 +4061,7 @@ impl Reader<'_> {
             )));
         }
         self.bump(1);
-        Ok(Expr::Isset {
-            var: Child::new(var),
-            empty,
-        })
+        Ok(Child::at(var.line(), Expr::Isset { var, empty }))
     }
 
     /// Whether a name, php's `T_STRING` or `T_NAME_*`, starts here.
@@ -3991,7 +4087,7 @@ impl Reader<'_> {
     /// it: `$a++` is one operand, so `-$a++` is php's `-($a++)`. A `++`
     /// or `--` after that is php's parse error, and is refused by
     /// whatever reads on.
-    fn incremented(&mut self) -> Result<Expr, Trouble> {
+    fn incremented(&mut self) -> Result<Child, Trouble> {
         let var = self.variable()?;
         self.skip_trivia();
         let step = match (self.byte(0), self.byte(1)) {
@@ -3999,11 +4095,15 @@ impl Reader<'_> {
             (Some(b'-'), Some(b'-')) => Expr::PostDec,
             _ => return Ok(var),
         };
-        let Expr::Var(name) = var else {
+        if !matches!(&*var, Expr::Var(_)) {
             return Ok(var);
+        }
+        let line = var.line();
+        let Expr::Var(name) = var.take() else {
+            return Err(self.trouble("a `++` before what is no variable"));
         };
         self.bump(2);
-        Ok(step(name))
+        Ok(Child::at(line, step(name)))
     }
 
     /// `$` and php's `LABEL`: a letter, `_` or a byte past ASCII, then
@@ -4011,7 +4111,8 @@ impl Reader<'_> {
     /// `FETCH_THIS` (`is_this_fetch`). What else `zend_try_compile_cv`
     /// refuses is refused here too: `$_GET` and its kin, which it fetches
     /// by `FETCH_R`; and `$$a` and `${`, which name a variable at runtime.
-    fn variable(&mut self) -> Result<Expr, Trouble> {
+    fn variable(&mut self) -> Result<Child, Trouble> {
+        let line = self.line;
         let start = self.at + 1;
         if !self
             .byte(1)
@@ -4028,12 +4129,12 @@ impl Reader<'_> {
         }
         let name = self.taken(start);
         if name == b"this" {
-            return Ok(Expr::This);
+            return Ok(Child::at(line, Expr::This));
         }
         if is_auto_global(&name) {
             return Err(self.trouble("a variable this compiler cannot read yet"));
         }
-        Ok(Expr::Var(name))
+        Ok(Child::at(line, Expr::Var(name)))
     }
 
     /// A name, namespace separators and all, as written.
@@ -4102,7 +4203,8 @@ impl Reader<'_> {
                 .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
     }
 
-    fn number(&mut self) -> Result<Expr, Trouble> {
+    fn number(&mut self) -> Result<Child, Trouble> {
+        let line = self.line;
         let start = self.at;
         let mut float = false;
         // php's `DNUM` takes a point with digits on either side of it,
@@ -4143,22 +4245,23 @@ impl Reader<'_> {
             .collect();
         if float {
             return match digits.parse() {
-                Ok(f) => Ok(Expr::Float(f)),
+                Ok(f) => Ok(Child::at(line, Expr::Float(f))),
                 Err(_) => Err(self.trouble("a number this compiler cannot read")),
             };
         }
         // php's integer literal that does not fit becomes a float.
         match digits.parse::<i64>() {
-            Ok(n) => Ok(Expr::Int(n)),
+            Ok(n) => Ok(Child::at(line, Expr::Int(n))),
             Err(_) => match digits.parse::<f64>() {
-                Ok(f) => Ok(Expr::Float(f)),
+                Ok(f) => Ok(Child::at(line, Expr::Float(f))),
                 Err(_) => Err(self.trouble("a number this compiler cannot read")),
             },
         }
     }
 
     /// `'...'`: a backslash escapes a backslash and a quote, nothing else.
-    fn single_quoted(&mut self) -> Result<Expr, Trouble> {
+    fn single_quoted(&mut self) -> Result<Child, Trouble> {
+        let line = self.line;
         self.bump(1);
         let mut bytes = Vec::new();
         loop {
@@ -4166,7 +4269,7 @@ impl Reader<'_> {
                 None => return Err(self.trouble("a string no quote closes")),
                 Some(b'\'') => {
                     self.bump(1);
-                    return Ok(Expr::Str(bytes));
+                    return Ok(Child::at(line, Expr::Str(bytes)));
                 }
                 Some(b'\\') if matches!(self.byte(1), Some(b'\\' | b'\'')) => {
                     bytes.extend(self.byte(1));
@@ -4189,7 +4292,8 @@ impl Reader<'_> {
     /// plain byte, and the byte after a `\` is never one of them. A
     /// variable followed by `[` or `->` and a label, php's `encaps_var`
     /// over a dimension or a property, and `${expr}` are not read yet.
-    fn double_quoted(&mut self) -> Result<Expr, Trouble> {
+    fn double_quoted(&mut self) -> Result<Child, Trouble> {
+        let line = self.line;
         self.bump(1);
         let mut pieces: Vec<Piece> = Vec::new();
         let mut bytes = Vec::new();
@@ -4199,15 +4303,15 @@ impl Reader<'_> {
                 Some(b'"') => {
                     self.bump(1);
                     if pieces.is_empty() {
-                        return Ok(Expr::Str(bytes));
+                        return Ok(Child::at(line, Expr::Str(bytes)));
                     }
                     if !bytes.is_empty() {
                         pieces.push(Piece {
-                            expr: Expr::Str(bytes),
+                            expr: Child::at(line, Expr::Str(bytes)),
                             dollar_curly: false,
                         });
                     }
-                    return Ok(Expr::Encaps(pieces));
+                    return Ok(Child::at(line, Expr::Encaps(pieces)));
                 }
                 Some(b'$') if self.label_starts(1) => {
                     let expr = self.variable()?;
@@ -4339,10 +4443,10 @@ impl Reader<'_> {
     /// The plain bytes so far as a piece where there are any, then the
     /// variable, php's `encaps_list` growing by a `T_ENCAPSED_AND_WHITESPACE`
     /// and an `encaps_var`.
-    fn piece(pieces: &mut Vec<Piece>, bytes: &mut Vec<u8>, expr: Expr, dollar_curly: bool) {
+    fn piece(pieces: &mut Vec<Piece>, bytes: &mut Vec<u8>, expr: Child, dollar_curly: bool) {
         if !bytes.is_empty() {
             pieces.push(Piece {
-                expr: Expr::Str(std::mem::take(bytes)),
+                expr: Child::at(expr.line(), Expr::Str(std::mem::take(bytes))),
                 dollar_curly: false,
             });
         }
@@ -4434,6 +4538,14 @@ mod tests {
         Unset,
     };
 
+    /// One expression node at line 1, where every source below stands
+    /// but the few that say otherwise; a node's line is what the
+    /// witnesses beside the kernels pin, and a shape read on one line
+    /// carries that line throughout.
+    fn at(expr: Expr) -> Child {
+        Child::at(1, expr)
+    }
+
     /// The reader on a thread nothing holds to a limit.
     fn read(source: &[u8]) -> Result<Read, Trouble> {
         super::read(source, crate::StackLimit::UNCHECKED)
@@ -4443,8 +4555,8 @@ mod tests {
     /// line 1.
     fn arm(name: Option<&[u8]>, echoed: i64) -> IfArm {
         IfArm {
-            cond: name.map(|name| Expr::Var(name.to_vec())),
-            body: vec![(Stmt::Echo(vec![Expr::Int(echoed)]), 1)],
+            cond: name.map(|name| at(Expr::Var(name.to_vec()))),
+            body: vec![(Stmt::Echo(vec![at(Expr::Int(echoed))]), 1)],
             line: 1,
         }
     }
@@ -4459,13 +4571,13 @@ mod tests {
         assert_eq!(
             chain,
             vec![(
-                Stmt::Echo(vec![Expr::Coalesce {
-                    left: Child::new(Expr::Var(b"a".to_vec())),
-                    right: Child::new(Expr::Coalesce {
-                        left: Child::new(Expr::Var(b"b".to_vec())),
-                        right: Child::new(Expr::Int(2)),
+                Stmt::Echo(vec![at(Expr::Coalesce {
+                    left: at(Expr::Var(b"a".to_vec())),
+                    right: at(Expr::Coalesce {
+                        left: at(Expr::Var(b"b".to_vec())),
+                        right: at(Expr::Int(2)),
                     }),
-                }]),
+                })]),
                 1
             )]
         );
@@ -4473,15 +4585,15 @@ mod tests {
         assert_eq!(
             shorthand,
             vec![(
-                Stmt::Echo(vec![Expr::Ternary {
-                    cond: Child::new(Expr::Coalesce {
-                        left: Child::new(Expr::Var(b"a".to_vec())),
-                        right: Child::new(Expr::Int(1)),
+                Stmt::Echo(vec![at(Expr::Ternary {
+                    cond: at(Expr::Coalesce {
+                        left: at(Expr::Var(b"a".to_vec())),
+                        right: at(Expr::Int(1)),
                     }),
                     then: None,
-                    otherwise: Child::new(Expr::Int(2)),
+                    otherwise: at(Expr::Int(2)),
                     parenthesised: false,
-                }]),
+                })]),
                 1
             )]
         );
@@ -4564,15 +4676,15 @@ mod tests {
     fn an_arm_takes_a_block_and_an_alternative_arm_runs_to_its_keyword() {
         let read = read(b"<?php if ($a): if ($b) { echo 1; } endif;").unwrap_or_default();
         let inner = Stmt::If(vec![IfArm {
-            cond: Some(Expr::Var(b"b".to_vec())),
-            body: vec![(Stmt::Echo(vec![Expr::Int(1)]), 1)],
+            cond: Some(at(Expr::Var(b"b".to_vec()))),
+            body: vec![(Stmt::Echo(vec![at(Expr::Int(1))]), 1)],
             line: 1,
         }]);
         assert_eq!(
             read,
             vec![(
                 Stmt::If(vec![IfArm {
-                    cond: Some(Expr::Var(b"a".to_vec())),
+                    cond: Some(at(Expr::Var(b"a".to_vec()))),
                     body: vec![(inner, 1)],
                     line: 1,
                 }]),
@@ -4595,7 +4707,7 @@ mod tests {
     #[test]
     fn an_echo_of_one_number_is_one_statement() {
         let read = read(b"<?php echo 1;").unwrap_or_default();
-        assert_eq!(read, vec![(Stmt::Echo(vec![Expr::Int(1)]), 1)]);
+        assert_eq!(read, vec![(Stmt::Echo(vec![at(Expr::Int(1))]), 1)]);
     }
 
     /// `clone $a ** 2` is php's `(clone $a) ** 2`, the construct binding
@@ -4607,14 +4719,14 @@ mod tests {
         assert_eq!(
             read,
             vec![(
-                Stmt::Echo(vec![Expr::Binary {
+                Stmt::Echo(vec![at(Expr::Binary {
                     op: BinaryOp::Pow,
-                    left: Child::new(Expr::Call {
+                    left: at(Expr::Call {
                         name: b"\\clone".to_vec(),
-                        arguments: vec![Expr::Var(b"a".to_vec())],
+                        arguments: vec![at(Expr::Var(b"a".to_vec()))],
                     }),
-                    right: Child::new(Expr::Int(2)),
-                }]),
+                    right: at(Expr::Int(2)),
+                })]),
                 1
             )]
         );
@@ -4626,13 +4738,13 @@ mod tests {
         assert_eq!(
             read,
             vec![(
-                Stmt::Effect(Expr::Call {
+                Stmt::Effect(at(Expr::Call {
                     name: b"var_dump".to_vec(),
-                    arguments: vec![Expr::Call {
+                    arguments: vec![at(Expr::Call {
                         name: b"extension_loaded".to_vec(),
-                        arguments: vec![Expr::Str(b"demo".to_vec())],
-                    }],
-                }),
+                        arguments: vec![at(Expr::Str(b"demo".to_vec()))],
+                    })],
+                })),
                 1
             )]
         );
@@ -4646,10 +4758,10 @@ mod tests {
             read[1],
             (
                 Stmt::Echo(vec![
-                    Expr::Str(b"b\n".to_vec()),
-                    Expr::Float(2.5),
-                    Expr::Bool(true),
-                    Expr::Null,
+                    Child::at(3, Expr::Str(b"b\n".to_vec())),
+                    Child::at(3, Expr::Float(2.5)),
+                    Child::at(3, Expr::Bool(true)),
+                    Child::at(3, Expr::Null),
                 ]),
                 3
             )
@@ -4663,15 +4775,15 @@ mod tests {
         assert_eq!(
             read,
             vec![(
-                Stmt::Echo(vec![Expr::Binary {
+                Stmt::Echo(vec![at(Expr::Binary {
                     op: BinaryOp::Add,
-                    left: Child::new(Expr::Int(1)),
-                    right: Child::new(Expr::Binary {
+                    left: at(Expr::Int(1)),
+                    right: at(Expr::Binary {
                         op: BinaryOp::Mul,
-                        left: Child::new(Expr::Int(2)),
-                        right: Child::new(Expr::Int(3)),
+                        left: at(Expr::Int(2)),
+                        right: at(Expr::Int(3)),
                     }),
-                }]),
+                })]),
                 1
             )],
             "`*` binds tighter than `+`"
@@ -4684,15 +4796,15 @@ mod tests {
         assert_eq!(
             left_to_right,
             vec![(
-                Stmt::Echo(vec![Expr::Binary {
+                Stmt::Echo(vec![at(Expr::Binary {
                     op: BinaryOp::Sub,
-                    left: Child::new(Expr::Binary {
+                    left: at(Expr::Binary {
                         op: BinaryOp::Sub,
-                        left: Child::new(Expr::Int(1)),
-                        right: Child::new(Expr::Int(2)),
+                        left: at(Expr::Int(1)),
+                        right: at(Expr::Int(2)),
                     }),
-                    right: Child::new(Expr::Int(3)),
-                }]),
+                    right: at(Expr::Int(3)),
+                })]),
                 1
             )]
         );
@@ -4700,15 +4812,15 @@ mod tests {
         assert_eq!(
             grouped,
             vec![(
-                Stmt::Echo(vec![Expr::Binary {
+                Stmt::Echo(vec![at(Expr::Binary {
                     op: BinaryOp::Mul,
-                    left: Child::new(Expr::Binary {
+                    left: at(Expr::Binary {
                         op: BinaryOp::Add,
-                        left: Child::new(Expr::Int(1)),
-                        right: Child::new(Expr::Int(2)),
+                        left: at(Expr::Int(1)),
+                        right: at(Expr::Int(2)),
                     }),
-                    right: Child::new(Expr::Int(3)),
-                }]),
+                    right: at(Expr::Int(3)),
+                })]),
                 1
             )]
         );
@@ -4721,14 +4833,14 @@ mod tests {
             read,
             vec![(
                 Stmt::Echo(vec![
-                    Expr::Unary {
+                    at(Expr::Unary {
                         minus: true,
-                        operand: Child::new(Expr::Float(2.5)),
-                    },
-                    Expr::Unary {
+                        operand: at(Expr::Float(2.5)),
+                    }),
+                    at(Expr::Unary {
                         minus: true,
-                        operand: Child::new(Expr::Constant(b"INF".to_vec())),
-                    },
+                        operand: at(Expr::Constant(b"INF".to_vec())),
+                    }),
                 ]),
                 1
             )],
@@ -4741,33 +4853,33 @@ mod tests {
     /// assignment after its operand inside it as php's grammar does.
     #[test]
     fn an_at_sign_is_the_silence_php_reads_it_as() {
-        let var = || Child::new(Expr::Var(b"a".to_vec()));
+        let var = || at(Expr::Var(b"a".to_vec()));
         assert_eq!(
             read(b"<?php echo @$a ** 2, @$a + 1, -@$a, @-$a, @@f();").unwrap_or_default(),
             vec![(
                 Stmt::Echo(vec![
-                    Expr::Silence(Child::new(Expr::Binary {
+                    at(Expr::Silence(at(Expr::Binary {
                         op: BinaryOp::Pow,
                         left: var(),
-                        right: Child::new(Expr::Int(2)),
-                    })),
-                    Expr::Binary {
+                        right: at(Expr::Int(2)),
+                    }))),
+                    at(Expr::Binary {
                         op: BinaryOp::Add,
-                        left: Child::new(Expr::Silence(var())),
-                        right: Child::new(Expr::Int(1)),
-                    },
-                    Expr::Unary {
+                        left: at(Expr::Silence(var())),
+                        right: at(Expr::Int(1)),
+                    }),
+                    at(Expr::Unary {
                         minus: true,
-                        operand: Child::new(Expr::Silence(var())),
-                    },
-                    Expr::Silence(Child::new(Expr::Unary {
+                        operand: at(Expr::Silence(var())),
+                    }),
+                    at(Expr::Silence(at(Expr::Unary {
                         minus: true,
                         operand: var(),
-                    })),
-                    Expr::Silence(Child::new(Expr::Silence(Child::new(Expr::Call {
+                    }))),
+                    at(Expr::Silence(at(Expr::Silence(at(Expr::Call {
                         name: b"f".to_vec(),
                         arguments: vec![],
-                    })))),
+                    }))))),
                 ]),
                 1
             )]
@@ -4775,14 +4887,14 @@ mod tests {
         assert_eq!(
             read(b"<?php @$a = 1 + 2;").unwrap_or_default(),
             vec![(
-                Stmt::Effect(Expr::Silence(Child::new(Expr::Assign {
+                Stmt::Effect(at(Expr::Silence(at(Expr::Assign {
                     var: b"a".to_vec(),
-                    value: Child::new(Expr::Binary {
+                    value: at(Expr::Binary {
                         op: BinaryOp::Add,
-                        left: Child::new(Expr::Int(1)),
-                        right: Child::new(Expr::Int(2)),
+                        left: at(Expr::Int(1)),
+                        right: at(Expr::Int(2)),
                     }),
-                }))),
+                })))),
                 1
             )],
             "the `=` is shifted, so the assignment is inside the `@`"
@@ -4798,7 +4910,7 @@ mod tests {
         let read = read(b"<?php echo NAN;").unwrap_or_default();
         assert_eq!(
             read,
-            vec![(Stmt::Echo(vec![Expr::Constant(b"NAN".to_vec())]), 1)]
+            vec![(Stmt::Echo(vec![at(Expr::Constant(b"NAN".to_vec()))]), 1)]
         );
     }
 
@@ -4809,9 +4921,9 @@ mod tests {
             read,
             vec![(
                 Stmt::Echo(vec![
-                    Expr::Float(1e25),
-                    Expr::Float(5e-324),
-                    Expr::Float(1.5e3)
+                    at(Expr::Float(1e25)),
+                    at(Expr::Float(5e-324)),
+                    at(Expr::Float(1.5e3))
                 ]),
                 1
             )]
@@ -4996,11 +5108,11 @@ mod tests {
         assert_eq!(
             read(b"<?php echo 'a' . 'b';").unwrap_or_default(),
             vec![(
-                Stmt::Echo(vec![Expr::Binary {
+                Stmt::Echo(vec![at(Expr::Binary {
                     op: BinaryOp::Concat,
-                    left: Child::new(Expr::Str(b"a".to_vec())),
-                    right: Child::new(Expr::Str(b"b".to_vec())),
-                }]),
+                    left: at(Expr::Str(b"a".to_vec())),
+                    right: at(Expr::Str(b"b".to_vec())),
+                })]),
                 1
             )]
         );
@@ -5008,7 +5120,7 @@ mod tests {
         // parser sees a `.`, so these are php's parse errors.
         assert_eq!(
             read(b"<?php echo 1.;").unwrap_or_default(),
-            vec![(Stmt::Echo(vec![Expr::Float(1.0)]), 1)]
+            vec![(Stmt::Echo(vec![at(Expr::Float(1.0))]), 1)]
         );
         for source in [
             b"<?php echo 1.'a';".as_slice(),
@@ -5039,11 +5151,11 @@ mod tests {
         assert_eq!(
             read(b"<?php echo 8 >> 1;").unwrap_or_default(),
             vec![(
-                Stmt::Echo(vec![Expr::Binary {
+                Stmt::Echo(vec![at(Expr::Binary {
                     op: BinaryOp::Sr,
-                    left: Child::new(Expr::Int(8)),
-                    right: Child::new(Expr::Int(1)),
-                }]),
+                    left: at(Expr::Int(8)),
+                    right: at(Expr::Int(1)),
+                })]),
                 1
             )]
         );
@@ -5076,14 +5188,14 @@ mod tests {
         assert_eq!(
             read(b"<?php echo 2 ** -1;").unwrap_or_default(),
             vec![(
-                Stmt::Echo(vec![Expr::Binary {
+                Stmt::Echo(vec![at(Expr::Binary {
                     op: BinaryOp::Pow,
-                    left: Child::new(Expr::Int(2)),
-                    right: Child::new(Expr::Unary {
+                    left: at(Expr::Int(2)),
+                    right: at(Expr::Unary {
                         minus: true,
-                        operand: Child::new(Expr::Int(1)),
+                        operand: at(Expr::Int(1)),
                     }),
-                }]),
+                })]),
                 1
             )],
             "the right side of `**` is a unary expression"
@@ -5098,17 +5210,17 @@ mod tests {
             read(b"<?php for ($i = 0; $i < 1000; $i++) { echo 'dax'; }").unwrap_or_default(),
             vec![(
                 Stmt::For {
-                    init: vec![Expr::Assign {
+                    init: vec![at(Expr::Assign {
                         var: b"i".to_vec(),
-                        value: Child::new(Expr::Int(0)),
-                    }],
-                    cond: vec![Expr::Binary {
+                        value: at(Expr::Int(0)),
+                    })],
+                    cond: vec![at(Expr::Binary {
                         op: BinaryOp::IsSmaller,
-                        left: Child::new(Expr::Var(b"i".to_vec())),
-                        right: Child::new(Expr::Int(1000)),
-                    }],
-                    step: vec![Expr::PostInc(b"i".to_vec())],
-                    body: vec![(Stmt::Echo(vec![Expr::Str(b"dax".to_vec())]), 1)],
+                        left: at(Expr::Var(b"i".to_vec())),
+                        right: at(Expr::Int(1000)),
+                    })],
+                    step: vec![at(Expr::PostInc(b"i".to_vec()))],
+                    body: vec![(Stmt::Echo(vec![at(Expr::Str(b"dax".to_vec()))]), 1)],
                 },
                 1
             )]
@@ -5161,7 +5273,7 @@ mod tests {
         let ops: Vec<BinaryOp> = match &echo[0].0 {
             Stmt::Echo(exprs) => exprs
                 .iter()
-                .filter_map(|e| match e {
+                .filter_map(|e| match &**e {
                     Expr::Binary { op, .. } => Some(*op),
                     _ => None,
                 })
@@ -5198,11 +5310,11 @@ mod tests {
         assert_eq!(
             read(b"<?php $a+++$b;").unwrap_or_default(),
             vec![(
-                Stmt::Effect(Expr::Binary {
+                Stmt::Effect(at(Expr::Binary {
                     op: BinaryOp::Add,
-                    left: Child::new(Expr::PostInc(b"a".to_vec())),
-                    right: Child::new(Expr::Var(b"b".to_vec())),
-                }),
+                    left: at(Expr::PostInc(b"a".to_vec())),
+                    right: at(Expr::Var(b"b".to_vec())),
+                })),
                 1
             )],
             "php's scanner takes `++` before `+`"
@@ -5231,11 +5343,11 @@ mod tests {
         assert_eq!(
             read(b"<?php $a---$b;").unwrap_or_default(),
             vec![(
-                Stmt::Effect(Expr::Binary {
+                Stmt::Effect(at(Expr::Binary {
                     op: BinaryOp::Sub,
-                    left: Child::new(Expr::PostDec(b"a".to_vec())),
-                    right: Child::new(Expr::Var(b"b".to_vec())),
-                }),
+                    left: at(Expr::PostDec(b"a".to_vec())),
+                    right: at(Expr::Var(b"b".to_vec())),
+                })),
                 1
             )],
             "php's scanner takes `--` before `-`"
@@ -5243,10 +5355,10 @@ mod tests {
         assert_eq!(
             read(b"<?php $a = --$b;").unwrap_or_default(),
             vec![(
-                Stmt::Effect(Expr::Assign {
+                Stmt::Effect(at(Expr::Assign {
                     var: b"a".to_vec(),
-                    value: Child::new(Expr::PreDec(b"b".to_vec())),
-                }),
+                    value: at(Expr::PreDec(b"b".to_vec())),
+                })),
                 1
             )],
         );
@@ -5275,10 +5387,10 @@ mod tests {
             assert_eq!(
                 read(source).unwrap_or_default(),
                 vec![(
-                    Stmt::Effect(Expr::AssignRef {
-                        target: Child::new(Expr::Var(b"b".to_vec())),
-                        source: Child::new(Expr::Var(b"a".to_vec())),
-                    }),
+                    Stmt::Effect(at(Expr::AssignRef {
+                        target: at(Expr::Var(b"b".to_vec())),
+                        source: at(Expr::Var(b"a".to_vec())),
+                    })),
                     1
                 )],
                 "{}",
@@ -5314,16 +5426,16 @@ mod tests {
             read(b"<?php FOR (f(); 1, 2; g())\n  echo 3;").unwrap_or_default(),
             vec![(
                 Stmt::For {
-                    init: vec![Expr::Call {
+                    init: vec![at(Expr::Call {
                         name: b"f".to_vec(),
                         arguments: vec![],
-                    }],
-                    cond: vec![Expr::Int(1), Expr::Int(2)],
-                    step: vec![Expr::Call {
+                    })],
+                    cond: vec![at(Expr::Int(1)), at(Expr::Int(2))],
+                    step: vec![at(Expr::Call {
                         name: b"g".to_vec(),
                         arguments: vec![],
-                    }],
-                    body: vec![(Stmt::Echo(vec![Expr::Int(3)]), 2)],
+                    })],
+                    body: vec![(Stmt::Echo(vec![Child::at(2, Expr::Int(3))]), 2)],
                 },
                 1
             )],
@@ -5352,15 +5464,18 @@ mod tests {
             vec![
                 (
                     Stmt::While {
-                        cond: Expr::Bool(true),
+                        cond: Child::at(2, Expr::Bool(true)),
                         body: vec![
-                            (Stmt::Echo(vec![Expr::Int(1)]), 3),
-                            (Stmt::Echo(vec![Expr::Int(2)]), 4),
+                            (Stmt::Echo(vec![Child::at(3, Expr::Int(1))]), 3),
+                            (Stmt::Echo(vec![Child::at(4, Expr::Int(2))]), 4),
                         ],
                     },
                     2
                 ),
-                (Stmt::Block(vec![(Stmt::Echo(vec![Expr::Int(3)]), 6)]), 6),
+                (
+                    Stmt::Block(vec![(Stmt::Echo(vec![Child::at(6, Expr::Int(3))]), 6)]),
+                    6
+                ),
             ]
         );
     }
@@ -5390,14 +5505,14 @@ mod tests {
         assert_eq!(
             read[0],
             (
-                Stmt::Effect(Expr::Assign {
+                Stmt::Effect(at(Expr::Assign {
                     var: b"a".to_vec(),
-                    value: Child::new(Expr::Binary {
+                    value: at(Expr::Binary {
                         op: BinaryOp::Add,
-                        left: Child::new(Expr::Int(1)),
-                        right: Child::new(Expr::Var(b"b".to_vec())),
+                        left: at(Expr::Int(1)),
+                        right: at(Expr::Var(b"b".to_vec())),
                     }),
-                }),
+                })),
                 1
             ),
             "`=` binds below `+`"
@@ -5406,17 +5521,17 @@ mod tests {
             read[1],
             (
                 Stmt::Echo(vec![
-                    Expr::Var(b"a".to_vec()),
-                    Expr::Assign {
+                    at(Expr::Var(b"a".to_vec())),
+                    at(Expr::Assign {
                         var: b"b".to_vec(),
-                        value: Child::new(Expr::Assign {
+                        value: at(Expr::Assign {
                             var: b"c".to_vec(),
-                            value: Child::new(Expr::Call {
+                            value: at(Expr::Call {
                                 name: b"f".to_vec(),
-                                arguments: vec![Expr::Var(b"a".to_vec())],
+                                arguments: vec![at(Expr::Var(b"a".to_vec()))],
                             }),
                         }),
-                    },
+                    }),
                 ]),
                 1
             ),
@@ -5428,7 +5543,7 @@ mod tests {
     fn a_variable_php_makes_no_cv_of_is_refused_rather_than_read_as_one() {
         assert_eq!(
             read(b"<?php echo $this;").unwrap_or_default(),
-            vec![(Stmt::Echo(vec![Expr::This]), 1)],
+            vec![(Stmt::Echo(vec![at(Expr::This)]), 1)],
             "$this is the one such variable read, as its own expression"
         );
         for source in [
@@ -5456,10 +5571,10 @@ mod tests {
                     Unset::Var(b"a".to_vec()),
                     Unset::Dim {
                         var: b"b".to_vec(),
-                        dim: Child::new(Expr::Int(0))
+                        dim: at(Expr::Int(0))
                     },
                     Unset::Prop {
-                        object: Expr::Var(b"c".to_vec()),
+                        object: at(Expr::Var(b"c".to_vec())),
                         name: b"p".to_vec()
                     },
                 ]),
@@ -5471,7 +5586,7 @@ mod tests {
             read(b"<?php unset($this->p);").unwrap_or_default(),
             vec![(
                 Stmt::Unset(vec![Unset::Prop {
-                    object: Expr::This,
+                    object: at(Expr::This),
                     name: b"p".to_vec()
                 }]),
                 1
@@ -5495,17 +5610,17 @@ mod tests {
             read(b"<?php isset($a); empty($a);").unwrap_or_default(),
             vec![
                 (
-                    Stmt::Effect(Expr::Isset {
-                        var: Child::new(Expr::Var(b"a".to_vec())),
+                    Stmt::Effect(at(Expr::Isset {
+                        var: at(Expr::Var(b"a".to_vec())),
                         empty: false
-                    }),
+                    })),
                     1
                 ),
                 (
-                    Stmt::Effect(Expr::Isset {
-                        var: Child::new(Expr::Var(b"a".to_vec())),
+                    Stmt::Effect(at(Expr::Isset {
+                        var: at(Expr::Var(b"a".to_vec())),
                         empty: true
-                    }),
+                    })),
                     1
                 ),
             ],
@@ -5514,16 +5629,16 @@ mod tests {
         assert_eq!(
             read(b"<?php isset($a[0][1]);").unwrap_or_default(),
             vec![(
-                Stmt::Effect(Expr::Isset {
-                    var: Child::new(Expr::Dim {
-                        container: Child::new(Expr::Dim {
-                            container: Child::new(Expr::Var(b"a".to_vec())),
-                            index: Some(Child::new(Expr::Int(0))),
+                Stmt::Effect(at(Expr::Isset {
+                    var: at(Expr::Dim {
+                        container: at(Expr::Dim {
+                            container: at(Expr::Var(b"a".to_vec())),
+                            index: Some(at(Expr::Int(0))),
                         }),
-                        index: Some(Child::new(Expr::Int(1))),
+                        index: Some(at(Expr::Int(1))),
                     }),
                     empty: false
-                }),
+                })),
                 1
             )],
             "the chain under an `isset` is the `ZEND_AST_DIM` chain a read is"
@@ -5544,7 +5659,7 @@ mod tests {
         assert_eq!(
             read,
             vec![
-                (Stmt::Echo(vec![Expr::Int(1), Expr::Int(2)]), 1),
+                (Stmt::Echo(vec![at(Expr::Int(1)), at(Expr::Int(2))]), 1),
                 (Stmt::Inline(b"after".to_vec()), 1),
             ]
         );
@@ -5569,7 +5684,7 @@ mod tests {
         assert_eq!(
             read(b"<?php echo \"\\101\\x41\\7\\777\\400\\xg\\x4\\1234\";").unwrap_or_default(),
             vec![(
-                Stmt::Echo(vec![Expr::Str(b"AA\x07\xff\x00\\xg\x04S4".to_vec())]),
+                Stmt::Echo(vec![at(Expr::Str(b"AA\x07\xff\x00\\xg\x04S4".to_vec()))]),
                 1
             )]
         );
@@ -5584,7 +5699,7 @@ mod tests {
     #[test]
     fn an_interpolated_string_is_its_pieces_as_php_s_lexer_cuts_them() {
         let piece = |expr: Expr| Piece {
-            expr,
+            expr: at(expr),
             dollar_curly: false,
         };
         let lit = |bytes: &[u8]| piece(Expr::Str(bytes.to_vec()));
@@ -5594,7 +5709,7 @@ mod tests {
                 .unwrap_or_default(),
             vec![(
                 Stmt::Echo(vec![
-                    Expr::Encaps(vec![
+                    at(Expr::Encaps(vec![
                         lit(b"a\\{"),
                         var(b"a"),
                         lit(b"}b$x{ "),
@@ -5602,15 +5717,15 @@ mod tests {
                         lit(b"}$ $1"),
                         piece(Expr::This),
                         Piece {
-                            expr: Expr::Var(b"b".to_vec()),
+                            expr: at(Expr::Var(b"b".to_vec())),
                             dollar_curly: true,
                         },
                         var(b"a"),
                         lit(b"-"),
                         var(b"b"),
-                    ]),
-                    Expr::Str(b"$".to_vec()),
-                    Expr::Str(b"{".to_vec()),
+                    ])),
+                    at(Expr::Str(b"$".to_vec())),
+                    at(Expr::Str(b"{".to_vec())),
                 ]),
                 1
             )]
@@ -5654,7 +5769,7 @@ mod tests {
     fn a_cast_is_read_at_unary_precedence() {
         let cast = |to: CastTo, operand: Expr| Expr::Cast {
             to,
-            operand: Child::new(operand),
+            operand: at(operand),
         };
         assert_eq!(
             read(b"<?php (int)$a; ( Integer )$a; (FLOAT)$a; (double)$a; (string)$a; (binary)$a; (array)$a; (OBJECT)$a; (bool)$a; (boolean)$a;")
@@ -5675,7 +5790,7 @@ mod tests {
                 CastTo::Bool
             ]
             .into_iter()
-            .map(|to| Stmt::Effect(cast(to, Expr::Var(b"a".to_vec()))))
+            .map(|to| Stmt::Effect(at(cast(to, Expr::Var(b"a".to_vec())))))
             .collect::<Vec<_>>()
         );
         // `(int)$a ** 2` is `(int)($a ** 2)`, as `-$a ** 2` is `-($a ** 2)`;
@@ -5684,22 +5799,22 @@ mod tests {
             read(b"<?php (int)$a ** 2; (int)$a + 1;").unwrap_or_default(),
             vec![
                 (
-                    Stmt::Effect(cast(
+                    Stmt::Effect(at(cast(
                         CastTo::Long,
                         Expr::Binary {
                             op: BinaryOp::Pow,
-                            left: Child::new(Expr::Var(b"a".to_vec())),
-                            right: Child::new(Expr::Int(2)),
+                            left: at(Expr::Var(b"a".to_vec())),
+                            right: at(Expr::Int(2)),
                         }
-                    )),
+                    ))),
                     1
                 ),
                 (
-                    Stmt::Effect(Expr::Binary {
+                    Stmt::Effect(at(Expr::Binary {
                         op: BinaryOp::Add,
-                        left: Child::new(cast(CastTo::Long, Expr::Var(b"a".to_vec()))),
-                        right: Child::new(Expr::Int(1)),
-                    }),
+                        left: at(cast(CastTo::Long, Expr::Var(b"a".to_vec()))),
+                        right: at(Expr::Int(1)),
+                    })),
                     1
                 ),
             ]
@@ -5707,11 +5822,11 @@ mod tests {
         assert_eq!(
             read(b"<?php (1 + 2);").unwrap_or_default(),
             vec![(
-                Stmt::Effect(Expr::Binary {
+                Stmt::Effect(at(Expr::Binary {
                     op: BinaryOp::Add,
-                    left: Child::new(Expr::Int(1)),
-                    right: Child::new(Expr::Int(2)),
-                }),
+                    left: at(Expr::Int(1)),
+                    right: at(Expr::Int(2)),
+                })),
                 1
             )]
         );
@@ -5745,13 +5860,13 @@ mod tests {
             read(b"<?php\nFOREACH ($a as $v)\n  echo $v;").unwrap_or_default(),
             vec![(
                 Stmt::Foreach {
-                    expr: Expr::Var(b"a".to_vec()),
+                    expr: Child::at(2, Expr::Var(b"a".to_vec())),
                     value: Target {
-                        expr: Expr::Var(b"v".to_vec()),
+                        expr: Child::at(2, Expr::Var(b"v".to_vec())),
                         by_ref: false,
                     },
                     key: None,
-                    body: vec![(Stmt::Echo(vec![Expr::Var(b"v".to_vec())]), 3)],
+                    body: vec![(Stmt::Echo(vec![Child::at(3, Expr::Var(b"v".to_vec()))]), 3)],
                 },
                 2
             )],
@@ -5761,16 +5876,16 @@ mod tests {
             read(b"<?php foreach (f() as $k => &$v) {}").unwrap_or_default(),
             vec![(
                 Stmt::Foreach {
-                    expr: Expr::Call {
+                    expr: at(Expr::Call {
                         name: b"f".to_vec(),
                         arguments: vec![],
-                    },
+                    }),
                     value: Target {
-                        expr: Expr::Var(b"v".to_vec()),
+                        expr: at(Expr::Var(b"v".to_vec())),
                         by_ref: true,
                     },
                     key: Some(Target {
-                        expr: Expr::Var(b"k".to_vec()),
+                        expr: at(Expr::Var(b"k".to_vec())),
                         by_ref: false,
                     }),
                     body: vec![],
@@ -5782,13 +5897,13 @@ mod tests {
             read(b"<?php foreach ($a as &$k => $this);").unwrap_or_default(),
             vec![(
                 Stmt::Foreach {
-                    expr: Expr::Var(b"a".to_vec()),
+                    expr: at(Expr::Var(b"a".to_vec())),
                     value: Target {
-                        expr: Expr::This,
+                        expr: at(Expr::This),
                         by_ref: false,
                     },
                     key: Some(Target {
-                        expr: Expr::Var(b"k".to_vec()),
+                        expr: at(Expr::Var(b"k".to_vec())),
                         by_ref: true,
                     }),
                     body: vec![],
@@ -5817,11 +5932,11 @@ mod tests {
             vec![
                 (Stmt::Return(None), 1),
                 (
-                    Stmt::Return(Some(Expr::Binary {
+                    Stmt::Return(Some(at(Expr::Binary {
                         op: BinaryOp::Add,
-                        left: Child::new(Expr::Int(1)),
-                        right: Child::new(Expr::Int(2)),
-                    })),
+                        left: at(Expr::Int(1)),
+                        right: at(Expr::Int(2)),
+                    }))),
                     1
                 ),
             ]
@@ -5835,24 +5950,24 @@ mod tests {
             read(b"<?php echo [], [1, 'k' => $a, [2,],];").unwrap_or_default(),
             vec![(
                 Stmt::Echo(vec![
-                    Expr::Array(vec![]),
-                    Expr::Array(vec![
+                    at(Expr::Array(vec![])),
+                    at(Expr::Array(vec![
                         Element {
                             key: None,
-                            value: Expr::Int(1),
+                            value: at(Expr::Int(1)),
                         },
                         Element {
-                            key: Some(Expr::Str(b"k".to_vec())),
-                            value: Expr::Var(b"a".to_vec()),
+                            key: Some(at(Expr::Str(b"k".to_vec()))),
+                            value: at(Expr::Var(b"a".to_vec())),
                         },
                         Element {
                             key: None,
-                            value: Expr::Array(vec![Element {
+                            value: at(Expr::Array(vec![Element {
                                 key: None,
-                                value: Expr::Int(2),
-                            }]),
+                                value: at(Expr::Int(2)),
+                            }])),
                         },
-                    ]),
+                    ])),
                 ]),
                 1
             )]

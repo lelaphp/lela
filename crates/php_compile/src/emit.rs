@@ -108,8 +108,8 @@ use php_unit::{
 
 use crate::read;
 use crate::read::{
-    Arm, BinaryOp, Case, CastTo, Catch, Class, Element, Expr, Function, IfArm, Magic, Method,
-    Piece, Property, Read, Stmt, Target, Unset, is_auto_global,
+    Arm, BinaryOp, Case, CastTo, Catch, Child, Class, Element, Expr, Function, IfArm, Magic,
+    Method, Piece, Property, Read, Stmt, Target, Unset, is_auto_global,
 };
 use crate::{CompileError, Options, StackLimit};
 
@@ -819,7 +819,7 @@ impl Emit<'_> {
     /// expression is a constant one, nothing where it is not, and the
     /// fatal through, since php's compiler leaves the file at
     /// `E_COMPILE_ERROR` and folds nothing after it.
-    pub(crate) fn constant_of(&mut self, expr: &Expr) -> Result<Option<Zval>, CompileError> {
+    pub(crate) fn constant_of(&mut self, expr: &Child) -> Result<Option<Zval>, CompileError> {
         match self.constant_expr(expr) {
             Ok(value) => Ok(Some(value)),
             Err(refused) if refused.level == Level::CompileError => Err(refused),
@@ -2366,9 +2366,9 @@ impl Emit<'_> {
     /// ```expect exit=0
     /// ab1
     /// ```
-    fn const_expr(&mut self, expr: &Expr) -> Result<ConstExpr, CompileError> {
+    fn const_expr(&mut self, expr: &Child) -> Result<ConstExpr, CompileError> {
         self.check_stack()?;
-        match expr {
+        match &**expr {
             Expr::Null => Ok(ConstExpr::Null),
             Expr::Bool(b) => Ok(ConstExpr::Bool(*b)),
             Expr::Int(n) => Ok(ConstExpr::Long(*n)),
@@ -2421,7 +2421,7 @@ impl Emit<'_> {
                         self.fatal("a constant expression this compiler cannot read yet")
                     });
                 }
-                match expr {
+                match &**expr {
                     Expr::Unary { minus, operand } => Ok(ConstExpr::Unary {
                         op: Name(if *minus { b"-".as_slice() } else { b"+" }.into()),
                         operand: Box::new(self.const_expr(operand)?),
@@ -2507,9 +2507,9 @@ impl Emit<'_> {
     /// header carry the statement's line, as the body's carry theirs.
     fn r#for(
         &mut self,
-        init: &[Expr],
-        cond: &[Expr],
-        step: &[Expr],
+        init: &[Child],
+        cond: &[Child],
+        step: &[Child],
         body: &Read,
     ) -> Result<(), CompileError> {
         let line = self.line;
@@ -2577,7 +2577,7 @@ impl Emit<'_> {
 
     /// `zend_compile_while`: a `JMP` forward to the condition, the body,
     /// then the condition as a `JMPNZ` back to the body's first opline.
-    fn r#while(&mut self, cond: &Expr, body: &Read) -> Result<(), CompileError> {
+    fn r#while(&mut self, cond: &Child, body: &Read) -> Result<(), CompileError> {
         let line = self.line;
         let jump = self.push(Opline {
             opcode: Opcode::Jmp,
@@ -2614,7 +2614,7 @@ impl Emit<'_> {
     /// int(1)
     /// int(3)
     /// ```
-    fn do_while(&mut self, body: &Read, cond: &Expr, line: u32) -> Result<(), CompileError> {
+    fn do_while(&mut self, body: &Read, cond: &Child, line: u32) -> Result<(), CompileError> {
         self.begin_loop(None, None, false);
         let start = self.next();
         self.statements(body)?;
@@ -2648,7 +2648,7 @@ impl Emit<'_> {
     /// fetch for writing are not read yet.
     fn foreach(
         &mut self,
-        expr: &Expr,
+        expr: &Child,
         value: &Target,
         key: Option<&Target>,
         body: &Read,
@@ -2732,8 +2732,8 @@ impl Emit<'_> {
     /// (`zend_separate_if_call_and_write`), and a call whose value is a
     /// temporary, one of the special table's, is php's compile error. A
     /// property fetched for writing is not read yet.
-    fn foreach_subject(&mut self, expr: &Expr, by_ref: bool) -> Result<Where, CompileError> {
-        if by_ref && matches!(expr, Expr::Prop { .. }) {
+    fn foreach_subject(&mut self, expr: &Child, by_ref: bool) -> Result<Where, CompileError> {
+        if by_ref && matches!(&**expr, Expr::Prop { .. }) {
             return Err(self
                 .fatal("a `foreach` by reference over a property this compiler cannot read yet"));
         }
@@ -2760,7 +2760,7 @@ impl Emit<'_> {
     /// temporary to write the key into (`zend_make_tmp_result`), then
     /// `zend_emit_assign_znode`'s `ASSIGN` of it into the key's CV, into
     /// a temporary nothing reads, which `zend_do_free` marks `UNUSED`.
-    fn foreach_key(&mut self, opnum_fetch: u32, key: &Expr) -> Result<(), CompileError> {
+    fn foreach_key(&mut self, opnum_fetch: u32, key: &Child) -> Result<(), CompileError> {
         let key_cv = self.foreach_target(key)?;
         let key_tmp = self.temporary();
         if let Some(fetch) = self.oplines.get_mut(opnum_fetch as usize) {
@@ -2785,8 +2785,8 @@ impl Emit<'_> {
     /// The CV a `foreach` value or key is assigned into: a variable
     /// through `zend_try_compile_cv`, `$this` php's compile error, and
     /// anything else, which php assigns through a `VAR`, not read yet.
-    fn foreach_target(&mut self, target: &Expr) -> Result<u32, CompileError> {
-        match target {
+    fn foreach_target(&mut self, target: &Child) -> Result<u32, CompileError> {
+        match &**target {
             Expr::Var(name) => Ok(self.lookup_cv(name)),
             Expr::This => Err(self.compile_error("Cannot re-assign $this")),
             _ => Err(self.fatal("a `foreach` whose target this compiler cannot read yet")),
@@ -2819,12 +2819,12 @@ impl Emit<'_> {
     /// g
     /// x
     /// ```
-    fn r#return(&mut self, value: Option<&Expr>) -> Result<(), CompileError> {
+    fn r#return(&mut self, value: Option<&Child>) -> Result<(), CompileError> {
         let by_ref = self.returns_by_ref;
         if by_ref
             && value.is_some_and(|expr| {
                 matches!(
-                    expr,
+                    &**expr,
                     Expr::Prop { .. } | Expr::StaticProp { .. } | Expr::This
                 )
             })
@@ -2833,7 +2833,7 @@ impl Emit<'_> {
                 "a return by reference of what is no variable this compiler cannot read yet",
             ));
         }
-        let extended_value = match value {
+        let extended_value = match value.map(|value| &**value) {
             Some(_) if !by_ref => 0,
             Some(Expr::Call { .. } | Expr::MethodCall { .. } | Expr::StaticCall { .. }) => {
                 RETURNS_FUNCTION
@@ -3115,7 +3115,11 @@ impl Emit<'_> {
     /// for a `continue` that targets a `switch`; then the `ZEND_BRK` or
     /// `ZEND_CONT`, here the `JMP` `pass_two` makes of it once its
     /// target is known ([`Self::resolve_breaks`]).
-    fn break_continue(&mut self, depth: Option<&Expr>, is_break: bool) -> Result<(), CompileError> {
+    fn break_continue(
+        &mut self,
+        depth: Option<&Child>,
+        is_break: bool,
+    ) -> Result<(), CompileError> {
         let word = if is_break { "break" } else { "continue" };
         let depth = match depth {
             None => 1,
@@ -3252,7 +3256,7 @@ impl Emit<'_> {
     /// cases and the `JMP` to the default; each case's statements with
     /// the jumps aimed at them and the table's targets recorded; the
     /// loop ended, and the subject freed when it is a temporary.
-    fn switch(&mut self, expr: &Expr, cases: &[Case]) -> Result<(), CompileError> {
+    fn switch(&mut self, expr: &Child, cases: &[Case]) -> Result<(), CompileError> {
         let subject = self.expr(expr)?;
         self.begin_loop(LoopVar::of(Opcode::Free, subject), None, true);
         let case_node = self.temporary();
@@ -3419,7 +3423,7 @@ impl Emit<'_> {
     /// `zend_hash_index_add` or `zend_hash_add` of the opline about to be
     /// emitted under the condition's value: the first case of a value
     /// keeps its target. Nothing where no table is being built.
-    fn table_add(&mut self, table: &mut Option<Table>, cond: &Expr) -> Result<(), CompileError> {
+    fn table_add(&mut self, table: &mut Option<Table>, cond: &Child) -> Result<(), CompileError> {
         let Some(table) = table else {
             return Ok(());
         };
@@ -3464,7 +3468,7 @@ impl Emit<'_> {
     /// The key a case or an arm condition adds to a jump table: its
     /// integer, or its string as interned; nothing for a constant of
     /// another type, which the type walk ruled out already.
-    fn jump_key(&mut self, cond: &Expr) -> Result<Option<Key>, CompileError> {
+    fn jump_key(&mut self, cond: &Child) -> Result<Option<Key>, CompileError> {
         let Some(value) = self.constant_of(cond)? else {
             return Ok(None);
         };
@@ -3502,7 +3506,7 @@ impl Emit<'_> {
     /// defined before it is freed; then the arms; the constant `null`
     /// for a `match` with no arm; and the subject freed when it is a
     /// temporary.
-    fn r#match(&mut self, expr: &Expr, arms: &[Arm], line: u32) -> Result<Where, CompileError> {
+    fn r#match(&mut self, expr: &Child, arms: &[Arm], line: u32) -> Result<Where, CompileError> {
         self.line = line;
         let subject = self.expr(expr)?;
         let case_node = self.temporary();
@@ -3666,7 +3670,7 @@ impl Emit<'_> {
     /// each one's value freed before the next is compiled, and where the
     /// last one left its value; the constant `true` for a list with
     /// nothing in it, which is what `for (;;)` tests.
-    fn expr_list(&mut self, exprs: &[Expr]) -> Result<Where, CompileError> {
+    fn expr_list(&mut self, exprs: &[Child]) -> Result<Where, CompileError> {
         let mut last = Where::Constant(Zval::bool(true));
         for expr in exprs {
             self.do_free(last);
@@ -3878,9 +3882,63 @@ impl Emit<'_> {
     }
 
     /// `zend_compile_expr`: compile `expr` and say where its value is.
-    pub(crate) fn expr(&mut self, expr: &Expr) -> Result<Where, CompileError> {
+    ///
+    /// `zend_compile_expr_inner` opens with
+    /// `CG(zend_lineno) = zend_ast_get_lineno(ast)`
+    /// (`Z/Zend/zend_compile.c:11807-11808`), so every opline this
+    /// emits carries the line of the expression it came from and not
+    /// the line its statement opened on. The line is left where the
+    /// last expression compiled put it, as php leaves it: the `ADD` of
+    /// `1\n+\n$a` is emitted after the right side, at the right side's
+    /// line.
+    ///
+    /// A `while` whose condition stands below the keyword raises from
+    /// the condition's line, not the keyword's:
+    ///
+    /// ```php
+    /// $a = 1;
+    /// while
+    /// (
+    ///
+    ///     1 / 0
+    /// )
+    /// {
+    ///     $a = 0;
+    /// }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught DivisionByZeroError: Division by zero in %s:6
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 6
+    /// ```
+    ///
+    /// So does an argument written on its own line of a call spread
+    /// over several, while the call's own oplines stay on the line the
+    /// callee was named at (`zend_compile_call_common`'s `lineno`,
+    /// `Z/Zend/zend_compile.c:3999`), which is the line the trace
+    /// names:
+    ///
+    /// ```php
+    /// function f($x) { throw new Exception("x"); }
+    /// echo f(
+    ///     $undefined
+    /// );
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Warning: Undefined variable $undefined in %s on line 4
+    ///
+    /// Fatal error: Uncaught Exception: x in %s:2
+    /// Stack trace:
+    /// #0 %s(3): f(NULL)
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    pub(crate) fn expr(&mut self, expr: &Child) -> Result<Where, CompileError> {
         self.check_stack()?;
-        match expr {
+        self.line = expr.line();
+        match &**expr {
             Expr::Call { name, arguments } => self.call(name, arguments),
             Expr::Unary { minus, operand } => self.unary(*minus, operand),
             Expr::Not(operand) => self.bool_not(operand),
@@ -3936,12 +3994,12 @@ impl Emit<'_> {
                 then,
                 otherwise,
                 ..
-            } => self.conditional(cond, then.as_deref(), otherwise),
+            } => self.conditional(cond, then.as_ref(), otherwise),
             Expr::Coalesce { left, right } => self.coalesce(left, right),
             Expr::AssignCoalesce { var, value } => self.assign_coalesce(var, value),
             Expr::And { left, right } => self.short_circuiting(false, left, right),
             Expr::Or { left, right } => self.short_circuiting(true, left, right),
-            known => Ok(Where::Constant(self.constant_expr(known)?)),
+            _ => Ok(Where::Constant(self.constant_expr(expr)?)),
         }
     }
 
@@ -3982,9 +4040,9 @@ impl Emit<'_> {
     /// bool(false)
     /// bool(false)
     /// ```
-    fn isset_or_empty(&mut self, var: &Expr, empty: bool) -> Result<Where, CompileError> {
+    fn isset_or_empty(&mut self, var: &Child, empty: bool) -> Result<Where, CompileError> {
         let extended_value = u32::from(empty);
-        if let Expr::Var(name) = var {
+        if let Expr::Var(name) = &**var {
             let cv = self.lookup_cv(name);
             let out = self.temporary();
             self.push(Opline {
@@ -3998,7 +4056,7 @@ impl Emit<'_> {
             });
             return Ok(Where::Temporary(out));
         }
-        if !matches!(var, Expr::Dim { .. }) {
+        if !matches!(&**var, Expr::Dim { .. }) {
             return Err(
                 self.fatal("an `isset` over what is no variable this compiler cannot read yet")
             );
@@ -4029,7 +4087,7 @@ impl Emit<'_> {
     /// opline leaves a throwable pending whatever stands after it, and
     /// `zend_do_free` over it is what leaves `throw new E;` its one
     /// opline.
-    fn throw(&mut self, operand: &Expr) -> Result<Where, CompileError> {
+    fn throw(&mut self, operand: &Child) -> Result<Where, CompileError> {
         let value = self.expr(operand)?;
         let (op1_type, op1) = self.operand(value);
         self.push(Opline {
@@ -4089,15 +4147,15 @@ impl Emit<'_> {
     /// ```
     fn conditional(
         &mut self,
-        cond: &Expr,
-        then: Option<&Expr>,
-        otherwise: &Expr,
+        cond: &Child,
+        then: Option<&Child>,
+        otherwise: &Child,
     ) -> Result<Where, CompileError> {
         if let Expr::Ternary {
             then: nested,
             parenthesised: false,
             ..
-        } = cond
+        } = &**cond
         {
             match (nested.is_some(), then.is_some()) {
                 (true, true) => return Err(self.compile_error(
@@ -4156,7 +4214,7 @@ impl Emit<'_> {
     ///
     /// `zend_eval_const_expr` folds neither side, so `1 ?? 2` is the
     /// two oplines any other pair is.
-    fn coalesce(&mut self, left: &Expr, right: &Expr) -> Result<Where, CompileError> {
+    fn coalesce(&mut self, left: &Child, right: &Child) -> Result<Where, CompileError> {
         let held = self.silent_read(left)?;
         let (op1_type, op1) = self.operand(held);
         let out = self.temporary();
@@ -4216,7 +4274,7 @@ impl Emit<'_> {
     /// int(3)
     /// int(3)
     /// ```
-    fn assign_coalesce(&mut self, var: &[u8], value: &Expr) -> Result<Where, CompileError> {
+    fn assign_coalesce(&mut self, var: &[u8], value: &Child) -> Result<Where, CompileError> {
         let cv = self.lookup_cv(var);
         let out = self.temporary();
         let opnum = self.push(Opline {
@@ -4271,8 +4329,8 @@ impl Emit<'_> {
     fn short_circuiting(
         &mut self,
         or: bool,
-        left: &Expr,
-        right: &Expr,
+        left: &Child,
+        right: &Child,
     ) -> Result<Where, CompileError> {
         let left = self.expr(left)?;
         if let Where::Constant(value) = left {
@@ -4329,9 +4387,9 @@ impl Emit<'_> {
     /// end for the same reason; each link's operands are settled where
     /// the link is made, since that is where `SET_NODE` puts a
     /// constant into the table.
-    fn silent_read(&mut self, expr: &Expr) -> Result<Where, CompileError> {
+    fn silent_read(&mut self, expr: &Child) -> Result<Where, CompileError> {
         if !matches!(
-            expr,
+            &**expr,
             Expr::Dim { .. } | Expr::Prop { .. } | Expr::StaticProp { .. }
         ) {
             return self.expr(expr);
@@ -4368,8 +4426,8 @@ impl Emit<'_> {
     /// `zend_delayed_compile_prop` and `zend_delayed_compile_static_prop`,
     /// which each compile what stands under them, then the dimension or
     /// the property's name, and only then settle the fetch's operands.
-    fn silent_link(&mut self, expr: &Expr, delayed: &mut Vec<IsLink>) -> Result<(), CompileError> {
-        match expr {
+    fn silent_link(&mut self, expr: &Child, delayed: &mut Vec<IsLink>) -> Result<(), CompileError> {
+        match &**expr {
             Expr::Dim { container, index } => {
                 let under = self.silent_under(container, delayed)?;
                 let Some(index) = index else {
@@ -4436,17 +4494,17 @@ impl Emit<'_> {
     /// that warns as php reads it there.
     fn silent_under(
         &mut self,
-        expr: &Expr,
+        expr: &Child,
         delayed: &mut Vec<IsLink>,
     ) -> Result<Under, CompileError> {
-        match expr {
+        match &**expr {
             Expr::Dim { .. } | Expr::Prop { .. } | Expr::StaticProp { .. } => {
                 self.silent_link(expr, delayed)?;
                 Ok(Under::Link)
             }
             Expr::This if self.this_in_scope => Ok(Under::This),
             Expr::This => Ok(Under::Value(self.fetch_this(OperandKind::Var))),
-            other => Ok(Under::Value(self.expr(other)?)),
+            _ => Ok(Under::Value(self.expr(expr)?)),
         }
     }
 
@@ -4478,8 +4536,8 @@ impl Emit<'_> {
     /// ```
     fn shorthand_conditional(
         &mut self,
-        cond: &Expr,
-        otherwise: &Expr,
+        cond: &Child,
+        otherwise: &Child,
     ) -> Result<Where, CompileError> {
         let tested = self.expr(cond)?;
         let (op1_type, op1) = self.operand(tested);
@@ -4531,11 +4589,16 @@ impl Emit<'_> {
     /// anything reads it; [`Self::do_free`] marks it `UNUSED` when
     /// nothing does, which is what the engine's `ASSIGN` reads as
     /// `RETURN_VALUE_USED`.
-    fn assign(&mut self, var: &[u8], value: &Expr) -> Result<Where, CompileError> {
+    fn assign(&mut self, var: &[u8], value: &Child) -> Result<Where, CompileError> {
+        // `CG(zend_lineno) = zend_ast_get_lineno(var_ast)` before the
+        // `ASSIGN` (`Z/Zend/zend_compile.c:3474`): the target's line,
+        // which is this node's, and not the line its value ended on.
+        let line = self.line;
         let cv = self.lookup_cv(var);
         let value = self.expr(value)?;
         let (op2_type, op2) = self.operand(value);
         let out = self.temporary();
+        self.line = line;
         self.push(Opline {
             opcode: Opcode::Assign,
             op1_type: OperandKind::Cv,
@@ -4566,8 +4629,8 @@ impl Emit<'_> {
     /// `VAR` it left: php turns the last delayed opline into an
     /// `ASSIGN_*_REF` only for a property and a class's own property,
     /// and leaves a dimension's fetch standing.
-    fn assign_ref(&mut self, target: &Expr, source: &Expr) -> Result<Where, CompileError> {
-        let (op1_type, op1) = match target {
+    fn assign_ref(&mut self, target: &Child, source: &Child) -> Result<Where, CompileError> {
+        let (op1_type, op1) = match &**target {
             Expr::Var(name) => (OperandKind::Cv, self.lookup_cv(name)),
             Expr::Dim { .. } => {
                 let (container, links) = self.dim_chain(target, Fetch::Write)?;
@@ -4598,10 +4661,10 @@ impl Emit<'_> {
         // `ZEND_RETURNS_FUNCTION` where it is a call
         // (`zend_is_call`), which is the bit the handler reads to
         // raise php's notice over a call that returned by value.
-        let (op2_type, op2, flags) = match source {
+        let (op2_type, op2, flags) = match &**source {
             Expr::Var(name) => (OperandKind::Cv, self.lookup_cv(name), 0),
-            call @ Expr::Call { .. } => {
-                let returned = self.expr(call)?;
+            Expr::Call { .. } => {
+                let returned = self.expr(source)?;
                 let (op2_type, op2) = self.operand(returned);
                 (op2_type, op2, RETURNS_FUNCTION)
             }
@@ -4636,14 +4699,20 @@ impl Emit<'_> {
     /// carrying `ZEND_FETCH_DIM_DIM`, the bit that names the dimension
     /// under a dimension in php's string-offset error; the `[]` of an
     /// append is an `UNUSED` `op2`, which the dump prints as `NEXT`.
-    fn assign_dim(&mut self, target: &Expr, value: &Expr) -> Result<Where, CompileError> {
+    fn assign_dim(&mut self, target: &Child, value: &Child) -> Result<Where, CompileError> {
         let (container, links) = self.dim_chain(target, Fetch::Write)?;
+        // `zend_delayed_emit_op` stamped the fetch's line where the
+        // fetch stood, and `zend_delayed_compile_end` carries it into
+        // the op array unchanged, so the value compiled after it does
+        // not move the `ASSIGN_DIM` (`Z/Zend/zend_compile.c:3487`).
+        let line = self.line;
         let value = self.assigned_value(target, value)?;
         let (data_type, data) = self.operand(value);
         let Some((last, fetches)) = links.split_last() else {
             return Err(self.fatal("a dimension assignment with no dimension"));
         };
         let (op1_type, op1) = self.dim_fetches(container, fetches, Fetch::Write);
+        self.line = line;
         self.push(Opline {
             opcode: Opcode::AssignDim,
             op1_type,
@@ -4674,16 +4743,16 @@ impl Emit<'_> {
     /// `Cannot use [] for reading` under a read.
     fn dim_chain(
         &mut self,
-        target: &Expr,
+        target: &Child,
         fetch: Fetch,
     ) -> Result<(u32, Vec<DimLink>), CompileError> {
         let mut dimensions = Vec::new();
         let mut base = target;
-        while let Expr::Dim { container, index } = base {
+        while let Expr::Dim { container, index } = &**base {
             dimensions.push(index);
             base = container;
         }
-        let Expr::Var(name) = base else {
+        let Expr::Var(name) = &**base else {
             return Err(
                 self.fatal("a dimension over what is no variable this compiler cannot read yet")
             );
@@ -4752,7 +4821,7 @@ impl Emit<'_> {
     /// (`zend_adjust_for_fetch_type` marks the fetch's out operand a
     /// `TMP` where a write leaves a `VAR`), and the value is the last
     /// one's temporary.
-    fn dim_read(&mut self, target: &Expr) -> Result<Where, CompileError> {
+    fn dim_read(&mut self, target: &Child) -> Result<Where, CompileError> {
         let (container, links) = self.dim_chain(target, Fetch::Read)?;
         match self.dim_fetches(container, &links, Fetch::Read) {
             (OperandKind::Tmp, at) => Ok(Where::Temporary(at)),
@@ -4792,15 +4861,15 @@ impl Emit<'_> {
     /// temporary, since the write to the left one may move what the
     /// right one named. php compares the written names of the chain's
     /// base and of the value, so `$a[0][1] = $a` is one too.
-    fn assigned_value(&mut self, target: &Expr, value: &Expr) -> Result<Where, CompileError> {
-        let Expr::Var(name) = value else {
+    fn assigned_value(&mut self, target: &Child, value: &Child) -> Result<Where, CompileError> {
+        let Expr::Var(name) = &**value else {
             return self.expr(value);
         };
         let mut base = target;
-        while let Expr::Dim { container, .. } = base {
+        while let Expr::Dim { container, .. } = &**base {
             base = container;
         }
-        if !matches!(base, Expr::Var(written) if written == name) {
+        if !matches!(&**base, Expr::Var(written) if written == name) {
             return self.expr(value);
         }
         let cv = self.lookup_cv(name);
@@ -4836,17 +4905,17 @@ impl Emit<'_> {
     /// neither is read yet.
     fn assign_prop(
         &mut self,
-        object: &Expr,
+        object: &Child,
         name: &[u8],
-        value: &Expr,
+        value: &Child,
     ) -> Result<Where, CompileError> {
         let mut names = vec![name];
         let mut base = object;
-        while let Expr::Prop { object, name } = base {
+        while let Expr::Prop { object, name } = &**base {
             names.push(name);
             base = object;
         }
-        if !matches!(base, Expr::Var(_) | Expr::This) {
+        if !matches!(&**base, Expr::Var(_) | Expr::This) {
             return Err(self.fatal(
                 "a property assignment over what is no variable this compiler cannot read yet",
             ));
@@ -4860,11 +4929,14 @@ impl Emit<'_> {
             let slots = self.cache_slots(3);
             links.push((name_at, out, slots));
         }
+        // The delayed fetch's line, as [`Self::assign_dim`] keeps it.
+        let line = self.line;
         let value = self.expr(value)?;
         let (data_type, data) = self.operand(value);
         let Some((last, fetches)) = links.split_last() else {
             return Err(self.fatal("a property assignment with no property"));
         };
+        self.line = line;
         for &(name_at, out, slots) in fetches {
             self.push(Opline {
                 opcode: Opcode::FetchObjW,
@@ -4920,15 +4992,18 @@ impl Emit<'_> {
         &mut self,
         class: &[u8],
         name: &[u8],
-        value: &Expr,
+        value: &Child,
     ) -> Result<Where, CompileError> {
         let name = self.string(name)?;
         let name_at = self.literal(name);
         let out = self.temporary();
         let slots = self.cache_slots(3);
         let class_at = self.class_name_literal(class)?;
+        // The delayed fetch's line, as [`Self::assign_dim`] keeps it.
+        let line = self.line;
         let value = self.expr(value)?;
         let (data_type, data) = self.operand(value);
+        self.line = line;
         self.push(Opline {
             opcode: Opcode::AssignStaticProp,
             op1_type: OperandKind::Const,
@@ -4953,7 +5028,7 @@ impl Emit<'_> {
     /// `zend_try_ct_eval_binary_op` folds the operator over two constants,
     /// and the opcode into a temporary where it does not
     /// (`zend_emit_op_tmp`).
-    fn binary(&mut self, op: BinaryOp, left: &Expr, right: &Expr) -> Result<Where, CompileError> {
+    fn binary(&mut self, op: BinaryOp, left: &Child, right: &Child) -> Result<Where, CompileError> {
         if op == BinaryOp::Concat {
             return self.concat(left, right);
         }
@@ -4979,7 +5054,7 @@ impl Emit<'_> {
     /// side converted to a string where it stands and `CONCAT` into a
     /// temporary. php converts before it emits, so what the opline reads
     /// is the string and never the number it was written as.
-    fn concat(&mut self, left: &Expr, right: &Expr) -> Result<Where, CompileError> {
+    fn concat(&mut self, left: &Child, right: &Child) -> Result<Where, CompileError> {
         let left = self.expr(left)?;
         let right = self.expr(right)?;
         if let (Where::Constant(a), Where::Constant(b)) = (left, right)
@@ -4997,7 +5072,12 @@ impl Emit<'_> {
     /// [`Self::bitwise_fold`] folds them, and otherwise the opcode into
     /// a temporary. The three are `SPEC(COMMUTATIVE)`, so `pass_two`
     /// may put the constant second ([`swap_commutative`]).
-    fn bitwise(&mut self, op: BinaryOp, left: &Expr, right: &Expr) -> Result<Where, CompileError> {
+    fn bitwise(
+        &mut self,
+        op: BinaryOp,
+        left: &Child,
+        right: &Child,
+    ) -> Result<Where, CompileError> {
         if let (Some(a), Some(b)) = (self.constant_of(left)?, self.constant_of(right)?)
             && let Some(folded) = self.bitwise_fold(op, a, b)?
         {
@@ -5049,8 +5129,8 @@ impl Emit<'_> {
     fn comparison(
         &mut self,
         op: BinaryOp,
-        left: &Expr,
-        right: &Expr,
+        left: &Child,
+        right: &Child,
     ) -> Result<Where, CompileError> {
         let left = self.expr(left)?;
         let right = self.expr(right)?;
@@ -5237,7 +5317,7 @@ impl Emit<'_> {
     /// `zend_compile_unary_pm`: php folds unary `-` and `+` as the
     /// multiplication by -1 and by 1 it would otherwise emit, and emits
     /// that multiplication where the operand is not a constant.
-    fn unary(&mut self, minus: bool, operand: &Expr) -> Result<Where, CompileError> {
+    fn unary(&mut self, minus: bool, operand: &Child) -> Result<Where, CompileError> {
         let sign = Zval::long(if minus { -1 } else { 1 });
         if let Some(value) = self.constant_of(operand)?
             && let Some(folded) = fold(BinaryOp::Mul, value, sign)
@@ -5257,7 +5337,7 @@ impl Emit<'_> {
     /// `zend_unary_op_produces_error`'s one arm for this opcode, so
     /// `!1` and `!""` are bools in the op array and `!1.5` is the
     /// opline over `float(1.5)`, as the oracle's dump has it.
-    fn bool_not(&mut self, operand: &Expr) -> Result<Where, CompileError> {
+    fn bool_not(&mut self, operand: &Child) -> Result<Where, CompileError> {
         if let Some(value) = self.constant_of(operand)?
             && value.as_double().is_none()
         {
@@ -5279,7 +5359,7 @@ impl Emit<'_> {
     /// php fetches `ZEND_FETCH_GLOBAL`, are refused by the reader. The
     /// value is where the expression left it, and its `zend_do_free`
     /// steps back over the `END_SILENCE` ([`Self::last_that_left_a_value`]).
-    fn silence(&mut self, operand: &Expr) -> Result<Where, CompileError> {
+    fn silence(&mut self, operand: &Child) -> Result<Where, CompileError> {
         let silence = self.temporary();
         self.push(Opline {
             opcode: Opcode::BeginSilence,
@@ -5287,7 +5367,7 @@ impl Emit<'_> {
             out: silence,
             ..Opline::default()
         });
-        let value = match operand {
+        let value = match &**operand {
             Expr::Var(name) => self.fetch_by_name(name)?,
             Expr::This => self.fetch_by_name(b"this")?,
             _ => self.expr(operand)?,
@@ -5503,7 +5583,7 @@ impl Emit<'_> {
     /// `extended_value` for the rest, into a temporary; nothing is folded,
     /// as php folds a cast only inside a constant expression
     /// (`zend_eval_const_expr`), so `(float)1` stands as an opline.
-    fn cast(&mut self, to: CastTo, operand: &Expr) -> Result<Where, CompileError> {
+    fn cast(&mut self, to: CastTo, operand: &Child) -> Result<Where, CompileError> {
         let operand = self.expr(operand)?;
         Ok(match to {
             CastTo::Bool => self.emit_unary(Opcode::Bool, operand, 0),
@@ -5585,9 +5665,9 @@ impl Emit<'_> {
     /// (`zend_try_ct_eval_binary_op`) and a call of a name in
     /// [`crate::special`]'s table over constants
     /// (`zend_try_compile_special_func`).
-    pub(crate) fn constant_expr(&mut self, expr: &Expr) -> Result<Zval, CompileError> {
+    pub(crate) fn constant_expr(&mut self, expr: &Child) -> Result<Zval, CompileError> {
         self.check_stack()?;
-        match expr {
+        match &**expr {
             Expr::Null => Ok(Zval::null()),
             Expr::Bool(b) => Ok(Zval::bool(*b)),
             Expr::Int(n) => Ok(Zval::long(*n)),
@@ -5710,8 +5790,8 @@ impl Emit<'_> {
     fn binary_constant(
         &mut self,
         op: BinaryOp,
-        left: &Expr,
-        right: &Expr,
+        left: &Child,
+        right: &Child,
     ) -> Result<Zval, CompileError> {
         let left = self.constant_expr(left)?;
         let right = self.constant_expr(right)?;
@@ -5741,8 +5821,8 @@ impl Emit<'_> {
     fn short_circuit_fold(
         &mut self,
         or: bool,
-        left: &Expr,
-        right: &Expr,
+        left: &Child,
+        right: &Child,
     ) -> Result<Zval, CompileError> {
         let held = truth(self.constant_expr(left)?);
         if held == or {
@@ -5909,7 +5989,7 @@ impl Emit<'_> {
     /// same cast written anywhere else is the `CAST` opline
     /// `zend_compile_cast` emits. The constant where the node folds,
     /// else the oplines that build it.
-    fn walked(&mut self, expr: &Expr) -> Result<Where, CompileError> {
+    fn walked(&mut self, expr: &Child) -> Result<Where, CompileError> {
         match self.constant_of(expr)? {
             Some(value) => Ok(Where::Constant(value)),
             None => self.expr(expr),
@@ -5945,7 +6025,8 @@ impl Emit<'_> {
     /// anything reads it; [`Self::do_free`] marks it `UNUSED` when
     /// nothing does, which is what the engine's `DO_ICALL` reads as
     /// `RETURN_VALUE_USED`.
-    fn call(&mut self, name: &[u8], arguments: &[Expr]) -> Result<Where, CompileError> {
+    fn call(&mut self, name: &[u8], arguments: &[Child]) -> Result<Where, CompileError> {
+        let line = self.line;
         let (resolved, runtime) = self.function_name(name);
         if runtime {
             return self.ns_call(&resolved, arguments);
@@ -5982,7 +6063,7 @@ impl Emit<'_> {
         });
         let by_ref = self.send_modes(&lowered_name, arguments.len());
         self.args(arguments, true, &by_ref)?;
-        Ok(self.call_op(call_op))
+        Ok(self.call_op(call_op, line))
     }
 
     /// `ARG_SHOULD_BE_SENT_BY_REF` (`Z/Zend/zend_compile.h:1141`) over
@@ -6039,7 +6120,8 @@ impl Emit<'_> {
     /// The engine resolves the pair's lowered name at the `INIT` and
     /// raises php's `Error` over the written one where nothing declares
     /// it.
-    fn dynamic_call(&mut self, name: &[u8], arguments: &[Expr]) -> Result<Where, CompileError> {
+    fn dynamic_call(&mut self, name: &[u8], arguments: &[Child]) -> Result<Where, CompileError> {
+        let line = self.line;
         let pair = self.func_name_literal(name)?;
         let count = u32::try_from(arguments.len()).unwrap_or(0);
         let slot = self.cache_slot();
@@ -6052,7 +6134,7 @@ impl Emit<'_> {
             ..Opline::default()
         });
         self.args(arguments, false, &[])?;
-        Ok(self.call_op(Opcode::DoFcallByName))
+        Ok(self.call_op(Opcode::DoFcallByName, line))
     }
 
     /// `zend_compile_dynamic_call` over a callee that is no constant
@@ -6063,7 +6145,8 @@ impl Emit<'_> {
     /// callee nothing is known of and `DO_FCALL`, which is what
     /// `zend_get_call_op` picks with `fbc` null over an opline that is
     /// no `INIT_FCALL_BY_NAME`.
-    fn call_var(&mut self, callee: &Expr, arguments: &[Expr]) -> Result<Where, CompileError> {
+    fn call_var(&mut self, callee: &Child, arguments: &[Child]) -> Result<Where, CompileError> {
+        let line = self.line;
         let value = self.expr(callee)?;
         let (op2_type, op2) = self.operand(value);
         let count = u32::try_from(arguments.len()).unwrap_or(0);
@@ -6075,7 +6158,7 @@ impl Emit<'_> {
             ..Opline::default()
         });
         self.args(arguments, false, &[])?;
-        Ok(self.call_op(Opcode::DoFcall))
+        Ok(self.call_op(Opcode::DoFcall, line))
     }
 
     /// `zend_compile_new` for a class named as written: `NEW` with the
@@ -6087,7 +6170,8 @@ impl Emit<'_> {
     /// the `DO_FCALL` that serves it, whose own `VAR` `zend_do_free`
     /// marks unused. `self`, `parent` and `static` are class references
     /// of another kind (`zend_get_class_fetch_type`), not read yet.
-    fn new_expression(&mut self, class: &[u8], arguments: &[Expr]) -> Result<Where, CompileError> {
+    fn new_expression(&mut self, class: &[u8], arguments: &[Child]) -> Result<Where, CompileError> {
+        let line = self.line;
         let class = self.class_name_literal(class)?;
         let out = self.temporary();
         let slot = self.cache_slot();
@@ -6103,7 +6187,7 @@ impl Emit<'_> {
             ..Opline::default()
         });
         self.args(arguments, false, &[])?;
-        let served = self.call_op(Opcode::DoFcall);
+        let served = self.call_op(Opcode::DoFcall, line);
         self.do_free(served);
         Ok(Where::Returned(out))
     }
@@ -6121,8 +6205,9 @@ impl Emit<'_> {
         &mut self,
         class: &[u8],
         method: &[u8],
-        arguments: &[Expr],
+        arguments: &[Child],
     ) -> Result<Where, CompileError> {
+        let line = self.line;
         let known = self.known_method(class, method);
         let call_op = match known {
             Some(Known::User) => Opcode::DoUcall,
@@ -6155,7 +6240,7 @@ impl Emit<'_> {
         };
         self.push(opline);
         self.args(arguments, known, &[])?;
-        Ok(self.call_op(call_op))
+        Ok(self.call_op(call_op, line))
     }
 
     /// `zend_compile_method_call`: the receiver compiled,
@@ -6165,10 +6250,11 @@ impl Emit<'_> {
     /// known of, and `DO_FCALL`.
     fn method_call(
         &mut self,
-        object: &Expr,
+        object: &Child,
         method: &[u8],
-        arguments: &[Expr],
+        arguments: &[Child],
     ) -> Result<Where, CompileError> {
+        let line = self.line;
         let (op1_type, op1) = self.receiver(object)?;
         let method_at = self.func_name_literal(method)?;
         let count = u32::try_from(arguments.len()).unwrap_or(0);
@@ -6184,7 +6270,7 @@ impl Emit<'_> {
             ..Opline::default()
         });
         self.args(arguments, false, &[])?;
-        Ok(self.call_op(Opcode::DoFcall))
+        Ok(self.call_op(Opcode::DoFcall, line))
     }
 
     /// The receiver of a method call or a property fetch: `$this` is
@@ -6192,15 +6278,15 @@ impl Emit<'_> {
     /// `zend_compile_method_call`, where `this_guaranteed_exists` is
     /// false outside a method's body, which is everywhere this compiler
     /// reads); anything else is the expression itself.
-    fn receiver(&mut self, object: &Expr) -> Result<(OperandKind, u32), CompileError> {
-        match object {
+    fn receiver(&mut self, object: &Child) -> Result<(OperandKind, u32), CompileError> {
+        match &**object {
             Expr::This if self.this_in_scope => Ok((OperandKind::Unused, 0)),
             Expr::This => {
                 let this = self.fetch_this(OperandKind::Var);
                 Ok(self.operand(this))
             }
-            other => {
-                let value = self.expr(other)?;
+            _ => {
+                let value = self.expr(object)?;
                 Ok(self.operand(value))
             }
         }
@@ -6283,7 +6369,7 @@ impl Emit<'_> {
     /// the property's name as one constant in `op2`, three cache slots in
     /// `extended_value` (`zend_alloc_cache_slots(3)`), written into a
     /// temporary (`zend_adjust_for_fetch_type`).
-    fn prop(&mut self, object: &Expr, name: &[u8]) -> Result<Where, CompileError> {
+    fn prop(&mut self, object: &Child, name: &[u8]) -> Result<Where, CompileError> {
         let (op1_type, op1) = self.receiver(object)?;
         let name = self.string(name)?;
         let name_at = self.literal(name);
@@ -6308,7 +6394,7 @@ impl Emit<'_> {
     /// otherwise `INSTANCEOF` over the operand with the class's constant
     /// pair in `op2` and a cache slot in `extended_value`, into a
     /// temporary.
-    fn instance_of(&mut self, expr: &Expr, class: &[u8]) -> Result<Where, CompileError> {
+    fn instance_of(&mut self, expr: &Child, class: &[u8]) -> Result<Where, CompileError> {
         let value = self.expr(expr)?;
         if let Where::Constant(_) = value {
             return Ok(Where::Constant(Zval::bool(false)));
@@ -6685,7 +6771,7 @@ impl Emit<'_> {
     fn frameless_icall(
         &mut self,
         index: usize,
-        arguments: &[Expr],
+        arguments: &[Child],
         into: Option<u32>,
     ) -> Result<Option<Where>, CompileError> {
         let Some(arity) = self.frameless_arity(index, arguments.len()) else {
@@ -6780,7 +6866,8 @@ impl Emit<'_> {
     /// a second time. The `JMP_FRAMELESS` takes its cache slot after
     /// the `INIT_NS_FCALL_BY_NAME` took its own, which is the number
     /// the dump prints.
-    fn ns_call(&mut self, name: &[u8], arguments: &[Expr]) -> Result<Where, CompileError> {
+    fn ns_call(&mut self, name: &[u8], arguments: &[Child]) -> Result<Where, CompileError> {
+        let line = self.line;
         let name_constants = self.ns_func_name_literal(name)?;
         let lowered = name.to_ascii_lowercase();
         let unqualified = lowered
@@ -6815,7 +6902,7 @@ impl Emit<'_> {
             ..Opline::default()
         });
         self.args(arguments, false, &[])?;
-        let returned = self.call_op(Opcode::DoFcallByName);
+        let returned = self.call_op(Opcode::DoFcallByName, line);
         if let Some((jmp_fl, index)) = branch
             && let Where::Returned(var) = returned
         {
@@ -6871,7 +6958,7 @@ impl Emit<'_> {
     /// `CHECK_FUNC_ARG` and `FETCH_OBJ_FUNC_ARG`, not read yet.
     fn args(
         &mut self,
-        arguments: &[Expr],
+        arguments: &[Child],
         known: bool,
         by_ref: &[bool],
     ) -> Result<(), CompileError> {
@@ -6884,20 +6971,19 @@ impl Emit<'_> {
             // `Only variables can be passed by reference` is raised where
             // the argument is placed and not where it is written.
             if by_ref.get(at).copied().unwrap_or(false) {
-                let (opcode, op1_type, op1) = match argument {
-                    Expr::Var(name) => (Opcode::SendRef, OperandKind::Cv, self.lookup_cv(name)),
-                    other => {
-                        let value = self.expr(other)?;
-                        let (op1_type, op1) = self.operand(value);
-                        let opcode = match op1_type {
-                            OperandKind::Var => Opcode::SendVarNoRefEx,
-                            OperandKind::Cv => Opcode::SendVarEx,
-                            OperandKind::Const | OperandKind::Tmp | OperandKind::Unused => {
-                                Opcode::SendValEx
-                            }
-                        };
-                        (opcode, op1_type, op1)
-                    }
+                let (opcode, op1_type, op1) = if let Expr::Var(name) = &**argument {
+                    (Opcode::SendRef, OperandKind::Cv, self.lookup_cv(name))
+                } else {
+                    let value = self.expr(argument)?;
+                    let (op1_type, op1) = self.operand(value);
+                    let opcode = match op1_type {
+                        OperandKind::Var => Opcode::SendVarNoRefEx,
+                        OperandKind::Cv => Opcode::SendVarEx,
+                        OperandKind::Const | OperandKind::Tmp | OperandKind::Unused => {
+                            Opcode::SendValEx
+                        }
+                    };
+                    (opcode, op1_type, op1)
                 };
                 self.push(Opline {
                     opcode,
@@ -6909,7 +6995,7 @@ impl Emit<'_> {
                 });
                 continue;
             }
-            let value = match argument {
+            let value = match &**argument {
                 Expr::This if !known => {
                     let this = self.fetch_this(OperandKind::Var);
                     let (op1_type, op1) = self.operand(this);
@@ -6928,7 +7014,7 @@ impl Emit<'_> {
                         "a property fetch sent to a callee the table has not this compiler cannot read yet",
                     ));
                 }
-                other => self.expr(other)?,
+                _ => self.expr(argument)?,
             };
             let (op1_type, op1) = self.operand(value);
             let opcode = match (known, op1_type) {
@@ -6952,7 +7038,11 @@ impl Emit<'_> {
 
     /// The call op `zend_get_call_op` picked, with the `VAR` for what
     /// the call returns.
-    fn call_op(&mut self, opcode: Opcode) -> Where {
+    fn call_op(&mut self, opcode: Opcode, line: u32) -> Where {
+        // `opline->lineno = lineno` after `zend_emit_op`
+        // (`Z/Zend/zend_compile.c:3999`): the call's own line, not the
+        // line the last argument ended on.
+        self.line = line;
         let out = self.temporary();
         self.push(Opline {
             opcode,
@@ -7057,8 +7147,8 @@ impl Bind {
     clippy::too_many_lines,
     reason = "one arm per node kind, which is what php's walk over the children of a node it makes no special case of comes to here: the length is the number of kinds `Expr` has, and there is nothing in it to shorten that would not be a second walk"
 )]
-fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Expr) {
-    match expr {
+fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Child) {
+    match &**expr {
         Expr::Var(name) => note(names, name),
         Expr::Closure(closure) => implicit_uses_of_closure(names, closure),
         Expr::Unary { operand, .. }
@@ -7107,7 +7197,7 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Expr) {
         Expr::Prop { object, .. } => implicit_uses(names, object),
         Expr::Dim { container, index } => {
             implicit_uses(names, container);
-            implicit_uses_of_any(names, index.as_deref());
+            implicit_uses_of_any(names, index.as_ref());
         }
         // `ZEND_AST_CONDITIONAL` is no special node either, so the walk
         // reaches all three children and an arrow function captures what
@@ -7120,7 +7210,7 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Expr) {
             ..
         } => {
             implicit_uses(names, cond);
-            implicit_uses_of_any(names, then.as_deref());
+            implicit_uses_of_any(names, then.as_ref());
             implicit_uses(names, otherwise);
         }
         Expr::AssignDim { target, value } => {
@@ -7188,7 +7278,7 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Expr) {
 /// `find_implicit_binds_recursively` over a child php may leave null,
 /// which it returns on at once: the `ZEND_AST_DIM` with no index and
 /// the `ZEND_AST_CONDITIONAL` written `a ?: c`.
-fn implicit_uses_of_any(names: &mut Vec<Vec<u8>>, expr: Option<&Expr>) {
+fn implicit_uses_of_any(names: &mut Vec<Vec<u8>>, expr: Option<&Child>) {
     if let Some(expr) = expr {
         implicit_uses(names, expr);
     }
@@ -7225,8 +7315,8 @@ fn implicit_uses_of_closure(names: &mut Vec<Vec<u8>>, closure: &read::Closure) {
 /// `zend_compile_params` leaves unsubstituted in a parameter's default:
 /// a constant by name or a class constant, anywhere in the tree. `true`,
 /// `false` and `null` are the reader's own values and name none.
-fn names_a_constant(expr: &Expr) -> bool {
-    match expr {
+fn names_a_constant(expr: &Child) -> bool {
+    match &**expr {
         Expr::Constant(_) | Expr::ClassConst { .. } => true,
         Expr::Unary { operand, .. } | Expr::Not(operand) => names_a_constant(operand),
         Expr::Binary { left, right, .. } => names_a_constant(left) || names_a_constant(right),
@@ -7248,9 +7338,9 @@ enum Known {
 
 /// `zend_is_call`: a call by name, a call on a class or a method call,
 /// whose `VAR` is separated where it is written to.
-fn is_call(expr: &Expr) -> bool {
+fn is_call(expr: &Child) -> bool {
     matches!(
-        expr,
+        &**expr,
         Expr::Call { .. } | Expr::StaticCall { .. } | Expr::MethodCall { .. }
     )
 }
