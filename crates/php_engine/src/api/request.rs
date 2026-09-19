@@ -2911,6 +2911,18 @@ impl Request {
         Ok(Some((declaring, property)))
     }
 
+    /// `CE_STATIC_MEMBERS(ce)[prop_info->offset]`: what the slot of the
+    /// `static` property `name` on the class that declared it holds,
+    /// nobody's to release, and `IS_UNDEF` where the slot stands
+    /// unwritten or the table has none.
+    fn held_static(&self, declaring: ClassId, name: &[u8]) -> Value {
+        self.statics
+            .iter()
+            .find(|((at, under), _)| *at == declaring && under == name)
+            .map(|(_, value)| *value)
+            .unwrap_or_default()
+    }
+
     /// `zend_read_static_property_ex` (`Z/Zend/zend_API.c`): the value
     /// of a `static` property, one more owner taken for the caller and
     /// the slot keeping its own (`RETURN_COPY_DEREF`), a reference
@@ -2934,12 +2946,7 @@ impl Request {
         let Some((declaring, property)) = self.static_slot(class, name, scope, read)? else {
             return Ok(Value::null());
         };
-        let held = self
-            .statics
-            .iter()
-            .find(|((at, under), _)| *at == declaring && under == name)
-            .map(|(_, value)| *value)
-            .unwrap_or_default();
+        let held = self.held_static(declaring, name);
         if held.tag() == TypeTag::Undef {
             if property.ty.is_some() && read == PropertyRead::Warning {
                 let declaring = self.class_name(declaring);
@@ -2957,6 +2964,45 @@ impl Request {
         let held = held.deref();
         self.addref(&held);
         Ok(held)
+    }
+
+    /// `zend_std_get_static_property(ce, name, BP_VAR_IS)` as the
+    /// pointer php hands back, which
+    /// `ReflectionClass::getStaticPropertyValue` and
+    /// `setStaticPropertyValue` read rather than a value:
+    /// [`Request::static_slot`] under [`PropertyRead::Silent`] is the
+    /// `NULL`, so nothing here is a name no class of the chain
+    /// declares, one declared as an instance property or one the scope
+    /// may not reach; an undefined value is the slot php hands back
+    /// holding `IS_UNDEF`, a typed property nothing has written, which
+    /// [`Request::static_property`] flattens to `null` because php's
+    /// `zend_read_static_property_ex` reads the slot and never the
+    /// pointer; and otherwise one more owner of the value, a reference
+    /// followed. Nothing is raised on those paths; a default
+    /// expression that throws as the slot is laid down is php's own
+    /// `zend_update_class_constants` failure and is handed on.
+    pub(crate) fn static_property_silent(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+        scope: Option<ClassId>,
+    ) -> Result<Option<Value>, Thrown> {
+        let Some((declaring, property)) =
+            self.static_slot(class, name, scope, PropertyRead::Silent)?
+        else {
+            return Ok(None);
+        };
+        let held = self.held_static(declaring, name);
+        if held.tag() == TypeTag::Undef {
+            return Ok(Some(if property.ty.is_some() {
+                Value::undef()
+            } else {
+                Value::null()
+            }));
+        }
+        let held = held.deref();
+        self.addref(&held);
+        Ok(Some(held))
     }
 
     /// `zend_update_static_property_ex` (`Z/Zend/zend_API.c`): the value

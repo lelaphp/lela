@@ -7,16 +7,14 @@
 //! `linked_constants`, `linked_properties`).
 //!
 //! What stands beside `stub::unbuilt` still: `getTraitAliases`, whose
-//! `use ... as ...` list the declaration model does not carry; the
-//! three `static` property accessors, which have the members table
-//! `read_static_prop` reads to read since #332 and are #471; and the
+//! `use ... as ...` list the declaration model does not carry; and the
 //! eight lazy-object entries, each of which takes
 //! a `Closure` (#415).
 
-use php_ext::call::{eval_const_expr, instantiate};
+use php_ext::call::{eval_const_expr, instantiate, read_class_prop_silent, write_static_prop};
 use php_ext::coerce::value_name;
 use php_ext::decl::{ClassKind, MethodDecl, Visibility};
-use php_ext::raising::{Thrown, arg_type_error, throw};
+use php_ext::raising::{Thrown, arg_count_error, arg_type_error, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -990,4 +988,262 @@ fn instantiable(req: &mut Request, class: ClassId) -> Result<(), Thrown> {
         "ReflectionException",
         &format!("Class {} is an {what}", String::from_utf8_lossy(&name)),
     ))
+}
+
+/// `ReflectionClass::getStaticProperties()`: `CE_STATIC_MEMBERS(ce)` as
+/// an array, one slot per `static` property of `properties_info` under
+/// its own name, in that table's order, the slots laid down from their
+/// defaults on first use (`zend_class_init_statics`). php skips a
+/// property a class above declared private, one declared as an
+/// instance property, and a typed one nothing has written, whose slot
+/// stands `IS_UNDEF`; each value is handed back deref'd, with one more
+/// owner, which is what "enforce read only access" comes to.
+///
+/// ```php
+/// class A { public static int $n; public static $p = 1; private static $q = 2; protected static $r = 3; public $i = 4; }
+/// class B extends A { private static $q = 5; }
+/// var_dump((new ReflectionClass('A'))->getStaticProperties(), (new ReflectionClass('B'))->getStaticProperties());
+/// ```
+/// ```expect
+/// array(3) {
+///   ["p"]=>
+///   int(1)
+///   ["q"]=>
+///   int(2)
+///   ["r"]=>
+///   int(3)
+/// }
+/// array(3) {
+///   ["q"]=>
+///   int(5)
+///   ["p"]=>
+///   int(1)
+///   ["r"]=>
+///   int(3)
+/// }
+/// ```
+///
+/// ```php
+/// (new ReflectionClass('Exception'))->getStaticProperties(1);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: ReflectionClass::getStaticProperties() expects exactly 0 arguments, 1 given in %s:2
+/// Stack trace:
+/// #0 %s(2): ReflectionClass->getStaticProperties(1)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+pub(super) fn reflection_class_get_static_properties(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let class = this_class(req)?;
+    let mut properties = PhpArray::new(req)?;
+    for (property, declaring) in linked_properties(req, class) {
+        if property.is_instance
+            || (property.visibility == Visibility::Private && declaring != class)
+        {
+            continue;
+        }
+        let Some(value) = read_class_prop_silent(req, class, &property.name.0)? else {
+            continue;
+        };
+        if matches!(value.as_ref(), ValueRef::Undef) {
+            continue;
+        }
+        let key = Key::Str(PhpString::new(req, &property.name.0)?);
+        properties.set(req, key, value)?;
+    }
+    Ok(Value::array(properties))
+}
+
+/// `ReflectionClass::getStaticPropertyValue(string $name, mixed
+/// $default = UNKNOWN)`: the slot addressed under `BP_VAR_IS` with the
+/// fake scope set to the class ([`read_class_prop_silent`]), so a
+/// property the class itself declared private is reached and one a
+/// class above did is not. A slot holding a value is that value, one
+/// more owner taken (`RETURN_COPY_DEREF`); otherwise `$default` where
+/// the call gave one, which php hands back before it looks at why the
+/// slot was empty; otherwise php's `Error` for a typed property
+/// nothing has written, whose text here is `Typed property` and not
+/// the engine's `Typed static property`, and php's
+/// `ReflectionException` for a name the class does not have.
+///
+/// ```php
+/// class A { private static $q = 'a'; protected static $r = 'b'; public static $p = 'c'; }
+/// class B extends A { private static $q = 'd'; }
+/// $a = new ReflectionClass('A'); $b = new ReflectionClass('B');
+/// var_dump($a->getStaticPropertyValue('q'), $a->getStaticPropertyValue('r'), $a->getStaticPropertyValue('p'));
+/// var_dump($b->getStaticPropertyValue('q'), $b->getStaticPropertyValue('r'), $b->getStaticPropertyValue('nope', 'default value'));
+/// ```
+/// ```expect
+/// string(1) "a"
+/// string(1) "b"
+/// string(1) "c"
+/// string(1) "d"
+/// string(1) "b"
+/// string(13) "default value"
+/// ```
+///
+/// A typed property nothing has written is the `Error`, and a default
+/// stands before it.
+///
+/// ```php
+/// class A { public static int $n; }
+/// var_dump((new ReflectionClass('A'))->getStaticPropertyValue('n', 'd'));
+/// (new ReflectionClass('A'))->getStaticPropertyValue('n');
+/// ```
+/// ```expect exit=255
+/// string(1) "d"
+///
+/// Fatal error: Uncaught Error: Typed property A::$n must not be accessed before initialization in %s:4
+/// Stack trace:
+/// #0 %s(4): ReflectionClass->getStaticPropertyValue('n')
+/// #1 {main}
+///   thrown in %s on line 4
+/// ```
+///
+/// An instance property is a name the class does not have, as php's
+/// `BP_VAR_IS` hands back nothing for one.
+///
+/// ```php
+/// class A { public $i = 1; }
+/// (new ReflectionClass('A'))->getStaticPropertyValue('i');
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ReflectionException: Property A::$i does not exist in %s:3
+/// Stack trace:
+/// #0 %s(3): ReflectionClass->getStaticPropertyValue('i')
+/// #1 {main}
+///   thrown in %s on line 3
+/// ```
+///
+/// ```php
+/// (new ReflectionClass('Exception'))->getStaticPropertyValue();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: ReflectionClass::getStaticPropertyValue() expects at least 1 argument, 0 given in %s:2
+/// Stack trace:
+/// #0 %s(2): ReflectionClass->getStaticPropertyValue()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+pub(super) fn reflection_class_get_static_property_value(
+    req: &mut Request,
+) -> Result<Value, Thrown> {
+    at_most_arguments(req, 2)?;
+    if req.argument_count() == 0 {
+        return Err(arg_count_error(req, "at least 1 argument, 0 given"));
+    }
+    let name = string_argument(req, 1)?;
+    let class = this_class(req)?;
+    let held = read_class_prop_silent(req, class, &name)?;
+    if let Some(value) = held
+        && !matches!(value.as_ref(), ValueRef::Undef)
+    {
+        return Ok(value);
+    }
+    if let Some(default) = req.argument(2) {
+        let default = default.deref();
+        req.addref(&default);
+        return Ok(default);
+    }
+    let shown = class_name_of(req, class);
+    let shown = String::from_utf8_lossy(&shown).into_owned();
+    let name = String::from_utf8_lossy(&name).into_owned();
+    if held.is_some() {
+        return Err(throw(
+            req,
+            "Error",
+            &format!("Typed property {shown}::${name} must not be accessed before initialization"),
+        ));
+    }
+    Err(throw(
+        req,
+        "ReflectionException",
+        &format!("Property {shown}::${name} does not exist"),
+    ))
+}
+
+/// `ReflectionClass::setStaticPropertyValue(string $name, mixed
+/// $value)`: the slot addressed under `BP_VAR_W` with the fake scope
+/// set to the class, which is [`read_class_prop_silent`]'s test with
+/// the typed-and-unwritten slot standing as a slot; a name the class
+/// does not have is php's `ReflectionException` in words of its own,
+/// `Class C does not have a property named p`, and never the engine's
+/// `Access to undeclared static property`. The write is
+/// `zend_update_static_property_ex` ([`write_static_prop`]), which
+/// writes through a slot holding a reference.
+///
+/// php verifies the value against a typed property
+/// (`zend_verify_property_type`) and this engine does not yet, here or
+/// on `ReflectionProperty::setValue`; a value of the property's own
+/// type is written the same either way.
+///
+/// ```php
+/// class A { private static $q = 'a'; public static $p = 'b'; }
+/// class B extends A { private static $q = 'c'; }
+/// $a = new ReflectionClass('A'); $b = new ReflectionClass('B');
+/// $a->setStaticPropertyValue('q', 'one'); $a->setStaticPropertyValue('p', 'two'); $b->setStaticPropertyValue('q', 'three');
+/// var_dump($a->getStaticProperties(), $b->getStaticProperties());
+/// ```
+/// ```expect
+/// array(2) {
+///   ["q"]=>
+///   string(3) "one"
+///   ["p"]=>
+///   string(3) "two"
+/// }
+/// array(2) {
+///   ["q"]=>
+///   string(5) "three"
+///   ["p"]=>
+///   string(3) "two"
+/// }
+/// ```
+///
+/// ```php
+/// class A { public $i = 1; }
+/// (new ReflectionClass('A'))->setStaticPropertyValue('i', 2);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ReflectionException: Class A does not have a property named i in %s:3
+/// Stack trace:
+/// #0 %s(3): ReflectionClass->setStaticPropertyValue('i', 2)
+/// #1 {main}
+///   thrown in %s on line 3
+/// ```
+///
+/// ```php
+/// (new ReflectionClass('Exception'))->setStaticPropertyValue('p');
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: ReflectionClass::setStaticPropertyValue() expects exactly 2 arguments, 1 given in %s:2
+/// Stack trace:
+/// #0 %s(2): ReflectionClass->setStaticPropertyValue('p')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+pub(super) fn reflection_class_set_static_property_value(
+    req: &mut Request,
+) -> Result<Value, Thrown> {
+    exactly_arguments(req, 2)?;
+    let name = string_argument(req, 1)?;
+    let class = this_class(req)?;
+    let held = read_class_prop_silent(req, class, &name)?;
+    let Some(held) = held else {
+        let shown = class_name_of(req, class);
+        return Err(throw(
+            req,
+            "ReflectionException",
+            &format!(
+                "Class {} does not have a property named {}",
+                String::from_utf8_lossy(&shown),
+                String::from_utf8_lossy(&name)
+            ),
+        ));
+    };
+    req.release(held);
+    let value = req.argument(2).unwrap_or_default().deref();
+    req.addref(&value);
+    write_static_prop(req, class, &name, value)?;
+    Ok(Value::null())
 }

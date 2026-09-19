@@ -5480,7 +5480,7 @@ fn reflection_class() -> Declared {
             ),
             (
                 tentative(method(b"getStaticProperties", &[], Some(Type::Array))),
-                unbuilt as Entry,
+                super::class::reflection_class_get_static_properties as Entry,
             ),
             (
                 tentative(method(
@@ -5491,7 +5491,7 @@ fn reflection_class() -> Declared {
                     ],
                     Some(Type::Mixed),
                 )),
-                unbuilt as Entry,
+                super::class::reflection_class_get_static_property_value as Entry,
             ),
             (
                 tentative(method(
@@ -5502,7 +5502,7 @@ fn reflection_class() -> Declared {
                     ],
                     Some(Type::Void),
                 )),
-                unbuilt as Entry,
+                super::class::reflection_class_set_static_property_value as Entry,
             ),
             (
                 tentative(method(b"getDefaultProperties", &[], Some(Type::Array))),

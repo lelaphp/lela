@@ -584,6 +584,30 @@ pub fn read_static_prop(req: &mut Request, class: ClassId, name: &[u8]) -> Resul
     req.static_property(class, name, Some(class), PropertyRead::Warning)
 }
 
+/// Address a `static` property of `class` silently — a property of the
+/// class and not of an instance, which is what the name has of
+/// [`read_prop`]'s — `zend_std_get_static_property(ce, name,
+/// BP_VAR_IS)`, which
+/// `ReflectionClass::getStaticPropertyValue` and
+/// `setStaticPropertyValue` reach the slot through: `None` where php
+/// hands back `NULL`, which is a name the class does not have, one
+/// declared as an instance property and one the fake scope may not
+/// reach; an undefined value for a typed property nothing has written,
+/// which is the slot php hands back holding `IS_UNDEF`; and otherwise
+/// one more owner of the value, a reference followed. Nothing is
+/// raised on those paths, so the caller says in its own words what a
+/// name the class does not have is. It is [`read_static_prop`]'s read
+/// under [`PropertyRead::Silent`] rather than
+/// [`PropertyRead::Warning`], stopping at the pointer where that one
+/// goes on to the value; the fake scope is the same.
+pub fn read_class_prop_silent(
+    req: &mut Request,
+    class: ClassId,
+    name: &[u8],
+) -> Result<Option<Value>, Thrown> {
+    req.static_property_silent(class, name, Some(class))
+}
+
 /// Write a `static` property of `class`,
 /// `zend_update_static_property_ex`: the value is the slot's from here
 /// and what the slot held is given up. The fake scope is

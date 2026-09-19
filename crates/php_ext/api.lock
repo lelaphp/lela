@@ -92,6 +92,7 @@ call::lookup_function
 call::new_lazy_ghost
 call::new_lazy_proxy
 call::new_object
+call::read_class_prop_silent
 call::read_prop
 call::read_static_prop
 call::reset_as_lazy_ghost
