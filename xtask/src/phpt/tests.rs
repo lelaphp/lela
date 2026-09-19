@@ -290,6 +290,14 @@ fn a_program_the_compiler_refused_is_unread_and_names_the_construct() {
 /// sentence the lane knew and the test counted as a failure. The engine
 /// here is the one linked into the harness, since the fixture holds one
 /// program and not a subset to run.
+///
+/// The construct moves as the compiler grows, and the fixture moves with
+/// it: `$a and $b` was the first and `b16f247` taught the compiler to
+/// read it, `1 | 2` the second and `ad386d9` did the same, and each time
+/// the test found no refusal at all (#483). The program is the one
+/// `php_compile`'s own test for this refusal names,
+/// `an_unread_expression_inside_parentheses_names_the_expression`, so the
+/// two move together.
 #[test]
 fn the_refusal_for_an_unread_expression_inside_parentheses_is_read_as_unread() {
     let pin = manifest().pin;
