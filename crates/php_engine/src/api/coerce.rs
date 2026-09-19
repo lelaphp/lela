@@ -84,21 +84,14 @@ pub fn int_to_string(req: &mut Request, n: i64) -> Result<PhpString, Thrown> {
     PhpString::new(req, n.to_string().as_bytes())
 }
 
-/// `smart_str_append_double` with `precision`: php's `%.*G` shape with
-/// `-1` meaning the shortest round-trip repr (`zend_gcvt`), as the text
-/// php appends to a `smart_str` and not yet a string of the request's.
+/// `smart_str_append_double(buf, num, precision, false)`: the text php
+/// appends to a `smart_str`, `zend_gcvt` at `precision` with `-1`
+/// meaning the shortest text that reads back as the same double, and
+/// not yet a string of the request's. The `zero_fraction` half of php's
+/// call is the caller's, since only `var_export` asks for it.
 #[must_use]
 pub fn float_format(f: f64, precision: i32) -> String {
-    if f.is_nan() {
-        "NAN".to_owned()
-    } else if f.is_infinite() {
-        if f > 0.0 { "INF" } else { "-INF" }.to_owned()
-    } else if precision < 0 {
-        let s = format!("{f}");
-        s.strip_suffix(".0").map_or(s.clone(), str::to_owned)
-    } else {
-        format!("{f:.*}", usize::try_from(precision).unwrap_or(0))
-    }
+    php_heap::double_to_string(f, precision)
 }
 
 /// A `float` as php prints it under the request's `precision` ini, as a

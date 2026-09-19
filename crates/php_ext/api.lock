@@ -258,6 +258,7 @@ request::Request::restore_exception_handler
 request::Request::sapi_name
 request::Request::scope
 request::Request::script_name
+request::Request::serialize_precision
 request::Request::set_assert_callback
 request::Request::set_cwd
 request::Request::set_env
@@ -367,7 +368,6 @@ values::PhpObject::as_value
 values::PhpObject::class
 values::PhpObject::closure
 values::PhpObject::closure_bound
-values::PhpObject::debug_props
 values::PhpObject::entries
 values::PhpObject::index
 values::PhpObject::instance_of
@@ -380,6 +380,7 @@ values::PhpObject::native
 values::PhpObject::native_mut
 values::PhpObject::prop
 values::PhpObject::props
+values::PhpObject::props_for
 values::PhpObject::protect
 values::PhpObject::set_prop
 values::PhpObject::set_slot

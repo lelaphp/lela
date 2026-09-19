@@ -29,6 +29,7 @@ use std::cmp::Ordering;
 
 use php_heap::{Arr, Obj, Ref, Res, Str, Zval, ZvalType};
 
+use crate::api::abi::PropertyPurpose;
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
@@ -646,15 +647,20 @@ impl PhpObject {
         req.object_entries(self.0)
     }
 
-    /// The properties a dumper reads, `zend_get_properties_for` under
-    /// `ZEND_PROP_PURPOSE_DEBUG`: the declared slots that hold a value
-    /// in slot order and then the dynamic table, each name carrying the
-    /// prefix `zend_mangle_property_name` puts before it, `\0*\0p` for a
-    /// protected property and `\0C\0p` for a private one. Views, no
-    /// owner taken, and a mangled name is interned as php's is; the
-    /// `Err` is the memory limit refusing the intern.
-    pub fn debug_props(&self, req: &mut Request) -> Result<Vec<(PhpString, Value)>, Thrown> {
-        crate::ops::debug_properties(req, *self)
+    /// The properties one reader of them sees, `zend_get_properties_for`
+    /// under its purpose: the declared slots that hold a value in slot
+    /// order and then the dynamic table, each name carrying the prefix
+    /// `zend_mangle_property_name` puts before it, `\0*\0p` for a
+    /// protected property and `\0C\0p` for a private one, which is what
+    /// `print_r` unmangles and `var_export` strips. Views, no owner
+    /// taken, and a mangled name is interned as php's is; the `Err` is
+    /// the memory limit refusing the intern.
+    pub fn props_for(
+        &self,
+        req: &mut Request,
+        purpose: PropertyPurpose,
+    ) -> Result<Vec<(PhpString, Value)>, Thrown> {
+        crate::ops::properties_for(req, *self, purpose)
     }
 
     /// The properties as array entries, mangled names and all, what

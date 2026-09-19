@@ -4802,7 +4802,8 @@ impl Request {
     /// `serialize_precision`, what `var_dump`, `var_export`, `serialize`
     /// and `json_encode` print a float at; -1, its default, asks for the
     /// shortest text that reads back as the same double.
-    pub(crate) fn serialize_precision(&self) -> i32 {
+    #[must_use]
+    pub fn serialize_precision(&self) -> i32 {
         self.ini_number(b"serialize_precision", -1)
     }
 

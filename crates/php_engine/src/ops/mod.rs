@@ -670,8 +670,8 @@ fn mangled_prefix(mangled: &[MangledName], at: &mut usize, name: PhpString) -> O
     mangled.get(found).and_then(|slot| slot.prefix.clone())
 }
 
-/// `zend_get_properties_for(object, ZEND_PROP_PURPOSE_DEBUG)`, the rows
-/// a dumper reads: the class's `get_properties_for` first and
+/// `zend_get_properties_for(object, purpose)`, the rows one reader of
+/// an object's properties sees: the class's `get_properties_for` first and
 /// `get_properties` where that slot is null, each declared name carrying
 /// the prefix `zend_mangle_property_name` puts before it, `\0*\0p` for a
 /// protected property and `\0C\0p` for a private one, so a reader
@@ -694,12 +694,13 @@ fn mangled_prefix(mangled: &[MangledName], at: &mut usize, name: PhpString) -> O
 ///     [c:B:private] => 4
 /// )
 /// ```
-pub(crate) fn debug_properties(
+pub(crate) fn properties_for(
     req: &mut Request,
     object: PhpObject,
+    purpose: PropertyPurpose,
 ) -> Result<Vec<(PhpString, Value)>, Thrown> {
     let table = req.object_handlers(object.heap());
-    let rows = match table.get_properties_for(req, object, PropertyPurpose::Debug)? {
+    let rows = match table.get_properties_for(req, object, purpose)? {
         Some(rows) => rows,
         None => table.get_properties(req, object)?,
     };
