@@ -4817,8 +4817,11 @@ pub(crate) fn assign<T: Tier>(
 /// and the value (`zend_binary_op(var_ptr, var_ptr, value)`), so `$a /=
 /// 0` raises exactly what `/` raises and the variable is left as it was;
 /// the write lands in the cell where the CV holds a reference, as
-/// `ASSIGN` over one does, and the temporary takes what the variable now
-/// holds under `RETURN_VALUE_USED`.
+/// `ASSIGN` over one does, and a cell that carries types holds the value
+/// the operation came to before it lands
+/// (`ZEND_REF_HAS_TYPE_SOURCES`, `zend_binary_assign_op_typed_ref`); the
+/// temporary takes what landed under `RETURN_VALUE_USED`, which a typed
+/// cell may have made something else.
 ///
 /// ```php
 /// $a = 6; $a |= 3; $a .= "x"; var_dump($a);
@@ -4901,13 +4904,24 @@ pub(crate) fn assign_op<T: Tier>(
         Ok(stepped) => stepped,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    write_out(req, frame, code, op, &stepped);
     let Some(at) = req.slot_ptr(frame, op.op1) else {
         return Err(Fatal::Error(String::from(
             "InternalError: ZEND_ASSIGN_OP over a CV the frame does not have",
         )));
     };
-    let garbage = assign_to_place(at, stepped);
+    // php's `ZEND_REF_HAS_TYPE_SOURCES` arm,
+    // `zend_binary_assign_op_typed_ref`: the operation is over what the
+    // cell holds either way, and the value it comes to is held to each
+    // type the cell carries before it lands, which
+    // [`assign_to_place`] does under the frame's own regime (#496).
+    // What landed is what `result` takes, so the copy is after the
+    // write and not before it.
+    let strict = req.caller_strict_types();
+    let (landed, garbage) = match assign_to_place(req, at, stepped, strict) {
+        Ok(pair) => pair,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    write_out(req, frame, code, op, &landed);
     req.release(garbage);
     Ok(advance(req, frame))
 }
