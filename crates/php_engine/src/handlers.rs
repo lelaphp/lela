@@ -4801,6 +4801,117 @@ pub(crate) fn assign<T: Tier>(
     Ok(advance(req, frame))
 }
 
+/// `ZEND_ASSIGN_OP` (`Z/Zend/zend_vm_def.h:1257`), `$a op= v` over a
+/// CV: one opline, the variable in `op1`, the value in `op2` and the
+/// operator's own opcode in `extended_value`, which php reads back with
+/// `get_binary_op`.
+///
+/// php reads the value first (`GET_OP2_ZVAL_PTR(BP_VAR_R)`) and the
+/// variable after it (`GET_OP1_ZVAL_PTR_PTR(BP_VAR_RW)`), so `$v .= $w`
+/// with both undefined warns for `$w` before `$v`. The `BP_VAR_RW` read
+/// makes an undefined CV `null` where `BP_VAR_R` leaves it undefined
+/// (`_get_zval_ptr_cv_BP_VAR_RW`, `Z/Zend/zend_execute.c:242`), which is
+/// what a variable an operator threw over is left holding.
+///
+/// The operation is php's own binary kernel over what the variable holds
+/// and the value (`zend_binary_op(var_ptr, var_ptr, value)`), so `$a /=
+/// 0` raises exactly what `/` raises and the variable is left as it was;
+/// the write lands in the cell where the CV holds a reference, as
+/// `ASSIGN` over one does, and the temporary takes what the variable now
+/// holds under `RETURN_VALUE_USED`.
+///
+/// ```php
+/// $a = 6; $a |= 3; $a .= "x"; var_dump($a);
+/// $a = 7; var_dump($a **= 2, $a <<= 1, $a %= 5, $a -= 1.5);
+/// $b = &$a; $b *= 2; var_dump($a);
+/// ```
+/// ```expect
+/// string(2) "7x"
+/// int(49)
+/// int(98)
+/// int(3)
+/// float(1.5)
+/// float(3)
+/// ```
+///
+/// A kernel that threw leaves the variable as it stood, and `%=` over
+/// zero is the same `DivisionByZeroError` with php's own message for the
+/// operator:
+///
+/// ```php
+/// $a = 1;
+/// try { $a /= 0; } catch (DivisionByZeroError $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// var_dump($a);
+/// $a %= 0;
+/// ```
+/// ```expect exit=255
+/// DivisionByZeroError: Division by zero
+/// int(1)
+///
+/// Fatal error: Uncaught DivisionByZeroError: Modulo by zero in %s:5
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 5
+/// ```
+///
+/// The value is read before the variable, so the two warnings of `$v .=
+/// $w` name `$w` first; the variable the `BP_VAR_RW` read made `null` is
+/// what the operator works over.
+///
+/// ```php
+/// $u += 1; var_dump($u);
+/// $v .= $w;
+/// var_dump($v);
+/// ```
+/// ```expect
+/// Warning: Undefined variable $u in %s on line 2
+/// int(1)
+///
+/// Warning: Undefined variable $w in %s on line 3
+///
+/// Warning: Undefined variable $v in %s on line 3
+/// string(0) ""
+/// ```
+pub(crate) fn assign_op<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let Some(kernel) = binary_op_of(op.extended_value) else {
+        return Err(Fatal::Error(format!(
+            "InternalError: ZEND_ASSIGN_OP over the operator {}, which is no binary operation",
+            op.extended_value
+        )));
+    };
+    if op.op1_type != OperandKind::Cv {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ASSIGN_OP over what is no CV",
+        )));
+    }
+    let value = exec::operand(req, frame, code, op.op2_type, op.op2);
+    let held = exec::operand(req, frame, code, op.op1_type, op.op1);
+    if req.slot(frame, op.op1).tag() == TypeTag::Undef {
+        let previous = req.set_slot(frame, op.op1, Value::null());
+        req.release(previous);
+    }
+    let computed = kernel(req, &held, &value);
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    let stepped = match computed {
+        Ok(stepped) => stepped,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    write_out(req, frame, code, op, &stepped);
+    let Some(at) = req.slot_ptr(frame, op.op1) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ASSIGN_OP over a CV the frame does not have",
+        )));
+    };
+    let garbage = assign_to_place(at, stepped);
+    req.release(garbage);
+    Ok(advance(req, frame))
+}
+
 /// `ZEND_ASSIGN_REF` (`Z/Zend/zend_vm_def.h:2839`), `$b = &$a` over two
 /// CVs: `zend_assign_to_variable_reference`
 /// (`Z/Zend/zend_execute.c:565`). The source is read in place under
@@ -5418,9 +5529,10 @@ struct Placed {
 /// compound assignment back.
 type BinaryKernel = fn(&mut Request, &Value, &Value) -> Result<Value, Thrown>;
 
-/// The binary operation `extended_value` names on an
-/// `ASSIGN_STATIC_PROP_OP`, which php reads with `get_binary_op` over
-/// the opcode `zend_compile_compound_assign` wrote there.
+/// The binary operation `extended_value` names on a compound
+/// assignment, `ASSIGN_OP` and `ASSIGN_STATIC_PROP_OP` alike, which php
+/// reads with `get_binary_op` over the opcode
+/// `zend_compile_compound_assign` wrote there.
 fn binary_op_of(extended_value: u32) -> Option<BinaryKernel> {
     let opcode = u8::try_from(extended_value)
         .ok()

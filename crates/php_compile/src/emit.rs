@@ -2443,6 +2443,7 @@ impl Emit<'_> {
             | Expr::Prop { .. }
             | Expr::Dim { .. }
             | Expr::Assign { .. }
+            | Expr::AssignOp { .. }
             | Expr::AssignCoalesce { .. }
             | Expr::AssignDim { .. }
             | Expr::AssignProp { .. }
@@ -4031,6 +4032,7 @@ impl Emit<'_> {
             Expr::This => Ok(self.fetch_this(OperandKind::Tmp)),
             Expr::Prop { object, name } => self.prop(object, name),
             Expr::Assign { var, value } => self.assign(var, value),
+            Expr::AssignOp { var, op, value } => self.assign_op(var, *op, value),
             Expr::AssignProp {
                 object,
                 name,
@@ -4664,6 +4666,43 @@ impl Emit<'_> {
             ..Opline::default()
         });
         Where::Temporary(out)
+    }
+
+    /// `zend_compile_compound_assign`, the `ZEND_AST_VAR` arm
+    /// (`Z/Zend/zend_compile.c:3634`): the variable's CV looked up first
+    /// (`zend_delayed_compile_var` under `BP_VAR_RW`, which delays
+    /// nothing for a plain CV), then the value, then one `ASSIGN_OP`
+    /// over the two into a temporary (`zend_emit_op_tmp`) with the
+    /// binary operator's own opcode in `extended_value`. The temporary
+    /// is numbered whether or not anything reads it, as [`Self::assign`]
+    /// numbers its own.
+    ///
+    /// php sets `CG(zend_lineno)` back to the target's line for an
+    /// `ASSIGN` and does not for this node, so the opline carries the
+    /// line the value ended on: `$a\n+=\n1;` is line 3 and its warning
+    /// for an undefined `$a` names line 3.
+    fn assign_op(
+        &mut self,
+        var: &[u8],
+        op: BinaryOp,
+        value: &Child,
+    ) -> Result<Where, CompileError> {
+        let cv = self.lookup_cv(var);
+        let value = self.expr(value)?;
+        let (op2_type, op2) = self.operand(value);
+        let out = self.temporary();
+        self.push(Opline {
+            opcode: Opcode::AssignOp,
+            op1_type: OperandKind::Cv,
+            op1: cv,
+            op2_type,
+            op2,
+            out_type: OperandKind::Tmp,
+            out,
+            extended_value: u32::from(Self::opcode_of(op) as u8),
+            ..Opline::default()
+        });
+        Ok(Where::Temporary(out))
     }
 
     /// `zend_compile_assign`, the `ZEND_AST_VAR` arm: the variable's CV
@@ -5947,6 +5986,7 @@ impl Emit<'_> {
             | Expr::Prop { .. }
             | Expr::Dim { .. }
             | Expr::Assign { .. }
+            | Expr::AssignOp { .. }
             | Expr::AssignDim { .. }
             | Expr::AssignProp { .. }
             | Expr::AssignStaticProp { .. }
@@ -7395,7 +7435,9 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Child) {
             implicit_uses(names, left);
             implicit_uses(names, right);
         }
-        Expr::Assign { var, value } | Expr::AssignCoalesce { var, value } => {
+        Expr::Assign { var, value }
+        | Expr::AssignOp { var, value, .. }
+        | Expr::AssignCoalesce { var, value } => {
             note(names, var);
             implicit_uses(names, value);
         }

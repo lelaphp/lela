@@ -503,6 +503,16 @@ pub(crate) enum Expr {
         var: Vec<u8>,
         value: Child,
     },
+    /// `$a op= expr`, php's `ZEND_AST_ASSIGN_OP` over a `ZEND_AST_VAR`
+    /// with the operator in `attr`, which `zend_compile_compound_assign`
+    /// emits as one `ASSIGN_OP`. The twelve spellings are one node here
+    /// as they are one node in php, the operator a field beside the
+    /// variable and the value.
+    AssignOp {
+        var: Vec<u8>,
+        op: BinaryOp,
+        value: Child,
+    },
     /// `$a[k] = expr` and `$a[] = expr`, php's `ZEND_AST_ASSIGN` to a
     /// `ZEND_AST_DIM`: the dimension written, and the value.
     AssignDim {
@@ -658,9 +668,9 @@ pub(crate) enum Expr {
     /// `C::$p op= expr`, php's `ZEND_AST_ASSIGN_OP` over a
     /// `ZEND_AST_STATIC_PROP` with the operator in `attr`, which
     /// `zend_compile_compound_assign` turns the fetch's own opline into
-    /// `ASSIGN_STATIC_PROP_OP` for. The other three targets php's
-    /// switch has, a variable, a dimension and a property, are not read
-    /// yet.
+    /// `ASSIGN_STATIC_PROP_OP` for. A variable is [`Expr::AssignOp`];
+    /// the other two targets php's switch has, a dimension and a
+    /// property, are not read yet.
     AssignStaticPropOp {
         class: Vec<u8>,
         name: Vec<u8>,
@@ -773,7 +783,9 @@ impl Drop for Child {
                     drop(right);
                     left.take()
                 }
-                Expr::Assign { value, .. } | Expr::AssignCoalesce { value, .. } => value.take(),
+                Expr::Assign { value, .. }
+                | Expr::AssignOp { value, .. }
+                | Expr::AssignCoalesce { value, .. } => value.take(),
                 Expr::Isset { var, .. } => var.take(),
                 Expr::AssignProp { object, value, .. } => {
                     drop(value);
@@ -3219,28 +3231,47 @@ impl Reader<'_> {
         Ok(Child::at(left.line(), Expr::Binary { op, left, right }))
     }
 
-    /// One `variable op= expr`, the operator read: only a `static`
-    /// property is taken as its target so far, which is the one arm of
+    /// One `variable op= expr`, the operator read: a variable and a
+    /// `static` property are the two arms of
     /// `zend_compile_compound_assign`'s switch this compiler emits; the
-    /// other three, a variable, a dimension and a property, are refused
-    /// where they stand.
+    /// other two, a dimension and a property, are `ASSIGN_DIM_OP` and
+    /// `ASSIGN_OBJ_OP` and are refused where they stand.
+    ///
+    /// php's `zend_ensure_writable_variable` refuses everything else
+    /// before the switch is reached, and the grammar takes only a
+    /// `variable` on the left of the operator, so a number written out
+    /// there is php's parse error and is refused here too.
     fn compound(&mut self, left: Child, op: BinaryOp, width: usize) -> Result<Child, Trouble> {
         let line = left.line();
-        let Expr::StaticProp { class, name } = left.take() else {
-            return Err(self.trouble(
-                "a compound assignment to what is no static property this compiler cannot read yet",
-            ));
-        };
-        self.bump(width);
-        Ok(Child::at(
-            line,
-            Expr::AssignStaticPropOp {
-                class,
-                name,
-                op,
-                value: self.assigned()?,
-            },
-        ))
+        match left.take() {
+            // `zend_compile_compound_assign`'s `ZEND_AST_VAR` arm.
+            Expr::Var(var) => {
+                self.bump(width);
+                Ok(Child::at(
+                    line,
+                    Expr::AssignOp {
+                        var,
+                        op,
+                        value: self.assigned()?,
+                    },
+                ))
+            }
+            // Its `ZEND_AST_STATIC_PROP` arm.
+            Expr::StaticProp { class, name } => {
+                self.bump(width);
+                Ok(Child::at(
+                    line,
+                    Expr::AssignStaticPropOp {
+                        class,
+                        name,
+                        op,
+                        value: self.assigned()?,
+                    },
+                ))
+            }
+            _ => Err(self
+                .trouble("a compound assignment to what is no variable or `static` property this compiler cannot read yet")),
+        }
     }
 
     /// The compound assignment operator standing here, and its width in
@@ -4734,6 +4765,39 @@ mod tests {
                 })]),
                 1
             )]
+        );
+    }
+
+    /// The twelve `T_*_EQUAL` tokens stand at php's `%precedence '='`
+    /// with the `=` beside them: they read right to left, every level
+    /// above them binds tighter, and the three word operators below
+    /// them bind looser. The scanner takes the longest token, so `**=`,
+    /// `<<=` and `>>=` are one operator and not a shift beside an `=`.
+    #[test]
+    fn a_compound_assignment_is_read_at_the_assignment_level_right_to_left() {
+        assert_eq!(
+            shape(b"<?php $a += $b -= 1;"),
+            shape(b"<?php $a += ($b -= 1);"),
+            "a compound assignment reads right to left"
+        );
+        assert_eq!(
+            shape(b"<?php $a *= $b + 1;"),
+            shape(b"<?php $a *= ($b + 1);"),
+            "`+` binds tighter than `*=`"
+        );
+        assert_eq!(
+            shape(b"<?php $a += 1 and $c;"),
+            shape(b"<?php ($a += 1) and $c;"),
+            "`and` binds looser than `+=`, as it does than `=`"
+        );
+        assert_eq!(
+            shape(b"<?php $a **= 2;"),
+            shape(b"<?php $a **= (2);"),
+            "`**=` is one token and not `*` beside `*=`"
+        );
+        assert!(
+            read(b"<?php 1 += 1;").is_err(),
+            "php's grammar takes only a variable on the left"
         );
     }
 

@@ -3522,6 +3522,44 @@ mod tests {
         );
     }
 
+    /// `zend_compile_compound_assign`, the `ZEND_AST_VAR` arm (#479):
+    /// the twelve operators over a plain variable, each one `ASSIGN_OP`
+    /// with the binary operator's own opcode in `extended_value`, which
+    /// the dump prints in brackets. The temporary is numbered for every
+    /// one of them and `zend_do_free` marks all but the last `UNUSED`,
+    /// so the one `$b` reads is `T15`. The dump is the oracle's under
+    /// `[regime.dump]` at 8.5.9.
+    #[test]
+    fn the_twelve_compound_assignments_to_a_variable_are_the_oracle_s_oplines() {
+        assert_eq!(
+            dump_of(
+                b"<?php $a = 6; $a += 1; $a -= 1; $a *= 2; $a /= 3; $a %= 5; $a **= 2; \
+                  $a .= \"x\"; $a |= 3; $a ^= 1; $a &= 6; $a <<= 2; $a >>= 1; $b = $a += 2;"
+            ),
+            main_dump(
+                16,
+                2,
+                15,
+                "0000 ASSIGN CV0($a) int(6)\n\
+                 0001 ASSIGN_OP (ADD) CV0($a) int(1)\n\
+                 0002 ASSIGN_OP (SUB) CV0($a) int(1)\n\
+                 0003 ASSIGN_OP (MUL) CV0($a) int(2)\n\
+                 0004 ASSIGN_OP (DIV) CV0($a) int(3)\n\
+                 0005 ASSIGN_OP (MOD) CV0($a) int(5)\n\
+                 0006 ASSIGN_OP (POW) CV0($a) int(2)\n\
+                 0007 ASSIGN_OP (CONCAT) CV0($a) string(\"x\")\n\
+                 0008 ASSIGN_OP (BW_OR) CV0($a) int(3)\n\
+                 0009 ASSIGN_OP (BW_XOR) CV0($a) int(1)\n\
+                 0010 ASSIGN_OP (BW_AND) CV0($a) int(6)\n\
+                 0011 ASSIGN_OP (SL) CV0($a) int(2)\n\
+                 0012 ASSIGN_OP (SR) CV0($a) int(1)\n\
+                 0013 T15 = ASSIGN_OP (ADD) CV0($a) int(2)\n\
+                 0014 ASSIGN CV1($b) T15\n\
+                 0015 RETURN int(1)\n"
+            )
+        );
+    }
+
     /// What stands beside a `C::$p` read and is not read yet is refused
     /// as such (#372): a write, an assignment and `++`, the property
     /// the program names as it serves, `self`, `parent` and `static`
@@ -3545,9 +3583,9 @@ mod tests {
             Some("a statement this compiler cannot read yet")
         );
         assert_eq!(
-            refused(b"<?php $a += 1;").as_deref(),
+            refused(b"<?php $a[0] += 1;").as_deref(),
             Some(
-                "a compound assignment to what is no static property this compiler cannot read yet"
+                "a compound assignment to what is no variable or `static` property this compiler cannot read yet"
             )
         );
         assert_eq!(
