@@ -136,6 +136,32 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 /// )
 /// ```
 ///
+/// The array half of the guard is `GC_PROTECTED` on the array itself,
+/// which a program reaches by binding an entry to the variable that
+/// holds the array (`$a[] = &$a`): the entry is the cell the CV holds,
+/// the cell holds the array, and the array is the one the walk is
+/// already inside. php writes the marker after the `Array` it has
+/// already printed, so it lands on the next line with one space before
+/// it and the rows never open.
+///
+/// ```php
+/// $a = []; $a[] = &$a; print_r($a);
+/// $b = [1]; $b["self"] = &$b; print_r($b);
+/// ```
+/// ```expect
+/// Array
+/// (
+///     [0] => Array
+///  *RECURSION*
+/// )
+/// Array
+/// (
+///     [0] => 1
+///     [self] => Array
+///  *RECURSION*
+/// )
+/// ```
+///
 /// `$return = true` hands the same bytes back as a string rather than
 /// writing them, which is what a caller that renders into a page does.
 ///
