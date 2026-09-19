@@ -1230,7 +1230,7 @@ fn enter(
     let returns_to =
         (op.out_type != OperandKind::Unused).then(|| (frame, exec::temporary_slot(code, op.out)));
     let passed = call.arguments.len();
-    let Some(callee) = req.push_user_frame(function, call, returns_to) else {
+    let Some(callee) = req.push_user_frame(function, call, returns_to, Some(frame)) else {
         return Err(Fatal::Error(String::from(
             "InternalError: a user function whose body the unit has not",
         )));
@@ -1321,6 +1321,24 @@ fn enter(
 /// Stack trace:
 /// #0 %s(3): C->m()
 /// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// A call a native served has no user frame that pushed it, and php's
+/// sentence leaves the call site out there
+/// ([`missing_argument`]); the trace still carries the call, as
+/// `[internal function]`.
+///
+/// ```php
+/// class C { function m($a, $b) {} }
+/// (new ReflectionMethod("C", "m"))->invoke(new C);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: Too few arguments to function C::m(), 0 passed and exactly 2 expected in %s:2
+/// Stack trace:
+/// #0 [internal function]: C->m()
+/// #1 %s(3): ReflectionMethod->invoke(Object(C))
+/// #2 {main}
 ///   thrown in %s on line 2
 /// ```
 ///
@@ -1803,8 +1821,34 @@ fn arg_type_error(
     crate::api::raising::throw(req, "TypeError", &message)
 }
 
-/// `zend_missing_arg_error` (`Z/Zend/zend_execute.c`): the caller is
-/// the frame below, and its opline is the call.
+/// `EX(prev_execute_data)` as php's two argument diagnostics read it,
+/// as a file and a line: the frame whose opline pushed the call to
+/// `frame`, and nothing where a native pushed it or where `frame` is
+/// the one `serve` pushed. Both `zend_missing_arg_error` and
+/// `zend_verify_arg_error` drop the clause that names the call site
+/// where this is nothing.
+fn call_site(req: &Request, frame: FrameRef) -> Option<(String, u32)> {
+    let caller = req.vm().at(frame)?.caller?;
+    let caller = req.vm().at(caller)?;
+    Some((
+        exec::body_of(&caller.unit, caller.body)
+            .map(|code| String::from_utf8_lossy(&code.filename.0).into_owned())
+            .unwrap_or_default(),
+        exec::line_of(caller),
+    ))
+}
+
+/// `zend_missing_arg_error` (`Z/Zend/zend_execute.c`), which has two
+/// wordings and picks between them by `EX(prev_execute_data)`: the
+/// frame whose opline pushed the call names the call site, and where
+/// there is none, or php's is no user frame
+/// (`ZEND_USER_CODE(ptr->func->common.type)`), the sentence leaves the
+/// call site out. A call a native served
+/// ([`Request::serve_call`]) is the second: its frame has no caller
+/// slot and no caller, and php's `prev_execute_data` there is the
+/// native's own frame. Reading the frame under this one instead would
+/// name whatever user frame happens to stand below the native, which
+/// is a call site the program never wrote.
 fn missing_argument(req: &mut Request, frame: FrameRef, passed: u32) -> Thrown {
     let function = req.vm().at(frame).and_then(|state| state.function);
     let name = function.map_or_else(String::new, |function| req.qualified_name_of(function));
@@ -1827,14 +1871,7 @@ fn missing_argument(req: &mut Request, frame: FrameRef, passed: u32) -> Thrown {
     } else {
         "at least"
     };
-    let caller = req.vm().frames().iter().rev().nth(1).map(|caller| {
-        (
-            exec::body_of(&caller.unit, caller.body)
-                .map(|code| String::from_utf8_lossy(&code.filename.0).into_owned())
-                .unwrap_or_default(),
-            exec::line_of(caller),
-        )
-    });
+    let caller = call_site(req, frame);
     let message = match caller {
         Some((file, line)) => format!(
             "Too few arguments to function {name}(), {passed} passed in {file} on line {line} and {how} {required} expected"

@@ -69,6 +69,15 @@ pub(crate) struct FrameState {
     /// The caller's slot for what this frame returns, when the call that
     /// pushed it wants the value.
     pub(crate) returns_to: Option<(FrameRef, u32)>,
+    /// `EX(prev_execute_data)` as far as a diagnostic reads it: the
+    /// frame whose opline pushed the call, and `None` for the frame
+    /// `serve` pushed and for one a native re-entered the loop on
+    /// ([`Request::serve_call`]), which php's `zend_missing_arg_error`
+    /// and `zend_verify_arg_error` both test with
+    /// `ZEND_USER_CODE(ptr->func->common.type)`. Every frame here
+    /// serves user code, so the caller standing is the whole of that
+    /// test.
+    pub(crate) caller: Option<FrameRef>,
     /// `EX(This)` as an object: the receiver of a method call, one owner
     /// the frame holds until it is popped (`ZEND_CALL_RELEASE_THIS`);
     /// none for the main op array, a function or a method declared `static`.
@@ -282,12 +291,13 @@ impl Vm {
     /// writes it (`i_init_func_execute_data`), which is what a read of
     /// a CV warns of.
     pub(crate) fn push(&mut self, unit: Arc<Unit>) {
-        self.push_body(unit, Body::Main, None, None, None, 0, None);
+        self.push_body(unit, Body::Main, None, None, None, 0, None, None);
     }
 
     /// Push the state of a frame serving `body` of `unit`: the function
     /// it is, its receiver and called scope, how many arguments the
-    /// call placed, and where the caller wants what it returns
+    /// call placed, where the caller wants what it returns, and the
+    /// frame whose opline pushed the call
     /// (`zend_vm_stack_push_call_frame` with `i_init_func_execute_data`'s
     /// fields filled).
     #[allow(clippy::too_many_arguments)] // the frame header's fields, each one fact
@@ -300,6 +310,7 @@ impl Vm {
         called_scope: Option<ClassId>,
         num_args: u32,
         returns_to: Option<(FrameRef, u32)>,
+        caller: Option<FrameRef>,
     ) {
         let cache_size = body_of(&unit, body).map_or(0, |code| code.cache_size);
         let slots = usize::try_from(cache_size / SLOT_BYTES).unwrap_or(0);
@@ -310,6 +321,7 @@ impl Vm {
             function,
             opline: 0,
             returns_to,
+            caller,
             this,
             called_scope,
             closure: None,

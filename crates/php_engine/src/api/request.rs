@@ -552,13 +552,16 @@ impl Request {
     /// the first CVs, which are the parameters, the ones past the
     /// declared parameters kept beside the frame, and the receiver and
     /// the called scope carried over; `returns_to` is the caller's slot
-    /// for what the frame returns. None for a function that is no user
-    /// function, which is the caller's internal error to name.
+    /// for what the frame returns and `caller` the frame whose opline
+    /// pushed the call, `None` where a native did. None for a function
+    /// that is no user function, which is the caller's internal error
+    /// to name.
     pub(crate) fn push_user_frame(
         &mut self,
         function: Function,
         call: exec::CallState,
         returns_to: Option<(FrameRef, u32)>,
+        caller: Option<FrameRef>,
     ) -> Option<FrameRef> {
         let (unit, body) = {
             let user = self.user_function(function)?;
@@ -584,6 +587,7 @@ impl Request {
             call.called_scope,
             num_args,
             returns_to,
+            caller,
         );
         let mut extra = Vec::new();
         for (at, argument) in call.arguments.into_iter().enumerate() {
@@ -811,7 +815,7 @@ impl Request {
     fn serve_user(&mut self, function: Function, call: CallState) -> Result<Value, Thrown> {
         let standing = self.vm.frames().len();
         let passed = call.arguments.len();
-        let Some(frame) = self.push_user_frame(function, call, None) else {
+        let Some(frame) = self.push_user_frame(function, call, None, None) else {
             return self
                 .fatal_of::<()>(Err(Fatal::Error(String::from(
                     "InternalError: a user function whose body the unit has not",
