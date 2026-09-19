@@ -2127,7 +2127,7 @@ mod tests {
         let unit = Unit {
             main: php_unit::OpArray {
                 oplines: vec![php_unit::Opline {
-                    opcode: php_unit::Opcode::BwOr,
+                    opcode: php_unit::Opcode::Yield,
                     ..php_unit::Opline::default()
                 }]
                 .into_boxed_slice(),
@@ -2139,7 +2139,7 @@ mod tests {
         assert_eq!(
             crate::tier::execute::<Nop>(&mut req, frame),
             Err(Fatal::Error(String::from(
-                "InternalError: ZEND_BW_OR has no handler in this engine yet"
+                "InternalError: ZEND_YIELD has no handler in this engine yet"
             )))
         );
     }

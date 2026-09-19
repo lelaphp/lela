@@ -2568,7 +2568,7 @@ mod tests {
     fn what_the_reader_cannot_read_is_a_compile_error_at_its_line() {
         let mut strings = php_heap::Strings::new();
         let trouble = compile(
-            &php_syntax::parse(b"<?php\n$x | 1;", &php_syntax::Options::default()),
+            &php_syntax::parse(b"<?php\n$x . ~1;", &php_syntax::Options::default()),
             &Options::default(),
             &mut strings,
         )
@@ -2964,7 +2964,7 @@ mod tests {
             line: 0,
             raised: Vec::new(),
         };
-        let error = refused(b"<?php\n$a = (1 | 2);\n").unwrap_or_else(compiled);
+        let error = refused(b"<?php\n$a = (print 1);\n").unwrap_or_else(compiled);
         assert_eq!(error.level, Level::Parse);
         assert_eq!(
             error.message,

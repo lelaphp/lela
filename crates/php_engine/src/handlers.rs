@@ -6589,6 +6589,40 @@ pub(crate) fn bool<T: Tier>(
     })
 }
 
+/// `ZEND_BW_OR` (`Z/Zend/zend_vm_def.h:824`), what `|` compiles to:
+/// [`crate::ops::bitwise_or`] over both operands, into the temporary,
+/// with both freed after it.
+pub(crate) fn bw_or<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    binary(req, frame, code, op, crate::ops::bitwise_or)
+}
+
+/// `ZEND_BW_XOR` (`Z/Zend/zend_vm_def.h:902`), what `^` compiles to:
+/// [`crate::ops::bitwise_xor`] the same way.
+pub(crate) fn bw_xor<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    binary(req, frame, code, op, crate::ops::bitwise_xor)
+}
+
+/// `ZEND_BW_AND` (`Z/Zend/zend_vm_def.h:863`), what `&` compiles to:
+/// [`crate::ops::bitwise_and`] the same way.
+pub(crate) fn bw_and<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    binary(req, frame, code, op, crate::ops::bitwise_and)
+}
+
 /// `ZEND_BOOL_NOT` (`Z/Zend/zend_vm_def.h:961`), what `!` compiles to:
 /// [`crate::ops::is_true`] over the operand negated, `!i_zend_is_true`,
 /// into the temporary; the operand freed after it. A temporary this

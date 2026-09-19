@@ -4760,6 +4760,9 @@ impl Emit<'_> {
         if compares(op) {
             return self.comparison(op, left, right);
         }
+        if bitwise(op) {
+            return self.bitwise(op, left, right);
+        }
         if let (Some(a), Some(b)) = (self.constant_of(left)?, self.constant_of(right)?)
             && let Some(folded) = fold(op, a, b)
         {
@@ -4787,6 +4790,52 @@ impl Emit<'_> {
         let left = self.string_operand(left)?;
         let right = self.string_operand(right)?;
         Ok(self.emit_binary(Opcode::Concat, left, right))
+    }
+
+    /// `zend_compile_binary_op`'s `ZEND_BW_OR`, `ZEND_BW_XOR` and
+    /// `ZEND_BW_AND` arms: both sides folded where
+    /// [`Self::bitwise_fold`] folds them, and otherwise the opcode into
+    /// a temporary. The three are `SPEC(COMMUTATIVE)`, so `pass_two`
+    /// may put the constant second ([`swap_commutative`]).
+    fn bitwise(&mut self, op: BinaryOp, left: &Expr, right: &Expr) -> Result<Where, CompileError> {
+        if let (Some(a), Some(b)) = (self.constant_of(left)?, self.constant_of(right)?)
+            && let Some(folded) = self.bitwise_fold(op, a, b)?
+        {
+            return Ok(Where::Constant(folded));
+        }
+        let left = self.expr(left)?;
+        let right = self.expr(right)?;
+        Ok(self.emit_binary(Self::opcode_of(op), left, right))
+    }
+
+    /// `zend_try_ct_eval_binary_op` over `bitwise_or_function`,
+    /// `bitwise_xor_function` and `bitwise_and_function`, under the
+    /// three arms `zend_binary_op_produces_error` has for them: an array
+    /// on either side is refused, two strings are folded byte-wise and
+    /// are the one pair the guard lets through whatever they hold, a
+    /// string that is no number refuses, and an operand the long
+    /// conversion would not be exact over refuses too, since php will
+    /// not write the deprecation's answer into a constant.
+    fn bitwise_fold(
+        &mut self,
+        op: BinaryOp,
+        left: Zval,
+        right: Zval,
+    ) -> Result<Option<Zval>, CompileError> {
+        if left.as_arr().is_some() || right.as_arr().is_some() {
+            return Ok(None);
+        }
+        if let (Some(a), Some(b)) = (left.as_str(), right.as_str()) {
+            let folded = bitwise_bytes(op, a.bytes(), b.bytes());
+            return Ok(Some(self.string(&folded)?));
+        }
+        let (Some(a), Some(b)) = (number(left), number(right)) else {
+            return Ok(None);
+        };
+        let (Some(a), Some(b)) = (long_compatible(a), long_compatible(b)) else {
+            return Ok(None);
+        };
+        Ok(Some(Zval::long(bitwise_longs(op, a, b))))
     }
 
     /// `zend_compile_binary_op`'s comparison arms and `zend_compile_greater`:
@@ -4854,6 +4903,9 @@ impl Emit<'_> {
             | BinaryOp::Sl
             | BinaryOp::Sr
             | BinaryOp::BoolXor
+            | BinaryOp::BwOr
+            | BinaryOp::BwXor
+            | BinaryOp::BwAnd
             | BinaryOp::Concat => Zval::null(),
         }
     }
@@ -5321,6 +5373,9 @@ impl Emit<'_> {
             BinaryOp::IsNotIdentical => Opcode::IsNotIdentical,
             BinaryOp::Spaceship => Opcode::Spaceship,
             BinaryOp::BoolXor => Opcode::BoolXor,
+            BinaryOp::BwOr => Opcode::BwOr,
+            BinaryOp::BwXor => Opcode::BwXor,
+            BinaryOp::BwAnd => Opcode::BwAnd,
         }
     }
 
@@ -5368,27 +5423,7 @@ impl Emit<'_> {
                 }
                 Ok(Zval::bool(!truth(value)))
             }
-            Expr::Binary {
-                op: BinaryOp::Concat,
-                left,
-                right,
-            } => {
-                let left = self.constant_expr(left)?;
-                let right = self.constant_expr(right)?;
-                self.concat_fold(left, right)?
-                    .ok_or_else(|| self.fatal("a concatenation this compiler cannot fold yet"))
-            }
-            Expr::Binary { op, left, right } if compares(*op) => {
-                let left = self.constant_expr(left)?;
-                let right = self.constant_expr(right)?;
-                Ok(self.compare_fold(*op, left, right))
-            }
-            Expr::Binary { op, left, right } => {
-                let left = self.constant_expr(left)?;
-                let right = self.constant_expr(right)?;
-                fold(*op, left, right)
-                    .ok_or_else(|| self.fatal("arithmetic this compiler cannot fold yet"))
-            }
+            Expr::Binary { op, left, right } => self.binary_constant(*op, left, right),
             Expr::Call { name, arguments } => {
                 let (resolved, runtime) = self.function_name(name);
                 let folded = if runtime {
@@ -5463,6 +5498,36 @@ impl Emit<'_> {
             Expr::Closure(_) => Err(self.fatal("a closure is no constant expression")),
             Expr::CallVar { .. } => Err(self.fatal("a call is no constant expression")),
         }
+    }
+
+    /// [`Self::constant_expr`]'s `ZEND_AST_BINARY_OP` arm, one fold per
+    /// family: `zend_try_ct_eval_binary_op` over `concat_function`, over
+    /// `bitwise_or_function` and its kin, over `zend_compare` and
+    /// `zend_is_identical`, and over the arithmetic; each of the four
+    /// refuses where php's opcode would throw or warn, which is the
+    /// value left to the request.
+    fn binary_constant(
+        &mut self,
+        op: BinaryOp,
+        left: &Expr,
+        right: &Expr,
+    ) -> Result<Zval, CompileError> {
+        let left = self.constant_expr(left)?;
+        let right = self.constant_expr(right)?;
+        if op == BinaryOp::Concat {
+            return self
+                .concat_fold(left, right)?
+                .ok_or_else(|| self.fatal("a concatenation this compiler cannot fold yet"));
+        }
+        if bitwise(op) {
+            return self
+                .bitwise_fold(op, left, right)?
+                .ok_or_else(|| self.fatal("a bitwise operator this compiler cannot fold yet"));
+        }
+        if compares(op) {
+            return Ok(self.compare_fold(op, left, right));
+        }
+        fold(op, left, right).ok_or_else(|| self.fatal("arithmetic this compiler cannot fold yet"))
     }
 
     /// `zend_eval_const_expr`'s `ZEND_AST_AND` and `ZEND_AST_OR` arm:
@@ -7370,6 +7435,49 @@ fn doubles(op: BinaryOp, a: f64, b: f64) -> Option<Zval> {
         // doubles go there, and the guard refused every other pair; a
         // `.` and a comparison never reach [`fold`].
         _ => None,
+    }
+}
+
+/// Whether the operator is one of the three bitwise levels, which
+/// `zend_compile_binary_op` folds through `bitwise_or_function` and its
+/// kin and `zend_binary_op_produces_error` has its own arms for.
+fn bitwise(op: BinaryOp) -> bool {
+    matches!(op, BinaryOp::BwOr | BinaryOp::BwXor | BinaryOp::BwAnd)
+}
+
+/// `bitwise_or_function`, `bitwise_xor_function` and
+/// `bitwise_and_function` over two strings, the one operand pair the
+/// three read byte by byte: the shorter string's length of bytes joined
+/// by the operator, and for an `|` the longer string's tail after them,
+/// which is why an `|` is as long as the longer side and an `^` and an
+/// `&` as long as the shorter.
+fn bitwise_bytes(op: BinaryOp, left: &[u8], right: &[u8]) -> Vec<u8> {
+    let (longer, shorter) = if left.len() >= right.len() {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    let mut out: Vec<u8> = shorter
+        .iter()
+        .zip(longer)
+        .map(|(a, b)| match op {
+            BinaryOp::BwOr => a | b,
+            BinaryOp::BwXor => a ^ b,
+            _ => a & b,
+        })
+        .collect();
+    if op == BinaryOp::BwOr {
+        out.extend_from_slice(&longer[shorter.len()..]);
+    }
+    out
+}
+
+/// The same three over two longs.
+fn bitwise_longs(op: BinaryOp, left: i64, right: i64) -> i64 {
+    match op {
+        BinaryOp::BwOr => left | right,
+        BinaryOp::BwXor => left ^ right,
+        _ => left & right,
     }
 }
 

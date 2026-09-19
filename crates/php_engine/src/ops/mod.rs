@@ -1127,6 +1127,196 @@ pub(crate) fn shift_right(req: &mut Request, left: &Value, right: &Value) -> Res
     }
 }
 
+/// Which of the three bitwise operators a call of [`bitwise`] is: the
+/// one thing `bitwise_or_function`, `bitwise_xor_function` and
+/// `bitwise_and_function` differ by.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Bitwise {
+    Or,
+    Xor,
+    And,
+}
+
+impl Bitwise {
+    /// The operator as php's grammar spells it, which is what
+    /// `zend_binop_error` puts between the two type names.
+    const fn spelling(self) -> &'static str {
+        match self {
+            Bitwise::Or => "|",
+            Bitwise::Xor => "^",
+            Bitwise::And => "&",
+        }
+    }
+
+    /// The operator over one pair of bytes.
+    const fn byte(self, left: u8, right: u8) -> u8 {
+        match self {
+            Bitwise::Or => left | right,
+            Bitwise::Xor => left ^ right,
+            Bitwise::And => left & right,
+        }
+    }
+
+    /// The operator over two longs.
+    const fn long(self, left: i64, right: i64) -> i64 {
+        match self {
+            Bitwise::Or => left | right,
+            Bitwise::Xor => left ^ right,
+            Bitwise::And => left & right,
+        }
+    }
+}
+
+/// `bitwise_or_function` (`Zend/zend_operators.c:1698`),
+/// `bitwise_and_function` (`:1780`) and `bitwise_xor_function` (`:1862`),
+/// which differ only in the operator: two longs joined by it; two
+/// strings joined byte by byte over the shorter of the two, as long as
+/// the longer side for an `|`, whose tail is copied after them, and as
+/// long as the shorter for an `^` and an `&`, with php's `ZVAL_CHAR`
+/// where both sides are one byte; and every other pair read as
+/// `convert_op1_op2_long` reads it, which is [`to_long`] on each with
+/// `zend_binop_error`'s `TypeError` for the one that failed.
+fn bitwise(req: &mut Request, op: Bitwise, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    let (a, b) = (left.deref(), right.deref());
+    if let (Some(x), Some(y)) = (a.as_php_string(), b.as_php_string()) {
+        let (x, y) = (x.as_bytes(), y.as_bytes());
+        // php's own fast case: two strings of one byte are the interned
+        // one-character string, `ZVAL_CHAR`.
+        if x.len() == 1 && y.len() == 1 {
+            let byte = op.byte(x[0], y[0]);
+            return Ok(Value::string(req.string(&[byte])?));
+        }
+        let (longer, shorter) = if x.len() >= y.len() { (x, y) } else { (y, x) };
+        let len = if op == Bitwise::Or {
+            longer.len()
+        } else {
+            shorter.len()
+        };
+        let joined = PhpString::filled(req, len, |bytes| {
+            for (out, (l, r)) in bytes.iter_mut().zip(longer.iter().zip(shorter)) {
+                *out = op.byte(*l, *r);
+            }
+            if let Some(tail) = bytes.get_mut(shorter.len()..) {
+                tail.copy_from_slice(&longer[shorter.len()..len]);
+            }
+        })?;
+        return Ok(Value::string(joined));
+    }
+    let (x, y) = longs(req, op.spelling(), left, right)?;
+    Ok(Value::int(op.long(x, y)))
+}
+
+/// `bitwise_or_function`: [`bitwise`] with `|`, whose string pair is as
+/// long as the longer side.
+///
+/// php's compiler folds the operator over two constants where it can
+/// (`zend_try_ct_eval_binary_op`), so each fence calls a native on one
+/// side to leave the opcode standing; a string pair is the one it folds
+/// whatever the two hold, and stands here as it is written.
+///
+/// ```php
+/// $six = 6 * extension_loaded('Core');
+/// var_dump($six | 3, $six | 3.0, $six | "3", "ab" | "cd", "ab" | "c", "a" | "b", true | 0, null | 5);
+/// ```
+/// ```expect
+/// int(7)
+/// int(7)
+/// int(7)
+/// string(2) "cf"
+/// string(2) "cb"
+/// string(1) "c"
+/// int(1)
+/// int(5)
+/// ```
+///
+/// An operand php will not read as a number is `zend_binop_error`'s
+/// `TypeError`, which names php's types around the operator as written.
+///
+/// ```php
+/// echo [] | 1;
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: Unsupported operand types: array | int in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn bitwise_or(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    bitwise(req, Bitwise::Or, left, right)
+}
+
+/// `bitwise_xor_function`: [`bitwise`] with `^`, whose string pair is as
+/// long as the shorter side, so the longer side's tail is dropped.
+///
+/// ```php
+/// $six = 6 * extension_loaded('Core');
+/// var_dump($six ^ 3, $six ^ "3", "ab" ^ "  ", "ab" ^ " ", "a" ^ " ", true ^ 1, null ^ 5);
+/// ```
+/// ```expect
+/// int(5)
+/// int(5)
+/// string(2) "AB"
+/// string(1) "A"
+/// string(1) "A"
+/// int(0)
+/// int(5)
+/// ```
+///
+/// ```php
+/// echo 1 ^ [];
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: Unsupported operand types: int ^ array in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn bitwise_xor(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    bitwise(req, Bitwise::Xor, left, right)
+}
+
+/// `bitwise_and_function`: [`bitwise`] with `&`, the same shorter-side
+/// string.
+///
+/// ```php
+/// $six = 6 * extension_loaded('Core');
+/// var_dump($six & 3, $six & "3", "ab" & "cd", "ab" & "c", "a" & "b", true & 1, null & 5);
+/// ```
+/// ```expect
+/// int(2)
+/// int(2)
+/// string(2) "a`"
+/// string(1) "a"
+/// string(1) "`"
+/// int(1)
+/// int(0)
+/// ```
+///
+/// A string with a number in front of it and anything else behind it is
+/// the warning the arithmetic operators raise and the number php read;
+/// one that opens with no number at all is refused. The three are
+/// `SPEC(COMMUTATIVE)`, so `pass_two` may have swapped the operands, and
+/// the error names them in the order the opline holds them: the constant
+/// string was written first and is named second.
+///
+/// ```php
+/// $one = extension_loaded('Core');
+/// var_dump("6abc" & (3 * $one));
+/// echo "x" & (1 * $one);
+/// ```
+/// ```expect exit=255
+/// Warning: A non-numeric value encountered in %s on line 3
+/// int(2)
+///
+/// Fatal error: Uncaught TypeError: Unsupported operand types: int & string in %s:4
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 4
+/// ```
+pub(crate) fn bitwise_and(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    bitwise(req, Bitwise::And, left, right)
+}
+
 /// `concat_function` (`Zend/zend_operators.c:2017`): both sides as the
 /// strings [`to_string`] makes of them, the left one first, and the
 /// bytes of one after the other; the side that is empty leaves the other

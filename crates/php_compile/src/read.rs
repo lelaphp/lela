@@ -781,6 +781,12 @@ pub(crate) enum BinaryOp {
     IsNotIdentical,
     /// `ZEND_SPACESHIP`
     Spaceship,
+    /// `ZEND_BW_OR`
+    BwOr,
+    /// `ZEND_BW_XOR`
+    BwXor,
+    /// `ZEND_BW_AND`
+    BwAnd,
     /// `ZEND_BOOL_XOR`, which `xor` is: the one word spelling
     /// `zend_compile_binary_op` serves, with no jump in it, since both
     /// sides are read whatever either answers.
@@ -810,6 +816,9 @@ impl BinaryOp {
             BinaryOp::IsIdentical => "===",
             BinaryOp::IsNotIdentical => "!==",
             BinaryOp::Spaceship => "<=>",
+            BinaryOp::BwOr => "|",
+            BinaryOp::BwXor => "^",
+            BinaryOp::BwAnd => "&",
             BinaryOp::BoolXor => "xor",
         }
     }
@@ -2806,7 +2815,7 @@ impl Reader<'_> {
     /// php's `%left T_BOOLEAN_OR`, the level between `??` below it and
     /// `&&` above: `||`, left to right, one `ZEND_AST_OR` per operator
     /// written, so `$a || $b || $c` is `($a || $b) || $c`. A single `|`
-    /// is the bitwise level, which is not read.
+    /// is the bitwise level two below this one.
     fn boolean_or(&mut self) -> Result<Expr, Trouble> {
         self.check_stack()?;
         let mut left = self.boolean_and()?;
@@ -2824,17 +2833,17 @@ impl Reader<'_> {
     }
 
     /// php's `%left T_BOOLEAN_AND`, between `||` below it and the
-    /// bitwise `|` above, which stands where the equality level is read
-    /// here: `&&`, left to right, so `$a || $b && $c` is
-    /// `$a || ($b && $c)`. A single `&` is the bitwise operator and the
-    /// `&` of a by-reference assignment, neither of which is this one.
+    /// bitwise `|` above: `&&`, left to right, so `$a || $b && $c` is
+    /// `$a || ($b && $c)`, each operand read at the `|` level. A single
+    /// `&` is the bitwise operator and the `&` of a by-reference
+    /// assignment, neither of which is this one.
     /// php's `variable '=' expr` reaches inside this level, so
     /// `$a && $b = 1` is php's `$a && ($b = 1)`; that is the grouping
     /// [`Self::expr`] refuses rather than reads, as it refuses
     /// `1 + $a = 2`.
     fn boolean_and(&mut self) -> Result<Expr, Trouble> {
         self.check_stack()?;
-        let mut left = self.equality()?;
+        let mut left = self.bitwise_or()?;
         loop {
             self.skip_trivia();
             if !self.starts_with(b"&&") {
@@ -2842,6 +2851,76 @@ impl Reader<'_> {
             }
             self.bump(2);
             left = Expr::And {
+                left: Child::new(left),
+                right: Child::new(self.bitwise_or()?),
+            };
+        }
+    }
+
+    /// php's `%left '|'`, the lowest of the three bitwise levels, between
+    /// `&&` below it and `^` above: `|`, left to right, so `$a | $b | $c`
+    /// is `($a | $b) | $c`. A `||` is the boolean level below and a `|=`
+    /// assigns, neither of which this reads.
+    fn bitwise_or(&mut self) -> Result<Expr, Trouble> {
+        self.check_stack()?;
+        let mut left = self.bitwise_xor()?;
+        loop {
+            self.skip_trivia();
+            if self.byte(0) != Some(b'|') || matches!(self.byte(1), Some(b'|' | b'=')) {
+                return Ok(left);
+            }
+            self.bump(1);
+            left = Expr::Binary {
+                op: BinaryOp::BwOr,
+                left: Child::new(left),
+                right: Child::new(self.bitwise_xor()?),
+            };
+        }
+    }
+
+    /// php's `%left '^'`, between `|` below it and `&` above: `^`, left
+    /// to right. A `^=` assigns and is not read.
+    fn bitwise_xor(&mut self) -> Result<Expr, Trouble> {
+        self.check_stack()?;
+        let mut left = self.bitwise_and()?;
+        loop {
+            self.skip_trivia();
+            if self.byte(0) != Some(b'^') || self.byte(1) == Some(b'=') {
+                return Ok(left);
+            }
+            self.bump(1);
+            left = Expr::Binary {
+                op: BinaryOp::BwXor,
+                left: Child::new(left),
+                right: Child::new(self.bitwise_and()?),
+            };
+        }
+    }
+
+    /// php's `%left T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG
+    /// T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG`, the highest of the three
+    /// and the level just above the equalities, which is where `$a & $b
+    /// == $c` groups as php's `$a & ($b == $c)`: `&`, left to right. The
+    /// scanner's two `&` tokens stand at one level, so the operator is
+    /// this one whatever follows it.
+    ///
+    /// A `&&` is the boolean level, a `&=` assigns, and the `&` of a
+    /// by-reference assignment stands after the `=` that
+    /// [`Self::assignment`] has already read, so none of the three
+    /// reaches here. An `&` where an operand would stand, a by-reference
+    /// argument or array element, is refused where it stands, since this
+    /// level reads its left side before it looks for the operator.
+    fn bitwise_and(&mut self) -> Result<Expr, Trouble> {
+        self.check_stack()?;
+        let mut left = self.equality()?;
+        loop {
+            self.skip_trivia();
+            if self.byte(0) != Some(b'&') || matches!(self.byte(1), Some(b'&' | b'=')) {
+                return Ok(left);
+            }
+            self.bump(1);
+            left = Expr::Binary {
+                op: BinaryOp::BwAnd,
                 left: Child::new(left),
                 right: Child::new(self.equality()?),
             };
@@ -4722,8 +4801,8 @@ mod tests {
     fn an_operator_this_does_not_read_is_refused_rather_than_taken_for_another() {
         for source in [
             b"<?php echo 'a' .= 'b';".as_slice(),
-            b"<?php echo 1 | 2;".as_slice(),
-            b"<?php echo 1 ^ 2;".as_slice(),
+            b"<?php echo ~1;".as_slice(),
+            b"<?php echo 1 |= 2;".as_slice(),
         ] {
             assert!(read(source).is_err(), "{}", String::from_utf8_lossy(source));
         }
@@ -4794,6 +4873,44 @@ mod tests {
             shape(b"<?php $x = $a or $b;"),
             shape(b"<?php ($x = $a) or $b;"),
             "`or` binds looser than `=` as well"
+        );
+    }
+
+    /// php's three bitwise levels, `%left '|'`, `%left '^'` and the two
+    /// `&` tokens' level, which stand between `%left T_BOOLEAN_AND`
+    /// below them and the equalities above, in that order. A level that
+    /// moves is a failing test here and not a wrong grouping.
+    #[test]
+    fn the_three_bitwise_levels_stand_between_the_boolean_and_and_the_equalities() {
+        assert_eq!(
+            shape(b"<?php echo $a | $b ^ $c;"),
+            shape(b"<?php echo $a | ($b ^ $c);"),
+            "`^` binds tighter than `|`"
+        );
+        assert_eq!(
+            shape(b"<?php echo $a ^ $b & $c;"),
+            shape(b"<?php echo $a ^ ($b & $c);"),
+            "`&` binds tighter than `^`"
+        );
+        assert_eq!(
+            shape(b"<?php echo $a && $b | $c;"),
+            shape(b"<?php echo $a && ($b | $c);"),
+            "`|` binds tighter than `&&`"
+        );
+        assert_eq!(
+            shape(b"<?php echo $a & $b == $c;"),
+            shape(b"<?php echo $a & ($b == $c);"),
+            "`==` binds tighter than `&`, which is why the boolean level had to read its operands at the equality"
+        );
+        assert_eq!(
+            shape(b"<?php echo $a | $b | $c;"),
+            shape(b"<?php echo ($a | $b) | $c;"),
+            "`|` reads left to right, as `^` and `&` do"
+        );
+        assert_eq!(
+            shape(b"<?php echo $a | $b && $c;"),
+            shape(b"<?php echo ($a | $b) && $c;"),
+            "one `&&` over the `|` beside it"
         );
     }
 
@@ -5242,7 +5359,7 @@ mod tests {
 
     #[test]
     fn what_it_cannot_read_is_refused_at_its_line() {
-        let trouble = read(b"<?php\n$x | 1;").err();
+        let trouble = read(b"<?php\n$x . ~1;").err();
         assert_eq!(trouble.map(|t| t.line), Some(2));
     }
 
