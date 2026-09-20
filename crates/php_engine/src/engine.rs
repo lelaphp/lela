@@ -13,7 +13,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use std::any::Any;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
@@ -244,6 +244,18 @@ fn link_trampolines(classes: &[ClassDecl], methods: &mut Vec<NativeMethod>) -> V
     trampolines
 }
 
+/// Where a unit is compiled from, as the request describes it: the name
+/// the unit and its diagnostics carry, `CG(compiled_filename)`, and the
+/// working directory `__DIR__` folds to where that name has no directory
+/// (`VCWD_GETCWD`, the request's own under ZTS), which is
+/// [`RequestDescription::cwd`] for a request and the process's for a
+/// unit compiled outside one ([`Engine::unit`]).
+#[derive(Clone, Copy)]
+struct Origin<'a> {
+    filename: &'a [u8],
+    cwd: &'a Path,
+}
+
 /// What the engine has declared, as the compiler reads it: php's
 /// `CG(function_table)`, `CG(class_table)` and the persistent constants,
 /// each a view of the engine's own table.
@@ -405,7 +417,7 @@ impl Shared {
     fn publish(
         &self,
         source: &[u8],
-        filename: &[u8],
+        origin: Origin<'_>,
         stack: StackLimit,
     ) -> Result<Arc<Unit>, CompileError> {
         let mut strings = match self.strings.lock() {
@@ -417,7 +429,7 @@ impl Shared {
         };
         compile(
             source,
-            filename,
+            origin,
             self.precision(),
             self.declared(),
             stack,
@@ -453,7 +465,7 @@ impl Shared {
     /// and shared by every request that asks for it afterwards (design
     /// §6.3). A file the engine cannot stat is no unit at all, which is
     /// the `None` `serve` serves nothing for.
-    fn cached(&self, path: &[u8], stack: StackLimit) -> Cached {
+    fn cached(&self, path: &[u8], cwd: &Path, stack: StackLimit) -> Cached {
         let name = String::from_utf8_lossy(path).into_owned();
         let described = std::fs::metadata(&name).ok()?;
         let key = UnitKey {
@@ -466,7 +478,14 @@ impl Shared {
         };
         let held = self.units.get_or_build(key, |_| {
             let source = std::fs::read(&name).ok()?;
-            Some(self.publish(&source, path, stack))
+            Some(self.publish(
+                &source,
+                Origin {
+                    filename: path,
+                    cwd,
+                },
+                stack,
+            ))
         });
         Cached::clone(&held)
     }
@@ -819,7 +838,12 @@ impl Engine {
     #[must_use]
     pub fn unit(&self, source: &[u8], filename: &[u8]) -> Option<Arc<Unit>> {
         let stack = self.shared.stack_limit();
-        self.shared.publish(source, filename, stack).ok()
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let origin = Origin {
+            filename,
+            cwd: &cwd,
+        };
+        self.shared.publish(source, origin, stack).ok()
     }
 
     /// What php prints on the second stream for the program
@@ -858,8 +882,14 @@ impl Engine {
             .clone()
             .unwrap_or_else(|| b"Standard input code".to_vec());
         let unit = match &description.source {
-            Some(source) => self.shared.publish(source, &script, stack).ok()?,
-            None => self.shared.cached(&script, stack)?.ok()?,
+            Some(source) => {
+                let origin = Origin {
+                    filename: &script,
+                    cwd: &description.cwd,
+                };
+                self.shared.publish(source, origin, stack).ok()?
+            }
+            None => self.shared.cached(&script, &description.cwd, stack)?.ok()?,
         };
         Some(unit.dump(&self.frameless()))
     }
@@ -953,6 +983,7 @@ impl Engine {
         run: bool,
     ) -> Observables {
         let source = description.source.clone();
+        let cwd = description.cwd.clone();
         let script = description
             .script_name
             .clone()
@@ -976,7 +1007,10 @@ impl Engine {
                 let stack = req.stack_limit();
                 Some(compile(
                     &source,
-                    &script,
+                    Origin {
+                        filename: &script,
+                        cwd: &cwd,
+                    },
                     precision,
                     shared.declared(),
                     stack,
@@ -984,7 +1018,7 @@ impl Engine {
                     &shared.map_ptr_last,
                 ))
             }
-            None => self.shared.cached(&script, req.stack_limit()),
+            None => self.shared.cached(&script, &cwd, req.stack_limit()),
         };
         match compiled {
             Some(Ok(unit)) if run => serve_unit(&mut req, &unit, self.shared.entry),
@@ -1067,8 +1101,9 @@ impl Engine {
 
 /// One source compiled, with what the compiler refused kept instead of
 /// dropped: what `serve` needs to render php's parse error, and what
-/// [`Engine::unit`] is the lossy face over. `strings` is the home the
-/// unit's constant strings are interned into (design §5.2), `precision`
+/// [`Engine::unit`] is the lossy face over. `origin` is the name the
+/// unit carries and the request's working directory, `strings` the home
+/// the unit's constant strings are interned into (design §5.2), `precision`
 /// the ini entry php's compiler renders a double constant at, `declared`
 /// the engine's tables: the constants the bundle declared, which the
 /// compiler substitutes where they are written, the natives, which it
@@ -1080,7 +1115,7 @@ impl Engine {
 /// array of the unit takes one from ([`assign_map_ptrs`]).
 fn compile(
     source: &[u8],
-    filename: &[u8],
+    origin: Origin<'_>,
     precision: i32,
     declared: Declared<'_>,
     stack: StackLimit,
@@ -1088,7 +1123,8 @@ fn compile(
     map_ptr_last: &AtomicU32,
 ) -> Result<Arc<Unit>, CompileError> {
     let options = php_compile::Options {
-        filename: Name(filename.into()),
+        filename: Name(origin.filename.into()),
+        cwd: origin.cwd.as_os_str().as_encoded_bytes().to_vec(),
         strict_types: false,
         precision,
         persistent: declared.constants.to_vec(),
@@ -1298,6 +1334,29 @@ mod tests {
         engine.serve(description("<?php echo 'x';"), &mut cli);
         assert_eq!(cli.stdout, b"x");
         assert_eq!(cli.headers, b"");
+    }
+
+    /// `__DIR__` where the request's name has no directory is the
+    /// request's working directory, `VCWD_GETCWD` (#366): two requests
+    /// in one process described with two directories read two, which is
+    /// php's under ZTS and what design §3's threads need; the process's
+    /// own directory is neither.
+    #[test]
+    fn dir_is_the_described_request_s_working_directory_not_the_process_s() {
+        let engine = Engine::builder().build();
+        let dir_under = |cwd: &str| {
+            let mut sink = Kept::default();
+            engine.serve(
+                RequestDescription {
+                    cwd: PathBuf::from(cwd),
+                    ..description("<?php echo __DIR__;")
+                },
+                &mut sink,
+            );
+            String::from_utf8_lossy(&sink.body).into_owned()
+        };
+        assert_eq!(dir_under("/srv/one"), "/srv/one");
+        assert_eq!(dir_under("/srv/two"), "/srv/two");
     }
 
     fn served(engine: &Engine, source: &str) -> (String, Observables) {
@@ -1949,8 +2008,12 @@ mod tests {
         // What the cache holds after both: one unit, and the constant
         // string its `ECHO` names is the one allocation.
         let (Some(Ok(one)), Some(Ok(again))) = (
-            engine.shared.cached(&name, StackLimit::UNCHECKED),
-            engine.shared.cached(&name, StackLimit::UNCHECKED),
+            engine
+                .shared
+                .cached(&name, Path::new(""), StackLimit::UNCHECKED),
+            engine
+                .shared
+                .cached(&name, Path::new(""), StackLimit::UNCHECKED),
         ) else {
             return;
         };
@@ -2025,7 +2088,10 @@ mod tests {
             started_at.push(req.memory_usage(false));
             let compiled = compile(
                 source,
-                b"witness.php",
+                Origin {
+                    filename: b"witness.php",
+                    cwd: Path::new(""),
+                },
                 14,
                 Declared::default(),
                 StackLimit::UNCHECKED,

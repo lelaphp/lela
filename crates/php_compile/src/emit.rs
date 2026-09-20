@@ -254,6 +254,9 @@ pub(crate) struct Emit<'a> {
     /// The file's name, [`Options::filename`], what a declaration
     /// records as its site.
     filename: Name,
+    /// The request's working directory, [`Options::cwd`], what `__DIR__`
+    /// is where the file's name has no directory.
+    cwd: Vec<u8>,
     /// `CG(context).brk_cont_array`: every loop and `switch` of the op
     /// array, in the order begun, and `current_brk_cont`, the innermost
     /// one open.
@@ -649,6 +652,7 @@ pub(crate) fn unit(
         numeric_dims: Vec::new(),
         methods: Vec::new(),
         filename: options.filename.clone(),
+        cwd: options.cwd.clone(),
         loops: Vec::new(),
         current_loop: None,
         breaks: Vec::new(),
@@ -7754,9 +7758,7 @@ impl Emit<'_> {
             Magic::Dir => {
                 let dirname = dirname(&self.filename.0);
                 if dirname == b"." {
-                    std::env::current_dir()
-                        .map(|cwd| cwd.to_string_lossy().into_owned().into_bytes())
-                        .unwrap_or(dirname)
+                    self.cwd.clone()
                 } else {
                     dirname
                 }
@@ -9155,6 +9157,7 @@ mod tests {
             numeric_dims: Vec::new(),
             methods: Vec::new(),
             filename: options.filename.clone(),
+            cwd: options.cwd.clone(),
             loops: Vec::new(),
             current_loop: None,
             breaks: Vec::new(),

@@ -52,6 +52,13 @@ use php_unit::{Diagnostic, Level, Unit};
 pub struct Options {
     /// The file name the unit and its errors carry.
     pub filename: Name,
+    /// The working directory of the request the unit compiles for,
+    /// php's virtual one under ZTS (`VCWD_GETCWD`), which is what
+    /// `__DIR__` folds to where `zend_dirname` over `filename` answers
+    /// `.` (`zend_try_ct_eval_magic_const`). The host that described the
+    /// request is what knows it; the compiler reads no directory of the
+    /// process's own.
+    pub cwd: Vec<u8>,
     /// Whether the caller's `declare(strict_types=1)` is in force.
     pub strict_types: bool,
     /// php's `precision` ini entry as it stands while the file compiles,
@@ -91,6 +98,7 @@ impl Default for Options {
     fn default() -> Options {
         Options {
             filename: Name::default(),
+            cwd: Vec::new(),
             strict_types: false,
             precision: 14,
             persistent: Vec::new(),
@@ -616,6 +624,45 @@ mod tests {
              0002 RETURN int(1)\n",
             "a constant's name is case-sensitive, so the lowered spelling folds to nothing \
              and is fetched as the program serves"
+        );
+    }
+
+    /// `zend_try_ct_eval_magic_const`'s `T_DIR` arm (#366): `__DIR__` is
+    /// `zend_dirname` over the file's name, and where that answers `.`,
+    /// the working directory of the request, `VCWD_GETCWD`, which is per
+    /// request under ZTS and so the option's, never the process's. Two
+    /// units compiled for two requests in one process read two
+    /// directories.
+    #[test]
+    fn dir_is_the_option_s_working_directory_where_the_name_has_no_directory() {
+        fn dir(filename: &[u8], cwd: &[u8]) -> Option<Vec<u8>> {
+            let mut strings = php_heap::Strings::new();
+            let options = Options {
+                filename: Name(filename.into()),
+                cwd: cwd.to_vec(),
+                ..Options::default()
+            };
+            let unit = compile(
+                &php_syntax::parse(b"<?php echo __DIR__;", &php_syntax::Options::default()),
+                &options,
+                &mut strings,
+            )
+            .unwrap_or_default();
+            literal_text(&unit, 0)
+        }
+        assert_eq!(
+            dir(b"witness.php", b"/srv/one").as_deref(),
+            Some(b"/srv/one".as_slice())
+        );
+        assert_eq!(
+            dir(b"witness.php", b"/srv/two").as_deref(),
+            Some(b"/srv/two".as_slice()),
+            "the same name under another request's directory is that directory"
+        );
+        assert_eq!(
+            dir(b"/var/www/index.php", b"/srv/one").as_deref(),
+            Some(b"/var/www".as_slice()),
+            "a name with a directory in it is its dirname, whatever the request's"
         );
     }
 
