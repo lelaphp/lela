@@ -5479,10 +5479,13 @@ impl Emit<'_> {
     /// slots in `extended_value`, and its `VAR` is numbered, its name
     /// added and its slots taken when the fetch is delayed, before the
     /// value's own, which is the order php's temporaries come in. A
-    /// call under the chain is php's `SEPARATE` over its `VAR`
-    /// (`zend_separate_if_call_and_write`), and anything else under it
-    /// is php's compile error for a temporary expression in a write;
-    /// neither is read yet.
+    /// call under the chain is compiled where it stands and takes
+    /// `SEPARATE` over its own `VAR` (`zend_separate_if_call_and_write`)
+    /// before the delayed fetches, so the write lands in a value of the
+    /// request's own; a call php answered in a temporary has no `VAR` to
+    /// separate and is its own compile error, and anything else under
+    /// the chain is php's compile error for a temporary expression in a
+    /// write (`zend_compile_var`'s default arm).
     fn assign_prop(
         &mut self,
         object: &Child,
@@ -5495,12 +5498,33 @@ impl Emit<'_> {
             names.push(name);
             base = object;
         }
-        if !matches!(&**base, Expr::Var(_) | Expr::This) {
-            return Err(self.fatal(
-                "a property assignment over what is no variable this compiler cannot read yet",
-            ));
-        }
-        let (mut op1_type, mut op1) = self.receiver(base)?;
+        let (mut op1_type, mut op1) = match &**base {
+            Expr::Var(_) | Expr::This => self.receiver(base)?,
+            // `zend_separate_if_call_and_write`, as
+            // [`Self::dim_chain`] takes it at the base of a chain of
+            // dimensions: the call is compiled where it stands and
+            // `SEPARATE` reads and writes the one `VAR` it returned
+            // into, before the fetches the chain delays.
+            _ if is_call(base) => {
+                let returned = self.expr(base)?;
+                let Where::Returned(at) = returned else {
+                    return Err(self
+                        .compile_error("Cannot use result of built-in function in write context"));
+                };
+                self.push(Opline {
+                    opcode: Opcode::Separate,
+                    op1_type: OperandKind::Var,
+                    op1: at,
+                    out_type: OperandKind::Var,
+                    out: at,
+                    ..Opline::default()
+                });
+                (OperandKind::Var, at)
+            }
+            _ => {
+                return Err(self.compile_error("Cannot use temporary expression in write context"));
+            }
+        };
         let mut links = Vec::with_capacity(names.len());
         for name in names.iter().rev() {
             let name = self.string(name)?;
@@ -8383,12 +8407,18 @@ enum Known {
     User,
 }
 
-/// `zend_is_call`: a call by name, a call on a class or a method call,
-/// whose `VAR` is separated where it is written to.
+/// `zend_is_call` (`Z/Zend/zend_compile.c:2728`): a call by name, a call
+/// through a value, a call on a class or a method call, whose `VAR` is
+/// separated where it is written to. `$f()` is php's `ZEND_AST_CALL` the
+/// same as `f()` is, the callee an expression rather than a name, so it
+/// is separated the same way.
 fn is_call(expr: &Child) -> bool {
     matches!(
         &**expr,
-        Expr::Call { .. } | Expr::StaticCall { .. } | Expr::MethodCall { .. }
+        Expr::Call { .. }
+            | Expr::CallVar { .. }
+            | Expr::StaticCall { .. }
+            | Expr::MethodCall { .. }
     )
 }
 

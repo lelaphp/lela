@@ -3829,45 +3829,54 @@ mod tests {
     /// bit the dump prints as `(dim write)`. A call is compiled where
     /// it stands and takes `SEPARATE` over its own `VAR` under a write
     /// (`zend_separate_if_call_and_write`), which the dump prints into
-    /// the same `VAR` it reads.
+    /// the same `VAR` it reads; `$g()` is php's `ZEND_AST_CALL` the
+    /// same as `f()` is, so `zend_is_call` separates it the same way
+    /// (#336).
     #[test]
     fn the_base_of_a_chain_of_dimensions_is_the_oracle_s_delayed_fetch() {
         let source: &[u8] = b"<?php $o = new stdClass; $x = $o->p[0]; $o->p[1] = 2; \
-                              $y = f()[0]; f()[1] = 3; $z = $o->p[f()]; function f() { return [1]; }";
+                              $y = f()[0]; f()[1] = 3; $z = $o->p[f()]; $g()[2] = 4; \
+                              function f() { return [1]; }";
         assert_eq!(
             dump_of(source),
             main_dump(
-                24,
-                4,
-                17,
-                "0000 V4 = NEW 0 string(\"stdClass\")\n\
+                29,
+                5,
+                19,
+                "0000 V5 = NEW 0 string(\"stdClass\")\n\
                  0001 DO_FCALL\n\
-                 0002 ASSIGN CV0($o) V4\n\
-                 0003 T7 = FETCH_OBJ_R CV0($o) string(\"p\")\n\
-                 0004 T8 = FETCH_DIM_R T7 int(0)\n\
-                 0005 ASSIGN CV1($x) T8\n\
-                 0006 V10 = FETCH_OBJ_W (dim write) CV0($o) string(\"p\")\n\
-                 0007 ASSIGN_DIM V10 int(1)\n\
+                 0002 ASSIGN CV0($o) V5\n\
+                 0003 T8 = FETCH_OBJ_R CV0($o) string(\"p\")\n\
+                 0004 T9 = FETCH_DIM_R T8 int(0)\n\
+                 0005 ASSIGN CV1($x) T9\n\
+                 0006 V11 = FETCH_OBJ_W (dim write) CV0($o) string(\"p\")\n\
+                 0007 ASSIGN_DIM V11 int(1)\n\
                  0008 OP_DATA int(2)\n\
                  0009 INIT_FCALL_BY_NAME 0 string(\"f\")\n\
-                 0010 V12 = DO_FCALL_BY_NAME\n\
-                 0011 T13 = FETCH_DIM_R V12 int(0)\n\
-                 0012 ASSIGN CV2($y) T13\n\
+                 0010 V13 = DO_FCALL_BY_NAME\n\
+                 0011 T14 = FETCH_DIM_R V13 int(0)\n\
+                 0012 ASSIGN CV2($y) T14\n\
                  0013 INIT_FCALL_BY_NAME 0 string(\"f\")\n\
-                 0014 V15 = DO_FCALL_BY_NAME\n\
-                 0015 V15 = SEPARATE V15\n\
-                 0016 ASSIGN_DIM V15 int(1)\n\
+                 0014 V16 = DO_FCALL_BY_NAME\n\
+                 0015 V16 = SEPARATE V16\n\
+                 0016 ASSIGN_DIM V16 int(1)\n\
                  0017 OP_DATA int(3)\n\
                  0018 INIT_FCALL_BY_NAME 0 string(\"f\")\n\
-                 0019 V18 = DO_FCALL_BY_NAME\n\
-                 0020 T17 = FETCH_OBJ_R CV0($o) string(\"p\")\n\
-                 0021 T19 = FETCH_DIM_R T17 V18\n\
-                 0022 ASSIGN CV3($z) T19\n\
-                 0023 RETURN int(1)\n\
+                 0019 V19 = DO_FCALL_BY_NAME\n\
+                 0020 T18 = FETCH_OBJ_R CV0($o) string(\"p\")\n\
+                 0021 T20 = FETCH_DIM_R T18 V19\n\
+                 0022 ASSIGN CV3($z) T20\n\
+                 0023 INIT_DYNAMIC_CALL 0 CV4($g)\n\
+                 0024 V22 = DO_FCALL\n\
+                 0025 V22 = SEPARATE V22\n\
+                 0026 ASSIGN_DIM V22 int(2)\n\
+                 0027 OP_DATA int(4)\n\
+                 0028 RETURN int(1)\n\
                  LIVE RANGES:\n\
-                 \x20    4: 0001 - 0002 (new)\n\
-                 \x20    15: 0015 - 0016 (tmp/var)\n\
-                 \x20    18: 0020 - 0021 (tmp/var)\n"
+                 \x20    5: 0001 - 0002 (new)\n\
+                 \x20    16: 0015 - 0016 (tmp/var)\n\
+                 \x20    19: 0020 - 0021 (tmp/var)\n\
+                 \x20    22: 0025 - 0026 (tmp/var)\n"
             ) + "\nf:\n     ; (lines=2, args=0, vars=0, tmps=0)\n\
                  \x20    ; (before optimizer)\n     ; :1-1\n     ; return  [] RANGE[0..0]\n\
                  0000 RETURN array(...)\n\
@@ -3878,9 +3887,12 @@ mod tests {
     /// The bases php refuses under a write, `zend_compile_var`'s
     /// default arm and `zend_separate_if_call_and_write`: a temporary
     /// expression and a call php answered in one, each php's own
-    /// compile error; and the one this compiler has not, a `static`
+    /// compile error, under a dimension and under a property alike
+    /// (#336); and the one this compiler has not, a `static`
     /// property under a write, whose fetch is `FETCH_STATIC_PROP_W`
-    /// (#507).
+    /// (#507). `new C` is no call however its `VAR` is written, since
+    /// `zend_is_call` reads the shape of the expression and not where
+    /// its value landed.
     #[test]
     fn a_base_no_write_can_stand_on_is_php_s_compile_error() {
         let refused = |source: &[u8]| refused_message(source);
@@ -3894,6 +3906,22 @@ mod tests {
         );
         assert_eq!(
             refused(b"<?php strlen(\"a\")[0] = 1;").as_deref(),
+            Some("Cannot use result of built-in function in write context")
+        );
+        assert_eq!(
+            refused(b"<?php (new C)->p = 1;").as_deref(),
+            Some("Cannot use temporary expression in write context")
+        );
+        assert_eq!(
+            refused(b"<?php (1)->p = 1;").as_deref(),
+            Some("Cannot use temporary expression in write context")
+        );
+        assert_eq!(
+            refused(b"<?php [1, 2]->p = 1;").as_deref(),
+            Some("Cannot use temporary expression in write context")
+        );
+        assert_eq!(
+            refused(b"<?php strlen(\"a\")->p = 1;").as_deref(),
             Some("Cannot use result of built-in function in write context")
         );
         assert_eq!(
@@ -5627,9 +5655,61 @@ class C {
                 String::from_utf8_lossy(source)
             );
         }
-        assert!(
-            refused(b"<?php f()->p = 1;").is_some(),
-            "a call under the chain is php's SEPARATE, not read yet"
+    }
+
+    /// `zend_separate_if_call_and_write` under a property write (#336),
+    /// the oracle's dump under `[regime.dump]` at 8.5.9: a call under
+    /// the chain is compiled where it stands and `SEPARATE` reads and
+    /// writes the one `VAR` it returned into, before the fetches the
+    /// chain delays, so the `VAR` the write lands in is the request's
+    /// own. Every shape `zend_is_call` names is separated the same way:
+    /// a call by name, a call through a value, a method call and a call
+    /// on a class, each with the live range the dump prints over the
+    /// `SEPARATE` and the fetch after it.
+    #[test]
+    fn a_call_under_a_property_write_is_the_oracle_s_separate() {
+        assert_eq!(
+            dump_of(
+                b"<?php f()->p = 1; f()->a->b = 2; $o->m()->p = 3; $f()->p = 4; C::m()->p = 5;"
+            ),
+            main_dump(
+                27,
+                2,
+                11,
+                "0000 INIT_FCALL_BY_NAME 0 string(\"f\")\n\
+                 0001 V2 = DO_FCALL_BY_NAME\n\
+                 0002 V2 = SEPARATE V2\n\
+                 0003 ASSIGN_OBJ V2 string(\"p\")\n\
+                 0004 OP_DATA int(1)\n\
+                 0005 INIT_FCALL_BY_NAME 0 string(\"f\")\n\
+                 0006 V4 = DO_FCALL_BY_NAME\n\
+                 0007 V4 = SEPARATE V4\n\
+                 0008 V5 = FETCH_OBJ_W V4 string(\"a\")\n\
+                 0009 ASSIGN_OBJ V5 string(\"b\")\n\
+                 0010 OP_DATA int(2)\n\
+                 0011 INIT_METHOD_CALL 0 CV0($o) string(\"m\")\n\
+                 0012 V7 = DO_FCALL\n\
+                 0013 V7 = SEPARATE V7\n\
+                 0014 ASSIGN_OBJ V7 string(\"p\")\n\
+                 0015 OP_DATA int(3)\n\
+                 0016 INIT_DYNAMIC_CALL 0 CV1($f)\n\
+                 0017 V9 = DO_FCALL\n\
+                 0018 V9 = SEPARATE V9\n\
+                 0019 ASSIGN_OBJ V9 string(\"p\")\n\
+                 0020 OP_DATA int(4)\n\
+                 0021 INIT_STATIC_METHOD_CALL 0 string(\"C\") string(\"m\")\n\
+                 0022 V11 = DO_FCALL\n\
+                 0023 V11 = SEPARATE V11\n\
+                 0024 ASSIGN_OBJ V11 string(\"p\")\n\
+                 0025 OP_DATA int(5)\n\
+                 0026 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    2: 0002 - 0003 (tmp/var)\n\
+                 \x20    4: 0007 - 0008 (tmp/var)\n\
+                 \x20    7: 0013 - 0014 (tmp/var)\n\
+                 \x20    9: 0018 - 0019 (tmp/var)\n\
+                 \x20    11: 0023 - 0024 (tmp/var)\n"
+            )
         );
     }
 

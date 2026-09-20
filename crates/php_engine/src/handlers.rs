@@ -7190,6 +7190,25 @@ pub(crate) fn assign_dim<T: Tier>(
 /// ```expect
 /// written and gone
 /// ```
+///
+/// The same opline under a property write (#336), which is where a
+/// chain rooted at a call lands: the write reaches the object the call
+/// answered with, whether the call answered by value or by reference.
+///
+/// ```php
+/// class C { public $p = 0; }
+/// function f($o) { return $o; }
+/// function &r(&$x) { return $x; }
+/// $c = new C;
+/// f($c)->p = 7;
+/// echo $c->p, "\n";
+/// r($c)->p = 9;
+/// echo $c->p, "\n";
+/// ```
+/// ```expect
+/// 7
+/// 9
+/// ```
 pub(crate) fn separate<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
