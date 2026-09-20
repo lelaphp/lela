@@ -241,9 +241,17 @@ mod tests {
     /// reservation, to the page, and the base is above every local of
     /// the thread. On a platform this engine has no arm for, the
     /// fallback's number is the assumed size less php's 32 KiB.
+    ///
+    /// The size is above the 2 MiB the test harness spawns each test
+    /// on: glibc keeps a finished thread's stack in a cache and hands
+    /// it to the next thread that asks for one no larger, and
+    /// `pthread_getattr_np` then answers the cached stack's size, so a
+    /// thread asked for 1 MiB read as 2 MiB on the CI machine now and
+    /// then (`nptl/allocatestack.c`, `get_cached_stack`). A size no
+    /// cached stack reaches is served fresh, at the size asked for.
     #[test]
     fn detect_reads_the_calling_threads_bounds() {
-        let size = 1024 * 1024;
+        let size = 4 * 1024 * 1024;
         let Ok(spawned) = std::thread::Builder::new().stack_size(size).spawn(|| {
             let stack = StackLimit::init(0, 0);
             (stack, position())

@@ -765,6 +765,14 @@ mod tests {
     /// spawned at a size of this test's choosing, whose size is what
     /// was asked for, to the guard an arm deducts: one page on OpenBSD
     /// and NetBSD, four on Haiku.
+    ///
+    /// The size is above the 2 MiB the test harness spawns each test
+    /// on: glibc keeps a finished thread's stack in a cache and hands
+    /// it to the next thread that asks for one no larger, and
+    /// `pthread_getattr_np` then answers the cached stack's size
+    /// (`nptl/allocatestack.c`, `get_cached_stack`), which is how the
+    /// twin of this test in `php_compile` read a 1 MiB thread as 2 MiB
+    /// on the runner. A size no cached stack reaches is served fresh.
     #[test]
     fn a_local_lies_within_the_bounds_the_platform_answers() {
         if !ARMED {
@@ -772,7 +780,7 @@ mod tests {
             return;
         }
         assert!(holds_a_local(call_stack_bounds()));
-        let size = 1024 * 1024;
+        let size = 4 * 1024 * 1024;
         let spawned = std::thread::Builder::new()
             .stack_size(size)
             .spawn(|| (call_stack_bounds(), holds_a_local(call_stack_bounds())))
