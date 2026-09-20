@@ -183,6 +183,15 @@ pub fn is_callable(req: &Request, value: &Value) -> bool {
     req.callable_of(value).is_some()
 }
 
+/// `zend_is_callable_ex` with its `*error` (`Z/Zend/zend_API.c:4250`):
+/// the callable a value names, or the sentence php words the refusal
+/// with, one per shape. What `zend_fcall_info_init` hands its caller to
+/// raise, which is `ob_start`'s warning and every other native that
+/// prints php's own words rather than "must be a valid callback".
+pub fn callable_checked(req: &Request, value: &Value) -> Result<Callable, String> {
+    req.callable_checked(value)
+}
+
 /// The callable a value names, or php's `TypeError` for one that is not.
 pub fn to_callable(req: &mut Request, value: &Value) -> Result<Callable, Thrown> {
     match req.callable_of(value) {

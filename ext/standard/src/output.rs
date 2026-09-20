@@ -5,7 +5,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::coerce::{coerce_param, is_callable, to_callable};
+use php_ext::coerce::{callable_checked, coerce_param};
 use php_ext::decl::{ConstExpr, FunctionDecl, Name, Parameter, Type};
 use php_ext::raising::{Level, Thrown, arg_count_error, docref};
 use php_ext::request::{OutputOp, Request};
@@ -180,6 +180,21 @@ fn bool_at(req: &mut Request, position: u32) -> Result<bool, Thrown> {
 /// int(4352)
 /// ```
 ///
+/// A handler of its own holds the 128-byte user record beside all of
+/// that, and holds the callback's own string as its name rather than a
+/// copy, where the default handler's name is forty-eight bytes of its
+/// own: eighty more than the default handler, not a hundred and
+/// seventy-six.
+///
+/// ```php
+/// $b = memory_get_usage(); ob_start('strtoupper'); $held = memory_get_usage() - $b;
+/// try { ob_end_clean(); } catch (ArgumentCountError $e) { }
+/// var_dump($held);
+/// ```
+/// ```expect
+/// int(16720)
+/// ```
+///
 /// A callback that names no function is php's warning and the notice
 /// that no buffer was made.
 ///
@@ -193,6 +208,59 @@ fn bool_at(req: &mut Request, position: u32) -> Result<bool, Thrown> {
 /// bool(false)
 /// int(0)
 /// ```
+///
+/// Every other shape reads as `zend_is_callable_ex` words it: a value
+/// that is neither an array nor a string, including an object of a
+/// class with no `__invoke`; an array of the wrong size; an array whose
+/// class half names nothing; and one whose method half does.
+///
+/// ```php
+/// var_dump(ob_start(1));
+/// var_dump(ob_start(new stdClass));
+/// var_dump(ob_start([1, 2, 3]));
+/// var_dump(ob_start(['NoClass', 'method']));
+/// var_dump(ob_start([new stdClass, 'method']));
+/// var_dump(ob_get_level());
+/// ```
+/// ```expect
+/// Warning: ob_start(): no array or string given in %s on line 2
+///
+/// Notice: ob_start(): Failed to create buffer in %s on line 2
+/// bool(false)
+///
+/// Warning: ob_start(): no array or string given in %s on line 3
+///
+/// Notice: ob_start(): Failed to create buffer in %s on line 3
+/// bool(false)
+///
+/// Warning: ob_start(): array callback must have exactly two members in %s on line 4
+///
+/// Notice: ob_start(): Failed to create buffer in %s on line 4
+/// bool(false)
+///
+/// Warning: ob_start(): class "NoClass" not found in %s on line 5
+///
+/// Notice: ob_start(): Failed to create buffer in %s on line 5
+/// bool(false)
+///
+/// Warning: ob_start(): class stdClass does not have a method "method" in %s on line 6
+///
+/// Notice: ob_start(): Failed to create buffer in %s on line 6
+/// bool(false)
+/// int(0)
+/// ```
+///
+/// A closure is a shape it takes, and the handler runs as any other.
+///
+/// ```php
+/// var_dump(ob_start(function ($buffer, $phase) { return strtoupper($buffer); }));
+/// echo "hi"; ob_end_flush(); echo "|\n"; var_dump(ob_get_level());
+/// ```
+/// ```expect
+/// BOOL(TRUE)
+/// HI|
+/// int(0)
+/// ```
 fn ob_start(req: &mut Request) -> Result<Value, Thrown> {
     let given = at_most(req, 3)?;
     let callback = req.argument(1).unwrap_or_default();
@@ -200,21 +268,16 @@ fn ob_start(req: &mut Request) -> Result<Value, Thrown> {
     let flags = if given >= 3 { long_at(req, 3)? } else { 0x70 };
     let callback = match callback.deref().as_ref() {
         ValueRef::Undef | ValueRef::Null => None,
-        _ if is_callable(req, &callback) => Some(to_callable(req, &callback)?),
-        given => {
-            // `zend_fcall_info_init`'s error, as `zend_is_callable_ex`
-            // words it for a string and for anything else.
-            let error = match given {
-                ValueRef::Str(name) => format!(
-                    "function \"{}\" not found or invalid function name",
-                    String::from_utf8_lossy(name.as_bytes())
-                ),
-                _ => String::from("no array or string given"),
-            };
-            docref(req, Level::Warning, &error);
-            docref(req, Level::Notice, "Failed to create buffer");
-            return Ok(Value::bool(false));
-        }
+        _ => match callable_checked(req, &callback) {
+            Ok(callable) => Some(callable),
+            // `zend_fcall_info_init`'s error, which is the sentence
+            // `zend_is_callable_ex` words for the shape it refused.
+            Err(error) => {
+                docref(req, Level::Warning, &error);
+                docref(req, Level::Notice, "Failed to create buffer");
+                return Ok(Value::bool(false));
+            }
+        },
     };
     req.output_buffer_op(&OutputOp::Start {
         callback,

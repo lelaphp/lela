@@ -5767,7 +5767,13 @@ impl Request {
                 ));
             }
             let class = object.class();
-            return self.callable_method(*held, class, b"__invoke", Some(*object));
+            // `zend_std_get_closure` (`Z/Zend/zend_object_handlers.c:1706`)
+            // looks `__invoke` up and answers failure with no word of its
+            // own, so `case IS_OBJECT` falls to the sentence php words for
+            // every shape it cannot read at all.
+            return self
+                .callable_method(*held, class, b"__invoke", Some(*object))
+                .map_err(|_| String::from("no array or string given"));
         }
         if let Some(array) = held.as_array() {
             return self.callable_pair(*held, *array);
