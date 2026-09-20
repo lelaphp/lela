@@ -1403,19 +1403,23 @@ mod tests {
             .ini("zend.max_allowed_stack_size", "512K")
             .build();
         let (body, observables) = served(&engine, &source);
-        assert_eq!(
-            body,
-            format!(
-                "\nFatal error: Maximum call stack size of {} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached during compilation. Try splitting expression in witness.php on line 2\nStack trace:\n#0 {{main}}\n",
-                512 * 1024 - 48 * 1024
-            )
+        // 512K less the least `zend.reserved_stack_size`: 491520 is the
+        // oracle's number under `php -n` on macOS, where php reserves
+        // 32K, and 475136 is php's where `ZEND_ALLOCA_MAX_SIZE` is
+        // compiled and it reserves 48K (`php_compile::stack::RESERVED_MIN`).
+        let number = if cfg!(target_vendor = "apple") {
+            491_520
+        } else {
+            475_136
+        };
+        let sentence = format!(
+            "Maximum call stack size of {number} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached during compilation. Try splitting expression in witness.php on line 2\nStack trace:\n#0 {{main}}"
         );
+        assert_eq!(body, format!("\nFatal error: {sentence}\n"));
         assert_eq!(observables.exit_code, 255);
         assert_eq!(
             observables.fatal.as_deref(),
-            Some(
-                "PHP Fatal error:  Maximum call stack size of 475136 bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached during compilation. Try splitting expression in witness.php on line 2\nStack trace:\n#0 {main}"
-            ),
+            Some(format!("PHP Fatal error:  {sentence}").as_str()),
             "the log form the host is handed, as for every fatal, the trace with it"
         );
 
