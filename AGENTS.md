@@ -88,7 +88,7 @@ third-engine-design.md
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 322 |  | pass |
 
-<!-- /computed in=63ab82b9b4d9291a734b00d803ef97e8fb8eeb2aa9a0a054413dcece411ae6b8 out=f5b8e79ba94dbe2c4b2aad8a00ae27ab707ac34cc26c9768ba2e951746f4865b -->
+<!-- /computed in=48c68102af10440e7fe76c910cff4eb0255d4f16ad5a1b5bc825ba3a15701030 out=f5b8e79ba94dbe2c4b2aad8a00ae27ab707ac34cc26c9768ba2e951746f4865b -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -103,7 +103,7 @@ third-engine-design.md
 | xtask.lock-line |  | on | pass | A new pub item in xtask needs its xtask.lock line in the same commit. |
 | ext.pub-beyond-extension |  | on | pass | api-check prints each ext crate's pub items beyond extension(); anything beyond the pdo driver trait and the random handle needs a line in the design (§12). |
 | witness.exit-authored |  | deny_pattern | no reading | exit= in a witness is captured by `xtask witness --accept`, never authored. |
-| witness.coverage |  | check | skip | A kernel or a native without a witness fails CI (design §8). |
+| witness.coverage |  | check | no reading | A kernel or a native without a witness fails CI (design §8). |
 | vocab.avoid |  | avoid_from | pass | The glossary's _Avoid_ words appear in no public item name or rustdoc prose; a lock line mirrors php's names and is not read. |
 | vocab.harness |  | avoid_from | pass | The Harness section's _Avoid_ words appear in no public item name or rustdoc prose of the harness; xtask/fixtures/** are other crates' sources and are not read. |
 | generated.committed |  | generated | pass | ext/clippy.toml is generated from the manifest and committed; a stale copy fails budget. |
@@ -116,7 +116,7 @@ third-engine-design.md
 | harness.self |  | deny | fail | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
 | divergence.reason |  | check | no reading | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
 
-<!-- /computed in=58e4fd489562073a4f08a9b8bcb28680bd7eb420a50530a38333773baaa05ebf out=96f34607bfc1ab7131ae42a29d1ebab6fa30cace9ea58585954978611ff7b7c7 -->
+<!-- /computed in=20d095df55317bc22f5ab3eaa1441e0b6896d4ba5112116a1ae1ea582d8f39cb out=d6cfa66b48e0d88b4fae122326e9f4668c3c2476e09c957a868ffd770a7cd767 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

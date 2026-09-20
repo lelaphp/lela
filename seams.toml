@@ -134,6 +134,11 @@ budget = 2000
 [[crate]]
 name = "ext/tokenizer"
 budget = 1500
+# The port is partial: every miss in the crate's corpus is another crate's
+# gap -- `implode`, `strncmp` and `set_error_handler`, which nothing declares,
+# and the `Cannot override final method` fatal the linker does not raise -- so
+# `phpt` is the meter here (harness §4.5 condition 1, #383, #521).
+porting = true
 [[crate]]
 name = "ext/json"
 budget = 1500
