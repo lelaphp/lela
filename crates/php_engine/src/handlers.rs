@@ -5767,6 +5767,42 @@ pub(crate) fn assign_ref<T: Tier>(
 /// #0 {main}
 ///   thrown in %s on line 3
 /// ```
+///
+/// A slot the class declared with a type takes the write through
+/// `zend_assign_to_typed_prop`: the value the type accepts as it
+/// stands, the weak rule's coercion where the file is not `strict_types`
+/// and the type is a scalar one, and php's `TypeError` where it is
+/// neither, the slot keeping what it held.
+///
+/// ```php
+/// class C { public int $n = 1; }
+/// $c = new C;
+/// $c->n = "7";
+/// var_dump($c->n);
+/// try { $c->n = "x"; } catch (TypeError $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// var_dump($c->n);
+/// ```
+/// ```expect
+/// int(7)
+/// TypeError: Cannot assign string to property C::$n of type int
+/// int(7)
+/// ```
+///
+/// A `readonly` slot is refused before the value is looked at, once
+/// something has written it; the class that declared it is the one the
+/// `Error` names, and the write the constructor's promotion makes is
+/// the initialisation the bit lets through.
+///
+/// ```php
+/// class C { public function __construct(public readonly int $r) {} }
+/// $c = new C(1);
+/// try { $c->r = 2; } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// var_dump($c->r);
+/// ```
+/// ```expect
+/// Error: Cannot modify readonly property C::$r
+/// int(1)
+/// ```
 pub(crate) fn assign_obj<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -5852,15 +5888,37 @@ fn assign_property(
         // temporary takes under `RETURN_VALUE_USED`, is the coercion
         // where there was one, php's `tmp`.
         Some((slot, true)) => {
-            let Some((declaring, ty)) = req.declared_property_type(object.class(), bytes) else {
+            let Some(typed) = req.declared_typed_property(object.class(), bytes) else {
                 req.release(value);
                 return Err(Fatal::Error(format!(
                     "InternalError: ZEND_ASSIGN_OBJ placed the typed property ${shown_name}, whose declared type the class does not carry"
                 )));
             };
+            // The `ZEND_ACC_READONLY` arm, which stands before the
+            // value is looked at at all. php's fast path reaches
+            // `zend_assign_to_typed_prop` only over a slot that holds a
+            // value, and a slot nothing has written takes the write
+            // through `zend_std_write_property`, whose own readonly arm
+            // stands under the same `Z_TYPE_P(variable_ptr) != IS_UNDEF`
+            // (`Z/Zend/zend_object_handlers.c:1089`), so what the bit
+            // refuses is the second write and never the initialisation.
+            if typed.readonly && !object.heap().slot(slot).is_undef() {
+                req.release(value);
+                let class = req.class_name(typed.declaring);
+                return Ok(Err(crate::api::raising::throw(
+                    req,
+                    "Error",
+                    &format!("Cannot modify readonly property {class}::${shown_name}"),
+                )));
+            }
             let strict = req.frame_strict_types(frame);
             let value = match crate::ops::verify_property_type(
-                req, &value, &ty, declaring, bytes, strict,
+                req,
+                &value,
+                &typed.ty,
+                typed.declaring,
+                bytes,
+                strict,
             ) {
                 Ok(None) => value,
                 Ok(Some(coerced)) => {
@@ -7677,7 +7735,7 @@ fn step_property(
     // `zend_binary_assign_op_typed_prop`: what the kernel made is held
     // to the declared type under this frame's own regime, and what
     // landed is what the temporary takes.
-    let Some((declaring, ty)) = req.declared_property_type(object.class(), &bytes) else {
+    let Some(typed) = req.declared_typed_property(object.class(), &bytes) else {
         req.release(stepped);
         let shown = String::from_utf8_lossy(&bytes);
         return Err(Fatal::Error(format!(
@@ -7685,19 +7743,25 @@ fn step_property(
         )));
     };
     let strict = req.caller_strict_types(frame);
-    let landed =
-        match crate::ops::verify_property_type(req, &stepped, &ty, declaring, &bytes, strict) {
-            Ok(None) => stepped,
-            Ok(Some(coerced)) => {
-                req.release(stepped);
-                coerced
-            }
-            Err(thrown) => {
-                req.release(stepped);
-                write_out(req, frame, code, op, &Value::null());
-                return Ok(Err(thrown));
-            }
-        };
+    let landed = match crate::ops::verify_property_type(
+        req,
+        &stepped,
+        &typed.ty,
+        typed.declaring,
+        &bytes,
+        strict,
+    ) {
+        Ok(None) => stepped,
+        Ok(Some(coerced)) => {
+            req.release(stepped);
+            coerced
+        }
+        Err(thrown) => {
+            req.release(stepped);
+            write_out(req, frame, code, op, &Value::null());
+            return Ok(Err(thrown));
+        }
+    };
     write_out(req, frame, code, op, &landed);
     req.assign_declared_slot(object.heap(), slot, landed);
     Ok(Ok(()))

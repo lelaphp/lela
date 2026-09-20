@@ -447,6 +447,17 @@ struct DeclaredSlot {
     typed: bool,
 }
 
+/// What a write to a typed declared slot reads off its
+/// `zend_property_info`: the class that declared it, which the
+/// `TypeError` of a value the type refuses and the `Error` of a write
+/// to a readonly property both name; the declared type; and whether
+/// php marked it `ZEND_ACC_READONLY`.
+pub(crate) struct TypedProperty {
+    pub(crate) declaring: ClassId,
+    pub(crate) ty: php_unit::decl::Type,
+    pub(crate) readonly: bool,
+}
+
 /// One user function or method a request declared: the unit and the
 /// body, from which the declaration and the op array are both read.
 pub(crate) struct UserFunction {
@@ -3784,20 +3795,26 @@ impl Request {
         Ok(Some((placed.slot, placed.typed)))
     }
 
-    /// `property_info->type` of the declared property `name` names,
-    /// with the class that declared it, which is what the `TypeError` of
-    /// a write that does not satisfy it names. Read only where
+    /// The `zend_property_info` beside a typed slot, what
+    /// `zend_assign_to_typed_prop` is handed: the declared type, the
+    /// class that declared it, and `ZEND_ACC_READONLY`. Read only where
     /// [`Request::declared_slot_for_write`] said the slot is typed, so
-    /// an untyped write pays nothing for it.
-    pub(crate) fn declared_property_type(
+    /// an untyped write pays nothing for it; a property php lets carry
+    /// `readonly` is typed by php's own refusal, so no untyped write
+    /// misses the bit.
+    pub(crate) fn declared_typed_property(
         &self,
         class: ClassId,
         name: &[u8],
-    ) -> Option<(ClassId, php_unit::decl::Type)> {
+    ) -> Option<TypedProperty> {
         let placed = self.placed_properties(class);
         let at = placed.iter().rposition(|(_, p)| &*p.name.0 == name)?;
         let (declaring, p) = placed.get(at)?;
-        p.ty.clone().map(|ty| (*declaring, ty))
+        p.ty.clone().map(|ty| TypedProperty {
+            declaring: *declaring,
+            ty,
+            readonly: p.is_readonly,
+        })
     }
 
     /// `zend_assign_to_variable` over a declared slot, `ASSIGN_OBJ`'s
