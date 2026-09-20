@@ -1574,8 +1574,46 @@ impl Request {
     /// The arguments are the frame's, each followed through a reference
     /// and one more owner taken, `debug_backtrace_get_args`; under
     /// `zend.exception_ignore_args` the row has no `args`,
-    /// `DEBUG_BACKTRACE_IGNORE_ARGS`. The `Err` is the memory limit
-    /// refusing the rows.
+    /// `DEBUG_BACKTRACE_IGNORE_ARGS`, a user frame's row and a native's
+    /// alike, and the rendering has nothing between the parentheses. The
+    /// `Err` is the memory limit refusing the rows.
+    ///
+    /// ```php
+    /// ini_set('zend.exception_ignore_args', '1');
+    /// class C { function m($a) { return new Exception('m'); } }
+    /// function f($x) { return (new C)->m($x); }
+    /// var_dump(f(1)->getTrace());
+    /// echo f(1)->getTraceAsString(), "\n";
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   array(5) {
+    ///     ["file"]=>
+    ///     string(%d) "%s.php"
+    ///     ["line"]=>
+    ///     int(4)
+    ///     ["function"]=>
+    ///     string(1) "m"
+    ///     ["class"]=>
+    ///     string(1) "C"
+    ///     ["type"]=>
+    ///     string(2) "->"
+    ///   }
+    ///   [1]=>
+    ///   array(3) {
+    ///     ["file"]=>
+    ///     string(%d) "%s.php"
+    ///     ["line"]=>
+    ///     int(5)
+    ///     ["function"]=>
+    ///     string(1) "f"
+    ///   }
+    /// }
+    /// #0 %s(4): C->m()
+    /// #1 %s(6): f()
+    /// #2 {main}
+    /// ```
     fn debug_backtrace(&mut self) -> Result<PhpArray, Thrown> {
         let ignore_arguments = self.exception_ignore_args();
         let links = self.trace_chain();

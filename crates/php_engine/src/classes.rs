@@ -1297,15 +1297,107 @@ fn throwable_get_line(req: &mut Request) -> Result<Value, Thrown> {
 /// `zend_fetch_debug_backtrace` recorded at the site
 /// (`Request::note_throw_site`), one more owner taken for the return;
 /// the empty array where the slot holds none. A throwable made at the
-/// top level has no frame below it, and one made inside a native's call
-/// has that call's row, which an uncaught rendering prints; a user
-/// function's frame arrives with the calls that make it (#359).
+/// top level has no frame below it.
 ///
 /// ```php
 /// var_dump((new Exception)->getTrace());
 /// ```
 /// ```expect
 /// array(0) {
+/// }
+/// ```
+///
+/// One made inside a user function has a row per frame below it, the
+/// innermost first, each at the site the frame was called from: a
+/// method's row names its `class` and `type`, and `args` are the
+/// frame's, a by-reference parameter followed through the reference
+/// and a variadic's extras after the declared ones.
+///
+/// ```php
+/// class C { function m($a, &$r) { $r = 1; return new Exception('m'); } }
+/// function f(int ...$rest) { $x = 0; return (new C)->m('q', $x); }
+/// var_dump(f(1, 2)->getTrace());
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   array(6) {
+///     ["file"]=>
+///     string(%d) "%s.php"
+///     ["line"]=>
+///     int(3)
+///     ["function"]=>
+///     string(1) "m"
+///     ["class"]=>
+///     string(1) "C"
+///     ["type"]=>
+///     string(2) "->"
+///     ["args"]=>
+///     array(2) {
+///       [0]=>
+///       string(1) "q"
+///       [1]=>
+///       int(1)
+///     }
+///   }
+///   [1]=>
+///   array(4) {
+///     ["file"]=>
+///     string(%d) "%s.php"
+///     ["line"]=>
+///     int(4)
+///     ["function"]=>
+///     string(1) "f"
+///     ["args"]=>
+///     array(2) {
+///       [0]=>
+///       int(1)
+///       [1]=>
+///       int(2)
+///     }
+///   }
+/// }
+/// ```
+///
+/// One made inside a call a native serves has that call's row with no
+/// `file` and no `line`, since the link below it is the native and not
+/// user code, and then the native's own row at the opline that called
+/// it. `var_dump` over a `__debugInfo` that answers the trace prints it
+/// as the object's rows, and the object among `var_dump`'s `args` is
+/// the one being dumped, `*RECURSION*`.
+///
+/// ```php
+/// class C { function __debugInfo() { return (new Exception)->getTrace(); } }
+/// var_dump(new C);
+/// ```
+/// ```expect
+/// object(C)#1 (2) {
+///   [0]=>
+///   array(4) {
+///     ["function"]=>
+///     string(11) "__debugInfo"
+///     ["class"]=>
+///     string(1) "C"
+///     ["type"]=>
+///     string(2) "->"
+///     ["args"]=>
+///     array(0) {
+///     }
+///   }
+///   [1]=>
+///   array(4) {
+///     ["file"]=>
+///     string(%d) "%s.php"
+///     ["line"]=>
+///     int(3)
+///     ["function"]=>
+///     string(8) "var_dump"
+///     ["args"]=>
+///     array(1) {
+///       [0]=>
+///       *RECURSION*
+///     }
+///   }
 /// }
 /// ```
 fn throwable_get_trace(req: &mut Request) -> Result<Value, Thrown> {
@@ -1336,6 +1428,29 @@ fn throwable_get_previous(req: &mut Request) -> Result<Value, Thrown> {
 /// ```
 /// ```expect
 /// string(9) "#0 {main}"
+/// ```
+///
+/// The frames a throwable made inside user functions holds render one
+/// line each, the innermost first, and the uncaught rendering of the
+/// same throwable reads the same array.
+///
+/// ```php
+/// function g() { throw new Exception('deep'); }
+/// function f() { g(); }
+/// try { f(); } catch (Exception $e) { var_dump($e->getTraceAsString()); }
+/// f();
+/// ```
+/// ```expect exit=255
+/// string(%d) "#0 %s(3): g()
+/// #1 %s(4): f()
+/// #2 {main}"
+///
+/// Fatal error: Uncaught Exception: deep in %s:2
+/// Stack trace:
+/// #0 %s(3): g()
+/// #1 %s(5): f()
+/// #2 {main}
+///   thrown in %s on line 2
 /// ```
 fn throwable_get_trace_as_string(req: &mut Request) -> Result<Value, Thrown> {
     no_arguments(req)?;
