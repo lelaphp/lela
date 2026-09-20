@@ -21,7 +21,7 @@ use php_heap::{
 use php_unit::decl::{
     ClassConstDecl, ClassDecl, ClassKind, FunctionDecl, MethodDecl, Name, PropertyDecl, Visibility,
 };
-use php_unit::{FramelessEntry, Opcode, Unit};
+use php_unit::{CacheSlot, FramelessEntry, Opcode, Unit};
 
 use crate::api::abi::{
     Callable, Dependency, Extension, IniVerdict, NativeNew, ObjectHandlers, PropertyRead,
@@ -281,9 +281,10 @@ pub struct Request {
     heap: Heap,
     stack: VmStack,
     vm: Vm,
-    /// The map table of design §5.14, laid down with the request and
-    /// read once a published unit has map-pointer offsets to give it.
-    #[allow(dead_code)]
+    /// The map table of design §5.14, php's `CG(map_ptr_base)`: what a
+    /// published unit's map pointers index, laid down with the request,
+    /// every entry `NULL` until touched. Every op array's runtime cache
+    /// stands in it ([`exec::RuntimeCache`]) and nowhere else.
     map: MapTable,
     states: Vec<(TypeId, Box<dyn Any + Send>)>,
     ini: Vec<(Vec<u8>, Vec<u8>)>,
@@ -588,9 +589,24 @@ impl Request {
     pub(crate) fn push_frame(&mut self, unit: Arc<Unit>) -> FrameRef {
         let code = exec::code_of(&unit);
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
+        exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
         let frame = self.stack.push_frame(slots);
         self.vm.push(unit);
         frame
+    }
+
+    /// `CACHED_PTR(num)`: what the runtime cache of the op array `frame`
+    /// serves holds at `slot`, in this request's map table
+    /// ([`exec::Vm::cached`]).
+    pub(crate) fn cached(&self, frame: FrameRef, slot: CacheSlot) -> exec::Cached {
+        self.vm.cached(&self.map, frame, slot)
+    }
+
+    /// `CACHE_PTR(num, ptr)`: `value` into the runtime cache of the op
+    /// array `frame` serves at `slot`, in this request's map table
+    /// ([`exec::Vm::prime`]), where every pass after reads it.
+    pub(crate) fn prime(&mut self, frame: FrameRef, slot: CacheSlot, value: exec::Cached) {
+        self.vm.prime(&mut self.map, frame, slot, value);
     }
 
     /// Push a frame for the body of the user function `function`, the
@@ -626,6 +642,7 @@ impl Request {
         });
         let num_args = u32::try_from(call.arguments.len()).unwrap_or(u32::MAX);
         let closure = call.closure;
+        exec::init_runtime_cache(&mut self.map, code, body);
         let frame = self.stack.push_frame(slots);
         self.vm.push_body(
             unit,

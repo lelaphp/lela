@@ -14,6 +14,7 @@
 
 use std::any::Any;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -163,6 +164,31 @@ pub(crate) struct Shared {
     /// constant strings enter as it is published, grown here alone and
     /// read by every request thread with nothing taken.
     strings: Mutex<Strings>,
+    /// `CG(map_ptr_last)`: how many map pointers the engine has handed
+    /// out (design §5.14), which is the next one's offset. Every op
+    /// array of a unit takes one as the unit is published
+    /// (`ZEND_MAP_PTR_NEW` at `zend_persist_op_array`,
+    /// `Z/ext/opcache/zend_persist.c:715`), and a request's map table
+    /// grows to what its units index.
+    pub(crate) map_ptr_last: AtomicU32,
+}
+
+/// `ZEND_MAP_PTR_NEW` over every op array of `unit`, at its publication:
+/// each takes the next offset the engine has, so a request serving the
+/// unit finds each op array's runtime cache at its own entry
+/// ([`exec::init_runtime_cache`]). A unit compiled for one request,
+/// from source the host handed over, takes its offsets here too: php
+/// gives such an op array a cache on the heap (`ZEND_ACC_HEAP_RT_CACHE`)
+/// and no offset, so its count does not move for it, where this one
+/// does.
+pub(crate) fn assign_map_ptrs(unit: &mut Unit, map_ptr_last: &AtomicU32) {
+    let bodies = std::iter::once(&mut unit.main)
+        .chain(unit.functions.iter_mut().map(|(_, code)| code))
+        .chain(unit.dynamic.iter_mut().map(|(_, code)| code))
+        .chain(unit.methods.iter_mut().map(|method| &mut method.body));
+    for code in bodies {
+        code.runtime_cache = map_ptr_last.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// One native method's entry, `zend_internal_function` on a class:
@@ -327,6 +353,7 @@ impl Shared {
             self.declared(),
             stack,
             &mut *strings,
+            &self.map_ptr_last,
         )
     }
 
@@ -661,6 +688,7 @@ impl EngineBuilder {
                 reenter: self.reenter,
                 units: Cache::new(MAX_ACCELERATED_FILES),
                 strings: Mutex::new(strings),
+                map_ptr_last: AtomicU32::new(0),
             }),
         }
     }
@@ -884,6 +912,7 @@ impl Engine {
                     shared.declared(),
                     stack,
                     req.heap_mut(),
+                    &shared.map_ptr_last,
                 ))
             }
             None => self.shared.cached(&script, req.stack_limit()),
@@ -977,7 +1006,9 @@ impl Engine {
 /// reads as `CG(function_table)` before it serves a call of
 /// `zend_try_compile_special_func`'s table itself, and the classes, which
 /// it reads as `CG(class_table)` to know a method's callee; and `stack`
-/// the calling thread's limit, which the compiler's recursion is held to.
+/// the calling thread's limit, which the compiler's recursion is held to;
+/// and `map_ptr_last` the engine's count of map pointers, which every op
+/// array of the unit takes one from ([`assign_map_ptrs`]).
 fn compile(
     source: &[u8],
     filename: &[u8],
@@ -985,6 +1016,7 @@ fn compile(
     declared: Declared<'_>,
     stack: StackLimit,
     strings: &mut dyn Intern,
+    map_ptr_last: &AtomicU32,
 ) -> Result<Arc<Unit>, CompileError> {
     let options = php_compile::Options {
         filename: Name(filename.into()),
@@ -999,7 +1031,9 @@ fn compile(
         classes: declared.classes.to_vec(),
         stack,
     };
-    php_compile::compile_source(source, &options, strings).map(Arc::new)
+    let mut unit = php_compile::compile_source(source, &options, strings)?;
+    assign_map_ptrs(&mut unit, map_ptr_last);
+    Ok(Arc::new(unit))
 }
 
 /// What compiling the unit raised, raised now, each through the
@@ -1927,6 +1961,7 @@ mod tests {
                 Declared::default(),
                 StackLimit::UNCHECKED,
                 req.heap_mut(),
+                &engine.shared.map_ptr_last,
             );
             assert!(compiled.is_ok(), "the source compiles");
             assert!(

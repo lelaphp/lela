@@ -940,7 +940,7 @@ fn init_call(
         }
     };
     let slot = CacheSlot(op.out);
-    let function = if let Cached::Function(function) = req.vm().cached(frame, slot) {
+    let function = if let Cached::Function(function) = req.cached(frame, slot) {
         Some(function)
     } else {
         let found = lookups.iter().find_map(|&at| {
@@ -948,7 +948,7 @@ fn init_call(
             exec::find_function(req, key.as_str_bytes().unwrap_or(name.as_bytes()))
         });
         if let Some(function) = found {
-            req.vm_mut().prime(frame, slot, Cached::Function(function));
+            req.prime(frame, slot, Cached::Function(function));
         }
         found
     };
@@ -2432,7 +2432,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let slot = CacheSlot(op.out);
-    let primed = req.vm().cached(frame, slot);
+    let primed = req.cached(frame, slot);
     let class = match primed {
         Cached::Class(class) | Cached::ClassAndCallee { class, .. } => class,
         _ => {
@@ -2445,7 +2445,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
             // named at all, the class alone is what the slot holds, and
             // where it is a constant the pair below writes both.
             if op.op2_type != OperandKind::Const {
-                req.vm_mut().prime(frame, slot, Cached::Class(class));
+                req.prime(frame, slot, Cached::Class(class));
             }
             class
         }
@@ -2504,8 +2504,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
     // none of the three, so the write stands whenever the name was a
     // constant.
     if op.op2_type == OperandKind::Const {
-        req.vm_mut()
-            .prime(frame, slot, Cached::ClassAndCallee { class, function });
+        req.prime(frame, slot, Cached::ClassAndCallee { class, function });
     }
     static_call_frame(req, frame, op, class, function, name)
 }
@@ -4840,7 +4839,7 @@ fn cached_class(
     at: u32,
     slot: Option<CacheSlot>,
 ) -> Option<crate::api::values::ClassId> {
-    if let Some(Cached::Class(class)) = slot.map(|slot| req.vm().cached(frame, slot)) {
+    if let Some(Cached::Class(class)) = slot.map(|slot| req.cached(frame, slot)) {
         return Some(class);
     }
     let lowered = exec::constant(code, ConstIdx(at.saturating_add(1)));
@@ -4848,7 +4847,7 @@ fn cached_class(
         .as_str_bytes()
         .and_then(|lowered| exec::find_class(req, lowered));
     if let (Some(slot), Some(class)) = (slot, found) {
-        req.vm_mut().prime(frame, slot, Cached::Class(class));
+        req.prime(frame, slot, Cached::Class(class));
     }
     found
 }
@@ -5029,7 +5028,7 @@ pub(crate) fn jmp_frameless<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let slot = CacheSlot(op.extended_value);
-    let answer = match req.vm().cached(frame, slot) {
+    let answer = match req.cached(frame, slot) {
         Cached::Hit => Cached::Hit,
         Cached::Miss => Cached::Miss,
         Cached::Unprimed
@@ -5041,7 +5040,7 @@ pub(crate) fn jmp_frameless<T: Tier>(
                 .as_str_bytes()
                 .is_some_and(|name| exec::find_function(req, name).is_some());
             let answer = if found { Cached::Miss } else { Cached::Hit };
-            req.vm_mut().prime(frame, slot, answer);
+            req.prime(frame, slot, answer);
             answer
         }
     };
@@ -11357,10 +11356,7 @@ mod tests {
         let frame = req.push_frame(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
-        assert_eq!(
-            req.vm().cached(frame, CacheSlot(init.out)),
-            Cached::Unprimed
-        );
+        assert_eq!(req.cached(frame, CacheSlot(init.out)), Cached::Unprimed);
 
         assert_eq!(
             init_fcall_by_name::<Nop>(&mut req, frame, code, &init),
@@ -11370,7 +11366,7 @@ mod tests {
         let strlen = req.function_named(b"strlen");
         assert!(strlen.is_some());
         assert_eq!(
-            req.vm().cached(frame, CacheSlot(init.out)),
+            req.cached(frame, CacheSlot(init.out)),
             Cached::Function(strlen.unwrap_or(Function::PASS)),
             "and primes the slot with the callee"
         );
@@ -11386,6 +11382,101 @@ mod tests {
             "and pushes the same callee"
         );
         assert_eq!(popped_callee(&mut req), strlen);
+    }
+
+    /// A unit declaring `f`, whose body is the `INIT_FCALL_BY_NAME` of
+    /// [`by_name`] alone, and a main op array with a cache slot of its
+    /// own; each op array with the map pointer publication assigns it.
+    fn declaring_f(engine: &Engine, strings: &mut php_heap::Strings) -> Arc<Unit> {
+        use php_unit::decl::{FunctionDecl, Name};
+        let by_name = by_name(strings);
+        let mut body = by_name.main.clone();
+        body.oplines = body.oplines.iter().take(1).copied().collect();
+        let decl = FunctionDecl {
+            name: Name::from("f"),
+            parameters: Vec::new(),
+            return_type: None,
+            returns_by_ref: false,
+            attributes: Vec::new(),
+            doc_comment: None,
+            file: Name::default(),
+            line: 0,
+            end_line: 0,
+            frameless: Vec::new(),
+        };
+        let mut unit = Unit {
+            main: OpArray {
+                cache_size: 8,
+                ..OpArray::default()
+            },
+            functions: vec![(decl, body)],
+            ..Unit::default()
+        };
+        crate::engine::assign_map_ptrs(&mut unit, &engine.shared.map_ptr_last);
+        Arc::new(unit)
+    }
+
+    /// The runtime cache is the op array's for the request and not the
+    /// frame's (`ZEND_MAP_PTR(op_array->run_time_cache)`, laid down by
+    /// `init_func_run_time_cache` on the first activation): a function
+    /// called twice finds on its second call the slot its first call
+    /// primed, so the `INIT_FCALL_BY_NAME` in its body looks the table
+    /// up once across the two calls, and the main op array's own slot
+    /// stands at another entry and is not what it primed.
+    #[test]
+    fn a_function_called_twice_reads_on_its_second_call_what_its_first_primed() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let mut strings = php_heap::Strings::new();
+        let unit = declaring_f(&engine, &mut strings);
+        let main = req.push_frame(Arc::clone(&unit));
+        req.declare_functions(&unit);
+        let f = req.function_named(b"f").unwrap_or(Function::PASS);
+        let code = crate::exec::body_of(&unit, exec::Body::Function(0))
+            .cloned()
+            .unwrap_or_default();
+        let init = code.oplines.first().copied().unwrap_or_default();
+        let strlen = req.function_named(b"strlen");
+
+        for call in 1..=2 {
+            let state = CallState {
+                function: f,
+                name: None,
+                arguments: Vec::new(),
+                count: 0,
+                this: None,
+                called_scope: None,
+                closure: None,
+                stage: CallStage::Serving,
+                frameless: false,
+                coerced: Vec::new(),
+            };
+            let frame = req
+                .push_user_frame(f, state, None, Some(main))
+                .unwrap_or(main);
+            assert_eq!(
+                init_fcall_by_name::<Nop>(&mut req, frame, &code, &init),
+                Ok(Stepped::Same(frame)),
+                "call {call}"
+            );
+            assert_eq!(
+                req.vm().lookups,
+                1,
+                "the first call looks the table up and the second reads the slot (call {call})"
+            );
+            assert_eq!(
+                req.cached(frame, CacheSlot(init.out)),
+                Cached::Function(strlen.unwrap_or(Function::PASS)),
+                "the slot is primed with the callee (call {call})"
+            );
+            assert_eq!(popped_callee(&mut req), strlen, "call {call}");
+            req.pop_frame();
+        }
+        assert_eq!(
+            req.cached(main, CacheSlot(0)),
+            Cached::Unprimed,
+            "the main op array's cache is its own"
+        );
     }
 
     /// The call last pushed off the stack, its callee, the name it held
@@ -11440,10 +11531,10 @@ mod tests {
         );
         assert_eq!(req.vm().lookups, 2, "foo\\strlen misses, strlen hits");
         assert_eq!(
-            req.vm().cached(frame, CacheSlot(8)),
+            req.cached(frame, CacheSlot(8)),
             Cached::Function(strlen.unwrap_or(Function::PASS))
         );
-        assert_eq!(req.vm().cached(frame, CacheSlot(0)), Cached::Unprimed);
+        assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
 
         assert_eq!(
             init_ns_fcall_by_name::<Nop>(&mut req, frame, code, &init),
@@ -11491,7 +11582,7 @@ mod tests {
                 Ok(Stepped::Threw(frame))
             );
             assert_eq!(req.vm().lookups, pass);
-            assert_eq!(req.vm().cached(frame, CacheSlot(0)), Cached::Unprimed);
+            assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
             assert!(matches!(req.uncaught(), Err(Fatal::Error(_))));
         }
     }
@@ -11543,7 +11634,7 @@ mod tests {
         let clause = code.oplines.first().copied().unwrap_or_default();
         let error = req.class_named(b"error");
         assert!(error.is_some(), "the engine declares Error");
-        assert_eq!(req.vm().cached(frame, CacheSlot(0)), Cached::Unprimed);
+        assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
 
         for pass in 1..=2 {
             let thrown = crate::api::raising::throw(&mut req, "Error", "e");
@@ -11559,7 +11650,7 @@ mod tests {
             );
             assert_eq!(req.vm().lookups, 1, "one lookup over {pass} pass(es)");
             assert!(
-                matches!(req.vm().cached(frame, CacheSlot(0)), Cached::Class(class) if Some(class) == error),
+                matches!(req.cached(frame, CacheSlot(0)), Cached::Class(class) if Some(class) == error),
                 "the clause's class is in the slot after pass {pass}"
             );
         }
@@ -11628,7 +11719,7 @@ mod tests {
         assert!(closure.is_some(), "the engine declares Closure");
         let callee = closure.and_then(|class| req.method_named(class, b"fromcallable"));
         assert!(callee.is_some(), "Closure::fromCallable is a static method");
-        assert_eq!(req.vm().cached(frame, CacheSlot(0)), Cached::Unprimed);
+        assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
 
         for pass in 1..=2 {
             req.vm_mut().jump(frame, 0);
@@ -11640,7 +11731,7 @@ mod tests {
             assert_eq!(req.vm().lookups, 1, "one lookup over {pass} pass(es)");
             assert!(
                 matches!(
-                    req.vm().cached(frame, CacheSlot(0)),
+                    req.cached(frame, CacheSlot(0)),
                     Cached::ClassAndCallee { class, function }
                         if Some(class) == closure && Some(function) == callee
                 ),
@@ -11677,7 +11768,7 @@ mod tests {
             assert!(req.take_pending().is_some(), "it threw on pass {pass}");
             assert_eq!(req.vm().lookups, 1, "one lookup over {pass} pass(es)");
             assert!(
-                matches!(req.vm().cached(frame, CacheSlot(0)), Cached::Class(class)
+                matches!(req.cached(frame, CacheSlot(0)), Cached::Class(class)
                     if Some(class) == exception),
                 "the class alone is in the slot after pass {pass}"
             );
@@ -11708,7 +11799,7 @@ mod tests {
                 Ok(Stepped::Threw(frame))
             );
             assert_eq!(req.vm().lookups, pass, "looked up again on pass {pass}");
-            assert_eq!(req.vm().cached(frame, CacheSlot(0)), Cached::Unprimed);
+            assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
         }
         assert!(matches!(req.uncaught(), Err(Fatal::Error(_))));
     }
@@ -11784,8 +11875,7 @@ mod tests {
         assert!(named.is_some(), "the engine declares stdClass");
         let class = named.unwrap_or(ClassId(u32::MAX));
         for slot in [0, 8, 16] {
-            req.vm_mut()
-                .prime(frame, CacheSlot(slot), Cached::Class(class));
+            req.prime(frame, CacheSlot(slot), Cached::Class(class));
         }
 
         let new_op = code.oplines.first().copied().unwrap_or_default();
@@ -11862,7 +11952,7 @@ mod tests {
         let frame = req.push_frame(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let jmp = code.oplines.first().copied().unwrap_or_default();
-        assert_eq!(req.vm().cached(frame, CacheSlot(0)), Cached::Unprimed);
+        assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
 
         for pass in 1..=2 {
             req.vm_mut().jump(frame, 0);
@@ -11876,7 +11966,7 @@ mod tests {
                 "the jump is taken on pass {pass}"
             );
             assert_eq!(req.vm().lookups, 1, "one lookup over {pass} pass(es)");
-            assert_eq!(req.vm().cached(frame, CacheSlot(0)), Cached::Hit);
+            assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Hit);
         }
     }
 
@@ -11904,7 +11994,7 @@ mod tests {
                 "on to the call by name on pass {pass}"
             );
             assert_eq!(req.vm().lookups, 1);
-            assert_eq!(req.vm().cached(frame, CacheSlot(0)), Cached::Miss);
+            assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Miss);
         }
     }
 

@@ -109,6 +109,7 @@ MapPtr::new
 MapPtr::offset
 MapTable
 MapTable::base
+MapTable::get
 MapTable::map
 MapTable::new
 Number

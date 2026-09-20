@@ -278,6 +278,14 @@ pub struct OpArray {
     pub line_start: u32,
     pub line_end: u32,
     pub cache_size: u32,
+    /// `ZEND_MAP_PTR(op_array->run_time_cache)` as the offset it is: the
+    /// request's map-table entry the engine assigned the op array when
+    /// the unit was published (`ZEND_MAP_PTR_NEW`, design §5.14), and
+    /// zero until it did. The cache itself is the request's, laid down
+    /// on the op array's first activation and read through the entry;
+    /// what lives there is the engine's, so the offset is typed where
+    /// it is read and the unit carries the number alone.
+    pub runtime_cache: u32,
     /// `op_array->dynamic_func_defs` (`Z/Zend/zend_compile.h:559`): the
     /// functions written inside this op array that no name binds while
     /// the file compiles, in the order `zend_add_dynamic_func_def` took

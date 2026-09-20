@@ -61,6 +61,16 @@ impl MapTable {
         self.entries.as_ptr() as usize
     }
 
+    /// `ZEND_MAP_PTR_GET`: the `T` at `ptr` where the request has touched
+    /// it, and none where it has not.
+    #[must_use]
+    pub fn get<T: 'static>(&self, ptr: MapPtr<T>) -> Option<&T> {
+        self.entries
+            .get(ptr.offset() as usize)?
+            .as_ref()?
+            .downcast_ref::<T>()
+    }
+
     /// The `T` at `ptr`, built by `T::default()` on first touch.
     pub fn map<T: Default + Send + 'static>(&mut self, ptr: MapPtr<T>) -> &mut T {
         let at = ptr.offset() as usize;
@@ -87,9 +97,11 @@ mod tests {
     fn a_map_pointer_allocates_on_first_touch_and_keeps_what_was_written() {
         let mut table = MapTable::new();
         let ptr: MapPtr<u32> = MapPtr::new(3);
+        assert_eq!(table.get(ptr), None, "untouched, there is nothing to read");
         assert_eq!(*table.map(ptr), 0);
         *table.map(ptr) = 7;
         assert_eq!(*table.map(ptr), 7);
+        assert_eq!(table.get(ptr), Some(&7));
         assert_eq!(table.base(), table.entries.as_ptr() as usize);
     }
 }
