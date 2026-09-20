@@ -854,20 +854,22 @@ pub(super) fn reflection_constant_get_value(req: &mut Request) -> Result<Value, 
     Ok(constant(req, &name)?.unwrap_or_default())
 }
 
-/// `ReflectionConstant::isDeprecated()`: `CONST_DEPRECATED`, which no
-/// constant this engine declares carries, since `E_STRICT`, php's one
-/// deprecated constant, is not declared.
+/// `ReflectionConstant::isDeprecated()`: `CONST_DEPRECATED`, which is
+/// the `#[\Deprecated]` attribute on the declaration, and `E_STRICT`
+/// is the one constant carrying it.
 ///
 /// ```php
+/// var_dump((new ReflectionConstant('E_STRICT'))->isDeprecated());
 /// var_dump((new ReflectionConstant('PHP_EOL'))->isDeprecated());
 /// ```
 /// ```expect
+/// bool(true)
 /// bool(false)
 /// ```
 pub(super) fn reflection_constant_is_deprecated(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
-    this_global_constant(req)?;
-    Ok(Value::bool(false))
+    let name = this_global_constant(req)?;
+    Ok(Value::bool(super::constant_is_deprecated(req, &name)))
 }
 
 /// `ReflectionConstant::getExtensionName()`: the extension that
@@ -936,9 +938,11 @@ fn constant_extension_name(req: &mut Request) -> Result<Option<String>, Thrown> 
 ///
 /// ```php
 /// echo new ReflectionConstant('PHP_INT_SIZE');
+/// echo new ReflectionConstant('E_STRICT');
 /// ```
 /// ```expect
 /// Constant [ <persistent> int PHP_INT_SIZE ] { 8 }
+/// Constant [ <persistent, deprecated> int E_STRICT ] { 2048 }
 /// ```
 ///
 /// ```php

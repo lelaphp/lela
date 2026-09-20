@@ -19,7 +19,8 @@ use php_heap::{
     VmStack, Zval, ZvalRef,
 };
 use php_unit::decl::{
-    ClassConstDecl, ClassDecl, ClassKind, FunctionDecl, MethodDecl, Name, PropertyDecl, Visibility,
+    Attribute, ClassConstDecl, ClassDecl, ClassKind, FunctionDecl, MethodDecl, Name, PropertyDecl,
+    Visibility,
 };
 use php_unit::{CacheSlot, FramelessEntry, Opcode, Unit};
 
@@ -6809,6 +6810,27 @@ impl Request {
         }
         self.constants.push((name.to_vec(), value));
         Ok(true)
+    }
+
+    /// `zend_constant::attributes`: the attributes the declaration of
+    /// the global constant `name` carries, and the empty list for a
+    /// name no table has and for one a running program defined, which
+    /// carries none until the compiler reads the `#[...]` a program
+    /// writes on a `const` (#465). The key is the one
+    /// `zend_register_constant` writes, the namespace lowered.
+    ///
+    /// `#[\Deprecated]` among them is php's `CONST_DEPRECATED`, so
+    /// this is what `ReflectionConstant::isDeprecated()` reads and what
+    /// the deprecation a read raises is worded from
+    /// ([`crate::api::raising::deprecated_constant`]).
+    #[must_use]
+    pub fn constant_attributes(&self, name: &[u8]) -> &[Attribute] {
+        self.shared
+            .declared()
+            .constants
+            .iter()
+            .find(|decl| decl.name.0.as_ref() == name)
+            .map_or(&[], |decl| decl.attributes.as_slice())
     }
 
     /// `spl_autoload_register()`.

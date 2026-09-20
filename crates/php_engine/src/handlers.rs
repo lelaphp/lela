@@ -3179,6 +3179,15 @@ pub(crate) fn fetch_constant<T: Tier>(
     let slot = exec::temporary_slot(code, op.out);
     let previous = req.set_slot(frame, slot, value);
     req.release(previous);
+    // `if (ZEND_CONSTANT_FLAGS(c) & CONST_DEPRECATED)`
+    // (`Z/Zend/zend_execute.c:5439`): the value is copied first and the
+    // deprecation raised after, and the opline then advances under
+    // `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION`, so a handler that throws
+    // leaves the temporary written and the throwable pending. The
+    // constant a deprecation is worded from is the one the compiler
+    // refused to substitute (`can_ct_eval_const`), so the scan of the
+    // declaration table is a scan this opline alone makes.
+    crate::api::raising::deprecated_constant(req, &key);
     Ok(advance(req, frame))
 }
 

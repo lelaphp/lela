@@ -319,10 +319,21 @@ pub struct ClassDecl {
 }
 
 /// A global constant, `const X = ...;` or `define()` folded at compile time.
+///
+/// `attributes` is php's `zend_constant::attributes`, the table
+/// `zend_add_global_constant_attribute` hangs on a constant an
+/// extension registered and `ZEND_DECLARE_ATTRIBUTED_CONST` hangs on
+/// one a program wrote. `#[\Deprecated]` among them is php's
+/// `CONST_DEPRECATED`: `gen_stub` raises the bit from the attribute in
+/// the stub (`Z/Zend/zend_constants_arginfo.h:17` for `E_STRICT`) and
+/// `zend_compile_attributes`' validator raises it for a program's own,
+/// so the attribute is the whole of what `CONST_DEPRECATED` says and
+/// no second field carries it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConstDecl {
     pub name: Name,
     pub value: ConstExpr,
+    pub attributes: Vec<Attribute>,
 }
 
 /// An ini entry an extension declares: its default and where it may be

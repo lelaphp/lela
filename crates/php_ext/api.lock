@@ -191,6 +191,7 @@ request::Request::class_decl
 request::Request::class_extension
 request::Request::class_extension_name
 request::Request::clear_last_error
+request::Request::constant_attributes
 request::Request::constants
 request::Request::current_file
 request::Request::current_line

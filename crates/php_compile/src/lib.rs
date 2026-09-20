@@ -568,10 +568,12 @@ mod tests {
                 ConstDecl {
                     name: Name(b"T_LNUMBER".to_vec().into_boxed_slice()),
                     value: ConstExpr::Long(260),
+                    attributes: Vec::new(),
                 },
                 ConstDecl {
                     name: Name(b"PHP_OS".to_vec().into_boxed_slice()),
                     value: ConstExpr::Str(b"Darwin".to_vec().into_boxed_slice()),
+                    attributes: Vec::new(),
                 },
             ],
             ..Options::default()

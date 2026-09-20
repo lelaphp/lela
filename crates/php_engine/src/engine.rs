@@ -20,7 +20,9 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use php_compile::{CompileError, StackLimit};
 use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
-use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, MethodDecl, Name};
+use php_unit::decl::{
+    Attribute, AttributeArgument, ClassDecl, ConstDecl, ConstExpr, FunctionDecl, MethodDecl, Name,
+};
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
 use crate::api::abi::{Cache, Entry, Extension, NativeNew, ObjectHandlers, StartupIni};
@@ -252,6 +254,69 @@ pub(crate) struct Declared<'a> {
     pub(crate) classes: &'a [ClassDecl],
 }
 
+/// The error levels `register_zend_constants_symbols` registers
+/// (`Z/Zend/zend_constants_arginfo.h:6-20`), in the order php
+/// registers them, with `E_STRICT` among them carrying the one
+/// attribute `zend_add_global_constant_attribute` hangs on a Zend
+/// constant at the tag: `#[\Deprecated(since: '8.4', message: 'the
+/// error level was removed')]`, which is the whole of its
+/// `CONST_DEPRECATED` (`Z/Zend/zend_constants_arginfo.h:32-37`).
+/// `E_ALL`, beside the constants `main.c` registers above, is their
+/// union without `E_STRICT`, the level 8.4 dropped from the mask
+/// (`Z/Zend/zend_errors.h:43`).
+///
+/// ```php
+/// var_dump(E_ERROR, E_WARNING, E_USER_DEPRECATED, E_ALL);
+/// ```
+/// ```expect
+/// int(1)
+/// int(2)
+/// int(16384)
+/// int(30719)
+/// ```
+fn error_levels() -> Vec<ConstDecl> {
+    [
+        ("E_ERROR", 1 << 0),
+        ("E_WARNING", 1 << 1),
+        ("E_PARSE", 1 << 2),
+        ("E_NOTICE", 1 << 3),
+        ("E_CORE_ERROR", 1 << 4),
+        ("E_CORE_WARNING", 1 << 5),
+        ("E_COMPILE_ERROR", 1 << 6),
+        ("E_COMPILE_WARNING", 1 << 7),
+        ("E_USER_ERROR", 1 << 8),
+        ("E_USER_WARNING", 1 << 9),
+        ("E_USER_NOTICE", 1 << 10),
+        ("E_STRICT", 1 << 11),
+        ("E_RECOVERABLE_ERROR", 1 << 12),
+        ("E_DEPRECATED", 1 << 13),
+        ("E_USER_DEPRECATED", 1 << 14),
+    ]
+    .into_iter()
+    .map(|(name, value)| ConstDecl {
+        name: Name::from(name),
+        value: ConstExpr::Long(value),
+        attributes: if name == "E_STRICT" {
+            vec![Attribute {
+                name: Name::from("Deprecated"),
+                arguments: vec![
+                    AttributeArgument {
+                        name: Some(Name::from("since")),
+                        value: ConstExpr::Str(b"8.4".as_slice().into()),
+                    },
+                    AttributeArgument {
+                        name: Some(Name::from("message")),
+                        value: ConstExpr::Str(b"the error level was removed".as_slice().into()),
+                    },
+                ],
+            }]
+        } else {
+            Vec::new()
+        },
+    })
+    .collect()
+}
+
 impl Shared {
     /// The tables the compiler reads, as [`Declared`].
     pub(crate) fn declared(&self) -> Declared<'_> {
@@ -267,7 +332,8 @@ impl Shared {
     /// reaches with no extension loaded, as `ConstDecl`s the compiler
     /// folds where they stand (`zend_try_ct_eval_const`, design §6.1)
     /// and the request table reads while a program executes, both from
-    /// one row.
+    /// one row. The error levels are [`error_levels`], the one block
+    /// of them carrying an attribute.
     ///
     /// ```php
     /// echo PHP_VERSION, PHP_EOL;
@@ -277,7 +343,7 @@ impl Shared {
     /// ```expect
     /// 8.5.9
     /// int(8)
-    /// int(32767)
+    /// int(30719)
     /// int(9223372036854775807)
     /// int(-9223372036854775808)
     /// int(112)
@@ -293,7 +359,7 @@ impl Shared {
             ("PHP_INT_MAX", ConstExpr::Long(i64::MAX)),
             ("PHP_INT_MIN", ConstExpr::Long(i64::MIN)),
             ("PHP_INT_SIZE", ConstExpr::Long(8)),
-            ("E_ALL", ConstExpr::Long(32767)),
+            ("E_ALL", ConstExpr::Long(30719)),
         ];
         // `main/main.stub.php:260-328`: the output layer's constants,
         // the operation `ob_start`'s callback is handed and the flags
@@ -317,13 +383,16 @@ impl Shared {
             ]
             .map(|(name, value)| (name, ConstExpr::Long(value))),
         );
-        decls
+        let mut out: Vec<ConstDecl> = decls
             .into_iter()
             .map(|(name, value)| ConstDecl {
                 name: Name::from(name),
                 value,
+                attributes: Vec::new(),
             })
-            .collect()
+            .collect();
+        out.extend(error_levels());
+        out
     }
 
     /// One source compiled with its constant strings interned into the

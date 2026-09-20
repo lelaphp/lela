@@ -1352,6 +1352,19 @@ fn namespace_end(name: &[u8]) -> Option<usize> {
     name.iter().rposition(|&b| b == b'\\')
 }
 
+/// The key `zend_register_constant` writes a constant under, made of
+/// the name as a program wrote it: the leading `\` dropped, as
+/// `zend_lookup_class` drops it, and the namespace lowered, the name
+/// itself left as written.
+fn constant_key(name: &[u8]) -> Vec<u8> {
+    let bare = name.strip_prefix(b"\\").unwrap_or(name);
+    let mut key = bare.to_vec();
+    if let Some(end) = namespace_end(bare) {
+        key[..end].make_ascii_lowercase();
+    }
+    key
+}
+
 /// `reflection_class_object_ctor` with `is_object` off,
 /// `ReflectionClass::__construct(object|string $objectOrClass)`: an
 /// object's class or the class named, its declared name kept as
@@ -3065,11 +3078,7 @@ fn reflection_class_constant_get_doc_comment(req: &mut Request) -> Result<Value,
 /// ```
 fn reflection_constant_construct(req: &mut Request) -> Result<Value, Thrown> {
     let name = one_string_argument(req)?;
-    let bare = name.strip_prefix(b"\\").unwrap_or(&name);
-    let mut lowered = bare.to_vec();
-    if let Some(end) = namespace_end(bare) {
-        lowered[..end].make_ascii_lowercase();
-    }
+    let lowered = constant_key(&name);
     if constant(req, &lowered)?.is_none() {
         return Err(throw(
             req,
@@ -3087,23 +3096,48 @@ fn reflection_constant_construct(req: &mut Request) -> Result<Value, Thrown> {
 }
 
 /// `ReflectionConstant::getAttributes(?string $name = null, int $flags
-/// = 0)`: `reflect_attributes` over `const_->attributes`. A constant
-/// declaration (`ConstDecl`) carries no attributes, and no constant
-/// this engine declares has one in php either (`E_STRICT`, the one
-/// with `#[\Deprecated]`, is not declared), so the answer is the empty
-/// array; `ReflectionConstant_getAttributes_internal.phpt` waits on
-/// both.
+/// = 0)`: `reflect_attributes` over `const_->attributes`, the
+/// declaration's own, at `ZEND_ATTRIBUTE_TARGET_CONST` and in no
+/// scope, since a global constant's arguments are evaluated outside
+/// every class. `E_STRICT` is the one constant carrying an attribute
+/// here, as it is the one carrying one in php; a constant a program
+/// defined carries none until the compiler reads the `#[...]` written
+/// on a `const` (#465).
 ///
 /// ```php
-/// var_dump((new ReflectionConstant('PHP_EOL'))->getAttributes());
+/// var_dump((new ReflectionConstant('E_STRICT'))->getAttributes());
 /// ```
 /// ```expect
-/// array(0) {
+/// array(1) {
+///   [0]=>
+///   object(ReflectionAttribute)#2 (1) {
+///     ["name"]=>
+///     string(10) "Deprecated"
+///   }
 /// }
 /// ```
+///
+/// ```php
+/// var_dump((new ReflectionConstant('E_STRICT'))->getAttributes()[0]->getArguments());
+/// var_dump((new ReflectionConstant('PHP_EOL'))->getAttributes());
+/// var_dump(count((new ReflectionConstant('E_STRICT'))->getAttributes('Deprecated')), count((new ReflectionConstant('E_STRICT'))->getAttributes('Other')));
+/// ```
+/// ```expect
+/// array(2) {
+///   ["since"]=>
+///   string(3) "8.4"
+///   ["message"]=>
+///   string(27) "the error level was removed"
+/// }
+/// array(0) {
+/// }
+/// int(1)
+/// int(0)
+/// ```
 fn reflection_constant_get_attributes(req: &mut Request) -> Result<Value, Thrown> {
-    this_name(req, "ReflectionConstant")?;
-    attr::reflect_attributes(req, &[], None, attr::TARGET_CONST)
+    let (_, name) = this_name(req, "ReflectionConstant")?;
+    let attributes = req.constant_attributes(&constant_key(&name)).to_vec();
+    attr::reflect_attributes(req, &attributes, None, attr::TARGET_CONST)
 }
 
 /// `_extension_string`: the header with the extension's number and
@@ -3165,10 +3199,21 @@ fn extension_string(req: &mut Request, extension: ExtensionId, indent: &str) -> 
 fn const_string(req: &mut Request, name: &[u8], indent: &str) -> String {
     let value = constant(req, name).ok().flatten().unwrap_or_default();
     let shown = value_string(req, &value);
-    let words = if constant_is_persistent(req, name) {
-        "<persistent> "
+    // `DUMP_CONST_FLAG` (`php_reflection.c`'s `_const_string`): the
+    // words of the flags the constant carries, in `CONST_PERSISTENT`,
+    // `CONST_NO_FILE_CACHE`, `CONST_DEPRECATED` order, and no `<>` at
+    // all where it carries none. Nothing declares the middle one here.
+    let mut flags = Vec::new();
+    if constant_is_persistent(req, name) {
+        flags.push("persistent");
+    }
+    if constant_is_deprecated(req, name) {
+        flags.push("deprecated");
+    }
+    let words = if flags.is_empty() {
+        String::new()
     } else {
-        ""
+        format!("<{}> ", flags.join(", "))
     };
     format!(
         "{indent}Constant [ {words}{} {} ] {{ {shown} }}\n",
@@ -3186,6 +3231,16 @@ fn constant_is_persistent(req: &mut Request, name: &[u8]) -> bool {
     };
     let defined = req.constants().map(|table| table.contains(&Key::Str(key)));
     !defined.unwrap_or(false)
+}
+
+/// `CONST_DEPRECATED`: the bit `gen_stub` raises from a `#[\Deprecated]`
+/// in the stub and `zend_compile_attributes`' validator from one a
+/// program wrote, so the attribute on the declaration is the whole of
+/// it (`php_unit::decl::ConstDecl`).
+fn constant_is_deprecated(req: &Request, name: &[u8]) -> bool {
+    req.constant_attributes(&constant_key(name))
+        .iter()
+        .any(|one| one.name.0.eq_ignore_ascii_case(b"Deprecated"))
 }
 
 /// `zval_get_string` for a constant's value as `_const_string` and

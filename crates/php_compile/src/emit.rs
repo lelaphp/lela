@@ -8628,6 +8628,20 @@ impl Emit<'_> {
         let Some(declared) = self.persistent.iter().find(|c| c.name.0.as_ref() == name) else {
             return Ok(None);
         };
+        // `can_ct_eval_const` (`Z/Zend/zend_compile.c:1650`) refuses a
+        // constant `CONST_DEPRECATED` marks before it looks at
+        // anything else, so the `FETCH_CONSTANT` stands and the
+        // deprecation is raised where the constant is read and not
+        // where it was declared. The bit is the `#[\Deprecated]`
+        // attribute on the declaration, which is the whole of what php
+        // raises the flag from.
+        if declared
+            .attributes
+            .iter()
+            .any(|one| one.name.0.eq_ignore_ascii_case(b"Deprecated"))
+        {
+            return Ok(None);
+        }
         Ok(match &declared.value {
             ConstExpr::Null => Some(Zval::null()),
             ConstExpr::Bool(b) => Some(Zval::bool(*b)),

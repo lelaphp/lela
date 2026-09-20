@@ -9,6 +9,8 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use php_unit::decl::{Attribute, ConstExpr};
+
 use crate::api::request::Request;
 use crate::api::values::{PhpObject, PhpString, Value};
 
@@ -68,6 +70,74 @@ pub fn notice(req: &mut Request, message: &str) {
 /// `E_DEPRECATED`.
 pub fn deprecated(req: &mut Request, message: &str) {
     raise(req, Level::Deprecated, message);
+}
+
+/// `zend_deprecated_constant` (`Z/Zend/zend_execute.c:1994`): the
+/// `E_DEPRECATED` a read of a constant the `#[\Deprecated]` attribute
+/// marks raises, named by the key the table holds it under and worded
+/// with [`deprecation_suffix`] after php's sentence. A constant with
+/// no such attribute raises nothing, which is every constant but
+/// `E_STRICT` today. php's level is `E_USER_DEPRECATED` for a
+/// constant a program defined and `E_DEPRECATED` for an extension's;
+/// a constant a program defined carries no attribute here (#465), so
+/// only the extension's arm is reachable and only it is written.
+pub(crate) fn deprecated_constant(req: &mut Request, key: &[u8]) {
+    let Some(suffix) = deprecation_suffix(req.constant_attributes(key)) else {
+        return;
+    };
+    let name = String::from_utf8_lossy(key).into_owned();
+    deprecated(req, &format!("Constant {name} is deprecated{suffix}"));
+}
+
+/// `get_deprecation_suffix_from_attribute`
+/// (`Z/Zend/zend_execute.c:1801`): what php prints after `is
+/// deprecated`, ` since <since>` and `, <message>`, each written only
+/// where the argument of that name is a string; `None` where the list
+/// carries no `#[\Deprecated]` at all, which is the raise php does not
+/// make.
+///
+/// php builds the `Deprecated` object to read `$message` and `$since`
+/// off it, which sorts the positional arguments by the constructor's
+/// order; the class is not registered here yet (#464), so the
+/// arguments are read where they were written, by name and, for a
+/// positional one, by the position `Deprecated::__construct(?string
+/// $message = null, ?string $since = null)` gives it.
+pub(crate) fn deprecation_suffix(attributes: &[Attribute]) -> Option<String> {
+    let marked = attributes
+        .iter()
+        .find(|one| one.name.0.eq_ignore_ascii_case(b"Deprecated"))?;
+    let mut message = None;
+    let mut since = None;
+    let mut positional = 0;
+    for argument in &marked.arguments {
+        let written = match &argument.value {
+            ConstExpr::Str(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
+            _ => None,
+        };
+        match argument.name.as_ref().map(|name| &*name.0) {
+            Some(b"message") => message = written,
+            Some(b"since") => since = written,
+            Some(_) => {}
+            None => {
+                if positional == 0 {
+                    message = written;
+                } else if positional == 1 {
+                    since = written;
+                }
+                positional += 1;
+            }
+        }
+    }
+    let mut suffix = String::new();
+    if let Some(since) = since.filter(|s| !s.is_empty()) {
+        suffix.push_str(" since ");
+        suffix.push_str(&since);
+    }
+    if let Some(message) = message.filter(|s| !s.is_empty()) {
+        suffix.push_str(", ");
+        suffix.push_str(&message);
+    }
+    Some(suffix)
 }
 
 /// `php_error_docref(NULL, level, ...)`: a diagnostic from inside a

@@ -230,6 +230,7 @@ fn constants() -> Vec<ConstDecl> {
         .map(|(name, value)| ConstDecl {
             name: Name(name.into()),
             value: ConstExpr::Long(value),
+            attributes: Vec::new(),
         })
         .collect()
 }

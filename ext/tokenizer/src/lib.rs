@@ -1697,5 +1697,6 @@ fn constant(name: &[u8], value: i64) -> ConstDecl {
     ConstDecl {
         name: Name(name.into()),
         value: ConstExpr::Long(value),
+        attributes: Vec::new(),
     }
 }
