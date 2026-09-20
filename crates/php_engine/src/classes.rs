@@ -575,6 +575,23 @@ fn abstract_static_method(
 /// }
 /// bool(true)
 /// ```
+///
+/// The attribute is what the declaration is held to: a name the class
+/// never declared is written on an instance and read back, and the
+/// creation has nothing to say where a class without the bit raises
+/// php's 8.2 deprecation.
+///
+/// ```php
+/// $o = new stdClass;
+/// $o->a = 1;
+/// var_dump($o);
+/// ```
+/// ```expect
+/// object(stdClass)#1 (1) {
+///   ["a"]=>
+///   int(1)
+/// }
+/// ```
 fn std_class() -> ClassDecl {
     ClassDecl {
         flags: ClassFlags {
