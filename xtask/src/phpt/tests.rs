@@ -20,6 +20,7 @@ use super::*;
 use crate::divergence::Registry;
 use crate::manifest::{Crate, Manifest};
 use crate::oracle::{Promise, Runner};
+use crate::reading::Status;
 use crate::scratch::Tree;
 
 fn workspace() -> PathBuf {
@@ -109,7 +110,12 @@ fn run(subset: &Subset, registry: &Registry) -> Tally {
     let binary = oracle().unwrap();
     let manifest = manifest();
     let oracle = manifest.pin.oracle();
-    run_subset(&oracle, registry, &Runner::Engine(binary), None, subset).unwrap()
+    let under = Under {
+        runner: &Runner::Engine(binary),
+        lane: None,
+        oracle_absent: None,
+    };
+    run_subset(&oracle, registry, subset, under).unwrap()
 }
 
 fn only(tally: &Tally) -> (Judgement, String) {
@@ -166,14 +172,12 @@ fn the_digest_is_asserted_once_over_a_run_of_three_tests() {
     let manifest = manifest();
     assert_eq!(manifest.pin.digests_asserted(), 0);
     let oracle = manifest.pin.oracle();
-    let tally = run_subset(
-        &oracle,
-        &registry(""),
-        &Runner::Engine(binary),
-        None,
-        &subset,
-    )
-    .unwrap();
+    let under = Under {
+        runner: &Runner::Engine(binary),
+        lane: None,
+        oracle_absent: None,
+    };
+    let tally = run_subset(&oracle, &registry(""), &subset, under).unwrap();
     assert_eq!(tally.judged.len(), 3, "{tally:#?}");
     assert!(
         tally.judged.iter().all(|j| j.judgement == Judgement::Pass),
@@ -547,6 +551,48 @@ fn the_per_commit_lane_is_composed_from_the_crate_rows() {
     // with php_sapi, and the default extensions' own. A crate behind a
     // feature is not in the default build, and one with no subset owns none.
     assert_eq!(lane, ["php_engine", "php_sapi", "ext/pcre"]);
+}
+
+#[test]
+fn a_pinned_php_not_on_this_machine_runs_nothing_and_asserts_no_digest() {
+    // A binary is built and the pinned php is not here, the runner's
+    // shape (harness D.20): the engine never spawns the pinned php, so
+    // its absence is no refusal; the tests are found, none runs, the pin
+    // is not asked for a digest it cannot give, and the reading is a skip
+    // that says why, as the witness lane's is.
+    let (_tree, mut subset) = subset(
+        "oracle-absent",
+        &[(
+            "one.phpt",
+            "--TEST--\nEcho\n--FILE--\n<?php echo 1;\n--EXPECT--\n1\n",
+        )],
+    );
+    // A reading is stamped over its scope's tree, so the scope is a crate
+    // the manifest has and the tree holds.
+    subset.scope = "ext/pcre".to_owned();
+    let mut manifest = manifest();
+    manifest.pin.oracle.path = PathBuf::from("/nowhere/php");
+    let engine = Runner::Engine(std::env::current_exe().unwrap());
+    let why = format!(
+        "the pinned php is not at {}",
+        manifest.pin.oracle.path.display()
+    );
+    let oracle = manifest.pin.oracle();
+    let under = Under {
+        runner: &engine,
+        lane: None,
+        oracle_absent: Some(&why),
+    };
+    let tally = run_subset(&oracle, &registry(""), &subset, under).unwrap();
+    assert!(tally.judged.is_empty(), "{tally:#?}");
+    assert_eq!(tally.found, 1);
+    assert_eq!(manifest.pin.digests_asserted(), 0);
+    let source = manifest.pin.source.tree().unwrap_or_default();
+    let reading = reading(&tally, &workspace(), &manifest, &source, &subset, under).unwrap();
+    assert_eq!(reading.status, Status::Skip, "{reading:#?}");
+    assert!(reading.message.contains(&why), "{}", reading.message);
+    assert_eq!(reading.numbers["run"], 0i64.into());
+    assert_eq!(reading.numbers["engine_absent"], 0i64.into());
 }
 
 #[test]

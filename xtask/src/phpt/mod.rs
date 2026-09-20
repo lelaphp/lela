@@ -11,7 +11,11 @@
 //! adapter, `adapter`, runs the engine's own `php` under
 //! `Oracle::run_under`, the same recipe the oracle runs under, which is
 //! what makes the two comparable. Until `crates/php` is built there is no
-//! binary and the reading is a skip that says so.
+//! binary and the reading is a skip that says so. The recipe is the pin's,
+//! so the pin's digest is asserted once before the first test where the
+//! pinned php is on this machine; where it is not, as on the runner (harness
+//! D.20), nothing runs and the reading is a skip that says so, as the
+//! witness lane's is, rather than a refusal over a binary no test spawns.
 //!
 //! **Which engine wrote the numbers.** The reading names the binary that
 //! ran it, its path and the md5 of its bytes, and a binary the tree has
@@ -372,6 +376,16 @@ pub(crate) type Judged = tally::Judged<Judgement>;
 /// What one subset's run came to.
 pub(crate) type Tally = tally::Tally<Judgement>;
 
+/// What a subset ran under: the runner, the lane it was asked for, and
+/// why the pinned php is not on this machine when it is not, in which
+/// case nothing ran under the engine and the reading says so.
+#[derive(Clone, Copy)]
+pub(crate) struct Under<'a> {
+    pub runner: &'a Runner,
+    pub lane: Option<Lane>,
+    pub oracle_absent: Option<&'a str>,
+}
+
 /// The subset's reading: the counts in `numbers`, the failures named in
 /// the message, and the status the ladder allows.
 pub(crate) fn reading(
@@ -380,9 +394,13 @@ pub(crate) fn reading(
     manifest: &Manifest,
     source: &Path,
     subset: &Subset,
-    runner: &Runner,
-    lane: Option<Lane>,
+    under: Under<'_>,
 ) -> Result<Reading> {
+    let Under {
+        runner,
+        lane,
+        oracle_absent,
+    } = under;
     let scope = subset.scope(runner, lane);
     let absent = subset.absent();
     // A subset of a crate not yet created: its tests are that crate's, and
@@ -402,66 +420,18 @@ pub(crate) fn reading(
         Outcome::Failed
     } else if uncreated {
         Outcome::Absent(sources::NOT_YET_CREATED)
+    } else if let Some(why) = oracle_absent
+        && matches!(runner, Runner::Engine(_))
+    {
+        // A binary is built and the pinned php is not here: the engine
+        // could run, and the recipe it would run under is the pin's,
+        // whose digest cannot be asserted. Nothing ran, and this is why;
+        // `done` excuses the absent engine and not this.
+        Outcome::OracleAbsent(why)
     } else {
         tally.outcome(runner)
     };
-    let message = if uncreated && absent.is_empty() {
-        format!(
-            "{scope}: {}; the subset holds {} tests",
-            sources::NOT_YET_CREATED,
-            tally.found
-        )
-    } else if absent.is_empty() {
-        match &outcome {
-            Outcome::Failed => format!(
-                "{scope}: {} of {} missed their expectation{}",
-                tally.against().len(),
-                tally.judged.len(),
-                tally.missed()
-            ),
-            Outcome::Absent(why) => {
-                format!("{scope}: no subset run over {} tests; {why}", tally.found)
-            }
-            Outcome::Control(binary) => format!(
-                "{scope}: {} of {} differ under {}, the pinned oracle; a control of the runner, not a reading of the engine{}",
-                tally.against().len(),
-                tally.judged.len(),
-                binary.display(),
-                tally.missed()
-            ),
-            Outcome::NothingRan => format!(
-                "{scope}: no test of the subset ran; {} found, {} skipped, {} unread by the compiler",
-                tally.found,
-                tally.count(Judgement::Skip),
-                tally.count(Judgement::Unread)
-            ),
-            // A rung this lane never asks for, since an empty subset is
-            // not a measurement of the engine; the words are here so no
-            // rung is without any.
-            Outcome::OracleAbsent(why) => {
-                format!("{scope}: nothing to run and the pinned oracle is absent; {why}")
-            }
-            Outcome::Passed => format!(
-                "{scope}: {} passed, {} skipped, {} unread by the compiler of {} tests",
-                tally.count(Judgement::Pass),
-                tally.count(Judgement::Skip),
-                tally.count(Judgement::Unread),
-                tally.judged.len()
-            ),
-        }
-    } else {
-        let named: Vec<String> = absent
-            .iter()
-            .map(|under| under.to_string_lossy().into_owned())
-            .collect();
-        let named: Vec<&str> = named.iter().map(String::as_str).collect();
-        format!(
-            "{scope}: the [[crate]] row names {}, and the pinned php-src at {} ({}) has no such directory",
-            listed(&named),
-            source.display(),
-            manifest.pin.source.tag
-        )
-    };
+    let message = words(&scope, tally, &outcome, subset, uncreated, source, manifest);
     // Which engine wrote these numbers. The reading's own stamp is the
     // tree's, and one tree had two binaries under it and two readings 37
     // tests apart before this line, with nothing to tell them apart
@@ -512,6 +482,75 @@ pub(crate) fn reading(
         .numbers
         .insert("percent".to_owned(), tally.percent().into());
     Ok(reading)
+}
+
+/// The reading's words: the rung's sentence over the subset's numbers,
+/// or the directories the row names and the pinned tree has not.
+fn words(
+    scope: &str,
+    tally: &Tally,
+    outcome: &Outcome<'_>,
+    subset: &Subset,
+    uncreated: bool,
+    source: &Path,
+    manifest: &Manifest,
+) -> String {
+    let absent = subset.absent();
+    if uncreated && absent.is_empty() {
+        format!(
+            "{scope}: {}; the subset holds {} tests",
+            sources::NOT_YET_CREATED,
+            tally.found
+        )
+    } else if absent.is_empty() {
+        match &outcome {
+            Outcome::Failed => format!(
+                "{scope}: {} of {} missed their expectation{}",
+                tally.against().len(),
+                tally.judged.len(),
+                tally.missed()
+            ),
+            Outcome::Absent(why) => {
+                format!("{scope}: no subset run over {} tests; {why}", tally.found)
+            }
+            Outcome::Control(binary) => format!(
+                "{scope}: {} of {} differ under {}, the pinned oracle; a control of the runner, not a reading of the engine{}",
+                tally.against().len(),
+                tally.judged.len(),
+                binary.display(),
+                tally.missed()
+            ),
+            Outcome::NothingRan => format!(
+                "{scope}: no test of the subset ran; {} found, {} skipped, {} unread by the compiler",
+                tally.found,
+                tally.count(Judgement::Skip),
+                tally.count(Judgement::Unread)
+            ),
+            Outcome::OracleAbsent(why) => format!(
+                "{scope}: no test of the subset ran, {} found; the recipe is the pinned oracle's and {why}",
+                tally.found
+            ),
+            Outcome::Passed => format!(
+                "{scope}: {} passed, {} skipped, {} unread by the compiler of {} tests",
+                tally.count(Judgement::Pass),
+                tally.count(Judgement::Skip),
+                tally.count(Judgement::Unread),
+                tally.judged.len()
+            ),
+        }
+    } else {
+        let named: Vec<String> = absent
+            .iter()
+            .map(|under| under.to_string_lossy().into_owned())
+            .collect();
+        let named: Vec<&str> = named.iter().map(String::as_str).collect();
+        format!(
+            "{scope}: the [[crate]] row names {}, and the pinned php-src at {} ({}) has no such directory",
+            listed(&named),
+            source.display(),
+            manifest.pin.source.tag
+        )
+    }
 }
 
 /// What one `xtask phpt` run was asked for.
@@ -570,31 +609,57 @@ pub fn run(
         println!("phpt: {why}");
     }
     // One oracle for the run: the digest is asserted before the first
-    // program and never per test, subset or section (harness §4.3).
+    // program and never per test, subset or section (harness §4.3). A
+    // pinned php that is not on this machine is no refusal, as it is none
+    // for `witness` and `crosscheck`: nothing runs, and each reading says
+    // why.
     let oracle = manifest.pin.oracle();
+    let pinned = &manifest.pin.oracle.path;
+    let oracle_absent = if pinned.is_file() {
+        None
+    } else {
+        Some(format!("the pinned php is not at {}", pinned.display()))
+    };
+    if let Some(why) = &oracle_absent
+        && matches!(runner, Runner::Engine(_))
+    {
+        println!("phpt: nothing runs; {why}");
+    }
+    let under = Under {
+        runner: &runner,
+        lane: ask.lane,
+        oracle_absent: oracle_absent.as_deref(),
+    };
     let mut readings = Vec::new();
     for subset in &subsets {
-        let tally = run_subset(&oracle, registry, &runner, ask.lane, subset)?;
-        readings.push(reading(
-            &tally, root, manifest, &source, subset, &runner, ask.lane,
-        )?);
+        let tally = run_subset(&oracle, registry, subset, under)?;
+        readings.push(reading(&tally, root, manifest, &source, subset, under)?);
     }
     Ok(readings)
 }
 
 /// Run one subset: every test through the runner, each verdict printed as
-/// it is reached unless it passed.
+/// it is reached unless it passed. Where `under` says the pinned php is
+/// not on this machine, the tests are found and none runs, since the
+/// digest the run asserts first is of a binary that is not there.
 pub(crate) fn run_subset(
     oracle: &Oracle<'_>,
     registry: &Registry,
-    runner: &Runner,
-    lane: Option<Lane>,
     subset: &Subset,
+    under: Under<'_>,
 ) -> Result<Tally> {
+    let Under {
+        runner,
+        lane,
+        oracle_absent,
+    } = under;
     let tests = subset.tests()?;
     let Some(binary) = runner.binary() else {
         return Ok(Tally::found(tests.len()));
     };
+    if oracle_absent.is_some() {
+        return Ok(Tally::found(tests.len()));
+    }
     // A digest mismatch refuses the whole run (§4.3), before the first
     // test rather than at its first SKIPIF.
     oracle.asserted()?;
