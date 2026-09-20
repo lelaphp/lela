@@ -633,7 +633,7 @@ fn handler_op(req: &mut Request, at: usize, context: &mut Context) -> Status {
     req.output_mut().running = Some(at);
     if let Some(callable) = user {
         let buffered = req.output().buffered(at);
-        status = match user_handler(req, &callable, &buffered, context) {
+        status = match user_handler(req, at, &callable, &buffered, context) {
             Ok(status) => status,
             Err(thrown) => {
                 req.leave_pending(&thrown);
@@ -641,18 +641,6 @@ fn handler_op(req: &mut Request, at: usize, context: &mut Context) -> Status {
             }
         };
         still_have_handler = req.output().handlers.len() > at;
-        if still_have_handler && req.output().handlers[at].flags & HANDLER_PRODUCED_OUTPUT != 0 {
-            // The handler wrote through the layer it serves: php's
-            // deprecation, and the flag taken back.
-            let output = req.output_mut();
-            output.handlers[at].flags &= !HANDLER_PRODUCED_OUTPUT;
-            let name = String::from_utf8_lossy(output.handlers[at].name.bytes()).into_owned();
-            docref(
-                req,
-                Level::Deprecated,
-                &format!("Producing output from user output handler {name} is deprecated"),
-            );
-        }
     } else {
         context.input = req.output().buffered(at);
         context.pass();
@@ -712,8 +700,57 @@ fn settle(req: &mut Request, at: usize, status: Status, context: &mut Context) {
 /// a string of the request's, `ob_mode` the operation, and what it
 /// returned read: `false` fails, a bool keeps everything, anything
 /// else is its string form and is what comes out.
+///
+/// A string is what the buffer becomes.
+///
+/// ```php
+/// function wraps($buffer, $phase) { return "[$buffer]"; }
+/// ob_start('wraps'); echo "one"; ob_end_flush(); echo "\n";
+/// ```
+/// ```expect
+/// [one]
+/// ```
+///
+/// `false` fails the handler, which disables it and hands its buffer on
+/// unchanged.
+///
+/// ```php
+/// function refuses($buffer, $phase) { return false; }
+/// ob_start('refuses'); echo "two"; ob_end_flush(); echo "\n"; var_dump(ob_get_level());
+/// ```
+/// ```expect
+/// two
+/// int(0)
+/// ```
+///
+/// `true` is the handler keeping everything: nothing comes out and the
+/// buffer is emptied with it.
+///
+/// ```php
+/// function keeps($buffer, $phase) { return true; }
+/// ob_start('keeps'); echo "three"; ob_end_flush(); echo "|\n"; var_dump(ob_get_level());
+/// ```
+/// ```expect
+/// |
+/// int(0)
+/// ```
+///
+/// A handler that writes through the layer it serves has that write
+/// discarded and raises php's deprecation, named for the native that
+/// ran the operation; the raise itself is written past the handler,
+/// which is why it stands ahead of what the handler returned.
+///
+/// ```php
+/// function talks($buffer, $phase) { echo "swallowed"; return "[$buffer]"; }
+/// ob_start('talks'); echo "four"; ob_end_flush(); echo "\n";
+/// ```
+/// ```expect
+/// Deprecated: ob_end_flush(): Producing output from user output handler talks is deprecated in %s on line 3
+/// [four]
+/// ```
 fn user_handler(
     req: &mut Request,
+    at: usize,
     callable: &Callable,
     buffered: &[u8],
     context: &mut Context,
@@ -723,6 +760,7 @@ fn user_handler(
     let returned = call::call(req, callable, &arguments);
     req.release(Value::string(data));
     let returned = returned?;
+    produced_output(req, at);
     let status = match returned.as_ref() {
         ValueRef::Bool(false) => Status::Failure,
         ValueRef::Bool(true) => Status::NoData,
@@ -740,6 +778,32 @@ fn user_handler(
     };
     req.release(returned);
     Ok(status)
+}
+
+/// What a handler wrote through the layer it serves
+/// (`Z/main/output.c:978-1015`): the write itself was appended to the
+/// handler's own buffer and is dropped with it, so php raises the
+/// deprecation with the handler disabled, which is what carries the
+/// raise past the buffer that would swallow it, and enables it again
+/// where the raise left it standing.
+fn produced_output(req: &mut Request, at: usize) {
+    let Some(handler) = req.output_mut().handlers.get_mut(at) else {
+        return;
+    };
+    if handler.flags & HANDLER_PRODUCED_OUTPUT == 0 {
+        return;
+    }
+    handler.flags |= HANDLER_DISABLED;
+    handler.flags &= !HANDLER_PRODUCED_OUTPUT;
+    let name = String::from_utf8_lossy(handler.name.bytes()).into_owned();
+    docref(
+        req,
+        Level::Deprecated,
+        &format!("Producing output from user output handler {name} is deprecated"),
+    );
+    if let Some(handler) = req.output_mut().handlers.get_mut(at) {
+        handler.flags &= !HANDLER_DISABLED;
+    }
 }
 
 /// `php_output_header` (`Z/main/output.c:102`): where the body started,
