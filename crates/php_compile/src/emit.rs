@@ -5199,7 +5199,7 @@ impl Emit<'_> {
             // `zend_compile_static_prop` with `delayed`, the other
             // fetch php holds back: the name, the class's constant
             // pair and three slots taken here.
-            (Expr::StaticProp { class, name }, Fetch::Read | Fetch::Is) => {
+            (Expr::StaticProp { class, name }, Fetch::Read | Fetch::Is | Fetch::Write) => {
                 let name = self.string(name)?;
                 let name_at = self.literal(name);
                 let out = self.temporary();
@@ -5212,9 +5212,11 @@ impl Emit<'_> {
                     slots,
                 }
             }
-            (Expr::StaticProp { .. }, _) => {
+            // A compound assignment's chain is `BP_VAR_RW`, whose fetch
+            // here is `FETCH_STATIC_PROP_RW` and no handler serves it.
+            (Expr::StaticProp { .. }, Fetch::Rw) => {
                 return Err(self.fatal(
-                    "a dimension written over a `static` property, whose fetch is `FETCH_STATIC_PROP_W`, this compiler cannot read yet",
+                    "a compound assignment to a dimension over a `static` property, whose fetch is `FETCH_STATIC_PROP_RW`, this compiler cannot read yet",
                 ));
             }
             (_, Fetch::Read | Fetch::Is) => {
@@ -5242,15 +5244,14 @@ impl Emit<'_> {
                 });
                 Base::Settled((OperandKind::Var, at))
             }
-            // php compiles `$this` under a write too, `FETCH_THIS` into
-            // a `VAR` that `zend_compile_simple_var` leaves, and fails
-            // at run time where no object is in scope; the receiver
-            // this emitter hands a property fetch is `UNUSED` inside a
-            // method, which no dimension can stand on.
+            // `zend_compile_simple_var`'s `is_this_fetch` arm under a
+            // write: `FETCH_THIS` into a `VAR`, which fails at run time
+            // where no object is in scope. The `UNUSED` receiver a
+            // property fetch takes is ruled out here, since no
+            // dimension can stand on it.
             (Expr::This, Fetch::Write | Fetch::Rw) => {
-                return Err(self.fatal(
-                    "a dimension written over `$this`, whose fetch is `FETCH_THIS`, this compiler cannot read yet",
-                ));
+                let this = self.fetch_this(OperandKind::Var);
+                Base::Settled(self.operand(this))
             }
             // `zend_compile_var`'s default arm under a write.
             (_, Fetch::Write | Fetch::Rw) => {

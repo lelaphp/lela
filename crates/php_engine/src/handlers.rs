@@ -2674,6 +2674,30 @@ pub(crate) fn init_method_call<T: Tier>(
 /// #0 {main}
 ///   thrown in %s on line 2
 /// ```
+/// A dimension written over `$this` is this opline's `VAR`, php's
+/// `zend_compile_simple_var` under a write, and the `ASSIGN_DIM` over
+/// it is the receiver's `offsetSet`; outside a method the fetch is the
+/// `Error` and the write never runs.
+///
+/// ```php
+/// class A implements ArrayAccess {
+///     public function offsetExists($o): bool { return true; }
+///     public function offsetGet($o): mixed { return 1; }
+///     public function offsetSet($o, $v): void { echo "set $o=$v\n"; }
+///     public function offsetUnset($o): void {}
+///     public function m() { $this[0] = 1; }
+/// }
+/// (new A)->m();
+/// $this[0] = 1;
+/// ```
+/// ```expect exit=255
+/// set 0=1
+///
+/// Fatal error: Uncaught Error: Using $this when not in object context in %s:10
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 10
+/// ```
 pub(crate) fn fetch_this<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -3018,6 +3042,77 @@ pub(crate) fn fetch_static_prop_r<T: Tier>(
 /// constant pair in `op2`, the property's name off `op1`, and
 /// [`Request::static_property`] over the executed scope under the fetch
 /// type given.
+/// `ZEND_FETCH_STATIC_PROP_W` (`Z/Zend/zend_vm_def.h:1857`), the base
+/// of a dimension written over a `static` property: the slot addressed
+/// as a place (`zend_fetch_static_property_address` under `BP_VAR_W`,
+/// [`Request::static_property_place`]) and an `IS_INDIRECT` naming it
+/// written into the opline's `VAR`, which is what the `ASSIGN_DIM` over
+/// it writes through. The compiler marks the opline
+/// `ZEND_FETCH_DIM_WRITE` where a dimension stands over it, which is
+/// what the dump prints as `(dim write)`.
+///
+/// ```php
+/// class C { public static $s = [1]; public static $n; }
+/// C::$s[0] = 2;
+/// C::$s[] = 3;
+/// var_dump(C::$s);
+/// C::$n[1] = 4;
+/// var_dump(C::$n);
+/// try { C::$nope[0] = 5; } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   int(2)
+///   [1]=>
+///   int(3)
+/// }
+/// array(1) {
+///   [1]=>
+///   int(4)
+/// }
+/// Error: Access to undeclared static property C::$nope
+/// ```
+pub(crate) fn fetch_static_prop_w<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    if op.op1_type != OperandKind::Const {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_FETCH_STATIC_PROP_W over a property named at run time",
+        )));
+    }
+    let class = match class_operand(req, frame, code, op.op2_type, op.op2, None) {
+        Ok(class) => class,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let name = exec::constant(code, ConstIdx(op.op1));
+    let name = name.as_str_bytes().unwrap_or_default().to_vec();
+    let scope = req.executed_scope();
+    let place = match req.static_property_place(class, &name, scope) {
+        Ok(Some(place)) => place,
+        Ok(None) => {
+            return Err(Fatal::Error(format!(
+                "InternalError: ZEND_FETCH_STATIC_PROP_W placed ${} and the table holds no slot for it",
+                String::from_utf8_lossy(&name)
+            )));
+        }
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let out = exec::temporary_slot(code, op.out);
+    let previous = req.take_slot(frame, out);
+    req.release(previous);
+    let Some(var) = req.slot_ptr(frame, out) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_FETCH_STATIC_PROP_W writes a VAR the frame does not have",
+        )));
+    };
+    var.write(php_heap::Zval::indirect(place));
+    Ok(advance(req, frame))
+}
+
 fn fetch_static_prop(
     req: &mut Request,
     frame: FrameRef,

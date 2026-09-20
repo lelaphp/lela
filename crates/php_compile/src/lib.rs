@@ -3897,9 +3897,9 @@ mod tests {
             Some("Cannot use result of built-in function in write context")
         );
         assert_eq!(
-            refused(b"<?php C::$s[0] = 1;").as_deref(),
+            refused(b"<?php C::$s[0] += 1;").as_deref(),
             Some(
-                "a dimension written over a `static` property, whose fetch is `FETCH_STATIC_PROP_W`, this compiler cannot read yet"
+                "a compound assignment to a dimension over a `static` property, whose fetch is `FETCH_STATIC_PROP_RW`, this compiler cannot read yet"
             )
         );
     }
@@ -3961,6 +3961,40 @@ mod tests {
                  0005 ASSIGN_OBJ_OP (ADD) V5 string(\"q\")\n\
                  0006 OP_DATA int(1)\n\
                  0007 RETURN int(1)\n"
+            )
+        );
+    }
+
+    /// `zend_delayed_compile_var`'s last two bases under a write
+    /// (#507): a `static` property is `FETCH_STATIC_PROP_W` carrying
+    /// `ZEND_FETCH_DIM_WRITE`, the bit the dump prints as `(dim write)`,
+    /// and `$this` is `FETCH_THIS` into the `VAR` the dimension stands
+    /// on, never the `UNUSED` receiver a property fetch takes. The dump
+    /// is the oracle's under `[regime.dump]` at 8.5.9.
+    #[test]
+    fn a_static_property_and_this_under_a_written_dimension_are_the_oracle_s_bases() {
+        assert_eq!(
+            dump_of(b"<?php class C { public static $s = [1]; } C::$s[0] = 1;"),
+            main_dump(
+                4,
+                0,
+                2,
+                "0000 V0 = FETCH_STATIC_PROP_W (dim write) string(\"s\") string(\"C\")\n\
+                 0001 ASSIGN_DIM V0 int(0)\n\
+                 0002 OP_DATA int(1)\n\
+                 0003 RETURN int(1)\n"
+            )
+        );
+        assert_eq!(
+            dump_of(b"<?php $this[0] = 1;"),
+            main_dump(
+                4,
+                0,
+                2,
+                "0000 V0 = FETCH_THIS\n\
+                 0001 ASSIGN_DIM V0 int(0)\n\
+                 0002 OP_DATA int(1)\n\
+                 0003 RETURN int(1)\n"
             )
         );
     }
@@ -5428,19 +5462,19 @@ class C {
     /// `Cannot use [] for reading`; under a write the bases php
     /// refuses outright, a temporary expression and a call answered in
     /// one; and the two bases this compiler has not under a write,
-    /// `$this` and a `static` property, whose fetches are `FETCH_THIS`
-    /// and `FETCH_STATIC_PROP_W` (#507). A property and a call under a
-    /// write, and every base php compiles where it stands under a
-    /// read, compile since #451.
+    /// A `static` property under a compound assignment, whose fetch is
+    /// `FETCH_STATIC_PROP_RW` and which no handler serves. `$this` and
+    /// a `static` property under a plain write, a property and a call
+    /// under a write, and every base php compiles where it stands under
+    /// a read, compile since #451 and #507.
     #[test]
     fn a_dimension_this_compiler_cannot_read_yet_is_refused() {
         for source in [
             b"<?php $a[] = $b[];".as_slice(),
             b"<?php echo $a[];".as_slice(),
-            b"<?php $this[0] = 1;".as_slice(),
             b"<?php \"ab\"[0] = 1;".as_slice(),
             b"<?php [1, 2][0] = 1;".as_slice(),
-            b"<?php C::$p[0] = 1;".as_slice(),
+            b"<?php C::$p[0] += 1;".as_slice(),
         ] {
             assert!(
                 refused(source).is_some(),

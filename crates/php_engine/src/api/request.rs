@@ -3174,6 +3174,58 @@ impl Request {
         self.release(previous);
     }
 
+    /// `zend_fetch_static_property_address` under `BP_VAR_W`
+    /// (`Z/Zend/zend_execute.c:3084`): the `static` property's slot as a
+    /// place, which is what `FETCH_STATIC_PROP_W` hands its `VAR` as an
+    /// `IS_INDIRECT` and the `ASSIGN_DIM` over it writes through.
+    /// `None` is [`Request::static_slot`]'s own, a name the chain does
+    /// not declare under a read that did not raise.
+    ///
+    /// php's slot is one zval of `CE_STATIC_MEMBERS(ce)`, a table whose
+    /// address is stable for the life of the request. The slots here
+    /// are values of a `Vec` the request owns, and no address of one
+    /// outlives a write to that table, so a slot a place is asked for
+    /// is bound to a reference cell first and the cell is the place.
+    /// Every read and every write of a `static` property follows a
+    /// reference already ([`Request::static_property`] derefs what it
+    /// reads and [`Request::store_static_property`] writes through what
+    /// the slot holds), so the binding is a place to write through and
+    /// nothing a program can see.
+    pub(crate) fn static_property_place(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+        scope: Option<ClassId>,
+    ) -> Result<Option<php_heap::ZvalRef>, Thrown> {
+        let Some((declaring, _)) = self.static_slot(class, name, scope, PropertyRead::Warning)?
+        else {
+            return Ok(None);
+        };
+        if let Some(cell) = self.static_slot_cell(declaring, name) {
+            return Ok(Some(cell.heap().val_ref()));
+        }
+        let held = self.held_static(declaring, name);
+        let held = if held.tag() == TypeTag::Undef {
+            Value::null()
+        } else {
+            held
+        };
+        // The row owns what it holds and the cell takes that owner, so
+        // the row's value is replaced and never released.
+        let cell = self.reference(held)?;
+        let at = self
+            .statics
+            .iter()
+            .position(|((held, under), _)| *held == declaring && under == name);
+        let Some(at) = at else {
+            return Ok(Some(cell.heap().val_ref()));
+        };
+        if let Some((_, slot)) = self.statics.get_mut(at) {
+            *slot = Value::reference(cell);
+        }
+        Ok(Some(cell.heap().val_ref()))
+    }
+
     /// The cell the `static` property's slot holds, for the handler that
     /// must know whether it is writing through a reference php would
     /// have typed (`ZEND_REF_HAS_TYPE_SOURCES` at the top of
