@@ -141,7 +141,12 @@ jobs:
       # every touched crate for (#191): the workspace here, the touched
       # crates at pre-commit. The harness's own run a second time, after
       # the test job's, since that job promises the corpus and this one
-      # writes the reading.
+      # writes the reading. The harness's tests need `computed` as the
+      # test job's do: `new-ext` renders ext/AGENTS.md's extensions region
+      # with `computed run`, and the test that holds the template topology
+      # reads the row it wrote; without the binary the crate is laid down
+      # with a note and no row, and the reading fails.
+      - run: cargo install computed --locked
       - run: cargo xtask test
       - run: cargo xtask api-check
       - run: cargo xtask budget
