@@ -2,6 +2,13 @@
 //! content, read as one verdict by `done`'s condition 5 over the working
 //! tree and by pre-commit's `permit --diff` over the index
 //! (harness-design.md §4.4, §4.5, §6).
+//!
+//! Each file carries what the base has at its path beside what it would
+//! carry, so a rule that fires on what a write adds is asked of the diff
+//! and not of the file against itself (#510): the base is the index's
+//! `HEAD` and the commit `done` measures since, and a path the base has
+//! not, or a base that cannot be read, displaces nothing, which is the
+//! reading that denies rather than excuses.
 
 use std::collections::btree_map::{BTreeMap, Entry};
 use std::fs;
@@ -92,6 +99,15 @@ impl Judged {
     }
 }
 
+/// One file of a diff: where it is, what it would carry there, and what
+/// the base carries at that path, which is what the write displaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Diffed {
+    pub path: String,
+    pub content: String,
+    pub displaced: String,
+}
+
 /// Judge `files`, each a path relative to `root` and the content that
 /// would be committed there. A file in a workspace of its own under
 /// `root`, a fixture that carries a manifest, is judged by that manifest
@@ -99,12 +115,17 @@ impl Judged {
 /// manifest is read once per workspace, and one that cannot be read is
 /// the error, since a file no manifest describes is not a file nothing
 /// denies.
-pub fn judge_files(manifest: &Manifest, root: &Path, files: &[(String, String)]) -> Result<Judged> {
+pub fn judge_files(manifest: &Manifest, root: &Path, files: &[Diffed]) -> Result<Judged> {
     let mut a_persons: Vec<String> = a_persons_of(manifest).collect();
     let mut nested: BTreeMap<PathBuf, Manifest> = BTreeMap::new();
     let mut judged = Vec::new();
-    for (path, content) in files {
-        let call = Call::write_of(&root.join(path).to_string_lossy(), Some(content));
+    for Diffed {
+        path,
+        content,
+        displaced,
+    } in files
+    {
+        let call = Call::diff_of(&root.join(path).to_string_lossy(), content, displaced);
         let judgement = match call.nested(root) {
             None => judge(manifest, root, &call)?,
             Some(workspace) => {
@@ -145,21 +166,42 @@ fn a_persons_of(manifest: &Manifest) -> impl Iterator<Item = String> + '_ {
         .map(|r| r.id.clone())
 }
 
-/// The staged files with their staged content: what a commit would take.
-/// A deleted file has nothing to judge.
-fn staged_files(root: &Path) -> Result<Vec<(String, String)>> {
+/// What `rev` carries at `path`, the empty text where it carries nothing
+/// and where the revision cannot be read at all: a base that answers with
+/// an error is no evidence that a line stood there, and reading it as
+/// empty is the answer that denies rather than excuses.
+fn displaced(root: &Path, rev: &str, path: &str) -> String {
+    git::show(root, rev, path)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+/// The staged files with their staged content: what a commit would take,
+/// against what `HEAD` carries. A deleted file has nothing to judge.
+fn staged_files(root: &Path) -> Result<Vec<Diffed>> {
     let mut files = Vec::new();
     for change in git::staged(root)?.into_iter().filter(|c| !c.deleted) {
         if let Some(content) = git::staged_content(root, &change.path)? {
-            files.push((change.path, content));
+            let displaced = displaced(root, "HEAD", &change.path);
+            files.push(Diffed {
+                path: change.path,
+                content,
+                displaced,
+            });
         }
     }
     Ok(files)
 }
 
 /// The changed files with their working-tree content, as `done` judges
-/// them; a deleted or vanished file has nothing to judge.
-pub(crate) fn working_files(root: &Path, changed: &[git::Change]) -> Result<Vec<(String, String)>> {
+/// them, against what `base` carries; a deleted or vanished file has
+/// nothing to judge.
+pub(crate) fn working_files(
+    root: &Path,
+    base: &str,
+    changed: &[git::Change],
+) -> Result<Vec<Diffed>> {
     let mut files = Vec::new();
     for change in changed.iter().filter(|c| !c.deleted) {
         let file = root.join(&change.path);
@@ -167,10 +209,11 @@ pub(crate) fn working_files(root: &Path, changed: &[git::Change]) -> Result<Vec<
             continue;
         }
         let bytes = fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
-        files.push((
-            change.path.clone(),
-            String::from_utf8_lossy(&bytes).into_owned(),
-        ));
+        files.push(Diffed {
+            path: change.path.clone(),
+            content: String::from_utf8_lossy(&bytes).into_owned(),
+            displaced: displaced(root, base, &change.path),
+        });
     }
     Ok(files)
 }

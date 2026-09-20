@@ -8,19 +8,27 @@
 //!
 //! **What stands as evidence.** The instrument's reading and the tree hash
 //! it carries (§4.2, §13 D.18). A hit is the instrument's own when it
-//! already stands in the file as that instrument last saw it: every hit of
-//! the pattern is in the file on disk, and the crate the file lies in has a
-//! reading of the named instrument stamped with the crate's tree hash now.
-//! `witness` constructs its reading after `--accept` has written, so the
-//! line it captured is inside the tree the reading is over.
+//! already stands in the file as that instrument last saw it: the text the
+//! call would leave adds no hit over what the file on disk carries, and the
+//! crate the file lies in has a reading of the named instrument stamped
+//! with the crate's tree hash now. `witness` constructs its reading after
+//! `--accept` has written, so the line it captured is inside the tree the
+//! reading is over.
 //!
-//! **What stays denied.** A call at the hook that would put an `exit=` in a
-//! file: what it writes is not in the file yet, so no reading covers it and
-//! the denial stands whatever the store holds — which is the rule doing its
-//! work, since the authoring it refuses happens there. A line left in the
-//! tree by a hand the hook did not see: the crate has no reading of the
-//! instrument, or one taken before the line was written, whose stamp is not
-//! the tree's, so `permit --diff` and `done` deny it with the rule id.
+//! **Who asks.** The diff judge, which measures a write against the base
+//! and not against the file: a line `--accept` wrote stands in the tree and
+//! not in the base, so the row fires there and this is what answers it. A
+//! call at the hook is measured against the file it would change, so a hit
+//! it adds is by that fact one the file has not got and no reading can
+//! cover it — the rule's own work, since the authoring it refuses happens
+//! there. Counting the hits and not looking for the words is what makes
+//! that hold in a file already carrying seventy-eight of the same line: an
+//! edit adding a seventy-ninth adds one (#510).
+//!
+//! **What stays denied.** A line left in the tree by a hand the hook did
+//! not see: the crate has no reading of the instrument, or one taken before
+//! the line was written, whose stamp is not the tree's, so `permit --diff`
+//! and `done` deny it with the rule id.
 //!
 //! The file comes before the store and git, so a call that would author a
 //! line pays one read and the walk ends there; a hit already in the tree is
@@ -66,10 +74,9 @@ pub(super) fn captured(
     let Ok(text) = fs::read_to_string(root.join(path)) else {
         return false;
     };
-    if !regex
-        .find_iter(written)
-        .all(|hit| text.contains(hit.as_str()))
-    {
+    // Every hit stands in the file already, counted: the text adds none
+    // over what is on disk, so what fired is the tree's and not the call's.
+    if super::rules::adds(regex, written, &text) {
         return false;
     }
     let Some(krate) = manifest.crate_of(path) else {

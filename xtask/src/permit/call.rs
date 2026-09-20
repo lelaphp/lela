@@ -2,6 +2,7 @@
 //! file relative to the workspace, the workspace whose manifest judges the
 //! call, and the checkout that workspace is in.
 
+use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -23,6 +24,12 @@ pub struct Call {
     pub cwd: Option<String>,
     #[serde(default)]
     pub session_id: String,
+    /// What the call displaces, where the caller knows it and the file at
+    /// the path is not it: the diff judge's, the tracked content at the
+    /// base it measures since ([`Call::diff_of`]). The hook's JSON never
+    /// carries it, since a call at the hook displaces what is at the path.
+    #[serde(skip)]
+    pub(super) displaced: Option<String>,
 }
 
 /// The fields of `tool_input` a rule can read: an `Edit`'s, a `Write`'s or
@@ -55,6 +62,18 @@ impl Call {
             },
             cwd: None,
             session_id: String::new(),
+            displaced: None,
+        }
+    }
+
+    /// One file of a diff as the `Write` of its content: the same call
+    /// with what the base carries at that path beside it, so a rule that
+    /// asks what the write adds is asked of the diff and not of a file
+    /// against itself.
+    pub(super) fn diff_of(path: &str, content: &str, displaced: &str) -> Call {
+        Call {
+            displaced: Some(displaced.to_owned()),
+            ..Call::write_of(path, Some(content))
         }
     }
 
@@ -65,6 +84,41 @@ impl Call {
             .new_string
             .as_deref()
             .or(self.tool_input.content.as_deref())
+    }
+
+    /// What the call displaces and what it would leave in its place, both
+    /// as whole texts, for a rule that fires on what a write adds rather
+    /// than on what the file already carries (#510). `None` for a call
+    /// that writes no file.
+    ///
+    /// A `Write` leaves its `content`; what it displaces is the caller's
+    /// `displaced` where there is one, the diff judge's base, and what
+    /// stands at the path otherwise. An `Edit` leaves the file with the
+    /// replacement made, so a line the file already carries is counted
+    /// once on both sides and only the edit's own addition stands out; an
+    /// `old_string` the file has not is an edit that cannot apply, and
+    /// what it would write is read as if it were appended, which denies
+    /// where reading it alone would excuse.
+    pub(super) fn rewrite(&self, root: &Path, path: Option<&Path>) -> Option<(String, String)> {
+        let standing = path
+            .map(|path| fs::read_to_string(root.join(path)).unwrap_or_default())
+            .unwrap_or_default();
+        if let Some(content) = self.tool_input.content.as_deref() {
+            let before = self.displaced.clone().unwrap_or(standing);
+            return Some((before, content.to_owned()));
+        }
+        let new = self.tool_input.new_string.as_deref()?;
+        let old = self.tool_input.old_string.as_deref().unwrap_or_default();
+        let after = if !old.is_empty() && standing.contains(old) {
+            if self.tool_input.replace_all {
+                standing.replace(old, new)
+            } else {
+                standing.replacen(old, new, 1)
+            }
+        } else {
+            format!("{standing}{new}")
+        };
+        Some((standing, after))
     }
 
     pub(super) fn command(&self) -> Option<&str> {

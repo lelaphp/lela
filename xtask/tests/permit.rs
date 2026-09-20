@@ -1872,50 +1872,83 @@ fn denial(root: &Path, manifest: &Manifest, call: &Call) -> Option<String> {
         .map(xtask::permit::Finding::reason)
 }
 
-/// The `unless` qualifier's sensor (#105): an `exit=` the named
-/// instrument's fresh reading covers is permitted, and one no reading
-/// accounts for is denied with the rule id, which is where the row stood
-/// for every hit before.
+/// The `Edit` that would put `new` where `old` stands in `path`.
+fn edit_call(path: &str, old: &str, new: &str) -> Call {
+    Call::parse(
+        &serde_json::json!({
+            "tool_name": "Edit",
+            "tool_input": {"file_path": path, "old_string": old, "new_string": new},
+        })
+        .to_string(),
+    )
+    .unwrap()
+}
+
+/// What a call at the hook is measured against is the file it would change
+/// (#510): a write that adds an `exit=` is denied whatever the store holds,
+/// since the authoring the row refuses happens here, and one that leaves
+/// every pinned verdict where it stood adds none and is permitted with no
+/// reading behind it. The count decides and not the words, so a second copy
+/// of the very line the file carries is a line added. The evidence `unless`
+/// reads is the diff judge's question, held by
+/// [`what_accept_wrote_permit_diff_permits_over_the_same_tree`].
 #[test]
-fn an_exit_a_fresh_witness_reading_covers_is_permitted_and_one_without_is_denied() {
+fn a_write_that_adds_an_exit_is_denied_and_one_that_adds_none_is_permitted() {
     let root = scratch("unless");
     let manifest = Manifest::load(&root).unwrap();
     let captured = block("exit=3");
     lay_down(&root, &captured);
     let write = write_call(FILE, &captured);
 
-    let denied = denial(&root, &manifest, &write).expect("no reading covers the line yet");
-    assert!(denied.contains(EXIT_AUTHORED), "{denied}");
-
-    witness_reading(&root);
+    // The file's own content: nothing is authored, and no reading is
+    // needed to say so.
     assert_eq!(
         denial(&root, &manifest, &write),
         None,
-        "the instrument measured the tree the line stands in"
+        "a write that leaves the pinned verdict where it stood"
     );
+    witness_reading(&root);
+    assert_eq!(denial(&root, &manifest, &write), None);
 
-    // The call the rule is for: a status this tree does not carry, which
-    // no reading covers however fresh it is.
+    // The call the rule is for: a status this file does not carry.
     let authored = block("exit=7");
     let denied = denial(&root, &manifest, &write_call(FILE, &authored))
-        .expect("an authored status is not in the tree");
+        .expect("an authored status the file has not");
     assert!(denied.contains(EXIT_AUTHORED), "{denied}");
 
-    // The same line in the tree with the reading taken before it: the
-    // stamp is not the crate's hash now, so the line is no measurement's.
-    lay_down(&root, &authored);
-    let denied = denial(&root, &manifest, &write_call(FILE, &authored))
-        .expect("the reading predates the line");
+    // One more copy of the line the file already carries is one more all
+    // the same, which a fresh reading over the crate does not excuse.
+    let denied = denial(
+        &root,
+        &manifest,
+        &write_call(FILE, &format!("{captured}{captured}")),
+    )
+    .expect("a second copy of the pinned line is a line added");
     assert!(denied.contains(EXIT_AUTHORED), "{denied}");
 
-    // And a reading over the crate as it now stands permits it again: the
-    // sensor reads the stamp and never the words of the line.
-    witness_reading(&root);
-    assert_eq!(denial(&root, &manifest, &write_call(FILE, &authored)), None);
+    // The shape #510 named: an edit beside a pinned verdict, in a file
+    // that carries one, adding another. The status is built from the
+    // number, as `block` builds it, so this file carries no fence line of
+    // its own for the row to read.
+    let status = 3;
+    let fence = format!("/// ```expect exit={status}");
+    let beside = edit_call(
+        FILE,
+        "pub fn native() {}",
+        &format!("{fence}\npub fn native() {{}}"),
+    );
+    let denied = denial(&root, &manifest, &beside).expect("the edit brings a second verdict");
+    assert!(denied.contains(EXIT_AUTHORED), "{denied}");
+
+    // And an edit that moves the prose around the pinned verdict adds
+    // nothing, which is the edit the row used to refuse.
+    let around = edit_call(FILE, &fence, &format!("/// A note:\n{fence}"));
+    assert_eq!(denial(&root, &manifest, &around), None);
 }
 
 /// The evidence this cannot read is no evidence: a crate the manifest does
-/// not name has no reading to stand on, however the tree looks.
+/// not name has no reading to stand on, so a write that adds the line to a
+/// file there is denied however the tree looks.
 #[test]
 fn an_exit_in_a_file_no_crate_row_names_is_denied() {
     let root = scratch("unless-uncrated");
@@ -1923,24 +1956,26 @@ fn an_exit_in_a_file_no_crate_row_names_is_denied() {
     let text = block("exit=3");
     let file = "vendor/other/src/lib.rs";
     std::fs::create_dir_all(root.join(file).parent().unwrap()).unwrap();
-    std::fs::write(root.join(file), &text).unwrap();
+    std::fs::write(root.join(file), "pub fn native() {}\n").unwrap();
     let denied = denial(&root, &manifest, &write_call(file, &text)).expect("no crate, no reading");
     assert!(denied.contains(EXIT_AUTHORED), "{denied}");
 }
 
-/// The whole-file case (#134): the shape the ticket named, a `Write` of a
-/// whole file with a status `--accept` captured in it, as one fixture
-/// beside the three `Edit` calls the directory already carries. Under
-/// #105's reading the shape is not what decides, the evidence is, so the
-/// one fixture is judged twice: over this workspace, where the line stands
-/// in no file and no `witness` reading covers it, it is denied with the
-/// rule id; over a tree where the same file stands and `witness` measured
-/// it, it is permitted. A case that must never fire whatever the store
-/// holds cannot exist for this row, and these two answers are what stands
-/// in its place.
+/// The whole-file case (#134, #510): the shape the ticket named, a `Write`
+/// of a whole file with a status `--accept` captured in it, as one fixture
+/// beside the `Edit` calls the directory carries. The fixture is judged
+/// twice: over this workspace, where the file at that path carries no such
+/// line, the write adds one and is denied with the rule id; over a tree
+/// where the same file stands, it adds none and is permitted with no
+/// reading behind it, which is the file a session must be able to write
+/// again. Beside it, `beside-a-pinned-one.json` edits that same tree, the
+/// verdicts untouched, and brings one more: the negative control of the
+/// same pair, denied though the line it types stands in the file already
+/// and the crate's reading is fresh.
 #[test]
-fn the_whole_file_fixture_is_denied_here_and_permitted_where_a_reading_covers_it() {
-    let written = call(&fixtures().join("rules/witness.exit-authored/whole-file.json"));
+fn the_whole_file_fixture_is_denied_here_and_permitted_where_the_file_carries_it() {
+    let dir = fixtures().join("rules/witness.exit-authored");
+    let written = call(&dir.join("whole-file.json"));
     assert_eq!(
         written.tool_input.file_path.as_deref(),
         Some(FILE),
@@ -1955,17 +1990,23 @@ fn the_whole_file_fixture_is_denied_here_and_permitted_where_a_reading_covers_it
 
     let manifest = Manifest::load(workspace()).unwrap();
     let denied = denial(workspace(), &manifest, &written)
-        .expect("no reading of this workspace covers that line");
+        .expect("the file at that path carries no such line");
     assert!(denied.contains(EXIT_AUTHORED), "{denied}");
 
     let root = scratch("unless-whole-file");
+    let manifest = Manifest::load(&root).unwrap();
     lay_down(&root, &text);
-    witness_reading(&root);
     assert_eq!(
-        denial(&root, &Manifest::load(&root).unwrap(), &written),
+        denial(&root, &manifest, &written),
         None,
-        "the instrument measured the tree the whole file stands in"
+        "the whole file as it stands adds no verdict"
     );
+
+    witness_reading(&root);
+    let beside = call(&dir.join("beside-a-pinned-one.json"));
+    let denied = denial(&root, &manifest, &beside)
+        .expect("the edit brings a verdict the file does not carry yet");
+    assert!(denied.contains(EXIT_AUTHORED), "{denied}");
 }
 
 /// The tracked pin's binary, when it is on this machine; a failure where

@@ -315,7 +315,14 @@ pub fn judge(
     }
     locks(root, manifest, store, &changed, &mut unmet)?;
     open_rows(root, &base.commit, registry, &crates, &changed, &mut unmet)?;
-    over_the_diff(root, manifest, &changed, &mut unmet, &mut notes)?;
+    over_the_diff(
+        root,
+        manifest,
+        &base.commit,
+        &changed,
+        &mut unmet,
+        &mut notes,
+    )?;
     if let Some(ticket) = ticket {
         boxes(root, store, ticket, &mut unmet)?;
     }
@@ -660,11 +667,12 @@ fn open_rows(
 fn over_the_diff(
     root: &Path,
     manifest: &Manifest,
+    base: &str,
     changed: &[Change],
     unmet: &mut Vec<String>,
     notes: &mut Vec<String>,
 ) -> Result<()> {
-    let files = permit::working_files(root, changed)?;
+    let files = permit::working_files(root, base, changed)?;
     let diff = permit::judge_files(manifest, root, &files)?;
     for (path, finding) in diff.denials() {
         unmet.push(format!("permit denies {path}: {}", finding.reason()));

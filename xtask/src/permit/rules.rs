@@ -176,13 +176,28 @@ fn evaluate(
             .with_context(|| format!("rule \"{}\": deny_pattern is not a regex", rule.id))?;
         // A hit the rule's `unless` accounts for is the named instrument's
         // own and not this call's ([`unless::captured`]).
-        match call.command().or_else(|| call.written()) {
-            Some(subject) if regex.is_match(subject) => {
-                !p.unless.as_deref().is_some_and(|unless| {
-                    unless::captured(manifest, root, unless, &regex, subject, path)
-                })
-            }
-            _ => false,
+        let excused = |subject: &str| {
+            p.unless.as_deref().is_some_and(|unless| {
+                unless::captured(manifest, root, unless, &regex, subject, path)
+            })
+        };
+        // A shell line is the whole of what it would do, so the pattern is
+        // asked of it as it stands. A write is a change to a file, so the
+        // pattern is asked of what the change adds and not of what the
+        // file already carries (#510): a write that leaves every hit where
+        // it stood adds none and fires on nothing.
+        match call.command() {
+            Some(command) => regex.is_match(command) && !excused(command),
+            // Text the call writes with no hit in it adds none whatever
+            // the file holds, so the file is read only where there is a
+            // hit to place.
+            None => match call.written().filter(|text| regex.is_match(text)) {
+                Some(_) => match call.rewrite(root, path) {
+                    Some((before, after)) => adds(&regex, &after, &before) && !excused(&after),
+                    None => false,
+                },
+                None => false,
+            },
         }
     } else if p.deny == Some(true) {
         true
@@ -211,6 +226,23 @@ fn evaluate(
 
 fn is_rust_source(path: &Path) -> bool {
     path.extension().is_some_and(|e| e == "rs")
+}
+
+/// Whether `after` carries any hit of `regex` more often than `before`
+/// does: what a change adds, as a `deny_pattern` over a write reads it
+/// (#510). The count and not the presence, so one more copy of a line the
+/// file already carries is an addition and a line moved is not.
+pub(super) fn adds(regex: &Regex, after: &str, before: &str) -> bool {
+    let mut standing: Vec<&str> = regex.find_iter(before).map(|hit| hit.as_str()).collect();
+    regex.find_iter(after).any(
+        |hit| match standing.iter().position(|held| *held == hit.as_str()) {
+            Some(at) => {
+                standing.swap_remove(at);
+                false
+            }
+            None => true,
+        },
+    )
 }
 
 /// The tokens of each simple command in a shell line, split on unquoted
