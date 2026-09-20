@@ -367,7 +367,7 @@ impl Emit<'_> {
     /// other expression, whether the compiler would fold it or not, which
     /// is why `chr(1 + 64)` is a call where `ord('a' . '')` is a
     /// constant.
-    fn written(&mut self, expr: &Child) -> Result<Option<Zval>, CompileError> {
+    pub(crate) fn written(&mut self, expr: &Child) -> Result<Option<Zval>, CompileError> {
         match &**expr {
             Expr::Int(n) => Ok(Some(Zval::long(*n))),
             Expr::Float(f) => Ok(Some(Zval::double(*f))),

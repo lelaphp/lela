@@ -443,13 +443,25 @@ pub(crate) struct Arm {
 }
 
 /// One piece of an interpolated string, php's `encaps_var` or
-/// `T_ENCAPSED_AND_WHITESPACE`: the expression, and whether it was
-/// written `${a}`, php's `ZEND_ENCAPS_VAR_DOLLAR_CURLY`, which
-/// `zend_compile_encaps_list` deprecates.
+/// `T_ENCAPSED_AND_WHITESPACE`: the expression, and how it was
+/// written, php's `attr` on the `encaps_var`, which
+/// `zend_compile_encaps_list` reads for its two deprecations.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Piece {
     pub(crate) expr: Child,
-    pub(crate) dollar_curly: bool,
+    pub(crate) written: Written,
+}
+
+/// How a variable piece of an interpolated string was written: `$a`,
+/// `{$a}` and the plain bytes carry no `attr`; `${a}` and `${a[0]}` are
+/// php's `ZEND_ENCAPS_VAR_DOLLAR_CURLY`, and `${expr}` its
+/// `ZEND_ENCAPS_VAR_DOLLAR_CURLY_VAR_VAR`, each deprecated in its own
+/// words.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub(crate) enum Written {
+    Plain,
+    DollarCurly,
+    DollarCurlyVarVar,
 }
 
 /// One expression.
@@ -523,6 +535,13 @@ pub(crate) enum Expr {
     /// `$this`, php's `ZEND_AST_VAR` over the one name `is_this_fetch`
     /// picks out, fetched by `FETCH_THIS` and never a CV.
     This,
+    /// `${expr}` inside a double-quoted string, php's `ZEND_AST_VAR`
+    /// over an expression rather than a name: the variable the
+    /// expression's value names, which `zend_compile_simple_var` fetches
+    /// by `FETCH_R` unless php's parser had the expression as one value,
+    /// `ZEND_AST_ZVAL`, and the value names a CV. `$$a` and `${expr}`
+    /// outside a string are not read yet.
+    VarVar(Child),
     /// `$o->p`, php's `ZEND_AST_PROP` over any expression and a property
     /// named as written; `$o?->p` and `$o->$p` are not read.
     Prop {
@@ -4541,6 +4560,12 @@ impl Reader<'_> {
             self.bump(1);
         }
         let name = self.taken(start);
+        self.named_variable(line, name)
+    }
+
+    /// The variable a label names, once read: `$this` is [`Expr::This`],
+    /// an auto-global is refused, and the rest is the CV.
+    fn named_variable(&self, line: u32, name: Vec<u8>) -> Result<Child, Trouble> {
         if name == b"this" {
             return Ok(Child::at(line, Expr::This));
         }
@@ -4698,13 +4723,14 @@ impl Reader<'_> {
 
     /// `"..."`: the escapes php's scanner takes, and the interpolations
     /// its `ST_DOUBLE_QUOTES` state cuts the string at. `$` before a
-    /// label starts a variable, `{$` opens `T_CURLY_OPEN` and reads a
-    /// variable up to its `}`, and `${` before a label and `}` is the
-    /// `T_DOLLAR_OPEN_CURLY_BRACES` form, kept as written for the
-    /// compiler's deprecation; a `$` or a `{` before anything else is a
-    /// plain byte, and the byte after a `\` is never one of them. A
-    /// variable followed by `[` or `->` and a label, php's `encaps_var`
-    /// over a dimension or a property, and `${expr}` are not read yet.
+    /// label starts a variable, php's `encaps_var` with the dimension or
+    /// the property the scanner reads after it ([`Self::encaps_var`]);
+    /// `{$` opens `T_CURLY_OPEN` and reads a `variable` up to its `}`
+    /// ([`Self::curly_variable`]); and `${` is `T_DOLLAR_OPEN_CURLY_BRACES`,
+    /// a name, a name and a dimension, or an expression, kept as
+    /// written for the compiler's deprecation ([`Self::dollar_curly`]).
+    /// A `$` or a `{` before anything else is a plain byte, and the byte
+    /// after a `\` is never one of them.
     fn double_quoted(&mut self) -> Result<Child, Trouble> {
         let line = self.line;
         self.bump(1);
@@ -4721,39 +4747,22 @@ impl Reader<'_> {
                     if !bytes.is_empty() {
                         pieces.push(Piece {
                             expr: Child::at(line, Expr::Str(bytes)),
-                            dollar_curly: false,
+                            written: Written::Plain,
                         });
                     }
                     return Ok(Child::at(line, Expr::Encaps(pieces)));
                 }
                 Some(b'$') if self.label_starts(1) => {
-                    let expr = self.variable()?;
-                    self.refuse_dim_or_prop()?;
-                    Self::piece(&mut pieces, &mut bytes, expr, false);
+                    let expr = self.encaps_var()?;
+                    Self::piece(&mut pieces, &mut bytes, expr, Written::Plain);
                 }
                 Some(b'{') if self.byte(1) == Some(b'$') => {
-                    self.bump(1);
-                    let expr = self.variable()?;
-                    if self.byte(0) != Some(b'}') {
-                        return Err(self
-                            .trouble("an interpolated expression this compiler cannot read yet"));
-                    }
-                    self.bump(1);
-                    Self::piece(&mut pieces, &mut bytes, expr, false);
+                    let expr = self.curly_variable()?;
+                    Self::piece(&mut pieces, &mut bytes, expr, Written::Plain);
                 }
                 Some(b'$') if self.byte(1) == Some(b'{') => {
-                    if !self.label_starts(2) {
-                        return Err(self
-                            .trouble("an interpolated expression this compiler cannot read yet"));
-                    }
-                    self.bump(1);
-                    let expr = self.variable()?;
-                    if self.byte(0) != Some(b'}') {
-                        return Err(self
-                            .trouble("an interpolated expression this compiler cannot read yet"));
-                    }
-                    self.bump(1);
-                    Self::piece(&mut pieces, &mut bytes, expr, true);
+                    let (expr, written) = self.dollar_curly()?;
+                    Self::piece(&mut pieces, &mut bytes, expr, written);
                 }
                 Some(b'\\') => self.escape(&mut bytes)?,
                 Some(b) => {
@@ -4840,30 +4849,229 @@ impl Reader<'_> {
             .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_' || b >= 0x80)
     }
 
-    /// The `[` and `->` php's `ST_VAR_OFFSET` and `ST_LOOKING_FOR_PROPERTY`
-    /// states read after a variable inside a string, which this refuses.
-    fn refuse_dim_or_prop(&self) -> Result<(), Trouble> {
-        let dim = self.byte(0) == Some(b'[');
-        let prop = self.byte(0) == Some(b'-') && self.byte(1) == Some(b'>') && self.label_starts(2);
-        if dim || prop {
+    /// `$a`, `$a[k]` and `$a->b` inside a string, php's `encaps_var` over
+    /// a `T_VARIABLE`: a `[` right after the label is the scanner's
+    /// `ST_VAR_OFFSET`, one `encaps_var_offset` and its `]`, php's
+    /// `ZEND_AST_DIM`; `->` and a label byte right after is its
+    /// `ST_LOOKING_FOR_PROPERTY`, php's `ZEND_AST_PROP` over the one
+    /// label. Neither chains: `"$a[0][1]"` and `"$a->b->c"` are the one
+    /// member and then plain bytes, as the scanner pops its state after
+    /// one. `?->` and a label is `ZEND_AST_NULLSAFE_PROP`, not read yet.
+    fn encaps_var(&mut self) -> Result<Child, Trouble> {
+        let var = self.variable()?;
+        if self.byte(0) == Some(b'[') {
+            self.bump(1);
+            let index = self.encaps_var_offset()?;
+            if self.byte(0) != Some(b']') {
+                return Err(self.trouble("a dimension in a string no bracket closes"));
+            }
+            self.bump(1);
+            return Ok(Child::at(
+                var.line(),
+                Expr::Dim {
+                    container: var,
+                    index: Some(index),
+                },
+            ));
+        }
+        if self.byte(0) == Some(b'-') && self.byte(1) == Some(b'>') && self.label_starts(2) {
+            self.bump(2);
+            let name = self.label();
+            return Ok(Child::at(var.line(), Expr::Prop { object: var, name }));
+        }
+        if self.byte(0) == Some(b'?')
+            && self.byte(1) == Some(b'-')
+            && self.byte(2) == Some(b'>')
+            && self.label_starts(3)
+        {
             return Err(
-                self.trouble("a dimension or a property in a string this compiler cannot read yet")
+                self.trouble("a nullsafe property in a string this compiler cannot read yet")
             );
         }
-        Ok(())
+        Ok(var)
+    }
+
+    /// php's `encaps_var_offset`, the one token between `$a[` and `]`
+    /// in a string: a variable, a `T_NUM_STRING` ([`Self::num_string`]),
+    /// `-` and one, negated as `zend_negate_num_string` negates it (`-0`
+    /// is the string `-0`, since `$a[-0]` is `$a["-0"]`), or a label,
+    /// which is the string it spells and never a constant. Anything
+    /// else, a space among them, is php's parse error.
+    fn encaps_var_offset(&mut self) -> Result<Child, Trouble> {
+        let line = self.line;
+        match self.byte(0) {
+            Some(b'$') if self.label_starts(1) => self.variable(),
+            Some(b'-') => {
+                self.bump(1);
+                if !self.digit_ahead(0) {
+                    return Err(self.trouble("a `-` in a dimension in a string before no number"));
+                }
+                let negated = match self.num_string() {
+                    Expr::Int(0) => Expr::Str(b"-0".to_vec()),
+                    Expr::Int(n) => Expr::Int(-n),
+                    Expr::Str(digits) => {
+                        let mut bytes = vec![b'-'];
+                        bytes.extend(digits);
+                        Expr::Str(bytes)
+                    }
+                    other => other,
+                };
+                Ok(Child::at(line, negated))
+            }
+            Some(b) if b.is_ascii_digit() => {
+                let number = self.num_string();
+                Ok(Child::at(line, number))
+            }
+            Some(_) if self.label_starts(0) => {
+                let label = self.label();
+                Ok(Child::at(line, Expr::Str(label)))
+            }
+            _ => Err(self.trouble("a dimension in a string this compiler cannot read")),
+        }
+    }
+
+    /// php's `T_NUM_STRING` in `ST_VAR_OFFSET`, at a digit: the longest
+    /// of the scanner's `LNUM`, `HNUM`, `BNUM` and `ONUM`, and the
+    /// integer it spells only where the match is `0` or digits with no
+    /// leading zero and no `_` (`[0]|([1-9][0-9]*)`, listed first and so
+    /// taken on a tie) and fits a `zend_long`; otherwise the bytes as
+    /// written, so `$a[01]`, `$a[0x1]`, `$a[1_0]` and a decimal past
+    /// `ZEND_LONG_MAX` are string keys.
+    fn num_string(&mut self) -> Expr {
+        let start = self.at;
+        let run = |from: usize, digit: fn(u8) -> bool| -> usize {
+            let mut n = 0;
+            while self.byte(from + n).is_some_and(digit) {
+                n += 1;
+                if self.byte(from + n) == Some(b'_') && self.byte(from + n + 1).is_some_and(digit) {
+                    n += 1;
+                }
+            }
+            n
+        };
+        let mut len = run(0, |b| b.is_ascii_digit());
+        if self.byte(0) == Some(b'0') {
+            let radix: Option<fn(u8) -> bool> = match self.byte(1) {
+                Some(b'x' | b'X') => Some(|b| b.is_ascii_hexdigit()),
+                Some(b'b' | b'B') => Some(|b| matches!(b, b'0' | b'1')),
+                Some(b'o' | b'O') => Some(|b| matches!(b, b'0'..=b'7')),
+                _ => None,
+            };
+            if let Some(digit) = radix {
+                let digits = run(2, digit);
+                if digits > 0 {
+                    len = len.max(2 + digits);
+                }
+            }
+        }
+        self.bump(len);
+        let text = self.taken(start);
+        let canonical = text == b"0"
+            || (text.first().is_some_and(|b| (b'1'..=b'9').contains(b))
+                && text.iter().all(u8::is_ascii_digit));
+        if canonical
+            && let Ok(n) = std::str::from_utf8(&text)
+                .unwrap_or_default()
+                .parse::<i64>()
+        {
+            return Expr::Int(n);
+        }
+        Expr::Str(text)
+    }
+
+    /// `{$…}` inside a string, php's `T_CURLY_OPEN variable '}'`: the
+    /// `{` stepped over, then a variable and what php's `variable`
+    /// production chains after it, a dimension, a property, a method
+    /// call or a call of the variable, read in `ST_IN_SCRIPTING` with
+    /// whitespace and comments skipped, up to the `}`. What stands
+    /// before the `}` and is none of those is not read yet.
+    fn curly_variable(&mut self) -> Result<Child, Trouble> {
+        self.bump(1);
+        let receiver = self.variable()?;
+        let receiver = self.dynamic_calls(receiver)?;
+        let expr = self.member_calls(receiver)?;
+        self.skip_trivia();
+        if self.byte(0) != Some(b'}') {
+            return Err(self.trouble("an interpolated expression this compiler cannot read yet"));
+        }
+        self.bump(1);
+        Ok(expr)
+    }
+
+    /// `${…}` inside a string, php's `T_DOLLAR_OPEN_CURLY_BRACES` and
+    /// what its `ST_LOOKING_FOR_VARNAME` state makes of the next bytes:
+    /// a label followed by `}` or `[` is a `T_STRING_VARNAME`, the
+    /// variable of that name, alone or with `'[' expr ']'` after it,
+    /// both `ZEND_ENCAPS_VAR_DOLLAR_CURLY`; anything else is read again
+    /// in `ST_IN_SCRIPTING` as php's `expr`, the variable the value
+    /// names, `ZEND_ENCAPS_VAR_DOLLAR_CURLY_VAR_VAR`. Both end at a `}`.
+    fn dollar_curly(&mut self) -> Result<(Child, Written), Trouble> {
+        self.bump(2);
+        let line = self.line;
+        let mut len = 0;
+        if self.label_starts(0) {
+            while self
+                .byte(len)
+                .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80)
+            {
+                len += 1;
+            }
+        }
+        if len > 0 && matches!(self.byte(len), Some(b'[' | b'}')) {
+            let name = self.taken_ahead(0, len).to_vec();
+            self.bump(len);
+            let var = self.named_variable(line, name)?;
+            if self.byte(0) == Some(b'}') {
+                self.bump(1);
+                return Ok((var, Written::DollarCurly));
+            }
+            self.bump(1);
+            self.skip_trivia();
+            let index = self.expr()?;
+            self.skip_trivia();
+            if self.byte(0) != Some(b']') {
+                return Err(self.trouble("a dimension in a string no bracket closes"));
+            }
+            self.bump(1);
+            self.skip_trivia();
+            if self.byte(0) != Some(b'}') {
+                return Err(
+                    self.trouble("an interpolated expression this compiler cannot read yet")
+                );
+            }
+            self.bump(1);
+            let dim = Child::at(
+                line,
+                Expr::Dim {
+                    container: var,
+                    index: Some(index),
+                },
+            );
+            return Ok((dim, Written::DollarCurly));
+        }
+        let name = self.expr()?;
+        self.skip_trivia();
+        if self.byte(0) != Some(b'}') {
+            return Err(self.trouble("an interpolated expression this compiler cannot read yet"));
+        }
+        self.bump(1);
+        Ok((
+            Child::at(line, Expr::VarVar(name)),
+            Written::DollarCurlyVarVar,
+        ))
     }
 
     /// The plain bytes so far as a piece where there are any, then the
     /// variable, php's `encaps_list` growing by a `T_ENCAPSED_AND_WHITESPACE`
     /// and an `encaps_var`.
-    fn piece(pieces: &mut Vec<Piece>, bytes: &mut Vec<u8>, expr: Child, dollar_curly: bool) {
+    fn piece(pieces: &mut Vec<Piece>, bytes: &mut Vec<u8>, expr: Child, written: Written) {
         if !bytes.is_empty() {
             pieces.push(Piece {
                 expr: Child::at(expr.line(), Expr::Str(std::mem::take(bytes))),
-                dollar_curly: false,
+                written: Written::Plain,
             });
         }
-        pieces.push(Piece { expr, dollar_curly });
+        pieces.push(Piece { expr, written });
     }
 
     /// Whitespace and the three comment forms.
@@ -4948,7 +5156,7 @@ pub(crate) fn is_auto_global(name: &[u8]) -> bool {
 mod tests {
     use super::{
         BinaryOp, CastTo, Child, Element, Expr, IfArm, Level, Piece, Read, Stmt, Target, Trouble,
-        Unset,
+        Unset, Written,
     };
 
     /// One expression node at line 1, where every source below stands
@@ -6190,13 +6398,13 @@ mod tests {
     /// at: `$a`, `{$a}` and `${a}` each a piece, the last marked as
     /// written; a `$` or a `{` before anything else, and the byte after a
     /// `\`, plain bytes; a string with no variable piece is a plain string.
-    /// A dimension, a property and an expression under the braces are
+    /// `{$…}` over what is no `variable`, and `?->` after a variable, are
     /// refused, not read as something else.
     #[test]
     fn an_interpolated_string_is_its_pieces_as_php_s_lexer_cuts_them() {
         let piece = |expr: Expr| Piece {
             expr: at(expr),
-            dollar_curly: false,
+            written: Written::Plain,
         };
         let lit = |bytes: &[u8]| piece(Expr::Str(bytes.to_vec()));
         let var = |name: &[u8]| piece(Expr::Var(name.to_vec()));
@@ -6214,7 +6422,7 @@ mod tests {
                         piece(Expr::This),
                         Piece {
                             expr: at(Expr::Var(b"b".to_vec())),
-                            dollar_curly: true,
+                            written: Written::DollarCurly,
                         },
                         var(b"a"),
                         lit(b"-"),
@@ -6228,24 +6436,16 @@ mod tests {
         );
         for (source, what) in [
             (
-                &b"<?php \"$a[0]\";"[..],
-                "a dimension or a property in a string this compiler cannot read yet",
-            ),
-            (
-                b"<?php \"$a->b\";",
-                "a dimension or a property in a string this compiler cannot read yet",
-            ),
-            (
-                b"<?php \"{$a->b}\";",
+                &b"<?php \"{$a[0] . 1}\";"[..],
                 "an interpolated expression this compiler cannot read yet",
             ),
             (
-                b"<?php \"${a[0]}\";",
-                "an interpolated expression this compiler cannot read yet",
+                b"<?php \"$a?->b\";",
+                "a nullsafe property in a string this compiler cannot read yet",
             ),
             (
-                b"<?php \"${f()}\";",
-                "an interpolated expression this compiler cannot read yet",
+                b"<?php \"${_GET}\";",
+                "a variable this compiler cannot read yet",
             ),
         ] {
             assert_eq!(
@@ -6255,6 +6455,119 @@ mod tests {
                 String::from_utf8_lossy(source)
             );
         }
+    }
+
+    /// The rest of php's `encaps_var`: `$a[…]` with each
+    /// `encaps_var_offset`, a decimal that fits an integer key, `-` and
+    /// one negated, `-0` the string `-0`, a `T_NUM_STRING` that is no
+    /// plain decimal or does not fit a string key, a label a string key
+    /// and a variable the CV; `$a->b` one property, and the `[0]` or
+    /// `->c` after either plain bytes, as the scanner pops its state
+    /// after one member; `{$…}` over the chain `member_calls` reads and
+    /// a call of the variable, whitespace before the `}` skipped; `${a}`
+    /// and `${a[expr]}` marked `DollarCurly` with the dimension a full
+    /// expression, `${a }` and `${expr}` the variable the value names,
+    /// marked `DollarCurlyVarVar`.
+    #[test]
+    fn a_dimension_a_property_and_an_expression_in_a_string_are_php_s_encaps_var() {
+        let piece = |expr: Expr| Piece {
+            expr: at(expr),
+            written: Written::Plain,
+        };
+        let lit = |bytes: &[u8]| piece(Expr::Str(bytes.to_vec()));
+        let var = |name: &[u8]| at(Expr::Var(name.to_vec()));
+        let dim = |container: Child, index: Expr| Expr::Dim {
+            container,
+            index: Some(at(index)),
+        };
+        let prop = |object: Child, name: &[u8]| Expr::Prop {
+            object,
+            name: name.to_vec(),
+        };
+        assert_eq!(
+            read(b"<?php \"$a[0]$a[-1]$a[-0]$a[01]$a[0x1F]$a[1_0]$a[9223372036854775807]$a[9223372036854775808]$a[k]$a[$i]$a[$this]\";")
+                .unwrap_or_default(),
+            vec![(
+                Stmt::Effect(at(Expr::Encaps(vec![
+                    piece(dim(var(b"a"), Expr::Int(0))),
+                    piece(dim(var(b"a"), Expr::Int(-1))),
+                    piece(dim(var(b"a"), Expr::Str(b"-0".to_vec()))),
+                    piece(dim(var(b"a"), Expr::Str(b"01".to_vec()))),
+                    piece(dim(var(b"a"), Expr::Str(b"0x1F".to_vec()))),
+                    piece(dim(var(b"a"), Expr::Str(b"1_0".to_vec()))),
+                    piece(dim(var(b"a"), Expr::Int(i64::MAX))),
+                    piece(dim(
+                        var(b"a"),
+                        Expr::Str(b"9223372036854775808".to_vec())
+                    )),
+                    piece(dim(var(b"a"), Expr::Str(b"k".to_vec()))),
+                    piece(dim(var(b"a"), Expr::Var(b"i".to_vec()))),
+                    piece(dim(var(b"a"), Expr::This)),
+                ]))),
+                1
+            )]
+        );
+        assert_eq!(
+            read(b"<?php \"$o->p[0]$a[0]->c$this->p\";").unwrap_or_default(),
+            vec![(
+                Stmt::Effect(at(Expr::Encaps(vec![
+                    piece(prop(var(b"o"), b"p")),
+                    lit(b"[0]"),
+                    piece(dim(var(b"a"), Expr::Int(0))),
+                    lit(b"->c"),
+                    piece(prop(at(Expr::This), b"p")),
+                ]))),
+                1
+            )]
+        );
+        assert_eq!(
+            read(b"<?php \"{$a[0][1]}{$o->p->q}{$o->m(1)}{$f()}{$a }\";").unwrap_or_default(),
+            vec![(
+                Stmt::Effect(at(Expr::Encaps(vec![
+                    piece(dim(at(dim(var(b"a"), Expr::Int(0))), Expr::Int(1))),
+                    piece(prop(at(prop(var(b"o"), b"p")), b"q")),
+                    piece(Expr::MethodCall {
+                        object: var(b"o"),
+                        method: b"m".to_vec(),
+                        arguments: vec![at(Expr::Int(1))],
+                    }),
+                    piece(Expr::CallVar {
+                        callee: var(b"f"),
+                        arguments: Vec::new(),
+                    }),
+                    piece(Expr::Var(b"a".to_vec())),
+                ]))),
+                1
+            )]
+        );
+        assert_eq!(
+            read(b"<?php \"${a}${a[ 'k' ]}${a }${1}${$b[0]}\";").unwrap_or_default(),
+            vec![(
+                Stmt::Effect(at(Expr::Encaps(vec![
+                    Piece {
+                        expr: var(b"a"),
+                        written: Written::DollarCurly,
+                    },
+                    Piece {
+                        expr: at(dim(var(b"a"), Expr::Str(b"k".to_vec()))),
+                        written: Written::DollarCurly,
+                    },
+                    Piece {
+                        expr: at(Expr::VarVar(at(Expr::Constant(b"a".to_vec())))),
+                        written: Written::DollarCurlyVarVar,
+                    },
+                    Piece {
+                        expr: at(Expr::VarVar(at(Expr::Int(1)))),
+                        written: Written::DollarCurlyVarVar,
+                    },
+                    Piece {
+                        expr: at(Expr::VarVar(at(dim(var(b"b"), Expr::Int(0))))),
+                        written: Written::DollarCurlyVarVar,
+                    },
+                ]))),
+                1
+            )]
+        );
     }
 
     /// The cast spellings php's scanner takes, whatever their case and

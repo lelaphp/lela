@@ -109,7 +109,7 @@ use php_unit::{
 use crate::read;
 use crate::read::{
     Arm, BinaryOp, Case, CastTo, Catch, Child, Class, ConstElem, Element, Expr, Function, IfArm,
-    Magic, Method, Piece, Property, Read, Step, Stmt, Target, Unset, is_auto_global,
+    Magic, Method, Piece, Property, Read, Step, Stmt, Target, Unset, Written, is_auto_global,
 };
 use crate::{CompileError, Options, StackLimit};
 
@@ -117,6 +117,10 @@ use crate::{CompileError, Options, StackLimit};
 /// `extended_value` of a `FETCH_*` by name that is no auto-global, which
 /// the dump prints as `(local)`.
 const FETCH_LOCAL: u32 = 1 << 2;
+
+/// `ZEND_FETCH_GLOBAL` (`Z/Zend/zend_compile.h:1082`), the same slot for
+/// a name `zend_is_auto_global` answers for, printed `(global)`.
+const FETCH_GLOBAL: u32 = 1 << 1;
 
 /// `IS_VOID` (`Z/Zend/zend_types.h:637`), the type code `void` carries
 /// in a declared type's mask.
@@ -2552,6 +2556,7 @@ impl Emit<'_> {
             | Expr::Binary { .. }
             | Expr::Cast { .. } => self.const_expr_operation(expr),
             Expr::Var(_)
+            | Expr::VarVar(_)
             | Expr::This
             | Expr::Prop { .. }
             | Expr::Dim { .. }
@@ -4266,6 +4271,7 @@ impl Emit<'_> {
             // `zend_compile_simple_var` for `$this` under `BP_VAR_R`:
             // `FETCH_THIS` into a temporary.
             Expr::This => Ok(self.fetch_this(OperandKind::Tmp)),
+            Expr::VarVar(name) => self.var_var(name),
             Expr::Prop { object, name } => self.prop(object, name),
             Expr::Assign { var, value } => self.assign(var, value),
             Expr::AssignOp { var, op, value } => self.assign_op(var, *op, value),
@@ -6354,18 +6360,82 @@ impl Emit<'_> {
     /// into a temporary.
     fn fetch_by_name(&mut self, name: &[u8]) -> Result<Where, CompileError> {
         let name = self.string(name)?;
-        let at = self.constant(name);
+        Ok(self.fetch_r(Where::Constant(name), FETCH_LOCAL))
+    }
+
+    /// `zend_compile_simple_var_no_cv`'s opline: `FETCH_R` over the
+    /// name, `ZEND_FETCH_LOCAL` or `ZEND_FETCH_GLOBAL` in
+    /// `extended_value`, into the temporary `zend_adjust_for_fetch_type`
+    /// makes of it under `BP_VAR_R`.
+    fn fetch_r(&mut self, name: Where, scope: u32) -> Where {
+        let (op1_type, op1) = self.operand(name);
         let out = self.temporary();
         self.push(Opline {
             opcode: Opcode::FetchR,
-            op1_type: OperandKind::Const,
-            op1: at,
+            op1_type,
+            op1,
             out_type: OperandKind::Tmp,
             out,
-            extended_value: FETCH_LOCAL,
+            extended_value: scope,
             ..Opline::default()
         });
-        Ok(Where::Temporary(out))
+        Where::Temporary(out)
+    }
+
+    /// `zend_compile_simple_var` under `BP_VAR_R` for a `ZEND_AST_VAR`
+    /// whose name is an expression, `"${expr}"`: where php's parser had
+    /// the expression as one value ([`Self::written`]), a string
+    /// `this` is `FETCH_THIS` (`is_this_fetch`), an auto-global's name
+    /// is `FETCH_R (global)` over it (`zend_try_compile_cv` refuses it),
+    /// and any other value is the CV its string names, so `${'a'}` and
+    /// `${1}` are `$a` and `$1` with no opline. Otherwise
+    /// `zend_compile_simple_var_no_cv`: the expression compiled, a
+    /// constant converted to a string, and `FETCH_R (local)` over it
+    /// into a temporary. `$GLOBALS` by value, `FETCH_GLOBALS`, is not
+    /// read yet. The `FETCH_R` over a temporary or a global name is
+    /// what the engine's handler refuses still, so the witness reads
+    /// the CVs only:
+    ///
+    /// ```php
+    /// $a = 5; $ab = 7;
+    /// echo "${'a'} ${1} ${'a' . 'b'}", PHP_EOL;
+    /// ```
+    /// ```expect
+    /// Deprecated: Using ${expr} (variable variables) in strings is deprecated, use {${expr}} instead in %s on line 3
+    ///
+    /// Deprecated: Using ${expr} (variable variables) in strings is deprecated, use {${expr}} instead in %s on line 3
+    ///
+    /// Deprecated: Using ${expr} (variable variables) in strings is deprecated, use {${expr}} instead in %s on line 3
+    ///
+    /// Warning: Undefined variable $1 in %s on line 3
+    /// 5  7
+    /// ```
+    fn var_var(&mut self, name: &Child) -> Result<Where, CompileError> {
+        if let Some(value) = self.written(name)? {
+            if value.as_str().is_some_and(|s| s.bytes() == b"this") {
+                return Ok(self.fetch_this(OperandKind::Tmp));
+            }
+            let value = self.stringified(value)?.unwrap_or(value);
+            let Some(name) = value.as_str().map(|s| s.bytes().to_vec()) else {
+                return Err(self.fatal("a variable's name that is no string"));
+            };
+            if name == b"GLOBALS" {
+                return Err(self.fatal("a `$GLOBALS` read this compiler cannot read yet"));
+            }
+            if is_auto_global(&name) {
+                return Ok(self.fetch_r(Where::Constant(value), FETCH_GLOBAL));
+            }
+            return Ok(Where::Cv(self.lookup_cv(&name)));
+        }
+        let name = match self.expr(name)? {
+            Where::Constant(value) => Where::Constant(self.stringified(value)?.unwrap_or(value)),
+            other => other,
+        };
+        let global = match name {
+            Where::Constant(value) => value.as_str().is_some_and(|s| is_auto_global(s.bytes())),
+            _ => false,
+        };
+        Ok(self.fetch_r(name, if global { FETCH_GLOBAL } else { FETCH_LOCAL }))
     }
 
     /// `zend_compile_encaps_list` (`Z/Zend/zend_compile.c:11221`): each
@@ -6380,17 +6450,37 @@ impl Emit<'_> {
     /// deprecated before its piece compiles. A list with no variable
     /// piece is the joined constant, which the reader never hands here
     /// since such a string is [`Expr::Str`].
+    ///
+    /// A dimension piece is `zend_compile_dim` under `BP_VAR_R` and a
+    /// property piece `zend_compile_prop`, each piece's oplines before
+    /// the `ROPE_ADD` that takes its value; the offset is what
+    /// `encaps_var_offset` read, `0` an integer, `-1` its negation,
+    /// `k` a string and `$i` the CV:
+    ///
+    /// ```php
+    /// $a = [1, 'k' => 'v', -1 => 'm']; $o = new stdClass; $o->p = 'q'; $i = 0;
+    /// echo "$a[0]-$a[k]-$a[-1]-$a[$i]-$o->p-{$a[0]}-{$o->p}-${a[0]}", PHP_EOL;
+    /// ```
+    /// ```expect
+    /// Deprecated: Using ${var} in strings is deprecated, use {$var} instead in %s on line 3
+    /// 1-v-m-1-q-1-q-1
+    /// ```
     fn encaps(&mut self, pieces: &[Piece]) -> Result<Where, CompileError> {
         let mut last_const: Option<Zval> = None;
         let mut reserved: Option<usize> = None;
         let mut init_at: Option<usize> = None;
         let mut count = 0u32;
         for piece in pieces {
-            if piece.dollar_curly {
-                self.raise(
+            match piece.written {
+                Written::Plain => {}
+                Written::DollarCurly => self.raise(
                     Level::Deprecated,
                     "Using ${var} in strings is deprecated, use {$var} instead",
-                );
+                ),
+                Written::DollarCurlyVarVar => self.raise(
+                    Level::Deprecated,
+                    "Using ${expr} (variable variables) in strings is deprecated, use {${expr}} instead",
+                ),
             }
             let value = self.expr(&piece.expr)?;
             if let Where::Constant(value) = value {
@@ -6694,6 +6784,7 @@ impl Emit<'_> {
                 .constant_array(elements)?
                 .ok_or_else(|| self.fatal("an array expression that is no constant")),
             Expr::Var(_)
+            | Expr::VarVar(_)
             | Expr::This
             | Expr::Prop { .. }
             | Expr::Dim { .. }
@@ -8268,6 +8359,15 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Child) {
             implicit_uses(names, container);
             implicit_uses_of_any(names, index.as_ref());
         }
+        // A `ZEND_AST_VAR` whose name is one string value is that
+        // name; over anything else the walk goes on into the name,
+        // `varvars_used` being a bit php sets and never reads. A `.`
+        // over two literals is one value to php's parser and two to
+        // this reader, so `${'a' . 'b'}` binds nothing here.
+        Expr::VarVar(name) => match &**name {
+            Expr::Str(literal) => note(names, literal),
+            _ => implicit_uses(names, name),
+        },
         // `ZEND_AST_CONDITIONAL` is no special node either, so the walk
         // reaches all three children and an arrow function captures what
         // every arm reads; the middle one is absent for `a ?: c`, and

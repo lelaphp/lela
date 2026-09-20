@@ -2811,6 +2811,149 @@ mod tests {
         );
     }
 
+    /// #356's program under the oracle's `[regime.dump]`: a dimension
+    /// piece is `zend_compile_dim` under `BP_VAR_R`, `FETCH_DIM_R` over
+    /// the CV and the offset as `encaps_var_offset` read it, an integer
+    /// for `0` and a string for `k`; a property piece is
+    /// `zend_compile_prop`, `FETCH_OBJ_R`; and `{$a[0]}` and `{$o->p}`
+    /// are the same two; each piece's opline before its `ROPE_ADD`, the
+    /// rope's temporary taken after every piece's and the live range
+    /// from the init to the end.
+    #[test]
+    fn a_dimension_and_a_property_piece_are_fetched_before_their_rope_add() {
+        let (unit, _strings) = unit_and_strings(
+            b"<?php $a = [1]; $o = new stdClass; echo \"$a[0]-$a[k]-$o->p-{$a[0]}-{$o->p}\";",
+        );
+        assert_eq!(
+            unit.dump(&[]),
+            main_dump(
+                20,
+                2,
+                15,
+                "0000 ASSIGN CV0($a) array(...)\n\
+                 0001 V3 = NEW 0 string(\"stdClass\")\n\
+                 0002 DO_FCALL\n\
+                 0003 ASSIGN CV1($o) V3\n\
+                 0004 T6 = FETCH_DIM_R CV0($a) int(0)\n\
+                 0005 T12 = ROPE_INIT 9 T6\n\
+                 0006 T12 = ROPE_ADD 1 T12 string(\"-\")\n\
+                 0007 T7 = FETCH_DIM_R CV0($a) string(\"k\")\n\
+                 0008 T12 = ROPE_ADD 2 T12 T7\n\
+                 0009 T12 = ROPE_ADD 3 T12 string(\"-\")\n\
+                 0010 T8 = FETCH_OBJ_R CV1($o) string(\"p\")\n\
+                 0011 T12 = ROPE_ADD 4 T12 T8\n\
+                 0012 T12 = ROPE_ADD 5 T12 string(\"-\")\n\
+                 0013 T9 = FETCH_DIM_R CV0($a) int(0)\n\
+                 0014 T12 = ROPE_ADD 6 T12 T9\n\
+                 0015 T12 = ROPE_ADD 7 T12 string(\"-\")\n\
+                 0016 T10 = FETCH_OBJ_R CV1($o) string(\"p\")\n\
+                 0017 T11 = ROPE_END 8 T12 T10\n\
+                 0018 ECHO T11\n\
+                 0019 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    3: 0002 - 0003 (new)\n\
+                 \x20    12: 0005 - 0017 (rope)\n"
+            )
+        );
+    }
+
+    /// The rest of `encaps_var` against the oracle's dump: the offset
+    /// negated as `zend_negate_num_string` negates it, `-0` and a
+    /// decimal past `ZEND_LONG_MAX` string keys; a method call under
+    /// `{…}` its `INIT_METHOD_CALL` and `DO_FCALL` before the `CAST`;
+    /// `${a[0]}` a `FETCH_DIM_R` with php's `${var}` deprecation on the
+    /// unit; and `${expr}` `zend_compile_simple_var` with the variable
+    /// variables one: `${$b}` and `${$b[0]}` a `FETCH_R (local)` over
+    /// the value, `${'a'}`, `${1}` and `${'a' . 'b'}` the CV php's
+    /// parser names, `${'_GET'}` the auto-global's `FETCH_R (global)`.
+    #[test]
+    fn the_string_offset_spellings_and_the_variable_variable_are_php_s() {
+        assert_eq!(
+            oplines_of(
+                b"<?php $a = [1]; echo \"$a[-1]$a[-0]$a[9223372036854775808]\"; echo \"{$o->m()}\"; echo \"$a[$i]\";"
+            ),
+            "0000 ASSIGN CV0($a) array(...)\n\
+             0001 T4 = FETCH_DIM_R CV0($a) int(-1)\n\
+             0002 T8 = ROPE_INIT 3 T4\n\
+             0003 T5 = FETCH_DIM_R CV0($a) string(\"-0\")\n\
+             0004 T8 = ROPE_ADD 1 T8 T5\n\
+             0005 T6 = FETCH_DIM_R CV0($a) string(\"9223372036854775808\")\n\
+             0006 T7 = ROPE_END 2 T8 T6\n\
+             0007 ECHO T7\n\
+             0008 INIT_METHOD_CALL 0 CV1($o) string(\"m\")\n\
+             0009 V10 = DO_FCALL\n\
+             0010 T11 = CAST (string) V10\n\
+             0011 ECHO T11\n\
+             0012 T12 = FETCH_DIM_R CV0($a) CV2($i)\n\
+             0013 T13 = CAST (string) T12\n\
+             0014 ECHO T13\n\
+             0015 RETURN int(1)\n\
+             LIVE RANGES:\n\
+             \x20    8: 0002 - 0006 (rope)\n"
+        );
+        let (unit, _strings) = unit_and_strings(b"<?php\necho \"${a[0]}\";");
+        assert_eq!(
+            unit.dump(&[])
+                .split_once("RANGE[0..0]\n")
+                .map(|(_, rest)| rest),
+            Some(
+                "0000 T1 = FETCH_DIM_R CV0($a) int(0)\n\
+                 0001 T2 = CAST (string) T1\n\
+                 0002 ECHO T2\n\
+                 0003 RETURN int(1)\n"
+            )
+        );
+        assert_eq!(
+            unit.diagnostics,
+            vec![Diagnostic {
+                level: Level::Deprecated,
+                line: 2,
+                message: "Using ${var} in strings is deprecated, use {$var} instead".into(),
+            }]
+        );
+        let (unit, _strings) = unit_and_strings(
+            b"<?php\necho \"${$b}${$b[0]}${'a'}${1}${'a' . 'b'}${'_GET'}${'this'}\";",
+        );
+        assert_eq!(
+            unit.dump(&[])
+                .split_once("RANGE[0..0]\n")
+                .map(|(_, rest)| rest),
+            Some(
+                "0000 T4 = FETCH_R (local) CV0($b)\n\
+                 0001 T10 = ROPE_INIT 7 T4\n\
+                 0002 T5 = FETCH_DIM_R CV0($b) int(0)\n\
+                 0003 T6 = FETCH_R (local) T5\n\
+                 0004 T10 = ROPE_ADD 1 T10 T6\n\
+                 0005 T10 = ROPE_ADD 2 T10 CV1($a)\n\
+                 0006 T10 = ROPE_ADD 3 T10 CV2($1)\n\
+                 0007 T10 = ROPE_ADD 4 T10 CV3($ab)\n\
+                 0008 T7 = FETCH_R (global) string(\"_GET\")\n\
+                 0009 T10 = ROPE_ADD 5 T10 T7\n\
+                 0010 T8 = FETCH_THIS\n\
+                 0011 T9 = ROPE_END 6 T10 T8\n\
+                 0012 ECHO T9\n\
+                 0013 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    10: 0001 - 0011 (rope)\n"
+            )
+        );
+        assert_eq!(
+            unit.diagnostics.len(),
+            7,
+            "one variable-variables deprecation per `${{expr}}` piece"
+        );
+        assert_eq!(
+            unit.diagnostics.first(),
+            Some(&Diagnostic {
+                level: Level::Deprecated,
+                line: 2,
+                message:
+                    "Using ${expr} (variable variables) in strings is deprecated, use {${expr}} instead"
+                        .into(),
+            })
+        );
+    }
+
     /// The oplines and the live-range table of one source's main op
     /// array, the header left off: what the oracle's dump prints after
     /// `; return  [] RANGE[0..0]`.
