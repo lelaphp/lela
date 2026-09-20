@@ -993,8 +993,11 @@ pub(crate) fn send_val<T: Tier>(
 }
 
 /// `ZEND_SEND_VAR`: an argument that is a variable or what a call
-/// returned. By value here, since nothing declares a by-reference
-/// parameter yet.
+/// returned, sent by value: the compiler emits it for a callee the
+/// table has whose parameter at this number takes its argument by
+/// value, and [`send_ref`] where the parameter takes one by reference,
+/// so a reference the operand holds is followed here and never passed
+/// on (`ZVAL_COPY_DEREF`).
 pub(crate) fn send_var<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -1173,10 +1176,32 @@ pub(crate) fn send_var_ex<T: Tier>(
     send(req, frame, code, op)
 }
 
-/// `ZEND_SEND_VAR_NO_REF_EX`: what a call returned, sent to a callee the
-/// compiler knew nothing of; `SEND_VAR` where the parameter is not by
-/// reference (`ZEND_VM_C_GOTO(send_var)`), which is every parameter
-/// here; reached as [`send_val_ex`] is.
+/// `ZEND_SEND_VAR_NO_REF_EX` (`Z/Zend/zend_vm_def.h:5019`): what a call
+/// returned, sent to a callee the compiler knew nothing of, which reads
+/// the parameter's by-reference bit off the callee the `INIT` resolved
+/// (`ARG_SHOULD_BE_SENT_BY_REF`) and is `SEND_VAR` where it is unset
+/// (`ZEND_VM_C_GOTO(send_var)`). Where it is set, what the call
+/// returned is placed as it stands, with no reference followed: a call
+/// that returned by reference hands its cell to the parameter, so a
+/// write through the parameter lands where the callee named; anything
+/// else has no place in the caller for such a write to land in, so it
+/// is wrapped in a cell of its own (`ZVAL_NEW_REF(arg, arg)`) and php's
+/// notice `Only variables should be passed by reference` is raised.
+/// php's third arm, `ARG_MAY_BE_SENT_BY_REF`, is the parameter declared
+/// prefer-by-reference that takes a value without the notice; nothing
+/// in this engine declares one, so it is folded into the arm that
+/// raises.
+///
+/// ```php
+/// class C { function m(&$x) { $x = 9; var_dump($x); } }
+/// function g() { return 7; }
+/// $o = new C;
+/// $o->m(g());
+/// ```
+/// ```expect
+/// Notice: Only variables should be passed by reference in %s on line 5
+/// int(9)
+/// ```
 ///
 /// ```php
 /// echo nope(strlen('ab'), nope2('y'));
@@ -1193,7 +1218,21 @@ pub(crate) fn send_var_no_ref_ex<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    send(req, frame, code, op)
+    if !must_be_sent_by_ref(req, op.op2) {
+        return send(req, frame, code, op);
+    }
+    // `GET_OP1_ZVAL_PTR(BP_VAR_R)` over a `VAR`, which follows no
+    // reference: the operand's owner is the argument's from here.
+    let returned = req.take_slot(frame, exec::temporary_slot(code, op.op1));
+    if returned.as_php_ref().is_some() {
+        return place_argument(req, frame, op, returned);
+    }
+    let cell = match req.reference(returned) {
+        Ok(cell) => cell,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    crate::api::raising::notice(req, "Only variables should be passed by reference");
+    place_argument(req, frame, op, cell.as_value())
 }
 
 /// `ZEND_DO_ICALL`: serve the native the call frame names, and write

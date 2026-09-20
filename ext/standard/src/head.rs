@@ -263,8 +263,9 @@ fn http_response_code(req: &mut Request) -> Result<Value, Thrown> {
 /// (`Z/ext/standard/head.c:310`): `SG(headers_sent)`, with where the
 /// body started written through the two references, the line first as
 /// php's `switch` falls through, and the empty string and zero while
-/// nothing is sent. A reference reaches the native only once `SEND_REF`
-/// does (#344), so until then the two are read and not written.
+/// nothing is sent. `SEND_REF` is what puts a reference in the two
+/// places (#344); an argument that is no variable never reaches the
+/// native at all, since the send raises php's `Error` over it first.
 ///
 /// ```php
 /// $before = headers_sent(); echo "x"; var_dump($before, headers_sent());
@@ -272,6 +273,32 @@ fn http_response_code(req: &mut Request) -> Result<Value, Thrown> {
 /// ```expect
 /// xbool(false)
 /// bool(true)
+/// ```
+///
+/// ```php
+/// echo "x"; headers_sent($f, $l); var_dump($f, $l);
+/// ```
+/// ```expect
+/// xstring(11) "witness.php"
+/// int(2)
+/// ```
+///
+/// ```php
+/// headers_sent($f, $l); var_dump($f, $l);
+/// ```
+/// ```expect
+/// string(0) ""
+/// int(0)
+/// ```
+///
+/// ```php
+/// headers_sent(1, 2);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: headers_sent(): Argument #1 ($filename) could not be passed by reference in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
 /// ```
 fn headers_sent(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 0, 2)?;
