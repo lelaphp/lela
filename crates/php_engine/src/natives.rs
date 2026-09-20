@@ -3,13 +3,14 @@
 //! keeps in `ext/standard` and this engine keeps here, so an engine with
 //! no extensions serves a program that uses Zend alone (design §4.10).
 //!
-//! Thirteen of them are here: the two the first witness of a loop needs,
+//! Sixteen of them are here: the two the first witness of a loop needs,
 //! the three that read what `php_heap::mm` accounts, so the allocator's
 //! numbers are php's numbers under a witness and not under a terminal
 //! session a person typed once, `ini_get` and `ini_set`, which read and
 //! move the engine's own ini table so a witness can reach what an entry
 //! decides and what it kept, `set_time_limit`, which moves the one
-//! entry the execution timer is armed from, `strlen` and `defined`,
+//! entry the execution timer is armed from, `error_reporting`, which
+//! reads and writes the word `BEGIN_SILENCE` masks (#354), `strlen` and `defined`,
 //! the two of `zend_builtin_functions.c` whose calls php's compiler
 //! serves itself (#219): the compiler emits `ZEND_STRLEN` and
 //! `ZEND_DEFINED` over their kernels where it reads the name, and reads
@@ -118,7 +119,7 @@ fn constant_natives() -> Vec<(FunctionDecl, Entry)> {
 }
 
 fn zend_natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
+    let mut natives = vec![
         (
             declared(
                 b"var_dump",
@@ -155,6 +156,37 @@ fn zend_natives() -> Vec<(FunctionDecl, Entry)> {
             ),
             extension_loaded as Entry,
         ),
+    ];
+    natives.extend(ini_natives());
+    natives.extend([
+        (
+            declared(
+                b"strlen",
+                &[parameter(b"string", Some(Type::String), false)],
+                Some(Type::Int),
+            ),
+            strlen as Entry,
+        ),
+        (
+            declared(
+                b"register_shutdown_function",
+                &[
+                    parameter(b"callback", Some(Type::Callable), false),
+                    parameter(b"args", Some(Type::Mixed), true),
+                ],
+                Some(Type::Void),
+            ),
+            register_shutdown_function as Entry,
+        ),
+    ]);
+    natives
+}
+
+/// The four that read and move the engine's ini table and the word
+/// beside it: `ini_get`, `ini_set`, `set_time_limit` and
+/// `error_reporting`.
+fn ini_natives() -> Vec<(FunctionDecl, Entry)> {
+    vec![
         (
             declared(
                 b"ini_get",
@@ -194,22 +226,18 @@ fn zend_natives() -> Vec<(FunctionDecl, Entry)> {
         ),
         (
             declared(
-                b"strlen",
-                &[parameter(b"string", Some(Type::String), false)],
+                b"error_reporting",
+                &[Parameter {
+                    default: Some(ConstExpr::Null),
+                    ..parameter(
+                        b"error_level",
+                        Some(Type::Nullable(Box::new(Type::Int))),
+                        false,
+                    )
+                }],
                 Some(Type::Int),
             ),
-            strlen as Entry,
-        ),
-        (
-            declared(
-                b"register_shutdown_function",
-                &[
-                    parameter(b"callback", Some(Type::Callable), false),
-                    parameter(b"args", Some(Type::Mixed), true),
-                ],
-                Some(Type::Void),
-            ),
-            register_shutdown_function as Entry,
+            error_reporting as Entry,
         ),
     ]
 }
@@ -1531,6 +1559,64 @@ fn set_time_limit(req: &mut Request) -> Result<Value, Thrown> {
     }
     let seconds = long_argument(req, 1)?;
     Ok(Value::bool(req.set_time_limit(seconds)))
+}
+
+/// `error_reporting(?int $error_level = null): int`, php's
+/// `ZEND_FUNCTION(error_reporting)` (`Z/Zend/zend_builtin_functions.c:457`):
+/// `EG(error_reporting)` as it stood, and, for a level given that is
+/// not `null` and not the one standing, the level written into the
+/// word and into the ini entry's value ([`Request::alter_error_reporting`]),
+/// past the entry's `on_modify`. The level is read as `Z_PARAM_LONG_OR_NULL`
+/// reads it; `null` asks and writes nothing.
+///
+/// ```php
+/// var_dump(error_reporting(), error_reporting(30717), error_reporting(null), ini_get("error_reporting"), error_reporting("8"), ini_get("error_reporting"));
+/// echo $u;
+/// var_dump(error_reporting(32767));
+/// echo $u;
+/// ```
+/// ```expect
+/// int(32767)
+/// int(32767)
+/// int(30717)
+/// string(5) "30717"
+/// int(30717)
+/// string(1) "8"
+/// int(8)
+///
+/// Warning: Undefined variable $u in %s on line 5
+/// ```
+///
+/// `ini_set` moves the same word through `OnUpdateErrorReporting`,
+/// `atoi` of the text:
+///
+/// ```php
+/// var_dump(ini_set("error_reporting", "2x"), error_reporting(), ini_set("error_reporting", "E_ALL"), error_reporting());
+/// ```
+/// ```expect
+/// string(5) "32767"
+/// int(2)
+/// string(2) "2x"
+/// int(0)
+/// ```
+fn error_reporting(req: &mut Request) -> Result<Value, Thrown> {
+    let count = req.argument_count();
+    if count > 1 {
+        return Err(wrong_argument_count(req, 0, 1, count));
+    }
+    let old = req.error_reporting();
+    if count == 1 {
+        let given = req.argument(1).unwrap_or_default();
+        if !matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
+            let level = coerce_param(req, &given, &Type::Int, 1)?
+                .as_int()
+                .unwrap_or(0);
+            if level != old {
+                req.alter_error_reporting(level);
+            }
+        }
+    }
+    Ok(Value::int(old))
 }
 
 /// `register_shutdown_function(callable $callback, mixed ...$args): void`,

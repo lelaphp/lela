@@ -288,6 +288,15 @@ pub struct Request {
     map: MapTable,
     states: Vec<(TypeId, Box<dyn Any + Send>)>,
     ini: Vec<(Vec<u8>, Vec<u8>)>,
+    /// `EG(error_reporting)`, the mask a diagnostic is held to
+    /// ([`Request::error_cb`]): what `OnUpdateErrorReporting`
+    /// (`Z/Zend/zend.c:111`) reads out of the `error_reporting` entry at
+    /// request start and whenever the entry moves, what
+    /// `error_reporting()` and `BEGIN_SILENCE` write past the entry, and
+    /// what `error_reporting()` answers. php keeps it apart from the ini
+    /// entry, which is why `ini_get('error_reporting')` under a `@` reads
+    /// the level the `@` masked.
+    error_reporting: i64,
     /// What passed the `php_output` layer, php's `sapi_module.ub_write`: the
     /// bytes the host will be handed, kept until `serve` hands them.
     body: Vec<u8>,
@@ -499,6 +508,7 @@ impl Request {
             map: MapTable::new(),
             states: Vec::new(),
             ini: Vec::new(),
+            error_reporting: 0,
             body: Vec::new(),
             output: Output::activate(web),
             header_callback: None,
@@ -547,6 +557,7 @@ impl Request {
         // `php_request_startup` sets one from the ini.
         req.arm_timer();
         req.set_memory_limit();
+        req.update_error_reporting();
         req.stack_limit = req.shared.stack_limit();
         req
     }
@@ -6474,12 +6485,37 @@ impl Request {
         self.log_err(message);
     }
 
-    /// `error_reporting()` as it stands.
+    /// `EG(error_reporting)` as it stands: what `error_reporting()`
+    /// answers and what every diagnostic is masked by.
     #[must_use]
     pub fn error_reporting(&self) -> i64 {
-        self.ini_get(b"error_reporting")
-            .and_then(|v| String::from_utf8_lossy(v).parse().ok())
-            .unwrap_or(32767)
+        self.error_reporting
+    }
+
+    /// `EG(error_reporting) = level`, the store `BEGIN_SILENCE` and
+    /// `END_SILENCE` make and the unwinder makes for a `ZEND_LIVE_SILENCE`
+    /// range: the word alone, the ini entry left where it stands.
+    pub(crate) fn set_error_reporting(&mut self, level: i64) {
+        self.error_reporting = level;
+    }
+
+    /// The write `error_reporting(int $error_level)` makes
+    /// (`Z/Zend/zend_builtin_functions.c:470-497`): the entry's value
+    /// replaced by the number's decimal text, `zend_long_to_str`, past
+    /// its `on_modify`, and the word set to the number.
+    pub(crate) fn alter_error_reporting(&mut self, level: i64) {
+        self.ini.retain(|(n, _)| n.as_slice() != b"error_reporting");
+        self.ini
+            .push((b"error_reporting".to_vec(), level.to_string().into_bytes()));
+        self.error_reporting = level;
+    }
+
+    /// `OnUpdateErrorReporting` (`Z/Zend/zend.c:111`): the word read out
+    /// of the `error_reporting` entry, `atoi` of its text, and `E_ALL`
+    /// where the entry has no value. Made at request start and by
+    /// `ini_set('error_reporting', ...)`.
+    fn update_error_reporting(&mut self) {
+        self.error_reporting = self.ini_get(b"error_reporting").map_or(E_ALL, ini_atol);
     }
 
     /// `set_error_handler()`: the previous handler.
@@ -7143,6 +7179,7 @@ impl Request {
         match name {
             b"max_execution_time" => self.arm_timer(),
             b"memory_limit" => self.set_memory_limit(),
+            b"error_reporting" => self.update_error_reporting(),
             _ => {}
         }
         Ok(previous)
@@ -7997,6 +8034,11 @@ fn ini_truth(value: Option<&[u8]>) -> bool {
     let text = value.to_ascii_lowercase();
     !matches!(text.as_slice(), b"" | b"0" | b"off" | b"no" | b"false")
 }
+
+/// `E_ALL` (`Z/Zend/zend_errors.h:43`), the fourteen levels php 8.5
+/// raises, which is every bit below `E_USER_DEPRECATED`'s but
+/// `E_STRICT`'s, the one 8.4 removed from the sum.
+const E_ALL: i64 = 32767 & !Level::Strict.bit();
 
 /// `ZEND_ATOL`, which is `atoll` (`Z/Zend/zend_long.h:77`): leading
 /// whitespace skipped, one sign, the digits up to the first byte that is

@@ -45,7 +45,10 @@
 //! `ZEND_DO_UCALL`, which enters the callee's op array as the
 //! `ZEND_USER_FUNCTION` arm of every `DO_*CALL` does, `ZEND_RECV` and
 //! `ZEND_RECV_INIT`, the parameter prologue, `ZEND_FETCH_THIS` on a
-//! frame with a receiver, and `ZEND_FETCH_CLASS_CONSTANT`.
+//! frame with a receiver, and `ZEND_FETCH_CLASS_CONSTANT`; and the three
+//! a `@` compiles to (#354): `ZEND_BEGIN_SILENCE` and `ZEND_END_SILENCE`
+//! around the expression, and `ZEND_FETCH_R` by a constant name, which
+//! is how a variable under `@` is read inside the span.
 
 // Every handler is generic over the tier and hands back the same edge, so
 // the generated dispatch calls them all the same way; the ones that raise a
@@ -53,7 +56,7 @@
 #![allow(clippy::extra_unused_type_parameters, clippy::unnecessary_wraps)]
 
 use php_heap::{Fatal, FrameRef};
-use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
+use php_unit::{CacheSlot, ConstIdx, Level, OpArray, OperandKind, Opline};
 
 use crate::api::abi::{PropertyRead, PropertyTest};
 use crate::api::call::Function;
@@ -76,6 +79,23 @@ const BIND_REF: u32 = 1;
 /// `ZEND_BIND_IMPLICIT`: an arrow function's capture, which raises no
 /// warning for a variable the scope has not.
 const BIND_IMPLICIT: u32 = 2;
+
+/// `ZEND_FETCH_LOCAL` (`Z/Zend/zend_compile.h:1083`), the one fetch
+/// type a `FETCH_*` by name carries here: the frame's own variables,
+/// where `ZEND_FETCH_GLOBAL` (`1<<1`) and `ZEND_FETCH_GLOBAL_LOCK`
+/// (`1<<3`) name `EG(symbol_table)`, which the compiler emits no fetch
+/// of yet.
+const FETCH_LOCAL: u32 = 1 << 2;
+
+/// `E_FATAL_ERRORS` (`Z/Zend/zend_errors.h:47`): the six levels a `@`
+/// does not silence, and what `E_HAS_ONLY_FATAL_ERRORS` tests a mask
+/// against.
+const E_FATAL_ERRORS: i64 = Level::Error.bit()
+    | Level::CoreError.bit()
+    | Level::CompileError.bit()
+    | Level::UserError.bit()
+    | Level::RecoverableError.bit()
+    | Level::Parse.bit();
 
 /// `IS_CONSTANT_UNQUALIFIED_IN_NAMESPACE` (`Z/Zend/zend_types.h:637`),
 /// the one bit a `FETCH_CONSTANT`'s `op1` carries: the name was
@@ -2782,6 +2802,206 @@ pub(crate) fn fetch_this<T: Tier>(
     let previous = req.set_slot(frame, slot, value);
     req.release(previous);
     Ok(advance(req, frame))
+}
+
+/// `ZEND_FETCH_R` (`Z/Zend/zend_vm_def.h:1825`) over a constant name
+/// under `ZEND_FETCH_LOCAL`, through `zend_fetch_var_address_helper`
+/// at `BP_VAR_R` (`:1724`): what `zend_compile_silence` emits for a
+/// variable under `@`, so the read happens inside the span. php looks
+/// the name up in the frame's symbol table, which
+/// `zend_rebuild_symbol_table` lays down over the CVs; the CVs are
+/// that table here, so the name finds its CV, and `ZVAL_COPY_DEREF`
+/// puts what it holds into the temporary, the reference followed
+/// ([`exec::take_operand`]). A CV nothing wrote, or a name the op
+/// array numbered no CV for, is `Undefined variable $a` and `null`.
+/// `$this` is `zend_fetch_this_var`: the receiver with one more
+/// owner, and on a frame without one `Undefined variable $this`
+/// and `null`. A fetch over a temporary name, `$$b`, or a global one,
+/// is what the compiler does not emit yet, and the internal error
+/// says so.
+///
+/// ```php
+/// echo @$undefined;
+/// $b = 2; $r = 1; $c = &$r;
+/// var_dump(@$a, @$this, @$b, @$c);
+/// class K { function m() { return @$this; } }
+/// var_dump((new K)->m() instanceof K);
+/// echo $b;
+/// ```
+/// ```expect
+/// NULL
+/// NULL
+/// int(2)
+/// int(1)
+/// bool(true)
+/// 2
+/// ```
+///
+pub(crate) fn fetch_r<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    if op.op1_type != OperandKind::Const || op.extended_value & FETCH_LOCAL == 0 {
+        return Err(Fatal::Error(String::from(
+            "InternalError: FETCH_R over a computed name or a global fetch, which the compiler does not emit yet",
+        )));
+    }
+    let name = exec::constant(code, ConstIdx(op.op1));
+    let name = name.as_str_bytes().unwrap_or_default().to_vec();
+    let value = if name == b"this" {
+        if let Some(this) = req.vm().this(frame) {
+            let value = this.as_value();
+            req.addref(&value);
+            value
+        } else {
+            crate::api::raising::warning(req, "Undefined variable $this");
+            Value::null()
+        }
+    } else if let Some(cv) = code.vars.iter().position(|var| *var.0 == *name) {
+        exec::take_operand(
+            req,
+            frame,
+            code,
+            OperandKind::Cv,
+            u32::try_from(cv).unwrap_or(u32::MAX),
+        )
+    } else {
+        crate::api::raising::warning(
+            req,
+            &format!("Undefined variable ${}", String::from_utf8_lossy(&name)),
+        );
+        Value::null()
+    };
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, value);
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_BEGIN_SILENCE` (`Z/Zend/zend_vm_def.h`, handler 57): the
+/// `error_reporting` standing saved into the temporary, and the word
+/// masked to `E_FATAL_ERRORS` unless it holds nothing else already,
+/// `E_HAS_ONLY_FATAL_ERRORS`, so a fatal is never silenced. php marks
+/// the ini entry modified beside this so `zend_ini_deactivate` puts the
+/// word back at request end; the entry's value is left as it was, which
+/// is why `ini_get` under the `@` reads the unmasked level, and the
+/// request's ini table is dropped with the request here, so there is
+/// nothing to mark.
+///
+/// ```php
+/// function f() { var_dump(error_reporting(), ini_get("error_reporting")); return "aa"; }
+/// echo @f(), "\n";
+/// var_dump(error_reporting());
+/// var_dump(@@error_reporting());
+/// error_reporting(1);
+/// echo @f(), "\n";
+/// ```
+/// ```expect
+/// int(4437)
+/// string(5) "32767"
+/// aa
+/// int(32767)
+/// int(4437)
+/// int(1)
+/// string(1) "1"
+/// aa
+/// ```
+///
+/// The masked word is what the diagnostics are held to, so a warning
+/// under the span is neither displayed nor logged:
+///
+/// ```php
+/// echo @str_repeat("a", 2), "\n";
+/// echo @$a; var_dump(error_reporting());
+/// var_dump(@[1][5]);
+/// ```
+/// ```expect
+/// aa
+/// int(32767)
+/// NULL
+/// ```
+pub(crate) fn begin_silence<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let standing = req.error_reporting();
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, Value::int(standing));
+    req.release(previous);
+    if !has_only_fatal_errors(standing) {
+        req.set_error_reporting(standing & E_FATAL_ERRORS);
+    }
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_END_SILENCE` (`Z/Zend/zend_vm_def.h`, handler 58): the word
+/// restored from the temporary `BEGIN_SILENCE` saved it in, while the
+/// word still holds only fatal levels and the saved one held more.
+/// The first test is php's check that nothing under the span moved the
+/// word: an `error_reporting()` or an `ini_set` inside the `@` set a
+/// level the `@` keeps. The second is the `BEGIN_SILENCE` that masked
+/// nothing, whose `END_SILENCE` restores nothing.
+///
+/// ```php
+/// @error_reporting(30717);
+/// var_dump(error_reporting());
+/// var_dump(@ini_set("error_reporting", "8"), error_reporting());
+/// echo @$x, "done\n";
+/// ```
+/// ```expect
+/// int(30717)
+/// string(5) "30717"
+/// int(8)
+/// done
+/// ```
+///
+/// A throw under the span leaves through the unwinder, not this opline;
+/// [`cleanup_live_vars`] makes the same restore for the
+/// `ZEND_LIVE_SILENCE` range the compiler opened:
+///
+/// ```php
+/// function t() { throw new Exception("x"); }
+/// function u() { var_dump(error_reporting()); throw new Exception("y"); }
+/// try { @$a = 1 / 0; } catch (DivisionByZeroError $e) { var_dump(error_reporting()); }
+/// try { echo @t(); } catch (Exception $e) { var_dump(error_reporting()); }
+/// try { @u(); } catch (Exception $e) { var_dump(error_reporting()); }
+/// ```
+/// ```expect
+/// int(32767)
+/// int(32767)
+/// int(4437)
+/// int(32767)
+/// ```
+pub(crate) fn end_silence<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let slot = exec::temporary_slot(code, op.op1);
+    let saved = req.take_slot(frame, slot);
+    restore_silenced(req, &saved);
+    req.release(saved);
+    Ok(advance(req, frame))
+}
+
+/// `E_HAS_ONLY_FATAL_ERRORS(mask)` (`Z/Zend/zend_errors.h:49`).
+fn has_only_fatal_errors(mask: i64) -> bool {
+    mask & !E_FATAL_ERRORS == 0
+}
+
+/// The restore `END_SILENCE` and the unwinder share: the word put back
+/// to what a `BEGIN_SILENCE` saved, where the word still holds only
+/// fatal levels and the saved one held more.
+fn restore_silenced(req: &mut Request, saved: &Value) {
+    let saved = saved.as_int().unwrap_or(0);
+    if has_only_fatal_errors(req.error_reporting()) && !has_only_fatal_errors(saved) {
+        req.set_error_reporting(saved);
+    }
 }
 
 /// `ZEND_FETCH_CLASS_CONSTANT` (`Z/Zend/zend_vm_def.h`, handler 181)
@@ -10927,9 +11147,10 @@ fn free_throwing_result(req: &mut Request, frame: FrameRef, code: &OpArray, op: 
 /// range is left.
 ///
 /// php frees each kind by what it holds; every kind here is one value in
-/// one temporary, freed the same way, and the one that is not,
-/// `ZEND_LIVE_SILENCE`, holds the saved `error_reporting`, which is an
-/// integer nobody owns and whose restore arrives with `BEGIN_SILENCE`.
+/// one temporary, freed the same way, but `ZEND_LIVE_SILENCE`, which
+/// holds the `error_reporting` a `BEGIN_SILENCE` saved: the word is put
+/// back as `END_SILENCE` would have put it ([`restore_silenced`]), so a
+/// throw under a `@` does not leave the request silenced.
 fn cleanup_live_vars(
     req: &mut Request,
     frame: FrameRef,
@@ -10949,6 +11170,9 @@ fn cleanup_live_vars(
         }
         let slot = exec::temporary_slot(code, range.var);
         let garbage = req.take_slot(frame, slot);
+        if range.kind == php_unit::LiveKind::Silence {
+            restore_silenced(req, &garbage);
+        }
         req.release(garbage);
     }
 }
