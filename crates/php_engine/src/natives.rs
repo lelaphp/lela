@@ -801,6 +801,41 @@ fn defined(req: &mut Request) -> Result<Value, Thrown> {
 ///   NULL
 /// }
 /// ```
+///
+/// A property's name is printed through `zend_unmangle_property_name`
+/// whatever table it came from, so a dynamic property carrying a
+/// mangled name, which `(object)` over `(array)` of an object makes
+/// (#294), is rendered with the visibility the prefix spells and
+/// never as its bytes. A name that opens with `\0` and cannot be
+/// unmangled is a notice where its row is, and then the bytes as they
+/// are (#347).
+///
+/// ```php
+/// class A { public $a = 1; protected $b = 2; private $c = 3; }
+/// var_dump((object)(array)new A, (object)["\0one" => 4, "\0\0two" => 5, "\0B\0c\0d" => 6]);
+/// ```
+/// ```expect
+/// object(stdClass)#1 (3) {
+///   ["a"]=>
+///   int(1)
+///   ["b":protected]=>
+///   int(2)
+///   ["c":"A":private]=>
+///   int(3)
+/// }
+/// object(stdClass)#2 (3) {
+///
+/// Notice: Corrupt member variable name in %s on line 3
+///   ["%0one"]=>
+///   int(4)
+///
+/// Notice: Illegal member variable name in %s on line 3
+///   ["%0%0two"]=>
+///   int(5)
+///   ["d":"B":private]=>
+///   int(6)
+/// }
+/// ```
 fn var_dump(req: &mut Request) -> Result<Value, Thrown> {
     let count = req.argument_count();
     if count == 0 {
@@ -976,6 +1011,9 @@ fn dump_members(
         .into_iter()
         .map(|(declaring, p)| (p.name.0.to_vec(), declaring, p.visibility, p.ty))
         .collect();
+    // Each row's key as php's property table holds it, mangled by
+    // `zend_mangle_property_name` for a declared one, so every name is
+    // printed through the one unmangling below.
     let mut rows: Vec<(Vec<u8>, Option<Value>, Option<Type>)> = declared
         .iter()
         .enumerate()
@@ -984,15 +1022,15 @@ fn dump_members(
             if value.is_none() && ty.is_none() {
                 return None;
             }
-            let shown = match visibility {
+            let mangled = match visibility {
                 Visibility::Public => name.clone(),
-                Visibility::Protected => [&b"\""[..], name, b"\":protected"].concat(),
+                Visibility::Protected => [&b"\0*\0"[..], name].concat(),
                 Visibility::Private => {
                     let class = req.class_name(*declaring);
-                    [&b"\""[..], name, b"\":\"", class.as_bytes(), b"\":private"].concat()
+                    [&b"\0"[..], class.as_bytes(), b"\0", name].concat()
                 }
             };
-            Some((shown, value, ty.clone()))
+            Some((mangled, value, ty.clone()))
         })
         .collect();
     let dynamic: Vec<(PhpString, Value)> = object.props(req).unwrap_or_default();
@@ -1014,18 +1052,8 @@ fn dump_members(
         )
         .as_bytes(),
     );
-    for (shown, value, ty) in rows {
-        out.extend(std::iter::repeat_n(b' ', level + 1));
-        let quoted = shown.first() == Some(&b'"');
-        if quoted {
-            out.extend_from_slice(b"[");
-            out.extend_from_slice(&shown);
-            out.extend_from_slice(b"]=>\n");
-        } else {
-            out.extend_from_slice(b"[\"");
-            out.extend_from_slice(&shown);
-            out.extend_from_slice(b"\"]=>\n");
-        }
+    for (name, value, ty) in rows {
+        dump_property_name(req, out, level, &name);
         if let Some(value) = value {
             dump(req, out, &value, level + 2);
         } else {
@@ -1040,12 +1068,99 @@ fn dump_members(
     out.extend_from_slice(b"}\n");
 }
 
+/// `php_object_property_dump`'s string key: the indent, then the name
+/// between `[` and `]=>` as `zend_unmangle_property_name` reads it,
+/// `"p":protected` for a class part of `*`, `"p":"Class":private` for
+/// any other, and `"p"` for a name with no class part; the property and
+/// the class are printed with `%s`, so each stops at a `\0` of its own.
+/// A name php cannot unmangle is its bytes in quotes, after the notice
+/// `zend_unmangle_property_name_ex` raises for it, which php prints
+/// where the row is, ahead of the indent, so what the walk has rendered
+/// so far is written before the notice is.
+fn dump_property_name(req: &mut Request, out: &mut Vec<u8>, level: usize, name: &[u8]) {
+    let unmangled = unmangle_property_name(name);
+    if let Unmangled::Illegal(notice) = unmangled {
+        req.write(out);
+        out.clear();
+        crate::api::raising::notice(req, notice);
+    }
+    out.extend(std::iter::repeat_n(b' ', level + 1));
+    out.extend_from_slice(b"[\"");
+    match unmangled {
+        Unmangled::Mangled { class, prop } => {
+            out.extend_from_slice(c_string(prop));
+            if class.first() == Some(&b'*') {
+                out.extend_from_slice(b"\":protected");
+            } else {
+                out.extend_from_slice(b"\":\"");
+                out.extend_from_slice(c_string(class));
+                out.extend_from_slice(b"\":private");
+            }
+        }
+        Unmangled::Plain | Unmangled::Illegal(_) => {
+            out.extend_from_slice(name);
+            out.extend_from_slice(b"\"");
+        }
+    }
+    out.extend_from_slice(b"]=>\n");
+}
+
+/// What `zend_unmangle_property_name_ex` answers for one name.
+#[derive(Clone, Copy)]
+enum Unmangled<'a> {
+    /// A name with no `\0` at its head: `SUCCESS` with no class.
+    Plain,
+    /// The class part and the property: `SUCCESS` with a class.
+    Mangled { class: &'a [u8], prop: &'a [u8] },
+    /// `FAILURE`, with the notice php raises for it.
+    Illegal(&'static str),
+}
+
+/// `zend_unmangle_property_name_ex` (`Z/Zend/zend_compile.c:1575`): a
+/// name opening with `\0` is split at its second `\0` into the class
+/// part and the property, and where the property holds a `\0` of its
+/// own, an anonymous class's source suffix, the class part runs through
+/// it. The notice is `Illegal member variable name` for a name shorter
+/// than three bytes or with `\0` at its second byte, and `Corrupt
+/// member variable name` for one with no second `\0`.
+fn unmangle_property_name(name: &[u8]) -> Unmangled<'_> {
+    let Some(rest) = name.strip_prefix(b"\0") else {
+        return Unmangled::Plain;
+    };
+    if rest.len() < 2 || rest.first() == Some(&0) {
+        return Unmangled::Illegal("Illegal member variable name");
+    }
+    // `zend_strnlen(ZSTR_VAL(name) + 1, ZSTR_LEN(name) - 2)`: the second
+    // `\0` is looked for short of the last byte, so the property is at
+    // least one byte.
+    let Some(at) = rest.iter().take(rest.len() - 1).position(|&b| b == 0) else {
+        return Unmangled::Illegal("Corrupt member variable name");
+    };
+    let (class, prop) = (&rest[..at], &rest[at + 1..]);
+    match prop.iter().position(|&b| b == 0) {
+        Some(inner) => Unmangled::Mangled {
+            class: &rest[..at + 1 + inner],
+            prop: &prop[inner + 1..],
+        },
+        None => Unmangled::Mangled { class, prop },
+    }
+}
+
+/// What `%s` prints of `bytes`: up to its first `\0`.
+fn c_string(bytes: &[u8]) -> &[u8] {
+    bytes
+        .iter()
+        .position(|&b| b == 0)
+        .map_or(bytes, |at| &bytes[..at])
+}
+
 /// `php_var_dump`'s object arm over the table a class showed in place
 /// of its properties: the header with the table's count, then each row
 /// as `php_object_property_dump` prints one, `[0]=>` for an integer key
-/// and `["name"]=>` for a string one, with the value under it. The keys
-/// are the class's own and carry no mangling, so none is unmangled
-/// here. The table has one owner and is given up last.
+/// and `["name"]=>` for a string one, with the value under it. A string
+/// key is unmangled as any property name is, so a table that carries
+/// `\0*\0p` shows `["p":protected]`. The table has one owner and is
+/// given up last.
 fn dump_rows(
     req: &mut Request,
     out: &mut Vec<u8>,
@@ -1064,14 +1179,12 @@ fn dump_rows(
         .as_bytes(),
     );
     for (key, value) in rows.snapshot() {
-        out.extend(std::iter::repeat_n(b' ', level + 1));
         match &key {
-            Key::Int(at) => out.extend_from_slice(format!("[{at}]=>\n").as_bytes()),
-            Key::Str(name) => {
-                out.extend_from_slice(b"[\"");
-                out.extend_from_slice(name.as_bytes());
-                out.extend_from_slice(b"\"]=>\n");
+            Key::Int(at) => {
+                out.extend(std::iter::repeat_n(b' ', level + 1));
+                out.extend_from_slice(format!("[{at}]=>\n").as_bytes());
             }
+            Key::Str(name) => dump_property_name(req, out, level, name.as_bytes()),
         }
         dump(req, out, &value, level + 2);
     }
