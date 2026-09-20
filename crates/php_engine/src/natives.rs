@@ -1158,6 +1158,53 @@ fn memory_get_usage(req: &mut Request) -> Result<Value, Thrown> {
 /// `memory_get_peak_usage(bool $real_usage = false): int`, php's
 /// `zend_memory_peak_usage`: the high-water mark of the same two
 /// numbers since the request began or the peak was last reset.
+///
+/// A packed array's growth is where the peak reads an arm of
+/// `zend_mm_realloc_heap` that the usage never sees, so the witness
+/// resets the peak and takes both numbers as a delta: the base each
+/// engine starts from differs by design §5.13's approximation, and what
+/// one growth moves does not (#174, #278).
+///
+/// A packed table of `n` slots is `HT_HASH_SIZE(HT_MIN_MASK)` beside
+/// `n` zvals, 8 + 16n, and the 56-byte `zend_array` is an allocation of
+/// its own. `zend_hash_packed_grow` doubles, so no doubling of a packed
+/// table ever lands in the bin it came from and the same-bin arm of
+/// `Mm::realloc` is never the one a growing table takes; what it takes
+/// below 3072 bytes is `zend_mm_realloc_slow`
+/// (`Z/Zend/zend_alloc.c:1569`), which holds the new slot while the old
+/// one still stands and then puts the peak back at
+/// `MAX(orig_peak, heap->size)`. Sixty-five appends end on 128 slots,
+/// 2056 bytes, the 2560 bin, and every growth under them is that arm:
+/// the peak reads 2560 + 56 and not the 1280-byte slot that stood
+/// beside the last of them.
+///
+/// Past 256 slots a packed table leaves the bins. Three hundred appends
+/// end on 512 slots, 8200 bytes, a `run` of three pages the two-page
+/// table grew into where it stood, so 12288 + 56. A 5000-byte string
+/// laid down after it takes the two pages that follow, and the growth
+/// to 1024 slots cannot stay: it moves, and the peak is again what the
+/// slow arm restores, 20480 + 8192 + 56, never the old `run` beside the
+/// new one (#278).
+///
+/// ```php
+/// $bin = []; memory_reset_peak_usage(); $b = memory_get_usage();
+/// for ($i = 0; $i < 65; $i++) { $bin[] = $i; }
+/// var_dump(memory_get_usage() - $b, memory_get_peak_usage() - $b);
+/// $pages = []; memory_reset_peak_usage(); $b = memory_get_usage();
+/// for ($i = 0; $i < 300; $i++) { $pages[] = $i; }
+/// var_dump(memory_get_usage() - $b, memory_get_peak_usage() - $b);
+/// $after = str_repeat("x", 5000);
+/// for ($i = 300; $i < 900; $i++) { $pages[] = $i; }
+/// var_dump(memory_get_usage() - $b, memory_get_peak_usage() - $b);
+/// ```
+/// ```expect
+/// int(2616)
+/// int(2616)
+/// int(12344)
+/// int(12344)
+/// int(28728)
+/// int(28728)
+/// ```
 fn memory_get_peak_usage(req: &mut Request) -> Result<Value, Thrown> {
     let real = real_usage(req)?;
     Ok(Value::int(as_long(req.memory_peak(real))))
