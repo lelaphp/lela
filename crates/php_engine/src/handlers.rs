@@ -3338,6 +3338,61 @@ pub(crate) fn fetch_obj_w<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    fetch_obj_place(req, frame, code, op, PropertyRead::Silent)
+}
+
+/// `ZEND_FETCH_OBJ_RW` (`Z/Zend/zend_vm_def.h:2072`), the property
+/// fetch under a compound assignment's last link: [`fetch_obj_w`]'s
+/// body with the read's own diagnostics in it, which is what `_RW` adds
+/// to `_W`. `zend_std_get_property_ptr_ptr` under `BP_VAR_RW` raises
+/// `Undefined property` for a declared slot nothing has written and
+/// leaves it holding `null`, the uninitialised-access `Error` for a
+/// typed one, and the same warning after the creation's deprecation for
+/// a name no class declared ([`Request::dynamic_property_ref`]).
+///
+/// ```php
+/// class C { public $p; public int $t; }
+/// $i = new C;
+/// unset($i->p);
+/// $o = new C;
+/// $o->p = $i;
+/// $o->p->p += 1;
+/// var_dump($o->p->p);
+/// try { $o->t->q += 1; } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// $u = new C;
+/// try { $u->nope->q += 1; } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+///
+/// Warning: Undefined property: C::$p in %s on line 7
+/// int(1)
+/// Error: Typed property C::$t must not be accessed before initialization
+///
+/// Deprecated: Creation of dynamic property C::$nope is deprecated in %s on line 11
+///
+/// Warning: Undefined property: C::$nope in %s on line 11
+/// Error: Attempt to assign property "q" on null
+/// ```
+pub(crate) fn fetch_obj_rw<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    fetch_obj_place(req, frame, code, op, PropertyRead::Warning)
+}
+
+/// The body `FETCH_OBJ_W` and `FETCH_OBJ_RW` share, php's one
+/// `zend_fetch_property_address` under two `BP_VAR_*`: `read` is
+/// `BP_VAR_RW`'s own diagnostics, which `BP_VAR_W` lays the place down
+/// without.
+fn fetch_obj_place(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    read: PropertyRead,
+) -> Edge {
     let name = match op.op2_type {
         OperandKind::Const => exec::constant(code, ConstIdx(op.op2)),
         _ => {
@@ -3371,7 +3426,31 @@ pub(crate) fn fetch_obj_w<T: Tier>(
     let placed = req.declared_slot_for_write(object.class(), &name, "indirectly modify", false);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     let at = match placed {
-        Ok(Some((slot, _))) => {
+        Ok(Some((slot, typed))) => {
+            // `if (UNEXPECTED(Z_TYPE_P(retval) == IS_UNDEF))`: under
+            // `BP_VAR_RW` a slot nothing has written raises the read's
+            // own diagnostic and php then leaves it holding `null`.
+            if read == PropertyRead::Warning && object.heap().slot(slot).is_undef() {
+                let shown = String::from_utf8_lossy(&name).into_owned();
+                let class = req.class_name(object.class());
+                if typed {
+                    let thrown = crate::api::raising::throw(
+                        req,
+                        "Error",
+                        &format!(
+                            "Typed property {class}::${shown} must not be accessed before initialization"
+                        ),
+                    );
+                    return threw(req, frame, &thrown);
+                }
+                crate::api::raising::warning(
+                    req,
+                    &format!("Undefined property: {class}::${shown}"),
+                );
+                if let Err(thrown) = req.write_declared_slot(object.heap(), slot, Value::null()) {
+                    return threw(req, frame, &thrown);
+                }
+            }
             let Some(at) = object.heap().slot_ref(slot) else {
                 return Err(Fatal::Error(format!(
                     "InternalError: ZEND_FETCH_OBJ_W placed ${} in slot {slot}, which the object does not have",
@@ -3387,10 +3466,11 @@ pub(crate) fn fetch_obj_w<T: Tier>(
                 )));
             };
             req.addref(&name_value);
-            // `zend_std_get_property_ptr_ptr` under `BP_VAR_W`, which
-            // lays the entry down with the creation's diagnostics and
-            // no read's warning.
-            match req.dynamic_property_ref(object, key, PropertyRead::Silent) {
+            // `zend_std_get_property_ptr_ptr`: under `BP_VAR_W` the
+            // entry is laid down with the creation's diagnostics and no
+            // read's warning, and under `BP_VAR_RW` with the warning
+            // after them.
+            match req.dynamic_property_ref(object, key, read) {
                 Ok(Some(at)) => at,
                 Ok(None) => {
                     return Err(Fatal::Error(format!(
@@ -4158,6 +4238,7 @@ fn write_entry(
     array: PhpArray,
     dim: Option<&Value>,
     constant: bool,
+    read: DimRead,
 ) -> Result<Result<Option<php_heap::ZvalRef>, Thrown>, Fatal> {
     let Some(dim) = dim else {
         return Ok(req.array_next_entry(array.heap()));
@@ -4166,6 +4247,20 @@ fn write_entry(
         Ok(key) => key,
         Err(thrown) => return Ok(Err(thrown)),
     };
+    // `zend_undefined_offset_write` and `zend_undefined_index_write`
+    // (`Z/Zend/zend_execute.c:2765`): under `BP_VAR_RW` the key the
+    // table has not got warns before it is laid down, which is the one
+    // thing `_RW` adds to `_W`.
+    if read == DimRead::Warning && array.heap().get(key).is_none() {
+        let message = match key {
+            php_heap::Key::Long(n) => format!("Undefined array key {n}"),
+            php_heap::Key::Str(s) => format!(
+                "Undefined array key \"{}\"",
+                String::from_utf8_lossy(s.bytes())
+            ),
+        };
+        crate::api::raising::warning(req, &message);
+    }
     Ok(req.array_lookup(array.heap(), key))
 }
 
@@ -4258,6 +4353,69 @@ pub(crate) fn fetch_dim_w<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    fetch_dim_place(req, frame, code, op, DimRead::Silent)
+}
+
+/// `ZEND_FETCH_DIM_RW` (`Z/Zend/zend_vm_def.h:2024`), the link of a
+/// compound assignment's chain under the last: [`fetch_dim_w`]'s body
+/// with the read's own diagnostic in it, which is what `_RW` adds to
+/// `_W`. `zend_fetch_dimension_address_inner` under `BP_VAR_RW` is
+/// `zend_undefined_offset_write` and `zend_undefined_index_write`: the
+/// `Undefined array key` warning, and then the entry laid down holding
+/// `null` exactly as `_W` lays it down.
+///
+/// ```php
+/// $a = [[1]];
+/// $a[0][1] *= 2;
+/// var_dump($a);
+/// $b = [];
+/// $b[0][0] += 1;
+/// var_dump($b);
+/// ```
+/// ```expect
+///
+/// Warning: Undefined array key 1 in %s on line 3
+/// array(1) {
+///   [0]=>
+///   array(2) {
+///     [0]=>
+///     int(1)
+///     [1]=>
+///     int(0)
+///   }
+/// }
+///
+/// Warning: Undefined array key 0 in %s on line 6
+///
+/// Warning: Undefined array key 0 in %s on line 6
+/// array(1) {
+///   [0]=>
+///   array(1) {
+///     [0]=>
+///     int(1)
+///   }
+/// }
+/// ```
+pub(crate) fn fetch_dim_rw<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    fetch_dim_place(req, frame, code, op, DimRead::Warning)
+}
+
+/// The body `FETCH_DIM_W` and `FETCH_DIM_RW` share, php's one
+/// `zend_fetch_dimension_address` under two `BP_VAR_*`: `read` is
+/// `BP_VAR_RW`'s own diagnostic for a key the table has not got, which
+/// `BP_VAR_W` lays down in silence.
+fn fetch_dim_place(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    read: DimRead,
+) -> Edge {
     let out = exec::temporary_slot(code, op.out);
     let Some(place) = write_place(req, frame, code, op.op1_type, op.op1) else {
         return Err(Fatal::Error(String::from(
@@ -4268,7 +4426,13 @@ pub(crate) fn fetch_dim_w<T: Tier>(
         Ok(Container::Array(array)) => {
             let dim = (op.op2_type != OperandKind::Unused)
                 .then(|| exec::operand(req, frame, code, op.op2_type, op.op2));
-            let written = write_entry(req, array, dim.as_ref(), op.op2_type == OperandKind::Const)?;
+            let written = write_entry(
+                req,
+                array,
+                dim.as_ref(),
+                op.op2_type == OperandKind::Const,
+                read,
+            )?;
             match written {
                 Ok(Some(entry)) => Ok(php_heap::Zval::indirect(entry)),
                 Ok(None) => Err(crate::api::raising::throw(
@@ -6783,7 +6947,13 @@ pub(crate) fn assign_dim<T: Tier>(
         }
         Ok(Container::Array(array)) => {
             let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
-            let entry = write_entry(req, array, Some(&dim), op.op2_type == OperandKind::Const)?;
+            let entry = write_entry(
+                req,
+                array,
+                Some(&dim),
+                op.op2_type == OperandKind::Const,
+                DimRead::Silent,
+            )?;
             match entry {
                 Ok(Some(entry)) => {
                     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);

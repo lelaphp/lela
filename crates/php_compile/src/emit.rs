@@ -453,6 +453,13 @@ struct DimLink {
 enum Fetch {
     Read,
     Write,
+    /// `BP_VAR_RW`, the fetch a compound assignment's links take: the
+    /// `_W` opcode plus one, which lays the place down as `_W` does and
+    /// raises the read's own diagnostics on the way
+    /// (`zend_adjust_for_fetch_type`'s second arm). php's
+    /// `zend_delayed_compile_dim` gives a property base under it no
+    /// `ZEND_FETCH_DIM_WRITE`, which it adds under `BP_VAR_W` alone.
+    Rw,
     /// `BP_VAR_IS`, the read that raises nothing where what it reads is
     /// not there: `zend_adjust_for_fetch_type`'s third arm, which is
     /// `FETCH_DIM_R` plus three and a temporary for what it leaves.
@@ -464,6 +471,18 @@ enum Fetch {
 /// `FETCH_STATIC_PROP_W` under it: what the handler reads to know the
 /// place it hands out is written through rather than written to.
 const FETCH_DIM_WRITE: u32 = 2;
+
+/// One held-back `FETCH_OBJ_RW` of a property chain, php's delayed
+/// `zend_delayed_compile_prop`: the name's constant, the `VAR` the
+/// fetch writes into and the three cache slots it carries, all taken
+/// where the fetch was written and the opline laid down after the
+/// value.
+#[derive(Clone, Copy)]
+struct PropLink {
+    name_at: u32,
+    out: u32,
+    slots: u32,
+}
 
 /// What a chain of dimensions stands on, php's
 /// `zend_delayed_compile_var` over the node under the innermost `[`: an
@@ -5207,7 +5226,7 @@ impl Emit<'_> {
             // write lands in a value of the request's own and not in
             // one the callee still holds; a call php answered in a
             // temporary has no `VAR` to separate.
-            (_, Fetch::Write) if is_call(base) => {
+            (_, Fetch::Write | Fetch::Rw) if is_call(base) => {
                 let returned = self.expr(base)?;
                 let Where::Returned(at) = returned else {
                     return Err(self
@@ -5228,13 +5247,13 @@ impl Emit<'_> {
             // at run time where no object is in scope; the receiver
             // this emitter hands a property fetch is `UNUSED` inside a
             // method, which no dimension can stand on.
-            (Expr::This, Fetch::Write) => {
+            (Expr::This, Fetch::Write | Fetch::Rw) => {
                 return Err(self.fatal(
                     "a dimension written over `$this`, whose fetch is `FETCH_THIS`, this compiler cannot read yet",
                 ));
             }
             // `zend_compile_var`'s default arm under a write.
-            (_, Fetch::Write) => {
+            (_, Fetch::Write | Fetch::Rw) => {
                 return Err(self.compile_error("Cannot use temporary expression in write context"));
             }
         };
@@ -5274,6 +5293,7 @@ impl Emit<'_> {
         let (opcode, out_type, extended_value) = match fetch {
             Fetch::Read => (Opcode::FetchDimR, OperandKind::Tmp, 0),
             Fetch::Write => (Opcode::FetchDimW, OperandKind::Var, FETCH_DIM_DIM),
+            Fetch::Rw => (Opcode::FetchDimRw, OperandKind::Var, FETCH_DIM_DIM),
             Fetch::Is => (Opcode::FetchDimIs, OperandKind::Tmp, 0),
         };
         let (mut op1_type, mut op1) = self.base_fetch(container, fetch);
@@ -5303,14 +5323,19 @@ impl Emit<'_> {
     /// to the cache slots; under a read it is the `_R` opcode into a
     /// temporary (`zend_adjust_for_fetch_type`).
     fn base_fetch(&mut self, container: Base, fetch: Fetch) -> (OperandKind, u32) {
-        let write = matches!(fetch, Fetch::Write);
+        let write = matches!(fetch, Fetch::Write | Fetch::Rw);
         let out_type = if write {
             OperandKind::Var
         } else {
             OperandKind::Tmp
         };
+        // `if (type == BP_VAR_W && (opline->opcode == ZEND_FETCH_STATIC_PROP_W
+        // || opline->opcode == ZEND_FETCH_OBJ_W)) opline->extended_value |=
+        // ZEND_FETCH_DIM_WRITE`: the bit is `BP_VAR_W`'s alone, so a
+        // property under a `BP_VAR_RW` chain carries the slots and
+        // nothing else.
         let extended_value = |slots: u32| {
-            if write {
+            if matches!(fetch, Fetch::Write) {
                 slots | FETCH_DIM_WRITE
             } else {
                 slots
@@ -5329,6 +5354,7 @@ impl Emit<'_> {
                     opcode: match fetch {
                         Fetch::Read => Opcode::FetchObjR,
                         Fetch::Write => Opcode::FetchObjW,
+                        Fetch::Rw => Opcode::FetchObjRw,
                         Fetch::Is => Opcode::FetchObjIs,
                     },
                     op1_type,
@@ -5351,7 +5377,7 @@ impl Emit<'_> {
                 self.push(Opline {
                     opcode: match fetch {
                         Fetch::Read => Opcode::FetchStaticPropR,
-                        Fetch::Write => Opcode::FetchStaticPropW,
+                        Fetch::Write | Fetch::Rw => Opcode::FetchStaticPropW,
                         Fetch::Is => Opcode::FetchStaticPropIs,
                     },
                     op1_type: OperandKind::Const,
@@ -5588,32 +5614,25 @@ impl Emit<'_> {
     /// fetch has none to move.
     ///
     /// A chain of more than one dimension is php's `FETCH_DIM_RW` for
-    /// every link but the last, which no handler serves yet, so it is
-    /// refused here rather than compiled to an opline the engine stops
-    /// on (#504).
+    /// every link but the last, and a property under one is
+    /// `FETCH_OBJ_RW`; both are [`Fetch::Rw`], the chain compiled under
+    /// `BP_VAR_RW` from end to end.
     fn assign_dim_op(
         &mut self,
         target: &Child,
         op: BinaryOp,
         value: &Child,
     ) -> Result<Where, CompileError> {
-        let (container, links) = self.dim_chain(target, Fetch::Write)?;
-        let [last] = links.as_slice() else {
-            return Err(self.fatal(
-                "a compound assignment to a dimension under a dimension, whose links are `FETCH_DIM_RW`, this compiler cannot read yet",
-            ));
-        };
-        let Base::Settled(container) = container else {
-            return Err(self.fatal(
-                "a compound assignment to a dimension over a property, whose fetch is `FETCH_OBJ_RW`, this compiler cannot read yet",
-            ));
+        let (container, links) = self.dim_chain(target, Fetch::Rw)?;
+        let Some((last, fetches)) = links.split_last() else {
+            return Err(self.fatal("a dimension with no dimension"));
         };
         // `zend_delayed_emit_op` stamped the fetch's line where the
         // fetch stood, as [`Self::assign_dim`] keeps it.
         let line = self.line;
         let value = self.assigned_value(target, value)?;
         let (data_type, data) = self.operand(value);
-        let (op1_type, op1) = container;
+        let (op1_type, op1) = self.dim_fetches(container, fetches, Fetch::Rw);
         self.line = line;
         self.push(Opline {
             opcode: Opcode::AssignDimOp,
@@ -5655,17 +5674,7 @@ impl Emit<'_> {
         op: BinaryOp,
         value: &Child,
     ) -> Result<Where, CompileError> {
-        if matches!(&**object, Expr::Prop { .. }) {
-            return Err(self.fatal(
-                "a compound assignment to a property under a property, whose fetch is `FETCH_OBJ_RW`, this compiler cannot read yet",
-            ));
-        }
-        if !matches!(&**object, Expr::Var(_) | Expr::This) {
-            return Err(self.fatal(
-                "a compound assignment to a property over what is no variable this compiler cannot read yet",
-            ));
-        }
-        let (op1_type, op1) = self.receiver(object)?;
+        let (receiver, links) = self.prop_chain(object)?;
         let name = self.string(name)?;
         let name_at = self.literal(name);
         let out = self.temporary();
@@ -5674,6 +5683,7 @@ impl Emit<'_> {
         let line = self.line;
         let value = self.expr(value)?;
         let (data_type, data) = self.operand(value);
+        let (op1_type, op1) = self.prop_fetches(receiver, &links);
         self.line = line;
         self.push(Opline {
             opcode: Opcode::AssignObjOp,
@@ -5694,6 +5704,71 @@ impl Emit<'_> {
             ..Opline::default()
         });
         Ok(Where::Temporary(out))
+    }
+
+    /// `zend_delayed_compile_prop` under `BP_VAR_RW` over the receiver
+    /// of a property fetch: the innermost receiver, compiled where it
+    /// stands, and one held-back link per `->` under the last, each
+    /// taking its temporary and its three cache slots here and its
+    /// opline laid down by [`Self::prop_fetches`] after the value, so
+    /// `$o->p->q += f()` calls `f` before it fetches `p`, as php's
+    /// delayed emission does.
+    fn prop_chain(
+        &mut self,
+        object: &Child,
+    ) -> Result<((OperandKind, u32), Vec<PropLink>), CompileError> {
+        let mut names = Vec::new();
+        let mut base = object;
+        while let Expr::Prop { object, name } = &**base {
+            names.push(name);
+            base = object;
+        }
+        if !matches!(&**base, Expr::Var(_) | Expr::This) {
+            return Err(self.fatal(
+                "a compound assignment to a property over what is no variable this compiler cannot read yet",
+            ));
+        }
+        let receiver = self.receiver(base)?;
+        let mut links = Vec::with_capacity(names.len());
+        for name in names.iter().rev() {
+            let name = self.string(name)?;
+            let name_at = self.literal(name);
+            let out = self.temporary();
+            let slots = self.cache_slots(3);
+            links.push(PropLink {
+                name_at,
+                out,
+                slots,
+            });
+        }
+        Ok((receiver, links))
+    }
+
+    /// The held-back `FETCH_OBJ_RW` oplines of a property chain, laid
+    /// down at `zend_delayed_compile_end` in the order they were taken,
+    /// each over the `VAR` the one under it left.
+    fn prop_fetches(
+        &mut self,
+        receiver: (OperandKind, u32),
+        links: &[PropLink],
+    ) -> (OperandKind, u32) {
+        let (mut op1_type, mut op1) = receiver;
+        for link in links {
+            self.push(Opline {
+                opcode: Opcode::FetchObjRw,
+                op1_type,
+                op1,
+                op2_type: OperandKind::Const,
+                op2: link.name_at,
+                out_type: OperandKind::Var,
+                out: link.out,
+                extended_value: link.slots,
+                ..Opline::default()
+            });
+            op1_type = OperandKind::Var;
+            op1 = link.out;
+        }
+        (op1_type, op1)
     }
 
     /// `zend_compile_compound_assign`, the `ZEND_AST_STATIC_PROP` arm

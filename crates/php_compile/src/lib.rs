@@ -3940,6 +3940,31 @@ mod tests {
         );
     }
 
+    /// `zend_adjust_for_fetch_type` under `BP_VAR_RW` (#504): every
+    /// link of a compound assignment's target but the last is
+    /// `FETCH_DIM_RW` or `FETCH_OBJ_RW`, the `_W` opcode plus one, into
+    /// a `VAR` the link over it stands on. The dump is the oracle's
+    /// under `[regime.dump]` at 8.5.9.
+    #[test]
+    fn the_links_under_a_compound_assignment_s_last_are_the_oracle_s_rw_fetches() {
+        assert_eq!(
+            dump_of(b"<?php $a = [[1]]; $a[0][1] *= 2; $o->p->q += 1;"),
+            main_dump(
+                8,
+                2,
+                5,
+                "0000 ASSIGN CV0($a) array(...)\n\
+                 0001 V3 = FETCH_DIM_RW CV0($a) int(0)\n\
+                 0002 ASSIGN_DIM_OP (MUL) V3 int(1)\n\
+                 0003 OP_DATA int(2)\n\
+                 0004 V5 = FETCH_OBJ_RW CV1($o) string(\"p\")\n\
+                 0005 ASSIGN_OBJ_OP (ADD) V5 string(\"q\")\n\
+                 0006 OP_DATA int(1)\n\
+                 0007 RETURN int(1)\n"
+            )
+        );
+    }
+
     /// `zend_compile_const`'s second half (#380), the oracle's dump
     /// under `[regime.dump]` at 8.5.9: a name `zend_try_ct_eval_const`
     /// cannot fold is `FETCH_CONSTANT` into a temporary over the name
