@@ -33,7 +33,7 @@ use crate::api::values::{
     ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpRef, PhpString, Resource, TypeTag, Value,
     ValueRef,
 };
-use crate::engine::{RequestDescription, Shared};
+use crate::engine::{MethodAt, NativeMethod, RequestDescription, Shared};
 use crate::exec::{self, CallStage, CallState, Vm};
 use crate::output::Output;
 
@@ -943,7 +943,7 @@ impl Request {
 
     /// The native method `function` is, if it is one: its class and its
     /// index among the class's declared methods.
-    fn native_method(&self, function: Function) -> Option<&crate::engine::NativeMethod> {
+    fn native_method(&self, function: Function) -> Option<&NativeMethod> {
         let at = usize::try_from(function.0).ok()?;
         self.shared
             .methods
@@ -1040,17 +1040,43 @@ impl Request {
             })?;
             return self.user_function_id(position);
         }
+        self.native_method_id(|m| {
+            m.class == class
+                && matches!(m.at, MethodAt::Declared(index)
+                    if decl
+                        .methods
+                        .get(usize::try_from(index).unwrap_or(usize::MAX))
+                        .is_some_and(|method| method.function.name.0.eq_ignore_ascii_case(lowered)))
+        })
+    }
+
+    /// The trampoline `class` answers under the lowered name, php's
+    /// `ZEND_ACC_CALL_VIA_HANDLER` function: a method the class's
+    /// `get_method` synthesises, which `ce->function_table` has no row
+    /// for, so [`Request::method_named`] never finds it and no
+    /// rendering lists it. `zend_get_closure_invoke_method` is the one
+    /// the engine makes, `Closure::__invoke`.
+    pub(crate) fn trampoline_named(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
+        self.native_method_id(|m| {
+            m.class == class
+                && matches!(m.at, MethodAt::Trampoline(index)
+                    if self
+                        .shared
+                        .trampolines
+                        .get(usize::try_from(index).unwrap_or(usize::MAX))
+                        .is_some_and(|method| method.function.name.0.eq_ignore_ascii_case(lowered)))
+        })
+    }
+
+    /// The number of the first native method the predicate takes, which
+    /// is its position among `methods` past the natives.
+    fn native_method_id(&self, matching: impl FnMut(NativeMethod) -> bool) -> Option<Function> {
         let base = self.shared.functions.len();
         self.shared
             .methods
             .iter()
-            .position(|m| {
-                m.class == class
-                    && decl
-                        .methods
-                        .get(usize::try_from(m.index).unwrap_or(usize::MAX))
-                        .is_some_and(|method| method.function.name.0.eq_ignore_ascii_case(lowered))
-            })
+            .copied()
+            .position(matching)
             .and_then(|i| u32::try_from(base.saturating_add(i)).ok())
             .map(Function)
     }
@@ -1058,10 +1084,15 @@ impl Request {
     /// The declaration of a method, native or user, if `function` is one.
     pub(crate) fn method_decl(&self, function: Function) -> Option<&MethodDecl> {
         if let Some(method) = self.native_method(function) {
-            return self
-                .class_decl(method.class)?
-                .methods
-                .get(usize::try_from(method.index).ok()?);
+            return match method.at {
+                MethodAt::Declared(index) => self
+                    .class_decl(method.class)?
+                    .methods
+                    .get(usize::try_from(index).ok()?),
+                MethodAt::Trampoline(index) => {
+                    self.shared.trampolines.get(usize::try_from(index).ok()?)
+                }
+            };
         }
         let user = self.user_function(function)?;
         let exec::Body::Method { class, method } = user.body else {

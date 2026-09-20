@@ -19,7 +19,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use php_compile::{CompileError, StackLimit};
 use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
-use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, Name};
+use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, MethodDecl, Name};
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
 use crate::api::abi::{Cache, Entry, Extension, NativeNew, ObjectHandlers, StartupIni};
@@ -132,8 +132,14 @@ pub(crate) struct Shared {
     /// parent's and `zend_objects_new` at a root.
     pub(crate) natives: Vec<Option<NativeNew>>,
     /// Each native method's entry, in the order the classes declare
-    /// them: a `Function` past `functions` indexes here.
+    /// them and then the trampolines': a `Function` past `functions`
+    /// indexes here.
     pub(crate) methods: Vec<NativeMethod>,
+    /// The declaration of each trampoline, one row per
+    /// [`MethodAt::Trampoline`]: a method a class's `get_method`
+    /// synthesises, which `ce->function_table` has no row for, so no
+    /// lookup by name and no rendering finds it.
+    pub(crate) trampolines: Vec<MethodDecl>,
     constants: Vec<ConstDecl>,
     pub(crate) engine_states: Vec<Box<dyn Any + Send + Sync>>,
     ini: Vec<(Vec<u8>, Vec<u8>)>,
@@ -160,13 +166,54 @@ pub(crate) struct Shared {
 }
 
 /// One native method's entry, `zend_internal_function` on a class:
-/// which class, which of its declared methods, and the function served
+/// which class, where its declaration stands, and the function served
 /// for it.
 #[derive(Clone, Copy)]
 pub(crate) struct NativeMethod {
     pub(crate) class: ClassId,
-    pub(crate) index: u32,
+    pub(crate) at: MethodAt,
     pub(crate) entry: Entry,
+}
+
+/// Where a native method's declaration stands: among the class's own,
+/// php's `ce->function_table`, which is what a lookup by name walks and
+/// a rendering lists; or among the engine's trampolines, a method the
+/// class's `get_method` answers that no table carries
+/// (`ZEND_ACC_CALL_VIA_HANDLER`). `zend_get_closure_invoke_method`
+/// makes one for `Closure::__invoke`, which the stub declares nowhere.
+#[derive(Clone, Copy)]
+pub(crate) enum MethodAt {
+    /// The index among `ce->function_table`'s own declarations.
+    Declared(u32),
+    /// The index among [`Shared::trampolines`].
+    Trampoline(u32),
+}
+
+/// `zend_register_closure_ce` leaves `__invoke` off `Closure`'s table
+/// and `zend_closure_get_method` answers it on the lookup: every
+/// trampoline [`crate::classes::trampolines`] names is numbered past
+/// the declared methods, so a `Function` still names one row of
+/// `methods`, and its declaration stands beside the linked table
+/// rather than in it. A row naming a class nothing declares is left
+/// unlinked, as a method of an absent class would be.
+fn link_trampolines(classes: &[ClassDecl], methods: &mut Vec<NativeMethod>) -> Vec<MethodDecl> {
+    let mut trampolines = Vec::new();
+    for (class_name, method, entry) in crate::classes::trampolines() {
+        let Some(at) = classes
+            .iter()
+            .position(|decl| decl.name.0.eq_ignore_ascii_case(&class_name.0))
+        else {
+            continue;
+        };
+        let index = u32::try_from(trampolines.len()).unwrap_or(u32::MAX);
+        methods.push(NativeMethod {
+            class: ClassId(u32::try_from(at).unwrap_or(u32::MAX)),
+            at: MethodAt::Trampoline(index),
+            entry,
+        });
+        trampolines.push(method);
+    }
+    trampolines
 }
 
 /// What the engine has declared, as the compiler reads it: php's
@@ -564,12 +611,13 @@ impl EngineBuilder {
                 decl.methods.push(method.clone());
                 methods.push(NativeMethod {
                     class,
-                    index,
+                    at: MethodAt::Declared(index),
                     entry: *entry,
                 });
             }
             classes.push(decl);
         }
+        let trampolines = link_trampolines(&classes, &mut methods);
         // Zend's own constants stand before the bundle's, as
         // `zend_register_standard_constants` runs before any `MINIT`.
         let constants: Vec<ConstDecl> = Shared::zend_constants()
@@ -604,6 +652,7 @@ impl EngineBuilder {
                 handlers,
                 natives,
                 methods,
+                trampolines,
                 constants,
                 engine_states,
                 ini,

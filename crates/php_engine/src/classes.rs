@@ -24,6 +24,7 @@ use php_unit::decl::{
 };
 
 use crate::api::abi::{CloneObj, Entry, NativeClassDecl, ObjectHandlers};
+use crate::api::call::Function;
 use crate::api::coerce::coerce_param;
 use crate::api::raising::{Thrown, arg_count_error, arg_type_error, throw};
 use crate::api::request::Request;
@@ -100,6 +101,45 @@ impl ObjectHandlers for ClosureHandlers {
     /// `zend_closure_get_closure`: the payload itself.
     fn get_closure(&self, req: &mut Request, object: PhpObject) -> Option<ClosureInfo> {
         object.closure(req).cloned()
+    }
+
+    /// `zend_closure_get_method` (`Z/Zend/zend_closures.c:528`):
+    /// `__invoke` is the trampoline `zend_get_closure_invoke_method`
+    /// makes on the lookup, a function `Closure`'s table has no row
+    /// for, and every other name falls to `zend_std_get_method`. So
+    /// `$f->__invoke()` reaches the same entry `$f()` reaches, and
+    /// nothing that reads the table, a rendering or a reflector, sees
+    /// a seventh method on the class.
+    ///
+    /// ```php
+    /// $f = function ($x) { return $x + 1; };
+    /// var_dump($f->__invoke(1), $f->__INVOKE(2), $f(3));
+    /// class C { public $p = 4; public function m() { return function () { return $this->p; }; } }
+    /// $g = (new C)->m();
+    /// var_dump($g->__invoke());
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// int(3)
+    /// int(4)
+    /// int(4)
+    /// ```
+    ///
+    /// ```php
+    /// $f = function () {};
+    /// $f->nope();
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught Error: Call to undefined method Closure::nope() in %s:3
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 3
+    /// ```
+    fn get_method(&self, req: &mut Request, object: PhpObject, lowered: &[u8]) -> Option<Function> {
+        if lowered.eq_ignore_ascii_case(INVOKE) {
+            return req.trampoline_named(object.class(), INVOKE);
+        }
+        req.method_named(object.class(), lowered)
     }
 
     /// `zend_closure_get_debug_info` (`Z/Zend/zend_closures.c:602`): the
@@ -605,12 +645,17 @@ fn std_class() -> ClassDecl {
 }
 
 /// `final class Closure` as `zend_register_closure_ce` declares it,
-/// `ZEND_ACC_FINAL | ZEND_ACC_NO_DYNAMIC_PROPERTIES` and the two of its
-/// methods this engine serves, `fromCallable` on the class and
-/// `__invoke` on an instance. php synthesises `__invoke` in
-/// `zend_closure_get_method` rather than declaring it; it is a declared
-/// method here until `get_method` can answer a function the table has
-/// no entry for.
+/// `ZEND_ACC_FINAL | ZEND_ACC_NO_DYNAMIC_PROPERTIES`, with the six
+/// methods `class_Closure_methods` carries and no seventh:
+/// [`ClosureHandlers::get_method`] answers `__invoke` as
+/// `zend_closure_get_method` does, off the table.
+///
+/// `__construct` is the first row of the stub's table and stands here
+/// with the declaration, with no entry to pair, as an interface's
+/// methods do: php reaches its body through no lookup, since
+/// `zend_closure_get_constructor` raises `Instantiation of class
+/// Closure is not allowed` before `new` can find it, and the slot
+/// `ZEND_NEW` reads is not the class's here yet.
 fn closure_class() -> ClassDecl {
     ClassDecl {
         flags: ClassFlags {
@@ -620,63 +665,167 @@ fn closure_class() -> ClassDecl {
         },
         interfaces: Vec::new(),
         properties: Vec::new(),
+        methods: vec![MethodDecl {
+            visibility: Visibility::Private,
+            ..closure_method(b"__construct", Vec::new(), None, true)
+        }],
         ..declared(b"Closure", ClassKind::Class, None)
     }
 }
 
+/// `class_Closure_methods` (`Z/Zend/zend_closures_arginfo.h:37`) past
+/// its first row, the five the stub declares after `__construct`, in
+/// its order, each with the entry that serves it; the linker places
+/// them after the declaration's own, so the linked table reads as the
+/// stub writes it. `__invoke` is no row of this table in php and is
+/// none here: it is [`ClosureHandlers::get_method`]'s answer, the
+/// trampoline [`trampolines`] lays down. `bind`, `bindTo`, `call` and
+/// `getCurrent` are declared against [`unbuilt`] until their bodies
+/// arrive, so a call reaches php's `Error` and not php's `Call to
+/// undefined method`, which would be wrong about a method the class
+/// has.
 fn closure_methods() -> Vec<(MethodDecl, Entry)> {
-    let method = |function: FunctionDecl, is_instance: bool| MethodDecl {
-        function,
-        visibility: Visibility::Public,
-        is_instance,
-        is_abstract: false,
-        is_final: false,
-        tentative_return: false,
-    };
-    let function = |name: &[u8], parameters: Vec<Parameter>, returns: Type| FunctionDecl {
-        name: Name(name.into()),
-        parameters,
-        return_type: Some(returns),
-        returns_by_ref: false,
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-        frameless: Vec::new(),
-    };
-    let parameter = |name: &[u8], ty: Type, variadic: bool| Parameter {
-        name: Name(name.into()),
-        ty: Some(ty),
-        by_ref: false,
-        variadic,
-        default: None,
-        attributes: Vec::new(),
+    let closure = || Type::Named(Name(b"Closure".as_slice().into()));
+    let scope = || Parameter {
+        default: Some(ConstExpr::Str(b"static".as_slice().into())),
+        ..parameter(
+            b"newScope",
+            Type::Union(vec![Type::Object, Type::String, Type::Null]),
+        )
     };
     vec![
         (
-            method(
-                function(
-                    b"fromCallable",
-                    vec![parameter(b"callback", Type::Callable, false)],
-                    Type::Named(Name(b"Closure".as_slice().into())),
-                ),
+            closure_method(
+                b"bind",
+                vec![
+                    parameter(b"closure", closure()),
+                    parameter(b"newThis", Type::Nullable(Box::new(Type::Object))),
+                    scope(),
+                ],
+                Some(Type::Nullable(Box::new(closure()))),
+                false,
+            ),
+            unbuilt as Entry,
+        ),
+        (
+            closure_method(
+                b"bindTo",
+                vec![
+                    parameter(b"newThis", Type::Nullable(Box::new(Type::Object))),
+                    scope(),
+                ],
+                Some(Type::Nullable(Box::new(closure()))),
+                true,
+            ),
+            unbuilt as Entry,
+        ),
+        (
+            closure_method(
+                b"call",
+                vec![parameter(b"newThis", Type::Object), variadic(b"args")],
+                Some(Type::Mixed),
+                true,
+            ),
+            unbuilt as Entry,
+        ),
+        (
+            closure_method(
+                b"fromCallable",
+                vec![parameter(b"callback", Type::Callable)],
+                Some(closure()),
                 false,
             ),
             closure_from_callable as Entry,
         ),
         (
-            method(
-                function(
-                    b"__invoke",
-                    vec![parameter(b"args", Type::Mixed, true)],
-                    Type::Mixed,
-                ),
-                true,
-            ),
-            closure_invoke as Entry,
+            closure_method(b"getCurrent", Vec::new(), Some(closure()), false),
+            unbuilt as Entry,
         ),
     ]
+}
+
+/// `__invoke`, the one name a table here answers off the table.
+const INVOKE: &[u8] = b"__invoke";
+
+/// Every trampoline the engine lays down, `(class, method, entry)`:
+/// php's `ZEND_ACC_CALL_VIA_HANDLER` function, which a class's
+/// `get_method` synthesises on the lookup and no `ce->function_table`
+/// carries, so no rendering and no lookup by name finds it.
+/// `zend_get_closure_invoke_method` (`Z/Zend/zend_closures.c:476`)
+/// makes the one there is: `Closure::__invoke`, public, an instance
+/// member, and `ZEND_MN(Closure___invoke)` as its handler. php copies
+/// the closure's own signature onto it, one function per lookup; here
+/// one declaration stands for every closure, since the entry reads its
+/// arguments off the frame and the payload's own declaration is what a
+/// reflector and a diagnostic read.
+pub(crate) fn trampolines() -> Vec<(Name, MethodDecl, Entry)> {
+    vec![(
+        Name(b"Closure".as_slice().into()),
+        closure_method(INVOKE, vec![variadic(b"args")], Some(Type::Mixed), true),
+        closure_invoke as Entry,
+    )]
+}
+
+/// One method of `Closure` as the stub declares it: public, neither
+/// abstract nor final, with `parameters` and `returns`, an instance
+/// member or one on the class.
+fn closure_method(
+    name: &[u8],
+    parameters: Vec<Parameter>,
+    returns: Option<Type>,
+    is_instance: bool,
+) -> MethodDecl {
+    MethodDecl {
+        function: FunctionDecl {
+            name: Name(name.into()),
+            parameters,
+            return_type: returns,
+            returns_by_ref: false,
+            attributes: Vec::new(),
+            doc_comment: None,
+            file: Name(Box::new([])),
+            line: 0,
+            end_line: 0,
+            frameless: Vec::new(),
+        },
+        visibility: Visibility::Public,
+        is_instance,
+        is_abstract: false,
+        is_final: false,
+        tentative_return: false,
+    }
+}
+
+/// `type $name`: a required parameter, taken by value.
+fn parameter(name: &[u8], ty: Type) -> Parameter {
+    Parameter {
+        name: Name(name.into()),
+        ty: Some(ty),
+        by_ref: false,
+        variadic: false,
+        default: None,
+        attributes: Vec::new(),
+    }
+}
+
+/// `mixed ...$name`.
+fn variadic(name: &[u8]) -> Parameter {
+    Parameter {
+        variadic: true,
+        ..parameter(name, Type::Mixed)
+    }
+}
+
+/// The entry of a method declared and not yet served: php's `Error`,
+/// as a native that cannot do what it was asked raises one. `bind`,
+/// `bindTo`, `call` and `getCurrent` are the rest of
+/// `zend_closures.c`, and arrive with the tests that call them.
+fn unbuilt(req: &mut Request) -> Result<Value, Thrown> {
+    Err(throw(
+        req,
+        "Error",
+        "This Closure method is declared and not yet served by this engine",
+    ))
 }
 
 /// `Closure::fromCallable(callable $callback): Closure`,
