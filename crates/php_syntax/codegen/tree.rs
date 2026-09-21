@@ -11,7 +11,12 @@
 //! required child is a plain field, which is the `!` promise held by the
 //! type rather than by an accessor that unwraps. An alternation is an
 //! enum whose variants carry the index of the node they name, or the
-//! token, and a mixin is a trait over the fields it injects (A5).
+//! token, and a mixin is a trait over the fields it injects (A5). Before
+//! the fields stand the two facts every node carries whatever its kind:
+//! `range`, where it is in the source, and `line`, php's
+//! `zend_ast.lineno`, which the builder computes at `Finish` and hands
+//! to `resolve` beside the doc comment (design §4.9, ledger 27); the
+//! `Node` trait answers both.
 //!
 //! The slot model implements the schema's conventions: A2 arity honesty,
 //! A3 labeled tokens, A4 anchored resolution for same-typed siblings, A5
@@ -899,7 +904,9 @@ fn emit_struct(
          #[derive(Clone, Debug, PartialEq, Eq)]\n\
          pub struct {name} {{\n    \
              /// Where the node is in the source: from its first significant token to its last.\n    \
-             pub range: TextRange,\n"
+             pub range: TextRange,\n    \
+             /// php's `zend_ast.lineno`, as the builder records it (design §4.9).\n    \
+             pub line: u32,\n"
     );
     for field in fields {
         let from = field
@@ -922,6 +929,7 @@ fn emit_struct(
         "impl Node for {name} {{\n    \
              const KIND: SyntaxKind = SyntaxKind::{kind};\n    \
              fn range(&self) -> TextRange {{\n        self.range\n    }}\n    \
+             fn line(&self) -> u32 {{\n        self.line\n    }}\n    \
              fn all(nodes: &Nodes) -> &[Self] {{\n        &nodes.{field}\n    }}\n\
          }}\n",
         field = snake_case(name)
@@ -1040,6 +1048,7 @@ fn emit_resolver(
              /// The node from its children, resolved once (ADR-0003){doc}.\n    \
              fn resolve(\n        \
                  range: TextRange,\n        \
+                 line: u32,\n        \
                  {children_param}: &[Element],\n        \
                  {doc_param}: Option<TokenId>,\n    \
              ) -> {ret} {{\n"
@@ -1069,7 +1078,7 @@ fn emit_resolver(
             let _ = writeln!(buf, "        let {label} = {read};");
         }
     }
-    let _ = writeln!(buf, "        {ok}\n            range,");
+    let _ = writeln!(buf, "        {ok}\n            range,\n            line,");
     for field in fields {
         let _ = writeln!(buf, "            {},", rust_label(&field.name));
     }
@@ -1123,6 +1132,7 @@ fn emit_resolve(buf: &mut String, model: &Model<'_>) {
              nodes: &mut Nodes,\n    \
              kind: SyntaxKind,\n    \
              range: TextRange,\n    \
+             line: u32,\n    \
              children: &[Element],\n    \
              doc_comment: Option<TokenId>,\n\
          ) -> Resolved {\n    \
@@ -1139,7 +1149,7 @@ fn emit_resolve(buf: &mut String, model: &Model<'_>) {
         let (open, close) = if fallible { ("", "") } else { ("Ok(", ")") };
         let _ = writeln!(
             buf,
-            "        SyntaxKind::{} => push(&mut nodes.{}, {open}{name}::resolve(range, children, doc_comment){close}),",
+            "        SyntaxKind::{} => push(&mut nodes.{}, {open}{name}::resolve(range, line, children, doc_comment){close}),",
             screaming_snake(name),
             snake_case(name)
         );
@@ -1481,6 +1491,8 @@ mod tests {
         for needle in [
             "pub struct Root {",
             "pub range: TextRange,",
+            "pub line: u32,",
+            "fn line(&self) -> u32 {\n        self.line\n    }",
             "pub items: Box<[Item]>,",
             "pub name: TokenId,",
             "pub params: NodeId<ParamList>,",
@@ -1613,8 +1625,8 @@ mod tests {
         let union = &union[..union.find("\n}\n").unwrap_or(union.len())];
         assert_eq!(
             union.matches("\n    pub ").count(),
-            2,
-            "the range and one list, no head beside the tail:\n{union}"
+            3,
+            "the range, the line and one list, no head beside the tail:\n{union}"
         );
         let errors =
             errors_of("Mixed = first:Ty ('|' first:Name)*\nTy = name:<ident>\nName = <ident>\n");
@@ -1664,7 +1676,7 @@ mod tests {
             "        let Some(name) = token(children, &[], &[SyntaxKind::IDENT]) else {\n            \
                  return Err(\"Decl.name\");\n        };",
             "        let body = first::<NodeId<Block>>(children);",
-            "        Ok(Self {\n            range,\n            doc_comment,\n            name,\n            body,\n        })",
+            "        Ok(Self {\n            range,\n            line,\n            doc_comment,\n            name,\n            body,\n        })",
             "        let items = all::<Item>(children);",
             "    ) -> Self {",
             "        let then = first_after::<Item>(children, &[SyntaxKind::QUESTION], &[SyntaxKind::COLON]);",
@@ -1677,8 +1689,8 @@ mod tests {
             "        if let Element::Token { kind: SyntaxKind::IDENT, id } = *element {\n            \
                  return Some(Self::Ident(id));",
             "pub(crate) fn resolve(",
-            "        SyntaxKind::DECL => push(&mut nodes.decl, Decl::resolve(range, children, doc_comment)),",
-            "        SyntaxKind::ROOT => push(&mut nodes.root, Ok(Root::resolve(range, children, doc_comment))),",
+            "        SyntaxKind::DECL => push(&mut nodes.decl, Decl::resolve(range, line, children, doc_comment)),",
+            "        SyntaxKind::ROOT => push(&mut nodes.root, Ok(Root::resolve(range, line, children, doc_comment))),",
             "        _ => Resolved::Untyped,",
         ] {
             assert!(text.contains(needle), "missing {needle:?} in:\n{text}");

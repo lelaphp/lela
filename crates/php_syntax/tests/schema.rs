@@ -230,16 +230,19 @@ fn the_included_nodes_are_built_from_fields() {
 
     let sum = BinaryExpr {
         range: TextRange::new(6, 12),
+        line: 2,
         lhs: Expr::SimpleVarExpr(NodeId::new(0)),
         op: Some(TokenId(3)),
         rhs: Some(Expr::LiteralExpr(NodeId::new(1))),
     };
     assert_eq!(BinaryExpr::KIND, SyntaxKind::BINARY_EXPR);
     assert_eq!(sum.range().end(), 12);
+    assert_eq!(sum.line(), 2);
     assert!(matches!(sum.lhs, Expr::SimpleVarExpr(id) if id.index() == 0));
 
     let param = Param {
         range: TextRange::new(0, 10),
+        line: 1,
         attrs: Box::new([]),
         modifiers: Box::new([
             Modifier::PublicKw(TokenId(0)),

@@ -22,7 +22,7 @@ struct Hand {
 impl Hand {
     fn new(source: &'static [u8], events: Vec<Event>) -> Hand {
         let tokens = lex(FileId(0), source, &LexOptions::default()).tokens;
-        let built = tree::build(&tokens, events);
+        let built = tree::build(&tokens, &php_syntax::LineIndex::new(source), events);
         Hand {
             source,
             tokens,

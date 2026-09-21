@@ -18,6 +18,13 @@
 //! dump first among them; an `ERROR` node, which no schema rule names,
 //! lives in the shape alone.
 //!
+//! **What every node carries.** Its kind, its range and its line: `range`
+//! is where the node is in the source, and `line` is php's
+//! `zend_ast.lineno`, the one fact of the tree that is not a position in
+//! the token stream, computed by the builder at `Finish` as php's parser
+//! computes it ([`line`]) and read by the compiler where php's reads
+//! `ast->lineno` (design §4.9, ledger 27).
+//!
 //! The nodes, the alternation enums, the mixin traits, the token sets, the
 //! arena and the one-pass resolution are emitted by `build.rs` into
 //! `OUT_DIR/tree.rs` and included below; what is written here by hand is
@@ -26,6 +33,7 @@
 
 mod builder;
 mod dump;
+mod line;
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -100,8 +108,8 @@ impl<T> fmt::Debug for NodeId<T> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TokenId(pub u32);
 
-/// What every emitted node is: a kind, a range in the source, and a place
-/// in the arena.
+/// What every emitted node is: a kind, a range in the source, php's line,
+/// and a place in the arena.
 pub trait Node: Sized {
     /// The node's kind, the one `SyntaxKind` its struct maps to (convention
     /// A1).
@@ -110,6 +118,13 @@ pub trait Node: Sized {
     /// Where the node is in the source: from its first significant token
     /// to its last.
     fn range(&self) -> TextRange;
+
+    /// php's `zend_ast.lineno` for this node, as the builder recorded it
+    /// ([`line`]): the line of its first child in php's child order, and
+    /// the scanner's line at the reduction for a node php builds without
+    /// one. What `zend_compile.c` sets `CG(zend_lineno)` to before it
+    /// compiles the node, so what an opline carries.
+    fn line(&self) -> u32;
 
     /// Every node of this kind in the arena, in the order the builder
     /// finished them; a `NodeId<Self>` indexes this slice.
@@ -131,6 +146,10 @@ pub enum Element {
         /// From the first significant token to the last; empty, at the
         /// next token's offset, for a node with none.
         range: TextRange,
+        /// php's `zend_ast.lineno`, what [`Node::line`] answers for the
+        /// node's struct, here so a parent's line is read from its child
+        /// as the builder closes it, and so an `ERROR` node has one.
+        line: u32,
         /// The index a `NodeId` of this kind carries.
         index: u32,
         /// The elements inside the node, which follow it in the shape.

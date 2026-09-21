@@ -123,7 +123,7 @@ pub fn parse(source: &[u8], options: &Options) -> Parsed {
     let input = parser::Input::new(source, &lexed.tokens);
     let mut p = parser::Parser::new(&input, file, &lines);
     grammar::source_file(&mut p);
-    let built = tree::build(&lexed.tokens, p.finish());
+    let built = tree::build(&lexed.tokens, &lines, p.finish());
     let diagnostics = in_php_order(&lexed.tokens, lexed.diagnostics, built.diagnostics);
     Parsed {
         source: source.into(),

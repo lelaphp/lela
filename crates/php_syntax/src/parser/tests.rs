@@ -51,7 +51,7 @@ fn marker_precede_chains() {
         "expected Start with forward_parent 3, got {:?}",
         events[0]
     );
-    let built = tree::build(&raw, events);
+    let built = tree::build(&raw, &LineIndex::new(text), events);
     assert_eq!(
         tree::dump(&built.tree, &raw, text),
         "BINARY_EXPR@0..3\n  LITERAL_EXPR@0..1\n    INT@0..1 \"1\"\n  PLUS@1..2 \"+\"\n  LITERAL_EXPR@2..3\n    INT@2..3 \"2\"\n"
@@ -259,7 +259,7 @@ fn parse_nested(src: &[u8]) -> tree::Built {
     let lines = LineIndex::new(src);
     let mut p = Parser::new(&input, FileId(0), &lines);
     crate::grammar::source_file(&mut p);
-    tree::build(&lexed.tokens, p.finish())
+    tree::build(&lexed.tokens, &lines, p.finish())
 }
 
 /// The nesting cap: past [`MAX_DEPTH`] the construct is consumed flat, no

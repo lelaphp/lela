@@ -56,6 +56,12 @@
 //! `HasDocComment` still takes, which keeps the state right, and its
 //! `resolve` reads nothing of it.
 //!
+//! **The line.** Every node records php's `zend_ast.lineno` at `Finish`,
+//! from its children and the tokens around it, by the rule in [`line`];
+//! the builder keeps what that rule reads: the last significant token
+//! consumed before the node opened, the last consumed when it closes and
+//! the next one after it.
+//!
 //! **A required child that is absent.** `!` is the parser's promise
 //! (convention A2), and the typed struct cannot be built without the
 //! field. The builder does not build it: the node stands in the shape as
@@ -65,9 +71,10 @@
 
 use crate::SyntaxKind;
 use crate::lexer::Token;
+use crate::line_index::LineIndex;
 use crate::source::{Diagnostic, TextRange};
 
-use super::{Element, Nodes, Resolved, TokenId, Tree, resolve};
+use super::{Element, Nodes, Resolved, TokenId, Tree, line, resolve};
 
 /// One parser event. The parser emits a flat stream; the builder assembles
 /// the tree, so the parser is tested without trees and the builder without
@@ -135,12 +142,19 @@ struct Frame {
     children_from: usize,
     /// The doc comment the node took at its `DocComment` event.
     doc_comment: Option<TokenId>,
+    /// The last significant token consumed before the node opened, which
+    /// is what php's scanner had last returned when the node's first rule
+    /// began ([`line`]).
+    before: Option<usize>,
 }
 
 struct Builder<'a> {
     tokens: &'a [Token],
+    lines: &'a LineIndex,
     /// The next token not yet passed over.
     raw: usize,
+    /// The last significant token consumed.
+    prev: Option<usize>,
     /// php's `CG(doc_comment)`: the pending doc comment (the docs above).
     doc_comment: Option<TokenId>,
     elements: Vec<Element>,
@@ -152,13 +166,17 @@ struct Builder<'a> {
 }
 
 /// Build the tree of `events` over `tokens`, the lossless stream the
-/// parser read. Unbalanced events do not fail the build: a `Finish` with
-/// nothing open is dropped, and a frame still open at the end is finished.
+/// parser read, with `lines` the line table of the source the tokens
+/// index, which every node's line is read from. Unbalanced events do not
+/// fail the build: a `Finish` with nothing open is dropped, and a frame
+/// still open at the end is finished.
 #[must_use]
-pub fn build(tokens: &[Token], mut events: Vec<Event>) -> Built {
+pub fn build(tokens: &[Token], lines: &LineIndex, mut events: Vec<Event>) -> Built {
     let mut builder = Builder {
         tokens,
+        lines,
         raw: 0,
+        prev: None,
         doc_comment: None,
         elements: Vec::new(),
         pending: Vec::new(),
@@ -257,10 +275,12 @@ impl Builder<'_> {
                 at: self.elements.len(),
                 children_from: self.pending.len(),
                 doc_comment: None,
+                before: self.prev,
             });
             self.elements.push(Element::Node {
                 kind,
                 range: TextRange::new(0, 0),
+                line: 0,
                 index: 0,
                 descendants: 0,
             });
@@ -301,6 +321,7 @@ impl Builder<'_> {
             kind: remap,
             id: TokenId(index(self.raw)),
         };
+        self.prev = Some(self.raw);
         self.raw += 1;
         self.elements.push(element);
         self.pending.push(element);
@@ -331,11 +352,26 @@ impl Builder<'_> {
             let at = self.position();
             TextRange::new(at, at)
         };
+        let site = line::Site {
+            tokens: self.tokens,
+            lines: self.lines,
+            before: frame.before,
+            last: self.prev,
+            next: self.peek(),
+            enclosing: self
+                .frames
+                .iter()
+                .rev()
+                .find(|open| open.before != frame.before)
+                .map(|open| open.kind),
+        };
         let children = &self.pending[frame.children_from..];
+        let line = line::of(frame.kind, children, &site);
         let (kind, index) = match resolve(
             &mut self.nodes,
             frame.kind,
             range,
+            line,
             children,
             frame.doc_comment,
         ) {
@@ -349,12 +385,21 @@ impl Builder<'_> {
         let element = Element::Node {
             kind,
             range,
+            line,
             index,
             descendants: index_from(self.elements.len() - frame.at - 1),
         };
         self.elements[frame.at] = element;
         self.pending.truncate(frame.children_from);
         self.pending.push(element);
+    }
+
+    /// The next significant token, the one php's parser reads as its
+    /// lookahead where a state needs one; read without passing over the
+    /// whitespace and comments before it, since a doc comment among them
+    /// is taken only where the grammar's event stands.
+    fn peek(&self) -> Option<usize> {
+        (self.raw..self.tokens.len()).find(|&i| !self.tokens[i].kind.is_trivia())
     }
 
     fn start_of(&self, element: Element) -> u32 {
@@ -409,6 +454,10 @@ mod tests {
         crate::lexer::lex(FileId(0), source, &LexOptions::default()).tokens
     }
 
+    fn build_over(source: &[u8], tokens: &[Token], events: Vec<Event>) -> Built {
+        build(tokens, &LineIndex::new(source), events)
+    }
+
     /// `class X {}` as events, under an open `SOURCE_FILE`; the take
     /// stands before the `{`, as the grammar places it.
     fn class_decl() -> Vec<Event> {
@@ -448,7 +497,8 @@ mod tests {
         use SyntaxKind::*;
         let source = b"<?php\n/** D1 */\n\nclass A {}\n/** D2 */ $x = 1; class B {}\nfunction f() {} /** D3 */\nclass C {}\n/** D7 */ if (1) { } class G {}";
         let tokens = lexed(source);
-        let built = build(
+        let built = build_over(
+            source,
             &tokens,
             file(
                 [
@@ -559,7 +609,7 @@ mod tests {
         declarator(&mut events);
         events.extend([token(SEMICOLON), Event::Finish]);
         events.extend([token(R_CURLY), Event::Finish, Event::Finish]);
-        let built = build(&tokens, file(events));
+        let built = build_over(source, &tokens, file(events));
         assert!(
             built.missing.is_empty(),
             "{}",
@@ -588,13 +638,17 @@ mod tests {
     fn a_take_passes_over_the_comments_before_it() {
         let source = b"<?php class A /** D6 */ {}";
         let tokens = lexed(source);
-        let built = build(&tokens, file(class_decl()));
+        let built = build_over(source, &tokens, file(class_decl()));
         let class = &built.tree.nodes::<ClassDecl>()[0];
         assert_eq!(
             text(source, &tokens, class.doc_comment()),
             Some(&b"/** D6 */"[..])
         );
-        let built = build(&tokens, vec![Event::DocComment, Event::DocCommentRestore]);
+        let built = build_over(
+            source,
+            &tokens,
+            vec![Event::DocComment, Event::DocCommentRestore],
+        );
         assert!(built.tree.nodes::<ClassDecl>().is_empty());
     }
 
@@ -641,7 +695,7 @@ mod tests {
             Event::Finish,
             Event::Finish,
         ];
-        let built = build(&tokens, file(events));
+        let built = build_over(source, &tokens, file(events));
         assert!(
             built.missing.is_empty(),
             "{}",
@@ -662,7 +716,8 @@ mod tests {
         use SyntaxKind::*;
         let source = b"<?php ; $x";
         let tokens = lexed(source);
-        let built = build(
+        let built = build_over(
+            source,
             &tokens,
             vec![
                 start(SOURCE_FILE),
@@ -697,7 +752,8 @@ mod tests {
         use crate::source::Span;
         let source = b"<?php";
         let tokens = lexed(source);
-        let built = build(
+        let built = build_over(
+            source,
             &tokens,
             vec![
                 start(SyntaxKind::SOURCE_FILE),
