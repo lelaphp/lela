@@ -110,22 +110,36 @@ pub fn int_to_string(req: &mut Request, n: i64) -> Result<PhpString, Thrown> {
 /// ```expect
 /// 0.33333333333333|0.33333333333333|0.33333333333333|0.3333333333333333|0.30000000000000004
 /// ```
+///
+/// This is the one rendering a float has in the engine; a `float` a
+/// `string` parameter or `echo` takes is [`to_string`], which is
+/// `zend_double_to_str` at the request's `precision` over the same
+/// `zend_gcvt`, so `1.5` reads `1.5` on either path and never at a fixed
+/// number of places. The shorter form, the exponent, the signed zero and
+/// the two non-finite words, through each caller's own arm (#408):
+///
+/// ```php
+/// function s(string $s): string { return $s; }
+/// foreach ([1.5, 1e20, -0.0, INF, NAN] as $f) {
+///     echo var_export($f, true), "|", sprintf('%.14G', $f), "|", s($f), "|", $f, "\n";
+/// }
+/// echo json_encode([1.5, 1e20, -0.0]), "\n";
+/// ```
+/// ```expect
+/// 1.5|1.5|1.5|1.5
+/// 1.0E+20|1.0E+20|1.0E+20|1.0E+20
+/// -0.0|-0|-0|-0
+/// INF|INF|INF|INF
+/// NAN|NaN|
+/// Warning: unexpected NAN value was coerced to string in %s on line 2
+/// NAN|
+/// Warning: unexpected NAN value was coerced to string in %s on line 4
+/// NAN
+/// [1.5,1.0e+20,-0]
+/// ```
 #[must_use]
 pub fn float_format(f: f64, precision: i32, exponent: Exponent) -> String {
     php_heap::double_to_string(f, precision, exponent)
-}
-
-/// `zend_double_to_str` without its NAN warning: a `float` as php prints
-/// it under the request's `precision` ini, `zend_gcvt` at `precision ?
-/// precision : 1` with `E`, as a string of the request's. The warning
-/// php raises for a NAN is [`to_string`]'s, which is `zval_get_string`.
-pub fn float_to_string(req: &mut Request, f: f64) -> Result<PhpString, Thrown> {
-    let precision = match req.precision() {
-        0 => 1,
-        precision => precision,
-    };
-    let text = float_format(f, precision, Exponent::Upper);
-    PhpString::new(req, text.as_bytes())
 }
 
 /// `zval_get_long`, the kernel [`crate::ops::get_long`] through the
@@ -475,8 +489,9 @@ pub(crate) fn scalar_type_hint(
         )
     {
         // `crate::ops::to_string`, the kernel that copies
-        // `zend_double_to_str`, and not this module's `float_format`,
-        // which prints a float at a fixed number of places (#408).
+        // `zend_double_to_str` at the request's `precision`; this
+        // module's `float_format` is the same `zend_gcvt` at a precision
+        // the caller names (#408).
         return Ok(Some(Value::string(crate::ops::to_string(req, &value)?)));
     }
     if mask & MAY_BE_BOOL == MAY_BE_BOOL

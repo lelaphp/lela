@@ -600,7 +600,7 @@ mahout = "mahout_value::convert::float_to_repr"
 sites = 3
 crates = 2
 status = "renamed"
-api = "coerce::float_to_string"
+api = "coerce::float_format"
 
 [[item]]
 mahout = "mahout_value::convert::debug_type_name"
@@ -1898,7 +1898,7 @@ mahout = "RequestCtx::settings.serialize_ndigit"
 sites = 3
 crates = 3
 status = "renamed"
-api = "coerce::float_to_string"
+api = "coerce::float_format"
 
 [[item]]
 mahout = "RequestCtx::classes.prop_slot"
@@ -1975,7 +1975,7 @@ mahout = "RequestCtx::settings.serialize_ndigit_h"
 sites = 2
 crates = 1
 status = "renamed"
-api = "coerce::float_to_string"
+api = "coerce::float_format"
 
 [[item]]
 mahout = "RequestCtx::settings.sys_temp_dir"
