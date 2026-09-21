@@ -328,6 +328,7 @@ test::Engine::loaded_extensions
 test::Engine::serve
 test::Engine::serve_capture
 test::Engine::serve_capture_as
+test::Engine::serve_capture_in
 test::Engine::unit
 values::ArrayIter
 values::ArrayIter::advance

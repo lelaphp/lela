@@ -219,6 +219,21 @@ fn the_snippet_is_named_witness_php_as_the_recipe_names_it() {
 }
 
 #[test]
+fn the_linked_snippet_is_served_in_the_tree_its_file_stands_in() {
+    // The linked adapter writes the snippet where the fresh-process
+    // adapter writes it and serves it there, so `__DIR__`, a relative
+    // `include` and the token the normaliser puts where the directory
+    // was all read the one tree (#396). No oracle is asked: the run of
+    // record is the linked engine's, and the token is the recipe's.
+    let recipe = manifest().pin.recipe;
+    let served = crate::oracle::linked::serve(&recipe, "echo __DIR__;").unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        recipe.normalise.scratch_token
+    );
+}
+
+#[test]
 fn a_witness_that_differs_notes_the_difference_and_an_accepted_row_notes_its_reason() {
     if oracle().is_none() {
         return;

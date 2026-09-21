@@ -891,15 +891,17 @@ fn renumber(haystack: &[u8], token: &[u8]) -> Vec<u8> {
 }
 
 /// Where a program runs: its directory and the path it is run by, and a
-/// directory of this run's own for the streams, removed on drop.
-struct Scratch {
-    dir: PathBuf,
+/// directory of this run's own for the streams, removed on drop. The
+/// linked adapter holds one too, so a snippet stands as a file under
+/// both adapters.
+pub(crate) struct Scratch {
+    pub(crate) dir: PathBuf,
     script: PathBuf,
     own: Tree,
 }
 
 impl Scratch {
-    fn for_program(recipe: &Recipe, program: Program<'_>) -> Result<Scratch> {
+    pub(crate) fn for_program(recipe: &Recipe, program: Program<'_>) -> Result<Scratch> {
         let own = Tree::new("oracle")?;
         let (dir, script) = match program {
             Program::Snippet(code) => {
@@ -915,7 +917,7 @@ impl Scratch {
 
     /// The recipe's normalisation of a stream: [`normalise_in`] over the
     /// directory the program ran in.
-    fn normalise(&self, rules: &Normalise, bytes: Vec<u8>) -> Vec<u8> {
+    pub(crate) fn normalise(&self, rules: &Normalise, bytes: Vec<u8>) -> Vec<u8> {
         normalise_in(rules, &self.dir, bytes)
     }
 }

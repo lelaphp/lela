@@ -11,7 +11,12 @@
 //! request is named the recipe's `script_name`, so `__FILE__` and the
 //! `in %s on line %d` of a diagnostic read `witness.php` as they do under
 //! the fresh-process adapter, and not `Standard input code`, the name
-//! `serve_capture` gives a piped source (#293); and the recipe's ini is
+//! `serve_capture` gives a piped source (#293); the file stands in a
+//! scratch tree of this run's own and the request's working directory is
+//! that tree, as the fresh-process adapter runs the program in its
+//! directory, so an `include` of the witness's own file reads the same
+//! file under both adapters and the tree's path is normalised to the
+//! recipe's token where php's would be (#396); and the recipe's ini is
 //! laid over the engine's defaults, so `precision`, `error_reporting` and
 //! the rest are the pin's. An entry the engine has
 //! no name for is carried and read by nobody, which is what php does with
@@ -37,13 +42,16 @@ use anyhow::{Result, bail};
 
 use php_bundle::test::Capture;
 
-use super::{Observation, Recipe, normalise};
+use super::{Observation, Program, Recipe, Scratch};
 
 /// One snippet through the linked engine under `recipe`, answered as the
-/// fresh-process adapter answers it: both streams normalised by the
-/// recipe's rules and the exit code the request ended on.
+/// fresh-process adapter answers it: the program written where that
+/// adapter writes it and served in that directory, both streams
+/// normalised by the recipe's rules with the directory as the token, and
+/// the exit code the request ended on.
 pub(crate) fn serve(recipe: &Recipe, snippet: &str) -> Result<Observation> {
     let source = format!("{}{snippet}", recipe.preamble);
+    let scratch = Scratch::for_program(recipe, Program::Snippet(snippet))?;
     let ini: Vec<(&str, &str)> = recipe
         .ini
         .iter()
@@ -53,7 +61,8 @@ pub(crate) fn serve(recipe: &Recipe, snippet: &str) -> Result<Observation> {
     // A fresh engine per snippet, which is the isolation a process gave
     // (design §8).
     let served = panic::catch_unwind(AssertUnwindSafe(|| {
-        php_bundle::test::engine(&ini).serve_capture_as(
+        php_bundle::test::engine(&ini).serve_capture_in(
+            &scratch.dir,
             recipe.script_name.as_bytes(),
             &source,
             Capture::default(),
@@ -64,8 +73,8 @@ pub(crate) fn serve(recipe: &Recipe, snippet: &str) -> Result<Observation> {
         bail!("the linked engine panicked; the panic itself is on the harness's second stream");
     };
     Ok(Observation {
-        stdout: normalise(&recipe.normalise, served.stdout),
-        stderr: normalise(&recipe.normalise, served.stderr),
+        stdout: scratch.normalise(&recipe.normalise, served.stdout),
+        stderr: scratch.normalise(&recipe.normalise, served.stderr),
         exit: Some(served.exit_code),
         wall,
     })

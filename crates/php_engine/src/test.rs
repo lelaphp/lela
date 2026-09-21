@@ -4,6 +4,8 @@
 //! what it wrote. Re-exported by `php_ext::test`; its items are `api.lock`
 //! lines in the `test` group.
 
+use std::path::Path;
+
 pub use crate::engine::Engine;
 use crate::engine::{OutputSink, RequestDescription};
 
@@ -73,13 +75,30 @@ impl Engine {
     /// each snippet under the recipe's `script_name` this way, as the
     /// fresh-process adapter runs it as that file (#293), which under the
     /// CLI is `argv` of that one word.
-    pub fn serve_capture_as(&self, name: &[u8], source: &str, mut sink: Capture) -> Served {
+    pub fn serve_capture_as(&self, name: &[u8], source: &str, sink: Capture) -> Served {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        self.serve_capture_in(&cwd, name, source, sink)
+    }
+
+    /// [`Engine::serve_capture_as`] with the request's working directory
+    /// `dir` rather than the process's: what `__DIR__`, a relative
+    /// `include` and `getcwd()` read. The witness lane's linked adapter
+    /// serves each snippet in the scratch tree the file stands in, as the
+    /// fresh-process adapter runs it there, so an `include` of the
+    /// witness's own file reads the same file under both.
+    pub fn serve_capture_in(
+        &self,
+        dir: &Path,
+        name: &[u8],
+        source: &str,
+        mut sink: Capture,
+    ) -> Served {
         let description = RequestDescription {
             argv: vec![name.to_vec()],
             sapi_name: String::from("cli"),
             script_name: Some(name.to_vec()),
             source: Some(source.as_bytes().to_vec()),
-            cwd: std::env::current_dir().unwrap_or_default(),
+            cwd: dir.to_path_buf(),
             ..RequestDescription::default()
         };
         let observables = self.serve(description, &mut sink);

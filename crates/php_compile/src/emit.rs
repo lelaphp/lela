@@ -7673,8 +7673,8 @@ impl Emit<'_> {
     ///
     /// `__DIR__` under the recipe: `witness.php` has no directory in
     /// its name, so `zend_dirname` answers `.` and the constant is the
-    /// working directory, which `%s` stands for since the oracle's is
-    /// its scratch directory and the linked engine's the harness's:
+    /// working directory, which `%s` stands for since each adapter's is
+    /// a scratch directory of its own:
     ///
     /// ```php
     /// echo __DIR__, "\n";
