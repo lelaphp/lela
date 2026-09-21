@@ -874,6 +874,23 @@ fn defined(req: &mut Request) -> Result<Value, Thrown> {
 ///   int(6)
 /// }
 /// ```
+///
+/// A resource is `php_var_dump`'s `IS_RESOURCE` arm: its id and its
+/// type's name, and `Unknown` once it is closed, since a closed
+/// resource has no type; the stream `fopen` hands back is the witness,
+/// with `ext/standard` linked.
+///
+/// ```php
+/// $f = fopen('php://memory', 'r+'); var_dump($f); fclose($f); var_dump($f, [$f]);
+/// ```
+/// ```expect
+/// resource(%d) of type (stream)
+/// resource(%d) of type (Unknown)
+/// array(1) {
+///   [0]=>
+///   resource(%d) of type (Unknown)
+/// }
+/// ```
 fn var_dump(req: &mut Request) -> Result<Value, Thrown> {
     let count = req.argument_count();
     if count == 0 {
@@ -955,6 +972,17 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) {
         out.extend_from_slice(b"}\n");
     } else if let Some(object) = value.as_object() {
         dump_object(req, out, common, *object, level);
+    } else if let Some(resource) = value.as_resource() {
+        // `IS_RESOURCE`: the list's id and the type's name through
+        // `zend_rsrc_list_get_rsrc_type`, which is `Unknown` once
+        // closed.
+        let name = resource.type_name(req).map_or_else(
+            || String::from("Unknown"),
+            |name| String::from_utf8_lossy(name).into_owned(),
+        );
+        out.extend_from_slice(
+            format!("{common}resource({}) of type ({name})\n", resource.id()).as_bytes(),
+        );
     } else {
         out.extend_from_slice(format!("{common}NULL\n").as_bytes());
     }

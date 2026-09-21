@@ -100,11 +100,101 @@ pub enum OutputOp {
     ImplicitFlush(bool),
 }
 
-/// An open stream: what `fopen` and `opendir` hand back, reached by id
-/// through the request's stream table (design §4.3 seam 5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Stream {
-    pub(crate) id: u32,
+/// An open stream, php's `php_stream` (design §4.3 seam 5), named by its
+/// resource as php names it through `stream->res`: what `fopen` hands
+/// back and `php_stream_to_zval` puts in a value, and what a native
+/// reads back out with [`Stream::from_value`], `PHP_Z_PARAM_STREAM`'s
+/// fetch. The operations are `php_stream_read` and its siblings, each
+/// through the request that holds the stream; the layer under them is
+/// the engine's `streams` layer.
+#[derive(Clone, Copy)]
+pub struct Stream(Resource);
+
+/// `SEEK_SET`, `SEEK_CUR` and `SEEK_END`: where a seek's offset counts
+/// from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Whence {
+    Set,
+    Cur,
+    End,
+}
+
+impl Stream {
+    pub(crate) const fn of(r: Resource) -> Stream {
+        Stream(r)
+    }
+
+    /// The resource the stream is, `stream->res`.
+    #[must_use]
+    pub const fn resource(self) -> Resource {
+        self.0
+    }
+
+    /// `php_stream_to_zval`: the resource as a value, `ZVAL_RES`, no
+    /// owner taken, so the one owner `fopen` was given goes with the
+    /// value it returns.
+    #[must_use]
+    pub const fn as_value(self) -> Value {
+        self.0.as_value()
+    }
+
+    /// `php_stream_from_zval_no_verify_no_error`, what
+    /// `PHP_Z_PARAM_STREAM` fetches: the stream `value` names, an open
+    /// resource of the `stream` type, and `None` for anything else, a
+    /// closed one included.
+    #[must_use]
+    pub fn from_value(req: &Request, value: &Value) -> Option<Stream> {
+        req.stream_of(value)
+    }
+
+    /// `php_stream_read_to_str`: up to `len` bytes as one string of the
+    /// request's, fewer at the end, `None` for the read that failed
+    /// before a byte was had (`fread` answers `false`); the `Err` is
+    /// the memory limit, met before a byte is read.
+    pub fn read(self, req: &mut Request, len: usize) -> Result<Option<PhpString>, Thrown> {
+        req.stream_read_to_str(self, len)
+    }
+
+    /// `php_stream_write`: how many bytes the stream took, `None` for
+    /// php's `-1` (`fwrite` answers `false`).
+    pub fn write(self, req: &mut Request, bytes: &[u8]) -> Option<usize> {
+        req.stream_op(self, |req, stream| stream.write(req, bytes))
+            .flatten()
+    }
+
+    /// `php_stream_seek`: `true` for php's `0`.
+    pub fn seek(self, req: &mut Request, offset: i64, whence: Whence) -> bool {
+        req.stream_op(self, |req, stream| stream.seek(req, offset, whence))
+            .unwrap_or(false)
+    }
+
+    /// `php_stream_tell`: the position, `-1` for a stream that has none.
+    #[must_use]
+    pub fn tell(self, req: &Request) -> i64 {
+        req.stream_ref(self)
+            .map_or(-1, crate::streams::PhpStream::position)
+    }
+
+    /// `php_stream_eof`.
+    #[must_use]
+    pub fn eof(self, req: &Request) -> bool {
+        req.stream_ref(self)
+            .is_some_and(crate::streams::PhpStream::eof)
+    }
+
+    /// `php_stream_flush`: `true` for php's `0`.
+    pub fn flush(self, req: &mut Request) -> bool {
+        req.stream_op(self, |req, stream| stream.flush(req))
+            .unwrap_or(false)
+    }
+
+    /// `php_stream_close`, what `fclose` does past its checks: the
+    /// resource closed and its destructor served, which flushes what was
+    /// written and closes the kind; the resource stays for its owners,
+    /// `resource(N) of type (Unknown)` under `var_dump`.
+    pub fn close(self, req: &mut Request) {
+        self.0.close(req);
+    }
 }
 
 /// A stream wrapper's operations, Zend's `php_stream_wrapper_ops` as a
@@ -115,8 +205,11 @@ pub struct Stream {
 pub struct StreamWrapper {
     /// The protocol, as `php_register_url_stream_wrapper` is given it.
     pub scheme: String,
-    pub open: fn(&mut Request, &[u8], &[u8]) -> Result<Stream, Thrown>,
-    pub open_dir: Option<fn(&mut Request, &[u8]) -> Result<Stream, Thrown>>,
+    /// `stream_opener`: `None` is the open that failed, which
+    /// `php_stream_display_wrapper_errors` reports as `operation
+    /// failed`.
+    pub open: fn(&mut Request, &[u8], &[u8]) -> Result<Option<Stream>, Thrown>,
+    pub open_dir: Option<fn(&mut Request, &[u8]) -> Result<Option<Stream>, Thrown>>,
     pub stat: Option<fn(&mut Request, &[u8]) -> Result<Option<PhpArray>, Thrown>>,
     pub unlink: Option<fn(&mut Request, &[u8]) -> Result<bool, Thrown>>,
     pub rename: Option<fn(&mut Request, &[u8], &[u8]) -> Result<bool, Thrown>>,
@@ -388,7 +481,7 @@ pub struct Request {
     /// reused, so a cell freed and a cell laid down at its address are
     /// never one row.
     next_ref_source: usize,
-    wrappers: Vec<StreamWrapper>,
+    pub(crate) wrappers: Vec<StreamWrapper>,
     filters: Vec<StreamFilter>,
     error_handlers: Vec<Option<Callable>>,
     exception_handlers: Vec<Option<Callable>>,
@@ -399,7 +492,8 @@ pub struct Request {
     umask: u32,
     cwd: PathBuf,
     gc_enabled: bool,
-    streams: u32,
+    /// `le_stream`, the resource type every stream is registered under.
+    stream_type: ResourceType,
     /// php's `EG(exception)`: the throwable a handler left pending, which
     /// the loop reads at the `Threw` edge.
     pending: Option<PhpObject>,
@@ -562,6 +656,8 @@ impl Request {
     pub(crate) fn new(shared: Arc<Shared>, description: RequestDescription) -> Request {
         let cwd = description.cwd.clone();
         let web = description.is_web;
+        let mut resources = Resources::default();
+        let stream_type = crate::streams::register(&mut resources);
         let mut req = Request {
             shared,
             description,
@@ -579,7 +675,7 @@ impl Request {
             last_error: None,
             last_fatal_error_backtrace: None,
             ending: None,
-            resources: Resources::default(),
+            resources,
             superglobals: Vec::new(),
             tables: vec![SymbolTable::default()],
             included_files: Vec::new(),
@@ -600,7 +696,7 @@ impl Request {
             umask: 0o022,
             cwd,
             gc_enabled: true,
-            streams: 0,
+            stream_type,
             pending: None,
             marked_destructed: false,
             returned: Value::null(),
@@ -6974,7 +7070,7 @@ impl Request {
     /// open left, and this engine as a file that is not there. The
     /// `Err` is the last attempt's reason, which the stream warning
     /// prints.
-    fn resolve_path(&self, written: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+    pub(crate) fn resolve_path(&self, written: &[u8]) -> Result<Vec<u8>, std::io::Error> {
         let not_found = || std::io::Error::from(std::io::ErrorKind::NotFound);
         if let Some(at) = written.windows(3).position(|w| w == b"://")
             && at > 1
@@ -8068,9 +8164,27 @@ impl Request {
         self.description.script_name.as_deref()
     }
 
-    /// The request body as a stream, `php://input` and `STDIN`.
-    pub fn stdin(&mut self) -> Stream {
-        self.new_stream()
+    /// The request body as a stream, `php://stdin`, which is what the
+    /// CLI's `STDIN` constant will hold: the body as the description
+    /// carries it, read whole until #544 reads it lazily.
+    pub fn stdin(&mut self) -> Result<Option<Stream>, Thrown> {
+        self.open_stream(b"php://stdin", b"r", false)
+    }
+
+    /// The request body's bytes, `SG(request_info).request_body`.
+    pub(crate) fn body_bytes(&self) -> &[u8] {
+        &self.description.body
+    }
+
+    /// `le_stream`.
+    pub(crate) const fn stream_type(&self) -> ResourceType {
+        self.stream_type
+    }
+
+    /// The heap's memory limit in bytes, `PG(memory_limit)` as
+    /// `zend_set_memory_limit` set it.
+    pub(crate) fn heap_memory_limit(&self) -> usize {
+        self.heap.memory_limit()
     }
 
     /// `getcwd()`.
@@ -8571,21 +8685,59 @@ impl Request {
         None
     }
 
-    fn new_stream(&mut self) -> Stream {
-        self.streams = self.streams.saturating_add(1);
-        Stream { id: self.streams }
+    /// `php_stream_open_wrapper_ex(path, mode, REPORT_ERRORS | USE_PATH?)`,
+    /// what `fopen()` is: the stream, or `None` after php's warning for
+    /// the open that failed (`fopen` answers `false`); the `Err` is a
+    /// throwable, php's `ValueError` for an empty path or the memory
+    /// limit. The wrapper is the path's scheme's, `php://` or the plain
+    /// files wrapper for none and for `file://`, or one the program
+    /// registered.
+    ///
+    /// ```php
+    /// var_dump(fopen("nope.txt", "r"), fopen(__FILE__, "r"), fopen("file://" . __DIR__ . "/witness.php", "r"), fopen("php://memory", "r"), fopen("foo://x", "r"), fopen("php://nope", "r"), fopen("file://host/x", "r"), fopen("x", "q"));
+    /// try { fopen("", "r"); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Warning: fopen(nope.txt): Failed to open stream: No such file or directory in %s on line 2
+    ///
+    /// Warning: fopen(): Unable to find the wrapper "foo" - did you forget to enable it when you configured PHP? in %s on line 2
+    ///
+    /// Warning: fopen(foo://x): Failed to open stream: No such file or directory in %s on line 2
+    ///
+    /// Warning: fopen(): Invalid php:// URL specified in %s on line 2
+    ///
+    /// Warning: fopen(php://nope): Failed to open stream: operation failed in %s on line 2
+    ///
+    /// Warning: fopen(): Remote host file access not supported, file://host/x in %s on line 2
+    ///
+    /// Warning: fopen(file://host/x): Failed to open stream: no suitable wrapper could be found in %s on line 2
+    ///
+    /// Warning: fopen(x): Failed to open stream: `q' is not a valid mode for fopen in %s on line 2
+    /// bool(false)
+    /// resource(%d) of type (stream)
+    /// resource(%d) of type (stream)
+    /// resource(%d) of type (stream)
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// Path must not be empty
+    /// ```
+    pub fn open_stream(
+        &mut self,
+        path: &[u8],
+        mode: &[u8],
+        use_include_path: bool,
+    ) -> Result<Option<Stream>, Thrown> {
+        self.open_stream_wrapper(path, mode, use_include_path)
     }
 
-    /// `fopen()` through the wrapper the path's scheme names.
-    pub fn open_stream(&mut self, path: &[u8], mode: &[u8]) -> Result<Stream, Thrown> {
-        let _ = (path, mode);
-        Ok(self.new_stream())
-    }
-
-    /// `opendir()`.
-    pub fn open_dir(&mut self, path: &[u8]) -> Result<Stream, Thrown> {
-        let _ = path;
-        Ok(self.new_stream())
+    /// `opendir()`, `php_stream_opendir`: no wrapper here has a
+    /// directory opener yet, which is php's `not implemented` after the
+    /// caption, and `None`.
+    pub fn open_dir(&mut self, path: &[u8]) -> Result<Option<Stream>, Thrown> {
+        self.display_wrapper_errors(path, "Failed to open directory", "not implemented");
+        Ok(None)
     }
 
     /// `stream_wrapper_register()`: `false` when the scheme is taken.
