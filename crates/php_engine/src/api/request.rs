@@ -6705,24 +6705,43 @@ impl Request {
         None
     }
 
-    /// `zend_get_executed_scope`, the class scope of the native being
-    /// served: a method's own class (`func->common.scope`), and none for
-    /// a function or outside a native's body.
+    /// `zend_get_executed_scope`, the class scope where the native being
+    /// served was called: a native method's own class
+    /// (`func->common.scope`), and for a native function the scope of
+    /// the user code that called it, a method's class or a closure's
+    /// bound scope; none under a plain function or the main op array.
     #[must_use]
     pub fn scope(&self) -> Option<ClassId> {
         self.executed_scope()
     }
 
-    /// `zend_get_called_scope`, the called scope of the native being
-    /// served, `static`: the receiver's class for an instance call and
-    /// the class named for a call on the class; none for a function or
-    /// outside a native's body.
+    /// `zend_get_called_scope` (`Z/Zend/zend_execute_API.c:727`), the
+    /// called scope of the native being served, `static`: the chain
+    /// walked from `EG(current_execute_data)` to the first link with a
+    /// receiver, whose class it is, or a called scope of its own; a
+    /// user link or a native method without one ends the walk with
+    /// none, and a native function without one, this native's own
+    /// call, is walked past. So `static` inside a native is the
+    /// calling method's, as `constant("static::X")` reads it.
     #[must_use]
     pub fn called_scope(&self) -> Option<ClassId> {
-        if let Some(call) = self.vm.serving_call() {
-            return call.called_scope;
+        for link in self.chain() {
+            let (function, this, called) = match link {
+                Link::Frame(_, state) => (state.function, state.this, state.called_scope),
+                Link::Call(call) => (Some(call.function), call.this, call.called_scope),
+            };
+            if let Some(this) = this {
+                return Some(this.class());
+            }
+            if called.is_some() {
+                return called;
+            }
+            let function = function?;
+            if self.user_function(function).is_some() || self.method_class(function).is_some() {
+                return None;
+            }
         }
-        self.vm.innermost()?.called_scope
+        None
     }
 
     /// `ZEND_THIS`, `getThis()`: the receiver of the method being
