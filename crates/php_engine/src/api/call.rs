@@ -441,9 +441,132 @@ pub fn autoload(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Throw
     Ok(None)
 }
 
-/// A constant by name, `zend_get_constant_ex`: `None` when undefined.
+/// A constant by the key the table holds it under, `zend_get_constant`:
+/// `None` when undefined, nothing raised, no owner taken.
 pub fn constant(req: &mut Request, name: &[u8]) -> Result<Option<Value>, Thrown> {
     Ok(req.constant_named(name))
+}
+
+/// `zend_get_constant_ex` under `ZEND_FETCH_CLASS_EXCEPTION`
+/// (`Z/Zend/zend_constants.c:416`), a name as a program spells it
+/// while it is served: a leading `\` is dropped; a `::` names a class constant,
+/// the class fetched as `zend_fetch_class` fetches it, `self`, `parent`
+/// and `static` against the executed and called scopes and anything
+/// else by lookup with autoload, and the constant read through
+/// [`Request::class_constant`] with the class named in an error as it
+/// was written; a `\` left in the name is a namespaced constant, the
+/// namespace lowered and the rest as written; and anything else is the
+/// table and then `true`, `false` and `null` in any case
+/// (`zend_get_special_const`). An undefined name is php's `Error`,
+/// `Undefined constant "X"`, and a class not found `Class "X" not
+/// found`. A constant the `#[\Deprecated]` attribute marks raises its
+/// deprecation before the value is handed over, and a handler that
+/// throws at it hands nothing over. The value is one more owner
+/// (`ZVAL_COPY_OR_DUP`), the caller's.
+///
+/// `constant()` in `ext/standard` is this and nothing else, and its
+/// witness is the one that pins each arm at the oracle.
+pub fn fetch_constant(req: &mut Request, name: &[u8]) -> Result<Value, Thrown> {
+    let name = name.strip_prefix(b"\\").unwrap_or(name);
+    if let Some(colon) = name.iter().rposition(|b| *b == b':')
+        && colon > 0
+        && name.get(colon.wrapping_sub(1)) == Some(&b':')
+    {
+        let (class_name, constant_name) = (&name[..colon - 1], &name[colon + 1..]);
+        let class = fetch_class(req, class_name)?;
+        let shown = String::from_utf8_lossy(class_name).into_owned();
+        return req.class_constant_shown(class, constant_name, &shown);
+    }
+    let found = if let Some(separator) = name.iter().rposition(|b| *b == b'\\') {
+        let (namespace, constant_name) = name.split_at(separator);
+        let mut lowered = namespace.to_ascii_lowercase();
+        lowered.extend_from_slice(constant_name);
+        req.constant_named(&lowered).map(|value| (lowered, value))
+    } else {
+        req.constant_named(name)
+            .map(|value| (name.to_vec(), value))
+            .or_else(|| special_constant(name).map(|value| (name.to_vec(), value)))
+    };
+    let Some((key, value)) = found else {
+        return Err(throw(
+            req,
+            "Error",
+            &format!("Undefined constant \"{}\"", String::from_utf8_lossy(name)),
+        ));
+    };
+    crate::api::raising::deprecated_constant(req, &key);
+    if let Some(pending) = req.pending() {
+        return Err(Thrown::of(Some(pending)));
+    }
+    req.addref(&value);
+    Ok(value)
+}
+
+/// `zend_get_special_const`: `true`, `false` and `null` in any case,
+/// the three names the table never holds; `None` for every other.
+fn special_constant(name: &[u8]) -> Option<Value> {
+    match name.to_ascii_lowercase().as_slice() {
+        b"true" => Some(Value::bool(true)),
+        b"false" => Some(Value::bool(false)),
+        b"null" => Some(Value::null()),
+        _ => None,
+    }
+}
+
+/// `zend_fetch_class` under `ZEND_FETCH_CLASS_EXCEPTION`
+/// (`Z/Zend/zend_execute_API.c:1712`) as `zend_get_class_constant_ex` calls
+/// it on a name a program spelled: `self` and `parent` are the
+/// executed scope's and its parent's, `static` the called scope's, each
+/// php's `Error` where there is no such scope, and any other name is
+/// `zend_lookup_class_ex`, the table and then the autoloaders, with
+/// `Class "X" not found` where neither has it.
+fn fetch_class(req: &mut Request, name: &[u8]) -> Result<ClassId, Thrown> {
+    if name.eq_ignore_ascii_case(b"self") {
+        return req.scope().ok_or_else(|| {
+            throw(
+                req,
+                "Error",
+                "Cannot access \"self\" when no class scope is active",
+            )
+        });
+    }
+    if name.eq_ignore_ascii_case(b"parent") {
+        let Some(scope) = req.scope() else {
+            return Err(throw(
+                req,
+                "Error",
+                "Cannot access \"parent\" when no class scope is active",
+            ));
+        };
+        return req.class_parent(scope).ok_or_else(|| {
+            throw(
+                req,
+                "Error",
+                "Cannot access \"parent\" when current class scope has no parent",
+            )
+        });
+    }
+    if name.eq_ignore_ascii_case(b"static") {
+        return req.called_scope().ok_or_else(|| {
+            throw(
+                req,
+                "Error",
+                "Cannot access \"static\" when no class scope is active",
+            )
+        });
+    }
+    let bare = name.strip_prefix(b"\\").unwrap_or(name);
+    let found = match req.class_named(bare) {
+        Some(class) => Some(class),
+        None => autoload(req, bare)?,
+    };
+    found.ok_or_else(|| {
+        throw(
+            req,
+            "Error",
+            &format!("Class \"{}\" not found", String::from_utf8_lossy(name)),
+        )
+    })
 }
 
 /// `zend_fetch_class_constant`: a class constant, its expression

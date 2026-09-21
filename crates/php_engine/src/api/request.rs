@@ -2938,9 +2938,24 @@ impl Request {
     /// private constant C::A` where `zend_verify_const_access` refuses
     /// the executing scope, and otherwise its value, the constant
     /// expression the declaration kept evaluated in the class's scope
-    /// (`zval_update_constant_ex`), one owner the caller's.
+    /// (`zval_update_constant_ex`), one owner the caller's. The class
+    /// is named in the error as the opline names it, `ce->name`.
     pub(crate) fn class_constant(&mut self, class: ClassId, name: &[u8]) -> Result<Value, Thrown> {
         let class_name = self.class_name(class);
+        self.class_constant_shown(class, name, &class_name)
+    }
+
+    /// [`Request::class_constant`] with the class named in the error as
+    /// `class_name` spells it: `zend_get_class_constant_ex` words
+    /// `Undefined constant a::Y` with the name it was handed, which is
+    /// the string `constant()` or `defined()` was given, and not the
+    /// linked class's own.
+    pub(crate) fn class_constant_shown(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+        class_name: &str,
+    ) -> Result<Value, Thrown> {
         let shown = String::from_utf8_lossy(name).into_owned();
         let Some((declaring, constant)) = self.class_constant_of(class, name, 0) else {
             return Err(crate::api::raising::throw(

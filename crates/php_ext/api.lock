@@ -84,6 +84,7 @@ call::clone
 call::closure_from_callable
 call::constant
 call::eval_const_expr
+call::fetch_constant
 call::initialize_lazy
 call::instantiate
 call::iterate

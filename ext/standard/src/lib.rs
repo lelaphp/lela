@@ -20,7 +20,8 @@
 //! call of the wrong count of arguments until dynamic calls land, for
 //! `count` the two-argument call, and for `chr` and `ord` an argument
 //! not written as a value. The `ob_*` natives are `output`'s and the
-//! header natives `head`'s, each over the engine's layer; `sleep` is
+//! header natives `head`'s, each over the engine's layer; `sleep` and
+//! `constant`, the second over the engine's `zend_get_constant_ex`, are
 //! `basic_functions.c`'s, `strtoupper` and `strtolower` are `string.c`'s
 //! beside `trim`, `array_unique` with the `SORT_*` constants is
 //! `array`'s, and `print_r` is `var`'s, the one native so far over the
@@ -44,6 +45,7 @@ mod output;
 mod var;
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
+use php_ext::call::fetch_constant;
 use php_ext::coerce::{coerce_param, is_type};
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, Type};
 use php_ext::raising::{
@@ -142,10 +144,20 @@ pub fn extension() -> Extension {
         .functions(output::natives())
         .functions(head::natives())
         .functions(var::natives())
-        .functions(vec![(
-            declared(b"sleep", &[parameter(b"seconds", Type::Int)], Type::Int),
-            sleep,
-        )])
+        .functions(vec![
+            (
+                declared(
+                    b"constant",
+                    &[parameter(b"name", Type::String)],
+                    Type::Mixed,
+                ),
+                constant_of,
+            ),
+            (
+                declared(b"sleep", &[parameter(b"seconds", Type::Int)], Type::Int),
+                sleep,
+            ),
+        ])
         .constants(vec![
             constant(b"COUNT_NORMAL", COUNT_NORMAL),
             constant(b"COUNT_RECURSIVE", COUNT_RECURSIVE),
@@ -609,6 +621,131 @@ fn one_argument(req: &mut Request) -> Result<Value, Thrown> {
         return Err(wrong_argument_count(req, 1, count));
     }
     Ok(req.argument(1).unwrap_or_default())
+}
+
+/// `constant(string $name): mixed`, php's `PHP_FUNCTION(constant)`
+/// (`Z/ext/standard/basic_functions.c:501`): one `Z_PARAM_STR`, then
+/// `zend_get_constant_ex` under `ZEND_FETCH_CLASS_EXCEPTION` with the
+/// executed scope, which is the engine's `fetch_constant`, and its
+/// answer one more owner (`ZVAL_COPY_OR_DUP`). Every arm of the name is
+/// the engine's: a leading `\` dropped, a `::` read through the class
+/// with `self`, `parent` and `static` against the scopes, a namespace
+/// lowered, the table and then `true`, `false` and `null` in any case.
+/// What `define()` wrote is what this reads back.
+///
+/// ```php
+/// echo new ReflectionFunction('constant');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function constant ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $name ]
+///   }
+///   - Return [ mixed ]
+/// }
+/// ```
+///
+/// ```php
+/// define("DEMO", 1); class E { const C = 3; } class A { const X = 1; private const P = 2; }
+/// var_dump(constant("DEMO"), constant("\\PHP_EOL"), constant("E::C"), constant("a::X"), constant("\\A::X"), constant("TRUE"), constant("nUlL"), constant("E_ALL"), constant("\\E_STRICT"));
+/// ```
+/// ```expect
+/// Deprecated: Constant E_STRICT is deprecated since 8.4, the error level was removed in %s on line 3
+/// int(1)
+/// string(1) "
+/// "
+/// int(3)
+/// int(1)
+/// int(1)
+/// bool(true)
+/// NULL
+/// int(30719)
+/// int(2048)
+/// ```
+///
+/// The refusals, each `zend_get_constant_ex`'s or `zend_fetch_class`'s
+/// `Error`, the class named as the string spelled it.
+///
+/// ```php
+/// class A { const X = 1; private const P = 2; }
+/// foreach (["a::Y", "A::P", "Nope::X", "self::X", "parent::X", "static::X", "foo\\BAR", "", "::X", "A::", "\\"] as $n) { try { constant($n); } catch (Error $e) { echo $e->getMessage(), "\n"; } }
+/// ```
+/// ```expect
+/// Undefined constant a::Y
+/// Cannot access private constant A::P
+/// Class "Nope" not found
+/// Cannot access "self" when no class scope is active
+/// Cannot access "parent" when no class scope is active
+/// Cannot access "static" when no class scope is active
+/// Undefined constant "foo\BAR"
+/// Undefined constant ""
+/// Class "" not found
+/// Undefined constant A::
+/// Undefined constant ""
+/// ```
+///
+/// `self`, `parent` and `static` are read against the scope of the
+/// method that called this native, `zend_get_executed_scope` walking
+/// past the native's own frame, so a private constant of the scope is
+/// reachable and `static` is the called class.
+///
+/// ```php
+/// class M { const K = 7; private const P = 8; function f() { return constant("self::P"); } static function g() { return constant("static::K"); } }
+/// class N extends M { const K = 9; function p() { return [constant("parent::K"), constant("self::K"), constant("static::K")]; } }
+/// var_dump((new M)->f(), N::g(), (new N)->p());
+/// ```
+/// ```expect
+/// int(8)
+/// int(9)
+/// array(3) {
+///   [0]=>
+///   int(7)
+///   [1]=>
+///   int(9)
+///   [2]=>
+///   int(9)
+/// }
+/// ```
+///
+/// ```php
+/// constant("NOPE");
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Undefined constant "NOPE" in %s:2
+/// Stack trace:
+/// #0 %s(2): constant('NOPE')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// var_dump(constant(null));
+/// ```
+/// ```expect exit=255
+/// Deprecated: constant(): Passing null to parameter #1 ($name) of type string is deprecated in %s on line 2
+///
+/// Fatal error: Uncaught Error: Undefined constant "" in %s:2
+/// Stack trace:
+/// #0 %s(2): constant('')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// constant("A", "B");
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: constant() expects exactly 1 argument, 2 given in %s:2
+/// Stack trace:
+/// #0 %s(2): constant('A', 'B')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+fn constant_of(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 1)?;
+    let name = string_argument(req, 1)?;
+    fetch_constant(req, name.as_bytes())
 }
 
 /// `sleep(int $seconds): int`, php's `PHP_FUNCTION(sleep)`
