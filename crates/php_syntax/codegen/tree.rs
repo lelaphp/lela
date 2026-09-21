@@ -1250,7 +1250,88 @@ fn emit_enum(
              }}"
         );
     }
-    buf.push_str("        None\n    }\n}\n\n");
+    buf.push_str("        None\n    }\n}\n");
+    emit_enum_place(buf, model, name, node_refs, token_variants);
+    buf.push('\n');
+}
+
+/// `impl Name { fn range, fn line }`: where the child stands, whichever
+/// variant it is. A node variant answers from the arena, a token variant
+/// from the token stream, a nested alternation from its own; a token's
+/// line is the line it starts on, which is what the builder gives a
+/// token child (design §4.9). The compiler reads these where php's
+/// reads `ast->lineno` of a child it has not matched on yet, and where
+/// it hands a child's bytes on by range.
+fn emit_enum_place(
+    buf: &mut String,
+    model: &Model<'_>,
+    name: &str,
+    node_refs: &[String],
+    token_variants: &[(String, String)],
+) {
+    let mut range_arms = String::new();
+    let mut line_arms = String::new();
+    // The token variants are one arm, since every one reads the stream
+    // the same way; a node variant reads its own kind's arena.
+    let mut tokens: Vec<String> = Vec::new();
+    for r in node_refs {
+        match model.class_of(r) {
+            Some(DefClass::StructNode) => {
+                let _ = writeln!(
+                    range_arms,
+                    "            Self::{r}(id) => parsed.tree[id].range(),"
+                );
+                let _ = writeln!(
+                    line_arms,
+                    "            Self::{r}(id) => parsed.tree[id].line(),"
+                );
+            }
+            Some(DefClass::Enum) => {
+                let _ = writeln!(
+                    range_arms,
+                    "            Self::{r}(inner) => inner.range(parsed),"
+                );
+                let _ = writeln!(
+                    line_arms,
+                    "            Self::{r}(inner) => inner.line(parsed),"
+                );
+            }
+            Some(DefClass::TokenAlt) => tokens.push(format!("Self::{r}(id)")),
+            Some(DefClass::Trait) | None => {}
+        }
+    }
+    tokens.extend(
+        token_variants
+            .iter()
+            .map(|(variant, _)| format!("Self::{variant}(id)")),
+    );
+    if !tokens.is_empty() {
+        let pattern = tokens.join(" | ");
+        let _ = writeln!(
+            range_arms,
+            "            {pattern} => token_range(parsed, id),"
+        );
+        let _ = writeln!(
+            line_arms,
+            "            {pattern} => token_line(parsed, id),"
+        );
+    }
+    let _ = write!(
+        buf,
+        "impl {name} {{\n    \
+             /// Where the child is in the source: the node's range, or the token's.\n    \
+             #[must_use]\n    \
+             pub fn range(self, parsed: &crate::Parsed) -> TextRange {{\n        \
+                 match self {{\n{range_arms}        }}\n    \
+             }}\n\n    \
+             /// php's line for the child: the node's `zend_ast.lineno`, or the line a\n    \
+             /// token starts on (design §4.9).\n    \
+             #[must_use]\n    \
+             pub fn line(self, parsed: &crate::Parsed) -> u32 {{\n        \
+                 match self {{\n{line_arms}        }}\n    \
+             }}\n\
+         }}\n"
+    );
 }
 
 /// The mixin traits (A5): one method per injected field, over the nodes
@@ -1507,6 +1588,13 @@ mod tests {
             "    Ident(TokenId),",
             "pub const NAME_REF_TOKENS: &[SyntaxKind] = &[SyntaxKind::IDENT, SyntaxKind::NAME_QUALIFIED];",
             "pub fn is_name_ref(self) -> bool",
+            "impl Item {",
+            "pub fn range(self, parsed: &crate::Parsed) -> TextRange {",
+            "            Self::Decl(id) => parsed.tree[id].range(),",
+            "            Self::Ident(id) => token_range(parsed, id),",
+            "pub fn line(self, parsed: &crate::Parsed) -> u32 {",
+            "            Self::Decl(id) => parsed.tree[id].line(),",
+            "            Self::Ident(id) => token_line(parsed, id),",
         ] {
             assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
         }

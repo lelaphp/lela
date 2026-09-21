@@ -355,4 +355,20 @@ fn member(children: &[Element], anchors: &[SyntaxKind]) -> Option<TokenId> {
     None
 }
 
+/// Where a token child stands in the source, for an alternation's `range`:
+/// from its first byte to its last, and empty at the end of the source for
+/// a token the stream lacks.
+fn token_range(parsed: &crate::Parsed, id: TokenId) -> TextRange {
+    match parsed.tokens.get(id.0 as usize) {
+        Some(token) => TextRange::new(token.offset, token.offset.saturating_add(token.len)),
+        None => TextRange::new(parsed.lines.len(), parsed.lines.len()),
+    }
+}
+
+/// The line a token child starts on, for an alternation's `line`: what the
+/// builder gives a token child of a node ([`line`]).
+fn token_line(parsed: &crate::Parsed, id: TokenId) -> u32 {
+    parsed.lines.line_number(token_range(parsed, id).start)
+}
+
 include!(concat!(env!("OUT_DIR"), "/tree.rs"));
