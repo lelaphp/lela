@@ -37,6 +37,72 @@ pub(crate) enum Body {
     Method { class: u32, method: u32 },
 }
 
+/// Which construct an `INCLUDE_OR_EVAL` is, php's `ZEND_INCLUDE`,
+/// `ZEND_INCLUDE_ONCE`, `ZEND_REQUIRE`, `ZEND_REQUIRE_ONCE` and
+/// `ZEND_EVAL` (`Z/Zend/zend_compile.h:1075-1079`), one bit each in the
+/// opline's `extended_value`: what `zend_include_or_eval` switches on,
+/// what `php_verror` names a diagnostic raised at the opline by, and
+/// what `zend_fetch_debug_backtrace` names the frame it pushed by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IncludeKind {
+    Eval,
+    Include,
+    IncludeOnce,
+    Require,
+    RequireOnce,
+}
+
+impl IncludeKind {
+    /// The construct an `extended_value` names; none for a value the
+    /// compiler never writes.
+    pub(crate) fn of(extended_value: u32) -> Option<IncludeKind> {
+        match extended_value {
+            1 => Some(IncludeKind::Eval),
+            2 => Some(IncludeKind::Include),
+            4 => Some(IncludeKind::IncludeOnce),
+            8 => Some(IncludeKind::Require),
+            16 => Some(IncludeKind::RequireOnce),
+            _ => None,
+        }
+    }
+
+    /// The keyword, as php's diagnostics and traces write it.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            IncludeKind::Eval => "eval",
+            IncludeKind::Include => "include",
+            IncludeKind::IncludeOnce => "include_once",
+            IncludeKind::Require => "require",
+            IncludeKind::RequireOnce => "require_once",
+        }
+    }
+
+    /// Whether the construct is `include_once` or `require_once`, the
+    /// two that read the included-files table before they open a file.
+    pub(crate) fn once(self) -> bool {
+        matches!(self, IncludeKind::IncludeOnce | IncludeKind::RequireOnce)
+    }
+
+    /// Whether a file that cannot be opened is php's `Error`, the two
+    /// `require` forms, or the warning and `false`, the two `include`
+    /// forms.
+    pub(crate) fn required(self) -> bool {
+        matches!(self, IncludeKind::Require | IncludeKind::RequireOnce)
+    }
+}
+
+/// One symbol table of the request, by its place among them: the first
+/// is `EG(symbol_table)`, the main op array's and every code frame's it
+/// includes; each after it is one `zend_rebuild_symbol_table` built for
+/// a function frame that included a file, freed when that frame pops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TableId(pub(crate) u32);
+
+impl TableId {
+    /// `EG(symbol_table)`.
+    pub(crate) const GLOBAL: TableId = TableId(0);
+}
+
 /// The unit a frame serves and which of its op arrays, held by a share
 /// of the unit so the oplines can be read while the request is borrowed.
 pub(crate) struct Serving {
@@ -85,6 +151,19 @@ pub(crate) struct FrameState {
     /// The called scope, `static`; none for the main op array or a
     /// function.
     pub(crate) called_scope: Option<ClassId>,
+    /// `EX(func)->op_array.scope` where the frame serves no function of
+    /// its own: the including frame's scope, which `INCLUDE_OR_EVAL`
+    /// writes onto the op array it pushes (`new_op_array->scope =
+    /// EX(func)->op_array.scope`), so `self::` and a private property
+    /// inside an included file read as the includer's. A function's or
+    /// a method's scope is its declaration's and this is `None`.
+    pub(crate) scope: Option<ClassId>,
+    /// `EX(symbol_table)` under `ZEND_CALL_HAS_SYMBOL_TABLE`: the table
+    /// the frame's CVs are attached to, which the main op array's frame
+    /// and every code frame have and a function frame gets when it
+    /// includes a file (`zend_rebuild_symbol_table`); `None` for a
+    /// function frame nothing has asked one of.
+    pub(crate) symbol_table: Option<TableId>,
     /// The `Closure` object whose call pushed the frame, one owner the
     /// frame holds until it is popped (`ZEND_CALL_CLOSURE`,
     /// `zend_vm_stack_free_call_frame`'s `OBJ_RELEASE`): what php
@@ -422,6 +501,8 @@ impl Vm {
             caller,
             this,
             called_scope,
+            scope: None,
+            symbol_table: None,
             closure: None,
             num_args,
             extra_args: Vec::new(),

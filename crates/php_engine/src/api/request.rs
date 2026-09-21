@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
-use php_compile::StackLimit;
+use php_compile::{CompileError, StackLimit};
 use php_heap::{
     Arr, Fatal, FrameRef, Heap, HeapHooks, Intern, MapTable, Obj, Ref, Res, ResourceType, Slot,
     SortEntry, VmStack, Zval, ZvalRef,
@@ -35,7 +35,7 @@ use crate::api::values::{
     ValueRef,
 };
 use crate::engine::{MethodAt, NativeMethod, RequestDescription, Shared};
-use crate::exec::{self, CallStage, CallState, Vm};
+use crate::exec::{self, CallStage, CallState, IncludeKind, TableId, Vm};
 use crate::output::Output;
 
 /// php's version, what `PHP_VERSION` and `phpversion()` say.
@@ -322,17 +322,27 @@ pub struct Request {
     ending: Option<Ending>,
     resources: Resources,
     superglobals: Vec<(Vec<u8>, PhpArray)>,
-    /// php's `EG(symbol_table)`, the main op array's variables (design
-    /// §5.6, §5.10): its CVs, which `zend_detach_symbol_table` moves
-    /// here in the order the compiler numbered them, each name once and
-    /// this table their one owner. It outlives the frame, so a variable
-    /// the program wrote at the top level is still an owner while the
-    /// shutdown functions are served; `shutdown_destructors` walks the
-    /// table in reverse before the store's walk, and
-    /// `zend_shutdown_executor_values` destroys it after the
-    /// extensions' `rshutdown`. `$GLOBALS`, `compact`, `extract` and
-    /// `get_defined_vars` read this table (design §5.6).
-    symbols: Vec<(Vec<u8>, Value)>,
+    /// The symbol tables, [`TableId`] naming one: php's
+    /// `EG(symbol_table)` first, the main op array's variables (design
+    /// §5.6, §5.10), and after it one table per function frame that
+    /// included a file, `zend_rebuild_symbol_table`'s, which goes with
+    /// its frame. A table's names stand in the order they were attached
+    /// or written, each once; while a frame is attached to a name the
+    /// bucket points at the frame's CV ([`Symbol::Indirect`]) and the
+    /// frame owns the value, and `zend_detach_symbol_table` moves the
+    /// value into the bucket when the frame leaves. The first table
+    /// outlives the main frame, so a variable the program wrote at the
+    /// top level is still an owner while the shutdown functions are
+    /// served; `shutdown_destructors` walks it in reverse before the
+    /// store's walk, and `zend_shutdown_executor_values` destroys it
+    /// after the extensions' `rshutdown`. `$GLOBALS`, `compact`,
+    /// `extract` and `get_defined_vars` read these tables (design §5.6).
+    tables: Vec<SymbolTable>,
+    /// `EG(included_files)`: the resolved path of every file compiled by
+    /// the request, the primary one first (`php_execute_script_ex`),
+    /// then each an `INCLUDE_OR_EVAL` opened, which the once forms read
+    /// before they open one (`zend_include_or_eval`).
+    included_files: Vec<Vec<u8>>,
     constants: Vec<(Vec<u8>, Value)>,
     /// `zend_enum_get_case`'s slot (`Z/Zend/zend_enum.c:410`): one
     /// instance per case of each enum, made on the first read of the
@@ -428,6 +438,36 @@ pub struct Request {
     user_functions: Vec<UserFunction>,
 }
 
+/// One bucket of a symbol table, php's zval in `EG(symbol_table)` or a
+/// rebuilt one: the value the table owns, or `IS_INDIRECT`, the CV of the
+/// frame the name is attached to (`zend_attach_symbol_table`), which
+/// owns the value while the frame stands.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Symbol {
+    Value(Value),
+    Indirect(FrameRef, u32),
+}
+
+/// One symbol table: its names in order, and the function frame it was
+/// rebuilt for, which frees it when it pops; `EG(symbol_table)` has no
+/// owner and lives as long as the request.
+#[derive(Debug, Default)]
+pub(crate) struct SymbolTable {
+    owner: Option<FrameRef>,
+    entries: Vec<(Vec<u8>, Symbol)>,
+}
+
+/// What `zend_include_or_eval` handed the handler: `ZEND_FAKE_OP_ARRAY`,
+/// a once form over a path the table already had, which answers `true`;
+/// `NULL`, a path nothing opened, which answers `false`; or the unit of
+/// the file, whose main op array the handler serves on a frame of its
+/// own.
+pub(crate) enum Opened {
+    Already,
+    Failed,
+    Unit(Arc<Unit>),
+}
+
 /// One row of a backtrace before it is an array: the callee, its
 /// receiver, the scope it was called in where the callee is a closure,
 /// its arguments, and the file and line of its call site, which a call
@@ -436,12 +476,26 @@ pub struct Request {
 /// copy here is the `Closure` object the call stands on, so the scope
 /// travels beside the callee.
 type TraceRow = (
-    Function,
+    Traced,
     Option<PhpObject>,
     Option<ClassId>,
     Vec<Value>,
     Option<(Vec<u8>, i64)>,
 );
+
+/// What a trace row names: the function a link serves, or the construct
+/// `zend_fetch_debug_backtrace` names a code frame by, `include` and its
+/// kin (`Z/Zend/zend_builtin_functions.c:2154`), with the included file
+/// as its one argument where a link stands above the frame, since
+/// `include_filename` is the file of the link the walk passed last, and
+/// none where the frame is the innermost link.
+enum Traced {
+    Function(Function),
+    Include {
+        kind: IncludeKind,
+        file: Option<Vec<u8>>,
+    },
+}
 
 /// One link of php's `prev_execute_data` chain as this engine holds it:
 /// a user frame, with its place among the frames, or a call a native
@@ -527,7 +581,8 @@ impl Request {
             ending: None,
             resources: Resources::default(),
             superglobals: Vec::new(),
-            symbols: Vec::new(),
+            tables: vec![SymbolTable::default()],
+            included_files: Vec::new(),
             constants: Vec::new(),
             enum_cases: Vec::new(),
             statics: Vec::new(),
@@ -612,7 +667,85 @@ impl Request {
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
         let frame = self.stack.push_frame(slots);
         self.vm.push(unit);
+        // `zend_execute` gives the main op array's frame `EG(symbol_table)`
+        // and `i_init_code_execute_data` attaches it, so every CV name
+        // stands in the table, in the compiler's order, from the start.
+        if let Some(state) = self.vm.at_mut(frame) {
+            state.symbol_table = Some(TableId::GLOBAL);
+        }
+        self.attach_symbol_table(frame);
         frame
+    }
+
+    /// The frame for the main op array of a file an `INCLUDE_OR_EVAL`
+    /// opened, `zend_vm_stack_push_call_frame` under
+    /// `ZEND_CALL_NESTED_CODE | ZEND_CALL_HAS_SYMBOL_TABLE` and
+    /// `i_init_code_execute_data` (`Z/Zend/zend_vm_def.h:6590`,
+    /// `Z/Zend/zend_execute.c:4504`): the includer's receiver and called
+    /// scope carried over, the receiver with one more owner since the pop
+    /// gives one up, the includer's scope written onto the op array
+    /// (`new_op_array->scope`), and the includer's symbol table shared,
+    /// rebuilt for it first where it is a function frame with none
+    /// ([`Request::rebuild_symbol_table`]); then the new frame attached
+    /// to it, so the included code reads the includer's variables.
+    /// `caller` is `prev_execute_data`, the frame whose opline is the
+    /// `INCLUDE_OR_EVAL`, and `returns_to` its `VAR` where the value is
+    /// read.
+    pub(crate) fn push_code_frame(
+        &mut self,
+        unit: Arc<Unit>,
+        caller: FrameRef,
+        returns_to: Option<(FrameRef, u32)>,
+    ) -> FrameRef {
+        let code = exec::code_of(&unit);
+        let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
+        let (this, called_scope, scope) = self.vm.at(caller).map_or((None, None, None), |state| {
+            (state.this, state.called_scope, self.frame_scope(caller))
+        });
+        if let Some(this) = this {
+            self.addref(&this.as_value());
+        }
+        let table = self.rebuild_symbol_table(caller);
+        exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
+        let frame = self.stack.push_frame(slots);
+        self.vm.push_body(
+            unit,
+            exec::Body::Main,
+            None,
+            this,
+            called_scope,
+            0,
+            returns_to,
+            Some(caller),
+        );
+        if let Some(state) = self.vm.at_mut(frame) {
+            state.scope = scope;
+            state.symbol_table = Some(table);
+        }
+        self.attach_symbol_table(frame);
+        frame
+    }
+
+    /// `zend_leave_helper`'s arm for a nested code frame
+    /// (`Z/Zend/zend_vm_def.h:3030`): the frame's CVs detached into the
+    /// table it shares with its includer, the frame popped, and the
+    /// includer attached to the table again, so what the included file
+    /// wrote to a variable of the includer's is in the includer's CV
+    /// when the loop goes on there. A function frame is popped alone,
+    /// as `zend_leave_helper`'s other arms pop one.
+    pub(crate) fn leave_frame(&mut self, frame: FrameRef) {
+        let code_frame = self
+            .vm
+            .at(frame)
+            .is_some_and(|state| state.function.is_none());
+        if code_frame {
+            self.detach_symbol_table(frame);
+        }
+        self.pop_frame();
+        if code_frame {
+            let caller = self.stack.current();
+            self.attach_symbol_table(caller);
+        }
     }
 
     /// `CACHED_PTR(num)`: what the runtime cache of the op array `frame`
@@ -711,6 +844,7 @@ impl Request {
             let value = self.take_slot(frame, u32::try_from(at).unwrap_or(u32::MAX));
             self.release(value);
         }
+        self.free_rebuilt_table(frame);
         if let Some(state) = self.vm.pop() {
             if let Some(this) = state.this {
                 self.release(this.as_value());
@@ -1207,13 +1341,14 @@ impl Request {
     /// its caller's; a native method's is its own class.
     pub(crate) fn executed_scope(&self) -> Option<ClassId> {
         for link in self.chain() {
-            let (function, closure) = match link {
-                Link::Frame(_, state) => (state.function, state.closure),
-                Link::Call(call) => (Some(call.function), call.closure),
+            let (function, closure, carried) = match link {
+                Link::Frame(_, state) => (state.function, state.closure, state.scope),
+                Link::Call(call) => (Some(call.function), call.closure, None),
             };
             let scope = self
                 .closure_scope(closure)
-                .or_else(|| self.method_class(function?));
+                .or_else(|| self.method_class(function?))
+                .or(carried);
             let user = function.is_some_and(|function| self.user_function(function).is_some());
             if scope.is_some() || user || matches!(link, Link::Frame(..)) {
                 return scope;
@@ -1634,13 +1769,24 @@ impl Request {
         let ignore_arguments = self.exception_ignore_args();
         let links = self.trace_chain();
         let mut trace = PhpArray::new(self)?;
-        for (function, this, scope, arguments, site) in links {
+        for (traced, this, scope, mut arguments, site) in links {
             let mut row = PhpArray::new(self)?;
-            let name = self.declared_name(function);
-            let method = self.method_class(function).or(scope).map(|class| {
-                let class = self.class_name(class);
-                (class, if this.is_some() { "->" } else { "::" })
-            });
+            let is_function = matches!(traced, Traced::Function(_));
+            let (name, method) = match traced {
+                Traced::Function(function) => (
+                    self.declared_name(function),
+                    self.method_class(function).or(scope).map(|class| {
+                        let class = self.class_name(class);
+                        (class, if this.is_some() { "->" } else { "::" })
+                    }),
+                ),
+                Traced::Include { kind, file } => {
+                    if let Some(file) = file {
+                        arguments.push(Value::string(PhpString::new(self, &file)?));
+                    }
+                    (kind.name().to_owned(), None)
+                }
+            };
             if let Some((file, line)) = site {
                 let file = Value::string(PhpString::new(self, &file)?);
                 self.set_string_key(&mut row, b"file", file)?;
@@ -1654,7 +1800,10 @@ impl Request {
                 let join = Value::string(PhpString::new(self, join.as_bytes())?);
                 self.set_string_key(&mut row, b"type", join)?;
             }
-            if !ignore_arguments {
+            // A code frame's row has an `args` only where it has the
+            // file, and a function's always, `debug_backtrace_get_args`.
+            let with_args = is_function || !arguments.is_empty();
+            if !ignore_arguments && with_args {
                 let mut args = PhpArray::new(self)?;
                 for argument in arguments {
                     let argument = argument.deref();
@@ -1662,6 +1811,10 @@ impl Request {
                     args.append(self, argument)?;
                 }
                 self.set_string_key(&mut row, b"args", Value::array(args))?;
+            } else {
+                for argument in arguments {
+                    self.release(argument);
+                }
             }
             trace.append(self, Value::array(row))?;
         }
@@ -1734,6 +1887,31 @@ impl Request {
             match &chain[at] {
                 Link::Frame(place, state) => {
                     let Some(function) = state.function else {
+                        // A code frame: named by the includer's opline
+                        // where that is an `INCLUDE_OR_EVAL`, and the
+                        // main op array's frame, which no opline pushed,
+                        // makes no row (`zend_trace_to_string` closes
+                        // every trace with `{main}`).
+                        let Some(kind) = chain
+                            .get(at.saturating_add(1))
+                            .and_then(|below| match below {
+                                Link::Frame(_, below) => Some(below),
+                                Link::Call(_) => None,
+                            })
+                            .and_then(|below| {
+                                let code = exec::body_of(&below.unit, below.body)?;
+                                exec::opline_at(code, below.opline)
+                            })
+                            .filter(|op| op.opcode == Opcode::IncludeOrEval)
+                            .and_then(|op| IncludeKind::of(op.extended_value))
+                        else {
+                            continue;
+                        };
+                        let file = (at > 0)
+                            .then(|| exec::body_of(&state.unit, state.body))
+                            .flatten()
+                            .map(|code| code.filename.0.to_vec());
+                        rows.push((Traced::Include { kind, file }, None, None, Vec::new(), site));
                         continue;
                     };
                     let frame = FrameRef(u32::try_from(*place).unwrap_or(u32::MAX));
@@ -1744,7 +1922,7 @@ impl Request {
                         .collect();
                     arguments.extend(state.extra_args.iter().copied());
                     rows.push((
-                        function,
+                        Traced::Function(function),
                         state.this,
                         self.closure_scope(state.closure),
                         arguments,
@@ -1753,7 +1931,7 @@ impl Request {
                 }
                 Link::Call(call) => {
                     rows.push((
-                        call.function,
+                        Traced::Function(call.function),
                         call.this,
                         self.closure_scope(call.closure),
                         call.arguments.clone(),
@@ -4798,29 +4976,143 @@ impl Request {
         self.vm.innermost().is_some() || self.vm.serving_call().is_some()
     }
 
+    /// `zend_attach_symbol_table` (`Z/Zend/zend_execute_API.c:1857`) on
+    /// the table `frame` names: every CV of the frame's op array, in the
+    /// order the compiler numbered them, takes what the table holds
+    /// under its name, moved out of the bucket or out of the CV of the
+    /// frame the bucket points at (`ZVAL_COPY_VALUE`, no owner taken),
+    /// and the bucket points at this frame's CV from here; a name the
+    /// table has not is added, its CV left `UNDEF`. What the main op
+    /// array's activation does with `EG(symbol_table)`, what a code
+    /// frame's does with its includer's, and what the includer does
+    /// again when the code frame leaves, so a variable the included
+    /// file wrote is the includer's.
+    pub(crate) fn attach_symbol_table(&mut self, frame: FrameRef) {
+        let Some(table) = self.vm.at(frame).and_then(|state| state.symbol_table) else {
+            return;
+        };
+        for (at, name) in self.frame_var_names(frame).into_iter().enumerate() {
+            let at = u32::try_from(at).unwrap_or(u32::MAX);
+            let found = self.table_mut(table).and_then(|entries| {
+                let index = entries.iter().position(|(key, _)| *key == name)?;
+                Some(std::mem::replace(
+                    &mut entries[index].1,
+                    Symbol::Indirect(frame, at),
+                ))
+            });
+            let value = match found {
+                Some(Symbol::Value(value)) => value,
+                Some(Symbol::Indirect(other, slot)) => self.take_slot(other, slot),
+                None => {
+                    if let Some(entries) = self.table_mut(table) {
+                        entries.push((name, Symbol::Indirect(frame, at)));
+                    }
+                    continue;
+                }
+            };
+            // The CV was `UNDEF` when the frame was pushed, or is its
+            // own value taken back, so the slot gives up nothing.
+            let previous = self.set_slot(frame, at, value);
+            self.release(previous);
+        }
+    }
+
     /// `zend_detach_symbol_table` (`Z/Zend/zend_execute_API.c:1892`),
-    /// what php does when it leaves the main op array's frame, the one
-    /// it marks `ZEND_CALL_TOP_CODE` and gives `EG(symbol_table)` as
-    /// its own (design §5.6): every CV that holds something is moved
-    /// into the symbol table under the name the compiler numbered it
-    /// by, the slot left `UNDEF` so the pop releases nothing, and a
-    /// name whose CV holds nothing is deleted from the table. The
-    /// variables are the request's from here and outlive the frame,
-    /// which is why `$a = new A;` is still an owner while the shutdown
+    /// what php does when it leaves a frame that has a symbol table, the
+    /// main op array's frame, the one it marks `ZEND_CALL_TOP_CODE` and
+    /// gives `EG(symbol_table)` as its own, and every code frame an
+    /// `INCLUDE_OR_EVAL` pushed (design §5.6): every CV that holds
+    /// something is moved into the table under the name the compiler
+    /// numbered it by, the bucket keeping its place, the slot left
+    /// `UNDEF` so the pop releases nothing, and a name whose CV holds
+    /// nothing is deleted from the table. The variables are the
+    /// table's from here: the request's for the main frame, which is
+    /// why `$a = new A;` is still an owner while the shutdown
     /// functions are served and the destructor waits for
-    /// [`Request::shutdown_destructors`].
-    pub(crate) fn detach_symbol_table(&mut self, frame: FrameRef, unit: &Unit) {
-        let names: Vec<Vec<u8>> = exec::code_of(unit)
-            .vars
-            .iter()
-            .map(|name| name.0.to_vec())
-            .collect();
-        for (at, name) in names.into_iter().enumerate() {
+    /// [`Request::shutdown_destructors`], and the includer's for a code
+    /// frame, whose re-attach takes them back.
+    pub(crate) fn detach_symbol_table(&mut self, frame: FrameRef) {
+        let Some(table) = self.vm.at(frame).and_then(|state| state.symbol_table) else {
+            return;
+        };
+        for (at, name) in self.frame_var_names(frame).into_iter().enumerate() {
             let value = self.take_slot(frame, u32::try_from(at).unwrap_or(u32::MAX));
             if value.tag() == TypeTag::Undef {
-                self.symbol_del(&name);
+                self.symbol_del(table, &name);
             } else {
-                self.symbol_update(name, value);
+                self.symbol_update(table, name, value);
+            }
+        }
+    }
+
+    /// `zend_rebuild_symbol_table` (`Z/Zend/zend_execute_API.c:1810`) for
+    /// `frame`: the table it already has, or a new one of its own with
+    /// every CV of its op array appended as `IS_INDIRECT` to the CV
+    /// (`_zend_hash_append_ind`), the values staying where they are, and
+    /// the frame marked `ZEND_CALL_HAS_SYMBOL_TABLE`. What a function
+    /// frame gets when it includes a file, so the included code reads
+    /// and writes the function's variables; freed when the frame pops
+    /// (`zend_clean_and_cache_symbol_table`).
+    pub(crate) fn rebuild_symbol_table(&mut self, frame: FrameRef) -> TableId {
+        if let Some(table) = self.vm.at(frame).and_then(|state| state.symbol_table) {
+            return table;
+        }
+        let entries = self
+            .frame_var_names(frame)
+            .into_iter()
+            .enumerate()
+            .map(|(at, name)| {
+                (
+                    name,
+                    Symbol::Indirect(frame, u32::try_from(at).unwrap_or(u32::MAX)),
+                )
+            })
+            .collect();
+        let table = TableId(u32::try_from(self.tables.len()).unwrap_or(u32::MAX));
+        self.tables.push(SymbolTable {
+            owner: Some(frame),
+            entries,
+        });
+        if let Some(state) = self.vm.at_mut(frame) {
+            state.symbol_table = Some(table);
+        }
+        table
+    }
+
+    /// The names of the CVs of the op array `frame` serves, in the
+    /// order the compiler numbered them, `op_array->vars`.
+    fn frame_var_names(&self, frame: FrameRef) -> Vec<Vec<u8>> {
+        self.vm
+            .at(frame)
+            .and_then(|state| exec::body_of(&state.unit, state.body))
+            .map(|code| code.vars.iter().map(|name| name.0.to_vec()).collect())
+            .unwrap_or_default()
+    }
+
+    fn table_mut(&mut self, table: TableId) -> Option<&mut Vec<(Vec<u8>, Symbol)>> {
+        self.tables
+            .get_mut(table.0 as usize)
+            .map(|table| &mut table.entries)
+    }
+
+    /// `zend_clean_and_cache_symbol_table` when the frame that rebuilt
+    /// the last table pops: its values released and the table gone. A
+    /// bucket still pointing at a CV points at a slot the pop is giving
+    /// up, and owns nothing.
+    fn free_rebuilt_table(&mut self, frame: FrameRef) {
+        if self
+            .tables
+            .last()
+            .is_none_or(|table| table.owner != Some(frame))
+        {
+            return;
+        }
+        let Some(table) = self.tables.pop() else {
+            return;
+        };
+        for (_, symbol) in table.entries {
+            if let Symbol::Value(value) = symbol {
+                self.release(value);
             }
         }
     }
@@ -4828,25 +5120,36 @@ impl Request {
     /// One symbol written, `zend_hash_update`: `value` is the table's
     /// and what stood under the name is released after the write, the
     /// name keeping the position it had, as php's update keeps a
-    /// bucket's and only a name the table has not appends.
-    fn symbol_update(&mut self, name: Vec<u8>, value: Value) {
-        if let Some(at) = self.symbols.iter().position(|(key, _)| *key == name) {
-            let old = std::mem::replace(&mut self.symbols[at].1, value);
-            self.release(old);
+    /// bucket's and only a name the table has not appends. A bucket
+    /// that pointed at a CV owned nothing.
+    fn symbol_update(&mut self, table: TableId, name: Vec<u8>, value: Value) {
+        let Some(entries) = self.table_mut(table) else {
+            return;
+        };
+        if let Some(at) = entries.iter().position(|(key, _)| *key == name) {
+            let old = std::mem::replace(&mut entries[at].1, Symbol::Value(value));
+            if let Symbol::Value(old) = old {
+                self.release(old);
+            }
             return;
         }
-        self.symbols.push((name, value));
+        entries.push((name, Symbol::Value(value)));
     }
 
     /// One symbol deleted, `zend_hash_del`: the name gone and what it
     /// held released; a name the table has not is no error, as php's
     /// delete of a missing key is none.
-    fn symbol_del(&mut self, name: &[u8]) {
-        let Some(at) = self.symbols.iter().position(|(key, _)| key == name) else {
+    fn symbol_del(&mut self, table: TableId, name: &[u8]) {
+        let Some(entries) = self.table_mut(table) else {
             return;
         };
-        let (_, value) = self.symbols.remove(at);
-        self.release(value);
+        let Some(at) = entries.iter().position(|(key, _)| key == name) else {
+            return;
+        };
+        let (_, symbol) = entries.remove(at);
+        if let Symbol::Value(value) = symbol {
+            self.release(value);
+        }
     }
 
     /// `shutdown_destructors` (`Z/Zend/zend_execute_API.c:251`), the
@@ -4908,23 +5211,32 @@ impl Request {
     /// ```
     pub(crate) fn shutdown_destructors(&mut self) {
         loop {
-            let symbols = self.symbols.len();
-            let mut at = self.symbols.len();
+            let symbols = self.globals().len();
+            let mut at = symbols;
             while at > 0 && !self.marked_destructed {
                 at -= 1;
-                let alone = self
-                    .symbols
-                    .get(at)
-                    .is_some_and(|(_, value)| value.as_object().is_some() && value.refcount() == 1);
+                let alone = self.globals().get(at).is_some_and(|(_, symbol)| {
+                    matches!(symbol, Symbol::Value(value) if value.as_object().is_some() && value.refcount() == 1)
+                });
                 if alone {
-                    let (_, value) = self.symbols.remove(at);
-                    self.release(value);
+                    let (_, symbol) = self.globals().remove(at);
+                    if let Symbol::Value(value) = symbol {
+                        self.release(value);
+                    }
                 }
             }
-            if symbols == self.symbols.len() || self.marked_destructed {
+            if symbols == self.globals().len() || self.marked_destructed {
                 break;
             }
         }
+    }
+
+    /// `EG(symbol_table)`'s buckets, the first table's.
+    fn globals(&mut self) -> &mut Vec<(Vec<u8>, Symbol)> {
+        if self.tables.is_empty() {
+            self.tables.push(SymbolTable::default());
+        }
+        &mut self.tables[0].entries
     }
 
     /// `zend_hash_graceful_reverse_destroy(&EG(symbol_table))` in
@@ -4935,8 +5247,10 @@ impl Request {
     /// the request by now, `zend_objects_store_call_destructors` having
     /// marked every object, so this frees and serves nothing.
     pub(crate) fn destroy_symbol_table(&mut self) {
-        while let Some((_, value)) = self.symbols.pop() {
-            self.release(value);
+        while let Some((_, symbol)) = self.globals().pop() {
+            if let Symbol::Value(value) = symbol {
+                self.release(value);
+            }
         }
     }
 
@@ -6360,16 +6674,51 @@ impl Request {
     /// [`Request::executed_scope`], which answers for the native being
     /// served where one is.
     pub(crate) fn frame_scope(&self, frame: FrameRef) -> Option<ClassId> {
-        self.method_class(self.vm.at(frame)?.function?)
+        let state = self.vm.at(frame)?;
+        match state.function {
+            Some(function) => self.method_class(function),
+            None => state.scope,
+        }
     }
 
-    pub(crate) fn declare_functions(&mut self, unit: &Arc<Unit>) {
-        for at in 0..unit.functions.len() {
+    /// `zend_hash_add_ptr(CG(function_table), …)` for every function the
+    /// unit declares at its top level, before its main op array runs:
+    /// php binds one at compile time and the compiler emitted no opline
+    /// for it, so the request's table takes it here. The compiler
+    /// refused a name the natives have or the file declares twice; a
+    /// name another file of the request declared is
+    /// `do_bind_function_error` at `E_COMPILE_ERROR`, which names the
+    /// earlier declaration's file and line and ends the request before
+    /// the frame is pushed, so nothing of a file that redeclares runs;
+    /// `false` says so.
+    pub(crate) fn declare_functions(&mut self, unit: &Arc<Unit>) -> bool {
+        for (at, (decl, _)) in unit.functions.iter().enumerate() {
+            if let Some(earlier) = self.function_named(&decl.name.0) {
+                let site = self
+                    .user_function(earlier)
+                    .and_then(user_function_decl)
+                    .map(|decl| {
+                        format!(
+                            " (previously declared in {}:{})",
+                            String::from_utf8_lossy(&decl.file.0),
+                            decl.line
+                        )
+                    })
+                    .unwrap_or_default();
+                let message = format!(
+                    "Cannot redeclare function {}(){site}",
+                    String::from_utf8_lossy(&decl.name.0)
+                );
+                let file = decl.file.0.to_vec();
+                self.end_in_compile_time(Level::CompileError, &message, &file, decl.line);
+                return false;
+            }
             self.user_functions.push(UserFunction {
                 unit: Arc::clone(unit),
                 body: exec::Body::Function(u32::try_from(at).unwrap_or(u32::MAX)),
             });
         }
+        true
     }
 
     pub(crate) fn constant_named(&self, name: &[u8]) -> Option<Value> {
@@ -6525,6 +6874,223 @@ impl Request {
         Ok(array)
     }
 
+    // -------------------------------------------------- include
+
+    /// `php_execute_script_ex` (`Z/main/main.c:2617`): the primary file
+    /// into `EG(included_files)` under its expanded path before it runs,
+    /// so a once form over the file being served answers `true`. A source
+    /// the host handed over, `php -r` and stdin, has no path and is
+    /// nowhere in the table, as php's `Standard input code` is not.
+    pub(crate) fn note_primary_file(&mut self, script: &[u8]) {
+        if let Some(HostPath(real)) = self.realpath(script) {
+            self.included_files
+                .push(real.as_os_str().as_encoded_bytes().to_vec());
+        }
+    }
+
+    /// `zend_include_or_eval` (`Z/Zend/zend_execute.c:5287`) for the four
+    /// file constructs: the once forms resolve the path first
+    /// ([`Request::resolve_path`]) and answer [`Opened::Already`] for one
+    /// the table has, then put the path in the table before the file is
+    /// compiled, so a file whose compile is refused is in the table
+    /// still; the other two compile first, `compile_filename`, and put
+    /// the path in the table after (`Z/Zend/zend_language_scanner.l:709`).
+    /// The file is compiled once and published through the unit cache
+    /// (design §6.3), as opcache keeps it, and every request after
+    /// reads the same unit.
+    ///
+    /// A path nothing opens is `zend_stream_open`'s warning, the stream
+    /// layer's `Failed to open stream` with the construct and the path
+    /// as written before it (`php_verror`, `Z/main/main.c:1096`), then
+    /// `zend_message_dispatcher`'s (`Z/main/main.c:1746`): the warning
+    /// `Failed opening '%s' for inclusion` and [`Opened::Failed`] under
+    /// an `include`, php's `Error` `Failed opening required '%s'` under
+    /// a `require`, each naming `include_path` as the ini has it. A
+    /// path with a NUL byte in it is the second message alone.
+    ///
+    /// A file the compiler refuses is php's `ParseError`, thrown at the
+    /// file and line the parser stopped at, which the includer may
+    /// catch; what the compiler raised before it was refused is raised
+    /// first. A refusal after the parse, `E_COMPILE_ERROR`, ends the
+    /// request as it ends one for the primary file.
+    pub(crate) fn include_file(
+        &mut self,
+        kind: IncludeKind,
+        written: &[u8],
+    ) -> Result<Opened, Thrown> {
+        if written.contains(&0) {
+            return self.failed_opening(kind, written);
+        }
+        let resolved = self.resolve_path(written);
+        if kind.once()
+            && let Ok(path) = &resolved
+            && self.included_files.contains(path)
+        {
+            return Ok(Opened::Already);
+        }
+        let path = match resolved {
+            Ok(path) => path,
+            Err(reason) => {
+                self.open_stream_failed(kind, written, &reason);
+                return self.failed_opening(kind, written);
+            }
+        };
+        if kind.once() {
+            self.included_files.push(path.clone());
+        }
+        let cwd = self.cwd.clone();
+        let stack = self.stack_limit();
+        match self.shared.cached(&path, &cwd, stack) {
+            Some(Ok(unit)) => {
+                if !self.included_files.contains(&path) {
+                    self.included_files.push(path);
+                }
+                Ok(Opened::Unit(unit))
+            }
+            Some(Err(refused)) => Err(self.refused_include(&refused, &path)),
+            // The file went between the stat that resolved it and the
+            // read that would have compiled it.
+            None => {
+                let reason = std::io::Error::from(std::io::ErrorKind::NotFound);
+                self.open_stream_failed(kind, written, &reason);
+                self.failed_opening(kind, written)
+            }
+        }
+    }
+
+    /// `php_resolve_path` (`Z/main/fopen_wrappers.c:500`) over the ini's
+    /// `include_path`: a path that begins `./` or `../`, or is absolute,
+    /// or is asked with no `include_path` at all, is `tsrm_realpath`
+    /// over itself; any other is tried under each entry of
+    /// `include_path` in turn, and last under the directory of the file
+    /// being served (`zend_get_executed_filename`), which is how a file
+    /// beside the primary file is found from another working directory. A
+    /// `scheme://` other than `file://` names a stream wrapper this
+    /// engine has not, and resolves to nothing. `tsrm_realpath` is the
+    /// kernel's canonical path against the request's working directory
+    /// ([`Request::realpath`]), and here a regular file alone, which is
+    /// the `S_ISREG` the plain-files wrapper holds an include to when it
+    /// opens; php reports a directory with whatever `errno` the failed
+    /// open left, and this engine as a file that is not there. The
+    /// `Err` is the last attempt's reason, which the stream warning
+    /// prints.
+    fn resolve_path(&self, written: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+        let not_found = || std::io::Error::from(std::io::ErrorKind::NotFound);
+        if let Some(at) = written.windows(3).position(|w| w == b"://")
+            && at > 1
+            && written[..at]
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+        {
+            if written[..at].eq_ignore_ascii_case(b"file") {
+                return self.realpath_file(&written[at + 3..]);
+            }
+            return Err(not_found());
+        }
+        let include_path = self.ini_get(b"include_path").unwrap_or_default().to_vec();
+        let dot_relative = written.starts_with(b"./") || written.starts_with(b"../");
+        if dot_relative || written.starts_with(b"/") || include_path.is_empty() {
+            return self.realpath_file(written);
+        }
+        let mut last = not_found();
+        for entry in include_path.split(|b| *b == b':') {
+            let mut candidate = entry.to_vec();
+            candidate.push(b'/');
+            candidate.extend_from_slice(written);
+            match self.realpath_file(&candidate) {
+                Ok(path) => return Ok(path),
+                Err(reason) => last = reason,
+            }
+        }
+        if let Some(file) = self.current_file()
+            && let Some(slash) = file.iter().rposition(|b| *b == b'/')
+            && slash > 0
+        {
+            let mut candidate = file[..=slash].to_vec();
+            candidate.extend_from_slice(written);
+            match self.realpath_file(&candidate) {
+                Ok(path) => return Ok(path),
+                Err(reason) => last = reason,
+            }
+        }
+        Err(last)
+    }
+
+    /// `tsrm_realpath` of a path that is a regular file: the canonical
+    /// path, against the request's working directory where the path is
+    /// relative.
+    fn realpath_file(&self, path: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+        let real = std::fs::canonicalize(self.absolutize(path).0)?;
+        if !real.is_file() {
+            return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        }
+        Ok(real.as_os_str().as_encoded_bytes().to_vec())
+    }
+
+    /// `php_stream_open_wrapper`'s warning under `REPORT_ERRORS`, the
+    /// `Failed to open stream: %s` of `php_stream_display_wrapper_errors`
+    /// with `strerror(errno)`, raised through `php_error_docref1` with
+    /// the construct and the path as written as its origin.
+    fn open_stream_failed(&mut self, kind: IncludeKind, written: &[u8], reason: &std::io::Error) {
+        let reason = reason.to_string();
+        let reason = reason
+            .split_once(" (os error")
+            .map_or(reason.as_str(), |(text, _)| text);
+        let message = format!(
+            "{}({}): Failed to open stream: {reason}",
+            kind.name(),
+            String::from_utf8_lossy(written)
+        );
+        crate::api::raising::warning(self, &message);
+    }
+
+    /// `php_message_handler_for_zend`'s `ZMSG_FAILED_INCLUDE_FOPEN` and
+    /// `ZMSG_FAILED_REQUIRE_FOPEN` (`Z/main/main.c:1746`): the warning
+    /// and `false` for an `include`, the `Error` for a `require`, each
+    /// naming the path as written and `include_path` as the ini has it.
+    fn failed_opening(&mut self, kind: IncludeKind, written: &[u8]) -> Result<Opened, Thrown> {
+        let include_path =
+            String::from_utf8_lossy(self.ini_get(b"include_path").unwrap_or_default()).into_owned();
+        let shown = String::from_utf8_lossy(written).into_owned();
+        if kind.required() {
+            return Err(crate::api::raising::throw(
+                self,
+                "Error",
+                &format!("Failed opening required '{shown}' (include_path='{include_path}')"),
+            ));
+        }
+        crate::api::raising::warning(
+            self,
+            &format!(
+                "{}(): Failed opening '{shown}' for inclusion (include_path='{include_path}')",
+                kind.name()
+            ),
+        );
+        Ok(Opened::Failed)
+    }
+
+    /// What the compiler refused an included file with, raised as php
+    /// raises it: the diagnostics before the refusal at the file's own
+    /// name, then a parse error as the `ParseError` `zendparse` throws,
+    /// at the file and the line the parser stopped on, and a refusal
+    /// after the parse as the `E_COMPILE_ERROR` that ends the request.
+    fn refused_include(&mut self, refused: &CompileError, path: &[u8]) -> Thrown {
+        for raised in &refused.raised {
+            self.note_error_in(raised.level, &raised.message, path, raised.line);
+        }
+        if refused.level == Level::Parse {
+            return crate::api::raising::throw_at(
+                self,
+                "ParseError",
+                &refused.message,
+                path,
+                refused.line,
+            );
+        }
+        self.end_in_compile_time(refused.level, &refused.message, path, refused.line);
+        Thrown::of(None)
+    }
+
     // -------------------------------------------------- diagnostics
 
     /// `error_get_last()`: the last diagnostic as php's four-key array,
@@ -6640,7 +7206,11 @@ impl Request {
     /// `zend_get_executed_filename`.
     #[must_use]
     pub fn current_file(&self) -> Option<&[u8]> {
-        self.description.script_name.as_deref()
+        self.vm
+            .innermost()
+            .and_then(|state| exec::body_of(&state.unit, state.body))
+            .map(|code| code.filename.0.as_ref())
+            .or(self.description.script_name.as_deref())
     }
 
     /// `zend_get_executed_lineno`: the line the innermost frame stands

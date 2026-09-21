@@ -2118,6 +2118,35 @@ mod tests {
         }
     }
 
+    /// The oracle's dump of the four file constructs (#396), each one
+    /// `INCLUDE_OR_EVAL` over its operand with the construct in
+    /// `extended_value`, into a `VAR` that `zend_do_free` marks unused
+    /// where nothing reads it, as it marks a call's; the operand of
+    /// `require_once` is the whole `$x . "b"`, so the `CONCAT` stands
+    /// before it.
+    #[test]
+    fn the_four_file_constructs_are_one_include_or_eval_each() {
+        assert_eq!(
+            dump_of(
+                b"<?php $r = include \"a.php\"; require_once $x . \"b\"; include_once \"c\"; require \"d\"; echo include_once \"e\";"
+            ),
+            main_dump(
+                9,
+                2,
+                7,
+                "0000 V2 = INCLUDE_OR_EVAL (include) string(\"a.php\")\n\
+                 0001 ASSIGN CV0($r) V2\n\
+                 0002 T4 = CONCAT CV1($x) string(\"b\")\n\
+                 0003 INCLUDE_OR_EVAL (require_once) T4\n\
+                 0004 INCLUDE_OR_EVAL (include_once) string(\"c\")\n\
+                 0005 INCLUDE_OR_EVAL (require) string(\"d\")\n\
+                 0006 V8 = INCLUDE_OR_EVAL (include_once) string(\"e\")\n\
+                 0007 ECHO V8\n\
+                 0008 RETURN int(1)\n"
+            )
+        );
+    }
+
     /// The oracle's dump of `echo nope($a);` (#252), a name php's
     /// function table has not: `zend_compile_dynamic_call`'s
     /// `INIT_FCALL_BY_NAME` with the argument count and no used stack,

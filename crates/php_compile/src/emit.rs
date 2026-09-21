@@ -109,7 +109,8 @@ use php_unit::{
 use crate::read;
 use crate::read::{
     Arm, BinaryOp, Case, CastTo, Catch, Child, Class, ConstElem, Element, Expr, Function, IfArm,
-    Magic, Method, Piece, Property, Read, Step, Stmt, Target, Unset, Written, is_auto_global,
+    IncludeKind, Magic, Method, Piece, Property, Read, Step, Stmt, Target, Unset, Written,
+    is_auto_global,
 };
 use crate::{CompileError, Options, StackLimit};
 
@@ -2585,6 +2586,7 @@ impl Emit<'_> {
             | Expr::StaticProp { .. }
             | Expr::Silence(_)
             | Expr::Throw(_)
+            | Expr::Include { .. }
             | Expr::Isset { .. }
             | Expr::CallVar { .. }
             | Expr::Closure(_)
@@ -4325,6 +4327,7 @@ impl Emit<'_> {
             Expr::StaticProp { class, name } => self.static_prop(class, name),
             Expr::Array(elements) => self.array(elements),
             Expr::Throw(operand) => self.throw(operand),
+            Expr::Include { kind, path } => self.include_or_eval(*kind, path),
             Expr::Isset { var, empty } => self.isset_or_empty(var, *empty),
             Expr::Closure(closure) => self.closure(closure),
             Expr::CallVar { callee, arguments } => self.call_var(callee, arguments),
@@ -4473,6 +4476,44 @@ impl Emit<'_> {
             ..Opline::default()
         });
         Ok(Where::Constant(Zval::bool(true)))
+    }
+
+    /// `zend_compile_include_or_eval` (`Z/Zend/zend_compile.c:10800`):
+    /// the operand, then one `INCLUDE_OR_EVAL` over it into a `VAR`, the
+    /// construct's bit ([`IncludeKind::attr`]) in `extended_value`;
+    /// `zend_do_free` marks the `VAR` unused where nothing reads it, as
+    /// it marks a call's. The engine's handler resolves the path, serves
+    /// the file on a frame of its own and leaves what it returned in the
+    /// `VAR`.
+    ///
+    /// ```php
+    /// $n = ($n ?? 0) + 1;
+    /// if ($n > 1) { echo "run $n\n"; return $n * 10; }
+    /// var_dump(include __FILE__, require 'witness.php');
+    /// var_dump(include_once __FILE__, require_once './witness.php');
+    /// ```
+    /// ```expect
+    /// run 2
+    /// run 3
+    /// int(20)
+    /// int(30)
+    /// bool(true)
+    /// bool(true)
+    /// ```
+    fn include_or_eval(&mut self, kind: IncludeKind, path: &Child) -> Result<Where, CompileError> {
+        let value = self.expr(path)?;
+        let (op1_type, op1) = self.operand(value);
+        let out = self.temporary();
+        self.push(Opline {
+            opcode: Opcode::IncludeOrEval,
+            op1_type,
+            op1,
+            out_type: OperandKind::Var,
+            out,
+            extended_value: kind.attr(),
+            ..Opline::default()
+        });
+        Ok(Where::Returned(out))
     }
 
     /// `zend_compile_conditional` (`Z/Zend/zend_compile.c:10505`): the
@@ -6850,6 +6891,8 @@ impl Emit<'_> {
             // `zend_compile_throw` emits an opline whatever stands
             // around it, so a `throw` folds to nothing.
             Expr::Throw(_) => Err(self.fatal("a `throw` is no constant expression")),
+            // `zend_compile_include_or_eval` emits its opline the same way.
+            Expr::Include { .. } => Err(self.fatal("an `include` is no constant expression")),
             // `zend_compile_isset_or_empty` emits an opline over the CV;
             // `zend_eval_const_expr` folds nothing here.
             Expr::Isset { .. } => Err(self.fatal("an `isset` is no constant expression")),
@@ -8427,6 +8470,7 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Child) {
         }
         Expr::Instanceof { expr, .. } => implicit_uses(names, expr),
         Expr::Throw(operand) => implicit_uses(names, operand),
+        Expr::Include { path, .. } => implicit_uses(names, path),
         Expr::Match { expr, arms, .. } => {
             implicit_uses(names, expr);
             for arm in arms {

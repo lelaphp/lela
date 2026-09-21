@@ -49,6 +49,42 @@ use php_unit::decl::{ClassKind, Name, Type, Visibility};
 
 use crate::StackLimit;
 
+/// Which of the four file constructs an [`Expr::Include`] is: php's
+/// `ZEND_INCLUDE`, `ZEND_INCLUDE_ONCE`, `ZEND_REQUIRE` and
+/// `ZEND_REQUIRE_ONCE` (`Z/Zend/zend_compile.h:1076-1079`), one bit
+/// each, which the parser puts in the node's `attr` and
+/// `zend_compile_include_or_eval` copies into the opline's
+/// `extended_value`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IncludeKind {
+    Include,
+    IncludeOnce,
+    Require,
+    RequireOnce,
+}
+
+impl IncludeKind {
+    /// The bit php names the construct by.
+    pub(crate) fn attr(self) -> u32 {
+        match self {
+            IncludeKind::Include => 1 << 1,
+            IncludeKind::IncludeOnce => 1 << 2,
+            IncludeKind::Require => 1 << 3,
+            IncludeKind::RequireOnce => 1 << 4,
+        }
+    }
+
+    /// The keyword, as php's scanner takes it: the once forms first,
+    /// since `include` is a prefix of `include_once` and the scanner
+    /// takes the longest match.
+    const KEYWORDS: [(&'static [u8], IncludeKind); 4] = [
+        (b"include_once", IncludeKind::IncludeOnce),
+        (b"require_once", IncludeKind::RequireOnce),
+        (b"include", IncludeKind::Include),
+        (b"require", IncludeKind::Require),
+    ];
+}
+
 /// One statement.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Stmt {
@@ -675,6 +711,17 @@ pub(crate) enum Expr {
     /// which `throw expr;` is the statement of, so the grammar's
     /// `expr: T_THROW expr` is read wherever a full expression stands.
     Throw(Child),
+    /// `include expr` and its three kin, php's `ZEND_AST_INCLUDE_OR_EVAL`
+    /// with the construct in `attr`: the operand is a whole expression,
+    /// since the four rules are `T_INCLUDE expr` and their tokens stand
+    /// on the grammar's lowest `%precedence` line
+    /// (`Z/Zend/zend_language_parser.y:56`, `:1708`), so
+    /// `include $a . 'b' or $c` is php's `include ($a . 'b' or $c)`.
+    /// `eval(...)`, the fifth construct of that node, is refused.
+    Include {
+        kind: IncludeKind,
+        path: Child,
+    },
     /// `isset($a)` and `empty($a)`, php's `ZEND_AST_ISSET` and
     /// `ZEND_AST_EMPTY` over one variable node, and whether the word was
     /// `empty`. The node is a `ZEND_AST_VAR` that `zend_try_compile_cv`
@@ -3863,12 +3910,38 @@ impl Reader<'_> {
                 self.bump(5);
                 self.clone_expression()
             }
+            Some(b'i' | b'I' | b'r' | b'R') if self.include_ahead().is_some() => {
+                self.include_expression()
+            }
             Some(b) if b.is_ascii_alphabetic() || b == b'_' || b == b'\\' => {
                 let named = self.named()?;
                 self.stepped(named)
             }
             _ => Err(self.trouble("an expression this compiler cannot read yet")),
         }
+    }
+
+    /// Which of the four file constructs stands here, if one does, and
+    /// how long its keyword is.
+    fn include_ahead(&mut self) -> Option<(IncludeKind, usize)> {
+        IncludeKind::KEYWORDS
+            .iter()
+            .find(|(word, _)| self.word_ahead(word))
+            .map(|(word, kind)| (*kind, word.len()))
+    }
+
+    /// `T_INCLUDE expr` and its three kin: the keyword, then the whole
+    /// expression after it, which is what the grammar's lowest
+    /// precedence line makes the operand. The node stands on the
+    /// operand's line, as `zend_ast_create_1` gives a one-child node
+    /// its child's, so the opline is where the path was written.
+    fn include_expression(&mut self) -> Result<Child, Trouble> {
+        let Some((kind, len)) = self.include_ahead() else {
+            return Err(self.trouble("an `include` this compiler cannot read"));
+        };
+        self.bump(len);
+        let path = self.expr()?;
+        Ok(Child::at(path.line(), Expr::Include { kind, path }))
     }
 
     /// `T_INC variable` and `T_DEC variable`, the operator read: php's
@@ -4020,12 +4093,15 @@ impl Reader<'_> {
                 return self.isset_or_empty(lowered == b"empty");
             }
         }
-        // php's grammar reads `unset(` and `array(` as its own
-        // constructs too, and each is still to be read; a `Call` named
-        // so would be emitted as `INIT_FCALL_BY_NAME` for a function
-        // that cannot exist.
+        // php's grammar reads `unset(`, `array(` and `eval(` as its
+        // own constructs too, and each is still to be read; a `Call`
+        // named so would be emitted as `INIT_FCALL_BY_NAME` for a
+        // function that cannot exist.
         if self.byte(0) == Some(b'(')
-            && matches!(name.to_ascii_lowercase().as_slice(), b"unset" | b"array")
+            && matches!(
+                name.to_ascii_lowercase().as_slice(),
+                b"unset" | b"array" | b"eval"
+            )
         {
             return Err(self.trouble(format!(
                 "an `{}` this compiler cannot read yet",

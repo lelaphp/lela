@@ -61,7 +61,7 @@ use php_unit::{CacheSlot, ConstIdx, Level, OpArray, OperandKind, Opline};
 use crate::api::abi::{PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::request::Request;
+use crate::api::request::{Opened, Request};
 use crate::api::values::{ClosureInfo, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 use crate::exec::{self, Cached, CallStage, CallState};
 use crate::ops::{Offset, Switched};
@@ -1339,6 +1339,163 @@ pub(crate) fn do_fcall<T: Tier>(
     op: &Opline,
 ) -> Edge {
     do_call(req, frame, code, op, "ZEND_DO_FCALL")
+}
+
+/// `ZEND_INCLUDE_OR_EVAL` (`Z/Zend/zend_vm_def.h:6544`), the four file
+/// constructs: the operand as a string (`zval_try_get_tmp_string`), the
+/// file resolved, compiled and put in the included-files table
+/// ([`Request::include_file`]), and its main op array served on a frame
+/// of its own that shares the includer's variables
+/// ([`Request::push_code_frame`]); what the file `return`s goes into the
+/// `VAR` under `RETURN_VALUE_USED`, `int(1)` where it returns nothing,
+/// since the compiler ends a file's op array in `RETURN int(1)`. A once
+/// form over a path the table has answers `true` and pushes nothing;
+/// a path nothing opens answers `false` under an `include`, after the
+/// two warnings, and is the `Error` under a `require`. A file whose op
+/// array is one `RETURN` of a constant, an empty file among them, is
+/// answered without a frame (`Z/Zend/zend_vm_def.h:6569`). The file's
+/// classes and functions are declared before its frame is pushed, as
+/// opcache binds them when it loads the file, and a function the
+/// request already has is the redeclaration fatal, so a `require` of
+/// one file twice ends the request where php's does.
+///
+/// A witness's own file is the one file the recipe lays down, so the
+/// witnesses here include `witness.php` itself, guarded by a variable
+/// the includer and the included file share.
+///
+/// ```php
+/// $n = ($n ?? 0) + 1;
+/// if ($n > 1) { echo "included $n, a=$a\n"; $b = $n * 10; return $n; }
+/// $a = 'x';
+/// var_dump(include __FILE__, $b, include 'witness.php', $b);
+/// var_dump(include_once __FILE__, require_once 'witness.php', include_once './witness.php');
+/// ```
+/// ```expect
+/// included 2, a=x
+/// included 3, a=x
+/// int(2)
+/// int(20)
+/// int(3)
+/// int(30)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// ```
+///
+/// ```php
+/// ini_set('include_path', '.');
+/// var_dump(include 'nope.php');
+/// require 'nope.php';
+/// echo "unreached";
+/// ```
+/// ```expect exit=255
+/// Warning: include(nope.php): Failed to open stream: No such file or directory in %s on line 3
+///
+/// Warning: include(): Failed opening 'nope.php' for inclusion (include_path='.') in %s on line 3
+/// bool(false)
+///
+/// Warning: require(nope.php): Failed to open stream: No such file or directory in %s on line 4
+///
+/// Fatal error: Uncaught Error: Failed opening required 'nope.php' (include_path='.') in %s:4
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 4
+/// ```
+///
+/// A throwable raised inside the included file unwinds through the
+/// includer, whose trace names the construct as php's
+/// `zend_fetch_debug_backtrace` names a code frame, with the included
+/// file as its one argument where a frame stands above it and none
+/// where the file itself threw.
+///
+/// ```php
+/// ini_set('zend.exception_ignore_args', '1');
+/// if (!isset($go)) { function boom() { throw new Exception('boom'); } }
+/// if ($go ?? false) { boom(); }
+/// $go = 1;
+/// try { include __FILE__; } catch (Exception $e) { echo $e->getTraceAsString(), "\n"; }
+/// $go = 2;
+/// try { include __FILE__; } catch (Exception $e) { echo $e->getTraceAsString(), "\n"; }
+/// ```
+/// ```expect
+/// #0 %s(4): boom()
+/// #1 %s(6): include()
+/// #2 {main}
+/// #0 %s(4): boom()
+/// #1 %s(8): include()
+/// #2 {main}
+/// ```
+pub(crate) fn include_or_eval<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let kind = match exec::IncludeKind::of(op.extended_value) {
+        Some(exec::IncludeKind::Eval) => {
+            return Err(Fatal::Error(String::from(
+                "InternalError: an INCLUDE_OR_EVAL (eval), which the compiler does not emit yet",
+            )));
+        }
+        Some(kind) => kind,
+        None => {
+            return Err(Fatal::Error(String::from(
+                "InternalError: an INCLUDE_OR_EVAL whose extended_value names no construct",
+            )));
+        }
+    };
+    let operand = exec::operand(req, frame, code, op.op1_type, op.op1);
+    let written = crate::ops::to_string(req, &operand);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    let written = match written {
+        Ok(string) => {
+            let bytes = string.as_bytes().to_vec();
+            req.release(Value::string(string));
+            bytes
+        }
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let returns_to =
+        (op.out_type != OperandKind::Unused).then(|| (frame, exec::temporary_slot(code, op.out)));
+    let unit = match req.include_file(kind, &written) {
+        Ok(Opened::Unit(unit)) => unit,
+        Ok(Opened::Already) => return answered(req, frame, returns_to, Value::bool(true)),
+        Ok(Opened::Failed) => return answered(req, frame, returns_to, Value::bool(false)),
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    crate::engine::note_compiled(req, &unit);
+    if !req.declare_classes(&unit) || !req.declare_functions(&unit) {
+        return Ok(Stepped::Threw(frame));
+    }
+    let main = exec::code_of(&unit);
+    if let [only] = &main.oplines[..]
+        && only.opcode == Opcode::Return
+        && only.op1_type == OperandKind::Const
+    {
+        let value = exec::constant(main, ConstIdx(only.op1));
+        req.addref(&value);
+        return answered(req, frame, returns_to, value);
+    }
+    let callee = req.push_code_frame(unit, frame, returns_to);
+    Ok(Stepped::Pushed(callee))
+}
+
+/// The value an `INCLUDE_OR_EVAL` answers without a frame, into the
+/// `VAR` where the opline's value is read and given up where it is not.
+fn answered(
+    req: &mut Request,
+    frame: FrameRef,
+    returns_to: Option<(FrameRef, u32)>,
+    value: Value,
+) -> Edge {
+    match returns_to {
+        Some((at, slot)) => {
+            let previous = req.set_slot(at, slot, value);
+            req.release(previous);
+        }
+        None => req.release(value),
+    }
+    Ok(advance(req, frame))
 }
 
 /// `ZEND_DO_UCALL` (`Z/Zend/zend_vm_def.h:4169`): the callee an
@@ -10462,7 +10619,7 @@ fn returned_to_caller<T: Tier>(
     }
     continued(T::safepoint(req, frame, Site::Return(SafepointIdx(op.out))))?;
     let returns_to = req.vm().returns_to(frame);
-    req.pop_frame();
+    req.leave_frame(frame);
     let caller = req.stack_mut().current();
     match returns_to {
         Some((at, slot)) => {
@@ -11089,7 +11246,7 @@ fn unwind_from<T: Tier>(
         return Ok(Stepped::Threw(frame));
     }
     let returns_to = req.vm().returns_to(frame);
-    req.pop_frame();
+    req.leave_frame(frame);
     let caller = req.stack_mut().current();
     // `zend_leave_helper`: the callee wrote no return value, so the
     // caller's temporary for the call is left undefined, and the caller

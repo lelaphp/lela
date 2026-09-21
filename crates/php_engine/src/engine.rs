@@ -92,7 +92,7 @@ type Loop = fn(&mut Request, FrameRef) -> Result<(), Fatal>;
 /// What the unit cache holds for one file: the published unit, the
 /// refusal the compiler gave for it, or nothing at all for a file that
 /// could not be read when it was asked for.
-type Cached = Option<Result<Arc<Unit>, CompileError>>;
+pub(crate) type Cached = Option<Result<Arc<Unit>, CompileError>>;
 
 /// What the unit cache is keyed by (design §6.3): the file's name and
 /// what says it has not changed under the engine, php's realpath with
@@ -465,7 +465,7 @@ impl Shared {
     /// and shared by every request that asks for it afterwards (design
     /// §6.3). A file the engine cannot stat is no unit at all, which is
     /// the `None` `serve` serves nothing for.
-    fn cached(&self, path: &[u8], cwd: &Path, stack: StackLimit) -> Cached {
+    pub(crate) fn cached(&self, path: &[u8], cwd: &Path, stack: StackLimit) -> Cached {
         let name = String::from_utf8_lossy(path).into_owned();
         let described = std::fs::metadata(&name).ok()?;
         let key = UnitKey {
@@ -524,7 +524,7 @@ impl Shared {
 /// table and empty here, since an entry with no value at all is one
 /// `ini_set()` refuses to set. `short_open_tag` is the one entry the
 /// scanner reads, `CG(short_tags)`, and `token_get_all` with it.
-const CORE_INI: [(&str, &str); 21] = [
+const CORE_INI: [(&str, &str); 22] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -542,6 +542,11 @@ const CORE_INI: [(&str, &str); 21] = [
     ("memory_limit", "128M"),
     ("max_execution_time", "0"),
     ("default_charset", "UTF-8"),
+    // `PHP_INCLUDE_PATH`, php's build constant `.:${PEAR_INSTALLDIR}`,
+    // which `configure` with no prefix makes `.:/usr/local/lib/php`;
+    // a package's build has its own, so a `-d include_path` under the
+    // recipe is what a comparison stands on.
+    ("include_path", ".:/usr/local/lib/php"),
     ("zend.exception_ignore_args", "0"),
     ("zend.exception_string_param_max_len", "15"),
     ("zend.max_allowed_stack_size", "0"),
@@ -1000,25 +1005,25 @@ impl Engine {
         // and a source the host handed over is this request's alone,
         // interned into this request's own memory and gone with it, as
         // php holds what it compiles for `-r` and for `eval`.
-        let compiled = match source {
-            Some(source) => {
-                let precision = req.precision();
-                let shared = Arc::clone(&self.shared);
-                let stack = req.stack_limit();
-                Some(compile(
-                    &source,
-                    Origin {
-                        filename: &script,
-                        cwd: &cwd,
-                    },
-                    precision,
-                    shared.declared(),
-                    stack,
-                    req.heap_mut(),
-                    &shared.map_ptr_last,
-                ))
-            }
-            None => self.shared.cached(&script, &cwd, req.stack_limit()),
+        let compiled = if let Some(source) = source {
+            let precision = req.precision();
+            let shared = Arc::clone(&self.shared);
+            let stack = req.stack_limit();
+            Some(compile(
+                &source,
+                Origin {
+                    filename: &script,
+                    cwd: &cwd,
+                },
+                precision,
+                shared.declared(),
+                stack,
+                req.heap_mut(),
+                &shared.map_ptr_last,
+            ))
+        } else {
+            req.note_primary_file(&script);
+            self.shared.cached(&script, &cwd, req.stack_limit())
         };
         match compiled {
             Some(Ok(unit)) if run => serve_unit(&mut req, &unit, self.shared.entry),
@@ -1189,7 +1194,7 @@ fn compile(
 /// Deprecated: Non-canonical cast (boolean) is deprecated, use the (bool) cast instead in %s on line 2
 /// 7|7|7 apples|1
 /// ```
-fn note_compiled(req: &mut Request, unit: &Arc<Unit>) {
+pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>) {
     for raised in &unit.diagnostics {
         req.note_error_in(
             raised.level,
@@ -1214,20 +1219,19 @@ fn note_compiled(req: &mut Request, unit: &Arc<Unit>) {
 /// `shutdown_executor` destroys the table (design §5.10).
 fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
     note_compiled(req, unit);
-    if !req.declare_classes(unit) {
+    if !req.declare_classes(unit) || !req.declare_functions(unit) {
         return;
     }
-    req.declare_functions(unit);
     let frame = req.push_frame(Arc::clone(unit));
     if req.seed_argv(frame, unit).is_err() {
-        req.detach_symbol_table(frame, unit);
+        req.detach_symbol_table(frame);
         req.pop_frame();
         return;
     }
     if let Err(fatal) = entry(req, frame) {
         req.end_in(&fatal);
     }
-    req.detach_symbol_table(frame, unit);
+    req.detach_symbol_table(frame);
     req.pop_frame();
 }
 
@@ -2032,6 +2036,150 @@ mod tests {
         assert!(first.is_interned(), "a published constant is interned");
         assert!(first.is_same(second), "one `zend_string`, read by both");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A tree of files for one test, under the system's temporary
+    /// directory and named for the process and the test, served as the
+    /// CLI serves `php main.php` from that directory; removed after.
+    struct Files {
+        dir: PathBuf,
+    }
+
+    impl Files {
+        fn new(name: &str, files: &[(&str, &str)]) -> Files {
+            let dir = std::env::temp_dir().join(format!("dax-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            assert!(std::fs::create_dir_all(&dir).is_ok());
+            for (file, text) in files {
+                assert!(std::fs::write(dir.join(file), text).is_ok());
+            }
+            Files { dir }
+        }
+
+        /// `php <dir>/<name>` in the tree's directory, the path as
+        /// upstream's runner hands it: what the request wrote and how it
+        /// ended.
+        fn serve(&self, engine: &Engine, name: &str) -> (String, Observables) {
+            let mut sink = Kept::default();
+            let observables = engine.serve(
+                RequestDescription {
+                    sapi_name: String::from("cli"),
+                    script_name: Some(self.dir.join(name).as_os_str().as_encoded_bytes().to_vec()),
+                    cwd: self.dir.clone(),
+                    ..RequestDescription::default()
+                },
+                &mut sink,
+            );
+            (
+                String::from_utf8_lossy(&sink.body).into_owned(),
+                observables,
+            )
+        }
+    }
+
+    impl Drop for Files {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// The once forms over a second file (#396): the file is served the
+    /// first time and answers what it returned, and `true` every time
+    /// after, from either once form, as the oracle prints for these
+    /// files.
+    #[test]
+    fn a_once_form_serves_a_file_once_and_answers_true_after() {
+        let files = Files::new(
+            "once",
+            &[
+                ("b.php", "<?php\necho \"b\\n\"; return 7;\n"),
+                (
+                    "main.php",
+                    "<?php\nvar_dump(include_once \"b.php\", include_once \"b.php\", require_once \"b.php\");\n",
+                ),
+            ],
+        );
+        let (body, observables) = files.serve(&Engine::builder().build(), "main.php");
+        assert_eq!(body, "b\nint(7)\nbool(true)\nbool(true)\n");
+        assert_eq!(observables.exit_code, 0);
+    }
+
+    /// An include inside a function reads and writes the function's
+    /// variables (#396): `zend_rebuild_symbol_table` gives the frame a
+    /// table, the included file attaches to it, and what it wrote to
+    /// `$r` is in the function's CV when the include returns, as the
+    /// oracle prints for these files.
+    #[test]
+    fn an_include_inside_a_function_shares_the_function_s_variables() {
+        let files = Files::new(
+            "func",
+            &[
+                (
+                    "fb.php",
+                    "<?php\necho \"p=$p\\n\"; $r = 3; return \"ok\";\n",
+                ),
+                (
+                    "main.php",
+                    "<?php\nfunction f($p) { $q = include \"fb.php\"; return \"$p|$q|$r\"; }\nvar_dump(f(\"z\"));\n",
+                ),
+            ],
+        );
+        let (body, observables) = files.serve(&Engine::builder().build(), "main.php");
+        assert_eq!(body, "p=z\nstring(6) \"z|ok|3\"\n");
+        assert_eq!(observables.exit_code, 0);
+    }
+
+    /// A variable an included file writes at the top level is the
+    /// includer's, and stands in `EG(symbol_table)` after every name the
+    /// main op array attached at its start (#396), so
+    /// `shutdown_destructors`' reverse walk serves it first, then the
+    /// main file's own in reverse: `d2`, `d3`, `d1`, as the oracle
+    /// prints for these files.
+    #[test]
+    fn a_variable_an_included_file_wrote_is_destructed_in_php_s_order() {
+        let files = Files::new(
+            "dtor",
+            &[
+                ("db.php", "<?php\n$b = new A(2);\n"),
+                (
+                    "main.php",
+                    "<?php\nclass A { public $n; function __construct($n) { $this->n = $n; } function __destruct() { echo \"d{$this->n}\\n\"; } }\n$a = new A(1);\ninclude \"db.php\";\n$c = new A(3);\necho \"end\\n\";\n",
+                ),
+            ],
+        );
+        let (body, observables) = files.serve(&Engine::builder().build(), "main.php");
+        assert_eq!(body, "end\nd2\nd3\nd1\n");
+        assert_eq!(observables.exit_code, 0);
+    }
+
+    /// A file the parser refuses is the `ParseError` the includer may
+    /// catch, at the file's own line (#396); a plain `include` whose
+    /// compile was refused is not in the included-files table, so a
+    /// once form after it compiles the file again and the uncaught
+    /// `ParseError` is rendered at its level, as the oracle prints for
+    /// these files.
+    #[test]
+    fn a_parse_error_in_an_included_file_is_a_parse_error_the_includer_may_catch() {
+        let files = Files::new(
+            "parse",
+            &[
+                ("bad.php", "<?php\n$x = ;\n"),
+                (
+                    "main.php",
+                    "<?php\ntry { include \"bad.php\"; } catch (ParseError $e) { echo $e->getMessage(), \" at line \", $e->getLine(), \"\\n\"; }\necho \"after\\n\";\nvar_dump(include_once \"bad.php\");\n",
+                ),
+            ],
+        );
+        let (body, observables) = files.serve(&Engine::builder().build(), "main.php");
+        let bad = files.dir.join("bad.php");
+        assert_eq!(
+            body,
+            format!(
+                "syntax error, unexpected token \";\" at line 2\nafter\n\nParse error: syntax error, unexpected token \";\" in {} on line 2\n",
+                bad.canonicalize().unwrap_or(bad).display()
+            )
+        );
+        assert_eq!(observables.exit_code, 255);
     }
 
     /// What compiling a file raised is raised on every request that
