@@ -101,37 +101,23 @@ pub fn float_to_string(req: &mut Request, f: f64) -> Result<PhpString, Thrown> {
     PhpString::new(req, text.as_bytes())
 }
 
-/// `zval_get_long` with php's warnings and errors.
+/// `zval_get_long`, the kernel [`crate::ops::get_long`] through the
+/// face, what `php_get_long` reads a `usort` callback's answer with: the
+/// number a string opens with, `is_numeric_string` with `allow_errors`,
+/// so `"2abc"` is two and a string that opens with none is zero; a
+/// float capped as `zend_dval_to_lval_cap` caps it; and an object
+/// php's warning that it could not be converted, and one. Nothing here
+/// throws; the `Result` is the face's shape.
 pub fn to_long(req: &mut Request, value: &Value) -> Result<i64, Thrown> {
-    match value.as_ref() {
-        ValueRef::Undef | ValueRef::Null => Ok(0),
-        ValueRef::Bool(b) => Ok(i64::from(b)),
-        ValueRef::Int(n) => Ok(n),
-        ValueRef::Float(f) => Ok(float_to_long(f)),
-        ValueRef::Str(s) => Ok(numeric_string(s.as_bytes())
-            .and_then(|n| n.as_int().or_else(|| n.as_float().map(float_to_long)))
-            .unwrap_or(0)),
-        ValueRef::Array(a) => Ok(i64::from(!a.is_empty())),
-        ValueRef::Resource(r) => Ok(r.id()),
-        ValueRef::Object(_) => Err(throw(
-            req,
-            "TypeError",
-            &format!("Cannot convert {} to int", value.type_name()),
-        )),
-        ValueRef::Reference(r) => to_long(req, &r.get()),
-    }
+    Ok(crate::ops::get_long(req, value))
 }
 
-/// `zval_get_double`.
+/// `zval_get_double`, the kernel [`crate::ops::get_double`] through the
+/// face, what `SORT_NUMERIC` reads each element with: `zend_strtod`
+/// over a string, so `"9a"` is nine, and an object php's warning and
+/// one. Nothing here throws; the `Result` is the face's shape.
 pub fn to_double(req: &mut Request, value: &Value) -> Result<f64, Thrown> {
-    match value.as_ref() {
-        ValueRef::Float(f) => Ok(f),
-        ValueRef::Str(s) => Ok(numeric_string(s.as_bytes())
-            .and_then(|n| n.as_float().or_else(|| n.as_int().map(|i| i as f64)))
-            .unwrap_or(0.0)),
-        ValueRef::Reference(r) => to_double(req, &r.get()),
-        _ => to_long(req, value).map(|n| n as f64),
-    }
+    Ok(crate::ops::get_double(req, value))
 }
 
 /// `zval_get_string`, the kernel [`crate::ops::to_string`] through the

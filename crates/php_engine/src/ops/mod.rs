@@ -1280,8 +1280,30 @@ pub(crate) fn to_object(req: &mut Request, value: &Value) -> Result<PhpObject, T
     Ok(object)
 }
 
-/// `zval_get_long_func` with `is_strict` off (`Z/Zend/zend_operators.c:957`).
-fn get_long(req: &mut Request, value: &Value) -> i64 {
+/// `zval_get_long_func` with `is_strict` off (`Z/Zend/zend_operators.c:957`),
+/// what `(int)` and `zval_get_long` read: the number a string opens
+/// with and nothing for none, silently, a double past the range capped
+/// to it, an array its emptiness, and an object php's warning and one.
+///
+/// ```php
+/// var_dump((int)"2abc", (int)" 12 ", (int)"1e3x", (int)"abc", (int)"9223372036854775808", (int)"1.9e19", (int)[1], (int)[], (int)null, (int)true, (int)new stdClass);
+/// ```
+/// ```expect
+///
+/// Warning: Object of class stdClass could not be converted to int in %s on line 2
+/// int(2)
+/// int(12)
+/// int(1000)
+/// int(0)
+/// int(9223372036854775807)
+/// int(9223372036854775807)
+/// int(1)
+/// int(0)
+/// int(0)
+/// int(1)
+/// int(1)
+/// ```
+pub(crate) fn get_long(req: &mut Request, value: &Value) -> i64 {
     match value.deref().as_ref() {
         ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) => 0,
         ValueRef::Bool(true) => 1,
@@ -1305,8 +1327,27 @@ fn get_long(req: &mut Request, value: &Value) -> i64 {
     }
 }
 
-/// `zval_get_double_func` (`Z/Zend/zend_operators.c:1027`).
-fn get_double(req: &mut Request, value: &Value) -> f64 {
+/// `zval_get_double_func` (`Z/Zend/zend_operators.c:1027`), what
+/// `(float)` and `zval_get_double` read: `zend_strtod` over a string,
+/// the number it opens with and zero for none, silently, and an object
+/// php's warning and one.
+///
+/// ```php
+/// var_dump((float)"9a", (float)" 1.5e2x", (float)"abc", (float)"0x1A", (float)[0], (float)false, (float)7, (float)new stdClass);
+/// ```
+/// ```expect
+///
+/// Warning: Object of class stdClass could not be converted to float in %s on line 2
+/// float(9)
+/// float(150)
+/// float(0)
+/// float(0)
+/// float(1)
+/// float(0)
+/// float(7)
+/// float(1)
+/// ```
+pub(crate) fn get_double(req: &mut Request, value: &Value) -> f64 {
     match value.deref().as_ref() {
         ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) => 0.0,
         ValueRef::Bool(true) => 1.0,
