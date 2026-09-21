@@ -910,9 +910,10 @@ fn closure_from_callable(req: &mut Request) -> Result<Value, Thrown> {
 
 /// `Closure::__invoke(mixed ...$args): mixed`, `ZEND_METHOD(Closure,
 /// __invoke)` (`Z/Zend/zend_closures.c:45`): the payload's function
-/// served with the frame's arguments, on the payload's receiver where
-/// the closure is bound and as a function where it is not
-/// (`zend_call_known_fcc`); what it returns is the call's.
+/// served with the frame's arguments, the extra named ones handed on
+/// as `Z_PARAM_VARIADIC_WITH_NAMED` hands them, on the payload's
+/// receiver where the closure is bound and as a function where it is
+/// not (`zend_call_known_fcc`); what it returns is the call's.
 fn closure_invoke(req: &mut Request) -> Result<Value, Thrown> {
     let Some(this) = req.this() else {
         return Err(throw(
@@ -924,7 +925,8 @@ fn closure_invoke(req: &mut Request) -> Result<Value, Thrown> {
     let arguments: Vec<Value> = (1..=u32::try_from(req.argument_count()).unwrap_or(u32::MAX))
         .filter_map(|position| req.argument(position))
         .collect();
-    req.serve_closure(this, &arguments)
+    let named = req.named_arguments();
+    req.serve_closure(this, &arguments, &named)
 }
 
 /// `private function __clone(): void {}`, as `Exception` and `Error`

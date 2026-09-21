@@ -799,6 +799,7 @@ pub(crate) fn init_dynamic_call<T: Tier>(
             this: closure.this,
             called_scope: closure.scope,
             closure: Some(object),
+            extra_named: Vec::new(),
             stage: CallStage::Building,
             frameless: false,
             coerced: Vec::new(),
@@ -823,6 +824,7 @@ pub(crate) fn init_dynamic_call<T: Tier>(
             this: None,
             called_scope: None,
             closure: None,
+            extra_named: Vec::new(),
             stage: CallStage::Building,
             frameless: false,
             coerced: Vec::new(),
@@ -994,6 +996,7 @@ fn init_call(
         this: None,
         called_scope: None,
         closure: None,
+        extra_named: Vec::new(),
         stage: CallStage::Building,
         frameless: false,
         coerced: Vec::new(),
@@ -1846,7 +1849,12 @@ fn verified_arg(
 /// replaces one; the `TypeError`
 /// names the argument's own number and no parameter name, since php has
 /// a name for the declared ones alone. A call that passed nothing from
-/// here on leaves the empty array.
+/// here on leaves the empty array. The extra named arguments a call
+/// placed ([`exec::FrameState::extra_named`]) follow under their names,
+/// each held to the declared type under the number after the last
+/// positional one; the witness for that stands beside
+/// `call_user_func_array` in `ext/standard`, the one caller that places
+/// them.
 ///
 /// ```php
 /// function f(int ...$r) { var_dump($r); }
@@ -1942,6 +1950,39 @@ pub(crate) fn recv_variadic<T: Tier>(
         };
         req.addref(&argument);
         if let Err(thrown) = req.array_append(collected.heap(), argument) {
+            return threw(req, frame, &thrown);
+        }
+    }
+    // `ZEND_CALL_HAS_EXTRA_NAMED_PARAMS`: the extra named arguments
+    // after the positional ones, each under its name, held to the
+    // declared type under the number php's `arg_num` stands at once
+    // the loop above has walked past the last positional one.
+    let number = first.saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
+    let named = req
+        .vm()
+        .at(frame)
+        .map(|state| state.extra_named.clone())
+        .unwrap_or_default();
+    for (name, argument) in named {
+        let argument = match verified_arg(req, frame, number, at, &argument) {
+            Ok(None) => argument,
+            Ok(Some(coerced)) => {
+                if let Some(state) = req.vm_mut().at_mut(frame)
+                    && let Some((_, place)) = state
+                        .extra_named
+                        .iter_mut()
+                        .find(|(held, _)| held.as_bytes() == name.as_bytes())
+                {
+                    let previous = std::mem::replace(place, coerced);
+                    req.release(previous);
+                }
+                coerced
+            }
+            Err(thrown) => return threw(req, frame, &thrown),
+        };
+        req.addref(&argument);
+        let key = php_heap::Key::Str(name.heap());
+        if let Err(thrown) = req.array_update(collected.heap(), key, argument) {
             return threw(req, frame, &thrown);
         }
     }
@@ -2509,6 +2550,7 @@ pub(crate) fn new<T: Tier>(
         this,
         called_scope: constructor.map(|_| class),
         closure: None,
+        extra_named: Vec::new(),
         stage: CallStage::Building,
         frameless: false,
         coerced: Vec::new(),
@@ -2724,6 +2766,7 @@ fn static_call_frame(
         this: None,
         called_scope: Some(class),
         closure: None,
+        extra_named: Vec::new(),
         stage: CallStage::Building,
         frameless: false,
         coerced: Vec::new(),
@@ -2866,6 +2909,7 @@ pub(crate) fn init_method_call<T: Tier>(
         this,
         called_scope: Some(class),
         closure: None,
+        extra_named: Vec::new(),
         stage: CallStage::Building,
         frameless: false,
         coerced: Vec::new(),
@@ -5661,6 +5705,7 @@ fn frameless_call(
         this: None,
         called_scope: None,
         closure: None,
+        extra_named: Vec::new(),
         stage: CallStage::Serving,
         frameless: true,
         coerced: Vec::new(),
@@ -11837,6 +11882,7 @@ mod tests {
                 this: None,
                 called_scope: None,
                 closure: None,
+                extra_named: Vec::new(),
                 stage: CallStage::Serving,
                 frameless: false,
                 coerced: Vec::new(),

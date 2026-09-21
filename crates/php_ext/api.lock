@@ -77,6 +77,7 @@ call::Iter::next
 call::Iter::value
 call::autoload
 call::call
+call::call_array
 call::call_method
 call::call_named
 call::class_constant
@@ -240,6 +241,7 @@ request::Request::last_error
 request::Request::loaded_extensions
 request::Request::memory_peak
 request::Request::memory_usage
+request::Request::named_arguments
 request::Request::open_dir
 request::Request::open_stream
 request::Request::os_error_text
@@ -283,6 +285,7 @@ request::Request::temp_dir
 request::Request::this
 request::Request::umask
 request::Request::unregister_tick_function
+request::Request::variadic_arguments
 request::Request::write
 request::Request::write_stderr
 request::ResourceDtor

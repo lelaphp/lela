@@ -51,12 +51,13 @@ mod head;
 mod output;
 mod var;
 
-use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
-use php_ext::call::fetch_constant;
-use php_ext::coerce::{coerce_param, is_type};
+use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder};
+use php_ext::call::{call_array, call_named, fetch_constant};
+use php_ext::coerce::{callable_checked, coerce_param, is_type};
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, Type};
 use php_ext::raising::{
-    Level, Thrown, arg_count_error, arg_null_deprecated, arg_value_error, docref,
+    Level, Thrown, arg_count_error, arg_null_deprecated, arg_type_error, arg_value_error, docref,
+    too_few_arguments,
 };
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, TypeTag, Value, ValueRef};
@@ -151,23 +152,13 @@ pub fn extension() -> Extension {
         .functions(formatted_print::natives())
         .functions(base64::natives())
         .functions(file::natives())
-        .functions(vec![
-            (
-                declared(
-                    b"constant",
-                    &[parameter(b"name", Type::String)],
-                    Type::Mixed,
-                ),
-                constant_of,
-            ),
-            (
-                declared(b"sleep", &[parameter(b"seconds", Type::Int)], Type::Int),
-                sleep,
-            ),
-        ])
+        .functions(basic_natives())
         .constants(vec![
             constant(b"COUNT_NORMAL", COUNT_NORMAL),
             constant(b"COUNT_RECURSIVE", COUNT_RECURSIVE),
+            constant(b"STR_PAD_LEFT", STR_PAD_LEFT),
+            constant(b"STR_PAD_RIGHT", STR_PAD_RIGHT),
+            constant(b"STR_PAD_BOTH", STR_PAD_BOTH),
         ])
         .constants(array::constants())
         .dependencies(dependencies())
@@ -192,6 +183,50 @@ fn dependencies() -> Vec<Dependency> {
             rel: None,
             version: None,
         },
+    ]
+}
+
+/// The natives of `basic_functions.c` itself declared so far, in the
+/// stub's order.
+fn basic_natives() -> Vec<(FunctionDecl, output::Entry)> {
+    vec![
+        (
+            declared(
+                b"constant",
+                &[parameter(b"name", Type::String)],
+                Type::Mixed,
+            ),
+            constant_of,
+        ),
+        (
+            declared(b"sleep", &[parameter(b"seconds", Type::Int)], Type::Int),
+            sleep,
+        ),
+        (
+            declared(
+                b"call_user_func",
+                &[
+                    parameter(b"callback", Type::Callable),
+                    Parameter {
+                        variadic: true,
+                        ..parameter(b"args", Type::Mixed)
+                    },
+                ],
+                Type::Mixed,
+            ),
+            call_user_func,
+        ),
+        (
+            declared(
+                b"call_user_func_array",
+                &[
+                    parameter(b"callback", Type::Callable),
+                    parameter(b"args", Type::Array),
+                ],
+                Type::Mixed,
+            ),
+            call_user_func_array,
+        ),
     ]
 }
 
@@ -245,6 +280,27 @@ fn string_natives() -> Vec<(FunctionDecl, output::Entry)> {
                 Type::String,
             ),
             strtolower,
+        ),
+        (
+            declared(
+                b"str_pad",
+                &[
+                    parameter(b"string", Type::String),
+                    parameter(b"length", Type::Int),
+                    Parameter {
+                        default: Some(ConstExpr::Str(b" ".as_slice().into())),
+                        ..parameter(b"pad_string", Type::String)
+                    },
+                    Parameter {
+                        default: Some(ConstExpr::Constant(Name(
+                            b"STR_PAD_RIGHT".as_slice().into(),
+                        ))),
+                        ..parameter(b"pad_type", Type::Int)
+                    },
+                ],
+                Type::String,
+            ),
+            str_pad,
         ),
         (
             frameless(
@@ -455,6 +511,326 @@ fn chr(req: &mut Request) -> Result<Value, Thrown> {
     // `c &= 0xff`, then `RETURN_CHAR(c)`.
     let byte = (codepoint & 0xff).to_le_bytes()[0];
     Ok(Value::string(PhpString::new(req, &[byte])?))
+}
+
+/// `call_user_func(callable $callback, mixed ...$args): mixed`, php's
+/// `PHP_FUNCTION(call_user_func)` (`Z/ext/standard/basic_functions.c:1473`):
+/// `Z_PARAM_FUNC` and then `Z_PARAM_VARIADIC_WITH_NAMED`, the
+/// positional arguments and the extra named ones off this call's own
+/// frame, handed to `zend_call_function` as `fci.params` and
+/// `fci.named_params`, which is the engine's `call_named`. The callee's
+/// return is this call's. php's compiler serves the spelling
+/// `call_user_func(...)` as a dynamic call of the callback itself
+/// (`zend_compile_func_cuf`) and this native is what the spelling
+/// `$f('call_user_func')` and every other reaches; this compiler serves
+/// every spelling through the native, and what differs is the frame a
+/// trace prints for a raise at the boundary, so the witnesses that pin
+/// a trace spell the call the way the oracle serves through the native
+/// too.
+///
+/// ```php
+/// function greet($who, $punct = '!') { return "hi $who$punct"; }
+/// class W { static function s($x) { return "s:$x"; } function i($x) { return "i:$x"; } }
+/// var_dump(call_user_func('strtoupper', 'abc'), call_user_func('greet', 'bob'), call_user_func(['W', 's'], 1), call_user_func([new W, 'i'], 2), call_user_func(fn($n) => $n * 2, 21), call_user_func('W::s', 3));
+/// ```
+/// ```expect
+/// string(3) "ABC"
+/// string(7) "hi bob!"
+/// string(3) "s:1"
+/// string(3) "i:2"
+/// int(42)
+/// string(3) "s:3"
+/// ```
+///
+/// The declarations, as `basic_functions.stub.php` has them.
+///
+/// ```php
+/// echo new ReflectionFunction('call_user_func'), new ReflectionFunction('call_user_func_array');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function call_user_func ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> callable $callback ]
+///     Parameter #1 [ <optional> mixed ...$args ]
+///   }
+///   - Return [ mixed ]
+/// }
+/// Function [ <internal:standard> function call_user_func_array ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> callable $callback ]
+///     Parameter #1 [ <required> array $args ]
+///   }
+///   - Return [ mixed ]
+/// }
+/// ```
+///
+/// A callback that is none is `Z_PARAM_FUNC`'s `TypeError`, with the
+/// sentence `zend_is_callable_ex` wrote for the miss; a call with no
+/// callback at all is the arity's `ArgumentCountError`.
+///
+/// ```php
+/// $f = 'call_user_func'; $f('nope');
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: call_user_func(): Argument #1 ($callback) must be a valid callback, function "nope" not found or invalid function name in %s:2
+/// Stack trace:
+/// #0 %s(2): call_user_func('nope')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// call_user_func();
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: call_user_func() expects at least 1 argument, 0 given in %s:2
+/// Stack trace:
+/// #0 %s(2): call_user_func()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// The extra named arguments this call carries are the callee's named
+/// ones: `call_user_func_array` places `length` on this native's frame,
+/// since `call_user_func` declares no parameter of that name and
+/// collects into a variadic, and this native hands it on to `str_pad`,
+/// where it lands at the parameter of that name. A trace prints them
+/// after the positional arguments, `name: value`, on the frame that
+/// holds them.
+///
+/// ```php
+/// $f = 'call_user_func_array';
+/// var_dump($f('call_user_func', ['str_pad', 'abc', 'length' => 6, 'pad_string' => '-']));
+/// $f('call_user_func', ['str_pad', 'abc', 'pad_type' => 0, 'length' => 'x']);
+/// ```
+/// ```expect exit=255
+/// string(6) "abc---"
+///
+/// Fatal error: Uncaught TypeError: str_pad(): Argument #2 ($length) must be of type int, string given in %s:4
+/// Stack trace:
+/// #0 [internal function]: str_pad('abc', 'x', NULL, 0)
+/// #1 [internal function]: call_user_func('str_pad', 'abc', pad_type: 0, length: 'x')
+/// #2 %s(4): call_user_func_array('call_user_func', Array)
+/// #3 {main}
+///   thrown in %s on line 4
+/// ```
+fn call_user_func(req: &mut Request) -> Result<Value, Thrown> {
+    if req.argument_count() < 1 {
+        return Err(too_few_arguments(req, 1, 0));
+    }
+    let callback = callable_argument(req, 1)?;
+    let arguments: Vec<Value> = (2..=req.argument_count())
+        .filter_map(|position| u32::try_from(position).ok())
+        .filter_map(|position| req.argument(position))
+        .collect();
+    let named = req.named_arguments();
+    call_named(req, &callback, &arguments, &named)
+}
+
+/// `call_user_func_array(callable $callback, array $args): mixed`, php's
+/// `PHP_FUNCTION(call_user_func_array)`
+/// (`Z/ext/standard/basic_functions.c:1497`): `Z_PARAM_FUNC` and
+/// `Z_PARAM_ARRAY_HT`, then `zend_call_function` with the array as
+/// `fci.named_params` and nothing in `fci.params`, which is the
+/// engine's `call_array`: an integer-keyed element is the next
+/// positional argument whatever its key, and a string-keyed one is
+/// placed at the parameter of that name by `zend_handle_named_arg`,
+/// the slots between left for the callee. php's compiler serves the
+/// spelling `call_user_func_array(...)` as `SEND_ARRAY` on a dynamic
+/// call (`zend_compile_func_cufa`), so a raise at the boundary prints
+/// one frame fewer there than through this native; the witnesses that
+/// pin a trace spell the call through a variable, which the oracle
+/// serves through the native too.
+///
+/// ```php
+/// function greet($who, $punct = '!') { return "hi $who$punct"; }
+/// var_dump(call_user_func_array('str_pad', ['abc', 'length' => 6]), call_user_func_array('str_pad', [1 => 'abc', 5 => 6, 'pad_string' => '-', 'pad_type' => STR_PAD_LEFT]), call_user_func_array('greet', ['punct' => '?', 'who' => 'ann']), call_user_func_array('strtoupper', ['abc']));
+/// ```
+/// ```expect
+/// string(6) "abc   "
+/// string(6) "---abc"
+/// string(7) "hi ann?"
+/// string(3) "ABC"
+/// ```
+///
+/// A name the callee declares no parameter for, and a name whose slot
+/// a positional argument filled, are `zend_handle_named_arg`'s two
+/// `Error`s, raised before the callee is entered, so the trace ends at
+/// this native's frame; a positional element after a named one is
+/// `zend_call_function`'s own, raised where the walk meets it, after
+/// an earlier name's.
+///
+/// ```php
+/// try { call_user_func_array('str_pad', ['abc', 'nope' => 6]); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// try { call_user_func_array('str_pad', ['abc', 6, 'length' => 7]); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// try { call_user_func_array('str_pad', ['abc', 'length' => 6, 7]); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// try { call_user_func_array('str_pad', ['x' => 1, 2]); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// function f($a) {} try { call_user_func_array('f', ['b' => 1]); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Error: Unknown named parameter $nope
+/// Error: Named parameter $length overwrites previous argument
+/// Error: Cannot use positional argument after named argument
+/// Error: Unknown named parameter $x
+/// Error: Unknown named parameter $b
+/// ```
+///
+/// ```php
+/// $f = 'call_user_func_array'; $f('str_pad', ['abc', 'nope' => 6]);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Unknown named parameter $nope in %s:2
+/// Stack trace:
+/// #0 %s(2): call_user_func_array('str_pad', Array)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// $f = 'call_user_func_array'; $f('str_pad', ['abc', 6, 'length' => 7]);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Named parameter $length overwrites previous argument in %s:2
+/// Stack trace:
+/// #0 %s(2): call_user_func_array('str_pad', Array)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// A name a variadic callee does not declare rides on the callee's
+/// frame as an extra named argument (`ZEND_CALL_HAS_EXTRA_NAMED_PARAMS`):
+/// a user function's `RECV_VARIADIC` takes it into the variadic's array
+/// under its name, after the positional extras, held to the declared
+/// type under the number after the last positional argument; and a
+/// trace prints it `name: value` after the positional arguments.
+///
+/// ```php
+/// function v($a, int ...$rest) { var_dump($rest); }
+/// call_user_func_array('v', [1, 2, 'x' => "3", 'y' => 4]);
+/// call_user_func_array('v', ['y' => 4, 'a' => 1]);
+/// function w(...$rest) { throw new Exception('x'); }
+/// $f = 'call_user_func_array'; $f('w', [1, 'x' => 5, 'y' => 'str']);
+/// ```
+/// ```expect exit=255
+/// array(3) {
+///   [0]=>
+///   int(2)
+///   ["x"]=>
+///   int(3)
+///   ["y"]=>
+///   int(4)
+/// }
+/// array(1) {
+///   ["y"]=>
+///   int(4)
+/// }
+///
+/// Fatal error: Uncaught Exception: x in %s:5
+/// Stack trace:
+/// #0 [internal function]: w(1, x: 5, y: 'str')
+/// #1 %s(6): call_user_func_array('w', Array)
+/// #2 {main}
+///   thrown in %s on line 5
+/// ```
+///
+/// ```php
+/// function v(int ...$rest) {}
+/// $f = 'call_user_func_array';
+/// try { $f('v', ['x' => 1, 'y' => 'a']); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// $f('v', [1, 'x' => 'a']);
+/// ```
+/// ```expect exit=255
+/// v(): Argument #1 must be of type int, string given
+///
+/// Fatal error: Uncaught TypeError: v(): Argument #2 must be of type int, string given in %s:2
+/// Stack trace:
+/// #0 [internal function]: v(1, x: 'a')
+/// #1 %s(5): call_user_func_array('v', Array)
+/// #2 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// A variadic native meets them where its parameter parsing reads the
+/// variadic, `Z_PARAM_VARIADIC`, and that is
+/// `zend_unexpected_extra_named_error`'s `ArgumentCountError`, raised
+/// inside the callee's frame after the checks before it: the arity's
+/// own error comes first.
+///
+/// ```php
+/// try { call_user_func_array('array_merge', ['a' => [1]]); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// try { call_user_func_array('sprintf', ['%d', 'a' => 1]); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// try { call_user_func_array('sprintf', ['a' => 1]); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// ArgumentCountError: array_merge() does not accept unknown named parameters
+/// ArgumentCountError: sprintf() does not accept unknown named parameters
+/// ArgumentCountError: sprintf() expects at least 1 argument, 0 given
+/// ```
+///
+/// ```php
+/// $f = 'call_user_func_array'; $f('array_merge', [[1], 'a' => [1]]);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: array_merge() does not accept unknown named parameters in %s:2
+/// Stack trace:
+/// #0 [internal function]: array_merge(Array, a: Array)
+/// #1 %s(2): call_user_func_array('array_merge', Array)
+/// #2 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// The two parameters' refusals.
+///
+/// ```php
+/// $f = 'call_user_func_array'; $f('strlen', 'x');
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: call_user_func_array(): Argument #2 ($args) must be of type array, string given in %s:2
+/// Stack trace:
+/// #0 %s(2): call_user_func_array('strlen', 'x')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// $f = 'call_user_func_array'; $f('strlen');
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: call_user_func_array() expects exactly 2 arguments, 1 given in %s:2
+/// Stack trace:
+/// #0 %s(2): call_user_func_array('strlen')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+fn call_user_func_array(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 2, 2)?;
+    let callback = callable_argument(req, 1)?;
+    let given = req.argument(2).unwrap_or_default();
+    let coerced = coerce_param(req, &given, &Type::Array, 2)?;
+    let array = match coerced.deref().as_array().copied() {
+        Some(array) => array,
+        None => PhpArray::new(req)?,
+    };
+    call_array(req, &callback, array)
+}
+
+/// One `Z_PARAM_FUNC` of a native, php's `"F"`: the argument at
+/// `position` resolved into the callee it names, `zend_parse_arg_func`
+/// over `zend_is_callable_ex`, so a callback is held to being one where
+/// it is taken and not where it is served. The sentence a miss takes is
+/// php's `*error` for that miss, the one `zend_is_callable_ex` wrote.
+fn callable_argument(req: &mut Request, position: u32) -> Result<Callable, Thrown> {
+    let given = req.argument(position).unwrap_or_default().deref();
+    match callable_checked(req, &given) {
+        Ok(callable) => Ok(callable),
+        Err(why) => Err(arg_type_error(
+            req,
+            position,
+            &format!("be a valid callback, {why}"),
+        )),
+    }
 }
 
 /// `php_error_docref(NULL, E_DEPRECATED, ...)`.
@@ -1045,6 +1421,145 @@ fn strtolower(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 1, 1)?;
     let string = string_argument(req, 1)?;
     cased(req, string, u8::to_ascii_lowercase)
+}
+
+/// `PHP_STR_PAD_LEFT`, `PHP_STR_PAD_RIGHT` and `PHP_STR_PAD_BOTH`
+/// (`Z/ext/standard/php_string.h`), what `str_pad`'s `$pad_type` is one
+/// of.
+const STR_PAD_LEFT: i64 = 0;
+const STR_PAD_RIGHT: i64 = 1;
+const STR_PAD_BOTH: i64 = 2;
+
+/// `str_pad(string $string, int $length, string $pad_string = " ", int
+/// $pad_type = STR_PAD_RIGHT): string`, php's `PHP_FUNCTION(str_pad)`
+/// (`Z/ext/standard/string.c:5760`): the string handed back as it is,
+/// one more owner, where `$length` is negative or no more than its
+/// length, before either later parameter is looked at; then the empty
+/// pad string's `ValueError` and the unknown type's; then the padding
+/// laid down as the pad string repeated byte by byte, `pad_str[i %
+/// pad_str_len]`, all of it on the right, all of it on the left, or the
+/// floor of half on the left and the rest on the right.
+///
+/// ```php
+/// var_dump(str_pad("abc", 6), str_pad("abc", 6, "-="), str_pad("abc", 6, "-=", STR_PAD_LEFT), str_pad("abc", 8, "-=", STR_PAD_BOTH), str_pad("abc", 7, "xy", STR_PAD_BOTH), str_pad("abc", 2), str_pad("abc", -1), str_pad("abc", 3), str_pad(12, 4, 0, STR_PAD_LEFT), str_pad("", 2, "ab"));
+/// foreach ([fn() => str_pad("abc", 6, ""), fn() => str_pad("abc", 6, " ", 3), fn() => str_pad("abc", 6, " ", -1), fn() => str_pad("abc", 2, "")] as $f) { try { var_dump($f()); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; } }
+/// var_dump(STR_PAD_LEFT, STR_PAD_RIGHT, STR_PAD_BOTH);
+/// ```
+/// ```expect
+/// string(6) "abc   "
+/// string(6) "abc-=-"
+/// string(6) "-=-abc"
+/// string(8) "-=abc-=-"
+/// string(7) "xyabcxy"
+/// string(3) "abc"
+/// string(3) "abc"
+/// string(3) "abc"
+/// string(4) "0012"
+/// string(2) "ab"
+/// ValueError: str_pad(): Argument #3 ($pad_string) must not be empty
+/// ValueError: str_pad(): Argument #4 ($pad_type) must be STR_PAD_LEFT, STR_PAD_RIGHT, or STR_PAD_BOTH
+/// ValueError: str_pad(): Argument #4 ($pad_type) must be STR_PAD_LEFT, STR_PAD_RIGHT, or STR_PAD_BOTH
+/// string(3) "abc"
+/// int(0)
+/// int(1)
+/// int(2)
+/// ```
+///
+/// The declaration, as `basic_functions.stub.php` has it, which is what
+/// a named argument is placed against.
+///
+/// ```php
+/// echo new ReflectionFunction('str_pad');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function str_pad ] {
+///
+///   - Parameters [4] {
+///     Parameter #0 [ <required> string $string ]
+///     Parameter #1 [ <required> int $length ]
+///     Parameter #2 [ <optional> string $pad_string = " " ]
+///     Parameter #3 [ <optional> int $pad_type = STR_PAD_RIGHT ]
+///   }
+///   - Return [ string ]
+/// }
+/// ```
+///
+/// ```php
+/// str_pad("abc", "x");
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: str_pad(): Argument #2 ($length) must be of type int, string given in %s:2
+/// Stack trace:
+/// #0 %s(2): str_pad('abc', 'x')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// str_pad("abc");
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: str_pad() expects at least 2 arguments, 1 given in %s:2
+/// Stack trace:
+/// #0 %s(2): str_pad('abc')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+fn str_pad(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 2, 4)?;
+    let given = req.argument_count();
+    let input = string_argument(req, 1)?;
+    let length = long_argument(req, 2)?;
+    let pad = if given >= 3 {
+        string_argument(req, 3)?.as_bytes().to_vec()
+    } else {
+        vec![b' ']
+    };
+    let pad_type = if given >= 4 {
+        long_argument(req, 4)?
+    } else {
+        STR_PAD_RIGHT
+    };
+    let bytes = input.as_bytes();
+    if length < 0 || usize::try_from(length).is_ok_and(|length| length <= bytes.len()) {
+        let value = Value::string(input);
+        req.addref(&value);
+        return Ok(value);
+    }
+    if pad.is_empty() {
+        return Err(arg_value_error(req, 3, "not be empty"));
+    }
+    let num_pad_chars = usize::try_from(length)
+        .unwrap_or(usize::MAX)
+        .saturating_sub(bytes.len());
+    let (left_pad, right_pad) = match pad_type {
+        STR_PAD_RIGHT => (0, num_pad_chars),
+        STR_PAD_LEFT => (num_pad_chars, 0),
+        STR_PAD_BOTH => (num_pad_chars / 2, num_pad_chars - num_pad_chars / 2),
+        _ => {
+            return Err(arg_value_error(
+                req,
+                4,
+                "be STR_PAD_LEFT, STR_PAD_RIGHT, or STR_PAD_BOTH",
+            ));
+        }
+    };
+    // `zend_string_safe_alloc(1, ZSTR_LEN(input), num_pad_chars, 0)`,
+    // then the three fills in place.
+    let padded = PhpString::product(req, 1, bytes.len(), num_pad_chars, |result| {
+        let mut at = 0;
+        for i in 0..left_pad {
+            result[at] = pad[i % pad.len()];
+            at += 1;
+        }
+        result[at..at + bytes.len()].copy_from_slice(bytes);
+        at += bytes.len();
+        for i in 0..right_pad {
+            result[at] = pad[i % pad.len()];
+            at += 1;
+        }
+    })?;
+    Ok(Value::string(padded))
 }
 
 /// `zend_string_toupper_ex` and `zend_string_tolower_ex`'s one shape

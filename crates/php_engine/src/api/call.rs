@@ -9,9 +9,9 @@
 use php_unit::decl::ConstExpr;
 
 use crate::api::abi::{Callable, PropertyRead};
-use crate::api::raising::{Thrown, fatal, throw};
+use crate::api::raising::{Thrown, throw};
 use crate::api::request::Request;
-use crate::api::values::{ClassId, PhpObject, PhpString, Value, ValueRef};
+use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 /// A linked function: user or native, by identity. A native method is
 /// one too, numbered past the functions.
@@ -144,15 +144,20 @@ fn no_loop(req: &mut Request, what: &str) -> Thrown {
 /// `zend_call_function` a filled `zend_fcall_info_cache` takes, which
 /// is a function with no scope, a method with its scope and receiver,
 /// or a closure through its payload.
-fn serve(req: &mut Request, target: Target, arguments: &[Value]) -> Result<Value, Thrown> {
+fn serve(
+    req: &mut Request,
+    target: Target,
+    arguments: &[Value],
+    extra_named: &[(PhpString, Value)],
+) -> Result<Value, Thrown> {
     match target {
-        Target::Function(function) => req.serve_function(function, arguments),
+        Target::Function(function) => req.serve_function(function, arguments, extra_named),
         Target::Method {
             function,
             scope,
             this,
-        } => req.serve_method(function, this, scope, arguments),
-        Target::Closure(object) => req.serve_closure(object, arguments),
+        } => req.serve_method(function, this, scope, arguments, extra_named),
+        Target::Closure(object) => req.serve_closure(object, arguments, extra_named),
     }
 }
 
@@ -271,7 +276,7 @@ fn callee(req: &Request, target: Target) -> Option<Function> {
 ///   thrown in %s on line 3
 /// ```
 pub fn call(req: &mut Request, callable: &Callable, arguments: &[Value]) -> Result<Value, Thrown> {
-    serve(req, callable.target(), arguments)
+    serve(req, callable.target(), arguments, &[])
 }
 
 /// `zend_call_function` with named arguments after the positional ones,
@@ -281,7 +286,12 @@ pub fn call(req: &mut Request, callable: &Callable, arguments: &[Value]) -> Resu
 /// prologue to fill, which is `zend_handle_named_arg`
 /// (`Z/Zend/zend_execute.c:5518`). A name the callee declares no
 /// parameter for is php's `Error` for an unknown named parameter, and a
-/// name a positional argument already filled is php's other one.
+/// name a positional argument already filled is php's other one; a
+/// name a variadic callee collects rides on the call as its extra named
+/// arguments. What an attribute's constructor is served with; a call
+/// whose whole argument list is one array is [`call_array`], and the
+/// witnesses for the placement stand beside `call_user_func_array` in
+/// `ext/standard`.
 pub fn call_named(
     req: &mut Request,
     callable: &Callable,
@@ -290,57 +300,130 @@ pub fn call_named(
 ) -> Result<Value, Thrown> {
     let target = callable.target();
     let Some(function) = callee(req, target).filter(|_| !named.is_empty()) else {
-        return serve(req, target, arguments);
+        return serve(req, target, arguments, &[]);
     };
-    let placed = place_named(req, function, arguments, named)?;
-    serve(req, target, &placed)
+    let mut placement = Placement::new(req, function, arguments);
+    for (name, value) in named {
+        placement.named(req, *name, *value)?;
+    }
+    serve(req, target, &placement.arguments, &placement.extra_named)
 }
 
-/// `zend_get_arg_offset_by_name` and `zend_handle_named_arg` over one
-/// call's named arguments (`Z/Zend/zend_execute.c:5450`): the
-/// positional arguments as passed, then each named one at the offset of
-/// the parameter of that name, the slots it skipped `UNDEF`. php
-/// collects a name a variadic callee does not declare into
-/// `extra_named_params`, which no call frame here carries, so that one
-/// is an `InternalError` and not a wrong placement.
-fn place_named(
+/// `zend_call_function` with `fci->named_params` the whole argument
+/// list and no `fci->params`, which is how `call_user_func_array` and
+/// `ReflectionFunction::invokeArgs` hand their array over: its walk
+/// (`Z/Zend/zend_execute_API.c:894`) takes an integer-keyed element as
+/// the next positional argument, at the offset its turn gives it and
+/// never at its key, and a string-keyed one as a named argument placed
+/// as [`call_named`] places it, in the array's order, so a positional
+/// element after a named one is php's `Error` there and not before an
+/// earlier name's own. A reference among the elements is followed, as
+/// the walk follows one for a parameter taken by value.
+pub fn call_array(
     req: &mut Request,
-    function: Function,
-    arguments: &[Value],
-    named: &[(PhpString, Value)],
-) -> Result<Vec<Value>, Thrown> {
-    let parameters: Vec<(Vec<u8>, bool)> = req
-        .function_decl(function)
-        .map(|decl| {
-            decl.parameters
-                .iter()
-                .map(|parameter| (parameter.name.0.to_vec(), parameter.variadic))
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut placed = arguments.to_vec();
-    for (name, value) in named {
+    callable: &Callable,
+    array: PhpArray,
+) -> Result<Value, Thrown> {
+    let target = callable.target();
+    let Some(function) = callee(req, target) else {
+        let positional: Vec<Value> = array.snapshot().into_iter().map(|(_, v)| v).collect();
+        return serve(req, target, &positional, &[]);
+    };
+    let mut placement = Placement::new(req, function, &[]);
+    let mut have_named = false;
+    for (key, value) in array.snapshot() {
+        match key {
+            Key::Int(_) => {
+                if have_named {
+                    return Err(throw(
+                        req,
+                        "Error",
+                        "Cannot use positional argument after named argument",
+                    ));
+                }
+                placement.arguments.push(value);
+            }
+            Key::Str(name) => {
+                have_named = true;
+                placement.named(req, name, value)?;
+            }
+        }
+    }
+    serve(req, target, &placement.arguments, &placement.extra_named)
+}
+
+/// One call's argument list while `zend_call_function` builds it: the
+/// positional arguments as placed so far, with the slots a named one
+/// skipped `UNDEF`, and the extra named arguments a variadic callee
+/// collects, against the parameter names the callee declares.
+struct Placement {
+    /// The declared parameters' names and whether each is the variadic,
+    /// `fbc->common.arg_info` over `num_args` and `ZEND_ACC_VARIADIC`.
+    parameters: Vec<(Vec<u8>, bool)>,
+    arguments: Vec<Value>,
+    extra_named: Vec<(PhpString, Value)>,
+}
+
+impl Placement {
+    fn new(req: &Request, function: Function, arguments: &[Value]) -> Placement {
+        let parameters = req
+            .function_decl(function)
+            .map(|decl| {
+                decl.parameters
+                    .iter()
+                    .map(|parameter| (parameter.name.0.to_vec(), parameter.variadic))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Placement {
+            parameters,
+            arguments: arguments.to_vec(),
+            extra_named: Vec::new(),
+        }
+    }
+
+    /// `zend_handle_named_arg` (`Z/Zend/zend_execute.c:5518`) over
+    /// `zend_get_arg_offset_by_name`: the offset of the declared
+    /// parameter of that name, the variadic's own name matching nothing
+    /// since php walks `num_args` alone; a callee with a variadic
+    /// collects a name it does not declare into `extra_named_params`,
+    /// where the same name twice is the `Error` a filled slot is; and a
+    /// callee without one has php's `Error` for an unknown named
+    /// parameter. A named argument lands in its slot, the slots between
+    /// the last positional one and it laid down `UNDEF`
+    /// (`ZEND_CALL_MAY_HAVE_UNDEF`), and one whose slot a positional
+    /// argument already filled is php's other `Error`.
+    fn named(&mut self, req: &mut Request, name: PhpString, value: Value) -> Result<(), Thrown> {
         let wanted = name.as_bytes();
         let spelled = String::from_utf8_lossy(wanted).into_owned();
-        let Some(at) = parameters
+        let Some(at) = self
+            .parameters
             .iter()
             .position(|(declared, variadic)| !variadic && declared == wanted)
         else {
-            if parameters.iter().any(|(_, variadic)| *variadic) {
-                return Err(fatal(
+            if !self.parameters.iter().any(|(_, variadic)| *variadic) {
+                return Err(throw(
                     req,
-                    &format!(
-                        "InternalError: the named argument ${spelled} a variadic parameter collects"
-                    ),
+                    "Error",
+                    &format!("Unknown named parameter ${spelled}"),
                 ));
             }
-            return Err(throw(
-                req,
-                "Error",
-                &format!("Unknown named parameter ${spelled}"),
-            ));
+            if self
+                .extra_named
+                .iter()
+                .any(|(held, _)| held.as_bytes() == wanted)
+            {
+                return Err(throw(
+                    req,
+                    "Error",
+                    &format!("Named parameter ${spelled} overwrites previous argument"),
+                ));
+            }
+            self.extra_named.push((name, value));
+            return Ok(());
         };
-        if placed
+        if self
+            .arguments
             .get(at)
             .is_some_and(|held| !matches!(held.as_ref(), ValueRef::Undef))
         {
@@ -350,12 +433,12 @@ fn place_named(
                 &format!("Named parameter ${spelled} overwrites previous argument"),
             ));
         }
-        if placed.len() <= at {
-            placed.resize(at + 1, Value::undef());
+        if self.arguments.len() <= at {
+            self.arguments.resize(at + 1, Value::undef());
         }
-        placed[at] = *value;
+        self.arguments[at] = value;
+        Ok(())
     }
-    Ok(placed)
 }
 
 /// `zend_call_method` on `object`: the method looked up on the
@@ -381,7 +464,7 @@ pub fn call_method(
             ),
         ));
     };
-    req.serve_method(function, Some(*object), class, arguments)
+    req.serve_method(function, Some(*object), class, arguments, &[])
 }
 
 /// `new $class(...$arguments)`: [`new_object`] and then the class's
@@ -395,7 +478,7 @@ pub fn instantiate(
 ) -> Result<PhpObject, Thrown> {
     let object = new_object(req, class)?;
     if let Some(constructor) = req.method_named(class, b"__construct") {
-        let served = req.serve_method(constructor, Some(object), class, arguments);
+        let served = req.serve_method(constructor, Some(object), class, arguments, &[]);
         if let Err(thrown) = served {
             req.release(object.as_value());
             return Err(thrown);

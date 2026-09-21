@@ -285,10 +285,7 @@ fn format_variadic(req: &mut Request) -> Result<Vec<u8>, Thrown> {
         return Err(too_few_arguments(req, 1, 0));
     }
     let format = string_argument(req, 1)?;
-    let arguments: Vec<Value> = (2..=count)
-        .filter_map(|at| u32::try_from(at).ok())
-        .filter_map(|at| req.argument(at))
-        .collect();
+    let arguments = req.variadic_arguments(2)?;
     formatted(req, format.as_bytes(), &arguments, Some(1))
 }
 

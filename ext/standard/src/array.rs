@@ -10,14 +10,16 @@ use std::cmp::Ordering;
 
 use php_ext::abi::Callable;
 use php_ext::call::call;
-use php_ext::coerce::{callable_checked, coerce_param, compare, to_double, to_long, to_string};
+use php_ext::coerce::{coerce_param, compare, to_double, to_long, to_string};
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Parameter, Type};
 use php_ext::raising::{Level, Thrown, arg_type_error, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, Value, ValueRef, zend_sort};
 
 use crate::output::Entry;
-use crate::{argument_count_between, constant, declared, long_argument, parameter};
+use crate::{
+    argument_count_between, callable_argument, constant, declared, long_argument, parameter,
+};
 
 /// `PHP_SORT_*` (`Z/ext/standard/php_array.h`), what a sort native's
 /// `$flags` is made of.
@@ -126,7 +128,152 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
             ),
             array_unique,
         ),
+        (
+            declared(
+                b"array_merge",
+                &[Parameter {
+                    variadic: true,
+                    ..parameter(b"arrays", Type::Array)
+                }],
+                Type::Array,
+            ),
+            array_merge,
+        ),
     ]
+}
+
+/// `array_merge(array ...$arrays): array`, php's `PHP_FUNCTION(array_merge)`
+/// over `php_array_merge_wrapper` (`Z/ext/standard/array.c:4268`) and
+/// `php_array_merge` (`Z/ext/standard/array.c:4113`): `Z_PARAM_VARIADIC`
+/// and then each argument held to being an array in turn, the
+/// `TypeError` naming its number and no parameter name, since the
+/// variadic's slots have none; no argument is the empty array; of two
+/// arguments one of which is empty, the other is handed back as it is
+/// with one more owner where nothing would be renumbered, which is a
+/// packed array without holes or one keyed by strings alone; and
+/// otherwise a new array the first argument's elements are laid into,
+/// a string key kept and an integer key given the next index, and each
+/// later argument's the same way over it, a string key writing in
+/// place where it is already there (`zend_hash_update`). A reference
+/// with no other owner is followed into the copy (`Z_ISREF_P` with
+/// `Z_REFCOUNT_P` one) and any other is kept, one more owner.
+///
+/// ```php
+/// var_dump(array_merge());
+/// var_dump(array_merge([3 => 'a', 'k' => 'b'], ['k' => 'c', 9 => 'd'], [], [true]));
+/// var_dump(array_merge([5 => 'x'], []));
+/// $a = 1; $r = []; $r[0] = &$a; $m = array_merge($r, [2]); $a = 3; var_dump($m);
+/// $b = memory_get_usage(); $e = array_merge([1, 2], []); var_dump(memory_get_usage() - $b);
+/// ```
+/// ```expect
+/// array(0) {
+/// }
+/// array(4) {
+///   [0]=>
+///   string(1) "a"
+///   ["k"]=>
+///   string(1) "c"
+///   [1]=>
+///   string(1) "d"
+///   [2]=>
+///   bool(true)
+/// }
+/// array(1) {
+///   [0]=>
+///   string(1) "x"
+/// }
+/// array(2) {
+///   [0]=>
+///   &int(3)
+///   [1]=>
+///   int(2)
+/// }
+/// int(0)
+/// ```
+///
+/// The declaration, as `basic_functions.stub.php` has it: one
+/// variadic, so a named argument it does not declare rides on the
+/// frame and `Z_PARAM_VARIADIC` refuses it, which
+/// `call_user_func_array`'s witness pins.
+///
+/// ```php
+/// echo new ReflectionFunction('array_merge');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function array_merge ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <optional> array ...$arrays ]
+///   }
+///   - Return [ array ]
+/// }
+/// ```
+///
+/// ```php
+/// var_dump(array_merge(['a' => 1], [1], 'x'));
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: array_merge(): Argument #3 must be of type array, string given in %s:2
+/// Stack trace:
+/// #0 %s(2): array_merge(Array, Array, 'x')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+fn array_merge(req: &mut Request) -> Result<Value, Thrown> {
+    let arguments = req.variadic_arguments(1)?;
+    let mut arrays = Vec::with_capacity(arguments.len());
+    for (at, argument) in arguments.iter().enumerate() {
+        let Some(array) = argument.deref().as_array().copied() else {
+            let position = u32::try_from(at.saturating_add(1)).unwrap_or(u32::MAX);
+            let given = php_ext::coerce::value_name(req, argument);
+            return Err(arg_type_error(
+                req,
+                position,
+                &format!("be of type array, {given} given"),
+            ));
+        };
+        arrays.push(array);
+    }
+    if arrays.is_empty() {
+        return Ok(Value::array(PhpArray::new(req)?));
+    }
+    if let [first, second] = arrays[..] {
+        let kept = if first.is_empty() {
+            Some(second)
+        } else if second.is_empty() {
+            Some(first)
+        } else {
+            None
+        };
+        // `HT_IS_PACKED` without holes, or every key a string: what a
+        // merge would lay down as it stands.
+        if let Some(kept) = kept
+            && (kept.is_list() || kept.iter().all(|(key, _)| matches!(key, Key::Str(_))))
+        {
+            let value = Value::array(kept);
+            req.addref(&value);
+            return Ok(value);
+        }
+    }
+    let mut merged = PhpArray::new(req)?;
+    for array in arrays {
+        for (key, value) in array.snapshot_refs() {
+            // `Z_ISREF_P(src_entry) && Z_REFCOUNT_P(src_entry) == 1`.
+            let value = match value.as_ref() {
+                ValueRef::Reference(_) if value.refcount() == 1 => value.deref(),
+                _ => value,
+            };
+            req.addref(&value);
+            match key {
+                Key::Str(name) => {
+                    req.addref(&Value::string(name));
+                    merged.set(req, Key::Str(name), value)?;
+                }
+                Key::Int(_) => merged.append(req, value)?,
+            }
+        }
+    }
+    Ok(Value::array(merged))
 }
 
 /// `sort(array &$array, int $flags = SORT_REGULAR): true`, php's
@@ -341,23 +488,6 @@ fn answer_sign(req: &mut Request, answer: Value) -> Result<Ordering, Thrown> {
     let long = to_long(req, &answer);
     req.release(answer);
     Ok(long?.cmp(&0))
-}
-
-/// One `Z_PARAM_FUNC` of a native, php's `"F"`: the argument at
-/// `position` resolved into the callee it names, `zend_parse_arg_func`
-/// over `zend_is_callable_ex`, so a callback is held to being one where
-/// it is taken and not where it is served. The sentence a miss takes is
-/// php's `*error` for that miss, the one `zend_is_callable_ex` wrote.
-fn callable_argument(req: &mut Request, position: u32) -> Result<Callable, Thrown> {
-    let given = req.argument(position).unwrap_or_default().deref();
-    match callable_checked(req, &given) {
-        Ok(callable) => Ok(callable),
-        Err(why) => Err(arg_type_error(
-            req,
-            position,
-            &format!("be a valid callback, {why}"),
-        )),
-    }
 }
 
 /// What `Z_PARAM_ARRAY_EX(array, 0, 1)` on a by-reference parameter

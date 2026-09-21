@@ -14,12 +14,13 @@
 //! `#[\Deprecated]` and the engine does not raise the deprecation of
 //! yet (#412).
 
-use php_ext::call::call_named;
+use php_ext::abi::Callable;
+use php_ext::call::{call_array, call_named};
 use php_ext::coerce::{is_callable, to_callable, value_name};
 use php_ext::decl::{FunctionDecl, MethodDecl, Visibility};
 use php_ext::raising::{Thrown, arg_count_error, arg_type_error, throw};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{ClassId, Key, PhpArray, PhpObject, Value};
 
 use super::signature::{FunctionRef, this_function, type_factory};
 use super::{
@@ -982,36 +983,6 @@ fn variadic_arguments(req: &mut Request, from: usize) -> Vec<Value> {
         .collect()
 }
 
-/// One call's argument list in the two halves `zend_call_function`
-/// takes it in: the positional arguments and the named ones.
-type Arguments = (Vec<Value>, Vec<(PhpString, Value)>);
-
-/// The array `invokeArgs` takes, walked as `zend_call_function` walks
-/// `fci->named_params` (`Z/Zend/zend_execute_API.c:894`): an
-/// integer-keyed element is positional, at the offset its turn in the
-/// walk gives it and never at its key, and a string-keyed one is named;
-/// a positional element after a named one is php's `Error`.
-fn split_arguments(req: &mut Request, array: PhpArray) -> Result<Arguments, Thrown> {
-    let mut positional = Vec::new();
-    let mut named: Vec<(PhpString, Value)> = Vec::new();
-    for (key, value) in array.snapshot() {
-        match key {
-            Key::Int(_) => {
-                if !named.is_empty() {
-                    return Err(throw(
-                        req,
-                        "Error",
-                        "Cannot use positional argument after named argument",
-                    ));
-                }
-                positional.push(value.deref());
-            }
-            Key::Str(name) => named.push((name, value.deref())),
-        }
-    }
-    Ok((positional, named))
-}
-
 /// `Z_PARAM_ARRAY` at `position`, the `h` of `invokeArgs`.
 fn array_argument(req: &mut Request, position: u32) -> Result<PhpArray, Thrown> {
     let given = req.argument(position).unwrap_or_default().deref();
@@ -1063,22 +1034,21 @@ fn callable_value(
 
 /// `zend_call_known_fcc` over what a reflector holds, which is what
 /// `ReflectionFunction::invoke` and `reflection_method_invoke` end in:
-/// the callable the reference resolves to, served with the arguments
-/// the call was given, and php's `ReflectionException` for a reference
-/// that resolves to no callee, the `Invocation of ... failed` php
-/// raises when `zend_call_known_fcc` came back with nothing and left
-/// nothing pending. The value the callable was read off is given up
-/// after the call, as `zend_fcc_dtor` gives its copy up.
+/// the callable the reference resolves to, served by `serve` with the
+/// arguments the call was given, and php's `ReflectionException` for a
+/// reference that resolves to no callee, the `Invocation of ... failed`
+/// php raises when `zend_call_known_fcc` came back with nothing and
+/// left nothing pending. The value the callable was read off is given
+/// up after the call, as `zend_fcc_dtor` gives its copy up.
 fn invoke(
     req: &mut Request,
     function: &FunctionRef,
     this: Option<PhpObject>,
-    arguments: &[Value],
-    named: &[(PhpString, Value)],
+    serve: impl FnOnce(&mut Request, &Callable) -> Result<Value, Thrown>,
 ) -> Result<Value, Thrown> {
     let value = callable_value(req, function, this)?;
     let served = if is_callable(req, &value) {
-        to_callable(req, &value).and_then(|callable| call_named(req, &callable, arguments, named))
+        to_callable(req, &value).and_then(|callable| serve(req, &callable))
     } else {
         let what = invocation_of(req, function);
         Err(throw(
@@ -1109,9 +1079,10 @@ fn invocation_of(req: &mut Request, function: &FunctionRef) -> String {
 
 /// `ReflectionFunction::invoke(mixed ...$args): mixed`,
 /// `ZEND_METHOD(ReflectionFunction, invoke)`: the function the
-/// reflector names served with the arguments as passed, and its return
-/// handed back. A reflector over a closure serves the closure, php's
-/// `get_closure` on `intern->obj`.
+/// reflector names served with the arguments as passed, the extra
+/// named ones handed on as `Z_PARAM_VARIADIC_WITH_NAMED` hands them,
+/// and its return handed back. A reflector over a closure serves the
+/// closure, php's `get_closure` on `intern->obj`.
 ///
 /// ```php
 /// var_dump((new ReflectionFunction('strtoupper'))->invoke('ab'));
@@ -1128,14 +1099,17 @@ fn invocation_of(req: &mut Request, function: &FunctionRef) -> String {
 pub(super) fn reflection_function_invoke(req: &mut Request) -> Result<Value, Thrown> {
     let (function, _) = this_function(req)?;
     let arguments = variadic_arguments(req, 1);
-    invoke(req, &function, None, &arguments, &[])
+    let named = req.named_arguments();
+    invoke(req, &function, None, |req, callable| {
+        call_named(req, callable, &arguments, &named)
+    })
 }
 
 /// `ReflectionFunction::invokeArgs(array $args): mixed`,
 /// `ZEND_METHOD(ReflectionFunction, invokeArgs)`: the same call with
 /// the array as the whole argument list, which php hands
 /// `zend_call_known_fcc` as `named_params` and its walk reads
-/// positionally for every integer key.
+/// positionally for every integer key, `call_array`.
 ///
 /// ```php
 /// var_dump((new ReflectionFunction('str_repeat'))->invokeArgs(['ab', 2]));
@@ -1149,8 +1123,9 @@ pub(super) fn reflection_function_invoke_args(req: &mut Request) -> Result<Value
     exactly_arguments(req, 1)?;
     let (function, _) = this_function(req)?;
     let array = array_argument(req, 1)?;
-    let (arguments, named) = split_arguments(req, array)?;
-    invoke(req, &function, None, &arguments, &named)
+    invoke(req, &function, None, |req, callable| {
+        call_array(req, callable, array)
+    })
 }
 
 /// The receiver `reflection_method_invoke` passes: none for a method
@@ -1239,8 +1214,11 @@ pub(super) fn reflection_method_invoke(req: &mut Request) -> Result<Value, Throw
     at_least_arguments(req, 1)?;
     let this = receiver(req, &decl, scope, 1)?;
     let arguments = variadic_arguments(req, 2);
+    let named = req.named_arguments();
     let function = FunctionRef::Method(class, decl.function.name.0.to_vec());
-    invoke(req, &function, this, &arguments, &[])
+    invoke(req, &function, this, |req, callable| {
+        call_named(req, callable, &arguments, &named)
+    })
 }
 
 /// `ReflectionMethod::invokeArgs(?object $object, array $args): mixed`,
@@ -1277,7 +1255,8 @@ pub(super) fn reflection_method_invoke_args(req: &mut Request) -> Result<Value, 
     exactly_arguments(req, 2)?;
     let this = receiver(req, &decl, scope, 1)?;
     let array = array_argument(req, 2)?;
-    let (arguments, named) = split_arguments(req, array)?;
     let function = FunctionRef::Method(class, decl.function.name.0.to_vec());
-    invoke(req, &function, this, &arguments, &named)
+    invoke(req, &function, this, |req, callable| {
+        call_array(req, callable, array)
+    })
 }

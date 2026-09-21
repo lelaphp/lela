@@ -179,6 +179,14 @@ pub(crate) struct FrameState {
     /// the temporaries (`zend_copy_extra_args`) for `func_get_args` to
     /// read; owned by the frame and given up with it.
     pub(crate) extra_args: Vec<Value>,
+    /// `ZEND_CALL_HAS_EXTRA_NAMED_PARAMS` and `EX(extra_named_params)`:
+    /// the named arguments the function declares no parameter for,
+    /// which `zend_handle_named_arg` collects for a variadic callee, in
+    /// the order they were given; `RECV_VARIADIC` adds them to its
+    /// array by name after the extra arguments, and a backtrace prints
+    /// them `name: value`. Each name and value one owner of the frame's,
+    /// given up with it (`zend_free_extra_named_params`).
+    pub(crate) extra_named: Vec<(PhpString, Value)>,
     /// How many calls stood on the call stack when the frame was pushed,
     /// which is where the frame sits among them: php's one
     /// `prev_execute_data` chain is two stacks here, and this is what
@@ -402,6 +410,15 @@ pub(crate) struct CallState {
     /// on, one owner the call holds, which the frame it becomes takes
     /// over; none for every other call.
     pub(crate) closure: Option<PhpObject>,
+    /// `ZEND_CALL_HAS_EXTRA_NAMED_PARAMS` and `call->extra_named_params`:
+    /// the named arguments the callee declares no parameter for, placed
+    /// by `zend_handle_named_arg` for a variadic callee and by nothing
+    /// an opline runs, since the compiler reads no named argument yet.
+    /// A native reads them off the call as `Z_PARAM_VARIADIC_WITH_NAMED`
+    /// reads them, or refuses them as `Z_PARAM_VARIADIC` refuses them;
+    /// a user function's frame takes them over. Each name and value one
+    /// owner the call holds, given up with it.
+    pub(crate) extra_named: Vec<(PhpString, Value)>,
     /// Where the call stands.
     pub(crate) stage: CallStage,
     /// Whether the call is a `FRAMELESS_ICALL_*`'s, whose arguments are
@@ -506,6 +523,7 @@ impl Vm {
             closure: None,
             num_args,
             extra_args: Vec::new(),
+            extra_named: Vec::new(),
             calls_below,
             fast_calls: Vec::new(),
             runtime_cache,

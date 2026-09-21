@@ -564,16 +564,17 @@ pub(crate) enum Opened {
 
 /// One row of a backtrace before it is an array: the callee, its
 /// receiver, the scope it was called in where the callee is a closure,
-/// its arguments, and the file and line of its call site, which a call
-/// a native made has none of. php reads the scope off
-/// `func->common.scope` of the closure's own copy of the function; the
-/// copy here is the `Closure` object the call stands on, so the scope
-/// travels beside the callee.
+/// its arguments, the extra named arguments the callee collected, and
+/// the file and line of its call site, which a call a native made has
+/// none of. php reads the scope off `func->common.scope` of the
+/// closure's own copy of the function; the copy here is the `Closure`
+/// object the call stands on, so the scope travels beside the callee.
 type TraceRow = (
     Traced,
     Option<PhpObject>,
     Option<ClassId>,
     Vec<Value>,
+    Vec<(PhpString, Value)>,
     Option<(Vec<u8>, i64)>,
 );
 
@@ -915,6 +916,7 @@ impl Request {
         }
         if let Some(state) = self.vm.at_mut(frame) {
             state.extra_args = extra;
+            state.extra_named = call.extra_named;
             state.closure = closure;
         }
         if let Some(name) = call.name {
@@ -951,6 +953,7 @@ impl Request {
             for extra in state.extra_args {
                 self.release(extra);
             }
+            self.release_named(state.extra_named);
         }
         self.stack.pop_frame();
     }
@@ -1020,6 +1023,16 @@ impl Request {
             if let Some(closure) = call.closure {
                 self.release(closure.as_value());
             }
+            self.release_named(call.extra_named);
+        }
+    }
+
+    /// `zend_free_extra_named_params`: each name and value of a call's
+    /// or a frame's extra named arguments given up.
+    fn release_named(&mut self, named: Vec<(PhpString, Value)>) {
+        for (name, value) in named {
+            self.release(Value::string(name));
+            self.release(value);
         }
     }
 
@@ -1027,14 +1040,25 @@ impl Request {
     /// as `INIT_METHOD_CALL` and the `SEND_*` oplines would push it, the
     /// receiver and each argument one more owner the frame holds, the
     /// entry served, and the frame popped whether it returned or threw.
+    /// `extra_named` is what `zend_handle_named_arg` collected for a
+    /// variadic callee, carried on the call as
+    /// `ZEND_CALL_HAS_EXTRA_NAMED_PARAMS`.
     pub(crate) fn serve_method(
         &mut self,
         function: Function,
         this: Option<PhpObject>,
         called_scope: ClassId,
         arguments: &[Value],
+        extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
-        self.serve_call(function, this, Some(called_scope), None, arguments)
+        self.serve_call(
+            function,
+            this,
+            Some(called_scope),
+            None,
+            arguments,
+            extra_named,
+        )
     }
 
     /// `zend_call_known_fcc` over a `Closure`, which is what
@@ -1048,6 +1072,7 @@ impl Request {
         &mut self,
         object: PhpObject,
         arguments: &[Value],
+        extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
         let Some(closure) = object.closure(self).cloned() else {
             return Err(crate::api::raising::throw(
@@ -1063,6 +1088,7 @@ impl Request {
             closure.scope,
             Some(object),
             arguments,
+            extra_named,
         )
     }
 
@@ -1073,8 +1099,9 @@ impl Request {
         &mut self,
         function: Function,
         arguments: &[Value],
+        extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
-        self.serve_call(function, None, None, None, arguments)
+        self.serve_call(function, None, None, None, arguments, extra_named)
     }
 
     fn serve_call(
@@ -1084,11 +1111,16 @@ impl Request {
         called_scope: Option<ClassId>,
         closure: Option<PhpObject>,
         arguments: &[Value],
+        extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
         let name = self.declared_name(function);
         let name = self.interned(name.as_bytes())?;
         for argument in arguments {
             self.addref(argument);
+        }
+        for (extra, value) in extra_named {
+            self.addref(&Value::string(*extra));
+            self.addref(value);
         }
         if let Some(this) = this {
             self.addref(&this.as_value());
@@ -1101,6 +1133,7 @@ impl Request {
             this,
             called_scope,
             closure,
+            extra_named: extra_named.to_vec(),
             stage: CallStage::Serving,
             frameless: false,
             coerced: Vec::new(),
@@ -1865,7 +1898,7 @@ impl Request {
         let ignore_arguments = self.exception_ignore_args();
         let links = self.trace_chain();
         let mut trace = PhpArray::new(self)?;
-        for (traced, this, scope, mut arguments, site) in links {
+        for (traced, this, scope, mut arguments, named, site) in links {
             let mut row = PhpArray::new(self)?;
             let is_function = matches!(traced, Traced::Function(_));
             let (name, method) = match traced {
@@ -1897,7 +1930,9 @@ impl Request {
                 self.set_string_key(&mut row, b"type", join)?;
             }
             // A code frame's row has an `args` only where it has the
-            // file, and a function's always, `debug_backtrace_get_args`.
+            // file, and a function's always, `debug_backtrace_get_args`,
+            // which adds the extra named arguments under their names
+            // after the positional ones.
             let with_args = is_function || !arguments.is_empty();
             if !ignore_arguments && with_args {
                 let mut args = PhpArray::new(self)?;
@@ -1905,6 +1940,12 @@ impl Request {
                     let argument = argument.deref();
                     self.addref(&argument);
                     args.append(self, argument)?;
+                }
+                for (name, argument) in named {
+                    let argument = argument.deref();
+                    self.addref(&argument);
+                    self.addref(&Value::string(name));
+                    args.set(self, Key::Str(name), argument)?;
                 }
                 self.set_string_key(&mut row, b"args", Value::array(args))?;
             } else {
@@ -1968,9 +2009,10 @@ impl Request {
     ///
     /// A user frame's arguments are its parameters' CVs up to the
     /// number passed and then its extra ones
-    /// (`debug_backtrace_get_args`); a native's are the call's, as they
-    /// were placed. A call still being built is not on the chain, as
-    /// php's is a chain of activations.
+    /// (`debug_backtrace_get_args`), with the extra named ones beside
+    /// them; a native's are the call's, as they were placed. A call
+    /// still being built is not on the chain, as php's is a chain of
+    /// activations.
     fn trace_chain(&self) -> Vec<TraceRow> {
         let chain: Vec<Link> = self.chain().collect();
         let mut rows = Vec::new();
@@ -2007,7 +2049,14 @@ impl Request {
                             .then(|| exec::body_of(&state.unit, state.body))
                             .flatten()
                             .map(|code| code.filename.0.to_vec());
-                        rows.push((Traced::Include { kind, file }, None, None, Vec::new(), site));
+                        rows.push((
+                            Traced::Include { kind, file },
+                            None,
+                            None,
+                            Vec::new(),
+                            Vec::new(),
+                            site,
+                        ));
                         continue;
                     };
                     let frame = FrameRef(u32::try_from(*place).unwrap_or(u32::MAX));
@@ -2022,6 +2071,7 @@ impl Request {
                         state.this,
                         self.closure_scope(state.closure),
                         arguments,
+                        state.extra_named.clone(),
                         site,
                     ));
                 }
@@ -2031,6 +2081,7 @@ impl Request {
                         call.this,
                         self.closure_scope(call.closure),
                         call.arguments.clone(),
+                        call.extra_named.clone(),
                         site,
                     ));
                 }
@@ -2117,10 +2168,7 @@ impl Request {
             let function = string(b"function").unwrap_or_else(|| String::from("unknown"));
             let arguments = field(b"args")
                 .and_then(|v| v.as_array().copied())
-                .map(|args| {
-                    let values: Vec<Value> = args.into_iter().map(|(_, v)| v).collect();
-                    self.trace_arguments(&values)
-                })
+                .map(|args| self.trace_arguments(&args.snapshot_refs()))
                 .unwrap_or_default();
             frames.push(format!(
                 "#{} {site}{class}{join}{function}({arguments})",
@@ -2146,8 +2194,10 @@ impl Request {
     }
 
     /// `_build_trace_args` (`Z/Zend/zend_exceptions.c:539`) over one
-    /// frame's arguments, `, ` between them: `smart_str_append_zval` for a
-    /// scalar and an enum case, and php's three words for the rest.
+    /// frame's arguments, `, ` between them and `name: ` before one the
+    /// row keeps under a string key, which is an extra named argument
+    /// (`_build_trace_string`'s walk of `args`): `smart_str_append_zval`
+    /// for a scalar and an enum case, and php's three words for the rest.
     /// `NULL`, `true`, `false` and a long's digits; a double through
     /// `smart_str_append_double` at `precision` with `zero_fraction` set,
     /// which is `zend_gcvt` and then `.0` on a finite text with no `.` in
@@ -2195,11 +2245,15 @@ impl Request {
     /// #1 {main}
     ///   thrown in %s on line 3
     /// ```
-    fn trace_arguments(&self, arguments: &[Value]) -> String {
+    fn trace_arguments(&self, arguments: &[(Key, Value)]) -> String {
         let mut out = String::new();
-        for (i, argument) in arguments.iter().enumerate() {
+        for (i, (key, argument)) in arguments.iter().enumerate() {
             if i > 0 {
                 out.push_str(", ");
+            }
+            if let Key::Str(name) = key {
+                out.push_str(&String::from_utf8_lossy(name.as_bytes()));
+                out.push_str(": ");
             }
             self.trace_argument(&mut out, &argument.deref());
         }
@@ -3915,7 +3969,7 @@ impl Request {
         sent.push(Value::string(interned));
         sent.extend_from_slice(arguments);
         self.addref(&object.as_value());
-        let served = self.serve_method(accessor, Some(object), object.class(), &sent);
+        let served = self.serve_method(accessor, Some(object), object.class(), &sent, &[]);
         self.release(object.as_value());
         served
     }
@@ -4798,7 +4852,7 @@ impl Request {
         if matches!(saved, Saved::TheObject) {
             return;
         }
-        if let Err(thrown) = self.serve_method(destructor, Some(object), class, &[]) {
+        if let Err(thrown) = self.serve_method(destructor, Some(object), class, &[], &[]) {
             self.leave_pending(&thrown);
             if !self.executing() {
                 self.end_the_walk();
@@ -7336,6 +7390,49 @@ impl Request {
         let call = self.vm.serving_call()?;
         let index = usize::try_from(position.checked_sub(1)?).ok()?;
         call.arguments.get(index).copied()
+    }
+
+    /// `Z_PARAM_VARIADIC` (`Z/Zend/zend_API.h:2181`) from `position`
+    /// on: the call's remaining arguments as they stand on the frame,
+    /// each a view the call keeps one owner of, and none where the call
+    /// gave fewer. A call that carries extra named arguments is
+    /// `ZPP_ERROR_UNEXPECTED_EXTRA_NAMED`, php's `ArgumentCountError`
+    /// from `zend_unexpected_extra_named_error`
+    /// (`Z/Zend/zend_API.c:394`), since a variadic native that reads
+    /// them by name reads [`Request::named_arguments`] instead. The
+    /// witness stands beside `array_merge` in `ext/standard`, which is
+    /// where the oracle's text is pinned.
+    pub fn variadic_arguments(&mut self, position: u32) -> Result<Vec<Value>, Thrown> {
+        let Some(call) = self.vm.serving_call() else {
+            return Ok(Vec::new());
+        };
+        if !call.extra_named.is_empty() {
+            let message = format!(
+                "{}() does not accept unknown named parameters",
+                self.active_native()
+            );
+            return Err(crate::api::raising::throw(
+                self,
+                "ArgumentCountError",
+                &message,
+            ));
+        }
+        let from = usize::try_from(position.saturating_sub(1)).unwrap_or(usize::MAX);
+        Ok(call.arguments.get(from..).unwrap_or_default().to_vec())
+    }
+
+    /// `Z_PARAM_VARIADIC_WITH_NAMED`'s named half: the extra named
+    /// arguments the call being served carries, `EX(extra_named_params)`
+    /// under `ZEND_CALL_HAS_EXTRA_NAMED_PARAMS`, name and value in the
+    /// order they were given, each a view the call keeps one owner of.
+    /// What `call_user_func` hands on as its own call's named
+    /// arguments; empty for a call that carries none.
+    #[must_use]
+    pub fn named_arguments(&self) -> Vec<(PhpString, Value)> {
+        self.vm
+            .serving_call()
+            .map(|call| call.extra_named.clone())
+            .unwrap_or_default()
     }
 
     /// `zend_parse_arg_*_weak` writing what it coerced back into the
