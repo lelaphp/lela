@@ -7371,14 +7371,17 @@ impl Emit<'_> {
 
     /// `zend_compile_class_const` under `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`,
     /// which opcache sets, so nothing folds: `FETCH_CLASS_CONSTANT` with
-    /// the class's constant pair in `op1` (`zend_set_class_name_op1`),
-    /// the constant's name in `op2` and two cache slots in
-    /// `extended_value`, into a temporary.
+    /// the constant's name in `op2`, into a temporary
+    /// (`zend_emit_op_tmp`), then the class's constant pair in `op1`
+    /// (`zend_set_class_name_op1`) and two cache slots in
+    /// `extended_value`. php reads the constant's name before the
+    /// class's, so the constants stand in that order, as they do under
+    /// [`Self::static_prop`].
     fn class_const(&mut self, class: &[u8], name: &[u8]) -> Result<Where, CompileError> {
-        let class_at = self.class_name_literal(class)?;
         let name = self.string(name)?;
         let name_at = self.literal(name);
         let out = self.temporary();
+        let class_at = self.class_name_literal(class)?;
         let slots = self.cache_slots(2);
         self.push(Opline {
             opcode: Opcode::FetchClassConstant,

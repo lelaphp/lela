@@ -3631,6 +3631,41 @@ mod tests {
         );
     }
 
+    /// The constant table `zend_compile_class_const` leaves (#392):
+    /// `zend_emit_op_tmp` adds the constant's name, then
+    /// `zend_set_class_name_op1` the class's pair, so the name stands
+    /// before the pair, as it does under `zend_compile_static_prop`.
+    /// The dump prints values and not slots, so it reads no order; the
+    /// table is read here, whole: `NEW`'s pair, the fetch's name and
+    /// pair, and the final return's `1`, each slot its own as
+    /// `zend_add_literal` keeps them.
+    #[test]
+    fn a_class_constant_fetch_adds_the_constant_s_name_before_the_class_s_pair() {
+        let (unit, _strings) =
+            unit_and_strings(b"<?php namespace A; class M { const K = 1; } new M; echo M::K;");
+        let table: Vec<String> = unit
+            .main
+            .literals
+            .iter()
+            .map(|z| match (z.as_str(), z.as_long()) {
+                (Some(s), _) => String::from_utf8_lossy(s.bytes()).into_owned(),
+                (None, Some(n)) => n.to_string(),
+                (None, None) => String::from("?"),
+            })
+            .collect();
+        assert_eq!(
+            table,
+            ["A\\M", "a\\m", "K", "A\\M", "a\\m", "1"],
+            "php's table, the constant's name before the class's pair"
+        );
+        let fetch = &unit.main.oplines[3];
+        assert_eq!(fetch.op2, 2, "the name is the slot added first");
+        assert_eq!(
+            fetch.op1, 3,
+            "the pair's written name follows it, its lowered form after"
+        );
+    }
+
     /// `zend_compile_static_prop` under `BP_VAR_R` (#372): the
     /// property's name in `op1`, the class's constant pair in `op2`, into
     /// a temporary (`zend_adjust_for_fetch_type`). The dump is the
