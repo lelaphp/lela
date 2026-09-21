@@ -110,7 +110,9 @@ pub(crate) enum Command {
     /// the `computed trust` line printed as a person's.
     /// `next` names the ticket the track works next, the oldest open
     /// `ready-for-agent` ticket that is unblocked, this track's and on no
-    /// branch of this clone. `sync` catches the track up with main.
+    /// branch of this clone; `chains` prints every open ticket of the
+    /// track under the one that blocks it. `sync` catches the track up
+    /// with main.
     /// `work` takes that ticket from start to retire without a person,
     /// syncing before each.
     #[command(args_conflicts_with_subcommands = true)]
@@ -420,6 +422,30 @@ pub(crate) enum TrackCommand {
         #[arg(long, value_name = "NAME")]
         track: Option<String>,
         /// Print the answer as one JSON object.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Every open ticket of the track under the ticket that blocks it,
+    /// one call in place of a walk over `blockedBy`: a chain starts at a
+    /// ticket no open ticket shown blocks and runs down through what it
+    /// unblocks, a ticket with two blockers is written out under the
+    /// first and named under the others, and the tickets with no edge
+    /// follow on their own. Each line carries the ticket's standing as
+    /// `next` judges it: `ready` or `a person's`, the branch of this
+    /// clone recording it, the open tickets it waits on. Reads the
+    /// tracker through the ticket module and writes no reading.
+    Chains {
+        /// The track, by name; default the branch's, `main` for a branch
+        /// on none and for a detached `HEAD`.
+        #[arg(long, value_name = "NAME")]
+        track: Option<String>,
+        /// Keep the tickets whose title names this crate before its colon
+        /// (`php_engine, ext/standard: ...`); `none` keeps the ones naming
+        /// no crate, the manifest rows, design revisions and decisions.
+        #[arg(long = "crate", value_name = "NAME")]
+        krate: Option<String>,
+        /// Print the rows as one JSON object, each with what it waits on
+        /// and what it blocks.
         #[arg(long)]
         json: bool,
     },

@@ -56,6 +56,7 @@ mod tally;
 pub mod test;
 pub mod ticket;
 pub mod track;
+pub mod track_chains;
 pub mod track_new;
 pub mod track_next;
 pub mod track_sync;
@@ -406,6 +407,15 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
             command: Some(TrackCommand::Next { track, json }),
             ..
         } => Some(track_next::command(root, track.as_deref(), *json)),
+        Command::Track {
+            command: Some(TrackCommand::Chains { track, krate, json }),
+            ..
+        } => Some(track_chains::command(
+            root,
+            track.as_deref(),
+            krate.as_deref(),
+            *json,
+        )),
         Command::Track {
             command: Some(TrackCommand::Sync),
             ..
