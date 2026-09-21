@@ -10,7 +10,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::coerce::{coerce_param, float_format, to_double, to_long, to_string};
+use php_ext::coerce::{Exponent, coerce_param, float_format, to_double, to_long, to_string};
 use php_ext::decl::{FunctionDecl, Parameter, Type};
 use php_ext::raising::{Level, Thrown, docref, fatal, throw, too_few_arguments};
 use php_ext::request::Request;
@@ -908,10 +908,16 @@ fn append_double(
         }
         _ => {
             let precision = if precision == 0 { 1 } else { precision };
-            let mut text = float_format(number, i32::try_from(precision).unwrap_or(i32::MAX));
-            if matches!(fmt, b'g' | b'h') {
-                text = text.replace('E', "e");
-            }
+            let exponent = if matches!(fmt, b'G' | b'H') {
+                Exponent::Upper
+            } else {
+                Exponent::Lower
+            };
+            let mut text = float_format(
+                number,
+                i32::try_from(precision).unwrap_or(i32::MAX),
+                exponent,
+            );
             let negative = text.starts_with('-');
             if !negative && spec.always_sign {
                 text.insert(0, '+');

@@ -102,6 +102,8 @@ call::skip_lazy_initialization
 call::write_prop
 call::write_static_prop
 coerce::BinaryOp
+coerce::Exponent
+coerce::Exponent::as_char
 coerce::binary_op
 coerce::callable_checked
 coerce::coerce_param

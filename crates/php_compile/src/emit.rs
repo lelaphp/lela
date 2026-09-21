@@ -94,7 +94,7 @@
 use std::cmp::Ordering;
 
 use php_heap::{
-    Fatal, Intern, Key, Number, Scalar, Zval, ZvalType, double_to_string, numeric_prefix,
+    Exponent, Fatal, Intern, Key, Number, Scalar, Zval, ZvalType, double_to_string, numeric_prefix,
 };
 use php_unit::decl::{
     Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstDecl,
@@ -6215,7 +6215,8 @@ impl Emit<'_> {
             return Ok(Some(self.string(n.to_string().as_bytes())?));
         }
         if let Some(d) = value.as_double() {
-            let text = self.string(double_to_string(d, self.precision).as_bytes())?;
+            let text =
+                self.string(double_to_string(d, self.precision, Exponent::Upper).as_bytes())?;
             if d.is_nan() {
                 self.raise(Level::Warning, "unexpected NAN value was coerced to string");
             }

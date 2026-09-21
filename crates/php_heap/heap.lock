@@ -31,6 +31,8 @@ Block::is_empty
 Block::len
 CallStack
 EntryGuard
+Exponent
+Exponent::as_char
 Fatal
 Frame
 Frame::is_empty

@@ -2219,7 +2219,7 @@ impl Request {
                     0 => 1,
                     precision => precision,
                 };
-                let text = php_heap::double_to_string(f, precision);
+                let text = php_heap::double_to_string(f, precision, php_heap::Exponent::Upper);
                 out.push_str(&text);
                 if f.is_finite() && !text.contains('.') {
                     out.push_str(".0");

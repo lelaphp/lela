@@ -54,7 +54,9 @@ pub use call_stack::{CallStack, call_stack_bounds, call_stack_default_size};
 pub use compare::{Scalar, compare, identical};
 pub use hooks::{Fatal, HeapHooks};
 pub use map::{MapPtr, MapTable};
-pub use numeric::{Number, double_to_string, numeric_prefix, power, shift_left, shift_right};
+pub use numeric::{
+    Exponent, Number, double_to_string, numeric_prefix, power, shift_left, shift_right,
+};
 pub use object::{Obj, ObjectId};
 pub use reference::Ref;
 pub use resource::{Res, ResourceType};

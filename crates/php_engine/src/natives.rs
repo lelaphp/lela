@@ -936,7 +936,8 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) {
         out.extend_from_slice(format!("{common}int({n})\n").as_bytes());
     } else if let Some(f) = value.as_float() {
         // `php_var_dump` prints a float with `%.*H` at `serialize_precision`.
-        let text = php_heap::double_to_string(f, req.serialize_precision());
+        let text =
+            php_heap::double_to_string(f, req.serialize_precision(), php_heap::Exponent::Upper);
         out.extend_from_slice(format!("{common}float({text})\n").as_bytes());
     } else if let Some(s) = value.as_php_string() {
         out.extend_from_slice(format!("{common}string({}) \"", s.len()).as_bytes());

@@ -14,7 +14,7 @@
 
 use std::cmp::Ordering;
 
-use crate::numeric::{Number, double_to_string, numeric_read};
+use crate::numeric::{Exponent, Number, double_to_string, numeric_read};
 
 /// One scalar as `zend_compare` switches on it: php's `IS_NULL`,
 /// `IS_FALSE` and `IS_TRUE`, `IS_LONG`, `IS_DOUBLE` and `IS_STRING`, in
@@ -276,7 +276,9 @@ fn double_to_string_cmp(d: f64, s: &[u8], precision: i32) -> Ordering {
     match numeric_read(s).filter(|r| !r.trailing).map(|r| r.number) {
         Some(Number::Long(l)) => three_way(d, Number::Long(l).double()),
         Some(Number::Double(sd)) => three_way(d, sd),
-        None => double_to_string(d, precision).as_bytes().cmp(s),
+        None => double_to_string(d, precision, Exponent::Upper)
+            .as_bytes()
+            .cmp(s),
     }
 }
 

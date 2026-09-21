@@ -168,12 +168,36 @@ pub(crate) fn numeric_read(bytes: &[u8]) -> Option<NumericRead> {
 /// which an integer is a double before it is read to the end.
 const MAX_LENGTH_OF_LONG: usize = 20;
 
+/// The exponent character `zend_gcvt` is handed, the fourth of its
+/// arguments: Zend prints every float with `E` (`smart_str_append_double`,
+/// `zend_double_to_str`, `var_export`, `%G` and `%H`), and `e` is what
+/// `php_json_encode_double` and `printf`'s `%g` and `%h` pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exponent {
+    /// `'E'`, Zend's own.
+    Upper,
+    /// `'e'`, json's and `%g`'s.
+    Lower,
+}
+
+impl Exponent {
+    /// The character itself.
+    #[must_use]
+    pub fn as_char(self) -> char {
+        match self {
+            Self::Upper => 'E',
+            Self::Lower => 'e',
+        }
+    }
+}
+
 /// `zend_gcvt` (`Zend/zend_strtod.c:4509`), which every float php prints
 /// goes through: `precision` significant digits when it is not negative,
 /// and the shortest text that reads back as the same double when it is,
 /// which is what `serialize_precision = -1` asks for. The form is php's:
 /// exponential when the decimal point stands past `ndigit` digits or more
-/// than three places before them, fixed otherwise.
+/// than three places before them, fixed otherwise, with the exponent
+/// character the caller passes, as php's callers each pass their own.
 ///
 /// ```php
 /// echo 2.5, "|", 1.0, "|", 0.1 + 0.2, "|", 1e25, "|", 0.00001, "|", 1/3, "|", -0.0, "|", INF, "|", -INF, "|", 5e-324, "|", 0.001;
@@ -193,8 +217,15 @@ const MAX_LENGTH_OF_LONG: usize = 20;
 /// float(1)
 /// float(5.0E-324)
 /// ```
+///
+/// ```php
+/// echo json_encode([1e25, 1e-5, 0.1, -2.5e-7]), "|", sprintf('%g', 1e25), "|", sprintf('%G', 1e25), "|", var_export(1e-5, true);
+/// ```
+/// ```expect
+/// [1.0e+25,1.0e-5,0.1,-2.5e-7]|1.0e+25|1.0E+25|1.0E-5
+/// ```
 #[must_use]
-pub fn double_to_string(value: f64, precision: i32) -> String {
+pub fn double_to_string(value: f64, precision: i32, exponent: Exponent) -> String {
     if value.is_nan() {
         return "NAN".to_owned();
     }
@@ -211,7 +242,7 @@ pub fn double_to_string(value: f64, precision: i32) -> String {
         out.push('-');
     }
     if (point >= 0 && point > ndigit) || point < -3 {
-        exponential(&mut out, &digits, point - 1);
+        exponential(&mut out, &digits, point - 1, exponent);
     } else {
         fixed(&mut out, &digits, point);
     }
@@ -239,14 +270,14 @@ fn significant(value: f64, precision: i32) -> (String, i32) {
     (digits, exponent.parse().unwrap_or(0) + 1)
 }
 
-/// `zend_gcvt`'s E-style: one digit, the point, the rest or a zero, and
-/// the exponent with its sign and no padding.
-fn exponential(out: &mut String, digits: &str, exponent: i32) {
+/// `zend_gcvt`'s E-style: one digit, the point, the rest or a zero, the
+/// exponent character, and the exponent with its sign and no padding.
+fn exponential(out: &mut String, digits: &str, exponent: i32, character: Exponent) {
     let (first, rest) = digits.split_at(1.min(digits.len()));
     out.push_str(first);
     out.push('.');
     out.push_str(if rest.is_empty() { "0" } else { rest });
-    out.push('E');
+    out.push(character.as_char());
     out.push(if exponent < 0 { '-' } else { '+' });
     out.push_str(&exponent.abs().to_string());
 }
@@ -393,9 +424,13 @@ mod tests {
             (f64::INFINITY, "INF"),
             (f64::NEG_INFINITY, "-INF"),
         ] {
-            assert_eq!(double_to_string(value, 14), text, "{value} at precision 14");
+            assert_eq!(
+                double_to_string(value, 14, Exponent::Upper),
+                text,
+                "{value} at precision 14"
+            );
         }
-        assert_eq!(double_to_string(f64::NAN, 14), "NAN");
+        assert_eq!(double_to_string(f64::NAN, 14, Exponent::Upper), "NAN");
 
         // `serialize_precision` at its -1 default, php's mode 0: the
         // shortest text that reads back as the same double.
@@ -408,11 +443,16 @@ mod tests {
             (5e-324, "5.0E-324"),
         ] {
             assert_eq!(
-                double_to_string(value, -1),
+                double_to_string(value, -1, Exponent::Upper),
                 text,
                 "{value} at serialize_precision -1"
             );
         }
+
+        // json's exponent character, and `%g`'s.
+        assert_eq!(double_to_string(1e25, -1, Exponent::Lower), "1.0e+25");
+        assert_eq!(double_to_string(1e-5, -1, Exponent::Lower), "1.0e-5");
+        assert_eq!(double_to_string(0.1, -1, Exponent::Lower), "0.1");
     }
 
     /// `oflow_info`: the sign of an integer that overflowed a long, set

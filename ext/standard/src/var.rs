@@ -10,7 +10,7 @@
 //! name rather than beside it, and no type or length anywhere.
 
 use php_ext::abi::PropertyPurpose;
-use php_ext::coerce::{float_format, to_string};
+use php_ext::coerce::{Exponent, float_format, to_string};
 use php_ext::decl::{ClassKind, ConstExpr, EnumBacking, FunctionDecl, Parameter, Type};
 use php_ext::raising::{Thrown, warning};
 use php_ext::request::Request;
@@ -538,7 +538,7 @@ fn export(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> 
     } else if let Some(f) = value.as_float() {
         // `smart_str_append_double` with `zero_fraction`: the text, and
         // `.0` after a finite one that carries no point of its own.
-        let text = float_format(f, req.serialize_precision());
+        let text = float_format(f, req.serialize_precision(), Exponent::Upper);
         out.extend_from_slice(text.as_bytes());
         if f.is_finite() && !text.contains('.') {
             out.extend_from_slice(b".0");

@@ -10,7 +10,7 @@
 
 use std::cmp::Ordering;
 
-use php_heap::{Number, Scalar, ZvalType, double_to_string, numeric_prefix};
+use php_heap::{Exponent, Number, Scalar, ZvalType, double_to_string, numeric_prefix};
 
 use php_unit::decl::Visibility;
 
@@ -48,7 +48,10 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, T
         ValueRef::Float(f) => {
             // `zend_double_to_str`: the text, then the warning php raises
             // when the value it converted was NAN.
-            let text = PhpString::new(req, double_to_string(f, req.precision()).as_bytes())?;
+            let text = PhpString::new(
+                req,
+                double_to_string(f, req.precision(), Exponent::Upper).as_bytes(),
+            )?;
             if f.is_nan() {
                 warning(req, "unexpected NAN value was coerced to string");
             }
@@ -333,7 +336,10 @@ pub(crate) fn match_unhandled_error(req: &mut Request, subject: &Value) -> Throw
                 0 => 1,
                 precision => precision,
             };
-            format!("Unhandled match case {}", double_to_string(f, precision))
+            format!(
+                "Unhandled match case {}",
+                double_to_string(f, precision, Exponent::Upper)
+            )
         }
         ValueRef::Str(s) => {
             let mut text = String::from("Unhandled match case '");
@@ -3836,7 +3842,7 @@ fn dval_to_lval_cap(d: f64) -> i64 {
 /// shortest digits, which is [`double_to_string`] under
 /// `serialize_precision`'s -1.
 fn rendered(d: f64) -> String {
-    String::from_utf8_lossy(double_to_string(d, -1).as_bytes()).into_owned()
+    String::from_utf8_lossy(double_to_string(d, -1, Exponent::Upper).as_bytes()).into_owned()
 }
 
 /// `ZEND_DOUBLE_FITS_LONG` on a 64-bit long: `(double) ZEND_LONG_MAX`

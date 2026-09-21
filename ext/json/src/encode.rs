@@ -13,7 +13,7 @@
 //! object and `false` for one with anything in it.
 
 use php_ext::call;
-use php_ext::coerce::numeric_string;
+use php_ext::coerce::{Exponent, float_format, numeric_string};
 use php_ext::decl::{ClassKind, EnumBacking, Visibility};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
@@ -146,78 +146,11 @@ fn held(
 /// `.0` appended under `JSON_PRESERVE_ZERO_FRACTION` where the text
 /// carries no decimal point.
 fn encode_double(buf: &mut Vec<u8>, value: f64, options: i64, precision: i32) {
-    let text = gcvt(value, precision);
+    let text = float_format(value, precision, Exponent::Lower);
     let bare = !text.contains('.');
     buf.extend_from_slice(text.as_bytes());
     if options & PRESERVE_ZERO_FRACTION != 0 && bare {
         buf.extend_from_slice(b".0");
-    }
-}
-
-/// `zend_gcvt(value, ndigit, '.', 'e', buf)` for a finite double:
-/// `ndigit` significant digits, or the shortest text that reads back as
-/// the same double where `serialize_precision` is negative, laid out
-/// exponentially when the point stands past seventeen digits or more
-/// than three places before them.
-fn gcvt(value: f64, precision: i32) -> String {
-    let ndigit = if precision < 0 { 17 } else { precision.max(1) };
-    let rendered = if precision < 0 {
-        format!("{:e}", value.abs())
-    } else {
-        let digits = usize::try_from(ndigit).unwrap_or(17).clamp(1, 17);
-        format!("{:.*e}", digits - 1, value.abs())
-    };
-    let (mantissa, exponent) = rendered.split_once('e').unwrap_or((rendered.as_str(), "0"));
-    let mut digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
-    while digits.len() > 1 && digits.ends_with('0') {
-        digits.pop();
-    }
-    let point: i32 = exponent.parse().unwrap_or(0) + 1;
-    let mut out = String::new();
-    if value.is_sign_negative() {
-        out.push('-');
-    }
-    if (point >= 0 && point > ndigit) || point < -3 {
-        exponential(&mut out, &digits, point - 1);
-    } else {
-        fixed(&mut out, &digits, point);
-    }
-    out
-}
-
-/// `zend_gcvt`'s E-style: one digit, the point, the rest or a zero, and
-/// the exponent with its sign and no padding.
-fn exponential(out: &mut String, digits: &str, exponent: i32) {
-    let (first, rest) = digits.split_at(1.min(digits.len()));
-    out.push_str(first);
-    out.push('.');
-    out.push_str(if rest.is_empty() { "0" } else { rest });
-    out.push('e');
-    out.push(if exponent < 0 { '-' } else { '+' });
-    out.push_str(&exponent.abs().to_string());
-}
-
-/// `zend_gcvt`'s standard format: the point before every digit when it
-/// stands before them, and among them otherwise.
-fn fixed(out: &mut String, digits: &str, point: i32) {
-    if point < 0 {
-        out.push_str("0.");
-        for _ in point..0 {
-            out.push('0');
-        }
-        out.push_str(digits);
-        return;
-    }
-    let at = usize::try_from(point).unwrap_or(0);
-    for i in 0..at {
-        out.push(digits.as_bytes().get(i).map_or('0', |b| char::from(*b)));
-    }
-    if at < digits.len() {
-        if at == 0 {
-            out.push('0');
-        }
-        out.push('.');
-        out.push_str(digits.get(at..).unwrap_or_default());
     }
 }
 

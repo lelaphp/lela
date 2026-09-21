@@ -11,6 +11,7 @@
 
 use std::cmp::Ordering;
 
+pub use php_heap::Exponent;
 use php_heap::ZvalType;
 use php_unit::decl::Type;
 
@@ -84,20 +85,46 @@ pub fn int_to_string(req: &mut Request, n: i64) -> Result<PhpString, Thrown> {
     PhpString::new(req, n.to_string().as_bytes())
 }
 
-/// `smart_str_append_double(buf, num, precision, false)`: the text php
-/// appends to a `smart_str`, `zend_gcvt` at `precision` with `-1`
-/// meaning the shortest text that reads back as the same double, and
-/// not yet a string of the request's. The `zero_fraction` half of php's
-/// call is the caller's, since only `var_export` asks for it.
+/// `zend_gcvt(f, precision, '.', exponent, buf)`, the one
+/// [`php_heap::double_to_string`] through the face: `precision`
+/// significant digits, or with `-1` the shortest text that reads back as
+/// the same double, in the form php chooses, and not yet a string of the
+/// request's. The exponent character is the caller's, as it is at each
+/// of php's call sites: `Exponent::Upper` for `var_export`, `%G` and
+/// `%H`, `Exponent::Lower` for `json_encode`, `%g` and `%h`. A
+/// `zero_fraction` such as `smart_str_append_double` takes is the
+/// caller's too, since only `var_export` and `json_encode` ask for it.
+///
+/// ```php
+/// echo var_export(1e25, true), "|", var_export(1e-5, true), "|", var_export(0.1, true), "|", json_encode([1e25, 1e-5, 0.1]), "|", sprintf('%.14G|%.14G|%.14G', 1e25, 1e-5, 0.1), "|", sprintf('%.14g', 1e25);
+/// ```
+/// ```expect
+/// 1.0E+25|1.0E-5|0.1|[1.0e+25,1.0e-5,0.1]|1.0E+25|1.0E-5|0.1|1.0e+25
+/// ```
+///
+/// ```php
+/// ini_set('serialize_precision', '14');
+/// ini_set('precision', '-1');
+/// echo var_export(1/3, true), "|", json_encode(1/3), "|", sprintf('%.14G', 1/3), "|", 1/3, "|", 0.1 + 0.2;
+/// ```
+/// ```expect
+/// 0.33333333333333|0.33333333333333|0.33333333333333|0.3333333333333333|0.30000000000000004
+/// ```
 #[must_use]
-pub fn float_format(f: f64, precision: i32) -> String {
-    php_heap::double_to_string(f, precision)
+pub fn float_format(f: f64, precision: i32, exponent: Exponent) -> String {
+    php_heap::double_to_string(f, precision, exponent)
 }
 
-/// A `float` as php prints it under the request's `precision` ini, as a
-/// string of the request's.
+/// `zend_double_to_str` without its NAN warning: a `float` as php prints
+/// it under the request's `precision` ini, `zend_gcvt` at `precision ?
+/// precision : 1` with `E`, as a string of the request's. The warning
+/// php raises for a NAN is [`to_string`]'s, which is `zval_get_string`.
 pub fn float_to_string(req: &mut Request, f: f64) -> Result<PhpString, Thrown> {
-    let text = float_format(f, req.precision());
+    let precision = match req.precision() {
+        0 => 1,
+        precision => precision,
+    };
+    let text = float_format(f, precision, Exponent::Upper);
     PhpString::new(req, text.as_bytes())
 }
 
