@@ -5,6 +5,7 @@
 //! not closing it.
 
 use crate::source::Diagnostic;
+use crate::value::Quote;
 
 use super::strings::Trigger;
 use super::{Lexer, State, is_label_continue, is_label_start};
@@ -175,7 +176,7 @@ impl Lexer<'_> {
                     if matches!(self.byte(self.pos + 1), b'\r' | b'\n') {
                         self.pos += 1;
                     } else {
-                        self.eat_escape();
+                        self.eat_escape(Quote::Heredoc);
                     }
                     continue;
                 }

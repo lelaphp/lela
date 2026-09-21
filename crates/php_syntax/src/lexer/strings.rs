@@ -9,6 +9,7 @@
 //! like Zend.
 
 use crate::source::{Diagnostic, Level};
+use crate::value::{self, Defect, Quote};
 
 use super::{Lexer, State, is_label_start};
 use crate::SyntaxKind;
@@ -64,6 +65,11 @@ impl Lexer<'_> {
     /// One dispatch step inside `"…"` or `` `…` ``.
     pub(crate) fn lex_quoted(&mut self, delim: u8, delim_kind: SyntaxKind) {
         let start = self.pos;
+        let quote = if delim == b'"' {
+            Quote::Double
+        } else {
+            Quote::Backquote
+        };
         if self.byte(start) == delim {
             self.pos = start + 1;
             self.emit(delim_kind, start);
@@ -75,14 +81,14 @@ impl Lexer<'_> {
             return;
         }
         // A text span up to the delimiter, the next trigger, or EOF.
-        while !self.scan_text_step(delim) {}
+        while !self.scan_text_step(delim, quote) {}
         self.emit(SyntaxKind::STRING_TEXT, start);
     }
 
     /// Advances over one text element; true when the span must end before
     /// the element at the current position (the closing delimiter, an
     /// interpolation trigger, or EOF).
-    fn scan_text_step(&mut self, delim: u8) -> bool {
+    fn scan_text_step(&mut self, delim: u8, quote: Quote) -> bool {
         if self.pos >= self.text.len() {
             return true;
         }
@@ -93,16 +99,21 @@ impl Lexer<'_> {
         if b == b'\\' {
             // Zend ST_DOUBLE_QUOTES and ST_BACKQUOTE: `\` skips any next
             // byte, newline included (heredoc differs; see heredoc.rs).
-            self.eat_escape();
+            self.eat_escape(quote);
         } else {
             self.pos += 1;
         }
         false
     }
 
-    /// Consumes `\X` (two bytes), with `\u{…}` held to php's rule: a
-    /// malformed or out-of-range escape raises php's `Invalid UTF-8
-    /// codepoint escape sequence` and the text goes on.
+    /// Steps over one `\` and what it escapes, as [`value::escape`]
+    /// reads it under the string's own mark, and raises what php's
+    /// scanner raises there: `Octal escape sequence overflow` as a
+    /// compile warning on three octal digits past `\377`, and `Invalid
+    /// UTF-8 codepoint escape sequence` as a parse error on a malformed
+    /// `\u{…}`, with the `: Codepoint too large` tail when the shape is
+    /// right and the number is not. After a malformed `\u{…}` the text
+    /// goes on from the `{`, as the value does.
     ///
     /// ```php
     /// echo "\u{zz}";
@@ -110,51 +121,15 @@ impl Lexer<'_> {
     /// ```expect exit=255
     /// Parse error: Invalid UTF-8 codepoint escape sequence in %s on line 2
     /// ```
-    pub(crate) fn eat_escape(&mut self) {
+    pub(crate) fn eat_escape(&mut self, quote: Quote) {
         let start = self.pos;
-        if self.byte(start + 1) == b'u' && self.byte(start + 2) == b'{' {
-            let mut i = start + 3;
-            let mut value: u32 = 0;
-            let mut overflow = false;
-            while self.byte(i).is_ascii_hexdigit() {
-                value = value
-                    .saturating_mul(16)
-                    .saturating_add(u32::from(hex_val(self.byte(i))));
-                overflow = overflow || value > 0x0010_FFFF;
-                i += 1;
-            }
-            let has_digits = i > start + 3;
-            if self.byte(i) == b'}' && has_digits && !overflow {
-                self.pos = i + 1; // a well-formed \u{…}
-                return;
-            }
-            let span_end = if self.byte(i) == b'}' { i + 1 } else { i };
-            let span = self.span(start, span_end.min(self.text.len()));
-            // php-src's text (probed 8.5.7): a too-large codepoint adds the
-            // `: Codepoint too large` tail; every other malformed `\u{…}`
-            // (empty, non-hex, signed, unterminated) is the bare text.
-            let text = if overflow {
-                "Invalid UTF-8 codepoint escape sequence: Codepoint too large"
-            } else {
-                "Invalid UTF-8 codepoint escape sequence"
-            };
-            let line = self.line(start);
-            self.diag(Diagnostic::new(span, line, text));
-            self.pos = start + 2; // recover after `\u`; the rest re-scans as text
-            return;
-        }
-        if matches!(self.byte(start + 1), b'0'..=b'7') {
-            // `\NNN`: up to three octal digits. Three that name more than
-            // 0377 are still one escape, one byte, and php warns as it
-            // scans (`zend_scan_escape_string`).
-            let mut i = start + 1;
-            while i < start + 4 && matches!(self.byte(i), b'0'..=b'7') {
-                i += 1;
-            }
-            if i == start + 4 && self.byte(start + 1) >= b'4' {
-                let span = self.span(start, i);
+        let escape = value::escape(self.text, start, quote);
+        match escape.defect {
+            Some(Defect::OctalOverflow) => {
+                let span = self.span(start, start + escape.len);
                 let line = self.line(start);
-                let digits = String::from_utf8_lossy(&self.text[start + 1..i]).into_owned();
+                let digits =
+                    String::from_utf8_lossy(&self.text[start + 1..start + escape.len]).into_owned();
                 self.diag(Diagnostic::of(
                     Level::CompileWarning,
                     span,
@@ -162,10 +137,19 @@ impl Lexer<'_> {
                     format!("Octal escape sequence overflow \\{digits} is greater than \\377"),
                 ));
             }
-            self.pos = i;
-            return;
+            Some(Defect::Codepoint { too_large, end }) => {
+                let span = self.span(start, end.min(self.text.len()));
+                let text = if too_large {
+                    "Invalid UTF-8 codepoint escape sequence: Codepoint too large"
+                } else {
+                    "Invalid UTF-8 codepoint escape sequence"
+                };
+                let line = self.line(start);
+                self.diag(Diagnostic::new(span, line, text));
+            }
+            None => {}
         }
-        self.pos = (start + 2).min(self.text.len());
+        self.pos = (start + escape.len).min(self.text.len());
     }
 
     /// Zend's interpolation triggers, shared by `"…"`, `` `…` `` and
@@ -366,16 +350,5 @@ impl Lexer<'_> {
         }
         self.pos = i;
         self.emit(SyntaxKind::ENCAPS_INT, start);
-    }
-}
-
-/// One hex digit's value; the one caller, the `\u{…}` scan in
-/// [`Lexer::eat_escape`], admits the byte with `is_ascii_hexdigit` first.
-fn hex_val(b: u8) -> u8 {
-    match b {
-        b'0'..=b'9' => b - b'0',
-        b'a'..=b'f' => b - b'a' + 10,
-        b'A'..=b'F' => b - b'A' + 10,
-        _ => 0,
     }
 }

@@ -109,6 +109,7 @@
 //! ```
 
 use crate::SyntaxKind;
+use crate::value::{self, TokenValue};
 
 /// php's name for a multi-character operator; nothing for any other kind,
 /// a single-character operator included, which `token_get_all` answers as
@@ -204,35 +205,17 @@ pub fn cast_name(text: &[u8]) -> &'static str {
 /// Does the text of an `INT` overflow php's 64-bit long? The lexer records
 /// the digits and nothing else; the reader owns the promotion of an
 /// overflowing `INT` to `T_DNUMBER`, which is where php's scanner makes it
-/// a double. A bad digit in a legacy octal (`08`) is the lexer's
-/// diagnostic, and php's `{LNUM}` rule then reads the digits before it as
-/// the number (`len = i`), so what overflows is that prefix: `08` does
-/// not, `0100000000000000000009` does.
+/// a double: [`value::number`], whose retry answers `Float`. A bad
+/// digit in a legacy octal (`08`) is the lexer's diagnostic, and php's
+/// `{LNUM}` rule then reads the digits before it as the number
+/// (`len = i`), so what overflows is that prefix: `08` does not,
+/// `0100000000000000000009` does.
 #[must_use]
 pub fn int_overflows(text: &[u8]) -> bool {
-    let digits: Vec<u8> = text.iter().copied().filter(|&b| b != b'_').collect();
-    let (radix, body): (u32, &[u8]) = match digits.as_slice() {
-        [b'0', b'x' | b'X', rest @ ..] => (16, rest),
-        [b'0', b'b' | b'B', rest @ ..] => (2, rest),
-        [b'0', b'o' | b'O', rest @ ..] => (8, rest),
-        // Legacy octal: a leading 0 and more digits.
-        [b'0', rest @ ..] if !rest.is_empty() => (8, rest),
-        all => (10, all),
-    };
-    let mut value: u128 = 0;
-    for &b in body {
-        let Some(d) = char::from(b).to_digit(radix) else {
-            break; // the prefix before a bad digit is the number php reads
-        };
-        value = match value
-            .checked_mul(u128::from(radix))
-            .and_then(|v| v.checked_add(u128::from(d)))
-        {
-            Some(v) => v,
-            None => return true,
-        };
-    }
-    value > u128::from(i64::MAX.unsigned_abs())
+    matches!(
+        value::number(SyntaxKind::INT, text).value,
+        TokenValue::Float(_)
+    )
 }
 
 /// The 8.1 ampersand split, recomputed from the bytes after the `&`, at

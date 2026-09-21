@@ -51,6 +51,7 @@ mod parser;
 mod php_names;
 mod source;
 pub mod tree;
+mod value;
 
 pub use kind::SyntaxKind;
 pub use lexer::{LexOptions, Lexed, Token, lex};
@@ -58,6 +59,7 @@ pub use line_index::{LineCol, LineIndex};
 pub use php_names::{amp_name, cast_name, int_overflows, magic_const_name, operator_name};
 pub use source::{Diagnostic, FileId, Level, MAX_FILE_LEN, Span, TextRange, load_bytes};
 pub use tree::{Missing, Tree};
+pub use value::{Holder, TokenValue};
 
 /// What the parser is told beside the source (design §4.1).
 #[derive(Debug, Clone, Default)]

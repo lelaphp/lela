@@ -7,11 +7,14 @@
 //! parser then says (`unexpected identifier "x_1"`, with the site's
 //! clause) this parser says at the same token. The one diagnostic raised
 //! here is the scanner's own: a legacy octal number with an `8` or a
-//! `9`, which php lexes whole and throws `Invalid numeric literal` on.
-//! Overflow is not read here: an integer that does not fit is the
-//! compiler's to fold to a float, as `zend_compile.c` does.
+//! `9`, which php lexes whole and throws `Invalid numeric literal` on,
+//! found by [`value::number`], the one reading of the digits in the
+//! crate. The value is not read here: an integer that does not fit is
+//! `TokenValue::Float` when the token's value is asked for, as the `LNUM`
+//! rule's retry makes it, and `T_DNUMBER` to `token_get_all`.
 
 use crate::source::Diagnostic;
+use crate::value::{self, Radix};
 
 use super::Lexer;
 use crate::SyntaxKind;
@@ -29,21 +32,13 @@ impl Lexer<'_> {
         let start = self.pos;
         // Radix-prefixed forms: HNUM, BNUM, ONUM. Without a digit after
         // the prefix the pattern fails and LNUM matches the `0` alone.
-        if self.byte(start) == b'0' {
-            let is_digit: Option<fn(&u8) -> bool> = match self.byte(start + 1) {
-                b'x' | b'X' => Some(u8::is_ascii_hexdigit),
-                b'b' | b'B' => Some(|b| matches!(b, b'0' | b'1')),
-                b'o' | b'O' => Some(|b| matches!(b, b'0'..=b'7')),
-                _ => None,
-            };
-            if let Some(is_digit) = is_digit {
-                self.pos = start + 2;
-                if !self.eat_digit_run(is_digit) {
-                    self.pos = start + 1;
-                }
-                self.emit(SyntaxKind::INT, start);
-                return;
+        if let Some(radix) = Radix::prefixed(self.text, start) {
+            self.pos = start + 2;
+            if !self.eat_digit_run(|b| radix.takes(b)) {
+                self.pos = start + 1;
             }
+            self.emit(SyntaxKind::INT, start);
+            return;
         }
 
         // Decimal and float. Zend's grammar, mirrored by longest match:
@@ -51,7 +46,7 @@ impl Lexer<'_> {
         //   DNUM   ({LNUM}?"."{LNUM})|({LNUM}"."{LNUM}?)
         //   EXPONENT_DNUM (({LNUM}|{DNUM})[eE][+-]?{LNUM})
         let mut is_float = false;
-        let has_int_part = self.eat_digit_run(u8::is_ascii_digit);
+        let has_int_part = self.eat_digit_run(|b| Radix::Decimal.takes(b));
         if self.byte(self.pos) == b'.' {
             // `.5` (the caller guarantees the digit), `1.5`, and trailing-dot
             // `1.` are all DNUM. A second `.` is never consumed (`1..2` is
@@ -59,7 +54,7 @@ impl Lexer<'_> {
             if has_int_part || self.byte(self.pos + 1).is_ascii_digit() {
                 self.pos += 1;
                 is_float = true;
-                self.eat_digit_run(u8::is_ascii_digit);
+                self.eat_digit_run(|b| Radix::Decimal.takes(b));
             }
         }
         // An exponent only when [eE][+-]?[0-9] follows: `1e` is INT(1)
@@ -72,18 +67,7 @@ impl Lexer<'_> {
             if self.byte(i).is_ascii_digit() {
                 self.pos = i;
                 is_float = true;
-                self.eat_digit_run(u8::is_ascii_digit);
-            }
-        }
-
-        if !is_float && self.byte(start) == b'0' && self.pos - start > 1 {
-            // Legacy octal: php-src lexes the digit span and throws
-            // `Invalid numeric literal` on an 8 or a 9 (probed 8.5.7: `08`,
-            // `0779`); one INT token here, the diagnostic on the digit.
-            if let Some(bad) = (start..self.pos).find(|&i| matches!(self.byte(i), b'8' | b'9')) {
-                let span = self.span(bad, bad + 1);
-                let line = self.line(bad);
-                self.diag(Diagnostic::new(span, line, "Invalid numeric literal"));
+                self.eat_digit_run(|b| Radix::Decimal.takes(b));
             }
         }
 
@@ -92,23 +76,32 @@ impl Lexer<'_> {
         } else {
             SyntaxKind::INT
         };
+        // Legacy octal: php-src lexes the digit span and throws
+        // `Invalid numeric literal` on an 8 or a 9 (probed 8.5.7: `08`,
+        // `0779`); one INT token here, the diagnostic on the digit.
+        if let Some(bad) = value::number(kind, &self.text[start..self.pos]).bad_digit {
+            let bad = start + bad;
+            let span = self.span(bad, bad + 1);
+            let line = self.line(bad);
+            self.diag(Diagnostic::new(span, line, "Invalid numeric literal"));
+        }
         self.emit(kind, start);
     }
 
     /// Consumes `D+(_D+)*` for the digit class: an underscore only
     /// between two digits, the span ending before one that is not. Whether
     /// a digit was consumed at all.
-    fn eat_digit_run(&mut self, is_digit: fn(&u8) -> bool) -> bool {
+    fn eat_digit_run(&mut self, is_digit: impl Fn(u8) -> bool) -> bool {
         let start = self.pos;
-        while is_digit(&self.byte(self.pos)) {
+        while is_digit(self.byte(self.pos)) {
             self.pos += 1;
         }
         if self.pos == start {
             return false;
         }
-        while self.byte(self.pos) == b'_' && is_digit(&self.byte(self.pos + 1)) {
+        while self.byte(self.pos) == b'_' && is_digit(self.byte(self.pos + 1)) {
             self.pos += 1;
-            while is_digit(&self.byte(self.pos)) {
+            while is_digit(self.byte(self.pos)) {
                 self.pos += 1;
             }
         }

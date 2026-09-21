@@ -194,14 +194,21 @@ fn malformed_unicode_escape() {
     assert_eq!(diags(b"<?php \"\\u{10FFFF}\\u x\";"), vec![]);
     // Enough hex digits to saturate u32: the accumulator must not
     // overflow past the saturation point. The unterminated variant also
-    // exercises the no-closer span path.
+    // exercises the no-closer span path, and php judges the shape before
+    // the size (`zend_scan_escape_string` walks to the `}` first), so it
+    // is malformed and not too large (probed 8.5.9), as is a run of hex
+    // digits that a byte other than `}` ends.
     assert_eq!(
         diags(b"<?php \"\\u{FFFFFFFFFF}\";"),
         vec![(format!("{INVALID_ESCAPE}: Codepoint too large"), 7, 14)]
     );
     assert_eq!(
         diags(b"<?php \"\\u{1F60aF60aF60a\";"),
-        vec![(format!("{INVALID_ESCAPE}: Codepoint too large"), 7, 16)]
+        vec![(INVALID_ESCAPE.into(), 7, 16)]
+    );
+    assert_eq!(
+        diags(b"<?php \"\\u{FFFFFFFFzz}\";"),
+        vec![(INVALID_ESCAPE.into(), 7, 11)]
     );
     // A heredoc is held to the same rule.
     assert_eq!(
