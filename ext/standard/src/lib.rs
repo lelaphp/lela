@@ -723,6 +723,36 @@ fn constant(name: &[u8], value: i64) -> ConstDecl {
 /// `ArgumentCountError`; `the_count_below_zero_and_the_arity_are_php_s`
 /// in `tests/capture.rs` holds that without the oracle.
 ///
+/// A `null` string is `zend_parse_arg_str_weak`'s: the 8.1 deprecation
+/// and the empty string written back into the frame, which the trace
+/// then prints; under `strict_types` it is the `TypeError`, and the
+/// trace prints what was passed.
+///
+/// ```php
+/// str_repeat(null, -1);
+/// ```
+/// ```expect exit=255
+/// Deprecated: str_repeat(): Passing null to parameter #1 ($string) of type string is deprecated in %s on line 2
+///
+/// Fatal error: Uncaught ValueError: str_repeat(): Argument #2 ($times) must be greater than or equal to 0 in %s:2
+/// Stack trace:
+/// #0 %s(2): str_repeat('', -1)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// declare(strict_types=1);
+/// str_repeat(null, 1);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: str_repeat(): Argument #1 ($string) must be of type string, null given in %s:3
+/// Stack trace:
+/// #0 %s(3): str_repeat(NULL, 1)
+/// #1 {main}
+///   thrown in %s on line 3
+/// ```
+///
 /// ```php
 /// str_repeat('a longer string than fifteen', -1);
 /// ```
@@ -1228,15 +1258,13 @@ fn wrong_argument_count(req: &mut Request, exactly: usize, given: usize) -> Thro
 }
 
 /// One `Z_PARAM_STR` of a native, the argument at `position` read off
-/// the call frame: `null` is the 8.1 deprecation and then the empty
-/// string, and what is there is coerced as php coerces a string
-/// parameter.
+/// the call frame, coerced as php coerces a string parameter
+/// (`zend_parse_arg_str_weak`): `null` is the 8.1 deprecation and then
+/// the empty string written back into the frame, so a trace taken
+/// after it prints `''` as php's does, and under `strict_types` the
+/// `TypeError`, both `coerce_param`'s.
 fn string_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown> {
     let given = req.argument(position).unwrap_or_default();
-    if matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
-        arg_null_deprecated(req, position, "string");
-        return PhpString::new(req, b"");
-    }
     let coerced = coerce_param(req, &given, &Type::String, position)?;
     match coerced.as_php_string() {
         Some(s) => Ok(*s),
