@@ -75,6 +75,7 @@ Heap::object_set_slot
 Heap::object_with
 Heap::objects
 Heap::reference
+Heap::reference_separate
 Heap::reference_set
 Heap::release
 Heap::release_string
@@ -149,6 +150,7 @@ ResourceType
 Scalar
 Scalar::is_true
 Slot
+SortEntry
 Str
 Str::addref
 Str::bytes
@@ -219,3 +221,4 @@ numeric_prefix
 power
 shift_left
 shift_right
+zend_sort

@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use php_compile::StackLimit;
 use php_heap::{
     Arr, Fatal, FrameRef, Heap, HeapHooks, Intern, MapTable, Obj, Ref, Res, ResourceType, Slot,
-    VmStack, Zval, ZvalRef,
+    SortEntry, VmStack, Zval, ZvalRef,
 };
 use php_unit::decl::{
     Attribute, ClassConstDecl, ClassDecl, ClassKind, FunctionDecl, MethodDecl, Name, PropertyDecl,
@@ -7795,14 +7795,27 @@ impl Request {
         self.fatal_of(separated)
     }
 
-    /// `zend_hash_sort` over `a`, which has one owner, keys kept.
+    /// `zend_hash_sort` over `a`, which has one owner: the comparison
+    /// carried through seam 1, since a `usort` callback runs PHP code,
+    /// and the keys dropped under `renumber`.
     pub(crate) fn array_sort(
         &mut self,
         a: Arr,
-        compare: &mut dyn FnMut(Zval, Zval) -> std::cmp::Ordering,
+        renumber: bool,
+        compare: &mut dyn FnMut(&mut Request, &SortEntry, &SortEntry) -> std::cmp::Ordering,
     ) -> Result<(), Thrown> {
-        let sorted = self.heap.array_sort(a, compare);
+        let sorted = Heap::array_sort(&mut Hooks(self), a, renumber, &mut |hooks, x, y| {
+            compare(hooks.0, x, y)
+        });
         self.fatal_of(sorted)
+    }
+
+    /// `SEPARATE_ZVAL_NOREF` on what `r` holds, what
+    /// [`PhpRef::separate_array`] is: the array in the cell with one
+    /// owner, a copy written into the cell where it had more.
+    pub(crate) fn reference_separate(&mut self, r: Ref) -> Result<Option<Arr>, Thrown> {
+        let separated = self.heap.reference_separate(r);
+        self.fatal_of(separated)
     }
 
     /// What the heap answered, as the native sees it: the value, or the

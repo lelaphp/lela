@@ -43,11 +43,12 @@ mod object;
 mod payload;
 mod reference;
 mod resource;
+mod sort;
 mod stack;
 mod string;
 mod zval;
 
-pub use array::{Arr, ArrIter, Key, canonical_int};
+pub use array::{Arr, ArrIter, Key, SortEntry, canonical_int};
 pub use block::Block;
 pub use call_stack::{CallStack, call_stack_bounds, call_stack_default_size};
 pub use compare::{Scalar, compare, identical};
@@ -57,6 +58,7 @@ pub use numeric::{Number, double_to_string, numeric_prefix, power, shift_left, s
 pub use object::{Obj, ObjectId};
 pub use reference::Ref;
 pub use resource::{Res, ResourceType};
+pub use sort::zend_sort;
 pub use stack::{EntryGuard, Frame, FrameRef, Slot, VmStack};
 pub use string::{Intern, Str, Strings};
 pub use zval::{Zval, ZvalRef, ZvalType};

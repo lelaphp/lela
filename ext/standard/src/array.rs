@@ -1,16 +1,20 @@
 //! The natives of `array.c` declared so far, and what they sort with:
-//! `array_unique` over php's `zend_sort` (`Z/Zend/zend_sort.c`), copied
-//! because the order it leaves a stretch of equal elements in is what decides
-//! which of them survives a comparison that is not transitive, and
-//! `strnatcmp_ex` (`Z/ext/standard/strnatcmp.c`) for `SORT_NATURAL`.
+//! `sort` and `usort` over the face's `PhpArray::sort_by`, `array_unique`
+//! over `zend_sort` itself on an index table of its own, both the one
+//! statement of php's hybrid in `php_heap`, because the order it leaves
+//! a stretch of equal elements in is what decides which of them survives
+//! a comparison that is not transitive; and `strnatcmp_ex`
+//! (`Z/ext/standard/strnatcmp.c`) for `SORT_NATURAL`.
 
 use std::cmp::Ordering;
 
-use php_ext::coerce::{coerce_param, compare, to_double, to_string};
+use php_ext::abi::Callable;
+use php_ext::call::call;
+use php_ext::coerce::{callable_checked, coerce_param, compare, to_double, to_long, to_string};
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Parameter, Type};
-use php_ext::raising::Thrown;
+use php_ext::raising::{Level, Thrown, arg_type_error, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, Value};
+use php_ext::values::{Key, PhpArray, Value, ValueRef, zend_sort};
 
 use crate::output::Entry;
 use crate::{argument_count_between, constant, declared, long_argument, parameter};
@@ -60,7 +64,7 @@ pub(crate) fn constants() -> Vec<ConstDecl> {
 /// renders it as the oracle does.
 ///
 /// ```php
-/// echo new ReflectionFunction('array_unique');
+/// echo new ReflectionFunction('array_unique'), new ReflectionFunction('sort'), new ReflectionFunction('usort');
 /// ```
 /// ```expect
 /// Function [ <internal:standard> function array_unique ] {
@@ -71,24 +75,336 @@ pub(crate) fn constants() -> Vec<ConstDecl> {
 ///   }
 ///   - Return [ array ]
 /// }
+/// Function [ <internal:standard> function sort ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> array &$array ]
+///     Parameter #1 [ <optional> int $flags = SORT_REGULAR ]
+///   }
+///   - Return [ true ]
+/// }
+/// Function [ <internal:standard> function usort ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> array &$array ]
+///     Parameter #1 [ <required> callable $callback ]
+///   }
+///   - Return [ true ]
+/// }
 /// ```
 pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![(
-        declared(
-            b"array_unique",
-            &[
-                parameter(b"array", Type::Array),
-                Parameter {
-                    default: Some(ConstExpr::Constant(php_ext::decl::Name(
-                        b"SORT_STRING".as_slice().into(),
-                    ))),
-                    ..parameter(b"flags", Type::Int)
-                },
-            ],
-            Type::Array,
+    let flags = |default: &[u8]| Parameter {
+        default: Some(ConstExpr::Constant(php_ext::decl::Name(default.into()))),
+        ..parameter(b"flags", Type::Int)
+    };
+    let by_ref_array = || Parameter {
+        by_ref: true,
+        ..parameter(b"array", Type::Array)
+    };
+    vec![
+        (
+            declared(
+                b"sort",
+                &[by_ref_array(), flags(b"SORT_REGULAR")],
+                Type::True,
+            ),
+            sort,
         ),
-        array_unique,
-    )]
+        (
+            declared(
+                b"usort",
+                &[by_ref_array(), parameter(b"callback", Type::Callable)],
+                Type::True,
+            ),
+            usort,
+        ),
+        (
+            declared(
+                b"array_unique",
+                &[parameter(b"array", Type::Array), flags(b"SORT_STRING")],
+                Type::Array,
+            ),
+            array_unique,
+        ),
+    ]
+}
+
+/// `sort(array &$array, int $flags = SORT_REGULAR): true`, php's
+/// `PHP_FUNCTION(sort)` (`Z/ext/standard/array.c:780`): the array the
+/// reference holds, separated in the cell, sorted in place by the
+/// comparison `$flags` names with the bucket-order fallback
+/// (`php_get_data_compare_func`) and renumbered, `zend_hash_sort` with
+/// `renumber`. Under `SORT_REGULAR` the comparison is `zend_compare`,
+/// which over mixed types is not transitive, and the order it leaves is
+/// `zend_sort`'s walk over those answers, php's to the element.
+///
+/// ```php
+/// $a = [1, "1", 2, 2.0, "a", "A", null, "", false, true]; var_dump(sort($a), $a);
+/// ```
+/// ```expect
+/// bool(true)
+/// array(10) {
+///   [0]=>
+///   NULL
+///   [1]=>
+///   string(0) ""
+///   [2]=>
+///   bool(false)
+///   [3]=>
+///   int(1)
+///   [4]=>
+///   string(1) "1"
+///   [5]=>
+///   int(2)
+///   [6]=>
+///   float(2)
+///   [7]=>
+///   string(1) "A"
+///   [8]=>
+///   string(1) "a"
+///   [9]=>
+///   bool(true)
+/// }
+/// ```
+///
+/// The other comparisons `$flags` names, and `SORT_FLAG_CASE` read off
+/// them.
+///
+/// ```php
+/// $a = [3, "10", 9, "9a", 1.5]; $b = $a; sort($a, SORT_STRING); sort($b, SORT_NUMERIC); $c = ["img12", "img10", "IMG2"]; sort($c, SORT_NATURAL | SORT_FLAG_CASE); echo json_encode($a), json_encode($b), json_encode($c), "\n";
+/// ```
+/// ```expect
+/// [1.5,"10",3,9,"9a"][1.5,3,9,"9a","10"]["IMG2","img10","img12"]
+/// ```
+///
+/// A shared array is copied into the variable before it is sorted, so
+/// the other holder keeps its order, `SEPARATE_ZVAL_NOREF`; anything
+/// but an array in the variable is php's `TypeError`, and an array
+/// written in the call cannot be passed by reference at all.
+///
+/// ```php
+/// $a = [3, 1, 2]; $shared = $a; sort($a); $s = "x"; try { sort($s); } catch (TypeError $e) { echo $e->getMessage(), "\n"; } echo json_encode($shared), json_encode($a), "\n";
+/// ```
+/// ```expect
+/// sort(): Argument #1 ($array) must be of type array, string given
+/// [3,1,2][1,2,3]
+/// ```
+///
+/// ```php
+/// sort([2, 1]);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: sort(): Argument #1 ($array) could not be passed by reference in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+fn sort(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 2)?;
+    let mut target = array_by_reference(req, 1)?;
+    let flags = if req.argument_count() == 2 {
+        long_argument(req, 2)?
+    } else {
+        SORT_REGULAR
+    };
+    let sorted = target
+        .array
+        .sort_by(req, true, |req, a, b| compared(req, flags, a, b));
+    target.finish(req);
+    sorted?;
+    Ok(Value::bool(true))
+}
+
+/// `usort(array &$array, callable $callback): true`, php's
+/// `PHP_FUNCTION(usort)` over `php_usort` (`Z/ext/standard/array.c:878`):
+/// the array copied first, `zend_array_dup`, so the callback sees the
+/// caller's array unchanged while the copy is sorted with
+/// `php_array_user_compare`, and the copy written into the caller's
+/// variable after, whatever the sort raised. An empty array is left
+/// alone, not copied. The callback's answer is read as `php_get_long`
+/// reads it and normalised to a sign, so a constant answer of `1` or
+/// `-1` never falls back to the bucket order and what is left is
+/// `zend_sort`'s walk alone; `0` falls back every time and leaves the
+/// array as it was.
+///
+/// ```php
+/// $seven = [1, 2, 3, 4, 5, 6, 7]; usort($seven, fn($a, $b) => 1);
+/// $twenty = []; for ($i = 1; $i <= 20; $i++) $twenty[] = $i; $less = $twenty; usort($twenty, fn($a, $b) => 1); usort($less, fn($a, $b) => -1);
+/// $zero = [3, 1, 2]; usort($zero, fn($a, $b) => 0);
+/// echo json_encode($seven), "\n", json_encode($twenty), "\n", json_encode($less), "\n", json_encode($zero), "\n";
+/// ```
+/// ```expect
+/// [6,7,5,4,3,2,1]
+/// [16,14,15,12,13,19,2,8,9,6,7,5,4,3,17,10,18,11,20,1]
+/// [1,12,19,18,17,16,15,14,13,11,2,10,9,8,7,6,5,4,3,20]
+/// [3,1,2]
+/// ```
+///
+/// A bool answer is the 8.0 deprecation, once per call, and `false` is
+/// asked again with the operands swapped; a string answer is read as a
+/// long.
+///
+/// ```php
+/// $a = [3, 1, 2]; usort($a, fn($x, $y) => $x > $y); $b = [3, 1, 2]; usort($b, fn($x, $y) => $x < $y); $c = [3, 1, 2]; var_dump(usort($c, fn($x, $y) => "2abc")); echo json_encode($a), json_encode($b), json_encode($c), "\n";
+/// ```
+/// ```expect
+///
+/// Deprecated: usort(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero in %s on line 2
+///
+/// Deprecated: usort(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero in %s on line 2
+/// bool(true)
+/// [1,2,3][3,2,1][1,2,3]
+/// ```
+///
+/// A callback that throws ends the calls but not the sort: every
+/// comparison after it answers by bucket order, the copy is written
+/// into the variable as it stands, and what was thrown is raised from the
+/// native.
+///
+/// ```php
+/// $a = [3, 1, 2, 5, 4]; $seen = 0; try { usort($a, function ($x, $y) use (&$seen) { if (++$seen == 3) throw new Exception("stop"); return $x <=> $y; }); } catch (Exception $e) { echo $e->getMessage(), "\n"; } echo json_encode($a), " ", $seen, "\n";
+/// ```
+/// ```expect
+/// stop
+/// [1,3,2,5,4] 3
+/// ```
+///
+/// ```php
+/// $a = [1]; usort($a, "no_such_function");
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: usort(): Argument #2 ($callback) must be a valid callback, function "no_such_function" not found or invalid function name in %s:2
+/// Stack trace:
+/// #0 %s(2): usort(Array, 'no_such_functio...')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+fn usort(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 2, 2)?;
+    let given = req.argument(1).unwrap_or_default();
+    let coerced = coerce_param(req, &given, &Type::Array, 1)?;
+    let callback = callable_argument(req, 2)?;
+    let Some(array) = coerced.as_array().copied() else {
+        return Ok(Value::bool(true));
+    };
+    if array.is_empty() {
+        return Ok(Value::bool(true));
+    }
+    let mut copy = array.copy(req)?;
+    let mut deprecated = false;
+    let sorted = copy.sort_by(req, true, |req, a, b| {
+        user_compare(req, &callback, &mut deprecated, a, b)
+    });
+    match given.as_ref() {
+        ValueRef::Reference(reference) => reference.set(req, copy.to_value()),
+        _ => req.release(copy.to_value()),
+    }
+    sorted?;
+    Ok(Value::bool(true))
+}
+
+/// `php_array_user_compare_unstable` (`Z/ext/standard/array.c:826`):
+/// the callback over the two values, its answer read as `php_get_long`
+/// reads it and normalised to a sign, `ZEND_NORMALIZE_BOOL`. A bool is
+/// the deprecation, raised once per sort as `ARRAYG(compare_deprecation_thrown)`
+/// holds it, and `false` is the callback asked again with the operands
+/// swapped and that answer's sign reversed, since `$a > $b` returning
+/// `false` says nothing about which is less.
+fn user_compare(
+    req: &mut Request,
+    callback: &Callable,
+    deprecated: &mut bool,
+    a: &Value,
+    b: &Value,
+) -> Result<Ordering, Thrown> {
+    let answer = call(req, callback, &[*a, *b])?;
+    if let ValueRef::Bool(truth) = answer.as_ref() {
+        if !*deprecated {
+            docref(
+                req,
+                Level::Deprecated,
+                "Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero",
+            );
+            *deprecated = true;
+        }
+        if !truth {
+            let swapped = call(req, callback, &[*b, *a])?;
+            let sign = answer_sign(req, swapped)?;
+            return Ok(sign.reverse());
+        }
+    }
+    answer_sign(req, answer)
+}
+
+/// `ZEND_NORMALIZE_BOOL(php_get_long(&retval))`, the answer given up.
+fn answer_sign(req: &mut Request, answer: Value) -> Result<Ordering, Thrown> {
+    let long = to_long(req, &answer);
+    req.release(answer);
+    Ok(long?.cmp(&0))
+}
+
+/// One `Z_PARAM_FUNC` of a native, php's `"F"`: the argument at
+/// `position` resolved into the callee it names, `zend_parse_arg_func`
+/// over `zend_is_callable_ex`, so a callback is held to being one where
+/// it is taken and not where it is served. The sentence a miss takes is
+/// php's `*error` for that miss, the one `zend_is_callable_ex` wrote.
+fn callable_argument(req: &mut Request, position: u32) -> Result<Callable, Thrown> {
+    let given = req.argument(position).unwrap_or_default().deref();
+    match callable_checked(req, &given) {
+        Ok(callable) => Ok(callable),
+        Err(why) => Err(arg_type_error(
+            req,
+            position,
+            &format!("be a valid callback, {why}"),
+        )),
+    }
+}
+
+/// What `Z_PARAM_ARRAY_EX(array, 0, 1)` on a by-reference parameter
+/// separated: the array in the caller's reference, written in place, or
+/// a copy of an argument that came by value, `call_user_func('sort', $a)`
+/// past its warning, which is sorted and given up, as php's sort of
+/// the argument slot is read by nobody.
+struct SortTarget {
+    array: PhpArray,
+    copied: bool,
+}
+
+impl SortTarget {
+    /// The copy given up; the caller's array left where the caller
+    /// reads it.
+    fn finish(self, req: &mut Request) {
+        if self.copied {
+            req.release(self.array.to_value());
+        }
+    }
+}
+
+/// `Z_PARAM_ARRAY_EX(array, 0, 1)` at `position`: php's `TypeError` for
+/// anything but an array, `ZVAL_DEREF` and `SEPARATE_ZVAL_NOREF` on the
+/// reference the argument is, so that what the native sorts is what the
+/// caller holds. An argument that is no reference is copied, which is
+/// what php's separation of the argument slot comes to for every such
+/// argument but a temporary with one owner.
+fn array_by_reference(req: &mut Request, position: u32) -> Result<SortTarget, Thrown> {
+    let given = req.argument(position).unwrap_or_default();
+    let coerced = coerce_param(req, &given, &Type::Array, position)?;
+    if let ValueRef::Reference(reference) = given.as_ref()
+        && let Some(array) = reference.separate_array(req)?
+    {
+        return Ok(SortTarget {
+            array,
+            copied: false,
+        });
+    }
+    let array = match coerced.as_array() {
+        Some(array) => array.copy(req)?,
+        None => PhpArray::new(req)?,
+    };
+    Ok(SortTarget {
+        array,
+        copied: true,
+    })
 }
 
 /// `array_unique(array $array, int $flags = SORT_STRING): array`, php's
@@ -367,206 +683,6 @@ fn as_strings(
     req.release(Value::string(x));
     req.release(Value::string(y));
     Ok(ordering)
-}
-
-// -------------------------------------------------- zend_sort
-
-/// `zend_sort` (`Z/Zend/zend_sort.c:248`), libc++'s hybrid as php
-/// carries it: insertion sort at sixteen elements or fewer, else a
-/// pivot chosen by a three-element network, five past a thousand,
-/// swapped to the second slot and partitioned, the smaller side
-/// recursed and the larger looped. The element order this leaves is
-/// php's for any comparison, transitive or not.
-fn zend_sort<T>(v: &mut [T], cmp: &mut dyn FnMut(&T, &T) -> Ordering) {
-    let mut base = 0;
-    let mut n = v.len();
-    loop {
-        if n <= 16 {
-            insert_sort(&mut v[base..base + n], cmp);
-            return;
-        }
-        let start = base;
-        let end = base + n;
-        let offset = n >> 1;
-        let mut pivot = start + offset;
-        if n >> 10 != 0 {
-            let delta = offset >> 1;
-            sort5(
-                v,
-                [start, start + delta, pivot, pivot + delta, end - 1],
-                cmp,
-            );
-        } else {
-            sort3(v, [start, pivot, end - 1], cmp);
-        }
-        v.swap(start + 1, pivot);
-        pivot = start + 1;
-        let mut i = pivot + 1;
-        let mut j = end - 1;
-        'partition: loop {
-            while greater(v, pivot, i, cmp) {
-                i += 1;
-                if i == j {
-                    break 'partition;
-                }
-            }
-            j -= 1;
-            if j == i {
-                break 'partition;
-            }
-            while greater(v, j, pivot, cmp) {
-                j -= 1;
-                if j == i {
-                    break 'partition;
-                }
-            }
-            v.swap(i, j);
-            i += 1;
-            if i == j {
-                break 'partition;
-            }
-        }
-        v.swap(pivot, i - 1);
-        if (i - 1) - start < end - i {
-            zend_sort(&mut v[start..i - 1], cmp);
-            base = i;
-            n = end - i;
-        } else {
-            zend_sort(&mut v[i..end], cmp);
-            n = i - start - 1;
-        }
-    }
-}
-
-/// `cmp(a, b) > 0`.
-fn greater<T>(v: &[T], a: usize, b: usize, cmp: &mut dyn FnMut(&T, &T) -> Ordering) -> bool {
-    cmp(&v[a], &v[b]) == Ordering::Greater
-}
-
-/// `zend_insert_sort` (`Z/Zend/zend_sort.c:84`): the networks up to
-/// five elements, and past them an insertion sort that walks the first
-/// six back one slot at a time and the rest two at a time.
-fn insert_sort<T>(v: &mut [T], cmp: &mut dyn FnMut(&T, &T) -> Ordering) {
-    match v.len() {
-        0 | 1 => {}
-        2 => sort2(v, 0, 1, cmp),
-        3 => sort3(v, [0, 1, 2], cmp),
-        4 => sort4(v, [0, 1, 2, 3], cmp),
-        5 => sort5(v, [0, 1, 2, 3, 4], cmp),
-        len => {
-            let sentry = 6;
-            for i in 1..sentry {
-                let mut j = i - 1;
-                if !greater(v, j, i, cmp) {
-                    continue;
-                }
-                while j != 0 {
-                    j -= 1;
-                    if !greater(v, j, i, cmp) {
-                        j += 1;
-                        break;
-                    }
-                }
-                slide(v, i, j);
-            }
-            for i in sentry..len {
-                let mut j = i - 1;
-                if !greater(v, j, i, cmp) {
-                    continue;
-                }
-                loop {
-                    j -= 2;
-                    if !greater(v, j, i, cmp) {
-                        j += 1;
-                        if !greater(v, j, i, cmp) {
-                            j += 1;
-                        }
-                        break;
-                    }
-                    if j == 0 {
-                        break;
-                    }
-                    if j == 1 {
-                        j -= 1;
-                        if greater(v, i, j, cmp) {
-                            j += 1;
-                        }
-                        break;
-                    }
-                }
-                slide(v, i, j);
-            }
-        }
-    }
-}
-
-/// The swap loop that moves the element at `from` down to `to`.
-fn slide<T>(v: &mut [T], from: usize, to: usize) {
-    let mut k = from;
-    while k > to {
-        v.swap(k, k - 1);
-        k -= 1;
-    }
-}
-
-/// `zend_sort_2`.
-fn sort2<T>(v: &mut [T], a: usize, b: usize, cmp: &mut dyn FnMut(&T, &T) -> Ordering) {
-    if greater(v, a, b, cmp) {
-        v.swap(a, b);
-    }
-}
-
-/// `zend_sort_3`.
-fn sort3<T>(v: &mut [T], [a, b, c]: [usize; 3], cmp: &mut dyn FnMut(&T, &T) -> Ordering) {
-    if !greater(v, a, b, cmp) {
-        if !greater(v, b, c, cmp) {
-            return;
-        }
-        v.swap(b, c);
-        if greater(v, a, b, cmp) {
-            v.swap(a, b);
-        }
-        return;
-    }
-    if !greater(v, c, b, cmp) {
-        v.swap(a, c);
-        return;
-    }
-    v.swap(a, b);
-    if greater(v, b, c, cmp) {
-        v.swap(b, c);
-    }
-}
-
-/// `zend_sort_4`, over the four positions `at`.
-fn sort4<T>(v: &mut [T], at: [usize; 4], cmp: &mut dyn FnMut(&T, &T) -> Ordering) {
-    sort3(v, [at[0], at[1], at[2]], cmp);
-    if greater(v, at[2], at[3], cmp) {
-        v.swap(at[2], at[3]);
-        if greater(v, at[1], at[2], cmp) {
-            v.swap(at[1], at[2]);
-            if greater(v, at[0], at[1], cmp) {
-                v.swap(at[0], at[1]);
-            }
-        }
-    }
-}
-
-/// `zend_sort_5`, over the five positions `at`.
-fn sort5<T>(v: &mut [T], at: [usize; 5], cmp: &mut dyn FnMut(&T, &T) -> Ordering) {
-    sort4(v, [at[0], at[1], at[2], at[3]], cmp);
-    if greater(v, at[3], at[4], cmp) {
-        v.swap(at[3], at[4]);
-        if greater(v, at[2], at[3], cmp) {
-            v.swap(at[2], at[3]);
-            if greater(v, at[1], at[2], cmp) {
-                v.swap(at[1], at[2]);
-                if greater(v, at[0], at[1], cmp) {
-                    v.swap(at[0], at[1]);
-                }
-            }
-        }
-    }
 }
 
 // -------------------------------------------------- strnatcmp_ex

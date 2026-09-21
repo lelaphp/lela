@@ -38,6 +38,7 @@ use std::ptr::NonNull;
 use crate::gc::{self, Refcounted};
 use crate::hooks::{Fatal, HeapHooks};
 use crate::mm::Mm;
+use crate::sort::zend_sort;
 use crate::string::Str;
 use crate::{Heap, Zval, ZvalRef, ZvalType};
 
@@ -316,6 +317,22 @@ struct Bucket {
 pub enum Key {
     Long(i64),
     Str(Str),
+}
+
+/// One element as `zend_hash_sort` hands it to the comparison: php's
+/// `Bucket`, its key and value, with `Z_EXTRA(val)` set to the position
+/// the element held before the sort, which is what the stable
+/// comparators of `array.c` fall back to when two elements compare
+/// equal (`RETURN_STABLE_SORT`, `stable_sort_fallback`). A view: naming
+/// the value takes no owner.
+#[derive(Clone, Copy, Debug)]
+pub struct SortEntry {
+    /// The key, as [`Arr::iter`] reads it.
+    pub key: Key,
+    /// The value, a view of it.
+    pub val: Zval,
+    /// `Z_EXTRA`: where the element stood, holes compacted, before the sort.
+    pub position: u32,
 }
 
 /// `ZEND_HANDLE_NUMERIC_STR` itself (`_zend_handle_numeric_str_ex`,
@@ -1538,33 +1555,117 @@ impl crate::Heap {
         Ok(copy)
     }
 
-    /// `zend_hash_sort` without renumbering: the holes compacted, the
-    /// elements sorted by `compare`, stable as php's `sort()` is since
-    /// 8.0, the internal pointer reset and the chains rebuilt. A packed
-    /// table becomes a hash table first, as php's does.
-    pub fn array_sort(
-        &mut self,
+    /// `zend_hash_sort_ex` (`Z/Zend/zend_hash.c:3077`) with
+    /// [`zend_sort`] as its sort, the one every sort native runs: a
+    /// packed table made a hash table first, the holes compacted and
+    /// each element handed to `compare` with the position it held, the
+    /// buckets ordered as php's hybrid orders them for any comparison,
+    /// the internal pointer reset, and then the chains rebuilt where the
+    /// keys are kept, or under `renumber` the keys dropped, `nNextFreeElement`
+    /// set past the last, and the table laid down packed in a fresh
+    /// allocation with the hash table's given back. Nothing here is
+    /// stable of itself: php's stable order is the caller's comparison
+    /// falling back to [`SortEntry::position`], `RETURN_STABLE_SORT`, and
+    /// a caller that wants `zend_sort`'s own order leaves it out. The
+    /// hooks carry the comparison to the code it may serve, a `usort`
+    /// callback, and are the heap after it. An empty table is left as it
+    /// is; one element is renumbered where php renumbers it.
+    ///
+    /// The renumbered array is packed, so its keys are gone and the
+    /// next append lands past the last; a hole and a string key vanish
+    /// with the rest.
+    ///
+    /// ```php
+    /// $a = ["x" => 3, 5 => 1, "y" => 2, 9 => 1]; unset($a[5]); sort($a); $a[] = 7; var_dump($a);
+    /// $one = [4 => "a"]; sort($one); var_dump($one);
+    /// ```
+    /// ```expect
+    /// array(4) {
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(2)
+    ///   [2]=>
+    ///   int(3)
+    ///   [3]=>
+    ///   int(7)
+    /// }
+    /// array(1) {
+    ///   [0]=>
+    ///   string(1) "a"
+    /// }
+    /// ```
+    pub fn array_sort<H: HeapHooks + ?Sized>(
+        hooks: &mut H,
         a: Arr,
-        compare: &mut dyn FnMut(Zval, Zval) -> Ordering,
+        renumber: bool,
+        compare: &mut dyn FnMut(&mut H, &SortEntry, &SortEntry) -> Ordering,
     ) -> Result<(), Fatal> {
-        if a.len() <= 1 {
+        // `!(nNumOfElements > 1) && !(renumber && nNumOfElements > 0)`.
+        if a.len() <= 1 && (!renumber || a.is_empty()) {
             return Ok(());
         }
         if a.is_packed() {
-            a.packed_to_hash(&mut self.mm)?;
+            a.packed_to_hash(&mut hooks.heap().mm)?;
         }
-        let mut buckets: Vec<Bucket> = (0..a.num_used())
+        let mut entries: Vec<SortEntry> = (0..a.num_used())
             .map(|i| a.read_bucket(i))
             .filter(|b| !b.val.is_undef())
+            .enumerate()
+            .map(|(position, b)| SortEntry {
+                key: match b.key {
+                    Some(s) => Key::Str(s),
+                    None => Key::Long(b.h.cast_signed()),
+                },
+                val: b.val,
+                position: position as u32,
+            })
             .collect();
-        buckets.sort_by(|x, y| compare(x.val, y.val));
+        zend_sort(&mut entries, &mut |x, y| compare(hooks, x, y));
         let header = a.header();
-        header.num_used.set(buckets.len() as u32);
-        for (i, b) in buckets.into_iter().enumerate() {
-            a.write_bucket(i as u32, b);
+        header.num_used.set(entries.len() as u32);
+        let used = entries.len() as u32;
+        let heap = hooks.heap();
+        for (i, entry) in entries.into_iter().enumerate() {
+            let (h, key) = match entry.key {
+                Key::Str(s) if renumber => {
+                    heap.release_string(s);
+                    (i as u64, None)
+                }
+                Key::Long(_) if renumber => (i as u64, None),
+                Key::Str(s) => (s.hash(), Some(s)),
+                Key::Long(n) => (n.cast_unsigned(), None),
+            };
+            a.write_bucket(
+                i as u32,
+                Bucket {
+                    val: entry.val,
+                    h,
+                    key,
+                },
+            );
         }
         header.internal_pointer.set(0);
-        a.rehash();
+        if !renumber {
+            a.rehash();
+            return Ok(());
+        }
+        header.next_free.set(i64::from(used));
+        let old = a.data_addr();
+        let new = heap.mm.alloc(Arr::packed_size(a.table_size()))?;
+        let slots: Vec<Zval> = (0..used).map(|i| a.read_bucket(i).val).collect();
+        header.flags.set(header.flags.get() | PACKED | STATIC_KEYS);
+        header.table_mask.set(MIN_MASK);
+        a.set_data_addr(new);
+        for (i, val) in slots.into_iter().enumerate() {
+            a.write_slot(i as u32, val);
+        }
+        if let Some(old) = old {
+            // SAFETY: the old data was this heap's and the slots hold the
+            // elements now.
+            unsafe { heap.mm.free(old) };
+        }
+        a.hash_reset();
         Ok(())
     }
 
@@ -2105,13 +2206,41 @@ mod tests {
         }
         assert!(Heap::array_del(&mut nothing, a, Key::Long(2)));
         a.end();
-        let sorted = nothing
-            .heap
-            .array_sort(a, &mut |x, y| x.as_long().cmp(&y.as_long()));
+        let sorted = Heap::array_sort(&mut nothing, a, false, &mut |_, x, y| {
+            x.val
+                .as_long()
+                .cmp(&y.val.as_long())
+                .then(x.position.cmp(&y.position))
+        });
         assert!(sorted.is_ok());
         assert_eq!(keys(a), vec![1, 3, 0]);
         assert_eq!(a.position(), 0);
         assert!(!a.is_packed());
+        Heap::release(&mut nothing, Zval::array(a));
+    }
+
+    /// A renumbered sort drops the keys, packs the table and sets the
+    /// next free element past the last, as `sort()` leaves an array.
+    #[test]
+    fn a_renumbered_sort_packs_the_table() {
+        let _alone = alone();
+        let mut nothing = Nothing::new();
+        let Ok(a) = nothing.heap.array() else { return };
+        for v in [3, 1, 2] {
+            assert!(matches!(
+                nothing.heap.array_append(a, Zval::long(v)),
+                Ok(true)
+            ));
+        }
+        assert!(Heap::array_del(&mut nothing, a, Key::Long(1)));
+        let sorted = Heap::array_sort(&mut nothing, a, true, &mut |_, x, y| {
+            x.val.as_long().cmp(&y.val.as_long())
+        });
+        assert!(sorted.is_ok());
+        assert_eq!(keys(a), vec![0, 1]);
+        assert_eq!(a.get(Key::Long(0)).and_then(Zval::as_long), Some(2));
+        assert_eq!(a.next_free(), 2);
+        assert!(a.is_packed());
         Heap::release(&mut nothing, Zval::array(a));
     }
 }

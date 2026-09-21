@@ -395,18 +395,45 @@ impl PhpArray {
         self.iter().collect()
     }
 
-    /// Sort the elements in place by `compare`, keys kept, after
-    /// `SEPARATE_ARRAY`: `zend_hash_sort` without renumbering, stable as
-    /// `sort()` guarantees since 8.0, the internal pointer reset.
+    /// `zend_hash_sort` after `SEPARATE_ARRAY`, what every sort native
+    /// of `array.c` calls: the elements ordered in place by `compare`
+    /// with php's hybrid, [`zend_sort`], the internal pointer reset, and
+    /// the keys kept or dropped as `renumber` says, `sort()` dropping
+    /// them and `asort()` keeping them. Two elements `compare` answers
+    /// `Equal` for stay in the order they were in, `RETURN_STABLE_SORT`
+    /// over the position each held, which is how php's `sort()` is
+    /// stable since 8.0 while its algorithm is not; a comparison that is
+    /// not transitive leaves what the algorithm leaves, php's order.
+    ///
+    /// `compare` may serve PHP code, a `usort` callback, and so may throw:
+    /// the first `Err` is kept and every comparison after it answers
+    /// `Equal`, as `zend_call_function` returns without calling while
+    /// `EG(exception)` is set, so the sort runs to its end over the
+    /// positions alone and the array is left as php leaves it before what
+    /// was thrown is raised from here.
     pub fn sort_by(
         &mut self,
         req: &mut Request,
-        mut compare: impl FnMut(&Value, &Value) -> Ordering,
+        renumber: bool,
+        mut compare: impl FnMut(&mut Request, &Value, &Value) -> Result<Ordering, Thrown>,
     ) -> Result<(), Thrown> {
         self.separate(req)?;
-        req.array_sort(self.0, &mut |x, y| {
-            compare(&Value::of_zval(x), &Value::of_zval(y))
-        })
+        let mut pending: Option<Thrown> = None;
+        req.array_sort(self.0, renumber, &mut |req, x, y| {
+            let ordering = if pending.is_some() {
+                Ordering::Equal
+            } else {
+                match compare(req, &Value::of_zval(x.val), &Value::of_zval(y.val)) {
+                    Ok(ordering) => ordering,
+                    Err(thrown) => {
+                        pending = Some(thrown);
+                        Ordering::Equal
+                    }
+                }
+            };
+            ordering.then(x.position.cmp(&y.position))
+        })?;
+        pending.map_or(Ok(()), Err)
     }
 
     /// The array as a value.
@@ -865,6 +892,19 @@ impl PhpRef {
     pub const fn as_value(&self) -> Value {
         Value::of(Inner::Reference(*self))
     }
+
+    /// `Z_PARAM_ARRAY_EX` with `separate` on a by-reference parameter,
+    /// `ZVAL_DEREF` and then `SEPARATE_ZVAL_NOREF` on the cell
+    /// (`Z/Zend/zend_API.h`): the array the cell holds, written in
+    /// place when it has one owner, and otherwise replaced in the cell by
+    /// a copy with one, the shared or immutable original one owner fewer
+    /// and no destructor served, since an owner remains. What `sort()`
+    /// and the rest of the by-reference natives write through, so the
+    /// caller reads the sorted array in its variable. `None` for a cell
+    /// holding no array, which is the native's `TypeError` to raise.
+    pub fn separate_array(&self, req: &mut Request) -> Result<Option<PhpArray>, Thrown> {
+        Ok(req.reference_separate(self.0)?.map(PhpArray::of))
+    }
 }
 
 /// Two names are equal when they name one cell, php's pointer
@@ -885,6 +925,13 @@ impl std::fmt::Debug for PhpRef {
 /// (`zend_register_list_destructors_ex`): what a resource carries as
 /// php's `int type`, naming its type name and its destructor.
 pub use php_heap::ResourceType;
+
+/// `zend_sort` over a slice, for a native that sorts an index table of
+/// its own rather than an array, `array_unique` and `array_multisort`:
+/// the one statement of php's hybrid, whose order under a comparison
+/// that is not transitive is what those natives observe. An array is
+/// sorted through [`PhpArray::sort_by`], which runs the same function.
+pub use php_heap::zend_sort;
 
 /// A resource (design §5.5): php's `zend_resource *`, thirty-two bytes
 /// of the request's heap in the list `EG(regular_list)` is, its id the

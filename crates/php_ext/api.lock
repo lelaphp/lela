@@ -393,6 +393,7 @@ values::PhpRef
 values::PhpRef::as_value
 values::PhpRef::get
 values::PhpRef::new
+values::PhpRef::separate_array
 values::PhpRef::set
 values::PhpString
 values::PhpString::as_bytes
@@ -438,3 +439,4 @@ values::Value::string
 values::Value::tag
 values::Value::type_name
 values::ValueRef
+values::zend_sort

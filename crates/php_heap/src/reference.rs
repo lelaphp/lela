@@ -21,7 +21,7 @@ use std::ptr::NonNull;
 
 use crate::gc::{self, Refcounted};
 use crate::hooks::{Fatal, HeapHooks};
-use crate::{Heap, Zval, ZvalRef, ZvalType};
+use crate::{Arr, Heap, Zval, ZvalRef, ZvalType};
 
 /// `zend_reference`: thirty-two bytes, php's own order.
 #[repr(C)]
@@ -180,6 +180,25 @@ impl Heap {
         // SAFETY: the allocation is exactly the header's size and nothing
         // else holds it.
         Ok(unsafe { Ref::init(at, z) })
+    }
+
+    /// `SEPARATE_ZVAL_NOREF` on the zval a reference holds
+    /// (`Z/Zend/zend_types.h`), which is `Z_PARAM_ARRAY_EX`'s separate on
+    /// a by-reference parameter, what `sort(&$array)` writes through:
+    /// the array held, itself where it has one owner, else a copy with
+    /// one written into the cell and the original one owner fewer,
+    /// `GC_TRY_DELREF`, and nothing released since an owner remains;
+    /// `None` where the cell holds no array, which is the caller's
+    /// `TypeError` to raise.
+    pub fn reference_separate(&mut self, r: Ref) -> Result<Option<Arr>, Fatal> {
+        let Some(a) = r.val().as_arr() else {
+            return Ok(None);
+        };
+        let separated = self.separate(a)?;
+        if !separated.is_same(a) {
+            r.write_val(Zval::array(separated));
+        }
+        Ok(Some(separated))
     }
 
     /// The reference's half of `zend_assign_to_variable`
