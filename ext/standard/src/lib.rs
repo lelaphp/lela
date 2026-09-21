@@ -24,8 +24,9 @@
 //! `constant`, the second over the engine's `zend_get_constant_ex`, are
 //! `basic_functions.c`'s, `strtoupper` and `strtolower` are `string.c`'s
 //! beside `trim`, `array_unique` with the `SORT_*` constants is
-//! `array`'s, and `print_r` is `var`'s, the one native so far over the
-//! renderer 8.5 keeps in Zend.
+//! `array`'s, `print_r` and `var_export` are `var`'s, the first over the
+//! renderer 8.5 keeps in Zend, `sprintf`, `printf` and `vsprintf` are
+//! `formatted_print`'s over `php_formatted_print`.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -40,6 +41,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod array;
+mod formatted_print;
 mod head;
 mod output;
 mod var;
@@ -60,11 +62,8 @@ use php_ext::values::{PhpArray, PhpString, TypeTag, Value, ValueRef};
 struct State {}
 
 /// The extension value (design §7.1): declarations paired with entries,
-/// the state declared on it, and the `deps` table `standard_deps`
-/// declares (`Z/ext/standard/basic_functions.c:143`), `uri` required
-/// and `session` optional, in php's order and with no `rel` or
-/// `version`, which is what `ReflectionExtension::getDependencies`
-/// reads.
+/// the state declared on it, and the `deps` table, which is what
+/// `ReflectionExtension::getDependencies` reads.
 ///
 /// ```php
 /// var_dump(extension_loaded('standard'), (new ReflectionExtension('standard'))->getDependencies());
@@ -144,6 +143,7 @@ pub fn extension() -> Extension {
         .functions(output::natives())
         .functions(head::natives())
         .functions(var::natives())
+        .functions(formatted_print::natives())
         .functions(vec![
             (
                 declared(
@@ -163,22 +163,29 @@ pub fn extension() -> Extension {
             constant(b"COUNT_RECURSIVE", COUNT_RECURSIVE),
         ])
         .constants(array::constants())
-        .dependencies(vec![
-            Dependency {
-                name: String::from("uri"),
-                kind: DependencyKind::Required,
-                rel: None,
-                version: None,
-            },
-            Dependency {
-                name: String::from("session"),
-                kind: DependencyKind::Optional,
-                rel: None,
-                version: None,
-            },
-        ])
+        .dependencies(dependencies())
         .request_state::<State>()
         .build("standard")
+}
+
+/// `standard_deps` (`Z/ext/standard/basic_functions.c:143`): `uri`
+/// required and `session` optional, in php's order and with no `rel`
+/// or `version`.
+fn dependencies() -> Vec<Dependency> {
+    vec![
+        Dependency {
+            name: String::from("uri"),
+            kind: DependencyKind::Required,
+            rel: None,
+            version: None,
+        },
+        Dependency {
+            name: String::from("session"),
+            kind: DependencyKind::Optional,
+            rel: None,
+            version: None,
+        },
+    ]
 }
 
 /// The natives of `string.c` declared so far, each with the frameless
