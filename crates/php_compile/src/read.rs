@@ -1,14 +1,16 @@
-//! What the compiler walks while `php_syntax` is a stub (design §4.9).
+//! The reader `emit`'s walk of `php_syntax`'s tree hands an expression
+//! to, and the shapes it builds (design §4.9, #595).
 //!
-//! `php_syntax::Parsed` carries the source and no tree yet, and the tree
-//! is inherited work of its own; so what is here reads the source into
-//! the few statements the engine's loop serves today, and [`crate::emit`]
-//! emits from them. Every name below mirrors the tree node that replaces
-//! it, so when §4.9's copy lands this file goes and `emit` is given the
-//! tree instead.
+//! `php_syntax::Parsed` carries the tree, and [`crate::emit`] walks its
+//! statements; what is here is the expression reader that walk still
+//! bridges to, one node's byte range at a time ([`expr_at`]), and the
+//! shapes every statement and expression is handed to the emitter in.
+//! Every name below mirrors the tree node it stands for, and each family
+//! of expressions leaves here as `emit` reads it from the tree, the
+//! reader going with the last; the statement shapes stay while a closure
+//! inside a bridged expression is read here with its body.
 //!
-//! What it reads: the open and close tags with the text around them,
-//! `<?=` as the `echo` php reads it as, an `echo` of one or more
+//! What it reads: in a closure's body, an `echo` of one or more
 //! expressions, the empty statement, an expression statement, a block,
 //! a `for`, a `while` and a `foreach` whose body is a block or one
 //! statement, the `foreach` over any expression with a variable as its
@@ -16,12 +18,12 @@
 //! without a value, a
 //! `switch` with its cases between braces, an `if` with its `elseif`,
 //! `else if` and `else` arms in either syntax, `break` and `continue` with
-//! or without a depth, a top-level `class` with no parent, interface,
+//! or without a depth, a `class` with no parent, interface,
 //! attribute or modifier whose members are untyped properties and
 //! constants, each declarator taking the pending doc comment as php's
 //! `backup_doc_comment` takes it, the
-//! unbraced `namespace A\B;`, and
-//! inside an expression a `match`, an array expression `[k => v, w]` with
+//! unbraced `namespace A\B;`; and
+//! in an expression a `match`, an array expression `[k => v, w]` with
 //! no `...` and no `&`, a number, a single-quoted string, a double-quoted
 //! string with `$a`, `{$a}` and `${a}` interpolated as php's lexer takes
 //! them, `true`, `false`, `null`, a constant by name, a magic constant
@@ -871,7 +873,7 @@ impl Child {
     }
 
     /// The expression out, `Null` left in its place for the drop to find.
-    fn take(mut self) -> Expr {
+    pub(crate) fn take(mut self) -> Expr {
         std::mem::replace(&mut self.expr, Expr::Null)
     }
 }
@@ -1128,28 +1130,32 @@ struct Reader<'a> {
     doc_comment: Option<Vec<u8>>,
 }
 
-/// What one source file holds, or the first thing in it this cannot read.
-pub(crate) fn read(source: &[u8], stack: StackLimit) -> Result<Read, Trouble> {
+/// One expression, the bytes of its node's range handed over by
+/// [`crate::emit`]'s walk of the tree (design §4.9, #595): read as the
+/// reader read it inside the file, at `line`, the line the range starts
+/// on, with `doc_comment` pending as `CG(doc_comment)` was when the
+/// scanner reached it. The slice is the whole expression, so what stands
+/// after the expression the reader read is a shape the two do not agree
+/// on and is refused as such.
+pub(crate) fn expr_at(
+    source: &[u8],
+    line: u32,
+    stack: StackLimit,
+    doc_comment: Option<Vec<u8>>,
+) -> Result<Child, Trouble> {
     let mut reader = Reader {
         source,
         at: 0,
-        line: 1,
+        line,
         stack,
-        doc_comment: None,
+        doc_comment,
     };
-    let mut out = Read::new();
-    loop {
-        let line = reader.line;
-        let text = reader.inline_text();
-        if !text.is_empty() {
-            out.push((Stmt::Inline(text), line));
-        }
-        if reader.at >= reader.source.len() {
-            return Ok(out);
-        }
-        let short = reader.open_tag();
-        reader.statements(&mut out, short, Until::Tag)?;
+    let expr = reader.expr()?;
+    reader.skip_trivia();
+    if reader.at < reader.source.len() {
+        return Err(reader.trouble("an expression whose end this compiler cannot read"));
     }
+    Ok(expr)
 }
 
 /// What the reader could not read: php's line, what stood there, and
@@ -1208,32 +1214,6 @@ impl Reader<'_> {
             what: refused.message,
             line: refused.line,
         })
-    }
-
-    /// The text up to the next open tag, or to the end.
-    fn inline_text(&mut self) -> Vec<u8> {
-        let start = self.at;
-        while self.at < self.source.len()
-            && !self.starts_with(b"<?php")
-            && !self.starts_with(b"<?=")
-        {
-            self.bump(1);
-        }
-        self.taken(start)
-    }
-
-    /// Step over the open tag; `true` for `<?=`, which php reads as an
-    /// `echo` of the statement that follows it.
-    fn open_tag(&mut self) -> bool {
-        if self.starts_with(b"<?php") {
-            self.bump(5);
-            return false;
-        }
-        if self.starts_with(b"<?=") {
-            self.bump(3);
-            return true;
-        }
-        false
     }
 
     /// Every statement up to where `until` says the list ends: the
@@ -5270,7 +5250,7 @@ impl Reader<'_> {
 
 /// `zend_is_reserved_class_name`: the names `reserved_class_names` lists
 /// in `zend_compile.c`, which no class may take, whatever the case.
-fn is_reserved_class_name(name: &[u8]) -> bool {
+pub(crate) fn is_reserved_class_name(name: &[u8]) -> bool {
     matches!(
         name.to_ascii_lowercase().as_slice(),
         b"bool"
@@ -5322,9 +5302,41 @@ mod tests {
         Child::at(1, expr)
     }
 
-    /// The reader on a thread nothing holds to a limit.
+    /// The reader over a whole file, on a thread nothing holds to a
+    /// limit: the entry `compile()` had before `emit` walked the tree's
+    /// statements (#595), kept here so the shapes the reader still
+    /// builds inside a bridged expression stay pinned. The text outside
+    /// the tags is an `Inline` statement, `<?=` the `echo` php reads it
+    /// as.
     fn read(source: &[u8]) -> Result<Read, Trouble> {
-        super::read(source, crate::StackLimit::UNCHECKED)
+        let mut reader = super::Reader {
+            source,
+            at: 0,
+            line: 1,
+            stack: crate::StackLimit::UNCHECKED,
+            doc_comment: None,
+        };
+        let mut out = Read::new();
+        loop {
+            let line = reader.line;
+            let start = reader.at;
+            while reader.at < reader.source.len()
+                && !reader.starts_with(b"<?php")
+                && !reader.starts_with(b"<?=")
+            {
+                reader.bump(1);
+            }
+            let text = reader.taken(start);
+            if !text.is_empty() {
+                out.push((Stmt::Inline(text), line));
+            }
+            if reader.at >= reader.source.len() {
+                return Ok(out);
+            }
+            let short = reader.starts_with(b"<?=");
+            reader.bump(if short { 3 } else { 5 });
+            reader.statements(&mut out, short, super::Until::Tag)?;
+        }
     }
 
     /// One arm over `$name`, its body one `echo` of `echoed`, all on

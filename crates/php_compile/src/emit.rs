@@ -93,6 +93,8 @@
 
 use std::cmp::Ordering;
 
+use php_syntax::Parsed;
+
 use php_heap::{
     Exponent, Fatal, Intern, Key, Number, Scalar, Zval, ZvalType, double_to_string, numeric_prefix,
 };
@@ -113,6 +115,8 @@ use crate::read::{
     is_auto_global,
 };
 use crate::{CompileError, Options, StackLimit};
+
+mod walk;
 
 /// `ZEND_FETCH_LOCAL` (`Z/Zend/zend_compile.h:1083`), the
 /// `extended_value` of a `FETCH_*` by name that is no auto-global, which
@@ -150,6 +154,10 @@ const ZVAL_SIZE: usize = 16;
 /// `zend_add_literal_string`, which calls `zend_new_interned_string`
 /// through whichever handler is installed).
 pub(crate) struct Emit<'a> {
+    /// The parse this compiles: the tree the walk reads (design §4.9),
+    /// the token stream a name, a value and a doc comment are read
+    /// from, and the source the bridge hands the reader by range.
+    parsed: &'a Parsed,
     strings: &'a mut dyn Intern,
     /// php's `precision` while the file compiles, [`Options::precision`].
     precision: i32,
@@ -638,12 +646,13 @@ fn dirname(path: &[u8]) -> Vec<u8> {
 /// then php's implicit final `RETURN 1` (`zend_emit_final_return`, with
 /// `extended_value` at -1), and the diagnostics raised on the way.
 pub(crate) fn unit(
-    read: &Read,
+    parsed: &Parsed,
     options: &Options,
-    lines: u32,
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
+    let lines = u32::try_from(parsed.source.split(|b| *b == b'\n').count()).unwrap_or(u32::MAX);
     let mut emit = Emit {
+        parsed,
         strings,
         precision: options.precision,
         persistent: &options.persistent,
@@ -692,7 +701,7 @@ pub(crate) fn unit(
     };
     // A fatal leaves the file with what `zend_error` had raised before
     // it already rendered, so those travel with it.
-    if let Err(mut refused) = emit.statements(read) {
+    if let Err(mut refused) = emit.source_file() {
         refused.raised = emit.diagnostics;
         return Err(refused);
     }
@@ -9521,8 +9530,13 @@ mod tests {
     /// An emitter as [`unit`] builds one, in namespace `A` and at the
     /// file's own statement list, which is where a class binds at
     /// compile time.
-    fn in_namespace<'a>(strings: &'a mut php_heap::Strings, options: &'a Options) -> Emit<'a> {
+    fn in_namespace<'a>(
+        parsed: &'a Parsed,
+        strings: &'a mut php_heap::Strings,
+        options: &'a Options,
+    ) -> Emit<'a> {
         Emit {
+            parsed,
             strings,
             precision: options.precision,
             persistent: &options.persistent,
@@ -9584,7 +9598,8 @@ mod tests {
     fn a_known_method_is_found_on_a_class_the_file_declared_in_a_namespace() {
         let mut strings = php_heap::Strings::new();
         let options = Options::default();
-        let mut emit = in_namespace(&mut strings, &options);
+        let parsed = Parsed::default();
+        let mut emit = in_namespace(&parsed, &mut strings, &options);
         let read = Class {
             name: b"M".to_vec(),
             kind: ClassKind::Class,

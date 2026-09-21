@@ -5,8 +5,10 @@
 //! here is the first slice of Lane B (design §11): the statements the
 //! engine's loop serves, `echo` and a call of a named function, emitted as
 //! php emits them, with the entry safepoint and the numbered return. The
-//! tree it walks is `read`'s while `php_syntax` is a stub (design §4.9);
-//! what it cannot read is refused as a [`CompileError`].
+//! tree it walks is `php_syntax`'s, [`Parsed::tree`] (design §4.9):
+//! `emit` reads every statement node from it, and an expression it does
+//! not read from the tree yet it hands to `read` by the node's byte
+//! range (#595). What it cannot read is refused as a [`CompileError`].
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -185,18 +187,11 @@ pub fn compile(
             message: diagnostic.message.as_str().into(),
         });
     }
-    let read = read::read(&parsed.source, options.stack).map_err(|trouble| CompileError {
-        level: trouble.level,
-        message: trouble.what,
-        line: trouble.line,
-        raised: raised.clone(),
-    })?;
-    let lines = u32::try_from(parsed.source.split(|b| *b == b'\n').count()).unwrap_or(u32::MAX);
     // The scanner's diagnostics stand before the compiler's on the unit,
     // as php raised them: the whole file is scanned before
     // `zend_compile_top_stmt` runs, and opcache records both kinds on a
     // `persistent_script` to replay on a hit.
-    match emit::unit(&read, options, lines, strings) {
+    match emit::unit(parsed, options, strings) {
         Ok(mut unit) => {
             raised.append(&mut unit.diagnostics);
             unit.diagnostics = raised;
@@ -4341,7 +4336,7 @@ mod tests {
         };
         assert_eq!(
             refused(b"<?php C::$p = &$o->q;").as_deref(),
-            Some("a statement this compiler cannot read yet")
+            Some("an expression whose end this compiler cannot read")
         );
         assert_eq!(
             refused(b"<?php $this += 1;").as_deref(),
@@ -4682,7 +4677,7 @@ mod tests {
             refused(b"<?php\nclass M { public readonly int $x; }"),
             Some((
                 Level::Parse,
-                String::from("a class member this compiler cannot read yet"),
+                String::from("a property this compiler cannot read yet"),
                 2
             ))
         );
