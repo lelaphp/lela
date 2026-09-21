@@ -27,10 +27,10 @@ use serde_json::{Value, json};
 use crate::ticket::{Gh, Open};
 use crate::track::{self, Ticket, Track};
 
-/// The label a ticket an agent may take carries.
-const READY: &str = "ready-for-agent";
+/// The label a ticket an agent may take carries; `track chains` reads it too.
+pub(crate) const READY: &str = "ready-for-agent";
 /// The label a ticket that is a person's alone carries (harness §11).
-const PERSON: &str = "for-a-person";
+pub(crate) const PERSON: &str = "for-a-person";
 /// The prefix of the label that names the one track working a ticket.
 /// The frontier reads it here and `ticket` holds a close's successors to
 /// it; one statement, two readers.
@@ -119,8 +119,9 @@ fn frontier<'a>(
 }
 
 /// Whether `track` works the ticket: it carries no `track:` label, or one
-/// of the labels it carries names this track.
-fn is_tracks(ticket: &Open, track: &str) -> bool {
+/// of the labels it carries names this track. `track chains` keeps the
+/// same tickets.
+pub(crate) fn is_tracks(ticket: &Open, track: &str) -> bool {
     let mut named = ticket
         .label_names()
         .filter_map(|name| name.strip_prefix(TRACK_LABEL))
