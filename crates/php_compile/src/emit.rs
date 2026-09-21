@@ -263,17 +263,22 @@ pub(crate) struct Emit<'a> {
     /// one open.
     loops: Vec<Loop>,
     current_loop: Option<usize>,
-    /// The `ZEND_BRK` and `ZEND_CONT` oplines, which `pass_two` turns
-    /// into the `JMP` each is once every loop's end is known: the opline,
-    /// the loop it was written in, its depth and whether it breaks.
-    breaks: Vec<Pending>,
+    /// The `ZEND_BRK`, `ZEND_CONT` and `ZEND_GOTO` oplines, which
+    /// `pass_two` turns into the `JMP` each is once every loop's end and
+    /// every label is known, in the order they stand.
+    jumps: Vec<Pending>,
+    /// `CG(context).labels`: every label of the op array being compiled,
+    /// by name, with the opline it stands before and the loop it stands
+    /// in (`zend_label`).
+    labels: Vec<(Vec<u8>, Label)>,
     /// `op_array->try_catch_array`: every `try` of the op array in the
     /// order `zend_add_try_element` added them, which is the order their
     /// `try_op`s stand in.
     try_catch: Vec<TryCatch>,
-    /// `CG(loop_var_stack)`, the finally half: what a `return` out of
-    /// here must emit before the `RETURN`, innermost last
-    /// (`zend_handle_loops_and_finally_ex`). The loop half is [`Emit::loops`],
+    /// `CG(loop_var_stack)`, the finally half: what a `return`, a
+    /// `break` or a `goto` out of here must emit before its jump,
+    /// innermost last (`zend_handle_loops_and_finally_ex`). The loop
+    /// half is [`Emit::loops`],
     /// pushed and popped beside it, so an entry records how many loops
     /// stood open under it and the walk interleaves the two again.
     unwind: Vec<Unwind>,
@@ -375,12 +380,34 @@ impl LoopVar {
     }
 }
 
-/// One `break` or `continue` before `pass_two` resolves it.
-struct Pending {
-    at: u32,
-    r#loop: usize,
-    depth: u32,
-    is_break: bool,
+/// One `ZEND_BRK`, `ZEND_CONT` or `ZEND_GOTO` before `pass_two`
+/// resolves it: the opline, and what the resolution reads off it.
+enum Pending {
+    /// `ZEND_BRK` or `ZEND_CONT`: the loop it was written in (`op1`),
+    /// its depth (`op2`) and whether it breaks.
+    Break {
+        at: u32,
+        r#loop: usize,
+        depth: u32,
+        is_break: bool,
+    },
+    /// `ZEND_GOTO`: the label's constant (`op2`), how many oplines
+    /// [`Emit::handle_loops_and_finally`] emitted before it (`op1`),
+    /// and the loop it was written in (`extended_value`).
+    Goto {
+        at: u32,
+        label: u32,
+        emitted: u32,
+        r#loop: Option<usize>,
+    },
+}
+
+/// `zend_label`: where a label stands, the opline after it, and the
+/// loop it was written in, which a `goto` to it must be written in too.
+#[derive(Clone, Copy)]
+struct Label {
+    opline: u32,
+    r#loop: Option<usize>,
 }
 
 /// The jump table of one `SWITCH_LONG`, `SWITCH_STRING` or `MATCH`
@@ -656,7 +683,8 @@ pub(crate) fn unit(
         cwd: options.cwd.clone(),
         loops: Vec::new(),
         current_loop: None,
-        breaks: Vec::new(),
+        jumps: Vec::new(),
+        labels: Vec::new(),
         try_catch: Vec::new(),
         unwind: Vec::new(),
         fast_call_var: None,
@@ -710,7 +738,8 @@ struct Saved {
     cache_slots: u32,
     loops: Vec<Loop>,
     current_loop: Option<usize>,
-    breaks: Vec<Pending>,
+    jumps: Vec<Pending>,
+    labels: Vec<(Vec<u8>, Label)>,
     try_catch: Vec<TryCatch>,
     unwind: Vec<Unwind>,
     fast_call_var: Option<u32>,
@@ -987,6 +1016,8 @@ impl Emit<'_> {
             Stmt::Switch { expr, cases } => self.switch(expr, cases)?,
             Stmt::Break(depth) => self.break_continue(depth.as_ref(), true)?,
             Stmt::Continue(depth) => self.break_continue(depth.as_ref(), false)?,
+            Stmt::Goto(name) => self.goto(name)?,
+            Stmt::Label(name) => self.label(name)?,
             Stmt::Class(class) => self.class(class)?,
             Stmt::Function(function) => self.function_decl(function)?,
             Stmt::Try {
@@ -1917,7 +1948,8 @@ impl Emit<'_> {
             cache_slots: std::mem::take(&mut self.cache_slots),
             loops: std::mem::take(&mut self.loops),
             current_loop: self.current_loop.take(),
-            breaks: std::mem::take(&mut self.breaks),
+            jumps: std::mem::take(&mut self.jumps),
+            labels: std::mem::take(&mut self.labels),
             try_catch: std::mem::take(&mut self.try_catch),
             unwind: std::mem::take(&mut self.unwind),
             fast_call_var: self.fast_call_var.take(),
@@ -1943,7 +1975,8 @@ impl Emit<'_> {
         self.cache_slots = saved.cache_slots;
         self.loops = saved.loops;
         self.current_loop = saved.current_loop;
-        self.breaks = saved.breaks;
+        self.jumps = saved.jumps;
+        self.labels = saved.labels;
         self.try_catch = saved.try_catch;
         self.unwind = saved.unwind;
         self.fast_call_var = saved.fast_call_var;
@@ -1972,7 +2005,7 @@ impl Emit<'_> {
         line_end: u32,
     ) -> Result<OpArray, CompileError> {
         self.final_return(return_one)?;
-        self.resolve_breaks();
+        self.resolve_jumps()?;
         resolve_fast_calls(&mut self.oplines, &self.try_catch);
         headers_numbered(&self.oplines, &self.safepoints)?;
         swap_commutative(&mut self.oplines);
@@ -3063,12 +3096,16 @@ impl Emit<'_> {
     }
 
     /// `zend_compile_return` (`Z/Zend/zend_compile.c:5694`): the value,
-    /// or the constant `null` where none is written; the value copied
+    /// a dimension fetched for writing where it is returned by
+    /// reference (`zend_compile_var` under `BP_VAR_W`), or the constant
+    /// `null` where none is written; the value copied
     /// into a temporary where a `finally` stands between here and the
     /// `RETURN` ([`Self::copied_past_finally`]); the return type check
     /// where the op array declares one ([`Self::return_type_check`]);
     /// every open loop's variable freed and every open `finally` called,
-    /// innermost first ([`Self::unwind_to_return`]); then `RETURN` over
+    /// innermost first ([`Self::handle_loops_and_finally`]), and the
+    /// type check repeated after them for a by-reference return, whose
+    /// cell the block may have written; then `RETURN` over
     /// the value, or `RETURN_BY_REF` where the function was written
     /// `function &f`, carrying its safepoint number as
     /// [`Self::final_return`]'s carries its own. `extended_value` is
@@ -3087,6 +3124,19 @@ impl Emit<'_> {
     /// t
     /// g
     /// x
+    /// ```
+    ///
+    /// A dimension returned by reference is fetched for writing
+    /// ([`Self::dim_for_reference`]), so the block writing beside it
+    /// leaves the cell the caller is bound to where it was (php's bug
+    /// #72216).
+    ///
+    /// ```php
+    /// function &test() { $a = ["ok"]; try { return $a[0]; } finally { $a[""] = 42; } }
+    /// var_dump(test());
+    /// ```
+    /// ```expect
+    /// string(2) "ok"
     /// ```
     fn r#return(&mut self, value: Option<&Child>) -> Result<(), CompileError> {
         let by_ref = self.returns_by_ref;
@@ -3107,16 +3157,32 @@ impl Emit<'_> {
             Some(Expr::Call { .. } | Expr::MethodCall { .. } | Expr::StaticCall { .. }) => {
                 RETURNS_FUNCTION
             }
-            Some(Expr::Var(_)) | None => 0,
+            Some(Expr::Var(_) | Expr::Dim { .. }) | None => 0,
             Some(_) => RETURNS_VALUE,
         };
+        // `zend_compile_var(BP_VAR_W, 1)` over a variable returned by
+        // reference: a dimension is fetched for writing, so the cell the
+        // caller is bound to is the array's own slot.
         let compiled = match value {
+            Some(expr) if by_ref && matches!(&**expr, Expr::Dim { .. }) => {
+                let (_, at) = self.dim_for_reference(expr)?;
+                Where::Returned(at)
+            }
             Some(expr) => self.expr(expr)?,
             None => Where::Constant(Zval::null()),
         };
-        let compiled = self.copied_past_finally(compiled, by_ref)?;
+        let compiled = self.copied_past_finally(compiled, by_ref);
         let compiled = self.return_type_check(compiled, value.is_some(), false)?;
-        self.unwind_to_return(compiled);
+        let before_finally = self.next();
+        self.handle_loops_and_finally(Some(compiled));
+        // The `finally` may have written into the cell a by-reference
+        // return hands back, so the return type is checked again where
+        // the walk emitted anything.
+        let compiled = if by_ref && before_finally != self.next() {
+            self.return_type_check(compiled, value.is_some(), false)?
+        } else {
+            compiled
+        };
         let (op1_type, op1) = self.operand(compiled);
         let at = self.next();
         let number = self.safepoint(at);
@@ -3248,12 +3314,33 @@ impl Emit<'_> {
         }
     }
 
-    /// `zend_compile_return`'s copy into a temporary: a returned CV is
-    /// moved into a `QM_ASSIGN` where the op array has a `finally` block
-    /// and one stands between here and the `RETURN` (`zend_has_finally`),
-    /// so code in the `finally` cannot write the value out from under
-    /// the return. A constant or a temporary is already nobody else's.
-    fn copied_past_finally(&mut self, value: Where, by_ref: bool) -> Result<Where, CompileError> {
+    /// `zend_compile_return`'s copy past the block: a returned CV is
+    /// moved into a `QM_ASSIGN` where a `finally` stands between here
+    /// and the `RETURN` (`zend_has_finally`), so code in the `finally`
+    /// cannot write the value out from under the return. A by-reference
+    /// return makes a `MAKE_REF` of the CV, or of the `VAR` a call left,
+    /// and returns the cell, so the `finally` writes into what the
+    /// caller will be bound to. A constant or a temporary is already
+    /// nobody else's.
+    ///
+    /// ```php
+    /// function &f(array &$a): array { try { return $a; } finally { $a[] = 2; } }
+    /// $x = [1];
+    /// $y = &f($x);
+    /// $y[] = 3;
+    /// var_dump($x);
+    /// ```
+    /// ```expect
+    /// array(3) {
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(2)
+    ///   [2]=>
+    ///   int(3)
+    /// }
+    /// ```
+    fn copied_past_finally(&mut self, value: Where, by_ref: bool) -> Where {
         // `zend_has_finally`: a `FAST_CALL` stands on the stack, which
         // is a `finally` between here and the `RETURN`; inside a
         // `finally` block its own marker is a `DISCARD_EXCEPTION` and
@@ -3263,47 +3350,68 @@ impl Emit<'_> {
             .iter()
             .any(|marker| matches!(marker, Unwind::FastCall { .. }))
         {
-            return Ok(value);
+            return value;
         }
-        if by_ref {
-            // php makes a `MAKE_REF` of a `VAR` here and checks the
-            // return type again past the block, neither of which this
-            // compiler emits yet.
-            return Err(self.fatal(
-                "a return by reference out of a `try` with a `finally` this compiler cannot read yet",
-            ));
-        }
-        let Where::Cv(cv) = value else {
-            return Ok(value);
+        let (op1_type, op1) = match (value, by_ref) {
+            (Where::Cv(cv), _) => (OperandKind::Cv, cv),
+            (Where::Returned(var), true) => (OperandKind::Var, var),
+            _ => return value,
         };
         let out = self.temporary();
+        if by_ref {
+            self.push(Opline {
+                opcode: Opcode::MakeRef,
+                op1_type,
+                op1,
+                out_type: OperandKind::Var,
+                out,
+                ..Opline::default()
+            });
+            return Where::Returned(out);
+        }
         self.push(Opline {
             opcode: Opcode::QmAssign,
-            op1_type: OperandKind::Cv,
-            op1: cv,
+            op1_type,
+            op1,
             out_type: OperandKind::Tmp,
             out,
             ..Opline::default()
         });
-        Ok(Where::Temporary(out))
+        Where::Temporary(out)
     }
 
-    /// `zend_handle_loops_and_finally` on the way to a `RETURN`: every
-    /// entry of `CG(loop_var_stack)` innermost first, with no depth to
-    /// stop at, so every open loop's variable is freed and every open
-    /// `finally` is called. The two stacks are one in php; here the
-    /// loops hang off [`Emit::current_loop`] and the `finally` markers
-    /// off [`Emit::unwind`], each marker recording how many loops stood
+    /// `zend_handle_loops_and_finally`: the walk with no depth an entry
+    /// can stop at, what a `return` emits before the `RETURN`, so every
+    /// open loop's variable is freed and every open `finally` is called.
+    fn handle_loops_and_finally(&mut self, value: Option<Where>) {
+        let count = self
+            .loops_open()
+            .saturating_add(u32::try_from(self.unwind.len()).unwrap_or(u32::MAX));
+        self.handle_loops_and_finally_ex(count.saturating_add(1), value);
+    }
+
+    /// `zend_handle_loops_and_finally_ex` (`Z/Zend/zend_compile.c:5607`):
+    /// `CG(loop_var_stack)` walked innermost first, to `depth` loops out.
+    /// A `finally` marker on the way is its `FAST_CALL`, or the
+    /// `DISCARD_EXCEPTION` of a block being left from inside it; a loop
+    /// is one level of the depth, its variable freed on the way past
+    /// where it has one, and the walk stops at the loop the depth names,
+    /// whose own end frees it. Whether the depth was met is the answer,
+    /// which `break n` past the loops that stand reads as its refusal.
+    /// The two stacks are one in php; here the loops hang off
+    /// [`Emit::current_loop`] and the `finally` markers off
+    /// [`Emit::unwind`], each marker recording how many loops stood
     /// under it, which puts them back in one order.
     ///
     /// A `FAST_CALL` emitted here carries the value being returned in
-    /// `op2`, which is what a `DISCARD_EXCEPTION` or an unwind through
-    /// the block gives up when the return never happens.
-    fn unwind_to_return(&mut self, value: Where) {
+    /// `op2` where a `return` gives one, which is what a
+    /// `DISCARD_EXCEPTION` or an unwind through the block gives up when
+    /// the return never happens; a `break` or a `continue` gives none.
+    fn handle_loops_and_finally_ex(&mut self, mut depth: u32, value: Option<Where>) -> bool {
         let (value_type, value_at) = match value {
-            Where::Temporary(at) => (OperandKind::Tmp, at),
-            Where::Returned(at) => (OperandKind::Var, at),
-            Where::Constant(_) | Where::Cv(_) => (OperandKind::Unused, 0),
+            Some(Where::Temporary(at)) => (OperandKind::Tmp, at),
+            Some(Where::Returned(at)) => (OperandKind::Var, at),
+            Some(Where::Constant(_) | Where::Cv(_)) | None => (OperandKind::Unused, 0),
         };
         let mut loops = self.current_loop;
         let mut open = self.loops_open();
@@ -3346,6 +3454,9 @@ impl Emit<'_> {
                     let Some(index) = loops else {
                         break;
                     };
+                    if depth <= 1 {
+                        return true;
+                    }
                     let Some((var, parent)) =
                         self.loops.get(index).map(|one| (one.var, one.parent))
                     else {
@@ -3354,11 +3465,13 @@ impl Emit<'_> {
                     if let Some(var) = var {
                         self.free_on_return(var);
                     }
+                    depth -= 1;
                     loops = parent;
                     open = open.saturating_sub(1);
                 }
             }
         }
+        depth == 0
     }
 
     /// One opline of `zend_handle_loops_and_finally_ex`: the loop's
@@ -3375,15 +3488,26 @@ impl Emit<'_> {
         });
     }
 
-    /// `zend_compile_break_continue`: the depth, `1` unwritten and
-    /// otherwise the positive integer php's compiler holds it to; the
-    /// loop or `switch` it stands in, without which php refuses; the
-    /// `FREE` of each `switch` subject the jump leaves behind
-    /// (`zend_handle_loops_and_finally_ex`), which is also where a depth
-    /// past the loops that stand is refused; the compile-time warning
-    /// for a `continue` that targets a `switch`; then the `ZEND_BRK` or
-    /// `ZEND_CONT`, here the `JMP` `pass_two` makes of it once its
-    /// target is known ([`Self::resolve_breaks`]).
+    /// `zend_compile_break_continue` (`Z/Zend/zend_compile.c:5812`): the
+    /// depth, `1` unwritten and otherwise the positive integer php's
+    /// compiler holds it to; the loop or `switch` it stands in, without
+    /// which php refuses; the `FAST_CALL` of every `finally` and the
+    /// `FREE` of every loop variable the jump leaves behind
+    /// ([`Self::handle_loops_and_finally_ex`]), which is also where a
+    /// depth past the loops that stand is refused; the compile-time
+    /// warning for a `continue` that targets a `switch`; then the
+    /// `ZEND_BRK` or `ZEND_CONT`, here the `JMP` `pass_two` makes of it
+    /// once its target is known ([`Self::resolve_jumps`]).
+    ///
+    /// ```php
+    /// foreach ([1, 2] as $v) { try { break; } finally { echo "f"; } }
+    /// foreach ([1, 2] as $v) { try { continue; } finally { echo "c"; } }
+    /// foreach ([1, 2] as $v) { foreach ([3] as $w) { try { try { break 2; } finally { echo "i"; } } finally { echo "o"; } } }
+    /// foreach ([1, 2] as $v) { try { switch ($v) { case 1: try { continue 2; } finally { echo "s"; } } } finally { echo "t"; } echo $v; }
+    /// ```
+    /// ```expect
+    /// fcciostt2
+    /// ```
     fn break_continue(
         &mut self,
         depth: Option<&Child>,
@@ -3413,41 +3537,19 @@ impl Emit<'_> {
                 self.compile_error(format!("'{word}' not in the 'loop' or 'switch' context"))
             );
         };
-        // `zend_handle_loops_and_finally_ex` emits the `FAST_CALL` of
-        // every `finally` the jump leaves, and `zend_check_finally_breakout`
-        // refuses the jump that leaves one it cannot; neither is read
-        // yet, so a jump that would cross a marker is refused rather
-        // than emitted without its `finally`.
-        if self
-            .unwind
-            .last()
-            .is_some_and(|marker| marker.loops() >= self.loops_open().saturating_sub(depth))
-        {
-            return Err(self.fatal(format!(
-                "a `{word}` out of a `try` with a `finally` this compiler cannot read yet"
-            )));
-        }
-        // `zend_handle_loops_and_finally_ex`: the loops inside the target
-        // are left, each `switch` subject among them freed on the way.
-        let mut left = 0;
-        let mut at = Some(current);
-        while left + 1 < depth {
-            let Some(index) = at else {
-                break;
-            };
-            let Some((var, parent)) = self.loops.get(index).map(|open| (open.var, open.parent))
-            else {
-                break;
-            };
-            if let Some(var) = var {
-                self.free_on_return(var);
-            }
-            at = parent;
-            left += 1;
-        }
-        if at.is_none() || left + 1 < depth {
+        // `zend_handle_loops_and_finally_ex`: the `FAST_CALL` of every
+        // `finally` the jump leaves and the `FREE` of every loop's
+        // variable inside the target, innermost first, and the refusal
+        // where the depth is more loops than stand.
+        if !self.handle_loops_and_finally_ex(depth, None) {
             let plural = if depth == 1 { "" } else { "s" };
             return Err(self.compile_error(format!("Cannot '{word}' {depth} level{plural}")));
+        }
+        let mut at = Some(current);
+        for _ in 1..depth {
+            at = at
+                .and_then(|index| self.loops.get(index))
+                .and_then(|open| open.parent);
         }
         if !is_break
             && let Some(target) = at.and_then(|index| self.loops.get(index))
@@ -3471,7 +3573,7 @@ impl Emit<'_> {
             opcode: Opcode::Jmp,
             ..Opline::default()
         });
-        self.breaks.push(Pending {
+        self.jumps.push(Pending::Break {
             at: opline,
             r#loop: current,
             depth,
@@ -3480,39 +3582,286 @@ impl Emit<'_> {
         Ok(())
     }
 
-    /// `pass_two`'s `ZEND_BRK` and `ZEND_CONT` arm, `zend_get_brk_cont_target`:
-    /// the loop `depth` levels out from the one the jump was written in,
-    /// and its `brk` or `cont` as the `JMP`'s target.
-    fn resolve_breaks(&mut self) {
-        for jump in std::mem::take(&mut self.breaks) {
-            let mut index = jump.r#loop;
-            let mut levels = jump.depth;
-            while levels > 1 {
-                match self.loops.get(index).and_then(|open| open.parent) {
-                    Some(parent) => index = parent,
-                    None => break,
+    /// `zend_compile_label` (`Z/Zend/zend_compile.c:5966`): the label
+    /// into `CG(context).labels` with the next opline's number and the
+    /// loop it stands in; a name the op array already has is php's
+    /// compile error.
+    fn label(&mut self, name: &[u8]) -> Result<(), CompileError> {
+        if self.labels.iter().any(|(held, _)| held == name) {
+            return Err(self.compile_error(format!(
+                "Label '{}' already defined",
+                String::from_utf8_lossy(name)
+            )));
+        }
+        let label = Label {
+            opline: self.next(),
+            r#loop: self.current_loop,
+        };
+        self.labels.push((name.to_vec(), label));
+        Ok(())
+    }
+
+    /// `zend_compile_goto` (`Z/Zend/zend_compile.c:5950`): the label's
+    /// name as a constant of its own (`zend_add_literal`), every open
+    /// loop's variable freed and every open `finally` called as a
+    /// `return` frees and calls them, since where the label stands is
+    /// not known until `pass_two`, then the `ZEND_GOTO`, here the `JMP`
+    /// [`Self::resolve_goto`] makes of it, carrying how many of those
+    /// oplines stand before it and the loop it was written in.
+    ///
+    /// ```php
+    /// $i = 0;
+    /// again:
+    /// $i++;
+    /// if ($i < 3) { goto again; }
+    /// foreach ([1, 2] as $v) { try { if ($v == 2) { goto out; } echo $v; } finally { echo "f"; } }
+    /// out:
+    /// echo $i, "\n";
+    /// ```
+    /// ```expect
+    /// 1ff3
+    /// ```
+    fn goto(&mut self, name: &[u8]) -> Result<(), CompileError> {
+        let label = self.string(name)?;
+        let label = self.literal(label);
+        let start = self.next();
+        self.handle_loops_and_finally(None);
+        let at = self.push(Opline {
+            opcode: Opcode::Jmp,
+            ..Opline::default()
+        });
+        self.jumps.push(Pending::Goto {
+            at,
+            label,
+            emitted: at.saturating_sub(start),
+            r#loop: self.current_loop,
+        });
+        Ok(())
+    }
+
+    /// `pass_two` over the jumps it resolves, in opline order: the
+    /// `ZEND_BRK` and `ZEND_CONT` arm, `zend_get_brk_cont_target`, the
+    /// loop `depth` levels out from the one the jump was written in and
+    /// its `brk` or `cont` as the `JMP`'s target; and the `ZEND_GOTO`
+    /// arm, [`Self::resolve_goto`]; each once
+    /// [`Self::check_finally_breakout`] has allowed the jump.
+    fn resolve_jumps(&mut self) -> Result<(), CompileError> {
+        for jump in std::mem::take(&mut self.jumps) {
+            match jump {
+                Pending::Break {
+                    at,
+                    r#loop,
+                    depth,
+                    is_break,
+                } => {
+                    let mut index = r#loop;
+                    let mut levels = depth;
+                    while levels > 1 {
+                        match self.loops.get(index).and_then(|open| open.parent) {
+                            Some(parent) => index = parent,
+                            None => break,
+                        }
+                        levels -= 1;
+                    }
+                    let Some(target) = self.loops.get(index) else {
+                        continue;
+                    };
+                    let header = if is_break { None } else { target.header };
+                    let target = if is_break { target.brk } else { target.cont };
+                    self.check_finally_breakout(at, target)?;
+                    if let Some(opline) = self.oplines.get_mut(at as usize) {
+                        opline.op1 = target;
+                        // A `continue` that jumps back to a `foreach`'s
+                        // header is a back-edge and carries the header's
+                        // number, the one the loop's own `JMP` carries
+                        // (design §5.7).
+                        if let Some(header) = header {
+                            opline.out = header;
+                        }
+                    }
                 }
-                levels -= 1;
-            }
-            let Some(target) = self.loops.get(index) else {
-                continue;
-            };
-            let header = if jump.is_break { None } else { target.header };
-            let target = if jump.is_break {
-                target.brk
-            } else {
-                target.cont
-            };
-            if let Some(opline) = self.oplines.get_mut(jump.at as usize) {
-                opline.op1 = target;
-                // A `continue` that jumps back to a `foreach`'s header is
-                // a back-edge and carries the header's number, the one
-                // the loop's own `JMP` carries (design §5.7).
-                if let Some(header) = header {
-                    opline.out = header;
-                }
+                Pending::Goto {
+                    at,
+                    label,
+                    emitted,
+                    r#loop,
+                } => self.resolve_goto(at, label, emitted, r#loop)?,
             }
         }
+        Ok(())
+    }
+
+    /// `zend_resolve_goto_label` (`Z/Zend/zend_compile.c:5888`): the
+    /// label the constant names, or php's compile error for one the op
+    /// array has not; the loops between the `goto`'s and the label's,
+    /// walked outwards, which is php's compile error where the label
+    /// stands in a loop the `goto` does not; then the oplines the
+    /// `goto` emitted for what it turns out not to leave, made `NOP`
+    /// from the `JMP` backwards: one `FREE` for each loop it stays in,
+    /// and one `FAST_CALL` for each `finally` whose `try` holds both
+    /// ends. The `JMP` lands on the label; where that is a backward
+    /// jump it is a back-edge and carries a safepoint number of its own
+    /// (design §5.7). php nulls the constant's slot here; this compiler
+    /// leaves the string, since [`Self::constant`] may have handed the
+    /// slot to a later operand, and a slot nothing reads is observable
+    /// by nothing.
+    ///
+    /// ```php
+    /// goto missing;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: 'goto' to undefined label 'missing' in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// goto inside;
+    /// while (true) { inside: break; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: 'goto' into loop or switch statement is disallowed in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// try { echo 1; } finally { goto out; }
+    /// out: echo 2;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: jump out of a finally block is disallowed in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// goto inside;
+    /// try { echo 1; } finally { inside: echo 2; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: jump into a finally block is disallowed in %s on line 2
+    /// ```
+    fn resolve_goto(
+        &mut self,
+        at: u32,
+        label: u32,
+        emitted: u32,
+        r#loop: Option<usize>,
+    ) -> Result<(), CompileError> {
+        let line = self
+            .oplines
+            .get(at as usize)
+            .map_or(self.line, |op| op.lineno);
+        let refused = |message: String| CompileError {
+            level: Level::CompileError,
+            message,
+            line,
+            raised: Vec::new(),
+        };
+        let name = self
+            .constants
+            .get(label as usize)
+            .and_then(|held| held.as_str())
+            .map(|s| s.bytes().to_vec())
+            .unwrap_or_default();
+        let Some(dest) = self
+            .labels
+            .iter()
+            .find(|(held, _)| *held == name)
+            .map(|(_, label)| *label)
+        else {
+            return Err(refused(format!(
+                "'goto' to undefined label '{}'",
+                String::from_utf8_lossy(&name)
+            )));
+        };
+        let mut remove = emitted;
+        let mut current = r#loop;
+        while current != dest.r#loop {
+            let Some(index) = current else {
+                return Err(refused(String::from(
+                    "'goto' into loop or switch statement is disallowed",
+                )));
+            };
+            let Some(open) = self.loops.get(index) else {
+                break;
+            };
+            if open.var.is_some() {
+                remove = remove.saturating_sub(1);
+            }
+            current = open.parent;
+        }
+        for element in &self.try_catch {
+            if element.try_op.0 > at {
+                break;
+            }
+            if element.finally_op.0 != 0
+                && at < element.finally_op.0.saturating_sub(1)
+                && (dest.opline > element.finally_end.0 || dest.opline < element.try_op.0)
+            {
+                remove = remove.saturating_sub(1);
+            }
+        }
+        let number = (dest.opline <= at).then(|| self.safepoint(dest.opline));
+        if let Some(opline) = self.oplines.get_mut(at as usize) {
+            opline.op1 = dest.opline;
+            opline.out = number.unwrap_or(0);
+        }
+        for back in 1..=remove {
+            if let Some(opline) = self.oplines.get_mut((at - back) as usize) {
+                *opline = Opline {
+                    lineno: opline.lineno,
+                    ..Opline::default()
+                };
+            }
+        }
+        self.check_finally_breakout(at, dest.opline)
+    }
+
+    /// `zend_check_finally_breakout` (`Z/Zend/zend_opcode.c:687`), what
+    /// `pass_two` asks of every `BRK`, `CONT` and `GOTO` of an op array
+    /// with a `finally` block: a jump from outside a `finally` block to
+    /// inside one, or from inside one to outside it, is php's compile
+    /// error at the jump's line, in php's words. The block a `FAST_RET`
+    /// ends is `finally_op` to `finally_end` inclusive.
+    ///
+    /// ```php
+    /// foreach ([1] as $v) { try { echo 1; } finally { break; } }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: jump out of a finally block is disallowed in %s on line 2
+    /// ```
+    ///
+    /// A loop that opens and closes inside the block is left by nothing.
+    ///
+    /// ```php
+    /// foreach ([1] as $v) { try { echo 1; } finally { while (true) { break; } echo 2; } }
+    /// ```
+    /// ```expect
+    /// 12
+    /// ```
+    fn check_finally_breakout(&self, op_num: u32, dst_num: u32) -> Result<(), CompileError> {
+        for element in &self.try_catch {
+            let (finally_op, finally_end) = (element.finally_op.0, element.finally_end.0);
+            if finally_op == 0 {
+                continue;
+            }
+            let from_inside = (finally_op..=finally_end).contains(&op_num);
+            let to_inside = (finally_op..=finally_end).contains(&dst_num);
+            let refused = if !from_inside && to_inside {
+                "jump into a finally block is disallowed"
+            } else if from_inside && !to_inside {
+                "jump out of a finally block is disallowed"
+            } else {
+                continue;
+            };
+            let line = self
+                .oplines
+                .get(op_num as usize)
+                .map_or(self.line, |op| op.lineno);
+            return Err(CompileError {
+                level: Level::CompileError,
+                message: String::from(refused),
+                line,
+                raised: Vec::new(),
+            });
+        }
+        Ok(())
     }
 
     /// `zend_compile_switch`: the subject compiled, then the loop
@@ -5066,6 +5415,31 @@ impl Emit<'_> {
         Ok(Where::Temporary(out))
     }
 
+    /// `zend_compile_var(…, BP_VAR_W, 1)` over a dimension, what a
+    /// by-reference assignment's target and a by-reference return's
+    /// operand are: the whole chain fetched for writing, the last link
+    /// carried by `ZEND_FETCH_DIM_REF` where a plain write carries
+    /// nothing, and the `VAR` it left as the operand.
+    fn dim_for_reference(&mut self, target: &Child) -> Result<(OperandKind, u32), CompileError> {
+        let (container, links) = self.dim_chain(target, Fetch::Write)?;
+        let Some((last, fetches)) = links.split_last() else {
+            return Err(self.fatal("a dimension with no dimension"));
+        };
+        let (kind, at) = self.dim_fetches(container, fetches, Fetch::Write);
+        self.push(Opline {
+            opcode: Opcode::FetchDimW,
+            op1_type: kind,
+            op1: at,
+            op2_type: last.kind,
+            op2: last.at,
+            out_type: OperandKind::Var,
+            out: last.out,
+            extended_value: FETCH_DIM_REF,
+            ..Opline::default()
+        });
+        Ok((OperandKind::Var, last.out))
+    }
+
     /// `zend_compile_assign_ref` (`Z/Zend/zend_compile.c:3549`) for
     /// `$b = &$a` over two variables: the target's CV looked up first
     /// (`zend_delayed_compile_var` under `BP_VAR_W`, which delays nothing
@@ -5089,25 +5463,7 @@ impl Emit<'_> {
         }
         let (op1_type, op1) = match &**target {
             Expr::Var(name) => (OperandKind::Cv, self.lookup_cv(name)),
-            Expr::Dim { .. } => {
-                let (container, links) = self.dim_chain(target, Fetch::Write)?;
-                let Some((last, fetches)) = links.split_last() else {
-                    return Err(self.fatal("a dimension with no dimension"));
-                };
-                let (kind, at) = self.dim_fetches(container, fetches, Fetch::Write);
-                self.push(Opline {
-                    opcode: Opcode::FetchDimW,
-                    op1_type: kind,
-                    op1: at,
-                    op2_type: last.kind,
-                    op2: last.at,
-                    out_type: OperandKind::Var,
-                    out: last.out,
-                    extended_value: FETCH_DIM_REF,
-                    ..Opline::default()
-                });
-                (OperandKind::Var, last.out)
-            }
+            Expr::Dim { .. } => self.dim_for_reference(target)?,
             _ => {
                 return Err(self.fatal(
                     "a by-reference assignment to what is no variable this compiler cannot read yet",
@@ -9208,7 +9564,8 @@ mod tests {
             cwd: options.cwd.clone(),
             loops: Vec::new(),
             current_loop: None,
-            breaks: Vec::new(),
+            jumps: Vec::new(),
+            labels: Vec::new(),
             try_catch: Vec::new(),
             unwind: Vec::new(),
             fast_call_var: None,

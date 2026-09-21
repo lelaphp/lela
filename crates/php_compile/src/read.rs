@@ -139,6 +139,11 @@ pub(crate) enum Stmt {
     Break(Option<Child>),
     /// `continue;` or `continue n;`, php's `ZEND_AST_CONTINUE`.
     Continue(Option<Child>),
+    /// `goto label;`, php's `ZEND_AST_GOTO` over the label's name.
+    Goto(Vec<u8>),
+    /// `label:`, php's `ZEND_AST_LABEL`, a `T_STRING` and a colon at
+    /// the start of a statement.
+    Label(Vec<u8>),
     /// `class M { … }` at the top level, php's `ZEND_AST_CLASS`.
     Class(Class),
     /// `function f(…) { … }`, php's `ZEND_AST_FUNC_DECL`.
@@ -1351,6 +1356,13 @@ impl Reader<'_> {
         if self.word_ahead(b"continue") {
             self.bump(8);
             return self.depth().map(|depth| Some(Stmt::Continue(depth)));
+        }
+        if self.word_ahead(b"goto") {
+            self.bump(4);
+            return self.goto().map(Some);
+        }
+        if let Some(label) = self.label_ahead() {
+            return Ok(Some(Stmt::Label(label)));
         }
         if self.word_ahead(b"class") {
             self.bump(5);
@@ -4715,6 +4727,38 @@ impl Reader<'_> {
             && !self
                 .byte(word.len())
                 .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
+    }
+
+    /// `goto label;`, the keyword read: php's `T_GOTO T_STRING ';'`.
+    fn goto(&mut self) -> Result<Stmt, Trouble> {
+        self.skip_trivia();
+        if !self.label_starts(0) {
+            return Err(self.trouble("a `goto` whose label this compiler cannot read"));
+        }
+        let label = self.label();
+        self.end_of_statement()?;
+        Ok(Stmt::Goto(label))
+    }
+
+    /// php's `statement: T_STRING ':'`, a label: one identifier with no
+    /// namespace separator and the colon after it, which is not the
+    /// `::` of a class member. Read where it stands, and nothing read
+    /// where it does not.
+    fn label_ahead(&mut self) -> Option<Vec<u8>> {
+        if !self.label_starts(0) {
+            return None;
+        }
+        let (at, line, doc_comment) = (self.at, self.line, self.doc_comment.clone());
+        let label = self.label();
+        self.skip_trivia();
+        if self.byte(0) == Some(b':') && self.byte(1) != Some(b':') {
+            self.bump(1);
+            return Some(label);
+        }
+        self.at = at;
+        self.line = line;
+        self.doc_comment = doc_comment;
+        None
     }
 
     fn number(&mut self) -> Result<Child, Trouble> {

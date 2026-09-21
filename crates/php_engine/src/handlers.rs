@@ -8424,6 +8424,12 @@ fn write_out(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, va
 /// php's notice where the call returned by value.
 const RETURNS_FUNCTION: u32 = 1 << 0;
 
+/// `ZEND_RETURNS_VALUE` (`Z/Zend/zend_compile.h:1199`), on a
+/// `RETURN_BY_REF` whose operand is a `VAR` that is no variable, what
+/// `zend_compile_return` puts there for an expression that is neither
+/// a call nor a variable.
+const RETURNS_VALUE: u32 = 1 << 1;
+
 /// `ZEND_ARRAY_ELEMENT_REF`, `ZEND_ARRAY_NOT_PACKED` and
 /// `ZEND_ARRAY_SIZE_SHIFT` (`Z/Zend/zend_compile.h:1201`): the bits of
 /// `INIT_ARRAY`'s and `ADD_ARRAY_ELEMENT`'s `extended_value`, the element
@@ -11413,8 +11419,10 @@ fn jump_to(req: &mut Request, frame: FrameRef, at: u32) -> Edge {
 /// call binds a name to what the callee named. A constant or a temporary
 /// is php's notice `Only variable references should be returned by
 /// reference` and a fresh cell over the value, which is the arm
-/// `ZEND_RETURNS_VALUE` names; the frame is left as [`r#return`] leaves
-/// it.
+/// `ZEND_RETURNS_VALUE` names; a call's `VAR` that holds no reference,
+/// `ZEND_RETURNS_FUNCTION`, is the same notice and the same fresh cell,
+/// and one that holds a reference, a call that returned by reference,
+/// is that cell. The frame is left as [`r#return`] leaves it.
 ///
 /// ```php
 /// function &f(&$x) { return $x; }
@@ -11436,42 +11444,181 @@ fn jump_to(req: &mut Request, frame: FrameRef, at: u32) -> Edge {
 /// Notice: Only variable references should be returned by reference in %s on line 2
 /// int(1)
 /// ```
+///
+/// ```php
+/// function g() { return 1; }
+/// function &f() { return g(); }
+/// function &h(&$x) { return $x; }
+/// function &k(&$x) { return h($x); }
+/// $b = &f();
+/// $a = 1;
+/// $c = &k($a);
+/// $c = 2;
+/// var_dump($b, $a);
+/// ```
+/// ```expect
+/// Notice: Only variable references should be returned by reference in %s on line 3
+/// int(1)
+/// int(2)
+/// ```
 pub(crate) fn return_by_ref<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let returned = if let Some(at) = write_place(req, frame, code, op.op1_type, op.op1) {
-        let held = exec::value_of(at.read());
-        let cell = if let Some(cell) = held.as_php_ref() {
-            req.addref(&held);
-            *cell
-        } else {
-            let cell = match req.reference(held.undef_as_null()) {
-                Ok(cell) => cell,
-                Err(thrown) => return threw(req, frame, &thrown),
-            };
-            at.write(cell.as_value().to_zval());
-            req.addref(&cell.as_value());
-            cell
-        };
-        cell.as_value()
-    } else {
+    let by_value = match op.op1_type {
+        OperandKind::Const | OperandKind::Tmp => true,
+        OperandKind::Var => op.extended_value == RETURNS_VALUE,
+        OperandKind::Cv | OperandKind::Unused => false,
+    };
+    let returned = if by_value {
         // `ZEND_RETURNS_VALUE`: a constant or a temporary is no
         // variable, so php raises its notice and wraps the value in a
-        // cell of its own.
+        // cell of its own; a `VAR` already holding a cell is handed on
+        // as it stands (`ZVAL_COPY_VALUE`).
         crate::api::raising::notice(
             req,
             "Only variable references should be returned by reference",
         );
-        let value = exec::take_operand(req, frame, code, op.op1_type, op.op1);
-        match req.reference(value) {
-            Ok(cell) => cell.as_value(),
-            Err(thrown) => return threw(req, frame, &thrown),
+        let value = if op.op1_type == OperandKind::Var {
+            req.take_slot(frame, exec::temporary_slot(code, op.op1))
+        } else {
+            exec::take_operand(req, frame, code, op.op1_type, op.op1)
+        };
+        if value.as_php_ref().is_some() {
+            value
+        } else {
+            match req.reference(value) {
+                Ok(cell) => cell.as_value(),
+                Err(thrown) => return threw(req, frame, &thrown),
+            }
         }
+    } else if let Some(at) = write_place(req, frame, code, op.op1_type, op.op1) {
+        let held = exec::value_of(at.read());
+        if op.op1_type == OperandKind::Var
+            && op.extended_value == RETURNS_FUNCTION
+            && held.as_php_ref().is_none()
+        {
+            // `ZEND_RETURNS_FUNCTION` over a call that returned by
+            // value: the notice, and the value moved into a cell of its
+            // own (`ZVAL_NEW_REF`).
+            crate::api::raising::notice(
+                req,
+                "Only variable references should be returned by reference",
+            );
+            let value = req.take_slot(frame, exec::temporary_slot(code, op.op1));
+            match req.reference(value) {
+                Ok(cell) => cell.as_value(),
+                Err(thrown) => return threw(req, frame, &thrown),
+            }
+        } else {
+            let cell = if let Some(cell) = held.as_php_ref() {
+                req.addref(&held);
+                *cell
+            } else {
+                let cell = match req.reference(held.undef_as_null()) {
+                    Ok(cell) => cell,
+                    Err(thrown) => return threw(req, frame, &thrown),
+                };
+                at.write(cell.as_value().to_zval());
+                req.addref(&cell.as_value());
+                cell
+            };
+            cell.as_value()
+        }
+    } else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: RETURN_BY_REF over an operand that is no place",
+        )));
     };
     returned_to_caller::<T>(req, frame, op, returned)
+}
+
+/// `ZEND_MAKE_REF` (`Z/Zend/zend_vm_def.h:9262`), what a by-reference
+/// `return` emits over its variable where a `finally` stands between
+/// it and the `RETURN_BY_REF`: the CV is made a reference where it
+/// holds none, a CV nothing wrote holding a fresh cell over `null`
+/// (`ZVAL_NEW_EMPTY_REF`), and the `VAR` the opline writes holds that
+/// cell as one more owner, so what the block writes into the variable
+/// is what the caller is bound to. A `VAR` operand is the place a
+/// `FETCH_*_W` left as `IS_INDIRECT`, made a reference the same way, or
+/// a call's value moved into the written `VAR` as it stands
+/// (`ZVAL_COPY_VALUE`), which `RETURN_BY_REF` then wraps under
+/// `ZEND_RETURNS_FUNCTION`.
+///
+/// ```php
+/// function &f(&$a) { try { return $a; } finally { $a = 2; } }
+/// $x = 1;
+/// $y = &f($x);
+/// $y = 3;
+/// var_dump($x);
+/// function &g() { try { return $u; } finally { echo "g\n"; } }
+/// $z = &g();
+/// var_dump($z);
+/// ```
+/// ```expect
+/// int(3)
+/// g
+/// NULL
+/// ```
+///
+/// A by-reference return of a call's value past a `finally` is the
+/// call's own value, and the notice `RETURN_BY_REF` raises for what is
+/// no variable is raised after the block ran.
+///
+/// ```php
+/// function h() { return 1; }
+/// function &k() { try { return h(); } finally { echo "k\n"; } }
+/// var_dump(k());
+/// ```
+/// ```expect
+/// k
+///
+/// Notice: Only variable references should be returned by reference in %s on line 3
+/// int(1)
+/// ```
+pub(crate) fn make_ref<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let out = exec::temporary_slot(code, op.out);
+    let held = if op.op1_type == OperandKind::Cv {
+        let cell = match cv_reference(req, frame, op.op1) {
+            Ok(cell) => cell,
+            Err(thrown) => return threw(req, frame, &thrown),
+        };
+        req.addref(&cell.as_value());
+        cell.as_value()
+    } else {
+        let at = exec::temporary_slot(code, op.op1);
+        let place = req
+            .slot_ptr(frame, at)
+            .and_then(|slot| slot.read().as_indirect());
+        match place {
+            Some(place) => {
+                let value = exec::value_of(place.read());
+                let cell = if let Some(cell) = value.as_php_ref() {
+                    *cell
+                } else {
+                    let cell = match req.reference(value.undef_as_null()) {
+                        Ok(cell) => cell,
+                        Err(thrown) => return threw(req, frame, &thrown),
+                    };
+                    place.write(cell.as_value().to_zval());
+                    cell
+                };
+                req.addref(&cell.as_value());
+                cell.as_value()
+            }
+            None => req.take_slot(frame, at),
+        }
+    };
+    let previous = req.set_slot(frame, out, held);
+    req.release(previous);
+    Ok(advance(req, frame))
 }
 
 #[cfg(test)]
