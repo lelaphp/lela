@@ -3,7 +3,7 @@
 //! keeps in `ext/standard` and this engine keeps here, so an engine with
 //! no extensions serves a program that uses Zend alone (design §4.10).
 //!
-//! Sixteen of them are here: the two the first witness of a loop needs,
+//! Seventeen of them are here: the two the first witness of a loop needs,
 //! the three that read what `php_heap::mm` accounts, so the allocator's
 //! numbers are php's numbers under a witness and not under a terminal
 //! session a person typed once, `ini_get` and `ini_set`, which read and
@@ -18,7 +18,9 @@
 //! `get_class`, which read the linked table (#259); and
 //! `register_shutdown_function`, whose entries the request holds and
 //! [`call_shutdown_functions`] serves at `php_request_shutdown`'s first
-//! step (#404). Each is declared and paired with its entry exactly as an
+//! step (#404); and `exit`, with `die` its second name, which throws
+//! the unwind exit the unwinder tells apart (#423). Each is declared
+//! and paired with its entry exactly as an
 //! extension's are, so there is one shape for a native and not two.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
@@ -32,7 +34,7 @@ use crate::api::raising::{
     too_few_arguments, warning,
 };
 use crate::api::request::Request;
-use crate::api::values::{ClassId, Key, PhpArray, PhpString, Value, ValueRef};
+use crate::api::values::{ClassId, Key, PhpArray, PhpString, TypeTag, Value, ValueRef};
 
 /// The engine's own natives, in the order php declares them, each
 /// declaration beside its entry.
@@ -43,9 +45,20 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     natives
 }
 
-/// The two that read the linked table (#259), and `clone`, which reads
-/// an object's handler table (#281).
+/// The two that read the linked table (#259), `clone`, which reads an
+/// object's handler table (#281), and `exit` with `die`, in the order
+/// `zend_builtin_functions_arginfo.h` has them: `die` is
+/// `ZEND_RAW_FENTRY("die", zif_exit, arginfo_die, ...)`, the same body
+/// and parameters under a second name.
 fn class_natives() -> Vec<(FunctionDecl, Entry)> {
+    let status = Parameter {
+        default: Some(ConstExpr::Long(0)),
+        ..parameter(
+            b"status",
+            Some(Type::Union(vec![Type::String, Type::Int])),
+            false,
+        )
+    };
     vec![
         (
             declared(
@@ -60,6 +73,14 @@ fn class_natives() -> Vec<(FunctionDecl, Entry)> {
                 Some(Type::Object),
             ),
             clone as Entry,
+        ),
+        (
+            declared(b"exit", std::slice::from_ref(&status), Some(Type::Never)),
+            exit as Entry,
+        ),
+        (
+            declared(b"die", std::slice::from_ref(&status), Some(Type::Never)),
+            exit as Entry,
         ),
         (
             declared(
@@ -284,6 +305,208 @@ fn clone(req: &mut Request) -> Result<Value, Thrown> {
     };
     req.clone_object(object, with)
         .map(|cloned| cloned.as_value())
+}
+
+/// `exit(string|int $status = 0): never`, `ZEND_FUNCTION(exit)`
+/// (`Z/Zend/zend_builtin_functions.c:118`), which `die` is a second
+/// name for: one `Z_PARAM_STR_OR_LONG` and then
+/// [`crate::api::raising::exit`], a string written and an int made
+/// php's `EG(exit_status)`, and the unwind exit thrown. Bare `exit` and
+/// `die` are the same call with no argument, as php's parser makes them.
+///
+/// ```php
+/// echo "a\n";
+/// exit(3);
+/// echo "b\n";
+/// ```
+/// ```expect exit=3
+/// a
+/// ```
+///
+/// ```php
+/// echo "a\n";
+/// die("bye\n");
+/// ```
+/// ```expect
+/// a
+/// bye
+/// ```
+///
+/// ```php
+/// echo "a\n";
+/// exit;
+/// ```
+/// ```expect
+/// a
+/// ```
+///
+/// ```php
+/// echo "a\n";
+/// die;
+/// ```
+/// ```expect
+/// a
+/// ```
+///
+/// The parameter is `string|int`, so a bool is its int, a float is
+/// read as an int where it fits, behind the 8.1 deprecation where that
+/// loses something, and as its string where it does not, `null` is the
+/// 8.1 deprecation and then `0`, an object with `__toString` is that
+/// string, and what is none of these is php's `TypeError`; `exit(300)`
+/// is the status the process reports, which the OS masks to 44. A
+/// second argument is php's `ArgumentCountError`.
+///
+/// ```php
+/// exit(3.5);
+/// ```
+/// ```expect exit=3
+/// Deprecated: Implicit conversion from float 3.5 to int loses precision in %s on line 2
+/// ```
+///
+/// ```php
+/// exit(1e19);
+/// ```
+/// ```expect
+/// 1.0E+19
+/// ```
+///
+/// ```php
+/// exit(null);
+/// ```
+/// ```expect
+/// Deprecated: exit(): Passing null to parameter #1 ($status) of type string|int is deprecated in %s on line 2
+/// ```
+///
+/// ```php
+/// exit(true);
+/// ```
+/// ```expect exit=1
+/// ```
+///
+/// ```php
+/// class S { function __toString() { return "s\n"; } }
+/// exit(new S);
+/// ```
+/// ```expect
+/// s
+/// ```
+///
+/// ```php
+/// exit([]);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: exit(): Argument #1 ($status) must be of type string|int, array given in %s:2
+/// Stack trace:
+/// #0 %s(2): exit(Array)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// exit(0, 1);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: exit() expects at most 1 argument, 2 given in %s:2
+/// Stack trace:
+/// #0 %s(2): exit(0, 1)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// A native whose callback exits reads the unwind exit as it reads a
+/// throwable the callback left, and returns with it standing, so the
+/// unwinder goes on from the call: what follows the call is never
+/// served, and php's status is the callback's.
+///
+/// ```php
+/// call_user_func(function () { echo "in\n"; exit(7); });
+/// echo "after\n";
+/// ```
+/// ```expect exit=7
+/// in
+/// ```
+///
+/// The status is `EG(exit_status)`, one word the last write wins, so
+/// an `exit` in a destructor served at shutdown moves what the main
+/// op array's `exit` set, and a fatal there is rendered and moves it
+/// to 255.
+///
+/// ```php
+/// class A { function __destruct() { echo "d\n"; exit(3); } }
+/// $a = new A;
+/// exit(1);
+/// ```
+/// ```expect exit=3
+/// d
+/// ```
+///
+/// ```php
+/// class A { function __destruct() { nope(); } }
+/// $a = new A;
+/// exit(1);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Call to undefined function nope() in %s:2
+/// Stack trace:
+/// #0 [internal function]: A->__destruct()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// A shutdown function's `exit` ends the shutdown functions where php's
+/// `zend_bailout` does, after the status it set; one after a fatal
+/// moves the status the fatal set.
+///
+/// ```php
+/// register_shutdown_function(function () { echo "s\n"; exit(4); });
+/// register_shutdown_function(function () { echo "s2\n"; });
+/// exit(1);
+/// ```
+/// ```expect exit=4
+/// s
+/// ```
+///
+/// ```php
+/// register_shutdown_function(function () { echo "s\n"; exit(4); });
+/// nope();
+/// ```
+/// ```expect exit=4
+/// Fatal error: Uncaught Error: Call to undefined function nope() in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// s
+/// ```
+///
+/// A destructor's throwable during the unwind takes the unwind exit's
+/// place, as `zend_exception_set_previous` releases the exit where it
+/// would chain it: the request ends in that throwable, uncaught, and
+/// the `catch` the `exit` stood in never sees it, since the CV is
+/// destroyed when the frame is left.
+///
+/// ```php
+/// class A { function __destruct() { throw new Exception("d"); } }
+/// try { $a = new A; exit(9); } catch (Exception $e) { echo "c\n"; }
+/// echo "after\n";
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Exception: d in %s:2
+/// Stack trace:
+/// #0 [internal function]: A->__destruct()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+fn exit(req: &mut Request) -> Result<Value, Thrown> {
+    let count = req.argument_count();
+    if count > 1 {
+        return Err(wrong_argument_count(req, 0, 1, count));
+    }
+    let status = if count == 0 {
+        Value::int(0)
+    } else {
+        string_or_long_argument(req, 1)?
+    };
+    Err(crate::api::raising::exit(req, &status))
 }
 
 /// `class_exists(string $class, bool $autoload = true): bool`, php's
@@ -1861,6 +2084,48 @@ fn string_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown
         Some(s) => Ok(*s),
         None => PhpString::new(req, b""),
     }
+}
+
+/// One `Z_PARAM_STR_OR_LONG` of a native, the argument at `position`
+/// read off the call frame (`zend_parse_arg_str_or_long`,
+/// `Z/Zend/zend_API.h`): a string or an int as it is, and under the weak
+/// rule `zend_parse_arg_str_or_long_slow`'s two tries in order, the
+/// int's (`null` the 8.1 deprecation and then `0`, a bool its int, a
+/// float the int it truncates to where it fits) and then the string's
+/// (a float past the long's range as its string, an object through
+/// `__toString`); what neither takes, and everything but a string or
+/// an int under `strict_types`, is php's `TypeError` naming the union.
+fn string_or_long_argument(req: &mut Request, position: u32) -> Result<Value, Thrown> {
+    let given = req.argument(position).unwrap_or_default().deref();
+    if matches!(given.as_ref(), ValueRef::Str(_) | ValueRef::Int(_)) {
+        return Ok(given);
+    }
+    if !req.strict_types() {
+        match given.as_ref() {
+            ValueRef::Null | ValueRef::Undef => {
+                arg_null_deprecated(req, position, "string|int");
+                return Ok(Value::int(0));
+            }
+            ValueRef::Bool(b) => return Ok(Value::int(i64::from(b))),
+            ValueRef::Float(_) => {
+                if let Some(n) = crate::ops::arg_long_weak(req, &given) {
+                    return Ok(Value::int(n));
+                }
+                return Ok(Value::string(to_string(req, &given)?));
+            }
+            ValueRef::Object(object) => {
+                if let Some(text) = req.cast_object(*object, TypeTag::String)? {
+                    return Ok(text);
+                }
+            }
+            _ => {}
+        }
+    }
+    let tail = format!(
+        "be of type string|int, {} given",
+        crate::ops::value_name(req, &given)
+    );
+    Err(arg_type_error(req, position, &tail))
 }
 
 /// One declared parameter.

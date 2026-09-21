@@ -339,8 +339,11 @@ struct State {
     seconds: AtomicI64,
 }
 
-/// How the request is ending, when it is: a fatal, a source that did
-/// not compile, or an `exit`.
+/// The fatal the request is ending in, when it is one: `E_ERROR` and
+/// its kin, or a source that did not compile. An `exit` is not one:
+/// php unwinds it as a throwable ([`Request::throw_unwind_exit`]) and
+/// records its status alone, in `EG(exit_status)`, which a fatal writes
+/// too and the last write wins.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Ending {
     /// `E_ERROR`: the fatal as `php_error_cb` gave it to `php_log_err`,
@@ -350,7 +353,6 @@ pub(crate) enum Ending {
     /// `E_PARSE`: the text is already on the stream `php_error_cb` put it
     /// on, and what is left is php's status, 255.
     Parse,
-    Exit(i32),
 }
 
 /// What a request wrote beside the body, one call the sink will see:
@@ -413,6 +415,10 @@ pub struct Request {
     /// `php_error_cb` for the display and the log forms.
     last_fatal_error_backtrace: Option<String>,
     ending: Option<Ending>,
+    /// php's `EG(exit_status)`: what the process ends with, 255 written
+    /// by `php_error_cb` for a fatal and the code by `exit`, whichever
+    /// wrote last.
+    exit_status: i32,
     resources: Resources,
     superglobals: Vec<(Vec<u8>, PhpArray)>,
     /// The symbol tables, [`TableId`] naming one: php's
@@ -497,6 +503,14 @@ pub struct Request {
     /// php's `EG(exception)`: the throwable a handler left pending, which
     /// the loop reads at the `Threw` edge.
     pending: Option<PhpObject>,
+    /// php's `zend_is_unwind_exit(EG(exception))`: the unwind exit an
+    /// `exit` threw is standing where a throwable would, and nothing is
+    /// in `pending` while it does. What `exit` leaves for the unwinder,
+    /// which skips every `finally` block for it and gives up every
+    /// throwable it meets, and for a native whose callback exited; the
+    /// outermost serving's end releases it, as `zend_exception_error`
+    /// does.
+    unwind_exit: bool,
     /// `zend_objects_store_mark_destructed`: every object behind the
     /// request, set where `shutdown_destructors` catches the
     /// `zend_bailout` a destructor's raise ends the walk with
@@ -676,6 +690,7 @@ impl Request {
             last_error: None,
             last_fatal_error_backtrace: None,
             ending: None,
+            exit_status: 0,
             resources,
             superglobals: Vec::new(),
             tables: vec![SymbolTable::default()],
@@ -699,6 +714,7 @@ impl Request {
             gc_enabled: true,
             stream_type,
             pending: None,
+            unwind_exit: false,
             marked_destructed: false,
             returned: Value::null(),
             interrupt: Interrupt::default(),
@@ -1237,6 +1253,11 @@ impl Request {
         self.fatal_of(served)?;
         match self.pending.take() {
             Some(pending) => Err(Thrown::of(Some(pending))),
+            // The callback exited: what the native reads is php's
+            // `EG(exception)` holding the unwind exit, and the native
+            // returns with it standing, for the unwinder to go on
+            // from the call opline.
+            None if self.unwind_exit => Err(Thrown::of(None)),
             None => Ok(std::mem::replace(&mut self.returned, Value::null())),
         }
     }
@@ -1639,12 +1660,15 @@ impl Request {
     /// throwable's one owner is the pending slot's from here; a second
     /// throwable raised while one is pending is given up, where php
     /// chains it as the first's `previous` (`zend_throw_exception_internal`),
-    /// which arrives with `catch`.
+    /// which arrives with `catch`. One raised while the unwind exit
+    /// stands is given up too, which is php's own arm there: what is
+    /// unwinding is not replaced by a different throwable
+    /// (`Z/Zend/zend_exceptions.c:195-199`).
     pub(crate) fn leave_pending(&mut self, thrown: &Thrown) {
         let Some(object) = thrown.exception().copied() else {
             return;
         };
-        if self.pending.is_none() {
+        if self.pending.is_none() && !self.unwind_exit {
             self.pending = Some(object);
         } else {
             self.release(object.as_value());
@@ -1704,6 +1728,10 @@ impl Request {
     /// `api::raising` holds it without the extension.
     pub(crate) fn uncaught(&mut self) -> Result<(), Fatal> {
         let Some(throwable) = self.pending.take() else {
+            // `zend_exception_error` on the unwind exit: "We
+            // successfully unwound, nothing more to do", and the
+            // object is released (`Z/Zend/zend_exceptions.c:1005`).
+            self.unwind_exit = false;
             return Ok(());
         };
         let (file, line) = self.throw_site(throwable);
@@ -2870,6 +2898,7 @@ impl Request {
         if self.ending.is_some() {
             return;
         }
+        self.exit_status = 255;
         self.ending = Some(match level {
             Level::Parse => Ending::Parse,
             _ => Ending::Fatal(format!(
@@ -2906,10 +2935,36 @@ impl Request {
         self.end_at_level(level, message, file, line);
     }
 
+    /// `EG(exit_status) = status`, `ZEND_FUNCTION(exit)`'s int arm: the
+    /// last write wins, so an `exit` in a destructor or a shutdown
+    /// function moves the status a fatal or an earlier `exit` set.
     pub(crate) fn end_in_exit(&mut self, code: i32) {
-        if self.ending.is_none() {
-            self.ending = Some(Ending::Exit(code));
+        self.exit_status = code;
+    }
+
+    /// php's `EG(exit_status)`, what `serve` reports the request ended
+    /// with.
+    pub(crate) fn exit_status(&self) -> i32 {
+        self.exit_status
+    }
+
+    /// `zend_throw_unwind_exit` (`Z/Zend/zend_exceptions.c:1061`): the
+    /// unwind exit is standing where a throwable would be, for the
+    /// unwinder to read; php asserts nothing else is pending, and a
+    /// raiser that found something pending returns it instead.
+    pub(crate) fn throw_unwind_exit(&mut self) {
+        if self.pending.is_none() {
+            self.unwind_exit = true;
         }
+    }
+
+    /// Whether the unwind exit is what is being unwound: php's
+    /// `zend_is_unwind_exit(EG(exception))`, read by the unwinder where
+    /// it would enter a `finally` block or chain a throwable, and by
+    /// [`Request::serve_user`] where a native reads what its callback
+    /// left.
+    pub(crate) fn unwind_exit(&self) -> bool {
+        self.unwind_exit
     }
 
     pub(crate) fn end_in(&mut self, fatal: &Fatal) {
@@ -4969,6 +5024,10 @@ impl Request {
             }
             _ => match self.pending.take() {
                 Some(pending) => Saved::Throwable(pending),
+                None if self.unwind_exit => {
+                    self.unwind_exit = false;
+                    Saved::UnwindExit
+                }
                 None => Saved::Nothing,
             },
         }
@@ -5012,12 +5071,22 @@ impl Request {
     ///   thrown in %s on line 5
     /// ```
     fn restore_pending(&mut self, saved: Saved) {
-        let Saved::Throwable(old) = saved else {
-            return;
-        };
-        match self.pending {
-            Some(new) => self.set_previous(new, old),
-            None => self.pending = Some(old),
+        match saved {
+            Saved::Throwable(old) => match self.pending {
+                Some(new) => self.set_previous(new, old),
+                None => self.pending = Some(old),
+            },
+            // `zend_exception_set_previous(EG(exception), old_exception)`
+            // with the unwind exit as the old one releases it
+            // (`Z/Zend/zend_exceptions.c:113-116`): what the destructor
+            // raised is what is unwound from here, and the `exit`'s
+            // status stands only until that throwable is rendered.
+            Saved::UnwindExit => {
+                if self.pending.is_none() {
+                    self.unwind_exit = true;
+                }
+            }
+            Saved::Nothing | Saved::TheObject => {}
         }
     }
 
@@ -6288,9 +6357,11 @@ impl Request {
 
     /// Whether a handler left a throwable pending, php's `EG(exception)`:
     /// the test the loop performs after a `throw`-effect op and after a
-    /// `Flow::Resume` (`jit-design.md` §2.2).
+    /// `Flow::Resume` (`jit-design.md` §2.2). The unwind exit is one
+    /// answer, since it stands in php's slot as any throwable does;
+    /// [`Request::pending`] is the object alone.
     pub(crate) fn is_pending(&self) -> bool {
-        self.pending.is_some()
+        self.pending.is_some() || self.unwind_exit
     }
 
     /// The pending throwable as a view, no owner taken: what `CATCH`
@@ -8939,13 +9010,14 @@ impl HeapHooks for Hooks<'_> {
 
 /// What `zend_objects_destroy_object` found in the pending slot before
 /// it served a destructor ([`Request::save_pending`]): nothing, one
-/// throwable held there for the duration of the call, or the throwable
-/// that is the object being destroyed, which is php's one
-/// `E_CORE_ERROR` and no call at all.
+/// throwable held there for the duration of the call, the unwind exit
+/// held the same way, or the throwable that is the object being
+/// destroyed, which is php's one `E_CORE_ERROR` and no call at all.
 #[derive(Clone, Copy)]
 enum Saved {
     Nothing,
     Throwable(PhpObject),
+    UnwindExit,
     TheObject,
 }
 

@@ -304,19 +304,30 @@ pub fn arg_null_deprecated(req: &mut Request, position: u32, type_name: &str) {
     deprecated(req, &text);
 }
 
-/// `exit`: end the request with `status`, an `int` code or a `string`
-/// printed first (design §5.9).
+/// `ZEND_FUNCTION(exit)` past its parameter parsing
+/// (`Z/Zend/zend_builtin_functions.c:118`): a `string` status is
+/// written, and one that is not empty may reach a buffer's handler
+/// that throws, which is then what the native returns with; an `int` status
+/// is php's `EG(exit_status)`, the `int` it is in C, so a code past
+/// 32 bits keeps its low ones. Then the unwind exit is thrown
+/// ([`Request::throw_unwind_exit`]), which no `catch` matches and no
+/// `finally` block is entered for, and the `Thrown` carries no
+/// throwable. Every other value is the caller's to coerce or refuse
+/// first, as the native `exit` does.
 pub fn exit(req: &mut Request, status: &Value) -> Thrown {
     if let Some(text) = status.as_str_bytes() {
-        req.write(text);
-        req.end_in_exit(0);
+        if !text.is_empty() {
+            req.write(text);
+            if req.is_pending() {
+                return Thrown::of(None);
+            }
+        }
     } else {
-        let code = status
-            .as_int()
-            .and_then(|n| i32::try_from(n).ok())
-            .unwrap_or(0);
+        #[allow(clippy::cast_possible_truncation)]
+        let code = status.as_int().unwrap_or(0) as i32;
         req.end_in_exit(code);
     }
+    req.throw_unwind_exit();
     Thrown::of(None)
 }
 

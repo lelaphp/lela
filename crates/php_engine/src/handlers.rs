@@ -11025,18 +11025,35 @@ fn thrown_value(req: &mut Request, value: &Value) -> Thrown {
 /// t1
 /// t2
 /// ```
+///
+/// The unwind exit reaches the clause as any throwable does, php's
+/// `ex` being set, and matches none of them: `UnwindExit` is a class
+/// of its own under no `Throwable`, so every `catch` rethrows it and
+/// the unwinder goes on outward.
+///
+/// ```php
+/// try { echo "a\n"; exit(3); } catch (Throwable $t) { echo "caught\n"; }
+/// echo "after\n";
+/// ```
+/// ```expect exit=3
+/// a
+/// ```
 pub(crate) fn catch<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some(pending) = req.pending() else {
-        return jump_to(req, frame, op.op2);
+    let pending = match req.pending() {
+        Some(pending) => Some(pending),
+        None if req.unwind_exit() => None,
+        None => return jump_to(req, frame, op.op2),
     };
     let slot = Some(CacheSlot(op.extended_value & !LAST_CATCH));
-    let matched = cached_class(req, frame, code, op.op1, slot)
-        .is_some_and(|of| req.instance_of(pending.class(), of));
+    let matched = pending.is_some_and(|pending| {
+        cached_class(req, frame, code, op.op1, slot)
+            .is_some_and(|of| req.instance_of(pending.class(), of))
+    });
     if !matched {
         if op.extended_value & LAST_CATCH != 0 {
             return Ok(Stepped::Threw(frame));
@@ -11230,6 +11247,50 @@ pub(crate) fn handle_exception<T: Tier>(
 /// under the one being unwound (`zend_exception_set_previous`) or
 /// becomes it.
 ///
+/// The unwind exit `exit` throws is told apart twice, as php tells it
+/// apart with `zend_is_unwind_exit`: no `finally` block is entered for
+/// it, which php's own comment there says is for now
+/// (`Z/Zend/zend_vm_def.h:8116`), and a throwable a block it is
+/// unwinding through had delayed is given up rather than chained
+/// (`Z/Zend/zend_vm_def.h:8143`), so an `exit` inside a `finally`
+/// block ends the request with its status and the throwable that
+/// entered the block is never rendered.
+///
+/// ```php
+/// try { echo "a\n"; exit(5); } finally { echo "f\n"; }
+/// echo "after\n";
+/// ```
+/// ```expect exit=5
+/// a
+/// ```
+///
+/// ```php
+/// function f() { try { exit(6); } finally { echo "f\n"; } }
+/// try { f(); } catch (Throwable $t) { echo "c\n"; } finally { echo "g\n"; }
+/// echo "after\n";
+/// ```
+/// ```expect exit=6
+/// ```
+///
+/// ```php
+/// try { throw new Exception("e"); } finally { echo "f\n"; exit(2); }
+/// ```
+/// ```expect exit=2
+/// f
+/// ```
+///
+/// A `finally` block an ordinary throwable enters still runs, and the
+/// `exit` inside a `catch` clause unwinds from there.
+///
+/// ```php
+/// try { try { throw new Exception("e"); } finally { echo "f\n"; } } catch (Exception $e) { echo "c\n"; exit(4); } finally { echo "g\n"; }
+/// echo "after\n";
+/// ```
+/// ```expect exit=4
+/// f
+/// c
+/// ```
+///
 /// Nothing left to answer is php's uncaught path: the frame's live
 /// temporaries are given up and the frame is left, its caller reading
 /// the throwable at the call opline as php's `zend_leave_helper` leaves
@@ -11253,6 +11314,10 @@ fn unwind_from<T: Tier>(
             return jump_to(req, frame, element.catch_op.0);
         }
         if op_num < element.finally_op.0 {
+            if req.unwind_exit() {
+                at = offset.checked_sub(1);
+                continue;
+            }
             let Some(var) = fast_call_var(code, element) else {
                 return Err(Fatal::Error(String::from(
                     "InternalError: a try element whose finally_end names no FAST_RET",
@@ -11286,6 +11351,7 @@ fn unwind_from<T: Tier>(
             if let Some(delayed) = delayed {
                 match req.pending() {
                     Some(pending) => req.set_previous(pending, delayed),
+                    None if req.unwind_exit() => req.release(delayed.as_value()),
                     None => req.leave_pending(&Thrown::of(Some(delayed))),
                 }
             }

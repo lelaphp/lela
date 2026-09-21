@@ -271,12 +271,13 @@ mod tests {
     /// The natives the tests below call that are in no row of
     /// `special::TABLE`: php's `-n` has each, so its dump reads them off
     /// `CG(function_table)` as `INIT_FCALL` and `DO_ICALL`.
-    const CALLED: [&[u8]; 5] = [
+    const CALLED: [&[u8]; 6] = [
         b"var_dump",
         b"extension_loaded",
         b"str_repeat",
         b"set_time_limit",
         b"memory_get_usage",
+        b"exit",
     ];
 
     /// The natives with a frameless entry the tests below call, as
@@ -6511,6 +6512,33 @@ class C {
     /// and carries `ZEND_LAST_CATCH`. The `return` inside a `try` with a
     /// `finally` calls the block before the `RETURN`, so `f` carries two
     /// `FAST_CALL`s into one block.
+    /// The oracle's dump under `[regime.dump]` of `exit`, `exit(0)`,
+    /// `exit("msg")` and `die`: each is `INIT_FCALL` over `exit`, the
+    /// function php 8.4 made of the keyword, with `die` given the same
+    /// name by the parser and no opcode of its own anywhere.
+    #[test]
+    fn an_exit_or_a_die_is_php_s_init_fcall_over_exit() {
+        assert_eq!(
+            dump_of(b"<?php exit; exit(0); exit(\"msg\"); die;"),
+            main_dump(
+                11,
+                0,
+                4,
+                "0000 INIT_FCALL 0 80 string(\"exit\")\n\
+                 0001 DO_ICALL\n\
+                 0002 INIT_FCALL 1 96 string(\"exit\")\n\
+                 0003 SEND_VAL int(0) 1\n\
+                 0004 DO_ICALL\n\
+                 0005 INIT_FCALL 1 96 string(\"exit\")\n\
+                 0006 SEND_VAL string(\"msg\") 1\n\
+                 0007 DO_ICALL\n\
+                 0008 INIT_FCALL 0 80 string(\"exit\")\n\
+                 0009 DO_ICALL\n\
+                 0010 RETURN int(1)\n"
+            )
+        );
+    }
+
     #[test]
     fn a_try_is_phps_catch_chain_and_a_finally_is_its_fast_call_and_fast_ret() {
         let source = b"<?php\ntry { throw new Exception(\"x\"); } catch (ValueError $e) { echo 1; } catch (TypeError|Error $e) { echo 2; }\n";

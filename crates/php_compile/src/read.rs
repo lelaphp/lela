@@ -26,7 +26,8 @@
 //! string with `$a`, `{$a}` and `${a}` interpolated as php's lexer takes
 //! them, `true`, `false`, `null`, a constant by name, a magic constant
 //! at the line its token stands on, a call of
-//! a named function, a parenthesised expression, a variable `$a` that is
+//! a named function, `exit` and `die` with or without an argument list,
+//! a parenthesised expression, a variable `$a` that is
 //! a CV, an assignment `$a = expr` to one, `$a++` and `++$a` on one,
 //! unary `-` and `+`, `@` over an expression, a cast to a scalar type in
 //! any of the spellings php's scanner takes, and `<`, `.`, `<<`, `>>`, `+`, `-`, `*`, `/`, `%`
@@ -3922,6 +3923,14 @@ impl Reader<'_> {
                 self.bump(5);
                 self.clone_expression()
             }
+            Some(b'e' | b'E') if self.word_ahead(b"exit") => {
+                self.bump(4);
+                self.exit_expression()
+            }
+            Some(b'd' | b'D') if self.word_ahead(b"die") => {
+                self.bump(3);
+                self.exit_expression()
+            }
             Some(b'i' | b'I' | b'r' | b'R') if self.include_ahead().is_some() => {
                 self.include_expression()
             }
@@ -4257,6 +4266,32 @@ impl Reader<'_> {
             Expr::Call {
                 name: b"\\clone".to_vec(),
                 arguments: vec![operand],
+            },
+        ))
+    }
+
+    /// `exit` and `die`, the keyword read, with or without an argument
+    /// list: php's scanner makes both `T_EXIT`, and its parser makes
+    /// `T_EXIT ctor_arguments` the call `\exit(...)`, `ZEND_AST_CALL`
+    /// over the known name `exit` with `ZEND_NAME_FQ`
+    /// (`Z/Zend/zend_language_parser.y:1369`), so `die("bye")` is the
+    /// call `exit("bye")` in the dump and in a trace. `exit` has been a
+    /// function since 8.4 and no opcode of its own; the table has it
+    /// and the call is `INIT_FCALL` over its name.
+    fn exit_expression(&mut self) -> Result<Child, Trouble> {
+        let line = self.line;
+        self.skip_trivia();
+        let arguments = if self.byte(0) == Some(b'(') {
+            self.bump(1);
+            self.arguments()?
+        } else {
+            Vec::new()
+        };
+        Ok(Child::at(
+            line,
+            Expr::Call {
+                name: b"\\exit".to_vec(),
+                arguments,
             },
         ))
     }
@@ -5538,6 +5573,28 @@ mod tests {
                 })]),
                 1
             )]
+        );
+    }
+
+    /// `exit`, `exit(1)` and `die('x')` are each the call `\exit` php's
+    /// parser makes of `T_EXIT ctor_arguments`, the bare keyword with no
+    /// argument.
+    #[test]
+    fn an_exit_or_a_die_is_the_fully_qualified_call_php_s_parser_makes_of_it() {
+        let read = read(b"<?php exit; exit(1); die('x');").unwrap_or_default();
+        let call = |arguments| {
+            Stmt::Effect(at(Expr::Call {
+                name: b"\\exit".to_vec(),
+                arguments,
+            }))
+        };
+        assert_eq!(
+            read,
+            vec![
+                (call(vec![]), 1),
+                (call(vec![at(Expr::Int(1))]), 1),
+                (call(vec![at(Expr::Str(b"x".to_vec()))]), 1),
+            ]
         );
     }
 

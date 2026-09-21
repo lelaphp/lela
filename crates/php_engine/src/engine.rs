@@ -1080,11 +1080,7 @@ impl Engine {
             Some(Ending::Fatal(logged)) => Some(logged.clone()),
             _ => None,
         };
-        let exit_code = match req.ending() {
-            Some(Ending::Fatal(_) | Ending::Parse) => 255,
-            Some(Ending::Exit(code)) => *code,
-            None => 0,
-        };
+        let exit_code = req.exit_status();
         let headers = req.header_block();
         let body = req.take_body();
         for aside in req.take_aside() {
