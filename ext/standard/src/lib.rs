@@ -26,7 +26,8 @@
 //! beside `trim`, `array_unique` with the `SORT_*` constants is
 //! `array`'s, `print_r` and `var_export` are `var`'s, the first over the
 //! renderer 8.5 keeps in Zend, `sprintf`, `printf` and `vsprintf` are
-//! `formatted_print`'s over `php_formatted_print`.
+//! `formatted_print`'s over `php_formatted_print`, and `base64_encode`
+//! and `base64_decode` are `base64`'s.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -41,6 +42,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod array;
+mod base64;
 mod formatted_print;
 mod head;
 mod output;
@@ -144,6 +146,7 @@ pub fn extension() -> Extension {
         .functions(head::natives())
         .functions(var::natives())
         .functions(formatted_print::natives())
+        .functions(base64::natives())
         .functions(vec![
             (
                 declared(
