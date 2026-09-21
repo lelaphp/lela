@@ -443,6 +443,14 @@ type TraceRow = (
     Option<(Vec<u8>, i64)>,
 );
 
+/// One link of php's `prev_execute_data` chain as this engine holds it:
+/// a user frame, with its place among the frames, or a call a native
+/// is serving.
+enum Link<'a> {
+    Frame(usize, &'a exec::FrameState),
+    Call(&'a exec::CallState),
+}
+
 /// What `zend_get_property_offset` places a declared instance property
 /// by: the slot it sits in, the visibility a read is held to, the set
 /// visibility a write is held to where it has one of its own, and
@@ -1189,22 +1197,29 @@ impl Request {
         false
     }
 
-    /// `zend_get_executed_scope`: the class of the method being served,
-    /// a native method's while its entry runs and a user method's while
-    /// the loop is in its body (`EX(func)->common.scope`), and none at
-    /// the main op array or inside a function.
+    /// `zend_get_executed_scope` (`Z/Zend/zend_execute_API.c:712`): the
+    /// chain walked from `EG(current_execute_data)` to the first link
+    /// that is user code or a function with a scope, and that link's
+    /// `func->common.scope`: a user method's class, a closure's bound
+    /// scope, and none for a plain user function or the main op array.
+    /// A native with no scope, `constant()` or `get_class()` called
+    /// from a method, is walked past, so the scope a native reads is
+    /// its caller's; a native method's is its own class.
     pub(crate) fn executed_scope(&self) -> Option<ClassId> {
-        self.method_class(self.executing_function()?)
-    }
-
-    /// `EX(func)` of `EG(current_execute_data)`: the native being
-    /// served, or, between natives, the function whose body the
-    /// innermost frame serves; none at the main op array.
-    fn executing_function(&self) -> Option<Function> {
-        if let Some(call) = self.vm.serving_call() {
-            return Some(call.function);
+        for link in self.chain() {
+            let (function, closure) = match link {
+                Link::Frame(_, state) => (state.function, state.closure),
+                Link::Call(call) => (Some(call.function), call.closure),
+            };
+            let scope = self
+                .closure_scope(closure)
+                .or_else(|| self.method_class(function?));
+            let user = function.is_some_and(|function| self.user_function(function).is_some());
+            if scope.is_some() || user || matches!(link, Link::Frame(..)) {
+                return scope;
+            }
         }
-        self.vm.innermost()?.function
+        None
     }
 
     /// `ce->parent`: the linked parent of a class, none at a root.
@@ -1653,6 +1668,37 @@ impl Request {
         Ok(trace)
     }
 
+    /// php's one `prev_execute_data` chain, innermost first, walked back
+    /// out of this engine's two stacks: the user frames, and the calls
+    /// being served, each frame's `calls_below` saying where among the
+    /// calls it was pushed. A call still being built is not on the
+    /// chain, as php's is a chain of activations.
+    fn chain(&self) -> impl Iterator<Item = Link<'_>> {
+        let frames = self.vm.frames();
+        let calls = self.vm.calls();
+        let mut chain: Vec<Link> = Vec::new();
+        let mut taken = 0usize;
+        for (at, state) in frames.iter().enumerate() {
+            let below = usize::try_from(state.calls_below)
+                .unwrap_or(usize::MAX)
+                .min(calls.len());
+            while taken < below {
+                if calls[taken].stage == exec::CallStage::Serving {
+                    chain.push(Link::Call(&calls[taken]));
+                }
+                taken += 1;
+            }
+            chain.push(Link::Frame(at, state));
+        }
+        while taken < calls.len() {
+            if calls[taken].stage == exec::CallStage::Serving {
+                chain.push(Link::Call(&calls[taken]));
+            }
+            taken += 1;
+        }
+        chain.into_iter().rev()
+    }
+
     /// `EG(current_execute_data)` and its `prev_execute_data` chain,
     /// innermost first: one row per link, the function it serves, its
     /// receiver, its arguments, and the site of the link below it. The
@@ -1677,35 +1723,10 @@ impl Request {
     /// were placed. A call still being built is not on the chain, as
     /// php's is a chain of activations.
     fn trace_chain(&self) -> Vec<TraceRow> {
-        enum Link<'a> {
-            Frame(usize, &'a exec::FrameState),
-            Call(&'a exec::CallState),
-        }
-        let frames = self.vm.frames();
-        let calls = self.vm.calls();
-        let mut chain: Vec<Link> = Vec::new();
-        let mut taken = 0usize;
-        for (at, state) in frames.iter().enumerate() {
-            let below = usize::try_from(state.calls_below)
-                .unwrap_or(usize::MAX)
-                .min(calls.len());
-            while taken < below {
-                if calls[taken].stage == exec::CallStage::Serving {
-                    chain.push(Link::Call(&calls[taken]));
-                }
-                taken += 1;
-            }
-            chain.push(Link::Frame(at, state));
-        }
-        while taken < calls.len() {
-            if calls[taken].stage == exec::CallStage::Serving {
-                chain.push(Link::Call(&calls[taken]));
-            }
-            taken += 1;
-        }
+        let chain: Vec<Link> = self.chain().collect();
         let mut rows = Vec::new();
-        for at in (0..chain.len()).rev() {
-            let site = match at.checked_sub(1).map(|below| &chain[below]) {
+        for at in 0..chain.len() {
+            let site = match chain.get(at.saturating_add(1)) {
                 Some(Link::Frame(_, below)) => exec::body_of(&below.unit, below.body)
                     .map(|code| (code.filename.0.to_vec(), i64::from(exec::line_of(below)))),
                 Some(Link::Call(_)) | None => None,

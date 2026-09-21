@@ -338,8 +338,18 @@ fn class_exists(req: &mut Request) -> Result<Value, Thrown> {
 /// `ZEND_FUNCTION(get_class)` (`Z/Zend/zend_builtin_functions.c:721`):
 /// the declared name of the object's class, `ce->name`; without an
 /// argument the executed scope's name, deprecated since 8.3, and php's
-/// `Error` where there is no scope, which is everywhere a native can be
-/// called from here.
+/// `Error` where there is no scope. The scope is
+/// `zend_get_executed_scope`'s, which walks past this native's own
+/// frame to the method that called it.
+///
+/// ```php
+/// class M { function f() { return get_class(); } }
+/// var_dump((new M)->f());
+/// ```
+/// ```expect
+/// Deprecated: Calling get_class() without arguments is deprecated in %s on line 2
+/// string(1) "M"
+/// ```
 ///
 /// ```php
 /// class M {} $m = new M;
