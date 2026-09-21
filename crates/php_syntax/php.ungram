@@ -217,10 +217,13 @@ ForStep = Expr,*
 
 ForeachStmt = 'foreach' '(' iterable:Expr 'as' key:ForeachKey? target:ForeachTarget? ')'
               ( body:Stmt | ':' StmtList 'endforeach' ';' )
-ForeachKey    = key:Expr! '=>'
+ForeachKey    = byref:'&'? key:Expr! '=>'
 ForeachTarget = byref:'&'? target:Expr
 // DESUGAR: iterator protocol (design doc §7.1). VALIDATE: target must be
 // writable / destructurable; by-ref target excludes key-less list forms.
+// NOTE: the key's `&` is php's illegal `&$k => $v`, which its grammar
+// parses and its compiler refuses (`Key element cannot be a reference`);
+// the field is the compiler's to read.
 
 SwitchStmt = 'switch' '(' subject:Expr ')'
              ( '{' SwitchArm* '}' | ':' SwitchArm* 'endswitch' ';' )
@@ -257,8 +260,10 @@ StaticVarDeclarator = var:<variable>! ('=' init:Expr)?
 
 UnsetStmt = 'unset' '(' targets:Expr,+ ')' ';'
 
-ConstStmt       = 'const' ConstDeclarator,+ ';'
+ConstStmt : HasAttributes = 'const' ConstDeclarator,+ ';'
 // NOTE: top-level const — untyped; typed constants are class-level (8.3).
+// LEVEL: attributes on constants 8.5; the groups before `const` are the
+// statement's, and what they may carry is the compiler's.
 
 UseStmt      = 'use' kind:('function' | 'const')? ( UseGroup | UseClause,+ ) ';'
 UseClause    = name:NameRef! alias:UseAlias?

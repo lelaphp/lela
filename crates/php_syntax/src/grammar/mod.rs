@@ -31,7 +31,7 @@ mod strings;
 mod types;
 
 use crate::SyntaxKind as K;
-use crate::parser::{CompletedMarker, Parser};
+use crate::parser::{CompletedMarker, Marker, Parser};
 use crate::source::Span;
 
 /// The tokens that introduce a statement: the sync anchors, and the
@@ -190,7 +190,10 @@ fn statement_inner(p: &mut Parser<'_>, top_level: bool) {
         K::TRY_KW => try_stmt(p),
         K::GLOBAL_KW => global_stmt(p),
         K::UNSET_KW => unset_stmt(p),
-        K::CONST_KW => const_stmt(p),
+        K::CONST_KW => {
+            let m = p.start();
+            const_stmt(p, m);
+        }
         K::USE_KW => use_stmt(p),
         K::NAMESPACE_KW => namespace_def(p),
         K::DECLARE_KW => declare_stmt(p),
@@ -284,8 +287,9 @@ fn attributed_statement(p: &mut Parser<'_>, top_level: bool) {
                     decl::modifiers_then_class(p, m);
                 }
                 // `#[A] const X = 1;` is legal at top level on 8.5, where
-                // attributes on constants land; parsed into the statement
-                // shape, and placement is the compiler's.
+                // attributes on constants land: the groups are the
+                // statement's, and placement is the compiler's.
+                K::CONST_KW if top_level => const_stmt(p, m),
                 _ => {
                     m.abandon(p);
                     statement(p, top_level);
@@ -712,8 +716,7 @@ fn unset_stmt(p: &mut Parser<'_>) {
     m.complete(p, K::UNSET_STMT);
 }
 
-fn const_stmt(p: &mut Parser<'_>) {
-    let m = p.start();
+fn const_stmt(p: &mut Parser<'_>, m: Marker) {
     p.bump(K::CONST_KW);
     // A top-level constant's name is a plain identifier; the
     // semi-reserved set applies to class constants alone (php-src
