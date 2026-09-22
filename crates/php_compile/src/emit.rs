@@ -3682,11 +3682,14 @@ impl Emit<'_> {
     ///
     /// The third shape #601 measured, `for (;;) if ($x) ; else\n{ … }`,
     /// is not a witness: its loop holds two jumps, the `JMPZ` of the
-    /// condition on line 2 and the jump back on line 3, both of which
-    /// test the interrupt, so the line the timer names is whichever of
-    /// the two the interrupt fell on. The pinned oracle prints line 2 on
-    /// some runs and line 3 on others, so what the tree gives the `else`
-    /// arm is held in `php_syntax`'s `tests/line.rs` instead.
+    /// condition on line 2 and the jump back on line 3, and php tests
+    /// the interrupt after either of them, so the line it names is
+    /// whichever the interrupt fell on — line 3 on ten runs of the
+    /// pinned oracle and line 2 on the other two of twelve — where this
+    /// engine tests at the back-edge alone and names line 2 on all
+    /// twelve. Design §5.8 and ledger 28 leave that line unheld, and
+    /// what the tree gives the `else` arm is held in `php_syntax`'s
+    /// `tests/line.rs` instead.
     fn r#for(&mut self, id: NodeId<tree::ForStmt>) -> Result<(), CompileError> {
         let node = &self.parsed.tree[id];
         let tree = &self.parsed.tree;
