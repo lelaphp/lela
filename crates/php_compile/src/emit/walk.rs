@@ -1,24 +1,17 @@
 //! The walk over `php_syntax`'s tree (design §4.9): what [`Emit`]
-//! reads a statement node as, and the bridge under it.
+//! reads a statement node as, and, in [`expr`], an expression node.
 //!
-//! `emit` walks the tree's `SourceFile`, every statement node in it and
-//! every declaration a statement carries, reading each fact where the
-//! tree holds it: a name from its token, a modifier from its token, a
-//! type from its `TypeExpr`, a doc comment from the token index the
-//! builder recorded, a line from [`Node::line`], which is php's
-//! `zend_ast.lineno`. What a statement holds is handed to the emitter in
-//! the shape [`crate::read`] gave it, so every statement's semantics
-//! stays in the one function that had it and nothing here decides what
-//! an opline is.
-//!
-//! **The bridge.** An expression is not walked from the tree yet: its
-//! node's byte range is handed to [`read::expr_at`] as one expression,
-//! with the line the range starts on, and the reader reads that slice of
-//! `parsed.source` where it read the whole file. The bridge runs from a
-//! range to the reader and never from the reader to a node: nothing
-//! maps an offset back to a `NodeId`. Each family of expressions that
-//! `emit` learns to walk from the tree leaves the bridge, and the bridge
-//! goes with the last (#595).
+//! `emit` walks the tree's `SourceFile`, every statement node in it,
+//! every declaration a statement carries and every expression under
+//! them, reading each fact where the tree holds it: a name from its
+//! token, a modifier from its token, a type from its `TypeExpr`, a
+//! scalar's value from [`php_syntax::TokenValue::of`], a doc comment
+//! from the token index the builder recorded, a line from
+//! [`Node::line`], which is php's `zend_ast.lineno`. What a node holds
+//! is handed to the emitter in the shape [`crate::read`] gave it, so
+//! every construct's semantics stays in the one function that had it
+//! and nothing here decides what an opline is; each family of those
+//! shapes goes as the emitter learns to read its nodes directly (#595).
 //!
 //! **What is refused.** A construct the tree parses and the emitter
 //! cannot emit yet is refused here, at the node's line, in the one-line
@@ -33,6 +26,8 @@ use php_syntax::tree::{
 use php_syntax::{SyntaxKind, TextRange, tree};
 use php_unit::Level;
 use php_unit::decl::{ClassKind, Name, Type, Visibility};
+
+mod expr;
 
 use super::Emit;
 use crate::CompileError;
@@ -146,63 +141,6 @@ impl Emit<'_> {
             .line_number(range.end().saturating_sub(1).max(range.start))
     }
 
-    /// The bridge: one expression node handed to the reader as the
-    /// bytes of its range, at the line the range starts on, with the
-    /// doc comment pending before it as the reader would have held it
-    /// (`CG(doc_comment)` when the scanner reaches the expression).
-    /// What the reader cannot read is its refusal, unchanged.
-    fn bridge(&mut self, expr: tree::Expr) -> Result<Child, CompileError> {
-        let range = expr.range(self.parsed);
-        let line = self.parsed.lines.line_number(range.start);
-        let slice = self
-            .parsed
-            .source
-            .get(range.start as usize..range.end() as usize)
-            .unwrap_or_default();
-        let doc_comment = self.doc_comment_before(range.start);
-        read::expr_at(slice, line, self.stack, doc_comment).map_err(|trouble| CompileError {
-            level: trouble.level,
-            message: trouble.what,
-            line: trouble.line,
-            raised: Vec::new(),
-        })
-    }
-
-    /// The `/**` comment directly before `offset`, whitespace and plain
-    /// comments between them: what the reader's `skip_trivia` had
-    /// pending when it reached the expression.
-    fn doc_comment_before(&self, offset: u32) -> Option<Vec<u8>> {
-        let at = self
-            .parsed
-            .tokens
-            .partition_point(|token| token.offset < offset);
-        self.parsed.tokens[..at]
-            .iter()
-            .rev()
-            .take_while(|token| {
-                matches!(
-                    token.kind,
-                    SyntaxKind::WHITESPACE
-                        | SyntaxKind::LINE_COMMENT
-                        | SyntaxKind::BLOCK_COMMENT
-                        | SyntaxKind::DOC_COMMENT
-                )
-            })
-            .find(|token| token.kind == SyntaxKind::DOC_COMMENT)
-            .map(|token| {
-                self.parsed
-                    .source
-                    .get(token.offset as usize..(token.offset + token.len) as usize)
-                    .unwrap_or_default()
-                    .to_vec()
-            })
-    }
-
-    /// Every expression of a list, bridged in order.
-    fn bridge_all(&mut self, exprs: &[tree::Expr]) -> Result<Vec<Child>, CompileError> {
-        exprs.iter().map(|expr| self.bridge(*expr)).collect()
-    }
-
     /// One statement read from the tree, with php's line for it, or
     /// nothing for the empty statement, which php's `statement: ';'`
     /// reduces to an empty list.
@@ -216,8 +154,8 @@ impl Emit<'_> {
                 let text = tree[id].body.map(|body| self.text(body).to_vec());
                 Ir::Inline(text.unwrap_or_default())
             }
-            Stmt::EchoStmt(id) => Ir::Echo(self.bridge_all(&tree[id].exprs)?),
-            Stmt::ExprStmt(id) => Ir::Effect(self.bridge(tree[id].expr)?),
+            Stmt::EchoStmt(id) => Ir::Echo(self.walk_all(&tree[id].exprs)?),
+            Stmt::ExprStmt(id) => Ir::Effect(self.walk_expr(tree[id].expr)?),
             Stmt::Block(id) => Ir::Block(self.walk_block(id)?),
             Stmt::IfStmt(id) => Ir::If(self.walk_if(id)?),
             Stmt::WhileStmt(id) => {
@@ -235,15 +173,15 @@ impl Emit<'_> {
             Stmt::ForStmt(id) => {
                 let node = &tree[id];
                 let init = match node.init {
-                    Some(init) => self.bridge_all(&tree[init].exprs)?,
+                    Some(init) => self.walk_all(&tree[init].exprs)?,
                     None => Vec::new(),
                 };
                 let cond = match node.cond {
-                    Some(cond) => self.bridge_all(&tree[cond].exprs)?,
+                    Some(cond) => self.walk_all(&tree[cond].exprs)?,
                     None => Vec::new(),
                 };
                 let step = match node.step {
-                    Some(step) => self.bridge_all(&tree[step].exprs)?,
+                    Some(step) => self.walk_all(&tree[step].exprs)?,
                     None => Vec::new(),
                 };
                 let body = self.walk_body(node.body, node.stmt_list)?;
@@ -259,7 +197,7 @@ impl Emit<'_> {
                 let expr = self.walk_cond(node.iterable, line, "a `foreach`")?;
                 let key = match node.key {
                     Some(key) => Some(Target {
-                        expr: self.bridge(tree[key].key)?,
+                        expr: self.walk_expr(tree[key].key)?,
                         by_ref: tree[key].byref.is_some(),
                     }),
                     None => None,
@@ -272,7 +210,7 @@ impl Emit<'_> {
                     return Err(unread(line, "a `foreach` whose target"));
                 };
                 let value = Target {
-                    expr: self.bridge(written)?,
+                    expr: self.walk_expr(written)?,
                     by_ref: target.byref.is_some(),
                 };
                 let body = self.walk_body(node.body, node.stmt_list)?;
@@ -290,7 +228,7 @@ impl Emit<'_> {
                 for arm in &node.switch_arms {
                     let arm = &tree[*arm];
                     let cond = match arm.value {
-                        Some(value) => Some(self.bridge(value)?),
+                        Some(value) => Some(self.walk_expr(value)?),
                         None => None,
                     };
                     let body = self.walk_stmt_list(arm.stmt_list)?;
@@ -339,7 +277,7 @@ impl Emit<'_> {
                 let targets = tree[id].targets.clone();
                 let mut out = Vec::with_capacity(targets.len());
                 for target in &targets {
-                    let written = self.bridge(*target)?;
+                    let written = self.walk_expr(*target)?;
                     out.push(unset_target(written, target.line(self.parsed))?);
                 }
                 Ir::Unset(out)
@@ -383,7 +321,7 @@ impl Emit<'_> {
                     };
                     elements.push(ConstElem {
                         name: self.text(directive.name).to_vec(),
-                        value: self.bridge(value)?,
+                        value: self.walk_expr(value)?,
                         line: directive.line(),
                     });
                 }
@@ -544,7 +482,7 @@ impl Emit<'_> {
         what: &str,
     ) -> Result<Child, CompileError> {
         match cond {
-            Some(cond) => self.bridge(cond),
+            Some(cond) => self.walk_expr(cond),
             None => Err(unread(line, &format!("{what} with no condition"))),
         }
     }
@@ -552,7 +490,7 @@ impl Emit<'_> {
     /// An expression written or not.
     fn walk_optional(&mut self, expr: Option<tree::Expr>) -> Result<Option<Child>, CompileError> {
         match expr {
-            Some(expr) => Some(self.bridge(expr)).transpose(),
+            Some(expr) => Some(self.walk_expr(expr)).transpose(),
             None => Ok(None),
         }
     }
@@ -661,13 +599,22 @@ impl Emit<'_> {
         };
         Ok(ConstElem {
             name: self.text(name).to_vec(),
-            value: self.bridge(value)?,
+            value: self.walk_expr(value)?,
             line,
         })
     }
 
-    /// The attributes before a class, `#[A(1), B] #[C]`, each with its
-    /// arguments bridged; a named or unpacked argument is refused.
+    /// The attributes before a class, `#[A(1), B] #[C]`, php's
+    /// `attributed_statement` groups, each attribute with its arguments;
+    /// a named or unpacked argument is refused.
+    ///
+    /// ```php
+    /// #[A] #[B(1), C] class M { public $x = 1; }
+    /// var_dump((new M)->x);
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// ```
     fn walk_attributes(
         &mut self,
         groups: &[NodeId<tree::AttributeGroup>],
@@ -692,7 +639,7 @@ impl Emit<'_> {
         Ok(out)
     }
 
-    /// The arguments of a list that are plain expressions, bridged;
+    /// The arguments of a list that are plain expressions;
     /// anything else refused as what `whose` cannot carry yet.
     fn plain_arguments(
         &mut self,
@@ -704,7 +651,7 @@ impl Emit<'_> {
         let mut out = Vec::with_capacity(args.len());
         for arg in &args {
             match arg {
-                tree::Arg::Expr(expr) => out.push(self.bridge(*expr)?),
+                tree::Arg::Expr(expr) => out.push(self.walk_expr(*expr)?),
                 tree::Arg::NamedArg(_) => {
                     return Err(unread(line, &format!("{whose} named argument")));
                 }
@@ -833,8 +780,28 @@ impl Emit<'_> {
         Ok(out)
     }
 
-    /// A modifier list read once, with php's one compile error over it
-    /// that the reader raised: two visibilities.
+    /// A modifier list read once, php's `member_modifier` list:
+    /// `zend_add_member_modifier` refuses a second visibility in its
+    /// own words, and a second set visibility in the same words under
+    /// its own arm (`Z/Zend/zend_compile.c:1043`).
+    ///
+    /// ```php
+    /// class Foo { public private(set) protected(set) int $bar; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Multiple access type modifiers are not allowed in %s on line 2
+    /// ```
+    ///
+    /// The word is read whatever its case, as every keyword is:
+    ///
+    /// ```php
+    /// class Foo { public PRIVATE(SET) int $bar = 7; }
+    /// var_dump((new Foo)->bar, (new ReflectionProperty('Foo', 'bar'))->isPrivateSet());
+    /// ```
+    /// ```expect
+    /// int(7)
+    /// bool(true)
+    /// ```
     fn walk_modifiers(&self, modifiers: &[Modifier], line: u32) -> Result<Modifiers, CompileError> {
         let mut out = Modifiers::default();
         for modifier in modifiers {

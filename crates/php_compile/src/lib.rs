@@ -6,9 +6,9 @@
 //! engine's loop serves, `echo` and a call of a named function, emitted as
 //! php emits them, with the entry safepoint and the numbered return. The
 //! tree it walks is `php_syntax`'s, [`Parsed::tree`] (design §4.9):
-//! `emit` reads every statement node from it, and an expression it does
-//! not read from the tree yet it hands to `read` by the node's byte
-//! range (#595). What it cannot read is refused as a [`CompileError`].
+//! `emit` reads every statement and expression node from it, into the
+//! shapes `read` names, one per node kind, until it reads each kind
+//! directly (#595). What it cannot read is refused as a [`CompileError`].
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -3183,11 +3183,11 @@ mod tests {
         }
     }
 
-    /// An expression the reader cannot take further inside parentheses:
-    /// the refusal names the expression, in the sentence the phpt lane
-    /// reads as a construct not read yet, where it named the parenthesis
-    /// before (#395). A parenthesis nothing closes is the scanner's own
-    /// refusal, raised before this reader runs.
+    /// An expression the walk cannot emit yet inside parentheses: the
+    /// refusal names the expression itself, in the sentence the phpt
+    /// lane reads as a construct not read yet, where the reader named
+    /// the parenthesis before (#395). A parenthesis nothing closes is the
+    /// parser's own refusal, raised before the walk runs.
     #[test]
     fn an_unread_expression_inside_parentheses_names_the_expression() {
         let compiled = || CompileError {
@@ -3198,10 +3198,7 @@ mod tests {
         };
         let error = refused(b"<?php\n$a = (print 1);\n").unwrap_or_else(compiled);
         assert_eq!(error.level, Level::Parse);
-        assert_eq!(
-            error.message,
-            "an expression inside parentheses this compiler cannot read yet"
-        );
+        assert_eq!(error.message, "a `print` this compiler cannot read yet");
         assert_eq!(error.line, 2);
         let unclosed = refused(b"<?php\n$a = (1 + 2;\n").unwrap_or_else(compiled);
         assert_eq!(unclosed.message, "syntax error, unexpected token \";\"");
@@ -4336,7 +4333,9 @@ mod tests {
         };
         assert_eq!(
             refused(b"<?php C::$p = &$o->q;").as_deref(),
-            Some("an expression whose end this compiler cannot read")
+            Some(
+                "a by-reference assignment from what is no variable this compiler cannot read yet"
+            )
         );
         assert_eq!(
             refused(b"<?php $this += 1;").as_deref(),
@@ -6083,7 +6082,7 @@ class C {
         );
         assert_eq!(
             refused(b"<?php echo E::class;").as_deref(),
-            Some("a `::class` or a class member named at run time this compiler cannot read yet")
+            Some("a `::class` this compiler cannot read yet")
         );
         assert_eq!(
             refused(b"<?php echo $o->$p;").as_deref(),

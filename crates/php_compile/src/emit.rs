@@ -155,8 +155,8 @@ const ZVAL_SIZE: usize = 16;
 /// through whichever handler is installed).
 pub(crate) struct Emit<'a> {
     /// The parse this compiles: the tree the walk reads (design §4.9),
-    /// the token stream a name, a value and a doc comment are read
-    /// from, and the source the bridge hands the reader by range.
+    /// and the token stream and the source a name, a value and a doc
+    /// comment are read from.
     parsed: &'a Parsed,
     strings: &'a mut dyn Intern,
     /// php's `precision` while the file compiles, [`Options::precision`].
