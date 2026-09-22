@@ -1511,7 +1511,7 @@ mod tests {
         let (body, observables) = served(&engine, "<?php\necho `ls`;");
         assert_eq!(
             body,
-            "\nParse error: an expression this compiler cannot read yet in witness.php on line 2\n"
+            "\nParse error: a backtick operator this compiler cannot read yet in witness.php on line 2\n"
         );
         assert_eq!(observables.exit_code, 255);
         assert_eq!(
@@ -1533,7 +1533,7 @@ mod tests {
         assert!(logged.body.is_empty());
         assert_eq!(
             logged.logged(),
-            "PHP Parse error:  an expression this compiler cannot read yet in witness.php on line 2\n"
+            "PHP Parse error:  a backtick operator this compiler cannot read yet in witness.php on line 2\n"
         );
         assert_eq!(observables.exit_code, 255);
 
