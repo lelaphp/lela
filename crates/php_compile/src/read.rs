@@ -8,32 +8,27 @@
 //! built them from the source is gone; each shape goes as the emitter
 //! learns to read its node directly, and this file with the last.
 //!
-//! What the walk builds: an `echo` of one or more expressions, an
-//! expression statement, a block, a `for`, a `while` and a `foreach`
-//! whose body is a block or one statement, the `foreach` over any
-//! expression with a variable as its value and one as its key, either
-//! by reference, a `return` with or without a value, a `switch` in
-//! either syntax, an `if` with its `elseif`, `else if` and `else` arms
-//! in either syntax, `break` and `continue` with or without a depth, a
-//! `class` with no modifier whose members are typed or untyped
-//! properties, constants and methods, each declarator with its doc
-//! comment, an interface, the unbraced `namespace A\B;`, `declare`,
-//! `const`, `unset`, `try`, `goto` and a label; and in an expression a
-//! `match`, an array expression with no `...` and no `&`, a number, a
-//! string in every spelling with `$a`, `{$a}` and `${a}` interpolated
-//! as php's grammar takes them, `true`, `false`, `null`, a constant by
-//! name, a magic constant at the line its token stands on, a call of a
-//! named function, `exit`, `die` and `clone`, a variable that is a CV,
-//! an assignment to one, to an element, a property or a class's
-//! property, plain, compound, coalescing or by reference, `++` and `--`
-//! on a variable or a class's property, unary `-`, `+`, `!` and `~`, `@`
-//! over an expression, a cast to a scalar type, `instanceof`, `new`, a
-//! method call, a call of a class's method, a call through a variable, `isset` and
-//! `empty` over a variable chain, `include` and its kin, `throw`, a
-//! closure and an arrow function, the conditional, `??`, `&&`, `||`,
-//! `and`, `or`, `xor`, and every binary operator but `|>`. Anything
-//! else is a [`crate::CompileError`], so what this cannot read is
-//! refused rather than silently compiled to something else.
+//! What the walk builds: the declarations, a `class` with no modifier
+//! whose members are typed or untyped properties, constants and
+//! methods, each declarator with its doc comment, an interface, a
+//! function and a closure, each body the tree's own statement nodes,
+//! which the emitter walks itself; and in an expression a `match`, an
+//! array expression with no `...` and no `&`, a number, a string in
+//! every spelling with `$a`, `{$a}` and `${a}` interpolated as php's
+//! grammar takes them, `true`, `false`, `null`, a constant by name, a
+//! call of a named function, `exit`, `die` and `clone`, a variable that
+//! is a CV, an assignment to one, to an element, a property or a
+//! class's property, plain, compound, coalescing or by reference, `++`
+//! and `--` on a variable or a class's property, unary `-`, `+`, `!`
+//! and `~`, `@` over an expression, a cast to a scalar type,
+//! `instanceof`, `new`, a method call, a call of a class's method, a
+//! call through a variable, `isset` and `empty` over a variable chain,
+//! `include` and its kin, `throw`, a closure and an arrow function, the
+//! conditional, `??`, `&&`, `||`, `and`, `or`, `xor`, and every binary
+//! operator but `|>`. Anything else is a [`crate::CompileError`], so
+//! what this cannot read is refused rather than silently compiled to
+//! something else. The statements left first: the emitter reads every
+//! statement node from the tree (#595).
 
 use std::fmt;
 use std::ops::Deref;
@@ -65,173 +60,6 @@ impl IncludeKind {
             IncludeKind::RequireOnce => 1 << 4,
         }
     }
-}
-
-/// One statement.
-#[derive(Debug, PartialEq)]
-pub(crate) enum Stmt {
-    /// Text outside the tags, which php echoes as it stands.
-    Inline(Vec<u8>),
-    /// `echo $a, $b;`
-    Echo(Vec<Child>),
-    /// An expression served for its effect; its value is discarded.
-    Effect(Child),
-    /// `{ ... }`, php's `ZEND_AST_STMT_LIST`.
-    Block(Read),
-    /// `for (init; cond; step) body`, php's `ZEND_AST_FOR`: three
-    /// expression lists, each empty where nothing is written between the
-    /// semicolons, and the body's statements.
-    For {
-        init: Vec<Child>,
-        cond: Vec<Child>,
-        step: Vec<Child>,
-        body: Read,
-    },
-    /// `while (cond) body`, php's `ZEND_AST_WHILE`.
-    While { cond: Child, body: Read },
-    /// `do body while (cond);`, php's `ZEND_AST_DO_WHILE`: the body,
-    /// which runs before the condition is asked the first time, and the
-    /// condition. php compiles the condition at the line its own node
-    /// carries and not at the `do`'s (the `while` is written after the
-    /// body, so the two are rarely the same line), which is
-    /// [`Child::line`] and nothing beside it.
-    DoWhile { body: Read, cond: Child },
-    /// `foreach (expr as key => value) body`, php's `ZEND_AST_FOREACH`:
-    /// the subject, the value target, the key target where one is
-    /// written, and the body's statements.
-    Foreach {
-        expr: Child,
-        value: Target,
-        key: Option<Target>,
-        body: Read,
-    },
-    /// `return;` or `return expr;`, php's `ZEND_AST_RETURN`.
-    Return(Option<Child>),
-    /// `namespace A\B;`, php's `ZEND_AST_NAMESPACE` with no body: the
-    /// name as written, in force for what follows it. The braced form
-    /// and the global `namespace;` are refused as what this reader
-    /// cannot read yet.
-    Namespace(Vec<u8>),
-    /// `switch (expr) { case …: … default: … }`, php's `ZEND_AST_SWITCH`
-    /// over a `ZEND_AST_SWITCH_LIST`.
-    Switch { expr: Child, cases: Vec<Case> },
-    /// `break;` or `break n;`, php's `ZEND_AST_BREAK` with the depth
-    /// written after it, if one is; what it may be is the emitter's to
-    /// refuse as `zend_compile_break_continue` refuses it.
-    Break(Option<Child>),
-    /// `continue;` or `continue n;`, php's `ZEND_AST_CONTINUE`.
-    Continue(Option<Child>),
-    /// `goto label;`, php's `ZEND_AST_GOTO` over the label's name.
-    Goto(Vec<u8>),
-    /// `label:`, php's `ZEND_AST_LABEL`, a `T_STRING` and a colon at
-    /// the start of a statement.
-    Label(Vec<u8>),
-    /// `class M { … }` at the top level, php's `ZEND_AST_CLASS`.
-    Class(Class),
-    /// `function f(…) { … }`, php's `ZEND_AST_FUNC_DECL`.
-    Function(Function),
-    /// `unset($a, $b[0], $c->p);`, php's `unset_variables`, which the
-    /// grammar reduces to one `ZEND_AST_UNSET` per operand in a
-    /// statement list; each is compiled by `zend_compile_unset` and
-    /// leaves one opline.
-    Unset(Vec<Unset>),
-    /// `try { … } catch (…) { … } finally { … }`, php's `ZEND_AST_TRY`
-    /// over three children: the body, the `catch` clauses, empty where
-    /// none is written, and the `finally` block with the keyword's line,
-    /// which `CG(zend_lineno)` is set to before the block's oplines.
-    Try {
-        body: Read,
-        catches: Vec<Catch>,
-        finally: Option<(Read, u32)>,
-    },
-    /// `if (cond) stmt elseif (cond) stmt else stmt`, php's
-    /// `ZEND_AST_IF`: the arms in the order they are written, one
-    /// `ZEND_AST_IF_ELEM` each.
-    If(Vec<IfArm>),
-    /// `declare(strict_types=1);` and its kin, php's `ZEND_AST_DECLARE`
-    /// over a `ZEND_AST_CONST_DECL` list and the statement written after
-    /// it: the directives as written, and the statement, which php's
-    /// grammar leaves `NULL` for the `;` spelling and which
-    /// `zend_compile_declare` reads as the braced form where it is
-    /// anything else. What each directive means is the emitter's.
-    Declare {
-        directives: Vec<ConstElem>,
-        body: Option<Read>,
-    },
-    /// `const K = 1, L = 2;`, php's `ZEND_AST_CONST_DECL` over its
-    /// declarators. php's grammar has it among the `top_statement`s and
-    /// not among the statements, so it stands at the file's own list and
-    /// nowhere else.
-    Const(Vec<ConstElem>),
-}
-
-/// One `name = value`, php's `ZEND_AST_CONST_ELEM`: the name as
-/// written, unqualified, the expression after the `=`, and the line the
-/// name stands on, which is where php's fatal over it is raised. php's
-/// grammar has one `const_list` rule and both its readers take this:
-/// `zend_compile_const_decl` over a `const` statement, and
-/// `zend_compile_declare` over the directives inside `declare(...)`,
-/// whose names it compares without case
-/// (`zend_string_equals_literal_ci`) and whose values it requires to be
-/// a `ZEND_AST_ZVAL` rather than an expression to fold.
-#[derive(Debug, PartialEq)]
-pub(crate) struct ConstElem {
-    pub(crate) name: Vec<u8>,
-    pub(crate) value: Child,
-    pub(crate) line: u32,
-}
-
-/// One arm of an `if`, php's `ZEND_AST_IF_ELEM`: a condition and the
-/// statements under it. The `else` arm carries no condition and is the
-/// last, which `zend_compile_if` asserts.
-///
-/// `line` is the arm's own line, `elem_ast->lineno`: the one
-/// `zend_compile_if` sets `CG(zend_lineno)` to before an arm past the
-/// first compiles its condition and before the `JMP` that leaves an arm
-/// another follows. `zend_ast_create` takes it from the arm's first
-/// child, so for an arm with a condition it is where the condition
-/// stands and for the `else` arm it is where its statements start. It
-/// is the arm's and not a node's: the `else` arm has one and has no
-/// condition to read it from, so unlike a `Case`'s or an `Arm`'s it
-/// stays a field here.
-#[derive(Debug, PartialEq)]
-pub(crate) struct IfArm {
-    pub(crate) cond: Option<Child>,
-    pub(crate) body: Read,
-    pub(crate) line: u32,
-}
-
-/// One `catch (A|B $e) { … }`, php's `ZEND_AST_CATCH`: the class names
-/// as written, one at least; the variable the throwable binds to, and
-/// none where the clause names none; the body; and the `catch` keyword's
-/// line, which `CG(zend_lineno)` is set to before the clause's oplines.
-#[derive(Debug, PartialEq)]
-pub(crate) struct Catch {
-    pub(crate) types: Vec<Vec<u8>>,
-    pub(crate) var: Option<Vec<u8>>,
-    pub(crate) body: Read,
-    pub(crate) line: u32,
-}
-
-/// One operand of `unset`, php's `unset_variable`, which is a
-/// `variable` production: the three forms `zend_compile_unset` has an
-/// opcode for and this reader takes, a plain variable, one element of
-/// one and one property of one. A chain under either, `$a[0][1]` and
-/// `$a->b->c`, is php's `FETCH_DIM_UNSET` and `FETCH_OBJ_UNSET` under
-/// the last fetch and is not read; neither is a property of a class,
-/// `unset(C::$p)`, whose arm is `UNSET_STATIC_PROP`, nor
-/// `$GLOBALS['k']`.
-#[derive(Debug, PartialEq)]
-pub(crate) enum Unset {
-    /// `unset($a)`, php's `ZEND_AST_VAR` arm: `UNSET_CV` over the CV.
-    Var(Vec<u8>),
-    /// `unset($a[$k])`, php's `ZEND_AST_DIM` arm: `UNSET_DIM` over the
-    /// CV and the element's offset.
-    Dim { var: Vec<u8>, dim: Child },
-    /// `unset($o->p)`, php's `ZEND_AST_PROP` arm: `UNSET_OBJ` over the
-    /// receiver and the property's name as written. The receiver is a
-    /// variable or `$this`.
-    Prop { object: Child, name: Vec<u8> },
 }
 
 /// The nine magic constants, php's `T_LINE` through `T_PROPERTY_C`: the
@@ -268,16 +96,6 @@ impl Magic {
             _ => return None,
         })
     }
-}
-
-/// One target of a `foreach`, php's `foreach_variable`: the expression
-/// written, and whether an `&` stands before it, php's `ZEND_AST_REF`
-/// around it. What the expression may be is the emitter's to refuse as
-/// `zend_compile_foreach` refuses it.
-#[derive(Debug, PartialEq)]
-pub(crate) struct Target {
-    pub(crate) expr: Child,
-    pub(crate) by_ref: bool,
 }
 
 /// One element of an array expression, php's `ZEND_AST_ARRAY_ELEM`: the
@@ -334,16 +152,17 @@ pub(crate) struct Attr {
 /// One function declaration, php's `zend_ast_decl` for a function or a
 /// method: the name as written, the parameters, the return type where
 /// one is written after the `)`, whether an `&` before the name returns
-/// it by reference (`ZEND_ACC_RETURN_REFERENCE`), the body, the doc
-/// comment taken before the `function` keyword, and the lines of the
-/// keyword and of the closing brace, `start_lineno` and `end_lineno`.
+/// it by reference (`ZEND_ACC_RETURN_REFERENCE`), the body's statement
+/// nodes, which the emitter walks from the tree, the doc comment taken
+/// before the `function` keyword, and the lines of the keyword and of
+/// the closing brace, `start_lineno` and `end_lineno`.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Function {
     pub(crate) name: Vec<u8>,
     pub(crate) parameters: Vec<Parameter>,
     pub(crate) return_type: Option<Type>,
     pub(crate) by_ref: bool,
-    pub(crate) body: Read,
+    pub(crate) body: Vec<php_syntax::tree::Stmt>,
     pub(crate) doc_comment: Option<Vec<u8>>,
     pub(crate) line: u32,
     pub(crate) end_line: u32,
@@ -387,15 +206,17 @@ pub(crate) struct Method {
 /// because `zend_begin_func_decl` builds `{closure:...}` from where it
 /// stands; the `use` list as written, empty for an arrow
 /// function, whose captures are found in its body
-/// (`find_implicit_binds`); and whether `static` stands before the
+/// (`find_implicit_binds`); whether `static` stands before the
 /// keyword, php's `ZEND_ACC_STATIC`, which keeps `$this` out of the
-/// body.
+/// body; and for an arrow function the expression after `=>`, the one
+/// `return` php makes its body of (`zend_compile_func_decl`), the
+/// function's own statement list being empty.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Closure {
     pub(crate) function: Function,
     pub(crate) uses: Vec<Use>,
     pub(crate) is_static: bool,
-    pub(crate) is_arrow: bool,
+    pub(crate) arrow: Option<php_syntax::tree::Expr>,
 }
 
 /// One `use` variable of a closure, php's `lexical_var`: the name
@@ -441,17 +262,6 @@ pub(crate) struct Constant {
     pub(crate) is_final: bool,
     pub(crate) value: Child,
     pub(crate) doc_comment: Option<Vec<u8>>,
-    pub(crate) line: u32,
-}
-
-/// One `case cond:` or `default:` of a `switch` with the statements
-/// under it, php's `ZEND_AST_SWITCH_CASE`: the condition, which is
-/// compiled at the line its own node carries, and the keyword's line,
-/// which the `default:` with no node under it needs.
-#[derive(Debug, PartialEq)]
-pub(crate) struct Case {
-    pub(crate) cond: Option<Child>,
-    pub(crate) body: Read,
     pub(crate) line: u32,
 }
 
@@ -1072,9 +882,6 @@ impl CastTo {
         }
     }
 }
-
-/// The line each statement stands on, beside it.
-pub(crate) type Read = Vec<(Stmt, u32)>;
 
 /// `zend_is_reserved_class_name`: the names `reserved_class_names` lists
 /// in `zend_compile.c`, which no class may take, whatever the case.

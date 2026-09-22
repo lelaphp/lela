@@ -11,11 +11,12 @@
 //! node as `zend_compile_expr` checks it (design §5.6): the chain
 //! `stack.rs`'s witness refuses is refused here at the same line.
 
+use super::super::Where;
 use super::{Emit, refused, unread};
 use crate::CompileError;
 use crate::read::{
-    Arm, BinaryOp, CastTo, Child, Closure, Element, Expr as Ir, Function, IncludeKind, Piece, Stmt,
-    Use, Written, is_auto_global,
+    Arm, BinaryOp, CastTo, Child, Closure, Element, Expr as Ir, Function, IncludeKind, Piece, Use,
+    Written, is_auto_global,
 };
 use php_syntax::tree::{
     Arg, ArgList, ArrowFnExpr, AssignExpr, CallExpr, ClosureExpr, Expr, MemberAccessExpr,
@@ -45,7 +46,7 @@ impl Emit<'_> {
     /// bool(false)
     /// ```
     #[allow(clippy::too_many_lines)]
-    pub(super) fn walk_expr(&mut self, expr: Expr) -> Result<Child, CompileError> {
+    pub(in crate::emit) fn walk_expr(&mut self, expr: Expr) -> Result<Child, CompileError> {
         let line = expr.line(self.parsed);
         self.stack.check(line)?;
         let tree = &self.parsed.tree;
@@ -350,6 +351,33 @@ impl Emit<'_> {
         exprs.iter().map(|expr| self.walk_expr(*expr)).collect()
     }
 
+    /// `zend_compile_expr` over a node: read into the shape the emitter
+    /// takes, then compiled. The bridge from a consumer that reads the
+    /// tree to a family that has not left the shapes yet; it goes with
+    /// the last of them (#595).
+    pub(in crate::emit) fn expr_of(&mut self, expr: Expr) -> Result<Where, CompileError> {
+        let expr = self.walk_expr(expr)?;
+        self.expr(&expr)
+    }
+
+    /// [`Emit::constant_expr`] over a node, the same bridge.
+    pub(in crate::emit) fn constant_expr_of(
+        &mut self,
+        expr: Expr,
+    ) -> Result<php_heap::Zval, CompileError> {
+        let expr = self.walk_expr(expr)?;
+        self.constant_expr(&expr)
+    }
+
+    /// [`Emit::constant_of`] over a node, the same bridge.
+    pub(in crate::emit) fn constant_of_node(
+        &mut self,
+        expr: Expr,
+    ) -> Result<Option<php_heap::Zval>, CompileError> {
+        let expr = self.walk_expr(expr)?;
+        self.constant_of(&expr)
+    }
+
     /// A child the grammar requires, refused as `what` where recovery
     /// left none.
     fn walk_inner(
@@ -362,14 +390,6 @@ impl Emit<'_> {
             Some(expr) => self.walk_expr(expr),
             None => Err(unread(line, what)),
         }
-    }
-
-    /// The tree's kind of a token.
-    fn kind(&self, token: TokenId) -> SyntaxKind {
-        self.parsed
-            .tokens
-            .get(token.0 as usize)
-            .map_or(SyntaxKind::ERROR, |token| token.kind)
     }
 
     /// The kind of the first significant token inside `range`.
@@ -713,7 +733,7 @@ impl Emit<'_> {
             function,
             uses: lexical,
             is_static,
-            is_arrow: false,
+            arrow: None,
         })))
     }
 
@@ -738,22 +758,20 @@ impl Emit<'_> {
         let Some(body) = node.body else {
             return Err(unread(line, "an arrow function with no body"));
         };
-        let returned = body.line(self.parsed);
-        let value = self.walk_expr(body)?;
         Ok(Ir::Closure(Box::new(Closure {
             function: Function {
                 name: Vec::new(),
                 parameters,
                 return_type,
                 by_ref: node.byref.is_some(),
-                body: vec![(Stmt::Return(Some(value)), returned)],
+                body: Vec::new(),
                 doc_comment: self.doc_comment(node.doc_comment),
                 line,
                 end_line: self.line_after(node.range),
             },
             uses: Vec::new(),
             is_static,
-            is_arrow: true,
+            arrow: Some(body),
         })))
     }
 
