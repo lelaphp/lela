@@ -24,7 +24,7 @@
 
 use crate::lexer::Token;
 use crate::tree::{
-    HeredocExpr, InterpolatedStringExpr, LiteralExpr, NowdocExpr, ShellExecExpr, TokenId,
+    HeredocExpr, InterpolatedStringExpr, LiteralExpr, NowdocExpr, ShellExecExpr, SimpleDim, TokenId,
 };
 use crate::{Parsed, SyntaxKind};
 
@@ -61,6 +61,9 @@ pub enum Holder<'a> {
     Nowdoc(&'a NowdocExpr),
     /// A `ShellExecExpr`: the parts of a `` `…` ``.
     ShellExec(&'a ShellExecExpr),
+    /// A `SimpleDim`, the `[…]` after a variable inside a string: its
+    /// `ENCAPS_INT` or `INT` index, php's `T_NUM_STRING`.
+    Offset(&'a SimpleDim),
 }
 
 impl TokenValue {
@@ -103,6 +106,21 @@ impl TokenValue {
     /// ```expect
     /// string(9) "a\b'c\nd\"
     /// ```
+    ///
+    /// The `[…]` index after a variable inside a string, the scanner's
+    /// `ST_VAR_OFFSET` state: a decimal with no leading zero that fits
+    /// a long is `IS_LONG`, and every other spelling, `01`, `0x1`,
+    /// `1_0` and a decimal past `ZEND_LONG_MAX`, is the string as
+    /// written (`Z/Zend/zend_language_scanner.l:2207-2230` at the pin),
+    /// so `$a[1]` and `$a[01]` read two different keys:
+    ///
+    /// ```php
+    /// $a = [1 => 'int', '01' => 'str', '0x1' => 'hex', '1_0' => 'sep'];
+    /// echo "$a[1] $a[01] $a[0x1] $a[1_0]\n";
+    /// ```
+    /// ```expect
+    /// int str hex sep
+    /// ```
     #[must_use]
     pub fn of(parsed: &Parsed, holder: Holder<'_>, token: TokenId) -> Option<TokenValue> {
         let at = parsed.tokens.get(token.0 as usize)?;
@@ -127,6 +145,7 @@ impl TokenValue {
             (Holder::Nowdoc(node), SyntaxKind::STRING_TEXT) => {
                 TokenValue::Bytes(body(text, &parsed.tokens, token, node.end).to_vec())
             }
+            (Holder::Offset(_), SyntaxKind::ENCAPS_INT | SyntaxKind::INT) => offset(text),
             _ => return None,
         })
     }
@@ -135,6 +154,18 @@ impl TokenValue {
 /// The text of a heredoc or nowdoc part, less the newline before the
 /// closing label when this part is the one before it: every token
 /// between the two is the marker's own indentation, or there is none.
+/// `T_NUM_STRING`'s value: `[0]|([1-9][0-9]*)` that `ZEND_STRTOL` takes
+/// without `ERANGE` is a long, and anything else the text.
+fn offset(text: &[u8]) -> TokenValue {
+    let canonical = text == b"0"
+        || (text.first().is_some_and(|b| (b'1'..=b'9').contains(b))
+            && text.iter().all(u8::is_ascii_digit));
+    if canonical && let Ok(n) = std::str::from_utf8(text).unwrap_or_default().parse::<i64>() {
+        return TokenValue::Int(n);
+    }
+    TokenValue::Bytes(text.to_vec())
+}
+
 fn body<'a>(text: &'a [u8], tokens: &[Token], token: TokenId, end: Option<TokenId>) -> &'a [u8] {
     let Some(end) = end else {
         return text;
