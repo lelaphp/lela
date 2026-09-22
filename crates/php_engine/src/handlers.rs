@@ -6060,6 +6060,20 @@ pub(crate) fn assign_op<T: Tier>(
 /// ```expect
 /// int(1)
 /// ```
+///
+/// One dimension bound to another of the same array is the `VAR` a
+/// `MAKE_REF` left, whose owner `FREE_OP2` gives up here, so the cell
+/// is the array's thirty-two bytes and the whole array goes when
+/// nothing names it.
+///
+/// ```php
+/// $a[0] = 1; $b = memory_get_usage(); $a[1] = &$a[0]; $held = memory_get_usage() - $b;
+/// unset($a); var_dump($held, memory_get_usage() - $b);
+/// ```
+/// ```expect
+/// int(32)
+/// int(-216)
+/// ```
 pub(crate) fn assign_ref<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -6107,6 +6121,8 @@ pub(crate) fn assign_ref<T: Tier>(
     let cell = match held.as_php_ref() {
         Some(cell) if target == source => {
             write_out(req, frame, code, op, &cell.as_value());
+            exec::free_operand(req, frame, code, op.op2_type, op.op2);
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
             return Ok(advance(req, frame));
         }
         Some(cell) => *cell,
@@ -6127,6 +6143,12 @@ pub(crate) fn assign_ref<T: Tier>(
     target.write(bound.to_zval());
     write_out(req, frame, code, op, &bound);
     req.release(garbage);
+    // `FREE_OP2()` before `FREE_OP1()`: a `VAR` holding the
+    // `IS_INDIRECT` a fetch left owns nothing and this drops nothing,
+    // and one holding the cell a `MAKE_REF` or this handler itself put
+    // there gives up the owner it took, so the cell is held by the
+    // place it binds and by the target alone.
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     Ok(advance(req, frame))
 }

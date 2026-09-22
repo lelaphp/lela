@@ -4390,11 +4390,12 @@ mod tests {
     }
 
     /// What stands beside a `C::$p` read and is not read yet is refused
-    /// as such (#372): a write, an assignment and `++`, the property
-    /// the program names as it serves, `self`, `parent` and `static`
-    /// as the class, `C::$p()` whose method the local `$p` names, and
-    /// such a fetch in a constant expression, which php refuses
-    /// outright.
+    /// as such (#372): a compound assignment over what is no variable,
+    /// the property the program names as it serves, `self`, `parent`
+    /// and `static` as the class, `C::$p()` whose method the local `$p`
+    /// names, and such a fetch in a constant expression, which php
+    /// refuses outright. `C::$p = &$o->q` was one of them until #611
+    /// made the source of a `= &` `zend_compile_var`'s.
     #[test]
     fn what_stands_beside_a_static_property_read_is_refused_as_not_yet_read() {
         let refused = |source: &[u8]| {
@@ -4407,12 +4408,6 @@ mod tests {
             .err()
             .map(|e| e.message)
         };
-        assert_eq!(
-            refused(b"<?php C::$p = &$o->q;").as_deref(),
-            Some(
-                "a by-reference assignment from what is no variable this compiler cannot read yet"
-            )
-        );
         assert_eq!(
             refused(b"<?php $this += 1;").as_deref(),
             Some("a compound assignment to what is no variable this compiler cannot read yet")
@@ -5440,7 +5435,16 @@ class C {
     /// numbered first, its `VAR` marked unused where nothing reads it
     /// and kept where an assignment, an `ECHO` or an operator does; the
     /// same with the `&` spaced either way and with one CV as both.
+    ///
+    /// What stands on the right is `zend_compile_var` under `BP_VAR_W`
+    /// with `by_ref`, so a dimension is the `FETCH_DIM_W` chain, a
+    /// property and a `static` property their `_W` fetches carrying
+    /// `ZEND_FETCH_REF`, and `$this` a `FETCH_THIS` into a `VAR`. The
+    /// target is held back while that compiles, which is why
+    /// `$a[1] = &$a[0]` fetches the source first and why `MAKE_REF`
+    /// stands between them wherever the target is no plain `$name`.
     #[test]
+    #[allow(clippy::too_many_lines)] // one case per shape: the table is the test
     fn a_by_reference_assignment_compiles_to_assign_ref_as_php_emits_it() {
         let cases: &[(&[u8], usize, u32, u32, &str)] = &[
             (
@@ -5507,6 +5511,77 @@ class C {
                  0004 DO_ICALL\n\
                  0005 RETURN int(1)\n",
             ),
+            // `zend_compile_var(BP_VAR_W, 1)` over the source: the
+            // target's own fetch is held back until it has compiled, so
+            // the source is numbered second and fetched first, with
+            // `MAKE_REF` between the two (bug #71539).
+            (
+                b"<?php $a[1] = &$a[0];",
+                5,
+                1,
+                4,
+                "0000 V2 = FETCH_DIM_W CV0($a) int(0)\n\
+                 0001 V3 = MAKE_REF V2\n\
+                 0002 V1 = FETCH_DIM_W CV0($a) int(1)\n\
+                 0003 ASSIGN_REF V1 V3\n\
+                 0004 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    3: 0002 - 0003 (tmp/var)\n",
+            ),
+            (
+                b"<?php $b = &$o->p;",
+                3,
+                2,
+                2,
+                "0000 V2 = FETCH_OBJ_W (ref) CV1($o) string(\"p\")\n\
+                 0001 ASSIGN_REF CV0($b) V2\n\
+                 0002 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $b = &C::$s;",
+                3,
+                1,
+                2,
+                "0000 V1 = FETCH_STATIC_PROP_W (ref) string(\"s\") string(\"C\")\n\
+                 0001 ASSIGN_REF CV0($b) V1\n\
+                 0002 RETURN int(1)\n",
+            ),
+            // Only the outermost link of the chain is the reference's:
+            // the `FETCH_OBJ_W` under it is `ZEND_FETCH_DIM_WRITE` as
+            // any property under a dimension is.
+            (
+                b"<?php $b = &$o->p[0];",
+                4,
+                2,
+                3,
+                "0000 V2 = FETCH_OBJ_W (dim write) CV1($o) string(\"p\")\n\
+                 0001 V3 = FETCH_DIM_W V2 int(0)\n\
+                 0002 ASSIGN_REF CV0($b) V3\n\
+                 0003 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $b = &$this;",
+                3,
+                1,
+                2,
+                "0000 V1 = FETCH_THIS\n\
+                 0001 ASSIGN_REF CV0($b) V1\n\
+                 0002 RETURN int(1)\n",
+            ),
+            // A `static` property on the left is php's
+            // `ASSIGN_STATIC_PROP_REF` arm, whose source rides in the
+            // `OP_DATA` after it and is `MAKE_REF`'d like any other.
+            (
+                b"<?php C::$t = &$a[0];",
+                5,
+                1,
+                3,
+                "0000 V2 = FETCH_DIM_W CV0($a) int(0)\n\
+                 0001 V3 = MAKE_REF V2\n\
+                 0002 ASSIGN_STATIC_PROP_REF string(\"t\") string(\"C\")\n\
+                 0003 OP_DATA V3\n\
+                 0004 RETURN int(1)\n",
+            ),
         ];
         for (source, lines, vars, tmps, oplines) in cases {
             assert_eq!(
@@ -5531,10 +5606,15 @@ class C {
                  0003 RETURN int(1)\n"
             )
         );
+        // `zend_compile_var_inner`'s default arm under `BP_VAR_W`, and
+        // the arm after `MAKE_REF` over a call php answered in a
+        // temporary: php's own words for each.
+        assert_eq!(
+            refused_message(b"<?php $b = &count($x);").as_deref(),
+            Some("Cannot use result of built-in function in write context")
+        );
         for source in [
             b"<?php $b = &$a = 1;".as_slice(),
-            b"<?php $b = &$o->p;".as_slice(),
-            b"<?php $b = &$this;".as_slice(),
             b"<?php $b = &&$a;".as_slice(),
         ] {
             assert!(

@@ -587,6 +587,15 @@ enum Fetch {
 /// place it hands out is written through rather than written to.
 const FETCH_DIM_WRITE: u32 = 2;
 
+/// `ZEND_FETCH_REF` (`Z/Zend/zend_compile.h:1089`), the bit a
+/// `FETCH_OBJ_W` and a `FETCH_STATIC_PROP_W` carry where `by_ref` stood
+/// on the `zend_compile_var` that made them, which is a `&` and nothing
+/// else: what `zend_handle_fetch_obj_flags` reads to bind the
+/// property's own cell where a plain write would hand a place out. It
+/// shares `extended_value` with the cache slots, which is why php masks
+/// with `ZEND_FETCH_OBJ_FLAGS`, and the dump prints it `(ref)`.
+const FETCH_REF: u32 = 1;
+
 /// One held-back `FETCH_OBJ_RW` of a property chain, php's delayed
 /// `zend_delayed_compile_prop`: the name's constant, the `VAR` the
 /// fetch writes into and the three cache slots it carries, all taken
@@ -640,6 +649,13 @@ enum Base {
 enum Over {
     Dim,
     Obj,
+    /// Nothing but the `&` itself, php's `by_ref` on
+    /// `zend_compile_var`: a dimension's last link carries
+    /// `ZEND_FETCH_DIM_REF` and a property's and a `static` property's
+    /// fetch carries `ZEND_FETCH_REF`. What stands under such a last
+    /// link is a dimension all the same, so the chain below it is
+    /// marked as any other chain's is.
+    Ref,
 }
 
 /// One link of a chain compiled under `BP_VAR_IS`, the opline
@@ -4022,7 +4038,7 @@ impl Emit<'_> {
     /// ```
     ///
     /// A dimension returned by reference is fetched for writing
-    /// ([`Self::dim_for_reference`]), so the block writing beside it
+    /// ([`Self::var_for_reference`]), so the block writing beside it
     /// leaves the cell the caller is bound to where it was (php's bug
     /// #72216).
     ///
@@ -4058,7 +4074,7 @@ impl Emit<'_> {
         // caller is bound to is the array's own slot.
         let compiled = match written {
             Some(expr @ tree::Expr::SubscriptExpr(_)) if by_ref => {
-                let (_, at) = self.dim_for_reference(expr)?;
+                let (_, at) = self.var_for_reference(expr)?;
                 Where::Returned(at)
             }
             Some(expr) => self.expr(expr)?,
@@ -6565,51 +6581,167 @@ impl Emit<'_> {
         Ok(Where::Temporary(out))
     }
 
-    /// `zend_compile_var(…, BP_VAR_W, 1)` over a dimension, what a
-    /// by-reference assignment's target and a by-reference return's
-    /// operand are: the whole chain fetched for writing, the last link
-    /// carried by `ZEND_FETCH_DIM_REF` where a plain write carries
-    /// nothing, and the `VAR` it left as the operand.
-    fn dim_for_reference(
+    /// `zend_compile_var(…, BP_VAR_W, 1)` over one of the fetches php
+    /// delays — a dimension, a property and a `static` property — what a
+    /// by-reference assignment's source and a by-reference return's
+    /// operand are: the chain [`Self::delayed_var`] held back, laid
+    /// straight back down ([`Self::base_fetch`]) with nothing over its
+    /// last opline but the `&` itself, so that one carries
+    /// `ZEND_FETCH_DIM_REF` or `ZEND_FETCH_REF` where a plain write
+    /// carries the dimension's or the property's own bit. The `VAR` it
+    /// left is the operand.
+    fn var_for_reference(
         &mut self,
         target: tree::Expr,
     ) -> Result<(OperandKind, u32), CompileError> {
-        let (container, links) = self.dim_chain(target, Fetch::Write)?;
-        let Some((last, fetches)) = links.split_last() else {
-            return Err(self.fatal("a dimension with no dimension"));
-        };
-        let (kind, at) = self.dim_fetches(container, fetches, Fetch::Write, Over::Dim);
-        self.push(Opline {
-            opcode: Opcode::FetchDimW,
-            op1_type: kind,
-            op1: at,
-            op2_type: last.kind,
-            op2: last.at,
-            out_type: OperandKind::Var,
-            out: last.out,
-            extended_value: FETCH_DIM_REF,
-            ..Opline::default()
-        });
-        Ok((OperandKind::Var, last.out))
+        let held = self.delayed_var(target, Fetch::Write)?;
+        Ok(self.base_fetch(held, Fetch::Write, Over::Ref))
     }
 
-    /// `zend_compile_assign_ref` (`Z/Zend/zend_compile.c:3549`) for
-    /// `$b = &$a` over two variables: the target's CV looked up first
-    /// (`zend_delayed_compile_var` under `BP_VAR_W`, which delays nothing
-    /// for a plain CV), the source's after it (`zend_compile_var` under
-    /// `BP_VAR_W`), then `ASSIGN_REF` over the two into a `VAR`
-    /// (`zend_emit_op`), `extended_value` zero since the source is no
-    /// call (`ZEND_RETURNS_FUNCTION`). No `MAKE_REF` stands between
-    /// them: php emits one only where the source is neither a CV nor
-    /// bound for a plain variable. [`Self::do_free`] marks the `VAR`
-    /// `UNUSED` where nothing reads it, as it marks a call's.
+    /// `zend_compile_var(&source_node, source_ast, BP_VAR_W, 1)` and the
+    /// `MAKE_REF` after it, what stands on the right of a `= &`
+    /// (`zend_compile_assign_ref`, `Z/Zend/zend_compile.c:3568`): a
+    /// plain variable is its CV; a dimension, a property and a `static`
+    /// property are the `_W` fetch of the whole chain with the `&`'s own
+    /// bit on its last opline ([`Self::var_for_reference`]); `$this` is
+    /// `FETCH_THIS` into a `VAR` (`zend_compile_simple_var`'s
+    /// `is_this_fetch` arm, whose opline writes a `VAR` and not a
+    /// temporary under `BP_VAR_W`); a call is the `VAR` it returned
+    /// into; and
+    /// everything else is `zend_compile_var_inner`'s default arm,
+    /// `Cannot use temporary expression in write context`.
+    ///
+    /// `MAKE_REF` stands over what that left where the target is not a
+    /// plain `$name` and the source is no CV, php's fix for bug #71539:
+    /// both sides may modify one structure and the place the left side
+    /// named can dangle while the right side runs, so the right side is
+    /// made a reference before the left side is fetched at all. That is
+    /// why `$a[1] = &$a[0]` fetches the source, makes the reference and
+    /// only then fetches the target.
+    ///
+    /// `Cannot use result of built-in function in write context` is
+    /// php's arm after it, over a call it answered in a temporary. php
+    /// reads the node `MAKE_REF` has already overwritten, so only a
+    /// plain `$name` on the left reaches that error: `$a = &count($x)`
+    /// is refused where `$a[0] = &count($x)` compiles to a `MAKE_REF`
+    /// over a temporary, which is an opcode php has no handler for and
+    /// runs into `Invalid opcode 140/2/0`. The copy is php's, quirk and
+    /// all, because the dump is held to it byte for byte.
+    fn ref_source(
+        &mut self,
+        source: tree::Expr,
+        plain_target: bool,
+    ) -> Result<(OperandKind, u32, u32), CompileError> {
+        self.check_stack()?;
+        let line = self.line;
+        let node = self.peel(source);
+        let (kind, at) = match node {
+            tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
+                SimpleVar::Cv(name) => (OperandKind::Cv, self.lookup_cv(&name)),
+                SimpleVar::This => {
+                    let this = self.fetch_this(OperandKind::Var);
+                    self.operand(this)
+                }
+            },
+            tree::Expr::SubscriptExpr(_) | tree::Expr::MemberAccessExpr(_) => {
+                self.var_for_reference(node)?
+            }
+            tree::Expr::ScopedAccessExpr(id)
+                if matches!(self.scoped_of(id, line)?, Scoped::Property { .. }) =>
+            {
+                self.var_for_reference(node)?
+            }
+            tree::Expr::CallExpr(_) => {
+                let returned = self.expr(node)?;
+                self.operand(returned)
+            }
+            _ => {
+                return Err(self.compile_error("Cannot use temporary expression in write context"));
+            }
+        };
+        // Bug #71539: `zend_emit_op(&source_node, ZEND_MAKE_REF,
+        // &source_node, NULL)`, and `source_node` is the `VAR` it wrote
+        // from here on, which is the node the arm below reads.
+        let (kind, at) = if plain_target || kind == OperandKind::Cv {
+            (kind, at)
+        } else {
+            let out = self.temporary();
+            self.push(Opline {
+                opcode: Opcode::MakeRef,
+                op1_type: kind,
+                op1: at,
+                out_type: OperandKind::Var,
+                out,
+                ..Opline::default()
+            });
+            (OperandKind::Var, out)
+        };
+        let call = self.is_call(source);
+        if kind != OperandKind::Var && call {
+            return Err(
+                self.compile_error("Cannot use result of built-in function in write context")
+            );
+        }
+        // `ZEND_RETURNS_FUNCTION` where the source is a call
+        // (`zend_is_call`), the bit the handler reads to raise php's
+        // notice over a call that returned by value.
+        Ok((kind, at, if call { RETURNS_FUNCTION } else { 0 }))
+    }
+
+    /// `zend_compile_assign_ref` (`Z/Zend/zend_compile.c:3549`),
+    /// `$b = &$a`: the target compiled first and held back
+    /// (`zend_delayed_compile_var` under `BP_VAR_W` with `by_ref`, which
+    /// holds back a dimension's fetch and delays nothing for a plain
+    /// CV), the source compiled after it where it stands
+    /// ([`Self::ref_source`], php's `zend_compile_var` under the same
+    /// pair), then the target's own fetch laid down
+    /// (`zend_delayed_compile_end`) and `ASSIGN_REF` over the two into a
+    /// `VAR` (`zend_emit_op`), `extended_value` the source's
+    /// `ZEND_RETURNS_FUNCTION` or nothing. That order is why
+    /// `$a[1] = &$a[0]` fetches `$a[0]` first, makes the reference, and
+    /// only then fetches `$a[1]`: the right side may move what the left
+    /// side named. [`Self::do_free`] marks the `VAR` `UNUSED` where
+    /// nothing reads it, as it marks a call's.
     ///
     /// A dimension as the target, `$a[] = &$x`, is the whole chain
     /// fetched for writing, the last link carried by `ZEND_FETCH_DIM_REF`
     /// where a plain write carries nothing, and `ASSIGN_REF` over the
     /// `VAR` it left: php turns the last delayed opline into an
     /// `ASSIGN_*_REF` only for a property and a class's own property,
-    /// and leaves a dimension's fetch standing.
+    /// and leaves a dimension's fetch standing. The property's half,
+    /// `$o->p = &$x` and its `ASSIGN_OBJ_REF`, is refused here still.
+    ///
+    /// One dimension bound to another of the same array: the source is
+    /// fetched for writing, so what both names hold is one cell and a
+    /// write through either is read through both.
+    ///
+    /// ```php
+    /// $a[0] = 1; $a[1] = &$a[0]; $a[1] = 2; var_dump($a);
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   &int(2)
+    ///   [1]=>
+    ///   &int(2)
+    /// }
+    /// ```
+    ///
+    /// A property and a `static` property on the right are the same
+    /// fetch under `ZEND_FETCH_REF`, which binds the property's own
+    /// cell rather than a copy of what it holds.
+    ///
+    /// ```php
+    /// class C { public $p = 1; public static $s = 3; }
+    /// $o = new C;
+    /// $x = &$o->p; $x = 2;
+    /// $y = &C::$s; $y = 4;
+    /// var_dump($o->p, C::$s);
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// int(4)
+    /// ```
     fn assign_ref(
         &mut self,
         target: tree::Expr,
@@ -6622,9 +6754,12 @@ impl Emit<'_> {
         {
             return self.assign_static_prop_ref(&class, &name, source);
         }
-        let (op1_type, op1) = match target {
+        // `zend_delayed_compile_var(&target_node, target_ast, BP_VAR_W, 1)`:
+        // a plain CV settles where it stands and a dimension's fetches
+        // wait for `base_fetch` below, after the source has compiled.
+        let held = match target {
             tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
-                SimpleVar::Cv(name) => (OperandKind::Cv, self.lookup_cv(&name)),
+                SimpleVar::Cv(name) => Base::Settled((OperandKind::Cv, self.lookup_cv(&name))),
                 SimpleVar::This => {
                     return Err(walk::unread(
                         line,
@@ -6632,7 +6767,7 @@ impl Emit<'_> {
                     ));
                 }
             },
-            tree::Expr::SubscriptExpr(_) => self.dim_for_reference(target)?,
+            tree::Expr::SubscriptExpr(_) => self.delayed_var(target, Fetch::Write)?,
             _ => {
                 return Err(walk::unread(
                     line,
@@ -6640,32 +6775,12 @@ impl Emit<'_> {
                 ));
             }
         };
-        // `zend_compile_var(BP_VAR_W, 1)` over the source, and
-        // `ZEND_RETURNS_FUNCTION` where it is a call
-        // (`zend_is_call`), which is the bit the handler reads to
-        // raise php's notice over a call that returned by value.
-        let (op2_type, op2, flags) = match self.peel(source) {
-            tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
-                SimpleVar::Cv(name) => (OperandKind::Cv, self.lookup_cv(&name), 0),
-                SimpleVar::This => {
-                    return Err(walk::unread(
-                        line,
-                        "a by-reference assignment from what is no variable",
-                    ));
-                }
-            },
-            tree::Expr::CallExpr(_) => {
-                let returned = self.expr(source)?;
-                let (op2_type, op2) = self.operand(returned);
-                (op2_type, op2, RETURNS_FUNCTION)
-            }
-            _ => {
-                return Err(walk::unread(
-                    line,
-                    "a by-reference assignment from what is no variable",
-                ));
-            }
-        };
+        // php's `target_ast->kind != ZEND_AST_VAR ||
+        // target_ast->child[0]->kind != ZEND_AST_ZVAL`, the one shape no
+        // `MAKE_REF` stands under.
+        let plain = matches!(held, Base::Settled((OperandKind::Cv, _)));
+        let (op2_type, op2, flags) = self.ref_source(source, plain)?;
+        let (op1_type, op1) = self.base_fetch(held, Fetch::Write, Over::Ref);
         let out = self.temporary();
         self.push(Opline {
             opcode: Opcode::AssignRef,
@@ -6956,6 +7071,10 @@ impl Emit<'_> {
             let extended_value = match (fetch, last.then_some(over)) {
                 (Fetch::Read | Fetch::Is, _) => 0,
                 (_, Some(Over::Obj)) => FETCH_DIM_OBJ,
+                // `zend_delayed_compile_dim`'s `if (by_ref)`, which
+                // overwrites what the recursion left: the outermost
+                // link of a chain a `&` takes is the reference's own.
+                (_, Some(Over::Ref)) => FETCH_DIM_REF,
                 (_, _) => FETCH_DIM_DIM,
             };
             self.push(Opline {
@@ -6995,12 +7114,14 @@ impl Emit<'_> {
         // ZEND_FETCH_DIM_WRITE`: the bit is `zend_delayed_compile_dim`'s
         // and `BP_VAR_W`'s alone, so a property under a `->` or under a
         // `BP_VAR_RW` chain carries the slots and nothing else.
-        let extended_value = |slots: u32| {
-            if matches!(fetch, Fetch::Write) && over == Over::Dim {
-                slots | FETCH_DIM_WRITE
-            } else {
-                slots
-            }
+        // `ZEND_FETCH_REF` is the other half of the pair, put on by
+        // `zend_delayed_compile_var`'s `by_ref` and by
+        // `zend_compile_static_prop`'s, where nothing but the `&`
+        // stands over the fetch.
+        let extended_value = |slots: u32| match over {
+            Over::Dim if matches!(fetch, Fetch::Write) => slots | FETCH_DIM_WRITE,
+            Over::Ref => slots | FETCH_REF,
+            Over::Dim | Over::Obj => slots,
         };
         match container {
             Base::Settled(pair) => pair,
@@ -7562,6 +7683,13 @@ impl Emit<'_> {
     /// beside it, so the handler steps over two oplines. What the
     /// opline leaves is the fetch's `VAR`, which [`Self::do_free`]
     /// marks `UNUSED` where nothing reads it.
+    ///
+    /// The name, the `VAR` and the cache slots are taken before the
+    /// source compiles and the opline is pushed after it, which is
+    /// where `zend_delayed_compile_end` lays the held-back
+    /// `FETCH_STATIC_PROP_W` down. A `static` property is no plain
+    /// `$name`, so [`Self::ref_source`] puts `MAKE_REF` over whatever
+    /// the source leaves but a CV.
     fn assign_static_prop_ref(
         &mut self,
         class: &[u8],
@@ -7573,27 +7701,7 @@ impl Emit<'_> {
         let out = self.temporary();
         let slots = self.cache_slots(3);
         let class_at = self.class_name_literal(class)?;
-        let line = self.line;
-        let (data_type, data, flags) = match self.peel(source) {
-            tree::Expr::SimpleVarExpr(id)
-                if matches!(self.simple_var_of(id, line)?, SimpleVar::Cv(_)) =>
-            {
-                let SimpleVar::Cv(name) = self.simple_var_of(id, line)? else {
-                    return Err(self.fatal("a variable that is no CV"));
-                };
-                (OperandKind::Cv, self.lookup_cv(&name), 0)
-            }
-            tree::Expr::CallExpr(_) => {
-                let returned = self.expr(source)?;
-                let (kind, at) = self.operand(returned);
-                (kind, at, RETURNS_FUNCTION)
-            }
-            _ => {
-                return Err(self.fatal(
-                    "a by-reference assignment from what is no variable this compiler cannot read yet",
-                ));
-            }
-        };
+        let (data_type, data, flags) = self.ref_source(source, false)?;
         self.push(Opline {
             opcode: Opcode::AssignStaticPropRef,
             op1_type: OperandKind::Const,
