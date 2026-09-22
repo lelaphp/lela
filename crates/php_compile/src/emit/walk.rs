@@ -107,6 +107,18 @@ impl Emit<'_> {
             .line_number(range.end().saturating_sub(1).max(range.start))
     }
 
+    /// The line a node's first byte stands on, php's
+    /// `zend_ast_decl.start_lineno`: the line the `function`, the `fn`
+    /// or the `class` keyword was written on, which
+    /// `zend_ast_create_decl` is handed beside the node's own `lineno`
+    /// and which `zend_begin_func_decl` names a closure by. A
+    /// declaration is the one node with two lines of its own, and this
+    /// is the other one, read from the range as [`Self::end_line`]
+    /// reads `end_lineno`.
+    fn start_line(&self, range: TextRange) -> u32 {
+        self.parsed.lines.line_number(range.start)
+    }
+
     /// A `class` or an `interface` declaration read from the tree, in
     /// the shape the emitter's `class` takes: the name, the parent, the
     /// interfaces, the attributes, the doc comment and the members.

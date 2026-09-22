@@ -63,7 +63,7 @@ impl Emit<'_> {
             node.ret,
             node.body,
             node.doc_comment,
-            line,
+            self.start_line(node.range),
             node.range,
         )?;
         Ok(Closure {
@@ -103,7 +103,7 @@ impl Emit<'_> {
                 by_ref: node.byref.is_some(),
                 body: Vec::new(),
                 doc_comment: self.doc_comment(node.doc_comment),
-                line,
+                line: self.start_line(node.range),
                 end_line: self.line_after(node.range),
             },
             uses: Vec::new(),
