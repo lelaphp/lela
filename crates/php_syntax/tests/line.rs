@@ -14,11 +14,13 @@
 //!    statement, "a `declare(ticks)` of a count this compiler cannot read
 //!    yet", and #499 is where that work stands.
 //! 2. **The line the execution timer names**, for the third of #601's
-//!    three `for (;;)` programs: its loop holds a forward `JMPZ` beside
-//!    the jump back, and php tests the interrupt after every jump where
-//!    this engine tests it at a back-edge alone (design §5.8), so php
-//!    names line 2 on some runs and line 3 on others while the engine
-//!    names line 2 on every one. The op array itself is held to php's:
+//!    three `for (;;)` programs: its loop holds a taken forward `JMPZ`
+//!    beside the jump back, and php tests the interrupt after every
+//!    jump that sets an opline where this engine tests it at a
+//!    back-edge alone, so php names line 3 on ten runs of twelve and
+//!    line 2 on the other two while the engine names line 2 on all
+//!    twelve. Design §5.8 and ledger 28 say the line such a timeout
+//!    names is not held. The op array itself is held to php's:
 //!    `xtask compile-identity --file` reads all three programs as
 //!    byte-identical with the oracle's dump.
 //! 3. **A `yield`**, which the compiler refuses, "a `yield` this compiler
@@ -88,8 +90,10 @@ fn an_empty_block_an_else_arm_and_a_finally_clause_under_ticks() {
 
 /// The third of the three programs that read the line a `for` loop's jump
 /// back is left at, which is the `else` arm's block's (reason 2). The
-/// other two are witnesses beside `php_compile`'s `for`; this one the
-/// timer cannot name the same way twice, under php or under the engine.
+/// other two are witnesses beside `php_compile`'s `for`; this one no
+/// lane pins, php naming the opline the interrupt fell on and this
+/// engine the one the jump back lands on, which design §5.8 and ledger
+/// 28 leave unheld. What the tree holds is the `else` arm's line.
 #[test]
 fn the_line_a_for_loops_jump_back_is_left_at_over_an_else_arm() {
     let arm = "<?php\nset_time_limit(1); $x = 0; for (;;) if ($x) ; else\n{ /*\n\n*/\n}\n";
