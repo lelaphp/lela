@@ -9,11 +9,10 @@
 //! modifier from its token, a type from its `TypeExpr`, a doc comment
 //! from the token index the builder recorded, a line from
 //! [`Node::line`], which is php's `zend_ast.lineno`. A declaration is
-//! handed to the emitter in the shape [`crate::read`] gave it, its
-//! body and its defaults the tree's own nodes, so every construct's
-//! semantics stays in the one function that had it and nothing here
-//! decides what an opline is; those shapes go as the emitter learns to
-//! read the declarations directly (#595).
+//! handed to the emitter in one of the shapes at the foot of this
+//! file, its body and its defaults the tree's own nodes, so every
+//! construct's semantics stays in the one function that has it and
+//! nothing here decides what an opline is (#595).
 //!
 //! **What is refused.** A construct the tree parses and the emitter
 //! cannot emit yet is refused here, at the node's line, in the one-line
@@ -32,7 +31,6 @@ mod expr;
 
 use super::Emit;
 use crate::CompileError;
-use crate::read::{self, Attr, Class, Constant, Function, Method, Parameter, Promoted, Property};
 
 /// A group of a member's modifiers as the tree holds them, read once:
 /// php's `member_modifier` list before `zend_add_member_modifier`
@@ -489,7 +487,7 @@ impl Emit<'_> {
         range: TextRange,
     ) -> Result<Class, CompileError> {
         let name = self.text(name).to_vec();
-        if read::is_reserved_class_name(&name) {
+        if is_reserved_class_name(&name) {
             return Err(refused(
                 line,
                 format!(
@@ -702,4 +700,192 @@ fn type_name(name: &[u8]) -> Type {
         b"parent" => Type::ParentClass,
         _ => Type::Named(Name(name.strip_prefix(b"\\").unwrap_or(name).into())),
     }
+}
+
+// ----- the shapes a declaration reaches the emitter in -----
+//
+// What the walk above reads a class, a function, a closure and the
+// members and parameters under them into, each named after the tree
+// node it stands for and the `zend_ast` kind that node is, with the
+// expressions under it the tree's own nodes (design §4.9, #595).
+/// One class declaration, php's `zend_ast_decl` for a class: the name as
+/// written, the doc comment taken before its `{` (`class_declaration_statement`
+/// reduces `backup_doc_comment` after `implements_list`), and its
+/// members as php's `ZEND_AST_PROP_GROUP` and `ZEND_AST_CLASS_CONST_GROUP`
+/// hold them, one declarator each so the doc comment and the line are
+/// the declarator's own.
+///
+/// `extends_from` is the parent of a class, `child[0]`; `implements_list`
+/// is `child[1]`, and an interface's own `extends` list is the same
+/// child, since `interface_declaration_statement` hands its
+/// `interface_extends_list` to `zend_ast_create_decl` where a class
+/// hands its `implements_list`.
+#[derive(Debug, PartialEq)]
+pub(super) struct Class {
+    pub(super) name: Vec<u8>,
+    pub(super) kind: ClassKind,
+    pub(super) parent: Option<Vec<u8>>,
+    pub(super) interfaces: Vec<Vec<u8>>,
+    pub(super) attributes: Vec<Attr>,
+    pub(super) doc_comment: Option<Vec<u8>>,
+    pub(super) properties: Vec<Property>,
+    pub(super) constants: Vec<Constant>,
+    pub(super) methods: Vec<Method>,
+    /// The line the name is on, `ce->info.user.line_start`, which is
+    /// where php raises what `zend_compile_attributes` refuses and not
+    /// where the attribute itself was written.
+    pub(super) line: u32,
+    /// The line of the closing brace, `ce->info.user.line_end`.
+    pub(super) end_line: u32,
+}
+
+/// One attribute as written, php's `ZEND_AST_ATTRIBUTE`: the class name
+/// before it is resolved, and the arguments of its list, still
+/// expressions. `zend_compile_attributes` is what turns a group of
+/// these into a declaration's, so a group is not a thing that outlives
+/// the reader: `#[A] #[B]` and `#[A, B]` are the same two attributes.
+#[derive(Debug, PartialEq)]
+pub(super) struct Attr {
+    pub(super) name: Vec<u8>,
+    pub(super) arguments: Vec<php_syntax::tree::Expr>,
+    pub(super) line: u32,
+}
+
+/// One function declaration, php's `zend_ast_decl` for a function or a
+/// method: the name as written, the parameters, the return type where
+/// one is written after the `)`, whether an `&` before the name returns
+/// it by reference (`ZEND_ACC_RETURN_REFERENCE`), the body's statement
+/// nodes, which the emitter walks from the tree, the doc comment taken
+/// before the `function` keyword, and the lines of the keyword and of
+/// the closing brace, `start_lineno` and `end_lineno`.
+#[derive(Debug, PartialEq)]
+pub(super) struct Function {
+    pub(super) name: Vec<u8>,
+    pub(super) parameters: Vec<Parameter>,
+    pub(super) return_type: Option<Type>,
+    pub(super) by_ref: bool,
+    pub(super) body: Vec<php_syntax::tree::Stmt>,
+    pub(super) doc_comment: Option<Vec<u8>>,
+    pub(super) line: u32,
+    pub(super) end_line: u32,
+}
+
+/// One parameter, php's `ZEND_AST_PARAM`: the declared type where one is
+/// written, `ZEND_PARAM_REF` for an `&` and `ZEND_PARAM_VARIADIC` for a
+/// `...` before the variable, the name, the default, and the modifiers
+/// that promote it to a property in a constructor.
+#[derive(Debug, PartialEq)]
+pub(super) struct Parameter {
+    pub(super) name: Vec<u8>,
+    pub(super) ty: Option<Type>,
+    pub(super) by_ref: bool,
+    pub(super) variadic: bool,
+    pub(super) default: Option<php_syntax::tree::Expr>,
+    pub(super) promote: Option<Promoted>,
+}
+
+/// The modifiers that make a constructor's parameter a property,
+/// php's `promotion_flags` in `zend_compile_params`: the visibility and
+/// the `readonly` bit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Promoted {
+    pub(super) visibility: Visibility,
+    pub(super) is_readonly: bool,
+}
+
+/// One method, php's `ZEND_AST_METHOD`: a function with the group's
+/// modifiers beside it.
+#[derive(Debug, PartialEq)]
+pub(super) struct Method {
+    pub(super) function: Function,
+    pub(super) visibility: Visibility,
+    pub(super) is_static: bool,
+    pub(super) is_final: bool,
+}
+
+/// One closure as written, php's `ZEND_AST_CLOSURE` and its
+/// `ZEND_AST_ARROW_FUNC`: the function itself, whose `name` is empty
+/// because `zend_begin_func_decl` builds `{closure:...}` from where it
+/// stands; the `use` list as written, empty for an arrow
+/// function, whose captures are found in its body
+/// (`find_implicit_binds`); whether `static` stands before the
+/// keyword, php's `ZEND_ACC_STATIC`, which keeps `$this` out of the
+/// body; and for an arrow function the expression after `=>`, the one
+/// `return` php makes its body of (`zend_compile_func_decl`), the
+/// function's own statement list being empty.
+#[derive(Debug, PartialEq)]
+pub(super) struct Closure {
+    pub(super) function: Function,
+    pub(super) uses: Vec<Use>,
+    pub(super) is_static: bool,
+    pub(super) arrow: Option<php_syntax::tree::Expr>,
+}
+
+/// One `use` variable of a closure, php's `lexical_var`: the name
+/// without its `$`, whether an `&` stands before it
+/// (`ZEND_BIND_REF`), and the line the name is written on, which
+/// `zend_compile_closure_binding` sets `CG(zend_lineno)` to before the
+/// `BIND_LEXICAL` it emits.
+#[derive(Debug, PartialEq)]
+pub(super) struct Use {
+    pub(super) name: Vec<u8>,
+    pub(super) by_ref: bool,
+    pub(super) line: u32,
+}
+
+/// One property declarator, php's `ZEND_AST_PROP_ELEM` with the group's
+/// modifiers and type beside it: `public $x`, `static $y = 1`,
+/// `public private(set) int $z`. Its doc comment is what was pending
+/// after its last token, php's `property: T_VARIABLE
+/// backup_doc_comment | T_VARIABLE '=' expr backup_doc_comment`.
+/// `set_visibility` is the group's `public(set)`, `protected(set)` or
+/// `private(set)` as written, before `zend_declare_typed_property`
+/// holds it to the read visibility.
+#[derive(Debug, PartialEq)]
+pub(super) struct Property {
+    pub(super) name: Vec<u8>,
+    pub(super) visibility: Visibility,
+    pub(super) set_visibility: Option<Visibility>,
+    pub(super) ty: Option<Type>,
+    pub(super) is_static: bool,
+    pub(super) default: Option<php_syntax::tree::Expr>,
+    pub(super) doc_comment: Option<Vec<u8>>,
+    pub(super) line: u32,
+}
+
+/// One class constant declarator, php's `ZEND_AST_CONST_ELEM` with the
+/// group's modifiers beside it: `const A = 1`, `final protected const B = 2`.
+/// Its doc comment is taken after its value, `class_const_decl: identifier
+/// '=' expr backup_doc_comment`.
+#[derive(Debug, PartialEq)]
+pub(super) struct Constant {
+    pub(super) name: Vec<u8>,
+    pub(super) visibility: Visibility,
+    pub(super) is_final: bool,
+    pub(super) value: php_syntax::tree::Expr,
+    pub(super) doc_comment: Option<Vec<u8>>,
+    pub(super) line: u32,
+}
+
+/// `zend_is_reserved_class_name`: the names `reserved_class_names` lists
+/// in `zend_compile.c`, which no class may take, whatever the case.
+fn is_reserved_class_name(name: &[u8]) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_slice(),
+        b"bool"
+            | b"false"
+            | b"float"
+            | b"int"
+            | b"null"
+            | b"parent"
+            | b"self"
+            | b"static"
+            | b"string"
+            | b"true"
+            | b"void"
+            | b"never"
+            | b"iterable"
+            | b"object"
+            | b"mixed"
+    )
 }

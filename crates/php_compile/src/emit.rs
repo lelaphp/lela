@@ -109,12 +109,10 @@ use php_unit::{
     OplineIdx, TryCatch, Unit, frameless_table,
 };
 
-use crate::read;
-use crate::read::{
-    BinaryOp, CastTo, Class, Function, IncludeKind, Magic, Method, Property, Step, Written,
-    is_auto_global,
-};
+use php_syntax::magic_const_name;
+
 use crate::{CompileError, Options, StackLimit};
+use walk::{Class, Closure, Function, Method, Property};
 
 mod walk;
 
@@ -2128,7 +2126,7 @@ impl Emit<'_> {
     /// captures are written nowhere — each at the line its name stands
     /// on, and the body reads them back with the `BIND_STATIC` prologue
     /// [`Self::closure_uses`] emits.
-    fn closure(&mut self, closure: &read::Closure) -> Result<Where, CompileError> {
+    fn closure(&mut self, closure: &Closure) -> Result<Where, CompileError> {
         let name = self.closure_name(closure.function.line);
         let at = u32::try_from(self.dynamic.len()).unwrap_or(u32::MAX);
         self.dynamic.push(None);
@@ -2209,7 +2207,7 @@ impl Emit<'_> {
     /// declare (`find_implicit_binds`). php's three compile errors are
     /// raised here, where `zend_hash_add` and the two name tests raise
     /// them.
-    fn closure_binds(&mut self, closure: &read::Closure) -> Result<Vec<Bind>, CompileError> {
+    fn closure_binds(&mut self, closure: &Closure) -> Result<Vec<Bind>, CompileError> {
         if let Some(body) = closure.arrow {
             return Ok(self.implicit_binds(&closure.function, body));
         }
@@ -2609,7 +2607,7 @@ impl Emit<'_> {
     /// promotion outside a constructor or on a variadic.
     fn parameter_refused(
         &self,
-        parameter: &crate::read::Parameter,
+        parameter: &walk::Parameter,
         variadic_seen: bool,
         is_ctor: bool,
     ) -> Result<(), CompileError> {
@@ -11388,4 +11386,240 @@ mod tests {
             "JMP_NULL has no safepoint column"
         );
     }
+}
+
+// ----- the `attr` php's parser puts on a node -----
+//
+// The enums php keeps in `zend_ast.attr`, which the walk reads from the
+// token that decided it: which file construct an `include` is, which
+// magic constant a `__LINE__` is, which operator a `+` is, which type a
+// cast is to, which of the four step nodes a `++` is, and how a
+// variable piece of an interpolated string was written (design §4.9).
+/// Which of the four file constructs an `include` is: php's
+/// `ZEND_INCLUDE`, `ZEND_INCLUDE_ONCE`, `ZEND_REQUIRE` and
+/// `ZEND_REQUIRE_ONCE` (`Z/Zend/zend_compile.h:1076-1079`), one bit
+/// each, which the parser puts in the node's `attr` and
+/// `zend_compile_include_or_eval` copies into the opline's
+/// `extended_value`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IncludeKind {
+    Include,
+    IncludeOnce,
+    Require,
+    RequireOnce,
+}
+
+impl IncludeKind {
+    /// The bit php names the construct by.
+    fn attr(self) -> u32 {
+        match self {
+            IncludeKind::Include => 1 << 1,
+            IncludeKind::IncludeOnce => 1 << 2,
+            IncludeKind::Require => 1 << 3,
+            IncludeKind::RequireOnce => 1 << 4,
+        }
+    }
+}
+
+/// The nine magic constants, php's `T_LINE` through `T_PROPERTY_C`: the
+/// lexer's tokens, matched whatever their case, so `__file__` is
+/// `__FILE__`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Magic {
+    Line,
+    File,
+    Dir,
+    Function,
+    Class,
+    Trait,
+    Method,
+    Namespace,
+    Property,
+}
+
+impl Magic {
+    /// The magic constant this spelling is, by the token name
+    /// `php_syntax` gives it; none for any other name, `\__FILE__`
+    /// included, which php reads as a constant of that name.
+    fn of(name: &[u8]) -> Option<Magic> {
+        Some(match magic_const_name(name) {
+            "T_LINE" => Magic::Line,
+            "T_FILE" => Magic::File,
+            "T_DIR" => Magic::Dir,
+            "T_FUNC_C" => Magic::Function,
+            "T_CLASS_C" => Magic::Class,
+            "T_TRAIT_C" => Magic::Trait,
+            "T_METHOD_C" => Magic::Method,
+            "T_NS_C" => Magic::Namespace,
+            "T_PROPERTY_C" => Magic::Property,
+            _ => return None,
+        })
+    }
+}
+
+/// How a variable piece of an interpolated string was written: `$a`,
+/// `{$a}` and the plain bytes carry no `attr`; `${a}` and `${a[0]}` are
+/// php's `ZEND_ENCAPS_VAR_DOLLAR_CURLY`, and `${expr}` its
+/// `ZEND_ENCAPS_VAR_DOLLAR_CURLY_VAR_VAR`, each deprecated in its own
+/// words.
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum Written {
+    Plain,
+    DollarCurly,
+    DollarCurlyVarVar,
+}
+
+/// Which of php's four step nodes stands over a target: whether the
+/// value the step leaves is the one before it (`POST`) or after it
+/// (`PRE`), and whether it counts up or down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    /// `++$x`, php's `ZEND_AST_PRE_INC`
+    PreInc,
+    /// `--$x`, php's `ZEND_AST_PRE_DEC`
+    PreDec,
+    /// `$x++`, php's `ZEND_AST_POST_INC`
+    PostInc,
+    /// `$x--`, php's `ZEND_AST_POST_DEC`
+    PostDec,
+}
+
+/// The binary operators this reads, each the opcode php's
+/// `zend_compile_binary_op` gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BinaryOp {
+    /// `ZEND_ADD`
+    Add,
+    /// `ZEND_SUB`
+    Sub,
+    /// `ZEND_MUL`
+    Mul,
+    /// `ZEND_DIV`
+    Div,
+    /// `ZEND_MOD`
+    Mod,
+    /// `ZEND_POW`
+    Pow,
+    /// `ZEND_SL`
+    Sl,
+    /// `ZEND_SR`
+    Sr,
+    /// `ZEND_CONCAT`
+    Concat,
+    /// `ZEND_IS_SMALLER`
+    IsSmaller,
+    /// `ZEND_IS_SMALLER_OR_EQUAL`
+    IsSmallerOrEqual,
+    /// `>`, php's `ZEND_AST_GREATER`, which `zend_compile_greater` emits
+    /// as `ZEND_IS_SMALLER` with the operands swapped.
+    Greater,
+    /// `>=`, php's `ZEND_AST_GREATER_EQUAL`, `ZEND_IS_SMALLER_OR_EQUAL`
+    /// the same way.
+    GreaterOrEqual,
+    /// `ZEND_IS_EQUAL`
+    IsEqual,
+    /// `ZEND_IS_NOT_EQUAL`, which `<>` is as well.
+    IsNotEqual,
+    /// `ZEND_IS_IDENTICAL`
+    IsIdentical,
+    /// `ZEND_IS_NOT_IDENTICAL`
+    IsNotIdentical,
+    /// `ZEND_SPACESHIP`
+    Spaceship,
+    /// `ZEND_BW_OR`
+    BwOr,
+    /// `ZEND_BW_XOR`
+    BwXor,
+    /// `ZEND_BW_AND`
+    BwAnd,
+    /// `ZEND_BOOL_XOR`, which `xor` is: the one word spelling
+    /// `zend_compile_binary_op` serves, with no jump in it, since both
+    /// sides are read whatever either answers.
+    BoolXor,
+}
+
+impl BinaryOp {
+    /// The operator as php's grammar spells it, what a constant
+    /// expression's `Binary` node names it by (design §4.7).
+    fn spelling(self) -> &'static str {
+        match self {
+            BinaryOp::Add => "+",
+            BinaryOp::Sub => "-",
+            BinaryOp::Mul => "*",
+            BinaryOp::Div => "/",
+            BinaryOp::Mod => "%",
+            BinaryOp::Pow => "**",
+            BinaryOp::Sl => "<<",
+            BinaryOp::Sr => ">>",
+            BinaryOp::Concat => ".",
+            BinaryOp::IsSmaller => "<",
+            BinaryOp::IsSmallerOrEqual => "<=",
+            BinaryOp::Greater => ">",
+            BinaryOp::GreaterOrEqual => ">=",
+            BinaryOp::IsEqual => "==",
+            BinaryOp::IsNotEqual => "!=",
+            BinaryOp::IsIdentical => "===",
+            BinaryOp::IsNotIdentical => "!==",
+            BinaryOp::Spaceship => "<=>",
+            BinaryOp::BwOr => "|",
+            BinaryOp::BwXor => "^",
+            BinaryOp::BwAnd => "&",
+            BinaryOp::BoolXor => "xor",
+        }
+    }
+}
+
+/// The type a cast is to, php's `attr` on `ZEND_AST_CAST`: the scanner's
+/// `T_INT_CAST`, `T_DOUBLE_CAST`, `T_STRING_CAST`, `T_ARRAY_CAST`,
+/// `T_OBJECT_CAST` and `T_BOOL_CAST`, each scalar one with the canonical
+/// spelling and the one 8.5 deprecates (`zend_language_scanner.l` at the
+/// pin). `(unset)` is refused as the compile error `zend_compile_cast`
+/// raises for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CastTo {
+    /// `(int)` and `(integer)`: `IS_LONG`.
+    Long,
+    /// `(float)` and `(double)`: `IS_DOUBLE`.
+    Double,
+    /// `(string)` and `(binary)`: `IS_STRING`.
+    Str,
+    /// `(array)`: `IS_ARRAY`.
+    Array,
+    /// `(object)`: `IS_OBJECT`.
+    Object,
+    /// `(bool)` and `(boolean)`: `_IS_BOOL`, which php compiles to
+    /// `ZEND_BOOL` and never to `ZEND_CAST`.
+    Bool,
+}
+
+impl CastTo {
+    /// php's type constant, `ZEND_CAST`'s `extended_value`.
+    fn type_code(self) -> u32 {
+        match self {
+            CastTo::Long => 4,
+            CastTo::Double => 5,
+            CastTo::Str => 6,
+            CastTo::Array => 7,
+            CastTo::Object => 8,
+            // `_IS_BOOL` is 18 and reaches no opline: `ZEND_BOOL` carries
+            // nothing in `extended_value`.
+            CastTo::Bool => 0,
+        }
+    }
+}
+
+/// `zend_is_auto_global`: the names `php_startup_auto_globals` and
+/// `zend_startup` register, which no CV holds.
+fn is_auto_global(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"GLOBALS"
+            | b"_GET"
+            | b"_POST"
+            | b"_COOKIE"
+            | b"_SERVER"
+            | b"_ENV"
+            | b"_REQUEST"
+            | b"_FILES"
+    )
 }

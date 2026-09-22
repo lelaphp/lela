@@ -1,8 +1,8 @@
-//! The walk over a closure written inside an expression (design §4.9,
-//! #595): what [`Emit`] reads `function (…) use (…) {…}` and `fn (…) =>
-//! e` as, in the shape [`crate::read`] gave the emitter, since a
-//! closure is a declaration and reaches the emitter as the other
-//! declarations do.
+//! The walk over a closure written inside an expression of
+//! `php_syntax`'s tree (design §4.9, #595): what [`Emit`] reads
+//! `function (…) use (…) {…}` and `fn (…) => e` as, in the [`Closure`]
+//! shape that stands beside the other declarations', since a closure
+//! is a declaration and reaches the emitter as they do.
 //!
 //! The body is the tree's own statement nodes, which the emitter walks
 //! where it compiles them, and an arrow function's is the expression
@@ -11,9 +11,8 @@
 //! builder recorded on the node; the `static` before the keyword is the
 //! first significant token of its range, php's `ZEND_ACC_STATIC`.
 
-use super::{Emit, unread};
+use super::{Closure, Emit, Function, Use, unread};
 use crate::CompileError;
-use crate::read::{Closure, Function, Use};
 use php_syntax::tree::{ArrowFnExpr, ClosureExpr, Expr, Node, NodeId};
 use php_syntax::{SyntaxKind, TextRange};
 

@@ -6,10 +6,10 @@
 //! engine's loop serves, `echo` and a call of a named function, emitted as
 //! php emits them, with the entry safepoint and the numbered return. The
 //! tree it walks is `php_syntax`'s, [`Parsed::tree`] (design §4.9):
-//! `emit` reads every statement and every expression from its own node,
-//! and a declaration through the shapes `read` names, which go as it
-//! learns to read those from the tree too (#595). What it cannot read
-//! is refused as a [`CompileError`].
+//! `emit` reads every statement, every expression and every
+//! declaration from its own node, and no second parser stands between
+//! the source and the unit (#595). What it cannot read is refused as a
+//! [`CompileError`].
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -23,7 +23,6 @@
 
 mod emit;
 mod live;
-mod read;
 mod special;
 mod stack;
 
