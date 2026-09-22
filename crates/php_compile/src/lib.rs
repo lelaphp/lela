@@ -173,6 +173,21 @@ pub struct CompileError {
 /// <? echo "code"; ?>
 /// echoed
 /// ```
+///
+/// With it on, the same file is the code the tag opened, and the text
+/// around it is gone. The entry is `PHP_INI_SYSTEM|PHP_INI_PERDIR`, so no
+/// snippet turns it on from inside: the fence names `[regime.short-tags]`
+/// of the pin, whose ini stands after the recipe's for the oracle and for
+/// the engine alike (harness-design.md §8, ledger 55; #610):
+///
+/// ```php
+/// ?>
+/// <? echo "code"; ?>
+/// <?= "echoed" ?>
+/// ```
+/// ```expect regime=short-tags exit=0
+/// codeechoed
+/// ```
 pub fn compile_source(
     source: &[u8],
     options: &Options,
