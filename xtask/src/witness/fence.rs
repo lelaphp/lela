@@ -24,6 +24,15 @@
 //! follows, is the pinned second stream; without one, an empty stream is
 //! asserted.
 //!
+//! A `regime=<name>` names one `[regime.<name>]` of the pin, whose ini
+//! stands after the recipe's for the oracle run and for the linked engine
+//! alike (harness-design.md §8, ledger 55): the way to pin a behaviour the
+//! recipe's own ini holds off, such as what `<?` opens while
+//! `short_open_tag` is on. The name is all a fence carries; the values are
+//! the pin's, written by a person, so a fence that would set an ini of its
+//! own is an attribute this grammar has no meaning for and the block is
+//! refused.
+//!
 //! The scan is textual, as `vocab`'s is, not a parse. A doc line is one
 //! beginning `///` or `//!` with one leading space dropped from its body; a
 //! block ends at the first item line, which is a line at indentation zero
@@ -88,16 +97,27 @@ pub struct Witness {
     /// The pinned second stream; `None` asserts an empty one.
     pub stderr: Option<String>,
     pub exit: Exit,
+    /// The `[regime.<name>]` of the pin the fence names, whose ini stands
+    /// after the recipe's for both runs; nothing where it names none, and
+    /// then the recipe alone is what the snippet runs under.
+    pub regime: Option<String>,
     /// The declared duration, disclosure only; the instrument sums them.
     pub wall: Option<Duration>,
 }
 
 impl Witness {
     /// The divergence key (harness-design.md §4.3): `witness:` and a content
-    /// hash of the snippet, so a registry row names the program and not the
-    /// file it stands in.
+    /// hash of what runs, so a registry row names the program and not the
+    /// file it stands in. The program is the snippet where the fence names
+    /// no regime, and the regime's name ahead of it where it names one,
+    /// since the same snippet under two regimes is two runs and a person's
+    /// row on one of them is not a row on the other.
     pub fn id(&self) -> String {
-        format!("witness:{}", git::blob_id(self.snippet.as_bytes()))
+        let program = match &self.regime {
+            None => self.snippet.clone(),
+            Some(regime) => format!("{regime}\n{}", self.snippet),
+        };
+        format!("witness:{}", git::blob_id(program.as_bytes()))
     }
 
     /// Where it stands, as a person reads a printed line.
@@ -241,7 +261,7 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
             file,
             opened,
             format!(
-                "`{unknown}` on an expect fence; the attributes are `exit`, `exit=<status>` and `wall=<duration>`"
+                "`{unknown}` on an expect fence; the attributes are `exit`, `exit=<status>`, `wall=<duration>` and `regime=<name>`, and the ini a regime carries is the pin's"
             ),
         ));
     }
@@ -269,6 +289,7 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
             stderr,
             exit: attributes.exit,
             wall: attributes.wall,
+            regime: attributes.regime,
         },
         after,
     ))
@@ -337,6 +358,8 @@ fn first_word(info: &str) -> &str {
 struct Attributes {
     exit: Exit,
     wall: Option<Duration>,
+    /// The name of the pin's regime the run stands under.
+    regime: Option<String>,
     /// Attributes this grammar has no meaning for, in the order written.
     unknown: Vec<String>,
 }
@@ -358,6 +381,15 @@ impl Attributes {
                 match duration(wall) {
                     Some(wall) => out.wall = Some(wall),
                     None => out.unknown.push(word.to_owned()),
+                }
+            } else if let Some(regime) = word.strip_prefix("regime=") {
+                // The name alone, and a name at all; whether the pin
+                // carries it is the instrument's to say, and it names the
+                // regimes the pin has.
+                if regime.is_empty() {
+                    out.unknown.push(word.to_owned());
+                } else {
+                    out.regime = Some(regime.to_owned());
                 }
             } else {
                 out.unknown.push(word.to_owned());
@@ -583,6 +615,71 @@ mod tests {
     }
 
     #[test]
+    fn a_regime_attribute_names_one_block_of_the_pin_and_carries_no_ini() {
+        let found = php(concat!(
+            "/// ```php\n/// x\n/// ```\n",
+            "/// ```expect regime=short-tags exit=0\n/// 1\n/// ```\n",
+            "pub fn k() {}\n"
+        ));
+        assert!(found.problems.is_empty(), "{:#?}", found.problems);
+        let [witness] = &found.witnesses[..] else {
+            panic!("{found:#?}")
+        };
+        assert_eq!(witness.regime.as_deref(), Some("short-tags"));
+        assert_eq!(witness.exit, Exit::Pinned(0));
+    }
+
+    #[test]
+    fn a_fence_that_names_no_regime_stands_under_the_recipe_alone() {
+        let found = php("/// ```php\n/// x\n/// ```\n/// ```expect\n/// ```\npub fn k() {}\n");
+        assert_eq!(found.witnesses[0].regime, None);
+    }
+
+    /// A fence carries a regime's name and never its values: an ini on the
+    /// fence would let the fence approve itself against a pin nobody wrote,
+    /// so it is an attribute the grammar has no meaning for, and so is a
+    /// `regime=` that names none (#610).
+    #[test]
+    fn a_fence_that_sets_its_own_ini_is_a_problem_naming_the_attributes() {
+        for word in ["ini=short_open_tag=1", "-d", "regime="] {
+            let found = php(&format!(
+                "/// ```php\n/// x\n/// ```\n/// ```expect {word}\n/// ```\npub fn k() {{}}\n"
+            ));
+            assert!(found.witnesses.is_empty(), "{word}: {found:#?}");
+            assert!(
+                found.problems[0].what.contains(word)
+                    && found.problems[0].what.contains("`regime=<name>`"),
+                "{word}: {:?}",
+                found.problems[0]
+            );
+        }
+    }
+
+    /// The same snippet under two regimes is two runs, so a person's row on
+    /// one of them is not a row on the other; a fence naming none keys as it
+    /// keyed before the attribute existed.
+    #[test]
+    fn the_id_is_a_content_hash_of_the_program_and_the_regime_it_runs_under() {
+        let keyed = |fences: &str| {
+            php(&format!(
+                "/// ```php\n/// echo 1;\n/// ```\n{fences}pub fn a() {{}}\n"
+            ))
+            .witnesses[0]
+                .id()
+        };
+        let plain = keyed("/// ```expect\n/// 1\n/// ```\n");
+        assert_eq!(plain, format!("witness:{}", git::blob_id(b"echo 1;")));
+        assert_ne!(
+            plain,
+            keyed("/// ```expect regime=short-tags\n/// 1\n/// ```\n")
+        );
+        assert_ne!(
+            keyed("/// ```expect regime=short-tags\n/// 1\n/// ```\n"),
+            keyed("/// ```expect regime=dump\n/// 1\n/// ```\n")
+        );
+    }
+
+    #[test]
     fn an_attribute_the_grammar_has_no_meaning_for_is_a_problem() {
         let found =
             php("/// ```php\n/// x\n/// ```\n/// ```expect status\n/// ```\npub fn k() {}\n");
@@ -616,7 +713,7 @@ mod tests {
     }
 
     #[test]
-    fn the_id_is_a_content_hash_of_the_snippet_and_of_nothing_else() {
+    fn the_id_is_a_content_hash_of_the_snippet_and_not_of_what_it_pins() {
         let one =
             php("/// ```php\n/// echo 1;\n/// ```\n/// ```expect\n/// 1\n/// ```\npub fn a() {}\n");
         let two =

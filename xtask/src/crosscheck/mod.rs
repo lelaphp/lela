@@ -383,7 +383,7 @@ pub fn run(
 fn rendering(manifest: &Manifest, ask: &Ask, name: &str, column: Column) -> Result<Rendering> {
     let Some(dir) = &ask.renderings else {
         return Ok(
-            match linked::serve(&manifest.pin.recipe, &column.program(name)) {
+            match linked::serve(&manifest.pin.recipe, None, &column.program(name)) {
                 Err(trouble) => {
                     Rendering::Absent(format!("the linked engine did not serve it: {trouble:#}"))
                 }

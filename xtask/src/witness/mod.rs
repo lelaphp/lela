@@ -62,6 +62,14 @@
 //! **What `wall=D` is.** Disclosure. The declared durations are summed into
 //! the reading's `wall_ms` and stop nothing; the limit a run has is the
 //! recipe's.
+//!
+//! **What `regime=<name>` is.** One `[regime.<name>]` of the pin, whose
+//! ini stands after the recipe's for the oracle run and for the linked
+//! engine alike (harness §8, ledger 55): the way a witness pins a
+//! behaviour the recipe's own ini holds off. The values are the pin's and
+//! a person writes them, so a fence carries the name alone; a name the pin
+//! does not carry is read before anything runs, and the block is one the
+//! lane cannot run, named beside the regimes the pin has.
 
 pub(crate) mod fence;
 mod judge;
@@ -77,7 +85,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::divergence::Registry;
 use crate::manifest::{Crate, Manifest, Rule};
-use crate::oracle::{Oracle, Runner};
+use crate::oracle::{Oracle, Pin, Regime, Runner};
 use crate::reading::{Reading, Status, Store, listed};
 use crate::sources;
 use crate::tally::{self, Outcome};
@@ -468,14 +476,33 @@ pub(crate) fn judge(
     } else {
         Some(format!("the pinned php is not at {}", pinned.display()))
     };
+    // Which regime each witness stands under, read off the pin before
+    // anything runs and without php: a fence names one `[regime.<name>]`
+    // and the values are the pin's, so a name the pin does not carry is a
+    // block the lane cannot run, whether or not the oracle is here.
+    let mut problems: Vec<String> = found.problems.iter().map(fence::Problem::at_line).collect();
+    let mut runnable: Vec<(&fence::Witness, Option<&Regime>)> = Vec::new();
+    for witness in &found.witnesses {
+        match under(oracle.pin(), witness) {
+            Ok(regime) => runnable.push((witness, regime)),
+            Err(unknown) => problems.push(unknown),
+        }
+    }
     let mut captured = Vec::new();
     let mut wall = Duration::ZERO;
     let witnesses = if oracle_absent.is_some() {
-        tally::Tally::found(found.witnesses.len())
+        tally::Tally::found(runnable.len())
     } else {
-        tally::Tally::judge(&found.witnesses, |witness| {
+        tally::Tally::judge(&runnable, |(witness, regime)| {
             wall += witness.wall.unwrap_or_default();
-            Ok(judge::one(oracle, registry, ask, witness, &mut captured))
+            Ok(judge::one(
+                oracle,
+                registry,
+                ask,
+                witness,
+                *regime,
+                &mut captured,
+            ))
         })?
     };
     Ok(Tally {
@@ -487,11 +514,25 @@ pub(crate) fn judge(
             .filter(|s| !s.witnessed)
             .map(fence::Subject::at)
             .collect(),
-        problems: found.problems.iter().map(fence::Problem::at_line).collect(),
+        problems,
         wall,
         captured,
         oracle_absent,
     })
+}
+
+/// The regime one witness stands under, by the name its fence carries;
+/// nothing where it carries none, and where it names one the pin does not
+/// have, the line a person reads, at the fence and beside the regimes the
+/// pin does have.
+fn under<'a>(pin: &'a Pin, witness: &fence::Witness) -> Result<Option<&'a Regime>, String> {
+    let Some(name) = witness.regime.as_deref() else {
+        return Ok(None);
+    };
+    match pin.regime(name) {
+        Ok(regime) => Ok(Some(regime)),
+        Err(why) => Err(format!("{}: {why:#}", witness.at())),
+    }
 }
 
 /// Write the fence lines a run captured: each file under `root` read, the

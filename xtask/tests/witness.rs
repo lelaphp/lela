@@ -38,9 +38,16 @@ fn manifest() -> Manifest {
 
 /// The negative-control fixture of one manifest rule (harness §4.1).
 fn fixture(rule: &str) -> PathBuf {
+    fixture_at("rules", rule)
+}
+
+/// A negative-control fixture by the two names its path carries: the
+/// instrument's, or `rules` for one of a manifest rule's.
+fn fixture_at(kind: &str, name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/rules")
-        .join(rule);
+        .join("fixtures")
+        .join(kind)
+        .join(name);
     assert!(dir.is_dir(), "no fixture at {}", dir.display());
     dir
 }
@@ -327,6 +334,53 @@ fn a_kernel_or_native_without_a_witness_is_missing_and_fails_the_crate() {
                 reading.message
             );
         }
+    }
+}
+
+/// The negative control of the regime a fence may name (harness §4.1, §8,
+/// ledger 55): a workspace whose one fence names a regime `oracle.toml`
+/// does not carry, which the instrument must fail on. The name is read off
+/// the pin before anything runs, so the same failure comes with the pinned
+/// binary here and absent, and it names the fence, the regime asked for and
+/// the regimes the pin has.
+#[test]
+fn a_fence_naming_a_regime_the_pin_does_not_carry_fails_the_crate_and_names_it() {
+    let root = fixture_at("witness", "regime");
+    let manifest = Manifest::load(&root).unwrap();
+    for absent in [false, true] {
+        let mut manifest = manifest.clone();
+        if absent {
+            manifest.pin.oracle.path = root.join("no-php-here");
+        } else if oracle().is_none() {
+            continue;
+        }
+        let readings = witness::run(
+            &root,
+            &manifest,
+            &Registry::default(),
+            &Ask {
+                crates: vec!["ext/pcre".to_owned()],
+                accept: false,
+                staged: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(readings.len(), 1, "{readings:#?}");
+        let reading = &readings[0];
+        assert_eq!(
+            reading.status,
+            Status::Fail,
+            "absent={absent}: {reading:#?}"
+        );
+        assert_eq!(count(reading, "unread"), 1, "{reading:#?}");
+        assert_eq!(count(reading, "run"), 0, "{reading:#?}");
+        assert!(
+            reading.message.contains("ext/pcre/src/lib.rs:13")
+                && reading.message.contains("no-such-regime")
+                && reading.message.contains("short-tags"),
+            "{}",
+            reading.message
+        );
     }
 }
 

@@ -18,7 +18,9 @@
 //! file under both adapters and the tree's path is normalised to the
 //! recipe's token where php's would be (#396); and the recipe's ini is
 //! laid over the engine's defaults, so `precision`, `error_reporting` and
-//! the rest are the pin's. An entry the engine has
+//! the rest are the pin's, and a named `[regime.<name>]` of the pin lays
+//! its own after them, in the order the fresh-process adapter passes the
+//! two as `-d` (harness-design.md §8, ledger 55). An entry the engine has
 //! no name for is carried and read by nobody, which is what php does with
 //! `opcache.*` when opcache is not loaded.
 //!
@@ -42,19 +44,28 @@ use anyhow::{Result, bail};
 
 use php_bundle::test::Capture;
 
-use super::{Observation, Program, Recipe, Scratch};
+use super::{Observation, Program, Recipe, Regime, Scratch};
 
-/// One snippet through the linked engine under `recipe`, answered as the
+/// One snippet through the linked engine under `recipe`, and under
+/// `regime`'s ini after it where a run names one, answered as the
 /// fresh-process adapter answers it: the program written where that
 /// adapter writes it and served in that directory, both streams
 /// normalised by the recipe's rules with the directory as the token, and
 /// the exit code the request ended on.
-pub(crate) fn serve(recipe: &Recipe, snippet: &str) -> Result<Observation> {
+pub(crate) fn serve(
+    recipe: &Recipe,
+    regime: Option<&Regime>,
+    snippet: &str,
+) -> Result<Observation> {
     let source = format!("{}{snippet}", recipe.preamble);
     let scratch = Scratch::for_program(recipe, Program::Snippet(snippet))?;
+    // The recipe's entries first and the regime's after them, so an entry
+    // both name is the regime's, as the later `-d` is under the
+    // fresh-process adapter.
     let ini: Vec<(&str, &str)> = recipe
         .ini
         .iter()
+        .chain(regime.into_iter().flat_map(|r| &r.ini))
         .filter_map(|entry| entry.split_once('='))
         .collect();
     let started = Instant::now();

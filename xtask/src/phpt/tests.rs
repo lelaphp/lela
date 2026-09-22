@@ -315,7 +315,7 @@ fn the_refusal_for_an_unread_expression_inside_parentheses_is_read_as_unread() {
         .strip_prefix("<?php\n")
         .expect("the program opens with the tag the recipe's preamble writes")
         .to_owned();
-    let served = crate::oracle::linked::serve(&pin.recipe, &snippet).unwrap();
+    let served = crate::oracle::linked::serve(&pin.recipe, None, &snippet).unwrap();
     assert_eq!(
         adapter::unread(&served.stdout),
         Some("a `print` this compiler cannot read yet".to_owned()),

@@ -5,6 +5,11 @@
 //! own binary (harness §7, revision 48; #401); and the two streams and the
 //! status are held to what the fences pin through [`oracle::verdict`], so
 //! the registry decides what a difference means (harness §4.3).
+//!
+//! Both runs stand under the recipe, and under the `[regime.<name>]` the
+//! fence names where it names one, its ini after the recipe's in each
+//! (harness §8, ledger 55). The name is resolved against the pin before
+//! anything runs, so the two runs are handed one regime and never two.
 
 use anyhow::Result;
 
@@ -12,7 +17,7 @@ use super::fence::{Exit, Witness};
 use super::{Ask, Captured, Judged, Judgement, fence};
 use crate::divergence::Registry;
 use crate::oracle::expect::Expectation;
-use crate::oracle::{self, Observation, Oracle, Pin, Program, Verdict as Compared, linked};
+use crate::oracle::{self, Observation, Oracle, Pin, Program, Regime, Verdict as Compared, linked};
 
 /// A verdict on one witness, placed where it stands and at the item it
 /// documents, which is what the printed line says after the id.
@@ -27,7 +32,10 @@ fn judged(witness: &Witness, judgement: Judgement, note: impl Into<String>) -> J
 }
 
 /// One witness, end to end: the oracle's run, the status `--accept` may
-/// capture from it, the run of record, and the verdict. What `--accept`
+/// capture from it, the run of record, and the verdict. `regime` is the
+/// block the fence's own `regime=<name>` names, resolved against the pin
+/// by the caller once for both runs, so the oracle is passed the name and
+/// the linked engine the ini it carries and neither is passed another's. What `--accept`
 /// captures goes onto `captured`; the write is the caller's. Every way
 /// this can go wrong is a judgement the witness carries, the oracle's
 /// trouble and the linked engine's included, so there is nothing here for
@@ -37,9 +45,13 @@ pub(super) fn one(
     registry: &Registry,
     ask: &Ask,
     witness: &Witness,
+    regime: Option<&Regime>,
     captured: &mut Vec<Captured>,
 ) -> Judged {
-    let oracle_out = match oracle.run(Program::Snippet(&witness.snippet), None) {
+    let oracle_out = match oracle.run(
+        Program::Snippet(&witness.snippet),
+        witness.regime.as_deref(),
+    ) {
         Ok(out) => out,
         Err(trouble) => {
             return judged(
@@ -84,7 +96,7 @@ pub(super) fn one(
     // The engine linked into the harness, which needs no binary and is
     // the run of record (design §8; #119, #401). A panic inside is trouble
     // the witness borks on, never the lane's end.
-    let ran = match linked::serve(&oracle.pin().recipe, &witness.snippet) {
+    let ran = match linked::serve(&oracle.pin().recipe, regime, &witness.snippet) {
         Ok(out) => out,
         Err(trouble) => {
             return judged(

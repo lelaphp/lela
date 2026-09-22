@@ -226,11 +226,83 @@ fn the_linked_snippet_is_served_in_the_tree_its_file_stands_in() {
     // was all read the one tree (#396). No oracle is asked: the run of
     // record is the linked engine's, and the token is the recipe's.
     let recipe = manifest().pin.recipe;
-    let served = crate::oracle::linked::serve(&recipe, "echo __DIR__;").unwrap();
+    let served = crate::oracle::linked::serve(&recipe, None, "echo __DIR__;").unwrap();
     assert_eq!(
         String::from_utf8_lossy(&served.stdout),
         recipe.normalise.scratch_token
     );
+}
+
+/// A fence that names a regime of the pin runs under the recipe's ini and
+/// that regime's, in both runs: the oracle's, whose status is what
+/// `--accept` captures, and the linked engine's, which is the run of
+/// record (harness §8, ledger 55). The recipe pins `short_open_tag=0` and
+/// `[regime.short-tags]` turns it on, and the entry is
+/// `PHP_INI_SYSTEM|PHP_INI_PERDIR`, so nothing the snippet itself can do
+/// reaches it: a pass here is the regime reaching both.
+#[test]
+fn a_fence_that_names_a_regime_runs_under_the_recipes_ini_and_that_regimes() {
+    if oracle().is_none() {
+        return;
+    }
+    let snippet = "/// ```php\n/// ?>\n/// <? echo \"code\"; ?>\n/// ```\n";
+    let under = |fences: &str| {
+        only(&judge_text(
+            &format!("{snippet}{fences}pub fn native() {{}}\n"),
+            &registry(""),
+        ))
+    };
+    // Under the recipe alone the tag is the text the file echoes.
+    let (judgement, note) = under("/// ```expect\n/// <? echo \"code\"; ?>\n/// ```\n");
+    assert_eq!(judgement, Judgement::Pass, "{note}");
+    // Under the regime it opens code, in the oracle and in the engine.
+    let (judgement, note) = under("/// ```expect regime=short-tags\n/// code\n/// ```\n");
+    assert_eq!(judgement, Judgement::Pass, "{note}");
+    // And the regime is what makes the difference, not the fence's body.
+    let (judgement, _) =
+        under("/// ```expect regime=short-tags\n/// <? echo \"code\"; ?>\n/// ```\n");
+    assert_eq!(judgement, Judgement::Fail);
+}
+
+/// A regime is the pin's, so a fence naming one `oracle.toml` does not
+/// carry is a block the lane cannot run: it is read off the pin before
+/// anything runs, which is why the reading is the same with the pinned
+/// binary here and absent, and the line names the regime and the ones the
+/// pin has.
+#[test]
+fn a_fence_naming_a_regime_the_pin_does_not_carry_is_a_block_the_lane_cannot_run() {
+    let text = format!(
+        "{}pub fn native() {{}}\n",
+        block("/// ```expect regime=no-such-regime\n/// 1\n/// ```\n")
+    );
+    let found = fence::extract(Path::new("ext/fixture/src/lib.rs"), &text);
+    assert_eq!(found.witnesses.len(), 1, "{found:#?}");
+    let mut manifest = manifest();
+    for absent in [false, true] {
+        if absent {
+            manifest.pin.oracle.path = PathBuf::from("no-php-here");
+        } else if oracle().is_none() {
+            continue;
+        }
+        let tally = judge(
+            &manifest.pin.oracle(),
+            &registry(""),
+            &Ask::default(),
+            &found,
+        )
+        .unwrap();
+        assert!(tally.failed(), "absent={absent}: {tally:#?}");
+        assert!(tally.witnesses.judged.is_empty(), "{tally:#?}");
+        let [problem] = &tally.problems[..] else {
+            panic!("{tally:#?}")
+        };
+        assert!(
+            problem.contains("ext/fixture/src/lib.rs:1")
+                && problem.contains("no-such-regime")
+                && problem.contains("short-tags"),
+            "{problem}"
+        );
+    }
 }
 
 #[test]
