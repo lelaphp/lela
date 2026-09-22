@@ -27,9 +27,10 @@
 //! `array`'s, `print_r` and `var_export` are `var`'s, the first over the
 //! renderer 8.5 keeps in Zend, `sprintf`, `printf` and `vsprintf` are
 //! `formatted_print`'s over `php_formatted_print`, `base64_encode`
-//! and `base64_decode` are `base64`'s, and `fopen`, `fclose`, `feof`,
-//! `fread`, `fwrite`, `rewind` and `ftell` are `file`'s, over the
-//! engine's streams facet.
+//! and `base64_decode` are `base64`'s, `shell_exec` is `exec`'s, the
+//! one native the backtick operator compiles to, and `fopen`,
+//! `fclose`, `feof`, `fread`, `fwrite`, `rewind` and `ftell` are
+//! `file`'s, over the engine's streams facet.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -45,6 +46,7 @@
 
 mod array;
 mod base64;
+mod exec;
 mod file;
 mod formatted_print;
 mod head;
@@ -151,6 +153,7 @@ pub fn extension() -> Extension {
         .functions(var::natives())
         .functions(formatted_print::natives())
         .functions(base64::natives())
+        .functions(exec::natives())
         .functions(file::natives())
         .functions(basic_natives())
         .constants(vec![
