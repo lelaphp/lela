@@ -33,7 +33,7 @@ use php_unit::Opcode;
 
 use crate::CompileError;
 use crate::emit::{Emit, Where};
-use crate::read::{BinaryOp, Child, Expr};
+use php_syntax::tree;
 
 /// What php's compiler makes of one name in the table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,7 +175,7 @@ impl Emit<'_> {
     pub(crate) fn special(
         &mut self,
         lowered: &[u8],
-        arguments: &[Child],
+        arguments: &[tree::Expr],
     ) -> Result<Option<Where>, CompileError> {
         if !self.native(lowered) {
             return Ok(None);
@@ -202,7 +202,7 @@ impl Emit<'_> {
     pub(crate) fn special_constant(
         &mut self,
         lowered: &[u8],
-        arguments: &[Child],
+        arguments: &[tree::Expr],
     ) -> Result<Option<Zval>, CompileError> {
         if !self.native(lowered) {
             return Ok(None);
@@ -222,11 +222,11 @@ impl Emit<'_> {
     /// `zend_compile_func_strlen`: one argument, compiled, and a constant
     /// string is its length; `ZEND_STRLEN` over anything else, a
     /// constant that is not a string included (`strlen(1)`).
-    fn strlen(&mut self, arguments: &[Child]) -> Result<Option<Where>, CompileError> {
+    fn strlen(&mut self, arguments: &[tree::Expr]) -> Result<Option<Where>, CompileError> {
         let [argument] = arguments else {
             return Ok(None);
         };
-        let value = self.expr(argument)?;
+        let value = self.expr(*argument)?;
         if let Where::Constant(constant) = value
             && let Some(s) = constant.as_str()
         {
@@ -237,11 +237,11 @@ impl Emit<'_> {
 
     /// [`Self::strlen`]'s constant arm alone: the length of a constant
     /// string, and nothing for anything else.
-    fn strlen_constant(&mut self, arguments: &[Child]) -> Result<Option<Zval>, CompileError> {
+    fn strlen_constant(&mut self, arguments: &[tree::Expr]) -> Result<Option<Zval>, CompileError> {
         let [argument] = arguments else {
             return Ok(None);
         };
-        let Some(value) = self.constant_of(argument)? else {
+        let Some(value) = self.constant_of(*argument)? else {
             return Ok(None);
         };
         Ok(value.as_str().map(|s| length(s.len())))
@@ -255,13 +255,13 @@ impl Emit<'_> {
     fn over_one(
         &mut self,
         opcode: Opcode,
-        arguments: &[Child],
+        arguments: &[tree::Expr],
         extended_value: u32,
     ) -> Result<Option<Where>, CompileError> {
         let [argument] = arguments else {
             return Ok(None);
         };
-        let value = self.expr(argument)?;
+        let value = self.expr(*argument)?;
         Ok(Some(self.emit_unary(opcode, value, extended_value)))
     }
 
@@ -269,12 +269,12 @@ impl Emit<'_> {
     /// as such, 0 to 255 (`ZVAL_CHAR`). A long written any other way
     /// (`chr(1 + 64)`, `chr(-0)`), one outside the byte and anything
     /// else is the call, as php leaves it.
-    fn chr(&mut self, arguments: &[Child]) -> Result<Option<Zval>, CompileError> {
+    fn chr(&mut self, arguments: &[tree::Expr]) -> Result<Option<Zval>, CompileError> {
         let [argument] = arguments else {
             return Ok(None);
         };
         let Some(byte) = self
-            .written(argument)?
+            .written(*argument)?
             .and_then(Zval::as_long)
             .and_then(|n| u8::try_from(n).ok())
         else {
@@ -285,11 +285,11 @@ impl Emit<'_> {
 
     /// `zend_compile_func_ord`: the byte of a one-byte string written as
     /// such; a longer or an empty string, or anything else, is the call.
-    fn ord(&mut self, arguments: &[Child]) -> Result<Option<Zval>, CompileError> {
+    fn ord(&mut self, arguments: &[tree::Expr]) -> Result<Option<Zval>, CompileError> {
         let [argument] = arguments else {
             return Ok(None);
         };
-        let Some(value) = self.written(argument)? else {
+        let Some(value) = self.written(*argument)? else {
             return Ok(None);
         };
         Ok(value.as_str().and_then(|s| match s.bytes() {
@@ -304,7 +304,7 @@ impl Emit<'_> {
     /// ([`Emit::ct_eval_const`]) is `true`; and the rest is
     /// `ZEND_DEFINED` over the name as a constant string, with a cache
     /// slot in `extended_value`.
-    fn defined(&mut self, arguments: &[Child]) -> Result<Option<Where>, CompileError> {
+    fn defined(&mut self, arguments: &[tree::Expr]) -> Result<Option<Where>, CompileError> {
         let Some(name) = self.defined_name(arguments)? else {
             return Ok(None);
         };
@@ -325,7 +325,7 @@ impl Emit<'_> {
     /// [`Self::defined`]'s constant arm alone: `true` for a name the
     /// compiler substitutes, and nothing for a name it would leave to
     /// the opcode or the call.
-    fn defined_constant(&mut self, arguments: &[Child]) -> Result<Option<Zval>, CompileError> {
+    fn defined_constant(&mut self, arguments: &[tree::Expr]) -> Result<Option<Zval>, CompileError> {
         let Some(name) = self.defined_name(arguments)? else {
             return Ok(None);
         };
@@ -339,11 +339,11 @@ impl Emit<'_> {
     /// written as a value, as a string, and nothing where the argument
     /// is anything else, there are two or none, or the name has a `\`
     /// or a `:` in it.
-    fn defined_name(&mut self, arguments: &[Child]) -> Result<Option<Zval>, CompileError> {
+    fn defined_name(&mut self, arguments: &[tree::Expr]) -> Result<Option<Zval>, CompileError> {
         let [argument] = arguments else {
             return Ok(None);
         };
-        let Some(value) = self.written(argument)? else {
+        let Some(value) = self.written(*argument)? else {
             return Ok(None);
         };
         let Some(name) = self.stringified(value)? else {
@@ -367,17 +367,26 @@ impl Emit<'_> {
     /// other expression, whether the compiler would fold it or not, which
     /// is why `chr(1 + 64)` is a call where `ord('a' . '')` is a
     /// constant.
-    pub(crate) fn written(&mut self, expr: &Child) -> Result<Option<Zval>, CompileError> {
-        match &**expr {
-            Expr::Int(n) => Ok(Some(Zval::long(*n))),
-            Expr::Float(f) => Ok(Some(Zval::double(*f))),
-            Expr::Str(bytes) => Ok(Some(self.string(bytes)?)),
-            Expr::Binary {
-                op: BinaryOp::Concat,
-                left,
-                right,
-            } => {
-                let (Some(a), Some(b)) = (self.written(left)?, self.written(right)?) else {
+    pub(crate) fn written(&mut self, expr: tree::Expr) -> Result<Option<Zval>, CompileError> {
+        match self.peel(expr) {
+            tree::Expr::LiteralExpr(_)
+            | tree::Expr::NowdocExpr(_)
+            | tree::Expr::InterpolatedStringExpr(_)
+            | tree::Expr::HeredocExpr(_) => {
+                if !self.is_written_value(expr) {
+                    return Ok(None);
+                }
+                Ok(Some(self.constant_expr(expr)?))
+            }
+            tree::Expr::BinaryExpr(id) => {
+                let (lhs, op, rhs) = self.binary_of(id);
+                if op != Some(php_syntax::SyntaxKind::DOT) {
+                    return Ok(None);
+                }
+                let Some(rhs) = rhs else {
+                    return Ok(None);
+                };
+                let (Some(a), Some(b)) = (self.written(lhs)?, self.written(rhs)?) else {
                     return Ok(None);
                 };
                 self.concat_fold(a, b)

@@ -6,9 +6,10 @@
 //! engine's loop serves, `echo` and a call of a named function, emitted as
 //! php emits them, with the entry safepoint and the numbered return. The
 //! tree it walks is `php_syntax`'s, [`Parsed::tree`] (design §4.9):
-//! `emit` reads every statement and expression node from it, into the
-//! shapes `read` names, one per node kind, until it reads each kind
-//! directly (#595). What it cannot read is refused as a [`CompileError`].
+//! `emit` reads every statement and every expression from its own node,
+//! and a declaration through the shapes `read` names, which go as it
+//! learns to read those from the tree too (#595). What it cannot read
+//! is refused as a [`CompileError`].
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -2661,9 +2662,9 @@ mod tests {
     }
 
     /// A file php's parser refuses is refused here in php's words, the
-    /// first diagnostic `parse` handed back, before the reader is asked
+    /// first diagnostic `parse` handed back, before the walk is asked
     /// anything: `echo 1 +;` is php's `unexpected token ";"` and not the
-    /// reader's sentence about the expression.
+    /// walk's sentence about the expression.
     #[test]
     fn what_php_refuses_is_the_first_parse_error_in_phps_words() {
         let mut strings = php_heap::Strings::new();
@@ -3186,8 +3187,8 @@ mod tests {
     /// An expression the walk cannot emit yet inside parentheses: the
     /// refusal names the expression itself, in the sentence the phpt
     /// lane reads as a construct not read yet, where the reader named
-    /// the parenthesis before (#395). A parenthesis nothing closes is the
-    /// parser's own refusal, raised before the walk runs.
+    /// the parenthesis before (#395). A parenthesis nothing closes is
+    /// the parser's own refusal, raised before the walk runs.
     #[test]
     fn an_unread_expression_inside_parentheses_names_the_expression() {
         let compiled = || CompileError {

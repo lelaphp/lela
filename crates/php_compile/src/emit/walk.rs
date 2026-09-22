@@ -1,18 +1,19 @@
-//! The walk over `php_syntax`'s tree (design §4.9): what [`Emit`]
-//! reads a declaration node as, and, in [`expr`], an expression node.
+//! The walk over the declarations of `php_syntax`'s tree (design §4.9):
+//! what [`Emit`] reads a class, a function and their members as, and,
+//! in [`expr`], a closure.
 //!
-//! `emit` walks the tree's `SourceFile` and every statement node in it
-//! itself ([`Emit::statement`]); what is here reads the declarations a
-//! statement carries and the expressions under them, each fact where
-//! the tree holds it: a name from its token, a modifier from its token,
-//! a type from its `TypeExpr`, a scalar's value from
-//! [`php_syntax::TokenValue::of`], a doc comment from the token index
-//! the builder recorded, a line from [`Node::line`], which is php's
-//! `zend_ast.lineno`. What a node holds is handed to the emitter in the
-//! shape [`crate::read`] gave it, so every construct's semantics stays
-//! in the one function that had it and nothing here decides what an
-//! opline is; each family of those shapes goes as the emitter learns to
-//! read its nodes directly (#595).
+//! `emit` walks the tree's `SourceFile`, every statement node in it and
+//! every expression under them itself ([`Emit::statement`],
+//! [`Emit::expr`]); what is here reads the declarations a statement
+//! carries, each fact where the tree holds it: a name from its token, a
+//! modifier from its token, a type from its `TypeExpr`, a doc comment
+//! from the token index the builder recorded, a line from
+//! [`Node::line`], which is php's `zend_ast.lineno`. A declaration is
+//! handed to the emitter in the shape [`crate::read`] gave it, its
+//! body and its defaults the tree's own nodes, so every construct's
+//! semantics stays in the one function that had it and nothing here
+//! decides what an opline is; those shapes go as the emitter learns to
+//! read the declarations directly (#595).
 //!
 //! **What is refused.** A construct the tree parses and the emitter
 //! cannot emit yet is refused here, at the node's line, in the one-line
@@ -31,9 +32,7 @@ mod expr;
 
 use super::Emit;
 use crate::CompileError;
-use crate::read::{
-    self, Attr, Child, Class, Constant, Function, Method, Parameter, Promoted, Property,
-};
+use crate::read::{self, Attr, Class, Constant, Function, Method, Parameter, Promoted, Property};
 
 /// A group of a member's modifiers as the tree holds them, read once:
 /// php's `member_modifier` list before `zend_add_member_modifier`
@@ -247,12 +246,12 @@ impl Emit<'_> {
         id: NodeId<tree::ArgList>,
         line: u32,
         whose: &str,
-    ) -> Result<Vec<Child>, CompileError> {
+    ) -> Result<Vec<tree::Expr>, CompileError> {
         let args = self.parsed.tree[id].args.clone();
         let mut out = Vec::with_capacity(args.len());
         for arg in &args {
             match arg {
-                tree::Arg::Expr(expr) => out.push(self.walk_expr(*expr)?),
+                tree::Arg::Expr(expr) => out.push(*expr),
                 tree::Arg::NamedArg(_) => {
                     return Err(unread(line, &format!("{whose} named argument")));
                 }
@@ -368,16 +367,12 @@ impl Emit<'_> {
                 Some(ty) => Some(self.walk_type(ty, line)?),
                 None => None,
             };
-            let default = match param.default {
-                Some(default) => Some(self.walk_expr(default)?),
-                None => None,
-            };
             out.push(Parameter {
                 name: self.variable_name(param.var),
                 ty,
                 by_ref: param.byref.is_some(),
                 variadic: param.variadic.is_some(),
-                default,
+                default: param.default,
                 promote,
             });
         }
@@ -559,7 +554,7 @@ impl Emit<'_> {
                 name,
                 visibility: modifiers.visibility.unwrap_or_default(),
                 is_final: modifiers.has(Flag::Final),
-                value: self.walk_expr(value)?,
+                value,
                 doc_comment,
                 line,
             });
@@ -593,17 +588,13 @@ impl Emit<'_> {
         };
         for declarator in &node.property_declarators {
             let declarator = self.parsed.tree[*declarator].clone();
-            let default = match declarator.init {
-                Some(init) => Some(self.walk_expr(init)?),
-                None => None,
-            };
             class.properties.push(Property {
                 name: self.variable_name(declarator.var),
                 visibility: modifiers.visibility.unwrap_or_default(),
                 set_visibility: modifiers.set_visibility,
                 ty: ty.clone(),
                 is_static: modifiers.has(Flag::Static),
-                default,
+                default: declarator.init,
                 doc_comment: self.doc_comment(declarator.doc_comment),
                 line: declarator.line(),
             });

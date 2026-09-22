@@ -111,8 +111,8 @@ use php_unit::{
 
 use crate::read;
 use crate::read::{
-    Arm, BinaryOp, CastTo, Child, Class, Element, Expr, Function, IncludeKind, Magic, Method,
-    Piece, Property, Step, Written, is_auto_global,
+    BinaryOp, CastTo, Class, Function, IncludeKind, Magic, Method, Property, Step, Written,
+    is_auto_global,
 };
 use crate::{CompileError, Options, StackLimit};
 
@@ -135,9 +135,51 @@ struct IfElem {
     line: u32,
 }
 
+/// One piece of an interpolated string as the emitter reads it, php's
+/// `encaps_var` or `T_ENCAPSED_AND_WHITESPACE`: what to compile, the
+/// line php's node for it carries, and how it was written, php's `attr`
+/// on the `encaps_var`, which `zend_compile_encaps_list` reads for its
+/// two deprecations.
+struct Piece {
+    fetch: Fetched,
+    line: u32,
+    written: Written,
+}
+
+/// What one piece of an interpolated string stands for: the text
+/// written between the variables, a variable, the one `[…]` or `->p`
+/// the in-string grammar takes after it, an expression under `{…}`, or
+/// the variable an
+/// expression under `${…}` names.
+enum Fetched {
+    Text(Vec<u8>),
+    Var(Vec<u8>),
+    Dim(Vec<u8>, Offset),
+    Prop(Vec<u8>, Vec<u8>),
+    Node(tree::Expr),
+    VarVar(tree::Expr),
+}
+
+/// The `[…]` after a variable inside a string, php's
+/// `encaps_var_offset`: the value a bare word or a number stands for,
+/// or the variable that names it.
+enum Offset {
+    Value(Zval),
+    Var(Vec<u8>),
+}
+
+/// What stands after a `::`: a class constant, or a class's own
+/// property, php's `ZEND_AST_CLASS_CONST` and `ZEND_AST_STATIC_PROP`,
+/// which the grammar tells apart by the `$`.
+enum Scoped {
+    Constant { class: Vec<u8>, name: Vec<u8> },
+    Property { class: Vec<u8>, name: Vec<u8> },
+}
+
 /// What `zend_compile_simple_var` makes of a `$name`: the CV
 /// `zend_try_compile_cv` gives it, or `$this`, the one name
 /// `is_this_fetch` picks out, fetched by `FETCH_THIS` and never a CV.
+#[derive(PartialEq, Eq)]
 enum SimpleVar {
     Cv(Vec<u8>),
     This,
@@ -956,18 +998,6 @@ impl Emit<'_> {
         self.stack.check(self.line)
     }
 
-    /// [`Self::constant_expr`] asked for a fold: the value where the
-    /// expression is a constant one, nothing where it is not, and the
-    /// fatal through, since php's compiler leaves the file at
-    /// `E_COMPILE_ERROR` and folds nothing after it.
-    pub(crate) fn constant_of(&mut self, expr: &Child) -> Result<Option<Zval>, CompileError> {
-        match self.constant_expr(expr) {
-            Ok(value) => Ok(Some(value)),
-            Err(refused) if refused.level == Level::CompileError => Err(refused),
-            Err(_) => Ok(None),
-        }
-    }
-
     /// `zend_error` under `CG(in_compilation)` for what is not a fatal:
     /// the diagnostic is recorded on the unit at the line
     /// `zend_get_compiled_lineno` answers (`get_filename_lineno`,
@@ -991,6 +1021,18 @@ impl Emit<'_> {
             Ok(s) => Ok(Zval::string(s)),
             Err(Fatal::Error(message)) => Err(self.fatal(message)),
             Err(Fatal::OutOfMemory(_)) => Err(self.fatal("Out of memory")),
+        }
+    }
+
+    /// [`Self::constant_expr`] asked for a fold: the value where the
+    /// expression is a constant one, nothing where it is not, and the
+    /// fatal through, since php's compiler leaves the file at
+    /// `E_COMPILE_ERROR` and folds nothing after it.
+    pub(crate) fn constant_of(&mut self, expr: tree::Expr) -> Result<Option<Zval>, CompileError> {
+        match self.constant_expr(expr) {
+            Ok(value) => Ok(Some(value)),
+            Err(refused) if refused.level == Level::CompileError => Err(refused),
+            Err(_) => Ok(None),
         }
     }
 
@@ -1031,7 +1073,7 @@ impl Emit<'_> {
             }
             Stmt::EchoStmt(id) => {
                 for part in &tree[id].exprs {
-                    let value = self.expr_of(*part)?;
+                    let value = self.expr(*part)?;
                     let (op1_type, op1) = self.operand(value);
                     self.push(Opline {
                         opcode: Opcode::Echo,
@@ -1042,7 +1084,7 @@ impl Emit<'_> {
                 }
             }
             Stmt::ExprStmt(id) => {
-                let value = self.expr_of(tree[id].expr)?;
+                let value = self.expr(tree[id].expr)?;
                 self.do_free(value);
             }
             Stmt::Block(id) => self.block(id)?,
@@ -1116,7 +1158,7 @@ impl Emit<'_> {
     /// compile function looks at to sort an operand by its kind is the
     /// inner node, and the parenthesised conditional's mark is the one
     /// thing the parentheses leave, on the node ([`Self::expr`]).
-    fn peel(&self, mut expr: tree::Expr) -> tree::Expr {
+    pub(crate) fn peel(&self, mut expr: tree::Expr) -> tree::Expr {
         while let tree::Expr::ParenExpr(id) = expr {
             match self.parsed.tree[id].inner {
                 Some(inner) => expr = inner,
@@ -1158,7 +1200,7 @@ impl Emit<'_> {
     }
 
     /// The tree's kind of a token.
-    fn kind(&self, token: TokenId) -> SyntaxKind {
+    pub(crate) fn kind(&self, token: TokenId) -> SyntaxKind {
         self.parsed
             .tokens
             .get(token.0 as usize)
@@ -1229,8 +1271,343 @@ impl Emit<'_> {
             let this = self.fetch_this(OperandKind::Var);
             return Ok(self.operand(this));
         }
-        let value = self.expr_of(object)?;
+        let value = self.expr(object)?;
         Ok(self.operand(value))
+    }
+
+    /// `zend_compile_assign`, `zend_compile_assign_ref` and
+    /// `zend_compile_compound_assign` by the target's shape and the
+    /// operator: a variable, an element, a property or a class's
+    /// property.
+    fn assignment(
+        &mut self,
+        id: NodeId<tree::AssignExpr>,
+        line: u32,
+    ) -> Result<Where, CompileError> {
+        let node = &self.parsed.tree[id];
+        let (target, op, byref) = (self.peel(node.lhs), node.op, node.byref.is_some());
+        let op = op.map(|op| self.kind(op));
+        let Some(value) = node.rhs else {
+            return Err(self.unread("an assignment"));
+        };
+        if byref {
+            if op != Some(SyntaxKind::EQ) {
+                return Err(self.unread("a by-reference compound assignment"));
+            }
+            return self.assign_ref(target, value);
+        }
+        if op == Some(SyntaxKind::QUESTION_QUESTION_EQ) {
+            let tree::Expr::SimpleVarExpr(var) = target else {
+                return Err(self.unread("a `??=` over what is no variable"));
+            };
+            let SimpleVar::Cv(name) = self.simple_var_of(var, line)? else {
+                return Err(self.unread("a `??=` over what is no variable"));
+            };
+            return self.assign_coalesce(&name, value);
+        }
+        if op == Some(SyntaxKind::EQ) {
+            return match target {
+                tree::Expr::SimpleVarExpr(var) => match self.simple_var_of(var, line)? {
+                    SimpleVar::Cv(name) => self.assign(&name, value),
+                    SimpleVar::This => Err(self.unread("an assignment to what is no variable")),
+                },
+                tree::Expr::SubscriptExpr(_) => self.assign_dim(target, value),
+                tree::Expr::MemberAccessExpr(access) => {
+                    let name = self.member_name_of(access, line)?;
+                    let object = self.parsed.tree[access].obj;
+                    self.assign_prop(object, &name, value)
+                }
+                tree::Expr::ScopedAccessExpr(scoped) => match self.scoped_of(scoped, line)? {
+                    Scoped::Property { class, name } => {
+                        self.assign_static_prop(&class, &name, value)
+                    }
+                    Scoped::Constant { .. } => {
+                        Err(self.unread("an assignment to what is no variable"))
+                    }
+                },
+                _ => Err(self.unread("an assignment to what is no variable")),
+            };
+        }
+        let Some(op) = op.and_then(compound_op) else {
+            return Err(self.unread("an assignment operator"));
+        };
+        match target {
+            tree::Expr::SimpleVarExpr(var) => match self.simple_var_of(var, line)? {
+                SimpleVar::Cv(name) => self.assign_op(&name, op, value),
+                SimpleVar::This => Err(self.unread("a compound assignment to what is no variable")),
+            },
+            tree::Expr::SubscriptExpr(_) => self.assign_dim_op(target, op, value),
+            tree::Expr::MemberAccessExpr(access) => {
+                let name = self.member_name_of(access, line)?;
+                let object = self.parsed.tree[access].obj;
+                self.assign_obj_op(object, &name, op, value)
+            }
+            tree::Expr::ScopedAccessExpr(scoped) => match self.scoped_of(scoped, line)? {
+                Scoped::Property { class, name } => {
+                    self.assign_static_prop_op(&class, &name, op, value)
+                }
+                Scoped::Constant { .. } => {
+                    Err(self.unread("a compound assignment to what is no variable"))
+                }
+            },
+            _ => Err(self.unread("a compound assignment to what is no variable")),
+        }
+    }
+
+    /// `++$a`, `$a--` and their kin over a variable or a class's
+    /// property (`ZEND_AST_STATIC_PROP`), php's four step nodes;
+    /// anything else is not read yet.
+    fn step(&mut self, target: tree::Expr, up: bool, pre: bool) -> Result<Where, CompileError> {
+        let line = self.line_of(target);
+        match self.peel(target) {
+            tree::Expr::SimpleVarExpr(var) => {
+                let SimpleVar::Cv(name) = self.simple_var_of(var, line)? else {
+                    return Err(self.stepless(up));
+                };
+                let opcode = match (pre, up) {
+                    (true, true) => Opcode::PreInc,
+                    (true, false) => Opcode::PreDec,
+                    (false, true) => Opcode::PostInc,
+                    (false, false) => Opcode::PostDec,
+                };
+                Ok(self.incdec(&name, opcode))
+            }
+            tree::Expr::ScopedAccessExpr(scoped) => match self.scoped_of(scoped, line)? {
+                Scoped::Property { class, name } => {
+                    let step = match (pre, up) {
+                        (true, true) => Step::PreInc,
+                        (true, false) => Step::PreDec,
+                        (false, true) => Step::PostInc,
+                        (false, false) => Step::PostDec,
+                    };
+                    self.static_prop_step(&class, &name, step)
+                }
+                Scoped::Constant { .. } => Err(self.stepless(up)),
+            },
+            _ => Err(self.stepless(up)),
+        }
+    }
+
+    /// The refusal for a `++` or a `--` over what is no variable.
+    fn stepless(&self, up: bool) -> CompileError {
+        self.unread(if up {
+            "a `++` over what is no variable"
+        } else {
+            "a `--` over what is no variable"
+        })
+    }
+
+    /// A call by the callee's shape, php's four call nodes: a named
+    /// function (`ZEND_AST_CALL` over a `ZEND_AST_ZVAL`), a class's
+    /// method (`ZEND_AST_STATIC_CALL`), an object's method
+    /// (`ZEND_AST_METHOD_CALL`), or a variable holding a callable
+    /// (`ZEND_AST_CALL` over an expression).
+    fn call_of(&mut self, id: NodeId<tree::CallExpr>, line: u32) -> Result<Where, CompileError> {
+        let node = &self.parsed.tree[id];
+        let (callee, args) = (self.peel(node.callee), node.args);
+        match callee {
+            tree::Expr::NameRef(name) => {
+                let name = self.text(name).to_vec();
+                let arguments = self.arguments(args, line)?;
+                self.call(&name, &arguments)
+            }
+            tree::Expr::ScopedAccessExpr(scoped) => {
+                let node = &self.parsed.tree[scoped];
+                let tree::Expr::NameRef(class) = self.peel(node.scope) else {
+                    return Err(self.unread("a static call on what is no class name"));
+                };
+                let Some(tree::ScopedSelector::MemberName(method)) = node.member else {
+                    return Err(self.unread("a static call whose method is named at run time"));
+                };
+                let Some(method) = self.parsed.tree[method].name else {
+                    return Err(self.unread("a static call"));
+                };
+                let class = self.text(class).to_vec();
+                let method = self.text(method).to_vec();
+                let arguments = self.arguments(args, line)?;
+                self.static_call(&class, &method, &arguments)
+            }
+            tree::Expr::MemberAccessExpr(access) => {
+                let method = self.member_name_of(access, line)?;
+                let object = self.parsed.tree[access].obj;
+                let arguments = self.arguments(args, line)?;
+                self.method_call(object, &method, &arguments)
+            }
+            tree::Expr::SimpleVarExpr(_) | tree::Expr::CallExpr(_) => {
+                let arguments = self.arguments(args, line)?;
+                self.call_var(callee, &arguments)
+            }
+            _ => Err(self.unread("a call of what is no name")),
+        }
+    }
+
+    /// Whether a constant expression names a constant, which
+    /// `zend_compile_params` leaves unsubstituted in a parameter's
+    /// default: a constant by name or a class constant, anywhere in the
+    /// tree. `true`, `false` and `null` are php's own values and name
+    /// none.
+    fn names_a_constant(&self, expr: tree::Expr) -> bool {
+        let tree = &self.parsed.tree;
+        match self.peel(expr) {
+            tree::Expr::NameRef(token) => self.constant_name(token).is_none(),
+            tree::Expr::ScopedAccessExpr(_) => true,
+            tree::Expr::UnaryExpr(id) => tree[id]
+                .operand
+                .is_some_and(|operand| self.names_a_constant(operand)),
+            tree::Expr::BinaryExpr(id) => {
+                let node = &tree[id];
+                self.names_a_constant(node.lhs)
+                    || node.rhs.is_some_and(|rhs| self.names_a_constant(rhs))
+            }
+            tree::Expr::ArrayExpr(id) => tree[id].array_elements.iter().any(|element| {
+                let element = &tree[*element];
+                element
+                    .key
+                    .is_some_and(|key| self.names_a_constant(tree[key].key))
+                    || element
+                        .value
+                        .is_some_and(|value| self.names_a_constant(value))
+            }),
+            _ => false,
+        }
+    }
+
+    /// `zend_try_ct_eval_const`'s three special names: `true`, `false`
+    /// and `null`, whatever their case, which php's compiler
+    /// substitutes where they are written and no program may
+    /// redeclare; every other name is a constant of its own.
+    fn constant_name(&self, token: TokenId) -> Option<Zval> {
+        match self.text(token).to_ascii_lowercase().as_slice() {
+            b"true" => Some(Zval::bool(true)),
+            b"false" => Some(Zval::bool(false)),
+            b"null" => Some(Zval::null()),
+            _ => None,
+        }
+    }
+
+    /// A class named as written where php's grammar has a
+    /// `class_name_reference`: `new C` and `$o instanceof C`. A class
+    /// held in a variable is not read yet.
+    fn class_reference(&self, expr: Option<tree::Expr>) -> Option<Vec<u8>> {
+        match expr.map(|expr| self.peel(expr)) {
+            Some(tree::Expr::NameRef(name)) => Some(self.text(name).to_vec()),
+            _ => None,
+        }
+    }
+
+    /// The type a cast is to, php's `attr` on `ZEND_AST_CAST`: the
+    /// scanner's `T_INT_CAST`, `T_DOUBLE_CAST`, `T_STRING_CAST`,
+    /// `T_ARRAY_CAST`, `T_OBJECT_CAST` and `T_BOOL_CAST`, each with the
+    /// canonical spelling and the one 8.5 deprecates. `(unset)` is the
+    /// compile error `zend_compile_cast` raises for it.
+    fn cast_to(&self, op: Option<TokenId>, line: u32) -> Result<CastTo, CompileError> {
+        match op.map(|op| php_syntax::cast_name(self.text(op))) {
+            Some("T_INT_CAST") => Ok(CastTo::Long),
+            Some("T_DOUBLE_CAST") => Ok(CastTo::Double),
+            Some("T_STRING_CAST") => Ok(CastTo::Str),
+            Some("T_ARRAY_CAST") => Ok(CastTo::Array),
+            Some("T_OBJECT_CAST") => Ok(CastTo::Object),
+            Some("T_BOOL_CAST") => Ok(CastTo::Bool),
+            Some("T_UNSET_CAST") => Err(walk::refused(
+                line,
+                "The (unset) cast is no longer supported",
+            )),
+            _ => Err(walk::unread(line, "a cast")),
+        }
+    }
+
+    /// The arguments of a call, each a plain expression; a named or an
+    /// unpacked argument, and the `...` of a first-class callable, are
+    /// refused as not read yet.
+    fn arguments(
+        &self,
+        id: NodeId<tree::ArgList>,
+        line: u32,
+    ) -> Result<Vec<tree::Expr>, CompileError> {
+        let args = &self.parsed.tree[id].args;
+        let mut out = Vec::with_capacity(args.len());
+        for arg in args {
+            match arg {
+                tree::Arg::Expr(expr) => out.push(*expr),
+                tree::Arg::NamedArg(_) => return Err(walk::unread(line, "a named argument")),
+                tree::Arg::SpreadArg(_) => return Err(walk::unread(line, "an unpacked argument")),
+                tree::Arg::VariadicPlaceholder(_) => {
+                    return Err(walk::unread(line, "a first-class callable"));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// One element of an array expression, php's `ZEND_AST_ARRAY_ELEM`:
+    /// the key where one is written before `=>`, and the value; a
+    /// `...` and a `&` are not read yet.
+    fn element_of(
+        &self,
+        id: NodeId<tree::ArrayElement>,
+    ) -> Result<(Option<tree::Expr>, tree::Expr), CompileError> {
+        let element = &self.parsed.tree[id];
+        let line = element.line();
+        if element.spread.is_some() || element.byref.is_some() {
+            return Err(walk::unread(line, "an array expression"));
+        }
+        let Some(value) = element.value else {
+            return Err(walk::unread(line, "an array expression"));
+        };
+        let key = element.key.map(|key| self.parsed.tree[key].key);
+        Ok((key, value))
+    }
+
+    /// `C::NAME` and `C::$name`: a class constant or a class's
+    /// property (`ZEND_AST_STATIC_PROP`), the class named as written;
+    /// `::class`, a scope that is no name and a member the program
+    /// names are refused as not read yet.
+    fn scoped_of(
+        &self,
+        id: NodeId<tree::ScopedAccessExpr>,
+        line: u32,
+    ) -> Result<Scoped, CompileError> {
+        let node = &self.parsed.tree[id];
+        let tree::Expr::NameRef(class) = self.peel(node.scope) else {
+            return Err(walk::unread(line, "a class reference of the scope"));
+        };
+        let class = self.text(class).to_vec();
+        match node.member {
+            Some(tree::ScopedSelector::MemberName(member)) => {
+                let Some(name) = self.parsed.tree[member].name else {
+                    return Err(walk::unread(line, "a class constant"));
+                };
+                Ok(Scoped::Constant {
+                    class,
+                    name: self.text(name).to_vec(),
+                })
+            }
+            Some(tree::ScopedSelector::SimpleVarExpr(var)) => {
+                let Some(var) = self.parsed.tree[var].var else {
+                    return Err(walk::unread(line, "a static property"));
+                };
+                Ok(Scoped::Property {
+                    class,
+                    name: self.variable_name(var),
+                })
+            }
+            Some(tree::ScopedSelector::ClassKw(_)) => Err(walk::unread(line, "a `::class`")),
+            Some(tree::ScopedSelector::VarVarExpr(_) | tree::ScopedSelector::DynamicVarExpr(_)) => {
+                Err(walk::unread(line, "a static property named at run time"))
+            }
+            _ => Err(walk::unread(line, "a class member named at run time")),
+        }
+    }
+
+    /// The three children of a `BinaryExpr`: the left side, the
+    /// operator's kind and the right side, which recovery may leave
+    /// absent.
+    pub(crate) fn binary_of(
+        &self,
+        id: NodeId<tree::BinaryExpr>,
+    ) -> (tree::Expr, Option<SyntaxKind>, Option<tree::Expr>) {
+        let node = &self.parsed.tree[id];
+        (node.lhs, node.op.map(|op| self.kind(op)), node.rhs)
     }
 
     /// Whether `expr` is `C::$p`, php's `ZEND_AST_STATIC_PROP`: a scoped
@@ -1281,6 +1658,14 @@ impl Emit<'_> {
             tree::Expr::NowdocExpr(_) => Some(Literal::Other),
             _ => None,
         }
+    }
+
+    /// Whether a node is php's `ZEND_AST_ZVAL`, one value its parser
+    /// made before the compiler saw it: what
+    /// `zend_compile_func_defined` and `zend_compile_func_chr` read an
+    /// argument as.
+    pub(crate) fn is_written_value(&self, expr: tree::Expr) -> bool {
+        self.literal_of(expr).is_some()
     }
 
     /// `zend_compile_stmt_list` over a block's statements.
@@ -1368,7 +1753,7 @@ impl Emit<'_> {
                     return Err(walk::refused(line, "Cannot use [] for unsetting"));
                 };
                 let cv = self.lookup_cv(&name);
-                let dim = self.expr_of(index)?;
+                let dim = self.expr(index)?;
                 let (op2_type, op2) = self.dim_operand(dim);
                 self.push(Opline {
                     opcode: Opcode::UnsetDim,
@@ -2146,8 +2531,8 @@ impl Emit<'_> {
             // `IS_CONSTANT_AST` zval over the expression, which the
             // engine evaluates on the pass that copies it and
             // Reflection reads back as the name.
-            let folded = match &parameter.default {
-                Some(expr) if names_a_constant(expr) => {
+            let folded = match parameter.default {
+                Some(expr) if self.names_a_constant(expr) => {
                     let unevaluated = self.const_expr(expr)?;
                     Some(self.unevaluated(unevaluated))
                 }
@@ -2186,7 +2571,6 @@ impl Emit<'_> {
                 });
                 parameter
                     .default
-                    .as_ref()
                     .map(|expr| self.const_expr(expr))
                     .transpose()?
             } else {
@@ -2543,7 +2927,7 @@ impl Emit<'_> {
                     String::from_utf8_lossy(&constant.name)
                 )));
             }
-            let value = self.const_expr(&constant.value)?;
+            let value = self.const_expr(constant.value)?;
             decl.constants.push(ClassConstDecl {
                 name: Name(constant.name.clone().into_boxed_slice()),
                 visibility: constant.visibility,
@@ -2607,10 +2991,10 @@ impl Emit<'_> {
                 dynamic_properties = DynamicProperties::Allowed;
             }
             let mut arguments = Vec::new();
-            for argument in &attribute.arguments {
+            for argument in &attribute.arguments.clone() {
                 arguments.push(AttributeArgument {
                     name: None,
-                    value: self.const_expr(argument)?,
+                    value: self.const_expr(*argument)?,
                 });
             }
             out.push(Attribute {
@@ -2643,7 +3027,7 @@ impl Emit<'_> {
             }
             let set_visibility = self.set_visibility_of(property, name)?;
             self.active_property = Some(property.name.clone());
-            let default = match &property.default {
+            let default = match property.default {
                 Some(expr) => Some(self.const_expr(expr)?),
                 None => None,
             };
@@ -2839,13 +3223,15 @@ impl Emit<'_> {
     }
 
     /// A constant expression as a declaration keeps it (design §4.7):
-    /// `zend_const_expr_to_zval` folds what `zend_eval_const_expr` can,
-    /// so `1 + 2` is `3`, `'a' . 'b'` is `'ab'` and a number or a string as written is itself, and what names a
-    /// constant stays the tree it was written as, for the engine to
-    /// evaluate on first use. `zend_is_allowed_in_const_expr` refuses a
-    /// variable, a call, an assignment and an increment in php's words;
-    /// a cast or a `match`, which php allows or refuses on its own
-    /// terms, is not read yet.
+    /// `zend_compile_const_expr` over a node: the constant expression a
+    /// declaration keeps, php's `zend_const_expr_to_zval`, which folds
+    /// what `zend_eval_const_expr` can, so `1 + 2` is `3`, `'a' . 'b'`
+    /// is `'ab'` and a number or a string as written is itself, and what
+    /// names a constant stays the tree it was written as, for the engine
+    /// to evaluate on first use. `zend_is_allowed_in_const_expr` refuses
+    /// a variable, a call, an assignment and an increment in php's
+    /// words; a cast or a `match`, which php allows or refuses on its
+    /// own terms, is not read yet.
     ///
     /// A concatenation of two strings in a property's default is the
     /// one string it folds to, kept as a declaration keeps a string:
@@ -2858,128 +3244,158 @@ impl Emit<'_> {
     /// ```expect exit=0
     /// ab1
     /// ```
-    /// The operators `zend_eval_const_expr` folds where it can and
-    /// leaves as the tree it was written as where it cannot: the fold
-    /// first, since php's own walk evaluates the node before the
-    /// constant expression is kept, and the node's own shape after it,
-    /// each child a constant expression of its own.
-    fn const_expr_operation(&mut self, expr: &Child) -> Result<ConstExpr, CompileError> {
-        if let Some(folded) = self.constant_of(expr)? {
-            return folded_const_expr(folded)
-                .ok_or_else(|| self.fatal("a constant expression this compiler cannot read yet"));
-        }
-        match &**expr {
-            Expr::Unary { minus, operand } => Ok(ConstExpr::Unary {
-                op: Name(if *minus { b"-".as_slice() } else { b"+" }.into()),
-                operand: Box::new(self.const_expr(operand)?),
-            }),
-            Expr::Not(operand) => Ok(ConstExpr::Unary {
-                op: Name(b"!".as_slice().into()),
-                operand: Box::new(self.const_expr(operand)?),
-            }),
-            Expr::BwNot(operand) => Ok(ConstExpr::Unary {
-                op: Name(b"~".as_slice().into()),
-                operand: Box::new(self.const_expr(operand)?),
-            }),
-            Expr::Binary { op, left, right } => Ok(ConstExpr::Binary {
-                op: Name(op.spelling().as_bytes().into()),
-                lhs: Box::new(self.const_expr(left)?),
-                rhs: Box::new(self.const_expr(right)?),
-            }),
-            _ => Err(self.fatal("a constant expression this compiler cannot read yet")),
-        }
-    }
-
-    fn const_expr(&mut self, expr: &Child) -> Result<ConstExpr, CompileError> {
+    #[allow(clippy::too_many_lines)]
+    fn const_expr(&mut self, expr: tree::Expr) -> Result<ConstExpr, CompileError> {
+        let line = expr.line(self.parsed);
         self.check_stack()?;
-        match &**expr {
-            Expr::Null => Ok(ConstExpr::Null),
-            Expr::Bool(b) => Ok(ConstExpr::Bool(*b)),
-            Expr::Int(n) => Ok(ConstExpr::Long(*n)),
-            Expr::Float(f) => Ok(ConstExpr::Double(*f)),
-            Expr::Str(bytes) => Ok(ConstExpr::Str(bytes.clone().into_boxed_slice())),
-            Expr::Constant(name) => Ok(ConstExpr::Constant(Name(name.clone().into_boxed_slice()))),
+        let tree = &self.parsed.tree;
+        match expr {
+            tree::Expr::ParenExpr(id) => match tree[id].inner {
+                Some(inner) => self.const_expr(inner),
+                None => Err(self.unread("an expression inside parentheses")),
+            },
+            tree::Expr::NameRef(token) => match self.constant_name(token) {
+                Some(value) => folded_const_expr(value).ok_or_else(|| {
+                    self.fatal("a constant expression this compiler cannot read yet")
+                }),
+                None => Ok(ConstExpr::Constant(Name(self.text(token).into()))),
+            },
             // `zend_compile_const_expr_class_const`: the class named as
             // written, resolved in the namespace, and the constant's
             // name, kept as the tree for the engine to fetch on first
             // use; `self`, `parent` and `static` are refused as
             // `class_name_literal` refuses them.
-            Expr::ClassConst { class, name } => {
-                let class = self.class_name(class);
-                if class.eq_ignore_ascii_case(b"self")
-                    || class.eq_ignore_ascii_case(b"parent")
-                    || class.eq_ignore_ascii_case(b"static")
-                {
-                    return Err(
-                        self.fatal("a class reference of the scope this compiler cannot read yet")
-                    );
+            tree::Expr::ScopedAccessExpr(id) => match self.scoped_of(id, line)? {
+                Scoped::Constant { class, name } => {
+                    let class = self.class_name(&class);
+                    if class.eq_ignore_ascii_case(b"self")
+                        || class.eq_ignore_ascii_case(b"parent")
+                        || class.eq_ignore_ascii_case(b"static")
+                    {
+                        return Err(self.fatal(
+                            "a class reference of the scope this compiler cannot read yet",
+                        ));
+                    }
+                    Ok(ConstExpr::ClassConstant {
+                        class: Name(class.into_boxed_slice()),
+                        name: Name(name.into_boxed_slice()),
+                    })
                 }
-                Ok(ConstExpr::ClassConstant {
-                    class: Name(class.into_boxed_slice()),
-                    name: Name(name.clone().into_boxed_slice()),
-                })
-            }
-            Expr::Node(node) => self.const_node(*node),
+                Scoped::Property { .. } => {
+                    Err(self.compile_error("Constant expression contains invalid operations"))
+                }
+            },
             // `ZEND_AST_ARRAY` in a constant expression stays the tree
             // it was written as, each element's key and value.
-            Expr::Array(elements) => {
+            tree::Expr::ArrayExpr(id) => {
+                let elements = tree[id].array_elements.clone();
                 let mut items = Vec::with_capacity(elements.len());
-                for element in elements {
-                    let key = match &element.key {
+                for element in &elements {
+                    let (key, value) = self.element_of(*element)?;
+                    let key = match key {
                         Some(key) => Some(self.const_expr(key)?),
                         None => None,
                     };
-                    items.push((key, self.const_expr(&element.value)?));
+                    items.push((key, self.const_expr(value)?));
                 }
                 Ok(ConstExpr::Array(items))
             }
-            Expr::Unary { .. }
-            | Expr::Not(_)
-            | Expr::BwNot(_)
-            | Expr::Binary { .. }
-            | Expr::Cast { .. } => self.const_expr_operation(expr),
-            Expr::Var(_)
-            | Expr::VarVar(_)
-            | Expr::This
-            | Expr::Prop { .. }
-            | Expr::Dim { .. }
-            | Expr::Assign { .. }
-            | Expr::AssignOp { .. }
-            | Expr::AssignCoalesce { .. }
-            | Expr::AssignDim { .. }
-            | Expr::AssignDimOp { .. }
-            | Expr::AssignProp { .. }
-            | Expr::AssignObjOp { .. }
-            | Expr::AssignStaticProp { .. }
-            | Expr::AssignStaticPropOp { .. }
-            | Expr::StaticPropStep { .. }
-            | Expr::AssignRef { .. }
-            | Expr::Call { .. }
-            | Expr::PreInc(_)
-            | Expr::PostInc(_)
-            | Expr::PreDec(_)
-            | Expr::PostDec(_)
-            | Expr::StaticCall { .. }
-            | Expr::MethodCall { .. }
-            | Expr::StaticProp { .. }
-            | Expr::Silence(_)
-            | Expr::Throw(_)
-            | Expr::Include { .. }
-            | Expr::Isset { .. }
-            | Expr::CallVar { .. }
-            | Expr::Closure(_)
-            | Expr::Encaps(_) => {
-                Err(self.compile_error("Constant expression contains invalid operations"))
+            // The operators `zend_eval_const_expr` folds where it can
+            // and leaves as the tree they were written as where it
+            // cannot: the fold first, since php's own walk evaluates the
+            // node before the constant expression is kept, and the
+            // node's own shape after it, each child a constant
+            // expression of its own.
+            tree::Expr::UnaryExpr(id) => {
+                if let Some(folded) = self.constant_of(expr)? {
+                    return folded_const_expr(folded).ok_or_else(|| {
+                        self.fatal("a constant expression this compiler cannot read yet")
+                    });
+                }
+                let node = &tree[id];
+                let operand = self.required(node.operand, "a unary operator")?;
+                let op: &[u8] = match node.op.map(|op| self.kind(op)) {
+                    Some(SyntaxKind::MINUS) => b"-",
+                    Some(SyntaxKind::PLUS) => b"+",
+                    Some(SyntaxKind::BANG) => b"!",
+                    Some(SyntaxKind::TILDE) => b"~",
+                    _ => return Err(self.unread("a unary operator")),
+                };
+                Ok(ConstExpr::Unary {
+                    op: Name(op.into()),
+                    operand: Box::new(self.const_expr(operand)?),
+                })
             }
-            Expr::Match { .. }
-            | Expr::New { .. }
-            | Expr::Instanceof { .. }
-            | Expr::Coalesce { .. }
-            | Expr::And { .. }
-            | Expr::Or { .. }
-            | Expr::Ternary { .. } => {
-                Err(self.fatal("a constant expression this compiler cannot read yet"))
+            tree::Expr::BinaryExpr(id) => {
+                if let Some(folded) = self.constant_of(expr)? {
+                    return folded_const_expr(folded).ok_or_else(|| {
+                        self.fatal("a constant expression this compiler cannot read yet")
+                    });
+                }
+                let node = &tree[id];
+                let left = node.lhs;
+                let right = self.required(node.rhs, "a binary operator")?;
+                let Some(op) = node.op.map(|op| self.kind(op)).and_then(binary_op) else {
+                    return Err(self.fatal("a constant expression this compiler cannot read yet"));
+                };
+                Ok(ConstExpr::Binary {
+                    op: Name(op.spelling().as_bytes().into()),
+                    lhs: Box::new(self.const_expr(left)?),
+                    rhs: Box::new(self.const_expr(right)?),
+                })
             }
+            // `zend_is_allowed_in_const_expr` refuses these in php's
+            // words: a variable, a call, an assignment, an increment,
+            // `@`, `throw`, `include`, `isset` and an interpolated
+            // string are none of the nodes php's walk allows.
+            tree::Expr::SimpleVarExpr(_)
+            | tree::Expr::VarVarExpr(_)
+            | tree::Expr::DynamicVarExpr(_)
+            | tree::Expr::AssignExpr(_)
+            | tree::Expr::CallExpr(_)
+            | tree::Expr::CloneExpr(_)
+            | tree::Expr::ExitExpr(_)
+            | tree::Expr::PrefixIncDecExpr(_)
+            | tree::Expr::PostfixIncDecExpr(_)
+            | tree::Expr::ErrorSuppressExpr(_)
+            | tree::Expr::ThrowExpr(_)
+            | tree::Expr::IncludeExpr(_)
+            | tree::Expr::IssetExpr(_)
+            | tree::Expr::EmptyExpr(_)
+            | tree::Expr::EvalExpr(_)
+            | tree::Expr::ShellExecExpr(_)
+            | tree::Expr::ListExpr(_)
+            | tree::Expr::PrintExpr(_)
+            | tree::Expr::YieldExpr(_)
+            | tree::Expr::YieldFromExpr(_)
+            | tree::Expr::InterpolatedStringExpr(_)
+            | tree::Expr::HeredocExpr(_) => self.const_refused(expr),
+            // What php's walk allows and this compiler cannot keep as
+            // the tree it was written as yet: a property fetch and a
+            // dimension (8.5), a `match`, a conditional, a `??`, a
+            // `new`, an `instanceof` and a closure.
+            _ => match self.constant_of(expr)? {
+                Some(folded) => folded_const_expr(folded).ok_or_else(|| {
+                    self.fatal("a constant expression this compiler cannot read yet")
+                }),
+                None => Err(self.fatal("a constant expression this compiler cannot read yet")),
+            },
+        }
+    }
+
+    /// `zend_is_allowed_in_const_expr`'s refusal, php's
+    /// `Constant expression contains invalid operations`, unless the
+    /// node is one this compiler cannot read yet, whose own refusal
+    /// stands instead so the phpt lane counts the file as unread: an
+    /// argument list with a `...` in it is php's first-class callable,
+    /// which its walk allows and this does not read.
+    fn const_refused(&mut self, expr: tree::Expr) -> Result<ConstExpr, CompileError> {
+        match self.constant_expr(expr) {
+            Ok(folded) => folded_const_expr(folded)
+                .ok_or_else(|| self.fatal("a constant expression this compiler cannot read yet")),
+            Err(refused) if unread(&refused) => Err(refused),
+            Err(refused) if refused.level == Level::CompileError => Err(refused),
+            Err(_) => Err(self.compile_error("Constant expression contains invalid operations")),
         }
     }
 
@@ -3118,7 +3534,7 @@ impl Emit<'_> {
         for declarator in &node.const_declarators {
             let (name, value, line) = self.const_declarator(*declarator)?;
             self.line = line;
-            let value = self.constant_expr_of(value)?;
+            let value = self.constant_expr(value)?;
             if [&b"true"[..], b"false", b"null"]
                 .iter()
                 .any(|special| name.eq_ignore_ascii_case(special))
@@ -3287,7 +3703,7 @@ impl Emit<'_> {
             if index > 0 {
                 self.line = arm.line;
             }
-            let cond = self.expr_of(cond)?;
+            let cond = self.expr(cond)?;
             let opnum_jmpz = self.cond_jump_forward(Opcode::Jmpz, cond);
             self.compound(arm.body, arm.stmt_list)?;
             if index != last {
@@ -3321,7 +3737,7 @@ impl Emit<'_> {
         let continue_at = self.next();
         self.line = line;
         self.update_jump_target_to_next(jump);
-        let cond = self.expr_of(cond)?;
+        let cond = self.expr(cond)?;
         self.emit_cond_jump(cond, start);
         self.end_loop(continue_at);
         Ok(())
@@ -3372,7 +3788,7 @@ impl Emit<'_> {
         self.compound(body, None)?;
         let continue_at = self.next();
         self.line = self.line_of(cond);
-        let cond = self.expr_of(cond)?;
+        let cond = self.expr(cond)?;
         self.emit_cond_jump(cond, start);
         self.end_loop(continue_at);
         Ok(())
@@ -3493,7 +3909,7 @@ impl Emit<'_> {
             return Err(self
                 .fatal("a `foreach` by reference over a property this compiler cannot read yet"));
         }
-        let subject = self.expr_of(expr)?;
+        let subject = self.expr(expr)?;
         if by_ref && self.is_call(expr) {
             let Where::Returned(at) = subject else {
                 return Err(
@@ -3619,11 +4035,10 @@ impl Emit<'_> {
         // caller is bound to is the array's own slot.
         let compiled = match written {
             Some(expr @ tree::Expr::SubscriptExpr(_)) if by_ref => {
-                let target = self.walk_expr(expr)?;
-                let (_, at) = self.dim_for_reference(&target)?;
+                let (_, at) = self.dim_for_reference(expr)?;
                 Where::Returned(at)
             }
-            Some(expr) => self.expr_of(expr)?,
+            Some(expr) => self.expr(expr)?,
             None => Where::Constant(Zval::null()),
         };
         let compiled = self.copied_past_finally(compiled, by_ref);
@@ -3972,7 +4387,7 @@ impl Emit<'_> {
         let depth = match depth {
             None => 1,
             Some(expr) => {
-                let Some(value) = self.constant_of_node(expr)? else {
+                let Some(value) = self.constant_of(expr)? else {
                     return Err(self.compile_error(format!(
                         "'{word}' operator with non-integer operand is no longer supported"
                     )));
@@ -4333,7 +4748,7 @@ impl Emit<'_> {
         let node = &self.parsed.tree[id];
         let expr = self.required(node.subject, "a `switch` with no condition")?;
         let cases = &node.switch_arms;
-        let subject = self.expr_of(expr)?;
+        let subject = self.expr(expr)?;
         self.begin_loop(LoopVar::of(Opcode::Free, subject), None, true);
         let case_node = self.temporary();
         let mut table = match self.switch_jumptable_type(cases)? {
@@ -4358,7 +4773,7 @@ impl Emit<'_> {
             if let (Some(cond), Some(jump)) = (case.value, jump) {
                 self.update_jump_target_to_next(jump);
                 let value = match table {
-                    Some(_) => self.constant_of_node(cond)?,
+                    Some(_) => self.constant_of(cond)?,
                     None => None,
                 };
                 self.table_add(&mut table, value);
@@ -4426,7 +4841,7 @@ impl Emit<'_> {
                 continue;
             };
             self.line = self.line_of(cond);
-            let cond = self.expr_of(cond)?;
+            let cond = self.expr(cond)?;
             let jump = match subject {
                 Where::Constant(value) if value.kind() == ZvalType::False => {
                     self.cond_jump_forward(Opcode::Jmpz, cond)
@@ -4480,7 +4895,7 @@ impl Emit<'_> {
             let Some(cond) = self.parsed.tree[*case].value else {
                 continue;
             };
-            let Some(value) = self.constant_of_node(cond)? else {
+            let Some(value) = self.constant_of(cond)? else {
                 return Ok(None);
             };
             let kind = value.kind();
@@ -4594,15 +5009,20 @@ impl Emit<'_> {
     /// defined before it is freed; then the arms; the constant `null`
     /// for a `match` with no arm; and the subject freed when it is a
     /// temporary.
-    fn r#match(&mut self, expr: &Child, arms: &[Arm]) -> Result<Where, CompileError> {
-        self.line = expr.line();
+    fn r#match(
+        &mut self,
+        expr: tree::Expr,
+        arms: &[NodeId<tree::MatchArm>],
+    ) -> Result<Where, CompileError> {
+        self.line = self.line_of(expr);
         let subject = self.expr(expr)?;
         let case_node = self.temporary();
         let mut has_default = false;
         for arm in arms {
+            let arm = &self.parsed.tree[*arm];
             if arm.conds.is_none() {
                 if has_default {
-                    self.line = arm.body.line();
+                    self.line = arm.line();
                     return Err(
                         self.compile_error("Match expressions may only contain one default arm")
                     );
@@ -4646,13 +5066,17 @@ impl Emit<'_> {
 
     /// `can_match_use_jumptable` and `count_match_conds`: every
     /// condition a constant `long` or `string`, and two or more of them.
-    fn match_uses_jumptable(&mut self, arms: &[Arm]) -> Result<bool, CompileError> {
+    fn match_uses_jumptable(
+        &mut self,
+        arms: &[NodeId<tree::MatchArm>],
+    ) -> Result<bool, CompileError> {
         let mut count = 0;
         for arm in arms {
-            let Some(conds) = &arm.conds else {
+            let Some(conds) = self.parsed.tree[*arm].conds else {
                 continue;
             };
-            for cond in conds {
+            for cond in &self.parsed.tree[conds].exprs.clone() {
+                let cond = *cond;
                 count += 1;
                 let Some(value) = self.constant_of(cond)? else {
                     return Ok(false);
@@ -4663,6 +5087,17 @@ impl Emit<'_> {
             }
         }
         Ok(count >= 2)
+    }
+
+    /// Every condition of every arm, in written order: the conditions
+    /// php's `ZEND_AST_MATCH_ARM_LIST` walks, the default arm carrying
+    /// none.
+    fn match_conds(&self, arms: &[NodeId<tree::MatchArm>]) -> Vec<tree::Expr> {
+        let tree = &self.parsed.tree;
+        arms.iter()
+            .filter_map(|arm| tree[*arm].conds)
+            .flat_map(|conds| tree[conds].exprs.iter().copied())
+            .collect()
     }
 
     /// The chain of `zend_compile_match`: per condition, at its line, one
@@ -4690,11 +5125,11 @@ impl Emit<'_> {
         &mut self,
         subject: Where,
         case_node: u32,
-        arms: &[Arm],
+        arms: &[NodeId<tree::MatchArm>],
     ) -> Result<Vec<u32>, CompileError> {
         let mut jumps = Vec::new();
-        for cond in arms.iter().filter_map(|arm| arm.conds.as_ref()).flatten() {
-            self.line = cond.line();
+        for cond in self.match_conds(arms) {
+            self.line = self.line_of(cond);
             let cond = self.expr(cond)?;
             let opcode = match subject {
                 Where::Temporary(_) | Where::Returned(_) => Opcode::CaseStrict,
@@ -4733,7 +5168,7 @@ impl Emit<'_> {
     /// ```
     fn match_arms(
         &mut self,
-        arms: &[Arm],
+        arms: &[NodeId<tree::MatchArm>],
         table: &mut Option<Table>,
         jumps: &[u32],
         default_jump: Option<u32>,
@@ -4742,13 +5177,15 @@ impl Emit<'_> {
         let mut ends = Vec::with_capacity(arms.len());
         let mut jumps = jumps.iter().copied();
         for arm in arms {
-            if let Some(conds) = &arm.conds {
-                for cond in conds {
+            let node = &self.parsed.tree[*arm];
+            let (conds, body, line) = (node.conds, node.body, node.line());
+            if let Some(conds) = conds {
+                for cond in &self.parsed.tree[conds].exprs.clone() {
                     if let Some(jump) = jumps.next() {
                         self.update_jump_target_to_next(jump);
                     }
                     let value = match table {
-                        Some(_) => self.constant_of(cond)?,
+                        Some(_) => self.constant_of(*cond)?,
                         None => None,
                     };
                     self.table_add(table, value);
@@ -4759,8 +5196,11 @@ impl Emit<'_> {
                 }
                 self.table_default_to_next(table.as_ref());
             }
-            self.line = arm.body.line();
-            let body = self.expr(&arm.body)?;
+            let Some(body) = body else {
+                return Err(walk::unread(line, "a `match` arm"));
+            };
+            self.line = self.line_of(body);
+            let body = self.expr(body)?;
             let (op1_type, op1) = self.operand(body);
             let out = *result.get_or_insert_with(|| self.temporary());
             self.push(Opline {
@@ -4803,7 +5243,7 @@ impl Emit<'_> {
         let mut last = Where::Constant(Zval::bool(true));
         for expr in exprs {
             self.do_free(last);
-            last = self.expr_of(*expr)?;
+            last = self.expr(*expr)?;
         }
         Ok(last)
     }
@@ -5010,16 +5450,27 @@ impl Emit<'_> {
         }
     }
 
-    /// `zend_compile_expr`: compile `expr` and say where its value is.
+    /// `zend_compile_expr`: compile the expression this node is and say
+    /// where its value is (design §4.9).
     ///
     /// `zend_compile_expr_inner` opens with
     /// `CG(zend_lineno) = zend_ast_get_lineno(ast)`
     /// (`Z/Zend/zend_compile.c:11807-11808`), so every opline this
     /// emits carries the line of the expression it came from and not
-    /// the line its statement opened on. The line is left where the
-    /// last expression compiled put it, as php leaves it: the `ADD` of
-    /// `1\n+\n$a` is emitted after the right side, at the right side's
-    /// line.
+    /// the line its statement opened on; and `ZEND_CHECK_STACK_LIMIT`
+    /// stands there too, which is one native frame per node of the tree
+    /// here as it is one per node of `zend_ast` there. The line is left
+    /// where the last expression compiled put it, as php leaves it: the
+    /// `ADD` of `1\n+\n$a` is emitted after the right side, at the right
+    /// side's line.
+    ///
+    /// A `(` and a `)` around an expression are no node of php's: its
+    /// grammar hands the compiler what stands inside them, and the one
+    /// thing they leave is what [`Self::conditional`] reads, a
+    /// conditional that is a conditional's child with no parentheses
+    /// between them. A node this compiler cannot emit yet is refused
+    /// where it stands, in the one-line shape the phpt lane counts as
+    /// unread.
     ///
     /// A `while` whose condition stands below the keyword raises from
     /// the condition's line, not the keyword's:
@@ -5064,129 +5515,230 @@ impl Emit<'_> {
     /// #1 {main}
     ///   thrown in %s on line 2
     /// ```
-    pub(crate) fn expr(&mut self, expr: &Child) -> Result<Where, CompileError> {
+    ///
+    /// `expr instanceof C` is `expr T_INSTANCEOF class_name_reference`
+    /// with no associativity declared, so a second `instanceof` reads
+    /// the first as its left side, php's `($o instanceof E) instanceof
+    /// F`, which the grammar groups to the left as this compiles it;
+    /// the oracle at 8.5.9 compiles it to two `INSTANCEOF`s, the second
+    /// over the first's temporary, and a bool on the left is no object,
+    /// so the chain is `false`.
+    ///
+    /// ```php
+    /// $o = 1;
+    /// var_dump($o instanceof E instanceof F);
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// ```
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn expr(&mut self, expr: tree::Expr) -> Result<Where, CompileError> {
+        let line = expr.line(self.parsed);
+        self.line = line;
         self.check_stack()?;
-        self.line = expr.line();
-        match &**expr {
-            Expr::Call { name, arguments } => self.call(name, arguments),
-            Expr::Unary { minus, operand } => self.unary(*minus, operand),
-            Expr::Not(operand) => self.bool_not(operand),
-            Expr::BwNot(operand) => self.bw_not(operand),
-            Expr::Silence(operand) => self.silence(operand),
-            Expr::Encaps(pieces) => self.encaps(pieces),
-            Expr::Cast { to, operand } => self.cast(*to, operand),
-            Expr::Binary { op, left, right } => self.binary(*op, left, right),
+        let tree = &self.parsed.tree;
+        match expr {
+            tree::Expr::ParenExpr(id) => match tree[id].inner {
+                Some(inner) => self.expr(inner),
+                None => Err(self.unread("an expression inside parentheses")),
+            },
+            tree::Expr::LiteralExpr(_)
+            | tree::Expr::MagicConstExpr(_)
+            | tree::Expr::NowdocExpr(_) => Ok(Where::Constant(self.constant_expr(expr)?)),
+            // `zend_compile_const`: `true`, `false` and `null` are the
+            // values `zend_try_ct_eval_const` substitutes whatever their
+            // case, and every other name is a constant fetched by the
+            // name as written.
+            tree::Expr::NameRef(token) => {
+                if let Some(value) = self.constant_name(token) {
+                    return Ok(Where::Constant(value));
+                }
+                let name = self.text(token).to_vec();
+                self.const_fetch(&name)
+            }
+            tree::Expr::InterpolatedStringExpr(id) => {
+                let parts = tree[id].parts.clone();
+                self.encaps(&parts, Holder::DoubleQuoted(&self.parsed.tree[id]), line)
+            }
+            tree::Expr::HeredocExpr(id) => {
+                let parts = tree[id].parts.clone();
+                self.encaps(&parts, Holder::Heredoc(&self.parsed.tree[id]), line)
+            }
+            tree::Expr::ShellExecExpr(_) => Err(self.unread("a backtick operator")),
             // `zend_compile_simple_var` through `zend_try_compile_cv`: the
-            // variable is its CV, and no opline reads it into anything.
-            Expr::Var(name) => Ok(Where::Cv(self.lookup_cv(name))),
-            // `zend_compile_simple_var` for `$this` under `BP_VAR_R`:
-            // `FETCH_THIS` into a temporary.
-            Expr::This => Ok(self.fetch_this(OperandKind::Tmp)),
-            Expr::VarVar(name) => self.var_var(name),
-            Expr::Prop { object, name } => self.prop(object, name),
-            Expr::Assign { var, value } => self.assign(var, value),
-            Expr::AssignOp { var, op, value } => self.assign_op(var, *op, value),
-            Expr::AssignProp {
-                object,
-                name,
-                value,
-            } => self.assign_prop(object, name, value),
-            Expr::AssignStaticProp { class, name, value } => {
-                self.assign_static_prop(class, name, value)
+            // variable is its CV, and no opline reads it into anything;
+            // `$this` under `BP_VAR_R` is `FETCH_THIS` into a temporary.
+            tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
+                SimpleVar::Cv(name) => Ok(Where::Cv(self.lookup_cv(&name))),
+                SimpleVar::This => Ok(self.fetch_this(OperandKind::Tmp)),
+            },
+            tree::Expr::VarVarExpr(id) => {
+                let inner = self.required(tree[id].inner, "a variable")?;
+                self.var_var(inner)
             }
-            Expr::AssignStaticPropOp {
-                class,
-                name,
-                op,
-                value,
-            } => self.assign_static_prop_op(class, name, *op, value),
-            Expr::AssignDimOp { target, op, value } => self.assign_dim_op(target, *op, value),
-            Expr::AssignObjOp {
-                object,
-                name,
-                op,
-                value,
-            } => self.assign_obj_op(object, name, *op, value),
-            Expr::StaticPropStep { class, name, step } => self.static_prop_step(class, name, *step),
-            Expr::AssignDim { target, value } => self.assign_dim(target, value),
-            Expr::AssignRef { target, source } => self.assign_ref(target, source),
-            Expr::Dim { .. } => self.dim_read(expr),
-            Expr::PreInc(var) => Ok(self.incdec(var, Opcode::PreInc)),
-            Expr::PostInc(var) => Ok(self.incdec(var, Opcode::PostInc)),
-            Expr::PreDec(var) => Ok(self.incdec(var, Opcode::PreDec)),
-            Expr::PostDec(var) => Ok(self.incdec(var, Opcode::PostDec)),
-            Expr::Match { expr, arms } => self.r#match(expr, arms),
-            Expr::New { class, arguments } => self.new_expression(class, arguments),
-            Expr::StaticCall {
-                class,
-                method,
-                arguments,
-            } => self.static_call(class, method, arguments),
-            Expr::MethodCall {
-                object,
-                method,
-                arguments,
-            } => self.method_call(object, method, arguments),
-            Expr::Instanceof { expr, class } => self.instance_of(expr, class),
-            Expr::ClassConst { class, name } => self.class_const(class, name),
-            Expr::StaticProp { class, name } => self.static_prop(class, name),
-            Expr::Array(elements) => self.array(elements),
-            Expr::Throw(operand) => self.throw(operand),
-            Expr::Include { kind, path } => self.include_or_eval(*kind, path),
-            Expr::Isset { var, empty } => self.isset_or_empty(var, *empty),
-            Expr::Closure(closure) => self.closure(closure),
-            Expr::CallVar { callee, arguments } => self.call_var(callee, arguments),
-            Expr::Ternary {
-                cond,
-                then,
-                otherwise,
-                ..
-            } => self.conditional(cond, then.as_ref(), otherwise),
-            Expr::Coalesce { left, right } => self.coalesce(left, right),
-            Expr::AssignCoalesce { var, value } => self.assign_coalesce(var, value),
-            Expr::And { left, right } => self.short_circuiting(false, left, right),
-            Expr::Or { left, right } => self.short_circuiting(true, left, right),
-            Expr::Constant(name) => self.const_fetch(name),
-            Expr::Node(node) => self.node(*node),
-            _ => Ok(Where::Constant(self.constant_expr(expr)?)),
-        }
-    }
-
-    /// `zend_compile_expr_inner` over a node the emitter reads from the
-    /// tree itself (design §4.9): one arm per kind the walk hands on as
-    /// a node, [`Expr::Node`]'s list; a kind outside it is the walk's
-    /// defect, an `InternalError`.
-    fn node(&mut self, node: php_syntax::tree::Expr) -> Result<Where, CompileError> {
-        match node {
-            php_syntax::tree::Expr::MagicConstExpr(id) => Ok(Where::Constant(self.magic_node(id)?)),
-            _ => Err(self.unshaped(node)),
-        }
-    }
-
-    /// `zend_compile_const_expr` over a node the emitter reads from the
-    /// tree: `zend_eval_const_expr` folds a magic constant as
-    /// `zend_compile_expr` does; the one it leaves, `__CLASS__` in a
-    /// trait, is not read yet (a trait is not).
-    fn const_node(&mut self, node: php_syntax::tree::Expr) -> Result<ConstExpr, CompileError> {
-        match node {
-            php_syntax::tree::Expr::MagicConstExpr(id) => {
-                let (which, line) = self.magic_of(id)?;
-                Ok(match self.magic_const(which, line) {
-                    Folded::Line(n) => ConstExpr::Long(n),
-                    Folded::Text(text) => ConstExpr::Str(text.into_boxed_slice()),
-                })
+            tree::Expr::DynamicVarExpr(id) => {
+                let inner = self.required(tree[id].inner, "a variable")?;
+                self.var_var(inner)
             }
-            _ => Err(self.unshaped(node)),
-        }
-    }
-
-    /// [`Self::constant_expr`] over a node the emitter reads from the
-    /// tree: the value `zend_compile_expr` leaves as an `IS_CONST`
-    /// operand.
-    fn constant_node(&mut self, node: php_syntax::tree::Expr) -> Result<Zval, CompileError> {
-        match node {
-            php_syntax::tree::Expr::MagicConstExpr(id) => self.magic_node(id),
-            _ => Err(self.unshaped(node)),
+            tree::Expr::ArrayExpr(id) => {
+                let elements = tree[id].array_elements.clone();
+                self.array(&elements)
+            }
+            tree::Expr::ListExpr(_) => Err(self.unread("a `list`")),
+            tree::Expr::UnaryExpr(id) => {
+                let node = &tree[id];
+                let operand = self.required(node.operand, "a unary operator")?;
+                match node.op.map(|op| self.kind(op)) {
+                    Some(SyntaxKind::MINUS) => self.unary(true, operand),
+                    Some(SyntaxKind::PLUS) => self.unary(false, operand),
+                    Some(SyntaxKind::BANG) => self.bool_not(operand),
+                    Some(SyntaxKind::TILDE) => self.bw_not(operand),
+                    _ => Err(self.unread("a unary operator")),
+                }
+            }
+            tree::Expr::PrefixIncDecExpr(id) => {
+                let node = &tree[id];
+                let up = node.op.map(|op| self.kind(op)) == Some(SyntaxKind::PLUS_PLUS);
+                let target = self.required(node.operand, if up { "a `++`" } else { "a `--`" })?;
+                self.step(target, up, true)
+            }
+            tree::Expr::PostfixIncDecExpr(id) => {
+                let node = &tree[id];
+                let up = node.op.map(|op| self.kind(op)) == Some(SyntaxKind::PLUS_PLUS);
+                self.step(node.operand, up, false)
+            }
+            tree::Expr::CastExpr(id) => {
+                let node = &tree[id];
+                let to = self.cast_to(node.op, line)?;
+                let operand = self.required(node.operand, "a cast")?;
+                self.cast(to, operand)
+            }
+            tree::Expr::ErrorSuppressExpr(id) => {
+                let operand = self.required(tree[id].operand, "an `@`")?;
+                self.silence(operand)
+            }
+            // `clone` and `exit` are the calls php's parser makes of
+            // them, `\clone` and `\exit` in the function table.
+            tree::Expr::CloneExpr(id) => {
+                let node = &tree[id];
+                let operand = match (node.operand, node.args) {
+                    (Some(operand), _) => operand,
+                    (None, Some(args)) => {
+                        let arguments = self.arguments(args, line)?;
+                        let [operand] = arguments[..] else {
+                            return Err(self.unread("a `clone` with an argument list"));
+                        };
+                        operand
+                    }
+                    (None, None) => return Err(self.unread("a `clone`")),
+                };
+                self.call(b"\\clone", &[operand])
+            }
+            tree::Expr::ExitExpr(id) => {
+                let arguments = match tree[id].args {
+                    Some(args) => self.arguments(args, line)?,
+                    None => Vec::new(),
+                };
+                self.call(b"\\exit", &arguments)
+            }
+            tree::Expr::PrintExpr(_) => Err(self.unread("a `print`")),
+            tree::Expr::ThrowExpr(id) => {
+                let operand = self.required(tree[id].operand, "a `throw`")?;
+                self.throw(operand)
+            }
+            tree::Expr::BinaryExpr(id) => {
+                let node = &tree[id];
+                let left = node.lhs;
+                let right = self.required(node.rhs, "a binary operator")?;
+                match node.op.map(|op| self.kind(op)) {
+                    Some(SyntaxKind::AMP_AMP | SyntaxKind::AND_KW) => {
+                        self.short_circuiting(false, left, right)
+                    }
+                    Some(SyntaxKind::PIPE_PIPE | SyntaxKind::OR_KW) => {
+                        self.short_circuiting(true, left, right)
+                    }
+                    Some(SyntaxKind::QUESTION_QUESTION) => self.coalesce(left, right),
+                    Some(kind) => match binary_op(kind) {
+                        Some(op) => self.binary(op, left, right),
+                        None => Err(self.unread("a binary operator")),
+                    },
+                    None => Err(self.unread("a binary operator")),
+                }
+            }
+            tree::Expr::InstanceofExpr(id) => {
+                let node = &tree[id];
+                let Some(class) = self.class_reference(node.rhs) else {
+                    return Err(self.unread("an `instanceof` of what is no class name"));
+                };
+                self.instance_of(node.lhs, &class)
+            }
+            tree::Expr::AssignExpr(id) => self.assignment(id, line),
+            tree::Expr::TernaryExpr(id) => {
+                let node = &tree[id];
+                let (cond, then, otherwise) = (node.cond, node.then, node.else_branch);
+                self.conditional(cond, then, otherwise)
+            }
+            tree::Expr::MatchExpr(id) => {
+                let node = &tree[id];
+                let subject = self.required(node.subject, "a `match`")?;
+                let arms = node.match_arms.clone();
+                self.r#match(subject, &arms)
+            }
+            tree::Expr::NewExpr(id) => {
+                let node = &tree[id];
+                if node.anon.is_some() {
+                    return Err(self.unread("an anonymous class"));
+                }
+                let Some(class) = self.class_reference(node.ctor) else {
+                    return Err(self.unread("a `new` of what is no class name"));
+                };
+                let arguments = match node.args {
+                    Some(args) => self.arguments(args, line)?,
+                    None => Vec::new(),
+                };
+                self.new_expression(&class, &arguments)
+            }
+            tree::Expr::YieldExpr(_) | tree::Expr::YieldFromExpr(_) => {
+                Err(self.unread("a `yield`"))
+            }
+            tree::Expr::IncludeExpr(id) => {
+                let node = &tree[id];
+                let kind = match node.op.map(|op| self.kind(op)) {
+                    Some(SyntaxKind::INCLUDE_KW) => IncludeKind::Include,
+                    Some(SyntaxKind::INCLUDE_ONCE_KW) => IncludeKind::IncludeOnce,
+                    Some(SyntaxKind::REQUIRE_KW) => IncludeKind::Require,
+                    Some(SyntaxKind::REQUIRE_ONCE_KW) => IncludeKind::RequireOnce,
+                    _ => return Err(self.unread("an `include`")),
+                };
+                let path = self.required(node.operand, "an `include`")?;
+                self.include_or_eval(kind, path)
+            }
+            tree::Expr::IssetExpr(id) => {
+                let targets = tree[id].targets.clone();
+                let [target] = targets[..] else {
+                    return Err(self.unread("an `isset` over more than one variable"));
+                };
+                self.isset_or_empty(target, false)
+            }
+            tree::Expr::EmptyExpr(id) => {
+                let target = self.required(tree[id].target, "an `empty`")?;
+                self.isset_or_empty(target, true)
+            }
+            tree::Expr::EvalExpr(_) => Err(self.unread("an `eval`")),
+            tree::Expr::CallExpr(id) => self.call_of(id, line),
+            tree::Expr::MemberAccessExpr(id) => {
+                let name = self.member_name_of(id, line)?;
+                self.prop(tree[id].obj, &name)
+            }
+            tree::Expr::ScopedAccessExpr(id) => match self.scoped_of(id, line)? {
+                Scoped::Constant { class, name } => self.class_const(&class, &name),
+                Scoped::Property { class, name } => self.static_prop(&class, &name),
+            },
+            tree::Expr::SubscriptExpr(_) => self.dim_read(expr),
+            tree::Expr::ClosureExpr(_) | tree::Expr::ArrowFnExpr(_) => {
+                let closure = self.walk_closure(expr, line)?;
+                self.closure(&closure)
+            }
         }
     }
 
@@ -5194,10 +5746,7 @@ impl Emit<'_> {
     /// token in `attr` and the token's own line in `lineno`, which is
     /// what `__LINE__` folds to and not the statement's
     /// (`zend_try_ct_eval_magic_const`).
-    fn magic_node(
-        &mut self,
-        id: php_syntax::tree::NodeId<php_syntax::tree::MagicConstExpr>,
-    ) -> Result<Zval, CompileError> {
+    fn magic_node(&mut self, id: NodeId<tree::MagicConstExpr>) -> Result<Zval, CompileError> {
         let (which, line) = self.magic_of(id)?;
         match self.magic_const(which, line) {
             Folded::Line(n) => Ok(Zval::long(n)),
@@ -5207,10 +5756,7 @@ impl Emit<'_> {
 
     /// Which magic constant a `MagicConstExpr` is, by its token's name
     /// in `php_syntax`, and the node's line.
-    fn magic_of(
-        &self,
-        id: php_syntax::tree::NodeId<php_syntax::tree::MagicConstExpr>,
-    ) -> Result<(Magic, u32), CompileError> {
+    fn magic_of(&self, id: NodeId<tree::MagicConstExpr>) -> Result<(Magic, u32), CompileError> {
         let node = &self.parsed.tree[id];
         let which = node
             .token
@@ -5223,18 +5769,7 @@ impl Emit<'_> {
             .and_then(Magic::of);
         match which {
             Some(which) => Ok((which, node.line)),
-            None => Err(self.unshaped(php_syntax::tree::Expr::MagicConstExpr(id))),
-        }
-    }
-
-    /// `InternalError`: the walk handed on a node of a kind the emitter
-    /// does not read from the tree (design §10).
-    fn unshaped(&self, node: php_syntax::tree::Expr) -> CompileError {
-        CompileError {
-            level: Level::Error,
-            message: format!("InternalError: a {node:?} node the walk handed the emitter unshaped"),
-            line: self.line,
-            raised: Vec::new(),
+            None => Err(self.unread("a magic constant")),
         }
     }
 
@@ -5275,10 +5810,19 @@ impl Emit<'_> {
     /// bool(false)
     /// bool(false)
     /// ```
-    fn isset_or_empty(&mut self, var: &Child, empty: bool) -> Result<Where, CompileError> {
+    fn isset_or_empty(&mut self, var: tree::Expr, empty: bool) -> Result<Where, CompileError> {
         let extended_value = u32::from(empty);
-        if let Expr::Var(name) = &**var {
-            let cv = self.lookup_cv(name);
+        let line = self.line_of(var);
+        let word = if empty { "empty" } else { "isset" };
+        let var = self.peel(var);
+        if let tree::Expr::SimpleVarExpr(id) = var {
+            let SimpleVar::Cv(name) = self.simple_var_of(id, line)? else {
+                return Err(walk::unread(
+                    line,
+                    &format!("an `{word}` over $this, whose opcode is `ISSET_ISEMPTY_THIS`,"),
+                ));
+            };
+            let cv = self.lookup_cv(&name);
             let out = self.temporary();
             self.push(Opline {
                 opcode: Opcode::IssetIsemptyCv,
@@ -5298,19 +5842,21 @@ impl Emit<'_> {
         // `extended_value` where `FETCH_OBJ_IS` left them, with
         // `ZEND_ISEMPTY` in the bit below them, which is free because a
         // slot is eight bytes wide.
-        if let Expr::Prop { object, name } = &**var {
+        if let tree::Expr::MemberAccessExpr(id) = var {
+            let object = self.peel(self.parsed.tree[id].obj);
             // Every link under the last is `BP_VAR_IS` too, so a
             // property or a dimension under this one is a `FETCH_OBJ_IS`
             // or a `FETCH_DIM_IS` chain, which `zend_delayed_compile_var`
             // builds and this arm does not; a receiver compiled where it
             // stands would read where php says nothing.
-            if !matches!(&**object, Expr::Var(_) | Expr::This) {
+            if !matches!(object, tree::Expr::SimpleVarExpr(_)) {
                 return Err(self.fatal(
                     "an `isset` over a property under a property or a dimension, whose links are `FETCH_OBJ_IS`, this compiler cannot read yet",
                 ));
             }
+            let name = self.member_name_of(id, line)?;
             let (op1_type, op1) = self.receiver(object)?;
-            let name = self.string(name)?;
+            let name = self.string(&name)?;
             let name_at = self.literal(name);
             let out = self.temporary();
             let slots = self.cache_slots(3);
@@ -5327,10 +5873,11 @@ impl Emit<'_> {
             });
             return Ok(Where::Temporary(out));
         }
-        if !matches!(&**var, Expr::Dim { .. }) {
-            return Err(
-                self.fatal("an `isset` over what is no variable this compiler cannot read yet")
-            );
+        if !matches!(var, tree::Expr::SubscriptExpr(_)) {
+            return Err(walk::unread(
+                line,
+                &format!("an `{word}` over what is no variable"),
+            ));
         }
         let (container, links) = self.dim_chain(var, Fetch::Is)?;
         let Some((last, fetches)) = links.split_last() else {
@@ -5358,7 +5905,7 @@ impl Emit<'_> {
     /// opline leaves a throwable pending whatever stands after it, and
     /// `zend_do_free` over it is what leaves `throw new E;` its one
     /// opline.
-    fn throw(&mut self, operand: &Child) -> Result<Where, CompileError> {
+    fn throw(&mut self, operand: tree::Expr) -> Result<Where, CompileError> {
         let value = self.expr(operand)?;
         let (op1_type, op1) = self.operand(value);
         self.push(Opline {
@@ -5392,7 +5939,11 @@ impl Emit<'_> {
     /// bool(true)
     /// bool(true)
     /// ```
-    fn include_or_eval(&mut self, kind: IncludeKind, path: &Child) -> Result<Where, CompileError> {
+    fn include_or_eval(
+        &mut self,
+        kind: IncludeKind,
+        path: tree::Expr,
+    ) -> Result<Where, CompileError> {
         let value = self.expr(path)?;
         let (op1_type, op1) = self.operand(value);
         let out = self.temporary();
@@ -5456,16 +6007,20 @@ impl Emit<'_> {
     /// ```
     fn conditional(
         &mut self,
-        cond: &Child,
-        then: Option<&Child>,
-        otherwise: &Child,
+        cond: tree::Expr,
+        then: Option<tree::Expr>,
+        otherwise: Option<tree::Expr>,
     ) -> Result<Where, CompileError> {
-        if let Expr::Ternary {
-            then: nested,
-            parenthesised: false,
-            ..
-        } = &**cond
-        {
+        // `ZEND_PARENTHESIZED_CONDITIONAL` is the bit php's grammar
+        // puts on a conditional a `(` and a `)` stand around, and
+        // `zend_compile_conditional` reads it on its own left child to
+        // tell an unparenthesised nested conditional, php's compile
+        // error, from the grouping that is written out. Here the
+        // parentheses are the `ParenExpr` between the two nodes, so a
+        // child that is a `TernaryExpr` itself is php's unparenthesised
+        // one and a child under parentheses is not.
+        if let tree::Expr::TernaryExpr(id) = cond {
+            let nested = self.parsed.tree[id].then;
             match (nested.is_some(), then.is_some()) {
                 (true, true) => return Err(self.compile_error(
                     "Unparenthesized `a ? b : c ? d : e` is not supported. Use either `(a ? b : c) ? d : e` or `a ? b : (c ? d : e)`",
@@ -5479,6 +6034,9 @@ impl Emit<'_> {
                 (false, false) => {}
             }
         }
+        let Some(otherwise) = otherwise else {
+            return Err(self.unread("a `?`"));
+        };
         let Some(then) = then else {
             return self.shorthand_conditional(cond, otherwise);
         };
@@ -5523,7 +6081,7 @@ impl Emit<'_> {
     ///
     /// `zend_eval_const_expr` folds neither side, so `1 ?? 2` is the
     /// two oplines any other pair is.
-    fn coalesce(&mut self, left: &Child, right: &Child) -> Result<Where, CompileError> {
+    fn coalesce(&mut self, left: tree::Expr, right: tree::Expr) -> Result<Where, CompileError> {
         let held = self.silent_read(left)?;
         let (op1_type, op1) = self.operand(held);
         let out = self.temporary();
@@ -5583,7 +6141,7 @@ impl Emit<'_> {
     /// int(3)
     /// int(3)
     /// ```
-    fn assign_coalesce(&mut self, var: &[u8], value: &Child) -> Result<Where, CompileError> {
+    fn assign_coalesce(&mut self, var: &[u8], value: tree::Expr) -> Result<Where, CompileError> {
         let cv = self.lookup_cv(var);
         let out = self.temporary();
         let opnum = self.push(Opline {
@@ -5638,8 +6196,8 @@ impl Emit<'_> {
     fn short_circuiting(
         &mut self,
         or: bool,
-        left: &Child,
-        right: &Child,
+        left: tree::Expr,
+        right: tree::Expr,
     ) -> Result<Where, CompileError> {
         let left = self.expr(left)?;
         if let Where::Constant(value) = left {
@@ -5696,11 +6254,8 @@ impl Emit<'_> {
     /// end for the same reason; each link's operands are settled where
     /// the link is made, since that is where `SET_NODE` puts a
     /// constant into the table.
-    fn silent_read(&mut self, expr: &Child) -> Result<Where, CompileError> {
-        if !matches!(
-            &**expr,
-            Expr::Dim { .. } | Expr::Prop { .. } | Expr::StaticProp { .. }
-        ) {
+    fn silent_read(&mut self, expr: tree::Expr) -> Result<Where, CompileError> {
+        if !self.is_fetch(expr) {
             return self.expr(expr);
         }
         let mut delayed = Vec::new();
@@ -5735,9 +6290,16 @@ impl Emit<'_> {
     /// `zend_delayed_compile_prop` and `zend_delayed_compile_static_prop`,
     /// which each compile what stands under them, then the dimension or
     /// the property's name, and only then settle the fetch's operands.
-    fn silent_link(&mut self, expr: &Child, delayed: &mut Vec<IsLink>) -> Result<(), CompileError> {
-        match &**expr {
-            Expr::Dim { container, index } => {
+    fn silent_link(
+        &mut self,
+        expr: tree::Expr,
+        delayed: &mut Vec<IsLink>,
+    ) -> Result<(), CompileError> {
+        let line = self.line_of(expr);
+        match self.peel(expr) {
+            tree::Expr::SubscriptExpr(id) => {
+                let node = &self.parsed.tree[id];
+                let (container, index) = (node.base, node.index);
                 let under = self.silent_under(container, delayed)?;
                 let Some(index) = index else {
                     return Err(self.compile_error("Cannot use [] for reading"));
@@ -5756,10 +6318,12 @@ impl Emit<'_> {
                 });
                 Ok(())
             }
-            Expr::Prop { object, name } => {
+            tree::Expr::MemberAccessExpr(id) => {
+                let name = self.member_name_of(id, line)?;
+                let object = self.parsed.tree[id].obj;
                 let under = self.silent_under(object, delayed)?;
                 let op1 = self.settled(&under);
-                let name = self.string(name)?;
+                let name = self.string(&name)?;
                 let op2 = self.literal(name);
                 let out = self.temporary();
                 let extended_value = self.cache_slots(3);
@@ -5776,12 +6340,15 @@ impl Emit<'_> {
             // `zend_compile_static_prop` names the property in `op1` and
             // the class in `op2`, so the link stands under nothing and
             // is always the first of its chain.
-            Expr::StaticProp { class, name } => {
-                let name = self.string(name)?;
+            tree::Expr::ScopedAccessExpr(id) => {
+                let Scoped::Property { class, name } = self.scoped_of(id, line)? else {
+                    return Err(self.fatal("a `??` over a class constant, which is no variable"));
+                };
+                let name = self.string(&name)?;
                 let name_at = self.literal(name);
                 let out = self.temporary();
                 let extended_value = self.cache_slots(3);
-                let op2 = self.class_name_literal(class)?;
+                let op2 = self.class_name_literal(&class)?;
                 delayed.push(IsLink {
                     opcode: Opcode::FetchStaticPropIs,
                     op1: Some((OperandKind::Const, name_at)),
@@ -5796,6 +6363,21 @@ impl Emit<'_> {
         }
     }
 
+    /// Whether a node is one of the three php delays under
+    /// `BP_VAR_IS`, `zend_delayed_compile_var`'s `ZEND_AST_DIM`,
+    /// `ZEND_AST_PROP` and `ZEND_AST_STATIC_PROP`; a class constant
+    /// after a `::` is none of them.
+    fn is_fetch(&self, expr: tree::Expr) -> bool {
+        match self.peel(expr) {
+            tree::Expr::SubscriptExpr(_) | tree::Expr::MemberAccessExpr(_) => true,
+            tree::Expr::ScopedAccessExpr(id) => matches!(
+                self.parsed.tree[id].member,
+                Some(tree::ScopedSelector::SimpleVarExpr(_))
+            ),
+            _ => false,
+        }
+    }
+
     /// What stands under one link: the link before it where the node is
     /// one of the three php delays, `$this` as the `IS_UNUSED` receiver
     /// `zend_delayed_compile_prop` gives it inside a method, and
@@ -5803,18 +6385,20 @@ impl Emit<'_> {
     /// that warns as php reads it there.
     fn silent_under(
         &mut self,
-        expr: &Child,
+        expr: tree::Expr,
         delayed: &mut Vec<IsLink>,
     ) -> Result<Under, CompileError> {
-        match &**expr {
-            Expr::Dim { .. } | Expr::Prop { .. } | Expr::StaticProp { .. } => {
-                self.silent_link(expr, delayed)?;
-                Ok(Under::Link)
-            }
-            Expr::This if self.this_in_scope => Ok(Under::This),
-            Expr::This => Ok(Under::Value(self.fetch_this(OperandKind::Var))),
-            _ => Ok(Under::Value(self.expr(expr)?)),
+        if self.is_fetch(expr) {
+            self.silent_link(expr, delayed)?;
+            return Ok(Under::Link);
         }
+        if self.is_this(expr) {
+            if self.this_in_scope {
+                return Ok(Under::This);
+            }
+            return Ok(Under::Value(self.fetch_this(OperandKind::Var)));
+        }
+        Ok(Under::Value(self.expr(expr)?))
     }
 
     /// The `op1` a link carries: nothing where it reads the link under
@@ -5845,8 +6429,8 @@ impl Emit<'_> {
     /// ```
     fn shorthand_conditional(
         &mut self,
-        cond: &Child,
-        otherwise: &Child,
+        cond: tree::Expr,
+        otherwise: tree::Expr,
     ) -> Result<Where, CompileError> {
         let tested = self.expr(cond)?;
         let (op1_type, op1) = self.operand(tested);
@@ -5908,7 +6492,7 @@ impl Emit<'_> {
         &mut self,
         var: &[u8],
         op: BinaryOp,
-        value: &Child,
+        value: tree::Expr,
     ) -> Result<Where, CompileError> {
         let cv = self.lookup_cv(var);
         let value = self.expr(value)?;
@@ -5935,7 +6519,7 @@ impl Emit<'_> {
     /// anything reads it; [`Self::do_free`] marks it `UNUSED` when
     /// nothing does, which is what the engine's `ASSIGN` reads as
     /// `RETURN_VALUE_USED`.
-    fn assign(&mut self, var: &[u8], value: &Child) -> Result<Where, CompileError> {
+    fn assign(&mut self, var: &[u8], value: tree::Expr) -> Result<Where, CompileError> {
         // `CG(zend_lineno) = zend_ast_get_lineno(var_ast)` before the
         // `ASSIGN` (`Z/Zend/zend_compile.c:3474`): the target's line,
         // which is this node's, and not the line its value ended on.
@@ -5963,7 +6547,10 @@ impl Emit<'_> {
     /// operand are: the whole chain fetched for writing, the last link
     /// carried by `ZEND_FETCH_DIM_REF` where a plain write carries
     /// nothing, and the `VAR` it left as the operand.
-    fn dim_for_reference(&mut self, target: &Child) -> Result<(OperandKind, u32), CompileError> {
+    fn dim_for_reference(
+        &mut self,
+        target: tree::Expr,
+    ) -> Result<(OperandKind, u32), CompileError> {
         let (container, links) = self.dim_chain(target, Fetch::Write)?;
         let Some((last, fetches)) = links.split_last() else {
             return Err(self.fatal("a dimension with no dimension"));
@@ -6000,16 +6587,33 @@ impl Emit<'_> {
     /// `VAR` it left: php turns the last delayed opline into an
     /// `ASSIGN_*_REF` only for a property and a class's own property,
     /// and leaves a dimension's fetch standing.
-    fn assign_ref(&mut self, target: &Child, source: &Child) -> Result<Where, CompileError> {
-        if let Expr::StaticProp { class, name } = &**target {
-            return self.assign_static_prop_ref(class, name, source);
+    fn assign_ref(
+        &mut self,
+        target: tree::Expr,
+        source: tree::Expr,
+    ) -> Result<Where, CompileError> {
+        let line = self.line;
+        let target = self.peel(target);
+        if let tree::Expr::ScopedAccessExpr(id) = target
+            && let Scoped::Property { class, name } = self.scoped_of(id, line)?
+        {
+            return self.assign_static_prop_ref(&class, &name, source);
         }
-        let (op1_type, op1) = match &**target {
-            Expr::Var(name) => (OperandKind::Cv, self.lookup_cv(name)),
-            Expr::Dim { .. } => self.dim_for_reference(target)?,
+        let (op1_type, op1) = match target {
+            tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
+                SimpleVar::Cv(name) => (OperandKind::Cv, self.lookup_cv(&name)),
+                SimpleVar::This => {
+                    return Err(walk::unread(
+                        line,
+                        "a by-reference assignment to what is no variable",
+                    ));
+                }
+            },
+            tree::Expr::SubscriptExpr(_) => self.dim_for_reference(target)?,
             _ => {
-                return Err(self.fatal(
-                    "a by-reference assignment to what is no variable this compiler cannot read yet",
+                return Err(walk::unread(
+                    line,
+                    "a by-reference assignment to what is no variable",
                 ));
             }
         };
@@ -6017,16 +6621,25 @@ impl Emit<'_> {
         // `ZEND_RETURNS_FUNCTION` where it is a call
         // (`zend_is_call`), which is the bit the handler reads to
         // raise php's notice over a call that returned by value.
-        let (op2_type, op2, flags) = match &**source {
-            Expr::Var(name) => (OperandKind::Cv, self.lookup_cv(name), 0),
-            Expr::Call { .. } => {
+        let (op2_type, op2, flags) = match self.peel(source) {
+            tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
+                SimpleVar::Cv(name) => (OperandKind::Cv, self.lookup_cv(&name), 0),
+                SimpleVar::This => {
+                    return Err(walk::unread(
+                        line,
+                        "a by-reference assignment from what is no variable",
+                    ));
+                }
+            },
+            tree::Expr::CallExpr(_) => {
                 let returned = self.expr(source)?;
                 let (op2_type, op2) = self.operand(returned);
                 (op2_type, op2, RETURNS_FUNCTION)
             }
             _ => {
-                return Err(self.fatal(
-                    "a by-reference assignment from what is no variable this compiler cannot read yet",
+                return Err(walk::unread(
+                    line,
+                    "a by-reference assignment from what is no variable",
                 ));
             }
         };
@@ -6055,7 +6668,7 @@ impl Emit<'_> {
     /// carrying `ZEND_FETCH_DIM_DIM`, the bit that names the dimension
     /// under a dimension in php's string-offset error; the `[]` of an
     /// append is an `UNUSED` `op2`, which the dump prints as `NEXT`.
-    fn assign_dim(&mut self, target: &Child, value: &Child) -> Result<Where, CompileError> {
+    fn assign_dim(&mut self, target: tree::Expr, value: tree::Expr) -> Result<Where, CompileError> {
         let (container, links) = self.dim_chain(target, Fetch::Write)?;
         // `zend_delayed_emit_op` stamped the fetch's line where the
         // fetch stood, and `zend_delayed_compile_end` carries it into
@@ -6116,26 +6729,38 @@ impl Emit<'_> {
     /// int(2)
     /// string(1) "d"
     /// ```
+    #[allow(clippy::too_many_lines)]
     fn dim_chain(
         &mut self,
-        target: &Child,
+        target: tree::Expr,
         fetch: Fetch,
     ) -> Result<(Base, Vec<DimLink>), CompileError> {
+        let line = self.line;
         let mut dimensions = Vec::new();
-        let mut base = target;
-        while let Expr::Dim { container, index } = &**base {
-            dimensions.push(index);
-            base = container;
+        let mut base = self.peel(target);
+        while let tree::Expr::SubscriptExpr(id) = base {
+            let node = &self.parsed.tree[id];
+            dimensions.push(node.index);
+            base = self.peel(node.base);
         }
-        let container = match (&**base, fetch) {
-            (Expr::Var(name), _) => Base::Settled((OperandKind::Cv, self.lookup_cv(name))),
+        let container = match (base, fetch) {
+            (tree::Expr::SimpleVarExpr(id), _)
+                if matches!(self.simple_var_of(id, line)?, SimpleVar::Cv(_)) =>
+            {
+                let SimpleVar::Cv(name) = self.simple_var_of(id, line)? else {
+                    return Err(self.fatal("a variable that is no CV"));
+                };
+                Base::Settled((OperandKind::Cv, self.lookup_cv(&name)))
+            }
             // `zend_delayed_compile_prop`: the receiver is compiled
             // where it stands and the fetch itself is held back, its
             // temporary, its name and its three cache slots taken here
             // and its opline laid down by [`Self::dim_fetches`].
-            (Expr::Prop { object, name }, _) => {
+            (tree::Expr::MemberAccessExpr(id), _) => {
+                let name = self.member_name_of(id, line)?;
+                let object = self.parsed.tree[id].obj;
                 let (op1_type, op1) = self.receiver(object)?;
-                let name = self.string(name)?;
+                let name = self.string(&name)?;
                 let name_at = self.literal(name);
                 let out = self.temporary();
                 let slots = self.cache_slots(3);
@@ -6150,12 +6775,17 @@ impl Emit<'_> {
             // `zend_compile_static_prop` with `delayed`, the other
             // fetch php holds back: the name, the class's constant
             // pair and three slots taken here.
-            (Expr::StaticProp { class, name }, Fetch::Read | Fetch::Is | Fetch::Write) => {
-                let name = self.string(name)?;
+            (tree::Expr::ScopedAccessExpr(id), Fetch::Read | Fetch::Is | Fetch::Write)
+                if matches!(self.scoped_of(id, line)?, Scoped::Property { .. }) =>
+            {
+                let Scoped::Property { class, name } = self.scoped_of(id, line)? else {
+                    return Err(self.fatal("a class constant that is no property"));
+                };
+                let name = self.string(&name)?;
                 let name_at = self.literal(name);
                 let out = self.temporary();
                 let slots = self.cache_slots(3);
-                let class_at = self.class_name_literal(class)?;
+                let class_at = self.class_name_literal(&class)?;
                 Base::StaticProp {
                     name_at,
                     class_at,
@@ -6165,7 +6795,9 @@ impl Emit<'_> {
             }
             // A compound assignment's chain is `BP_VAR_RW`, whose fetch
             // here is `FETCH_STATIC_PROP_RW` and no handler serves it.
-            (Expr::StaticProp { .. }, Fetch::Rw) => {
+            (tree::Expr::ScopedAccessExpr(id), Fetch::Rw)
+                if matches!(self.scoped_of(id, line)?, Scoped::Property { .. }) =>
+            {
                 return Err(self.fatal(
                     "a compound assignment to a dimension over a `static` property, whose fetch is `FETCH_STATIC_PROP_RW`, this compiler cannot read yet",
                 ));
@@ -6179,7 +6811,7 @@ impl Emit<'_> {
             // write lands in a value of the request's own and not in
             // one the callee still holds; a call php answered in a
             // temporary has no `VAR` to separate.
-            (_, Fetch::Write | Fetch::Rw) if is_call(base) => {
+            (_, Fetch::Write | Fetch::Rw) if self.is_call(base) => {
                 let returned = self.expr(base)?;
                 let Where::Returned(at) = returned else {
                     return Err(self
@@ -6200,7 +6832,7 @@ impl Emit<'_> {
             // where no object is in scope. The `UNUSED` receiver a
             // property fetch takes is ruled out here, since no
             // dimension can stand on it.
-            (Expr::This, Fetch::Write | Fetch::Rw) => {
+            (_, Fetch::Write | Fetch::Rw) if self.is_this(base) => {
                 let this = self.fetch_this(OperandKind::Var);
                 Base::Settled(self.operand(this))
             }
@@ -6210,10 +6842,10 @@ impl Emit<'_> {
             }
         };
         let mut links = Vec::with_capacity(dimensions.len());
-        for index in dimensions.iter().rev() {
+        for index in dimensions.clone().iter().rev() {
             let (kind, at) = match index {
                 Some(index) => {
-                    let value = self.expr(index)?;
+                    let value = self.expr(*index)?;
                     self.dim_operand(value)
                 }
                 // `zend_delayed_compile_dim`: the append names no
@@ -6352,7 +6984,7 @@ impl Emit<'_> {
     /// (`zend_adjust_for_fetch_type` marks the fetch's out operand a
     /// `TMP` where a write leaves a `VAR`), and the value is the last
     /// one's temporary.
-    fn dim_read(&mut self, target: &Child) -> Result<Where, CompileError> {
+    fn dim_read(&mut self, target: tree::Expr) -> Result<Where, CompileError> {
         let (container, links) = self.dim_chain(target, Fetch::Read)?;
         match self.dim_fetches(container, &links, Fetch::Read) {
             (OperandKind::Tmp, at) => Ok(Where::Temporary(at)),
@@ -6392,18 +7024,29 @@ impl Emit<'_> {
     /// temporary, since the write to the left one may move what the
     /// right one named. php compares the written names of the chain's
     /// base and of the value, so `$a[0][1] = $a` is one too.
-    fn assigned_value(&mut self, target: &Child, value: &Child) -> Result<Where, CompileError> {
-        let Expr::Var(name) = &**value else {
+    fn assigned_value(
+        &mut self,
+        target: tree::Expr,
+        value: tree::Expr,
+    ) -> Result<Where, CompileError> {
+        let line = self.line;
+        let tree::Expr::SimpleVarExpr(id) = self.peel(value) else {
             return self.expr(value);
         };
-        let mut base = target;
-        while let Expr::Dim { container, .. } = &**base {
-            base = container;
+        let SimpleVar::Cv(name) = self.simple_var_of(id, line)? else {
+            return self.expr(value);
+        };
+        let mut base = self.peel(target);
+        while let tree::Expr::SubscriptExpr(id) = base {
+            base = self.peel(self.parsed.tree[id].base);
         }
-        if !matches!(&**base, Expr::Var(written) if written == name) {
+        let tree::Expr::SimpleVarExpr(id) = base else {
+            return self.expr(value);
+        };
+        if self.simple_var_of(id, line)? != SimpleVar::Cv(name.clone()) {
             return self.expr(value);
         }
-        let cv = self.lookup_cv(name);
+        let cv = self.lookup_cv(&name);
         let out = self.temporary();
         self.push(Opline {
             opcode: Opcode::QmAssign,
@@ -6439,24 +7082,26 @@ impl Emit<'_> {
     /// write (`zend_compile_var`'s default arm).
     fn assign_prop(
         &mut self,
-        object: &Child,
+        object: tree::Expr,
         name: &[u8],
-        value: &Child,
+        value: tree::Expr,
     ) -> Result<Where, CompileError> {
-        let mut names = vec![name];
-        let mut base = object;
-        while let Expr::Prop { object, name } = &**base {
-            names.push(name);
-            base = object;
+        let line = self.line;
+        let mut names = vec![name.to_vec()];
+        let mut base = self.peel(object);
+        while let tree::Expr::MemberAccessExpr(id) = base {
+            names.push(self.member_name_of(id, line)?);
+            base = self.peel(self.parsed.tree[id].obj);
         }
-        let (mut op1_type, mut op1) = match &**base {
-            Expr::Var(_) | Expr::This => self.receiver(base)?,
+        let (mut op1_type, mut op1) = match base {
+            tree::Expr::SimpleVarExpr(_) => self.receiver(base)?,
+            _ if self.is_this(base) => self.receiver(base)?,
             // `zend_separate_if_call_and_write`, as
             // [`Self::dim_chain`] takes it at the base of a chain of
             // dimensions: the call is compiled where it stands and
             // `SEPARATE` reads and writes the one `VAR` it returned
             // into, before the fetches the chain delays.
-            _ if is_call(base) => {
+            _ if self.is_call(base) => {
                 let returned = self.expr(base)?;
                 let Where::Returned(at) = returned else {
                     return Err(self
@@ -6477,7 +7122,7 @@ impl Emit<'_> {
             }
         };
         let mut links = Vec::with_capacity(names.len());
-        for name in names.iter().rev() {
+        for name in names.clone().iter().rev() {
             let name = self.string(name)?;
             let name_at = self.literal(name);
             let out = self.temporary();
@@ -6547,7 +7192,7 @@ impl Emit<'_> {
         &mut self,
         class: &[u8],
         name: &[u8],
-        value: &Child,
+        value: tree::Expr,
     ) -> Result<Where, CompileError> {
         let name = self.string(name)?;
         let name_at = self.literal(name);
@@ -6595,9 +7240,9 @@ impl Emit<'_> {
     /// `BP_VAR_RW` from end to end.
     fn assign_dim_op(
         &mut self,
-        target: &Child,
+        target: tree::Expr,
         op: BinaryOp,
-        value: &Child,
+        value: tree::Expr,
     ) -> Result<Where, CompileError> {
         let (container, links) = self.dim_chain(target, Fetch::Rw)?;
         let Some((last, fetches)) = links.split_last() else {
@@ -6645,10 +7290,10 @@ impl Emit<'_> {
     /// on (#504).
     fn assign_obj_op(
         &mut self,
-        object: &Child,
+        object: tree::Expr,
         name: &[u8],
         op: BinaryOp,
-        value: &Child,
+        value: tree::Expr,
     ) -> Result<Where, CompileError> {
         let (receiver, links) = self.prop_chain(object)?;
         let name = self.string(name)?;
@@ -6691,22 +7336,23 @@ impl Emit<'_> {
     /// delayed emission does.
     fn prop_chain(
         &mut self,
-        object: &Child,
+        object: tree::Expr,
     ) -> Result<((OperandKind, u32), Vec<PropLink>), CompileError> {
+        let line = self.line;
         let mut names = Vec::new();
-        let mut base = object;
-        while let Expr::Prop { object, name } = &**base {
-            names.push(name);
-            base = object;
+        let mut base = self.peel(object);
+        while let tree::Expr::MemberAccessExpr(id) = base {
+            names.push(self.member_name_of(id, line)?);
+            base = self.peel(self.parsed.tree[id].obj);
         }
-        if !matches!(&**base, Expr::Var(_) | Expr::This) {
+        if !matches!(base, tree::Expr::SimpleVarExpr(_)) {
             return Err(self.fatal(
                 "a compound assignment to a property over what is no variable this compiler cannot read yet",
             ));
         }
         let receiver = self.receiver(base)?;
         let mut links = Vec::with_capacity(names.len());
-        for name in names.iter().rev() {
+        for name in names.clone().iter().rev() {
             let name = self.string(name)?;
             let name_at = self.literal(name);
             let out = self.temporary();
@@ -6761,7 +7407,7 @@ impl Emit<'_> {
         class: &[u8],
         name: &[u8],
         op: BinaryOp,
-        value: &Child,
+        value: tree::Expr,
     ) -> Result<Where, CompileError> {
         let name = self.string(name)?;
         let name_at = self.literal(name);
@@ -6846,16 +7492,24 @@ impl Emit<'_> {
         &mut self,
         class: &[u8],
         name: &[u8],
-        source: &Child,
+        source: tree::Expr,
     ) -> Result<Where, CompileError> {
         let name = self.string(name)?;
         let name_at = self.literal(name);
         let out = self.temporary();
         let slots = self.cache_slots(3);
         let class_at = self.class_name_literal(class)?;
-        let (data_type, data, flags) = match &**source {
-            Expr::Var(name) => (OperandKind::Cv, self.lookup_cv(name), 0),
-            Expr::Call { .. } => {
+        let line = self.line;
+        let (data_type, data, flags) = match self.peel(source) {
+            tree::Expr::SimpleVarExpr(id)
+                if matches!(self.simple_var_of(id, line)?, SimpleVar::Cv(_)) =>
+            {
+                let SimpleVar::Cv(name) = self.simple_var_of(id, line)? else {
+                    return Err(self.fatal("a variable that is no CV"));
+                };
+                (OperandKind::Cv, self.lookup_cv(&name), 0)
+            }
+            tree::Expr::CallExpr(_) => {
                 let returned = self.expr(source)?;
                 let (kind, at) = self.operand(returned);
                 (kind, at, RETURNS_FUNCTION)
@@ -6890,7 +7544,12 @@ impl Emit<'_> {
     /// `zend_try_ct_eval_binary_op` folds the operator over two constants,
     /// and the opcode into a temporary where it does not
     /// (`zend_emit_op_tmp`).
-    fn binary(&mut self, op: BinaryOp, left: &Child, right: &Child) -> Result<Where, CompileError> {
+    fn binary(
+        &mut self,
+        op: BinaryOp,
+        left: tree::Expr,
+        right: tree::Expr,
+    ) -> Result<Where, CompileError> {
         if op == BinaryOp::Concat {
             return self.concat(left, right);
         }
@@ -6916,7 +7575,7 @@ impl Emit<'_> {
     /// side converted to a string where it stands and `CONCAT` into a
     /// temporary. php converts before it emits, so what the opline reads
     /// is the string and never the number it was written as.
-    fn concat(&mut self, left: &Child, right: &Child) -> Result<Where, CompileError> {
+    fn concat(&mut self, left: tree::Expr, right: tree::Expr) -> Result<Where, CompileError> {
         let left = self.expr(left)?;
         let right = self.expr(right)?;
         if let (Where::Constant(a), Where::Constant(b)) = (left, right)
@@ -6937,8 +7596,8 @@ impl Emit<'_> {
     fn bitwise(
         &mut self,
         op: BinaryOp,
-        left: &Child,
-        right: &Child,
+        left: tree::Expr,
+        right: tree::Expr,
     ) -> Result<Where, CompileError> {
         if let (Some(a), Some(b)) = (self.constant_of(left)?, self.constant_of(right)?)
             && let Some(folded) = self.bitwise_fold(op, a, b)?
@@ -6991,8 +7650,8 @@ impl Emit<'_> {
     fn comparison(
         &mut self,
         op: BinaryOp,
-        left: &Child,
-        right: &Child,
+        left: tree::Expr,
+        right: tree::Expr,
     ) -> Result<Where, CompileError> {
         let left = self.expr(left)?;
         let right = self.expr(right)?;
@@ -7180,7 +7839,7 @@ impl Emit<'_> {
     /// `zend_compile_unary_pm`: php folds unary `-` and `+` as the
     /// multiplication by -1 and by 1 it would otherwise emit, and emits
     /// that multiplication where the operand is not a constant.
-    fn unary(&mut self, minus: bool, operand: &Child) -> Result<Where, CompileError> {
+    fn unary(&mut self, minus: bool, operand: tree::Expr) -> Result<Where, CompileError> {
         let sign = Zval::long(if minus { -1 } else { 1 });
         if let Some(value) = self.constant_of(operand)?
             && let Some(folded) = fold(BinaryOp::Mul, value, sign)
@@ -7200,7 +7859,7 @@ impl Emit<'_> {
     /// `zend_unary_op_produces_error`'s one arm for this opcode, so
     /// `!1` and `!""` are bools in the op array and `!1.5` is the
     /// opline over `float(1.5)`, as the oracle's dump has it.
-    fn bool_not(&mut self, operand: &Child) -> Result<Where, CompileError> {
+    fn bool_not(&mut self, operand: tree::Expr) -> Result<Where, CompileError> {
         if let Some(value) = self.constant_of(operand)?
             && value.as_double().is_none()
         {
@@ -7238,7 +7897,7 @@ impl Emit<'_> {
     /// int(-2)
     /// bool(true)
     /// ```
-    fn bw_not(&mut self, operand: &Child) -> Result<Where, CompileError> {
+    fn bw_not(&mut self, operand: tree::Expr) -> Result<Where, CompileError> {
         if let Some(value) = self.constant_of(operand)?
             && let Some(folded) = self.bw_not_fold(value)?
         {
@@ -7278,7 +7937,7 @@ impl Emit<'_> {
     /// php fetches `ZEND_FETCH_GLOBAL`, are refused by the reader. The
     /// value is where the expression left it, and its `zend_do_free`
     /// steps back over the `END_SILENCE` ([`Self::last_that_left_a_value`]).
-    fn silence(&mut self, operand: &Child) -> Result<Where, CompileError> {
+    fn silence(&mut self, operand: tree::Expr) -> Result<Where, CompileError> {
         let silence = self.temporary();
         self.push(Opline {
             opcode: Opcode::BeginSilence,
@@ -7286,9 +7945,12 @@ impl Emit<'_> {
             out: silence,
             ..Opline::default()
         });
-        let value = match &**operand {
-            Expr::Var(name) => self.fetch_by_name(name)?,
-            Expr::This => self.fetch_by_name(b"this")?,
+        let line = self.line_of(operand);
+        let value = match self.peel(operand) {
+            tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
+                SimpleVar::Cv(name) => self.fetch_by_name(&name)?,
+                SimpleVar::This => self.fetch_by_name(b"this")?,
+            },
             _ => self.expr(operand)?,
         };
         self.push(Opline {
@@ -7355,7 +8017,7 @@ impl Emit<'_> {
     /// Warning: Undefined variable $1 in %s on line 3
     /// 5  7
     /// ```
-    fn var_var(&mut self, name: &Child) -> Result<Where, CompileError> {
+    fn var_var(&mut self, name: tree::Expr) -> Result<Where, CompileError> {
         if let Some(value) = self.written(name)? {
             if value.as_str().is_some_and(|s| s.bytes() == b"this") {
                 return Ok(self.fetch_this(OperandKind::Tmp));
@@ -7381,6 +8043,229 @@ impl Emit<'_> {
             _ => false,
         };
         Ok(self.fetch_r(name, if global { FETCH_GLOBAL } else { FETCH_LOCAL }))
+    }
+
+    /// The pieces of a `"…"` or a heredoc, php's `encaps_list`: the
+    /// written runs as the strings the scanner made of them, and each
+    /// variable as what it is, with how it was written, php's `attr` on
+    /// the `encaps_var`, which [`Self::encaps`] reads for its two
+    /// deprecations. Nothing is compiled here: a piece is read and
+    /// [`Self::encaps`] compiles it where the rope wants it.
+    fn pieces(
+        &mut self,
+        parts: &[tree::StringPart],
+        holder: Holder<'_>,
+        line: u32,
+    ) -> Result<Vec<Piece>, CompileError> {
+        let mut pieces: Vec<Piece> = Vec::new();
+        let mut bytes = Vec::new();
+        let mut at = line;
+        for part in parts {
+            match *part {
+                tree::StringPart::LiteralStringPart(id) => {
+                    let node = &self.parsed.tree[id];
+                    if bytes.is_empty() {
+                        at = node.line();
+                    }
+                    if let Some(TokenValue::Bytes(text)) = node
+                        .text
+                        .and_then(|text| TokenValue::of(self.parsed, holder, text))
+                    {
+                        bytes.extend(text);
+                    }
+                }
+                tree::StringPart::SimpleInterpolation(id) => {
+                    let node = &self.parsed.tree[id];
+                    let (var, suffix, var_line) = (node.var, node.suffix, node.line());
+                    let name = self.variable_name(var);
+                    let fetch = match suffix {
+                        None => Fetched::Var(name),
+                        Some(tree::SimpleInterpolationSuffix::SimpleDim(dim)) => {
+                            Fetched::Dim(name, self.simple_dim(dim)?)
+                        }
+                        Some(tree::SimpleInterpolationSuffix::SimpleProp(prop)) => {
+                            let prop = &self.parsed.tree[prop];
+                            if prop.op.map(|op| self.kind(op)) == Some(SyntaxKind::NULLSAFE_ARROW) {
+                                return Err(walk::unread(
+                                    var_line,
+                                    "a nullsafe property in a string",
+                                ));
+                            }
+                            Fetched::Prop(name, self.text(prop.name).to_vec())
+                        }
+                    };
+                    Self::piece(&mut pieces, &mut bytes, at, fetch, var_line, Written::Plain);
+                }
+                tree::StringPart::BracedInterpolation(id) => {
+                    let node = &self.parsed.tree[id];
+                    let (inner, inner_line) = (node.inner, node.line());
+                    let Some(inner) = inner else {
+                        return Err(walk::unread(inner_line, "an interpolated expression"));
+                    };
+                    Self::piece(
+                        &mut pieces,
+                        &mut bytes,
+                        at,
+                        Fetched::Node(inner),
+                        inner_line,
+                        Written::Plain,
+                    );
+                }
+                tree::StringPart::DollarBraceInterpolation(id) => {
+                    let node = &self.parsed.tree[id];
+                    let (name, inner, dim, inner_line) =
+                        (node.name, node.inner, node.dim, node.line());
+                    let (fetch, written) = match (name, inner) {
+                        (Some(name), _) => {
+                            let name = self.text(name).to_vec();
+                            let fetch = match dim {
+                                Some(dim) => Fetched::Dim(name, self.simple_dim(dim)?),
+                                None => Fetched::Var(name),
+                            };
+                            (fetch, Written::DollarCurly)
+                        }
+                        (None, Some(inner)) => (Fetched::VarVar(inner), Written::DollarCurlyVarVar),
+                        (None, None) => {
+                            return Err(walk::unread(inner_line, "an interpolated expression"));
+                        }
+                    };
+                    Self::piece(&mut pieces, &mut bytes, at, fetch, inner_line, written);
+                }
+            }
+        }
+        if !bytes.is_empty() {
+            pieces.push(Piece {
+                fetch: Fetched::Text(std::mem::take(&mut bytes)),
+                line: at,
+                written: Written::Plain,
+            });
+        }
+        Ok(pieces)
+    }
+
+    /// One variable piece, after the written bytes before it as a piece
+    /// of their own at the line those bytes began on.
+    fn piece(
+        pieces: &mut Vec<Piece>,
+        bytes: &mut Vec<u8>,
+        at: u32,
+        fetch: Fetched,
+        line: u32,
+        written: Written,
+    ) {
+        if !bytes.is_empty() {
+            pieces.push(Piece {
+                fetch: Fetched::Text(std::mem::take(bytes)),
+                line: at,
+                written: Written::Plain,
+            });
+        }
+        pieces.push(Piece {
+            fetch,
+            line,
+            written,
+        });
+    }
+
+    /// The `[…]` after a variable inside a string, php's
+    /// `encaps_var_offset`: a bare word is the string, a number is
+    /// `T_NUM_STRING`'s value ([`Holder::Offset`]) and `-` before it is
+    /// `zend_negate_num_string`, a variable is itself.
+    fn simple_dim(&mut self, id: NodeId<tree::SimpleDim>) -> Result<Offset, CompileError> {
+        let node = &self.parsed.tree[id];
+        let line = node.line();
+        let Some(index) = node.index else {
+            return Err(walk::unread(line, "a dimension in a string"));
+        };
+        match self.kind(index) {
+            SyntaxKind::VARIABLE => Ok(Offset::Var(self.variable_name(index))),
+            SyntaxKind::IDENT => {
+                let text = self.text(index).to_vec();
+                Ok(Offset::Value(self.string(&text)?))
+            }
+            SyntaxKind::ENCAPS_INT | SyntaxKind::INT => {
+                let value = TokenValue::of(self.parsed, Holder::Offset(node), index);
+                let value = match (value, node.neg.is_some()) {
+                    (Some(TokenValue::Int(0)), true) => self.string(b"-0")?,
+                    (Some(TokenValue::Int(n)), true) => Zval::long(-n),
+                    (Some(TokenValue::Int(n)), false) => Zval::long(n),
+                    (Some(TokenValue::Bytes(digits)), true) => {
+                        let mut bytes = vec![b'-'];
+                        bytes.extend(digits);
+                        self.string(&bytes)?
+                    }
+                    (Some(TokenValue::Bytes(digits)), false) => self.string(&digits)?,
+                    _ => return Err(walk::unread(line, "a dimension in a string")),
+                };
+                Ok(Offset::Value(value))
+            }
+            _ => Err(walk::unread(line, "a dimension in a string")),
+        }
+    }
+
+    /// One piece compiled where the rope wants it: the written bytes as
+    /// the constant they are, a variable as its CV, `$this` as
+    /// `FETCH_THIS`, and the two suffixes the in-string grammar takes
+    /// as the one `FETCH_DIM_R` or `FETCH_OBJ_R` over it, which is what
+    /// `zend_compile_encaps_var_offset` and `zend_compile_prop` leave
+    /// there.
+    fn fetched(&mut self, fetch: &Fetched) -> Result<Where, CompileError> {
+        match fetch {
+            Fetched::Text(bytes) => Ok(Where::Constant(self.string(bytes)?)),
+            Fetched::Var(name) => Ok(self.in_string_var(name)),
+            Fetched::Dim(name, index) => {
+                let container = Base::Settled(self.in_string_operand(name));
+                let index = match index {
+                    Offset::Value(value) => Where::Constant(*value),
+                    Offset::Var(name) => self.in_string_var(name),
+                };
+                let (kind, at) = self.dim_operand(index);
+                let out = self.temporary();
+                let link = DimLink { kind, at, out };
+                match self.dim_fetches(container, &[link], Fetch::Read) {
+                    (OperandKind::Tmp, at) => Ok(Where::Temporary(at)),
+                    _ => Err(self.fatal("a dimension read with no dimension")),
+                }
+            }
+            Fetched::Prop(name, prop) => {
+                let (op1_type, op1) = self.in_string_operand(name);
+                let name = self.string(prop)?;
+                let name_at = self.literal(name);
+                let out = self.temporary();
+                let slots = self.cache_slots(3);
+                self.push(Opline {
+                    opcode: Opcode::FetchObjR,
+                    op1_type,
+                    op1,
+                    op2_type: OperandKind::Const,
+                    op2: name_at,
+                    out_type: OperandKind::Tmp,
+                    out,
+                    extended_value: slots,
+                    ..Opline::default()
+                });
+                Ok(Where::Temporary(out))
+            }
+            Fetched::Node(expr) => self.expr(*expr),
+            Fetched::VarVar(expr) => self.var_var(*expr),
+        }
+    }
+
+    /// A variable named inside a string: the CV, `$this` fetched by
+    /// `FETCH_THIS`, and an auto-global, which php fetches by another
+    /// opline, left to the CV as the reader left it.
+    fn in_string_var(&mut self, name: &[u8]) -> Where {
+        if name == b"this" {
+            return self.fetch_this(OperandKind::Tmp);
+        }
+        Where::Cv(self.lookup_cv(name))
+    }
+
+    /// The operand a variable named inside a string stands as under a
+    /// fetch.
+    fn in_string_operand(&mut self, name: &[u8]) -> (OperandKind, u32) {
+        let value = self.in_string_var(name);
+        self.operand(value)
     }
 
     /// `zend_compile_encaps_list` (`Z/Zend/zend_compile.c:11221`): each
@@ -7410,12 +8295,19 @@ impl Emit<'_> {
     /// Deprecated: Using ${var} in strings is deprecated, use {$var} instead in %s on line 3
     /// 1-v-m-1-q-1-q-1
     /// ```
-    fn encaps(&mut self, pieces: &[Piece]) -> Result<Where, CompileError> {
+    fn encaps(
+        &mut self,
+        parts: &[tree::StringPart],
+        holder: Holder<'_>,
+        line: u32,
+    ) -> Result<Where, CompileError> {
+        let pieces = self.pieces(parts, holder, line)?;
         let mut last_const: Option<Zval> = None;
         let mut reserved: Option<usize> = None;
         let mut init_at: Option<usize> = None;
         let mut count = 0u32;
-        for piece in pieces {
+        for piece in &pieces {
+            self.line = piece.line;
             match piece.written {
                 Written::Plain => {}
                 Written::DollarCurly => self.raise(
@@ -7427,7 +8319,7 @@ impl Emit<'_> {
                     "Using ${expr} (variable variables) in strings is deprecated, use {${expr}} instead",
                 ),
             }
-            let value = self.expr(&piece.expr)?;
+            let value = self.fetched(&piece.fetch)?;
             if let Where::Constant(value) = value {
                 let value = self.stringified(value)?.unwrap_or(value);
                 if value.as_str().is_some_and(|s| s.bytes().is_empty()) {
@@ -7586,7 +8478,7 @@ impl Emit<'_> {
     /// `extended_value` for the rest, into a temporary; nothing is folded,
     /// as php folds a cast only inside a constant expression
     /// (`zend_eval_const_expr`), so `(float)1` stands as an opline.
-    fn cast(&mut self, to: CastTo, operand: &Child) -> Result<Where, CompileError> {
+    fn cast(&mut self, to: CastTo, operand: tree::Expr) -> Result<Where, CompileError> {
         let operand = self.expr(operand)?;
         Ok(match to {
             CastTo::Bool => self.emit_unary(Opcode::Bool, operand, 0),
@@ -7663,138 +8555,235 @@ impl Emit<'_> {
     }
 
     /// php's constant expression: the value `zend_compile_expr` leaves as
-    /// an `IS_CONST` operand, folding a number as written, a persistent constant
-    /// (`zend_try_ct_eval_const`), arithmetic over two of them
+    /// an `IS_CONST` operand, folding a number as written, a persistent
+    /// constant (`zend_try_ct_eval_const`), arithmetic over two of them
     /// (`zend_try_ct_eval_binary_op`) and a call of a name in
     /// [`crate::special`]'s table over constants
     /// (`zend_try_compile_special_func`).
-    pub(crate) fn constant_expr(&mut self, expr: &Child) -> Result<Zval, CompileError> {
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn constant_expr(&mut self, expr: tree::Expr) -> Result<Zval, CompileError> {
+        // `zend_eval_const_expr` checks the stack and leaves
+        // `CG(zend_lineno)` where it stands: the fold emits no opline,
+        // so the line the compiler is on is the one the opline that
+        // does emit was given.
+        let line = expr.line(self.parsed);
         self.check_stack()?;
-        match &**expr {
-            Expr::Null => Ok(Zval::null()),
-            Expr::Bool(b) => Ok(Zval::bool(*b)),
-            Expr::Int(n) => Ok(Zval::long(*n)),
-            Expr::Float(f) => Ok(Zval::double(*f)),
-            Expr::Str(bytes) => self.string(bytes),
-            Expr::Constant(name) => self
-                .const_name(name)?
-                .ok_or_else(|| self.fatal("a constant this compiler cannot read yet")),
-            Expr::Node(node) => self.constant_node(*node),
+        let tree = &self.parsed.tree;
+        match expr {
+            tree::Expr::ParenExpr(id) => match tree[id].inner {
+                Some(inner) => self.constant_expr(inner),
+                None => Err(self.unread("an expression inside parentheses")),
+            },
+            tree::Expr::LiteralExpr(id) => {
+                let node = &tree[id];
+                let Some(token) = node.value else {
+                    return Err(self.unread("a literal"));
+                };
+                match TokenValue::of(self.parsed, Holder::Scalar(node), token) {
+                    Some(TokenValue::Int(n)) => Ok(Zval::long(n)),
+                    Some(TokenValue::Float(f)) => Ok(Zval::double(f)),
+                    Some(TokenValue::Bytes(bytes)) => self.string(&bytes),
+                    None => Err(self.unread("a literal")),
+                }
+            }
+            tree::Expr::MagicConstExpr(id) => self.magic_node(id),
+            tree::Expr::NowdocExpr(id) => {
+                let node = &tree[id];
+                let mut bytes = Vec::new();
+                for token in &node.text {
+                    if let Some(TokenValue::Bytes(text)) =
+                        TokenValue::of(self.parsed, Holder::Nowdoc(node), *token)
+                    {
+                        bytes.extend(text);
+                    }
+                }
+                self.string(&bytes)
+            }
+            tree::Expr::NameRef(token) => {
+                if let Some(value) = self.constant_name(token) {
+                    return Ok(value);
+                }
+                let name = self.text(token).to_vec();
+                self.const_name(&name)?
+                    .ok_or_else(|| self.fatal("a constant this compiler cannot read yet"))
+            }
+            // A `"…"` or a heredoc with nothing interpolated is one
+            // string php's parser folded before the compiler saw it;
+            // one with a variable in it is `ZEND_AST_ENCAPS_LIST`, whose
+            // oplines no fold replaces.
+            tree::Expr::InterpolatedStringExpr(_) | tree::Expr::HeredocExpr(_) => {
+                match self.expr(expr)? {
+                    Where::Constant(value) => Ok(value),
+                    _ => Err(self.fatal("an interpolated string is no constant expression")),
+                }
+            }
+            tree::Expr::ShellExecExpr(_) => Err(self.unread("a backtick operator")),
             // `zend_try_ct_eval_unary_pm`: php folds unary `-` and `+` as
             // the multiplication by -1 and by 1 it would otherwise emit.
-            Expr::Unary { minus, operand } => {
-                let value = self.constant_expr(operand)?;
-                fold(
-                    BinaryOp::Mul,
-                    value,
-                    Zval::long(if *minus { -1 } else { 1 }),
-                )
-                .ok_or_else(|| self.fatal("arithmetic this compiler cannot fold yet"))
-            }
-            // `zend_eval_const_expr`'s `ZEND_AST_UNARY_OP` arm: the
-            // operand folded, then `zend_try_ct_eval_unary_op`, which
-            // `zend_unary_op_produces_error` refuses over a double,
-            // since `ZEND_BOOL_NOT` warns casting a NAN. So `!1.5` is
-            // the opline php leaves standing and never the bool.
-            Expr::Not(operand) => {
-                let value = self.constant_expr(operand)?;
-                if value.as_double().is_some() {
-                    return Err(self.fatal("a `!` over a float is left to its opcode"));
+            // The `ZEND_AST_UNARY_OP` arm of `zend_eval_const_expr` folds
+            // the operand first, then `zend_try_ct_eval_unary_op`, which
+            // `zend_unary_op_produces_error` refuses over a double for
+            // `ZEND_BOOL_NOT`, since it warns casting a NAN, so `!1.5` is
+            // the opline php leaves standing and never the bool; the
+            // `ZEND_BW_NOT` arm refuses `null`, `false`, `true` and a
+            // double the long conversion would lose something of, and
+            // folds a string as it stands.
+            tree::Expr::UnaryExpr(id) => {
+                let node = &tree[id];
+                let operand = self.required(node.operand, "a unary operator")?;
+                match node.op.map(|op| self.kind(op)) {
+                    Some(kind @ (SyntaxKind::MINUS | SyntaxKind::PLUS)) => {
+                        let value = self.constant_expr(operand)?;
+                        fold(
+                            BinaryOp::Mul,
+                            value,
+                            Zval::long(if kind == SyntaxKind::MINUS { -1 } else { 1 }),
+                        )
+                        .ok_or_else(|| self.fatal("arithmetic this compiler cannot fold yet"))
+                    }
+                    Some(SyntaxKind::BANG) => {
+                        let value = self.constant_expr(operand)?;
+                        if value.as_double().is_some() {
+                            return Err(self.fatal("a `!` over a float is left to its opcode"));
+                        }
+                        Ok(Zval::bool(!truth(value)))
+                    }
+                    Some(SyntaxKind::TILDE) => {
+                        let value = self.constant_expr(operand)?;
+                        self.bw_not_fold(value)?.ok_or_else(|| {
+                            self.fatal("a `~` over this constant is left to its opcode")
+                        })
+                    }
+                    _ => Err(self.unread("a unary operator")),
                 }
-                Ok(Zval::bool(!truth(value)))
             }
-            // The same arm for `ZEND_BW_NOT`, whose
-            // `zend_unary_op_produces_error` refuses `null`, `false`,
-            // `true` and a double the long conversion would lose
-            // something of, and folds a string as it stands.
-            Expr::BwNot(operand) => {
+            // `zend_eval_const_expr`'s `ZEND_AST_CAST` arm: the operand
+            // folded, then `zend_try_ct_eval_cast` over it;
+            // `zend_compile_cast` itself folds nothing, which
+            // [`Self::cast`] copies. `(unset)` is refused where it
+            // stands, as php's grammar puts it.
+            tree::Expr::CastExpr(id) => {
+                let node = &tree[id];
+                let to = self.cast_to(node.op, line)?;
+                let operand = self.required(node.operand, "a cast")?;
                 let value = self.constant_expr(operand)?;
-                self.bw_not_fold(value)?
-                    .ok_or_else(|| self.fatal("a `~` over this constant is left to its opcode"))
+                self.cast_fold(to, value)?
+                    .ok_or_else(|| self.fatal("a cast this compiler cannot fold"))
             }
-            Expr::Binary { op, left, right } => self.binary_constant(*op, left, right),
-            Expr::Call { name, arguments } => {
-                let (resolved, runtime) = self.function_name(name);
+            tree::Expr::BinaryExpr(id) => {
+                let node = &tree[id];
+                let left = node.lhs;
+                let right = self.required(node.rhs, "a binary operator")?;
+                match node.op.map(|op| self.kind(op)) {
+                    // `zend_eval_const_expr`'s `ZEND_AST_AND` and
+                    // `ZEND_AST_OR` arm (`Z/Zend/zend_compile.c:12116`).
+                    Some(SyntaxKind::AMP_AMP | SyntaxKind::AND_KW) => {
+                        self.short_circuit_fold(false, left, right)
+                    }
+                    Some(SyntaxKind::PIPE_PIPE | SyntaxKind::OR_KW) => {
+                        self.short_circuit_fold(true, left, right)
+                    }
+                    // `zend_compile_coalesce` emits two oplines whatever
+                    // stands on either side, and `zend_eval_const_expr`
+                    // folds neither.
+                    Some(SyntaxKind::QUESTION_QUESTION) => {
+                        Err(self.fatal("a `??` is no constant expression"))
+                    }
+                    Some(kind) => match binary_op(kind) {
+                        Some(op) => self.binary_constant(op, left, right),
+                        None => Err(self.unread("a binary operator")),
+                    },
+                    None => Err(self.unread("a binary operator")),
+                }
+            }
+            tree::Expr::ArrayExpr(id) => {
+                let elements = tree[id].array_elements.clone();
+                self.constant_array(&elements)?
+                    .ok_or_else(|| self.fatal("an array expression that is no constant"))
+            }
+            tree::Expr::ListExpr(_) => Err(self.unread("a `list`")),
+            // `zend_is_allowed_in_const_expr` allows `ZEND_AST_CALL`
+            // for the first-class callable alone, `f(...)`, which this
+            // compiler does not read; the arguments are read before the
+            // callee so that refusal is the one that stands.
+            tree::Expr::CallExpr(id) => {
+                let node = &tree[id];
+                let (callee, args) = (node.callee, node.args);
+                let arguments = self.arguments(args, line)?;
+                let tree::Expr::NameRef(name) = self.peel(callee) else {
+                    return Err(self.fatal("a call is no constant expression"));
+                };
+                let name = self.text(name).to_vec();
+                let (resolved, runtime) = self.function_name(&name);
                 let folded = if runtime {
                     None
                 } else {
-                    self.special_constant(&resolved.to_ascii_lowercase(), arguments)?
+                    self.special_constant(&resolved.to_ascii_lowercase(), &arguments)?
                 };
                 folded.ok_or_else(|| self.fatal("a call this compiler cannot fold"))
             }
-            Expr::Array(elements) => self
-                .constant_array(elements)?
-                .ok_or_else(|| self.fatal("an array expression that is no constant")),
-            Expr::Var(_)
-            | Expr::VarVar(_)
-            | Expr::This
-            | Expr::Prop { .. }
-            | Expr::Dim { .. }
-            | Expr::Assign { .. }
-            | Expr::AssignOp { .. }
-            | Expr::AssignDim { .. }
-            | Expr::AssignDimOp { .. }
-            | Expr::AssignProp { .. }
-            | Expr::AssignObjOp { .. }
-            | Expr::AssignStaticProp { .. }
-            | Expr::AssignStaticPropOp { .. }
-            | Expr::StaticPropStep { .. }
-            | Expr::AssignRef { .. }
-            | Expr::PreInc(_)
-            | Expr::PostInc(_)
-            | Expr::PreDec(_)
-            | Expr::PostDec(_)
-            | Expr::StaticProp { .. } => Err(self.fatal("a variable is no constant expression")),
-            Expr::Match { .. } => Err(self.fatal("a match is no constant expression")),
-            Expr::Silence(_) => Err(self.fatal("a silenced expression is no constant expression")),
-            Expr::Encaps(_) => Err(self.fatal("an interpolated string is no constant expression")),
-            Expr::New { .. } | Expr::StaticCall { .. } | Expr::MethodCall { .. } => {
+            tree::Expr::CloneExpr(_) | tree::Expr::ExitExpr(_) => {
                 Err(self.fatal("a call is no constant expression"))
             }
-            Expr::Instanceof { .. } => Err(self.fatal("an instanceof is no constant expression")),
+            tree::Expr::SimpleVarExpr(_)
+            | tree::Expr::VarVarExpr(_)
+            | tree::Expr::DynamicVarExpr(_)
+            | tree::Expr::AssignExpr(_)
+            | tree::Expr::PrefixIncDecExpr(_)
+            | tree::Expr::PostfixIncDecExpr(_) => {
+                Err(self.fatal("a variable is no constant expression"))
+            }
+            // A property fetch and a dimension are what php's walk
+            // allows in a constant expression on 8.5 and this compiler
+            // does not fold: the refusal is the one the phpt lane counts
+            // as unread and not php's invalid-operations sentence.
+            tree::Expr::MemberAccessExpr(_) => {
+                Err(self.unread("a property fetch in a constant expression"))
+            }
+            tree::Expr::SubscriptExpr(_) => {
+                Err(self.unread("a dimension in a constant expression"))
+            }
             // `zend_try_ct_eval_class_const` folds nothing under
             // `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`, which opcache
-            // sets, so a class constant is fetched as the program serves.
-            Expr::ClassConst { .. } => Err(self.fatal("a class constant is fetched at run time")),
-            // `zend_eval_const_expr`'s `ZEND_AST_CAST` arm: the
-            // operand folded, then `zend_try_ct_eval_cast` over it;
-            // `zend_compile_cast` itself folds nothing, which
-            // [`Self::cast`] copies. `(unset)` is refused while the
-            // source is read, where php's grammar puts it.
-            Expr::Cast { to, operand } => {
-                let value = self.constant_expr(operand)?;
-                self.cast_fold(*to, value)?
-                    .ok_or_else(|| self.fatal("a cast this compiler cannot fold"))
+            // sets, so a class constant is fetched as the program serves,
+            // and a class's property is a variable.
+            tree::Expr::ScopedAccessExpr(id) => match self.scoped_of(id, line)? {
+                Scoped::Constant { .. } => {
+                    Err(self.fatal("a class constant is fetched at run time"))
+                }
+                Scoped::Property { .. } => Err(self.fatal("a variable is no constant expression")),
+            },
+            tree::Expr::MatchExpr(_) => Err(self.fatal("a match is no constant expression")),
+            tree::Expr::ErrorSuppressExpr(_) => {
+                Err(self.fatal("a silenced expression is no constant expression"))
+            }
+            tree::Expr::NewExpr(_) => Err(self.fatal("a call is no constant expression")),
+            tree::Expr::InstanceofExpr(_) => {
+                Err(self.fatal("an instanceof is no constant expression"))
             }
             // `zend_compile_conditional` folds nothing either: the arm of
             // `zend_eval_const_expr` that takes the branch a constant
             // condition picks is not read yet (#437).
-            Expr::Ternary { .. } => Err(self.fatal("a conditional is no constant expression here")),
-            // `zend_compile_coalesce` emits two oplines whatever stands
-            // on either side, and `zend_eval_const_expr` folds neither.
-            Expr::Coalesce { .. } => Err(self.fatal("a `??` is no constant expression")),
-            // `zend_eval_const_expr`'s `ZEND_AST_AND` and `ZEND_AST_OR`
-            // arm (`Z/Zend/zend_compile.c:12116`): the left side folded,
-            // and its own truth the answer where that truth settles the
-            // operator, with the right side left unfolded there; else
-            // the right side's truth, which is the answer whichever of
-            // the two operators was written.
-            // `zend_compile_assign_coalesce` emits four oplines whatever
-            // stands on either side, and `zend_eval_const_expr` folds
-            // nothing here.
-            Expr::AssignCoalesce { .. } => Err(self.fatal("a `??=` is no constant expression")),
-            Expr::And { left, right } => self.short_circuit_fold(false, left, right),
-            Expr::Or { left, right } => self.short_circuit_fold(true, left, right),
+            tree::Expr::TernaryExpr(_) => {
+                Err(self.fatal("a conditional is no constant expression here"))
+            }
             // `zend_compile_throw` emits an opline whatever stands
-            // around it, so a `throw` folds to nothing.
-            Expr::Throw(_) => Err(self.fatal("a `throw` is no constant expression")),
-            // `zend_compile_include_or_eval` emits its opline the same way.
-            Expr::Include { .. } => Err(self.fatal("an `include` is no constant expression")),
-            // `zend_compile_isset_or_empty` emits an opline over the CV;
-            // `zend_eval_const_expr` folds nothing here.
-            Expr::Isset { .. } => Err(self.fatal("an `isset` is no constant expression")),
-            Expr::Closure(_) => Err(self.fatal("a closure is no constant expression")),
-            Expr::CallVar { .. } => Err(self.fatal("a call is no constant expression")),
+            // around it, so a `throw` folds to nothing, and
+            // `zend_compile_include_or_eval` emits its opline the same
+            // way; `zend_compile_isset_or_empty` emits one over the CV.
+            tree::Expr::ThrowExpr(_) => Err(self.fatal("a `throw` is no constant expression")),
+            tree::Expr::IncludeExpr(_) => Err(self.fatal("an `include` is no constant expression")),
+            tree::Expr::IssetExpr(_) | tree::Expr::EmptyExpr(_) => {
+                Err(self.fatal("an `isset` is no constant expression"))
+            }
+            tree::Expr::ClosureExpr(_) | tree::Expr::ArrowFnExpr(_) => {
+                Err(self.fatal("a closure is no constant expression"))
+            }
+            tree::Expr::PrintExpr(_) => Err(self.unread("a `print`")),
+            tree::Expr::EvalExpr(_) => Err(self.unread("an `eval`")),
+            tree::Expr::YieldExpr(_) | tree::Expr::YieldFromExpr(_) => {
+                Err(self.unread("a `yield`"))
+            }
         }
     }
 
@@ -7807,8 +8796,8 @@ impl Emit<'_> {
     fn binary_constant(
         &mut self,
         op: BinaryOp,
-        left: &Child,
-        right: &Child,
+        left: tree::Expr,
+        right: tree::Expr,
     ) -> Result<Zval, CompileError> {
         let left = self.constant_expr(left)?;
         let right = self.constant_expr(right)?;
@@ -7838,8 +8827,8 @@ impl Emit<'_> {
     fn short_circuit_fold(
         &mut self,
         or: bool,
-        left: &Child,
-        right: &Child,
+        left: tree::Expr,
+        right: tree::Expr,
     ) -> Result<Zval, CompileError> {
         let held = truth(self.constant_expr(left)?);
         if held == or {
@@ -7864,17 +8853,21 @@ impl Emit<'_> {
     /// here too; an array or an object as a key is php's `Illegal
     /// offset type`, raised only once every element is known constant,
     /// as php raises it in its second pass.
-    fn constant_array(&mut self, elements: &[Element]) -> Result<Option<Zval>, CompileError> {
+    fn constant_array(
+        &mut self,
+        elements: &[NodeId<tree::ArrayElement>],
+    ) -> Result<Option<Zval>, CompileError> {
         let mut folded: Vec<(Option<Zval>, Zval)> = Vec::with_capacity(elements.len());
         for element in elements {
-            let key = match &element.key {
+            let (key, value) = self.element_of(*element)?;
+            let key = match key {
                 Some(key) => match self.constant_of(key)? {
                     Some(key) => Some(key),
                     None => return Ok(None),
                 },
                 None => None,
             };
-            let Some(value) = self.constant_of(&element.value)? else {
+            let Some(value) = self.constant_of(value)? else {
                 return Ok(None);
             };
             folded.push((key, value));
@@ -7940,7 +8933,7 @@ impl Emit<'_> {
     /// `INIT_ARRAY` once a constant string key is seen, and
     /// `ZEND_ARRAY_ELEMENT_REF` never, since a `&` element is not read
     /// yet; neither is `...`, which would be `ADD_ARRAY_UNPACK`.
-    fn array(&mut self, elements: &[Element]) -> Result<Where, CompileError> {
+    fn array(&mut self, elements: &[NodeId<tree::ArrayElement>]) -> Result<Where, CompileError> {
         if let Some(value) = self.constant_array(elements)? {
             return Ok(Where::Constant(value));
         }
@@ -7949,14 +8942,15 @@ impl Emit<'_> {
         let mut out = 0u32;
         let mut packed = true;
         for (i, element) in elements.iter().enumerate() {
-            let key = match &element.key {
+            let (key, value) = self.element_of(*element)?;
+            let key = match key {
                 Some(key) => {
                     let key = self.walked(key)?;
                     Some(Self::numeric_op(key))
                 }
                 None => None,
             };
-            let value = self.walked(&element.value)?;
+            let value = self.walked(value)?;
             let (op1_type, op1) = self.operand(value);
             let (op2_type, op2) = match key {
                 Some(key) => self.operand(key),
@@ -8006,7 +9000,7 @@ impl Emit<'_> {
     /// same cast written anywhere else is the `CAST` opline
     /// `zend_compile_cast` emits. The constant where the node folds,
     /// else the oplines that build it.
-    fn walked(&mut self, expr: &Child) -> Result<Where, CompileError> {
+    fn walked(&mut self, expr: tree::Expr) -> Result<Where, CompileError> {
         match self.constant_of(expr)? {
             Some(value) => Ok(Where::Constant(value)),
             None => self.expr(expr),
@@ -8042,7 +9036,7 @@ impl Emit<'_> {
     /// anything reads it; [`Self::do_free`] marks it `UNUSED` when
     /// nothing does, which is what the engine's `DO_ICALL` reads as
     /// `RETURN_VALUE_USED`.
-    fn call(&mut self, name: &[u8], arguments: &[Child]) -> Result<Where, CompileError> {
+    fn call(&mut self, name: &[u8], arguments: &[tree::Expr]) -> Result<Where, CompileError> {
         let line = self.line;
         let (resolved, runtime) = self.function_name(name);
         if runtime {
@@ -8137,7 +9131,11 @@ impl Emit<'_> {
     /// The engine resolves the pair's lowered name at the `INIT` and
     /// raises php's `Error` over the written one where nothing declares
     /// it.
-    fn dynamic_call(&mut self, name: &[u8], arguments: &[Child]) -> Result<Where, CompileError> {
+    fn dynamic_call(
+        &mut self,
+        name: &[u8],
+        arguments: &[tree::Expr],
+    ) -> Result<Where, CompileError> {
         let line = self.line;
         let pair = self.func_name_literal(name)?;
         let count = u32::try_from(arguments.len()).unwrap_or(0);
@@ -8162,7 +9160,11 @@ impl Emit<'_> {
     /// callee nothing is known of and `DO_FCALL`, which is what
     /// `zend_get_call_op` picks with `fbc` null over an opline that is
     /// no `INIT_FCALL_BY_NAME`.
-    fn call_var(&mut self, callee: &Child, arguments: &[Child]) -> Result<Where, CompileError> {
+    fn call_var(
+        &mut self,
+        callee: tree::Expr,
+        arguments: &[tree::Expr],
+    ) -> Result<Where, CompileError> {
         let line = self.line;
         let value = self.expr(callee)?;
         let (op2_type, op2) = self.operand(value);
@@ -8187,7 +9189,11 @@ impl Emit<'_> {
     /// the `DO_FCALL` that serves it, whose own `VAR` `zend_do_free`
     /// marks unused. `self`, `parent` and `static` are class references
     /// of another kind (`zend_get_class_fetch_type`), not read yet.
-    fn new_expression(&mut self, class: &[u8], arguments: &[Child]) -> Result<Where, CompileError> {
+    fn new_expression(
+        &mut self,
+        class: &[u8],
+        arguments: &[tree::Expr],
+    ) -> Result<Where, CompileError> {
         let line = self.line;
         let class = self.class_name_literal(class)?;
         let out = self.temporary();
@@ -8222,7 +9228,7 @@ impl Emit<'_> {
         &mut self,
         class: &[u8],
         method: &[u8],
-        arguments: &[Child],
+        arguments: &[tree::Expr],
     ) -> Result<Where, CompileError> {
         let line = self.line;
         let known = self.known_method(class, method);
@@ -8267,9 +9273,9 @@ impl Emit<'_> {
     /// known of, and `DO_FCALL`.
     fn method_call(
         &mut self,
-        object: &Child,
+        object: tree::Expr,
         method: &[u8],
-        arguments: &[Child],
+        arguments: &[tree::Expr],
     ) -> Result<Where, CompileError> {
         let line = self.line;
         let (op1_type, op1) = self.receiver(object)?;
@@ -8295,18 +9301,8 @@ impl Emit<'_> {
     /// `zend_compile_method_call`, where `this_guaranteed_exists` is
     /// false outside a method's body, which is everywhere this compiler
     /// reads); anything else is the expression itself.
-    fn receiver(&mut self, object: &Child) -> Result<(OperandKind, u32), CompileError> {
-        match &**object {
-            Expr::This if self.this_in_scope => Ok((OperandKind::Unused, 0)),
-            Expr::This => {
-                let this = self.fetch_this(OperandKind::Var);
-                Ok(self.operand(this))
-            }
-            _ => {
-                let value = self.expr(object)?;
-                Ok(self.operand(value))
-            }
-        }
+    fn receiver(&mut self, object: tree::Expr) -> Result<(OperandKind, u32), CompileError> {
+        self.receiver_of(object)
     }
 
     /// `zend_compile_class_const` under `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`,
@@ -8389,7 +9385,7 @@ impl Emit<'_> {
     /// the property's name as one constant in `op2`, three cache slots in
     /// `extended_value` (`zend_alloc_cache_slots(3)`), written into a
     /// temporary (`zend_adjust_for_fetch_type`).
-    fn prop(&mut self, object: &Child, name: &[u8]) -> Result<Where, CompileError> {
+    fn prop(&mut self, object: tree::Expr, name: &[u8]) -> Result<Where, CompileError> {
         let (op1_type, op1) = self.receiver(object)?;
         let name = self.string(name)?;
         let name_at = self.literal(name);
@@ -8414,7 +9410,7 @@ impl Emit<'_> {
     /// otherwise `INSTANCEOF` over the operand with the class's constant
     /// pair in `op2` and a cache slot in `extended_value`, into a
     /// temporary.
-    fn instance_of(&mut self, expr: &Child, class: &[u8]) -> Result<Where, CompileError> {
+    fn instance_of(&mut self, expr: tree::Expr, class: &[u8]) -> Result<Where, CompileError> {
         let value = self.expr(expr)?;
         if let Where::Constant(_) = value {
             return Ok(Where::Constant(Zval::bool(false)));
@@ -8865,7 +9861,7 @@ impl Emit<'_> {
     fn frameless_icall(
         &mut self,
         index: usize,
-        arguments: &[Child],
+        arguments: &[tree::Expr],
         into: Option<u32>,
     ) -> Result<Option<Where>, CompileError> {
         let Some(arity) = self.frameless_arity(index, arguments.len()) else {
@@ -8877,7 +9873,7 @@ impl Emit<'_> {
         let mut values = Vec::new();
         for at in 0..arity as usize {
             if let Some(argument) = arguments.get(at) {
-                values.push(self.expr(argument)?);
+                values.push(self.expr(*argument)?);
                 continue;
             }
             let default = self
@@ -8960,7 +9956,7 @@ impl Emit<'_> {
     /// a second time. The `JMP_FRAMELESS` takes its cache slot after
     /// the `INIT_NS_FCALL_BY_NAME` took its own, which is the number
     /// the dump prints.
-    fn ns_call(&mut self, name: &[u8], arguments: &[Child]) -> Result<Where, CompileError> {
+    fn ns_call(&mut self, name: &[u8], arguments: &[tree::Expr]) -> Result<Where, CompileError> {
         let line = self.line;
         let name_constants = self.ns_func_name_literal(name)?;
         let lowered = name.to_ascii_lowercase();
@@ -9052,7 +10048,7 @@ impl Emit<'_> {
     /// `CHECK_FUNC_ARG` and `FETCH_OBJ_FUNC_ARG`, not read yet.
     fn args(
         &mut self,
-        arguments: &[Child],
+        arguments: &[tree::Expr],
         known: bool,
         by_ref: &[bool],
     ) -> Result<(), CompileError> {
@@ -9065,10 +10061,17 @@ impl Emit<'_> {
             // `Only variables can be passed by reference` is raised where
             // the argument is placed and not where it is written.
             if by_ref.get(at).copied().unwrap_or(false) {
-                let (opcode, op1_type, op1) = if let Expr::Var(name) = &**argument {
-                    (Opcode::SendRef, OperandKind::Cv, self.lookup_cv(name))
+                let cv = match self.peel(*argument) {
+                    tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, self.line)? {
+                        SimpleVar::Cv(name) => Some(self.lookup_cv(&name)),
+                        SimpleVar::This => None,
+                    },
+                    _ => None,
+                };
+                let (opcode, op1_type, op1) = if let Some(cv) = cv {
+                    (Opcode::SendRef, OperandKind::Cv, cv)
                 } else {
-                    let value = self.expr(argument)?;
+                    let value = self.expr(*argument)?;
                     let (op1_type, op1) = self.operand(value);
                     let opcode = match op1_type {
                         OperandKind::Var => Opcode::SendVarNoRefEx,
@@ -9089,8 +10092,8 @@ impl Emit<'_> {
                 });
                 continue;
             }
-            let value = match &**argument {
-                Expr::This if !known => {
+            let value = match self.peel(*argument) {
+                _ if !known && self.is_this(*argument) => {
                     let this = self.fetch_this(OperandKind::Var);
                     let (op1_type, op1) = self.operand(this);
                     self.push(Opline {
@@ -9103,12 +10106,12 @@ impl Emit<'_> {
                     });
                     continue;
                 }
-                Expr::Prop { .. } if !known => {
+                tree::Expr::MemberAccessExpr(_) if !known => {
                     return Err(self.fatal(
                         "a property fetch sent to a callee the table has not this compiler cannot read yet",
                     ));
                 }
-                _ => self.expr(argument)?,
+                _ => self.expr(*argument)?,
             };
             let (op1_type, op1) = self.operand(value);
             let opcode = match (known, op1_type) {
@@ -9537,22 +10540,6 @@ fn note(names: &mut Vec<Vec<u8>>, name: &[u8]) {
     }
 }
 
-/// Whether a constant expression names a constant, which
-/// `zend_compile_params` leaves unsubstituted in a parameter's default:
-/// a constant by name or a class constant, anywhere in the tree. `true`,
-/// `false` and `null` are the reader's own values and name none.
-fn names_a_constant(expr: &Child) -> bool {
-    match &**expr {
-        Expr::Constant(_) | Expr::ClassConst { .. } => true,
-        Expr::Unary { operand, .. } | Expr::Not(operand) => names_a_constant(operand),
-        Expr::Binary { left, right, .. } => names_a_constant(left) || names_a_constant(right),
-        Expr::Array(elements) => elements.iter().any(|element| {
-            element.key.as_ref().is_some_and(names_a_constant) || names_a_constant(&element.value)
-        }),
-        _ => false,
-    }
-}
-
 /// What a call site knows of its callee once the table has it
 /// (`zend_get_call_op`): a native, served by `DO_ICALL` or `DO_FCALL`,
 /// or a user function of this file, served by `DO_UCALL`.
@@ -9562,19 +10549,60 @@ enum Known {
     User,
 }
 
-/// `zend_is_call` (`Z/Zend/zend_compile.c:2728`): a call by name, a call
-/// through a value, a call on a class or a method call, whose `VAR` is
-/// separated where it is written to. `$f()` is php's `ZEND_AST_CALL` the
-/// same as `f()` is, the callee an expression rather than a name, so it
-/// is separated the same way.
-fn is_call(expr: &Child) -> bool {
-    matches!(
-        &**expr,
-        Expr::Call { .. }
-            | Expr::CallVar { .. }
-            | Expr::StaticCall { .. }
-            | Expr::MethodCall { .. }
-    )
+/// The binary operator a token is, php's `zend_compile_binary_op`
+/// opcode by the token; none for `|>`, which the emitter does not read.
+fn binary_op(kind: SyntaxKind) -> Option<BinaryOp> {
+    Some(match kind {
+        SyntaxKind::PLUS => BinaryOp::Add,
+        SyntaxKind::MINUS => BinaryOp::Sub,
+        SyntaxKind::STAR => BinaryOp::Mul,
+        SyntaxKind::SLASH => BinaryOp::Div,
+        SyntaxKind::PERCENT => BinaryOp::Mod,
+        SyntaxKind::STAR_STAR => BinaryOp::Pow,
+        SyntaxKind::SHL => BinaryOp::Sl,
+        SyntaxKind::SHR => BinaryOp::Sr,
+        SyntaxKind::DOT => BinaryOp::Concat,
+        SyntaxKind::LT => BinaryOp::IsSmaller,
+        SyntaxKind::LT_EQ => BinaryOp::IsSmallerOrEqual,
+        SyntaxKind::GT => BinaryOp::Greater,
+        SyntaxKind::GT_EQ => BinaryOp::GreaterOrEqual,
+        SyntaxKind::EQ_EQ => BinaryOp::IsEqual,
+        SyntaxKind::BANG_EQ | SyntaxKind::LT_GT => BinaryOp::IsNotEqual,
+        SyntaxKind::EQ_EQ_EQ => BinaryOp::IsIdentical,
+        SyntaxKind::BANG_EQ_EQ => BinaryOp::IsNotIdentical,
+        SyntaxKind::SPACESHIP => BinaryOp::Spaceship,
+        SyntaxKind::PIPE => BinaryOp::BwOr,
+        SyntaxKind::CARET => BinaryOp::BwXor,
+        SyntaxKind::AMP => BinaryOp::BwAnd,
+        SyntaxKind::XOR_KW => BinaryOp::BoolXor,
+        _ => return None,
+    })
+}
+
+/// The operator of a compound assignment, `+=` and its kin.
+fn compound_op(kind: SyntaxKind) -> Option<BinaryOp> {
+    Some(match kind {
+        SyntaxKind::PLUS_EQ => BinaryOp::Add,
+        SyntaxKind::MINUS_EQ => BinaryOp::Sub,
+        SyntaxKind::STAR_EQ => BinaryOp::Mul,
+        SyntaxKind::SLASH_EQ => BinaryOp::Div,
+        SyntaxKind::PERCENT_EQ => BinaryOp::Mod,
+        SyntaxKind::STAR_STAR_EQ => BinaryOp::Pow,
+        SyntaxKind::SHL_EQ => BinaryOp::Sl,
+        SyntaxKind::SHR_EQ => BinaryOp::Sr,
+        SyntaxKind::DOT_EQ => BinaryOp::Concat,
+        SyntaxKind::AMP_EQ => BinaryOp::BwAnd,
+        SyntaxKind::PIPE_EQ => BinaryOp::BwOr,
+        SyntaxKind::CARET_EQ => BinaryOp::BwXor,
+        _ => return None,
+    })
+}
+
+/// Whether a refusal is the one-line shape a construct this compiler
+/// cannot emit yet is refused in, which `xtask phpt` reads as unread
+/// (`xtask/src/phpt/adapter.rs`): the sentence [`walk::unread`] writes.
+fn unread(refused: &CompileError) -> bool {
+    refused.level == Level::Parse && refused.message.ends_with("this compiler cannot read yet")
 }
 
 /// `ZEND_HANDLE_NUMERIC_STR` (`Z/Zend/zend_hash.h:402`,
