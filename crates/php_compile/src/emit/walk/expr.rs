@@ -14,8 +14,8 @@
 use super::{Emit, refused, unread};
 use crate::CompileError;
 use crate::read::{
-    Arm, BinaryOp, CastTo, Child, Closure, Element, Expr as Ir, Function, IncludeKind, Magic,
-    Piece, Stmt, Use, Written, is_auto_global,
+    Arm, BinaryOp, CastTo, Child, Closure, Element, Expr as Ir, Function, IncludeKind, Piece, Stmt,
+    Use, Written, is_auto_global,
 };
 use php_syntax::tree::{
     Arg, ArgList, ArrowFnExpr, AssignExpr, CallExpr, ClosureExpr, Expr, MemberAccessExpr,
@@ -62,13 +62,8 @@ impl Emit<'_> {
                     None => return Err(unread(line, "a literal")),
                 }
             }
-            Expr::MagicConstExpr(id) => {
-                let Some(which) = tree[id].token.and_then(|token| Magic::of(self.text(token)))
-                else {
-                    return Err(unread(line, "a magic constant"));
-                };
-                Ir::Magic { which, line }
-            }
+            // The kinds the emitter reads from the tree itself.
+            Expr::MagicConstExpr(_) => Ir::Node(expr),
             Expr::NameRef(token) => {
                 let name = self.text(token);
                 match name.to_ascii_lowercase().as_slice() {

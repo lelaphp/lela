@@ -2577,13 +2577,7 @@ impl Emit<'_> {
                     name: Name(name.clone().into_boxed_slice()),
                 })
             }
-            // `zend_eval_const_expr` folds a magic constant as
-            // `zend_compile_expr` does; the one it leaves,
-            // `__CLASS__` in a trait, is not read yet (a trait is not).
-            Expr::Magic { which, line } => Ok(match self.magic_const(*which, *line) {
-                Folded::Line(n) => ConstExpr::Long(n),
-                Folded::Text(text) => ConstExpr::Str(text.into_boxed_slice()),
-            }),
+            Expr::Node(node) => self.const_node(*node),
             // `ZEND_AST_ARRAY` in a constant expression stays the tree
             // it was written as, each element's key and value.
             Expr::Array(elements) => {
@@ -4700,7 +4694,94 @@ impl Emit<'_> {
             Expr::And { left, right } => self.short_circuiting(false, left, right),
             Expr::Or { left, right } => self.short_circuiting(true, left, right),
             Expr::Constant(name) => self.const_fetch(name),
+            Expr::Node(node) => self.node(*node),
             _ => Ok(Where::Constant(self.constant_expr(expr)?)),
+        }
+    }
+
+    /// `zend_compile_expr_inner` over a node the emitter reads from the
+    /// tree itself (design §4.9): one arm per kind the walk hands on as
+    /// a node, [`Expr::Node`]'s list; a kind outside it is the walk's
+    /// defect, an `InternalError`.
+    fn node(&mut self, node: php_syntax::tree::Expr) -> Result<Where, CompileError> {
+        match node {
+            php_syntax::tree::Expr::MagicConstExpr(id) => Ok(Where::Constant(self.magic_node(id)?)),
+            _ => Err(self.unshaped(node)),
+        }
+    }
+
+    /// `zend_compile_const_expr` over a node the emitter reads from the
+    /// tree: `zend_eval_const_expr` folds a magic constant as
+    /// `zend_compile_expr` does; the one it leaves, `__CLASS__` in a
+    /// trait, is not read yet (a trait is not).
+    fn const_node(&mut self, node: php_syntax::tree::Expr) -> Result<ConstExpr, CompileError> {
+        match node {
+            php_syntax::tree::Expr::MagicConstExpr(id) => {
+                let (which, line) = self.magic_of(id)?;
+                Ok(match self.magic_const(which, line) {
+                    Folded::Line(n) => ConstExpr::Long(n),
+                    Folded::Text(text) => ConstExpr::Str(text.into_boxed_slice()),
+                })
+            }
+            _ => Err(self.unshaped(node)),
+        }
+    }
+
+    /// [`Self::constant_expr`] over a node the emitter reads from the
+    /// tree: the value `zend_compile_expr` leaves as an `IS_CONST`
+    /// operand.
+    fn constant_node(&mut self, node: php_syntax::tree::Expr) -> Result<Zval, CompileError> {
+        match node {
+            php_syntax::tree::Expr::MagicConstExpr(id) => self.magic_node(id),
+            _ => Err(self.unshaped(node)),
+        }
+    }
+
+    /// `__LINE__` and its kin, php's `ZEND_AST_MAGIC_CONST` with the
+    /// token in `attr` and the token's own line in `lineno`, which is
+    /// what `__LINE__` folds to and not the statement's
+    /// (`zend_try_ct_eval_magic_const`).
+    fn magic_node(
+        &mut self,
+        id: php_syntax::tree::NodeId<php_syntax::tree::MagicConstExpr>,
+    ) -> Result<Zval, CompileError> {
+        let (which, line) = self.magic_of(id)?;
+        match self.magic_const(which, line) {
+            Folded::Line(n) => Ok(Zval::long(n)),
+            Folded::Text(text) => self.string(&text),
+        }
+    }
+
+    /// Which magic constant a `MagicConstExpr` is, by its token's name
+    /// in `php_syntax`, and the node's line.
+    fn magic_of(
+        &self,
+        id: php_syntax::tree::NodeId<php_syntax::tree::MagicConstExpr>,
+    ) -> Result<(Magic, u32), CompileError> {
+        let node = &self.parsed.tree[id];
+        let which = node
+            .token
+            .and_then(|token| self.parsed.tokens.get(token.0 as usize))
+            .and_then(|token| {
+                self.parsed
+                    .source
+                    .get(token.offset as usize..(token.offset + token.len) as usize)
+            })
+            .and_then(Magic::of);
+        match which {
+            Some(which) => Ok((which, node.line)),
+            None => Err(self.unshaped(php_syntax::tree::Expr::MagicConstExpr(id))),
+        }
+    }
+
+    /// `InternalError`: the walk handed on a node of a kind the emitter
+    /// does not read from the tree (design §10).
+    fn unshaped(&self, node: php_syntax::tree::Expr) -> CompileError {
+        CompileError {
+            level: Level::Error,
+            message: format!("InternalError: a {node:?} node the walk handed the emitter unshaped"),
+            line: self.line,
+            raised: Vec::new(),
         }
     }
 
@@ -7145,10 +7226,7 @@ impl Emit<'_> {
             Expr::Constant(name) => self
                 .const_name(name)?
                 .ok_or_else(|| self.fatal("a constant this compiler cannot read yet")),
-            Expr::Magic { which, line } => match self.magic_const(*which, *line) {
-                Folded::Line(n) => Ok(Zval::long(n)),
-                Folded::Text(text) => self.string(&text),
-            },
+            Expr::Node(node) => self.constant_node(*node),
             // `zend_try_ct_eval_unary_pm`: php folds unary `-` and `+` as
             // the multiplication by -1 and by 1 it would otherwise emit.
             Expr::Unary { minus, operand } => {
@@ -8846,13 +8924,13 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Child) {
                 implicit_uses(names, &arm.body);
             }
         }
+        Expr::Node(node) => implicit_uses_of_node(names, *node),
         Expr::Null
         | Expr::Bool(_)
         | Expr::Int(_)
         | Expr::Float(_)
         | Expr::Str(_)
         | Expr::Constant(_)
-        | Expr::Magic { .. }
         | Expr::This
         | Expr::ClassConst { .. }
         // A step over a static property names no variable either: the
@@ -8860,6 +8938,14 @@ fn implicit_uses(names: &mut Vec<Vec<u8>>, expr: &Child) {
         | Expr::StaticPropStep { .. }
         | Expr::StaticProp { .. } => {}
     }
+}
+
+/// `find_implicit_binds_recursively` over a node the emitter reads from
+/// the tree: the kinds that name no variable contribute nothing.
+fn implicit_uses_of_node(names: &mut Vec<Vec<u8>>, node: php_syntax::tree::Expr) {
+    // Nothing yet reads a variable: a kind the walk has not handed on as
+    // a node is the emitter's dispatch to refuse, not this walk's.
+    let _ = (names, node);
 }
 
 /// `find_implicit_binds_recursively` over a child php may leave null,

@@ -490,6 +490,12 @@ pub(crate) enum Written {
 /// One expression.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Expr {
+    /// A node the emitter reads from the tree itself, no shape between
+    /// (design §4.9): the kinds `emit` has learned to read directly,
+    /// which the walk hands on as they stand. One kind at a time joins
+    /// this arm until every kind has, and the shapes below go (#595).
+    /// Today: `MagicConstExpr`.
+    Node(php_syntax::tree::Expr),
     Null,
     Bool(bool),
     Int(i64),
@@ -504,13 +510,6 @@ pub(crate) enum Expr {
     Array(Vec<Element>),
     /// A constant named as written, php's `ZEND_AST_CONST`.
     Constant(Vec<u8>),
-    /// `__LINE__` and its kin, php's `ZEND_AST_MAGIC_CONST` with the
-    /// token in `attr` and the token's own line in `lineno`, which is
-    /// what `__LINE__` folds to and not the statement's.
-    Magic {
-        which: Magic,
-        line: u32,
-    },
     /// `-$a` and `+$a`, php's `ZEND_AST_UNARY_MINUS` and
     /// `ZEND_AST_UNARY_PLUS`.
     Unary {
