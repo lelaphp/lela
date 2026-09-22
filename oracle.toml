@@ -124,6 +124,13 @@ ini = ["opcache.enable_cli=1", "opcache.jit=off"]
 # deterministic; php compiles synchronously always.
 ini = ["opcache.enable_cli=1", "opcache.jit=tracing", "opcache.jit_buffer_size=64M", "opcache.jit_debug=258048"]
 
+[regime.short-tags]
+# `short_open_tag` is `PHP_INI_SYSTEM|PHP_INI_PERDIR` (`Z/main/main.c:820`), so
+# no snippet can turn it on from inside; the recipe pins it off, as upstream's
+# `$ini_overwrites` does, and a witness for what `<?` opens with it on names
+# this regime (#610).
+ini = ["short_open_tag=1"]
+
 [regime.dump]
 # design §6.1: php prints its op arrays before the optimizer runs. The
 # compile-identity lane passes `-l` beside these, which compiles a file
