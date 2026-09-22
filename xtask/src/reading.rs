@@ -63,6 +63,15 @@ pub struct Reading {
     /// carried none.
     #[serde(default)]
     pub session: String,
+    /// A lane's named groups: one count per key, where the keys are the
+    /// run's own and not a fixed set `numbers` could name. The phpt
+    /// census is the first, a count per construct the compiler refused
+    /// (#617), and the reason this is not `numbers`: `status` tables
+    /// `numbers` as one line of `key=value`, which a fold over an open
+    /// set of sentences is not. Empty for every instrument that writes
+    /// none, and for a reading written before this field existed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub groups: BTreeMap<String, Number>,
 }
 
 impl Reading {
@@ -142,6 +151,7 @@ impl Reading {
                 .parse()
                 .unwrap_or_else(|_| unreachable!("{EPOCH} is a datetime")),
             session: String::new(),
+            groups: BTreeMap::new(),
         }
     }
 }
@@ -156,6 +166,15 @@ impl Reading {
     pub fn count(&mut self, key: &str, n: u64) -> Result<()> {
         let n = i64::try_from(n).with_context(|| format!("{key} = {n} overflows a reading"))?;
         self.numbers.insert(key.to_owned(), n.into());
+        Ok(())
+    }
+
+    /// One group of the reading's fold: a count under a key the run
+    /// named. Unlike [`Reading::count`] the key is data, so nothing here
+    /// holds it to a spelling.
+    pub fn group(&mut self, key: &str, n: u64) -> Result<()> {
+        let n = i64::try_from(n).with_context(|| format!("{key} = {n} overflows a reading"))?;
+        self.groups.insert(key.to_owned(), n.into());
         Ok(())
     }
 

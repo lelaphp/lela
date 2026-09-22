@@ -629,3 +629,98 @@ fn every_expectf_section_of_the_pinned_pcre_subset_compiles() {
     }
     assert!(seen > 30, "the subset carried {seen} patterns");
 }
+
+/// The census folds the unread verdicts by the construct their refusal
+/// named, the widest construct first, and a tie is broken by the
+/// construct's own text so one run prints the same twice (#617). A
+/// verdict of any other judgement carries a note too — a skip's reason, a
+/// difference — and none of them is the compiler's refusal, so none is
+/// counted here however its note reads.
+#[test]
+fn the_census_groups_the_unread_by_construct_widest_first() {
+    let judged = |name: &str, judgement, note: &str| {
+        let mut one = Judged::new(name, name, judgement, note);
+        one.place = String::new();
+        one
+    };
+    let tally = Tally {
+        judged: vec![
+            judged(
+                "a.phpt",
+                Judgement::Unread,
+                "a `foreach` this compiler cannot read yet",
+            ),
+            judged(
+                "b.phpt",
+                Judgement::Unread,
+                "an `eval` this compiler cannot read yet",
+            ),
+            judged(
+                "c.phpt",
+                Judgement::Unread,
+                "a `foreach` this compiler cannot read yet",
+            ),
+            judged(
+                "d.phpt",
+                Judgement::Fail,
+                "a `foreach` this compiler cannot read yet",
+            ),
+            judged("e.phpt", Judgement::Skip, "the extension is not built"),
+            judged(
+                "f.phpt",
+                Judgement::Unread,
+                "a class this compiler cannot read yet",
+            ),
+        ],
+        found: 6,
+    };
+    let mut census = census::Census::default();
+    census.add(&tally);
+
+    // The fail's note reads like a refusal and is not one: four unread.
+    assert_eq!(census.unread(), 4);
+    let rows = census.rows();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows[0].construct,
+        "a `foreach` this compiler cannot read yet"
+    );
+    assert_eq!(
+        rows[0].tests,
+        vec!["a.phpt".to_owned(), "c.phpt".to_owned()]
+    );
+    // One test each, so the tie is the construct's own text: `a class`
+    // before `an `eval``.
+    assert_eq!(rows[1].construct, "a class this compiler cannot read yet");
+    assert_eq!(rows[2].construct, "an `eval` this compiler cannot read yet");
+
+    // A second subset folded in adds to the group it shares and makes a
+    // group of its own, which is what the lane's census is.
+    census.add(&Tally {
+        judged: vec![judged(
+            "g.phpt",
+            Judgement::Unread,
+            "an `eval` this compiler cannot read yet",
+        )],
+        found: 1,
+    });
+    let rows = census.rows();
+    assert_eq!(census.unread(), 5);
+    assert_eq!(rows[1].construct, "an `eval` this compiler cannot read yet");
+    assert_eq!(rows[1].tests.len(), 2);
+}
+
+/// A census with nothing in it is the answer a subset the compiler read
+/// through gives, and it says so rather than printing a heading over no
+/// rows.
+#[test]
+fn a_subset_with_no_unread_test_has_an_empty_census() {
+    let mut census = census::Census::default();
+    census.add(&Tally {
+        judged: vec![Judged::new("a.phpt", "a.phpt", Judgement::Pass, "")],
+        found: 1,
+    });
+    assert!(census.is_empty());
+    assert_eq!(census.unread(), 0);
+    assert!(census.rows().is_empty());
+}

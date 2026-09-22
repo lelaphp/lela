@@ -60,6 +60,7 @@
 //! item 17.
 
 mod adapter;
+mod census;
 pub(crate) mod file;
 
 use std::fs;
@@ -564,6 +565,11 @@ pub struct Ask {
     /// The binary the process adapter runs; without it, the engine's own
     /// where cargo puts it.
     pub engine: Option<PathBuf>,
+    /// Render the unread census beside the run and carry its groups on
+    /// each reading (#617). The lane, the verdicts and every count are
+    /// the same either way: this asks for one more rendering of what the
+    /// run already reached, never for a second run.
+    pub census: bool,
 }
 
 /// Run what was asked for: one reading per subset, each written by the
@@ -631,9 +637,28 @@ pub fn run(
         oracle_absent: oracle_absent.as_deref(),
     };
     let mut readings = Vec::new();
+    // The lane's census, folded over the subsets as each is run, so the
+    // widest construct of the whole corpus is one line at the end and not
+    // a sum a reader does by hand.
+    let mut lane = census::Census::default();
     for subset in &subsets {
         let tally = run_subset(&oracle, registry, subset, under)?;
-        readings.push(reading(&tally, root, manifest, &source, subset, under)?);
+        let mut reading = reading(&tally, root, manifest, &source, subset, under)?;
+        if ask.census {
+            let mut counted = census::Census::default();
+            counted.add(&tally);
+            counted.print(&subset.scope);
+            for row in counted.rows() {
+                reading.group(&row.construct, row.tests.len() as u64)?;
+            }
+            lane.add(&tally);
+        }
+        readings.push(reading);
+    }
+    // One subset's census is the census; a lane's is worth a second line
+    // only where there was more than one subset to fold.
+    if ask.census && subsets.len() > 1 {
+        lane.print("the lane");
     }
     Ok(readings)
 }

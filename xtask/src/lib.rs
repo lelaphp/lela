@@ -167,12 +167,7 @@ fn command_line() -> Result<()> {
         Command::Test { crates, staged } => {
             test::command(&root, &manifest, &store, &crates, staged)
         }
-        Command::Phpt {
-            subset,
-            full,
-            jit,
-            engine,
-        } => phpt_command(&root, &manifest, &store, subset, full, jit, engine),
+        Command::Phpt(ask) => phpt_command(&root, &manifest, &store, ask),
         Command::PortMap { tree } => port_map::command(&root, &manifest, &store, tree.as_deref()),
         Command::CompileIdentity(ask) => identity_command(&root, &manifest, &store, ask),
         Command::Crosscheck { ext } => crosscheck_command(&root, &manifest, &store, ext),
@@ -283,21 +278,14 @@ fn ticket_command(
 }
 
 /// `xtask phpt`: the subsets asked for, each run and each written.
-fn phpt_command(
-    root: &Path,
-    manifest: &Manifest,
-    store: &Store,
-    subset: Option<String>,
-    full: bool,
-    jit: Option<phpt::Lane>,
-    engine: Option<PathBuf>,
-) -> Result<()> {
+fn phpt_command(root: &Path, manifest: &Manifest, store: &Store, ask: cli::Phpt) -> Result<()> {
     let registry = Registry::load(root)?;
     let ask = phpt::Ask {
-        subset,
-        full,
-        lane: jit,
-        engine,
+        subset: ask.subset,
+        full: ask.full,
+        lane: ask.jit,
+        engine: ask.engine,
+        census: ask.census,
     };
     record(store, &phpt::run(root, manifest, &registry, &ask)?)
 }

@@ -225,24 +225,7 @@ pub(crate) enum Command {
     /// crate whose subset it is.
     ///
     /// Without `--subset`, the per-commit lane the manifest composes.
-    Phpt {
-        /// The subset: a crate by name (`php_engine`, `pcre`, `ext/pcre`),
-        /// whose subsets its `[[crate]]` row owns, or a directory of the
-        /// pinned php-src tree (`Zend/tests`). Without it, the per-commit
-        /// lane: every subset the manifest's rows own.
-        #[arg(long, value_name = "NAME", conflicts_with = "full")]
-        subset: Option<String>,
-        /// Every subset of the corpus: the nightly lane, which CI runs.
-        #[arg(long)]
-        full: bool,
-        /// The compiled tier's lane: the engine runs under `jit.mode`.
-        #[arg(long, value_name = "MODE")]
-        jit: Option<Lane>,
-        /// The binary the process adapter runs; without it, the engine's
-        /// own where cargo puts it.
-        #[arg(long, value_name = "PATH")]
-        engine: Option<PathBuf>,
-    },
+    Phpt(Phpt),
     /// Join the Mahout census to `api.lock`: every item `same`, `renamed`
     /// or `gone`, the rows the port has not taken as the number. One
     /// reading, at the crate the lock lives with.
@@ -369,6 +352,34 @@ pub(crate) struct Bench {
     /// owes.
     #[arg(long, value_name = "TEXT")]
     pub note: Option<String>,
+}
+
+/// What one `phpt` run is asked for, flattened onto the command so the
+/// dispatch has one line for the instrument as it has for every other.
+#[derive(Debug, Args)]
+pub(crate) struct Phpt {
+    /// The subset: a crate by name (`php_engine`, `pcre`, `ext/pcre`),
+    /// whose subsets its `[[crate]]` row owns, or a directory of the
+    /// pinned php-src tree (`Zend/tests`). Without it, the per-commit
+    /// lane: every subset the manifest's rows own.
+    #[arg(long, value_name = "NAME", conflicts_with = "full")]
+    pub subset: Option<String>,
+    /// Every subset of the corpus: the nightly lane, which CI runs.
+    #[arg(long)]
+    pub full: bool,
+    /// The compiled tier's lane: the engine runs under `jit.mode`.
+    #[arg(long, value_name = "MODE")]
+    pub jit: Option<Lane>,
+    /// The binary the process adapter runs; without it, the engine's own
+    /// where cargo puts it.
+    #[arg(long, value_name = "PATH")]
+    pub engine: Option<PathBuf>,
+    /// The unread census beside the run: the tests the compiler refused,
+    /// grouped by the construct it refused them for, the widest first,
+    /// and carried on each reading. One more rendering of the same lane;
+    /// nothing runs twice and no count changes.
+    #[arg(long)]
+    pub census: bool,
 }
 
 /// What one `compile-identity` run is asked for, flattened onto the

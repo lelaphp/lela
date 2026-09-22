@@ -193,6 +193,7 @@ reading::Reading::count
 reading::Reading::for_crate
 reading::Reading::for_scope
 reading::Reading::from_json
+reading::Reading::group
 reading::Reading::new
 reading::Reading::stamped_over
 reading::Reading::to_json
