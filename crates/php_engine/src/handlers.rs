@@ -4583,11 +4583,18 @@ fn write_place(
     }
 }
 
-/// `ZEND_FETCH_DIM_REF` and `ZEND_FETCH_DIM_DIM`
-/// (`Z/Zend/zend_compile.h:1095`), the two `extended_value` bits the
+/// `ZEND_FETCH_DIM_REF`, `ZEND_FETCH_DIM_DIM` and `ZEND_FETCH_DIM_OBJ`
+/// (`Z/Zend/zend_compile.h:1095`), the `extended_value` values the
 /// compiler puts on a `FETCH_DIM_W`: what `zend_wrong_string_offset_error`
-/// reads to pick its sentence for a string under a write.
+/// reads to pick its sentence for a string under a write
+/// (`Z/Zend/zend_execute.c:1779`).
 const FETCH_DIM_REF: u32 = 1;
+
+/// `ZEND_FETCH_DIM_OBJ` (`Z/Zend/zend_compile.h:1097`), the value
+/// `zend_delayed_compile_prop` leaves on the `FETCH_DIM_W` under a
+/// `->`: `$s[0]->p = 1` over a string is `Cannot use string offset as
+/// an object` where `$s[0][1] = 1` is the array's sentence.
+const FETCH_DIM_OBJ: u32 = 3;
 
 /// What the container of a dimension write turns out to be, the three
 /// `zend_fetch_dimension_address` and `ZEND_ASSIGN_DIM` both have a body
@@ -4872,7 +4879,8 @@ fn write_entry(
 /// `[] operator not supported for strings`, and a dimension is
 /// `zend_check_string_offset`'s diagnostics and then
 /// `zend_wrong_string_offset_error`, whose sentence the opline's
-/// `ZEND_FETCH_DIM_REF` or `ZEND_FETCH_DIM_DIM` picks. An object is
+/// `ZEND_FETCH_DIM_REF`, `ZEND_FETCH_DIM_DIM` or `ZEND_FETCH_DIM_OBJ`
+/// picks — a reference, an array or an object over the offset. An object is
 /// `offsetGet` under `BP_VAR_W`: what it returned is written into the
 /// `VAR` as a value and not an `IS_INDIRECT`, with php's notice
 /// `Indirect modification of overloaded element of C has no effect`
@@ -4905,6 +4913,17 @@ fn write_entry(
 /// ```
 /// ```expect exit=255
 /// Fatal error: Uncaught Error: Cannot use string offset as an array in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+///
+/// ```php
+/// $s = "abc";
+/// $s[0]->p = "x";
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Cannot use string offset as an object in %s:3
 /// Stack trace:
 /// #0 {main}
 ///   thrown in %s on line 3
@@ -5071,6 +5090,11 @@ fn fetch_dim_place(
                     req,
                     "Error",
                     "Cannot create references to/from string offsets",
+                ),
+                Ok(_) if op.extended_value == FETCH_DIM_OBJ => crate::api::raising::throw(
+                    req,
+                    "Error",
+                    "Cannot use string offset as an object",
                 ),
                 Ok(_) => {
                     crate::api::raising::throw(req, "Error", "Cannot use string offset as an array")

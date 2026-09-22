@@ -541,6 +541,13 @@ const FETCH_DIM_REF: u32 = 1;
 /// as an array` the same way.
 const FETCH_DIM_DIM: u32 = 2;
 
+/// `ZEND_FETCH_DIM_OBJ` (`Z/Zend/zend_compile.h:1097`), on the last
+/// `FETCH_DIM_W` of the chain a `->` stands on, where a dimension over
+/// it would carry `ZEND_FETCH_DIM_DIM`: `Cannot use string offset as an
+/// object` in place of that one's array
+/// (`Z/Zend/zend_execute.c:1786`).
+const FETCH_DIM_OBJ: u32 = 3;
+
 /// One link of a dimension chain as `zend_delayed_compile_dim` leaves
 /// it: the dimension's operand, `UNUSED` for the `[]` of an append, and
 /// the `VAR` or temporary the opline writes.
@@ -592,19 +599,25 @@ struct PropLink {
     slots: u32,
 }
 
-/// What a chain of dimensions stands on, php's
-/// `zend_delayed_compile_var` over the node under the innermost `[`: an
-/// operand settled where the base was written, which is a variable's CV
-/// and what a call and every expression php compiles in place leave;
-/// or one of the two fetches php delays, a property's and a `static`
-/// property's, whose opline is laid down after the dimensions have
-/// compiled, so `$o->p[f()]` calls `f` before it fetches `p`.
-#[derive(Clone, Copy)]
+/// What a chain of dimensions or of property fetches stands on, php's
+/// `zend_delayed_compile_var` over the node under the innermost `[` or
+/// `->`: an operand settled where the base was written, which is a
+/// variable's CV, `$this`, the `VAR` a call was separated into and what
+/// every expression php compiles in place leaves; or one of the fetches
+/// php delays, a dimension's, a property's and a `static` property's,
+/// whose oplines are laid down after the chain over them has compiled,
+/// so `$o->p[f()]` calls `f` before it fetches `p`.
 enum Base {
     Settled((OperandKind, u32)),
+    /// A chain of dimensions, `zend_delayed_compile_dim` over a node
+    /// under a `->`: `$a[0]->p = 1` fetches `$a[0]` for writing, where
+    /// an object compiled in place would read it into a temporary.
+    Dim {
+        container: Box<Base>,
+        links: Vec<DimLink>,
+    },
     Prop {
-        op1_type: OperandKind,
-        op1: u32,
+        object: Box<Base>,
         name_at: u32,
         out: u32,
         slots: u32,
@@ -615,6 +628,18 @@ enum Base {
         out: u32,
         slots: u32,
     },
+}
+
+/// What stands over the last held-back opline of a base, the compile
+/// function that patches it once it has it back:
+/// `zend_delayed_compile_dim`, which marks a dimension under it
+/// `ZEND_FETCH_DIM_DIM` and a property under it `ZEND_FETCH_DIM_WRITE`;
+/// or `zend_delayed_compile_prop`, which marks a dimension under it
+/// `ZEND_FETCH_DIM_OBJ` and leaves a property alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Over {
+    Dim,
+    Obj,
 }
 
 /// One link of a chain compiled under `BP_VAR_IS`, the opline
@@ -5881,7 +5906,7 @@ impl Emit<'_> {
         let Some((last, fetches)) = links.split_last() else {
             return Err(self.fatal("a dimension with no dimension"));
         };
-        let (op1_type, op1) = self.dim_fetches(container, fetches, Fetch::Is);
+        let (op1_type, op1) = self.dim_fetches(container, fetches, Fetch::Is, Over::Dim);
         self.push(Opline {
             opcode: Opcode::IssetIsemptyDimObj,
             op1_type,
@@ -6553,7 +6578,7 @@ impl Emit<'_> {
         let Some((last, fetches)) = links.split_last() else {
             return Err(self.fatal("a dimension with no dimension"));
         };
-        let (kind, at) = self.dim_fetches(container, fetches, Fetch::Write);
+        let (kind, at) = self.dim_fetches(container, fetches, Fetch::Write, Over::Dim);
         self.push(Opline {
             opcode: Opcode::FetchDimW,
             op1_type: kind,
@@ -6678,7 +6703,7 @@ impl Emit<'_> {
         let Some((last, fetches)) = links.split_last() else {
             return Err(self.fatal("a dimension assignment with no dimension"));
         };
-        let (op1_type, op1) = self.dim_fetches(container, fetches, Fetch::Write);
+        let (op1_type, op1) = self.dim_fetches(container, fetches, Fetch::Write, Over::Dim);
         self.line = line;
         self.push(Opline {
             opcode: Opcode::AssignDim,
@@ -6708,16 +6733,8 @@ impl Emit<'_> {
     /// the append under a write and php's `Cannot use [] for reading`
     /// under a read.
     ///
-    /// The container is a plain variable's CV, or, under a read, one of
-    /// the bases `zend_delayed_compile_var` compiles where it stands: a
-    /// string or an array written out, a parenthesised expression,
-    /// `$this`, a call. A property and a `static` property are the two
-    /// it delays, so their fetch stands after the dimensions'
-    /// oplines and not before them (`$o->p[f()]` calls `f` first); that
-    /// delay is #451's and both are refused here until it lands. Under a
-    /// write php's `zend_ensure_writable_variable` takes only a
-    /// variable, so everything else is refused there, which is where php
-    /// raises `Cannot use temporary expression in write context`.
+    /// The container is [`Self::delayed_var`]'s, php's
+    /// `zend_delayed_compile_var` over the node under the innermost `[`.
     ///
     /// ```php
     /// var_dump("ab"[0], [1, 2][1], "ab"[9] ?? 'd');
@@ -6727,13 +6744,11 @@ impl Emit<'_> {
     /// int(2)
     /// string(1) "d"
     /// ```
-    #[allow(clippy::too_many_lines)]
     fn dim_chain(
         &mut self,
         target: tree::Expr,
         fetch: Fetch,
     ) -> Result<(Base, Vec<DimLink>), CompileError> {
-        let line = self.line;
         let mut dimensions = Vec::new();
         let mut base = self.peel(target);
         while let tree::Expr::SubscriptExpr(id) = base {
@@ -6741,7 +6756,57 @@ impl Emit<'_> {
             dimensions.push(node.index);
             base = self.peel(node.base);
         }
-        let container = match (base, fetch) {
+        let container = self.delayed_var(base, fetch)?;
+        let mut links = Vec::with_capacity(dimensions.len());
+        for index in dimensions.clone().iter().rev() {
+            let (kind, at) = match index {
+                Some(index) => {
+                    let value = self.expr(*index)?;
+                    self.dim_operand(value)
+                }
+                // `zend_delayed_compile_dim`: the append names no
+                // element to read, under `BP_VAR_R` and `BP_VAR_IS` alike.
+                None if matches!(fetch, Fetch::Read | Fetch::Is) => {
+                    return Err(self.compile_error("Cannot use [] for reading"));
+                }
+                None => (OperandKind::Unused, 0),
+            };
+            links.push(DimLink {
+                kind,
+                at,
+                out: self.temporary(),
+            });
+        }
+        Ok((container, links))
+    }
+
+    /// `zend_delayed_compile_var` (`Z/Zend/zend_compile.c:12019`), the
+    /// node a chain of dimensions or of property fetches stands on,
+    /// compiled under `fetch`: a plain variable is its CV
+    /// (`zend_compile_simple_var` with `delayed`, which lays no opline
+    /// down), a dimension and a property are the fetches php holds back,
+    /// so their oplines stand after the chain over them has compiled
+    /// (`$o->p[f()]` calls `f` before it fetches `p`), and everything
+    /// else is `zend_compile_var` where it stands.
+    ///
+    /// Under a write that last group is `zend_compile_var`'s default
+    /// arm, `Cannot use temporary expression in write context`, but for
+    /// `$this`, which is `FETCH_THIS` into a `VAR`, and a call, which
+    /// takes `SEPARATE` over the `VAR` it returned into
+    /// (`zend_separate_if_call_and_write`), so the write lands in a
+    /// value of the request's own and not in one the callee still holds;
+    /// a call php answered in a temporary has no `VAR` to separate and
+    /// is its own compile error.
+    ///
+    /// php checks the stack here as it does at the top of
+    /// `zend_compile_expr`, since a chain of `[` and `->` recurses one
+    /// native frame per link.
+    #[allow(clippy::too_many_lines)]
+    fn delayed_var(&mut self, base: tree::Expr, fetch: Fetch) -> Result<Base, CompileError> {
+        self.check_stack()?;
+        let line = self.line;
+        let base = self.peel(base);
+        Ok(match (base, fetch) {
             (tree::Expr::SimpleVarExpr(id), _)
                 if matches!(self.simple_var_of(id, line)?, SimpleVar::Cv(_)) =>
             {
@@ -6750,21 +6815,31 @@ impl Emit<'_> {
                 };
                 Base::Settled((OperandKind::Cv, self.lookup_cv(&name)))
             }
-            // `zend_delayed_compile_prop`: the receiver is compiled
-            // where it stands and the fetch itself is held back, its
-            // temporary, its name and its three cache slots taken here
-            // and its opline laid down by [`Self::dim_fetches`].
+            // `zend_delayed_compile_dim`: the chain's own container and
+            // its links, each dimension compiled where it stands and
+            // every opline held back for [`Self::base_fetch`].
+            (tree::Expr::SubscriptExpr(_), _) => {
+                let (container, links) = self.dim_chain(base, fetch)?;
+                Base::Dim {
+                    container: Box::new(container),
+                    links,
+                }
+            }
+            // `zend_delayed_compile_prop`: the object under the `->` is
+            // itself `zend_delayed_compile_var`'s, and the fetch is held
+            // back, its temporary, its name and its three cache slots
+            // taken here and its opline laid down by
+            // [`Self::base_fetch`].
             (tree::Expr::MemberAccessExpr(id), _) => {
                 let name = self.member_name_of(id, line)?;
                 let object = self.parsed.tree[id].obj;
-                let (op1_type, op1) = self.receiver(object)?;
+                let object = self.delayed_object(object, fetch)?;
                 let name = self.string(&name)?;
                 let name_at = self.literal(name);
                 let out = self.temporary();
                 let slots = self.cache_slots(3);
                 Base::Prop {
-                    op1_type,
-                    op1,
+                    object: Box::new(object),
                     name_at,
                     out,
                     slots,
@@ -6805,10 +6880,8 @@ impl Emit<'_> {
                 Base::Settled(self.operand(value))
             }
             // `zend_separate_if_call_and_write`: a call under a write
-            // is `SEPARATE` over the `VAR` it returned into, so the
-            // write lands in a value of the request's own and not in
-            // one the callee still holds; a call php answered in a
-            // temporary has no `VAR` to separate.
+            // is `SEPARATE` over the `VAR` it returned into; a call php
+            // answered in a temporary has no `VAR` to separate.
             (_, Fetch::Write | Fetch::Rw) if self.is_call(base) => {
                 let returned = self.expr(base)?;
                 let Where::Returned(at) = returned else {
@@ -6828,8 +6901,9 @@ impl Emit<'_> {
             // `zend_compile_simple_var`'s `is_this_fetch` arm under a
             // write: `FETCH_THIS` into a `VAR`, which fails at run time
             // where no object is in scope. The `UNUSED` receiver a
-            // property fetch takes is ruled out here, since no
-            // dimension can stand on it.
+            // property fetch takes is `zend_delayed_compile_prop`'s own
+            // arm and stands above this one
+            // ([`Self::delayed_object`]).
             (_, Fetch::Write | Fetch::Rw) if self.is_this(base) => {
                 let this = self.fetch_this(OperandKind::Var);
                 Base::Settled(self.operand(this))
@@ -6838,48 +6912,52 @@ impl Emit<'_> {
             (_, Fetch::Write | Fetch::Rw) => {
                 return Err(self.compile_error("Cannot use temporary expression in write context"));
             }
-        };
-        let mut links = Vec::with_capacity(dimensions.len());
-        for index in dimensions.clone().iter().rev() {
-            let (kind, at) = match index {
-                Some(index) => {
-                    let value = self.expr(*index)?;
-                    self.dim_operand(value)
-                }
-                // `zend_delayed_compile_dim`: the append names no
-                // element to read, under `BP_VAR_R` and `BP_VAR_IS` alike.
-                None if matches!(fetch, Fetch::Read | Fetch::Is) => {
-                    return Err(self.compile_error("Cannot use [] for reading"));
-                }
-                None => (OperandKind::Unused, 0),
-            };
-            links.push(DimLink {
-                kind,
-                at,
-                out: self.temporary(),
-            });
+        })
+    }
+
+    /// `zend_delayed_compile_prop`'s first step, the object under a
+    /// `->`: `$this` inside a method is `is_this_fetch`'s `IS_UNUSED`
+    /// receiver, which no opline fetches, and everything else is
+    /// [`Self::delayed_var`]'s, so a dimension under a property write
+    /// is `FETCH_DIM_W` and not the read's temporary.
+    fn delayed_object(&mut self, object: tree::Expr, fetch: Fetch) -> Result<Base, CompileError> {
+        if self.is_this(object) {
+            return Ok(Base::Settled(self.receiver(object)?));
         }
-        Ok((container, links))
+        self.delayed_var(object, fetch)
     }
 
     /// The fetch oplines of a chain, each the container of the next, and
     /// the operand the opline after them reads: `FETCH_DIM_W` into a
     /// `VAR` carrying `ZEND_FETCH_DIM_DIM` under a write, `FETCH_DIM_R`
-    /// into a temporary under a read.
+    /// into a temporary under a read. What stands over the last of them
+    /// is `over`, the compile function that patches it.
     fn dim_fetches(
         &mut self,
         container: Base,
         fetches: &[DimLink],
         fetch: Fetch,
+        over: Over,
     ) -> (OperandKind, u32) {
-        let (opcode, out_type, extended_value) = match fetch {
-            Fetch::Read => (Opcode::FetchDimR, OperandKind::Tmp, 0),
-            Fetch::Write => (Opcode::FetchDimW, OperandKind::Var, FETCH_DIM_DIM),
-            Fetch::Rw => (Opcode::FetchDimRw, OperandKind::Var, FETCH_DIM_DIM),
-            Fetch::Is => (Opcode::FetchDimIs, OperandKind::Tmp, 0),
+        let (opcode, out_type) = match fetch {
+            Fetch::Read => (Opcode::FetchDimR, OperandKind::Tmp),
+            Fetch::Write => (Opcode::FetchDimW, OperandKind::Var),
+            Fetch::Rw => (Opcode::FetchDimRw, OperandKind::Var),
+            Fetch::Is => (Opcode::FetchDimIs, OperandKind::Tmp),
         };
-        let (mut op1_type, mut op1) = self.base_fetch(container, fetch);
-        for link in fetches {
+        let under = if fetches.is_empty() { over } else { Over::Dim };
+        let (mut op1_type, mut op1) = self.base_fetch(container, fetch, under);
+        for (at, link) in fetches.iter().enumerate() {
+            // Every link but the last has a dimension over it, and the
+            // last one has what `over` names; a read patches nothing,
+            // since `zend_adjust_for_fetch_type` left `FETCH_DIM_R` and
+            // `FETCH_DIM_IS` with no `extended_value` at all.
+            let last = at + 1 == fetches.len();
+            let extended_value = match (fetch, last.then_some(over)) {
+                (Fetch::Read | Fetch::Is, _) => 0,
+                (_, Some(Over::Obj)) => FETCH_DIM_OBJ,
+                (_, _) => FETCH_DIM_DIM,
+            };
             self.push(Opline {
                 opcode,
                 op1_type,
@@ -6897,14 +6975,15 @@ impl Emit<'_> {
         (op1_type, op1)
     }
 
-    /// The base's own opline, laid down at `zend_delayed_compile_end`
+    /// The base's own oplines, laid down at `zend_delayed_compile_end`
     /// before the chain's own: nothing where the base settled where it
-    /// stood, and the one fetch php delayed where it did. Under a write
-    /// the fetch is the `_W` opcode into a `VAR` carrying
-    /// `ZEND_FETCH_DIM_WRITE`, the bit `zend_delayed_compile_dim` adds
-    /// to the cache slots; under a read it is the `_R` opcode into a
-    /// temporary (`zend_adjust_for_fetch_type`).
-    fn base_fetch(&mut self, container: Base, fetch: Fetch) -> (OperandKind, u32) {
+    /// stood, and the fetches php delayed where it did, innermost first.
+    /// Under a write a property's fetch is the `_W` opcode into a `VAR`
+    /// carrying `ZEND_FETCH_DIM_WRITE`, the bit
+    /// `zend_delayed_compile_dim` adds to the cache slots where a
+    /// dimension stands over it; under a read it is the `_R` opcode into
+    /// a temporary (`zend_adjust_for_fetch_type`).
+    fn base_fetch(&mut self, container: Base, fetch: Fetch, over: Over) -> (OperandKind, u32) {
         let write = matches!(fetch, Fetch::Write | Fetch::Rw);
         let out_type = if write {
             OperandKind::Var
@@ -6913,11 +6992,11 @@ impl Emit<'_> {
         };
         // `if (type == BP_VAR_W && (opline->opcode == ZEND_FETCH_STATIC_PROP_W
         // || opline->opcode == ZEND_FETCH_OBJ_W)) opline->extended_value |=
-        // ZEND_FETCH_DIM_WRITE`: the bit is `BP_VAR_W`'s alone, so a
-        // property under a `BP_VAR_RW` chain carries the slots and
-        // nothing else.
+        // ZEND_FETCH_DIM_WRITE`: the bit is `zend_delayed_compile_dim`'s
+        // and `BP_VAR_W`'s alone, so a property under a `->` or under a
+        // `BP_VAR_RW` chain carries the slots and nothing else.
         let extended_value = |slots: u32| {
-            if matches!(fetch, Fetch::Write) {
+            if matches!(fetch, Fetch::Write) && over == Over::Dim {
                 slots | FETCH_DIM_WRITE
             } else {
                 slots
@@ -6925,13 +7004,18 @@ impl Emit<'_> {
         };
         match container {
             Base::Settled(pair) => pair,
+            // `zend_delayed_compile_dim`'s own oplines, every link of
+            // the chain laid down here: the one the chain over this
+            // base reads is the last of them, and it is the one `over`
+            // patches.
+            Base::Dim { container, links } => self.dim_fetches(*container, &links, fetch, over),
             Base::Prop {
-                op1_type,
-                op1,
+                object,
                 name_at,
                 out,
                 slots,
             } => {
+                let (op1_type, op1) = self.base_fetch(*object, fetch, Over::Obj);
                 self.push(Opline {
                     opcode: match fetch {
                         Fetch::Read => Opcode::FetchObjR,
@@ -6984,7 +7068,7 @@ impl Emit<'_> {
     /// one's temporary.
     fn dim_read(&mut self, target: tree::Expr) -> Result<Where, CompileError> {
         let (container, links) = self.dim_chain(target, Fetch::Read)?;
-        match self.dim_fetches(container, &links, Fetch::Read) {
+        match self.dim_fetches(container, &links, Fetch::Read, Over::Dim) {
             (OperandKind::Tmp, at) => Ok(Where::Temporary(at)),
             _ => Err(self.fatal("a dimension read with no dimension")),
         }
@@ -7063,21 +7147,40 @@ impl Emit<'_> {
     /// `zend_delayed_compile_end` with the last of them turned into
     /// `ASSIGN_OBJ` writing a temporary, and `OP_DATA` carrying the value
     /// (`zend_emit_op_data`). What is delayed is the chain of property
-    /// fetches alone: the receiver under the chain is compiled where it
-    /// stands, before the value, as `zend_delayed_compile_var` compiles
-    /// a CV or `$this` (`FETCH_THIS` into a `VAR`); each fetch but the
-    /// last is `FETCH_OBJ_W` into a `VAR` (`zend_adjust_for_fetch_type`
-    /// under `BP_VAR_W`), its name one constant in `op2` and three cache
+    /// fetches and the base under it: the base is
+    /// [`Self::delayed_object`]'s, so a CV settles where it stands, a
+    /// `$this` inside a method is the `IS_UNUSED` receiver, a call takes
+    /// `SEPARATE` over its own `VAR` (`zend_separate_if_call_and_write`)
+    /// before the delayed fetches, and a dimension is a `FETCH_DIM_W`
+    /// held back with them, carrying `ZEND_FETCH_DIM_OBJ` as the last
+    /// link under a `->`. Each fetch of the chain but the last is
+    /// `FETCH_OBJ_W` into a `VAR` (`zend_adjust_for_fetch_type` under
+    /// `BP_VAR_W`), its name one constant in `op2` and three cache
     /// slots in `extended_value`, and its `VAR` is numbered, its name
     /// added and its slots taken when the fetch is delayed, before the
-    /// value's own, which is the order php's temporaries come in. A
-    /// call under the chain is compiled where it stands and takes
-    /// `SEPARATE` over its own `VAR` (`zend_separate_if_call_and_write`)
-    /// before the delayed fetches, so the write lands in a value of the
-    /// request's own; a call php answered in a temporary has no `VAR` to
-    /// separate and is its own compile error, and anything else under
-    /// the chain is php's compile error for a temporary expression in a
-    /// write (`zend_compile_var`'s default arm).
+    /// value's own, which is the order php's temporaries come in.
+    ///
+    /// ```php
+    /// $a = [new stdClass];
+    /// $a[0]->p = 1;
+    /// $a[0]->o = new stdClass;
+    /// $a[0]->o->q = 2;
+    /// var_dump($a);
+    /// ```
+    /// ```expect
+    /// array(1) {
+    ///   [0]=>
+    ///   object(stdClass)#1 (2) {
+    ///     ["p"]=>
+    ///     int(1)
+    ///     ["o"]=>
+    ///     object(stdClass)#2 (1) {
+    ///       ["q"]=>
+    ///       int(2)
+    ///     }
+    ///   }
+    /// }
+    /// ```
     fn assign_prop(
         &mut self,
         object: tree::Expr,
@@ -7091,34 +7194,7 @@ impl Emit<'_> {
             names.push(self.member_name_of(id, line)?);
             base = self.peel(self.parsed.tree[id].obj);
         }
-        let (mut op1_type, mut op1) = match base {
-            tree::Expr::SimpleVarExpr(_) => self.receiver(base)?,
-            _ if self.is_this(base) => self.receiver(base)?,
-            // `zend_separate_if_call_and_write`, as
-            // [`Self::dim_chain`] takes it at the base of a chain of
-            // dimensions: the call is compiled where it stands and
-            // `SEPARATE` reads and writes the one `VAR` it returned
-            // into, before the fetches the chain delays.
-            _ if self.is_call(base) => {
-                let returned = self.expr(base)?;
-                let Where::Returned(at) = returned else {
-                    return Err(self
-                        .compile_error("Cannot use result of built-in function in write context"));
-                };
-                self.push(Opline {
-                    opcode: Opcode::Separate,
-                    op1_type: OperandKind::Var,
-                    op1: at,
-                    out_type: OperandKind::Var,
-                    out: at,
-                    ..Opline::default()
-                });
-                (OperandKind::Var, at)
-            }
-            _ => {
-                return Err(self.compile_error("Cannot use temporary expression in write context"));
-            }
-        };
+        let base = self.delayed_object(base, Fetch::Write)?;
         let mut links = Vec::with_capacity(names.len());
         for name in names.clone().iter().rev() {
             let name = self.string(name)?;
@@ -7135,6 +7211,7 @@ impl Emit<'_> {
             return Err(self.fatal("a property assignment with no property"));
         };
         self.line = line;
+        let (mut op1_type, mut op1) = self.base_fetch(base, Fetch::Write, Over::Obj);
         for &(name_at, out, slots) in fetches {
             self.push(Opline {
                 opcode: Opcode::FetchObjW,
@@ -7251,7 +7328,7 @@ impl Emit<'_> {
         let line = self.line;
         let value = self.assigned_value(target, value)?;
         let (data_type, data) = self.operand(value);
-        let (op1_type, op1) = self.dim_fetches(container, fetches, Fetch::Rw);
+        let (op1_type, op1) = self.dim_fetches(container, fetches, Fetch::Rw, Over::Dim);
         self.line = line;
         self.push(Opline {
             opcode: Opcode::AssignDimOp,
@@ -7283,9 +7360,18 @@ impl Emit<'_> {
     /// ([`Self::assign_static_prop_op`]).
     ///
     /// A property under a property is php's `FETCH_OBJ_RW` for every
-    /// fetch but the last, which no handler serves yet, so it is
-    /// refused here rather than compiled to an opline the engine stops
-    /// on (#504).
+    /// fetch but the last, which [`Self::prop_chain`] holds back with
+    /// the rest of the chain.
+    ///
+    /// ```php
+    /// $a = ['k' => [1 => new stdClass]];
+    /// $a['k'][1]->p = 'a';
+    /// $a['k'][1]->p .= 'x';
+    /// var_dump($a['k'][1]->p);
+    /// ```
+    /// ```expect
+    /// string(2) "ax"
+    /// ```
     fn assign_obj_op(
         &mut self,
         object: tree::Expr,
@@ -7331,11 +7417,10 @@ impl Emit<'_> {
     /// taking its temporary and its three cache slots here and its
     /// opline laid down by [`Self::prop_fetches`] after the value, so
     /// `$o->p->q += f()` calls `f` before it fetches `p`, as php's
-    /// delayed emission does.
-    fn prop_chain(
-        &mut self,
-        object: tree::Expr,
-    ) -> Result<((OperandKind, u32), Vec<PropLink>), CompileError> {
+    /// delayed emission does. The receiver is
+    /// [`Self::delayed_object`]'s, so a dimension under it is
+    /// `FETCH_DIM_RW` held back with the rest (`$a[0]->p += 1`).
+    fn prop_chain(&mut self, object: tree::Expr) -> Result<(Base, Vec<PropLink>), CompileError> {
         let line = self.line;
         let mut names = Vec::new();
         let mut base = self.peel(object);
@@ -7343,12 +7428,7 @@ impl Emit<'_> {
             names.push(self.member_name_of(id, line)?);
             base = self.peel(self.parsed.tree[id].obj);
         }
-        if !matches!(base, tree::Expr::SimpleVarExpr(_)) {
-            return Err(self.fatal(
-                "a compound assignment to a property over what is no variable this compiler cannot read yet",
-            ));
-        }
-        let receiver = self.receiver(base)?;
+        let receiver = self.delayed_object(base, Fetch::Rw)?;
         let mut links = Vec::with_capacity(names.len());
         for name in names.clone().iter().rev() {
             let name = self.string(name)?;
@@ -7367,12 +7447,8 @@ impl Emit<'_> {
     /// The held-back `FETCH_OBJ_RW` oplines of a property chain, laid
     /// down at `zend_delayed_compile_end` in the order they were taken,
     /// each over the `VAR` the one under it left.
-    fn prop_fetches(
-        &mut self,
-        receiver: (OperandKind, u32),
-        links: &[PropLink],
-    ) -> (OperandKind, u32) {
-        let (mut op1_type, mut op1) = receiver;
+    fn prop_fetches(&mut self, receiver: Base, links: &[PropLink]) -> (OperandKind, u32) {
+        let (mut op1_type, mut op1) = self.base_fetch(receiver, Fetch::Rw, Over::Obj);
         for link in links {
             self.push(Opline {
                 opcode: Opcode::FetchObjRw,
@@ -8220,7 +8296,7 @@ impl Emit<'_> {
                 let (kind, at) = self.dim_operand(index);
                 let out = self.temporary();
                 let link = DimLink { kind, at, out };
-                match self.dim_fetches(container, &[link], Fetch::Read) {
+                match self.dim_fetches(container, &[link], Fetch::Read, Over::Dim) {
                     (OperandKind::Tmp, at) => Ok(Where::Temporary(at)),
                     _ => Err(self.fatal("a dimension read with no dimension")),
                 }
