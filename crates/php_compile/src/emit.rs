@@ -1707,9 +1707,17 @@ impl Emit<'_> {
         self.literal_of(expr).is_some()
     }
 
-    /// `zend_compile_stmt_list` over a block's statements.
+    /// `zend_compile_stmt_list` over a block's statements, entered as
+    /// `zend_compile_stmt` enters one: `CG(zend_lineno) = ast->lineno`
+    /// first (`Z/Zend/zend_compile.c:11692`), the `{`'s line, which each
+    /// statement then sets to its own. A block that holds no statement
+    /// sets it and emits nothing, so what is emitted after the block —
+    /// the `JMP` back of a `for` with no condition, a `FAST_RET` — stands
+    /// on the `{`'s line, which is [`Self::for`]'s witnesses.
     fn block(&mut self, id: NodeId<Block>) -> Result<(), CompileError> {
-        let stmts = &self.parsed.tree[id].stmts;
+        let node = &self.parsed.tree[id];
+        self.line = node.line();
+        let stmts = &node.stmts;
         self.statements(stmts)
     }
 
@@ -1727,7 +1735,9 @@ impl Emit<'_> {
             (Some(Stmt::Block(block)), _) => self.block(block),
             (Some(stmt), _) => self.statements(&[stmt]),
             (None, Some(list)) => {
-                let stmts = &self.parsed.tree[list].stmts;
+                let node = &self.parsed.tree[list];
+                self.line = node.line();
+                let stmts = &node.stmts;
                 self.statements(stmts)
             }
             (None, None) => Ok(()),
@@ -3633,15 +3643,56 @@ impl Emit<'_> {
 
     /// `zend_compile_for`: the initialisers, a `JMP` forward to the
     /// condition, the body, the step expressions, then the condition
-    /// as a `JMPNZ` back to the body's first opline. The oplines of the
-    /// header carry the statement's line, as the body's carry theirs.
+    /// as a `JMPNZ` back to the body's first opline.
+    ///
+    /// **The jump back stands at the line the body left.**
+    /// `zend_compile_for` (`Z/Zend/zend_compile.c:6060-6091`) never
+    /// writes `CG(zend_lineno)` itself: the header's oplines carry the
+    /// statement's line because `zend_compile_expr` sets it from each
+    /// expression it compiles, and where a list is empty nothing is
+    /// compiled and nothing is set. So `for (;;)`, whose condition list
+    /// is empty, emits its `JMP` back at whatever `zend_compile_stmt`
+    /// left after the body, which is the body's own line where the body
+    /// emitted no opline at all. The execution timer names that line:
+    ///
+    /// ```php
+    /// set_time_limit(1); for (;;)
+    /// { /*
+    ///
+    /// */
+    /// }
+    /// ```
+    /// ```expect exit=255 wall=2s
+    /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 3
+    /// ```
+    ///
+    /// A `finally` clause leaves its own block's line the same way, the
+    /// `FAST_RET` over an empty body emitted there:
+    ///
+    /// ```php
+    /// set_time_limit(1); for (;;) try {} finally
+    /// { /*
+    ///
+    /// */
+    /// }
+    /// ```
+    /// ```expect exit=255 wall=2s
+    /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 3
+    /// ```
+    ///
+    /// The third shape #601 measured, `for (;;) if ($x) ; else\n{ … }`,
+    /// is not a witness: its loop holds two jumps, the `JMPZ` of the
+    /// condition on line 2 and the jump back on line 3, both of which
+    /// test the interrupt, so the line the timer names is whichever of
+    /// the two the interrupt fell on. The pinned oracle prints line 2 on
+    /// some runs and line 3 on others, so what the tree gives the `else`
+    /// arm is held in `php_syntax`'s `tests/line.rs` instead.
     fn r#for(&mut self, id: NodeId<tree::ForStmt>) -> Result<(), CompileError> {
         let node = &self.parsed.tree[id];
         let tree = &self.parsed.tree;
         let init = node.init.map_or(&[][..], |init| &tree[init].exprs[..]);
         let cond = node.cond.map_or(&[][..], |cond| &tree[cond].exprs[..]);
         let step = node.step.map_or(&[][..], |step| &tree[step].exprs[..]);
-        let line = self.line;
         let init = self.expr_list(init)?;
         self.do_free(init);
         let jump = self.push(Opline {
@@ -3652,7 +3703,6 @@ impl Emit<'_> {
         let start = self.next();
         self.compound(node.body, node.stmt_list)?;
         let continue_at = self.next();
-        self.line = line;
         let step = self.expr_list(step)?;
         self.do_free(step);
         self.update_jump_target_to_next(jump);

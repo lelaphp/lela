@@ -1,10 +1,30 @@
 //! A node's `line` against what the pinned php printed for the same
-//! program, for the programs the linked engine cannot yet serve as a
-//! witness (design §4.9, ledger 27; #601, #603). Each program is written
-//! as the witness recipe runs one, `<?php` on line 1 and the code from
-//! line 2, and the number asserted is the one the oracle printed on
-//! #601, probed again at 8.5.9 on 2026-09-21; `line.rs`'s own witnesses
-//! hold the two the engine serves through the oracle.
+//! program, for the programs the linked engine cannot serve as a witness
+//! (design §4.9, ledger 27; #601, #603, #606). Each program is written as
+//! the witness recipe runs one, `<?php` on line 1 and the code from line
+//! 2, and the number asserted is the one the oracle printed on #601,
+//! probed again at 8.5.9 on 2026-09-22. What the engine now serves is a
+//! `php` fence beside the rule it exercises, in `src/tree/line.rs` and,
+//! for the jump back of a `for`, in `php_compile`'s `emit`; what is left
+//! here is left for one of four reasons, each named on the test that
+//! carries it and each measured under the linked engine:
+//!
+//! 1. **`declare(ticks=1)`**, which the two programs that observe a line
+//!    through `register_tick_function` need: the engine refuses the
+//!    statement, "a `declare(ticks)` of a count this compiler cannot read
+//!    yet", and #499 is where that work stands.
+//! 2. **The line the execution timer names**, for the third of #601's
+//!    three `for (;;)` programs: its loop holds a forward `JMPZ` beside
+//!    the jump back, and php tests the interrupt after every jump where
+//!    this engine tests it at a back-edge alone (design §5.8), so php
+//!    names line 2 on some runs and line 3 on others while the engine
+//!    names line 2 on every one. The op array itself is held to php's:
+//!    `xtask compile-identity --file` reads all three programs as
+//!    byte-identical with the oracle's dump.
+//! 3. **A `yield`**, which the compiler refuses, "a `yield` this compiler
+//!    cannot read yet"; #564 is where that work stands.
+//! 4. **`static` as a class reference**, which it refuses too, "a class
+//!    reference of the scope this compiler cannot read yet".
 
 use php_syntax::tree::Element;
 use php_syntax::{Options, SyntaxKind, parse};
@@ -32,17 +52,10 @@ fn line(src: &str, kind: SyntaxKind) -> u32 {
     all[0]
 }
 
-/// `ASSIGN` is emitted at the target's line: `Warning: Undefined
-/// variable $b in %s on line 2`.
-#[test]
-fn an_assignment_is_its_targets_line() {
-    assert_eq!(line("<?php\n$a\n=\n$b;\n", SyntaxKind::ASSIGN_EXPR), 2);
-}
-
-/// #601 pin 1, under `declare(ticks=1)`: the lines printed are 3, 5,
-/// 10, 15 and 21. An empty block is its `{`'s line,
-/// an `else` arm its block's, a `finally` clause its block's, and an
-/// `else` arm over a statement that statement's.
+/// #601 pin 1, under `declare(ticks=1)` (reason 1): the lines printed are
+/// 3, 5, 10, 15 and 21. An empty block is its `{`'s line, an `else` arm
+/// its block's, a `finally` clause its block's, and an `else` arm over a
+/// statement that statement's.
 #[test]
 fn an_empty_block_an_else_arm_and_a_finally_clause_under_ticks() {
     let src = "<?php\n\
@@ -73,83 +86,33 @@ fn an_empty_block_an_else_arm_and_a_finally_clause_under_ticks() {
     assert_eq!(line(src, SyntaxKind::FINALLY_CLAUSE), 15);
 }
 
-/// The same three lines as the execution timer finds them, on the jump
-/// back of a `for` with no condition and no step, which is emitted at
-/// the line the body left: `Maximum execution time of 1 second exceeded
-/// in %s on line 3` for each (probed 8.5.9). These are the programs a
-/// witness in `line.rs` runs once the engine's compiler leaves the line
-/// where php leaves it.
+/// The third of the three programs that read the line a `for` loop's jump
+/// back is left at, which is the `else` arm's block's (reason 2). The
+/// other two are witnesses beside `php_compile`'s `for`; this one the
+/// timer cannot name the same way twice, under php or under the engine.
 #[test]
-fn the_line_a_for_loops_jump_back_is_left_at() {
-    let block = "<?php\nset_time_limit(1); for (;;)\n{ /*\n\n*/\n}\n";
-    assert_eq!(lines(block, SyntaxKind::BLOCK), [3]);
-    let finally = "<?php\nset_time_limit(1); for (;;) try {} finally\n{ /*\n\n*/\n}\n";
-    assert_eq!(line(finally, SyntaxKind::FINALLY_CLAUSE), 3);
+fn the_line_a_for_loops_jump_back_is_left_at_over_an_else_arm() {
     let arm = "<?php\nset_time_limit(1); $x = 0; for (;;) if ($x) ; else\n{ /*\n\n*/\n}\n";
     assert_eq!(line(arm, SyntaxKind::ELSE_CLAUSE), 3);
 }
 
-/// #601 pins 2 and 3: `Switch statements may only contain one default
-/// clause in %s on line 2`, and `Case statements followed by a semicolon
-/// (;) are deprecated … on line 4`. A `default`'s line is its empty
-/// statement list's, the `:`'s or the `;`'s, comments on both sides
-/// uncounted.
+/// #601 pin 3: `Case statements followed by a semicolon (;) are
+/// deprecated … on line 4`. A `default`'s line is its empty statement
+/// list's, the `;`'s, comments on both sides uncounted. The engine
+/// compiles the program and raises no deprecation over it, so the line is
+/// not one it shows yet; pin 2, the same rule through the fatal
+/// `zend_compile_switch` raises over two `default` clauses, is a witness
+/// in `src/tree/line.rs`.
 #[test]
 fn a_switch_arms_empty_body_is_its_separators_line() {
-    let two = "<?php\nswitch (1) { default: default:\n/*\n\n*/ }\n";
-    assert_eq!(lines(two, SyntaxKind::SWITCH_ARM), [2, 2]);
     let semi = "<?php\nswitch (1) { default /*\n\n*/ ; /*\n\n*/ }\n";
     assert_eq!(line(semi, SyntaxKind::SWITCH_ARM), 4);
 }
 
-/// #601 pins 4 and 5: `Array to string conversion in %s on line 4`, and
-/// `could not be passed by reference in %s:5`. An empty array is its
-/// `]`'s line, the lookahead its rule reduced on.
-#[test]
-fn an_empty_array_is_its_closing_brackets_line() {
-    assert_eq!(
-        line("<?php\necho [ /*\n\n*/ ];\n", SyntaxKind::ARRAY_EXPR),
-        4
-    );
-    assert_eq!(
-        line(
-            "<?php\nfunction f(&$x) {}\nf([ /*\n\n*/ ]);\n",
-            SyntaxKind::ARRAY_EXPR
-        ),
-        5
-    );
-}
-
-/// #601 pins 6, 7 and 8: `must return a value in %s on line 3`, `… on
-/// line 2` for `return ?>` with a newline, whose `;` ends on the `?>`'s
-/// line, and `'break' not in the 'loop' or 'switch' context in %s on
-/// line 4`. A bare `return` or `break` is its `;`'s line.
-#[test]
-fn a_bare_return_or_break_is_its_semicolons_line() {
-    assert_eq!(
-        line(
-            "<?php\nfunction f(): int { return\n; /*\n\n*/ }\n",
-            SyntaxKind::RETURN_STMT
-        ),
-        3
-    );
-    assert_eq!(
-        line(
-            "<?php\nfunction f(): int { return ?>\n<?php }\n",
-            SyntaxKind::RETURN_STMT
-        ),
-        2
-    );
-    assert_eq!(
-        line("<?php\nbreak /*\n\n*/ ; /*\n\n*/\n", SyntaxKind::BREAK_STMT),
-        4
-    );
-}
-
-/// #601 pin 9 and the amendment's pin: `The "yield" expression can only
-/// be used inside a function in %s on line 4`, and `… on line 5` for a
-/// `yield $k => $v` written over four lines, the value's line and not
-/// the key's, since `ZEND_AST_YIELD` is `(value, key)`.
+/// #601 pin 9 and the amendment's pin (reason 3): `The "yield" expression
+/// can only be used inside a function in %s on line 4`, and `… on line 5`
+/// for a `yield $k => $v` written over four lines, the value's line and
+/// not the key's, since `ZEND_AST_YIELD` is `(value, key)`.
 #[test]
 fn a_yield_is_the_lookaheads_line_bare_and_its_values_line_keyed() {
     assert_eq!(line("<?php\nyield /*\n\n*/ ;\n", SyntaxKind::YIELD_EXPR), 4);
@@ -159,25 +122,9 @@ fn a_yield_is_the_lookaheads_line_bare_and_its_values_line_keyed() {
     );
 }
 
-/// #601 pins 10 and 11: `exit(): Argument #1 ($status) must be of type
-/// string|int, array given in %s:4`, and `Too few arguments to function
-/// readonly(), 0 passed in %s on line 5`. Both name zvals are made after
-/// the `)`.
-#[test]
-fn exit_and_readonly_as_calls_are_their_closing_parens_line() {
-    assert_eq!(line("<?php\nexit(\n[]\n);\n", SyntaxKind::EXIT_EXPR), 4);
-    assert_eq!(
-        line(
-            "<?php\nfunction readonly($x) {}\nreadonly(\n\n);\n",
-            SyntaxKind::CALL_EXPR
-        ),
-        5
-    );
-}
-
-/// #601 pin 12, under `declare(ticks=1)`: 5 is printed for the empty
-/// heredoc, whose line is its closing label's, and 7 for the one with a
-/// body, whose line is the body's first.
+/// #601 pin 12, under `declare(ticks=1)` (reason 1): 5 is printed for the
+/// empty heredoc, whose line is its closing label's, and 7 for the one
+/// with a body, whose line is the body's first.
 #[test]
 fn a_heredoc_is_its_bodys_first_line_or_its_closing_labels() {
     let src = "<?php\n\
@@ -192,24 +139,8 @@ fn a_heredoc_is_its_bodys_first_line_or_its_closing_labels() {
     assert_eq!(lines(src, SyntaxKind::HEREDOC_EXPR), [5, 7]);
 }
 
-/// #601 pin 13: `2` then `8`. `__LINE__` is its own line as a statement
-/// and the `)`'s as an argument, where the keyword may be a named
-/// argument's label and the parser reads past it before it reduces.
-#[test]
-fn a_magic_constant_is_the_lookaheads_line_in_argument_position() {
-    let src = "<?php\n\
-        echo __LINE__ /*\n\
-        \n\
-        */ ;\n\
-        function f($x) { return $x; }\n\
-        echo f(__LINE__ /*\n\
-        \n\
-        */ );\n";
-    assert_eq!(lines(src, SyntaxKind::MAGIC_CONST_EXPR), [2, 8]);
-}
-
-/// #601 pins 14 and 15: the constructor's `ArgumentCountError` names
-/// `on line 2` for `new static` written over three lines, and the
+/// #601 pins 14 and 15 (reason 4): the constructor's `ArgumentCountError`
+/// names `on line 2` for `new static` written over three lines, and the
 /// method's names `on line 4` for `static::f()` written the same way:
 /// `class_name: T_STATIC` reduces before the lookahead after `new` and
 /// after it where a statement may begin.
@@ -219,34 +150,4 @@ fn static_as_a_class_name_is_its_own_line_or_the_double_colons() {
     assert_eq!(line(new, SyntaxKind::NEW_EXPR), 2);
     let scoped = "<?php\nclass A { static function f($x) {} static function m() { static /*\n\n*/ ::f(); } }\nA::m();\n";
     assert_eq!(lines(scoped, SyntaxKind::SCOPED_ACCESS_EXPR), [4, 5]);
-}
-
-/// #601 pin 16: `Too few arguments to function g(), 0 passed in %s on
-/// line 6`. A call through a variable is the `(`'s line.
-#[test]
-fn a_call_through_a_variable_is_its_opening_parens_line() {
-    let src = "<?php\nfunction g($x) {}\n$f = \"g\";\n$f /*\n\n*/ (\n);\n";
-    assert_eq!(line(src, SyntaxKind::CALL_EXPR), 6);
-}
-
-/// #601 pin 17, and one more probed 8.5.9: `2`, `9`, then `2` again for
-/// `static function` in argument position, whose `static` took the
-/// lookahead so the `function` after it reduces on its own line.
-#[test]
-fn a_closures_line_is_its_keywords_or_the_next_tokens_in_argument_position() {
-    let src = "<?php\n\
-        $c = function /*\n\
-        \n\
-        */ () {};\n\
-        echo (new ReflectionFunction($c))->getStartLine(), \"\\n\";\n\
-        function f($c) { return $c; }\n\
-        $d = f(function /*\n\
-        \n\
-        */ () {});\n\
-        echo (new ReflectionFunction($d))->getStartLine(), \"\\n\";\n\
-        $e = f(static function /*\n\
-        \n\
-        */ () {});\n\
-        echo (new ReflectionFunction($e))->getStartLine(), \"\\n\";\n";
-    assert_eq!(lines(src, SyntaxKind::CLOSURE_EXPR), [2, 9, 11]);
 }

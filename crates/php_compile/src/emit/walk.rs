@@ -99,22 +99,18 @@ impl Emit<'_> {
 
     /// The line a node's last byte stands on: a declaration's
     /// `end_lineno`, the line of its closing brace.
+    ///
+    /// A declaration's other line, `start_lineno`, is not read from the
+    /// range: `zend_ast_decl` writes it where `zend_ast.lineno` stands
+    /// (`Z/Zend/zend_ast.c:137-158`), so it is the node's own `line()`,
+    /// which the builder puts on the keyword and, in argument position,
+    /// on the token after it (`php_syntax`'s `tree::line`, #601 row 17).
+    /// Reading it from the range would name the `static` or the
+    /// attribute group written ahead of the keyword instead.
     fn end_line(&self, range: TextRange) -> u32 {
         self.parsed
             .lines
             .line_number(range.end().saturating_sub(1).max(range.start))
-    }
-
-    /// The line a node's first byte stands on, php's
-    /// `zend_ast_decl.start_lineno`: the line the `function`, the `fn`
-    /// or the `class` keyword was written on, which
-    /// `zend_ast_create_decl` is handed beside the node's own `lineno`
-    /// and which `zend_begin_func_decl` names a closure by. A
-    /// declaration is the one node with two lines of its own, and this
-    /// is the other one, read from the range as [`Self::end_line`]
-    /// reads `end_lineno`.
-    fn start_line(&self, range: TextRange) -> u32 {
-        self.parsed.lines.line_number(range.start)
     }
 
     /// A `class` or an `interface` declaration read from the tree, in

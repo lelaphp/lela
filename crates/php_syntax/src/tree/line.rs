@@ -74,6 +74,15 @@ impl Site<'_> {
             .line_number(token.offset + token.len.saturating_sub(1))
     }
 
+    /// The next significant token after the one at `index`: the
+    /// lookahead php's parser has read where the state at that token
+    /// reads one, #601's N. Whitespace and comments are passed over, as
+    /// the scanner passes over them on its way to the next token, and
+    /// they count under `end_line(N)` for that reason.
+    fn after(&self, index: usize) -> Option<usize> {
+        (index.saturating_add(1)..self.tokens.len()).find(|&i| !self.tokens[i].kind.is_trivia())
+    }
+
     /// The line the token's first byte is on, `zendlex`'s `start_line`.
     fn start_line(&self, id: super::TokenId) -> Option<u32> {
         let token = self.tokens.get(id.0 as usize)?;
@@ -99,6 +108,24 @@ impl Site<'_> {
     /// list? There a keyword may also be a named argument's label, so
     /// php's parser reads the token after it before it reduces the
     /// keyword (#601: states 443, 444, 452, 446, 438, 441).
+    ///
+    /// `__LINE__` is `ast->lineno` read back by
+    /// `zend_try_ct_eval_magic_const`, so what it prints is the line this
+    /// answers for: its own as a statement, the `)`'s as an argument
+    /// (#601 pin 13, `2` then `8`):
+    ///
+    /// ```php
+    /// echo __LINE__ /*
+    ///
+    /// */ ;
+    /// function f($x) { return $x; }
+    /// echo f(__LINE__ /*
+    ///
+    /// */ );
+    /// ```
+    /// ```expect
+    /// 28
+    /// ```
     fn in_argument_position(&self) -> bool {
         matches!(
             self.before_kind(),
@@ -158,20 +185,6 @@ fn first_token(children: &[Element], site: &Site<'_>) -> Option<(usize, SyntaxKi
     })
 }
 
-/// The token child directly after the child at `at`, or the next token
-/// after the node: the lookahead php read before it reduced the child.
-fn token_after(children: &[Element], at: usize, site: &Site<'_>) -> Option<usize> {
-    children
-        .get(at + 1..)
-        .and_then(|rest| {
-            rest.iter().find_map(|child| match child {
-                Element::Token { id, .. } => Some(id.0 as usize),
-                Element::Node { .. } => None,
-            })
-        })
-        .or(site.next)
-}
-
 /// The first node child of `kind`.
 fn node_of(children: &[Element], kind: SyntaxKind) -> Option<(usize, TextRange, u32)> {
     children
@@ -218,11 +231,94 @@ fn node_of(children: &[Element], kind: SyntaxKind) -> Option<(usize, TextRange, 
 /// Fatal error: Switch statements may only contain one default clause in %s on line 2
 /// ```
 ///
-/// The rest of what #601 pinned, an empty block's line, an `else` arm's
-/// and a `finally` clause's among them, is held to what the oracle
-/// printed in `tests/line.rs`: the linked engine's compiler still reads
-/// its lines from `read.rs` and puts those oplines elsewhere (#595, and
-/// #606 lifts each of those programs into a fence here).
+/// An empty array is its `]`'s line, the lookahead its rule reduced on,
+/// and the `ECHO` that converts it is emitted there (#601 pin 4):
+///
+/// ```php
+/// echo [ /*
+///
+/// */ ];
+/// ```
+/// ```expect
+/// Warning: Array to string conversion in %s on line 4
+/// Array
+/// ```
+///
+/// The same line through `zend_compile_args`, which raises after the
+/// argument's `zend_compile_expr` (#601 pin 5):
+///
+/// ```php
+/// function f(&$x) {}
+/// f([ /*
+///
+/// */ ]);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: f(): Argument #1 ($x) could not be passed by reference in %s:5
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 5
+/// ```
+///
+/// A bare `return` is its `;`'s line and not its keyword's, the comment
+/// after the `;` uncounted (#601 pin 6):
+///
+/// ```php
+/// function f(): int { return
+/// ; /*
+///
+/// */ }
+/// ```
+/// ```expect exit=255
+/// Fatal error: A function with return type must return a value in %s on line 3
+/// ```
+///
+/// The `;` that `?>` and a newline spell is on the `?>`'s line, since the
+/// newline is counted at the next `zendlex` (#601 pin 7):
+///
+/// ```php
+/// function f(): int { return ?>
+/// <?php }
+/// ```
+/// ```expect exit=255
+/// Fatal error: A function with return type must return a value in %s on line 2
+/// ```
+///
+/// A bare `break` is its `;`'s line the same way (#601 pin 8):
+///
+/// ```php
+/// break /*
+///
+/// */ ; /*
+///
+/// */
+/// ```
+/// ```expect exit=255
+/// Fatal error: 'break' not in the 'loop' or 'switch' context in %s on line 4
+/// ```
+///
+/// `exit`'s name zval is made when `T_EXIT ctor_arguments` reduces, after
+/// the `)`, so the call is the `)`'s line (#601 pin 10):
+///
+/// ```php
+/// exit(
+/// []
+/// );
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: exit(): Argument #1 ($status) must be of type string|int, array given in %s:4
+/// Stack trace:
+/// #0 %s(4): exit(Array)
+/// #1 {main}
+///   thrown in %s on line 4
+/// ```
+///
+/// What is left of #601's pins is held to what the oracle printed in
+/// `tests/line.rs`, each for a reason written beside it there: the two
+/// programs that read a line through `declare(ticks=1)`, the `yield` and
+/// the `static` the compiler refuses, and the `case ;` deprecation it
+/// does not raise. The line a `for` loop's jump back is left at is a
+/// witness beside `php_compile`'s `for`, where the mechanism is.
 pub(super) fn of(kind: SyntaxKind, children: &[Element], site: &Site<'_>) -> u32 {
     use SyntaxKind as K;
     let by_rule_1 = || first_child(children, site);
@@ -282,7 +378,7 @@ pub(super) fn of(kind: SyntaxKind, children: &[Element], site: &Site<'_>) -> u32
         // A named argument's label that is a keyword is reduced after the
         // `:` in argument position (#601: `identifier: semi_reserved`).
         K::NAMED_ARG if first_token(children, site).is_some_and(|(_, kind)| kind.is_keyword()) => {
-            site.end_line(token_after(children, 0, site))
+            site.end_line(first_token(children, site).and_then(|(at, _)| site.after(at)))
         }
         // `zend_ast_create_ex(ZEND_AST_MAGIC_CONST, …)` has no child: its
         // own line, or the lookahead's in argument position (#601 row
@@ -316,7 +412,46 @@ pub(super) fn of(kind: SyntaxKind, children: &[Element], site: &Site<'_>) -> u32
 /// { $<num>$ = CG(zend_lineno); }` and the interface, trait, enum and
 /// anonymous-class rules alike, handed to `zend_ast_create_decl` as
 /// `start_lineno`). In argument position a closure's keyword is reduced
-/// after the lookahead (#601 row 17, pin 17).
+/// after the lookahead (#601 row 17, pin 17), which is what Reflection
+/// reads back as the closure's start line, `2`, `9` and `11` here:
+///
+/// ```php
+/// $c = function /*
+///
+/// */ () {};
+/// echo (new ReflectionFunction($c))->getStartLine(), "\n";
+/// function f($c) { return $c; }
+/// $d = f(function /*
+///
+/// */ () {});
+/// echo (new ReflectionFunction($d))->getStartLine(), "\n";
+/// $e = f(static function /*
+///
+/// */ () {});
+/// echo (new ReflectionFunction($e))->getStartLine(), "\n";
+/// ```
+/// ```expect
+/// 2
+/// 9
+/// 11
+/// ```
+///
+/// The lookahead is the token after the keyword in the source, which is
+/// the `(` of the parameter list and not the token after the closure:
+/// `zend_ast_create_decl` is handed the mid-rule value, so a closure
+/// whose `(` stands on the keyword's line is that line however far the
+/// argument list runs past it.
+///
+/// ```php
+/// function f($c) { return $c; }
+/// $d = f(function () {
+/// }
+/// );
+/// echo (new ReflectionFunction($d))->getStartLine(), "\n";
+/// ```
+/// ```expect
+/// 3
+/// ```
 fn declaration(kind: SyntaxKind, children: &[Element], site: &Site<'_>) -> u32 {
     use SyntaxKind as K;
     let keyword = children
@@ -341,11 +476,11 @@ fn declaration(kind: SyntaxKind, children: &[Element], site: &Site<'_>) -> u32 {
             _ => None,
         });
     match keyword {
-        Some((0, _))
+        Some((0, token))
             if matches!(kind, K::CLOSURE_EXPR | K::ARROW_FN_EXPR)
                 && site.in_argument_position() =>
         {
-            site.end_line(token_after(children, 0, site))
+            site.end_line(site.after(token))
         }
         Some((_, token)) => site.end_line(Some(token)),
         None => first_child(children, site).unwrap_or_else(|| site.end_line(site.last)),
@@ -372,6 +507,42 @@ fn value_before_key(children: &[Element], key_kind: SyntaxKind, site: &Site<'_>)
 /// row 16, pin 16); a method call or a `::` call takes its receiver's,
 /// as rule 1 gives it; `readonly(…)`'s name zval is made after the `)`
 /// (`:1449`, #601 row 11).
+///
+/// The call through a variable, whose line the `ArgumentCountError`
+/// names (#601 pin 16):
+///
+/// ```php
+/// function g($x) {}
+/// $f = "g";
+/// $f /*
+///
+/// */ (
+/// );
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: Too few arguments to function g(), 0 passed in %s on line 6 and exactly 1 expected in %s:2
+/// Stack trace:
+/// #0 %s(6): g()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// `readonly` as a function name, whose zval is made after the `)` (#601
+/// pin 11):
+///
+/// ```php
+/// function readonly($x) {}
+/// readonly(
+///
+/// );
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: Too few arguments to function readonly(), 0 passed in %s on line 5 and exactly 1 expected in %s:2
+/// Stack trace:
+/// #0 %s(5): readonly()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
 fn call(children: &[Element], site: &Site<'_>) -> u32 {
     use SyntaxKind as K;
     match children.first() {
@@ -405,7 +576,7 @@ fn class_name(kind: SyntaxKind, children: &[Element], site: &Site<'_>) -> u32 {
             if site.raw(*id) == Some(K::STATIC_KW)
                 && !(kind == K::SCOPED_ACCESS_EXPR && static_stands_alone(site)) =>
         {
-            site.end_line(token_after(children, 0, site))
+            site.end_line(site.after(id.0 as usize))
         }
         _ => first_child(children, site).unwrap_or_else(|| site.end_line(site.last)),
     }
