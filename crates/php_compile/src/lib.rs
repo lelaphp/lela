@@ -68,6 +68,19 @@ pub struct Options {
     /// compiler folds a `.` over it (`zend_double_to_str`, which reads
     /// `EG(precision)`); php's default is 14.
     pub precision: i32,
+    /// php's `short_open_tag` ini entry as it stands while the file
+    /// compiles, `CG(short_tags)`: whether `<?` opens code. The entry is
+    /// an `OnUpdateBool` onto php's compiler state (`Z/main/main.c:820`)
+    /// and php's scanner reads it at each `<?` it meets
+    /// (`Z/Zend/zend_language_scanner.l:2331`): while it is off the tag
+    /// falls to `inline_char_handler`, which takes it and what follows
+    /// into the `T_INLINE_HTML` around it, so the file echoes its own
+    /// text where the code inside the tag would have been. `<?php` and `<?=` open code
+    /// whatever the entry says. php's built-in default is on
+    /// (`DEFAULT_SHORT_OPEN_TAG`), which is this one's; the entry is
+    /// `PHP_INI_SYSTEM|PHP_INI_PERDIR`, so the value the request started
+    /// under is the value every file it compiles is read under.
+    pub short_open_tag: bool,
     /// The persistent constants the engine's extensions declared
     /// (`CONST_PERSISTENT`), which `zend_try_ct_eval_const` substitutes
     /// where they are written; a name not here is fetched as the program serves.
@@ -103,6 +116,7 @@ impl Default for Options {
             cwd: Vec::new(),
             strict_types: false,
             precision: 14,
+            short_open_tag: true,
             persistent: Vec::new(),
             functions: Vec::new(),
             classes: Vec::new(),
@@ -143,16 +157,34 @@ pub struct CompileError {
 /// heap for a unit that is one request's alone. php decides the same
 /// thing by which handler is installed when `zend_compile_file` runs
 /// (`Z/Zend/zend_string.c:363-373`).
+///
+/// The lexer is told what php's scanner reads off `CG(short_tags)`,
+/// [`Options::short_open_tag`], and nothing here reads an ini of its
+/// own: the caller that described the request is what knows the entry.
+/// With it off, which is what the pin's recipe passes, a `<?` is text
+/// the file echoes and the `<?=` beside it still opens code:
+///
+/// ```php
+/// ?>
+/// <? echo "code"; ?>
+/// <?= "echoed" ?>
+/// ```
+/// ```expect
+/// <? echo "code"; ?>
+/// echoed
+/// ```
 pub fn compile_source(
     source: &[u8],
     options: &Options,
     strings: &mut dyn Intern,
 ) -> Result<Unit, CompileError> {
-    compile(
-        &php_syntax::parse(source, &php_syntax::Options::default()),
-        options,
-        strings,
-    )
+    let syntax = php_syntax::Options {
+        lex: php_syntax::LexOptions {
+            short_open_tag: options.short_open_tag,
+        },
+        ..php_syntax::Options::default()
+    };
+    compile(&php_syntax::parse(source, &syntax), options, strings)
 }
 
 /// Compile one parsed file into a unit, interning its constant strings
@@ -394,6 +426,50 @@ mod tests {
             (unit.main.oplines[0].op1, unit.main.oplines[1].op1),
             (0, 0),
             "php keeps one slot for it"
+        );
+    }
+
+    /// The dump of one source compiled through [`compile_source`] under
+    /// `short_open_tag`, which is the route the lexer is told it by.
+    fn dump_under_short_open_tag(source: &[u8], short_open_tag: bool) -> String {
+        let mut strings = php_heap::Strings::new();
+        let options = Options {
+            short_open_tag,
+            ..bundled()
+        };
+        compile_source(source, &options, &mut strings)
+            .unwrap_or_default()
+            .dump(&[])
+    }
+
+    /// [`Options::short_open_tag`] reaching the scanner (#608): with the
+    /// entry off the `<?` and everything after it is the one
+    /// `T_INLINE_HTML` php's `inline_char_handler` takes it into, and
+    /// with it on the same source is the code inside the tag. The
+    /// oracle answers the off side beside [`compile_source`], which is
+    /// the value the pin's recipe passes; the on side is
+    /// `tests/lang/short_tags.001.phpt`, whose `--INI--` turns it on.
+    #[test]
+    fn a_short_tag_opens_code_only_while_short_open_tag_is_on() {
+        let source = b"<?\necho 1;\n";
+        let dump = |lines: usize, oplines: &str| {
+            format!(
+                "\n$_main:\n     ; (lines={lines}, args=0, vars=0, tmps=0)\n\
+                 \x20    ; (before optimizer)\n     ; :1-3\n     ; return  [] RANGE[0..0]\n{oplines}"
+            )
+        };
+        assert_eq!(
+            dump_under_short_open_tag(source, false),
+            dump(
+                2,
+                "0000 ECHO string(\"<?\\necho 1;\\n\")\n0001 RETURN int(1)\n"
+            ),
+            "off, the file echoes its own text"
+        );
+        assert_eq!(
+            dump_under_short_open_tag(source, true),
+            dump(2, "0000 ECHO int(1)\n0001 RETURN int(1)\n"),
+            "on, the tag opens code and the 1 inside it is echoed"
         );
     }
 

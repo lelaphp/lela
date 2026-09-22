@@ -430,7 +430,7 @@ impl Shared {
         compile(
             source,
             origin,
-            self.precision(),
+            self.compile_ini(),
             self.declared(),
             stack,
             &mut *strings,
@@ -452,13 +452,19 @@ impl Shared {
         )
     }
 
-    /// php's `precision` as the startup ini has it, which a unit bound
+    /// The compiler's ini as the startup one has it, which a unit bound
     /// for the cache is compiled under; a request compiles its own
-    /// source under its own.
-    fn precision(&self) -> i32 {
-        self.ini_default(b"precision")
-            .and_then(|value| String::from_utf8_lossy(value).parse().ok())
-            .unwrap_or(14)
+    /// source under its own ([`CompileIni`]).
+    fn compile_ini(&self) -> CompileIni {
+        CompileIni {
+            precision: self
+                .ini_default(b"precision")
+                .and_then(|value| String::from_utf8_lossy(value).parse().ok())
+                .unwrap_or(14),
+            short_open_tag: self
+                .ini_default(b"short_open_tag")
+                .is_none_or(Request::ini_parse_bool),
+        }
     }
 
     /// The unit for the file `path` names: compiled and published once,
@@ -1006,7 +1012,10 @@ impl Engine {
         // interned into this request's own memory and gone with it, as
         // php holds what it compiles for `-r` and for `eval`.
         let compiled = if let Some(source) = source {
-            let precision = req.precision();
+            let ini = CompileIni {
+                precision: req.precision(),
+                short_open_tag: req.short_open_tag(),
+            };
             let shared = Arc::clone(&self.shared);
             let stack = req.stack_limit();
             Some(compile(
@@ -1015,7 +1024,7 @@ impl Engine {
                     filename: &script,
                     cwd: &cwd,
                 },
-                precision,
+                ini,
                 shared.declared(),
                 stack,
                 req.heap_mut(),
@@ -1100,13 +1109,28 @@ impl Engine {
     }
 }
 
+/// The ini entries php reads while a file compiles, read once where the
+/// compile begins and handed down: `precision`, which `zend_double_to_str`
+/// renders a folded double constant at (`EG(precision)`), and
+/// `short_open_tag`, which php's scanner opens a `<?` under
+/// (`CG(short_tags)`, `Z/main/main.c:820`). php keeps both where its
+/// compiler reads them as it compiles, so what the ini says when the
+/// compile begins is what the whole file is compiled under: the startup ini's
+/// for a unit bound for the cache, which every request that serves it
+/// shares, and the request's own for a source that request holds.
+#[derive(Debug, Clone, Copy)]
+struct CompileIni {
+    precision: i32,
+    short_open_tag: bool,
+}
+
 /// One source compiled, with what the compiler refused kept instead of
 /// dropped: what `serve` needs to render php's parse error, and what
 /// [`Engine::unit`] is the lossy face over. `origin` is the name the
 /// unit carries and the request's working directory, `strings` the home
-/// the unit's constant strings are interned into (design §5.2), `precision`
-/// the ini entry php's compiler renders a double constant at, `declared`
-/// the engine's tables: the constants the bundle declared, which the
+/// the unit's constant strings are interned into (design §5.2), `ini`
+/// the entries php's compiler reads as it compiles ([`CompileIni`]),
+/// `declared` the engine's tables: the constants the bundle declared, which the
 /// compiler substitutes where they are written, the natives, which it
 /// reads as `CG(function_table)` before it serves a call of
 /// `zend_try_compile_special_func`'s table itself, and the classes, which
@@ -1117,7 +1141,7 @@ impl Engine {
 fn compile(
     source: &[u8],
     origin: Origin<'_>,
-    precision: i32,
+    ini: CompileIni,
     declared: Declared<'_>,
     stack: StackLimit,
     strings: &mut dyn Intern,
@@ -1127,7 +1151,8 @@ fn compile(
         filename: Name(origin.filename.into()),
         cwd: origin.cwd.as_os_str().as_encoded_bytes().to_vec(),
         strict_types: false,
-        precision,
+        precision: ini.precision,
+        short_open_tag: ini.short_open_tag,
         persistent: declared.constants.to_vec(),
         functions: declared
             .functions
@@ -2236,7 +2261,10 @@ mod tests {
                     filename: b"witness.php",
                     cwd: Path::new(""),
                 },
-                14,
+                CompileIni {
+                    precision: 14,
+                    short_open_tag: true,
+                },
                 Declared::default(),
                 StackLimit::UNCHECKED,
                 req.heap_mut(),

@@ -6341,6 +6341,19 @@ impl Request {
         self.ini_number(b"precision", 14)
     }
 
+    /// `short_open_tag`, php's `CG(short_tags)`: whether a `<?` opens
+    /// code in the source this request compiles, which its scanner reads
+    /// at every tag it meets (`Z/Zend/zend_language_scanner.l:2331`).
+    /// php's built-in default is on (`DEFAULT_SHORT_OPEN_TAG`), which is
+    /// what an engine with no entry for it answers, and the entry is
+    /// `PHP_INI_SYSTEM|PHP_INI_PERDIR`, so no `ini_set()` of the
+    /// request's moves it. `token_get_all` reads the same entry, which
+    /// is why it is the request's and not the engine's alone.
+    pub(crate) fn short_open_tag(&self) -> bool {
+        self.ini_get(b"short_open_tag")
+            .is_none_or(Request::ini_parse_bool)
+    }
+
     /// `serialize_precision`, what `var_dump`, `var_export`, `serialize`
     /// and `json_encode` print a float at; -1, its default, asks for the
     /// shortest text that reads back as the same double.
