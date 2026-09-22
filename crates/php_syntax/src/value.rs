@@ -96,15 +96,16 @@ impl TokenValue {
     /// ```
     ///
     /// A `SINGLE_QUOTED` token takes `\\` and `\'` and leaves every
-    /// other backslash where it stands (the `b` prefix, dropped the same
-    /// way, is held in `tests/value.rs` until the linked engine reads
-    /// one):
+    /// other backslash where it stands, and the `b` prefix, in either
+    /// case, goes with the quotes:
     ///
     /// ```php
-    /// var_dump('a\\b\'c\nd\\');
+    /// var_dump('a\\b\'c\nd\\', b'e', B'e');
     /// ```
     /// ```expect
     /// string(9) "a\b'c\nd\"
+    /// string(1) "e"
+    /// string(1) "e"
     /// ```
     ///
     /// The `[…]` index after a variable inside a string, the scanner's
@@ -151,9 +152,6 @@ impl TokenValue {
     }
 }
 
-/// The text of a heredoc or nowdoc part, less the newline before the
-/// closing label when this part is the one before it: every token
-/// between the two is the marker's own indentation, or there is none.
 /// `T_NUM_STRING`'s value: `[0]|([1-9][0-9]*)` that `ZEND_STRTOL` takes
 /// without `ERANGE` is a long, and anything else the text.
 fn offset(text: &[u8]) -> TokenValue {
@@ -166,6 +164,35 @@ fn offset(text: &[u8]) -> TokenValue {
     TokenValue::Bytes(text.to_vec())
 }
 
+/// The text of a heredoc or nowdoc part, less the newline before the
+/// closing label when this part is the one before it: every token
+/// between the two is the marker's own indentation, or there is none.
+///
+/// The newline goes in a heredoc and in a nowdoc alike, and a flexible
+/// heredoc's indentation stands between the body and the label without
+/// making that newline the body's (a lone `\r` before the label, which
+/// php also counts as the marker's, is held in `tests/value.rs`, where
+/// the byte can be written):
+///
+/// ```php
+/// $v = 'v';
+/// var_dump(<<<E
+/// a
+/// $v
+/// E, <<<E
+///   a
+///   b
+///   E, <<<'E'
+/// a
+/// E);
+/// ```
+/// ```expect
+/// string(3) "a
+/// v"
+/// string(3) "a
+/// b"
+/// string(1) "a"
+/// ```
 fn body<'a>(text: &'a [u8], tokens: &[Token], token: TokenId, end: Option<TokenId>) -> &'a [u8] {
     let Some(end) = end else {
         return text;
@@ -270,6 +297,57 @@ pub(crate) struct Number {
 /// which rounds at every step past 53 bits and is not the correctly
 /// rounded parse; the difference is observable, so the accumulation is
 /// copied, its order of operations included.
+///
+/// The four radices and what each spells, the `0x`, `0o` and `0b`
+/// prefixes, the legacy leading `0` and `_` between digits among them:
+///
+/// ```php
+/// var_dump(0x1F, 0o17, 017, 0b101, 0_7_7, 0xf_f);
+/// ```
+/// ```expect
+/// int(31)
+/// int(15)
+/// int(15)
+/// int(5)
+/// int(63)
+/// int(255)
+/// ```
+///
+/// The last long and the first double in each radix: the hex, both
+/// octal spellings and decimal retry to 2^63, and the binary rule's
+/// `value * 2 + c - '0'` lands an ulp below it, which is the
+/// accumulation and not a correctly rounded parse (php prints the two
+/// rounded; the bit pattern is held in `tests/value.rs`):
+///
+/// ```php
+/// var_dump(0x7FFFFFFFFFFFFFFF, 0x8000000000000000, 0777777777777777777777, 01000000000000000000000, 0o777777777777777777777, 0o1000000000000000000000, 0b111111111111111111111111111111111111111111111111111111111111111, 0b1000000000000000000000000000000000000000000000000000000000000000);
+/// ```
+/// ```expect
+/// int(9223372036854775807)
+/// float(9.223372036854776E+18)
+/// int(9223372036854775807)
+/// float(9.223372036854776E+18)
+/// int(9223372036854775807)
+/// float(9.223372036854776E+18)
+/// int(9223372036854775807)
+/// float(9.223372036854775E+18)
+/// ```
+///
+/// Past 53 bits every step of the accumulation rounds, so a double from
+/// one radix is not the double the same number reaches from another:
+///
+/// ```php
+/// var_dump(0x1FFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFFFF, 0x123456789ABCDEF12345, 0b1111111111111111111111111111111111111111111111111111111111111111, 0o7777777777777777777777, 01234567012345670123456701234567, 99999999999999999999999);
+/// ```
+/// ```expect
+/// float(3.6893488147419103E+19)
+/// float(4.722366482869645E+21)
+/// float(8.596805828370696E+22)
+/// float(1.844674407370955E+19)
+/// float(7.378697629483821E+19)
+/// float(1.6168958788107255E+27)
+/// float(1.0E+23)
+/// ```
 ///
 /// Which side of `ZEND_LONG_MAX` a token falls on, in every radix and
 /// with `_` between digits, is what `token_get_all` spells as
@@ -439,19 +517,17 @@ pub(crate) enum Defect {
 /// byte, the newline included, as written behind its `\`. A `\` that
 /// ends the text is itself.
 ///
-/// The named escapes, both marks, `\x` with one and two digits, the
-/// octal form, one past `\377` with php's warning, and a byte the table
-/// has no row for, each spelled out as its bytes (`\X`, the same as
-/// `\x`, is held in `tests/value.rs` until the linked engine reads
-/// it):
+/// The named escapes, both marks, `\x` and `\X` with one and two
+/// digits, the octal form, one past `\377` with php's warning, and a
+/// byte the table has no row for, each spelled out as its bytes:
 ///
 /// ```php
-/// $s = "\n\t\r\v\f\e\\\$\"\`\x41\x4\101\7\400\z";
+/// $s = "\n\t\r\v\f\e\\\$\"\`\x41\x4\X4a\101\7\400\z";
 /// for ($i = 0; $i < strlen($s); $i++) echo ord($s[$i]), " ";
 /// ```
 /// ```expect
 /// Warning: Octal escape sequence overflow \400 is greater than \377 in %s on line 2
-/// 10 9 13 11 12 27 92 36 34 92 96 65 4 65 7 0 92 122
+/// 10 9 13 11 12 27 92 36 34 92 96 65 4 74 65 7 0 92 122
 /// ```
 ///
 /// `\u{…}` names a codepoint, and one past `0x10FFFF` is php's parse
@@ -521,6 +597,18 @@ pub(crate) fn escape(text: &[u8], at: usize, quote: Quote) -> Escape {
 /// with the first message. Malformed, the scanner throws and the
 /// lexer's diagnostic stands for it; the bytes here are `\u` and the
 /// text goes on after them, which is where the lexer resumes too.
+///
+/// One byte, two, three and four of UTF-8, `\u{0}` the NUL byte and
+/// `0x10FFFF` the last codepoint there is, and `\u` before anything but
+/// a `{` the two bytes as written:
+///
+/// ```php
+/// $s = "\u{41}\u{e9}\u{20ac}\u{1F600}\u{0}\u{10FFFF}\u x";
+/// for ($i = 0; $i < strlen($s); $i++) echo ord($s[$i]), " ";
+/// ```
+/// ```expect
+/// 65 195 169 226 130 172 240 159 152 128 0 244 143 191 191 92 117 32 120
+/// ```
 fn codepoint(text: &[u8], at: usize) -> Escape {
     if text.get(at + 2) != Some(&b'{') {
         return Escape::of(2, b"\\u");
@@ -551,6 +639,31 @@ fn codepoint(text: &[u8], at: usize) -> Escape {
 
 /// The bytes of one `"…"`, heredoc or `` `…` `` part: every `\` read by
 /// [`escape`] under the string's own mark, every other byte as written.
+///
+/// A `"…"` takes `\"` and leaves `` \` `` where it stands; a heredoc
+/// takes neither mark and every other escape; a nowdoc takes none at
+/// all. The `` `…` `` side of the same table is held in
+/// `tests/value.rs`, since a backquote runs what it spells and the
+/// bytes are the shell's to see:
+///
+/// ```php
+/// $d = "\"\`\$";
+/// $h = <<<E
+/// \"\`\$\n\x41\101
+/// E;
+/// $n = <<<'E'
+/// \n\\$x
+/// E;
+/// foreach ([$d, $h, $n] as $s) {
+///     for ($i = 0; $i < strlen($s); $i++) echo $i ? ' ' : '', ord($s[$i]);
+///     echo "\n";
+/// }
+/// ```
+/// ```expect
+/// 34 92 96 36
+/// 92 34 92 96 36 10 65 65
+/// 92 110 92 92 36 120
+/// ```
 fn unescape(text: &[u8], quote: Quote) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len());
     let mut i = 0;
