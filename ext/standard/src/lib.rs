@@ -64,6 +64,7 @@ mod string;
 mod strnatcmp;
 mod stub;
 mod url;
+mod uuencode;
 mod var;
 mod zpp;
 
@@ -201,6 +202,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         pack::natives(),
         http::natives(),
         quot_print::natives(),
+        uuencode::natives(),
     ]
     .into_iter()
     .flatten()
