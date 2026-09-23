@@ -53,6 +53,7 @@ mod file;
 mod formatted_print;
 mod head;
 mod html;
+mod http;
 mod md5;
 mod output;
 mod pack;
@@ -177,6 +178,7 @@ pub fn extension() -> Extension {
         .functions(sha1::natives())
         .functions(crc32::natives())
         .functions(pack::natives())
+        .functions(http::natives())
         .constants(vec![
             constant(b"COUNT_NORMAL", COUNT_NORMAL),
             constant(b"COUNT_RECURSIVE", COUNT_RECURSIVE),
