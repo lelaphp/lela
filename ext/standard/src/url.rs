@@ -1,0 +1,603 @@
+//! `Z/ext/standard/url.c`: `parse_url` over `php_url_parse_ex2`, and
+//! the four codecs over `php_url_encode_impl`, `php_url_decode_ex` and
+//! `php_raw_url_decode_ex`, which `http_build_query` and `parse_str`
+//! read too. `get_headers` needs the http wrapper's response headers,
+//! which the streams facet does not carry yet, and waits on it.
+// The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
+#![allow(rustdoc::invalid_codeblock_attributes)]
+
+use php_ext::decl::{ConstDecl, FunctionDecl};
+use php_ext::raising::{Thrown, arg_value_error};
+use php_ext::request::Request;
+use php_ext::values::{Key, PhpArray, PhpString, Value};
+
+use crate::output::Entry;
+use crate::stub::stub;
+use crate::zpp::{optional_long, string_value};
+use crate::{argument_count_between, constant, string_argument};
+
+/// `PHP_URL_*`, `parse_url`'s component selectors, and `PHP_QUERY_*`,
+/// `http_build_query`'s encodings.
+const PHP_URL_SCHEME: i64 = 0;
+const PHP_URL_HOST: i64 = 1;
+const PHP_URL_PORT: i64 = 2;
+const PHP_URL_USER: i64 = 3;
+const PHP_URL_PASS: i64 = 4;
+const PHP_URL_PATH: i64 = 5;
+const PHP_URL_QUERY: i64 = 6;
+const PHP_URL_FRAGMENT: i64 = 7;
+pub(super) const PHP_QUERY_RFC1738: i64 = 1;
+pub(super) const PHP_QUERY_RFC3986: i64 = 2;
+
+/// The constants `url.c`'s natives read, in the stub's order.
+///
+/// ```php
+/// var_dump(PHP_URL_SCHEME, PHP_URL_HOST, PHP_URL_PORT, PHP_URL_USER, PHP_URL_PASS, PHP_URL_PATH, PHP_URL_QUERY, PHP_URL_FRAGMENT, PHP_QUERY_RFC1738, PHP_QUERY_RFC3986);
+/// ```
+/// ```expect
+/// int(0)
+/// int(1)
+/// int(2)
+/// int(3)
+/// int(4)
+/// int(5)
+/// int(6)
+/// int(7)
+/// int(1)
+/// int(2)
+/// ```
+pub(crate) fn constants() -> Vec<ConstDecl> {
+    vec![
+        constant(b"PHP_URL_SCHEME", PHP_URL_SCHEME),
+        constant(b"PHP_URL_HOST", PHP_URL_HOST),
+        constant(b"PHP_URL_PORT", PHP_URL_PORT),
+        constant(b"PHP_URL_USER", PHP_URL_USER),
+        constant(b"PHP_URL_PASS", PHP_URL_PASS),
+        constant(b"PHP_URL_PATH", PHP_URL_PATH),
+        constant(b"PHP_URL_QUERY", PHP_URL_QUERY),
+        constant(b"PHP_URL_FRAGMENT", PHP_URL_FRAGMENT),
+        constant(b"PHP_QUERY_RFC1738", PHP_QUERY_RFC1738),
+        constant(b"PHP_QUERY_RFC3986", PHP_QUERY_RFC3986),
+    ]
+}
+
+/// The five, in the stub's order.
+///
+/// ```php
+/// foreach (['parse_url', 'urlencode', 'urldecode', 'rawurlencode', 'rawurldecode'] as $f) echo new ReflectionFunction($f);
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function parse_url ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $url ]
+///     Parameter #1 [ <optional> int $component = -1 ]
+///   }
+///   - Return [ array|string|int|false|null ]
+/// }
+/// Function [ <internal:standard> function urlencode ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $string ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function urldecode ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $string ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function rawurlencode ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $string ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function rawurldecode ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $string ]
+///   }
+///   - Return [ string ]
+/// }
+/// ```
+pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
+    vec![
+        (
+            stub("parse_url(string $url, int $component = -1): int|array|string|null|false"),
+            parse_url as Entry,
+        ),
+        (stub("urlencode(string $string): string"), urlencode),
+        (stub("urldecode(string $string): string"), urldecode),
+        (stub("rawurlencode(string $string): string"), rawurlencode),
+        (stub("rawurldecode(string $string): string"), rawurldecode),
+    ]
+}
+
+/// `php_url`: the components `php_url_parse_ex2` found.
+#[derive(Default)]
+struct Url {
+    scheme: Option<Vec<u8>>,
+    user: Option<Vec<u8>>,
+    pass: Option<Vec<u8>>,
+    host: Option<Vec<u8>>,
+    port: Option<u16>,
+    path: Option<Vec<u8>>,
+    query: Option<Vec<u8>>,
+    fragment: Option<Vec<u8>>,
+}
+
+/// `php_replace_controlchars`: every control byte as `_`.
+fn clean(bytes: &[u8]) -> Vec<u8> {
+    bytes
+        .iter()
+        .map(|&c| if c < 32 || c == 127 { b'_' } else { c })
+        .collect()
+}
+
+/// `binary_strcspn(s, e, chars)`: the first offset in `from..to` of
+/// any of `chars`, or `to`.
+fn strcspn(s: &[u8], from: usize, to: usize, chars: &[u8]) -> usize {
+    s[from..to]
+        .iter()
+        .position(|c| chars.contains(c))
+        .map_or(to, |at| at + from)
+}
+
+/// `ZEND_STRTOL(port_buf, &end, 10)` over up to five digits: the value,
+/// or `None` where no digit was read.
+fn port_of(digits: &[u8]) -> Option<i64> {
+    let n = digits.iter().take_while(|c| c.is_ascii_digit()).count();
+    if n == 0 {
+        return None;
+    }
+    std::str::from_utf8(&digits[..n]).ok()?.parse().ok()
+}
+
+/// `php_url_parse_ex2(str, length, &has_port)`: `None` where php
+/// refuses the string as a URL.
+#[allow(clippy::too_many_lines)]
+fn parse(str: &[u8]) -> Option<Url> {
+    // What the scheme branch hands on: where the host starts, a port
+    // read after a scheme-less colon, or straight to the path.
+    enum Next {
+        Host,
+        Port(usize),
+        Path,
+    }
+    let mut ret = Url::default();
+    let ue = str.len();
+    let mut s = 0usize;
+    let at = |i: usize| str.get(i).copied().unwrap_or(0);
+    let colon = str.iter().position(|c| *c == b':');
+    let next = match colon {
+        Some(e) if e != s => {
+            let valid = str[s..e]
+                .iter()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'.' | b'-'));
+            if !valid {
+                if e + 1 < ue && e < strcspn(str, s, ue, b"?#") {
+                    Next::Port(e)
+                } else if s + 1 < ue && str[s] == b'/' && str[s + 1] == b'/' {
+                    s += 2;
+                    Next::Host
+                } else {
+                    Next::Path
+                }
+            } else if e + 1 == ue {
+                ret.scheme = Some(clean(&str[s..e]));
+                return Some(ret);
+            } else if str[e + 1] != b'/' {
+                let mut p = e + 1;
+                while p < ue && str[p].is_ascii_digit() {
+                    p += 1;
+                }
+                if (p == ue || str[p] == b'/') && (p - e) < 7 {
+                    Next::Port(e)
+                } else {
+                    ret.scheme = Some(clean(&str[s..e]));
+                    s = e + 1;
+                    Next::Path
+                }
+            } else {
+                ret.scheme = Some(clean(&str[s..e]));
+                if e + 2 < ue && str[e + 2] == b'/' {
+                    s = e + 3;
+                    let file = ret
+                        .scheme
+                        .as_deref()
+                        .is_some_and(|scheme| scheme.eq_ignore_ascii_case(b"file"));
+                    if file && e + 3 < ue && str[e + 3] == b'/' {
+                        if e + 5 < ue && str[e + 5] == b':' {
+                            s = e + 4;
+                        }
+                        Next::Path
+                    } else {
+                        Next::Host
+                    }
+                } else {
+                    s = e + 1;
+                    Next::Path
+                }
+            }
+        }
+        Some(e) => Next::Port(e),
+        None => {
+            if s + 1 < ue && str[s] == b'/' && str[s + 1] == b'/' {
+                s += 2;
+                Next::Host
+            } else {
+                Next::Path
+            }
+        }
+    };
+    let next = match next {
+        Next::Port(e) => {
+            // `parse_port:`
+            let p = e + 1;
+            let mut pp = p;
+            while pp < ue && pp - p < 6 && str[pp].is_ascii_digit() {
+                pp += 1;
+            }
+            if pp - p > 0 && pp - p < 6 && (pp == ue || str[pp] == b'/') {
+                match port_of(&str[p..pp]) {
+                    Some(port) if (0..=65535).contains(&port) => {
+                        ret.port = u16::try_from(port).ok();
+                        if s + 1 < ue && str[s] == b'/' && str[s + 1] == b'/' {
+                            s += 2;
+                        }
+                        Next::Host
+                    }
+                    _ => return None,
+                }
+            } else if p == pp && pp == ue {
+                return None;
+            } else if s + 1 < ue && str[s] == b'/' && str[s + 1] == b'/' {
+                s += 2;
+                Next::Host
+            } else {
+                Next::Path
+            }
+        }
+        other => other,
+    };
+    if matches!(next, Next::Host) {
+        // `parse_host:`
+        let e = strcspn(str, s, ue, b"/?#");
+        if let Some(p) = str[s..e].iter().rposition(|c| *c == b'@').map(|at| at + s) {
+            match str[s..p].iter().position(|c| *c == b':').map(|at| at + s) {
+                Some(pp) => {
+                    ret.user = Some(clean(&str[s..pp]));
+                    ret.pass = Some(clean(&str[pp + 1..p]));
+                }
+                None => ret.user = Some(clean(&str[s..p])),
+            }
+            s = p + 1;
+        }
+        let ipv6 = s < ue && str[s] == b'[' && e > 0 && at(e - 1) == b']';
+        let colon = if ipv6 || s > e {
+            None
+        } else {
+            str[s..e].iter().rposition(|c| *c == b':').map(|at| at + s)
+        };
+        let host_end = match colon {
+            Some(p) => {
+                if ret.port.is_none_or(|port| port == 0) {
+                    let digits = &str[p + 1..e];
+                    if digits.len() > 5 {
+                        return None;
+                    } else if !digits.is_empty() {
+                        match port_of(digits) {
+                            Some(port) if (0..=65535).contains(&port) => {
+                                ret.port = u16::try_from(port).ok();
+                            }
+                            _ => return None,
+                        }
+                    }
+                }
+                p
+            }
+            None => e,
+        };
+        if host_end < s + 1 {
+            return None;
+        }
+        ret.host = Some(clean(&str[s..host_end]));
+        if e == ue {
+            return Some(ret);
+        }
+        s = e;
+    }
+    // `just_path:`
+    let mut e = ue;
+    if let Some(p) = str[s..e].iter().position(|c| *c == b'#').map(|at| at + s) {
+        ret.fragment = Some(clean(&str[p + 1..e]));
+        e = p;
+    }
+    if let Some(p) = str[s..e].iter().position(|c| *c == b'?').map(|at| at + s) {
+        ret.query = Some(clean(&str[p + 1..e]));
+        e = p;
+    }
+    if s < e || s == ue {
+        ret.path = Some(clean(&str[s..e]));
+    }
+    Some(ret)
+}
+
+/// One row of `parse_url`'s answer: the selector, the key, the bytes.
+type Part<'a> = (i64, &'a [u8], Option<&'a Vec<u8>>);
+
+/// `parse_url(string $url, int $component = -1):
+/// int|array|string|null|false`: the components as an array, in
+/// `scheme`, `host`, `port`, `user`, `pass`, `path`, `query`,
+/// `fragment` order and only those present, or the one `$component`
+/// names, `null` where it is absent; `false` for a string php does not
+/// read as a URL.
+///
+/// ```php
+/// var_dump(parse_url("https://user:pw@example.com:8080/p/a/t/h?query=1#frag"), parse_url("//example.com/x"), parse_url("/just/path?q"), parse_url("mailto:me@example.com"), parse_url("example.com:80"), parse_url("http://[::1]:80/"), parse_url("http:///x"), parse_url("http://a:99999"), parse_url("file:///etc/passwd"), parse_url("x:"), parse_url("a#"), parse_url("http://h\x01st/"));
+/// var_dump(parse_url("http://x.com:81/y", PHP_URL_PORT), parse_url("http://x.com/y", PHP_URL_PORT), parse_url("http://x.com/y", PHP_URL_HOST), parse_url("//x", PHP_URL_SCHEME));
+/// try { parse_url("x", 8); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// array(8) {
+///   ["scheme"]=>
+///   string(5) "https"
+///   ["host"]=>
+///   string(11) "example.com"
+///   ["port"]=>
+///   int(8080)
+///   ["user"]=>
+///   string(4) "user"
+///   ["pass"]=>
+///   string(2) "pw"
+///   ["path"]=>
+///   string(8) "/p/a/t/h"
+///   ["query"]=>
+///   string(7) "query=1"
+///   ["fragment"]=>
+///   string(4) "frag"
+/// }
+/// array(2) {
+///   ["host"]=>
+///   string(11) "example.com"
+///   ["path"]=>
+///   string(2) "/x"
+/// }
+/// array(2) {
+///   ["path"]=>
+///   string(10) "/just/path"
+///   ["query"]=>
+///   string(1) "q"
+/// }
+/// array(2) {
+///   ["scheme"]=>
+///   string(6) "mailto"
+///   ["path"]=>
+///   string(14) "me@example.com"
+/// }
+/// array(2) {
+///   ["host"]=>
+///   string(11) "example.com"
+///   ["port"]=>
+///   int(80)
+/// }
+/// array(4) {
+///   ["scheme"]=>
+///   string(4) "http"
+///   ["host"]=>
+///   string(5) "[::1]"
+///   ["port"]=>
+///   int(80)
+///   ["path"]=>
+///   string(1) "/"
+/// }
+/// bool(false)
+/// bool(false)
+/// array(2) {
+///   ["scheme"]=>
+///   string(4) "file"
+///   ["path"]=>
+///   string(11) "/etc/passwd"
+/// }
+/// array(1) {
+///   ["scheme"]=>
+///   string(1) "x"
+/// }
+/// array(2) {
+///   ["path"]=>
+///   string(1) "a"
+///   ["fragment"]=>
+///   string(0) ""
+/// }
+/// array(3) {
+///   ["scheme"]=>
+///   string(4) "http"
+///   ["host"]=>
+///   string(4) "h_st"
+///   ["path"]=>
+///   string(1) "/"
+/// }
+/// int(81)
+/// NULL
+/// string(5) "x.com"
+/// NULL
+/// parse_url(): Argument #2 ($component) must be a valid URL component identifier, 8 given
+/// ```
+fn parse_url(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 2)?;
+    let url = string_argument(req, 1)?;
+    let key = optional_long(req, 2, -1)?;
+    let Some(url) = parse(url.as_bytes()) else {
+        return Ok(Value::bool(false));
+    };
+    let parts: [Part; 8] = [
+        (PHP_URL_SCHEME, b"scheme", url.scheme.as_ref()),
+        (PHP_URL_HOST, b"host", url.host.as_ref()),
+        (PHP_URL_PORT, b"port", None),
+        (PHP_URL_USER, b"user", url.user.as_ref()),
+        (PHP_URL_PASS, b"pass", url.pass.as_ref()),
+        (PHP_URL_PATH, b"path", url.path.as_ref()),
+        (PHP_URL_QUERY, b"query", url.query.as_ref()),
+        (PHP_URL_FRAGMENT, b"fragment", url.fragment.as_ref()),
+    ];
+    if key > -1 {
+        if key == PHP_URL_PORT {
+            return Ok(url
+                .port
+                .map_or(Value::null(), |port| Value::int(i64::from(port))));
+        }
+        return match parts.iter().find(|(id, _, _)| *id == key) {
+            Some((_, _, Some(bytes))) => string_value(req, bytes),
+            Some((_, _, None)) => Ok(Value::null()),
+            None => Err(arg_value_error(
+                req,
+                2,
+                &format!("be a valid URL component identifier, {key} given"),
+            )),
+        };
+    }
+    let mut array = PhpArray::new(req)?;
+    for (id, name, bytes) in parts {
+        let value = if id == PHP_URL_PORT {
+            match url.port {
+                Some(port) => Value::int(i64::from(port)),
+                None => continue,
+            }
+        } else {
+            match bytes {
+                Some(bytes) => string_value(req, bytes)?,
+                None => continue,
+            }
+        };
+        let key = Key::Str(PhpString::new(req, name)?);
+        array.set(req, key, value)?;
+    }
+    Ok(Value::array(array))
+}
+
+/// `hexchars`.
+const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+/// `php_url_encode_impl(to, s, len, raw)`: every byte but the
+/// alphanumerics and `-_.` as `%XX`, a space as `+` unless `raw`, and
+/// `~` kept when `raw`.
+pub(super) fn url_encode(s: &[u8], raw: bool, out: &mut Vec<u8>) {
+    for &c in s {
+        if !raw && c == b' ' {
+            out.push(b'+');
+        } else if (c < b'0' && c != b'-' && c != b'.')
+            || (c < b'A' && c > b'9')
+            || (c > b'Z' && c < b'a' && c != b'_')
+            || (c > b'z' && (!raw || c != b'~'))
+        {
+            out.extend_from_slice(&[b'%', HEX[usize::from(c >> 4)], HEX[usize::from(c & 15)]]);
+        } else {
+            out.push(c);
+        }
+    }
+}
+
+/// `php_url_decode_ex` and, without `plus`, `php_raw_url_decode_ex`:
+/// `%XX` with two hex digits as its byte, and `+` as a space unless
+/// raw.
+fn decode(s: &[u8], plus: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        let c = s[i];
+        if plus && c == b'+' {
+            out.push(b' ');
+        } else if c == b'%'
+            && i + 2 < s.len()
+            && s[i + 1].is_ascii_hexdigit()
+            && s[i + 2].is_ascii_hexdigit()
+        {
+            let hex = |x: u8| (x as char).to_digit(16).unwrap_or(0);
+            out.push(u8::try_from(hex(s[i + 1]) * 16 + hex(s[i + 2])).unwrap_or(0));
+            i += 2;
+        } else {
+            out.push(c);
+        }
+        i += 1;
+    }
+    out
+}
+
+/// `php_url_decode(str, len)`.
+pub(super) fn php_url_decode(s: &[u8]) -> Vec<u8> {
+    decode(s, true)
+}
+
+/// `urlencode(string $string): string`, the form encoding.
+///
+/// ```php
+/// var_dump(strtr(urlencode("a b&c=d/é~_.-*"), "%", "#"), urlencode(""), strtr(urlencode("\x00\xff+"), "%", "#"));
+/// ```
+/// ```expect
+/// string(29) "a+b#26c#3Dd#2F#C3#A9#7E_.-#2A"
+/// string(0) ""
+/// string(9) "#00#FF#2B"
+/// ```
+fn urlencode(req: &mut Request) -> Result<Value, Thrown> {
+    encoded(req, false)
+}
+
+/// `rawurlencode(string $string): string`, RFC 3986's.
+///
+/// ```php
+/// var_dump(strtr(rawurlencode("a b+c~d_e.f-g*h/"), "%", "#"), rawurlencode(""), strtr(rawurlencode("\x00\xff"), "%", "#"));
+/// ```
+/// ```expect
+/// string(24) "a#20b#2Bc~d_e.f-g#2Ah#2F"
+/// string(0) ""
+/// string(6) "#00#FF"
+/// ```
+fn rawurlencode(req: &mut Request) -> Result<Value, Thrown> {
+    encoded(req, true)
+}
+
+fn encoded(req: &mut Request, raw: bool) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 1)?;
+    let string = string_argument(req, 1)?;
+    let mut out = Vec::with_capacity(string.len() * 3);
+    url_encode(string.as_bytes(), raw, &mut out);
+    string_value(req, &out)
+}
+
+/// `urldecode(string $string): string`.
+///
+/// ```php
+/// var_dump(urldecode("a+b%20c%zz%4%41"), bin2hex(urldecode("%E9%00")), urldecode("100%"));
+/// ```
+/// ```expect
+/// string(11) "a b c%zz%4A"
+/// string(4) "e900"
+/// string(4) "100%"
+/// ```
+fn urldecode(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 1)?;
+    let string = string_argument(req, 1)?;
+    let out = decode(string.as_bytes(), true);
+    string_value(req, &out)
+}
+
+/// `rawurldecode(string $string): string`.
+///
+/// ```php
+/// var_dump(rawurldecode("a+b%20c%41%4"), rawurldecode("%7e%7E"), rawurldecode("%"));
+/// ```
+/// ```expect
+/// string(8) "a+b cA%4"
+/// string(2) "~~"
+/// string(1) "%"
+/// ```
+fn rawurldecode(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 1)?;
+    let string = string_argument(req, 1)?;
+    let out = decode(string.as_bytes(), false);
+    string_value(req, &out)
+}

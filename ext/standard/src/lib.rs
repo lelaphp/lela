@@ -56,6 +56,7 @@ mod scanf;
 mod string;
 mod strnatcmp;
 mod stub;
+mod url;
 mod var;
 mod zpp;
 
@@ -165,6 +166,7 @@ pub fn extension() -> Extension {
         .functions(file::natives())
         .functions(basic_natives())
         .functions(string::natives())
+        .functions(url::natives())
         .constants(vec![
             constant(b"COUNT_NORMAL", COUNT_NORMAL),
             constant(b"COUNT_RECURSIVE", COUNT_RECURSIVE),
@@ -174,6 +176,7 @@ pub fn extension() -> Extension {
         ])
         .constants(array::constants())
         .constants(string::constants())
+        .constants(url::constants())
         .dependencies(dependencies())
         .request_state::<State>()
         .build("standard")

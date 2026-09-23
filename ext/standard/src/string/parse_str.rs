@@ -8,6 +8,7 @@ use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
+use crate::url::php_url_decode;
 use crate::zpp::string_value;
 use crate::{argument_count_between, string_argument};
 
@@ -340,29 +341,4 @@ fn write_at(
         }
     }
     Ok(())
-}
-
-/// `php_url_decode(str, len)` (`Z/ext/standard/url.c`): `+` as a space
-/// and `%XX` with two hex digits as its byte.
-fn php_url_decode(s: &[u8]) -> Vec<u8> {
-    let hex = |x: u8| (x as char).to_digit(16).and_then(|d| u8::try_from(d).ok());
-    let mut out = Vec::with_capacity(s.len());
-    let mut i = 0;
-    while i < s.len() {
-        let c = s[i];
-        match (
-            c,
-            s.get(i + 1).copied().and_then(hex),
-            s.get(i + 2).copied().and_then(hex),
-        ) {
-            (b'+', _, _) => out.push(b' '),
-            (b'%', Some(high), Some(low)) => {
-                out.push((high << 4) | low);
-                i += 2;
-            }
-            _ => out.push(c),
-        }
-        i += 1;
-    }
-    out
 }
