@@ -36,6 +36,7 @@ use crate::api::raising::{
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Key, PhpArray, PhpString, TypeTag, Value, ValueRef};
 
+mod backtrace;
 mod classes;
 mod errors;
 mod functions;
@@ -54,6 +55,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     natives.extend(classes::natives());
     natives.extend(functions::natives());
     natives.extend(errors::natives());
+    natives.extend(backtrace::natives());
     natives.sort_by_key(|(decl, _)| {
         CORE.iter()
             .position(|name| name.as_bytes() == decl.name.0.as_ref())

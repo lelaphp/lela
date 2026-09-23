@@ -404,6 +404,19 @@ impl Shared {
             })
             .collect();
         out.extend(error_levels());
+        // `zend_builtin_functions.stub.php`'s two, which `debug_backtrace`
+        // and `debug_print_backtrace` read.
+        out.extend(
+            [
+                ("DEBUG_BACKTRACE_PROVIDE_OBJECT", 1),
+                ("DEBUG_BACKTRACE_IGNORE_ARGS", 2),
+            ]
+            .map(|(name, value)| ConstDecl {
+                name: Name::from(name),
+                value: ConstExpr::Long(value),
+                attributes: Vec::new(),
+            }),
+        );
         out
     }
 

@@ -697,6 +697,13 @@ pub(crate) enum NativeCaller {
     Native,
 }
 
+/// `DEBUG_BACKTRACE_PROVIDE_OBJECT` (`Z/Zend/zend_constants.h`): a
+/// method's row carries its receiver.
+pub(crate) const DEBUG_BACKTRACE_PROVIDE_OBJECT: i64 = 1;
+
+/// `DEBUG_BACKTRACE_IGNORE_ARGS`: no row carries its arguments.
+pub(crate) const DEBUG_BACKTRACE_IGNORE_ARGS: i64 = 2;
+
 /// One bucket of a symbol table, php's zval in `EG(symbol_table)` or a
 /// rebuilt one: the value the table owns, or `IS_INDIRECT`, the CV of the
 /// frame the name is attached to (`zend_attach_symbol_table`), which
@@ -2024,7 +2031,7 @@ impl Request {
             .prop(self, b"trace")
             .and_then(|value| value.as_array().copied())
         {
-            Some(trace) => self.trace_to_string(trace),
+            Some(trace) => self.trace_to_string(trace, true),
             None => String::from("#0 {main}"),
         }
     }
@@ -2082,8 +2089,38 @@ impl Request {
     /// #2 {main}
     /// ```
     fn debug_backtrace(&mut self) -> Result<PhpArray, Thrown> {
-        let ignore_arguments = self.exception_ignore_args();
-        let links = self.trace_chain();
+        let options = if self.exception_ignore_args() {
+            DEBUG_BACKTRACE_IGNORE_ARGS
+        } else {
+            0
+        };
+        self.fetch_debug_backtrace(false, options, 0)
+    }
+
+    /// `zend_fetch_debug_backtrace` with its three parameters: the link
+    /// of the native being served left out where `skip_last` says, as
+    /// `debug_backtrace()` leaves itself out; `options`,
+    /// `DEBUG_BACKTRACE_PROVIDE_OBJECT` for an `object` row of a
+    /// method's receiver between `class` and `type`, where php adds it,
+    /// and `DEBUG_BACKTRACE_IGNORE_ARGS` for no `args`; and `limit`
+    /// rows at most, none meaning every row.
+    pub(crate) fn fetch_debug_backtrace(
+        &mut self,
+        skip_last: bool,
+        options: i64,
+        limit: i64,
+    ) -> Result<PhpArray, Thrown> {
+        let ignore_arguments = options & DEBUG_BACKTRACE_IGNORE_ARGS != 0;
+        let provide_object = options & DEBUG_BACKTRACE_PROVIDE_OBJECT != 0;
+        let mut links = self.trace_chain();
+        if skip_last && !links.is_empty() {
+            links.remove(0);
+        }
+        if let Ok(limit) = usize::try_from(limit)
+            && limit > 0
+        {
+            links.truncate(limit);
+        }
         let mut trace = PhpArray::new(self)?;
         for (traced, this, scope, mut arguments, named, site) in links {
             let mut row = PhpArray::new(self)?;
@@ -2113,6 +2150,10 @@ impl Request {
             if let Some((class, join)) = method {
                 let class = Value::string(PhpString::new(self, class.as_bytes())?);
                 self.set_string_key(&mut row, b"class", class)?;
+                if provide_object && let Some(this) = this {
+                    self.addref(&this.as_value());
+                    self.set_string_key(&mut row, b"object", this.as_value())?;
+                }
                 let join = Value::string(PhpString::new(self, join.as_bytes())?);
                 self.set_string_key(&mut row, b"type", join)?;
             }
@@ -2320,13 +2361,15 @@ impl Request {
         row.set(self, key, value)
     }
 
-    /// `zend_trace_to_string` (`Z/Zend/zend_exceptions.c:668`) with
-    /// `include_main`: `_build_trace_string` over each row that is an
-    /// array, `#N file(line): ` where the row names a `file`, `[internal
+    /// `zend_trace_to_string` (`Z/Zend/zend_exceptions.c:668`):
+    /// `_build_trace_string` over each row that is an array, `#N
+    /// file(line): ` where the row names a `file`, `[internal
     /// function]: ` where it names none, the `class` and `type` where
     /// there are ones, the `function`, and the `args` between the
-    /// parentheses; then `#N {main}`.
-    fn trace_to_string(&self, trace: PhpArray) -> String {
+    /// parentheses; then, under `include_main`, `#N {main}`, and without
+    /// it every line closed by its newline, which is what
+    /// `debug_print_backtrace()` writes.
+    pub(crate) fn trace_to_string(&self, trace: PhpArray, include_main: bool) -> String {
         let mut frames: Vec<String> = Vec::new();
         for (_, row) in &trace {
             let Some(row) = row.as_array() else {
@@ -2362,6 +2405,13 @@ impl Request {
                 frames.len()
             ));
         }
+        if !include_main {
+            let mut out = frames.join("\n");
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            return out;
+        }
         let main = frames.len();
         frames.push(format!("#{main} {{main}}"));
         frames.join("\n")
@@ -2375,7 +2425,7 @@ impl Request {
         let Ok(trace) = self.debug_backtrace() else {
             return String::from("#0 {main}");
         };
-        let text = self.trace_to_string(trace);
+        let text = self.trace_to_string(trace, true);
         self.release(Value::array(trace));
         text
     }
@@ -7856,11 +7906,11 @@ impl Request {
         self.assert_callback = callback;
     }
 
-    /// `debug_backtrace()` with php's options and limit; empty while no
-    /// frame is live.
+    /// `zend_fetch_debug_backtrace(return_value, 1, options, limit)`,
+    /// what `debug_backtrace()` answers from inside the native being
+    /// served: the rows below it, under php's options and limit.
     pub fn backtrace(&mut self, options: i64, limit: i64) -> Result<PhpArray, Thrown> {
-        let _ = (options, limit);
-        PhpArray::new(self)
+        self.fetch_debug_backtrace(true, options, limit)
     }
 
     /// The file of the frame that called the native,
