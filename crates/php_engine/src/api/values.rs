@@ -774,6 +774,21 @@ impl PhpObject {
         table.write_property(req, *self, name, value)
     }
 
+    /// One property written as `unserialize()` writes it,
+    /// [`Request::unserialize_property`]: the key as a serialized object
+    /// carries it, mangled for a protected or a private property, placed
+    /// in the declared slot it names without the class's handlers, or
+    /// written into the dynamic table under the key; the value and the
+    /// key are the object's from here.
+    pub fn unserialize_prop(
+        &self,
+        req: &mut Request,
+        key: PhpString,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        req.unserialize_property(*self, key, value)
+    }
+
     /// One declared property by slot, `OBJ_PROP_NUM(obj, index)` by
     /// index among the class's declared instance properties, in
     /// declaration order: a view, no owner taken, and `None` for an

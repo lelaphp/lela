@@ -170,6 +170,8 @@ pub fn extension() -> Extension {
         .constants(array::constants())
         .constants(math::constants())
         .classes(math::classes())
+        .classes(var::classes())
+        .ini(var::ini())
         .dependencies(dependencies())
         .request_state::<State>()
         .build("standard")

@@ -4482,6 +4482,89 @@ impl Request {
         Ok(())
     }
 
+    /// `process_nested_object_data`'s write of one property
+    /// (`Z/ext/standard/var_unserializer.re:554`): `key` as a serialized
+    /// object carries it, the name plain for a public property, `\0*\0`
+    /// before a protected one's and `\0Class\0` before a private one's.
+    /// A key that names a declared property is written into its slot
+    /// directly, visibility, `readonly` and `__set` not consulted, as php
+    /// writes `Z_OBJPROP`; one whose mangling names another visibility
+    /// than the declaration's is placed by `is_property_visibility_changed`,
+    /// by the unmangled name among the class's own properties and the
+    /// ones it inherits that are not private. Any other key is a dynamic
+    /// property under the key as written, created through
+    /// [`Request::dynamic_property_creation`]'s two arms where the table
+    /// does not hold it yet. `value` and `key` are the object's from here;
+    /// what the slot held is released after the write.
+    pub(crate) fn unserialize_property(
+        &mut self,
+        object: PhpObject,
+        key: PhpString,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let class = object.class();
+        let bytes = key.as_bytes().to_vec();
+        let (mangled_class, name) = match bytes.strip_prefix(b"\0") {
+            Some(rest) => match rest.iter().position(|b| *b == 0) {
+                Some(end) => (Some(rest[..end].to_vec()), rest[end + 1..].to_vec()),
+                None => (None, bytes.clone()),
+            },
+            None => (None, bytes.clone()),
+        };
+        let placed = self.placed_properties(class);
+        let class_name = self.class_name(class).into_bytes();
+        let exact = placed.iter().rposition(|(declaring, p)| {
+            if *p.name.0 != *name.as_slice() {
+                return false;
+            }
+            match (&mangled_class, p.visibility) {
+                (None, Visibility::Public) => true,
+                (Some(c), Visibility::Protected) => c.as_slice() == b"*",
+                (Some(c), Visibility::Private) => {
+                    self.class_name(*declaring).as_bytes() == c.as_slice()
+                }
+                _ => false,
+            }
+        });
+        let changed = || {
+            let reachable = match &mangled_class {
+                None => true,
+                Some(c) => c.as_slice() == b"*" || c.eq_ignore_ascii_case(&class_name),
+            };
+            if !reachable {
+                return None;
+            }
+            placed.iter().rposition(|(declaring, p)| {
+                *p.name.0 == *name.as_slice()
+                    && (*declaring == class || p.visibility != Visibility::Private)
+            })
+        };
+        let slot = exact.or_else(changed);
+        if let Some(at) = slot.and_then(|at| u32::try_from(at).ok()) {
+            let z = value.into_zval();
+            Heap::object_set_slot(&mut Hooks(self), object.heap(), at, z);
+            self.release(Value::string(key));
+            return Ok(());
+        }
+        let o = object.heap();
+        let table_key = php_heap::Key::Str(key.heap());
+        let held = o
+            .properties()
+            .is_some_and(|table| table.contains(table_key));
+        if !held && let Err(thrown) = self.dynamic_property_creation(class, &name) {
+            self.release(value);
+            self.release(Value::string(key));
+            return Err(thrown);
+        }
+        let table = self.heap.object_properties(o);
+        let table = self.fatal_of(table)?;
+        let table = self.array_separate(table)?;
+        self.heap.object_set_properties(o, table);
+        self.array_update(table, table_key, value)?;
+        self.release(Value::string(key));
+        Ok(())
+    }
+
     /// The two arms php takes before it lays a name the class did not
     /// declare into the dynamic table, in
     /// `zend_std_write_property` and in `zend_std_get_property_ptr_ptr`

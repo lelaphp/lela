@@ -410,6 +410,7 @@ values::PhpObject::set_prop
 values::PhpObject::set_slot
 values::PhpObject::slot
 values::PhpObject::unprotect
+values::PhpObject::unserialize_prop
 values::PhpRef
 values::PhpRef::as_value
 values::PhpRef::get
