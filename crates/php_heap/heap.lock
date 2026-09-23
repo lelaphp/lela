@@ -34,6 +34,11 @@ EntryGuard
 Exponent
 Exponent::as_char
 Fatal
+FiberStack
+FiberStack::base
+FiberStack::end
+FiberStack::new
+FiberStack::resume
 Frame
 Frame::is_empty
 Frame::len
@@ -103,6 +108,9 @@ HeapHooks::free_resource
 HeapHooks::gc_children
 HeapHooks::heap
 HeapHooks::out_of_memory
+Host
+Host::Transfer
+Host::suspensions
 Intern
 Intern::constant_array
 Intern::intern
@@ -153,6 +161,7 @@ Scalar
 Scalar::is_true
 Slot
 SortEntry
+StackRefused
 Str
 Str::addref
 Str::bytes
@@ -170,6 +179,8 @@ Str::refcount
 Strings
 Strings::count
 Strings::new
+Suspensions
+Switched
 VmStack
 VmStack::current
 VmStack::entry
@@ -223,4 +234,5 @@ numeric_prefix
 power
 shift_left
 shift_right
+suspend
 zend_sort
