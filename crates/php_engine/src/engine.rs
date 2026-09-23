@@ -1079,6 +1079,7 @@ impl Engine {
         crate::output::deactivate(&mut req);
         req.free_shutdown_functions();
         req.close_resources();
+        req.free_user_handlers();
         req.destroy_symbol_table();
         req.free_object_storage();
         // `php_error_cb` rendered the fatal where it was raised, on
@@ -1254,6 +1255,13 @@ fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
     }
     req.detach_symbol_table(frame);
     req.pop_frame();
+    // What the loop left pending for the user exception handler, served
+    // with the main frame left (`zend_execute_scripts`).
+    if req.is_pending()
+        && let Err(fatal) = req.uncaught()
+    {
+        req.end_in(&fatal);
+    }
 }
 
 #[cfg(test)]

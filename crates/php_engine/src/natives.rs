@@ -36,14 +36,89 @@ use crate::api::raising::{
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Key, PhpArray, PhpString, TypeTag, Value, ValueRef};
 
-/// The engine's own natives, in the order php declares them, each
-/// declaration beside its entry.
+mod errors;
+mod stub;
+
+/// The engine's own natives, each declaration beside its entry: the
+/// ones of `zend_builtin_functions.c` first, in the order its stub
+/// declares them, which is the order `get_defined_functions()` and
+/// `get_extension_funcs('Core')` list them in; then the ones php keeps
+/// in `ext/standard` and this engine here, in the order they were
+/// declared.
 pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     let mut natives = zend_natives();
     natives.extend(constant_natives());
     natives.extend(class_natives());
+    natives.extend(errors::natives());
+    natives.sort_by_key(|(decl, _)| {
+        CORE.iter()
+            .position(|name| name.as_bytes() == decl.name.0.as_ref())
+            .unwrap_or(CORE.len())
+    });
     natives
 }
+
+/// `zend_builtin_functions.stub.php`'s functions in its order, the
+/// `gc_*` five and `zend_thread_id`, which a build without `ZEND_DEBUG`
+/// and `ZTS` does not declare, left out.
+const CORE: &[&str] = &[
+    "clone",
+    "exit",
+    "die",
+    "zend_version",
+    "func_num_args",
+    "func_get_arg",
+    "func_get_args",
+    "strlen",
+    "strcmp",
+    "strncmp",
+    "strcasecmp",
+    "strncasecmp",
+    "error_reporting",
+    "define",
+    "defined",
+    "get_class",
+    "get_called_class",
+    "get_parent_class",
+    "is_subclass_of",
+    "is_a",
+    "get_class_vars",
+    "get_object_vars",
+    "get_mangled_object_vars",
+    "get_class_methods",
+    "method_exists",
+    "property_exists",
+    "class_exists",
+    "interface_exists",
+    "trait_exists",
+    "enum_exists",
+    "function_exists",
+    "class_alias",
+    "get_included_files",
+    "get_required_files",
+    "trigger_error",
+    "user_error",
+    "set_error_handler",
+    "restore_error_handler",
+    "get_error_handler",
+    "set_exception_handler",
+    "restore_exception_handler",
+    "get_exception_handler",
+    "get_declared_classes",
+    "get_declared_traits",
+    "get_declared_interfaces",
+    "get_defined_functions",
+    "get_defined_vars",
+    "get_resource_type",
+    "get_resource_id",
+    "get_resources",
+    "get_loaded_extensions",
+    "get_defined_constants",
+    "debug_backtrace",
+    "debug_print_backtrace",
+    "extension_loaded",
+    "get_extension_funcs",
+];
 
 /// The two that read the linked table (#259), `clone`, which reads an
 /// object's handler table (#281), and `exit` with `die`, in the order

@@ -599,7 +599,19 @@ pub struct Request {
     next_ref_source: usize,
     pub(crate) wrappers: Vec<StreamWrapper>,
     filters: Vec<StreamFilter>,
-    error_handlers: Vec<Option<Callable>>,
+    /// php's `EG(user_error_handler)`, the handler `set_error_handler`
+    /// installed, `IS_UNDEF` as none; the stack under it is
+    /// `EG(user_error_handlers)`, each row the handler it replaced and
+    /// that handler's mask, `EG(user_error_handlers_error_reporting)`
+    /// kept beside it. Every handler here is one owner of its value.
+    error_handler: Option<Callable>,
+    /// `EG(user_error_handler_error_reporting)`: the levels the handler
+    /// is handed, `set_error_handler`'s `$error_levels`.
+    error_handler_levels: i64,
+    error_handlers: Vec<(Option<Callable>, i64)>,
+    /// php's `EG(user_exception_handler)` and the stack under it,
+    /// `EG(user_exception_handlers)`, the same shape without a mask.
+    exception_handler: Option<Callable>,
     exception_handlers: Vec<Option<Callable>>,
     shutdown_functions: Vec<(Callable, Vec<Value>)>,
     tick_functions: Vec<(Callable, Vec<Value>)>,
@@ -813,7 +825,10 @@ impl Request {
             next_ref_source: 1,
             wrappers: Vec::new(),
             filters: Vec::new(),
+            error_handler: None,
+            error_handler_levels: 0,
             error_handlers: Vec::new(),
+            exception_handler: None,
             exception_handlers: Vec::new(),
             shutdown_functions: Vec::new(),
             tick_functions: Vec::new(),
@@ -1837,6 +1852,10 @@ impl Request {
     /// rendering; `a_parse_error_is_rendered_as_its_level` in
     /// `api::raising` holds it without the extension.
     pub(crate) fn uncaught(&mut self) -> Result<(), Fatal> {
+        // `zend_execute_scripts` and `zend_throw_exception_internal` with
+        // no frame standing: a user exception handler takes the
+        // throwable first, and what it leaves is rendered.
+        self.user_exception_handler();
         let Some(throwable) = self.pending.take() else {
             // `zend_exception_error` on the unwind exit: "We
             // successfully unwound, nothing more to do", and the
@@ -2552,9 +2571,11 @@ impl Request {
     /// and to the body while `display_errors` is, in whichever of php's
     /// two display forms `html_errors` names, with
     /// `error_prepend_string` and `error_append_string` standing around
-    /// it. The message-id table, the user handler, `EH_THROW` and the
-    /// `@` scope are the rest of that branch and are not read yet.
-    pub(crate) fn note_error(&mut self, level: Level, message: &str) {
+    /// it. The user handler takes it first where one stands
+    /// ([`Request::note_error_in`]); the message-id table and `EH_THROW`
+    /// are the rest of that branch and are not read yet. `true` says the
+    /// built-in handler served it.
+    pub(crate) fn note_error(&mut self, level: Level, message: &str) -> bool {
         // `zend_error_va_list`'s site (`Z/Zend/zend.c:1633-1651`): the
         // executing frame's file and line, and, where nothing is
         // executing and nothing compiling, no file at all, which
@@ -2562,19 +2583,18 @@ impl Request {
         // (`ZEND_STR_UNKNOWN_CAPITALIZED`). A destructor the shutdown
         // walk refuses to serve raises there.
         if !self.executing() {
-            self.note_error_in(level, message, b"Unknown", 0);
-            return;
+            return self.note_error_in(level, message, b"Unknown", 0);
         }
         let line = self.current_line();
-        self.note_error_at(level, message, line);
+        self.note_error_at(level, message, line)
     }
 
     /// The same diagnostic at a line no frame stands on: what a
     /// compile-time error carries, since php's `zend_error_cb` is given
     /// the compiler's line while `zend_get_executed_lineno` has none.
-    pub(crate) fn note_error_at(&mut self, level: Level, message: &str, line: u32) {
+    pub(crate) fn note_error_at(&mut self, level: Level, message: &str, line: u32) -> bool {
         let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
-        self.note_error_in(level, message, &file, line);
+        self.note_error_in(level, message, &file, line)
     }
 
     /// The same diagnostic at a file and line of its own, which is what
@@ -2749,13 +2769,23 @@ impl Request {
     /// raises one while serving, so
     /// `the_second_html_format_carries_the_trace_after_the_line` below
     /// holds it to the oracle's bytes for `trigger_error()`.
-    pub(crate) fn note_error_in(&mut self, level: Level, message: &str, file: &[u8], line: u32) {
+    pub(crate) fn note_error_in(
+        &mut self,
+        level: Level,
+        message: &str,
+        file: &[u8],
+        line: u32,
+    ) -> bool {
         // "Always clear the last backtrace."
         self.last_fatal_error_backtrace = None;
         if self.pending.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
             self.last_fatal_error_backtrace = Some(self.trace_as_string());
         }
+        if self.user_error_handler(level, message, file, line) {
+            return false;
+        }
         self.error_cb(level, message, file, line);
+        true
     }
 
     /// `php_error_cb` (`Z/main/main.c:1370-1500`): the diagnostic stored,
@@ -2998,6 +3028,23 @@ impl Request {
         self.last_fatal_error_backtrace = None;
         self.error_cb(level, message, file, line);
         self.end_at_level(level, message, file, line);
+    }
+
+    /// `php_error_cb`'s `_zend_bailout` (`Z/main/main.c:1492-1520`) for a level
+    /// it cannot recover from that the built-in handler served, raised
+    /// where the request stands: every object marked destructed,
+    /// `zend_objects_store_mark_destructed`, so no destructor is served
+    /// after it, and the request ended at the level. What
+    /// `trigger_error()` reaches with `E_USER_ERROR`.
+    pub(crate) fn bail_out(&mut self, level: Level, message: &str) {
+        let (file, line) = if self.executing() {
+            let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+            (file, self.current_line())
+        } else {
+            (b"Unknown".to_vec(), 0)
+        };
+        self.marked_destructed = true;
+        self.end_at_level(level, message, &file, line);
     }
 
     /// The ending alone, the diagnostic already rendered at its own
@@ -7503,29 +7550,216 @@ impl Request {
         self.error_reporting = self.ini_get(b"error_reporting").map_or(E_ALL, ini_atol);
     }
 
-    /// `set_error_handler()`: the previous handler.
+    /// `ZEND_FUNCTION(set_error_handler)`
+    /// (`Z/Zend/zend_builtin_functions.c:1306`): the handler standing is
+    /// pushed with its mask, `zend_stack_push` of both, and `handler`
+    /// stands with `levels` as its mask; none leaves no handler and the
+    /// mask where it was. The answer is the handler that stood, a view
+    /// the stack keeps the owner of, which the native copies. The
+    /// handler given is one more owner from here.
     pub fn set_error_handler(&mut self, handler: Option<Callable>, levels: i64) -> Option<Value> {
-        let _ = levels;
-        let previous = self.error_handlers.last().cloned().flatten();
-        self.error_handlers.push(handler);
-        previous.map(Callable::into_value)
+        let previous = self.error_handler.take();
+        let answer = previous.as_ref().map(Callable::value);
+        self.error_handlers
+            .push((previous, self.error_handler_levels));
+        if let Some(handler) = handler {
+            self.addref(&handler.value());
+            self.error_handler = Some(handler);
+            self.error_handler_levels = levels;
+        }
+        answer
     }
 
-    /// `restore_error_handler()`.
+    /// `ZEND_FUNCTION(restore_error_handler)`
+    /// (`Z/Zend/zend_builtin_functions.c:1332`): the handler standing
+    /// released and the top of the stack standing in its place with its
+    /// mask; with the stack empty, no handler and the mask where it was.
+    /// php answers `true` whatever it found.
     pub fn restore_error_handler(&mut self) -> bool {
-        self.error_handlers.pop().is_some()
+        if let Some(handler) = self.error_handler.take() {
+            self.release(handler.into_value());
+        }
+        if let Some((handler, levels)) = self.error_handlers.pop() {
+            self.error_handler = handler;
+            self.error_handler_levels = levels;
+        }
+        true
     }
 
-    /// `set_exception_handler()`: the previous handler.
+    /// `EG(user_error_handler)` as `get_error_handler()` reads it: the
+    /// value the handler was set from, a view, none while no handler
+    /// stands.
+    pub(crate) fn error_handler(&self) -> Option<Value> {
+        self.error_handler.as_ref().map(Callable::value)
+    }
+
+    /// `ZEND_FUNCTION(set_exception_handler)`
+    /// (`Z/Zend/zend_builtin_functions.c:1367`): the error handler's
+    /// shape without a mask.
     pub fn set_exception_handler(&mut self, handler: Option<Callable>) -> Option<Value> {
-        let previous = self.exception_handlers.last().cloned().flatten();
-        self.exception_handlers.push(handler);
-        previous.map(Callable::into_value)
+        let previous = self.exception_handler.take();
+        let answer = previous.as_ref().map(Callable::value);
+        self.exception_handlers.push(previous);
+        if let Some(handler) = handler {
+            self.addref(&handler.value());
+            self.exception_handler = Some(handler);
+        }
+        answer
     }
 
-    /// `restore_exception_handler()`.
+    /// `ZEND_FUNCTION(restore_exception_handler)`
+    /// (`Z/Zend/zend_builtin_functions.c:1399`).
     pub fn restore_exception_handler(&mut self) -> bool {
-        self.exception_handlers.pop().is_some()
+        if let Some(handler) = self.exception_handler.take() {
+            self.release(handler.into_value());
+        }
+        if let Some(handler) = self.exception_handlers.pop() {
+            self.exception_handler = handler;
+        }
+        true
+    }
+
+    /// `EG(user_exception_handler)` as `get_exception_handler()` reads
+    /// it, a view.
+    pub(crate) fn exception_handler(&self) -> Option<Value> {
+        self.exception_handler.as_ref().map(Callable::value)
+    }
+
+    /// `zend_shutdown_executor_values`' release of both handlers and
+    /// both stacks (`Z/Zend/zend_execute_API.c:410-420`), after the open
+    /// resources are closed, so a resource's destructor that raises
+    /// still reaches the handler that stood.
+    pub(crate) fn free_user_handlers(&mut self) {
+        let error = self.error_handler.take().into_iter().chain(
+            std::mem::take(&mut self.error_handlers)
+                .into_iter()
+                .filter_map(|(handler, _)| handler),
+        );
+        let exception = self.exception_handler.take().into_iter().chain(
+            std::mem::take(&mut self.exception_handlers)
+                .into_iter()
+                .flatten(),
+        );
+        let all: Vec<Callable> = error.chain(exception).collect();
+        for handler in all {
+            self.release(handler.into_value());
+        }
+    }
+
+    /// `zend_error_impl`'s user branch (`Z/Zend/zend.c:1527-1604`): the
+    /// handler standing is handed the diagnostic where its mask has the
+    /// level, and where the level is not one php holds unsafe to hand to
+    /// user code, `E_ERROR`, `E_PARSE`, the two core levels and the two
+    /// compile levels. The handler is taken down while it runs, so a
+    /// diagnostic it raises reaches the built-in handler, and put back
+    /// after unless it set one of its own. It is handed the level, the
+    /// message, the file and the line; `true` says the diagnostic is
+    /// served, which is every answer but `false` and a throw, which is
+    /// left pending in the diagnostic's place. With a throwable already
+    /// pending, php's `zend_call_function` returns before the call and
+    /// the diagnostic is dropped, handled by nobody.
+    fn user_error_handler(&mut self, level: Level, message: &str, file: &[u8], line: u32) -> bool {
+        if self.error_handler.is_none()
+            || self.error_handler_levels & level.bit() == 0
+            || matches!(
+                level,
+                Level::Error
+                    | Level::Parse
+                    | Level::CoreError
+                    | Level::CoreWarning
+                    | Level::CompileError
+                    | Level::CompileWarning
+            )
+        {
+            return false;
+        }
+        if self.is_pending() {
+            return true;
+        }
+        let Some(handler) = self.error_handler.take() else {
+            return false;
+        };
+        let arguments = (|| -> Result<[Value; 4], Thrown> {
+            Ok([
+                Value::int(level.bit()),
+                Value::string(PhpString::new(self, message.as_bytes())?),
+                Value::string(PhpString::new(self, file)?),
+                Value::int(i64::from(line)),
+            ])
+        })();
+        let served = match arguments {
+            Ok(arguments) => {
+                let answer = crate::api::call::call(self, &handler, &arguments);
+                for argument in arguments {
+                    self.release(argument);
+                }
+                match answer {
+                    Ok(value) => {
+                        let fall_through = matches!(value.as_ref(), ValueRef::Bool(false));
+                        self.release(value);
+                        !fall_through
+                    }
+                    Err(thrown) => {
+                        self.leave_pending(&thrown);
+                        true
+                    }
+                }
+            }
+            Err(thrown) => {
+                self.leave_pending(&thrown);
+                true
+            }
+        };
+        if self.error_handler.is_none() {
+            self.error_handler = Some(handler);
+        } else {
+            self.release(handler.into_value());
+        }
+        served
+    }
+
+    /// `zend_user_exception_handler` (`Z/Zend/zend.c:1931`): the pending
+    /// throwable handed to the handler standing, which is taken down
+    /// onto the stack while it runs and stands again after unless it
+    /// set one of its own. The throwable is released once the handler
+    /// returns; what the handler throws is rendered as the uncaught
+    /// fatal, since no handler stands to take it, which ends the
+    /// request as php's `zend_throw_exception_internal` does with no
+    /// frame standing. Nothing is done for the unwind exit.
+    pub(crate) fn user_exception_handler(&mut self) {
+        if self.exception_handler.is_none() {
+            return;
+        }
+        let Some(throwable) = self.pending.take() else {
+            return;
+        };
+        let handler = self.exception_handler.take();
+        self.exception_handlers.push(handler.clone());
+        if let Some(handler) = handler {
+            match crate::api::call::call(self, &handler, &[throwable.as_value()]) {
+                Ok(value) => self.release(value),
+                Err(thrown) => {
+                    self.leave_pending(&thrown);
+                    if let Err(fatal) = self.uncaught() {
+                        self.end_in(&fatal);
+                    }
+                }
+            }
+        }
+        self.release(throwable.as_value());
+        if self.exception_handler.is_none()
+            && let Some(top) = self.exception_handlers.pop()
+        {
+            self.exception_handler = top;
+        }
+    }
+
+    /// Whether a user handler for throwables stands, which is what
+    /// decides whether a throwable the main op array did not catch is
+    /// rendered in its frame or handed to the handler once the frame is
+    /// left.
+    pub(crate) fn has_exception_handler(&self) -> bool {
+        self.exception_handler.is_some()
     }
 
     /// `assert_options(ASSERT_CALLBACK)` as it stands.
@@ -9181,7 +9415,7 @@ fn ini_truth(value: Option<&[u8]>) -> bool {
 /// `E_ALL` (`Z/Zend/zend_errors.h:43`), the fourteen levels php 8.5
 /// raises, which is every bit below `E_USER_DEPRECATED`'s but
 /// `E_STRICT`'s, the one 8.4 removed from the sum.
-const E_ALL: i64 = 32767 & !Level::Strict.bit();
+pub(crate) const E_ALL: i64 = 32767 & !Level::Strict.bit();
 
 /// `ZEND_ATOL`, which is `atoll` (`Z/Zend/zend_long.h:77`): leading
 /// whitespace skipped, one sign, the digits up to the first byte that is

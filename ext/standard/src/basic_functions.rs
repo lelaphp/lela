@@ -1,7 +1,8 @@
 //! `Z/ext/standard/basic_functions.c`'s environment and ini natives:
 //! `getenv`, `putenv`, `time_nanosleep`, the include path's pair,
 //! `ip2long` and `long2ip`, and `parse_ini_string` and `parse_ini_file`
-//! over the INI grammar of [`crate::ini`].
+//! over the INI grammar of [`crate::ini`], and the stored diagnostic's
+//! pair, `error_get_last` and `error_clear_last`.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -54,6 +55,8 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
             stub("time_nanosleep(int $seconds, int $nanoseconds): array|bool"),
             time_nanosleep,
         ),
+        (stub("error_get_last(): ?array"), error_get_last),
+        (stub("error_clear_last(): void"), error_clear_last),
         (
             stub("set_include_path(string $include_path): string|false"),
             set_include_path,
@@ -338,6 +341,64 @@ fn get_include_path(req: &mut Request) -> Result<Value, Thrown> {
         Some(path) => string_value(req, &path),
         None => Ok(Value::bool(false)),
     }
+}
+
+/// `error_get_last(): ?array`, php's `PHP_FUNCTION(error_get_last)`
+/// (`Z/ext/standard/basic_functions.c:1420`): the last diagnostic the
+/// built-in handler stored, as `type`, `message`, `file` and `line`, and
+/// `null` while none is. The handler stores what `error_reporting` and
+/// `@` hide, and nothing a user handler served; a handler that answers
+/// `false` falls through to it and the diagnostic is stored.
+///
+/// ```php
+/// var_dump(error_get_last()); @trigger_error("x", E_USER_WARNING); var_dump(error_get_last()); var_dump(error_clear_last(), error_get_last());
+/// set_error_handler(fn () => true); trigger_error("y"); var_dump(error_get_last());
+/// set_error_handler(fn () => false); trigger_error("z"); var_dump(error_get_last()["message"]);
+/// ```
+/// ```expect
+/// NULL
+/// array(4) {
+///   ["type"]=>
+///   int(512)
+///   ["message"]=>
+///   string(1) "x"
+///   ["file"]=>
+///   string(%d) "%s"
+///   ["line"]=>
+///   int(2)
+/// }
+/// NULL
+/// NULL
+/// NULL
+///
+/// Notice: z in %s on line 4
+/// string(1) "z"
+/// ```
+fn error_get_last(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 0, 0)?;
+    Ok(req.last_error()?.map_or_else(Value::null, Value::array))
+}
+
+/// `error_clear_last(): void`, php's `PHP_FUNCTION(error_clear_last)`
+/// (`Z/ext/standard/basic_functions.c:1449`): the stored diagnostic
+/// dropped, so `error_get_last()` answers `null` until the next.
+///
+/// ```php
+/// @trigger_error("x"); error_clear_last(); var_dump(error_get_last()); error_clear_last(1);
+/// ```
+/// ```expect exit=255
+/// NULL
+///
+/// Fatal error: Uncaught ArgumentCountError: error_clear_last() expects exactly 0 arguments, 1 given in %s:2
+/// Stack trace:
+/// #0 %s(2): error_clear_last(1)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+fn error_clear_last(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 0, 0)?;
+    req.clear_last_error();
+    Ok(Value::null())
 }
 
 /// The two optional arguments of the pair, `$process_sections` and

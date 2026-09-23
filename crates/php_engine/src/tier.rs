@@ -233,7 +233,12 @@ fn serve<T: Tier>(req: &mut Request, entry: FrameRef, unhandled: Unhandled) -> R
             Stepped::Threw(at) => {
                 let unwound = unwind::<T>(req, at)?;
                 if unwound == Stepped::Threw(at) {
+                    // A user exception handler is served once the main
+                    // frame is left, as `zend_execute_scripts` serves it
+                    // after `zend_execute` returns, so the throwable
+                    // stays pending for `serve` to hand it over.
                     return match unhandled {
+                        Unhandled::Render if req.has_exception_handler() => Ok(()),
                         Unhandled::Render => req.uncaught(),
                         Unhandled::Pending => Ok(()),
                     };
