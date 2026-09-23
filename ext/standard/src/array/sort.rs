@@ -604,3 +604,241 @@ pub(super) fn strtod(bytes: &[u8]) -> f64 {
         .and_then(|text| text.parse::<f64>().ok())
         .unwrap_or(0.0)
 }
+
+/// The declaration of `array_multisort`, both parameters taken by
+/// reference where a variable is given and by value otherwise, php's
+/// `@prefer-ref`.
+///
+/// ```php
+/// echo new ReflectionFunction('array_multisort');
+/// var_dump((new ReflectionParameter('array_multisort', 1))->canBePassedByValue());
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function array_multisort ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> &$array ]
+///     Parameter #1 [ <optional> &...$rest ]
+///   }
+///   - Return [ true ]
+/// }
+/// bool(true)
+/// ```
+pub(super) fn multisort_native() -> (FunctionDecl, Entry) {
+    (
+        declared(
+            b"array_multisort",
+            &[
+                Parameter {
+                    by_ref: true,
+                    prefer_ref: true,
+                    ty: None,
+                    ..parameter(b"array", Type::Mixed)
+                },
+                Parameter {
+                    by_ref: true,
+                    prefer_ref: true,
+                    variadic: true,
+                    ty: None,
+                    ..parameter(b"rest", Type::Mixed)
+                },
+            ],
+            Type::True,
+        ),
+        array_multisort,
+    )
+}
+
+/// `SORT_ASC` and `SORT_DESC`, the orders `array_multisort` reads.
+const SORT_ASC: i64 = 4;
+const SORT_DESC: i64 = 3;
+
+/// `array_multisort(&$array, &...$rest): true`, php's
+/// `PHP_FUNCTION(array_multisort)` (`Z/ext/standard/array.c:6058`): the
+/// arrays sorted together as SQL's `ORDER BY` sorts columns, the first
+/// array's values deciding and each later one breaking the ties the
+/// earlier left, each followed by at most one order and one comparison
+/// constant; then every array rewritten in the order found, string keys kept
+/// and integer keys renumbered. The rows are sorted by `zend_sort` with
+/// php's comparison, the position a row held its last word.
+///
+/// ```php
+/// $data = [3, 1, 2]; $other = ["c", "a", "b"]; var_dump(array_multisort($data, SORT_DESC, $other), $data, $other);
+/// $a = [10, 100, 100, 0]; $b = [1, 3, 2, 4]; array_multisort($a, $b); echo json_encode([$a, $b]), "\n";
+/// $s = ["10", 9, "1e1", "a" => 1]; array_multisort($s, SORT_STRING); echo json_encode($s), "\n";
+/// $e = []; var_dump(array_multisort($e));
+/// ```
+/// ```expect
+/// bool(true)
+/// array(3) {
+///   [0]=>
+///   int(3)
+///   [1]=>
+///   int(2)
+///   [2]=>
+///   int(1)
+/// }
+/// array(3) {
+///   [0]=>
+///   string(1) "c"
+///   [1]=>
+///   string(1) "b"
+///   [2]=>
+///   string(1) "a"
+/// }
+/// [[0,10,100,100],[4,1,2,3]]
+/// {"a":1,"0":"10","1":"1e1","2":9}
+/// bool(true)
+/// ```
+///
+/// ```php
+/// $a = [1, 2]; $b = [1];
+/// try { array_multisort($a, $b); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// try { array_multisort($a, SORT_ASC, SORT_DESC); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { array_multisort($a, 99); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// try { array_multisort($a, "x"); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Array sizes are inconsistent
+/// array_multisort(): Argument #3 must be an array or a sort flag that has not already been specified
+/// array_multisort(): Argument #2 must be a valid sort flag
+/// array_multisort(): Argument #2 must be an array or a sort flag
+/// ```
+// php's body is one function: the parse, the sort and the rewrite.
+#[allow(clippy::too_many_lines)]
+fn array_multisort(req: &mut Request) -> Result<Value, Thrown> {
+    use php_ext::raising::{arg_type_error, throw};
+    use php_ext::values::{PhpArray, PhpRef, zend_sort};
+    if req.argument_count() < 1 {
+        return Err(php_ext::raising::too_few_arguments(req, 1, 0));
+    }
+    let given = req.variadic_arguments(1)?;
+    // Each array with the cell it came in, and the comparison each array
+    // is sorted by, `(flags, descending)`.
+    let mut arrays: Vec<(PhpArray, Option<PhpRef>)> = Vec::new();
+    let mut sorts: Vec<(i64, bool)> = Vec::new();
+    let (mut order, mut kind) = (SORT_ASC, SORT_REGULAR);
+    let (mut order_allowed, mut kind_allowed) = (false, false);
+    for (at, argument) in given.iter().enumerate() {
+        let position = u32::try_from(at + 1).unwrap_or(u32::MAX);
+        let value = argument.deref();
+        if let Some(array) = value.as_array() {
+            if at > 0 {
+                sorts.push((kind, order != SORT_ASC));
+                order = SORT_ASC;
+                kind = SORT_REGULAR;
+            }
+            let entry = match argument.as_php_ref() {
+                Some(cell) => match cell.separate_array(req)? {
+                    Some(array) => (array, Some(*cell)),
+                    None => (*array, None),
+                },
+                None => (*array, None),
+            };
+            arrays.push(entry);
+            order_allowed = true;
+            kind_allowed = true;
+        } else if let Some(flag) = value.as_int() {
+            match flag & !SORT_FLAG_CASE {
+                SORT_ASC | SORT_DESC => {
+                    if !order_allowed {
+                        return Err(arg_type_error(
+                            req,
+                            position,
+                            "be an array or a sort flag that has not already been specified",
+                        ));
+                    }
+                    order = if flag == SORT_DESC {
+                        SORT_DESC
+                    } else {
+                        SORT_ASC
+                    };
+                    order_allowed = false;
+                }
+                SORT_REGULAR | SORT_NUMERIC | SORT_STRING | SORT_NATURAL | SORT_LOCALE_STRING => {
+                    if !kind_allowed {
+                        return Err(arg_type_error(
+                            req,
+                            position,
+                            "be an array or a sort flag that has not already been specified",
+                        ));
+                    }
+                    kind = flag;
+                    kind_allowed = false;
+                }
+                _ => {
+                    return Err(php_ext::raising::arg_value_error(
+                        req,
+                        position,
+                        "be a valid sort flag",
+                    ));
+                }
+            }
+        } else {
+            return Err(arg_type_error(req, position, "be an array or a sort flag"));
+        }
+    }
+    let Some((first, _)) = arrays.first() else {
+        return Ok(Value::bool(true));
+    };
+    let size = first.len();
+    if arrays.iter().any(|(array, _)| array.len() != size) {
+        return Err(throw(req, "ValueError", "Array sizes are inconsistent"));
+    }
+    if size < 1 {
+        return Ok(Value::bool(true));
+    }
+    sorts.push((kind, order != SORT_ASC));
+    let columns: Vec<Vec<(Key, Value)>> = arrays
+        .iter()
+        .map(|(array, _)| array.snapshot_refs())
+        .collect();
+    let mut rows: Vec<usize> = (0..size).collect();
+    let mut pending: Option<Thrown> = None;
+    zend_sort(&mut rows, &mut |a, b| {
+        if pending.is_some() {
+            return Ordering::Equal;
+        }
+        for (column, (flags, reverse)) in columns.iter().zip(&sorts) {
+            match compared(req, *flags, &column[*a].1, &column[*b].1) {
+                Ok(Ordering::Equal) => {}
+                Ok(ordering) => {
+                    return if *reverse {
+                        ordering.reverse()
+                    } else {
+                        ordering
+                    };
+                }
+                Err(thrown) => {
+                    pending = Some(thrown);
+                    return Ordering::Equal;
+                }
+            }
+        }
+        a.cmp(b)
+    });
+    if let Some(thrown) = pending {
+        return Err(thrown);
+    }
+    let count = i64::try_from(size).unwrap_or(i64::MAX);
+    for ((_, cell), column) in arrays.iter().zip(&columns) {
+        let mut rebuilt = PhpArray::new(req)?;
+        for row in &rows {
+            let (key, value) = &column[*row];
+            req.addref(value);
+            match key {
+                Key::Str(_) => {
+                    let key = super::key_copy(req, key);
+                    rebuilt.set(req, key, *value)?;
+                }
+                Key::Int(_) => rebuilt.append(req, *value)?,
+            }
+        }
+        rebuilt.set_next_free(req, count)?;
+        match cell {
+            Some(cell) => cell.set(req, rebuilt.to_value()),
+            None => req.release(rebuilt.to_value()),
+        }
+    }
+    Ok(Value::bool(true))
+}

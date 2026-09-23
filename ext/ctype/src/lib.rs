@@ -93,6 +93,7 @@ fn declared(name: &[u8]) -> FunctionDecl {
             name: Name(b"text".as_slice().into()),
             ty: Some(Type::Mixed),
             by_ref: false,
+            prefer_ref: false,
             variadic: false,
             default: None,
             attributes: Vec::new(),

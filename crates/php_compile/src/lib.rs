@@ -331,6 +331,7 @@ mod tests {
             name: Name::from(name),
             ty: Some(ty),
             by_ref: false,
+            prefer_ref: false,
             variadic: false,
             default,
             attributes: Vec::new(),

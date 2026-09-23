@@ -160,6 +160,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     natives.extend(stack::natives());
     natives.extend(keys::natives());
     natives.extend(make::natives());
+    natives.push(sort::multisort_native());
     natives
 }
 
