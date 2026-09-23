@@ -61,6 +61,7 @@ mod pack;
 mod quot_print;
 mod scanf;
 mod sha1;
+mod soundex;
 mod string;
 mod strnatcmp;
 mod stub;
@@ -205,6 +206,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         quot_print::natives(),
         uuencode::natives(),
         metaphone::natives(),
+        soundex::natives(),
     ]
     .into_iter()
     .flatten()
