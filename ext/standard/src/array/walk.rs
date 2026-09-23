@@ -17,7 +17,7 @@ use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpRef, Value, ValueRef};
 
 use super::sort::key_value;
-use super::{copied, key_copy};
+use super::{copied, key_copy, unknown};
 use crate::output::Entry;
 use crate::{argument_count_between, callable_argument, declared, long_argument, parameter};
 
@@ -25,15 +25,22 @@ use crate::{argument_count_between, callable_argument, declared, long_argument, 
 pub(super) const ARRAY_FILTER_USE_BOTH: i64 = 1;
 pub(super) const ARRAY_FILTER_USE_KEY: i64 = 2;
 
-/// The declarations, as `basic_functions.stub.php` has them. The
-/// walks' `$arg` is optional with a default php leaves unknown
-/// (`= UNKNOWN`), which the declaration model cannot say yet, so
-/// Reflection reads it as required here.
+/// The declarations, as `basic_functions.stub.php` has them, the walks'
+/// `$arg` optional with the default php leaves unknown.
 ///
 /// ```php
-/// foreach (['array_map', 'array_filter', 'array_reduce', 'array_find', 'array_all'] as $f) echo new ReflectionFunction($f);
+/// foreach (['array_walk', 'array_map', 'array_filter', 'array_reduce', 'array_find', 'array_all'] as $f) echo new ReflectionFunction($f);
 /// ```
 /// ```expect
+/// Function [ <internal:standard> function array_walk ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <required> object|array &$array ]
+///     Parameter #1 [ <required> callable $callback ]
+///     Parameter #2 [ <optional> mixed $arg = <default> ]
+///   }
+///   - Return [ true ]
+/// }
 /// Function [ <internal:standard> function array_map ] {
 ///
 ///   - Parameters [3] {
@@ -89,7 +96,10 @@ pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
                         ..parameter(b"array", Type::Union(vec![Type::Array, Type::Object]))
                     },
                     parameter(b"callback", Type::Callable),
-                    parameter(b"arg", Type::Mixed),
+                    Parameter {
+                        default: Some(unknown()),
+                        ..parameter(b"arg", Type::Mixed)
+                    },
                 ],
                 Type::True,
             ),

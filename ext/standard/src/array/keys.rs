@@ -20,7 +20,7 @@ use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use super::sort::key_value;
 use super::walk::array_argument;
-use super::{copied, key_copy};
+use super::{copied, key_copy, unknown};
 use crate::output::Entry;
 use crate::{
     argument_count_between, bool_argument, constant, declared, frameless, long_argument, parameter,
@@ -52,7 +52,7 @@ pub(super) fn constants() -> Vec<php_ext::decl::ConstDecl> {
 /// The declarations, as `basic_functions.stub.php` has them.
 ///
 /// ```php
-/// foreach (['in_array', 'array_search', 'array_key_exists', 'key_exists', 'array_column', 'array_pad', 'array_fill'] as $f) echo new ReflectionFunction($f);
+/// foreach (['in_array', 'array_search', 'array_keys', 'array_key_exists', 'key_exists', 'array_column', 'array_pad', 'array_fill'] as $f) echo new ReflectionFunction($f);
 /// ```
 /// ```expect
 /// Function [ <internal:standard> function in_array ] {
@@ -72,6 +72,15 @@ pub(super) fn constants() -> Vec<php_ext::decl::ConstDecl> {
 ///     Parameter #2 [ <optional> bool $strict = false ]
 ///   }
 ///   - Return [ string|int|false ]
+/// }
+/// Function [ <internal:standard> function array_keys ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <required> array $array ]
+///     Parameter #1 [ <optional> mixed $filter_value = <default> ]
+///     Parameter #2 [ <optional> bool $strict = false ]
+///   }
+///   - Return [ array ]
 /// }
 /// Function [ <internal:standard> function array_key_exists ] {
 ///
@@ -186,7 +195,14 @@ pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
         (
             declared(
                 b"array_keys",
-                &[array(), parameter(b"filter_value", Type::Mixed), strict()],
+                &[
+                    array(),
+                    Parameter {
+                        default: Some(unknown()),
+                        ..parameter(b"filter_value", Type::Mixed)
+                    },
+                    strict(),
+                ],
                 Type::Array,
             ),
             array_keys,
@@ -366,9 +382,7 @@ fn array_search(req: &mut Request) -> Result<Value, Thrown> {
 /// `array_keys(array $array, mixed $filter_value = UNKNOWN, bool $strict
 /// = false): array`, php's `PHP_FUNCTION(array_keys)`
 /// (`Z/ext/standard/array.c:4424`): every key in order, or with a filter
-/// value the keys of the elements that match it. The filter's default
-/// is one php leaves unknown, which the declaration model cannot say
-/// yet, so Reflection reads it as required here.
+/// value the keys of the elements that match it.
 ///
 /// ```php
 /// var_dump(array_keys(["a" => 1, 2 => "x", "b" => "1"]), array_keys(["a" => 1, 2 => "x", "b" => "1"], 1), array_keys(["a" => 1, "b" => "1"], "1", true), array_keys([]));

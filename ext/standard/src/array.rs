@@ -1012,3 +1012,9 @@ fn compare_left(a: &[u8], ap: &mut usize, b: &[u8], bp: &mut usize) -> Ordering 
         *bp += 1;
     }
 }
+
+/// The stub's `= UNKNOWN`: a parameter that is optional with a default
+/// php does not print, which Reflection shows as `<default>`.
+fn unknown() -> ConstExpr {
+    ConstExpr::Constant(php_ext::decl::Name(b"UNKNOWN".as_slice().into()))
+}
