@@ -52,6 +52,7 @@ mod formatted_print;
 mod head;
 mod math;
 mod output;
+mod r#type;
 mod var;
 
 use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder};
@@ -158,6 +159,7 @@ pub fn extension() -> Extension {
         .functions(file::natives())
         .functions(basic_natives())
         .functions(math::natives())
+        .functions(r#type::natives())
         .constants(vec![
             constant(b"COUNT_NORMAL", COUNT_NORMAL),
             constant(b"COUNT_RECURSIVE", COUNT_RECURSIVE),
