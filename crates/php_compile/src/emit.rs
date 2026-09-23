@@ -4911,6 +4911,42 @@ impl Emit<'_> {
     /// #0 {main}
     ///   thrown in %s on line 5
     /// ```
+    ///
+    /// An arm written `case 1;` or `default;` is php's
+    /// `ZEND_ALT_CASE_SYNTAX`, deprecated at 8.5 before the arm
+    /// compiles and at the arm's own line, which the `separator` token
+    /// the tree keeps names and the arm's `case` keyword does not:
+    ///
+    /// ```php
+    /// switch (1) {
+    ///     case 1;
+    ///         echo "a\n";
+    ///     default ;
+    ///         echo "b\n";
+    /// }
+    /// ```
+    /// ```expect
+    /// Deprecated: Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead in %s on line 3
+    ///
+    /// Deprecated: Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead in %s on line 5
+    /// a
+    /// b
+    /// ```
+    ///
+    /// The deprecation stands before the clause is read, so a second
+    /// `default` written with a `;` is deprecated twice and refused
+    /// after:
+    ///
+    /// ```php
+    /// switch (1) { default; default; }
+    /// ```
+    /// ```expect exit=255
+    /// Deprecated: Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead in %s on line 2
+    ///
+    /// Deprecated: Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead in %s on line 2
+    ///
+    /// Fatal error: Switch statements may only contain one default clause in %s on line 2
+    /// ```
     fn switch_chain(
         &mut self,
         subject: Where,
@@ -4921,6 +4957,21 @@ impl Emit<'_> {
         let mut has_default = false;
         for case in cases {
             let case = &self.parsed.tree[*case];
+            // `ZEND_ALT_CASE_SYNTAX` (`Z/Zend/zend_compile.c:6339`): the
+            // `;` spelling is deprecated under `CG(zend_lineno) =
+            // case_ast->lineno`, before the default clause is counted
+            // and before the condition compiles, so a second `default`
+            // is deprecated and then refused.
+            if case
+                .separator
+                .is_some_and(|token| self.kind(token) == SyntaxKind::SEMICOLON)
+            {
+                self.line = case.line();
+                self.raise(
+                    Level::Deprecated,
+                    "Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead",
+                );
+            }
             let Some(cond) = case.value else {
                 if has_default {
                     self.line = case.line();
