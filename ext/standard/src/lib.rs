@@ -52,6 +52,7 @@ mod exec;
 mod file;
 mod formatted_print;
 mod head;
+mod hrtime;
 mod html;
 mod http;
 mod levenshtein;
@@ -90,6 +91,7 @@ use php_ext::values::{PhpArray, PhpString, TypeTag, Value, ValueRef};
 struct State {
     string: string::State,
     uniqid: uniqid::State,
+    hrtime: hrtime::State,
 }
 
 /// The extension value (design §7.1): declarations paired with entries,
@@ -214,6 +216,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         levenshtein::natives(),
         uniqid::natives(),
         microtime::natives(),
+        hrtime::natives(),
     ]
     .into_iter()
     .flatten()
