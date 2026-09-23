@@ -31,7 +31,8 @@
 //! one native the backtick operator compiles to, and the natives of
 //! `file.c`, the directory natives of `dir.c` and `stream_get_meta_data`
 //! are `file`'s, over the engine's streams facet.
-#![forbid(unsafe_code)]
+// `unsafe` is `src/ffi/`'s alone, the C library calls `filestat.c` makes.
+#![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
     clippy::unwrap_used,
@@ -47,7 +48,9 @@
 mod array;
 mod base64;
 mod exec;
+mod ffi;
 mod file;
+mod filestat;
 mod formatted_print;
 mod head;
 mod output;
@@ -161,6 +164,7 @@ pub fn extension() -> Extension {
         .functions(base64::natives())
         .functions(exec::natives())
         .functions(file::natives())
+        .functions(filestat::natives())
         .functions(basic_natives())
         .constants(vec![
             constant(b"COUNT_NORMAL", COUNT_NORMAL),

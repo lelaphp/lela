@@ -8,7 +8,9 @@
 //! `fgetc`, `fgets`, `fread`, `fopen`, `ftruncate`, `fstat`, `fseek`,
 //! `ftell`, `fflush`, `fwrite` and its alias `fputs`,
 //! `file_get_contents` and `file_put_contents`; then
-//! `stream_get_meta_data`. A `$stream` parameter is
+//! `stream_get_meta_data`; then the natives over the wrapper operations
+//! past opening, `rmdir`, `umask`, `mkdir`, `rename`, `copy`, `tempnam`,
+//! `tmpfile` and `unlink`. A `$stream` parameter is
 //! `PHP_Z_PARAM_STREAM`: a resource, and one that is an open stream.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
@@ -17,7 +19,7 @@ use php_ext::call::lookup_class;
 use php_ext::coerce::{coerce_param, to_string, value_name};
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, Type};
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
-use php_ext::request::{Request, Stream, Whence};
+use php_ext::request::{Request, Stream, Whence, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::output::Entry;
@@ -188,6 +190,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
         (fwrite_decl(b"fputs"), fwrite),
     ]);
     natives.extend(contents_natives());
+    natives.extend(path_natives());
     natives
 }
 
@@ -1864,4 +1867,461 @@ fn stream_get_meta_data(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 1, 1)?;
     let stream = stream_argument(req, 1)?;
     Ok(Value::array(stream.meta_data(req)?))
+}
+
+/// The natives of `file.c` over the wrapper operations past opening, in
+/// the stub's order: `rmdir`, `umask`, `mkdir`, `rename`, `copy`,
+/// `tempnam`, `tmpfile` and `unlink`.
+fn path_natives() -> Vec<(FunctionDecl, Entry)> {
+    let two_paths = |name: &[u8]| {
+        declared(
+            name,
+            &[
+                parameter(b"from", Type::String),
+                parameter(b"to", Type::String),
+                untyped_null(b"context"),
+            ],
+            Type::Bool,
+        )
+    };
+    vec![
+        (
+            declared(
+                b"rmdir",
+                &[
+                    parameter(b"directory", Type::String),
+                    untyped_null(b"context"),
+                ],
+                Type::Bool,
+            ),
+            rmdir as Entry,
+        ),
+        (
+            declared(
+                b"umask",
+                &[Parameter {
+                    default: Some(ConstExpr::Null),
+                    ..parameter(b"mask", Type::Nullable(Box::new(Type::Int)))
+                }],
+                Type::Int,
+            ),
+            umask,
+        ),
+        (
+            declared(
+                b"mkdir",
+                &[
+                    parameter(b"directory", Type::String),
+                    Parameter {
+                        default: Some(ConstExpr::Long(0o777)),
+                        ..parameter(b"permissions", Type::Int)
+                    },
+                    Parameter {
+                        default: Some(ConstExpr::Bool(false)),
+                        ..parameter(b"recursive", Type::Bool)
+                    },
+                    untyped_null(b"context"),
+                ],
+                Type::Bool,
+            ),
+            mkdir,
+        ),
+        (two_paths(b"rename"), rename),
+        (two_paths(b"copy"), copy),
+        (
+            declared(
+                b"tempnam",
+                &[
+                    parameter(b"directory", Type::String),
+                    parameter(b"prefix", Type::String),
+                ],
+                string_or_false(),
+            ),
+            tempnam,
+        ),
+        (
+            FunctionDecl {
+                return_type: None,
+                ..declared(b"tmpfile", &[], Type::Mixed)
+            },
+            tmpfile,
+        ),
+        (
+            declared(
+                b"unlink",
+                &[
+                    parameter(b"filename", Type::String),
+                    untyped_null(b"context"),
+                ],
+                Type::Bool,
+            ),
+            unlink,
+        ),
+    ]
+}
+
+/// `rmdir(string $directory, $context = null): bool`,
+/// `PHP_FUNCTION(rmdir)` (`Z/ext/standard/file.c:1102`): the wrapper's
+/// `stream_rmdir`, the plain files wrapper's `rmdir(2)` with php's
+/// warning, the path and `strerror(errno)`, where it failed; a wrapper
+/// without one is `false` and says nothing.
+///
+/// ```php
+/// $d = __DIR__; mkdir("$d/empty"); mkdir("$d/full"); touch("$d/full/f");
+/// var_dump(rmdir("$d/empty"), is_dir("$d/empty"), rmdir("$d/full"), rmdir("$d/nope"), rmdir('php://memory'));
+/// ```
+/// ```expect
+/// Warning: rmdir(%s/full): Directory not empty in %s on line 3
+///
+/// Warning: rmdir(%s/nope): No such file or directory in %s on line 3
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// ```
+fn rmdir(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 2)?;
+    let dir = path_argument(req, 1)?;
+    context_argument(req, 2)?;
+    Ok(Value::bool(
+        req.wrapper_op(dir.as_bytes(), WrapperOp::Rmdir)?,
+    ))
+}
+
+/// `umask(?int $mask = null): int`, `PHP_FUNCTION(umask)`
+/// (`Z/ext/standard/file.c:1153`): the mask as it stood, and the new
+/// one set where one is given, `umask(2)`'s nine bits of it. The mask is
+/// the request's, and a file or directory the request makes after is
+/// given `mode & ~mask` by it.
+///
+/// ```php
+/// $d = __DIR__; $old = umask();
+/// var_dump($old, umask(0), umask(), umask(0777), umask()); umask(0);
+/// mkdir("$d/open", 0777); touch("$d/open.txt"); fclose(fopen("$d/w.txt", 'w'));
+/// umask(077); mkdir("$d/closed", 0777); touch("$d/closed.txt"); umask($old);
+/// printf("%o %o %o %o %o\n", fileperms("$d/open"), fileperms("$d/open.txt"), fileperms("$d/w.txt"), fileperms("$d/closed"), fileperms("$d/closed.txt"));
+/// ```
+/// ```expect
+/// int(18)
+/// int(18)
+/// int(0)
+/// int(0)
+/// int(511)
+/// 40777 100666 100666 40700 100600
+/// ```
+fn umask(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 0, 1)?;
+    let mask = crate::filestat::nullable_long(req, 1)?;
+    let old = req.umask();
+    if let Some(mask) = mask {
+        req.set_umask(u32::try_from(mask & UMASK_BITS).unwrap_or(0));
+    }
+    Ok(Value::int(i64::from(old)))
+}
+
+/// The bits of a mask `umask(2)` keeps: `ALLPERMS` on macOS, the nine
+/// permission bits elsewhere.
+#[cfg(target_os = "macos")]
+const UMASK_BITS: i64 = 0o7777;
+#[cfg(not(target_os = "macos"))]
+const UMASK_BITS: i64 = 0o777;
+
+/// `mkdir(string $directory, int $permissions = 0777, bool $recursive = false, $context = null): bool`,
+/// `PHP_FUNCTION(mkdir)` (`Z/ext/standard/file.c:1078`): the wrapper's
+/// `stream_mkdir`, which for a plain path is `mkdir(2)` with php's
+/// `strerror(errno)` warning where it failed, and under `$recursive`
+/// every missing parent made first, one that exists passed over; a
+/// wrapper without one is `false` and says nothing.
+///
+/// ```php
+/// $d = __DIR__;
+/// var_dump(mkdir("$d/a"), is_dir("$d/a"), mkdir("$d/a"), mkdir("$d/b/c"), mkdir("$d/b/c/d", 0777, true), is_dir("$d/b/c/d"));
+/// var_dump(mkdir("$d/b/c/d", 0777, true), mkdir("$d/b//e/./f/", 0777, true), is_dir("$d/b/e/f"), mkdir("file://$d/g"), is_dir("$d/g"), mkdir('php://memory'));
+/// ```
+/// ```expect
+/// Warning: mkdir(): File exists in %s on line 3
+///
+/// Warning: mkdir(): No such file or directory in %s on line 3
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+///
+/// Warning: mkdir(): File exists in %s on line 4
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// ```
+fn mkdir(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 4)?;
+    let dir = path_argument(req, 1)?;
+    let given = req.argument_count();
+    let mode = if given >= 2 {
+        long_argument(req, 2)?
+    } else {
+        0o777
+    };
+    let recursive = given >= 3 && bool_argument(req, 3)?;
+    context_argument(req, 4)?;
+    let op = WrapperOp::Mkdir { mode, recursive };
+    Ok(Value::bool(req.wrapper_op(dir.as_bytes(), op)?))
+}
+
+/// `rename(string $from, string $to, $context = null): bool`,
+/// `PHP_FUNCTION(rename)` (`Z/ext/standard/file.c:1196`): the source's
+/// wrapper's `rename`, php's warning where it has none, and where the
+/// target is another wrapper's; the plain files wrapper's is
+/// `rename(2)`, its failure php's warning with both paths.
+///
+/// ```php
+/// $d = __DIR__; file_put_contents("$d/from.txt", "moved");
+/// var_dump(rename("$d/from.txt", "$d/to.txt"), file_exists("$d/from.txt"), file_get_contents("$d/to.txt"));
+/// var_dump(rename("$d/nope", "$d/x"), rename("$d/to.txt", 'php://memory'), rename('php://memory', "$d/x"), rename("file://$d/to.txt", "$d/again.txt"), file_exists("$d/again.txt"));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// string(5) "moved"
+///
+/// Warning: rename(%s/nope,%s/x): No such file or directory in %s on line 4
+///
+/// Warning: rename(): Cannot rename a file across wrapper types in %s on line 4
+///
+/// Warning: rename(): PHP wrapper does not support renaming in %s on line 4
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// ```
+fn rename(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 2, 3)?;
+    let from = path_argument(req, 1)?;
+    let to = path_argument(req, 2)?;
+    context_argument(req, 3)?;
+    let op = WrapperOp::Rename { to: to.as_bytes() };
+    Ok(Value::bool(req.wrapper_op(from.as_bytes(), op)?))
+}
+
+/// `php_copy_file_ctx` (`Z/ext/standard/file.c:1447`): the source
+/// stated, a directory being php's warning, and one that cannot be
+/// stated copied without more; then the target, a directory php's
+/// warning and the same file by device and inode `false` with nothing
+/// said; then the source opened `rb` and the target `wb`, each failure
+/// php's `Failed to open stream` warning, and every byte read written.
+fn copy_file(req: &mut Request, source: &[u8], target: &[u8]) -> Result<bool, Thrown> {
+    const S_IFMT: i64 = 0o170_000;
+    const S_IFDIR: i64 = 0o040_000;
+    if let Some(src) = req.url_stat(source, false, false)? {
+        if src[2] & S_IFMT == S_IFDIR {
+            docref(
+                req,
+                Level::Warning,
+                "The first argument to copy() function cannot be a directory",
+            );
+            return Ok(false);
+        }
+        if let Some(dest) = req.url_stat(target, false, false)? {
+            if dest[2] & S_IFMT == S_IFDIR {
+                docref(
+                    req,
+                    Level::Warning,
+                    "The second argument to copy() function cannot be a directory",
+                );
+                return Ok(false);
+            }
+            if src[1] == 0 || dest[1] == 0 {
+                if req.absolutize(source) == req.absolutize(target) {
+                    return Ok(false);
+                }
+            } else if src[1] == dest[1] && src[0] == dest[0] {
+                return Ok(false);
+            }
+        }
+    }
+    let Some(from) = req.open_stream(source, b"rb", false)? else {
+        return Ok(false);
+    };
+    let mut done = false;
+    if let Some(to) = req.open_stream(target, b"wb", false)? {
+        done = copy_to_stream(req, from, to)?;
+        close_stream(req, to);
+    }
+    close_stream(req, from);
+    Ok(done)
+}
+
+/// `_php_stream_copy_to_stream_ex` under `PHP_STREAM_COPY_ALL`: a chunk
+/// read and written until a read gives nothing; a write that takes less
+/// than it was given is the copy that failed.
+fn copy_to_stream(req: &mut Request, from: Stream, to: Stream) -> Result<bool, Thrown> {
+    loop {
+        let Some(chunk) = from.read(req, 8192)? else {
+            return Ok(false);
+        };
+        if chunk.is_empty() {
+            return Ok(true);
+        }
+        let mut rest = chunk.as_bytes();
+        while !rest.is_empty() {
+            match to.write(req, rest) {
+                Some(n) if n > 0 => rest = &rest[n..],
+                _ => return Ok(false),
+            }
+        }
+    }
+}
+
+/// `php_stream_close`: the resource closed and the owner the open gave
+/// it let go.
+fn close_stream(req: &mut Request, stream: Stream) {
+    stream.close(req);
+    req.release(stream.as_value());
+}
+
+/// `copy(string $from, string $to, $context = null): bool`,
+/// `PHP_FUNCTION(copy)` (`Z/ext/standard/file.c:1408`): the source's
+/// wrapper located as the `open_basedir` check does, then
+/// `php_copy_file_ctx`.
+///
+/// ```php
+/// $d = __DIR__; file_put_contents("$d/src.txt", str_repeat("x", 10000));
+/// var_dump(copy("$d/src.txt", "$d/dst.txt"), filesize("$d/dst.txt"), copy("$d/src.txt", "$d/src.txt"), copy($d, "$d/y"), copy("$d/src.txt", $d), copy("$d/nope", "$d/y"));
+/// var_dump(copy('php://memory', "$d/empty.txt"), filesize("$d/empty.txt"), copy("$d/src.txt", "$d/nodir/y"));
+/// ```
+/// ```expect
+/// Warning: copy(): The first argument to copy() function cannot be a directory in %s on line 3
+///
+/// Warning: copy(): The second argument to copy() function cannot be a directory in %s on line 3
+///
+/// Warning: copy(%s/nope): Failed to open stream: No such file or directory in %s on line 3
+/// bool(true)
+/// int(10000)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+///
+/// Warning: copy(%s/nodir/y): Failed to open stream: No such file or directory in %s on line 4
+/// bool(true)
+/// int(0)
+/// bool(false)
+/// ```
+fn copy(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 2, 3)?;
+    let source = path_argument(req, 1)?;
+    let target = path_argument(req, 2)?;
+    context_argument(req, 3)?;
+    let _ = req.plain_path(source.as_bytes());
+    Ok(Value::bool(copy_file(
+        req,
+        source.as_bytes(),
+        target.as_bytes(),
+    )?))
+}
+
+/// `php_basename(s, len, NULL, 0)` (`Z/ext/standard/string.c:1364`)
+/// under the C locale: the last component, trailing slashes dropped.
+fn basename(path: &[u8]) -> &[u8] {
+    let end = path.len() - path.iter().rev().take_while(|b| **b == b'/').count();
+    let path = &path[..end];
+    let start = path.iter().rposition(|b| *b == b'/').map_or(0, |at| at + 1);
+    &path[start..]
+}
+
+/// `tempnam(string $directory, string $prefix): string|false`,
+/// `PHP_FUNCTION(tempnam)` (`Z/ext/standard/file.c:676`): the prefix's
+/// basename, cut to 63 bytes, and a new `0600` file made in the
+/// directory, or after php's notice in the temporary directory, whose
+/// path is returned; the file is closed and stays.
+///
+/// ```php
+/// $d = __DIR__; $t = tempnam($d, 'pre'); var_dump($t, file_exists($t), filesize($t)); printf("%o\n", fileperms($t) & 0777);
+/// var_dump(tempnam($d, 'x/y/zz'), $n = tempnam("$d/nodir", 'n'), unlink($n), strlen(tempnam($d, str_repeat('p', 80))) - strlen($t));
+/// ```
+/// ```expect
+/// string(%d) "%s/pre%s"
+/// bool(true)
+/// int(0)
+/// 600
+///
+/// Notice: tempnam(): file created in the system's temporary directory in %s on line 3
+/// string(%d) "%s/zz%s"
+/// string(%d) "%s/n%s"
+/// bool(true)
+/// int(60)
+/// ```
+fn tempnam(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 2, 2)?;
+    let dir = path_argument(req, 1)?;
+    let prefix = path_argument(req, 2)?;
+    let prefix = basename(prefix.as_bytes());
+    let prefix = &prefix[..prefix.len().min(63)];
+    match req.temporary_name(dir.as_bytes(), prefix)? {
+        Some(path) => Ok(Value::string(path)),
+        None => Ok(Value::bool(false)),
+    }
+}
+
+/// `tmpfile()`, `PHP_FUNCTION(tmpfile)` (`Z/ext/standard/file.c:705`):
+/// `php_stream_fopen_tmpfile`, a new file in the temporary directory
+/// opened `r+b` that is unlinked when it closes, or `false`.
+///
+/// ```php
+/// $f = tmpfile(); var_dump($f); fwrite($f, "abc"); rewind($f); var_dump(fread($f, 10));
+/// $m = stream_get_meta_data($f); var_dump($m['mode'], $m['wrapper_type'], file_exists($m['uri'])); fclose($f); var_dump(file_exists($m['uri']));
+/// ```
+/// ```expect
+/// resource(%d) of type (stream)
+/// string(3) "abc"
+/// string(3) "r+b"
+/// string(9) "plainfile"
+/// bool(true)
+/// bool(false)
+/// ```
+fn tmpfile(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 0, 0)?;
+    match req.tmpfile()? {
+        Some(stream) => Ok(stream.as_value()),
+        None => Ok(Value::bool(false)),
+    }
+}
+
+/// `unlink(string $filename, $context = null): bool`,
+/// `PHP_FUNCTION(unlink)` (`Z/ext/standard/file.c:1235`): the wrapper's
+/// `unlink`, php's warning where there is none; the plain files
+/// wrapper's is `unlink(2)`, its failure php's warning with the path and
+/// `strerror(errno)`.
+///
+/// ```php
+/// $d = __DIR__; touch("$d/u.txt"); touch("$d/v.txt");
+/// var_dump(unlink("$d/u.txt"), file_exists("$d/u.txt"), unlink("$d/u.txt"), unlink("file://$d/v.txt"), file_exists("$d/v.txt"), unlink('php://memory'), unlink(''));
+/// ```
+/// ```expect
+/// Warning: unlink(%s/u.txt): No such file or directory in %s on line 3
+///
+/// Warning: unlink(): PHP does not allow unlinking in %s on line 3
+///
+/// Warning: unlink(): No such file or directory in %s on line 3
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// ```
+fn unlink(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 2)?;
+    let filename = path_argument(req, 1)?;
+    context_argument(req, 2)?;
+    Ok(Value::bool(
+        req.wrapper_op(filename.as_bytes(), WrapperOp::Unlink)?,
+    ))
 }

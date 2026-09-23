@@ -862,8 +862,7 @@ impl Temp {
         if usize::try_from(pos).unwrap_or(0) + count < self.smax {
             return Ok(true);
         }
-        let dir = req.temp_dir().0;
-        let Some(file) = temporary_file(req, &dir)? else {
+        let Some(file) = temporary_file(req, None, b"php")? else {
             let text = format!(
                 "{}(): Unable to create temporary file, Check permissions in temporary files directory.",
                 req.active_native()
@@ -979,51 +978,30 @@ impl Ops for Temp {
 }
 
 /// `php_stream_fopen_temporary_file` (`Z/main/streams/plain_wrapper.c:237`)
-/// over `php_open_temporary_fd_ex`: a file `php` and six characters in
-/// `dir`, made `0600` as `mkstemp(3)` makes one and a new name tried
-/// where the name was taken, opened `r+b` as a plain file of its own
-/// resource, with the path as `orig_path` and the file unlinked at
-/// close. `None` is the file that could not be made.
-fn temporary_file(req: &mut Request, dir: &std::path::Path) -> Result<Option<Stream>, Thrown> {
-    use std::hash::{BuildHasher, Hasher};
-    use std::os::unix::fs::OpenOptionsExt;
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    for attempt in 0u64..100 {
-        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-        hasher.write_u64(attempt);
-        let mut bits = hasher.finish();
-        let mut name = b"php".to_vec();
-        for _ in 0..6 {
-            name.push(ALPHABET[usize::try_from(bits % 62).unwrap_or(0)]);
-            bits /= 62;
-        }
-        let path = dir.join(String::from_utf8_lossy(&name).as_ref());
-        match std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-        {
-            Ok(file) => {
-                let orig_path = path.as_os_str().as_encoded_bytes().to_vec();
-                let mut stream = PhpStream::new(
-                    Box::new(Stdio {
-                        file,
-                        is_seekable: true,
-                        temp_name: Some(path),
-                    }),
-                    b"r+b",
-                );
-                stream.wrapper = PLAIN_FILES;
-                stream.orig_path = Some(orig_path);
-                return Ok(Some(req.stream_alloc(stream)?));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) => return Ok(None),
-        }
-    }
-    Ok(None)
+/// over `php_open_temporary_fd_ex`: the file [`Request::open_temporary_fd`]
+/// makes in `dir`, or in the temporary directory, opened `r+b` as a plain
+/// file of its own resource, with the path as `orig_path` and the file
+/// unlinked at close. `None` is the file that could not be made.
+pub(crate) fn temporary_file(
+    req: &mut Request,
+    dir: Option<&[u8]>,
+    prefix: &[u8],
+) -> Result<Option<Stream>, Thrown> {
+    let Some((file, path)) = req.open_temporary_fd(dir, prefix) else {
+        return Ok(None);
+    };
+    let orig_path = path.as_os_str().as_encoded_bytes().to_vec();
+    let mut stream = PhpStream::new(
+        Box::new(Stdio {
+            file,
+            is_seekable: true,
+            temp_name: Some(path),
+        }),
+        b"r+b",
+    );
+    stream.wrapper = PLAIN_FILES;
+    stream.orig_path = Some(orig_path);
+    Ok(Some(req.stream_alloc(stream)?))
 }
 
 // -------------------------------------------------------- plain files
@@ -1056,10 +1034,32 @@ fn errno(error: &std::io::Error) -> String {
 
 /// `strerror(errno)`, which is the text Rust's error carries before its
 /// own ` (os error N)`.
-fn strerror(error: &std::io::Error) -> String {
+pub(crate) fn strerror(error: &std::io::Error) -> String {
     let text = error.to_string();
     text.split_once(" (os error")
         .map_or(text.clone(), |(text, _)| text.to_owned())
+}
+
+/// A `zend_stat_t` as `php_fstat` lays it out, from what `fstat(2)`,
+/// `stat(2)` or `lstat(2)` answered.
+pub(crate) fn stat_buf(meta: &std::fs::Metadata) -> StatBuf {
+    use std::os::unix::fs::MetadataExt;
+    let long = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+    [
+        long(meta.dev()),
+        long(meta.ino()),
+        i64::from(meta.mode()),
+        long(meta.nlink()),
+        i64::from(meta.uid()),
+        i64::from(meta.gid()),
+        long(meta.rdev()),
+        long(meta.size()),
+        meta.atime(),
+        meta.mtime(),
+        meta.ctime(),
+        long(meta.blksize()),
+        long(meta.blocks()),
+    ]
 }
 
 /// `EBADF`, the one `errno` `php_stdiop_read` leaves eof clear on.
@@ -1071,9 +1071,12 @@ impl Ops for Stdio {
     }
 
     /// `php_stdiop_write` (`Z/main/streams/plain_wrapper.c:374`): one
-    /// `write(2)`, and php's notice with `errno` where it failed.
+    /// `write(2)`, and php's notice with `errno` where it failed; the
+    /// stat cache cleared after it, since the file's times moved.
     fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
-        match self.file.write(buf) {
+        let written = self.file.write(buf);
+        req.forget_stats();
+        match written {
             Ok(n) => Some(n),
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => None,
             Err(error) => {
@@ -1091,9 +1094,12 @@ impl Ops for Stdio {
 
     /// `php_stdiop_read` (`Z/main/streams/plain_wrapper.c:421`): one
     /// `read(2)`, eof at zero bytes, and php's notice with `errno` where
-    /// it failed, eof set then too unless the fd was bad, `EBADF`.
+    /// it failed, eof set then too unless the fd was bad, `EBADF`; the
+    /// stat cache cleared after it, since the file's atime moved.
     fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
-        match self.file.read(buf) {
+        let read = self.file.read(buf);
+        req.forget_stats();
+        match read {
             Ok(0) => {
                 *eof = true;
                 Some(0)
@@ -1114,6 +1120,14 @@ impl Ops for Stdio {
                 None
             }
         }
+    }
+
+    /// `php_stdiop_flush` (`Z/main/streams/plain_wrapper.c:573`): nothing
+    /// is buffered above `write(2)` here, so only the stat cache php
+    /// clears before its `fflush(3)`.
+    fn flush(&mut self, req: &mut Request) -> bool {
+        req.forget_stats();
+        true
     }
 
     /// `php_stdiop_close` (`Z/main/streams/plain_wrapper.c:508`): a
@@ -1162,24 +1176,7 @@ impl Ops for Stdio {
     /// `php_stdiop_stat` (`Z/main/streams/plain_wrapper.c:703`):
     /// `fstat(2)`.
     fn stat(&mut self, _req: &mut Request) -> Option<StatBuf> {
-        use std::os::unix::fs::MetadataExt;
-        let meta = self.file.metadata().ok()?;
-        let long = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
-        Some([
-            long(meta.dev()),
-            long(meta.ino()),
-            i64::from(meta.mode()),
-            long(meta.nlink()),
-            i64::from(meta.uid()),
-            i64::from(meta.gid()),
-            long(meta.rdev()),
-            long(meta.size()),
-            meta.atime(),
-            meta.mtime(),
-            meta.ctime(),
-            long(meta.blksize()),
-            long(meta.blocks()),
-        ])
+        Some(stat_buf(&self.file.metadata().ok()?))
     }
 
     /// `php_stdiop_set_option`'s `PHP_STREAM_OPTION_TRUNCATE_API`
@@ -1256,7 +1253,8 @@ fn open_options(mode: &[u8]) -> Option<std::fs::OpenOptions> {
 
 /// `_php_stream_fopen` (`Z/main/streams/plain_wrapper.c:1151`) and
 /// `_php_stream_fopen_from_fd` (`:303`): `$mode` parsed, the path
-/// expanded against the working directory, `open(2)` with `0666`, then
+/// expanded against the working directory, `open(2)` with `0666` and the
+/// request's `umask` applied to a file it made, then
 /// whether the file seeks (`detect_is_seekable`: not a fifo or a
 /// character device), and the position `lseek(SEEK_CUR)` answers, zero
 /// for a fresh open and `-1` with `NO_SEEK` for one that cannot. The
@@ -1269,9 +1267,13 @@ fn plain_open(req: &Request, path: &[u8], mode: &[u8]) -> Result<PhpStream, Stri
             String::from_utf8_lossy(mode)
         ));
     };
-    let mut file = options
-        .open(req.absolutize(path).0)
-        .map_err(|error| strerror(&error))?;
+    let host = req.absolutize(path).0;
+    let creates = matches!(mode.first(), Some(b'w' | b'a' | b'x' | b'c'))
+        && std::fs::symlink_metadata(&host).is_err();
+    let mut file = options.open(&host).map_err(|error| strerror(&error))?;
+    if creates {
+        req.apply_umask(&host, 0o666);
+    }
     let is_seekable = file.metadata().map_or(true, |meta| {
         use std::os::unix::fs::FileTypeExt;
         let kind = meta.file_type();
@@ -1502,7 +1504,7 @@ fn temp(req: &mut Request, mode: TempMode, smax: usize) -> Result<Stream, Thrown
 /// (`Z/main/streams/streams.c:2010`) found for a path: the plain files
 /// wrapper for no scheme and for `file://`, the `php://` wrapper, one
 /// the program registered, or none.
-enum Located {
+pub(crate) enum Located {
     Plain,
     Php,
     User(usize),
@@ -1516,7 +1518,7 @@ impl Request {
     /// and then the plain files wrapper over the path as written;
     /// `file://` with a host that is not `localhost` is php's warning and
     /// no wrapper, and otherwise the path after the slashes.
-    fn locate_wrapper(&mut self, path: &[u8]) -> (Located, Vec<u8>) {
+    pub(crate) fn locate_wrapper(&mut self, path: &[u8]) -> (Located, Vec<u8>) {
         let n = path
             .iter()
             .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
@@ -1595,7 +1597,12 @@ impl Request {
             Located::Plain => (
                 PLAIN_FILES,
                 match plain_open(self, &path_to_open, mode) {
-                    Ok(stream) => Ok(self.stream_alloc(stream)?),
+                    Ok(stream) => {
+                        // `_php_stream_fopen`'s `php_clear_stat_cache`
+                        // (`Z/main/streams/plain_wrapper.c:1209`).
+                        self.forget_stats();
+                        Ok(self.stream_alloc(stream)?)
+                    }
                     Err(message) => Err(message),
                 },
             ),

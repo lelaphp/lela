@@ -194,6 +194,7 @@ request::Request::class_decl
 request::Request::class_extension
 request::Request::class_extension_name
 request::Request::clear_last_error
+request::Request::clear_stat_cache
 request::Request::constant_attributes
 request::Request::constants
 request::Request::current_file
@@ -248,6 +249,7 @@ request::Request::os_error_text
 request::Request::output_buffer_op
 request::Request::output_started_at
 request::Request::parse_query
+request::Request::plain_path
 request::Request::realpath
 request::Request::register_filter
 request::Request::register_shutdown_function
@@ -282,10 +284,14 @@ request::Request::stream_wrappers
 request::Request::superglobal
 request::Request::take_uploaded_file
 request::Request::temp_dir
+request::Request::temporary_name
 request::Request::this
+request::Request::tmpfile
 request::Request::umask
 request::Request::unregister_tick_function
+request::Request::url_stat
 request::Request::variadic_arguments
+request::Request::wrapper_op
 request::Request::write
 request::Request::write_stderr
 request::ResourceDtor
@@ -316,6 +322,7 @@ request::StreamFilter
 request::StreamWrapper
 request::Whence
 request::Whence::from_int
+request::WrapperOp
 syntax::Diagnostic
 syntax::Diagnostic::new
 syntax::Diagnostic::of
