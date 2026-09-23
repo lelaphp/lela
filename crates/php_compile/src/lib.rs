@@ -3295,6 +3295,25 @@ mod tests {
         assert_eq!(unclosed.message, "syntax error, unexpected token \";\"");
     }
 
+    /// `global $a, $b;` is `zend_compile_global_var`'s `BIND_GLOBAL` per
+    /// variable, the CV in `op1` and its name in `op2`, where the
+    /// statement was refused as not read before; a name the program
+    /// computes still is.
+    #[test]
+    fn a_global_statement_binds_each_cv_by_name() {
+        assert_eq!(
+            oplines_of(b"<?php global $a, $b; echo $a;"),
+            "0000 BIND_GLOBAL CV0($a) string(\"a\")\n\
+             0001 BIND_GLOBAL CV1($b) string(\"b\")\n\
+             0002 ECHO CV0($a)\n\
+             0003 RETURN int(1)\n"
+        );
+        assert_eq!(
+            refused_message(b"<?php global $$x;").as_deref(),
+            Some("a `global` of a variable named at run time this compiler cannot read yet")
+        );
+    }
+
     /// `print` is `zend_compile_print`'s `ECHO` and the constant `1` as
     /// the expression's value, which a condition over it reads as it
     /// stands, the oracle's `[regime.dump]` of the same source.

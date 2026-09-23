@@ -5446,6 +5446,52 @@ impl Request {
         }
     }
 
+    /// `ZEND_BIND_GLOBAL`'s half over `EG(symbol_table)`
+    /// (`Z/Zend/zend_vm_def.h:8679`): the bucket `name` has, laid down
+    /// holding `null` where the table has none (`zend_hash_lookup`); an
+    /// `IS_INDIRECT` bucket followed to the CV of the frame attached to
+    /// it, an `UNDEF` there taken as `null`; what stands there made a
+    /// reference in place where it is none (`ZVAL_MAKE_REF_EX`); and the
+    /// cell handed back with one more owner, the binding's.
+    pub(crate) fn global_cell(&mut self, name: &[u8]) -> Result<PhpRef, Thrown> {
+        let found = self.globals().iter().position(|(key, _)| key == name);
+        let at = found.unwrap_or_else(|| {
+            self.globals()
+                .push((name.to_vec(), Symbol::Value(Value::null())));
+            self.globals().len() - 1
+        });
+        let cell = match self.globals()[at].1 {
+            Symbol::Indirect(frame, slot) => {
+                let Some(place) = self.slot_ptr(frame, slot) else {
+                    return Err(crate::api::raising::fatal(
+                        self,
+                        "InternalError: a global bound to a CV the frame does not have",
+                    ));
+                };
+                let held = Value::of_zval(place.read());
+                if let Some(cell) = held.as_php_ref() {
+                    *cell
+                } else {
+                    let cell = self.reference(held.undef_as_null())?;
+                    // The CV's owner of what it held is the cell's now.
+                    place.write(cell.as_value().to_zval());
+                    cell
+                }
+            }
+            Symbol::Value(held) => {
+                if let Some(cell) = held.as_php_ref() {
+                    *cell
+                } else {
+                    let cell = self.reference(held.undef_as_null())?;
+                    self.globals()[at].1 = Symbol::Value(cell.as_value());
+                    cell
+                }
+            }
+        };
+        self.addref(&cell.as_value());
+        Ok(cell)
+    }
+
     /// One symbol written, `zend_hash_update`: `value` is the table's
     /// and what stood under the name is released after the write, the
     /// name keeping the position it had, as php's update keeps a

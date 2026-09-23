@@ -718,6 +718,66 @@ pub(crate) fn bind_static<T: Tier>(
     Ok(advance(req, frame))
 }
 
+/// `ZEND_BIND_GLOBAL` (`Z/Zend/zend_vm_def.h:8679`), one variable of a
+/// `global` statement: the CV in `op1` bound by reference to the entry
+/// the name in `op2` has in `EG(symbol_table)`, the table the main op
+/// array's variables and `$GLOBALS` are ([`Request::global_cell`]). A
+/// name the table has not is laid down holding `null`, so the write
+/// through the binding is a global the main op array reads after; a
+/// cell the CV held before is given up after the bind (`GC_DELREF`).
+///
+/// ```php
+/// function f() { global $a; var_dump($a); $a = 2; }
+/// $a = 1;
+/// f();
+/// var_dump($a);
+/// function g() { global $n, $m; var_dump($n); $n = 5; $m = 6; }
+/// g();
+/// var_dump($n, $m);
+/// ```
+/// ```expect
+/// int(1)
+/// int(2)
+/// NULL
+/// int(5)
+/// int(6)
+/// ```
+///
+/// The binding is by reference, so a second name bound in the same
+/// function, or a `global` at the top level where the CV is the
+/// entry's own, reads the one cell:
+///
+/// ```php
+/// $x = 1;
+/// global $x;
+/// function h() { global $x; $y = &$x; $y++; unset($x); global $x; return $x; }
+/// var_dump(h(), $x);
+/// ```
+/// ```expect
+/// int(2)
+/// int(2)
+/// ```
+pub(crate) fn bind_global<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let name = exec::constant(code, ConstIdx(op.op2));
+    let Some(name) = name.as_str_bytes().map(<[u8]>::to_vec) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_BIND_GLOBAL over a name that is no string",
+        )));
+    };
+    let cell = match req.global_cell(&name) {
+        Ok(cell) => cell,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let previous = req.set_slot(frame, op.op1, cell.as_value());
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
 /// `ZEND_INIT_DYNAMIC_CALL` (`Z/Zend/zend_vm_def.h:3899`): the call
 /// frame for a callee named as the program serves, `$f(…)`. A
 /// `Closure` is `zend_init_closure_call`, the payload's function with

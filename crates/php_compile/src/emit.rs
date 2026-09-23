@@ -1171,7 +1171,11 @@ impl Emit<'_> {
             Stmt::IfStmt(id) => self.r#if(id)?,
             Stmt::TraitDecl(_) => return Err(self.unread("a trait")),
             Stmt::EnumDecl(_) => return Err(self.unread("an enum")),
-            Stmt::GlobalStmt(_) => return Err(self.unread("a `global` statement")),
+            Stmt::GlobalStmt(id) => {
+                for var in tree[id].vars.clone() {
+                    self.global_var(var)?;
+                }
+            }
             Stmt::StaticVarStmt(_) => return Err(self.unread("a `static` variable")),
             Stmt::UseStmt(_) => return Err(self.unread("a `use` statement")),
             Stmt::HaltCompilerStmt(_) => return Err(self.unread("a `__halt_compiler`")),
@@ -1838,6 +1842,54 @@ impl Emit<'_> {
             }
             _ => return Err(walk::unread(line, "an `unset` over what is no variable")),
         }
+        Ok(())
+    }
+
+    /// `zend_compile_global_var` (`Z/Zend/zend_compile.c:5441`) over one
+    /// variable of a `global` statement: `$this` is php's compile error;
+    /// a name `zend_try_compile_cv` gives a CV is `BIND_GLOBAL` with the
+    /// CV in `op1`, the name as a constant string in `op2` and a cache
+    /// slot in `extended_value`, the binding the engine makes to
+    /// `EG(symbol_table)` by reference. The arm php keeps for a name it
+    /// gives no CV, an auto-global or one the program computes, is
+    /// `FETCH_W (global lock)` and an `ASSIGN_REF` over a fetch by the
+    /// same name, which this engine has no global fetch for yet.
+    ///
+    /// ```php
+    /// function f() { global $this; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use $this as global variable in %s on line 2
+    /// ```
+    fn global_var(&mut self, var: tree::Expr) -> Result<(), CompileError> {
+        let line = self.line_of(var);
+        self.line = line;
+        let tree::Expr::SimpleVarExpr(id) = self.peel(var) else {
+            return Err(self.unread("a `global` of a variable named at run time"));
+        };
+        let Some(token) = self.parsed.tree[id].var else {
+            return Err(self.unread("a `global` statement"));
+        };
+        let name = self.variable_name(token);
+        if name == b"this" {
+            return Err(walk::refused(line, "Cannot use $this as global variable"));
+        }
+        if is_auto_global(&name) {
+            return Err(self.unread("a `global` of an auto-global"));
+        }
+        let cv = self.lookup_cv(&name);
+        let name = self.string(&name)?;
+        let at = self.constant(name);
+        let slot = self.cache_slot();
+        self.push(Opline {
+            opcode: Opcode::BindGlobal,
+            op1_type: OperandKind::Cv,
+            op1: cv,
+            op2_type: OperandKind::Const,
+            op2: at,
+            extended_value: slot,
+            ..Opline::default()
+        });
         Ok(())
     }
 
