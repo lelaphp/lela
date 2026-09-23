@@ -21,7 +21,13 @@ use crate::{
     argument_count_between, callable_argument, constant, declared, long_argument, parameter,
 };
 
+mod keys;
+mod make;
+mod pointer;
+mod set;
 mod sort;
+mod stack;
+mod walk;
 
 /// `PHP_SORT_*` (`Z/ext/standard/php_array.h`), what a sort native's
 /// `$flags` is made of.
@@ -60,7 +66,12 @@ pub(crate) fn constants() -> Vec<ConstDecl> {
         constant(b"SORT_LOCALE_STRING", SORT_LOCALE_STRING),
         constant(b"SORT_NATURAL", SORT_NATURAL),
         constant(b"SORT_FLAG_CASE", SORT_FLAG_CASE),
+        constant(b"ARRAY_FILTER_USE_BOTH", walk::ARRAY_FILTER_USE_BOTH),
+        constant(b"ARRAY_FILTER_USE_KEY", walk::ARRAY_FILTER_USE_KEY),
     ]
+    .into_iter()
+    .chain(keys::constants())
+    .collect()
 }
 
 /// The natives declared here, paired with their entries, each with
@@ -143,7 +154,34 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
         ),
     ];
     natives.extend(sort::natives());
+    natives.extend(pointer::natives());
+    natives.extend(walk::natives());
+    natives.extend(set::natives());
+    natives.extend(stack::natives());
+    natives.extend(keys::natives());
+    natives.extend(make::natives());
     natives
+}
+
+/// `zval_add_ref` on an element being copied into a new array: a
+/// reference with no other owner is followed to its value, which is
+/// what the copy holds, and anything else is one more owner.
+fn copied(req: &mut Request, value: Value) -> Value {
+    let value = match value.as_ref() {
+        ValueRef::Reference(reference) if value.refcount() == 1 => reference.get(),
+        _ => value,
+    };
+    req.addref(&value);
+    value
+}
+
+/// A key written into another array: a string key one more owner, as
+/// `zend_hash_add_new` takes it.
+fn key_copy(req: &mut Request, key: &Key) -> Key {
+    if let Key::Str(s) = key {
+        req.addref(&Value::string(*s));
+    }
+    key.clone()
 }
 
 /// `array_merge(array ...$arrays): array`, php's `PHP_FUNCTION(array_merge)`

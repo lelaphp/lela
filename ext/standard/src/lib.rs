@@ -50,6 +50,7 @@ mod exec;
 mod file;
 mod formatted_print;
 mod head;
+mod math;
 mod output;
 mod var;
 

@@ -217,6 +217,7 @@ request::Request::extension_number
 request::Request::flush
 request::Request::frame_args
 request::Request::frame_vars
+request::Request::frameless
 request::Request::fs_guard
 request::Request::function_decl
 request::Request::function_extension
@@ -372,10 +373,12 @@ values::PhpArray::is_recursive
 values::PhpArray::iter
 values::PhpArray::len
 values::PhpArray::new
+values::PhpArray::next_free
 values::PhpArray::protect
 values::PhpArray::replace
 values::PhpArray::separate
 values::PhpArray::set
+values::PhpArray::set_next_free
 values::PhpArray::snapshot
 values::PhpArray::snapshot_refs
 values::PhpArray::sort_by

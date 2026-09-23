@@ -7454,6 +7454,16 @@ impl Request {
         self.vm.executing_line()
     }
 
+    /// Whether the call being served is a frameless one, a
+    /// `FRAMELESS_ICALL_*` the compiler emitted for a declared arity: php
+    /// serves such a call with the native's `ZEND_FRAMELESS_FUNCTION`
+    /// body, which for `min` and `max` answers a tie differently from
+    /// the framed body, so the native reads which one it is.
+    #[must_use]
+    pub fn frameless(&self) -> bool {
+        self.vm.serving_call().is_some_and(|call| call.frameless)
+    }
+
     /// `ZEND_NUM_ARGS()`: how many arguments the call being served was
     /// given, and zero outside a native's body.
     #[must_use]

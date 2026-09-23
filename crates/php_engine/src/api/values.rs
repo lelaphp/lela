@@ -360,6 +360,23 @@ impl PhpArray {
         Ok(req.array_del(self.0, key.heap()))
     }
 
+    /// `nNextFreeElement`: the index `$a[] = ...` writes at, one past the
+    /// greatest integer key the array has held, `ZEND_LONG_MIN` for an
+    /// array that never held one.
+    #[must_use]
+    pub fn next_free(&self) -> i64 {
+        self.0.next_free()
+    }
+
+    /// `nNextFreeElement` written after `SEPARATE_ARRAY`, as
+    /// `array_pop()` moves it back one where the element it took was the
+    /// last one appended.
+    pub fn set_next_free(&mut self, req: &mut Request, next: i64) -> Result<(), Thrown> {
+        self.separate(req)?;
+        self.0.set_next_free(next);
+        Ok(())
+    }
+
     /// `SEPARATE_ARRAY`: an array with one owner is itself, and one with
     /// more is copied once (`zend_array_dup`), the copy having one owner
     /// and this name, the original one owner fewer.
