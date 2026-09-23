@@ -157,6 +157,7 @@ pub fn extension() -> Extension {
         .functions(exec::natives())
         .functions(file::natives())
         .functions(basic_natives())
+        .functions(math::natives())
         .constants(vec![
             constant(b"COUNT_NORMAL", COUNT_NORMAL),
             constant(b"COUNT_RECURSIVE", COUNT_RECURSIVE),
@@ -165,6 +166,8 @@ pub fn extension() -> Extension {
             constant(b"STR_PAD_BOTH", STR_PAD_BOTH),
         ])
         .constants(array::constants())
+        .constants(math::constants())
+        .classes(math::classes())
         .dependencies(dependencies())
         .request_state::<State>()
         .build("standard")
