@@ -1,0 +1,129 @@
+//! `Z/ext/standard/microtime.c`: `microtime` and `gettimeofday` over
+//! the wall clock. `getrusage` reads the process's resource usage from
+//! the C library, which no face of this engine hands an extension, and
+//! waits on one.
+// The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
+#![allow(rustdoc::invalid_codeblock_attributes)]
+
+use php_ext::decl::FunctionDecl;
+use php_ext::raising::Thrown;
+use php_ext::request::Request;
+use php_ext::values::{Key, PhpArray, PhpString, Value};
+
+use crate::argument_count_between;
+use crate::output::Entry;
+use crate::stub::stub;
+use crate::uniqid::now;
+use crate::zpp::{optional_bool, string_value};
+
+/// `MICRO_IN_SEC`.
+const MICRO_IN_SEC: f64 = 1_000_000.0;
+
+/// The two, in the stub's order.
+///
+/// ```php
+/// echo new ReflectionFunction('microtime'), new ReflectionFunction('gettimeofday');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function microtime ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <optional> bool $as_float = false ]
+///   }
+///   - Return [ string|float ]
+/// }
+/// Function [ <internal:standard> function gettimeofday ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <optional> bool $as_float = false ]
+///   }
+///   - Return [ array|float ]
+/// }
+/// ```
+pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
+    vec![
+        (
+            stub("microtime(bool $as_float = false): string|float"),
+            microtime as Entry,
+        ),
+        (
+            stub("gettimeofday(bool $as_float = false): array|float"),
+            gettimeofday,
+        ),
+    ]
+}
+
+/// The time as a double, `tv_sec + tv_usec / MICRO_IN_SEC`.
+fn as_float(sec: u64, usec: u32) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let sec = sec as f64;
+    sec + f64::from(usec) / MICRO_IN_SEC
+}
+
+/// `microtime(bool $as_float = false): string|float`: `"%.8F %ld"` of
+/// the microseconds as a fraction and the seconds, or the time as a
+/// float.
+///
+/// ```php
+/// $s = microtime(); $f = microtime(true); $parts = explode(" ", $s);
+/// var_dump(count($parts), strlen($parts[0]), substr($parts[0], 0, 2), is_float($f), $f >= (float) $parts[1], $f - (float) $parts[1] < 5);
+/// ```
+/// ```expect
+/// int(2)
+/// int(10)
+/// string(2) "0."
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// ```
+fn microtime(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 0, 1)?;
+    let float = optional_bool(req, 1, false)?;
+    let (sec, usec) = now();
+    if float {
+        return Ok(Value::float(as_float(sec, usec)));
+    }
+    let text = format!("{:.8} {sec}", f64::from(usec) / MICRO_IN_SEC);
+    string_value(req, text.as_bytes())
+}
+
+/// `gettimeofday(bool $as_float = false): array|float`: `sec`, `usec`,
+/// `minuteswest` and `dsttime` of the time in `date.timezone`, which
+/// the witness regime pins to UTC, or the time as a float.
+///
+/// ```php
+/// $t = gettimeofday(); $f = gettimeofday(true);
+/// foreach ($t as $k => $v) { echo $k, " ", is_int($v) ? "int" : "other", "\n"; }
+/// var_dump($t["minuteswest"], $t["dsttime"], $t["usec"] < 1000000, is_float($f), $f - $t["sec"] < 5);
+/// ```
+/// ```expect
+/// sec int
+/// usec int
+/// minuteswest int
+/// dsttime int
+/// int(0)
+/// int(0)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// ```
+fn gettimeofday(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 0, 1)?;
+    let float = optional_bool(req, 1, false)?;
+    let (sec, usec) = now();
+    if float {
+        return Ok(Value::float(as_float(sec, usec)));
+    }
+    let mut array = PhpArray::new(req)?;
+    let rows: [(&[u8], i64); 4] = [
+        (b"sec", i64::try_from(sec).unwrap_or(i64::MAX)),
+        (b"usec", i64::from(usec)),
+        (b"minuteswest", 0),
+        (b"dsttime", 0),
+    ];
+    for (name, value) in rows {
+        let key = Key::Str(PhpString::new(req, name)?);
+        array.set(req, key, Value::int(value))?;
+    }
+    Ok(Value::array(array))
+}

@@ -57,6 +57,7 @@ mod http;
 mod levenshtein;
 mod md5;
 mod metaphone;
+mod microtime;
 mod output;
 mod pack;
 mod quot_print;
@@ -212,6 +213,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         soundex::natives(),
         levenshtein::natives(),
         uniqid::natives(),
+        microtime::natives(),
     ]
     .into_iter()
     .flatten()
