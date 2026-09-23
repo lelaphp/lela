@@ -2743,7 +2743,7 @@ mod tests {
     fn what_the_reader_cannot_read_is_a_compile_error_at_its_line() {
         let mut strings = php_heap::Strings::new();
         let trouble = compile(
-            &php_syntax::parse(b"<?php\n$x . `ls`;", &php_syntax::Options::default()),
+            &php_syntax::parse(b"<?php\n$x . list($a);", &php_syntax::Options::default()),
             &Options::default(),
             &mut strings,
         )

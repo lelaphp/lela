@@ -5656,7 +5656,7 @@ impl Emit<'_> {
                 let parts = tree[id].parts.clone();
                 self.encaps(&parts, Holder::Heredoc(&self.parsed.tree[id]), line)
             }
-            tree::Expr::ShellExecExpr(_) => Err(self.unread("a backtick operator")),
+            tree::Expr::ShellExecExpr(id) => self.shell_exec(id, line),
             // `zend_compile_simple_var` through `zend_try_compile_cv`: the
             // variable is its CV, and no opline reads it into anything;
             // `$this` under `BP_VAR_R` is `FETCH_THIS` into a temporary.
@@ -8852,7 +8852,14 @@ impl Emit<'_> {
                     _ => Err(self.fatal("an interpolated string is no constant expression")),
                 }
             }
-            tree::Expr::ShellExecExpr(_) => Err(self.unread("a backtick operator")),
+            // `zend_eval_const_expr` has no `ZEND_AST_SHELL_EXEC` case,
+            // so the node stands and [`Self::expr`] compiles it. The
+            // refusal is no `cannot read yet`, so a constant expression
+            // a declaration keeps ([`Self::const_expr`]) is refused in
+            // php's own words by [`Self::const_refused`].
+            tree::Expr::ShellExecExpr(_) => {
+                Err(self.fatal("a backtick operator is no constant expression"))
+            }
             // `zend_try_ct_eval_unary_pm`: php folds unary `-` and `+` as
             // the multiplication by -1 and by 1 it would otherwise emit.
             // The `ZEND_AST_UNARY_OP` arm of `zend_eval_const_expr` folds
@@ -9254,6 +9261,108 @@ impl Emit<'_> {
             return Where::Constant(Zval::long(n));
         }
         key
+    }
+
+    /// `zend_compile_shell_exec` (`Z/Zend/zend_compile.c:10915`): the
+    /// operator is deprecated at 8.5 before anything of it compiles,
+    /// and what compiles is the call `shell_exec(…)` over the parts, so
+    /// `` `…` `` has no opcode of its own and every semantic of it is
+    /// the native's. The name php hands that call is a `ZEND_AST_ZVAL`
+    /// whose `attr` is `ZEND_NAME_FQ`, so `zend_compile_function_name`
+    /// prefixes no namespace and asks for no resolution as the program
+    /// serves: the operator inside a namespace compiles to the same
+    /// `INIT_FCALL "shell_exec"` it does outside one.
+    ///
+    /// The `INIT_FCALL` stands before the parts, as
+    /// `zend_compile_call_common` emits it before `zend_compile_args`.
+    /// The parts are [`Self::encaps`] under `Holder::ShellExec`, which
+    /// leaves the joined constant where nothing is interpolated and the
+    /// rope's temporary where something is, never a CV or a `VAR`, so
+    /// the argument is sent by `SEND_VAL` where the table has the
+    /// native and by `SEND_VAL_EX` where it has not.
+    ///
+    /// ```php
+    /// $w = 'world';
+    /// echo `echo hello $w`;
+    /// echo `echo plain`;
+    /// ```
+    /// ```expect
+    /// Deprecated: The backtick (`) operator is deprecated, use shell_exec() instead in %s on line 3
+    ///
+    /// Deprecated: The backtick (`) operator is deprecated, use shell_exec() instead in %s on line 4
+    /// hello world
+    /// plain
+    /// ```
+    ///
+    /// `zend_is_allowed_in_const_expr` refuses the node before
+    /// `zend_compile_shell_exec` is reached, so a declaration that
+    /// keeps a constant expression refuses it and no deprecation is
+    /// raised:
+    ///
+    /// ```php
+    /// class A { const X = `echo x`; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Constant expression contains invalid operations in %s on line 2
+    /// ```
+    fn shell_exec(
+        &mut self,
+        id: NodeId<tree::ShellExecExpr>,
+        line: u32,
+    ) -> Result<Where, CompileError> {
+        self.raise(
+            Level::Deprecated,
+            "The backtick (`) operator is deprecated, use shell_exec() instead",
+        );
+        let name = b"shell_exec".as_slice();
+        let known = self.native_index(name).is_some();
+        if known {
+            let lowered = self.string(name)?;
+            let lowered = self.constant(lowered);
+            let slot = self.cache_slot();
+            self.push(Opline {
+                opcode: Opcode::InitFcall,
+                op1: used_stack(1, None),
+                op2_type: OperandKind::Const,
+                op2: lowered,
+                out: slot,
+                extended_value: 1,
+                ..Opline::default()
+            });
+        } else {
+            let pair = self.func_name_literal(name)?;
+            let slot = self.cache_slot();
+            self.push(Opline {
+                opcode: Opcode::InitFcallByName,
+                op2_type: OperandKind::Const,
+                op2: pair,
+                out: slot,
+                extended_value: 1,
+                ..Opline::default()
+            });
+        }
+        let parts = self.parsed.tree[id].parts.clone();
+        let command = self.encaps(&parts, Holder::ShellExec(&self.parsed.tree[id]), line)?;
+        let (op1_type, op1) = self.operand(command);
+        self.push(Opline {
+            opcode: if known {
+                Opcode::SendVal
+            } else {
+                Opcode::SendValEx
+            },
+            op1_type,
+            op1,
+            op2: 1,
+            ..Opline::default()
+        });
+        Ok(self.call_op(
+            if known {
+                Opcode::DoIcall
+            } else {
+                Opcode::DoFcallByName
+            },
+            line,
+        ))
     }
 
     /// `zend_compile_call`: `CG(function_table)` read first
