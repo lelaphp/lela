@@ -642,9 +642,7 @@ fn codepoint(text: &[u8], at: usize) -> Escape {
 ///
 /// A `"…"` takes `\"` and leaves `` \` `` where it stands; a heredoc
 /// takes neither mark and every other escape; a nowdoc takes none at
-/// all. The `` `…` `` side of the same table is held in
-/// `tests/value.rs`, since a backquote runs what it spells and the
-/// bytes are the shell's to see:
+/// all:
 ///
 /// ```php
 /// $d = "\"\`\$";
@@ -663,6 +661,22 @@ fn codepoint(text: &[u8], at: usize) -> Escape {
 /// 34 92 96 36
 /// 92 34 92 96 36 10 65 65
 /// 92 110 92 92 36 120
+/// ```
+///
+/// A `` `…` `` is the other way round: it takes `` \` `` and leaves
+/// `\"` where it stands. Its bytes are the shell's to see, since php
+/// spells them nowhere else, so the same three marks go to `printf`
+/// inside single quotes, which hand every byte on as it stands, and
+/// what comes back is what the mark made:
+///
+/// ```php
+/// $b = `printf %s '\"\`\$'`;
+/// for ($i = 0; $i < strlen($b); $i++) echo $i ? ' ' : '', ord($b[$i]);
+/// echo "\n";
+/// ```
+/// ```expect
+/// Deprecated: The backtick (`) operator is deprecated, use shell_exec() instead in %s on line 2
+/// 92 34 96 36
 /// ```
 fn unescape(text: &[u8], quote: Quote) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len());

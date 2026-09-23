@@ -1,15 +1,13 @@
-//! `TokenValue::of` on the three forms no witness in `value.rs` can
-//! say: the double a binary token accumulates to, which php prints
-//! rounded and this holds as the bit pattern; the `` `…` `` mark, which
-//! the linked engine refuses to compile (`Parse error: a backtick
-//! operator this compiler cannot read yet`, probed 2026-09-22); and a
-//! lone `\r` before a closing label, which a rustdoc fence trims off
-//! the line. Each is held to what the pinned php printed for the same
-//! token under `serialize_precision=-1` or `printf("%.17g")` (probed
-//! 8.5.9 on 2026-09-21); the witnesses in `value.rs` hold the rest
-//! through the engine.
+//! `TokenValue::of` on the two forms no witness in `value.rs` can say:
+//! the double a binary token accumulates to, which php prints rounded
+//! and this holds as the bit pattern; and a lone `\r` before a closing
+//! label, which a rustdoc fence trims off the line. Each is held to
+//! what the pinned php printed for the same token under
+//! `serialize_precision=-1` or `printf("%.17g")` (probed 8.5.9 on
+//! 2026-09-21); the witnesses in `value.rs` hold the rest through the
+//! engine, the `` `…` `` mark beside `unescape` since #609.
 
-use php_syntax::tree::{HeredocExpr, LiteralExpr, ShellExecExpr, StringPart};
+use php_syntax::tree::{HeredocExpr, LiteralExpr, StringPart};
 use php_syntax::{Holder, Options, TokenValue, parse};
 
 /// The value of every `LiteralExpr` in `src`, in source order.
@@ -27,8 +25,8 @@ fn values(src: &str) -> Vec<TokenValue> {
         .collect()
 }
 
-/// The bytes of every text part of the one `` `…` `` or heredoc in
-/// `src`, in source order.
+/// The bytes of every text part of the one heredoc in `src`, in source
+/// order.
 fn parts(src: &str) -> Vec<Vec<u8>> {
     let parsed = parse(src.as_bytes(), &Options::default());
     let bytes = |v: Option<TokenValue>| match v {
@@ -40,14 +38,6 @@ fn parts(src: &str) -> Vec<Vec<u8>> {
         StringPart::LiteralStringPart(id) => parsed.tree[*id].text,
         _ => None,
     };
-    if let Some(node) = parsed.tree.nodes::<ShellExecExpr>().first() {
-        return node
-            .parts
-            .iter()
-            .filter_map(|p| text(p).map(|t| TokenValue::of(&parsed, Holder::ShellExec(node), t)))
-            .map(bytes)
-            .collect();
-    }
     if let Some(node) = parsed.tree.nodes::<HeredocExpr>().first() {
         return node
             .parts
@@ -56,7 +46,7 @@ fn parts(src: &str) -> Vec<Vec<u8>> {
             .map(bytes)
             .collect();
     }
-    panic!("no string in {src}");
+    panic!("no heredoc in {src}");
 }
 
 #[test]
@@ -70,15 +60,6 @@ fn the_binary_retry_lands_an_ulp_below_two_to_the_sixty_third() {
             "<?php 0b111111111111111111111111111111111111111111111111111111111111111; 0b1000000000000000000000000000000000000000000000000000000000000000;"
         ),
         vec![Int(i64::MAX), Float(2f64.powi(63) - 1024.0)]
-    );
-}
-
-#[test]
-fn a_backquote_takes_its_own_mark_and_leaves_the_other() {
-    // `echo \"a\` \$b\``: the shell is handed `echo \"a` $b``
-    assert_eq!(
-        parts("<?php `echo \\\"a\\` \\$b\\``;"),
-        vec![b"echo \\\"a` $b`".to_vec()]
     );
 }
 
