@@ -3314,6 +3314,36 @@ mod tests {
         );
     }
 
+    /// `++` and `--` over an element and over a property, which were
+    /// refused as over what is no variable, as the oracle's
+    /// `[regime.dump]` has them: an element is `FETCH_DIM_RW` per link
+    /// and the step over the last `VAR`, a property is the last fetch
+    /// turned into `PRE_INC_OBJ` and its kin, and a `POST_*` nothing
+    /// reads is the `PRE_*` `zend_do_free` makes of it.
+    #[test]
+    fn a_step_over_an_element_or_a_property_is_the_fetch_under_rw() {
+        assert_eq!(
+            oplines_of(
+                b"<?php $a[0]++; $x = $a[0][1]--; $o->p++; $y = --$o->q->r; ++$a[0]->p; $b[]++;"
+            ),
+            "0000 V5 = FETCH_DIM_RW CV0($a) int(0)\n\
+             0001 PRE_INC V5\n\
+             0002 V7 = FETCH_DIM_RW CV0($a) int(0)\n\
+             0003 V8 = FETCH_DIM_RW V7 int(1)\n\
+             0004 T9 = POST_DEC V8\n\
+             0005 ASSIGN CV1($x) T9\n\
+             0006 PRE_INC_OBJ CV2($o) string(\"p\")\n\
+             0007 V12 = FETCH_OBJ_RW CV2($o) string(\"q\")\n\
+             0008 T13 = PRE_DEC_OBJ V12 string(\"r\")\n\
+             0009 ASSIGN CV3($y) T13\n\
+             0010 V15 = FETCH_DIM_RW CV0($a) int(0)\n\
+             0011 PRE_INC_OBJ V15 string(\"p\")\n\
+             0012 V17 = FETCH_DIM_RW CV4($b) NEXT\n\
+             0013 PRE_INC V17\n\
+             0014 RETURN int(1)\n"
+        );
+    }
+
     /// `print` is `zend_compile_print`'s `ECHO` and the constant `1` as
     /// the expression's value, which a condition over it reads as it
     /// stands, the oracle's `[regime.dump]` of the same source.
@@ -4300,10 +4330,14 @@ mod tests {
             Some("Cannot use result of built-in function in write context")
         );
         assert_eq!(
-            refused(b"<?php C::$s[0] += 1;").as_deref(),
-            Some(
-                "a compound assignment to a dimension over a `static` property, whose fetch is `FETCH_STATIC_PROP_RW`, this compiler cannot read yet"
-            )
+            oplines_of(b"<?php C::$s[0] += 1; C::$s[1]++;"),
+            "0000 V0 = FETCH_STATIC_PROP_RW string(\"s\") string(\"C\")\n\
+             0001 ASSIGN_DIM_OP (ADD) V0 int(0)\n\
+             0002 OP_DATA int(1)\n\
+             0003 V2 = FETCH_STATIC_PROP_RW string(\"s\") string(\"C\")\n\
+             0004 V3 = FETCH_DIM_RW V2 int(1)\n\
+             0005 PRE_INC V3\n\
+             0006 RETURN int(1)\n"
         );
     }
 
@@ -5946,12 +5980,10 @@ class C {
     /// What a dimension refuses: `[]` where a value is wanted, php's
     /// `Cannot use [] for reading`; under a write the bases php
     /// refuses outright, a temporary expression and a call answered in
-    /// one; and the two bases this compiler has not under a write,
-    /// A `static` property under a compound assignment, whose fetch is
-    /// `FETCH_STATIC_PROP_RW` and which no handler serves. `$this` and
-    /// a `static` property under a plain write, a property and a call
-    /// under a write, and every base php compiles where it stands under
-    /// a read, compile since #451 and #507.
+    /// one. `$this` and a `static` property under a write, a compound
+    /// assignment and a `++` (`FETCH_STATIC_PROP_RW`), a property and a
+    /// call under a write, and every base php compiles where it stands
+    /// under a read, compile since #451, #507 and #667.
     #[test]
     fn a_dimension_this_compiler_cannot_read_yet_is_refused() {
         for source in [
@@ -5959,7 +5991,6 @@ class C {
             b"<?php echo $a[];".as_slice(),
             b"<?php \"ab\"[0] = 1;".as_slice(),
             b"<?php [1, 2][0] = 1;".as_slice(),
-            b"<?php C::$p[0] += 1;".as_slice(),
         ] {
             assert!(
                 refused(source).is_some(),

@@ -548,6 +548,12 @@ const FETCH_DIM_DIM: u32 = 2;
 /// (`Z/Zend/zend_execute.c:1786`).
 const FETCH_DIM_OBJ: u32 = 3;
 
+/// `ZEND_FETCH_DIM_INCDEC` (`Z/Zend/zend_compile.h:1098`), on the last
+/// `FETCH_DIM_RW` of a `++` or a `--` over an element: `Cannot
+/// increment/decrement string offsets` in place of the array's
+/// sentence.
+const FETCH_DIM_INCDEC: u32 = 4;
+
 /// One link of a dimension chain as `zend_delayed_compile_dim` leaves
 /// it: the dimension's operand, `UNUSED` for the `[]` of an append, and
 /// the `VAR` or temporary the opline writes.
@@ -1397,9 +1403,9 @@ impl Emit<'_> {
         }
     }
 
-    /// `++$a`, `$a--` and their kin over a variable or a class's
-    /// property (`ZEND_AST_STATIC_PROP`), php's four step nodes;
-    /// anything else is not read yet.
+    /// `++$a`, `$a--` and their kin over a variable, an element, a
+    /// property or a class's property (`ZEND_AST_STATIC_PROP`), php's
+    /// four step nodes; anything else is not read yet.
     fn step(&mut self, target: tree::Expr, up: bool, pre: bool) -> Result<Where, CompileError> {
         let line = self.line_of(target);
         match self.peel(target) {
@@ -1427,8 +1433,132 @@ impl Emit<'_> {
                 }
                 Scoped::Constant { .. } => Err(self.stepless(up)),
             },
+            tree::Expr::SubscriptExpr(_) => self.dim_step(target, up, pre),
+            tree::Expr::MemberAccessExpr(access) => {
+                let name = self.member_name_of(access, line)?;
+                let object = self.parsed.tree[access].obj;
+                self.prop_step(object, &name, up, pre)
+            }
             _ => Err(self.stepless(up)),
         }
+    }
+
+    /// `zend_compile_pre_incdec` and `zend_compile_post_incdec` over a
+    /// `ZEND_AST_DIM` (`Z/Zend/zend_compile.c:10405`, `:10432`):
+    /// `zend_compile_var` under `BP_VAR_RW`, every link of the chain a
+    /// `FETCH_DIM_RW` into a `VAR`, the last marked
+    /// `ZEND_FETCH_DIM_INCDEC`, which is the sentence a string offset
+    /// under it is refused in; then `PRE_INC`, `PRE_DEC`, `POST_INC` or
+    /// `POST_DEC` over that `VAR` into a temporary. `$a[]++` is php's
+    /// append, the new element stepped from `null`.
+    ///
+    /// ```php
+    /// $a = [1, 'k' => 5];
+    /// $a[0]++;
+    /// var_dump(++$a['k'], $a[0]--, $a);
+    /// $b = [];
+    /// $b[]++;
+    /// $b['n']['m']++;
+    /// var_dump($b);
+    /// $s = "ab";
+    /// try { $s[0]++; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// int(6)
+    /// int(2)
+    /// array(2) {
+    ///   [0]=>
+    ///   int(1)
+    ///   ["k"]=>
+    ///   int(6)
+    /// }
+    ///
+    /// Warning: Undefined array key "n" in %s on line 7
+    ///
+    /// Warning: Undefined array key "m" in %s on line 7
+    /// array(2) {
+    ///   [0]=>
+    ///   int(1)
+    ///   ["n"]=>
+    ///   array(1) {
+    ///     ["m"]=>
+    ///     int(1)
+    ///   }
+    /// }
+    /// Cannot increment/decrement string offsets
+    /// ```
+    fn dim_step(&mut self, target: tree::Expr, up: bool, pre: bool) -> Result<Where, CompileError> {
+        let (container, links) = self.dim_chain(target, Fetch::Rw)?;
+        let Some((last, fetches)) = links.split_last() else {
+            return Err(self.fatal("a dimension with no dimension"));
+        };
+        let (op1_type, op1) = self.dim_fetches(container, fetches, Fetch::Rw, Over::Dim);
+        self.push(Opline {
+            opcode: Opcode::FetchDimRw,
+            op1_type,
+            op1,
+            op2_type: last.kind,
+            op2: last.at,
+            out_type: OperandKind::Var,
+            out: last.out,
+            extended_value: FETCH_DIM_INCDEC,
+            ..Opline::default()
+        });
+        let out = self.temporary();
+        self.push(Opline {
+            opcode: match (pre, up) {
+                (true, true) => Opcode::PreInc,
+                (true, false) => Opcode::PreDec,
+                (false, true) => Opcode::PostInc,
+                (false, false) => Opcode::PostDec,
+            },
+            op1_type: OperandKind::Var,
+            op1: last.out,
+            out_type: OperandKind::Tmp,
+            out,
+            ..Opline::default()
+        });
+        Ok(Where::Temporary(out))
+    }
+
+    /// `zend_compile_pre_incdec` and `zend_compile_post_incdec` over a
+    /// `ZEND_AST_PROP`: `zend_compile_prop` under `BP_VAR_RW`, whose last
+    /// opline has its opcode set to `PRE_INC_OBJ`, `PRE_DEC_OBJ`,
+    /// `POST_INC_OBJ` or `POST_DEC_OBJ` and its `result` made a
+    /// temporary, the receiver in `op1`, the name in `op2` and three
+    /// cache slots in `extended_value`; a property under it is
+    /// `FETCH_OBJ_RW` and a dimension `FETCH_DIM_RW`, held back as
+    /// [`Self::prop_chain`] holds them.
+    fn prop_step(
+        &mut self,
+        object: tree::Expr,
+        name: &[u8],
+        up: bool,
+        pre: bool,
+    ) -> Result<Where, CompileError> {
+        let (receiver, links) = self.prop_chain(object)?;
+        let name = self.string(name)?;
+        let name_at = self.literal(name);
+        let out = self.temporary();
+        let slots = self.cache_slots(3);
+        let (op1_type, op1) = self.prop_fetches(receiver, &links);
+        self.push(Opline {
+            opcode: match (pre, up) {
+                (true, true) => Opcode::PreIncObj,
+                (true, false) => Opcode::PreDecObj,
+                (false, true) => Opcode::PostIncObj,
+                (false, false) => Opcode::PostDecObj,
+            },
+            op1_type,
+            op1,
+            op2_type: OperandKind::Const,
+            op2: name_at,
+            out_type: OperandKind::Tmp,
+            out,
+            extended_value: slots,
+            ..Opline::default()
+        });
+        Ok(Where::Temporary(out))
     }
 
     /// The refusal for a `++` or a `--` over what is no variable.
@@ -7104,7 +7234,7 @@ impl Emit<'_> {
             // `zend_compile_static_prop` with `delayed`, the other
             // fetch php holds back: the name, the class's constant
             // pair and three slots taken here.
-            (tree::Expr::ScopedAccessExpr(id), Fetch::Read | Fetch::Is | Fetch::Write)
+            (tree::Expr::ScopedAccessExpr(id), _)
                 if matches!(self.scoped_of(id, line)?, Scoped::Property { .. }) =>
             {
                 let Scoped::Property { class, name } = self.scoped_of(id, line)? else {
@@ -7121,15 +7251,6 @@ impl Emit<'_> {
                     out,
                     slots,
                 }
-            }
-            // A compound assignment's chain is `BP_VAR_RW`, whose fetch
-            // here is `FETCH_STATIC_PROP_RW` and no handler serves it.
-            (tree::Expr::ScopedAccessExpr(id), Fetch::Rw)
-                if matches!(self.scoped_of(id, line)?, Scoped::Property { .. }) =>
-            {
-                return Err(self.fatal(
-                    "a compound assignment to a dimension over a `static` property, whose fetch is `FETCH_STATIC_PROP_RW`, this compiler cannot read yet",
-                ));
             }
             (_, Fetch::Read | Fetch::Is) => {
                 let value = self.expr(base)?;
@@ -7305,7 +7426,8 @@ impl Emit<'_> {
                 self.push(Opline {
                     opcode: match fetch {
                         Fetch::Read => Opcode::FetchStaticPropR,
-                        Fetch::Write | Fetch::Rw => Opcode::FetchStaticPropW,
+                        Fetch::Write => Opcode::FetchStaticPropW,
+                        Fetch::Rw => Opcode::FetchStaticPropRw,
                         Fetch::Is => Opcode::FetchStaticPropIs,
                     },
                     op1_type: OperandKind::Const,

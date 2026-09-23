@@ -3636,6 +3636,51 @@ pub(crate) fn fetch_static_prop_w<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    static_prop_place(req, frame, code, op, false)
+}
+
+/// `ZEND_FETCH_STATIC_PROP_RW` (`Z/Zend/zend_vm_def.h:1906`), the base
+/// of a compound assignment or a `++` over an element of a `static`
+/// property: [`fetch_static_prop_w`]'s place, with the read's refusal
+/// of a typed slot nothing has written
+/// (`zend_std_get_static_property_with_info` under `BP_VAR_RW`).
+///
+/// ```php
+/// class C { public static $s = [1]; public static array $t; }
+/// C::$s[0] += 2;
+/// C::$s[1]++;
+/// var_dump(C::$s);
+/// try { C::$t[0]++; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+///
+/// Warning: Undefined array key 1 in %s on line 4
+/// array(2) {
+///   [0]=>
+///   int(3)
+///   [1]=>
+///   int(1)
+/// }
+/// Typed static property C::$t must not be accessed before initialization
+/// ```
+pub(crate) fn fetch_static_prop_rw<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    static_prop_place(req, frame, code, op, true)
+}
+
+/// The body `FETCH_STATIC_PROP_W` and `FETCH_STATIC_PROP_RW` share:
+/// the slot as a place, an `IS_INDIRECT` naming it in the `VAR`.
+fn static_prop_place(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    rw: bool,
+) -> Edge {
     if op.op1_type != OperandKind::Const {
         return Err(Fatal::Error(String::from(
             "InternalError: ZEND_FETCH_STATIC_PROP_W over a property named at run time",
@@ -3648,6 +3693,12 @@ pub(crate) fn fetch_static_prop_w<T: Tier>(
     let name = exec::constant(code, ConstIdx(op.op1));
     let name = name.as_str_bytes().unwrap_or_default().to_vec();
     let scope = req.executed_scope();
+    if rw {
+        match req.static_property(class, &name, scope, PropertyRead::Warning) {
+            Ok(held) => req.release(held),
+            Err(thrown) => return threw(req, frame, &thrown),
+        }
+    }
     let place = match req.static_property_place(class, &name, scope) {
         Ok(Some(place)) => place,
         Ok(None) => {
@@ -4656,6 +4707,11 @@ const FETCH_DIM_REF: u32 = 1;
 /// an object` where `$s[0][1] = 1` is the array's sentence.
 const FETCH_DIM_OBJ: u32 = 3;
 
+/// `ZEND_FETCH_DIM_INCDEC` (`Z/Zend/zend_compile.h:1098`), on the last
+/// `FETCH_DIM_RW` of a `++` or a `--` over an element: `Cannot
+/// increment/decrement string offsets`.
+const FETCH_DIM_INCDEC: u32 = 4;
+
 /// What the container of a dimension write turns out to be, the three
 /// `zend_fetch_dimension_address` and `ZEND_ASSIGN_DIM` both have a body
 /// for: the array the write lands in, the object whose `offsetSet` and
@@ -5155,6 +5211,11 @@ fn fetch_dim_place(
                     req,
                     "Error",
                     "Cannot use string offset as an object",
+                ),
+                Ok(_) if op.extended_value == FETCH_DIM_INCDEC => crate::api::raising::throw(
+                    req,
+                    "Error",
+                    "Cannot increment/decrement string offsets",
                 ),
                 Ok(_) => {
                     crate::api::raising::throw(req, "Error", "Cannot use string offset as an array")
@@ -8513,6 +8574,452 @@ fn overloaded_property_step(
     written
 }
 
+/// `ZEND_PRE_INC_OBJ` (`Z/Zend/zend_vm_def.h:1288`), `++$o->p`: the
+/// receiver read in place as `GET_OP1_OBJ_ZVAL_PTR_PTR_UNDEF(BP_VAR_RW)`
+/// reads it, a reference followed; what is no object is php's `Error`
+/// `Attempt to increment/decrement property "p" on null`
+/// (`zend_throw_non_object_error`), an undefined CV having warned. On
+/// an object a declared slot the scope may reach is stepped in place
+/// (`zend_pre_incdec_property_zval`), an `int` slot at its edge refused
+/// as `zend_throw_incdec_prop_error` refuses it and a typed slot held to
+/// its type after the step (`zend_incdec_typed_prop`), what it held kept
+/// where the type refuses; a name the class did not declare is the
+/// dynamic entry laid down with the read's warning, and one the class
+/// serves through `__get` is `read_property` and `write_property`
+/// (`zend_pre_incdec_overloaded_property`). The value after the step is
+/// the temporary's under `RETURN_VALUE_USED`.
+///
+/// ```php
+/// class C { public $p = 1; public $s = "a"; }
+/// $o = new C;
+/// ++$o->p;
+/// var_dump(++$o->p, $o->p, ++$o->s);
+/// $a = [new C];
+/// ++$a[0]->p;
+/// var_dump($a[0]->p);
+/// ```
+/// ```expect
+///
+/// Deprecated: Increment on non-numeric string is deprecated, use str_increment() instead in %s on line 5
+/// int(3)
+/// int(3)
+/// string(1) "b"
+/// int(2)
+/// ```
+///
+/// ```php
+/// $n = null;
+/// try { ++$n->p; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { $u->p--; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Attempt to increment/decrement property "p" on null
+///
+/// Warning: Undefined variable $u in %s on line 4
+/// Attempt to increment/decrement property "p" on null
+/// ```
+pub(crate) fn pre_inc_obj<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    incdec_obj(req, frame, code, op, IncDec::PRE_INC)
+}
+
+/// `ZEND_PRE_DEC_OBJ`, `--$o->p`: the same over
+/// [`crate::ops::decrement`], an `int` slot at `PHP_INT_MIN` refused
+/// the other way.
+///
+/// ```php
+/// class C { public int $n = PHP_INT_MIN; public int|float $f = PHP_INT_MIN; public $u; }
+/// $o = new C;
+/// try { --$o->n; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($o->n, --$o->f, --$o->u);
+/// ```
+/// ```expect
+/// Cannot decrement property C::$n of type int past its minimal value
+///
+/// Warning: Decrement on type null has no effect, this will change in the next major version of PHP in %s on line 5
+/// int(-9223372036854775808)
+/// float(-9.223372036854776E+18)
+/// NULL
+/// ```
+pub(crate) fn pre_dec_obj<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    incdec_obj(req, frame, code, op, IncDec::PRE_DEC)
+}
+
+/// `ZEND_POST_INC_OBJ`, `$o->p++` where the value is read: the same
+/// step, with the value the property held before it in the temporary,
+/// dereferenced (`zend_post_incdec_property_zval`). A typed slot the
+/// step would take out of its type keeps what it held, and a `?int`
+/// holding null is stepped to `1`.
+///
+/// ```php
+/// class C { public ?int $n = null; public int $m = PHP_INT_MAX; public $p = 5; }
+/// $o = new C;
+/// var_dump($o->n++, $o->n, $o->p++, $o->p);
+/// try { $o->m++; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($o->m);
+/// ```
+/// ```expect
+/// NULL
+/// int(1)
+/// int(5)
+/// int(6)
+/// Cannot increment property C::$m of type int past its maximal value
+/// int(9223372036854775807)
+/// ```
+///
+/// A class serving the name through `__get` and `__set` is read once
+/// and written once with the stepped value; a name nothing declared is
+/// the dynamic entry, created with php's deprecation after the read's
+/// warning.
+///
+/// ```php
+/// class O {
+///     public function __get($k) { echo "get $k\n"; return 4; }
+///     public function __set($k, $v) { echo "set $k=$v\n"; }
+/// }
+/// $o = new O;
+/// var_dump($o->p++);
+/// class D { }
+/// $d = new D;
+/// $d->q++;
+/// var_dump($d->q);
+/// ```
+/// ```expect
+/// get p
+/// set p=5
+/// int(4)
+///
+/// Deprecated: Creation of dynamic property D::$q is deprecated in %s on line 10
+///
+/// Warning: Undefined property: D::$q in %s on line 10
+/// int(1)
+/// ```
+pub(crate) fn post_inc_obj<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    incdec_obj(req, frame, code, op, IncDec::POST_INC)
+}
+
+/// `ZEND_POST_DEC_OBJ`, `$o->p--` where the value is read: the same
+/// step over [`crate::ops::decrement`], the value before it in the
+/// temporary.
+///
+/// ```php
+/// class C { public $p = "9"; }
+/// $o = new C;
+/// var_dump($o->p--, $o->p);
+/// ```
+/// ```expect
+/// string(1) "9"
+/// int(8)
+/// ```
+pub(crate) fn post_dec_obj<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    incdec_obj(req, frame, code, op, IncDec::POST_DEC)
+}
+
+/// Which of the four steps a `*_INC_OBJ` or `*_DEC_OBJ` opline is:
+/// whether the temporary takes the value before the step, and whether
+/// the step is `increment_function`'s, php's `ZEND_IS_INCREMENT`.
+#[derive(Clone, Copy)]
+struct IncDec {
+    post: bool,
+    increment: bool,
+}
+
+impl IncDec {
+    const PRE_INC: IncDec = IncDec {
+        post: false,
+        increment: true,
+    };
+    const PRE_DEC: IncDec = IncDec {
+        post: false,
+        increment: false,
+    };
+    const POST_INC: IncDec = IncDec {
+        post: true,
+        increment: true,
+    };
+    const POST_DEC: IncDec = IncDec {
+        post: true,
+        increment: false,
+    };
+
+    fn kernel(self) -> fn(&mut Request, &Value) -> Result<Value, Thrown> {
+        if self.increment {
+            crate::ops::increment
+        } else {
+            crate::ops::decrement
+        }
+    }
+}
+
+/// The body the four `*_INC_OBJ`/`*_DEC_OBJ` handlers share, php's one
+/// handler per step over `zend_pre_incdec_property_zval`,
+/// `zend_post_incdec_property_zval` and their overloaded twins: the
+/// receiver, the name in `op2`, and the step over whichever place the
+/// object hands out; `FREE_OP1` after it.
+fn incdec_obj(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    step: IncDec,
+) -> Edge {
+    let name = match op.op2_type {
+        OperandKind::Const => exec::constant(code, ConstIdx(op.op2)),
+        _ => {
+            return Err(Fatal::Error(String::from(
+                "InternalError: an increment of a property named at run time",
+            )));
+        }
+    };
+    let container = match op.op1_type {
+        OperandKind::Cv => exec::operand(req, frame, code, op.op1_type, op.op1),
+        _ => exec::container(req, frame, code, op.op1_type, op.op1, "ZEND_PRE_INC_OBJ")?,
+    }
+    .deref();
+    let stepped = if let Some(object) = container.as_object().copied() {
+        incdec_property(req, frame, code, op, step, object, &name)?
+    } else {
+        let shown_name = String::from_utf8_lossy(name.as_str_bytes().unwrap_or_default());
+        let shown = crate::ops::value_name(req, &container.undef_as_null());
+        let thrown = crate::api::raising::throw(
+            req,
+            "Error",
+            &format!("Attempt to increment/decrement property \"{shown_name}\" on {shown}"),
+        );
+        write_out(req, frame, code, op, &Value::null());
+        Err(thrown)
+    };
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    match stepped {
+        Ok(()) => Ok(advance(req, frame)),
+        Err(thrown) => threw(req, frame, &thrown),
+    }
+}
+
+/// The step over an object's property, `get_property_ptr_ptr` under
+/// `BP_VAR_RW` and what php does with the place it answers: a declared
+/// slot stepped in place and held to its declared type, the dynamic
+/// entry laid down, or the overloaded pair where the class hands out no
+/// place.
+fn incdec_property(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    step: IncDec,
+    object: PhpObject,
+    name: &Value,
+) -> Result<Result<(), Thrown>, Fatal> {
+    let bytes = name.as_str_bytes().unwrap_or_default().to_vec();
+    let Some(key) = name.as_php_string().copied() else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: an increment of a property whose name is no string",
+        )));
+    };
+    let silent = req.serves_accessor(object.class(), b"__get");
+    let placed = match req.declared_slot_for_write(object.class(), &bytes, "modify", silent) {
+        Ok(placed) => placed,
+        Err(thrown) => {
+            write_out(req, frame, code, op, &Value::null());
+            return Ok(Err(thrown));
+        }
+    };
+    let Some((slot, typed)) = placed else {
+        if req.overloaded_place(object, &bytes) {
+            return Ok(overloaded_incdec(req, frame, code, op, step, object, key));
+        }
+        req.addref(&Value::string(key));
+        if let Err(thrown) = req.dynamic_property_ref(object, key, PropertyRead::Warning) {
+            write_out(req, frame, code, op, &Value::null());
+            return Ok(Err(thrown));
+        }
+        return Ok(overloaded_incdec(req, frame, code, op, step, object, key));
+    };
+    if object.heap().slot(slot).is_undef() {
+        let shown = String::from_utf8_lossy(&bytes).into_owned();
+        if typed {
+            let class = req.class_name(object.class());
+            let thrown = crate::api::raising::throw(
+                req,
+                "Error",
+                &format!(
+                    "Typed property {class}::${shown} must not be accessed before initialization"
+                ),
+            );
+            write_out(req, frame, code, op, &Value::null());
+            return Ok(Err(thrown));
+        }
+        if req.overloaded_place(object, &bytes) {
+            return Ok(overloaded_incdec(req, frame, code, op, step, object, key));
+        }
+        let class = req.class_name(object.class());
+        crate::api::raising::warning(req, &format!("Undefined property: {class}::${shown}"));
+    }
+    let held = exec::value_of(object.heap().slot(slot))
+        .deref()
+        .undef_as_null();
+    req.addref(&held);
+    let stepped = match step.kernel()(req, &held) {
+        Ok(stepped) => stepped,
+        Err(thrown) => {
+            req.release(held);
+            write_out(req, frame, code, op, &Value::null());
+            return Ok(Err(thrown));
+        }
+    };
+    let landed = if typed {
+        match typed_step(req, frame, object, slot, &bytes, step, (held, stepped))? {
+            Ok(landed) => landed,
+            Err(thrown) => {
+                req.release(held);
+                return Ok(Err(thrown));
+            }
+        }
+    } else {
+        stepped
+    };
+    write_out(
+        req,
+        frame,
+        code,
+        op,
+        if step.post { &held } else { &landed },
+    );
+    req.release(held);
+    req.assign_declared_slot(object.heap(), slot, landed);
+    Ok(Ok(()))
+}
+
+/// `zend_incdec_typed_prop` (`Z/Zend/zend_execute.c:2262`) over a
+/// declared slot's step: an `int` stepped into a float its type does not
+/// accept is `zend_throw_incdec_prop_error`, the slot taking the limit;
+/// otherwise the stepped value held to the type, converted where the
+/// weak rule can, and refused with the slot keeping what it held where
+/// it cannot. The stepped value is given up on a refusal; what stood
+/// in the slot is the caller's to release.
+fn typed_step(
+    req: &mut Request,
+    frame: FrameRef,
+    object: PhpObject,
+    slot: u32,
+    bytes: &[u8],
+    step: IncDec,
+    (held, stepped): (Value, Value),
+) -> Result<Result<Value, Thrown>, Fatal> {
+    let Some(declared) = req.declared_typed_property(object.class(), bytes) else {
+        req.release(stepped);
+        let shown = String::from_utf8_lossy(bytes);
+        return Err(Fatal::Error(format!(
+            "InternalError: an increment placed the typed property ${shown}, whose declared type the class does not carry"
+        )));
+    };
+    if crate::ops::steps_past_int(&held, &stepped, &declared.ty) {
+        // `zend_throw_incdec_prop_error`: the slot takes the limit and
+        // the `TypeError` stands beside it.
+        let (thrown, limit) = crate::ops::incdec_prop_error(
+            req,
+            &declared.ty,
+            declared.declaring,
+            bytes,
+            step.increment,
+        );
+        req.release(stepped);
+        req.assign_declared_slot(object.heap(), slot, limit);
+        return Ok(Err(thrown));
+    }
+    let strict = req.frame_strict_types(frame);
+    Ok(
+        match crate::ops::verify_property_type(
+            req,
+            &stepped,
+            &declared.ty,
+            declared.declaring,
+            bytes,
+            strict,
+        ) {
+            Ok(None) => Ok(stepped),
+            Ok(Some(coerced)) => {
+                req.release(stepped);
+                Ok(coerced)
+            }
+            // `ZVAL_COPY_VALUE(var_ptr, copy)`: the slot keeps what it
+            // held.
+            Err(thrown) => {
+                req.release(stepped);
+                Err(thrown)
+            }
+        },
+    )
+}
+
+/// `zend_pre_incdec_overloaded_property` and
+/// `zend_post_incdec_overloaded_property` (`Z/Zend/zend_execute.c:2367`):
+/// `read_property` under `BP_VAR_R`, the step over a dereferenced copy
+/// of what it answered, the temporary written with the value before or
+/// after it, and `write_property` with the stepped value.
+fn overloaded_incdec(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    step: IncDec,
+    object: PhpObject,
+    name: crate::api::values::PhpString,
+) -> Result<(), Thrown> {
+    let table = req.object_handlers(object.heap());
+    let read = table.read_property(req, object, name.as_bytes(), PropertyRead::Warning);
+    let held = match read {
+        Ok(held) => held,
+        Err(thrown) => {
+            write_out(req, frame, code, op, &Value::null());
+            return Err(thrown);
+        }
+    };
+    let copy = held.deref();
+    req.addref(&copy);
+    req.release(held);
+    let stepped = match step.kernel()(req, &copy) {
+        Ok(stepped) => stepped,
+        Err(thrown) => {
+            req.release(copy);
+            write_out(req, frame, code, op, &Value::null());
+            return Err(thrown);
+        }
+    };
+    write_out(
+        req,
+        frame,
+        code,
+        op,
+        if step.post { &copy } else { &stepped },
+    );
+    req.release(copy);
+    // `write_property` takes an owner of the value and of the name,
+    // the stepped value's own and one more of the name.
+    req.addref(&Value::string(name));
+    let table = req.object_handlers(object.heap());
+    table.write_property(req, object, name, stepped)
+}
+
 /// `if (RETURN_VALUE_USED(opline)) ZVAL_COPY(EX_VAR(opline->result.var), value)`:
 /// the temporary `out` names one more owner of `value`, and nothing
 /// where the compiler marked the temporary `UNUSED`.
@@ -10877,11 +11384,17 @@ fn incdec(
     post: bool,
     kernel: fn(&mut Request, &Value) -> Result<Value, Thrown>,
 ) -> Edge {
-    let slot = match op.op1_type {
-        OperandKind::Cv => op.op1,
-        _ => exec::temporary_slot(code, op.op1),
+    // `GET_OP1_ZVAL_PTR_PTR_UNDEF(BP_VAR_RW)`: a CV as it stands, and a
+    // `VAR` through the `IS_INDIRECT` a `FETCH_DIM_RW` left there, which
+    // is the element the step is written into.
+    let place = match op.op1_type {
+        OperandKind::Var => write_place(req, frame, code, op.op1_type, op.op1),
+        _ => None,
     };
-    let named = exec::operand(req, frame, code, op.op1_type, op.op1);
+    let named = match place {
+        Some(place) => exec::value_of(place.read()).undef_as_null(),
+        None => exec::operand(req, frame, code, op.op1_type, op.op1),
+    };
     // `if (Z_TYPE_P(var_ptr) == IS_REFERENCE) { var_ptr = Z_REFVAL_P(var_ptr); }`.
     let cell = named.as_php_ref().copied();
     let held = named.deref();
@@ -10902,13 +11415,22 @@ fn incdec(
             // which is what the in-place step does.
             if let Some(cell) = cell {
                 cell.set(req, stepped);
+            } else if let Some(place) = place {
+                let previous = exec::value_of(place.read());
+                place.write(stepped.into_zval());
+                req.release(previous);
             } else {
-                let previous = req.set_slot(frame, slot, stepped);
+                let previous = req.set_slot(frame, op.op1, stepped);
                 req.release(previous);
             }
+            // `FREE_OP1()`: a `VAR` holding an `IS_INDIRECT` owns
+            // nothing, and one holding what `offsetGet` answered gives
+            // it up.
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
             Ok(advance(req, frame))
         }
         Err(thrown) => {
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
             req.leave_pending(&thrown);
             Ok(Stepped::Threw(frame))
         }
