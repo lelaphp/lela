@@ -325,6 +325,35 @@ pub struct StreamWrapper {
     pub rename: Option<fn(&mut Request, &[u8], &[u8]) -> Result<bool, Thrown>>,
     pub mkdir: Option<fn(&mut Request, &[u8], i64, bool) -> Result<bool, Thrown>>,
     pub rmdir: Option<fn(&mut Request, &[u8]) -> Result<bool, Thrown>>,
+    /// `stream_metadata`: one of [`WrapperOp::Touch`], [`WrapperOp::Chmod`],
+    /// [`WrapperOp::Owner`] and [`WrapperOp::Group`], with the path as
+    /// the program wrote it.
+    pub set_stat: Option<fn(&mut Request, &[u8], WrapperOp<'_>) -> Result<bool, Thrown>>,
+}
+
+/// One wrapper operation past opening, php's `php_stream_wrapper_ops`
+/// from `unlink` on, as [`Request::wrapper_op`] hands it to the wrapper
+/// of a path: `stream_metadata`'s options are the last four, with an
+/// owner or a group already a number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WrapperOp<'a> {
+    /// `unlink`.
+    Unlink,
+    /// `rename`, to the path `to` as the program wrote it.
+    Rename { to: &'a [u8] },
+    /// `stream_mkdir` with its `mode` and `PHP_STREAM_MKDIR_RECURSIVE`.
+    Mkdir { mode: i64, recursive: bool },
+    /// `stream_rmdir`.
+    Rmdir,
+    /// `PHP_STREAM_META_TOUCH`: the modification and access times, or
+    /// the current time for both.
+    Touch(Option<(i64, i64)>),
+    /// `PHP_STREAM_META_ACCESS`, the permission bits `chmod(2)` sets.
+    Chmod(i64),
+    /// `PHP_STREAM_META_OWNER`, a user id.
+    Owner(i64),
+    /// `PHP_STREAM_META_GROUP`, a group id.
+    Group(i64),
 }
 
 /// A stream filter: its name and the function that filters one bucket,
@@ -606,6 +635,9 @@ pub struct Request {
     autoloaders: Vec<Callable>,
     assert_callback: Option<Value>,
     umask: u32,
+    /// `BG(CurrentStatFile)` and `BG(CurrentLStatFile)`, `php_stat`'s
+    /// cache, which the plain files kind clears (design §4.3 seam 5).
+    pub(crate) stat_cache: crate::wrapper::StatCache,
     cwd: PathBuf,
     gc_enabled: bool,
     /// `le_stream`, the resource type every stream is registered under.
@@ -820,6 +852,7 @@ impl Request {
             autoloaders: Vec::new(),
             assert_callback: None,
             umask: 0o022,
+            stat_cache: crate::wrapper::StatCache::default(),
             cwd,
             gc_enabled: true,
             stream_type,
@@ -8487,6 +8520,7 @@ impl Request {
     /// `chdir()`.
     pub fn set_cwd(&mut self, path: HostPath) -> Result<(), Thrown> {
         self.cwd = path.0;
+        self.forget_relative_stats();
         Ok(())
     }
 
@@ -9030,6 +9064,75 @@ impl Request {
     /// open directory: ` warning, which an empty path is not given.
     pub fn open_dir(&mut self, path: &[u8]) -> Result<Option<Stream>, Thrown> {
         self.open_dir_wrapper(path)
+    }
+
+    /// `php_stream_stat_path_ex`, and with `cached` the stat `php_stat`
+    /// makes: the path's wrapper located and its `url_stat` asked,
+    /// `lstat(2)` where `link` and `stat(2)` otherwise for a plain file,
+    /// laid out as `php_fstat` lays it out; `None` is the stat that
+    /// failed or a wrapper with none. With `cached` the answer comes
+    /// from, and goes into, `BG(CurrentStatFile)` or
+    /// `BG(CurrentLStatFile)` by the path as written, which
+    /// [`Request::clear_stat_cache`], a plain file's read, write or open,
+    /// and every operation of [`Request::wrapper_op`] that changed a
+    /// file clear.
+    pub fn url_stat(
+        &mut self,
+        path: &[u8],
+        link: bool,
+        cached: bool,
+    ) -> Result<Option<[i64; 13]>, Thrown> {
+        self.stat_url(path, link, cached)
+    }
+
+    /// `php_clear_stat_cache`: the stat cache emptied, both entries.
+    pub fn clear_stat_cache(&mut self) {
+        self.forget_stats();
+    }
+
+    /// `php_stream_locate_url_wrapper(path, &local, 0) ==
+    /// &php_plain_files_wrapper`: the path the plain files wrapper would
+    /// be handed, `file://` taken off, or `None` where the path is
+    /// another wrapper's or none's, after the warnings the locate raises.
+    pub fn plain_path(&mut self, path: &[u8]) -> Option<Vec<u8>> {
+        self.plain_local(path)
+    }
+
+    /// One [`WrapperOp`] at `path`, as `unlink`, `rename`, `mkdir`,
+    /// `rmdir`, and `touch`, `chmod`, `chown` and `chgrp` over a wrapper
+    /// reach it: the wrapper located, php's warning where there is none
+    /// or it lacks the operation, else the wrapper's own answer, the
+    /// plain files wrapper's with php's warnings, `strerror(errno)` among
+    /// them. `mkdir` and `rmdir` of a wrapper without them answer
+    /// `false` and say nothing, as `php_stream_mkdir` does.
+    pub fn wrapper_op(&mut self, path: &[u8], op: WrapperOp<'_>) -> Result<bool, Thrown> {
+        self.path_op(path, op)
+    }
+
+    /// `tempnam()`'s `php_open_temporary_fd_ex` under
+    /// `PHP_TMP_FILE_OPEN_BASEDIR_CHECK_ALWAYS`: a new `0600` file in
+    /// `dir`, or after php's notice in the temporary directory, named by
+    /// the prefix and nineteen random characters, and closed; its path,
+    /// or `None` where none could be made.
+    pub fn temporary_name(
+        &mut self,
+        dir: &[u8],
+        prefix: &[u8],
+    ) -> Result<Option<PhpString>, Thrown> {
+        match self.open_temporary_fd(Some(dir), prefix) {
+            Some((_, path)) => Ok(Some(PhpString::new(
+                self,
+                path.as_os_str().as_encoded_bytes(),
+            )?)),
+            None => Ok(None),
+        }
+    }
+
+    /// `php_stream_fopen_tmpfile`, what `tmpfile()` is: a new file in the
+    /// temporary directory, opened `r+b` as a plain file and unlinked
+    /// when it closes, or `None` where none could be made.
+    pub fn tmpfile(&mut self) -> Result<Option<Stream>, Thrown> {
+        crate::streams::temporary_file(self, None, b"php")
     }
 
     /// `stream_wrapper_register()`: `false` when the scheme is taken.

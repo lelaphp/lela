@@ -36,6 +36,7 @@ mod streams;
 #[cfg(any(feature = "test", test))]
 pub mod test;
 pub mod tier;
+mod wrapper;
 
 pub use api::request::PHP_VERSION;
 pub use engine::{Engine, EngineBuilder, Observables, OutputSink, RequestDescription};
