@@ -28,9 +28,9 @@
 //! renderer 8.5 keeps in Zend, `sprintf`, `printf` and `vsprintf` are
 //! `formatted_print`'s over `php_formatted_print`, `base64_encode`
 //! and `base64_decode` are `base64`'s, `shell_exec` is `exec`'s, the
-//! one native the backtick operator compiles to, and `fopen`,
-//! `fclose`, `feof`, `fread`, `fwrite`, `rewind` and `ftell` are
-//! `file`'s, over the engine's streams facet.
+//! one native the backtick operator compiles to, and the natives of
+//! `file.c`, the directory natives of `dir.c` and `stream_get_meta_data`
+//! are `file`'s, over the engine's streams facet.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -67,7 +67,13 @@ use php_ext::values::{PhpArray, PhpString, TypeTag, Value, ValueRef};
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
 #[derive(Default)]
-struct State {}
+struct State {
+    /// `DIRG(default_dir)` (`Z/ext/standard/dir.c:62`): the directory
+    /// `opendir` opened last, with the owner php's `GC_ADDREF` takes,
+    /// which `readdir`, `rewinddir` and `closedir` read without an
+    /// argument.
+    default_dir: Option<php_ext::values::Resource>,
+}
 
 /// The extension value (design §7.1): declarations paired with entries,
 /// the state declared on it, and the `deps` table, which is what
@@ -164,6 +170,7 @@ pub fn extension() -> Extension {
             constant(b"STR_PAD_BOTH", STR_PAD_BOTH),
         ])
         .constants(array::constants())
+        .constants(file::constants())
         .dependencies(dependencies())
         .request_state::<State>()
         .build("standard")

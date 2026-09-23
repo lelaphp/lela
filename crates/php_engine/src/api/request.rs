@@ -162,10 +162,120 @@ impl Stream {
             .flatten()
     }
 
-    /// `php_stream_seek`: `true` for php's `0`.
-    pub fn seek(self, req: &mut Request, offset: i64, whence: Whence) -> bool {
+    /// `php_stream_seek`: `true` for php's `0`. A `whence` of `None` is
+    /// a number that is none of the three, [`Whence::from_int`]'s
+    /// `None`, which a stream that seeks refuses and one that cannot is
+    /// php's warning for.
+    pub fn seek(self, req: &mut Request, offset: i64, whence: impl Into<Option<Whence>>) -> bool {
+        let whence = whence.into();
         req.stream_op(self, |req, stream| stream.seek(req, offset, whence))
             .unwrap_or(false)
+    }
+
+    /// `php_stream_get_line`: the next line with its `\n`, at most
+    /// `maxlen - 1` bytes of it, or all of it for `None`; `None` back is
+    /// no byte to give, at eof or after a read that failed (`fgets`
+    /// answers `false`). The string is asked for at `maxlen` first, as
+    /// `fgets` asks `zend_string_alloc`, so a length past the memory
+    /// limit is php's fatal before a byte is read.
+    pub fn get_line(
+        self,
+        req: &mut Request,
+        maxlen: Option<usize>,
+    ) -> Result<Option<PhpString>, Thrown> {
+        if let Some(len) = maxlen
+            && len > req.heap_memory_limit()
+        {
+            let asked = req.string_with(len, |_| {})?;
+            req.release(Value::string(asked));
+        }
+        match req
+            .stream_op(self, |req, stream| stream.get_line(req, maxlen))
+            .flatten()
+        {
+            Some(line) => Ok(Some(PhpString::new(req, &line)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// `_php_stream_copy_to_mem`: the rest of the stream, or up to
+    /// `maxlen` bytes of it, as one string, empty where nothing was read.
+    pub fn copy_to_mem(
+        self,
+        req: &mut Request,
+        maxlen: Option<usize>,
+    ) -> Result<PhpString, Thrown> {
+        let bytes = req
+            .stream_op(self, |req, stream| stream.copy_to_mem(req, maxlen))
+            .unwrap_or_default();
+        PhpString::new(req, &bytes)
+    }
+
+    /// `php_stream_stat`, as `php_fstat` lays it out: `dev`, `ino`,
+    /// `mode`, `nlink`, `uid`, `gid`, `rdev`, `size`, `atime`, `mtime`,
+    /// `ctime`, `blksize` and `blocks`, or `None` where the stream has
+    /// no stat (`fstat` answers `false`).
+    pub fn stat(self, req: &mut Request) -> Option<[i64; 13]> {
+        req.stream_op(self, |req, stream| stream.stat(req))
+            .flatten()
+    }
+
+    /// `php_stream_truncate_set_size` behind
+    /// `php_stream_truncate_supported`: `None` where the stream does not
+    /// truncate (`ftruncate`'s `Can't truncate this stream!`), else
+    /// whether it took the size.
+    pub fn truncate(self, req: &mut Request, size: usize) -> Option<bool> {
+        req.stream_op(self, |req, stream| stream.truncate(req, size))
+            .flatten()
+    }
+
+    /// `php_stream_lock`, `flock(2)` with its operation, which
+    /// `php_stream_supports_lock` guards: `false` where the stream has
+    /// no `flock(2)` or `flock(2)` refused.
+    pub fn flock(self, req: &mut Request, operation: i64) -> bool {
+        req.stream_op(self, |req, stream| stream.flock(req, operation))
+            .unwrap_or(false)
+    }
+
+    /// `php_stream_is(stream, PHP_STREAM_IS_STDIO)`: the stream is a
+    /// plain file's, or one of the host's standard ones.
+    #[must_use]
+    pub fn is_stdio(self, req: &Request) -> bool {
+        req.stream_ref(self)
+            .is_some_and(crate::streams::PhpStream::is_stdio)
+    }
+
+    /// `PHP_STREAM_OPTION_READ_BUFFER`: `false` is
+    /// `PHP_STREAM_BUFFER_NONE`, so the kind is read directly, and `true`
+    /// buffers it again.
+    pub fn set_read_buffer(self, req: &mut Request, buffered: bool) {
+        req.stream_op(self, |_, stream| stream.set_read_buffer(buffered));
+    }
+
+    /// What `stream_get_meta_data` answers: `timed_out`, `blocked` and
+    /// `eof` where the stream's kind reports them, `wrapper_type`,
+    /// `stream_type`, `mode`, `unread_bytes`, `seekable` and `uri`, in
+    /// php's order.
+    pub fn meta_data(self, req: &mut Request) -> Result<PhpArray, Thrown> {
+        req.stream_meta_data(self)
+    }
+
+    /// Whether `opendir` opened the stream, `PHP_STREAM_FLAG_IS_DIR`,
+    /// which is what `readdir` and `closedir` accept and `fclose`
+    /// refuses.
+    #[must_use]
+    pub fn is_dir(self, req: &Request) -> bool {
+        req.stream_ref(self)
+            .is_some_and(crate::streams::PhpStream::is_dir)
+    }
+
+    /// `php_stream_readdir`: the next entry's name, `.` and `..` first,
+    /// `None` past the last (`readdir` answers `false`).
+    pub fn read_dir(self, req: &mut Request) -> Result<Option<PhpString>, Thrown> {
+        match req.stream_op(self, |_, stream| stream.read_dir()).flatten() {
+            Some(name) => Ok(Some(PhpString::new(req, &name)?)),
+            None => Ok(None),
+        }
     }
 
     /// `php_stream_tell`: the position, `-1` for a stream that has none.
@@ -8913,12 +9023,13 @@ impl Request {
         self.open_stream_wrapper(path, mode, use_include_path)
     }
 
-    /// `opendir()`, `php_stream_opendir`: no wrapper here has a
-    /// directory opener yet, which is php's `not implemented` after the
-    /// caption, and `None`.
+    /// `opendir()`, `php_stream_opendir` under `REPORT_ERRORS`: the
+    /// directory as a stream of the `stream` type, through the plain
+    /// files wrapper's `php_plain_files_dirstream_ops` or a registered
+    /// wrapper's directory opener, and `None` after php's `Failed to
+    /// open directory: ` warning, which an empty path is not given.
     pub fn open_dir(&mut self, path: &[u8]) -> Result<Option<Stream>, Thrown> {
-        self.display_wrapper_errors(path, "Failed to open directory", "not implemented");
-        Ok(None)
+        self.open_dir_wrapper(path)
     }
 
     /// `stream_wrapper_register()`: `false` when the scheme is taken.

@@ -17,12 +17,18 @@
 //! the empty slot a re-entrant call would find is php's `in_free` guard
 //! and not a case a program reaches.
 //!
+//! The operations are php's generic half over the kind's: read, write,
+//! seek, tell, eof, flush and close, `php_stream_get_line`,
+//! `_php_stream_copy_to_mem`, `php_stream_stat`, the truncate and locking
+//! options of `php_stream_set_option`, the read buffer's, and what
+//! `stream_get_meta_data` reads (`stream->mode`, `stream->orig_path`, the
+//! kind's own `PHP_STREAM_OPTION_META_DATA_API` answer). The plain
+//! files wrapper opens directories as `php_plain_files_dirstream_ops`.
+//!
 //! What is not here: `php://temp`'s spill to a file past
 //! `PHP_STREAM_MAX_MEM`, the lazy body under `php://stdin` and
 //! `php://input` (#544), `php://fd/` and `php://filter/`, the filter
-//! chains, the read buffer's `DETECT_EOL` arm, the directory streams, and
-//! every stream operation past read, write, seek, tell, eof, flush and
-//! close.
+//! chains, and the read buffer's `DETECT_EOL` arm.
 
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -30,7 +36,7 @@ use php_heap::ResourceType;
 
 use crate::api::raising::{Level, Thrown, raise, throw, warning};
 use crate::api::request::{Request, Stream, Whence};
-use crate::api::values::{Resource, Value};
+use crate::api::values::{Key, PhpArray, PhpString, Resource, Value};
 
 /// `FG(def_chunk_size)`, which `PHP_SOCK_CHUNK_SIZE` sets at 8192
 /// (`Z/ext/standard/file.c:131`): what one fill of the read buffer asks
@@ -66,27 +72,100 @@ pub(crate) trait Ops: Send {
 
     /// `ops->seek`, or `None` where the kind has none: `position` is
     /// php's `*newoffs`, written as the kind writes it, which the
-    /// memory kind does on failure too; `Some(true)` for php's `0`.
+    /// memory kind does on failure too; `Some(true)` for php's `0`. A
+    /// `whence` of `None` is a number that is none of the three, which
+    /// every kind here answers `-1` to.
     fn seek(
         &mut self,
         _req: &mut Request,
         _offset: i64,
-        _whence: Whence,
+        _whence: Option<Whence>,
         _position: &mut i64,
     ) -> Option<bool> {
         None
     }
+
+    /// Whether the kind has an `ops->seek`, which `stream_get_meta_data`
+    /// reads as half of `seekable`.
+    fn seekable(&self) -> bool {
+        false
+    }
+
+    /// `ops->stat`, `None` where the kind has none or `fstat(2)` failed.
+    fn stat(&mut self, _req: &mut Request) -> Option<StatBuf> {
+        None
+    }
+
+    /// `PHP_STREAM_OPTION_TRUNCATE_API`: `None` where the kind does not
+    /// answer `PHP_STREAM_TRUNCATE_SUPPORTED`, else whether
+    /// `PHP_STREAM_TRUNCATE_SET_SIZE` to `size` was taken.
+    fn truncate(&mut self, _req: &mut Request, _size: usize) -> Option<bool> {
+        None
+    }
+
+    /// `PHP_STREAM_OPTION_LOCKING` with `flock(2)`'s operation,
+    /// `LOCK_SH`, `LOCK_EX` or `LOCK_UN` with `LOCK_NB` beside it:
+    /// `None` where the kind has no `flock(2)`, else whether `flock(2)`
+    /// took it.
+    fn flock(&mut self, _req: &mut Request, _operation: i64) -> Option<bool> {
+        None
+    }
+
+    /// What `PHP_STREAM_OPTION_META_DATA_API` answers for the kind.
+    fn meta_data(&self) -> MetaData {
+        MetaData::Generic
+    }
+
+    /// `php_plain_files_dirstream_read`: the next entry's name, `None`
+    /// past the last and for a kind that is no directory.
+    fn read_dir(&mut self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// `php_stream_is(stream, PHP_STREAM_IS_STDIO)`: the kind is
+    /// `php_stream_stdio_ops`.
+    fn is_stdio(&self) -> bool {
+        false
+    }
+}
+
+/// `php_stream_statbuf`'s thirteen fields in the order `php_fstat` puts
+/// them: `dev`, `ino`, `mode`, `nlink`, `uid`, `gid`, `rdev`, `size`,
+/// `atime`, `mtime`, `ctime`, `blksize` and `blocks`.
+pub(crate) type StatBuf = [i64; 13];
+
+/// What a kind's `PHP_STREAM_OPTION_META_DATA_API` answers, which is
+/// what `stream_get_meta_data` puts first.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MetaData {
+    /// `PHP_STREAM_OPTION_RETURN_NOTIMPL`: the generic three,
+    /// `timed_out`, `blocked` and `eof` as `php_stream_eof` answers it.
+    Generic,
+    /// `php_stdiop_set_option`'s three, with `eof` as the kind's last
+    /// read left `stream->eof` and `blocked` from `O_NONBLOCK`, which no
+    /// stream here sets.
+    Stdio,
+    /// `php_stream_temp_set_option`'s copy of `ts->meta`, which only
+    /// `data:` fills: nothing at all for `php://temp`.
+    Own,
 }
 
 /// php's `php_stream` (`Z/main/php_streams.h`), the half every kind
 /// shares: the position, `eof`, the read buffer with its two
-/// cursors, the wrapper it was opened through, and the bits the
-/// generic operations read. `stream->mode` and `stream->orig_path`,
-/// which `stream_get_meta_data` prints, wait for it.
+/// cursors, the wrapper it was opened through, the bits the generic
+/// operations read, and the `stream->mode` and path `stream_get_meta_data`
+/// prints.
 pub(crate) struct PhpStream {
     ops: Box<dyn Ops>,
     /// `stream->wrapper->wops->label`.
     wrapper: &'static str,
+    /// `stream->mode`, what `php_stream_alloc` was handed, cut to the
+    /// fifteen bytes its `char mode[16]` holds.
+    mode: Vec<u8>,
+    /// `stream->orig_path`: the path `php_stream_open_wrapper_ex` opened,
+    /// after `include_path`, and `None` for a stream no wrapper opened by
+    /// path, a directory stream among them.
+    orig_path: Option<Vec<u8>>,
     /// `stream->position`, `-1` for a stream that cannot seek.
     position: i64,
     /// `stream->eof`.
@@ -105,9 +184,10 @@ pub(crate) struct PhpStream {
     chunk_size: usize,
 }
 
-/// `stream->flags`, the three of `PHP_STREAM_FLAG_*` the generic
+/// `stream->flags`, the four of `PHP_STREAM_FLAG_*` the generic
 /// operations read.
 #[derive(Default)]
+#[allow(clippy::struct_excessive_bools)] // php's bitset, one field per bit a generic operation reads
 struct Flags {
     /// `PHP_STREAM_FLAG_NO_BUFFER`: the kind is read directly.
     no_buffer: bool,
@@ -115,16 +195,21 @@ struct Flags {
     no_seek: bool,
     /// `PHP_STREAM_FLAG_WAS_WRITTEN`: a flush is owed at close.
     was_written: bool,
+    /// `PHP_STREAM_FLAG_IS_DIR`, which `php_stream_opendir` sets, with
+    /// the `PHP_STREAM_FLAG_NO_FCLOSE` `opendir` sets beside it.
+    is_dir: bool,
 }
 
 impl PhpStream {
     /// `_php_stream_alloc` (`Z/main/streams/streams.c:301`) less the
     /// resource, which [`Request::stream_alloc`] registers: the kind,
-    /// the chunk size, and nothing read or written.
-    fn new(ops: Box<dyn Ops>) -> PhpStream {
+    /// its `stream->mode`, the chunk size, and nothing read or written.
+    fn new(ops: Box<dyn Ops>, mode: &[u8]) -> PhpStream {
         PhpStream {
             ops,
             wrapper: "",
+            mode: mode[..mode.len().min(15)].to_vec(),
+            orig_path: None,
             position: 0,
             eof: false,
             fatal_error: false,
@@ -139,6 +224,16 @@ impl PhpStream {
     /// `_php_stream_tell` (`Z/main/streams/streams.c:1380`).
     pub(crate) const fn position(&self) -> i64 {
         self.position
+    }
+
+    /// `php_stream_is(stream, PHP_STREAM_IS_STDIO)`.
+    pub(crate) fn is_stdio(&self) -> bool {
+        self.ops.is_stdio()
+    }
+
+    /// `stream->flags & PHP_STREAM_FLAG_IS_DIR`.
+    pub(crate) const fn is_dir(&self) -> bool {
+        self.flags.is_dir
     }
 
     /// `_php_stream_fill_read_buffer` (`Z/main/streams/streams.c:564`)
@@ -265,7 +360,7 @@ impl PhpStream {
             self.readpos = 0;
             self.writepos = 0;
             let Self { ops, position, .. } = self;
-            let _ = ops.seek(req, *position, Whence::Set, position);
+            let _ = ops.seek(req, *position, Some(Whence::Set), position);
         }
         let mut didwrite = 0;
         let mut rest = buf;
@@ -293,19 +388,21 @@ impl PhpStream {
     /// `SEEK_SET` from the position first, a negative `SEEK_SET` refused
     /// before the kind is, and the buffer dropped whatever the kind
     /// answered; a kind that cannot seek emulates a forward `SEEK_CUR`
-    /// by reading and is php's warning for anything else.
-    pub(crate) fn seek(&mut self, req: &mut Request, offset: i64, whence: Whence) -> bool {
+    /// by reading and is php's warning for anything else. A `whence`
+    /// that is none of the three reaches the kind as it is, and a kind
+    /// answers it `-1`.
+    pub(crate) fn seek(&mut self, req: &mut Request, offset: i64, whence: Option<Whence>) -> bool {
         if !self.flags.no_buffer {
             let held = i64::try_from(self.writepos - self.readpos).unwrap_or(i64::MAX);
             match whence {
-                Whence::Cur if offset > 0 && offset <= held => {
+                Some(Whence::Cur) if offset > 0 && offset <= held => {
                     self.readpos += usize::try_from(offset).unwrap_or(0);
                     self.position += offset;
                     self.eof = false;
                     self.fatal_error = false;
                     return true;
                 }
-                Whence::Set if offset > self.position && offset <= self.position + held => {
+                Some(Whence::Set) if offset > self.position && offset <= self.position + held => {
                     self.readpos += usize::try_from(offset - self.position).unwrap_or(0);
                     self.position = offset;
                     self.eof = false;
@@ -317,8 +414,8 @@ impl PhpStream {
         }
         if !self.flags.no_seek {
             let (offset, whence) = match whence {
-                Whence::Cur => (self.position.saturating_add(offset), Whence::Set),
-                Whence::Set if offset < 0 => return false,
+                Some(Whence::Cur) => (self.position.saturating_add(offset), Some(Whence::Set)),
+                Some(Whence::Set) if offset < 0 => return false,
                 other => (offset, other),
             };
             let Self { ops, position, .. } = self;
@@ -332,7 +429,7 @@ impl PhpStream {
                 return sought;
             }
         }
-        if whence == Whence::Cur && offset >= 0 {
+        if whence == Some(Whence::Cur) && offset >= 0 {
             let mut left = usize::try_from(offset).unwrap_or(usize::MAX);
             let mut tmp = [0u8; 1024];
             while left > 0 {
@@ -342,11 +439,154 @@ impl PhpStream {
                     _ => return false,
                 }
             }
+            self.eof = false;
+            self.fatal_error = false;
             return true;
         }
         let text = format!("{}(): Stream does not support seeking", req.active_native());
         warning(req, &text);
         false
+    }
+
+    /// `_php_stream_get_line` (`Z/main/streams/streams.c:958`) without
+    /// `DETECT_EOL`: bytes up to and including the first `\n`, taken
+    /// from the read buffer and the buffer filled a chunk at a time
+    /// while it holds none, for every kind, the unbuffered ones too;
+    /// `maxlen` is php's, so at most `maxlen - 1` bytes, and `None` is
+    /// php's `grow_mode`, a line of any length. `None` back is a line of no
+    /// bytes, at eof or after a read that failed.
+    pub(crate) fn get_line(&mut self, req: &mut Request, maxlen: Option<usize>) -> Option<Vec<u8>> {
+        if maxlen == Some(0) {
+            return None;
+        }
+        let mut line = Vec::new();
+        let mut left = maxlen.unwrap_or(0);
+        loop {
+            let avail = self.writepos - self.readpos;
+            if avail > 0 {
+                let held = &self.readbuf[self.readpos..self.writepos];
+                let (mut cpysz, mut done) = match held.iter().position(|b| *b == b'\n') {
+                    Some(eol) => (eol + 1, true),
+                    None => (avail, false),
+                };
+                if maxlen.is_some() && cpysz >= left - 1 {
+                    cpysz = left - 1;
+                    done = true;
+                }
+                line.extend_from_slice(&held[..cpysz]);
+                self.position += i64::try_from(cpysz).unwrap_or(i64::MAX);
+                self.readpos += cpysz;
+                left = left.saturating_sub(cpysz);
+                if done {
+                    break;
+                }
+            } else if self.eof {
+                break;
+            } else {
+                let toread = match maxlen {
+                    None => self.chunk_size,
+                    Some(_) => (left - 1).min(self.chunk_size),
+                };
+                // php gives up on a failed fill only where a filter set
+                // `fatal_error`, which no stream here has.
+                let _ = self.fill_read_buffer(req, toread);
+                if self.writepos == self.readpos {
+                    break;
+                }
+            }
+        }
+        (!line.is_empty()).then_some(line)
+    }
+
+    /// `_php_stream_copy_to_mem` (`Z/main/streams/streams.c:1569`): up
+    /// to `maxlen` bytes, `None` for all of them. A bound under four
+    /// chunks reads into a string of that size until it is full or the
+    /// stream is at eof; anything else reads into a buffer sized from
+    /// `php_stream_stat`'s size past the position and a chunk over,
+    /// grown a chunk at a time while a quarter chunk of room is left,
+    /// until a read gives nothing.
+    pub(crate) fn copy_to_mem(&mut self, req: &mut Request, maxlen: Option<usize>) -> Vec<u8> {
+        if maxlen == Some(0) {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        if let Some(max) = maxlen
+            && max < 4 * CHUNK_SIZE
+        {
+            out.resize(max, 0);
+            let mut len = 0;
+            while len < max && !self.eof() {
+                match self.read(req, &mut out[len..]) {
+                    Some(n) if n > 0 => len += n,
+                    _ => break,
+                }
+            }
+            out.truncate(len);
+            return out;
+        }
+        let size = self.ops.stat(req).map_or(0, |sb| sb[7]);
+        let mut buflen = if size > 0 {
+            usize::try_from((size - self.position).max(0)).unwrap_or(0) + CHUNK_SIZE
+        } else {
+            CHUNK_SIZE
+        };
+        if let Some(max) = maxlen {
+            buflen = buflen.min(max);
+        }
+        out.resize(buflen, 0);
+        let min_room = CHUNK_SIZE / 4;
+        let mut len = 0;
+        while let Some(n) = self.read(req, &mut out[len..buflen]) {
+            if n == 0 {
+                break;
+            }
+            len += n;
+            if len + min_room >= buflen {
+                if maxlen == Some(len) {
+                    break;
+                }
+                buflen = match maxlen {
+                    Some(max) if buflen + CHUNK_SIZE > max => max,
+                    _ => buflen + CHUNK_SIZE,
+                };
+                out.resize(buflen, 0);
+            }
+        }
+        out.truncate(len);
+        out
+    }
+
+    /// `_php_stream_stat` (`Z/main/streams/streams.c:888`): the kind's
+    /// `ops->stat`, since no wrapper here has a `stream_stat`.
+    pub(crate) fn stat(&mut self, req: &mut Request) -> Option<StatBuf> {
+        self.ops.stat(req)
+    }
+
+    /// `php_stream_truncate_set_size` behind
+    /// `php_stream_truncate_supported`: `None` where the kind does not
+    /// truncate.
+    pub(crate) fn truncate(&mut self, req: &mut Request, size: usize) -> Option<bool> {
+        self.ops.truncate(req, size)
+    }
+
+    /// `php_stream_lock`: `false` where the kind has no `flock(2)` or
+    /// `flock(2)` refused.
+    pub(crate) fn flock(&mut self, req: &mut Request, operation: i64) -> bool {
+        self.ops.flock(req, operation).unwrap_or(false)
+    }
+
+    /// `PHP_STREAM_OPTION_READ_BUFFER` as `_php_stream_set_option`
+    /// answers it for a kind that leaves it to the generic half:
+    /// `PHP_STREAM_BUFFER_NONE` sets `NO_BUFFER`, anything else clears
+    /// it.
+    pub(crate) const fn set_read_buffer(&mut self, buffered: bool) {
+        self.flags.no_buffer = !buffered;
+    }
+
+    /// `_php_stream_readdir` (`Z/main/streams/streams.c:2221`): the next
+    /// entry, which `php_stream_read` of one `php_stream_dirent` is.
+    pub(crate) fn read_dir(&mut self) -> Option<Vec<u8>> {
+        self.ops.read_dir()
     }
 
     /// `_php_stream_flush` (`Z/main/streams/streams.c:1316`) without a
@@ -411,7 +651,20 @@ impl TempMode {
             TempMode::ReadOnly
         }
     }
+
+    /// `_php_stream_mode_to_str` (`Z/main/streams/memory.c:261`): the
+    /// `stream->mode` a memory or temp stream is allocated with.
+    const fn as_mode(self) -> &'static [u8] {
+        match self {
+            TempMode::ReadOnly => b"rb",
+            TempMode::Append => b"a+b",
+            TempMode::Default => b"w+b",
+        }
+    }
 }
+
+/// `S_IFREG`, the regular file's bits in `st_mode`.
+const S_IFREG: i64 = 0o100_000;
 
 /// `php_stream_memory_data` under `php_stream_memory_ops`
 /// (`Z/main/streams/memory.c:36`): the bytes, the position in them, and
@@ -471,20 +724,26 @@ impl Ops for Memory {
     /// `php_stream_memory_seek` (`Z/main/streams/memory.c:120`): a
     /// position before the start is refused with the position left at
     /// zero and `*newoffs` at `-1`; `SEEK_END` past the end and
-    /// `SEEK_SET` anywhere at or past zero are taken as they are.
+    /// `SEEK_SET` anywhere at or past zero are taken as they are; any
+    /// other `whence` is `-1` with `*newoffs` at the position it stands
+    /// at.
     fn seek(
         &mut self,
         _req: &mut Request,
         offset: i64,
-        whence: Whence,
+        whence: Option<Whence>,
         position: &mut i64,
     ) -> Option<bool> {
         let len = i64::try_from(self.data.len()).unwrap_or(i64::MAX);
         let fpos = i64::try_from(self.fpos).unwrap_or(i64::MAX);
         let target = match whence {
-            Whence::Cur => fpos.saturating_add(offset),
-            Whence::Set => offset,
-            Whence::End => len.saturating_add(offset),
+            Some(Whence::Cur) => fpos.saturating_add(offset),
+            Some(Whence::Set) => offset,
+            Some(Whence::End) => len.saturating_add(offset),
+            None => {
+                *position = fpos;
+                return Some(false);
+            }
         };
         if target < 0 {
             self.fpos = 0;
@@ -495,17 +754,63 @@ impl Ops for Memory {
         *position = target;
         Some(true)
     }
+
+    fn seekable(&self) -> bool {
+        true
+    }
+
+    /// `php_stream_memory_stat` (`Z/main/streams/memory.c:163`): a
+    /// regular file of the bytes' length, `0444` read only and `0666`
+    /// otherwise, one link, device `0xC`, inode, owner and times zero,
+    /// and `-1` for `rdev`, `blksize` and `blocks`.
+    fn stat(&mut self, _req: &mut Request) -> Option<StatBuf> {
+        let perms = if self.mode == TempMode::ReadOnly {
+            0o444
+        } else {
+            0o666
+        };
+        let size = i64::try_from(self.data.len()).unwrap_or(i64::MAX);
+        Some([0xC, 0, perms | S_IFREG, 1, 0, 0, -1, size, 0, 0, 0, -1, -1])
+    }
+
+    /// `php_stream_memory_set_option`'s `PHP_STREAM_OPTION_TRUNCATE_API`
+    /// (`Z/main/streams/memory.c:193`): refused on a read-only stream;
+    /// a shorter size cuts the bytes and pulls the position back to it,
+    /// a longer one zero-fills.
+    fn truncate(&mut self, _req: &mut Request, size: usize) -> Option<bool> {
+        if self.mode == TempMode::ReadOnly {
+            return Some(false);
+        }
+        self.data.resize(size, 0);
+        self.fpos = self.fpos.min(size);
+        Some(true)
+    }
+
+    fn meta_data(&self) -> MetaData {
+        if self.label == "STDIO" {
+            MetaData::Stdio
+        } else {
+            MetaData::Generic
+        }
+    }
+
+    fn is_stdio(&self) -> bool {
+        self.label == "STDIO"
+    }
 }
 
 /// `_php_stream_memory_create` (`Z/main/streams/memory.c:271`): empty,
 /// at zero, unbuffered.
 fn memory(mode: TempMode) -> PhpStream {
-    let mut stream = PhpStream::new(Box::new(Memory {
-        data: Vec::new(),
-        fpos: 0,
-        mode,
-        label: "MEMORY",
-    }));
+    let mut stream = PhpStream::new(
+        Box::new(Memory {
+            data: Vec::new(),
+            fpos: 0,
+            mode,
+            label: "MEMORY",
+        }),
+        mode.as_mode(),
+    );
     stream.flags.no_buffer = true;
     stream
 }
@@ -567,7 +872,7 @@ impl Ops for Temp {
         &mut self,
         req: &mut Request,
         offset: i64,
-        whence: Whence,
+        whence: Option<Whence>,
         position: &mut i64,
     ) -> Option<bool> {
         let Some(inner) = self.inner else {
@@ -579,6 +884,33 @@ impl Ops for Temp {
         })?;
         *position = at;
         Some(sought)
+    }
+
+    fn seekable(&self) -> bool {
+        true
+    }
+
+    /// `php_stream_temp_stat` (`Z/main/streams/memory.c:510`): the inner
+    /// stream's.
+    fn stat(&mut self, req: &mut Request) -> Option<StatBuf> {
+        req.stream_op(self.inner?, |req, inner| inner.stat(req))
+            .flatten()
+    }
+
+    /// `php_stream_temp_set_option`'s default arm: the inner stream's.
+    fn truncate(&mut self, req: &mut Request, size: usize) -> Option<bool> {
+        req.stream_op(self.inner?, |req, inner| inner.truncate(req, size))
+            .flatten()
+    }
+
+    /// `php_stream_temp_set_option`'s default arm: the inner stream's.
+    fn flock(&mut self, req: &mut Request, operation: i64) -> Option<bool> {
+        req.stream_op(self.inner?, |req, inner| inner.ops.flock(req, operation))
+            .flatten()
+    }
+
+    fn meta_data(&self) -> MetaData {
+        MetaData::Own
     }
 }
 
@@ -677,12 +1009,13 @@ impl Ops for Stdio {
 
     /// `php_stdiop_seek` (`Z/main/streams/plain_wrapper.c:616`): php's
     /// warning on a stream that cannot seek, else `lseek(2)` and the
-    /// offset it answered.
+    /// offset it answered, and `EINVAL`'s `-1` for a `whence` it does
+    /// not know.
     fn seek(
         &mut self,
         req: &mut Request,
         offset: i64,
-        whence: Whence,
+        whence: Option<Whence>,
         position: &mut i64,
     ) -> Option<bool> {
         if !self.is_seekable {
@@ -691,9 +1024,10 @@ impl Ops for Stdio {
             return Some(false);
         }
         let from = match whence {
-            Whence::Set => SeekFrom::Start(u64::try_from(offset).unwrap_or(0)),
-            Whence::Cur => SeekFrom::Current(offset),
-            Whence::End => SeekFrom::End(offset),
+            Some(Whence::Set) => SeekFrom::Start(u64::try_from(offset).unwrap_or(0)),
+            Some(Whence::Cur) => SeekFrom::Current(offset),
+            Some(Whence::End) => SeekFrom::End(offset),
+            None => return Some(false),
         };
         match self.file.seek(from) {
             Ok(at) => {
@@ -703,7 +1037,77 @@ impl Ops for Stdio {
             Err(_) => Some(false),
         }
     }
+
+    fn seekable(&self) -> bool {
+        true
+    }
+
+    /// `php_stdiop_stat` (`Z/main/streams/plain_wrapper.c:703`):
+    /// `fstat(2)`.
+    fn stat(&mut self, _req: &mut Request) -> Option<StatBuf> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = self.file.metadata().ok()?;
+        let long = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+        Some([
+            long(meta.dev()),
+            long(meta.ino()),
+            i64::from(meta.mode()),
+            long(meta.nlink()),
+            i64::from(meta.uid()),
+            i64::from(meta.gid()),
+            long(meta.rdev()),
+            long(meta.size()),
+            meta.atime(),
+            meta.mtime(),
+            meta.ctime(),
+            long(meta.blksize()),
+            long(meta.blocks()),
+        ])
+    }
+
+    /// `php_stdiop_set_option`'s `PHP_STREAM_OPTION_TRUNCATE_API`
+    /// (`Z/main/streams/plain_wrapper.c:983`): `ftruncate(2)`, which
+    /// leaves the offset where it was.
+    fn truncate(&mut self, _req: &mut Request, size: usize) -> Option<bool> {
+        Some(
+            self.file
+                .set_len(u64::try_from(size).unwrap_or(u64::MAX))
+                .is_ok(),
+        )
+    }
+
+    /// `php_stdiop_set_option`'s `PHP_STREAM_OPTION_LOCKING`
+    /// (`Z/main/streams/plain_wrapper.c:774`): `flock(2)`, `LOCK_SH`,
+    /// `LOCK_EX` or `LOCK_UN`, without blocking under `LOCK_NB`.
+    fn flock(&mut self, _req: &mut Request, operation: i64) -> Option<bool> {
+        let nonblocking = operation & LOCK_NB != 0;
+        let taken = match operation & !LOCK_NB {
+            LOCK_SH if nonblocking => self.file.try_lock_shared().is_ok(),
+            LOCK_SH => self.file.lock_shared().is_ok(),
+            LOCK_EX if nonblocking => self.file.try_lock().is_ok(),
+            LOCK_EX => self.file.lock().is_ok(),
+            LOCK_UN => self.file.unlock().is_ok(),
+            _ => false,
+        };
+        Some(taken)
+    }
+
+    fn meta_data(&self) -> MetaData {
+        MetaData::Stdio
+    }
+
+    fn is_stdio(&self) -> bool {
+        true
+    }
 }
+
+/// `flock(2)`'s `LOCK_SH`, `LOCK_EX`, `LOCK_NB` and `LOCK_UN`, which is
+/// what `php_stream_lock` takes; php's own `PHP_LOCK_UN` is `3`, which
+/// `php_flock_common` maps (`Z/ext/standard/flock_compat.h:46`).
+const LOCK_SH: i64 = 1;
+const LOCK_EX: i64 = 2;
+const LOCK_NB: i64 = 4;
+const LOCK_UN: i64 = 8;
 
 /// `php_stream_parse_fopen_modes` (`Z/main/streams/plain_wrapper.c:75`)
 /// as `open(2)`'s flags: the first byte says what to do with the file,
@@ -762,7 +1166,7 @@ fn plain_open(req: &Request, path: &[u8], mode: &[u8]) -> Result<PhpStream, Stri
     } else {
         -1
     };
-    let mut stream = PhpStream::new(Box::new(Stdio { file, is_seekable }));
+    let mut stream = PhpStream::new(Box::new(Stdio { file, is_seekable }), mode);
     stream.flags.no_seek = !is_seekable;
     stream.position = position;
     Ok(stream)
@@ -805,6 +1209,24 @@ impl Ops for HostFd {
     }
 
     fn close(&mut self, _req: &mut Request) {}
+
+    fn seekable(&self) -> bool {
+        true
+    }
+
+    /// `ftruncate(2)` on a pipe or a terminal, which is what the host's
+    /// fds are to this engine: supported, and refused.
+    fn truncate(&mut self, _req: &mut Request, _size: usize) -> Option<bool> {
+        Some(false)
+    }
+
+    fn meta_data(&self) -> MetaData {
+        MetaData::Stdio
+    }
+
+    fn is_stdio(&self) -> bool {
+        true
+    }
 }
 
 /// `php_stream_output_ops` (`Z/ext/standard/php_fopen_wrapper.c:52`),
@@ -867,23 +1289,38 @@ fn php_open(req: &mut Request, path: &[u8], mode: &[u8]) -> Result<Opened, Throw
     }
     let stream = match lower.as_slice() {
         b"memory" => memory(TempMode::of(mode)),
-        b"output" => PhpStream::new(Box::new(Output)),
+        b"output" => PhpStream::new(Box::new(Output), b"wb"),
         b"stdin" | b"input" => {
-            let label = if lower == b"stdin" { "STDIO" } else { "Input" };
-            let mut stream = PhpStream::new(Box::new(Memory {
-                data: req.body_bytes().to_vec(),
-                fpos: 0,
-                mode: TempMode::ReadOnly,
-                label,
-            }));
-            stream.flags.no_seek = true;
-            stream.position = -1;
+            let (label, allocated): (_, &[u8]) = if lower == b"stdin" {
+                ("STDIO", mode)
+            } else {
+                ("Input", b"rb")
+            };
+            let mut stream = PhpStream::new(
+                Box::new(Memory {
+                    data: req.body_bytes().to_vec(),
+                    fpos: 0,
+                    mode: TempMode::ReadOnly,
+                    label,
+                }),
+                allocated,
+            );
+            // `php_stream_input_ops` seeks the body it reads
+            // (`php_stream_input_seek`); fd 0 under the CLI is a pipe or
+            // a terminal, which `detect_is_seekable` says does not.
+            if label == "STDIO" {
+                stream.flags.no_seek = true;
+                stream.position = -1;
+            }
             stream
         }
         b"stdout" | b"stderr" => {
-            let mut stream = PhpStream::new(Box::new(HostFd {
-                stderr: lower == b"stderr",
-            }));
+            let mut stream = PhpStream::new(
+                Box::new(HostFd {
+                    stderr: lower == b"stderr",
+                }),
+                mode,
+            );
             stream.flags.no_seek = true;
             stream.position = -1;
             stream
@@ -904,7 +1341,7 @@ fn php_open(req: &mut Request, path: &[u8], mode: &[u8]) -> Result<Opened, Throw
 /// temp stream registered first, then the memory stream it encloses, so
 /// the two ids come out in php's order.
 fn temp(req: &mut Request, mode: TempMode) -> Result<Stream, Thrown> {
-    let mut outer = PhpStream::new(Box::new(Temp { inner: None }));
+    let mut outer = PhpStream::new(Box::new(Temp { inner: None }), mode.as_mode());
     outer.flags.no_buffer = true;
     let outer = req.stream_alloc(outer)?;
     let inner = req.stream_alloc(memory(mode))?;
@@ -1031,10 +1468,11 @@ impl Request {
                 let append = mode.contains(&b'a');
                 self.stream_op(stream, |req, s| {
                     s.wrapper = label;
+                    s.orig_path = Some(to_open);
                     if append && !s.flags.no_seek && s.position == 0 {
                         let PhpStream { ops, position, .. } = s;
                         let mut newpos = 0;
-                        if ops.seek(req, 0, Whence::Cur, &mut newpos) == Some(true) {
+                        if ops.seek(req, 0, Some(Whence::Cur), &mut newpos) == Some(true) {
                             *position = newpos;
                         }
                     }
@@ -1046,6 +1484,116 @@ impl Request {
                 Ok(None)
             }
         }
+    }
+
+    /// `_php_stream_opendir` (`Z/main/streams/streams.c:2184`) under
+    /// `REPORT_ERRORS`: nothing for an empty path; the wrapper located
+    /// as for a stream and asked for its directory, which only the plain
+    /// files wrapper and a registered one with a directory opener have,
+    /// every other being php's `not implemented`; a stream opened is a
+    /// directory stream, unbuffered, opened `r`, that `fclose` refuses;
+    /// and one not opened is `php_stream_display_wrapper_errors`'s
+    /// warning, `Failed to open directory: ` and the message, at the path
+    /// as written.
+    pub(crate) fn open_dir_wrapper(&mut self, path: &[u8]) -> Result<Option<Stream>, Thrown> {
+        if path.is_empty() {
+            return Ok(None);
+        }
+        let (wrapper, path_to_open) = self.locate_wrapper(path);
+        let (label, opened) = match wrapper {
+            Located::Plain => (
+                PLAIN_FILES,
+                match std::fs::read_dir(self.absolutize(&path_to_open).0) {
+                    Ok(entries) => {
+                        let dir = PhpStream::new(
+                            Box::new(Dir {
+                                path: self.absolutize(&path_to_open).0,
+                                entries: Some(entries),
+                                dots: 0,
+                            }),
+                            b"r",
+                        );
+                        Ok(self.stream_alloc(dir)?)
+                    }
+                    Err(error) => Err(strerror(&error)),
+                },
+            ),
+            Located::Php => (PHP_WRAPPER, Err(String::from("not implemented"))),
+            Located::User(at) => match self.wrappers[at].open_dir {
+                Some(open_dir) => (
+                    "user-space",
+                    open_dir(self, &path_to_open)?.ok_or_else(|| String::from("operation failed")),
+                ),
+                None => ("user-space", Err(String::from("not implemented"))),
+            },
+            Located::Nothing => ("", Err(String::from("no suitable wrapper could be found"))),
+        };
+        match opened {
+            Ok(stream) => {
+                self.stream_op(stream, |_, s| {
+                    s.wrapper = label;
+                    s.flags.no_buffer = true;
+                    s.flags.is_dir = true;
+                });
+                Ok(Some(stream))
+            }
+            Err(message) => {
+                self.display_wrapper_errors(path, "Failed to open directory", &message);
+                Ok(None)
+            }
+        }
+    }
+
+    /// `stream_get_meta_data` (`Z/ext/standard/streamsfuncs.c:514`) over
+    /// the stream: the kind's own answer first, which for most kinds is
+    /// `timed_out`, `blocked` and `eof`; then `wrapper_type` where a
+    /// wrapper opened it, `stream_type`, `mode`, `unread_bytes`,
+    /// `seekable` and, where it was opened by path, `uri`.
+    pub(crate) fn stream_meta_data(&mut self, stream: Stream) -> Result<PhpArray, Thrown> {
+        let mut out = PhpArray::new(self)?;
+        let Some(s) = self.stream_ref(stream) else {
+            return Ok(out);
+        };
+        let eof = match s.ops.meta_data() {
+            MetaData::Generic => Some(s.eof()),
+            MetaData::Stdio => Some(s.eof),
+            MetaData::Own => None,
+        };
+        let wrapper = s.wrapper;
+        let stream_type = s.ops.label();
+        let mode = s.mode.clone();
+        let unread = i64::try_from(s.writepos - s.readpos).unwrap_or(i64::MAX);
+        let seekable = s.ops.seekable() && !s.flags.no_seek;
+        let uri = s.orig_path.clone();
+        let mut entries = Vec::new();
+        if let Some(eof) = eof {
+            entries.push(("timed_out", MetaValue::Bool(false)));
+            entries.push(("blocked", MetaValue::Bool(true)));
+            entries.push(("eof", MetaValue::Bool(eof)));
+        }
+        if !wrapper.is_empty() {
+            entries.push(("wrapper_type", MetaValue::Str(wrapper.as_bytes().to_vec())));
+        }
+        entries.push((
+            "stream_type",
+            MetaValue::Str(stream_type.as_bytes().to_vec()),
+        ));
+        entries.push(("mode", MetaValue::Str(mode)));
+        entries.push(("unread_bytes", MetaValue::Int(unread)));
+        entries.push(("seekable", MetaValue::Bool(seekable)));
+        if let Some(uri) = uri {
+            entries.push(("uri", MetaValue::Str(uri)));
+        }
+        for (key, value) in entries {
+            let value = match value {
+                MetaValue::Bool(b) => Value::bool(b),
+                MetaValue::Int(n) => Value::int(n),
+                MetaValue::Str(bytes) => Value::string(PhpString::new(self, &bytes)?),
+            };
+            let key = Key::Str(PhpString::new(self, key.as_bytes())?);
+            out.set(self, key, value)?;
+        }
+        Ok(out)
     }
 
     /// `php_stream_display_wrapper_errors` (`Z/main/streams/streams.c:175`)
@@ -1113,7 +1661,7 @@ impl Request {
         &mut self,
         stream: Stream,
         len: usize,
-    ) -> Result<Option<crate::api::values::PhpString>, Thrown> {
+    ) -> Result<Option<PhpString>, Thrown> {
         if len > self.heap_memory_limit() {
             let asked = self.string_with(len, |_| {})?;
             self.release(Value::string(asked));
@@ -1123,9 +1671,86 @@ impl Request {
             return Ok(None);
         };
         match read {
-            Some(n) => Ok(Some(crate::api::values::PhpString::new(self, &buf[..n])?)),
+            Some(n) => Ok(Some(PhpString::new(self, &buf[..n])?)),
             None => Ok(None),
         }
+    }
+}
+
+/// One entry of what [`Request::stream_meta_data`] puts in the array,
+/// before it is a value of the request's.
+enum MetaValue {
+    Bool(bool),
+    Int(i64),
+    Str(Vec<u8>),
+}
+
+// ---------------------------------------------------------- directories
+
+/// `php_plain_files_dirstream_ops` (`Z/main/streams/plain_wrapper.c:1104`)
+/// over a `DIR *`: the directory's path, what `readdir(3)` has left, and
+/// how many of `.` and `..` it has given, which `readdir(3)` gives first
+/// and Rust's iterator leaves out.
+struct Dir {
+    path: std::path::PathBuf,
+    entries: Option<std::fs::ReadDir>,
+    dots: u8,
+}
+
+impl Ops for Dir {
+    fn label(&self) -> &'static str {
+        "dir"
+    }
+
+    /// `ops->write` is `NULL`: `-1`.
+    fn write(&mut self, _req: &mut Request, _buf: &[u8]) -> Option<usize> {
+        None
+    }
+
+    /// `php_plain_files_dirstream_read` for a count that is not one
+    /// `php_stream_dirent`, which every read but `readdir`'s is: `-1`.
+    fn read(&mut self, _req: &mut Request, _buf: &mut [u8], _eof: &mut bool) -> Option<usize> {
+        None
+    }
+
+    /// `php_plain_files_dirstream_close`: `closedir(3)`, which dropping
+    /// the iterator is.
+    fn close(&mut self, _req: &mut Request) {
+        self.entries = None;
+    }
+
+    /// `php_plain_files_dirstream_rewind`: `rewinddir(3)` whatever it is
+    /// asked, and `0`, the position left as it was.
+    fn seek(
+        &mut self,
+        _req: &mut Request,
+        _offset: i64,
+        _whence: Option<Whence>,
+        _position: &mut i64,
+    ) -> Option<bool> {
+        self.entries = std::fs::read_dir(&self.path).ok();
+        self.dots = 0;
+        Some(true)
+    }
+
+    fn seekable(&self) -> bool {
+        true
+    }
+
+    /// `php_plain_files_dirstream_read`: the next name `readdir(3)`
+    /// gives, `.` and `..` first, and `None` past the last.
+    fn read_dir(&mut self) -> Option<Vec<u8>> {
+        use std::os::unix::ffi::OsStrExt;
+        if self.dots < 2 {
+            self.dots += 1;
+            return Some(if self.dots == 1 {
+                b".".to_vec()
+            } else {
+                b"..".to_vec()
+            });
+        }
+        let entry = self.entries.as_mut()?.next()?.ok()?;
+        Some(entry.file_name().as_bytes().to_vec())
     }
 }
 
