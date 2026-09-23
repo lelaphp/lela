@@ -120,8 +120,9 @@ fn the_four_filters_pass_a_ticket_over_and_the_oldest_left_is_next() {
             title: "ticket 20".to_owned(),
             url: "https://example.invalid/issues/20".to_owned(),
             labels: vec!["ready-for-agent".to_owned()],
+            weight: 0,
         }),
-        "10 is recorded by a branch, 11 is blocked by the open 12, 12 has no label, 14 is t-x's, 30 is main's"
+        "10 is recorded by a branch, 11 is blocked by the open 12, 12 has no label, 14 is t-x's, 30 is main's; no census weighs any of them, so the order is the number's"
     );
     assert!(
         recorded.calls().is_empty(),
@@ -174,8 +175,8 @@ fn an_empty_frontier_is_none_and_not_an_error() {
         "none: the frontier of t-y is empty\n"
     );
     assert_eq!(
-        Next::to_json(None, "t-y"),
-        serde_json::json!({"track": "t-y", "ticket": null, "title": null, "url": null})
+        Next::to_json(None, "t-y", None),
+        serde_json::json!({"track": "t-y", "ticket": null, "title": null, "url": null, "weight": null, "census_at": null})
     );
 }
 
@@ -186,10 +187,23 @@ fn a_found_ticket_is_printed_by_number_and_title() {
         title: "ticket 20".to_owned(),
         url: "https://example.invalid/issues/20".to_owned(),
         labels: vec!["ready-for-agent".to_owned()],
+        weight: 67,
     };
-    assert_eq!(Next::render(Some(&found), "t-y"), "#20 ticket 20\n");
     assert_eq!(
-        Next::to_json(Some(&found), "t-y"),
-        serde_json::json!({"track": "t-y", "ticket": 20, "title": "ticket 20", "url": "https://example.invalid/issues/20"})
+        Next::render(Some(&found), "t-y"),
+        "#20 ticket 20\n",
+        "the weight is not on the line a caller reads a number out of"
+    );
+    assert_eq!(
+        Next::to_json(Some(&found), "t-y", None),
+        serde_json::json!({"track": "t-y", "ticket": 20, "title": "ticket 20", "url": "https://example.invalid/issues/20", "weight": 67, "census_at": null})
+    );
+
+    // The census's own timestamp travels with the weight, so a ranking
+    // made on a stale reading is seen to be one (#618).
+    let at: toml::value::Datetime = "2026-09-23T09:25:00Z".parse().unwrap();
+    assert_eq!(
+        Next::to_json(Some(&found), "t-y", Some(&at))["census_at"],
+        serde_json::json!("2026-09-23T09:25:00Z")
     );
 }

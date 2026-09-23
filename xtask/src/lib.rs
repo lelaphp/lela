@@ -23,6 +23,7 @@ pub mod api_check;
 pub mod bench;
 pub mod budget;
 mod built;
+mod census_weight;
 pub mod cli;
 pub mod clippy;
 pub mod compile_identity;
@@ -392,9 +393,9 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
             Some(track_new::lay(root, name, &model).map(|_| ()))
         }
         Command::Track {
-            command: Some(TrackCommand::Next { track, json }),
+            command: Some(TrackCommand::Next { track, json, why }),
             ..
-        } => Some(track_next::command(root, track.as_deref(), *json)),
+        } => Some(track_next::command(root, track.as_deref(), *json, *why)),
         Command::Track {
             command: Some(TrackCommand::Chains { track, krate, json }),
             ..

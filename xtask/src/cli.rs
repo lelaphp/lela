@@ -435,6 +435,10 @@ pub(crate) enum TrackCommand {
         /// Print the answer as one JSON object.
         #[arg(long)]
         json: bool,
+        /// Say why this ticket and not another: its weight off the unread
+        /// census, the rows behind it and when that census was taken.
+        #[arg(long, conflicts_with = "json")]
+        why: bool,
     },
     /// Every open ticket of the track under the ticket that blocks it,
     /// one call in place of a walk over `blockedBy`: a chain starts at a
