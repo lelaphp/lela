@@ -57,6 +57,7 @@ mod http;
 mod md5;
 mod output;
 mod pack;
+mod quot_print;
 mod scanf;
 mod sha1;
 mod string;
@@ -171,14 +172,7 @@ pub fn extension() -> Extension {
         .functions(exec::natives())
         .functions(file::natives())
         .functions(basic_natives())
-        .functions(string::natives())
-        .functions(url::natives())
-        .functions(html::natives())
-        .functions(md5::natives())
-        .functions(sha1::natives())
-        .functions(crc32::natives())
-        .functions(pack::natives())
-        .functions(http::natives())
+        .functions(file_natives())
         .constants(vec![
             constant(b"COUNT_NORMAL", COUNT_NORMAL),
             constant(b"COUNT_RECURSIVE", COUNT_RECURSIVE),
@@ -187,12 +181,38 @@ pub fn extension() -> Extension {
             constant(b"STR_PAD_BOTH", STR_PAD_BOTH),
         ])
         .constants(array::constants())
-        .constants(string::constants())
-        .constants(url::constants())
-        .constants(html::constants())
+        .constants(file_constants())
         .dependencies(dependencies())
         .request_state::<State>()
         .build("standard")
+}
+
+/// The natives of the php-src files ported one file each (#655), in
+/// the order the modules landed: `string.c`, `url.c`, `html.c`, the
+/// digests, `pack.c`, `http.c` and the small files.
+fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
+    [
+        string::natives(),
+        url::natives(),
+        html::natives(),
+        md5::natives(),
+        sha1::natives(),
+        crc32::natives(),
+        pack::natives(),
+        http::natives(),
+        quot_print::natives(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// Their constants.
+fn file_constants() -> Vec<ConstDecl> {
+    [string::constants(), url::constants(), html::constants()]
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// `standard_deps` (`Z/ext/standard/basic_functions.c:143`): `uri`
