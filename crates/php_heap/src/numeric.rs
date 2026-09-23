@@ -224,6 +224,29 @@ impl Exponent {
 /// ```expect
 /// [1.0e+25,1.0e-5,0.1,-2.5e-7]|1.0e+25|1.0E+25|1.0E-5
 /// ```
+///
+/// Past seventeen digits php leaves the shortest text behind:
+/// `zend_dtoa` takes `ndigit` under no cap of its own, so it renders the
+/// double's decimal expansion to as many digits as were asked for, and a
+/// `precision` or a `serialize_precision` set past seventeen reads those
+/// digits and not the short form. The boundary is the third line here:
+/// sixteen digits still read `0.1`, seventeen read the shortest text that
+/// reads back, and eighteen open the expansion.
+///
+/// ```php
+/// ini_set('precision', 20); echo 0.1, "|", 0.1 + 0.2, "|", 1/3, "|", 1e25, "|", 5e-324, "|", 1.0, "|", 1e-5, "\n";
+/// foreach ([16, 17, 18] as $p) { ini_set('precision', $p); echo $p, ": ", 0.1, "|", 0.1 + 0.2, "|", 1/3, "\n"; }
+/// ini_set('serialize_precision', 20); var_dump(0.1, 0.1 + 0.2); echo json_encode([0.1, 1e25]), "|", var_export(0.1, true);
+/// ```
+/// ```expect
+/// 0.10000000000000000555|0.30000000000000004441|0.33333333333333331483|1.0000000000000000906E+25|4.9406564584124654418E-324|1|1.0000000000000000818E-5
+/// 16: 0.1|0.3|0.3333333333333333
+/// 17: 0.10000000000000001|0.30000000000000004|0.33333333333333331
+/// 18: 0.100000000000000006|0.300000000000000044|0.333333333333333315
+/// float(0.10000000000000000555)
+/// float(0.30000000000000004441)
+/// [0.10000000000000000555,1.0000000000000000906e+25]|0.10000000000000000555
+/// ```
 #[must_use]
 pub fn double_to_string(value: f64, precision: i32, exponent: Exponent) -> String {
     if value.is_nan() {
@@ -255,11 +278,21 @@ pub fn double_to_string(value: f64, precision: i32, exponent: Exponent) -> Strin
 /// digit before it). A `precision` that is not negative asks for that
 /// many digits, and a negative one for the shortest that reads back as
 /// the same double; Rust's formatter gives both.
+///
+/// Asked for a digit count, `zend_dtoa` rounds the double's own decimal
+/// expansion to it, under no cap of its own: past seventeen those digits
+/// are no longer the shortest text that reads back, they are the
+/// expansion itself, which is why `precision = 20` writes `0.1` as
+/// `0.10000000000000000555`. Rust's formatter rounds the same expansion
+/// by the same rule, half to even, which is `zend_dtoa`'s where
+/// `ROUND_BIASED` is not defined, as php does not define it.
 fn significant(value: f64, precision: i32) -> (String, i32) {
     let rendered = if precision < 0 {
         format!("{value:e}")
     } else {
-        let ndigit = usize::try_from(precision.max(1)).unwrap_or(17).clamp(1, 17);
+        let ndigit = usize::try_from(precision.max(1))
+            .unwrap_or(EXACT_DIGITS)
+            .min(EXACT_DIGITS);
         format!("{value:.*e}", ndigit - 1)
     };
     let (mantissa, exponent) = rendered.split_once('e').unwrap_or((rendered.as_str(), "0"));
@@ -269,6 +302,13 @@ fn significant(value: f64, precision: i32) -> (String, i32) {
     }
     (digits, exponent.parse().unwrap_or(0) + 1)
 }
+
+/// The most significant digits a double's decimal expansion carries,
+/// reached at the largest subnormal, `2.2250738585072009E-308`. Every
+/// digit a larger `ndigit` asks `zend_dtoa` for is a trailing zero it
+/// suppresses and the loop above drops, so asking for more renders the
+/// same text and only reads more of the formatter's time.
+const EXACT_DIGITS: usize = 767;
 
 /// `zend_gcvt`'s E-style: one digit, the point, the rest or a zero, the
 /// exponent character, and the exponent with its sign and no padding.
@@ -453,6 +493,70 @@ mod tests {
         assert_eq!(double_to_string(1e25, -1, Exponent::Lower), "1.0e+25");
         assert_eq!(double_to_string(1e-5, -1, Exponent::Lower), "1.0e-5");
         assert_eq!(double_to_string(0.1, -1, Exponent::Lower), "0.1");
+    }
+
+    /// Every row read off the oracle at the pin: `zend_dtoa` takes the
+    /// digit count it was asked for under no cap, so past
+    /// seventeen the text is the double's decimal expansion and not the
+    /// shortest that reads back. The boundary rows are `0.1` at sixteen,
+    /// seventeen and eighteen digits.
+    #[test]
+    fn a_precision_past_seventeen_renders_the_expansion_php_renders() {
+        for (value, precision, text) in [
+            (0.1_f64, 16, "0.1"),
+            (0.1, 17, "0.10000000000000001"),
+            (0.1, 18, "0.100000000000000006"),
+            (0.1, 19, "0.1000000000000000056"),
+            (0.1, 20, "0.10000000000000000555"),
+            (0.1, 25, "0.1000000000000000055511151"),
+            (0.1, 40, "0.1000000000000000055511151231257827021182"),
+            (
+                0.1,
+                53,
+                "0.10000000000000000555111512312578270211815834045410156",
+            ),
+            // Past the expansion's own 767 digits php renders no more,
+            // since `zend_dtoa` suppresses the trailing zeros.
+            (
+                0.1,
+                2000,
+                "0.1000000000000000055511151231257827021181583404541015625",
+            ),
+            (0.1 + 0.2, 20, "0.30000000000000004441"),
+            (1.0 / 3.0, 20, "0.33333333333333331483"),
+            (1e25, 20, "1.0000000000000000906E+25"),
+            // `decpt` is 26 and `ndigit` 30, so php's form test leaves
+            // the E-style behind at a precision this wide.
+            (1e25, 30, "10000000000000000905969664"),
+            (5e-324, 20, "4.9406564584124654418E-324"),
+            (5e-324, 18, "4.94065645841246544E-324"),
+            (1e-5, 20, "1.0000000000000000818E-5"),
+            (1.0, 20, "1"),
+            (2.5, 20, "2.5"),
+            (-0.1, 20, "-0.10000000000000000555"),
+            // `zend_dtoa` rounds a tie to even where `ROUND_BIASED` is
+            // not defined, and php does not define it.
+            (1.25, 2, "1.2"),
+            (1.35, 2, "1.4"),
+            (2.5, 1, "2"),
+            (1.5, 1, "2"),
+            (0.5, 1, "0.5"),
+        ] {
+            assert_eq!(
+                double_to_string(value, precision, Exponent::Upper),
+                text,
+                "{value} at precision {precision}"
+            );
+        }
+        // json's and `%g`'s exponent character on the same digits.
+        assert_eq!(
+            double_to_string(0.1, 20, Exponent::Lower),
+            "0.10000000000000000555"
+        );
+        assert_eq!(
+            double_to_string(1e25, 20, Exponent::Lower),
+            "1.0000000000000000906e+25"
+        );
     }
 
     /// `oflow_info`: the sign of an integer that overflowed a long, set
