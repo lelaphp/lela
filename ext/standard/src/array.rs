@@ -21,6 +21,8 @@ use crate::{
     argument_count_between, callable_argument, constant, declared, long_argument, parameter,
 };
 
+mod sort;
+
 /// `PHP_SORT_*` (`Z/ext/standard/php_array.h`), what a sort native's
 /// `$flags` is made of.
 const SORT_REGULAR: i64 = 0;
@@ -103,7 +105,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
         by_ref: true,
         ..parameter(b"array", Type::Array)
     };
-    vec![
+    let mut natives: Vec<(FunctionDecl, Entry)> = vec![
         (
             declared(
                 b"sort",
@@ -139,7 +141,9 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
             ),
             array_merge,
         ),
-    ]
+    ];
+    natives.extend(sort::natives());
+    natives
 }
 
 /// `array_merge(array ...$arrays): array`, php's `PHP_FUNCTION(array_merge)`
@@ -356,7 +360,7 @@ fn sort(req: &mut Request) -> Result<Value, Thrown> {
     };
     let sorted = target
         .array
-        .sort_by(req, true, |req, a, b| compared(req, flags, a, b));
+        .sort_by(req, true, |req, (_, a), (_, b)| compared(req, flags, a, b));
     target.finish(req);
     sorted?;
     Ok(Value::bool(true))
@@ -439,7 +443,7 @@ fn usort(req: &mut Request) -> Result<Value, Thrown> {
     }
     let mut copy = array.copy(req)?;
     let mut deprecated = false;
-    let sorted = copy.sort_by(req, true, |req, a, b| {
+    let sorted = copy.sort_by(req, true, |req, (_, a), (_, b)| {
         user_compare(req, &callback, &mut deprecated, a, b)
     });
     match given.as_ref() {
@@ -762,21 +766,21 @@ fn unique_by_string(req: &mut Request, array: PhpArray) -> Result<PhpArray, Thro
 /// `php_get_data_compare_func_unstable` (`Z/ext/standard/array.c`),
 /// applied: the comparison `$flags` names, `SORT_FLAG_CASE` read off
 /// it first, and `zend_compare` for `SORT_REGULAR` and any value the
-/// switch has no arm for. The enum grouping php adds beside
-/// `zend_compare` is not here: two enum cases compare as objects do.
+/// switch has no arm for, with the enum grouping php adds beside it
+/// (`php_array_data_compare_unstable_i`): where `zend_compare` finds
+/// an enum case on the right uncomparable, two cases are ordered by
+/// identity and anything else goes before the case. php orders two
+/// cases by their addresses and this engine by their object ids,
+/// which groups them the same way.
 fn compared(req: &mut Request, flags: i64, a: &Value, b: &Value) -> Result<Ordering, Thrown> {
     let fold = flags & SORT_FLAG_CASE != 0;
     match flags & !SORT_FLAG_CASE {
         SORT_NUMERIC => {
+            // `numeric_compare_function`: `ZEND_THREEWAY_COMPARE` over
+            // `zval_get_double` of each.
             let x = to_double(req, a)?;
             let y = to_double(req, b)?;
-            Ok(if x < y {
-                Ordering::Less
-            } else if x > y {
-                Ordering::Greater
-            } else {
-                Ordering::Equal
-            })
+            Ok(sort::threeway(x, y))
         }
         SORT_STRING => as_strings(req, a, b, |x, y| {
             if fold {
@@ -788,9 +792,34 @@ fn compared(req: &mut Request, flags: i64, a: &Value, b: &Value) -> Result<Order
             }
         }),
         SORT_NATURAL => as_strings(req, a, b, |x, y| strnatcmp(x, y, fold)),
-        SORT_LOCALE_STRING => as_strings(req, a, b, <[u8]>::cmp),
-        _ => compare(req, a, b),
+        SORT_LOCALE_STRING => {
+            as_strings(req, a, b, |x, y| sort::c_string(x).cmp(sort::c_string(y)))
+        }
+        _ => {
+            let ordering = compare(req, a, b)?;
+            // `result == ZEND_UNCOMPARABLE` with an enum case on the
+            // right: two cases grouped by identity, anything else put
+            // before the case.
+            if ordering == Ordering::Greater
+                && let Some(right) = enum_case(req, b)
+            {
+                return Ok(match enum_case(req, a) {
+                    Some(left) => left.cmp(&right),
+                    None => Ordering::Less,
+                });
+            }
+            Ok(ordering)
+        }
     }
+}
+
+/// The identity of the enum case `value` holds, a reference followed;
+/// none for anything else.
+fn enum_case(req: &Request, value: &Value) -> Option<u32> {
+    let value = value.deref();
+    let object = value.as_object()?;
+    let decl = req.class_decl(object.class())?;
+    matches!(decl.kind, php_ext::decl::ClassKind::Enum).then(|| object.index())
 }
 
 /// Both values as strings (`zval_get_tmp_string`), compared by `by`,

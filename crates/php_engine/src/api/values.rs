@@ -405,6 +405,10 @@ impl PhpArray {
     /// stable since 8.0 while its algorithm is not; a comparison that is
     /// not transitive leaves what the algorithm leaves, php's order.
     ///
+    /// `compare` is handed each element as its key and its value, the
+    /// `Bucket` php's comparators read, so the key comparators of
+    /// `ksort()` and `uksort()` stand on the same walk as the value ones.
+    ///
     /// `compare` may serve PHP code, a `usort` callback, and so may throw:
     /// the first `Err` is kept and every comparison after it answers
     /// `Equal`, as `zend_call_function` returns without calling while
@@ -415,7 +419,11 @@ impl PhpArray {
         &mut self,
         req: &mut Request,
         renumber: bool,
-        mut compare: impl FnMut(&mut Request, &Value, &Value) -> Result<Ordering, Thrown>,
+        mut compare: impl FnMut(
+            &mut Request,
+            (&Key, &Value),
+            (&Key, &Value),
+        ) -> Result<Ordering, Thrown>,
     ) -> Result<(), Thrown> {
         self.separate(req)?;
         let mut pending: Option<Thrown> = None;
@@ -423,7 +431,9 @@ impl PhpArray {
             let ordering = if pending.is_some() {
                 Ordering::Equal
             } else {
-                match compare(req, &Value::of_zval(x.val), &Value::of_zval(y.val)) {
+                let (xk, xv) = (Key::of(x.key), Value::of_zval(x.val));
+                let (yk, yv) = (Key::of(y.key), Value::of_zval(y.val));
+                match compare(req, (&xk, &xv), (&yk, &yv)) {
                     Ok(ordering) => ordering,
                     Err(thrown) => {
                         pending = Some(thrown);
