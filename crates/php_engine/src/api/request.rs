@@ -1348,6 +1348,21 @@ impl Request {
     /// #1 {main}
     ///   thrown in %s on line 2
     /// ```
+    ///
+    /// A fatal the body raises is rendered while the body's frames still
+    /// stand, as `php_error_cb` renders it under `zend_error` before
+    /// anything unwinds, so the site it names is the body's own line and
+    /// not the caller's.
+    ///
+    /// ```php
+    /// set_time_limit(1);
+    /// register_shutdown_function(function () {
+    ///     for (;;) {}
+    /// });
+    /// ```
+    /// ```expect exit=255 wall=1s
+    /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 4
+    /// ```
     fn serve_user(&mut self, function: Function, call: CallState) -> Result<Value, Thrown> {
         let standing = self.vm.frames().len();
         let passed = call.arguments.len();
@@ -1390,10 +1405,15 @@ impl Request {
         }
         let reenter = self.shared.reenter;
         let served = reenter(self, frame);
+        // A fatal is rendered where it was raised, `php_error_cb` under
+        // `zend_error`, so the frames that raised it still stand while
+        // it is: the site a timeout names inside a callback, or inside a
+        // fiber's body, is the callback's and not its caller's.
+        let served = self.fatal_of(served);
         while self.vm.frames().len() > standing {
             self.pop_frame();
         }
-        self.fatal_of(served)?;
+        served?;
         match self.pending.take() {
             Some(pending) => Err(Thrown::of(Some(pending))),
             // The callback exited: what the native reads is php's
