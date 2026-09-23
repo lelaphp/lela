@@ -52,6 +52,7 @@ mod exec;
 mod file;
 mod formatted_print;
 mod head;
+mod html;
 mod md5;
 mod output;
 mod scanf;
@@ -170,6 +171,7 @@ pub fn extension() -> Extension {
         .functions(basic_natives())
         .functions(string::natives())
         .functions(url::natives())
+        .functions(html::natives())
         .functions(md5::natives())
         .functions(sha1::natives())
         .functions(crc32::natives())
@@ -183,6 +185,7 @@ pub fn extension() -> Extension {
         .constants(array::constants())
         .constants(string::constants())
         .constants(url::constants())
+        .constants(html::constants())
         .dependencies(dependencies())
         .request_state::<State>()
         .build("standard")
