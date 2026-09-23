@@ -55,6 +55,7 @@ mod head;
 mod html;
 mod http;
 mod md5;
+mod metaphone;
 mod output;
 mod pack;
 mod quot_print;
@@ -203,6 +204,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         http::natives(),
         quot_print::natives(),
         uuencode::natives(),
+        metaphone::natives(),
     ]
     .into_iter()
     .flatten()
