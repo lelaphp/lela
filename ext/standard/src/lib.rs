@@ -51,6 +51,7 @@ mod exec;
 mod file;
 mod formatted_print;
 mod head;
+mod md5;
 mod output;
 mod scanf;
 mod string;
@@ -167,6 +168,7 @@ pub fn extension() -> Extension {
         .functions(basic_natives())
         .functions(string::natives())
         .functions(url::natives())
+        .functions(md5::natives())
         .constants(vec![
             constant(b"COUNT_NORMAL", COUNT_NORMAL),
             constant(b"COUNT_RECURSIVE", COUNT_RECURSIVE),
