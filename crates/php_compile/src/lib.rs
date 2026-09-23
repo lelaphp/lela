@@ -6581,6 +6581,30 @@ class C {
         );
     }
 
+    /// `T_ARRAY '(' array_pair_list ')'`
+    /// (`Z/Zend/zend_language_parser.y:1491`) is the same
+    /// `ZEND_AST_ARRAY` over the same `array_pair_list` as `[…]`, with
+    /// `ZEND_ARRAY_SYNTAX_LONG` in `attr`, which `zend_compile_array`
+    /// reads only to refuse a `list()` where an array is meant: the
+    /// long spelling emits what the short one above emits, opline for
+    /// opline, and the word is matched whatever its case.
+    #[test]
+    fn the_long_array_spelling_emits_what_the_short_one_emits() {
+        let short = oplines_of(b"<?php var_dump(['x', 'y'], [1, $a = 2, 'k' => 3]);");
+        assert_eq!(
+            oplines_of(b"<?php var_dump(array('x', 'y'), array(1, $a = 2, 'k' => 3));"),
+            short
+        );
+        assert_eq!(
+            oplines_of(b"<?php var_dump(ARRAY('x', 'y'), Array(1, $a = 2, 'k' => 3));"),
+            short
+        );
+        assert_eq!(
+            oplines_of(b"<?php $x = array(); $y = array(1, 'k' => 2);"),
+            oplines_of(b"<?php $x = []; $y = [1, 'k' => 2];")
+        );
+    }
+
     /// The rest of `zend_compile_array` against the oracle's dump: what
     /// `zend_try_ct_eval_array` leaves to the request, a `null` key, a
     /// float key that is no whole number, and a next index past

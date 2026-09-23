@@ -9226,6 +9226,42 @@ impl Emit<'_> {
     /// `INIT_ARRAY` once a constant string key is seen, and
     /// `ZEND_ARRAY_ELEMENT_REF` never, since a `&` element is not read
     /// yet; neither is `...`, which would be `ADD_ARRAY_UNPACK`.
+    ///
+    /// The `array(…)` spelling is the same node over the same
+    /// `array_pair_list` (`Z/Zend/zend_language_parser.y:1491`), with
+    /// `ZEND_ARRAY_SYNTAX_LONG` in `attr` where `[…]` has
+    /// `ZEND_ARRAY_SYNTAX_SHORT`; `zend_compile_array` reads `attr`
+    /// only to refuse a `list()` where an array is meant, so nothing
+    /// here differs by spelling. The word is matched whatever its
+    /// case, and `array` without the parenthesis stays the type name:
+    ///
+    /// ```php
+    /// $k = 'k';
+    /// function f(array $a): array { return $a; }
+    /// var_dump(array(1, 'k' => 2), ARRAY(1, $k => 2), [1, 'k' => 2], f(array()));
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   int(1)
+    ///   ["k"]=>
+    ///   int(2)
+    /// }
+    /// array(2) {
+    ///   [0]=>
+    ///   int(1)
+    ///   ["k"]=>
+    ///   int(2)
+    /// }
+    /// array(2) {
+    ///   [0]=>
+    ///   int(1)
+    ///   ["k"]=>
+    ///   int(2)
+    /// }
+    /// array(0) {
+    /// }
+    /// ```
     fn array(&mut self, elements: &[NodeId<tree::ArrayElement>]) -> Result<Where, CompileError> {
         if let Some(value) = self.constant_array(elements)? {
             return Ok(Where::Constant(value));
