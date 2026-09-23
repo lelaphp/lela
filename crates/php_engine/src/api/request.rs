@@ -7547,6 +7547,71 @@ impl Request {
         self.vm.serving_call().is_some_and(|call| call.frameless)
     }
 
+    /// `zend_hash_find_ind(zend_rebuild_symbol_table(), name)`: the
+    /// variable `name` of the innermost user frame, the one that called
+    /// the native, as it stands, a reference not followed; none where the
+    /// frame has no such variable or it holds nothing. The frame's symbol
+    /// table is rebuilt over its CVs first where it has none
+    /// ([`Request::rebuild_symbol_table`]), as `extract` and `compact`
+    /// rebuild it in php. A view: no owner taken.
+    #[must_use]
+    pub fn caller_var(&mut self, name: &[u8]) -> Option<Value> {
+        let frame = self.caller_frame()?;
+        let table = self.rebuild_symbol_table(frame);
+        let symbol = self
+            .table_mut(table)?
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, symbol)| match symbol {
+                Symbol::Value(value) => Ok(*value),
+                Symbol::Indirect(frame, at) => Err((*frame, *at)),
+            })?;
+        let value = match symbol {
+            Ok(value) => value,
+            Err((frame, at)) => self.slot(frame, at),
+        };
+        (value.tag() != TypeTag::Undef).then_some(value)
+    }
+
+    /// The variable `name` of the innermost user frame written with
+    /// `value`, which is the frame's from here: a CV's slot where the
+    /// table points the name at one, the bucket otherwise, a name the
+    /// table has not added to it; what stood there before is released
+    /// after the write, as `zend_hash_update` and `ZVAL_COPY_VALUE` into
+    /// an `IS_INDIRECT` slot leave it. What `extract` writes; a write
+    /// through a reference the variable holds is the native's to make.
+    pub fn set_caller_var(&mut self, name: &[u8], value: Value) {
+        let Some(frame) = self.caller_frame() else {
+            self.release(value);
+            return;
+        };
+        let table = self.rebuild_symbol_table(frame);
+        let indirect = self.table_mut(table).and_then(|entries| {
+            entries
+                .iter()
+                .find(|(key, _)| key == name)
+                .and_then(|(_, symbol)| match symbol {
+                    Symbol::Indirect(frame, at) => Some((*frame, *at)),
+                    Symbol::Value(_) => None,
+                })
+        });
+        match indirect {
+            Some((frame, at)) => {
+                let previous = self.set_slot(frame, at, value);
+                self.release(previous);
+            }
+            None => self.symbol_update(table, name.to_vec(), value),
+        }
+    }
+
+    /// The innermost user frame, the one a native's variable access
+    /// reads: `EG(current_execute_data)`'s caller.
+    fn caller_frame(&self) -> Option<FrameRef> {
+        let count = self.vm.frames().len();
+        let at = count.checked_sub(1)?;
+        Some(FrameRef(u32::try_from(at).ok()?))
+    }
+
     /// `ZEND_NUM_ARGS()`: how many arguments the call being served was
     /// given, and zero outside a native's body.
     #[must_use]

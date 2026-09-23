@@ -27,6 +27,7 @@ mod pointer;
 mod set;
 mod sort;
 mod stack;
+mod symbols;
 mod walk;
 
 /// `PHP_SORT_*` (`Z/ext/standard/php_array.h`), what a sort native's
@@ -71,6 +72,7 @@ pub(crate) fn constants() -> Vec<ConstDecl> {
     ]
     .into_iter()
     .chain(keys::constants())
+    .chain(symbols::constants())
     .collect()
 }
 
@@ -160,6 +162,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     natives.extend(stack::natives());
     natives.extend(keys::natives());
     natives.extend(make::natives());
+    natives.extend(symbols::natives());
     natives.push(sort::multisort_native());
     natives
 }
