@@ -72,6 +72,7 @@ mod uniqid;
 mod url;
 mod uuencode;
 mod var;
+mod versioning;
 mod zpp;
 
 use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder};
@@ -217,6 +218,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         uniqid::natives(),
         microtime::natives(),
         hrtime::natives(),
+        versioning::natives(),
     ]
     .into_iter()
     .flatten()
