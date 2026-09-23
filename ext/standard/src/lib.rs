@@ -46,12 +46,18 @@
 
 mod array;
 mod base64;
+mod csv;
 mod exec;
 mod file;
 mod formatted_print;
 mod head;
 mod output;
+mod scanf;
+mod string;
+mod strnatcmp;
+mod stub;
 mod var;
+mod zpp;
 
 use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder};
 use php_ext::call::{call_array, call_named, fetch_constant};
@@ -67,7 +73,9 @@ use php_ext::values::{PhpArray, PhpString, TypeTag, Value, ValueRef};
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
 #[derive(Default)]
-struct State {}
+struct State {
+    string: string::State,
+}
 
 /// The extension value (design §7.1): declarations paired with entries,
 /// the state declared on it, and the `deps` table, which is what
@@ -156,6 +164,7 @@ pub fn extension() -> Extension {
         .functions(exec::natives())
         .functions(file::natives())
         .functions(basic_natives())
+        .functions(string::natives())
         .constants(vec![
             constant(b"COUNT_NORMAL", COUNT_NORMAL),
             constant(b"COUNT_RECURSIVE", COUNT_RECURSIVE),
@@ -164,6 +173,7 @@ pub fn extension() -> Extension {
             constant(b"STR_PAD_BOTH", STR_PAD_BOTH),
         ])
         .constants(array::constants())
+        .constants(string::constants())
         .dependencies(dependencies())
         .request_state::<State>()
         .build("standard")
