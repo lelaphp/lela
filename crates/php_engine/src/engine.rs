@@ -530,7 +530,7 @@ impl Shared {
 /// table and empty here, since an entry with no value at all is one
 /// `ini_set()` refuses to set. `short_open_tag` is the one entry the
 /// scanner reads, `CG(short_tags)`, and `token_get_all` with it.
-const CORE_INI: [(&str, &str); 22] = [
+const CORE_INI: [(&str, &str); 23] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -557,6 +557,9 @@ const CORE_INI: [(&str, &str); 22] = [
     ("zend.exception_string_param_max_len", "15"),
     ("zend.max_allowed_stack_size", "0"),
     ("zend.reserved_stack_size", "0"),
+    // `fiber.stack_size`, `NULL` in php's table, which `ini_get` reads
+    // as the empty string and `OnUpdateFiberStackSize` as php's default.
+    ("fiber.stack_size", ""),
 ];
 
 /// A host's ini value as the ini scanner hands it to the table
@@ -719,7 +722,8 @@ impl EngineBuilder {
         // `zend_register_internal_class_with_flags` and `zend_register_functions`
         // over the class's methods: each declaration takes its methods,
         // and each method's entry is numbered in the order it is met.
-        let zend = crate::classes::zend_classes();
+        let mut zend = crate::classes::zend_classes();
+        zend.extend(crate::fiber::classes());
         let mut classes: Vec<ClassDecl> = Vec::new();
         let mut handlers = Vec::new();
         let mut natives = Vec::new();
