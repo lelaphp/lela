@@ -46,6 +46,7 @@
 
 mod array;
 mod base64;
+mod crc32;
 mod csv;
 mod exec;
 mod file;
@@ -171,6 +172,7 @@ pub fn extension() -> Extension {
         .functions(url::natives())
         .functions(md5::natives())
         .functions(sha1::natives())
+        .functions(crc32::natives())
         .constants(vec![
             constant(b"COUNT_NORMAL", COUNT_NORMAL),
             constant(b"COUNT_RECURSIVE", COUNT_RECURSIVE),
