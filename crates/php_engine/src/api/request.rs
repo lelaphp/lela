@@ -660,6 +660,12 @@ pub struct Request {
     /// so every class a unit declares is this request's, the
     /// `DECLARE_CLASS_DELAYED` path, and dropped with it.
     declared: Vec<(Arc<Unit>, u32)>,
+    /// The aliases `class_alias()` added to `EG(class_table)`, each the
+    /// lowered name it is keyed by, the class it names, and how many
+    /// classes the table held when it was added, which is where php's
+    /// table has it among them: `ZVAL_ALIAS_PTR` rows, request state as
+    /// the classes the request declared are.
+    aliases: Vec<(usize, Vec<u8>, ClassId)>,
     /// The functions and methods the units this request served declared,
     /// each the unit that holds it and which of its op arrays is the
     /// body: php's `EG(function_table)` past the natives and each user
@@ -667,6 +673,11 @@ pub struct Request {
     /// native methods counts into this list (design §5.6).
     user_functions: Vec<UserFunction>,
 }
+
+/// One row of an object's property table as [`Request::property_rows`]
+/// reads it: the name, the value, and for a declared slot the class
+/// that declared it and its visibility.
+pub(crate) type PropertyRow = (PhpString, Value, Option<(ClassId, Visibility)>);
 
 /// One bucket of a symbol table, php's zval in `EG(symbol_table)` or a
 /// rebuilt one: the value the table owns, or `IS_INDIRECT`, the CV of the
@@ -846,6 +857,7 @@ impl Request {
             timer: None,
             stack_limit: StackLimit::UNCHECKED,
             declared: Vec::new(),
+            aliases: Vec::new(),
             user_functions: Vec::new(),
         };
         // Request state in bundle order (ADR-0005).
@@ -4822,6 +4834,35 @@ impl Request {
     /// declared name is the interned string php's `prop_info->name` is,
     /// never refcounted, so a caller that takes an owner of it takes
     /// none; the `Err` is the memory limit refusing the intern.
+    /// The rows `get_properties` answers for `object`, each beside the
+    /// declared slot it is, the class that declared what stands there
+    /// and its visibility, or none for a dynamic row: the rows of the
+    /// std table are the slots that hold a value, in slot order, and
+    /// then the dynamic table, so the slots are walked with a cursor
+    /// beside them, as `zend_mangle_property_name` is walked by the
+    /// `(array)` cast. Views, no owner taken.
+    pub(crate) fn property_rows(&mut self, object: PhpObject) -> Result<Vec<PropertyRow>, Thrown> {
+        let table = self.object_handlers(object.heap());
+        let rows = table.get_properties(self, object)?;
+        let placed = self.placed_properties(object.class());
+        let mut at = 0;
+        Ok(rows
+            .into_iter()
+            .map(|(name, value)| {
+                let slot = placed
+                    .iter()
+                    .skip(at)
+                    .position(|(_, p)| &*p.name.0 == name.as_bytes())
+                    .map(|i| i + at);
+                let declared = slot.and_then(|i| {
+                    at = i + 1;
+                    placed.get(i).map(|(class, p)| (*class, p.visibility))
+                });
+                (name, value, declared)
+            })
+            .collect())
+    }
+
     pub(crate) fn object_entries(&mut self, o: Obj) -> Result<Vec<(PhpString, Value)>, Thrown> {
         let mut entries = Vec::new();
         let declared: Vec<Box<[u8]>> = self
@@ -6767,6 +6808,30 @@ impl Request {
             .position(|name| name.0.to_ascii_lowercase() == wanted)
             .and_then(|i| u32::try_from(i).ok())
             .map(ClassId)
+            .or_else(|| {
+                self.aliases
+                    .iter()
+                    .find(|(_, alias, _)| *alias == wanted)
+                    .map(|(_, _, class)| *class)
+            })
+    }
+
+    /// `EG(class_table)` in its order, each row the class and, for a row
+    /// `class_alias()` added, the lowered name it is keyed by: the
+    /// engine's classes, then the request's in the order they were
+    /// bound, each alias standing where it was added.
+    pub(crate) fn class_table(&self) -> Vec<(ClassId, Option<Vec<u8>>)> {
+        let count = self.shared.classes.len() + self.declared.len();
+        let mut rows = Vec::with_capacity(count + self.aliases.len());
+        let mut aliases = self.aliases.iter().peekable();
+        for at in 0..count {
+            while let Some((_, alias, class)) = aliases.next_if(|(before, _, _)| *before <= at) {
+                rows.push((*class, Some(alias.clone())));
+            }
+            rows.push((ClassId(u32::try_from(at).unwrap_or(u32::MAX)), None));
+        }
+        rows.extend(aliases.map(|(_, alias, class)| (*class, Some(alias.clone()))));
+        rows
     }
 
     /// `do_bind_class` for every class the unit declares that php bound
@@ -8030,10 +8095,18 @@ impl Request {
         Ok(array)
     }
 
-    /// `class_alias()`.
-    pub fn class_alias(&mut self, class: ClassId, alias: &[u8]) -> Result<(), Thrown> {
-        let _ = (class, alias);
-        Ok(())
+    /// `zend_register_class_alias_ex`'s `zend_hash_add` into
+    /// `EG(class_table)`: `class` under the lowered name `alias`, and
+    /// `false` where the table has that name already, a class's or
+    /// another alias's, and nothing is added. The name is the caller's
+    /// to have lowered and held to php's reserved names.
+    pub fn class_alias(&mut self, class: ClassId, alias: &[u8]) -> bool {
+        if self.class_named(alias).is_some() {
+            return false;
+        }
+        let at = self.shared.classes.len() + self.declared.len();
+        self.aliases.push((at, alias.to_ascii_lowercase(), class));
+        true
     }
 
     /// `get_defined_constants()`: what `define()` declared in this

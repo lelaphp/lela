@@ -598,21 +598,7 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
                 Some(rows) => rows,
                 None => table.get_properties(req, o)?,
             };
-            let mangled = mangled_names(req, o.class());
-            let mut array = PhpArray::new(req)?;
-            let mut at = 0;
-            for (name, entry) in rows {
-                let key = if let Some(prefix) = mangled_prefix(&mangled, &mut at, name) {
-                    let bytes = [prefix.as_slice(), name.as_bytes()].concat();
-                    Key::Str(PhpString::new(req, &bytes)?)
-                } else {
-                    req.addref(&Value::string(name));
-                    Key::from_string(name)
-                };
-                req.addref(&entry);
-                array.set(req, key, entry)?;
-            }
-            Ok(array)
+            mangled_array(req, o, rows)
         }
         _ => {
             if value.as_float().is_some_and(f64::is_nan) {
@@ -624,6 +610,58 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
             Ok(array)
         }
     }
+}
+
+/// `zend_proptable_to_symtable` over an object's rows: a new array of
+/// the request's whose keys are the rows' names, a declared one mangled
+/// by `zend_mangle_property_name` and a dynamic one read as a symtable
+/// key, so `"1"` is `1`, each value with one more owner. What the
+/// `(array)` cast makes of what `get_properties_for` answered, and what
+/// `get_mangled_object_vars()` makes of the table itself, which asks no
+/// purpose and so reads a `Closure`'s empty table where the cast wraps
+/// the closure.
+///
+/// ```php
+/// class P { private $p = 1; protected $q = 2; }
+/// class C extends P { public $p = 3; }
+/// var_dump(get_mangled_object_vars(new C), get_mangled_object_vars((object)['1' => 4]), get_mangled_object_vars(fn () => 1));
+/// ```
+/// ```expect
+/// array(3) {
+///   ["%0P%0p"]=>
+///   int(1)
+///   ["%0*%0q"]=>
+///   int(2)
+///   ["p"]=>
+///   int(3)
+/// }
+/// array(1) {
+///   [1]=>
+///   int(4)
+/// }
+/// array(0) {
+/// }
+/// ```
+pub(crate) fn mangled_array(
+    req: &mut Request,
+    object: PhpObject,
+    rows: Vec<(PhpString, Value)>,
+) -> Result<PhpArray, Thrown> {
+    let mangled = mangled_names(req, object.class());
+    let mut array = PhpArray::new(req)?;
+    let mut at = 0;
+    for (name, entry) in rows {
+        let key = if let Some(prefix) = mangled_prefix(&mangled, &mut at, name) {
+            let bytes = [prefix.as_slice(), name.as_bytes()].concat();
+            Key::Str(PhpString::new(req, &bytes)?)
+        } else {
+            req.addref(&Value::string(name));
+            Key::from_string(name)
+        };
+        req.addref(&entry);
+        array.set(req, key, entry)?;
+    }
+    Ok(array)
 }
 
 /// One declared instance property as `zend_mangle_property_name` reads

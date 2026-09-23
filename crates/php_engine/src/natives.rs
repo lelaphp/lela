@@ -36,6 +36,7 @@ use crate::api::raising::{
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Key, PhpArray, PhpString, TypeTag, Value, ValueRef};
 
+mod classes;
 mod errors;
 mod stub;
 
@@ -49,6 +50,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     let mut natives = zend_natives();
     natives.extend(constant_natives());
     natives.extend(class_natives());
+    natives.extend(classes::natives());
     natives.extend(errors::natives());
     natives.sort_by_key(|(decl, _)| {
         CORE.iter()
@@ -606,30 +608,7 @@ fn exit(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// ```
 fn class_exists(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if !(1..=2).contains(&count) {
-        return Err(wrong_argument_count(req, 1, 2, count));
-    }
-    let name = string_argument(req, 1)?;
-    let autoload = if count == 2 {
-        let given = req.argument(2).unwrap_or_default();
-        coerce_param(req, &given, &Type::Bool, 2)?
-            .as_bool()
-            .unwrap_or(true)
-    } else {
-        true
-    };
-    let bytes = name.as_bytes();
-    let bytes = bytes.strip_prefix(b"\\").unwrap_or(bytes);
-    let found = match req.class_named(bytes) {
-        Some(class) => Some(class),
-        None if autoload => crate::api::call::autoload(req, bytes)?,
-        None => None,
-    };
-    let exists = found
-        .and_then(|class| req.class_decl(class))
-        .is_some_and(|decl| !matches!(decl.kind, ClassKind::Interface | ClassKind::Trait));
-    Ok(Value::bool(exists))
+    classes::exists(req, &[ClassKind::Class, ClassKind::Enum])
 }
 
 /// `get_class(object $object = UNKNOWN): string`, php's
