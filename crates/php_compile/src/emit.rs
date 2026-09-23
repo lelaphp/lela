@@ -5733,7 +5733,10 @@ impl Emit<'_> {
                 };
                 self.call(b"\\exit", &arguments)
             }
-            tree::Expr::PrintExpr(_) => Err(self.unread("a `print`")),
+            tree::Expr::PrintExpr(id) => {
+                let operand = self.required(tree[id].operand, "a `print`")?;
+                self.print(operand)
+            }
             tree::Expr::ThrowExpr(id) => {
                 let operand = self.required(tree[id].operand, "a `throw`")?;
                 self.throw(operand)
@@ -5988,6 +5991,39 @@ impl Emit<'_> {
             ..Opline::default()
         });
         Ok(Where::Temporary(last.out))
+    }
+
+    /// `zend_compile_print` (`Z/Zend/zend_compile.c:10700`): the operand,
+    /// then `ZEND_ECHO` over it with `extended_value` 1, php's mark of
+    /// an `ECHO` a `print` emitted; the expression's value is the
+    /// constant `1`, so a `print` reads as `int(1)` where it is used and
+    /// a condition over it folds nothing away, the `JMPZ` standing over
+    /// the constant.
+    ///
+    /// ```php
+    /// $r = print "a";
+    /// var_dump($r);
+    /// if (print "b") echo "c";
+    /// $n = 0;
+    /// echo $n ? 1 : print "d", "\n";
+    /// print "e" . print "f";
+    /// ```
+    /// ```expect
+    /// aint(1)
+    /// bcd1
+    /// fe1
+    /// ```
+    fn print(&mut self, operand: tree::Expr) -> Result<Where, CompileError> {
+        let value = self.expr(operand)?;
+        let (op1_type, op1) = self.operand(value);
+        self.push(Opline {
+            opcode: Opcode::Echo,
+            op1_type,
+            op1,
+            extended_value: 1,
+            ..Opline::default()
+        });
+        Ok(Where::Constant(Zval::long(1)))
     }
 
     /// `zend_compile_throw` (`Z/Zend/zend_compile.c:5795`): the operand,
@@ -9021,7 +9057,9 @@ impl Emit<'_> {
             tree::Expr::ClosureExpr(_) | tree::Expr::ArrowFnExpr(_) => {
                 Err(self.fatal("a closure is no constant expression"))
             }
-            tree::Expr::PrintExpr(_) => Err(self.unread("a `print`")),
+            // `zend_compile_print` emits its `ECHO` whatever stands
+            // around it, so a `print` folds to nothing.
+            tree::Expr::PrintExpr(_) => Err(self.fatal("a `print` is no constant expression")),
             tree::Expr::EvalExpr(_) => Err(self.unread("an `eval`")),
             tree::Expr::YieldExpr(_) | tree::Expr::YieldFromExpr(_) => {
                 Err(self.unread("a `yield`"))

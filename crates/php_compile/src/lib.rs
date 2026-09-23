@@ -3287,12 +3287,28 @@ mod tests {
             line: 0,
             raised: Vec::new(),
         };
-        let error = refused(b"<?php\n$a = (print 1);\n").unwrap_or_else(compiled);
+        let error = refused(b"<?php\n$a = (eval('1;'));\n").unwrap_or_else(compiled);
         assert_eq!(error.level, Level::Parse);
-        assert_eq!(error.message, "a `print` this compiler cannot read yet");
+        assert_eq!(error.message, "an `eval` this compiler cannot read yet");
         assert_eq!(error.line, 2);
         let unclosed = refused(b"<?php\n$a = (1 + 2;\n").unwrap_or_else(compiled);
         assert_eq!(unclosed.message, "syntax error, unexpected token \";\"");
+    }
+
+    /// `print` is `zend_compile_print`'s `ECHO` and the constant `1` as
+    /// the expression's value, which a condition over it reads as it
+    /// stands, the oracle's `[regime.dump]` of the same source.
+    #[test]
+    fn print_is_an_echo_whose_value_is_the_constant_one() {
+        assert_eq!(
+            oplines_of(b"<?php $r = print \"a\"; if (print $r) echo \"y\";"),
+            "0000 ECHO string(\"a\")\n\
+             0001 ASSIGN CV0($r) int(1)\n\
+             0002 ECHO CV0($r)\n\
+             0003 JMPZ int(1) 0005\n\
+             0004 ECHO string(\"y\")\n\
+             0005 RETURN int(1)\n"
+        );
     }
 
     /// Five `long` cases, the default among them, are what
