@@ -54,6 +54,7 @@ mod formatted_print;
 mod head;
 mod html;
 mod http;
+mod levenshtein;
 mod md5;
 mod metaphone;
 mod output;
@@ -207,6 +208,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         uuencode::natives(),
         metaphone::natives(),
         soundex::natives(),
+        levenshtein::natives(),
     ]
     .into_iter()
     .flatten()
