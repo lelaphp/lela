@@ -22,13 +22,13 @@
 //! `_php_stream_copy_to_mem`, `php_stream_stat`, the truncate and locking
 //! options of `php_stream_set_option`, the read buffer's, and what
 //! `stream_get_meta_data` reads (`stream->mode`, `stream->orig_path`, the
-//! kind's own `PHP_STREAM_OPTION_META_DATA_API` answer). The plain
-//! files wrapper opens directories as `php_plain_files_dirstream_ops`.
+//! kind's own `PHP_STREAM_OPTION_META_DATA_API` answer). `php://temp`
+//! spills to a file past its `PHP_STREAM_MAX_MEM`, and the plain files
+//! wrapper opens directories as `php_plain_files_dirstream_ops`.
 //!
-//! What is not here: `php://temp`'s spill to a file past
-//! `PHP_STREAM_MAX_MEM`, the lazy body under `php://stdin` and
-//! `php://input` (#544), `php://fd/` and `php://filter/`, the filter
-//! chains, and the read buffer's `DETECT_EOL` arm.
+//! What is not here: the lazy body under `php://stdin` and `php://input`
+//! (#544), `php://fd/` and `php://filter/`, the filter chains, and the
+//! read buffer's `DETECT_EOL` arm.
 
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -119,6 +119,13 @@ pub(crate) trait Ops: Send {
     /// `php_plain_files_dirstream_read`: the next entry's name, `None`
     /// past the last and for a kind that is no directory.
     fn read_dir(&mut self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// `php_stream_memory_get_buffer`: the bytes of a memory stream,
+    /// `None` for every other kind, which is `php_stream_is(stream,
+    /// PHP_STREAM_IS_MEMORY)` answered no.
+    fn memory_buffer(&self) -> Option<&[u8]> {
         None
     }
 
@@ -794,6 +801,10 @@ impl Ops for Memory {
         }
     }
 
+    fn memory_buffer(&self) -> Option<&[u8]> {
+        (self.label == "MEMORY").then_some(self.data.as_slice())
+    }
+
     fn is_stdio(&self) -> bool {
         self.label == "STDIO"
     }
@@ -815,13 +826,58 @@ fn memory(mode: TempMode) -> PhpStream {
     stream
 }
 
+/// `PHP_STREAM_MAX_MEM` (`Z/main/php_memory_streams.h:27`): what a
+/// `php://temp` holds in memory before it spills to a file.
+const PHP_STREAM_MAX_MEM: usize = 2 * 1024 * 1024;
+
 /// `php_stream_temp_data` under `php_stream_temp_ops`
-/// (`Z/main/streams/memory.c:337`): a memory stream it encloses, its own
+/// (`Z/main/streams/memory.c:337`): the stream it encloses, its own
 /// resource as php's is, so a `php://temp` takes two ids as the oracle's
-/// does; `None` where php's `innerstream` is `NULL`. The spill to a file
-/// past `PHP_STREAM_MAX_MEM` is not here.
+/// does, `None` where php's `innerstream` is `NULL`; and `smax`, the
+/// bytes it keeps in memory before the spill.
 struct Temp {
     inner: Option<Stream>,
+    smax: usize,
+}
+
+impl Temp {
+    /// The spill of `php_stream_temp_write` (`Z/main/streams/memory.c:350`):
+    /// while the inner stream is the memory one and a write of `count`
+    /// at its position would reach `smax`, a temporary file opened by
+    /// `php_stream_fopen_temporary_file` takes the bytes, the memory
+    /// stream is freed, and the file, a third resource, is sought to
+    /// where the memory stream stood. `false` is the file that could not
+    /// be made, after php's warning.
+    fn spill(&mut self, req: &mut Request, inner: Stream, count: usize) -> Result<bool, Thrown> {
+        let Some((pos, membuf)) = req
+            .stream_op(inner, |_, s| {
+                s.ops
+                    .memory_buffer()
+                    .map(|data| (s.position, data.to_vec()))
+            })
+            .flatten()
+        else {
+            return Ok(true);
+        };
+        if usize::try_from(pos).unwrap_or(0) + count < self.smax {
+            return Ok(true);
+        }
+        let dir = req.temp_dir().0;
+        let Some(file) = temporary_file(req, &dir)? else {
+            let text = format!(
+                "{}(): Unable to create temporary file, Check permissions in temporary files directory.",
+                req.active_native()
+            );
+            warning(req, &text);
+            return Ok(false);
+        };
+        req.stream_op(file, |req, f| f.write(req, &membuf));
+        inner.resource().close(req);
+        req.release(inner.resource().as_value());
+        self.inner = Some(file);
+        req.stream_op(file, |req, f| f.seek(req, pos, Some(Whence::Set)));
+        Ok(true)
+    }
 }
 
 impl Ops for Temp {
@@ -833,9 +889,16 @@ impl Ops for Temp {
         self.inner = Some(inner);
     }
 
-    /// `php_stream_temp_write` (`Z/main/streams/memory.c:350`) less the
-    /// spill: the inner stream written.
+    /// `php_stream_temp_write` (`Z/main/streams/memory.c:350`): the spill
+    /// where the write would reach `smax`, then the inner stream
+    /// written; a spill that could not make its file writes nothing.
     fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
+        let inner = self.inner?;
+        match self.spill(req, inner, buf.len()) {
+            Ok(true) => {}
+            Ok(false) => return Some(0),
+            Err(_) => return None,
+        }
         req.stream_op(self.inner?, |req, inner| inner.write(req, buf))
             .flatten()
     }
@@ -851,7 +914,8 @@ impl Ops for Temp {
 
     /// `php_stream_temp_close` (`Z/main/streams/memory.c:399`),
     /// `php_stream_free_enclosed(innerstream, PHP_STREAM_FREE_CLOSE)`:
-    /// the inner resource closed and its one owner given up.
+    /// the inner resource closed and its one owner given up, which
+    /// unlinks a spilled file.
     fn close(&mut self, req: &mut Request) {
         if let Some(inner) = self.inner.take() {
             inner.resource().close(req);
@@ -914,6 +978,54 @@ impl Ops for Temp {
     }
 }
 
+/// `php_stream_fopen_temporary_file` (`Z/main/streams/plain_wrapper.c:237`)
+/// over `php_open_temporary_fd_ex`: a file `php` and six characters in
+/// `dir`, made `0600` as `mkstemp(3)` makes one and a new name tried
+/// where the name was taken, opened `r+b` as a plain file of its own
+/// resource, with the path as `orig_path` and the file unlinked at
+/// close. `None` is the file that could not be made.
+fn temporary_file(req: &mut Request, dir: &std::path::Path) -> Result<Option<Stream>, Thrown> {
+    use std::hash::{BuildHasher, Hasher};
+    use std::os::unix::fs::OpenOptionsExt;
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    for attempt in 0u64..100 {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u64(attempt);
+        let mut bits = hasher.finish();
+        let mut name = b"php".to_vec();
+        for _ in 0..6 {
+            name.push(ALPHABET[usize::try_from(bits % 62).unwrap_or(0)]);
+            bits /= 62;
+        }
+        let path = dir.join(String::from_utf8_lossy(&name).as_ref());
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(file) => {
+                let orig_path = path.as_os_str().as_encoded_bytes().to_vec();
+                let mut stream = PhpStream::new(
+                    Box::new(Stdio {
+                        file,
+                        is_seekable: true,
+                        temp_name: Some(path),
+                    }),
+                    b"r+b",
+                );
+                stream.wrapper = PLAIN_FILES;
+                stream.orig_path = Some(orig_path);
+                return Ok(Some(req.stream_alloc(stream)?));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Ok(None),
+        }
+    }
+    Ok(None)
+}
+
 // -------------------------------------------------------- plain files
 
 /// `php_plain_files_wrapper.wops->label`.
@@ -923,11 +1035,12 @@ const PLAIN_FILES: &str = "plainfile";
 const PHP_WRAPPER: &str = "PHP";
 
 /// `php_stdio_stream_data` under `php_stream_stdio_ops`
-/// (`Z/main/streams/plain_wrapper.c:135`): the file, and whether it
-/// seeks.
+/// (`Z/main/streams/plain_wrapper.c:135`): the file, whether it seeks,
+/// and `temp_name`, the path of a temporary file to unlink at close.
 struct Stdio {
     file: std::fs::File,
     is_seekable: bool,
+    temp_name: Option<std::path::PathBuf>,
 }
 
 /// `php_socket_strerror_s` over `errno`, as the plain files kind's two
@@ -1003,9 +1116,13 @@ impl Ops for Stdio {
         }
     }
 
-    /// `php_stdiop_close` (`Z/main/streams/plain_wrapper.c:508`): the
-    /// file closed, which its drop does.
-    fn close(&mut self, _req: &mut Request) {}
+    /// `php_stdiop_close` (`Z/main/streams/plain_wrapper.c:508`): a
+    /// temporary file unlinked, and the file closed, which its drop does.
+    fn close(&mut self, _req: &mut Request) {
+        if let Some(path) = self.temp_name.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 
     /// `php_stdiop_seek` (`Z/main/streams/plain_wrapper.c:616`): php's
     /// warning on a stream that cannot seek, else `lseek(2)` and the
@@ -1166,7 +1283,14 @@ fn plain_open(req: &Request, path: &[u8], mode: &[u8]) -> Result<PhpStream, Stri
     } else {
         -1
     };
-    let mut stream = PhpStream::new(Box::new(Stdio { file, is_seekable }), mode);
+    let mut stream = PhpStream::new(
+        Box::new(Stdio {
+            file,
+            is_seekable,
+            temp_name: None,
+        }),
+        mode,
+    );
     stream.flags.no_seek = !is_seekable;
     stream.position = position;
     Ok(stream)
@@ -1274,18 +1398,19 @@ fn php_open(req: &mut Request, path: &[u8], mode: &[u8]) -> Result<Opened, Throw
     };
     let lower = path.to_ascii_lowercase();
     if let Some(rest) = lower.strip_prefix(b"temp") {
+        let mut smax = PHP_STREAM_MAX_MEM;
         if let Some(digits) = rest.strip_prefix(b"/maxmemory:") {
-            // `ZEND_STRTOL(path, NULL, 10)`: the sign and the digits
-            // it can read, and a value below zero refused.
-            if digits.first() == Some(&b'-') && digits.get(1).is_some_and(u8::is_ascii_digit) {
+            let max_memory = strtol(digits);
+            if max_memory < 0 {
                 return Err(crate::api::raising::arg_value_error(
                     req,
                     2,
                     "be greater than or equal to 0",
                 ));
             }
+            smax = usize::try_from(max_memory).unwrap_or(usize::MAX);
         }
-        return Ok(Ok(temp(req, TempMode::of(mode))?));
+        return Ok(Ok(temp(req, TempMode::of(mode), smax)?));
     }
     let stream = match lower.as_slice() {
         b"memory" => memory(TempMode::of(mode)),
@@ -1337,11 +1462,33 @@ fn php_open(req: &mut Request, path: &[u8], mode: &[u8]) -> Result<Opened, Throw
     Ok(Ok(req.stream_alloc(stream)?))
 }
 
+/// `ZEND_STRTOL(path, NULL, 10)`: leading white space, a sign and the
+/// decimal digits after it, saturating where they overflow, and zero
+/// where there are none.
+fn strtol(bytes: &[u8]) -> i64 {
+    let bytes = bytes.trim_ascii_start();
+    let (negative, digits) = match bytes.first() {
+        Some(b'-') => (true, &bytes[1..]),
+        Some(b'+') => (false, &bytes[1..]),
+        _ => (false, bytes),
+    };
+    let mut value: i64 = 0;
+    for digit in digits.iter().take_while(|b| b.is_ascii_digit()) {
+        let d = i64::from(digit - b'0');
+        value = if negative {
+            value.saturating_mul(10).saturating_sub(d)
+        } else {
+            value.saturating_mul(10).saturating_add(d)
+        };
+    }
+    value
+}
+
 /// `_php_stream_temp_create_ex` (`Z/main/streams/memory.c:519`): the
 /// temp stream registered first, then the memory stream it encloses, so
 /// the two ids come out in php's order.
-fn temp(req: &mut Request, mode: TempMode) -> Result<Stream, Thrown> {
-    let mut outer = PhpStream::new(Box::new(Temp { inner: None }), mode.as_mode());
+fn temp(req: &mut Request, mode: TempMode, smax: usize) -> Result<Stream, Thrown> {
+    let mut outer = PhpStream::new(Box::new(Temp { inner: None, smax }), mode.as_mode());
     outer.flags.no_buffer = true;
     let outer = req.stream_alloc(outer)?;
     let inner = req.stream_alloc(memory(mode))?;

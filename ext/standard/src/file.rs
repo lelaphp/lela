@@ -1310,6 +1310,38 @@ fn fflush(req: &mut Request) -> Result<Value, Thrown> {
 /// fwrite(): Argument #1 ($stream) must be of type resource, string given
 /// fwrite(): Argument #3 ($length) must be of type ?int, string given
 /// ```
+///
+/// A `php://temp` keeps its bytes in the memory stream it encloses
+/// until a write would reach its `maxmemory`, `PHP_STREAM_MAX_MEM` by
+/// default, and then spills them to a temporary file, a third resource,
+/// which `fstat` reads from then on and the close unlinks.
+///
+/// ```php
+/// $t = fopen('php://temp/maxmemory:4', 'w+'); $a = fopen('php://memory', 'r');
+/// var_dump(fwrite($t, "ab"), fstat($t)['mode'], fwrite($t, "cdefgh"), fstat($t)['mode'], fstat($t)['size']);
+/// $b = fopen('php://memory', 'r');
+/// var_dump((int)$a - (int)$t, (int)$b - (int)$a, rewind($t), fread($t, 100), ftell($t), stream_get_meta_data($t)['stream_type']);
+/// $big = fopen('php://temp', 'w+'); fwrite($big, str_repeat("x", 2 * 1024 * 1024 - 1)); $c = fopen('php://memory', 'r');
+/// fwrite($big, "y"); $e = fopen('php://memory', 'r');
+/// var_dump((int)$c - (int)$big, (int)$e - (int)$c, fstat($big)['size'], fstat($big)['mode']);
+/// ```
+/// ```expect
+/// int(2)
+/// int(33206)
+/// int(6)
+/// int(33152)
+/// int(8)
+/// int(2)
+/// int(2)
+/// bool(true)
+/// string(8) "abcdefgh"
+/// int(8)
+/// string(4) "TEMP"
+/// int(2)
+/// int(2)
+/// int(2097152)
+/// int(33152)
+/// ```
 fn fwrite(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 2, 3)?;
     let stream = stream_argument(req, 1)?;
