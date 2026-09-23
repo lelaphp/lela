@@ -38,6 +38,7 @@ use crate::api::values::{ClassId, Key, PhpArray, PhpString, TypeTag, Value, Valu
 
 mod classes;
 mod errors;
+mod functions;
 mod stub;
 
 /// The engine's own natives, each declaration beside its entry: the
@@ -51,6 +52,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     natives.extend(constant_natives());
     natives.extend(class_natives());
     natives.extend(classes::natives());
+    natives.extend(functions::natives());
     natives.extend(errors::natives());
     natives.sort_by_key(|(decl, _)| {
         CORE.iter()

@@ -129,7 +129,7 @@ fn object_argument(req: &mut Request, position: u32) -> Result<PhpObject, Thrown
             req,
             position,
             &format!(
-                "must be of type object, {} given",
+                "be of type object, {} given",
                 crate::ops::value_name(req, &given.deref())
             ),
         )),

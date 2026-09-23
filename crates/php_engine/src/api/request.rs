@@ -370,6 +370,15 @@ impl Resources {
             .map(|(name, _)| name.as_slice())
     }
 
+    /// `zend_fetch_list_dtor_id`: the type registered under `name`.
+    fn type_named(&self, name: &[u8]) -> Option<ResourceType> {
+        self.types
+            .iter()
+            .position(|(registered, _)| registered == name)
+            .and_then(|at| u32::try_from(at).ok())
+            .map(ResourceType)
+    }
+
     /// The type's destructor, if it registered one.
     fn dtor(&self, kind: ResourceType) -> Option<ResourceDtor> {
         self.types.get(kind.0 as usize).and_then(|(_, dtor)| *dtor)
@@ -678,6 +687,15 @@ pub struct Request {
 /// reads it: the name, the value, and for a declared slot the class
 /// that declared it and its visibility.
 pub(crate) type PropertyRow = (PhpString, Value, Option<(ClassId, Visibility)>);
+
+/// What called the native being served ([`Request::native_caller`]):
+/// a user function's frame and its arguments, a code frame, or another
+/// native.
+pub(crate) enum NativeCaller {
+    Function(FrameRef, Vec<Value>),
+    Code(FrameRef),
+    Native,
+}
 
 /// One bucket of a symbol table, php's zval in `EG(symbol_table)` or a
 /// rebuilt one: the value the table owns, or `IS_INDIRECT`, the CV of the
@@ -7961,6 +7979,60 @@ impl Request {
         self.release(previous);
     }
 
+    /// What called the native being served, `EX(prev_execute_data)` as
+    /// `func_get_args` and `get_defined_vars` read it: a user function's
+    /// frame, with the arguments it was passed as its slots hold them
+    /// now, the extra ones after, `ZEND_CALL_NUM_ARGS` of them in all;
+    /// a code frame, the main op array or an included file's, which
+    /// php's `ZEND_CALL_CODE` names; or another native, which is a call
+    /// `zend_call_function` made and php's `ZEND_CALL_DYNAMIC`.
+    pub(crate) fn native_caller(&self) -> NativeCaller {
+        let mut chain = self.chain();
+        let _served = chain.next();
+        match chain.next() {
+            Some(Link::Frame(place, state)) if state.function.is_some() => {
+                let frame = FrameRef(u32::try_from(place).unwrap_or(u32::MAX));
+                let passed = usize::try_from(state.num_args).unwrap_or(0);
+                let mut arguments: Vec<Value> = (0..passed.saturating_sub(state.extra_args.len()))
+                    .map(|slot| self.slot(frame, u32::try_from(slot).unwrap_or(u32::MAX)))
+                    .collect();
+                arguments.extend(state.extra_args.iter().copied());
+                NativeCaller::Function(frame, arguments)
+            }
+            Some(Link::Frame(place, _)) => {
+                NativeCaller::Code(FrameRef(u32::try_from(place).unwrap_or(u32::MAX)))
+            }
+            Some(Link::Call(_)) | None => NativeCaller::Native,
+        }
+    }
+
+    /// `zend_rebuild_symbol_table` for `frame` and `zend_array_dup` of
+    /// it: every name the frame's table holds that has a value, in the
+    /// table's order, each value one more owner, a reference kept as
+    /// one; what `get_defined_vars()` answers.
+    pub(crate) fn defined_vars(&mut self, frame: FrameRef) -> Result<PhpArray, Thrown> {
+        let table = self.rebuild_symbol_table(frame);
+        let entries: Vec<(Vec<u8>, Symbol)> = self
+            .tables
+            .get(table.0 as usize)
+            .map(|table| table.entries.clone())
+            .unwrap_or_default();
+        let mut array = PhpArray::new(self)?;
+        for (name, symbol) in entries {
+            let value = match symbol {
+                Symbol::Value(value) => value,
+                Symbol::Indirect(frame, slot) => self.slot(frame, slot),
+            };
+            if value.tag() == TypeTag::Undef {
+                continue;
+            }
+            self.addref(&value);
+            let key = Key::from_string(PhpString::new(self, &name)?);
+            array.set(self, key, value)?;
+        }
+        Ok(array)
+    }
+
     /// The arguments of the frame `depth` levels up, `func_get_args` from
     /// outside.
     #[must_use]
@@ -8077,22 +8149,75 @@ impl Request {
             .collect()
     }
 
-    /// `get_defined_functions()`: `internal` and `user` lists, the names
-    /// strings of the request's.
+    /// `get_defined_functions()` over `EG(function_table)`: `internal`,
+    /// every native's key, and `user`, every user function's, each the
+    /// lowered name the table is keyed by and in the order the table
+    /// took them. A closure is no row, since php never adds one to the
+    /// table; a method is none either, being its class's.
     pub fn defined_functions(&mut self) -> Result<PhpArray, Thrown> {
-        let mut internal = PhpArray::new(self)?;
-        let shared = Arc::clone(&self.shared);
-        for (decl, _) in &shared.functions {
-            let name = Value::string(PhpString::new(self, &decl.name.0)?);
-            internal.append(self, name)?;
-        }
+        let internal: Vec<Vec<u8>> = self
+            .shared
+            .functions
+            .iter()
+            .map(|(decl, _)| decl.name.0.to_ascii_lowercase())
+            .collect();
+        let user: Vec<Vec<u8>> = self
+            .user_functions
+            .iter()
+            .filter_map(user_function_decl)
+            .map(|decl| decl.name.0.to_ascii_lowercase())
+            .filter(|name| !name.starts_with(b"{"))
+            .collect();
         let mut array = PhpArray::new(self)?;
-        let key = Key::Str(PhpString::new(self, b"internal")?);
-        array.set(self, key, Value::array(internal))?;
-        let key = Key::Str(PhpString::new(self, b"user")?);
-        let user = PhpArray::new(self)?;
-        array.set(self, key, Value::array(user))?;
+        for (list, names) in [(&b"internal"[..], internal), (b"user", user)] {
+            let mut rows = PhpArray::new(self)?;
+            for name in names {
+                let name = Value::string(PhpString::new(self, &name)?);
+                rows.append(self, name)?;
+            }
+            let key = Key::Str(PhpString::new(self, list)?);
+            array.set(self, key, Value::array(rows))?;
+        }
         Ok(array)
+    }
+
+    /// `EG(zend_constants)` in its order, each row the extension it was
+    /// registered under, `ZEND_CONSTANT_MODULE_NUMBER`, by name, none for
+    /// one the program defined, `PHP_USER_CONSTANT`: the engine's own
+    /// under `Core`, then each extension's in bundle order, then what
+    /// `define()` and `const` wrote. A value is a view, no owner taken;
+    /// a declared constant whose value the engine did not publish is no
+    /// row.
+    pub(crate) fn constant_table(&self) -> Vec<(Option<&str>, Vec<u8>, Value)> {
+        let decls = self.shared.declared().constants;
+        let from_extensions: usize = self
+            .shared
+            .extensions
+            .iter()
+            .map(|e| e.constants.len())
+            .sum();
+        let own = decls.len().saturating_sub(from_extensions);
+        let mut modules: Vec<&str> = vec!["Core"; own];
+        for extension in &self.shared.extensions {
+            modules.extend(std::iter::repeat_n(
+                extension.name.as_str(),
+                extension.constants.len(),
+            ));
+        }
+        let mut rows: Vec<(Option<&str>, Vec<u8>, Value)> = decls
+            .iter()
+            .zip(modules)
+            .filter_map(|(decl, module)| {
+                let value = self.shared.constant(&decl.name.0)?;
+                Some((Some(module), decl.name.0.to_vec(), value))
+            })
+            .collect();
+        rows.extend(
+            self.constants
+                .iter()
+                .map(|(name, value)| (None, name.clone(), *value)),
+        );
+        rows
     }
 
     /// `zend_register_class_alias_ex`'s `zend_hash_add` into
@@ -8180,10 +8305,10 @@ impl Request {
     }
 
     /// `get_included_files()`: the paths, as `EG(included_files)` holds
-    /// them.
+    /// them, the primary file's first.
     #[must_use]
     pub fn included_files(&self) -> Vec<Vec<u8>> {
-        self.description.script_name.iter().cloned().collect()
+        self.included_files.clone()
     }
 
     /// `get_loaded_extensions()`: the bundle in `MINIT` order, after
@@ -8490,6 +8615,27 @@ impl Request {
     /// The request's resource types, for an extension registering one.
     pub fn resources(&mut self) -> &mut Resources {
         &mut self.resources
+    }
+
+    /// `EG(regular_list)` in id order, every resource whose entry stands,
+    /// closed or not: what `get_resources()` walks.
+    pub(crate) fn resource_list(&self) -> Vec<Resource> {
+        let live = self.heap.resources();
+        let mut found = Vec::with_capacity(live);
+        let mut id = 1;
+        while found.len() < live && id < i64::MAX {
+            if let Some(resource) = self.resource(id) {
+                found.push(resource);
+            }
+            id += 1;
+        }
+        found
+    }
+
+    /// `zend_fetch_list_dtor_id`: the resource type registered under
+    /// `name`, as `get_resources()` is given it.
+    pub(crate) fn resource_type_named(&self, name: &[u8]) -> Option<ResourceType> {
+        self.resources.type_named(name)
     }
 
     /// `zend_hash_index_find(&EG(regular_list), id)`: the resource with
