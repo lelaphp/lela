@@ -55,6 +55,7 @@ mod head;
 mod html;
 mod md5;
 mod output;
+mod pack;
 mod scanf;
 mod sha1;
 mod string;
@@ -175,6 +176,7 @@ pub fn extension() -> Extension {
         .functions(md5::natives())
         .functions(sha1::natives())
         .functions(crc32::natives())
+        .functions(pack::natives())
         .constants(vec![
             constant(b"COUNT_NORMAL", COUNT_NORMAL),
             constant(b"COUNT_RECURSIVE", COUNT_RECURSIVE),
