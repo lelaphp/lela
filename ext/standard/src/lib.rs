@@ -46,6 +46,7 @@
 
 mod array;
 mod base64;
+mod basic_functions;
 mod crc32;
 mod csv;
 mod exec;
@@ -55,6 +56,7 @@ mod head;
 mod hrtime;
 mod html;
 mod http;
+mod ini;
 mod levenshtein;
 mod md5;
 mod metaphone;
@@ -199,7 +201,8 @@ pub fn extension() -> Extension {
 
 /// The natives of the php-src files ported one file each (#655), in
 /// the order the modules landed: `string.c`, `url.c`, `html.c`, the
-/// digests, `pack.c`, `http.c` and the small files.
+/// digests, `pack.c`, `http.c`, the small files and `basic_functions.c`'s
+/// environment and ini natives.
 fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
     [
         string::natives(),
@@ -219,6 +222,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         microtime::natives(),
         hrtime::natives(),
         versioning::natives(),
+        basic_functions::natives(),
     ]
     .into_iter()
     .flatten()
@@ -227,10 +231,15 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
 
 /// Their constants.
 fn file_constants() -> Vec<ConstDecl> {
-    [string::constants(), url::constants(), html::constants()]
-        .into_iter()
-        .flatten()
-        .collect()
+    [
+        string::constants(),
+        url::constants(),
+        html::constants(),
+        basic_functions::constants(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// `standard_deps` (`Z/ext/standard/basic_functions.c:143`): `uri`
