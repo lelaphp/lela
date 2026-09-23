@@ -66,6 +66,7 @@ mod soundex;
 mod string;
 mod strnatcmp;
 mod stub;
+mod uniqid;
 mod url;
 mod uuencode;
 mod var;
@@ -87,6 +88,7 @@ use php_ext::values::{PhpArray, PhpString, TypeTag, Value, ValueRef};
 #[derive(Default)]
 struct State {
     string: string::State,
+    uniqid: uniqid::State,
 }
 
 /// The extension value (design §7.1): declarations paired with entries,
@@ -209,6 +211,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         metaphone::natives(),
         soundex::natives(),
         levenshtein::natives(),
+        uniqid::natives(),
     ]
     .into_iter()
     .flatten()
