@@ -367,7 +367,7 @@ fn contents_natives() -> Vec<(FunctionDecl, Entry)> {
 /// that is not a resource is the parser's own `must be of type
 /// resource, %s given`, no null deprecation and no coercion either
 /// way.
-fn stream_argument(req: &mut Request, position: u32) -> Result<Stream, Thrown> {
+pub(super) fn stream_argument(req: &mut Request, position: u32) -> Result<Stream, Thrown> {
     let given = req.argument(position).unwrap_or_default();
     let given = given.deref();
     if let ValueRef::Resource(_) = given.as_ref() {

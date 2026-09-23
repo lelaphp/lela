@@ -1,0 +1,1164 @@
+//! `Z/ext/standard/html.c`: `php_escape_html_entities_ex` behind
+//! `htmlspecialchars` and `htmlentities`, `traverse_for_entities`
+//! behind `htmlspecialchars_decode` and `html_entity_decode`, and
+//! `get_html_translation_table` walking the same tables, which are
+//! `html_tables.h`'s, in `tables`. The charsets are php's fourteen:
+//! UTF-8, the eight single-byte ones with full tables, and the five
+//! multi-byte ones php reads and passes through, basic entities alone.
+// The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
+#![allow(rustdoc::invalid_codeblock_attributes)]
+
+mod tables;
+
+use php_ext::decl::{ConstDecl, FunctionDecl};
+use php_ext::raising::{Level, Thrown, docref};
+use php_ext::request::Request;
+use php_ext::values::{PhpArray, PhpString, Value};
+
+use crate::output::Entry;
+use crate::string::next_utf8_char;
+use crate::stub::stub;
+use crate::zpp::{
+    nullable_string, optional_bool, optional_long, optional_string, same, string_value,
+};
+use crate::{argument_count_between, constant, string_argument};
+use tables::Row;
+
+/// `ENT_HTML_QUOTE_SINGLE` and the rest of `html.h`'s `$flags` bits.
+const QUOTE_SINGLE: i64 = 1;
+const QUOTE_DOUBLE: i64 = 2;
+const IGNORE_ERRORS: i64 = 4;
+const SUBSTITUTE_ERRORS: i64 = 8;
+const DOC_TYPE_MASK: i64 = 16 | 32;
+const DOC_HTML401: i64 = 0;
+const DOC_XML1: i64 = 16;
+const DOC_XHTML: i64 = 32;
+const DOC_HTML5: i64 = 16 | 32;
+const SUBSTITUTE_DISALLOWED: i64 = 128;
+/// `ENT_QUOTES | ENT_SUBSTITUTE`, every native's default `$flags`.
+const DEFAULT_FLAGS: i64 = QUOTE_SINGLE | QUOTE_DOUBLE | SUBSTITUTE_ERRORS;
+/// `LONGEST_ENTITY_LENGTH`.
+const LONGEST_ENTITY_LENGTH: usize = 31;
+
+/// The constants of `html.c`, in the stub's order.
+///
+/// ```php
+/// var_dump(HTML_SPECIALCHARS, HTML_ENTITIES, ENT_COMPAT, ENT_QUOTES, ENT_NOQUOTES, ENT_IGNORE, ENT_SUBSTITUTE, ENT_DISALLOWED, ENT_HTML401, ENT_XML1, ENT_XHTML, ENT_HTML5);
+/// ```
+/// ```expect
+/// int(0)
+/// int(1)
+/// int(2)
+/// int(3)
+/// int(0)
+/// int(4)
+/// int(8)
+/// int(128)
+/// int(0)
+/// int(16)
+/// int(32)
+/// int(48)
+/// ```
+pub(crate) fn constants() -> Vec<ConstDecl> {
+    vec![
+        constant(b"HTML_SPECIALCHARS", 0),
+        constant(b"HTML_ENTITIES", 1),
+        constant(b"ENT_COMPAT", QUOTE_DOUBLE),
+        constant(b"ENT_QUOTES", QUOTE_SINGLE | QUOTE_DOUBLE),
+        constant(b"ENT_NOQUOTES", 0),
+        constant(b"ENT_IGNORE", IGNORE_ERRORS),
+        constant(b"ENT_SUBSTITUTE", SUBSTITUTE_ERRORS),
+        constant(b"ENT_DISALLOWED", SUBSTITUTE_DISALLOWED),
+        constant(b"ENT_HTML401", DOC_HTML401),
+        constant(b"ENT_XML1", DOC_XML1),
+        constant(b"ENT_XHTML", DOC_XHTML),
+        constant(b"ENT_HTML5", DOC_HTML5),
+    ]
+}
+
+/// The five, in the stub's order.
+///
+/// ```php
+/// foreach (['htmlspecialchars', 'htmlspecialchars_decode', 'html_entity_decode', 'htmlentities', 'get_html_translation_table'] as $f) echo new ReflectionFunction($f);
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function htmlspecialchars ] {
+///
+///   - Parameters [4] {
+///     Parameter #0 [ <required> string $string ]
+///     Parameter #1 [ <optional> int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401 ]
+///     Parameter #2 [ <optional> ?string $encoding = null ]
+///     Parameter #3 [ <optional> bool $double_encode = true ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function htmlspecialchars_decode ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $string ]
+///     Parameter #1 [ <optional> int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401 ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function html_entity_decode ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <required> string $string ]
+///     Parameter #1 [ <optional> int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401 ]
+///     Parameter #2 [ <optional> ?string $encoding = null ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function htmlentities ] {
+///
+///   - Parameters [4] {
+///     Parameter #0 [ <required> string $string ]
+///     Parameter #1 [ <optional> int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401 ]
+///     Parameter #2 [ <optional> ?string $encoding = null ]
+///     Parameter #3 [ <optional> bool $double_encode = true ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function get_html_translation_table ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <optional> int $table = HTML_SPECIALCHARS ]
+///     Parameter #1 [ <optional> int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401 ]
+///     Parameter #2 [ <optional> string $encoding = "UTF-8" ]
+///   }
+///   - Return [ array ]
+/// }
+/// ```
+pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
+    vec![
+        (
+            stub(
+                "htmlspecialchars(string $string, int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401, ?string $encoding = null, bool $double_encode = true): string",
+            ),
+            htmlspecialchars as Entry,
+        ),
+        (
+            stub(
+                "htmlspecialchars_decode(string $string, int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401): string",
+            ),
+            htmlspecialchars_decode,
+        ),
+        (
+            stub(
+                "html_entity_decode(string $string, int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401, ?string $encoding = null): string",
+            ),
+            html_entity_decode,
+        ),
+        (
+            stub(
+                "htmlentities(string $string, int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401, ?string $encoding = null, bool $double_encode = true): string",
+            ),
+            htmlentities,
+        ),
+        (
+            stub(
+                "get_html_translation_table(int $table = HTML_SPECIALCHARS, int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401, string $encoding = \"UTF-8\"): array",
+            ),
+            get_html_translation_table,
+        ),
+    ]
+}
+
+/// `enum entity_charset`, in php's order, which the three
+/// `CHARSET_*` classes read.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Charset {
+    Utf8,
+    Iso88591,
+    Cp1252,
+    Iso885915,
+    Cp1251,
+    Iso88595,
+    Cp866,
+    MacRoman,
+    Koi8r,
+    Big5,
+    Gb2312,
+    Big5Hkscs,
+    Sjis,
+    EucJp,
+}
+
+impl Charset {
+    /// `CHARSET_UNICODE_COMPAT`: its code units are code points.
+    fn unicode_compat(self) -> bool {
+        self <= Charset::Iso88591
+    }
+
+    /// `CHARSET_SINGLE_BYTE`.
+    fn single_byte(self) -> bool {
+        self > Charset::Utf8 && self < Charset::Big5
+    }
+
+    /// `CHARSET_PARTIAL_SUPPORT`: read, and escaped with the basic
+    /// entities alone.
+    fn partial(self) -> bool {
+        self >= Charset::Big5
+    }
+
+    /// `enc_to_uni_index[charset]` for a single-byte charset php maps
+    /// to Unicode.
+    fn to_unicode(self) -> Option<&'static [u16; 256]> {
+        Some(match self {
+            Charset::Cp1252 => &tables::TO_UNI_CP1252,
+            Charset::Iso885915 => &tables::TO_UNI_ISO_8859_15,
+            Charset::Cp1251 => &tables::TO_UNI_CP1251,
+            Charset::Iso88595 => &tables::TO_UNI_ISO_8859_5,
+            Charset::Cp866 => &tables::TO_UNI_CP866,
+            Charset::MacRoman => &tables::TO_UNI_MACROMAN,
+            Charset::Koi8r => &tables::TO_UNI_KOI8_R,
+            _ => return None,
+        })
+    }
+}
+
+/// `charset_map`: each name php takes, compared ignoring case.
+const CHARSET_MAP: [(&[u8], Charset); 33] = [
+    (b"ISO-8859-1", Charset::Iso88591),
+    (b"ISO8859-1", Charset::Iso88591),
+    (b"ISO-8859-15", Charset::Iso885915),
+    (b"ISO8859-15", Charset::Iso885915),
+    (b"utf-8", Charset::Utf8),
+    (b"cp1252", Charset::Cp1252),
+    (b"Windows-1252", Charset::Cp1252),
+    (b"1252", Charset::Cp1252),
+    (b"BIG5", Charset::Big5),
+    (b"950", Charset::Big5),
+    (b"GB2312", Charset::Gb2312),
+    (b"936", Charset::Gb2312),
+    (b"BIG5-HKSCS", Charset::Big5Hkscs),
+    (b"Shift_JIS", Charset::Sjis),
+    (b"SJIS", Charset::Sjis),
+    (b"932", Charset::Sjis),
+    (b"SJIS-win", Charset::Sjis),
+    (b"CP932", Charset::Sjis),
+    (b"EUCJP", Charset::EucJp),
+    (b"EUC-JP", Charset::EucJp),
+    (b"eucJP-win", Charset::EucJp),
+    (b"KOI8-R", Charset::Koi8r),
+    (b"koi8-ru", Charset::Koi8r),
+    (b"koi8r", Charset::Koi8r),
+    (b"cp1251", Charset::Cp1251),
+    (b"Windows-1251", Charset::Cp1251),
+    (b"win-1251", Charset::Cp1251),
+    (b"iso8859-5", Charset::Iso88595),
+    (b"iso-8859-5", Charset::Iso88595),
+    (b"cp866", Charset::Cp866),
+    (b"866", Charset::Cp866),
+    (b"ibm866", Charset::Cp866),
+    (b"MacRoman", Charset::MacRoman),
+];
+
+/// `determine_charset(charset_hint, quiet)`: the hint, else
+/// `internal_encoding`, else `default_charset`, looked up in
+/// `charset_map`; a name it lacks is UTF-8 behind php's warning.
+fn determine_charset(req: &mut Request, hint: Option<&[u8]>, quiet: bool) -> Charset {
+    // The hint is a C string: it ends at its first NUL.
+    let hint = hint.map(|h| h.split(|c| *c == 0).next().unwrap_or(&[]).to_vec());
+    let hint = match hint {
+        Some(h) if !h.is_empty() => h,
+        _ => ["internal_encoding", "default_charset"]
+            .iter()
+            .find_map(|name| {
+                req.ini_get(name.as_bytes())
+                    .filter(|v| !v.is_empty())
+                    .map(<[u8]>::to_vec)
+            })
+            .unwrap_or_default(),
+    };
+    if hint.is_empty() {
+        return Charset::Utf8;
+    }
+    if let Some((_, charset)) = CHARSET_MAP
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(&hint))
+    {
+        return *charset;
+    }
+    if !quiet {
+        let text = String::from_utf8_lossy(&hint).into_owned();
+        docref(
+            req,
+            Level::Warning,
+            &format!("Charset \"{text}\" is not supported, assuming UTF-8"),
+        );
+    }
+    Charset::Utf8
+}
+
+/// `get_next_char(charset, str, str_len, cursor, status)`: the
+/// character at `pos`, or `None` for an ill-formed one, and the offset
+/// after what was read.
+#[allow(clippy::too_many_lines)]
+fn next_char(charset: Charset, s: &[u8], pos: usize) -> (Option<u32>, usize) {
+    let avail = s.len() - pos;
+    let at = |i: usize| u32::from(s.get(pos + i).copied().unwrap_or(0));
+    let c = at(0);
+    let two = || (c << 8) | at(1);
+    match charset {
+        Charset::Utf8 => next_utf8_char(s, pos),
+        Charset::Big5 => {
+            if (0x81..=0xFE).contains(&c) {
+                if avail < 2 {
+                    return (None, pos + 1);
+                }
+                let next = at(1);
+                if (0x40..=0x7E).contains(&next) || (0xA1..=0xFE).contains(&next) {
+                    (Some(two()), pos + 2)
+                } else {
+                    (None, pos + 1)
+                }
+            } else {
+                (Some(c), pos + 1)
+            }
+        }
+        Charset::Big5Hkscs => {
+            if (0x81..=0xFE).contains(&c) {
+                if avail < 2 {
+                    return (None, pos + 1);
+                }
+                let next = at(1);
+                if (0x40..=0x7E).contains(&next) || (0xA1..=0xFE).contains(&next) {
+                    (Some(two()), pos + 2)
+                } else if next != 0x80 && next != 0xFF {
+                    (None, pos + 1)
+                } else {
+                    (None, pos + 2)
+                }
+            } else {
+                (Some(c), pos + 1)
+            }
+        }
+        Charset::Gb2312 => {
+            let lead = |c: u32| c != 0x8E && c != 0x8F && c != 0xA0 && c != 0xFF;
+            let trail = |c: u32| (0xA1..=0xFE).contains(&c);
+            if (0xA1..=0xFE).contains(&c) {
+                if avail < 2 {
+                    return (None, pos + 1);
+                }
+                let next = at(1);
+                if trail(next) {
+                    (Some(two()), pos + 2)
+                } else if lead(next) {
+                    (None, pos + 1)
+                } else {
+                    (None, pos + 2)
+                }
+            } else if lead(c) {
+                (Some(c), pos + 1)
+            } else {
+                (None, pos + 1)
+            }
+        }
+        Charset::Sjis => {
+            let lead = |c: u32| c != 0x80 && c != 0xA0 && c < 0xFD;
+            let trail = |c: u32| (0x40..0xFD).contains(&c) && c != 0x7F;
+            if (0x81..=0x9F).contains(&c) || (0xE0..=0xFC).contains(&c) {
+                if avail < 2 {
+                    return (None, pos + 1);
+                }
+                let next = at(1);
+                if trail(next) {
+                    (Some(two()), pos + 2)
+                } else if lead(next) {
+                    (None, pos + 1)
+                } else {
+                    (None, pos + 2)
+                }
+            } else if c < 0x80 || (0xA1..=0xDF).contains(&c) {
+                (Some(c), pos + 1)
+            } else {
+                (None, pos + 1)
+            }
+        }
+        Charset::EucJp => {
+            let edge = |next: u32| if next != 0xA0 && next != 0xFF { 1 } else { 2 };
+            if (0xA1..=0xFE).contains(&c) {
+                if avail < 2 {
+                    return (None, pos + 1);
+                }
+                let next = at(1);
+                if (0xA1..=0xFE).contains(&next) {
+                    (Some(two()), pos + 2)
+                } else {
+                    (None, pos + edge(next))
+                }
+            } else if c == 0x8E {
+                if avail < 2 {
+                    return (None, pos + 1);
+                }
+                let next = at(1);
+                if (0xA1..=0xDF).contains(&next) {
+                    (Some(two()), pos + 2)
+                } else {
+                    (None, pos + edge(next))
+                }
+            } else if c == 0x8F {
+                let kanji = |c: u32| (0xA1..=0xFE).contains(&c);
+                if avail < 3 || !kanji(at(1)) || !kanji(at(2)) {
+                    let skip = if avail < 2 || (at(1) != 0xA0 && at(1) != 0xFF) {
+                        1
+                    } else if avail < 3 || (at(2) != 0xA0 && at(2) != 0xFF) {
+                        2
+                    } else {
+                        3
+                    };
+                    return (None, pos + skip);
+                }
+                (Some((c << 16) | (at(1) << 8) | at(2)), pos + 3)
+            } else if c != 0xA0 && c != 0xFF {
+                (Some(c), pos + 1)
+            } else {
+                (None, pos + 1)
+            }
+        }
+        _ => (Some(c), pos + 1),
+    }
+}
+
+/// `unimap_bsearch(table, code, num)`: the byte `table` gives a BMP
+/// code point, or none.
+fn unimap(table: &[(u16, u8)], code: u32) -> Option<u32> {
+    let code = u16::try_from(code).ok()?;
+    table
+        .binary_search_by_key(&code, |(cp, _)| *cp)
+        .ok()
+        .map(|at| u32::from(table[at].1))
+}
+
+/// `map_from_unicode(code, charset, &res)`: the code unit `charset`
+/// writes a code point as, or none where it has none.
+fn map_from_unicode(code: u32, charset: Charset) -> Option<u32> {
+    match charset {
+        Charset::Iso88591 => (code <= 0xFF).then_some(code),
+        Charset::Iso88595 => {
+            if code <= 0xA0 || code == 0xAD {
+                Some(code)
+            } else if code == 0x2116 {
+                Some(0xF0)
+            } else if code == 0xA7 {
+                Some(0xFD)
+            } else if (0x0401..=0x045F).contains(&code) {
+                if code == 0x040D || code == 0x0450 || code == 0x045D {
+                    None
+                } else {
+                    Some(code - 0x360)
+                }
+            } else {
+                None
+            }
+        }
+        Charset::Iso885915 => {
+            if code < 0xA4 || (code > 0xBE && code <= 0xFF) {
+                Some(code)
+            } else {
+                unimap(tables::FROM_UNI_ISO_8859_15, code)
+            }
+        }
+        Charset::Cp1252 => {
+            if code <= 0x7F || (0xA0..=0xFF).contains(&code) {
+                Some(code)
+            } else {
+                unimap(tables::FROM_UNI_CP1252, code)
+            }
+        }
+        Charset::MacRoman | Charset::Cp1251 | Charset::Koi8r | Charset::Cp866 => {
+            if charset == Charset::MacRoman && code == 0x7F {
+                return None;
+            }
+            if code <= 0x7F {
+                return Some(code);
+            }
+            let table = match charset {
+                Charset::MacRoman => tables::FROM_UNI_MACROMAN,
+                Charset::Cp1251 => tables::FROM_UNI_CP1251,
+                Charset::Koi8r => tables::FROM_UNI_KOI8_R,
+                _ => tables::FROM_UNI_CP866,
+            };
+            unimap(table, code)
+        }
+        Charset::Sjis | Charset::EucJp => {
+            ((0x20..=0x7D).contains(&code) && code != 0x5C).then_some(code)
+        }
+        Charset::Big5 | Charset::Big5Hkscs | Charset::Gb2312 => {
+            (0x20..=0x7D).contains(&code).then_some(code)
+        }
+        Charset::Utf8 => None,
+    }
+}
+
+/// `unicode_cp_is_allowed(uni_cp, document_type)`.
+fn unicode_cp_is_allowed(cp: u32, doctype: i64) -> bool {
+    match doctype {
+        DOC_HTML401 => {
+            (0x20..=0x7E).contains(&cp)
+                || cp == 0x0A
+                || cp == 0x09
+                || cp == 0x0D
+                || (0xA0..=0xD7FF).contains(&cp)
+                || (0xE000..=0x0010_FFFF).contains(&cp)
+        }
+        DOC_HTML5 => {
+            (0x20..=0x7E).contains(&cp)
+                || ((0x09..=0x0D).contains(&cp) && cp != 0x0B)
+                || (0xA0..=0xD7FF).contains(&cp)
+                || ((0xE000..=0x0010_FFFF).contains(&cp)
+                    && (cp & 0xFFFF) < 0xFFFE
+                    && !(0xFDD0..=0xFDEF).contains(&cp))
+        }
+        _ => {
+            (0x20..=0xD7FF).contains(&cp)
+                || cp == 0x0A
+                || cp == 0x09
+                || cp == 0x0D
+                || ((0xE000..=0x0010_FFFF).contains(&cp) && cp != 0xFFFE && cp != 0xFFFF)
+        }
+    }
+}
+
+/// `numeric_entity_is_allowed(uni_cp, document_type)`.
+fn numeric_entity_is_allowed(cp: u32, doctype: i64) -> bool {
+    match doctype {
+        DOC_HTML401 => cp <= 0x0010_FFFF,
+        DOC_HTML5 => {
+            (0x20..=0x7E).contains(&cp)
+                || ((0x09..=0x0C).contains(&cp) && cp != 0x0B)
+                || ((0xA0..=0x0010_FFFF).contains(&cp)
+                    && (cp & 0xFFFF) < 0xFFFE
+                    && !(0xFDD0..=0xFDEF).contains(&cp))
+        }
+        _ => unicode_cp_is_allowed(cp, doctype),
+    }
+}
+
+/// `process_numeric_entity(&buf, &code_point)` with `buf` just past
+/// `#`: the code point and the offset of the `;` ending it.
+fn numeric_entity(s: &[u8], mut at: usize) -> Option<(u32, usize)> {
+    let hex = matches!(s.get(at), Some(b'x' | b'X'));
+    if hex {
+        at += 1;
+    }
+    let digit = |c: &u8| {
+        if hex {
+            c.is_ascii_hexdigit()
+        } else {
+            c.is_ascii_digit()
+        }
+    };
+    if !s.get(at).is_some_and(digit) {
+        return None;
+    }
+    let start = at;
+    while s.get(at).is_some_and(digit) {
+        at += 1;
+    }
+    if s.get(at) != Some(&b';') {
+        return None;
+    }
+    let text = std::str::from_utf8(&s[start..at]).ok()?;
+    // `ZEND_STRTOL` saturates; anything past U+10FFFF is refused alike.
+    let code = i64::from_str_radix(text, if hex { 16 } else { 10 }).unwrap_or(i64::MAX);
+    if code > 0x0010_FFFF {
+        return None;
+    }
+    Some((u32::try_from(code).ok()?, at))
+}
+
+/// `process_named_entity_html(&buf, &start, &length)`: the name's
+/// length where `s[at..]` is letters and digits closed by `;`.
+fn named_entity(s: &[u8], at: usize) -> Option<usize> {
+    let len = s[at.min(s.len())..]
+        .iter()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .count();
+    (len > 0 && s.get(at + len) == Some(&b';')).then_some(len)
+}
+
+/// Which entity-to-code-point table a decode reads,
+/// `unescape_inverse_map(all, flags)`.
+fn inverse_map(all: bool, flags: i64) -> &'static [(&'static str, u32, u32)] {
+    let doctype = flags & DOC_TYPE_MASK;
+    match (all, doctype) {
+        (true, DOC_HTML401 | DOC_XHTML) => tables::DECODE_HTML4,
+        (true, DOC_HTML5) => tables::DECODE_HTML5,
+        (false, DOC_HTML401) => tables::DECODE_BASIC_NOAPOS,
+        _ => tables::DECODE_BASIC_APOS,
+    }
+}
+
+/// `resolve_named_entity_html(start, length, ht, &cp1, &cp2)`.
+fn resolve_named(name: &[u8], map: &[(&str, u32, u32)]) -> Option<(u32, u32)> {
+    map.binary_search_by(|(entity, _, _)| entity.as_bytes().cmp(name))
+        .ok()
+        .map(|at| (map[at].1, map[at].2))
+}
+
+/// `php_utf32_utf8` and the single byte, `write_octet_sequence`.
+fn write_octets(out: &mut Vec<u8>, charset: Charset, code: u32) {
+    if charset != Charset::Utf8 {
+        out.push(u8::try_from(code & 0xFF).unwrap_or(0));
+        return;
+    }
+    let mut buf = [0u8; 4];
+    if let Some(ch) = char::from_u32(code) {
+        out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+    } else {
+        // A surrogate: php writes its three bytes all the same.
+        let b = |v: u32| u8::try_from(v & 0xFF).unwrap_or(0);
+        out.extend_from_slice(&[
+            b(0xE0 | (code >> 12)),
+            b(0x80 | ((code >> 6) & 0x3F)),
+            b(0x80 | (code & 0x3F)),
+        ]);
+    }
+}
+
+/// `traverse_for_entities(input, output, all, flags, inv_map,
+/// charset)`.
+fn traverse_for_entities(input: &[u8], all: bool, flags: i64, charset: Charset) -> Vec<u8> {
+    let map = inverse_map(all, flags);
+    let doctype = flags & DOC_TYPE_MASK;
+    let mut out = Vec::with_capacity(input.len());
+    let mut cur = 0usize;
+    while cur < input.len() {
+        let Some(amp) = input[cur..]
+            .iter()
+            .position(|c| *c == b'&')
+            .map(|at| at + cur)
+        else {
+            out.extend_from_slice(&input[cur..]);
+            break;
+        };
+        out.extend_from_slice(&input[cur..amp]);
+        cur = amp;
+        if input.len() - cur < 4 {
+            out.extend_from_slice(&input[cur..]);
+            break;
+        }
+        // The entity's code points and the offset of its `;`, or none
+        // for what is no entity, where the `&` is copied alone.
+        let parsed: Option<(u32, u32, usize)> = if input[cur + 1] == b'#' {
+            numeric_entity(input, cur + 2)
+                .filter(|(code, _)| {
+                    let basic =
+                        *code <= 63 && tables::ENCODE_BASIC_APOS.iter().any(|(cp, _)| cp == code);
+                    (all || basic)
+                        && unicode_cp_is_allowed(*code, doctype)
+                        && !(doctype == DOC_HTML5 && *code == 0x0D)
+                })
+                .map(|(code, end)| (code, 0, end))
+        } else {
+            let name_start = cur + 1;
+            let max = (LONGEST_ENTITY_LENGTH + 1).min(input.len() - name_start);
+            match input[name_start..name_start + max]
+                .iter()
+                .position(|c| *c == b';')
+            {
+                None | Some(0) => None,
+                Some(len) => {
+                    let name = &input[name_start..name_start + len];
+                    match resolve_named(name, map) {
+                        Some((c1, c2)) => Some((c1, c2, name_start + len)),
+                        None if doctype == DOC_XHTML && name == b"apos" => {
+                            Some((u32::from(b'\''), 0, name_start + len))
+                        }
+                        None => None,
+                    }
+                }
+            }
+        };
+        let Some((code, code2, end)) = parsed else {
+            out.push(input[cur]);
+            cur += 1;
+            continue;
+        };
+        let refused_quote = (code == u32::from(b'\'') && flags & QUOTE_SINGLE == 0)
+            || (code == u32::from(b'"') && flags & QUOTE_DOUBLE == 0);
+        let code = if refused_quote {
+            None
+        } else if charset == Charset::Utf8 {
+            Some(code)
+        } else {
+            map_from_unicode(code, charset).filter(|_| code2 == 0)
+        };
+        let Some(code) = code else {
+            // `invalid_complete_entity`: the text up to the `;` kept,
+            // the `;` read next as any byte is.
+            out.extend_from_slice(&input[cur..end]);
+            cur = end;
+            continue;
+        };
+        write_octets(&mut out, charset, code);
+        if code2 != 0 {
+            write_octets(&mut out, charset, code2);
+        }
+        cur = end + 1;
+    }
+    out
+}
+
+/// `php_unescape_html_entities(str, all, flags, hint_charset)`.
+fn unescape(
+    req: &mut Request,
+    string: PhpString,
+    all: bool,
+    flags: i64,
+    hint: Option<&[u8]>,
+) -> Result<Value, Thrown> {
+    let s = string.as_bytes();
+    if !s.contains(&b'&') {
+        return Ok(same(req, string));
+    }
+    let charset = if all {
+        determine_charset(req, hint, false)
+    } else {
+        Charset::Iso88591
+    };
+    let out = traverse_for_entities(s, all, flags, charset);
+    string_value(req, &out)
+}
+
+/// The encode table `determine_entity_table(all, doctype)` picks.
+fn entity_table(all: bool, doctype: i64) -> &'static [(u32, Row)] {
+    match (all, doctype) {
+        (true, DOC_HTML5) => tables::ENCODE_HTML5,
+        (true, _) => tables::ENCODE_HTML4,
+        (false, DOC_HTML401) => tables::ENCODE_BASIC_NOAPOS,
+        (false, _) => tables::ENCODE_BASIC_APOS,
+    }
+}
+
+/// The row a table gives a code point.
+fn row_of(table: &'static [(u32, Row)], cp: u32) -> Option<&'static Row> {
+    table
+        .binary_search_by_key(&cp, |(k, _)| *k)
+        .ok()
+        .map(|at| &table[at].1)
+}
+
+/// `php_escape_html_entities_ex(old, oldlen, all, flags, hint_charset,
+/// double_encode, quiet)`: the escaped bytes, or the empty string for
+/// input ill-formed in its charset where neither `ENT_IGNORE` nor
+/// `ENT_SUBSTITUTE` says what to do.
+#[allow(clippy::too_many_lines)]
+fn escape(
+    req: &mut Request,
+    old: &[u8],
+    all: bool,
+    flags: i64,
+    hint: Option<&[u8]>,
+    double_encode: bool,
+) -> Vec<u8> {
+    let charset = determine_charset(req, hint, false);
+    let doctype = flags & DOC_TYPE_MASK;
+    let mut all = all;
+    if all {
+        if charset.partial() {
+            docref(
+                req,
+                Level::Notice,
+                "Only basic entities substitution is supported for multi-byte encodings other than UTF-8; functionality is equivalent to htmlspecialchars",
+            );
+        }
+        all = !charset.partial() && doctype != DOC_XML1;
+    }
+    let table = entity_table(all, doctype);
+    let to_uni = if all && !charset.unicode_compat() {
+        charset.to_unicode()
+    } else {
+        None
+    };
+    let inv_map = inverse_map(true, flags);
+    let replacement: &[u8] = if charset == Charset::Utf8 {
+        "\u{FFFD}".as_bytes()
+    } else {
+        b"&#xFFFD;"
+    };
+    let mut out: Vec<u8> = Vec::with_capacity(old.len() + old.len() / 2);
+    let mut cursor = 0usize;
+    while cursor < old.len() {
+        let before = cursor;
+        let (this_char, next) = next_char(charset, old, cursor);
+        cursor = next;
+        let Some(mut this_char) = this_char else {
+            if flags & IGNORE_ERRORS != 0 {
+                continue;
+            } else if flags & SUBSTITUTE_ERRORS != 0 {
+                out.extend_from_slice(replacement);
+                continue;
+            }
+            return Vec::new();
+        };
+        let mut sequence: &[u8] = &old[before..cursor];
+        if this_char != u32::from(b'&') {
+            let quote_passes = (this_char == u32::from(b'\'') && flags & QUOTE_SINGLE == 0)
+                || (this_char == u32::from(b'"') && flags & QUOTE_DOUBLE == 0);
+            if quote_passes {
+                out.extend_from_slice(sequence);
+                continue;
+            }
+            let mut entity: Option<&str> = None;
+            if all {
+                if let Some(to_uni) = to_uni {
+                    this_char = u32::from(to_uni[usize::try_from(this_char & 0xFF).unwrap_or(0)]);
+                    if this_char == 0xFFFF {
+                        out.extend_from_slice(sequence);
+                        continue;
+                    }
+                }
+                // `find_entity_for_char`: past plane 1's `0x1D` stage the
+                // table has nothing; an ambiguous row peeks at the next
+                // character and takes it where a pair names both.
+                match row_of(table, this_char) {
+                    Some(Row::One(name)) => entity = Some(name),
+                    Some(Row::Many(default, pairs)) => {
+                        let peek = if cursor < old.len() {
+                            match next_char(charset, old, cursor) {
+                                (Some(second), after) => Some((second, after)),
+                                (None, _) => None,
+                            }
+                        } else {
+                            None
+                        };
+                        match peek.and_then(|(second, after)| {
+                            pairs
+                                .iter()
+                                .find(|(cp, _)| *cp == second)
+                                .map(|(_, name)| (*name, after))
+                        }) {
+                            Some((name, after)) => {
+                                entity = Some(name);
+                                cursor = after;
+                            }
+                            None => entity = *default,
+                        }
+                    }
+                    None => {}
+                }
+            } else if this_char < 64
+                && let Some(Row::One(name)) = row_of(table, this_char)
+            {
+                entity = Some(name);
+            }
+            if let Some(name) = entity {
+                out.push(b'&');
+                out.extend_from_slice(name.as_bytes());
+                out.push(b';');
+                continue;
+            }
+            if flags & SUBSTITUTE_DISALLOWED != 0 {
+                if charset.unicode_compat() {
+                    if !unicode_cp_is_allowed(this_char, doctype) {
+                        sequence = replacement;
+                    }
+                } else if to_uni.is_some() {
+                    // Mapped to Unicode above, since a map is only in
+                    // hand where every entity is.
+                    if !unicode_cp_is_allowed(this_char, doctype) {
+                        sequence = replacement;
+                    }
+                } else if this_char <= 0x7D && !unicode_cp_is_allowed(this_char, doctype) {
+                    sequence = replacement;
+                }
+            }
+            out.extend_from_slice(sequence);
+            continue;
+        }
+        // `&`: encoded, or, without double encoding, kept where a
+        // valid entity follows.
+        if !double_encode {
+            let valid = if old.get(cursor) == Some(&b'#') {
+                numeric_entity(old, cursor + 1).and_then(|(code, end)| {
+                    let refused = flags & SUBSTITUTE_DISALLOWED != 0
+                        && !numeric_entity_is_allowed(code, doctype);
+                    (!refused).then_some(end - cursor)
+                })
+            } else {
+                named_entity(old, cursor).filter(|len| {
+                    let name = &old[cursor..cursor + len];
+                    resolve_named(name, inv_map).is_some()
+                        || (doctype == DOC_XHTML && name == b"apos")
+                })
+            };
+            if let Some(len) = valid {
+                out.push(b'&');
+                out.extend_from_slice(&old[cursor..cursor + len]);
+                out.push(b';');
+                cursor += len + 1;
+                continue;
+            }
+        }
+        out.extend_from_slice(b"&amp;");
+    }
+    out
+}
+
+/// `php_html_entities(INTERNAL_FUNCTION_PARAM_PASSTHRU, all)`.
+fn entities(req: &mut Request, all: bool) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 4)?;
+    let string = string_argument(req, 1)?;
+    let flags = optional_long(req, 2, DEFAULT_FLAGS)?;
+    let hint = nullable_string(req, 3)?;
+    let double_encode = optional_bool(req, 4, true)?;
+    if string.is_empty() {
+        return string_value(req, b"");
+    }
+    let out = escape(
+        req,
+        string.as_bytes(),
+        all,
+        flags,
+        hint.as_ref().map(PhpString::as_bytes),
+        double_encode,
+    );
+    string_value(req, &out)
+}
+
+/// `htmlspecialchars(string $string, int $flags = ENT_QUOTES |
+/// ENT_SUBSTITUTE | ENT_HTML401, ?string $encoding = null, bool
+/// $double_encode = true): string`: `&`, `<`, `>` and the quotes the
+/// flags name as the basic entities, ill-formed input as `$flags`
+/// says.
+///
+/// ```php
+/// var_dump(htmlspecialchars("<a href='x'>T&amp;C \"q\"</a>"), htmlspecialchars("'\"", ENT_NOQUOTES), htmlspecialchars("'\"", ENT_COMPAT), htmlspecialchars("'", ENT_QUOTES | ENT_HTML5), htmlspecialchars("&amp; &#38; &#x26; &bogus; &", ENT_QUOTES, null, false), bin2hex(htmlspecialchars("a\x80b")), htmlspecialchars("a\x80b", ENT_QUOTES), htmlspecialchars("a\x80b", ENT_IGNORE), htmlspecialchars(""));
+/// var_dump(htmlspecialchars("\x01\x7f", ENT_QUOTES | ENT_DISALLOWED | ENT_HTML5), htmlspecialchars("x", ENT_QUOTES, "bogus"));
+/// ```
+/// ```expect
+/// string(63) "&lt;a href=&#039;x&#039;&gt;T&amp;amp;C &quot;q&quot;&lt;/a&gt;"
+/// string(2) "'""
+/// string(7) "'&quot;"
+/// string(6) "&apos;"
+/// string(36) "&amp; &#38; &#x26; &amp;bogus; &amp;"
+/// string(10) "61efbfbd62"
+/// string(0) ""
+/// string(2) "ab"
+/// string(0) ""
+///
+/// Warning: htmlspecialchars(): Charset "bogus" is not supported, assuming UTF-8 in %s on line 3
+/// string(6) "��"
+/// string(1) "x"
+/// ```
+fn htmlspecialchars(req: &mut Request) -> Result<Value, Thrown> {
+    entities(req, false)
+}
+
+/// `htmlentities(...)`: every character the document type names, as
+/// its entity, through the charset's map to Unicode; the multi-byte
+/// charsets but UTF-8 and XML 1.0 have the basic entities alone.
+///
+/// ```php
+/// var_dump(htmlentities("café <b> ©€"), htmlentities("café", ENT_QUOTES | ENT_HTML5), htmlentities("\xe9\x80", ENT_QUOTES, "cp1252"), htmlentities("\xe9", ENT_QUOTES, "ISO-8859-1"), htmlentities("<é>", ENT_QUOTES | ENT_XML1), htmlentities("≂̸ fj <⃒", ENT_QUOTES | ENT_HTML5), htmlentities("'", ENT_QUOTES | ENT_XHTML));
+/// var_dump(htmlentities("\xa4<", ENT_QUOTES, "BIG5"));
+/// ```
+/// ```expect
+/// string(34) "caf&eacute; &lt;b&gt; &copy;&euro;"
+/// string(11) "caf&eacute;"
+/// string(14) "&eacute;&euro;"
+/// string(8) "&eacute;"
+/// string(10) "&lt;é&gt;"
+/// string(22) "&nesim; &fjlig; &nvlt;"
+/// string(6) "&#039;"
+///
+/// Notice: htmlentities(): Only basic entities substitution is supported for multi-byte encodings other than UTF-8; functionality is equivalent to htmlspecialchars in %s on line 3
+/// string(0) ""
+/// ```
+fn htmlentities(req: &mut Request) -> Result<Value, Thrown> {
+    entities(req, true)
+}
+
+/// `htmlspecialchars_decode(string $string, int $flags = ENT_QUOTES |
+/// ENT_SUBSTITUTE | ENT_HTML401): string`: the basic entities, named
+/// or numeric, back to their bytes, the quotes as the flags allow.
+///
+/// ```php
+/// var_dump(htmlspecialchars_decode("&lt;b&gt; &amp;amp; &quot;q&quot; &#039;s&#39; &apos; &#60;&#x3E; &eacute;"), htmlspecialchars_decode("&quot;&#039;", ENT_NOQUOTES), htmlspecialchars_decode("&apos;", ENT_QUOTES | ENT_HTML5), htmlspecialchars_decode("&amp", ENT_QUOTES), htmlspecialchars_decode("no entity"));
+/// ```
+/// ```expect
+/// string(36) "<b> &amp; "q" 's' &apos; <> &eacute;"
+/// string(12) "&quot;&#039;"
+/// string(1) "'"
+/// string(4) "&amp"
+/// string(9) "no entity"
+/// ```
+fn htmlspecialchars_decode(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 2)?;
+    let string = string_argument(req, 1)?;
+    let flags = optional_long(req, 2, DEFAULT_FLAGS)?;
+    unescape(req, string, false, flags, None)
+}
+
+/// `html_entity_decode(string $string, int $flags = ENT_QUOTES |
+/// ENT_SUBSTITUTE | ENT_HTML401, ?string $encoding = null): string`:
+/// every entity the document type names and every numeric one it
+/// allows, back to the charset's bytes; one the charset cannot write
+/// stays as written.
+///
+/// ```php
+/// var_dump(html_entity_decode("caf&eacute; &euro; &#8364; &#x20AC; &hellip; &nosuch; &#0; &#xD800; &apos;"), html_entity_decode("&apos; &NotEqualTilde; &fjlig;", ENT_QUOTES | ENT_HTML5), bin2hex(html_entity_decode("&euro;&eacute;&#x2603;", ENT_QUOTES, "cp1252")), html_entity_decode("&apos;", ENT_QUOTES | ENT_XHTML), html_entity_decode("&quot;&#39;", ENT_NOQUOTES), bin2hex(html_entity_decode("&#1025;", ENT_QUOTES, "ISO-8859-5")));
+/// ```
+/// ```expect
+/// string(51) "café € € € … &nosuch; &#0; &#xD800; &apos;"
+/// string(10) "' ≂̸ fj"
+/// string(20) "80e9262378323630333b"
+/// string(1) "'"
+/// string(11) "&quot;&#39;"
+/// string(2) "a1"
+/// ```
+fn html_entity_decode(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 3)?;
+    let string = string_argument(req, 1)?;
+    let flags = optional_long(req, 2, DEFAULT_FLAGS)?;
+    let hint = nullable_string(req, 3)?;
+    unescape(
+        req,
+        string,
+        true,
+        flags,
+        hint.as_ref().map(PhpString::as_bytes),
+    )
+}
+
+/// `write_s3row_data(r, orig_cp, charset, arr)`: the row's entities
+/// under the character, and under the character and its second for
+/// each pair the charset can write.
+fn write_row(
+    req: &mut Request,
+    array: &mut PhpArray,
+    row: &Row,
+    key: &[u8],
+    charset: Charset,
+) -> Result<(), Thrown> {
+    let mut put = |req: &mut Request, key: &[u8], name: &str| -> Result<(), Thrown> {
+        let mut entity = Vec::with_capacity(name.len() + 2);
+        entity.push(b'&');
+        entity.extend_from_slice(name.as_bytes());
+        entity.push(b';');
+        let key = php_ext::values::Key::from_string(PhpString::new(req, key)?);
+        let value = string_value(req, &entity)?;
+        array.set(req, key, value)
+    };
+    match row {
+        Row::One(name) => put(req, key, name),
+        Row::Many(default, pairs) => {
+            if let Some(name) = default {
+                put(req, key, name)?;
+            }
+            for (second, name) in *pairs {
+                let code = if charset.unicode_compat() {
+                    Some(*second)
+                } else {
+                    map_from_unicode(*second, charset)
+                };
+                let Some(code) = code else {
+                    continue;
+                };
+                let mut both = key.to_vec();
+                write_octets(&mut both, charset, code);
+                put(req, &both, name)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// `get_html_translation_table(int $table = HTML_SPECIALCHARS, int
+/// $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401, string $encoding
+/// = "UTF-8"): array`: the table the escapes read, character to entity,
+/// in code point order, or, for a single-byte charset, byte order.
+///
+/// ```php
+/// var_dump(get_html_translation_table(), get_html_translation_table(HTML_SPECIALCHARS, ENT_NOQUOTES | ENT_HTML5), count(get_html_translation_table(HTML_ENTITIES)), count(get_html_translation_table(HTML_ENTITIES, ENT_QUOTES | ENT_HTML5)), count(get_html_translation_table(HTML_ENTITIES, ENT_QUOTES, "cp1252")), count(get_html_translation_table(HTML_ENTITIES, ENT_QUOTES | ENT_XML1)), count(get_html_translation_table(HTML_ENTITIES, ENT_QUOTES | ENT_HTML5, "ISO-8859-1")));
+/// foreach ([[ENT_QUOTES | ENT_HTML5, "UTF-8"], [ENT_QUOTES | ENT_HTML401, "UTF-8"], [ENT_QUOTES | ENT_HTML401, "KOI8-R"], [ENT_COMPAT | ENT_HTML5, "cp1252"], [ENT_QUOTES | ENT_XHTML, "MacRoman"], [ENT_QUOTES | ENT_HTML5, "ISO-8859-5"]] as $p) { $s = ""; foreach (get_html_translation_table(HTML_ENTITIES, $p[0], $p[1]) as $k => $v) { $s .= bin2hex($k) . "=" . $v . ","; } echo strlen($s), " ", md5($s), "\n"; }
+/// ```
+/// ```expect
+/// array(5) {
+///   ["""]=>
+///   string(6) "&quot;"
+///   ["&"]=>
+///   string(5) "&amp;"
+///   ["'"]=>
+///   string(6) "&#039;"
+///   ["<"]=>
+///   string(4) "&lt;"
+///   [">"]=>
+///   string(4) "&gt;"
+/// }
+/// array(3) {
+///   ["&"]=>
+///   string(5) "&amp;"
+///   ["<"]=>
+///   string(4) "&lt;"
+///   [">"]=>
+///   string(4) "&gt;"
+/// }
+/// int(253)
+/// int(1511)
+/// int(126)
+/// int(5)
+/// int(132)
+/// 23957 a24923ff13839c775201d7d99805084a
+/// 3366 b8a7e231d7e307797575f157ed6555bd
+/// 146 f8534ec3c87cb4084d31c3e7bdf3ede1
+/// 1752 f4a2e7e2d09c5ae2fa4f45a57784af3d
+/// 1318 5c3e4860155f13a6163e6e8f79e1ac59
+/// 1289 0d3ed27bb00aa7cf7011fbaa31282b12
+/// ```
+fn get_html_translation_table(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 0, 3)?;
+    let all = optional_long(req, 1, 0)?;
+    let flags = optional_long(req, 2, DEFAULT_FLAGS)?;
+    let hint = optional_string(req, 3)?;
+    let charset = determine_charset(req, hint.as_ref().map(PhpString::as_bytes), false);
+    let doctype = flags & DOC_TYPE_MASK;
+    let all = all != 0 && !charset.partial() && doctype != DOC_XML1;
+    let table = entity_table(all, doctype);
+    let mut array = PhpArray::new(req)?;
+    let quote_skipped = |cp: u32| {
+        (cp == u32::from(b'\'') && flags & QUOTE_SINGLE == 0)
+            || (cp == u32::from(b'"') && flags & QUOTE_DOUBLE == 0)
+    };
+    if all && charset.unicode_compat() {
+        // ISO-8859-1 walks the first 256 code points, UTF-8 all of
+        // them.
+        let limit = if charset.single_byte() {
+            0x100
+        } else {
+            u32::MAX
+        };
+        for (cp, row) in table {
+            if *cp >= limit || quote_skipped(*cp) {
+                continue;
+            }
+            let mut key = Vec::new();
+            write_octets(&mut key, charset, *cp);
+            write_row(req, &mut array, row, &key, charset)?;
+        }
+    } else if all {
+        let to_uni = charset.to_unicode().unwrap_or(&tables::TO_UNI_CP1252);
+        for byte in 0..=255u8 {
+            let cp = u32::from(byte);
+            if quote_skipped(cp) {
+                continue;
+            }
+            let uni = u32::from(to_uni[usize::from(byte)]);
+            if let Some(row) = row_of(table, uni) {
+                write_row(req, &mut array, row, &[byte], charset)?;
+            }
+        }
+    } else {
+        for (cp, row) in table {
+            if quote_skipped(*cp) {
+                continue;
+            }
+            let key = [u8::try_from(*cp).unwrap_or(0)];
+            write_row(req, &mut array, row, &key, Charset::Iso88591)?;
+        }
+    }
+    Ok(Value::array(array))
+}

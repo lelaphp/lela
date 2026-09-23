@@ -46,12 +46,36 @@
 
 mod array;
 mod base64;
+mod basic_functions;
+mod crc32;
+mod csv;
 mod exec;
 mod file;
 mod formatted_print;
 mod head;
+mod hrtime;
+mod html;
+mod http;
+mod ini;
+mod levenshtein;
+mod md5;
+mod metaphone;
+mod microtime;
 mod output;
+mod pack;
+mod quot_print;
+mod scanf;
+mod sha1;
+mod soundex;
+mod string;
+mod strnatcmp;
+mod stub;
+mod uniqid;
+mod url;
+mod uuencode;
 mod var;
+mod versioning;
+mod zpp;
 
 use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder};
 use php_ext::call::{call_array, call_named, fetch_constant};
@@ -73,6 +97,9 @@ struct State {
     /// which `readdir`, `rewinddir` and `closedir` read without an
     /// argument.
     default_dir: Option<php_ext::values::Resource>,
+    string: string::State,
+    uniqid: uniqid::State,
+    hrtime: hrtime::State,
 }
 
 /// The extension value (design §7.1): declarations paired with entries,
@@ -162,6 +189,7 @@ pub fn extension() -> Extension {
         .functions(exec::natives())
         .functions(file::natives())
         .functions(basic_natives())
+        .functions(file_natives())
         .constants(vec![
             constant(b"COUNT_NORMAL", COUNT_NORMAL),
             constant(b"COUNT_RECURSIVE", COUNT_RECURSIVE),
@@ -171,9 +199,53 @@ pub fn extension() -> Extension {
         ])
         .constants(array::constants())
         .constants(file::constants())
+        .constants(file_constants())
         .dependencies(dependencies())
         .request_state::<State>()
         .build("standard")
+}
+
+/// The natives of the php-src files ported one file each (#655), in
+/// the order the modules landed: `string.c`, `url.c`, `html.c`, the
+/// digests, `pack.c`, `http.c`, the small files and `basic_functions.c`'s
+/// environment and ini natives.
+fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
+    [
+        string::natives(),
+        url::natives(),
+        html::natives(),
+        md5::natives(),
+        sha1::natives(),
+        crc32::natives(),
+        pack::natives(),
+        http::natives(),
+        quot_print::natives(),
+        uuencode::natives(),
+        metaphone::natives(),
+        soundex::natives(),
+        levenshtein::natives(),
+        uniqid::natives(),
+        microtime::natives(),
+        hrtime::natives(),
+        versioning::natives(),
+        basic_functions::natives(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// Their constants.
+fn file_constants() -> Vec<ConstDecl> {
+    [
+        string::constants(),
+        url::constants(),
+        html::constants(),
+        basic_functions::constants(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// `standard_deps` (`Z/ext/standard/basic_functions.c:143`): `uri`

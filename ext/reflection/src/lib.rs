@@ -4253,7 +4253,8 @@ fn function_parameter_string(
 /// `zend_internal_arg_info.default_value`: the expression's source
 /// text, which for a scalar is the scalar as written, and for a string
 /// the stub's spelling, double-quoted as `zend_exceptions.stub.php` and
-/// the rest of php-src write theirs, and `<default>` for the stub's
+/// the rest of php-src write theirs, constants joined by `|` as the
+/// stub joins them, and `<default>` for the stub's
 /// `UNKNOWN`, an optional parameter with nothing to show; a string the
 /// stub spells with an escape needs the written text on the
 /// declaration, which the model does not carry (#377).
@@ -4268,6 +4269,14 @@ fn const_expr_string(expr: &php_ext::decl::ConstExpr) -> String {
         expr if stub::is_unknown_default(expr) => String::from("<default>"),
         ConstExpr::Constant(name) => String::from_utf8_lossy(&name.0).into_owned(),
         ConstExpr::Array(elements) if elements.is_empty() => String::from("[]"),
+        // `ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401`: the stub's
+        // operands with the operator between, as it wrote them.
+        ConstExpr::Binary { op, lhs, rhs } => format!(
+            "{} {} {}",
+            const_expr_string(lhs),
+            String::from_utf8_lossy(&op.0),
+            const_expr_string(rhs)
+        ),
         _ => String::from("<default>"),
     }
 }
