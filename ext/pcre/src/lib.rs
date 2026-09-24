@@ -37,9 +37,9 @@ mod split;
 pub use regex::Regex;
 
 use php_ext::abi::{Callable, Extension, ExtensionBuilder};
-use php_ext::coerce::{callable_checked, coerce_param};
+use php_ext::coerce::coerce_param;
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, IniDecl, Name, Parameter, Type};
-use php_ext::raising::{Thrown, arg_count_error, arg_type_error};
+use php_ext::raising::{Thrown, arg_count_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
 
@@ -454,9 +454,13 @@ fn either_argument(req: &mut Request, position: u32) -> Result<Either, Thrown> {
 
 /// One `Z_PARAM_FUNC`.
 fn callable_argument(req: &mut Request, position: u32) -> Result<Callable, Thrown> {
-    let given = req.argument(position).unwrap_or_default().deref();
-    callable_checked(req, &given)
-        .map_err(|why| arg_type_error(req, position, &format!("be a valid callback, {why}")))
+    match php_ext::coerce::callable_argument(req, position)? {
+        Some(callable) => Ok(callable),
+        None => Err(php_ext::raising::fatal(
+            req,
+            "InternalError: a callable parameter read no callable",
+        )),
+    }
 }
 
 /// `ZEND_TRY_ASSIGN_REF_*` on the argument at `position`: the value

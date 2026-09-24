@@ -2097,13 +2097,11 @@ pub(crate) fn call_shutdown_functions(req: &mut Request) {
 /// it is taken and not where it is served. The sentence a miss takes is
 /// php's `*error` for that miss, the one `zend_is_callable_ex` wrote.
 fn callable_argument(req: &mut Request, position: u32) -> Result<Callable, Thrown> {
-    let given = req.argument(position).unwrap_or_default().deref();
-    match req.callable_checked(&given) {
-        Ok(callable) => Ok(callable),
-        Err(why) => Err(arg_type_error(
+    match crate::api::coerce::callable_argument(req, position)? {
+        Some(callable) => Ok(callable),
+        None => Err(crate::api::raising::fatal(
             req,
-            position,
-            &format!("be a valid callback, {why}"),
+            "InternalError: a callable parameter read no callable",
         )),
     }
 }

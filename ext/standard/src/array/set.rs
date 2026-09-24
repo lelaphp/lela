@@ -16,9 +16,9 @@ use std::collections::HashSet;
 
 use php_ext::abi::Callable;
 use php_ext::call::call;
-use php_ext::coerce::{callable_checked, to_long, to_string};
+use php_ext::coerce::{to_long, to_string};
 use php_ext::decl::{FunctionDecl, Parameter, Type};
-use php_ext::raising::{Thrown, arg_count_error, arg_type_error};
+use php_ext::raising::{Thrown, arg_count_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, Value, ValueRef, zend_sort};
 
@@ -167,18 +167,9 @@ fn parse(req: &mut Request, callbacks: usize) -> Result<Parsed, Thrown> {
         .collect();
     let split = given - callbacks;
     let mut found = Vec::with_capacity(callbacks);
-    for (offset, value) in values[split..].iter().enumerate() {
+    for offset in 0..values.len() - split {
         let position = u32::try_from(split + offset + 1).unwrap_or(u32::MAX);
-        match callable_checked(req, value) {
-            Ok(callable) => found.push(callable),
-            Err(why) => {
-                return Err(arg_type_error(
-                    req,
-                    position,
-                    &format!("be a valid callback, {why}"),
-                ));
-            }
-        }
+        found.push(crate::callable_argument(req, position)?);
     }
     Ok(Parsed {
         arrays: values[..split].to_vec(),

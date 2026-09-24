@@ -101,10 +101,10 @@ mod zpp;
 
 use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder};
 use php_ext::call::{call_array, call_named, fetch_constant};
-use php_ext::coerce::{callable_checked, coerce_param, is_type};
+use php_ext::coerce::{coerce_param, is_type};
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, Type};
 use php_ext::raising::{
-    Level, Thrown, arg_count_error, arg_type_error, arg_value_error, docref, too_few_arguments,
+    Level, Thrown, arg_count_error, arg_value_error, docref, too_few_arguments,
 };
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, TypeTag, Value};
@@ -967,13 +967,11 @@ fn call_user_func_array(req: &mut Request) -> Result<Value, Thrown> {
 /// it is taken and not where it is served. The sentence a miss takes is
 /// php's `*error` for that miss, the one `zend_is_callable_ex` wrote.
 fn callable_argument(req: &mut Request, position: u32) -> Result<Callable, Thrown> {
-    let given = req.argument(position).unwrap_or_default().deref();
-    match callable_checked(req, &given) {
-        Ok(callable) => Ok(callable),
-        Err(why) => Err(arg_type_error(
+    match php_ext::coerce::callable_argument(req, position)? {
+        Some(callable) => Ok(callable),
+        None => Err(php_ext::raising::fatal(
             req,
-            position,
-            &format!("be a valid callback, {why}"),
+            "InternalError: a callable parameter read no callable",
         )),
     }
 }

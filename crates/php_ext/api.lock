@@ -112,6 +112,7 @@ coerce::Exponent
 coerce::Exponent::as_char
 coerce::argument
 coerce::binary_op
+coerce::callable_argument
 coerce::callable_checked
 coerce::coerce_param
 coerce::compare

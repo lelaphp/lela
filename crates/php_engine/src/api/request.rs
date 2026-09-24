@@ -1543,10 +1543,18 @@ impl Request {
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
+        let wrapped = self.values_for_references(function, arguments)?;
         let name = self.declared_name(function);
         let name = self.interned(name.as_bytes())?;
-        for argument in arguments {
+        let mut sent = arguments.to_vec();
+        for (at, argument) in sent.iter_mut().enumerate() {
             self.addref(argument);
+            if wrapped.contains(&at) {
+                // `Z_TRY_ADDREF_P(arg); ZVAL_NEW_REF(param, arg)`: the
+                // owner just taken is the new cell's, and the frame
+                // holds the cell.
+                *argument = PhpRef::new(self, *argument)?.as_value();
+            }
         }
         for (extra, value) in extra_named {
             self.addref(&Value::string(*extra));
@@ -1558,8 +1566,8 @@ impl Request {
         let call = CallState {
             function,
             name: Some(name),
-            arguments: arguments.to_vec(),
-            count: arguments.len(),
+            count: sent.len(),
+            arguments: sent,
             this,
             called_scope,
             closure,
@@ -1575,6 +1583,82 @@ impl Request {
         let served = self.serve_native(function);
         self.pop_call();
         served
+    }
+
+    /// `zend_call_function`'s walk of `fci->params`
+    /// (`Z/Zend/zend_execute_API.c:883-902`) over the by-reference
+    /// parameters: an argument that is no reference, handed to a
+    /// parameter `ARG_SHOULD_BE_SENT_BY_REF` and not
+    /// `ARG_MAY_BE_SENT_BY_REF`, is `zend_param_must_be_ref`'s warning,
+    /// and the call goes on with the value wrapped in a reference of its
+    /// own, so what the callee writes through it is lost. The positions
+    /// to wrap come back; a warning a handler turned into a throw stops
+    /// the call before it is made, as php's `cleanup_args` does, and is
+    /// the `Err`. The parameter is named where it is one of the declared
+    /// ones, `get_function_arg_name`, and a variadic's is not.
+    ///
+    /// ```php
+    /// function f(&$v) { $v = 1; return 'f'; }
+    /// class C { static function m(&$v, ...$rest) { return 'm'; } }
+    /// $x = 5;
+    /// var_dump(call_user_func('f', $x), $x, array_map('f', [1]), call_user_func('C::m', 1, 2));
+    /// ```
+    /// ```expect
+    /// Warning: f(): Argument #1 ($v) must be passed by reference, value given in %s on line 5
+    ///
+    /// Warning: f(): Argument #1 ($v) must be passed by reference, value given in %s on line 5
+    ///
+    /// Warning: C::m(): Argument #1 ($v) must be passed by reference, value given in %s on line 5
+    /// string(1) "f"
+    /// int(5)
+    /// array(1) {
+    ///   [0]=>
+    ///   string(1) "f"
+    /// }
+    /// string(1) "m"
+    /// ```
+    fn values_for_references(
+        &mut self,
+        function: Function,
+        arguments: &[Value],
+    ) -> Result<Vec<usize>, Thrown> {
+        let Some(decl) = self.function_decl(function) else {
+            return Ok(Vec::new());
+        };
+        let declared = decl.parameters.len();
+        let variadic = decl.parameters.last().filter(|last| last.variadic);
+        let mut wrapped: Vec<(usize, Option<String>)> = Vec::new();
+        for (at, argument) in arguments.iter().enumerate() {
+            if matches!(argument.as_ref(), ValueRef::Undef | ValueRef::Reference(_)) {
+                continue;
+            }
+            let Some(parameter) = decl.parameters.get(at).or(variadic) else {
+                continue;
+            };
+            if parameter.by_ref && !parameter.prefer_ref {
+                let name = (at < declared && !parameter.variadic)
+                    .then(|| String::from_utf8_lossy(&parameter.name.0).into_owned());
+                wrapped.push((at, name));
+            }
+        }
+        if wrapped.is_empty() {
+            return Ok(Vec::new());
+        }
+        let callee = self.qualified_name(function, None);
+        let mut positions = Vec::with_capacity(wrapped.len());
+        for (at, name) in wrapped {
+            let name = name.map(|name| format!(" (${name})")).unwrap_or_default();
+            let message = format!(
+                "{callee}(): Argument #{}{name} must be passed by reference, value given",
+                at + 1
+            );
+            crate::api::raising::warning(self, &message);
+            if self.is_pending() {
+                return Err(Thrown::of(self.take_pending()));
+            }
+            positions.push(at);
+        }
+        Ok(positions)
     }
 
     /// `zend_call_function` over a user function, the branch that calls

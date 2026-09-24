@@ -396,7 +396,9 @@ pub fn binary_op(
 /// the rest is `zend_argument_type_error`'s `must be of type %s, %s
 /// given`, the type as `zend_type_to_string` writes it
 /// ([`declared_type_name`]) and the value as `zend_zval_value_name`
-/// names it.
+/// names it. A `callable` is `zend_is_callable_ex`'s resolution, and
+/// its refusal `zend_wrong_callback_error`'s sentence
+/// ([`callable_argument`]).
 ///
 /// An int parameter given a float or a string reads it through the
 /// kernel that copies `zend_parse_arg_long_weak`,
@@ -550,7 +552,7 @@ pub fn coerce_param(
     ty: &Type,
     position: u32,
 ) -> Result<Value, Thrown> {
-    hold(req, value, ty, position)
+    hold(req, value, ty, position).map(|held| held.value)
 }
 
 /// [`coerce_param`] over the argument at `position` and the type the
@@ -590,13 +592,98 @@ pub fn argument(req: &mut Request, position: u32) -> Result<Option<Value>, Throw
     }
 }
 
-/// The body of [`coerce_param`].
-fn hold(req: &mut Request, value: &Value, ty: &Type, position: u32) -> Result<Value, Thrown> {
+/// `Z_PARAM_FUNC` and `Z_PARAM_FUNC_OR_NULL` over the argument at
+/// `position`, held to the `callable` or `?callable` the native
+/// declares there as [`argument`] holds any parameter, and to
+/// `callable` where the declaration names no callable, which is the
+/// macro's own form: the callee `zend_is_callable_ex` resolved it to,
+/// its deprecations raised once, or `zend_wrong_callback_error`'s `must
+/// be a valid callback, %s` ending with the resolver's own sentence, `or
+/// null` where `null` is a member. `None` for the `null` a `?callable`
+/// took and for no argument at all. Every form the resolver serves is
+/// taken, a `Closure` first among them.
+///
+/// ```php
+/// class C { function m($x) { return "m$x"; } static function s($x) { return "s$x"; } }
+/// function f($x) { return "f$x"; }
+/// var_dump(call_user_func(fn ($x) => "c$x", 1), call_user_func('f', 2), call_user_func([new C, 'm'], 3), call_user_func('C::s', 4), array_map(null, [5]));
+/// try { call_user_func('nope'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { array_map([new C, 'nope'], []); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $a = []; usort($a, null); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(2) "c1"
+/// string(2) "f2"
+/// string(2) "m3"
+/// string(2) "s4"
+/// array(1) {
+///   [0]=>
+///   int(5)
+/// }
+/// call_user_func(): Argument #1 ($callback) must be a valid callback, function "nope" not found or invalid function name
+/// array_map(): Argument #1 ($callback) must be a valid callback or null, class C does not have a method "nope"
+/// usort(): Argument #2 ($callback) must be a valid callback, no array or string given
+/// ```
+pub fn callable_argument(req: &mut Request, position: u32) -> Result<Option<Callable>, Thrown> {
+    let Some(given) = req
+        .argument(position)
+        .filter(|given| !matches!(given.as_ref(), ValueRef::Undef))
+    else {
+        return Ok(None);
+    };
+    let ty = req
+        .active_parameter_type(position)
+        .filter(|ty| callable_type(ty).is_some())
+        .unwrap_or(Type::Callable);
+    hold(req, &given, &ty, position).map(|held| held.callable)
+}
+
+/// What [`hold`] settled one argument to: the value the native reads,
+/// and the callee a `callable` parameter resolved it to.
+struct Held {
+    value: Value,
+    callable: Option<Callable>,
+}
+
+impl Held {
+    fn plain(value: Value) -> Held {
+        Held {
+            value,
+            callable: None,
+        }
+    }
+}
+
+/// The body of [`coerce_param`] and [`callable_argument`].
+fn hold(req: &mut Request, value: &Value, ty: &Type, position: u32) -> Result<Held, Thrown> {
     let value = value.deref().undef_as_null();
     let null = matches!(value.as_ref(), ValueRef::Null);
+    if let Some(nullable) = callable_type(ty) {
+        if null && nullable {
+            return Ok(Held::plain(Value::null()));
+        }
+        return match req.callable_checked(&value) {
+            Ok(callable) => Ok(Held {
+                value,
+                callable: Some(callable),
+            }),
+            // A deprecation the resolution raised became a throw, which
+            // stands as it is, as `zend_wrong_callback_error` raises
+            // nothing over a pending exception.
+            Err(_) if req.is_pending() => Err(Thrown::of(req.take_pending())),
+            Err(why) => {
+                let or_null = if nullable { " or null" } else { "" };
+                Err(arg_type_error(
+                    req,
+                    position,
+                    &format!("be a valid callback{or_null}, {why}"),
+                ))
+            }
+        };
+    }
     let scopes = req.active_native_scopes();
     if holds(req, &value, ty, scopes) {
-        return Ok(value);
+        return Ok(Held::plain(value));
     }
     let strict = req.strict_types();
     let mask = ty.mask();
@@ -627,7 +714,7 @@ fn hold(req: &mut Request, value: &Value, ty: &Type, position: u32) -> Result<Va
         crate::api::raising::arg_null_deprecated(req, position, &declared);
         if req.is_pending() {
             req.release(coerced);
-            return Err(Thrown::of(None));
+            return Err(Thrown::of(req.take_pending()));
         }
     }
     // `zend_parse_arg_str_weak` converts the argument's own zval, and
@@ -638,7 +725,21 @@ fn hold(req: &mut Request, value: &Value, ty: &Type, position: u32) -> Result<Va
     {
         req.replace_argument(position, coerced);
     }
-    Ok(coerced)
+    Ok(Held::plain(coerced))
+}
+
+/// Whether `ty` is `callable`, and whether `null` is a member beside
+/// it: the two shapes `Z_PARAM_FUNC` and `Z_PARAM_FUNC_OR_NULL` read.
+fn callable_type(ty: &Type) -> Option<bool> {
+    match ty {
+        Type::Callable => Some(false),
+        Type::Nullable(inner) => callable_type(inner).map(|_| true),
+        Type::Union(members) => match members.as_slice() {
+            [Type::Callable, Type::Null] | [Type::Null, Type::Callable] => Some(true),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// The classes a `self`, a `parent` and a `static` in a declared type

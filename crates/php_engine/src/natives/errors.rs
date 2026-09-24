@@ -12,9 +12,9 @@ use php_unit::Level;
 use super::stub::stub;
 use super::{long_argument, string_argument, wrong_argument_count};
 use crate::api::abi::{Callable, Entry};
-use crate::api::raising::{Thrown, arg_type_error, arg_value_error, deprecated};
+use crate::api::raising::{Thrown, arg_value_error, deprecated};
 use crate::api::request::Request;
-use crate::api::values::{Value, ValueRef};
+use crate::api::values::Value;
 use php_unit::decl::FunctionDecl;
 
 /// The eight, in the stub's order.
@@ -144,18 +144,7 @@ fn trigger_error(req: &mut Request) -> Result<Value, Thrown> {
 /// callable, and anything else is resolved where it is taken, the
 /// `TypeError` worded as `zend_parse_arg_func` words a miss.
 fn callable_or_null(req: &mut Request, position: u32) -> Result<Option<Callable>, Thrown> {
-    let given = req.argument(position).unwrap_or_default().deref();
-    if matches!(given.as_ref(), ValueRef::Null) {
-        return Ok(None);
-    }
-    match req.callable_checked(&given) {
-        Ok(callable) => Ok(Some(callable)),
-        Err(why) => Err(arg_type_error(
-            req,
-            position,
-            &format!("be a valid callback or null, {why}"),
-        )),
-    }
+    crate::api::coerce::callable_argument(req, position)
 }
 
 /// A handler's value as `RETURN_COPY` hands it back, one more owner,

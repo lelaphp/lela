@@ -48,7 +48,7 @@ use php_unit::decl::{
 
 use crate::api::abi::{Callable, CloneObj, Entry, NativeClassDecl, ObjectHandlers};
 use crate::api::call::call_named;
-use crate::api::raising::{Thrown, arg_count_error, arg_type_error, throw};
+use crate::api::raising::{Thrown, arg_count_error, throw};
 use crate::api::request::Request;
 use crate::api::values::{PhpObject, PhpString, Value};
 use crate::exec::Vm;
@@ -583,16 +583,11 @@ fn construct(req: &mut Request) -> Result<Value, Thrown> {
             &format!("exactly 1 argument, {count} given"),
         ));
     }
-    let given = req.argument(1).unwrap_or_default().deref();
-    let callable = match req.callable_checked(&given) {
-        Ok(callable) => callable,
-        Err(why) => {
-            return Err(arg_type_error(
-                req,
-                1,
-                &format!("be a valid callback, {why}"),
-            ));
-        }
+    let Some(callable) = crate::api::coerce::callable_argument(req, 1)? else {
+        return Err(crate::api::raising::fatal(
+            req,
+            "InternalError: a callable parameter read no callable",
+        ));
     };
     let this = this_fiber(req)?;
     let fiber = payload(req, this)?;
