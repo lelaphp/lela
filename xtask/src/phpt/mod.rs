@@ -36,6 +36,11 @@
 //! this module contributes [`Judgement`], the per-item judge and the words
 //! of the subset's message.
 //!
+//! **Held against a commit.** Every run the engine judged whole is kept
+//! as its verdicts, and `--against <commit>` holds each subset to the run
+//! kept at the commit, test by test, in one more reading per subset; the
+//! `against` module says what keys a run and what gives no verdict (#664).
+//!
 //! **What one run is.** One process per test, one test at a time, so
 //! `--CONFLICTS--` is honoured by construction: nothing else of the corpus
 //! is running while a test does.
@@ -60,6 +65,7 @@
 //! item 17.
 
 mod adapter;
+pub(crate) mod against;
 mod census;
 pub(crate) mod file;
 
@@ -68,6 +74,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 
 use crate::divergence::Registry;
 use crate::manifest::{Crate, Manifest};
@@ -325,8 +332,10 @@ impl Subset {
 }
 
 /// What one test came to: upstream's outcomes less the two a leak checker
-/// decides, and `Diverged`, which is the registry's answer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// decides, and `Diverged`, which is the registry's answer. Spelled in a
+/// kept run as [`tally::Judgement::as_str`] spells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum Judgement {
     Pass,
     /// The expectation is missed and an accepted registry row says so.
@@ -570,6 +579,10 @@ pub struct Ask {
     /// the same either way: this asks for one more rendering of what the
     /// run already reached, never for a second run.
     pub census: bool,
+    /// The commit whose kept run each subset is held to, test by test:
+    /// one more reading per subset, at its scope with `@against` after it,
+    /// failing while a test met there is not met here (#664).
+    pub against: Option<String>,
 }
 
 /// Run what was asked for: one reading per subset, each written by the
@@ -641,9 +654,16 @@ pub fn run(
     // widest construct of the whole corpus is one line at the end and not
     // a sum a reader does by hand.
     let mut lane = census::Census::default();
+    let runs = against::Runs::new(root, manifest, ask.against.as_deref())?;
     for subset in &subsets {
+        let scope = subset.scope(&runner, ask.lane);
+        if let Some(unheld) = runs.unheld(manifest, &scope)? {
+            readings.push(unheld);
+            continue;
+        }
         let tally = run_subset(&oracle, registry, subset, under)?;
         let mut reading = reading(&tally, root, manifest, &source, subset, under)?;
+        let held = runs.after(manifest, &scope, &tally, &runner, &reading)?;
         if ask.census {
             let mut counted = census::Census::default();
             counted.add(&tally);
@@ -654,6 +674,7 @@ pub fn run(
             lane.add(&tally);
         }
         readings.push(reading);
+        readings.extend(held);
     }
     // One subset's census is the census; a lane's is worth a second line
     // only where there was more than one subset to fold.

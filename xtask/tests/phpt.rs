@@ -690,3 +690,132 @@ fn a_binary_the_tree_has_not_moved_past_writes_an_ordinary_reading_that_names_it
     assert_eq!(digest.len(), 32, "{stamp}");
     assert!(digest.bytes().all(|b| b.is_ascii_hexdigit()), "{stamp}");
 }
+
+/// Every file of the scratch workspace committed, `target/` ignored, and
+/// the commit's id.
+fn commit_all(root: &Path, message: &str) -> String {
+    fs::write(root.join(".gitignore"), "target/\n").unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(["-c", "user.name=xtask", "-c", "user.email=xtask@scratch"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", message]);
+    git(&["rev-parse", "HEAD"])
+}
+
+/// A binary standing where the engine's would that writes `two` for the
+/// program `planted.php` and hands every other call to the pinned oracle.
+fn planting_engine(scratch: &Scratch) -> PathBuf {
+    let path = scratch.root.join("engine/planting");
+    fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    *planted.php) echo two; exit 0 ;;\n  esac\ndone\nexec \"{}\" \"$@\"\n",
+            oracle().unwrap().display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    path
+}
+
+/// `--against <commit>` (#664): the run a checkout of the merge base kept
+/// is found by the commit alone, and a test met there that fails here is
+/// named by a reading that fails, while the subset's own reading is
+/// written beside it. The controls: the head against itself passes, a
+/// binary the tree has moved past gives no verdict, and so does a commit
+/// with no run kept, whose subset is then not run at all.
+#[test]
+fn a_test_met_at_the_merge_base_and_failing_here_fails_the_comparison() {
+    if oracle().is_none() {
+        return;
+    }
+    let echo =
+        |name: &str| format!("--TEST--\n{name}\n--FILE--\n<?php echo \"one\";\n--EXPECT--\none\n");
+    let scratch = Scratch::new(
+        "against",
+        &[
+            ("kept.phpt", &echo("kept")),
+            ("planted.phpt", &echo("planted")),
+        ],
+    );
+    let run = |engine: &Path, against: Option<&str>| {
+        let ask = Ask {
+            subset: Some("ext/fixture".to_owned()),
+            engine: Some(engine.to_path_buf()),
+            against: against.map(str::to_owned),
+            ..Ask::default()
+        };
+        phpt::run(&scratch.root, &scratch.manifest, &registry(""), &ask).unwrap()
+    };
+
+    // The merge base: both tests pass, and the run is kept.
+    let base = commit_all(&scratch.root, "base");
+    let readings = run(&scratch.engine, None);
+    assert_eq!(readings.len(), 1, "{readings:#?}");
+    assert_eq!(readings[0].status, Status::Pass, "{readings:#?}");
+
+    // The head: the engine's sources moved and planted.phpt fails.
+    fs::create_dir_all(scratch.root.join("ext/fixture/src")).unwrap();
+    fs::write(scratch.root.join("ext/fixture/src/lib.rs"), "// head\n").unwrap();
+    let head = commit_all(&scratch.root, "head");
+    let planting = planting_engine(&scratch);
+    written_at(&planting, SystemTime::now() + Duration::from_mins(1));
+    let readings = run(&planting, Some(&base));
+    let scopes: Vec<&str> = readings.iter().map(|r| r.scope.as_str()).collect();
+    assert_eq!(scopes, ["ext/fixture", "ext/fixture@against"]);
+    let against = &readings[1];
+    assert_eq!(against.status, Status::Fail, "{against:#?}");
+    assert!(
+        against.message.contains("ext/fixture/tests/planted.phpt"),
+        "{}",
+        against.message
+    );
+    assert!(
+        !against.message.contains("kept.phpt"),
+        "{}",
+        against.message
+    );
+    assert_eq!(count(against, "regressed"), 1);
+    assert_eq!(count(against, "held"), 2);
+
+    // The head against its own kept run: nothing met there fails here.
+    let readings = run(&planting, Some(&head));
+    assert_eq!(readings[1].status, Status::Pass, "{readings:#?}");
+
+    // A binary the tree has moved past ran nothing: no verdict.
+    written_at(&planting, SystemTime::now() - Duration::from_hours(1));
+    let readings = run(&planting, Some(&base));
+    assert_eq!(readings[1].status, Status::Skip, "{readings:#?}");
+    assert!(
+        readings[1].message.contains("measured no engine"),
+        "{}",
+        readings[1].message
+    );
+
+    // No run kept at the commit: no verdict, and the subset is not run.
+    fs::remove_dir_all(scratch.root.join("target/phpt-runs")).unwrap();
+    let readings = run(&scratch.engine, Some(&base));
+    assert_eq!(readings.len(), 1, "{readings:#?}");
+    assert_eq!(readings[0].scope, "ext/fixture@against");
+    assert_eq!(readings[0].status, Status::Skip, "{readings:#?}");
+    assert!(
+        readings[0]
+            .message
+            .contains("no run of ext/fixture is kept"),
+        "{}",
+        readings[0].message
+    );
+}
