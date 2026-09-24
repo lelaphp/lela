@@ -36,6 +36,7 @@ mod call_stack;
 mod compare;
 mod gc;
 mod hooks;
+mod iterators;
 mod map;
 mod mm;
 mod numeric;
@@ -96,6 +97,9 @@ pub struct Heap {
     /// Declared after `mm` so that the chunks holding that data are gone
     /// before the table frees its header.
     interned: string::Table,
+    /// php's `EG(ht_iterators)`: the positions the walks of this
+    /// request's tables are registered at.
+    iterators: iterators::Iterators,
 }
 
 impl Default for Heap {
@@ -117,6 +121,7 @@ impl Heap {
             resources: resource::RegularList::new(),
             mm,
             interned: string::Table::new(),
+            iterators: iterators::Iterators::default(),
         }
     }
 
