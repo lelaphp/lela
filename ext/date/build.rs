@@ -5,7 +5,10 @@
 //! `timelib_sources` and `PHP_TIMELIB_CFLAGS`; nothing is discovered on
 //! the system. `HAVE_TIMELIB_CONFIG_H` is left undefined, so timelib
 //! allocates with the C library's `malloc` and `free` where php's build
-//! points it at `emalloc` and `efree`.
+//! points it at `emalloc` and `efree`. It is optimised as php is, and
+//! floating-point expressions are not contracted into fused
+//! multiply-adds, so `astro.c`'s sunrise hours round as the oracle's
+//! build rounds them, to the last bit.
 
 const SOURCES: [&str; 10] = [
     "astro.c",
@@ -32,6 +35,8 @@ fn main() {
         .define("HAVE_ATOLL", "1")
         .flag_if_supported("-fwrapv")
         .flag_if_supported("-Wno-implicit-fallthrough")
+        .opt_level(2)
+        .flag_if_supported("-ffp-contract=off")
         .warnings(false);
     for source in SOURCES {
         build.file(format!("lib/{source}"));

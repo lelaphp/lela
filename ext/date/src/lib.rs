@@ -33,6 +33,7 @@ mod args;
 mod ffi;
 mod format;
 mod parse;
+mod sun;
 mod zone;
 
 use std::collections::HashMap;
@@ -219,6 +220,35 @@ fn null_int(name: &str) -> Parameter {
     d(name, nullable(Type::Int), ConstExpr::Null)
 }
 
+/// `date_sunrise` and `date_sunset`, deprecated since 8.1.
+fn sunrise_decl(name: &str) -> FunctionDecl {
+    let null_float = |name: &str| d(name, nullable(Type::Float), ConstExpr::Null);
+    FunctionDecl {
+        attributes: deprecated("8.1", "use date_sun_info() instead"),
+        ..function(
+            name,
+            vec![
+                p("timestamp", Type::Int),
+                d(
+                    "returnFormat",
+                    Type::Int,
+                    ConstExpr::Constant(Name(b"SUNFUNCS_RET_STRING".as_slice().into())),
+                ),
+                null_float("latitude"),
+                null_float("longitude"),
+                null_float("zenith"),
+                null_float("utcOffset"),
+            ],
+            Some(union(vec![
+                Type::String,
+                Type::Int,
+                Type::Float,
+                Type::False,
+            ])),
+        )
+    }
+}
+
 /// The functions, in `php_date.stub.php`'s order.
 #[allow(clippy::too_many_lines)] // the stub's function table, one row per native
 fn functions() -> Vec<(FunctionDecl, Entry)> {
@@ -326,6 +356,20 @@ fn functions() -> Vec<(FunctionDecl, Entry)> {
         (
             function("date_default_timezone_get", vec![], Some(Type::String)),
             zone::date_default_timezone_get,
+        ),
+        (sunrise_decl("date_sunrise"), sun::date_sunrise),
+        (sunrise_decl("date_sunset"), sun::date_sunset),
+        (
+            function(
+                "date_sun_info",
+                vec![
+                    p("timestamp", Type::Int),
+                    p("latitude", Type::Float),
+                    p("longitude", Type::Float),
+                ],
+                Some(Type::Array),
+            ),
+            sun::date_sun_info,
         ),
     ]
 }
