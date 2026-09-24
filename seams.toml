@@ -95,9 +95,13 @@ porting = true
 [[crate]]
 name = "ext/spl"
 budget = 10000
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
 [[crate]]
 name = "ext/date"
 budget = 10000
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
 [[crate]]
 name = "ext/reflection"
 budget = 9000
@@ -108,6 +112,8 @@ porting = true
 [[crate]]
 name = "ext/pcre"
 budget = 6000
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
 [[crate]]
 name = "ext/mbstring"
 budget = 4000
@@ -115,12 +121,16 @@ feature = "mbstring"
 [[crate]]
 name = "ext/session"
 budget = 4000
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
 [[crate]]
 name = "ext/pdo"
 budget = 2500
 [[crate]]
 name = "ext/dom"
 budget = 2000
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
 [[crate]]
 name = "ext/random"
 budget = 2000
@@ -131,6 +141,8 @@ feature = "pdo_mysql"
 [[crate]]
 name = "ext/filter"
 budget = 2000
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
 [[crate]]
 name = "ext/tokenizer"
 budget = 1500
@@ -157,6 +169,8 @@ feature = "curl"
 [[crate]]
 name = "ext/iconv"
 budget = 500
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
 [[crate]]
 name = "ext/pdo_sqlite"
 budget = 500
@@ -166,6 +180,8 @@ budget = 500
 [[crate]]
 name = "ext/hash"
 budget = 3000    # design ledger 9: no Mahout crate; a thin port over the RustCrypto hash crates
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
 
 # ---------------------------------------------------------------- seams
 # The six locked seams (design §4.5). `effects.lock` is retired; its content is
