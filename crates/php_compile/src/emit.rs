@@ -1779,11 +1779,14 @@ impl Emit<'_> {
     }
 
     /// `zend_try_ct_eval_const`'s three special names: `true`, `false`
-    /// and `null`, whatever their case, which php's compiler
+    /// and `null`, whatever their case and with or without the leading
+    /// `\` `zend_resolve_const_name` strips, which php's compiler
     /// substitutes where they are written and no program may
     /// redeclare; every other name is a constant of its own.
     fn constant_name(&self, token: TokenId) -> Option<Zval> {
-        match self.text(token).to_ascii_lowercase().as_slice() {
+        let text = self.text(token);
+        let name = text.strip_prefix(b"\\").unwrap_or(text);
+        match name.to_ascii_lowercase().as_slice() {
             b"true" => Some(Zval::bool(true)),
             b"false" => Some(Zval::bool(false)),
             b"null" => Some(Zval::null()),

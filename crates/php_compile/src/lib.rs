@@ -1785,6 +1785,28 @@ mod tests {
         );
     }
 
+    /// `true`, `false` and `null` written with the leading `\` are the
+    /// values `zend_try_ct_eval_const` substitutes, as they are without
+    /// it: `zend_resolve_const_name` strips the `\` and
+    /// `zend_get_special_const` reads the rest. The oracle's dump under
+    /// `[regime.dump]` at 8.5.9 over the same source.
+    #[test]
+    fn a_special_constant_written_fully_qualified_is_substituted() {
+        assert_eq!(
+            dump_of(b"<?php echo \\true, \\NULL, \\False, TRUE;"),
+            main_dump(
+                5,
+                0,
+                0,
+                "0000 ECHO bool(true)\n\
+                 0001 ECHO null\n\
+                 0002 ECHO bool(false)\n\
+                 0003 ECHO bool(true)\n\
+                 0004 RETURN int(1)\n"
+            )
+        );
+    }
+
     /// The oracle's dump under the pin's `dump` regime of
     /// `$a = 1; echo $a, -$a, $A; $c = $b = $a + 1;`, `vars=4, tmps=5`:
     ///
