@@ -197,6 +197,7 @@ request::Request::clear_last_error
 request::Request::clear_stat_cache
 request::Request::constant_attributes
 request::Request::constants
+request::Request::core_ini_info
 request::Request::current_file
 request::Request::current_line
 request::Request::cwd

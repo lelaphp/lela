@@ -8124,6 +8124,52 @@ impl Request {
         self.info_table(&table);
     }
 
+    /// `display_ini_entries(NULL)` (`Z/main/php_ini.c:131`) as the CLI
+    /// prints it after `zend_ini_sort_entries`: the entries no extension
+    /// declared, the engine's own, sorted by name, under `Directive =>
+    /// Local Value => Master Value`, an empty value `no value`. What
+    /// `PHP_MINFO_FUNCTION(core)` and `phpinfo()`'s `PHP Core` print.
+    pub fn core_ini_info(&mut self) {
+        let shared = Arc::clone(&self.shared);
+        let owned = |name: &[u8]| {
+            shared
+                .extensions
+                .iter()
+                .any(|e| e.ini.iter().any(|entry| entry.name.0.as_ref() == name))
+        };
+        let mut names: Vec<&[u8]> = shared
+            .ini_defaults()
+            .iter()
+            .map(|(name, _)| name.as_slice())
+            .filter(|name| !owned(name))
+            .collect();
+        // `ini_key_compare`: `zend_binary_strcasecmp` of the names.
+        names.sort_unstable_by_key(|name| name.to_ascii_lowercase());
+        let shown = |value: Option<&[u8]>| {
+            value.filter(|v| !v.is_empty()).map_or_else(
+                || String::from("no value"),
+                |v| String::from_utf8_lossy(v).into_owned(),
+            )
+        };
+        let rows: Vec<[String; 3]> = names
+            .iter()
+            .map(|name| {
+                [
+                    String::from_utf8_lossy(name).into_owned(),
+                    shown(self.ini_get(name)),
+                    shown(shared.ini_default(name)),
+                ]
+            })
+            .collect();
+        let mut table: Vec<&[&str]> = vec![&["Directive", "Local Value", "Master Value"]];
+        let cells: Vec<[&str; 3]> = rows
+            .iter()
+            .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
+            .collect();
+        table.extend(cells.iter().map(<[&str; 3]>::as_slice));
+        self.info_table(&table);
+    }
+
     /// `php_info_print_table_start` and one `php_info_print_table_row`
     /// per row as the CLI prints them, `phpinfo_as_text`
     /// (`Z/ext/standard/info.c:1062-1220`): a blank line, then each
