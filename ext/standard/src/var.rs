@@ -23,6 +23,9 @@ mod debug;
 mod serialize;
 mod unserialize;
 
+pub use serialize::Serializer;
+pub use unserialize::Unserializer;
+
 /// `PHP_IC_ENTRY`'s name, the class an object of a class `unserialize()`
 /// could not load becomes.
 pub(crate) const INCOMPLETE_CLASS: &[u8] = b"__PHP_Incomplete_Class";

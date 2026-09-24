@@ -11,9 +11,14 @@ description = "The session extension, php-src/ext/session"
 [lints]
 workspace = true
 
-# The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
+# The facade, and ext/standard for what `session.c` includes of it:
+# `php_var_serialize` and `php_var_unserialize` (`php_var.h`) with the
+# var hash one decode shares, ADR-0004's edge where php-src includes the
+# other extension's headers. The engine is out of reach (`[[edge]]`
+# ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
+php_ext_standard = { path = "../standard" }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]

@@ -1,0 +1,843 @@
+//! The state machine of `session.c` over `PS(session_status)`:
+//! `php_session_start`, `php_session_initialize`, `php_session_flush`,
+//! `php_session_abort`, `php_session_reset`, `php_session_destroy`, the
+//! id and its cookie, the cache limiter's headers, garbage collection,
+//! and the request hooks. Each save handler operation is dispatched by
+//! the save handler standing in `PS(mod)`.
+
+use std::io::Read;
+
+use php_ext::raising::{Level, Thrown, docref};
+use php_ext::request::Request;
+use php_ext::values::PhpArray;
+
+use crate::{
+    Format, Module, State, Status, absorb, bind_array, files, headers_sent, ini, ini_bool,
+    ini_long, pending, sent_error, serializers, session_array, shown, started_error, throw_error,
+    user,
+};
+
+/// `PS_MAX_SID_LENGTH`.
+const MAX_SID_LENGTH: usize = 256;
+
+/// `hexconvtab`.
+const HEXCONVTAB: &[u8; 64] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ,-";
+
+// ------------------------------------------------------------ modules
+
+/// `PS(mod)->s_open`.
+pub(super) fn open(req: &mut Request, module: Module) -> Result<bool, Thrown> {
+    let path = ini(req, b"session.save_path");
+    let name = ini(req, b"session.name");
+    match module {
+        Module::Files => Ok(files::open(req, &path)),
+        Module::User => user::open(req, &path, &name),
+    }
+}
+
+/// `PS(mod)->s_close`, where `PS(mod_data) || PS(mod_user_implemented)`.
+pub(super) fn close(req: &mut Request) -> Result<(), Thrown> {
+    let state = req.state::<State>();
+    if state.files.is_none() && !state.user_open {
+        return Ok(());
+    }
+    if state.module == Some(Module::User) {
+        return user::close(req);
+    }
+    files::close(req);
+    Ok(())
+}
+
+fn read(req: &mut Request, module: Module, id: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
+    match module {
+        Module::Files => files::read(req, id),
+        Module::User => user::read(req, id),
+    }
+}
+
+pub(super) fn write(
+    req: &mut Request,
+    module: Module,
+    id: &[u8],
+    val: &[u8],
+) -> Result<bool, Thrown> {
+    match module {
+        Module::Files => files::write(req, id, val),
+        Module::User => user::write(req, id, val),
+    }
+}
+
+fn update_timestamp(
+    req: &mut Request,
+    module: Module,
+    id: &[u8],
+    val: &[u8],
+) -> Result<bool, Thrown> {
+    match module {
+        Module::Files => files::update_timestamp(req, id, val),
+        Module::User => user::update_timestamp(req, id, val),
+    }
+}
+
+pub(super) fn destroy_id(req: &mut Request, module: Module, id: &[u8]) -> Result<bool, Thrown> {
+    match module {
+        Module::Files => files::destroy(req, id),
+        Module::User => user::destroy(req, id),
+    }
+}
+
+pub(super) fn module_gc(
+    req: &mut Request,
+    module: Module,
+    maxlifetime: i64,
+) -> Result<i64, Thrown> {
+    match module {
+        Module::Files => files::gc(req, maxlifetime),
+        Module::User => user::gc(req, maxlifetime),
+    }
+}
+
+pub(super) fn create_sid(req: &mut Request, module: Module) -> Result<Option<Vec<u8>>, Thrown> {
+    match module {
+        Module::Files => files::create_sid(req),
+        Module::User => user::create_sid(req),
+    }
+}
+
+pub(super) fn validate_sid(req: &mut Request, module: Module, id: &[u8]) -> Result<bool, Thrown> {
+    match module {
+        Module::Files => files::validate_sid(req, id),
+        Module::User => user::validate_sid(req, id),
+    }
+}
+
+// ------------------------------------------------------------ ids
+
+/// `php_session_valid_key`: `[a-zA-Z0-9,-]`, one to 256 of them, read
+/// up to the first NUL.
+pub(super) fn valid_key(key: &[u8]) -> bool {
+    let key = crate::c_str(key);
+    !key.is_empty()
+        && key.len() <= MAX_SID_LENGTH
+        && key
+            .iter()
+            .all(|&c| c.is_ascii_alphanumeric() || c == b',' || c == b'-')
+}
+
+/// `php_session_create_id`: `session.sid_length` random bytes of the
+/// system's CSPRNG, read as `session.sid_bits_per_character` bits a
+/// character by `bin_to_readable`.
+///
+/// ```php
+/// $id = session_create_id(); var_dump(strlen($id), strspn($id, "0123456789abcdefghijklmnopqrstuv") === 32);
+/// var_dump(strlen(session_create_id("pre-")), session_create_id("bad prefix"));
+/// ```
+/// ```expect
+/// int(32)
+/// bool(true)
+///
+/// Warning: session_create_id(): Prefix cannot contain special characters. Only the A-Z, a-z, 0-9, "-", and "," characters are allowed in %s on line 3
+/// int(36)
+/// bool(false)
+/// ```
+pub(super) fn create_id(req: &mut Request) -> Option<Vec<u8>> {
+    let length = usize::try_from(ini_long(req, b"session.sid_length"))
+        .ok()
+        .filter(|n| (22..=MAX_SID_LENGTH).contains(n))
+        .unwrap_or(32);
+    let bits = u32::try_from(ini_long(req, b"session.sid_bits_per_character"))
+        .ok()
+        .filter(|n| (4..=6).contains(n))
+        .unwrap_or(4);
+    let mut random = vec![0u8; length];
+    let got = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut random));
+    if got.is_err() {
+        throw_error(req, "Cannot open source device");
+        return None;
+    }
+    let mut out = Vec::with_capacity(length);
+    let (mut w, mut have, mut p) = (0u32, 0u32, 0);
+    let mask = (1u32 << bits) - 1;
+    while out.len() < length {
+        if have < bits {
+            let Some(&byte) = random.get(p) else { break };
+            w |= u32::from(byte) << have;
+            p += 1;
+            have += 8;
+        }
+        out.push(HEXCONVTAB[usize::try_from(w & mask).unwrap_or(0)]);
+        w >>= bits;
+        have -= bits;
+    }
+    Some(out)
+}
+
+// ------------------------------------------------------------ vars
+
+/// `php_session_track_init`: `$_SESSION` a new empty array.
+pub(super) fn track_init(req: &mut Request) -> Result<(), Thrown> {
+    let array = PhpArray::new(req)?;
+    bind_array(req, array);
+    Ok(())
+}
+
+/// `php_session_encode`: the session's variables through the serializer,
+/// `None` after php's warning where there is no session array, and
+/// `None` where the serializer wrote nothing.
+pub(super) fn encode(req: &mut Request) -> Result<Option<Vec<u8>>, Thrown> {
+    if session_array(req).is_none() {
+        docref(req, Level::Warning, "Cannot encode non-existent session");
+        return Ok(None);
+    }
+    let format = req.state::<State>().format.unwrap_or(Format::Php);
+    let encoded = serializers::encode(req, format);
+    Ok(absorb(req, encoded)?.flatten())
+}
+
+/// `php_session_decode`: the data through the serializer into the
+/// session's array; a failure destroys the session with php's warning.
+pub(super) fn decode(req: &mut Request, data: &[u8]) -> Result<bool, Thrown> {
+    let format = req.state::<State>().format.unwrap_or(Format::Php);
+    let decoded = serializers::decode(req, format, data);
+    let ok = absorb(req, decoded)?.unwrap_or(false);
+    if !ok {
+        destroy(req)?;
+        track_init(req)?;
+        docref(
+            req,
+            Level::Warning,
+            "Failed to decode session object. Session has been destroyed",
+        );
+    }
+    Ok(ok)
+}
+
+// ------------------------------------------------------------ lifecycle
+
+/// `php_rinit_session_globals`.
+fn rinit_globals(req: &mut Request) {
+    let state = req.state::<State>();
+    state.id = None;
+    state.status = Status::None;
+    state.in_save_handler = false;
+    state.set_handler = false;
+    state.files = None;
+    state.parent_open = false;
+    state.define_sid = true;
+    state.session_vars = None;
+    state.tracked = false;
+}
+
+/// `php_rshutdown_session_globals`: the handler closed, the id, the
+/// read data and the start site forgotten.
+fn rshutdown_globals(req: &mut Request) -> Result<(), Thrown> {
+    req.state::<State>().tracked = false;
+    let closed = close(req);
+    absorb(req, closed)?;
+    let state = req.state::<State>();
+    state.id = None;
+    state.session_vars = None;
+    state.class_name = None;
+    state.started_at = None;
+    state.status = Status::None;
+    Ok(())
+}
+
+/// The save handler and the serializer the ini entries name, taken where the
+/// request set a valid one without the on-modify function (#744) and no
+/// session is active.
+pub(super) fn sync(req: &mut Request) {
+    let format = Format::find(&ini(req, b"session.serialize_handler"));
+    let module = Module::find(&ini(req, b"session.save_handler"));
+    let state = req.state::<State>();
+    if state.status == Status::Active {
+        return;
+    }
+    if let Some(format) = format {
+        state.format = Some(format);
+    }
+    if let Some(module) = module
+        && state.module != Some(module)
+        && (module == Module::Files || state.handlers.is_set())
+        && state.module.is_some()
+    {
+        state.default_module = state.module;
+        state.module = Some(module);
+    }
+}
+
+/// `PHP_RINIT_FUNCTION(session)`: the save handler and the serializer the ini
+/// names, the session disabled where either is unknown, and started
+/// under `session.auto_start`.
+pub(super) fn rinit(req: &mut Request) -> Result<(), Thrown> {
+    rinit_globals(req);
+    let module = Module::find(&ini(req, b"session.save_handler"));
+    let format = Format::find(&ini(req, b"session.serialize_handler"));
+    let state = req.state::<State>();
+    state.module = module;
+    state.format = format;
+    if module.is_none() || format.is_none() {
+        state.status = Status::Disabled;
+        return Ok(());
+    }
+    if ini_bool(req, b"session.auto_start") {
+        start(req)?;
+        if let Some(thrown) = req.state::<State>().thrown.take() {
+            return Err(thrown);
+        }
+    }
+    Ok(())
+}
+
+/// `PHP_RSHUTDOWN_FUNCTION(session)`: an active session written and
+/// closed, the handler's callables given up.
+pub(super) fn rshutdown(req: &mut Request) {
+    if req.state::<State>().status == Status::Active {
+        let _ = flush(req, true);
+    }
+    let _ = rshutdown_globals(req);
+    let handlers = std::mem::take(&mut req.state::<State>().handlers);
+    handlers.release(req);
+    req.state::<State>().thrown = None;
+}
+
+/// `php_session_start`.
+#[allow(clippy::too_many_lines)] // php's function, arm for arm
+pub(super) fn start(req: &mut Request) -> Result<bool, Thrown> {
+    sync(req);
+    match req.state::<State>().status {
+        Status::Active => {
+            started_error(
+                req,
+                Level::Notice,
+                "Ignoring session_start() because a session has already been started",
+            );
+            return Ok(false);
+        }
+        Status::Disabled => {
+            let handler = ini(req, b"session.save_handler");
+            if req.state::<State>().module.is_none() {
+                let Some(module) = Module::find(&handler) else {
+                    docref(
+                        req,
+                        Level::Warning,
+                        &format!(
+                            "Cannot find session save handler \"{}\" - session startup failed",
+                            shown(&handler)
+                        ),
+                    );
+                    return Ok(false);
+                };
+                req.state::<State>().module = Some(module);
+            }
+            let serializer = ini(req, b"session.serialize_handler");
+            if req.state::<State>().format.is_none() {
+                let Some(format) = Format::find(&serializer) else {
+                    docref(
+                        req,
+                        Level::Warning,
+                        &format!(
+                            "Cannot find session serialization handler \"{}\" - session startup failed",
+                            shown(&serializer)
+                        ),
+                    );
+                    return Ok(false);
+                };
+                req.state::<State>().format = Some(format);
+            }
+            req.state::<State>().status = Status::None;
+            prime(req);
+        }
+        Status::None => prime(req),
+    }
+    if req.state::<State>().id.is_none() {
+        find_id(req);
+    }
+    let dangerous = req.state::<State>().id.as_deref().is_some_and(|id| {
+        crate::c_str(id)
+            .iter()
+            .any(|c| b"\r\n\t <>'\"\\".contains(c))
+    });
+    if dangerous {
+        req.state::<State>().id = None;
+    }
+    if !initialize(req)? || cache_limiter(req)? == -2 {
+        let state = req.state::<State>();
+        state.status = Status::None;
+        state.id = None;
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// The flags `php_session_start` sets on its way into `none`.
+fn prime(req: &mut Request) {
+    let only_cookies = ini_bool(req, b"session.use_only_cookies");
+    let cookies = ini_bool(req, b"session.use_cookies");
+    let state = req.state::<State>();
+    state.define_sid = !only_cookies;
+    state.send_cookie = cookies || only_cookies;
+}
+
+/// `try_find_session_id_in_cookies` and `try_find_session_id_in_global`:
+/// the id the request's cookie, `$_GET` or `$_POST` carries under the
+/// session's name.
+fn find_id(req: &mut Request) {
+    let name = ini(req, b"session.name");
+    let lookup = |req: &mut Request, global: &[u8]| -> Option<Option<Vec<u8>>> {
+        let array = req.superglobal(global).copied()?;
+        let found = array
+            .snapshot()
+            .into_iter()
+            .find_map(|(key, value)| match key {
+                php_ext::values::Key::Str(s) if s.as_bytes() == name.as_slice() => Some(value),
+                _ => None,
+            })?;
+        Some(found.as_str_bytes().map(<[u8]>::to_vec))
+    };
+    if ini_bool(req, b"session.use_cookies")
+        && let Some(found) = lookup(req, b"_COOKIE")
+    {
+        let state = req.state::<State>();
+        state.id = found;
+        state.send_cookie = false;
+        state.define_sid = false;
+    }
+    if !ini_bool(req, b"session.use_only_cookies") {
+        for global in [b"_GET".as_slice(), b"_POST"] {
+            if req.state::<State>().id.is_some() {
+                break;
+            }
+            if let Some(found) = lookup(req, global) {
+                let state = req.state::<State>();
+                state.send_cookie = found.is_none();
+                state.id = found;
+            }
+        }
+    }
+}
+
+/// `php_session_initialize`: the handler opened, an id made or checked,
+/// the cookie and `SID`, the data read and decoded, garbage collected.
+pub(super) fn initialize(req: &mut Request) -> Result<bool, Thrown> {
+    req.state::<State>().status = Status::Active;
+    let Some(module) = req.state::<State>().module else {
+        req.state::<State>().status = Status::Disabled;
+        docref(
+            req,
+            Level::Warning,
+            "No storage module chosen - failed to initialize session",
+        );
+        return Ok(false);
+    };
+    let path = shown(&ini(req, b"session.save_path"));
+    let opened = open(req, module);
+    if !absorb(req, opened)?.unwrap_or(false) {
+        abort(req)?;
+        if !pending(req) {
+            docref(
+                req,
+                Level::Warning,
+                &format!(
+                    "Failed to initialize storage module: {} (path: {path})",
+                    module.name()
+                ),
+            );
+        }
+        return Ok(false);
+    }
+    let id = req.state::<State>().id.clone();
+    match id {
+        Some(id) if !crate::c_str(&id).is_empty() => {
+            if ini_bool(req, b"session.use_strict_mode") {
+                let valid = validate_sid(req, module, &id);
+                if !absorb(req, valid)?.unwrap_or(false) {
+                    let made = create_sid(req, module);
+                    let made = match absorb(req, made)?.flatten() {
+                        Some(made) => Some(made),
+                        None => create_id(req),
+                    };
+                    req.state::<State>().id = made;
+                    if ini_bool(req, b"session.use_cookies") {
+                        req.state::<State>().send_cookie = true;
+                    }
+                }
+            }
+        }
+        _ => {
+            let made = create_sid(req, module);
+            let Some(made) = absorb(req, made)?.flatten() else {
+                abort(req)?;
+                if !pending(req) {
+                    throw_error(
+                        req,
+                        &format!(
+                            "Failed to create session ID: {} (path: {path})",
+                            module.name()
+                        ),
+                    );
+                }
+                return Ok(false);
+            };
+            req.state::<State>().id = Some(made);
+            if ini_bool(req, b"session.use_cookies") {
+                req.state::<State>().send_cookie = true;
+            }
+        }
+    }
+    if !reset_id(req)? {
+        abort(req)?;
+        return Ok(false);
+    }
+    track_init(req)?;
+    let id = req.state::<State>().id.clone().unwrap_or_default();
+    let read = read(req, module, &id);
+    let Some(Some(val)) = absorb(req, read)? else {
+        abort(req)?;
+        if !pending(req) {
+            docref(
+                req,
+                Level::Warning,
+                &format!(
+                    "Failed to read session data: {} (path: {path})",
+                    module.name()
+                ),
+            );
+        }
+        return Ok(false);
+    };
+    gc(req, false)?;
+    req.state::<State>().session_vars = ini_bool(req, b"session.lazy_write").then(|| val.clone());
+    decode(req, &val)?;
+    let file = req.current_file().map(<[u8]>::to_vec);
+    let line = req.current_line();
+    req.state::<State>().started_at = file.map(|f| (f, line));
+    Ok(true)
+}
+
+/// `php_session_gc`: the handler's collection, forced or drawn with
+/// `gc_probability / gc_divisor`; the count it deleted, `-1` for none.
+pub(super) fn gc(req: &mut Request, immediate: bool) -> Result<i64, Thrown> {
+    let state = req.state::<State>();
+    if state.files.is_none() && !state.user_open {
+        return Ok(-1);
+    }
+    let Some(module) = state.module else {
+        return Ok(-1);
+    };
+    let probability = Request::ini_parse_bytes(&ini(req, b"session.gc_probability"));
+    let divisor = Request::ini_parse_bytes(&ini(req, b"session.gc_divisor")).max(1);
+    let mut collect = immediate;
+    if !collect && probability > 0 {
+        let mut draw = [0u8; 8];
+        let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut draw));
+        let range = u64::try_from(divisor).unwrap_or(1);
+        collect = i64::try_from(u64::from_le_bytes(draw) % range).unwrap_or(0) < probability;
+    }
+    if !collect {
+        return Ok(-1);
+    }
+    let maxlifetime = ini_long(req, b"session.gc_maxlifetime");
+    let collected = module_gc(req, module, maxlifetime);
+    Ok(absorb(req, collected)?.unwrap_or(-1))
+}
+
+/// `php_session_save_current_state`: the variables encoded and written,
+/// or the timestamp updated where `lazy_write` finds them unchanged,
+/// then the handler closed.
+fn save_current_state(req: &mut Request, write_data: bool) -> Result<(), Thrown> {
+    if write_data && session_array(req).is_some() {
+        let state = req.state::<State>();
+        let (module, class_name) = (state.module, state.class_name.clone());
+        let open = state.files.is_some() || state.user_open;
+        let mut function = "write";
+        let mut ret = false;
+        if let (true, Some(module)) = (open, module) {
+            let id = req.state::<State>().id.clone().unwrap_or_default();
+            let encoded = encode(req)?;
+            let lazy = ini_bool(req, b"session.lazy_write");
+            let read_back = req.state::<State>().session_vars.clone();
+            let done = match encoded {
+                Some(val) if lazy && read_back.as_deref() == Some(val.as_slice()) => {
+                    function = if class_name.is_some() {
+                        "updateTimestamp"
+                    } else {
+                        "update_timestamp"
+                    };
+                    update_timestamp(req, module, &id, &val)
+                }
+                Some(val) => write(req, module, &id, &val),
+                None => write(req, module, &id, b""),
+            };
+            ret = absorb(req, done)?.unwrap_or(false);
+        }
+        if !ret && !pending(req) {
+            let path = shown(&ini(req, b"session.save_path"));
+            let message = if !req.state::<State>().user_open {
+                format!(
+                    "Failed to write session data ({}). Please verify that the current setting of session.save_path is correct ({path})",
+                    module.map_or("", Module::name)
+                )
+            } else if let Some(class) = class_name {
+                format!(
+                    "Failed to write session data using user defined save handler. (session.save_path: {path}, handler: {}::{function})",
+                    shown(&class)
+                )
+            } else {
+                format!(
+                    "Failed to write session data using user defined save handler. (session.save_path: {path}, handler: {function})"
+                )
+            };
+            docref(req, Level::Warning, &message);
+        }
+    }
+    let closed = close(req);
+    absorb(req, closed)?;
+    Ok(())
+}
+
+/// `php_session_flush`.
+pub(super) fn flush(req: &mut Request, write_data: bool) -> Result<bool, Thrown> {
+    if req.state::<State>().status != Status::Active {
+        return Ok(false);
+    }
+    save_current_state(req, write_data)?;
+    req.state::<State>().status = Status::None;
+    Ok(true)
+}
+
+/// `php_session_abort`: the handler closed, nothing written.
+pub(super) fn abort(req: &mut Request) -> Result<bool, Thrown> {
+    if req.state::<State>().status != Status::Active {
+        return Ok(false);
+    }
+    let closed = close(req);
+    absorb(req, closed)?;
+    req.state::<State>().status = Status::None;
+    Ok(true)
+}
+
+/// `php_session_reset`: the session read again from its handler.
+pub(super) fn reset(req: &mut Request) -> Result<bool, Thrown> {
+    Ok(req.state::<State>().status == Status::Active && initialize(req)?)
+}
+
+/// `php_session_destroy`: the handler's data for the id removed, the
+/// session's request state reset.
+pub(super) fn destroy(req: &mut Request) -> Result<bool, Thrown> {
+    if req.state::<State>().status != Status::Active {
+        docref(
+            req,
+            Level::Warning,
+            "Trying to destroy uninitialized session",
+        );
+        return Ok(false);
+    }
+    let mut ok = true;
+    let state = req.state::<State>();
+    if let (Some(id), Some(module)) = (state.id.clone(), state.module) {
+        let destroyed = destroy_id(req, module, &id);
+        if !absorb(req, destroyed)?.unwrap_or(false) {
+            ok = false;
+            if !pending(req) {
+                docref(req, Level::Warning, "Session object destruction failed");
+            }
+        }
+    }
+    rshutdown_globals(req)?;
+    rinit_globals(req);
+    Ok(ok)
+}
+
+// ------------------------------------------------------------ the id's cookie
+
+/// `php_session_reset_id`: the cookie sent where it is due, and `SID`.
+pub(super) fn reset_id(req: &mut Request) -> Result<bool, Thrown> {
+    let Some(id) = req.state::<State>().id.clone() else {
+        docref(
+            req,
+            Level::Warning,
+            "Cannot set session ID - session ID is not initialized",
+        );
+        return Ok(false);
+    };
+    if ini_bool(req, b"session.use_cookies") && req.state::<State>().send_cookie {
+        if !send_cookie(req, &id) {
+            return Ok(false);
+        }
+        req.state::<State>().send_cookie = false;
+    }
+    let sid = if req.state::<State>().define_sid {
+        let mut sid = ini(req, b"session.name");
+        sid.push(b'=');
+        sid.extend_from_slice(&id);
+        sid
+    } else {
+        Vec::new()
+    };
+    let sid = crate::string_value(req, &sid)?;
+    if !req.define_constant(b"SID", sid)? {
+        req.release(sid);
+    }
+    Ok(true)
+}
+
+/// `php_url_encode`.
+fn url_encode(s: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    for &c in s {
+        match c {
+            b' ' => out.push(b'+'),
+            c if c.is_ascii_alphanumeric() || b"-_.".contains(&c) => out.push(c),
+            c => out.extend_from_slice(format!("%{c:02X}").as_bytes()),
+        }
+    }
+    out
+}
+
+/// The civil date of a Unix time, `D, d M Y H:i:s` in GMT.
+fn gmt(t: i64) -> String {
+    const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let (days, secs) = (t.div_euclid(86_400), t.rem_euclid(86_400));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{}, {day:02} {} {year} {:02}:{:02}:{:02}",
+        DAYS[usize::try_from(days.rem_euclid(7)).unwrap_or(0)],
+        MONTHS[usize::try_from(month - 1).unwrap_or(0)],
+        secs / 3600,
+        secs / 60 % 60,
+        secs % 60
+    )
+}
+
+/// The time now, in seconds.
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+/// `php_session_send_cookie`: `Set-Cookie` for the session's name and
+/// id with the `session.cookie_*` attributes, added beside any other.
+fn send_cookie(req: &mut Request, id: &[u8]) -> bool {
+    if headers_sent(req) {
+        sent_error(
+            req,
+            "Session cookie cannot be sent after headers have already been sent",
+        );
+        return false;
+    }
+    let secure = ini_bool(req, b"session.cookie_secure");
+    if ini_bool(req, b"session.cookie_partitioned") && !secure {
+        docref(
+            req,
+            Level::Warning,
+            "Partitioned session cookie cannot be used without also configuring it as secure",
+        );
+        return false;
+    }
+    let mut cookie = b"Set-Cookie: ".to_vec();
+    cookie.extend_from_slice(&ini(req, b"session.name"));
+    cookie.push(b'=');
+    cookie.extend_from_slice(&url_encode(id));
+    let lifetime = ini_long(req, b"session.cookie_lifetime");
+    if lifetime > 0 {
+        let t = now().saturating_add(lifetime);
+        if t > 0 {
+            cookie.extend_from_slice(
+                format!("; expires={} GMT; Max-Age={lifetime}", gmt(t)).as_bytes(),
+            );
+        }
+    }
+    for (entry, attribute) in [
+        (b"session.cookie_path".as_slice(), "; path="),
+        (b"session.cookie_domain", "; domain="),
+    ] {
+        let value = ini(req, entry);
+        if !value.is_empty() {
+            cookie.extend_from_slice(attribute.as_bytes());
+            cookie.extend_from_slice(&value);
+        }
+    }
+    for (entry, attribute) in [
+        (b"session.cookie_secure".as_slice(), "; secure"),
+        (b"session.cookie_partitioned", "; Partitioned"),
+        (b"session.cookie_httponly", "; HttpOnly"),
+    ] {
+        if ini_bool(req, entry) {
+            cookie.extend_from_slice(attribute.as_bytes());
+        }
+    }
+    let samesite = ini(req, b"session.cookie_samesite");
+    if !samesite.is_empty() {
+        cookie.extend_from_slice(b"; SameSite=");
+        cookie.extend_from_slice(&samesite);
+    }
+    req.header_add(&cookie, false, 0);
+    true
+}
+
+/// `php_session_cache_limiter`: the headers of `session.cache_limiter`,
+/// `0` for none to send, `-1` for a limiter php does not know or a
+/// session not active, and `-2` after php's warning where the headers
+/// are sent.
+fn cache_limiter(req: &mut Request) -> Result<i32, Thrown> {
+    let limiter = ini(req, b"session.cache_limiter");
+    if limiter.is_empty() {
+        return Ok(0);
+    }
+    if req.state::<State>().status != Status::Active {
+        return Ok(-1);
+    }
+    if headers_sent(req) {
+        abort(req)?;
+        sent_error(
+            req,
+            "Session cache limiter cannot be sent after headers have already been sent",
+        );
+        return Ok(-2);
+    }
+    let expire = ini_long(req, b"session.cache_expire").saturating_mul(60);
+    let limiter = crate::c_str(&limiter).to_ascii_lowercase();
+    let past = "Expires: Thu, 19 Nov 1981 08:52:00 GMT".to_owned();
+    let private = format!("Cache-Control: private, max-age={expire}");
+    let headers: Vec<String> = match limiter.as_slice() {
+        b"public" => vec![
+            format!("Expires: {} GMT", gmt(now().saturating_add(expire))),
+            format!("Cache-Control: public, max-age={expire}"),
+        ],
+        b"private" => vec![past, private],
+        b"private_no_expire" => vec![private],
+        b"nocache" => vec![
+            past,
+            "Cache-Control: no-store, no-cache, must-revalidate".to_owned(),
+            "Pragma: no-cache".to_owned(),
+        ],
+        _ => return Ok(-1),
+    };
+    for header in &headers {
+        req.header_add(header.as_bytes(), true, 0);
+    }
+    if limiter != b"nocache"
+        && let Some(script) = req.script_name().map(<[u8]>::to_vec)
+        && let Some(stat) = req.url_stat(&script, false, false)?
+    {
+        req.header_add(
+            format!("Last-Modified: {} GMT", gmt(stat[9])).as_bytes(),
+            true,
+            0,
+        );
+    }
+    Ok(0)
+}
