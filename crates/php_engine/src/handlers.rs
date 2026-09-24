@@ -2112,15 +2112,7 @@ fn verified_arg(
     else {
         return Ok(None);
     };
-    if ty.contains_code(argument.type_code()) {
-        return Ok(None);
-    }
-    if let Some(object) = argument.as_object()
-        && crate::ops::named_types(&ty).any(|name| {
-            req.class_named(&name.0)
-                .is_some_and(|of| req.instance_of(object.class(), of))
-        })
-    {
+    if crate::api::coerce::holds(req, argument, &ty, req.frame_scopes(frame)) {
         return Ok(None);
     }
     let strict = req.caller_strict_types(frame);
@@ -2366,15 +2358,7 @@ pub(crate) fn verify_return_type<T: Tier>(
         return threw(req, frame, &thrown);
     }
     let returned = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
-    if ty.contains_code(returned.type_code()) {
-        return Ok(advance(req, frame));
-    }
-    if let Some(object) = returned.as_object()
-        && crate::ops::named_types(&ty).any(|name| {
-            req.class_named(&name.0)
-                .is_some_and(|of| req.instance_of(object.class(), of))
-        })
-    {
+    if crate::api::coerce::holds(req, &returned, &ty, req.frame_scopes(frame)) {
         return Ok(advance(req, frame));
     }
     let strict = req.frame_strict_types(frame);

@@ -1744,10 +1744,18 @@ impl Request {
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
+        let wrapped = self.values_for_references(function, arguments)?;
         let name = self.declared_name(function);
         let name = self.interned(name.as_bytes())?;
-        for argument in arguments {
+        let mut sent = arguments.to_vec();
+        for (at, argument) in sent.iter_mut().enumerate() {
             self.addref(argument);
+            if wrapped.contains(&at) {
+                // `Z_TRY_ADDREF_P(arg); ZVAL_NEW_REF(param, arg)`: the
+                // owner just taken is the new cell's, and the frame
+                // holds the cell.
+                *argument = PhpRef::new(self, *argument)?.as_value();
+            }
         }
         for (extra, value) in extra_named {
             self.addref(&Value::string(*extra));
@@ -1759,8 +1767,8 @@ impl Request {
         let call = CallState {
             function,
             name: Some(name),
-            arguments: arguments.to_vec(),
-            count: arguments.len(),
+            count: sent.len(),
+            arguments: sent,
             this,
             called_scope,
             closure,
@@ -1776,6 +1784,82 @@ impl Request {
         let served = self.serve_native(function);
         self.pop_call();
         served
+    }
+
+    /// `zend_call_function`'s walk of `fci->params`
+    /// (`Z/Zend/zend_execute_API.c:883-902`) over the by-reference
+    /// parameters: an argument that is no reference, handed to a
+    /// parameter `ARG_SHOULD_BE_SENT_BY_REF` and not
+    /// `ARG_MAY_BE_SENT_BY_REF`, is `zend_param_must_be_ref`'s warning,
+    /// and the call goes on with the value wrapped in a reference of its
+    /// own, so what the callee writes through it is lost. The positions
+    /// to wrap come back; a warning a handler turned into a throw stops
+    /// the call before it is made, as php's `cleanup_args` does, and is
+    /// the `Err`. The parameter is named where it is one of the declared
+    /// ones, `get_function_arg_name`, and a variadic's is not.
+    ///
+    /// ```php
+    /// function f(&$v) { $v = 1; return 'f'; }
+    /// class C { static function m(&$v, ...$rest) { return 'm'; } }
+    /// $x = 5;
+    /// var_dump(call_user_func('f', $x), $x, array_map('f', [1]), call_user_func('C::m', 1, 2));
+    /// ```
+    /// ```expect
+    /// Warning: f(): Argument #1 ($v) must be passed by reference, value given in %s on line 5
+    ///
+    /// Warning: f(): Argument #1 ($v) must be passed by reference, value given in %s on line 5
+    ///
+    /// Warning: C::m(): Argument #1 ($v) must be passed by reference, value given in %s on line 5
+    /// string(1) "f"
+    /// int(5)
+    /// array(1) {
+    ///   [0]=>
+    ///   string(1) "f"
+    /// }
+    /// string(1) "m"
+    /// ```
+    fn values_for_references(
+        &mut self,
+        function: Function,
+        arguments: &[Value],
+    ) -> Result<Vec<usize>, Thrown> {
+        let Some(decl) = self.function_decl(function) else {
+            return Ok(Vec::new());
+        };
+        let declared = decl.parameters.len();
+        let variadic = decl.parameters.last().filter(|last| last.variadic);
+        let mut wrapped: Vec<(usize, Option<String>)> = Vec::new();
+        for (at, argument) in arguments.iter().enumerate() {
+            if matches!(argument.as_ref(), ValueRef::Undef | ValueRef::Reference(_)) {
+                continue;
+            }
+            let Some(parameter) = decl.parameters.get(at).or(variadic) else {
+                continue;
+            };
+            if parameter.by_ref && !parameter.prefer_ref {
+                let name = (at < declared && !parameter.variadic)
+                    .then(|| String::from_utf8_lossy(&parameter.name.0).into_owned());
+                wrapped.push((at, name));
+            }
+        }
+        if wrapped.is_empty() {
+            return Ok(Vec::new());
+        }
+        let callee = self.qualified_name(function, None);
+        let mut positions = Vec::with_capacity(wrapped.len());
+        for (at, name) in wrapped {
+            let name = name.map(|name| format!(" (${name})")).unwrap_or_default();
+            let message = format!(
+                "{callee}(): Argument #{}{name} must be passed by reference, value given",
+                at + 1
+            );
+            crate::api::raising::warning(self, &message);
+            if self.is_pending() {
+                return Err(Thrown::of(self.take_pending()));
+            }
+            positions.push(at);
+        }
+        Ok(positions)
     }
 
     /// `zend_call_function` over a user function, the branch that calls
@@ -7536,14 +7620,34 @@ impl Request {
     }
 
     /// `arg_info->type` of the active native's parameter at `position`,
-    /// what `zend_null_arg_deprecated` names the type by; none where the
-    /// native declares no type there.
+    /// what `zend_null_arg_deprecated` names the type by and what
+    /// [`crate::api::coerce::argument`] holds the argument to: the
+    /// variadic's own past the declared count, as php's `arg_offset`
+    /// stops at `num_args` there; none where the native declares no
+    /// type there.
     pub(crate) fn active_parameter_type(&self, position: u32) -> Option<php_unit::decl::Type> {
         let decl = self.function_decl(self.active_native_function()?)?;
-        decl.parameters
-            .get(usize::try_from(position.checked_sub(1)?).ok()?)?
-            .ty
-            .clone()
+        let at = usize::try_from(position.checked_sub(1)?).ok()?;
+        let parameter = match decl.parameters.get(at) {
+            Some(parameter) => parameter,
+            None => decl.parameters.last().filter(|last| last.variadic)?,
+        };
+        parameter.ty.clone()
+    }
+
+    /// `func->common.scope` and `Z_CE(EX(This))` of the native being
+    /// served: the class its method is declared on and the class it was
+    /// called on, what a parameter typed `self`, `parent` or `static`
+    /// resolves against; none for a function.
+    pub(crate) fn active_native_scopes(&self) -> crate::api::coerce::Scopes {
+        let own = self
+            .active_native_function()
+            .and_then(|function| self.method_class(function));
+        let called = self.vm.serving_call().and_then(|call| call.called_scope);
+        crate::api::coerce::Scopes {
+            own,
+            called: called.or(own),
+        }
     }
 
     /// The `($name)` `zend_argument_error_variadic` and
@@ -7647,14 +7751,64 @@ impl Request {
             .unwrap_or(default)
     }
 
-    /// `EX_USES_STRICT_TYPES()` (`Z/Zend/zend_compile.h:719`): whether
-    /// the op array the innermost frame serves was compiled under
-    /// `declare(strict_types=1)`. What a return's type check and a write
-    /// to a typed property read, and what a native's own argument
-    /// parsing reads too: a native holds no frame of this engine's, so
-    /// the frame standing while one runs is the caller php reaches
-    /// through the native's `prev_execute_data`.
+    /// `ZEND_ARG_USES_STRICT_TYPES()` (`Z/Zend/zend_compile.h:723`) for
+    /// the native being served, and `EX_USES_STRICT_TYPES()` of the
+    /// innermost frame where none is: whether its caller was compiled
+    /// under `declare(strict_types=1)`, which is what a native's own
+    /// argument parsing reads. A native holds no frame of this engine's,
+    /// so its `prev_execute_data` is the innermost frame, unless another
+    /// native is being served above that frame, which is a call
+    /// `zend_call_function` made: php's caller there is that native's
+    /// frame, which carries no `ZEND_ACC_STRICT_TYPES`, so a native a
+    /// callback names coerces its arguments though the file that named
+    /// it is strict.
+    ///
+    /// ```php
+    /// declare(strict_types=1);
+    /// var_dump(array_map('strlen', [12]), array_map('str_repeat', ['a'], ['2']));
+    /// try { str_repeat(12, 2); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// array(1) {
+    ///   [0]=>
+    ///   int(2)
+    /// }
+    /// array(1) {
+    ///   [0]=>
+    ///   string(2) "aa"
+    /// }
+    /// str_repeat(): Argument #1 ($string) must be of type string, int given
+    /// ```
+    ///
+    /// `call_user_func` in a namespace is such a native too, since php
+    /// compiles it to `INIT_USER_CALL` only where it resolves the name at
+    /// compile time (`zend_compile_func_cuf`), so its callee coerces.
+    ///
+    /// ```php
+    /// declare(strict_types=1);
+    /// namespace Foo;
+    /// var_dump(call_user_func('strlen', false));
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// ```
     pub(crate) fn strict_types(&self) -> bool {
+        let floor = self.vm.innermost().map_or(0, |state| {
+            usize::try_from(state.calls_below).unwrap_or(usize::MAX)
+        });
+        let calls = self.vm.calls();
+        let serving = calls
+            .iter()
+            .rposition(|call| call.stage == exec::CallStage::Serving);
+        if let Some(at) = serving
+            && calls.get(floor..at).is_some_and(|below| {
+                below
+                    .iter()
+                    .any(|call| call.stage == exec::CallStage::Serving)
+            })
+        {
+            return false;
+        }
         self.vm
             .innermost()
             .is_some_and(crate::exec::strict_types_of)
@@ -8696,6 +8850,19 @@ impl Request {
         match state.function {
             Some(function) => self.method_class(function),
             None => state.scope,
+        }
+    }
+
+    /// The classes a `self`, a `parent` and a `static` in a type checked
+    /// in `frame` name: the frame's scope and its called scope, which
+    /// is what `zend_check_type_slow` resolves them against for an
+    /// argument's `RECV` and for a return.
+    pub(crate) fn frame_scopes(&self, frame: FrameRef) -> crate::api::coerce::Scopes {
+        let own = self.frame_scope(frame);
+        let called = self.vm.at(frame).and_then(|state| state.called_scope);
+        crate::api::coerce::Scopes {
+            own,
+            called: called.or(own),
         }
     }
 

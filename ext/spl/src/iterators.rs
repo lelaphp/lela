@@ -14,7 +14,7 @@
 
 use php_ext::abi::{Callable, CloneObj, ObjectHandlers};
 use php_ext::call::{call, call_method, instantiate, lookup_class};
-use php_ext::coerce::{callable_checked, to_string, truthy};
+use php_ext::coerce::{to_string, truthy};
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, Value, ValueRef};
@@ -914,15 +914,11 @@ fn callback_construct_as(
 ) -> Result<Value, Thrown> {
     let (this, inner) = dual_construct(req, base, inner_class, 2, 2)?;
     let given = crate::value(req, 2);
-    let callback = match callable_checked(req, &given) {
-        Ok(callback) => callback,
-        Err(reason) => {
-            return Err(arg_type_error(
-                req,
-                2,
-                &format!("be a valid callback, {reason}"),
-            ));
-        }
+    let Some(callback) = php_ext::coerce::callable_argument(req, 2)? else {
+        return Err(php_ext::raising::fatal(
+            req,
+            "InternalError: a callable parameter read no callable",
+        ));
     };
     req.addref(&given);
     dual_set(req, this, kind, inner)?;

@@ -711,35 +711,15 @@ fn array_map(req: &mut Request) -> Result<Value, Thrown> {
             &format!("at least 2 arguments, {given} given"),
         ));
     }
-    let callback_value = req.argument(1).unwrap_or_default().deref();
-    let callback = if matches!(callback_value.as_ref(), ValueRef::Null) {
-        None
-    } else {
-        match php_ext::coerce::callable_checked(req, &callback_value) {
-            Ok(callable) => Some(callable),
-            Err(why) => {
-                return Err(arg_type_error(
-                    req,
-                    1,
-                    &format!("be a valid callback or null, {why}"),
-                ));
-            }
-        }
-    };
+    let callback = php_ext::coerce::callable_argument(req, 1)?;
     let values = req.variadic_arguments(2)?;
     let mut arrays = Vec::with_capacity(values.len());
     for (at, value) in values.iter().enumerate() {
-        let value = value.deref();
-        let Some(array) = value.as_array().copied() else {
-            let position = u32::try_from(at + 2).unwrap_or(u32::MAX);
-            let name = value_name(req, &value);
-            return Err(arg_type_error(
-                req,
-                position,
-                &format!("be of type array, {name} given"),
-            ));
-        };
-        arrays.push(array);
+        let position = u32::try_from(at + 2).unwrap_or(u32::MAX);
+        let held = coerce_param(req, value, &Type::Array, position)?;
+        if let Some(array) = held.as_array().copied() {
+            arrays.push(array);
+        }
     }
     if let [input] = arrays[..] {
         let Some(callback) = callback else {

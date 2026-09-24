@@ -11,7 +11,7 @@
 
 use php_ext::coerce::to_string;
 use php_ext::decl::ConstDecl;
-use php_ext::raising::{Level, Thrown, arg_type_error, docref};
+use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
@@ -245,22 +245,13 @@ pub(super) fn setlocale(req: &mut Request) -> Result<Value, Thrown> {
     let mut candidates: Vec<Value> = Vec::with_capacity(given - 1);
     for position in 2..=given {
         let position = u32::try_from(position).unwrap_or(u32::MAX);
-        let value = req.argument(position).unwrap_or_default().deref();
-        match value.as_ref() {
-            ValueRef::Array(_) | ValueRef::Null | ValueRef::Str(_) => candidates.push(value),
-            ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => {
-                let s = string_argument(req, position)?;
-                candidates.push(Value::string(s));
-            }
-            _ => {
-                let name = php_ext::coerce::value_name(req, &value);
-                return Err(arg_type_error(
-                    req,
-                    position,
-                    &format!("be of type array|string|null, {name} given"),
-                ));
-            }
-        }
+        let value = req.argument(position).unwrap_or_default();
+        let ty = php_ext::decl::Type::Union(vec![
+            php_ext::decl::Type::Array,
+            php_ext::decl::Type::String,
+            php_ext::decl::Type::Null,
+        ]);
+        candidates.push(php_ext::coerce::coerce_param(req, &value, &ty, position)?);
     }
     for candidate in candidates {
         let names: Vec<Vec<u8>> = match candidate.as_ref() {

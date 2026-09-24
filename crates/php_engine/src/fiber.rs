@@ -48,7 +48,7 @@ use php_unit::decl::{
 
 use crate::api::abi::{Callable, CloneObj, Entry, NativeClassDecl, ObjectHandlers};
 use crate::api::call::call_named;
-use crate::api::raising::{Thrown, arg_count_error, arg_type_error, throw};
+use crate::api::raising::{Thrown, arg_count_error, throw};
 use crate::api::request::Request;
 use crate::api::values::{PhpObject, PhpString, Value};
 use crate::exec::Vm;
@@ -660,16 +660,11 @@ fn construct(req: &mut Request) -> Result<Value, Thrown> {
             &format!("exactly 1 argument, {count} given"),
         ));
     }
-    let given = req.argument(1).unwrap_or_default().deref();
-    let callable = match req.callable_checked(&given) {
-        Ok(callable) => callable,
-        Err(why) => {
-            return Err(arg_type_error(
-                req,
-                1,
-                &format!("be a valid callback, {why}"),
-            ));
-        }
+    let Some(callable) = crate::api::coerce::callable_argument(req, 1)? else {
+        return Err(crate::api::raising::fatal(
+            req,
+            "InternalError: a callable parameter read no callable",
+        ));
     };
     let this = this_fiber(req)?;
     let fiber = payload(req, this)?;
@@ -1136,21 +1131,13 @@ fn throw_into(req: &mut Request) -> Result<Value, Thrown> {
             &format!("exactly 1 argument, {count} given"),
         ));
     }
-    let given = req.argument(1).unwrap_or_default().deref();
-    let throwable = given.as_object().copied().filter(|object| {
-        req.class_named(b"Throwable")
-            .is_some_and(|throwable| req.instance_of(object.class(), throwable))
-    });
-    let Some(throwable) = throwable else {
-        // `zend_zval_value_name`: an object is named by its class.
-        let named = given.as_object().map_or_else(
-            || String::from(given.type_name()),
-            |object| req.class_name(object.class()),
-        );
-        return Err(arg_type_error(
+    let given = req.argument(1).unwrap_or_default();
+    let ty = Type::Named(Name(b"Throwable".as_slice().into()));
+    let given = crate::api::coerce::coerce_param(req, &given, &ty, 1)?;
+    let Some(throwable) = given.as_object().copied() else {
+        return Err(crate::api::raising::fatal(
             req,
-            1,
-            &format!("be of type Throwable, {named} given"),
+            "InternalError: coerce_param held a value that is no object to a class",
         ));
     };
     let this = this_fiber(req)?;

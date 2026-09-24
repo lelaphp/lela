@@ -41,8 +41,7 @@ use php_ext::decl::{
     Name, Parameter, PropertyDecl, Type, Visibility,
 };
 use php_ext::raising::{
-    Level, Thrown, arg_count_error, arg_null_deprecated, arg_type_error, raise, raise_at, throw,
-    throw_at,
+    Level, Thrown, arg_count_error, arg_type_error, raise, raise_at, throw, throw_at,
 };
 use php_ext::request::Request;
 use php_ext::syntax::{self, FileId, LexOptions};
@@ -1634,15 +1633,30 @@ fn wrong_argument_count(req: &mut Request, least: usize, most: usize, given: usi
 }
 
 /// One `Z_PARAM_STR` of a native, the argument at `position` read off
-/// the call frame: `null` is the 8.1 deprecation and then the empty
-/// string, and what is there is coerced as php coerces a string
-/// parameter.
+/// the call frame, `coerce_param` over `string`: `null` is the 8.1
+/// deprecation and then the empty string under the weak rule, and the
+/// `TypeError` under `strict_types`.
+///
+/// ```php
+/// var_dump(token_get_all(null));
+/// ```
+/// ```expect
+/// Deprecated: token_get_all(): Passing null to parameter #1 ($code) of type string is deprecated in %s on line 2
+/// array(0) {
+/// }
+/// ```
+///
+/// ```php
+/// declare(strict_types=1);
+/// try { token_get_all(null); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { token_get_all('<?php 1;', null); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// token_get_all(): Argument #1 ($code) must be of type string, null given
+/// token_get_all(): Argument #2 ($flags) must be of type int, null given
+/// ```
 fn string_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown> {
     let given = req.argument(position).unwrap_or_default();
-    if matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
-        arg_null_deprecated(req, position, "string");
-        return PhpString::new(req, b"");
-    }
     let coerced = coerce_param(req, &given, &Type::String, position)?;
     match coerced.as_php_string() {
         Some(s) => Ok(*s),
@@ -1651,14 +1665,9 @@ fn string_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown
 }
 
 /// One `Z_PARAM_LONG` of a native, the argument at `position` read off
-/// the call frame: `null` is the 8.1 deprecation and then zero, and what
-/// is there is coerced as php coerces an int parameter.
+/// the call frame, `coerce_param` over `int`.
 fn long_argument(req: &mut Request, position: u32) -> Result<i64, Thrown> {
     let given = req.argument(position).unwrap_or_default();
-    if matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
-        arg_null_deprecated(req, position, "int");
-        return Ok(0);
-    }
     let coerced = coerce_param(req, &given, &Type::Int, position)?;
     Ok(coerced.as_int().unwrap_or(0))
 }

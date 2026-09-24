@@ -830,11 +830,10 @@ fn weakref_create(req: &mut Request) -> Result<Value, Thrown> {
     exactly(req, 1)?;
     let given = req.argument(1).unwrap_or_default();
     let given = coerce_param(req, &given, &Type::Object, 1)?;
-    let Some(referent) = given.deref().as_object().copied() else {
-        return Err(throw(
+    let Some(referent) = given.as_object().copied() else {
+        return Err(crate::api::raising::fatal(
             req,
-            "TypeError",
-            "WeakReference::create(): Argument #1 ($object) must be of type object",
+            "InternalError: coerce_param held a value that is no object to `object`",
         ));
     };
     let existing = req.weakrefs.row(referent.index()).and_then(|holders| {

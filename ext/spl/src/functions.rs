@@ -427,23 +427,15 @@ fn static_pair(req: &mut Request, loader: &Value) -> Result<Option<Value>, Throw
     Ok(Some(Value::array(pair)))
 }
 
-/// The callable at `position`, php's `Z_PARAM_FUNC` and its refusal.
-fn callable(req: &mut Request, position: u32, or_null: bool) -> Result<Callable, Thrown> {
-    let given = crate::value(req, position);
-    match callable_checked(req, &given) {
-        Ok(callable) => Ok(callable),
-        Err(reason) => {
-            let wanted = if or_null {
-                "a valid callback or null"
-            } else {
-                "a valid callback"
-            };
-            Err(arg_type_error(
-                req,
-                position,
-                &format!("be {wanted}, {reason}"),
-            ))
-        }
+/// The callable at `position`, php's `Z_PARAM_FUNC` and its refusal,
+/// `coerce::callable_argument`'s over the declared `callable`.
+fn callable(req: &mut Request, position: u32) -> Result<Callable, Thrown> {
+    match php_ext::coerce::callable_argument(req, position)? {
+        Some(callable) => Ok(callable),
+        None => Err(php_ext::raising::fatal(
+            req,
+            "InternalError: a callable parameter read no callable",
+        )),
     }
 }
 
@@ -475,7 +467,7 @@ fn spl_autoload_register(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 0, 3)?;
     let given = crate::given(req, 1).map(|v| v.deref());
     let loader = match given {
-        Some(v) if !matches!(v.as_ref(), ValueRef::Null) => Some(callable(req, 1, true)?),
+        Some(v) if !matches!(v.as_ref(), ValueRef::Null) => Some(callable(req, 1)?),
         _ => None,
     };
     let throw = crate::bool_or(req, 2, true)?;
@@ -541,7 +533,7 @@ fn names_native(req: &Request, given: &Value, name: &[u8]) -> bool {
 /// ```
 fn spl_autoload_unregister(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 1, 1)?;
-    let loader = callable(req, 1, false)?;
+    let loader = callable(req, 1)?;
     let given = crate::value(req, 1);
     let named = match given.deref().as_ref() {
         ValueRef::Str(s) => {
@@ -693,21 +685,10 @@ fn spl_object_id(req: &mut Request) -> Result<Value, Thrown> {
     Ok(Value::int(i64::from(object.index())))
 }
 
-/// `Z_PARAM_ITERABLE`: an array or a `Traversable`.
+/// `Z_PARAM_ITERABLE`: an array or a `Traversable`, `coerce_param`'s.
 fn iterable(req: &mut Request, position: u32) -> Result<Value, Thrown> {
     let given = crate::value(req, position);
-    let traversable = given
-        .as_object()
-        .is_some_and(|object| crate::is_a(req, object.class(), b"Traversable"));
-    if given.as_array().is_some() || traversable {
-        return Ok(given);
-    }
-    let name = value_name(req, &given);
-    Err(arg_type_error(
-        req,
-        position,
-        &format!("be of type Traversable|array, {name} given"),
-    ))
+    php_ext::coerce::coerce_param(req, &given, &php_ext::decl::Type::Iterable, position)
 }
 
 /// `iterator_apply(Traversable $iterator, callable $callback, ?array
@@ -734,7 +715,7 @@ fn iterable(req: &mut Request, position: u32) -> Result<Value, Thrown> {
 fn iterator_apply(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 2, 3)?;
     let iterator = crate::object(req, 1, Some("Traversable"))?;
-    let callback = callable(req, 2, false)?;
+    let callback = callable(req, 2)?;
     let arguments = match crate::given(req, 3).map(|v| v.deref()) {
         Some(v) if !matches!(v.as_ref(), ValueRef::Null) => Some(crate::array(req, 3)?),
         _ => None,

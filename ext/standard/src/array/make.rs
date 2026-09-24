@@ -4,9 +4,9 @@
 //! that draw from the random engine, `shuffle` and `array_rand`.
 
 use php_ext::call::{call, lookup_function};
-use php_ext::coerce::{numeric_string, to_array, value_name};
+use php_ext::coerce::{numeric_string, to_array};
 use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
@@ -157,17 +157,11 @@ fn arrays_of(req: &mut Request, from: u32) -> Result<Vec<PhpArray>, Thrown> {
     let values = req.variadic_arguments(from)?;
     let mut arrays = Vec::with_capacity(values.len());
     for (at, value) in values.iter().enumerate() {
-        let value = value.deref();
-        let Some(array) = value.as_array().copied() else {
-            let position = u32::try_from(at).unwrap_or(u32::MAX) + from;
-            let name = value_name(req, &value);
-            return Err(arg_type_error(
-                req,
-                position,
-                &format!("be of type array, {name} given"),
-            ));
-        };
-        arrays.push(array);
+        let position = u32::try_from(at).unwrap_or(u32::MAX).saturating_add(from);
+        let held = php_ext::coerce::coerce_param(req, value, &Type::Array, position)?;
+        if let Some(array) = held.as_array().copied() {
+            arrays.push(array);
+        }
     }
     Ok(arrays)
 }

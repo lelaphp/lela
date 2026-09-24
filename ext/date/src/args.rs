@@ -2,9 +2,9 @@
 //! with (`Z/Zend/zend_API.h`), each raising what php raises for a value
 //! it does not take, and the declarations the natives are made of.
 
-use php_ext::coerce::{coerce_param, value_name};
+use php_ext::coerce::coerce_param;
 use php_ext::decl::{ConstExpr, FunctionDecl, MethodDecl, Name, Parameter, Type, Visibility};
-use php_ext::raising::{Thrown, arg_count_error, arg_null_deprecated, arg_type_error};
+use php_ext::raising::{Thrown, arg_count_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -73,10 +73,6 @@ pub(super) fn nullable_string(
 /// `Z_PARAM_LONG`.
 pub(super) fn long(req: &mut Request, position: u32) -> Result<i64, Thrown> {
     let value = req.argument(position).unwrap_or_default();
-    if matches!(value.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
-        arg_null_deprecated(req, position, "int");
-        return Ok(0);
-    }
     let coerced = coerce_param(req, &value, &Type::Int, position)?;
     Ok(coerced.as_int().unwrap_or(0))
 }
@@ -104,10 +100,6 @@ pub(super) fn nullable_long(req: &mut Request, position: u32) -> Result<Option<i
 /// `Z_PARAM_DOUBLE`.
 pub(super) fn double(req: &mut Request, position: u32) -> Result<f64, Thrown> {
     let value = req.argument(position).unwrap_or_default();
-    if matches!(value.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
-        arg_null_deprecated(req, position, "float");
-        return Ok(0.0);
-    }
     let coerced = coerce_param(req, &value, &Type::Float, position)?;
     Ok(coerced.as_float().unwrap_or(0.0))
 }
@@ -133,10 +125,6 @@ pub(super) fn optional_bool(
     let Some(value) = given(req, position) else {
         return Ok(default);
     };
-    if matches!(value.deref().as_ref(), ValueRef::Null) {
-        arg_null_deprecated(req, position, "bool");
-        return Ok(false);
-    }
     let coerced = coerce_param(req, &value, &Type::Bool, position)?;
     Ok(coerced.as_bool().unwrap_or(false))
 }
@@ -152,41 +140,35 @@ pub(super) fn array(req: &mut Request, position: u32) -> Result<PhpArray, Thrown
 }
 
 /// `Z_PARAM_OBJECT_OF_CLASS(ce)`: the object, or the `TypeError` naming
-/// the class.
+/// the class, both `coerce_param`'s.
 pub(super) fn object_of(
     req: &mut Request,
     position: u32,
     class: &str,
 ) -> Result<PhpObject, Thrown> {
     let value = req.argument(position).unwrap_or_default();
-    let ty = Type::Named(Name(class.as_bytes().into()));
-    let coerced = coerce_param(req, &value, &ty, position)?;
-    if let Some(object) = coerced.deref().as_object().copied() {
-        let wanted = php_ext::call::lookup_class(req, class.as_bytes())?;
-        if wanted.is_some_and(|c| object.instance_of(req, c)) {
-            return Ok(object);
-        }
+    let coerced = coerce_param(req, &value, &self::class(class), position)?;
+    match coerced.as_object() {
+        Some(object) => Ok(*object),
+        None => Err(php_ext::raising::fatal(
+            req,
+            "InternalError: coerce_param held a value that is no object to a class",
+        )),
     }
-    let name = value_name(req, &value.deref());
-    Err(arg_type_error(
-        req,
-        position,
-        &format!("be of type {class}, {name} given"),
-    ))
 }
 
-/// `Z_PARAM_OBJECT_OF_CLASS_OR_NULL(ce)`.
+/// `Z_PARAM_OBJECT_OF_CLASS_OR_NULL(ce)`: `None` for `null` or no
+/// argument, and the refusal naming `?Class`.
 pub(super) fn nullable_object_of(
     req: &mut Request,
     position: u32,
     class: &str,
 ) -> Result<Option<PhpObject>, Thrown> {
-    match given(req, position) {
-        Some(value) if !matches!(value.deref().as_ref(), ValueRef::Null) => {
-            object_of(req, position, class).map(Some)
-        }
-        _ => Ok(None),
-    }
+    let Some(value) = given(req, position) else {
+        return Ok(None);
+    };
+    let coerced = coerce_param(req, &value, &nullable(self::class(class)), position)?;
+    Ok(coerced.as_object().copied())
 }
 
 /// A new string of `bytes` as the return.

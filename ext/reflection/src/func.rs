@@ -16,9 +16,9 @@
 
 use php_ext::abi::Callable;
 use php_ext::call::{call_array, call_named, known_method};
-use php_ext::coerce::{is_callable, to_callable, value_name};
+use php_ext::coerce::{is_callable, to_callable};
 use php_ext::decl::{FunctionDecl, MethodDecl, Visibility};
-use php_ext::raising::{Thrown, arg_count_error, arg_type_error, throw};
+use php_ext::raising::{Thrown, arg_count_error, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, Value};
 
@@ -1007,14 +1007,11 @@ fn variadic_arguments(req: &mut Request, from: usize) -> Vec<Value> {
 
 /// `Z_PARAM_ARRAY` at `position`, the `h` of `invokeArgs`.
 fn array_argument(req: &mut Request, position: u32) -> Result<PhpArray, Thrown> {
-    let given = req.argument(position).unwrap_or_default().deref();
+    let given = req.argument(position).unwrap_or_default();
+    let given = php_ext::coerce::coerce_param(req, &given, &php_ext::decl::Type::Array, position)?;
     match given.as_array() {
         Some(array) => Ok(*array),
-        None => Err(arg_type_error(
-            req,
-            position,
-            &format!("be of type array, {} given", value_name(req, &given)),
-        )),
+        None => PhpArray::new(req),
     }
 }
 

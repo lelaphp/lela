@@ -1191,37 +1191,9 @@ fn attach_iterator(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 1, 2)?;
     let this = crate::this(req)?;
     let iterator = crate::object(req, 1, Some("Iterator"))?;
-    let info = crate::given(req, 2).map(|v| v.deref());
-    let info = match info {
-        Some(v) if matches!(v.as_ref(), ValueRef::Null) => None,
-        Some(v) if matches!(v.as_ref(), ValueRef::Int(_) | ValueRef::Str(_)) => Some(v),
-        Some(v)
-            if matches!(
-                v.as_ref(),
-                ValueRef::Array(_) | ValueRef::Object(_) | ValueRef::Resource(_)
-            ) =>
-        {
-            let name = php_ext::coerce::value_name(req, &v);
-            return Err(php_ext::raising::arg_type_error(
-                req,
-                2,
-                &format!("be of type string|int|null, {name} given"),
-            ));
-        }
-        Some(v) => {
-            let coerced = php_ext::coerce::coerce_param(
-                req,
-                &v,
-                &php_ext::decl::Type::Union(vec![
-                    php_ext::decl::Type::String,
-                    php_ext::decl::Type::Int,
-                    php_ext::decl::Type::Null,
-                ]),
-                2,
-            )?;
-            Some(coerced)
-        }
-        None => None,
+    let info = match php_ext::coerce::argument(req, 2)? {
+        Some(info) if !matches!(info.as_ref(), ValueRef::Null) => Some(info),
+        _ => None,
     };
     if let Some(info) = info {
         let rows = with(req, this, |s| s.live())?;

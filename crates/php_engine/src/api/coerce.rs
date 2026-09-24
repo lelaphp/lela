@@ -18,7 +18,7 @@ use php_unit::decl::Type;
 use crate::api::abi::Callable;
 use crate::api::raising::{Thrown, arg_type_error, throw};
 use crate::api::request::Request;
-use crate::api::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
+use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 /// php's binary operators as `zend_binary_op` names them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -44,26 +44,14 @@ pub fn truthy(req: &mut Request, value: &Value) -> bool {
 }
 
 /// `is_numeric_string_ex`: the `int` or `float` a string denotes, with
-/// php's whitespace rules, or `None`. The skeleton reads what Rust
-/// parses after trimming php's whitespace set.
+/// php's whitespace rules, or `None`: [`php_heap::numeric_prefix`], the
+/// one reader of a numeric string, over the whole string.
 #[must_use]
 pub fn numeric_string(bytes: &[u8]) -> Option<Value> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    let trimmed = text.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c'));
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Ok(n) = trimmed.parse::<i64>() {
-        return Some(Value::int(n));
-    }
-    let f: f64 = trimmed.parse().ok()?;
-    if trimmed
-        .chars()
-        .any(|c| c.is_ascii_alphabetic() && !matches!(c, 'e' | 'E'))
-    {
-        return None;
-    }
-    Some(Value::float(f))
+    Some(match numeric_whole(bytes)? {
+        php_heap::Number::Long(n) => Value::int(n),
+        php_heap::Number::Double(d) => Value::float(d),
+    })
 }
 
 /// `zend_dval_to_lval`: saturating in 8.5's modular sense is the kernel's;
@@ -395,15 +383,30 @@ pub fn binary_op(
     Ok(Value::float(folded))
 }
 
-/// Coerce the argument at `position` to `ty` as php's parameter parsing
-/// does, honouring the caller's `strict_types`: the scalar cases here,
-/// and a `TypeError` in php's wording for what does not coerce. An int
-/// parameter given a float or a string reads it through the kernel that
-/// copies `zend_parse_arg_long_weak`, [`crate::ops::arg_long_weak`]: a
-/// float in the long's range is truncated behind the 8.1 deprecation
-/// where that loses something, and one that is NAN or past the range is
-/// the `TypeError`; a numeric string with a fraction is the same
-/// deprecation in its float-string wording.
+/// Hold the argument at `position` to `ty` as `zend_parse_parameters`
+/// and its `Z_PARAM_*` macros hold it (`Z/Zend/zend_API.h`,
+/// `Z/Zend/zend_API.c:533-820`), under the caller's `strict_types`
+/// ([`Request::strict_types`]), with php's text for what it refuses.
+/// One rule serves every declared shape: the value the type already
+/// holds stands, [`holds`]; `null` to a scalar that is not nullable is
+/// php 8.1's deprecation and then the scalar's zero under the weak rule,
+/// and the `TypeError` under the strict one; what is left converts by
+/// [`scalar_type_hint`], the one weak rule php's `RECV` walks too, which
+/// under `strict_types` converts nothing but an int a float takes; and
+/// the rest is `zend_argument_type_error`'s `must be of type %s, %s
+/// given`, the type as `zend_type_to_string` writes it
+/// ([`declared_type_name`]) and the value as `zend_zval_value_name`
+/// names it. A `callable` is `zend_is_callable_ex`'s resolution, and
+/// its refusal `zend_wrong_callback_error`'s sentence
+/// ([`callable_argument`]).
+///
+/// An int parameter given a float or a string reads it through the
+/// kernel that copies `zend_parse_arg_long_weak`,
+/// [`crate::ops::arg_long_weak`]: a float in the long's range is
+/// truncated behind the 8.1 deprecation where that loses something, and
+/// one that is NAN or past the range is the `TypeError`; a numeric
+/// string with a fraction is the same deprecation in its float-string
+/// wording.
 ///
 /// ```php
 /// var_dump(str_repeat('x', 1.5), str_repeat('x', '1.5'));
@@ -441,13 +444,390 @@ pub fn binary_op(
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// A `string` takes an object through its `__toString` under the weak
+/// rule, `zend_parse_arg_str_weak`'s object arm, and the string it made
+/// replaces the object in the frame; an object with no `__toString` is
+/// the `TypeError` naming its class, and what `__toString` throws is
+/// what the call throws, with no `TypeError` after it.
+///
+/// ```php
+/// class S { function __toString(): string { return "s"; } }
+/// class T { function __toString(): string { throw new Exception("from __toString"); } }
+/// var_dump(strtoupper(new S), str_repeat(new S, 2), strlen(new S));
+/// try { strtoupper(new stdClass); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { strtoupper(new T); } catch (Exception $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(1) "S"
+/// string(2) "ss"
+/// int(1)
+/// strtoupper(): Argument #1 ($string) must be of type string, stdClass given
+/// Exception: from __toString
+/// ```
+///
+/// Under `strict_types` the caller's file refuses what the weak rule
+/// converts, the object, the number and the numeric string alike, and
+/// takes an int where a float is asked for, the one conversion php
+/// makes there.
+///
+/// ```php
+/// declare(strict_types=1);
+/// class S { function __toString(): string { return "s"; } }
+/// foreach ([fn () => strtoupper(new S), fn () => str_repeat(12, 1), fn () => str_repeat('x', '2'), fn () => fmod('7', 2), fn () => in_array(1, [], 1)] as $f) {
+///     try { $f(); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// var_dump(fmod(7, 2));
+/// ```
+/// ```expect
+/// strtoupper(): Argument #1 ($string) must be of type string, S given
+/// str_repeat(): Argument #1 ($string) must be of type string, int given
+/// str_repeat(): Argument #2 ($times) must be of type int, string given
+/// fmod(): Argument #1 ($num1) must be of type float, string given
+/// in_array(): Argument #3 ($strict) must be of type bool, int given
+/// float(1)
+/// ```
+///
+/// The weak rule's scalar arms, each php's `zend_parse_arg_*_weak`: a
+/// numeric string, leading and trailing whitespace allowed, to a float
+/// and to an int; a bool to either; a number or a string to a bool.
+///
+/// ```php
+/// var_dump(fmod(' 7 ', '2e0'), fmod(true, 2), str_repeat('ab', true), in_array(1, [1], '0'), in_array('1', [1], 1));
+/// try { fmod('7x', 2); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// float(1)
+/// float(1)
+/// string(2) "ab"
+/// bool(true)
+/// bool(false)
+/// fmod(): Argument #1 ($num1) must be of type float, string given
+/// ```
+///
+/// A union holds a value one of its members holds, and otherwise
+/// converts it by the members' order, int, then float, then string,
+/// then bool, a string read by `is_numeric_str_function` where both
+/// numbers are members; `null` to one with a scalar member is the
+/// deprecation naming the whole union and the first member's zero. The
+/// refusal names the union as `zend_type_to_string` orders it, classes
+/// first, which is the `Z_EXPECTED_*` row `Z_PARAM_NUMBER`,
+/// `Z_PARAM_ARRAY_HT_OR_STR` and their kin print.
+///
+/// ```php
+/// var_dump(round('1.5'), round('2'), round(null), str_replace('a', 'b', 11));
+/// try { round([]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { str_replace('a', 'b', new stdClass); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Deprecated: round(): Passing null to parameter #1 ($num) of type int|float is deprecated in %s on line 2
+/// float(2)
+/// float(2)
+/// float(0)
+/// string(2) "11"
+/// round(): Argument #1 ($num) must be of type int|float, array given
+/// str_replace(): Argument #3 ($subject) must be of type array|string, stdClass given
+/// ```
+///
+/// A class is `instanceof_function` over the object's class, its
+/// parents and its interfaces, `Z_PARAM_OBJECT_OF_CLASS`, the refusal
+/// naming the class and `?Class` where `null` is a member,
+/// `zend_wrong_parameter_class_or_null_error`'s form.
+///
+/// ```php
+/// var_dump(iterator_count(new ArrayIterator([1, 2])));
+/// try { new CachingIterator(new ArrayObject([])); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { iterator_count(1); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { Closure::bind(fn () => 1, new stdClass, []); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(2)
+/// CachingIterator::__construct(): Argument #1 ($iterator) must be of type Iterator, ArrayObject given
+/// iterator_count(): Argument #1 ($iterator) must be of type Traversable|array, int given
+/// Closure::bind(): Argument #3 ($newScope) must be of type object|string|null, array given
+/// ```
 pub fn coerce_param(
     req: &mut Request,
     value: &Value,
     ty: &Type,
     position: u32,
 ) -> Result<Value, Thrown> {
-    coerce_typed(req, value, ty, position, false)
+    hold(req, value, ty, position).map(|held| held.value)
+}
+
+/// [`coerce_param`] over the argument at `position` and the type the
+/// native being served declares for it, `arg_info->type`, the one
+/// declaration Reflection reads too, so no native writes its parameter's
+/// type a second time: `None` where the call gave no argument there,
+/// which is where `Z_PARAM_OPTIONAL` leaves the default standing, and
+/// the value as passed where the parameter declares no type. A variadic
+/// position is held to the variadic's type.
+///
+/// ```php
+/// $m = new MultipleIterator(MultipleIterator::MIT_KEYS_ASSOC);
+/// $m->attachIterator(new ArrayIterator([1]), 1.0);
+/// $m->attachIterator(new ArrayIterator([2]), false);
+/// foreach ($m as $v) { var_dump($v); }
+/// try { $m->attachIterator(new ArrayIterator([3]), []); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// array(2) {
+///   [1]=>
+///   int(1)
+///   [0]=>
+///   int(2)
+/// }
+/// MultipleIterator::attachIterator(): Argument #2 ($info) must be of type string|int|null, array given
+/// ```
+pub fn argument(req: &mut Request, position: u32) -> Result<Option<Value>, Thrown> {
+    let Some(given) = req
+        .argument(position)
+        .filter(|given| !matches!(given.as_ref(), ValueRef::Undef))
+    else {
+        return Ok(None);
+    };
+    match req.active_parameter_type(position) {
+        Some(ty) => coerce_param(req, &given, &ty, position).map(Some),
+        None => Ok(Some(given.deref())),
+    }
+}
+
+/// `Z_PARAM_FUNC` and `Z_PARAM_FUNC_OR_NULL` over the argument at
+/// `position`, held to the `callable` or `?callable` the native
+/// declares there as [`argument`] holds any parameter, and to
+/// `callable` where the declaration names no callable, which is the
+/// macro's own form: the callee `zend_is_callable_ex` resolved it to,
+/// its deprecations raised once, or `zend_wrong_callback_error`'s `must
+/// be a valid callback, %s` ending with the resolver's own sentence, `or
+/// null` where `null` is a member. `None` for the `null` a `?callable`
+/// took and for no argument at all. Every form the resolver serves is
+/// taken, a `Closure` first among them.
+///
+/// ```php
+/// class C { function m($x) { return "m$x"; } static function s($x) { return "s$x"; } }
+/// function f($x) { return "f$x"; }
+/// var_dump(call_user_func(fn ($x) => "c$x", 1), call_user_func('f', 2), call_user_func([new C, 'm'], 3), call_user_func('C::s', 4), array_map(null, [5]));
+/// try { call_user_func('nope'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { array_map([new C, 'nope'], []); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $a = []; usort($a, null); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(2) "c1"
+/// string(2) "f2"
+/// string(2) "m3"
+/// string(2) "s4"
+/// array(1) {
+///   [0]=>
+///   int(5)
+/// }
+/// call_user_func(): Argument #1 ($callback) must be a valid callback, function "nope" not found or invalid function name
+/// array_map(): Argument #1 ($callback) must be a valid callback or null, class C does not have a method "nope"
+/// usort(): Argument #2 ($callback) must be a valid callback, no array or string given
+/// ```
+pub fn callable_argument(req: &mut Request, position: u32) -> Result<Option<Callable>, Thrown> {
+    let Some(given) = req
+        .argument(position)
+        .filter(|given| !matches!(given.as_ref(), ValueRef::Undef))
+    else {
+        return Ok(None);
+    };
+    let ty = req
+        .active_parameter_type(position)
+        .filter(|ty| callable_type(ty).is_some())
+        .unwrap_or(Type::Callable);
+    hold(req, &given, &ty, position).map(|held| held.callable)
+}
+
+/// What [`hold`] settled one argument to: the value the native reads,
+/// and the callee a `callable` parameter resolved it to.
+struct Held {
+    value: Value,
+    callable: Option<Callable>,
+}
+
+impl Held {
+    fn plain(value: Value) -> Held {
+        Held {
+            value,
+            callable: None,
+        }
+    }
+}
+
+/// The body of [`coerce_param`] and [`callable_argument`].
+fn hold(req: &mut Request, value: &Value, ty: &Type, position: u32) -> Result<Held, Thrown> {
+    let value = value.deref().undef_as_null();
+    let null = matches!(value.as_ref(), ValueRef::Null);
+    if let Some(nullable) = callable_type(ty) {
+        if null && nullable {
+            return Ok(Held::plain(Value::null()));
+        }
+        return match req.callable_checked(&value) {
+            Ok(callable) => Ok(Held {
+                value,
+                callable: Some(callable),
+            }),
+            // A deprecation the resolution raised became a throw, which
+            // stands as it is, as `zend_wrong_callback_error` raises
+            // nothing over a pending exception.
+            Err(_) if req.is_pending() => Err(Thrown::of(req.take_pending())),
+            Err(why) => {
+                let or_null = if nullable { " or null" } else { "" };
+                Err(arg_type_error(
+                    req,
+                    position,
+                    &format!("be a valid callback{or_null}, {why}"),
+                ))
+            }
+        };
+    }
+    let scopes = req.active_native_scopes();
+    if holds(req, &value, ty, scopes) {
+        return Ok(Held::plain(value));
+    }
+    let strict = req.strict_types();
+    let mask = ty.mask();
+    let coerced = if null {
+        if strict {
+            None
+        } else {
+            null_as_scalar(req, mask)?
+        }
+    } else {
+        scalar_type_hint(req, &value, mask, strict)?
+    };
+    let Some(coerced) = coerced else {
+        let given = value_name(req, &value);
+        let declared = declared_type_name(ty);
+        return Err(arg_type_error(
+            req,
+            position,
+            &format!("be of type {declared}, {given} given"),
+        ));
+    };
+    if null {
+        // `zend_null_arg_deprecated` names the type the parameter
+        // declares where it declares one, and the macro's where not.
+        let declared = req
+            .active_parameter_type(position)
+            .map_or_else(|| declared_type_name(ty), |ty| declared_type_name(&ty));
+        crate::api::raising::arg_null_deprecated(req, position, &declared);
+        if req.is_pending() {
+            req.release(coerced);
+            return Err(Thrown::of(req.take_pending()));
+        }
+    }
+    // `zend_parse_arg_str_weak` converts the argument's own zval, and
+    // so do `Z_PARAM_NUMBER`'s two slow paths; the long, double and bool
+    // readers write their destination and leave the zval as passed.
+    if coerced.as_php_string().is_some()
+        || (mask & (MAY_BE_LONG | MAY_BE_DOUBLE)) == (MAY_BE_LONG | MAY_BE_DOUBLE)
+    {
+        req.replace_argument(position, coerced);
+    }
+    Ok(Held::plain(coerced))
+}
+
+/// Whether `ty` is `callable`, and whether `null` is a member beside
+/// it: the two shapes `Z_PARAM_FUNC` and `Z_PARAM_FUNC_OR_NULL` read.
+fn callable_type(ty: &Type) -> Option<bool> {
+    match ty {
+        Type::Callable => Some(false),
+        Type::Nullable(inner) => callable_type(inner).map(|_| true),
+        Type::Union(members) => match members.as_slice() {
+            [Type::Callable, Type::Null] | [Type::Null, Type::Callable] => Some(true),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The classes a `self`, a `parent` and a `static` in a declared type
+/// name where it is checked: the class the function is declared on,
+/// php's `zf->common.scope`, and the class it was called on,
+/// `Z_CE(EX(This))`.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Scopes {
+    pub(crate) own: Option<ClassId>,
+    pub(crate) called: Option<ClassId>,
+}
+
+/// `zend_check_type` (`Z/Zend/zend_execute.c:1160`) and
+/// `zend_check_type_slow`: whether the declared type holds the value as
+/// it is, nothing converted and nothing raised. The mask is the whole
+/// check for a type that names no class; a class holds an object whose class is it,
+/// extends it or implements it (`instanceof_function`), an intersection
+/// one every member holds, `iterable` an array or a `Traversable`,
+/// `callable` what `zend_is_callable` resolves, and `self`, `parent`
+/// and `static` the classes `scopes` names. The one check an argument
+/// of a native, an argument of a user function, a return and a typed
+/// property are held to.
+///
+/// A class a return and a property are held to is the same
+/// `instanceof_function`:
+///
+/// ```php
+/// class A {} class B extends A {}
+/// function f(): A { return new B; }
+/// class C { public A $a; }
+/// $c = new C; $c->a = new B;
+/// var_dump(f() instanceof B, $c->a instanceof B);
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// ```
+///
+/// php declares no native with an intersection, so the witness for that
+/// arm is a user function's, which this same check serves:
+///
+/// ```php
+/// class A { function f(self $x) { return "self "; } function g(): static { return $this; } }
+/// function h(Countable&Traversable $x) { return "both "; }
+/// function i(iterable $x) { return "iterable "; }
+/// function k(?callable $c) { return "callable "; }
+/// echo (new A)->f(new A), get_class((new A)->g()), " ", h(new ArrayIterator([])), i(new ArrayObject([])), i([]), k(fn () => 1), k('strlen'), k(null), "|\n";
+/// foreach ([fn () => h(new EmptyIterator), fn () => i(1), fn () => k('nope')] as $f) {
+///     try { $f(); } catch (TypeError $e) { echo preg_replace('/, called in.*/', '', $e->getMessage()), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// self A both iterable iterable callable callable callable |
+/// h(): Argument #1 ($x) must be of type Countable&Traversable, EmptyIterator given
+/// i(): Argument #1 ($x) must be of type Traversable|array, int given
+/// k(): Argument #1 ($c) must be of type ?callable, string given
+/// ```
+pub(crate) fn holds(req: &Request, value: &Value, ty: &Type, scopes: Scopes) -> bool {
+    let value = value.deref();
+    let object = value.as_object().map(PhpObject::class);
+    let is = |class: Option<ClassId>| {
+        object
+            .zip(class)
+            .is_some_and(|(object, class)| req.instance_of(object, class))
+    };
+    match ty {
+        Type::Mixed => true,
+        Type::Nullable(inner) => {
+            matches!(value.as_ref(), ValueRef::Null | ValueRef::Undef)
+                || holds(req, &value, inner, scopes)
+        }
+        Type::Union(members) => members
+            .iter()
+            .any(|member| holds(req, &value, member, scopes)),
+        Type::Intersection(members) => members
+            .iter()
+            .all(|member| holds(req, &value, member, scopes)),
+        Type::Named(name) => is(req.class_named(&name.0)),
+        Type::Iterable => value.as_array().is_some() || is(req.class_named(b"Traversable")),
+        Type::Callable => req.callable_of(&value).is_some(),
+        Type::SelfClass => is(scopes.own),
+        Type::CalledClass => is(scopes.called),
+        Type::ParentClass => is(scopes
+            .own
+            .and_then(|class| req.class_decl(class)?.parent.clone())
+            .and_then(|parent| req.class_named(&parent.0))),
+        _ => ty.contains_code(value.type_code()),
+    }
 }
 
 /// `MAY_BE_FALSE`, `MAY_BE_TRUE`, `MAY_BE_LONG`, `MAY_BE_DOUBLE` and
@@ -458,16 +838,42 @@ const MAY_BE_LONG: u32 = 1 << 4;
 const MAY_BE_DOUBLE: u32 = 1 << 5;
 const MAY_BE_STRING: u32 = 1 << 6;
 
+/// `is_numeric_str_function`: the number a string is, whitespace
+/// allowed on either side and nothing else past it.
+fn numeric_whole(bytes: &[u8]) -> Option<php_heap::Number> {
+    match php_heap::numeric_prefix(bytes)? {
+        (number, false) => Some(number),
+        (_, true) => None,
+    }
+}
+
 /// `zend_verify_scalar_type_hint` (`Z/Zend/zend_execute.c:817`) over a
-/// declared type's mask, for an argument of a *user* function, which is
-/// what a `RECV` checks: under `strict_types` nothing converts but a
-/// long where the type accepts a float, and under the weak rule the
-/// preference order `zend_verify_weak_scalar_type_hint` walks, int then
-/// float then string then bool, with a string read by
-/// `is_numeric_str_function` where the type accepts both int and float.
-/// `null` never converts here, since php allows that for an internal
-/// parameter alone; what does not convert is `None`, and the caller
-/// raises the `TypeError`.
+/// declared type's mask, the one weak rule php's `RECV` and a native's
+/// parameter parsing both walk: under `strict_types` nothing converts
+/// but a long where the type accepts a float, and under the weak rule
+/// the preference order `zend_verify_weak_scalar_type_hint` walks over
+/// the `zend_parse_arg_*_weak` readers, int then float then string then
+/// bool, with a string read by `is_numeric_str_function` where the type
+/// accepts both int and float, and an object taken as the string its
+/// class's `cast_object` gives, `zend_parse_arg_str_weak`'s object arm,
+/// whose throw is the `Err`. `null` never converts here, since php
+/// allows that for an internal parameter alone ([`null_as_scalar`]); what does not
+/// convert is `None`, and the caller raises the `TypeError`.
+///
+/// ```php
+/// class S { function __toString(): string { return "s"; } }
+/// function f(string $s) { return $s; }
+/// function g(int|string $v) { return $v; }
+/// class P { public string $p = ''; }
+/// $p = new P; $p->p = new S;
+/// var_dump(f(new S), g(new S), g(1.0), $p->p);
+/// ```
+/// ```expect
+/// string(1) "s"
+/// string(1) "s"
+/// int(1)
+/// string(1) "s"
+/// ```
 pub(crate) fn scalar_type_hint(
     req: &mut Request,
     value: &Value,
@@ -490,15 +896,18 @@ pub(crate) fn scalar_type_hint(
         if mask & MAY_BE_DOUBLE != 0
             && let ValueRef::Str(s) = value.as_ref()
         {
-            match numeric_string(s.as_bytes()).as_ref().map(Value::as_ref) {
-                Some(ValueRef::Int(n)) => return Ok(Some(Value::int(n))),
-                Some(ValueRef::Float(d)) => return Ok(Some(Value::float(d))),
-                _ => {}
+            match numeric_whole(s.as_bytes()) {
+                Some(php_heap::Number::Long(n)) => return Ok(Some(Value::int(n))),
+                Some(php_heap::Number::Double(d)) => return Ok(Some(Value::float(d))),
+                None => {}
             }
         } else if let ValueRef::Bool(b) = value.as_ref() {
             return Ok(Some(Value::int(i64::from(b))));
         } else if let Some(n) = crate::ops::arg_long_weak(req, &value) {
             return Ok(Some(Value::int(n)));
+        }
+        if req.is_pending() {
+            return Ok(None);
         }
     }
     if mask & MAY_BE_DOUBLE != 0 {
@@ -506,24 +915,31 @@ pub(crate) fn scalar_type_hint(
             ValueRef::Int(n) => return Ok(Some(Value::float(n as f64))),
             ValueRef::Bool(b) => return Ok(Some(Value::float(f64::from(u8::from(b))))),
             ValueRef::Str(s) => {
-                if let Some(number) = numeric_string(s.as_bytes()) {
-                    return Ok(Some(Value::float(to_double(req, &number)?)));
+                if let Some(number) = numeric_whole(s.as_bytes()) {
+                    return Ok(Some(Value::float(number.double())));
                 }
             }
             _ => {}
         }
     }
-    if mask & MAY_BE_STRING != 0
-        && matches!(
-            value.as_ref(),
-            ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_)
-        )
-    {
-        // `crate::ops::to_string`, the kernel that copies
-        // `zend_double_to_str` at the request's `precision`; this
-        // module's `float_format` is the same `zend_gcvt` at a precision
-        // the caller names (#408).
-        return Ok(Some(Value::string(crate::ops::to_string(req, &value)?)));
+    if mask & MAY_BE_STRING != 0 {
+        match value.as_ref() {
+            // `crate::ops::to_string`, the kernel that copies
+            // `zend_double_to_str` at the request's `precision`; this
+            // module's `float_format` is the same `zend_gcvt` at a
+            // precision the caller names (#408).
+            ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => {
+                return Ok(Some(Value::string(crate::ops::to_string(req, &value)?)));
+            }
+            // `cast_object(zobj, &obj, IS_STRING)`, which for a class
+            // with no `__toString` fails without a word.
+            ValueRef::Object(object) => {
+                if let Some(text) = req.cast_object(*object, TypeTag::String)? {
+                    return Ok(Some(text));
+                }
+            }
+            _ => {}
+        }
     }
     if mask & MAY_BE_BOOL == MAY_BE_BOOL
         && matches!(
@@ -536,12 +952,12 @@ pub(crate) fn scalar_type_hint(
     Ok(None)
 }
 
-/// `zend_parse_arg_*_weak` on `null` for a scalar parameter that is
-/// not nullable: the value `null` coerces to under the 8.1 rule,
-/// `false`, `0`, `0.0` or the empty string, and none for a type php
-/// does not coerce `null` into. The caller raises
-/// `zend_null_arg_deprecated` beside it and writes the value back as
-/// the argument, as the `Z_PARAM_*` macros do.
+/// `zend_parse_arg_*_weak` on `null` for a parameter with a scalar
+/// member that is not nullable: the value `null` coerces to under the
+/// 8.1 rule, the zero of the first member in the weak order, `0`,
+/// `0.0`, the empty string or `false`, and none for a type with no
+/// scalar member, which is the `TypeError`. The caller raises
+/// `zend_null_arg_deprecated` beside it.
 ///
 /// ```php
 /// new ReflectionExtension(null);
@@ -555,149 +971,128 @@ pub(crate) fn scalar_type_hint(
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
-fn null_as_scalar(req: &mut Request, ty: &Type) -> Result<Option<Value>, Thrown> {
-    Ok(match ty {
-        Type::Bool => Some(Value::bool(false)),
-        Type::Int => Some(Value::int(0)),
-        Type::Float => Some(Value::float(0.0)),
-        Type::String => Some(Value::string(PhpString::new(req, b"")?)),
-        _ => None,
+///
+/// Under `strict_types` the same `null` is the `TypeError`, php's
+/// `zend_parse_arg_*_slow` refusing before the weak reader is reached,
+/// for a string, an int, a union and a bool alike.
+///
+/// ```php
+/// declare(strict_types=1);
+/// foreach ([fn () => define(null, 1), fn () => str_repeat('x', null), fn () => round(null), fn () => in_array(1, [], null), fn () => memory_get_usage(null)] as $f) {
+///     try { $f(); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// define(): Argument #1 ($constant_name) must be of type string, null given
+/// str_repeat(): Argument #2 ($times) must be of type int, null given
+/// round(): Argument #1 ($num) must be of type int|float, null given
+/// in_array(): Argument #3 ($strict) must be of type bool, null given
+/// memory_get_usage(): Argument #1 ($real_usage) must be of type bool, null given
+/// ```
+fn null_as_scalar(req: &mut Request, mask: u32) -> Result<Option<Value>, Thrown> {
+    Ok(if mask & MAY_BE_LONG != 0 {
+        Some(Value::int(0))
+    } else if mask & MAY_BE_DOUBLE != 0 {
+        Some(Value::float(0.0))
+    } else if mask & MAY_BE_STRING != 0 {
+        Some(Value::string(PhpString::new(req, b"")?))
+    } else if mask & MAY_BE_BOOL != 0 {
+        Some(Value::bool(false))
+    } else {
+        None
     })
 }
 
-/// The declared type as `zend_type_to_string` writes it, for the
-/// shapes a native parameter declares: a scalar, a class, `?T`, and a
-/// union in its declared order. What a `TypeError` for a parameter and
-/// the null deprecation name the type as.
+/// The declared type as `zend_type_to_string` writes it
+/// (`Z/Zend/zend_compile.c:1429`): the class names first, an
+/// intersection among them bracketed, then the other types in php's
+/// own order whatever order they were declared in, `static`, `callable`,
+/// `object`, `array`, `string`, `int`, `float`, `bool` or `false` or
+/// `true`, `void`, `never`; `iterable` as the `Traversable|array` php
+/// compiles it to; `mixed` alone; and `null` as `?T` beside one other
+/// type and as `|null` last beside several. What a `TypeError` for a
+/// parameter, a return or a property and the null deprecation name the
+/// type as.
+///
+/// ```php
+/// function f(int|string|array|null $x) {}
+/// function g(float|int $x) {}
+/// foreach ([fn () => f(new stdClass), fn () => g('x')] as $c) {
+///     try { $c(); } catch (TypeError $e) { echo preg_replace('/, called in.*/', '', $e->getMessage()), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// f(): Argument #1 ($x) must be of type array|string|int|null, stdClass given
+/// g(): Argument #1 ($x) must be of type int|float, string given
+/// ```
 pub(crate) fn declared_type_name(ty: &Type) -> String {
-    match ty {
-        Type::Mixed => String::from("mixed"),
-        Type::Void => String::from("void"),
-        Type::Never => String::from("never"),
-        Type::Null => String::from("null"),
-        Type::Bool => String::from("bool"),
-        Type::False => String::from("false"),
-        Type::True => String::from("true"),
-        Type::Int => String::from("int"),
-        Type::Float => String::from("float"),
-        Type::String => String::from("string"),
-        Type::Array => String::from("array"),
-        Type::Object => String::from("object"),
-        Type::Iterable => String::from("iterable"),
-        Type::Callable => String::from("callable"),
-        Type::CalledClass => String::from("static"),
-        Type::SelfClass => String::from("self"),
-        Type::ParentClass => String::from("parent"),
-        Type::Named(name) => String::from_utf8_lossy(&name.0).into_owned(),
-        Type::Nullable(inner) => format!("?{}", declared_type_name(inner)),
-        Type::Union(members) | Type::Intersection(members) => {
-            let glue = if matches!(ty, Type::Union(_)) {
-                "|"
-            } else {
-                "&"
-            };
-            members
+    let members: Vec<&Type> = match ty {
+        Type::Mixed => return String::from("mixed"),
+        Type::Intersection(members) => {
+            return members
                 .iter()
                 .map(declared_type_name)
                 .collect::<Vec<_>>()
-                .join(glue)
+                .join("&");
+        }
+        Type::Union(members) => members.iter().collect(),
+        Type::Nullable(inner) => match inner.as_ref() {
+            Type::Union(members) => members.iter().chain([&Type::Null]).collect(),
+            other => vec![other, &Type::Null],
+        },
+        other => vec![other],
+    };
+    let has = |wanted: &Type| members.contains(&wanted);
+    let mut parts: Vec<String> = Vec::new();
+    for member in &members {
+        match member {
+            Type::Named(name) => parts.push(String::from_utf8_lossy(&name.0).into_owned()),
+            Type::SelfClass => parts.push(String::from("self")),
+            Type::ParentClass => parts.push(String::from("parent")),
+            Type::Iterable => parts.push(String::from("Traversable")),
+            Type::Intersection(_) => parts.push(format!("({})", declared_type_name(member))),
+            _ => {}
         }
     }
-}
-
-/// [`coerce_param`] with the type named as the parameter declares it:
-/// `nullable` is set inside a `?T`, so the `TypeError` for what does
-/// not coerce says `?int` where php's `Z_EXPECTED_LONG_OR_NULL` does
-/// (`zend_wrong_parameter_type_error` over the `_OR_NULL` row of
-/// `Z_EXPECTED_TYPES`).
-fn coerce_typed(
-    req: &mut Request,
-    value: &Value,
-    ty: &Type,
-    position: u32,
-    nullable: bool,
-) -> Result<Value, Thrown> {
-    let strict = req.strict_types();
-    let value = &value.deref();
-    if !strict
-        && !nullable
-        && matches!(value.as_ref(), ValueRef::Null | ValueRef::Undef)
-        && let Some(coerced) = null_as_scalar(req, ty)?
-    {
-        let declared = req
-            .active_parameter_type(position)
-            .map_or_else(|| declared_type_name(ty), |ty| declared_type_name(&ty));
-        crate::api::raising::arg_null_deprecated(req, position, &declared);
-        req.replace_argument(position, coerced);
-        return Ok(coerced);
+    for (member, word) in [
+        (Type::CalledClass, "static"),
+        (Type::Callable, "callable"),
+        (Type::Object, "object"),
+    ] {
+        if has(&member) {
+            parts.push(String::from(word));
+        }
     }
-    let want = |req: &mut Request, name: &str| {
-        let question = if nullable { "?" } else { "" };
-        // `zend_argument_type_error(num, "must be of type %s, %s
-        // given", need, zend_zval_value_name(arg))`: the tail is the
-        // value's name and not its type's, so `true` stands where
-        // `zend_zval_type_name` would read `bool`.
-        let given = value_name(req, value);
-        Err(arg_type_error(
-            req,
-            position,
-            &format!("be of type {question}{name}, {given} given"),
-        ))
-    };
-    match ty {
-        Type::Null => match value.as_ref() {
-            ValueRef::Null | ValueRef::Undef => Ok(Value::null()),
-            _ => want(req, "null"),
-        },
-        Type::Bool => match value.as_ref() {
-            ValueRef::Bool(b) => Ok(Value::bool(b)),
-            ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Str(_) if !strict => {
-                Ok(Value::bool(truthy(req, value)))
-            }
-            _ => want(req, "bool"),
-        },
-        Type::Int => match value.as_ref() {
-            ValueRef::Int(n) => Ok(Value::int(n)),
-            ValueRef::Bool(b) if !strict => Ok(Value::int(i64::from(b))),
-            ValueRef::Float(_) | ValueRef::Str(_) if !strict => {
-                match crate::ops::arg_long_weak(req, value) {
-                    Some(n) => Ok(Value::int(n)),
-                    None => want(req, "int"),
-                }
-            }
-            _ => want(req, "int"),
-        },
-        Type::Float => match value.as_ref() {
-            ValueRef::Float(f) => Ok(Value::float(f)),
-            ValueRef::Int(n) => Ok(Value::float(n as f64)),
-            ValueRef::Bool(b) if !strict => Ok(Value::float(f64::from(u8::from(b)))),
-            ValueRef::Str(s) if !strict => match numeric_string(s.as_bytes()) {
-                Some(n) => to_double(req, &n).map(Value::float),
-                None => want(req, "float"),
-            },
-            _ => want(req, "float"),
-        },
-        Type::String => match value.as_ref() {
-            ValueRef::Str(_) => Ok(*value),
-            ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) if !strict => {
-                let coerced = Value::string(to_string(req, value)?);
-                req.replace_argument(position, coerced);
-                Ok(coerced)
-            }
-            _ => want(req, "string"),
-        },
-        Type::Array => match value.as_ref() {
-            ValueRef::Array(_) => Ok(*value),
-            _ => want(req, "array"),
-        },
-        Type::Object => match value.as_ref() {
-            ValueRef::Object(_) => Ok(*value),
-            _ => want(req, "object"),
-        },
-        Type::Nullable(inner) => match value.as_ref() {
-            ValueRef::Null | ValueRef::Undef => Ok(Value::null()),
-            _ => coerce_typed(req, value, inner, position, true),
-        },
-        _ => Ok(*value),
+    if has(&Type::Array) || has(&Type::Iterable) {
+        parts.push(String::from("array"));
     }
+    for (member, word) in [
+        (Type::String, "string"),
+        (Type::Int, "int"),
+        (Type::Float, "float"),
+    ] {
+        if has(&member) {
+            parts.push(String::from(word));
+        }
+    }
+    if has(&Type::Bool) || (has(&Type::False) && has(&Type::True)) {
+        parts.push(String::from("bool"));
+    } else if has(&Type::False) {
+        parts.push(String::from("false"));
+    } else if has(&Type::True) {
+        parts.push(String::from("true"));
+    }
+    for (member, word) in [(Type::Void, "void"), (Type::Never, "never")] {
+        if has(&member) {
+            parts.push(String::from(word));
+        }
+    }
+    if has(&Type::Null) {
+        let joined = parts.join("|");
+        if !parts.is_empty() && !joined.contains('|') && !joined.contains('&') {
+            return format!("?{joined}");
+        }
+        parts.push(String::from("null"));
+    }
+    parts.join("|")
 }
