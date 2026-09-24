@@ -37,14 +37,14 @@ mod logical;
 mod sanitizing;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
-use php_ext::coerce::{coerce_param, to_long, to_string, value_name};
+use php_ext::coerce::{coerce_param, numeric_string, to_long, to_string, value_name};
 use php_ext::decl::{
     Attribute, AttributeArgument, ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr,
     EnumBacking, FunctionDecl, IniDecl, Name, Parameter, Type,
 };
 use php_ext::raising::{
-    Level, Thrown, arg_count_error, arg_type_error, arg_value_error, docref, new_throwable, throw,
-    throw_value,
+    Level, Thrown, arg_count_error, arg_null_deprecated, arg_type_error, arg_value_error, docref,
+    new_throwable, throw, throw_value,
 };
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpString, Value, ValueRef};
@@ -595,21 +595,37 @@ fn array_or_long(
         return Ok((None, absent));
     };
     let value = value.deref();
-    match value.as_ref() {
-        ValueRef::Array(array) => Ok((Some(*array), 0)),
-        ValueRef::Object(_) | ValueRef::Resource(_) => {
-            let name = value_name(req, &value);
-            Err(arg_type_error(
-                req,
-                position,
-                &format!("be of type array|int, {name} given"),
-            ))
-        }
-        _ => {
-            let coerced = coerce_param(req, &value, &Type::Int, position)?;
-            Ok((None, coerced.as_int().unwrap_or(0)))
-        }
+    if let Some(array) = value.as_array() {
+        return Ok((Some(*array), 0));
     }
+    // The weak long's refusals name the union, as
+    // `zend_parse_arg_array_ht_or_long` reports them.
+    let refused = match value.as_ref() {
+        ValueRef::Null => {
+            arg_null_deprecated(req, position, "array|int");
+            return Ok((None, 0));
+        }
+        ValueRef::Str(s) => {
+            let text = s.as_bytes().trim_ascii_start();
+            let text = text
+                .strip_prefix(b"-")
+                .or_else(|| text.strip_prefix(b"+"))
+                .unwrap_or(text);
+            numeric_string(s.as_bytes()).is_none() && !text.first().is_some_and(u8::is_ascii_digit)
+        }
+        ValueRef::Object(_) | ValueRef::Resource(_) => true,
+        _ => false,
+    };
+    if refused {
+        let name = value_name(req, &value);
+        return Err(arg_type_error(
+            req,
+            position,
+            &format!("be of type array|int, {name} given"),
+        ));
+    }
+    let coerced = coerce_param(req, &value, &Type::Int, position)?;
+    Ok((None, coerced.deref().as_int().unwrap_or(0)))
 }
 
 /// `zend_hash_str_find` over an options array: the element under a
@@ -1131,9 +1147,11 @@ fn filter_input(req: &mut Request) -> Result<Value, Thrown> {
 /// and then filtered element by element.
 ///
 /// ```php
+/// try { filter_var_array([], ""); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// var_dump(filter_var("  42 ", FILTER_VALIDATE_INT), filter_var("abc"), filter_var(1.5), filter_var(true), filter_var(null), filter_var([1], FILTER_VALIDATE_INT), filter_var(["1", ["x", "3"]], FILTER_VALIDATE_INT, FILTER_REQUIRE_ARRAY), filter_var("5", FILTER_VALIDATE_INT, FILTER_FORCE_ARRAY), filter_var("5", FILTER_VALIDATE_INT, FILTER_REQUIRE_ARRAY));
 /// ```
 /// ```expect
+/// filter_var_array(): Argument #2 ($options) must be of type array|int, string given
 /// int(42)
 /// string(3) "abc"
 /// string(3) "1.5"
