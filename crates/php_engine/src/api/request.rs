@@ -6854,11 +6854,9 @@ impl Request {
     /// the parent resolved first and then each interface, which is the
     /// order php's messages come in. A name nothing declares is php's
     /// `Error`, `Class "P" not found` for a parent and `Interface "I"
-    /// not found` for an interface; a parent that is an interface, an
-    /// interface list naming something that is not one, and the same
-    /// interface twice are `zend_do_inheritance`'s and
-    /// `zend_do_implement_interface`'s `E_ERROR`, which ends the request
-    /// where it stands.
+    /// not found` for an interface; an interface list naming something
+    /// that is not one is `zend_do_link_class`'s `E_ERROR`, which ends
+    /// the request where it stands.
     ///
     /// Linking copies nothing: an inherited constant, property or
     /// method is found by walking `parent` from the declaration, so what
@@ -6888,6 +6886,115 @@ impl Request {
     /// ```expect exit=255
     /// Fatal error: C cannot implement P - it is not an interface in %s on line 3
     /// ```
+    ///
+    /// Then the class is linked (`zend_do_link_class`) by the checks
+    /// `zend_inheritance.c` makes, [`php_unit::link`], which the early
+    /// bind runs too: a class implementing an interface is never early
+    /// bound, so what linking refuses about one is refused here, after
+    /// what the file printed, at the site php names, and a deprecation
+    /// a tentative return raises is raised here before the class runs.
+    ///
+    /// ```php
+    /// interface I { const X = 1; }
+    /// interface J { const X = 2; }
+    /// class C implements I, J {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class C inherits both I::X and J::X, which is ambiguous in %s on line 4
+    /// ```
+    ///
+    /// ```php
+    /// interface I { const X = 1; }
+    /// class C implements I { protected const X = 2; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Access level to C::X must be public (as in interface I) in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class C implements Throwable {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class C cannot implement interface Throwable, extend Exception or Error instead in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class C implements UnitEnum {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Non-enum class C cannot implement interface UnitEnum in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class C implements ArrayAccess {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class C contains 4 abstract methods and must therefore be declared abstract or implement the remaining methods (ArrayAccess::offsetExists, ArrayAccess::offsetGet, ArrayAccess::offsetSet, ...) in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// echo "before\n";
+    /// class C implements ArrayAccess {
+    ///     function offsetExists($o): bool { return true; }
+    ///     function offsetGet($o): mixed { return 1; }
+    ///     function offsetSet(): void {}
+    ///     function offsetUnset($o): void {}
+    /// }
+    /// ```
+    /// ```expect exit=255
+    /// before
+    ///
+    /// Fatal error: Declaration of C::offsetSet(): void must be compatible with ArrayAccess::offsetSet(mixed $offset, mixed $value): void in %s on line 6
+    /// ```
+    ///
+    /// ```php
+    /// class A { function f(): X {} }
+    /// class B extends A implements Stringable {
+    ///     function __toString(): string { return ""; }
+    ///     function f(): Y {}
+    /// }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Could not check compatibility between B::f(): Y and A::f(): X, because class Y is not available in %s on line 5
+    /// ```
+    ///
+    /// What php takes, it takes: an override whose parameter is wider
+    /// and whose return is narrower, and one of a tentative return that
+    /// declares none, which is php's deprecation and links:
+    ///
+    /// ```php
+    /// class C implements ArrayAccess {
+    ///     function offsetExists(mixed $o): bool { return true; }
+    ///     function offsetGet($o) { return "got $o"; }
+    ///     function offsetSet($o, $v): void {}
+    ///     function offsetUnset($o): void {}
+    /// }
+    /// echo (new C)["k"], "\n";
+    /// ```
+    /// ```expect exit=0
+    /// Deprecated: Return type of C::offsetGet($o) should either be compatible with ArrayAccess::offsetGet(mixed $offset): mixed, or the #[\ReturnTypeWillChange] attribute should be used to temporarily suppress the notice in %s on line 4
+    /// got k
+    /// ```
+    ///
+    /// `Traversable` itself is php's `E_CORE_ERROR`, which names no site:
+    ///
+    /// ```php
+    /// class C implements Traversable {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class C must implement interface Traversable as part of either Iterator or IteratorAggregate in Unknown on line 0
+    /// ```
+    ///
+    /// An interface list naming one interface twice is refused in the
+    /// words for what the declaration is:
+    ///
+    /// ```php
+    /// interface I {}
+    /// interface J extends I, I {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Interface J cannot implement previously implemented interface I in %s on line 3
+    /// ```
     pub(crate) fn bind_class(&mut self, unit: &Arc<Unit>, lowered: &[u8]) -> Result<(), Thrown> {
         let Some(at) = unit
             .classes
@@ -6910,23 +7017,15 @@ impl Request {
             let message = self.redeclaration(existing, &decl.name.0);
             return Err(crate::api::raising::fatal(self, &message));
         }
-        if let Some(parent) = &decl.parent {
-            let Some(found) = self.class_named(&parent.0) else {
-                return Err(crate::api::raising::throw(
-                    self,
-                    "Error",
-                    &format!("Class \"{}\" not found", String::from_utf8_lossy(&parent.0)),
-                ));
-            };
-            if self.class_decl(found).map(|p| p.kind) == Some(ClassKind::Interface) {
-                let message = format!(
-                    "Class {name} cannot extend interface {}",
-                    self.class_name(found)
-                );
-                return Err(crate::api::raising::fatal(self, &message));
-            }
+        if let Some(parent) = &decl.parent
+            && self.class_named(&parent.0).is_none()
+        {
+            return Err(crate::api::raising::throw(
+                self,
+                "Error",
+                &format!("Class \"{}\" not found", String::from_utf8_lossy(&parent.0)),
+            ));
         }
-        let mut implemented: Vec<ClassId> = Vec::new();
         for interface in &decl.interfaces {
             let Some(found) = self.class_named(&interface.0) else {
                 return Err(crate::api::raising::throw(
@@ -6945,14 +7044,34 @@ impl Request {
                 );
                 return Err(crate::api::raising::fatal(self, &message));
             }
-            if implemented.contains(&found) {
-                let message = format!(
-                    "Class {name} cannot implement previously implemented interface {}",
-                    self.class_name(found)
-                );
-                return Err(crate::api::raising::fatal(self, &message));
+        }
+        let lookup = |name: &[u8]| self.class_named(name).and_then(|id| self.class_decl(id));
+        let linking = php_unit::link::link(&decl, &lookup);
+        for deprecation in &linking.deprecations {
+            crate::api::raising::raise_at(
+                self,
+                Level::Deprecated,
+                &deprecation.to_string(),
+                &deprecation.site.file.0,
+                deprecation.site.line,
+            );
+        }
+        if let php_unit::link::Linked::Refused(refused)
+        | php_unit::link::Linked::Unresolved(refused) = linking.outcome
+        {
+            let message = refused.refusal.to_string();
+            match refused.refusal.level() {
+                Level::CoreError => self.end_in_core_error(&message),
+                level => {
+                    self.end_in_compile_time(
+                        level,
+                        &message,
+                        &refused.site.file.0,
+                        refused.site.line,
+                    );
+                }
             }
-            implemented.push(found);
+            return Err(Thrown::of(None));
         }
         let Ok(at) = u32::try_from(at) else {
             return Err(crate::api::raising::fatal(

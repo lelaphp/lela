@@ -18,6 +18,7 @@
 pub mod decl;
 mod dump;
 mod frameless;
+pub mod link;
 mod op;
 mod types;
 mod unit;

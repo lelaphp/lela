@@ -47,4 +47,12 @@ decl::Type::contains_code
 decl::Type::mask
 decl::Visibility
 frameless_table
+link::Linked
+link::Linking
+link::Refusal
+link::Refusal::level
+link::Refused
+link::Site
+link::TentativeReturn
+link::link
 type_to_string

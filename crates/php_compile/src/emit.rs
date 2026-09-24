@@ -375,6 +375,9 @@ pub(crate) struct Emit<'a> {
     /// `zend_compile_class_decl` bound them; the last is the one whose
     /// body is being compiled while `active_class` names it.
     classes: Vec<ClassDecl>,
+    /// Which of [`Emit::classes`] were bound early, in the order bound:
+    /// the file's classes `CG(class_table)` holds while it compiles.
+    bound: Vec<usize>,
     /// The functions the file declares with their bodies,
     /// [`Unit::functions`]: `CG(function_table)` past the natives, each
     /// entry landing once its body has compiled, which is when php's
@@ -884,6 +887,7 @@ pub(crate) fn unit(
         line: 1,
         diagnostics: Vec::new(),
         classes: Vec::new(),
+        bound: Vec::new(),
         functions_declared: Vec::new(),
         dynamic: Vec::new(),
         dynamic_func_defs: Vec::new(),
@@ -2788,6 +2792,20 @@ impl Emit<'_> {
     /// `Cannot redeclare C::m()`, `E_COMPILE_ERROR`, spelled as the
     /// second declaration spells it. An instance method's body has
     /// `$this` as its frame's own (`this_guaranteed_exists`).
+    ///
+    /// A class that declares `__toString` implements `Stringable`
+    /// (`add_stringable_interface`), which keeps it from the early bind,
+    /// and the method returns `string` where it declares nothing:
+    ///
+    /// ```php
+    /// class A { function __toString() { return 1; } }
+    /// var_dump(new A instanceof Stringable);
+    /// echo new A, "\n";
+    /// ```
+    /// ```expect exit=0
+    /// bool(true)
+    /// 1
+    /// ```
     fn method_decl(&mut self, class: usize, method: &Method) -> Result<(), CompileError> {
         let class_name = self
             .classes
@@ -2821,6 +2839,17 @@ impl Emit<'_> {
         let Some(decl) = self.classes.get_mut(class) else {
             return Err(self.fatal("InternalError: a method of a class the unit has not"));
         };
+        // `add_stringable_interface`: a class that declares
+        // `__toString` implements `Stringable`, written or not.
+        if name.eq_ignore_ascii_case(b"__tostring")
+            && decl.kind != ClassKind::Trait
+            && !decl
+                .interfaces
+                .iter()
+                .any(|interface| interface.0.eq_ignore_ascii_case(b"Stringable"))
+        {
+            decl.interfaces.push(Name(b"Stringable".as_slice().into()));
+        }
         let at = u32::try_from(decl.methods.len()).unwrap_or(u32::MAX);
         decl.methods.push(declared);
         self.methods.push(MethodBody {
@@ -2876,8 +2905,14 @@ impl Emit<'_> {
         let line = function.line;
         self.line = line;
         self.returns_by_ref = function.by_ref;
+        // `zend_compile_params`' `fallback_return_type`: a method named
+        // `__toString` with no return type written returns `string` all
+        // the same, which is what `Stringable::__toString` holds it to.
         self.return_type = match function.return_type {
             Some(written) => Some(self.typename(written, false)?.0),
+            None if scope.is_some() && name.eq_ignore_ascii_case(b"__tostring") => {
+                Some(Type::String)
+            }
             None => None,
         };
         let is_ctor = scope.is_some() && name.eq_ignore_ascii_case(b"__construct");
@@ -3506,11 +3541,6 @@ impl Emit<'_> {
         // ZEND_FETCH_CLASS_NO_AUTOLOAD)` stands before the class itself
         // goes into the table, so a class naming itself as its parent
         // finds nothing and binds as the program serves.
-        let early = interfaces.is_empty()
-            && match &parent {
-                None => true,
-                Some(parent) => self.known_class(parent).is_some(),
-            };
         let (attributes, dynamic_properties) = self.class_attributes(class, &name, class.line)?;
         let mut decl = ClassDecl {
             name: Name(name.clone().into_boxed_slice()),
@@ -3562,13 +3592,19 @@ impl Emit<'_> {
         self.active_class = None;
         self.active_parent = None;
         self.line = line;
-        if early {
-            // `zend_try_early_bind`, which links the class here: what
-            // `zend_do_inheritance` refuses is php's `E_ERROR` while the
-            // file compiles, so nothing of the file runs.
-            if let Some(parent) = &parent {
-                self.inherit_at_compile_time(&name, parent)?;
-            }
+        // `zend_compile_class_decl` decides once the body has compiled,
+        // so an interface `add_stringable_interface` gave the class
+        // counts.
+        let early = self
+            .classes
+            .get(at)
+            .is_some_and(|decl| decl.interfaces.is_empty())
+            && match &parent {
+                None => true,
+                Some(parent) => self.bound_class(parent).is_some(),
+            };
+        if early && (parent.is_none() || self.try_early_bind(at)?) {
+            self.bound.push(at);
             return Ok(());
         }
         self.declare_class(&name, parent.as_deref())
@@ -3967,24 +4003,14 @@ impl Emit<'_> {
         Ok(self.class_name(written))
     }
 
-    /// `zend_lookup_class_ex` over `CG(class_table)`: the declaration of
-    /// the class of that name, one the engine declared
-    /// ([`Options::classes`]) or one this file has bound before this
-    /// point.
-    fn known_class(&self, name: &[u8]) -> Option<&ClassDecl> {
-        let wanted = name.to_ascii_lowercase();
-        self.known_classes
-            .iter()
-            .chain(self.classes.iter())
-            .find(|decl| decl.name.0.to_ascii_lowercase() == wanted)
-    }
-
-    /// What `zend_do_inheritance` refuses at the early bind, which is
-    /// `E_ERROR` while the file compiles and so runs nothing of it: a
-    /// parent that is an interface. The rest of inheritance is the
-    /// engine's, since a class this cannot link here it declares with a
-    /// `DECLARE_CLASS` instead. The refusal stands while the file
-    /// compiles, so nothing of it runs:
+    /// `zend_try_early_bind`: the class at `at` linked against what
+    /// `CG(class_table)` holds while the file compiles, the engine's
+    /// classes and the file's own bound so far, by the checks
+    /// `zend_inheritance.c` makes ([`php_unit::link`]). A refusal is
+    /// php's `E_COMPILE_ERROR` while the file compiles, so nothing of it
+    /// runs; a check that needs a class not bound yet leaves the class to
+    /// its `DECLARE_CLASS` (false), linked where it was written; and the
+    /// deprecations a tentative return raises are the unit's.
     ///
     /// ```php
     /// echo "before\n";
@@ -3994,23 +4020,199 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: Class C cannot extend interface I in %s on line 4
     /// ```
-    fn inherit_at_compile_time(&mut self, name: &[u8], parent: &[u8]) -> Result<(), CompileError> {
-        let Some(found) = self.known_class(parent) else {
-            return Ok(());
+    ///
+    /// ```php
+    /// class C extends Closure {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class C cannot extend final class Closure in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class A { final function f() {} }
+    /// class B extends A { function f() {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot override final method A::f() in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { function f() {} }
+    /// class B extends A { static function f() {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot make non static method A::f() static in class B in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { static function f() {} }
+    /// class B extends A { function f() {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot make static method A::f() non static in class B in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { function f() {} }
+    /// class B extends A { protected function f() {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Access level to B::f() must be public (as in class A) in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { protected function f() {} }
+    /// class B extends A { private function f() {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Access level to B::f() must be protected (as in class A) or weaker in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { function f($a) {} }
+    /// class B extends A { function f(int $a) {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Declaration of B::f(int $a) must be compatible with A::f($a) in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { public private(set) int $p; }
+    /// class B extends A { public private(set) int $p; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot override final property A::$p in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { public static $p; }
+    /// class B extends A { public $p; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot redeclare static A::$p as non static B::$p in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { function __construct(public readonly int $p) {} }
+    /// class B extends A { public int $p; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot redeclare readonly property A::$p as non-readonly B::$p in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { public int $p; }
+    /// class B extends A { public private(set) int $p; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Set access level of B::$p must be omitted (as in class A) in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { public protected(set) int $p; }
+    /// class B extends A { public private(set) int $p; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Set access level of B::$p must be protected(set) (as in class A) or weaker in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { public int $p; }
+    /// class B extends A { protected int $p; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Access level to B::$p must be public (as in class A) in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { public int $p; }
+    /// class B extends A { public string $p; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Type of B::$p must be int (as in class A) in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { public $p; }
+    /// class B extends A { public int $p; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Type of B::$p must be omitted to match the parent definition in class A in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { final const X = 1; }
+    /// class B extends A { const X = 2; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: B::X cannot override final constant A::X in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { const X = 1; }
+    /// class B extends A { protected const X = 2; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Access level to B::X must be public (as in class A) in %s on line 3
+    /// ```
+    ///
+    /// What php takes, it takes: a wider parameter, an added optional
+    /// one, a narrower return, a wider visibility, a property of the
+    /// same type written its own way, and a parent's private method
+    /// taken over on any terms, each bound early:
+    ///
+    /// ```php
+    /// class A {
+    ///     public int|string $p = 1;
+    ///     protected function f(int $a): object { return $this; }
+    ///     private function g(int $a) {}
+    /// }
+    /// class B extends A {
+    ///     public string|int $p = 2;
+    ///     public function f(int|string $a, $b = 0): B { return $this; }
+    ///     public static function g() {}
+    /// }
+    /// $b = new B;
+    /// var_dump($b->f(1) === $b, $b->p);
+    /// ```
+    /// ```expect exit=0
+    /// bool(true)
+    /// int(2)
+    /// ```
+    fn try_early_bind(&mut self, at: usize) -> Result<bool, CompileError> {
+        let Some(child) = self.classes.get(at) else {
+            return Ok(false);
         };
-        if found.kind != ClassKind::Interface {
-            return Ok(());
+        let lookup = |name: &[u8]| self.bound_class(name);
+        let linking = php_unit::link::link(child, &lookup);
+        for deprecation in linking.deprecations {
+            self.diagnostics.push(Diagnostic {
+                level: Level::Deprecated,
+                line: deprecation.site.line,
+                message: deprecation.to_string().as_str().into(),
+            });
         }
-        let parent = String::from_utf8_lossy(&found.name.0).into_owned();
-        Err(CompileError {
-            level: Level::Error,
-            message: format!(
-                "Class {} cannot extend interface {parent}",
-                String::from_utf8_lossy(name)
-            ),
-            line: self.line,
-            raised: Vec::new(),
-        })
+        match linking.outcome {
+            php_unit::link::Linked::Linked => Ok(true),
+            php_unit::link::Linked::Unresolved(_) => Ok(false),
+            php_unit::link::Linked::Refused(refused) => Err(CompileError {
+                level: refused.refusal.level(),
+                message: refused.refusal.to_string(),
+                line: refused.site.line,
+                raised: Vec::new(),
+            }),
+        }
+    }
+
+    /// A class `CG(class_table)` holds while the file compiles: one the
+    /// engine declared, or one of the file's own that was bound early,
+    /// which a class declared by a `DECLARE_CLASS` is not yet.
+    fn bound_class(&self, name: &[u8]) -> Option<&ClassDecl> {
+        let wanted = name.to_ascii_lowercase();
+        self.known_classes
+            .iter()
+            .chain(self.bound.iter().filter_map(|at| self.classes.get(*at)))
+            .find(|decl| decl.name.0.to_ascii_lowercase() == wanted)
     }
 
     /// `ZEND_DECLARE_CLASS`, what php emits for a class it did not early
@@ -12927,6 +13129,7 @@ mod tests {
             line: 1,
             diagnostics: Vec::new(),
             classes: Vec::new(),
+            bound: Vec::new(),
             functions_declared: Vec::new(),
             dynamic: Vec::new(),
             dynamic_func_defs: Vec::new(),

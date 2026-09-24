@@ -4765,12 +4765,8 @@ mod tests {
         );
         assert_eq!(
             refused(b"<?php\ninterface I {}\nclass M extends I {}"),
-            Some((
-                Level::Error,
-                String::from("Class M cannot extend interface I"),
-                3
-            )),
-            "the early bind links the class, so what zend_do_inheritance refuses is the file's"
+            compile_error("Class M cannot extend interface I", 3),
+            "the early bind links the class, so what zend_do_inheritance_ex refuses is the file's"
         );
         assert_eq!(
             refused(b"<?php\nclass M { abstract function f(); }"),

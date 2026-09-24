@@ -1,0 +1,1849 @@
+//! What class linking refuses, after `zend_inheritance.c`: the checks
+//! `zend_do_inheritance_ex` makes of a class against its parent and
+//! `do_interface_implementation` against each interface, in php's order
+//! and in php's words, over the declarations the linker binds (design
+//! §6.2). Linking copies nothing here, since an inherited member is
+//! found by walking the chain, so what php reads off a parent's tables
+//! is read off the chain in the order those tables hold it: a class's
+//! own members first, then what it inherited.
+//!
+//! One function answers for both of php's binds: the early bind
+//! while the file compiles, where `zend_try_early_bind` runs these
+//! checks and an unresolved one leaves the class to its
+//! `ZEND_DECLARE_CLASS`, and that opline as the program serves. So it
+//! lives here, below the compiler and the engine alike (ADR-0001), and
+//! reads the classes it links against through a lookup by name each
+//! caller hands it. Each refusal is `E_COMPILE_ERROR` at the site php
+//! names, the child method's first line for what is about a method and
+//! the class's line otherwise.
+//!
+//! Method compatibility is `zend_do_perform_implementation_check` over
+//! the two declarations, with `zend_perform_covariant_type_check` over
+//! each type, and a class a type names that no table holds is php's
+//! unresolved outcome, which the bind reports as php reports an
+//! obligation it could not discharge.
+
+use crate::Level;
+use crate::decl::{
+    ClassConstDecl, ClassDecl, ClassKind, ConstExpr, FunctionDecl, MethodDecl, Name, PropertyDecl,
+    Type, Visibility,
+};
+use crate::type_to_string;
+use std::fmt;
+
+const MAY_BE_OBJECT: u32 = 1 << 8;
+const MAY_BE_CALLABLE: u32 = 1 << 12;
+const MAY_BE_VOID: u32 = 1 << 14;
+const MAY_BE_STATIC: u32 = 1 << 15;
+const MAY_BE_NEVER: u32 = 1 << 17;
+
+/// Where php raises what a link refused or deprecated: the file and the
+/// first line of the declaration it is about, the child method's for a
+/// method and the class's for the rest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Site {
+    pub file: Name,
+    pub line: u32,
+}
+
+/// What `zend_inheritance.c` refuses, one variant per sentence php
+/// raises, each holding the names the sentence prints as php prints
+/// them; `Display` is the sentence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refusal {
+    /// `Interface %s cannot extend class %s`.
+    InterfaceExtendsClass { interface: String, class: String },
+    /// `Class %s cannot extend enum %s`.
+    ExtendsEnum { class: String, parent: String },
+    /// `Class %s cannot extend final class %s`.
+    ExtendsFinal { class: String, parent: String },
+    /// `Class %s cannot extend interface %s` and its trait twin.
+    ExtendsNotAClass {
+        class: String,
+        kind: ClassKind,
+        parent: String,
+    },
+    /// `%s class %s cannot extend %s class %s`, the readonly bits differing.
+    ReadonlyClass {
+        class: String,
+        readonly: bool,
+        parent: String,
+    },
+    /// `Cannot override final property %s::$%s`.
+    FinalProperty { parent: String, property: String },
+    /// `Cannot redeclare %s%s::$%s as %s%s::$%s`, a class's property on one
+    /// side and an instance's on the other.
+    PropertyReceiver {
+        parent: String,
+        class: String,
+        property: String,
+        parent_static: bool,
+    },
+    /// `Cannot redeclare %s property %s::$%s as %s %s::$%s`.
+    ReadonlyProperty {
+        parent: String,
+        class: String,
+        property: String,
+        parent_readonly: bool,
+    },
+    /// `Set access level of %s::$%s must be %s (as in class %s)%s`.
+    SetVisibility {
+        class: String,
+        property: String,
+        parent: String,
+        parent_set: Option<Visibility>,
+    },
+    /// `Access level to %s::$%s must be %s (as in class %s)%s`.
+    PropertyVisibility {
+        class: String,
+        property: String,
+        parent: String,
+        visibility: Visibility,
+    },
+    /// `Type of %s::$%s must be %s (as in class %s)`.
+    PropertyType {
+        class: String,
+        property: String,
+        ty: String,
+        parent: String,
+    },
+    /// `Type of %s::$%s must be omitted to match the parent definition in class %s`.
+    PropertyTypeOmitted {
+        class: String,
+        property: String,
+        parent: String,
+    },
+    /// `%s::%s cannot override final constant %s::%s`.
+    FinalConstant {
+        holder: String,
+        parent: String,
+        constant: String,
+    },
+    /// `%s %s inherits both %s::%s and %s::%s, which is ambiguous`.
+    AmbiguousConstant {
+        kind: ClassKind,
+        class: String,
+        holder: String,
+        parent: String,
+        constant: String,
+    },
+    /// `Access level to %s::%s must be %s (as in %s %s)%s`.
+    ConstantVisibility {
+        class: String,
+        constant: String,
+        visibility: Visibility,
+        parent_kind: ClassKind,
+        parent: String,
+    },
+    /// `Cannot override final method %s::%s()`.
+    FinalMethod { parent: String, method: String },
+    /// `Cannot make %s method %s::%s() %s in class %s`.
+    MethodReceiver {
+        parent: String,
+        method: String,
+        class: String,
+        parent_static: bool,
+    },
+    /// `Cannot make non abstract method %s::%s() abstract in class %s`.
+    AbstractMethod {
+        parent: String,
+        method: String,
+        class: String,
+    },
+    /// `Access level to %s::%s() must be %s (as in class %s)%s`.
+    MethodVisibility {
+        class: String,
+        method: String,
+        visibility: Visibility,
+        parent: String,
+    },
+    /// `Declaration of %s must be compatible with %s`, each side as
+    /// `zend_get_function_declaration` writes it.
+    Incompatible { child: String, parent: String },
+    /// `Could not check compatibility between %s and %s, because class
+    /// %s is not available`.
+    Unavailable {
+        child: String,
+        parent: String,
+        missing: String,
+    },
+    /// `Class %s cannot implement interface Throwable, extend Exception
+    /// or Error instead`.
+    Throwable { class: String },
+    /// `%s %s cannot implement previously implemented interface %s`, one
+    /// interface named twice in the declaration's own list.
+    PreviouslyImplemented {
+        kind: ClassKind,
+        class: String,
+        interface: String,
+    },
+    /// `Non-enum class %s cannot implement interface %s`.
+    EnumInterface { class: String, interface: String },
+    /// `Class %s must implement interface Traversable as part of either
+    /// Iterator or IteratorAggregate`.
+    Traversable { class: String },
+    /// `Class %s contains %d abstract method%s and must therefore be
+    /// declared abstract or implement the remaining method%s (%s)`, with
+    /// every method left, of which php names three.
+    AbstractLeft { class: String, methods: Vec<String> },
+}
+
+/// `zend_visibility_string`.
+fn visibility_word(visibility: Visibility) -> &'static str {
+    match visibility {
+        Visibility::Public => "public",
+        Visibility::Protected => "protected",
+        Visibility::Private => "private",
+    }
+}
+
+/// The `" or weaker"` php adds after any visibility but public.
+fn or_weaker(visibility: Visibility) -> &'static str {
+    match visibility {
+        Visibility::Public => "",
+        _ => " or weaker",
+    }
+}
+
+/// `zend_get_object_type`, lowercase, and `zend_get_object_type_uc`.
+fn object_type(kind: ClassKind) -> &'static str {
+    match kind {
+        ClassKind::Class => "class",
+        ClassKind::Interface => "interface",
+        ClassKind::Trait => "trait",
+        ClassKind::Enum => "enum",
+    }
+}
+
+fn object_type_uc(kind: ClassKind) -> &'static str {
+    match kind {
+        ClassKind::Class => "Class",
+        ClassKind::Interface => "Interface",
+        ClassKind::Trait => "Trait",
+        ClassKind::Enum => "Enum",
+    }
+}
+
+impl Refusal {
+    /// The level php raises the refusal at: `E_COMPILE_ERROR` for all
+    /// but `zend_verify_abstract_class`'s `E_ERROR` and
+    /// `zend_implement_traversable`'s `E_CORE_ERROR`, which php raises
+    /// with no site at all.
+    #[must_use]
+    pub fn level(&self) -> Level {
+        match self {
+            Refusal::AbstractLeft { .. } => Level::Error,
+            Refusal::Traversable { .. } => Level::CoreError,
+            _ => Level::CompileError,
+        }
+    }
+}
+
+impl fmt::Display for Refusal {
+    #[expect(clippy::too_many_lines, reason = "one arm per sentence php raises")]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Refusal::InterfaceExtendsClass { interface, class } => {
+                write!(f, "Interface {interface} cannot extend class {class}")
+            }
+            Refusal::ExtendsEnum { class, parent } => {
+                write!(f, "Class {class} cannot extend enum {parent}")
+            }
+            Refusal::ExtendsFinal { class, parent } => {
+                write!(f, "Class {class} cannot extend final class {parent}")
+            }
+            Refusal::ExtendsNotAClass {
+                class,
+                kind,
+                parent,
+            } => write!(
+                f,
+                "Class {class} cannot extend {} {parent}",
+                object_type(*kind)
+            ),
+            Refusal::ReadonlyClass {
+                class,
+                readonly,
+                parent,
+            } => {
+                let (own, theirs) = if *readonly {
+                    ("Readonly", "non-readonly")
+                } else {
+                    ("Non-readonly", "readonly")
+                };
+                write!(
+                    f,
+                    "{own} class {class} cannot extend {theirs} class {parent}"
+                )
+            }
+            Refusal::FinalProperty { parent, property } => {
+                write!(f, "Cannot override final property {parent}::${property}")
+            }
+            Refusal::PropertyReceiver {
+                parent,
+                class,
+                property,
+                parent_static,
+            } => {
+                let (theirs, own) = if *parent_static {
+                    ("static ", "non static ")
+                } else {
+                    ("non static ", "static ")
+                };
+                write!(
+                    f,
+                    "Cannot redeclare {theirs}{parent}::${property} as {own}{class}::${property}"
+                )
+            }
+            Refusal::ReadonlyProperty {
+                parent,
+                class,
+                property,
+                parent_readonly,
+            } => {
+                let (theirs, own) = if *parent_readonly {
+                    ("readonly", "non-readonly")
+                } else {
+                    ("non-readonly", "readonly")
+                };
+                write!(
+                    f,
+                    "Cannot redeclare {theirs} property {parent}::${property} as {own} {class}::${property}"
+                )
+            }
+            Refusal::SetVisibility {
+                class,
+                property,
+                parent,
+                parent_set,
+            } => {
+                let (word, weaker) = match parent_set {
+                    Some(Visibility::Private) => ("private(set)", " or weaker"),
+                    Some(Visibility::Protected) => ("protected(set)", " or weaker"),
+                    Some(Visibility::Public) => ("public(set)", " or weaker"),
+                    None => ("omitted", ""),
+                };
+                write!(
+                    f,
+                    "Set access level of {class}::${property} must be {word} (as in class {parent}){weaker}"
+                )
+            }
+            Refusal::PropertyVisibility {
+                class,
+                property,
+                parent,
+                visibility,
+            } => write!(
+                f,
+                "Access level to {class}::${property} must be {} (as in class {parent}){}",
+                visibility_word(*visibility),
+                or_weaker(*visibility)
+            ),
+            Refusal::PropertyType {
+                class,
+                property,
+                ty,
+                parent,
+            } => write!(
+                f,
+                "Type of {class}::${property} must be {ty} (as in class {parent})"
+            ),
+            Refusal::PropertyTypeOmitted {
+                class,
+                property,
+                parent,
+            } => write!(
+                f,
+                "Type of {class}::${property} must be omitted to match the parent definition in class {parent}"
+            ),
+            Refusal::FinalConstant {
+                holder,
+                parent,
+                constant,
+            } => write!(
+                f,
+                "{holder}::{constant} cannot override final constant {parent}::{constant}"
+            ),
+            Refusal::AmbiguousConstant {
+                kind,
+                class,
+                holder,
+                parent,
+                constant,
+            } => write!(
+                f,
+                "{} {class} inherits both {holder}::{constant} and {parent}::{constant}, which is ambiguous",
+                object_type_uc(*kind)
+            ),
+            Refusal::ConstantVisibility {
+                class,
+                constant,
+                visibility,
+                parent_kind,
+                parent,
+            } => write!(
+                f,
+                "Access level to {class}::{constant} must be {} (as in {} {parent}){}",
+                visibility_word(*visibility),
+                object_type(*parent_kind),
+                or_weaker(*visibility)
+            ),
+            Refusal::FinalMethod { parent, method } => {
+                write!(f, "Cannot override final method {parent}::{method}()")
+            }
+            Refusal::MethodReceiver {
+                parent,
+                method,
+                class,
+                parent_static,
+            } => {
+                let (theirs, own) = if *parent_static {
+                    ("static", "non static")
+                } else {
+                    ("non static", "static")
+                };
+                write!(
+                    f,
+                    "Cannot make {theirs} method {parent}::{method}() {own} in class {class}"
+                )
+            }
+            Refusal::AbstractMethod {
+                parent,
+                method,
+                class,
+            } => write!(
+                f,
+                "Cannot make non abstract method {parent}::{method}() abstract in class {class}"
+            ),
+            Refusal::MethodVisibility {
+                class,
+                method,
+                visibility,
+                parent,
+            } => write!(
+                f,
+                "Access level to {class}::{method}() must be {} (as in class {parent}){}",
+                visibility_word(*visibility),
+                or_weaker(*visibility)
+            ),
+            Refusal::Incompatible { child, parent } => {
+                write!(f, "Declaration of {child} must be compatible with {parent}")
+            }
+            Refusal::Unavailable {
+                child,
+                parent,
+                missing,
+            } => write!(
+                f,
+                "Could not check compatibility between {child} and {parent}, because class {missing} is not available"
+            ),
+            Refusal::PreviouslyImplemented {
+                kind,
+                class,
+                interface,
+            } => write!(
+                f,
+                "{} {class} cannot implement previously implemented interface {interface}",
+                object_type_uc(*kind)
+            ),
+            Refusal::Throwable { class } => write!(
+                f,
+                "Class {class} cannot implement interface Throwable, extend Exception or Error instead"
+            ),
+            Refusal::Traversable { class } => write!(
+                f,
+                "Class {class} must implement interface Traversable as part of either Iterator or IteratorAggregate"
+            ),
+            Refusal::EnumInterface { class, interface } => {
+                write!(
+                    f,
+                    "Non-enum class {class} cannot implement interface {interface}"
+                )
+            }
+            Refusal::AbstractLeft { class, methods } => {
+                let count = methods.len();
+                let plural = if count > 1 { "s" } else { "" };
+                let named = methods
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let more = if count > 3 { ", ..." } else { "" };
+                write!(
+                    f,
+                    "Class {class} contains {count} abstract method{plural} and must therefore be declared abstract or implement the remaining method{plural} ({named}{more})"
+                )
+            }
+        }
+    }
+}
+
+/// What a link refused and where php raises it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused {
+    pub refusal: Refusal,
+    pub site: Site,
+}
+
+/// An override of a tentative return type that does not match it,
+/// `emit_incompatible_method_error` under `INHERITANCE_WARNING`: php's
+/// deprecation, which the child's `#[\ReturnTypeWillChange]` silences.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TentativeReturn {
+    pub child: String,
+    pub parent: String,
+    pub site: Site,
+}
+
+impl fmt::Display for TentativeReturn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Return type of {} should either be compatible with {}, or the #[\\ReturnTypeWillChange] attribute should be used to temporarily suppress the notice",
+            self.child, self.parent
+        )
+    }
+}
+
+/// What linking one class came to, `zend_do_link_class`'s outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Linked {
+    /// The class links: every check held.
+    Linked,
+    /// A check failed, php's `E_COMPILE_ERROR` at the site named.
+    Refused(Refused),
+    /// A check needed a class no table holds yet, `INHERITANCE_UNRESOLVED`:
+    /// the early bind leaves the class to be declared as the program
+    /// serves, and a bind as the program serves refuses it in php's
+    /// words for an obligation it could not discharge.
+    Unresolved(Refused),
+}
+
+/// [`link`]'s answer: the outcome, and the deprecations the checks
+/// raised before it, in the order raised.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Linking {
+    pub outcome: Linked,
+    pub deprecations: Vec<TentativeReturn>,
+}
+
+/// `inheritance_status`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Status {
+    Success,
+    Error,
+    Unresolved,
+    Warning,
+}
+
+/// A class as `lookup_class` answers it while one is being linked: the
+/// class being linked, which no table holds yet, or one the table does.
+#[derive(Clone, Copy)]
+enum Cls<'a> {
+    Linking,
+    Linked(&'a ClassDecl),
+}
+
+impl PartialEq for Cls<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Cls::Linking, Cls::Linking) => true,
+            (Cls::Linked(a), Cls::Linked(b)) => same(a, b),
+            _ => false,
+        }
+    }
+}
+
+/// One class of the table, by name, whatever the case.
+fn same(a: &ClassDecl, b: &ClassDecl) -> bool {
+    a.name.0.eq_ignore_ascii_case(&b.name.0)
+}
+
+/// The scope a type is read in, `fe_scope` or `proto_scope`: the class
+/// that declared the member, which `self` and `parent` resolve against.
+#[derive(Clone, Copy)]
+struct Scope<'a> {
+    name: &'a [u8],
+    parent: Option<&'a [u8]>,
+    class: Cls<'a>,
+    is_final: bool,
+}
+
+/// One member of a type's list as `zend_type` holds it once compiled.
+#[derive(Clone)]
+enum Member {
+    Name(Vec<u8>),
+    Intersection(Vec<Vec<u8>>),
+}
+
+/// A type in `zend_type`'s shape: whether it is a pure intersection,
+/// its class names in order, and its pure mask.
+struct Shape {
+    intersection: bool,
+    members: Vec<Member>,
+    mask: u32,
+}
+
+/// `resolve_class_name`: `self` and `parent` in the scope's names.
+fn resolve(scope: &Scope<'_>, name: &[u8]) -> Vec<u8> {
+    if name.eq_ignore_ascii_case(b"self") {
+        return scope.name.to_vec();
+    }
+    if name.eq_ignore_ascii_case(b"parent")
+        && let Some(parent) = scope.parent
+    {
+        return parent.to_vec();
+    }
+    name.to_vec()
+}
+
+/// A declared type with `self` and `parent` named, which is what
+/// `zend_type_to_string_resolved` prints.
+fn resolved(ty: &Type, scope: &Scope<'_>) -> Type {
+    match ty {
+        Type::SelfClass => Type::Named(Name(scope.name.into())),
+        Type::ParentClass => match scope.parent {
+            Some(parent) => Type::Named(Name(parent.into())),
+            None => Type::ParentClass,
+        },
+        Type::Nullable(inner) => Type::Nullable(Box::new(resolved(inner, scope))),
+        Type::Union(members) => Type::Union(members.iter().map(|m| resolved(m, scope)).collect()),
+        Type::Intersection(members) => {
+            Type::Intersection(members.iter().map(|m| resolved(m, scope)).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+fn names_into(ty: &Type, scope: &Scope<'_>, out: &mut Vec<Member>) {
+    match ty {
+        Type::Named(name) => out.push(Member::Name(name.0.to_vec())),
+        Type::SelfClass => out.push(Member::Name(resolve(scope, b"self"))),
+        Type::ParentClass => out.push(Member::Name(resolve(scope, b"parent"))),
+        Type::Iterable => out.push(Member::Name(b"Traversable".to_vec())),
+        Type::Nullable(inner) => names_into(inner, scope, out),
+        Type::Union(members) => {
+            for member in members {
+                names_into(member, scope, out);
+            }
+        }
+        Type::Intersection(members) => {
+            let mut inner = Vec::new();
+            for member in members {
+                names_into(member, scope, &mut inner);
+            }
+            out.push(Member::Intersection(
+                inner
+                    .into_iter()
+                    .filter_map(|m| match m {
+                        Member::Name(name) => Some(name),
+                        Member::Intersection(_) => None,
+                    })
+                    .collect(),
+            ));
+        }
+        _ => {}
+    }
+}
+
+fn shape(ty: &Type, scope: &Scope<'_>) -> Shape {
+    if let Type::Intersection(members) = ty {
+        let mut names = Vec::new();
+        for member in members {
+            names_into(member, scope, &mut names);
+        }
+        return Shape {
+            intersection: true,
+            members: names,
+            mask: 0,
+        };
+    }
+    let mut members = Vec::new();
+    names_into(ty, scope, &mut members);
+    Shape {
+        intersection: false,
+        members,
+        mask: ty.mask(),
+    }
+}
+
+/// `ZEND_ACC_PPP_MASK` ordered as php's bits are, public the least.
+fn strength(visibility: Visibility) -> u8 {
+    match visibility {
+        Visibility::Public => 0,
+        Visibility::Protected => 1,
+        Visibility::Private => 2,
+    }
+}
+
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// `required_num_args`: the parameters up to the last one with no
+/// default that is not variadic.
+fn required(function: &FunctionDecl) -> usize {
+    function
+        .parameters
+        .iter()
+        .rposition(|p| p.default.is_none() && !p.variadic)
+        .map_or(0, |at| at + 1)
+}
+
+fn is_variadic(function: &FunctionDecl) -> bool {
+    function.parameters.last().is_some_and(|p| p.variadic)
+}
+
+/// A default as `zend_get_function_declaration` prints it.
+fn default_text(default: &ConstExpr) -> String {
+    match default {
+        ConstExpr::Null => String::from("null"),
+        ConstExpr::Bool(false) => String::from("false"),
+        ConstExpr::Bool(true) => String::from("true"),
+        ConstExpr::Long(n) => n.to_string(),
+        ConstExpr::Double(d) => {
+            if d.fract() == 0.0 && d.is_finite() && d.abs() < 1e15 {
+                format!("{d:.0}")
+            } else {
+                d.to_string()
+            }
+        }
+        ConstExpr::Str(bytes) => {
+            let shown = &bytes[..bytes.len().min(10)];
+            let more = if bytes.len() > 10 { "..." } else { "" };
+            format!("'{}{more}'", text(shown))
+        }
+        ConstExpr::Array(elements) if elements.is_empty() => String::from("[]"),
+        ConstExpr::Array(_) => String::from("[...]"),
+        ConstExpr::Constant(name) => text(&name.0),
+        ConstExpr::ClassConstant { class, name } => {
+            format!("{}::{}", text(&class.0), text(&name.0))
+        }
+        ConstExpr::EnumCase { class, case } => format!("{}::{}", text(&class.0), text(&case.0)),
+        _ => String::from("<expression>"),
+    }
+}
+
+/// `zend_get_function_declaration`: a method as php writes it in an
+/// incompatibility, the class that declared it before its name.
+fn declaration(function: &FunctionDecl, scope: &Scope<'_>) -> String {
+    let mut out = String::new();
+    if function.returns_by_ref {
+        out.push_str("& ");
+    }
+    out.push_str(&text(scope.name));
+    out.push_str("::");
+    out.push_str(&text(&function.name.0));
+    out.push('(');
+    let required = required(function);
+    for (at, parameter) in function.parameters.iter().enumerate() {
+        if at > 0 {
+            out.push_str(", ");
+        }
+        if let Some(ty) = &parameter.ty {
+            out.push_str(&type_to_string(&resolved(ty, scope)));
+            out.push(' ');
+        }
+        if parameter.by_ref {
+            out.push('&');
+        }
+        if parameter.variadic {
+            out.push_str("...");
+        }
+        out.push('$');
+        out.push_str(&text(&parameter.name.0));
+        if at >= required && !parameter.variadic {
+            out.push_str(" = ");
+            out.push_str(
+                &parameter
+                    .default
+                    .as_ref()
+                    .map_or_else(|| String::from("<default>"), default_text),
+            );
+        }
+    }
+    out.push(')');
+    if let Some(ty) = &function.return_type {
+        out.push_str(": ");
+        out.push_str(&type_to_string(&resolved(ty, scope)));
+    }
+    out
+}
+
+/// The member tables of the chain above a class, the way php's tables
+/// hold them after `zend_do_inheritance`: each class's own members,
+/// then what it inherited that it does not redeclare.
+struct Tables<'a> {
+    methods: Vec<(&'a ClassDecl, &'a MethodDecl)>,
+    properties: Vec<(&'a ClassDecl, &'a PropertyDecl)>,
+    constants: Vec<(&'a ClassDecl, &'a ClassConstDecl)>,
+}
+
+/// The class being linked, the table it is linked against, and the
+/// deprecations raised so far.
+struct Linker<'a> {
+    lookup: &'a dyn Fn(&[u8]) -> Option<&'a ClassDecl>,
+    deprecations: Vec<TentativeReturn>,
+}
+
+/// `zend_do_link_class`'s checks of `child` against the classes
+/// `lookup` finds by name, its parent and its interfaces among them:
+/// every refusal `zend_do_inheritance_ex` and
+/// `do_interface_implementation` make, the first in php's order.
+pub fn link<'a>(
+    child: &'a ClassDecl,
+    lookup: &'a dyn Fn(&[u8]) -> Option<&'a ClassDecl>,
+) -> Linking {
+    let mut linker = Linker {
+        lookup,
+        deprecations: Vec::new(),
+    };
+    let outcome = linker.link_refused(child);
+    Linking {
+        outcome,
+        deprecations: linker.deprecations,
+    }
+}
+
+impl<'a> Linker<'a> {
+    fn class_named(&self, name: &[u8]) -> Option<&'a ClassDecl> {
+        (self.lookup)(name)
+    }
+
+    fn class_parent(&self, class: &ClassDecl) -> Option<&'a ClassDecl> {
+        class
+            .parent
+            .as_ref()
+            .and_then(|name| self.class_named(&name.0))
+    }
+
+    /// `instanceof_function` over the table: `class` is `of`, extends
+    /// it or implements it, cut at a depth no declaration makes.
+    fn instance_of(&self, class: &ClassDecl, of: &ClassDecl) -> bool {
+        self.instance_of_at(class, of, 0)
+    }
+
+    fn instance_of_at(&self, class: &ClassDecl, of: &ClassDecl, depth: u32) -> bool {
+        if same(class, of) {
+            return true;
+        }
+        if depth > 64 {
+            return false;
+        }
+        class
+            .parent
+            .iter()
+            .chain(class.interfaces.iter())
+            .filter_map(|name| self.class_named(&name.0))
+            .any(|up| self.instance_of_at(up, of, depth + 1))
+    }
+
+    /// The members `class` has with what it inherited, its own first.
+    fn tables(&self, class: &'a ClassDecl) -> Tables<'a> {
+        let mut tables = Tables {
+            methods: Vec::new(),
+            properties: Vec::new(),
+            constants: Vec::new(),
+        };
+        let mut at = Some(class);
+        let mut depth = 0;
+        while let Some(here) = at {
+            let decl = here;
+            for method in &decl.methods {
+                if !tables.methods.iter().any(|(_, m)| {
+                    m.function
+                        .name
+                        .0
+                        .eq_ignore_ascii_case(&method.function.name.0)
+                }) {
+                    tables.methods.push((here, method));
+                }
+            }
+            for property in &decl.properties {
+                if !tables
+                    .properties
+                    .iter()
+                    .any(|(_, p)| p.name == property.name)
+                {
+                    tables.properties.push((here, property));
+                }
+            }
+            for constant in &decl.constants {
+                if !tables
+                    .constants
+                    .iter()
+                    .any(|(_, c)| c.name == constant.name)
+                {
+                    tables.constants.push((here, constant));
+                }
+            }
+            depth += 1;
+            if depth > 64 {
+                break;
+            }
+            at = self.class_parent(here);
+        }
+        tables
+    }
+
+    /// Every interface `class` implements, its own list and each one's
+    /// parents, in the order `zend_do_implement_interfaces` meets them.
+    fn interfaces_of(&self, names: &[Name], out: &mut Vec<&'a ClassDecl>, depth: u32) {
+        for name in names {
+            let Some(interface) = self.class_named(&name.0) else {
+                continue;
+            };
+            if out.iter().any(|seen| same(seen, interface)) || depth > 64 {
+                continue;
+            }
+            out.push(interface);
+            self.interfaces_of(&interface.interfaces, out, depth + 1);
+        }
+    }
+
+    /// `lookup_class` while `child` links.
+    fn lookup(&self, child: &'a ClassDecl, name: &[u8]) -> Option<Cls<'a>> {
+        if child.name.0.eq_ignore_ascii_case(name) {
+            return Some(Cls::Linking);
+        }
+        self.class_named(name).map(Cls::Linked)
+    }
+
+    /// `unlinked_instanceof`.
+    fn subclass(&self, child: &'a ClassDecl, a: Cls<'a>, b: Cls<'a>) -> bool {
+        match (a, b) {
+            (Cls::Linking, Cls::Linking) => true,
+            (Cls::Linked(x), Cls::Linked(y)) => self.instance_of(x, y),
+            (Cls::Linked(_), Cls::Linking) => false,
+            (Cls::Linking, Cls::Linked(y)) => child
+                .parent
+                .iter()
+                .chain(child.interfaces.iter())
+                .filter_map(|name| self.class_named(&name.0))
+                .any(|up| self.instance_of(up, y)),
+        }
+    }
+
+    fn scope_of(child: &'a ClassDecl, class: Cls<'a>) -> Scope<'a> {
+        let decl = match class {
+            Cls::Linking => child,
+            Cls::Linked(decl) => decl,
+        };
+        Scope {
+            name: &decl.name.0,
+            parent: decl.parent.as_ref().map(|p| &*p.0),
+            class,
+            is_final: decl.flags.is_final,
+        }
+    }
+
+    /// `zend_type_permits_self`.
+    fn permits_self(&self, child: &'a ClassDecl, proto: &Shape, fe_scope: &Scope<'a>) -> bool {
+        if proto.mask & MAY_BE_OBJECT != 0 {
+            return true;
+        }
+        proto.members.iter().any(|member| match member {
+            Member::Name(name) => self
+                .lookup(child, name)
+                .is_some_and(|ce| self.subclass(child, fe_scope.class, ce)),
+            Member::Intersection(_) => false,
+        })
+    }
+
+    /// `zend_is_class_subtype_of_type`.
+    fn class_subtype_of_type(
+        &self,
+        child: &'a ClassDecl,
+        fe_scope: &Scope<'a>,
+        fe_name: &[u8],
+        proto: &Shape,
+    ) -> Status {
+        let mut unresolved = false;
+        let fe_ce = self.lookup(child, fe_name);
+        if proto.mask & MAY_BE_OBJECT != 0 {
+            if fe_ce.is_some() {
+                return Status::Success;
+            }
+            unresolved = true;
+        }
+        if proto.mask & MAY_BE_CALLABLE != 0 {
+            match fe_ce {
+                None => unresolved = true,
+                Some(_) if fe_name.eq_ignore_ascii_case(b"Closure") => return Status::Success,
+                Some(_) => {}
+            }
+        }
+        if proto.mask & MAY_BE_STATIC != 0 && fe_scope.is_final {
+            match fe_ce {
+                None => unresolved = true,
+                Some(ce) if ce == fe_scope.class => return Status::Success,
+                Some(_) => {}
+            }
+        }
+        let is_intersection = proto.intersection;
+        for member in &proto.members {
+            match member {
+                Member::Intersection(names) => {
+                    let inner = Shape {
+                        intersection: true,
+                        members: names.iter().cloned().map(Member::Name).collect(),
+                        mask: 0,
+                    };
+                    match self.class_subtype_of_type(child, fe_scope, fe_name, &inner) {
+                        Status::Error if is_intersection => return Status::Error,
+                        Status::Unresolved => unresolved = true,
+                        Status::Success if !is_intersection => return Status::Success,
+                        _ => {}
+                    }
+                }
+                Member::Name(proto_name) => {
+                    if fe_name.eq_ignore_ascii_case(proto_name) {
+                        if !is_intersection {
+                            return Status::Success;
+                        }
+                        continue;
+                    }
+                    let (Some(fe_ce), Some(proto_ce)) = (fe_ce, self.lookup(child, proto_name))
+                    else {
+                        unresolved = true;
+                        continue;
+                    };
+                    if self.subclass(child, fe_ce, proto_ce) {
+                        if !is_intersection {
+                            return Status::Success;
+                        }
+                    } else if is_intersection {
+                        return Status::Error;
+                    }
+                }
+            }
+        }
+        if unresolved {
+            Status::Unresolved
+        } else if is_intersection {
+            Status::Success
+        } else {
+            Status::Error
+        }
+    }
+
+    /// `zend_is_intersection_subtype_of_class`.
+    fn intersection_subtype_of_class(
+        &self,
+        child: &'a ClassDecl,
+        fe_names: &[Vec<u8>],
+        proto_name: &[u8],
+    ) -> Status {
+        let mut unresolved = false;
+        for fe_name in fe_names {
+            if fe_name.eq_ignore_ascii_case(proto_name) {
+                return Status::Success;
+            }
+            let (Some(fe_ce), Some(proto_ce)) =
+                (self.lookup(child, fe_name), self.lookup(child, proto_name))
+            else {
+                unresolved = true;
+                continue;
+            };
+            if self.subclass(child, fe_ce, proto_ce) {
+                return Status::Success;
+            }
+        }
+        if unresolved {
+            Status::Unresolved
+        } else {
+            Status::Error
+        }
+    }
+
+    /// `zend_is_intersection_subtype_of_type`.
+    fn intersection_subtype_of_type(
+        &self,
+        child: &'a ClassDecl,
+        fe_names: &[Vec<u8>],
+        proto: &Shape,
+    ) -> Status {
+        let mut unresolved = false;
+        if proto.mask & MAY_BE_OBJECT != 0 {
+            for fe_name in fe_names {
+                if self.lookup(child, fe_name).is_some() {
+                    return Status::Success;
+                }
+                unresolved = true;
+            }
+        }
+        let early = if proto.intersection {
+            Status::Error
+        } else {
+            Status::Success
+        };
+        for member in &proto.members {
+            let status = match member {
+                Member::Intersection(names) => {
+                    let inner = Shape {
+                        intersection: true,
+                        members: names.iter().cloned().map(Member::Name).collect(),
+                        mask: 0,
+                    };
+                    self.intersection_subtype_of_type(child, fe_names, &inner)
+                }
+                Member::Name(name) => self.intersection_subtype_of_class(child, fe_names, name),
+            };
+            if status == early {
+                return status;
+            }
+            if status == Status::Unresolved {
+                unresolved = true;
+            }
+        }
+        if unresolved {
+            Status::Unresolved
+        } else if early == Status::Error {
+            Status::Success
+        } else {
+            Status::Error
+        }
+    }
+
+    /// `zend_perform_covariant_type_check`: whether `fe` in `fe_scope`
+    /// is a subtype of `proto` in `proto_scope`.
+    fn covariant(
+        &self,
+        child: &'a ClassDecl,
+        fe_scope: &Scope<'a>,
+        fe: &Type,
+        proto_scope: &Scope<'a>,
+        proto: &Type,
+    ) -> Status {
+        let fe = shape(fe, fe_scope);
+        let proto = shape(proto, proto_scope);
+        if proto.mask == Type::MAY_BE_ANY && fe.mask & MAY_BE_VOID == 0 {
+            return Status::Success;
+        }
+        let mut added = fe.mask & !proto.mask;
+        if added != 0 {
+            if added & MAY_BE_STATIC != 0 && self.permits_self(child, &proto, fe_scope) {
+                added &= !MAY_BE_STATIC;
+            }
+            if added == MAY_BE_NEVER {
+                return Status::Success;
+            }
+            if added != 0 {
+                return Status::Error;
+            }
+        }
+        let mut unresolved = false;
+        if fe.intersection {
+            let early = if proto.intersection {
+                Status::Error
+            } else {
+                Status::Success
+            };
+            let names: Vec<Vec<u8>> = fe
+                .members
+                .iter()
+                .filter_map(|m| match m {
+                    Member::Name(name) => Some(name.clone()),
+                    Member::Intersection(_) => None,
+                })
+                .collect();
+            let status = self.intersection_subtype_of_type(child, &names, &proto);
+            if status == early {
+                return status;
+            }
+            if status == Status::Unresolved {
+                unresolved = true;
+            }
+            if !unresolved {
+                return if early == Status::Error {
+                    Status::Success
+                } else {
+                    Status::Error
+                };
+            }
+            return Status::Unresolved;
+        }
+        for member in &fe.members {
+            let status = match member {
+                Member::Intersection(names) => {
+                    self.intersection_subtype_of_type(child, names, &proto)
+                }
+                Member::Name(name) => self.class_subtype_of_type(child, fe_scope, name, &proto),
+            };
+            if status == Status::Error {
+                return Status::Error;
+            }
+            if status == Status::Unresolved {
+                unresolved = true;
+            }
+        }
+        if unresolved {
+            Status::Unresolved
+        } else {
+            Status::Success
+        }
+    }
+
+    /// `zend_do_perform_implementation_check`.
+    fn implementation(
+        &self,
+        child: &'a ClassDecl,
+        fe: &MethodDecl,
+        fe_scope: &Scope<'a>,
+        proto: &MethodDecl,
+        proto_scope: &Scope<'a>,
+    ) -> Status {
+        let (f, p) = (&fe.function, &proto.function);
+        if required(p) < required(f) {
+            return Status::Error;
+        }
+        if p.returns_by_ref && !f.returns_by_ref {
+            return Status::Error;
+        }
+        let (proto_variadic, fe_variadic) = (is_variadic(p), is_variadic(f));
+        if proto_variadic && !fe_variadic {
+            return Status::Error;
+        }
+        let (proto_count, fe_count) = (p.parameters.len(), f.parameters.len());
+        let mut status = Status::Success;
+        for at in 0..proto_count.max(fe_count) {
+            let proto_arg = p
+                .parameters
+                .get(at)
+                .or_else(|| proto_variadic.then(|| p.parameters.last()).flatten());
+            let fe_arg = f
+                .parameters
+                .get(at)
+                .or_else(|| fe_variadic.then(|| f.parameters.last()).flatten());
+            let Some(proto_arg) = proto_arg else {
+                continue;
+            };
+            let Some(fe_arg) = fe_arg else {
+                return Status::Error;
+            };
+            let local = match (&fe_arg.ty, &proto_arg.ty) {
+                (None, _) => Status::Success,
+                (Some(ty), _) if ty.mask() == Type::MAY_BE_ANY => Status::Success,
+                (Some(_), None) => Status::Error,
+                (Some(fe_ty), Some(proto_ty)) => {
+                    self.covariant(child, proto_scope, proto_ty, fe_scope, fe_ty)
+                }
+            };
+            match local {
+                Status::Error => return Status::Error,
+                Status::Unresolved => status = Status::Unresolved,
+                _ => {}
+            }
+            if fe_arg.by_ref != proto_arg.by_ref {
+                return Status::Error;
+            }
+        }
+        if let Some(proto_ret) = &p.return_type {
+            let Some(fe_ret) = &f.return_type else {
+                if !proto.tentative_return {
+                    return Status::Error;
+                }
+                return if status == Status::Success {
+                    Status::Warning
+                } else {
+                    status
+                };
+            };
+            let local = self.covariant(child, fe_scope, fe_ret, proto_scope, proto_ret);
+            if local != Status::Success {
+                if local == Status::Error && proto.tentative_return {
+                    return Status::Warning;
+                }
+                return local;
+            }
+        }
+        status
+    }
+
+    /// The first class a type names that no table holds, which
+    /// `register_unresolved_classes` puts first in `CG(delayed_autoloads)`.
+    fn unresolved_in(&self, child: &'a ClassDecl, ty: &Type, scope: &Scope<'a>) -> Option<Vec<u8>> {
+        let mut members = Vec::new();
+        names_into(ty, scope, &mut members);
+        members
+            .into_iter()
+            .flat_map(|m| match m {
+                Member::Name(name) => vec![name],
+                Member::Intersection(names) => names,
+            })
+            .find(|name| self.lookup(child, name).is_none())
+    }
+
+    /// `do_inheritance_check_on_method` for a method the child declares
+    /// over the one its parent's table or an interface holds.
+    fn method_refused(
+        &mut self,
+        child: &'a ClassDecl,
+        fe: &MethodDecl,
+        proto: &MethodDecl,
+        proto_class: &'a ClassDecl,
+        interface: bool,
+    ) -> Option<Linked> {
+        let fe_scope = Self::scope_of(child, Cls::Linking);
+        let proto_scope = Self::scope_of(child, Cls::Linked(proto_class));
+        let site = Site {
+            file: fe.function.file.clone(),
+            line: fe.function.line,
+        };
+        let refused = |refusal: Refusal| {
+            Some(Linked::Refused(Refused {
+                refusal,
+                site: site.clone(),
+            }))
+        };
+        let parent = text(proto_scope.name);
+        let method = text(&fe.function.name.0);
+        let class = text(&child.name.0);
+        let is_ctor = proto.function.name.0.eq_ignore_ascii_case(b"__construct");
+        if proto.visibility == Visibility::Private && !proto.is_abstract && !is_ctor {
+            return None;
+        }
+        if proto.is_final {
+            return refused(Refusal::FinalMethod { parent, method });
+        }
+        if fe.is_instance != proto.is_instance {
+            return refused(Refusal::MethodReceiver {
+                parent,
+                method,
+                class,
+                parent_static: !proto.is_instance,
+            });
+        }
+        if fe.is_abstract && !proto.is_abstract {
+            return refused(Refusal::AbstractMethod {
+                parent,
+                method,
+                class,
+            });
+        }
+        if is_ctor && !proto.is_abstract && !interface {
+            return None;
+        }
+        if strength(fe.visibility) > strength(proto.visibility) {
+            return refused(Refusal::MethodVisibility {
+                class,
+                method,
+                visibility: proto.visibility,
+                parent,
+            });
+        }
+        let status = self.implementation(child, fe, &fe_scope, proto, &proto_scope);
+        let child_text = declaration(&fe.function, &fe_scope);
+        let parent_text = declaration(&proto.function, &proto_scope);
+        match status {
+            Status::Success => None,
+            Status::Warning => {
+                let silenced = fe
+                    .function
+                    .attributes
+                    .iter()
+                    .any(|a| a.name.0.eq_ignore_ascii_case(b"ReturnTypeWillChange"));
+                if !silenced {
+                    self.deprecations.push(TentativeReturn {
+                        child: child_text,
+                        parent: parent_text,
+                        site,
+                    });
+                }
+                None
+            }
+            Status::Error => refused(Refusal::Incompatible {
+                child: child_text,
+                parent: parent_text,
+            }),
+            Status::Unresolved => {
+                let missing = self
+                    .unresolved_of(child, &fe.function, &fe_scope)
+                    .or_else(|| self.unresolved_of(child, &proto.function, &proto_scope));
+                Some(match missing {
+                    Some(missing) => Linked::Unresolved(Refused {
+                        refusal: Refusal::Unavailable {
+                            child: child_text,
+                            parent: parent_text,
+                            missing: text(&missing),
+                        },
+                        site,
+                    }),
+                    None => Linked::Refused(Refused {
+                        refusal: Refusal::Incompatible {
+                            child: child_text,
+                            parent: parent_text,
+                        },
+                        site,
+                    }),
+                })
+            }
+        }
+    }
+
+    /// The first class a function's types name that no table holds.
+    fn unresolved_of(
+        &self,
+        child: &'a ClassDecl,
+        function: &FunctionDecl,
+        scope: &Scope<'a>,
+    ) -> Option<Vec<u8>> {
+        function
+            .parameters
+            .iter()
+            .filter_map(|p| p.ty.as_ref())
+            .chain(function.return_type.iter())
+            .find_map(|ty| self.unresolved_in(child, ty, scope))
+    }
+
+    /// `do_inherit_property` for a property the child redeclares: what
+    /// it refuses, and whether a type check needed a class no table
+    /// holds, which php leaves as an obligation.
+    fn property_refused(
+        &self,
+        child: &'a ClassDecl,
+        own: &PropertyDecl,
+        parent: &PropertyDecl,
+        parent_class: &'a ClassDecl,
+    ) -> Option<(Refusal, Status)> {
+        let parent_name = text(&parent_class.name.0);
+        let class = text(&child.name.0);
+        let property = text(&own.name.0);
+        if parent.is_final {
+            return Some((
+                Refusal::FinalProperty {
+                    parent: parent_name,
+                    property,
+                },
+                Status::Error,
+            ));
+        }
+        if parent.visibility == Visibility::Private {
+            return None;
+        }
+        let refusal = if parent.is_instance != own.is_instance {
+            Refusal::PropertyReceiver {
+                parent: parent_name,
+                class,
+                property,
+                parent_static: !parent.is_instance,
+            }
+        } else if parent.is_readonly != own.is_readonly {
+            Refusal::ReadonlyProperty {
+                parent: parent_name,
+                class,
+                property,
+                parent_readonly: parent.is_readonly,
+            }
+        } else if own.set_visibility.is_some_and(|set| {
+            strength(set) > strength(parent.set_visibility.unwrap_or(parent.visibility))
+        }) {
+            Refusal::SetVisibility {
+                class,
+                property,
+                parent: parent_name,
+                parent_set: parent.set_visibility,
+            }
+        } else if strength(own.visibility) > strength(parent.visibility) {
+            Refusal::PropertyVisibility {
+                class,
+                property,
+                parent: parent_name,
+                visibility: parent.visibility,
+            }
+        } else {
+            return self.property_type_refused(child, own, parent, parent_class);
+        };
+        Some((refusal, Status::Error))
+    }
+
+    /// The type half of `do_inherit_property`: invariance, php's
+    /// covariant check both ways, and a type the parent omits.
+    fn property_type_refused(
+        &self,
+        child: &'a ClassDecl,
+        own: &PropertyDecl,
+        parent: &PropertyDecl,
+        parent_class: &'a ClassDecl,
+    ) -> Option<(Refusal, Status)> {
+        let fe_scope = Self::scope_of(child, Cls::Linking);
+        let proto_scope = Self::scope_of(child, Cls::Linked(parent_class));
+        let (class, property, parent_name) = (
+            text(&child.name.0),
+            text(&own.name.0),
+            text(&parent_class.name.0),
+        );
+        match (&parent.ty, &own.ty) {
+            (Some(parent_ty), child_ty) => {
+                let status = match child_ty {
+                    None => Status::Error,
+                    Some(child_ty)
+                        if resolved(child_ty, &fe_scope) == resolved(parent_ty, &proto_scope) =>
+                    {
+                        Status::Success
+                    }
+                    Some(child_ty) => {
+                        let down =
+                            self.covariant(child, &fe_scope, child_ty, &proto_scope, parent_ty);
+                        let up =
+                            self.covariant(child, &proto_scope, parent_ty, &fe_scope, child_ty);
+                        if down == Status::Error || up == Status::Error {
+                            Status::Error
+                        } else if down == Status::Unresolved || up == Status::Unresolved {
+                            Status::Unresolved
+                        } else {
+                            Status::Success
+                        }
+                    }
+                };
+                (status != Status::Success).then(|| {
+                    (
+                        Refusal::PropertyType {
+                            class,
+                            property,
+                            ty: type_to_string(&resolved(parent_ty, &proto_scope)),
+                            parent: parent_name,
+                        },
+                        status,
+                    )
+                })
+            }
+            (None, Some(_)) => Some((
+                Refusal::PropertyTypeOmitted {
+                    class,
+                    property,
+                    parent: parent_name,
+                },
+                Status::Error,
+            )),
+            (None, None) => None,
+        }
+    }
+
+    /// `do_inherit_constant_check` for a constant the child's table
+    /// already holds, from `held_by`, none for the child's own.
+    fn constant_refused(
+        child: &'a ClassDecl,
+        held: &ClassConstDecl,
+        held_by: Option<&'a ClassDecl>,
+        parent: &ClassConstDecl,
+        parent_class: &'a ClassDecl,
+    ) -> Option<Refusal> {
+        let parent_name = text(&parent_class.name.0);
+        let holder = held_by.map_or_else(|| text(&child.name.0), |decl| text(&decl.name.0));
+        let constant = text(&parent.name.0);
+        let held_by_parent = held_by.is_some_and(|by| same(by, parent_class));
+        if !held_by_parent && parent.is_final {
+            return Some(Refusal::FinalConstant {
+                holder,
+                parent: parent_name,
+                constant,
+            });
+        }
+        if held_by.is_some() && !held_by_parent {
+            return Some(Refusal::AmbiguousConstant {
+                kind: child.kind,
+                class: text(&child.name.0),
+                holder,
+                parent: parent_name,
+                constant,
+            });
+        }
+        (strength(held.visibility) > strength(parent.visibility)).then(|| {
+            Refusal::ConstantVisibility {
+                class: text(&child.name.0),
+                constant,
+                visibility: parent.visibility,
+                parent_kind: parent_class.kind,
+                parent: parent_name,
+            }
+        })
+    }
+
+    /// `zend_do_inheritance_ex`'s refusals of the parent itself.
+    fn parent_refused(child: &ClassDecl, parent: &ClassDecl) -> Option<Refusal> {
+        let (class, parent_name) = (text(&child.name.0), text(&parent.name.0));
+        if child.kind == ClassKind::Interface {
+            return (parent.kind != ClassKind::Interface).then_some(
+                Refusal::InterfaceExtendsClass {
+                    interface: class,
+                    class: parent_name,
+                },
+            );
+        }
+        if parent.kind == ClassKind::Enum {
+            return Some(Refusal::ExtendsEnum {
+                class,
+                parent: parent_name,
+            });
+        }
+        if parent.flags.is_final {
+            return Some(Refusal::ExtendsFinal {
+                class,
+                parent: parent_name,
+            });
+        }
+        if matches!(parent.kind, ClassKind::Interface | ClassKind::Trait) {
+            return Some(Refusal::ExtendsNotAClass {
+                class,
+                kind: parent.kind,
+                parent: parent_name,
+            });
+        }
+        (child.flags.is_readonly != parent.flags.is_readonly).then_some(Refusal::ReadonlyClass {
+            class,
+            readonly: child.flags.is_readonly,
+            parent: parent_name,
+        })
+    }
+
+    /// Everything `zend_do_link_class` refuses about `child`, the first
+    /// refusal in php's order.
+    fn link_refused(&mut self, child: &'a ClassDecl) -> Linked {
+        // What the child's table holds as the checks go, each with the
+        // class that put it there, none for the child's own.
+        let mut constants: Table<'a, ClassConstDecl> =
+            child.constants.iter().map(|c| (None, c)).collect();
+        let mut methods: Table<'a, MethodDecl> = child.methods.iter().map(|m| (None, m)).collect();
+        if let Some(parent_name) = &child.parent
+            && let Some(parent) = self.class_named(&parent_name.0)
+            && let Some(linked) = self.inherit(child, parent, &mut constants, &mut methods)
+        {
+            return linked;
+        }
+        if let Some(linked) = self.implement(child, &mut constants, &mut methods) {
+            return linked;
+        }
+        match abstract_left(child, &methods) {
+            Some(refusal) => Linked::Refused(at_class(child, refusal)),
+            None => Linked::Linked,
+        }
+    }
+
+    /// `zend_do_inheritance_ex`: the parent itself, then its properties,
+    /// its constants and its methods against the child's, the child's
+    /// table taking what it does not redeclare.
+    fn inherit(
+        &mut self,
+        child: &'a ClassDecl,
+        parent: &'a ClassDecl,
+        constants: &mut Table<'a, ClassConstDecl>,
+        methods: &mut Table<'a, MethodDecl>,
+    ) -> Option<Linked> {
+        if let Some(refusal) = Self::parent_refused(child, parent) {
+            return Some(Linked::Refused(at_class(child, refusal)));
+        }
+        let tables = self.tables(parent);
+        for &(declaring, property) in &tables.properties {
+            if let Some(own) = child.properties.iter().find(|p| p.name == property.name)
+                && let Some((refusal, status)) =
+                    self.property_refused(child, own, property, declaring)
+            {
+                let refused = at_class(child, refusal);
+                return Some(if status == Status::Unresolved {
+                    Linked::Unresolved(refused)
+                } else {
+                    Linked::Refused(refused)
+                });
+            }
+        }
+        for &(declaring, constant) in &tables.constants {
+            match constants.iter().find(|(_, c)| c.name == constant.name) {
+                Some((held_by, held)) => {
+                    if let Some(refusal) =
+                        Self::constant_refused(child, held, *held_by, constant, declaring)
+                    {
+                        return Some(Linked::Refused(at_class(child, refusal)));
+                    }
+                }
+                None if constant.visibility != Visibility::Private => {
+                    constants.push((Some(declaring), constant));
+                }
+                None => {}
+            }
+        }
+        for &(declaring, method) in &tables.methods {
+            match methods.iter().find(|(_, m)| same_method(m, method)) {
+                Some((None, own)) => {
+                    if let Some(linked) = self.method_refused(child, own, method, declaring, false)
+                    {
+                        return Some(linked);
+                    }
+                }
+                Some(_) => {}
+                None => methods.push((Some(declaring), method)),
+            }
+        }
+        None
+    }
+
+    /// `zend_do_implement_interfaces`: each interface the class names
+    /// and each one's parents, `do_interface_implementation` over its
+    /// constants and methods.
+    fn implement(
+        &mut self,
+        child: &'a ClassDecl,
+        constants: &mut Table<'a, ClassConstDecl>,
+        methods: &mut Table<'a, MethodDecl>,
+    ) -> Option<Linked> {
+        let mut named: Vec<&ClassDecl> = Vec::new();
+        for interface in child
+            .interfaces
+            .iter()
+            .filter_map(|n| self.class_named(&n.0))
+        {
+            if named.iter().any(|seen| same(seen, interface)) {
+                return Some(Linked::Refused(at_class(
+                    child,
+                    Refusal::PreviouslyImplemented {
+                        kind: child.kind,
+                        class: text(&child.name.0),
+                        interface: text(&interface.name.0),
+                    },
+                )));
+            }
+            named.push(interface);
+        }
+        let mut interfaces = Vec::new();
+        self.interfaces_of(&child.interfaces, &mut interfaces, 0);
+        for interface in interfaces {
+            if child.kind != ClassKind::Interface
+                && let Some(refusal) = self.interface_refused(child, interface)
+            {
+                return Some(Linked::Refused(at_class(child, refusal)));
+            }
+            for constant in &interface.constants {
+                match constants.iter().find(|(_, c)| c.name == constant.name) {
+                    Some((held_by, _)) if held_by.is_some_and(|by| same(by, interface)) => {}
+                    Some((held_by, held)) => {
+                        if let Some(refusal) =
+                            Self::constant_refused(child, held, *held_by, constant, interface)
+                        {
+                            return Some(Linked::Refused(at_class(child, refusal)));
+                        }
+                    }
+                    None => constants.push((Some(interface), constant)),
+                }
+            }
+            for method in &interface.methods {
+                match methods.iter().find(|(_, m)| same_method(m, method)) {
+                    Some((None, own)) => {
+                        if let Some(linked) =
+                            self.method_refused(child, own, method, interface, true)
+                        {
+                            return Some(linked);
+                        }
+                    }
+                    Some(_) => {}
+                    None => methods.push((Some(interface), method)),
+                }
+            }
+        }
+        None
+    }
+
+    /// `interface_gets_implemented` of the interfaces php's engine
+    /// guards: `Throwable` only through `Exception` or `Error`,
+    /// `Traversable` only through `Iterator` or `IteratorAggregate`, and
+    /// the enum interfaces only on an enum.
+    fn interface_refused(&self, child: &'a ClassDecl, interface: &ClassDecl) -> Option<Refusal> {
+        let name = &interface.name.0;
+        let class = text(&child.name.0);
+        if name.eq_ignore_ascii_case(b"Throwable") {
+            let through_throwable = child
+                .parent
+                .as_ref()
+                .and_then(|p| self.class_named(&p.0))
+                .is_some_and(|parent| self.instance_of(parent, interface));
+            if !through_throwable {
+                return Some(Refusal::Throwable { class });
+            }
+        }
+        if name.eq_ignore_ascii_case(b"Traversable") && !child.flags.is_abstract {
+            let mut all = Vec::new();
+            self.interfaces_of(&child.interfaces, &mut all, 0);
+            let through_iterator = all.iter().any(|interface| {
+                interface.name.0.eq_ignore_ascii_case(b"Iterator")
+                    || interface.name.0.eq_ignore_ascii_case(b"IteratorAggregate")
+            }) || child
+                .parent
+                .as_ref()
+                .and_then(|p| self.class_named(&p.0))
+                .is_some_and(|parent| self.instance_of(parent, interface));
+            if !through_iterator {
+                return Some(Refusal::Traversable { class });
+            }
+        }
+        ((name.eq_ignore_ascii_case(b"UnitEnum") || name.eq_ignore_ascii_case(b"BackedEnum"))
+            && child.kind != ClassKind::Enum)
+            .then(|| Refusal::EnumInterface {
+                class,
+                interface: text(name),
+            })
+    }
+}
+
+/// The constants or the methods a class holds as it links, each with
+/// the class that put it there, none for the class's own.
+type Table<'a, T> = Vec<(Option<&'a ClassDecl>, &'a T)>;
+
+/// A refusal at the class's own line, where php raises what is not
+/// about one method.
+fn at_class(child: &ClassDecl, refusal: Refusal) -> Refused {
+    Refused {
+        refusal,
+        site: Site {
+            file: child.file.clone(),
+            line: child.line,
+        },
+    }
+}
+
+/// Two methods of one name, whatever the case.
+fn same_method(a: &MethodDecl, b: &MethodDecl) -> bool {
+    a.function.name.0.eq_ignore_ascii_case(&b.function.name.0)
+}
+
+/// `zend_verify_abstract_class` over the methods a class holds once
+/// linked: a
+/// class not declared abstract left with an abstract method, one it
+/// inherited or one an interface declares, `E_ERROR` in php and a fatal
+/// all the same.
+fn abstract_left(
+    child: &ClassDecl,
+    methods: &[(Option<&ClassDecl>, &MethodDecl)],
+) -> Option<Refusal> {
+    if child.kind != ClassKind::Class || child.flags.is_abstract {
+        return None;
+    }
+    let left: Vec<String> = methods
+        .iter()
+        .filter(|(by, method)| {
+            method.is_abstract || by.is_some_and(|by| by.kind == ClassKind::Interface)
+        })
+        .map(|(by, method)| {
+            let scope = by.map_or(&child.name, |by| &by.name);
+            format!("{}::{}", text(&scope.0), text(&method.function.name.0))
+        })
+        .collect();
+    (!left.is_empty()).then(|| Refusal::AbstractLeft {
+        class: text(&child.name.0),
+        methods: left,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_default_is_written_as_php_writes_it_in_a_declaration() {
+        assert_eq!(
+            default_text(&ConstExpr::Str(b"llllllllllll"[..].into())),
+            "'llllllllll...'"
+        );
+        assert_eq!(default_text(&ConstExpr::Array(Vec::new())), "[]");
+        assert_eq!(default_text(&ConstExpr::Null), "null");
+    }
+}

@@ -373,34 +373,8 @@ fn closure_clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
 /// both. `__clone` is private, the one method the visibility rule of
 /// `zend_std_get_method` has to be held to.
 pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
-    vec![
-        (
-            ClassDecl {
-                methods: vec![abstract_method(b"__toString", Some(Type::String))],
-                ..declared(b"Stringable", ClassKind::Interface, None)
-            },
-            Vec::new(),
-            None,
-            None,
-        ),
-        (
-            ClassDecl {
-                methods: throwable_abstract_methods(),
-                ..declared(b"Throwable", ClassKind::Interface, None)
-            },
-            Vec::new(),
-            None,
-            None,
-        ),
-        (
-            ClassDecl {
-                methods: array_access_methods(),
-                ..declared(b"ArrayAccess", ClassKind::Interface, None)
-            },
-            Vec::new(),
-            None,
-            None,
-        ),
+    let mut classes = zend_interfaces();
+    let rest: Vec<NativeClassDecl> = vec![
         (
             declared(b"Exception", ClassKind::Class, None),
             throwable_methods(),
@@ -469,6 +443,49 @@ pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
         (std_class(), Vec::new(), None, None),
         (unit_enum(), Vec::new(), None, None),
         (backed_enum(), Vec::new(), None, None),
+    ];
+    classes.extend(rest);
+    classes
+}
+
+/// The interfaces `zend_register_interfaces` and
+/// `zend_register_default_exception` declare ahead of the classes, in
+/// php's order.
+fn zend_interfaces() -> Vec<NativeClassDecl> {
+    vec![
+        (
+            declared(b"Traversable", ClassKind::Interface, None),
+            Vec::new(),
+            None,
+            None,
+        ),
+        (
+            ClassDecl {
+                methods: vec![abstract_method(b"__toString", Some(Type::String))],
+                ..declared(b"Stringable", ClassKind::Interface, None)
+            },
+            Vec::new(),
+            None,
+            None,
+        ),
+        (
+            ClassDecl {
+                methods: throwable_abstract_methods(),
+                ..declared(b"Throwable", ClassKind::Interface, None)
+            },
+            Vec::new(),
+            None,
+            None,
+        ),
+        (
+            ClassDecl {
+                methods: array_access_methods(),
+                ..declared(b"ArrayAccess", ClassKind::Interface, None)
+            },
+            Vec::new(),
+            None,
+            None,
+        ),
     ]
 }
 
