@@ -3999,9 +3999,14 @@ fn linked_properties(req: &mut Request, class: ClassId) -> Vec<(PropertyDecl, Cl
             // name was inherited and is being redeclared or is new.
             let own = table.iter().filter(|(_, d)| *d == class).count();
             match at_index {
-                // The child's declaration stands where the parent's was
-                // inherited.
-                Some(i) if internal => table[i] = (property.clone(), *at),
+                // An internal class declares its properties after
+                // `zend_do_inheritance` ran, and a redeclaration is
+                // `zend_hash_del` then `zend_hash_update_ptr` in
+                // `zend_declare_typed_property`, so it moves to the end.
+                Some(i) if internal => {
+                    table.remove(i);
+                    table.push((property.clone(), *at));
+                }
                 Some(i) => {
                     table.remove(i);
                     table.insert(own.min(table.len()), (property.clone(), *at));
