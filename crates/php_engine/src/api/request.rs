@@ -119,6 +119,65 @@ pub enum Whence {
     End,
 }
 
+/// What `php_stream_cast` is asked to make of a stream, of the casts
+/// that give a fd: `PHP_STREAM_AS_FD_FOR_SELECT` with
+/// `PHP_STREAM_CAST_INTERNAL`, which `stream_select` and `stream_isatty`
+/// ask and which neither flushes nor seeks; `PHP_STREAM_AS_FD` with it;
+/// and `PHP_STREAM_AS_FD` alone, which `proc_open` asks of a stream it
+/// hands a child and which warns of buffered bytes the child will not
+/// see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cast {
+    Select,
+    Internal,
+    Fd,
+}
+
+/// What a host fd becomes as a stream, [`Request::stream_from_fd`]:
+/// the three openers php has over one that is already open.
+#[derive(Debug)]
+pub enum FdStream<'a> {
+    /// `php_stream_fopen_from_fd(fd, mode, NULL)`: a plain file's kind,
+    /// `STDIO`, which seeks where the fd does and has no position where
+    /// it is a pipe or a character device; what `proc_open` hands back
+    /// for a `pipe`.
+    File { mode: &'a [u8] },
+    /// `php_stream_fopen_from_pipe` over what `popen(3)` opened: the
+    /// same kind, never seeking, whose close waits for `child`, the
+    /// process at the pipe's other end, and answers its exit status.
+    Process {
+        mode: &'a [u8],
+        child: std::process::Child,
+    },
+    /// `php_stream_sock_open_from_socket`: a socket, of the
+    /// `generic_socket` kind, `r+`, blocking, with
+    /// `default_socket_timeout` as its read timeout; what
+    /// `stream_socket_pair` and `proc_open`'s `socket` hand back.
+    Socket,
+}
+
+/// What `php_stream_xport_create` is asked to make of a `transport`'s
+/// name: a client connected within `timeout`, `None` to wait for ever,
+/// or a server bound to the name, listening where `listen` says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Xport {
+    Client {
+        timeout: Option<std::time::Duration>,
+    },
+    Server {
+        listen: bool,
+    },
+}
+
+/// Why `php_stream_xport_create` made no stream: the `errno` the natives
+/// hand back as `$error_code`, `0` where there was none, and the text
+/// they hand back as `$error_message` and print.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XportFailure {
+    pub code: i32,
+    pub text: String,
+}
+
 impl Stream {
     pub(crate) const fn of(r: Resource) -> Stream {
         Stream(r)
@@ -272,7 +331,10 @@ impl Stream {
     /// `php_stream_readdir`: the next entry's name, `.` and `..` first,
     /// `None` past the last (`readdir` answers `false`).
     pub fn read_dir(self, req: &mut Request) -> Result<Option<PhpString>, Thrown> {
-        match req.stream_op(self, |_, stream| stream.read_dir()).flatten() {
+        match req
+            .stream_op(self, |req, stream| stream.read_dir(req))
+            .flatten()
+        {
             Some(name) => Ok(Some(PhpString::new(req, &name)?)),
             None => Ok(None),
         }
@@ -354,18 +416,68 @@ pub enum WrapperOp<'a> {
     Owner(i64),
     /// `PHP_STREAM_META_GROUP`, a group id.
     Group(i64),
+    /// `PHP_STREAM_META_OWNER_NAME`, a user's name, which `chown` hands a
+    /// wrapper that is not the plain files one as it was given.
+    OwnerName(&'a [u8]),
+    /// `PHP_STREAM_META_GROUP_NAME`, a group's name, as `chgrp` hands it.
+    GroupName(&'a [u8]),
 }
 
-/// A stream filter: its name and the function that filters one bucket,
-/// with `closing` set on the last.
-#[derive(Debug, Clone)]
-#[allow(clippy::type_complexity)] // as StreamWrapper
-pub struct StreamFilter {
-    /// The filter's name, as `php_stream_filter_register_factory` is
-    /// given it.
-    pub name: String,
-    pub filter: fn(&mut Request, &[u8], &mut Vec<u8>, bool) -> Result<(), Thrown>,
+/// `php_stream_bucket_brigade`: the buckets a filter is handed and the
+/// ones it hands on, each bucket its bytes, in order.
+pub type Brigade = std::collections::VecDeque<Vec<u8>>;
+
+/// `php_stream_filter_status_t`, what a filter answers: `PSFS_ERR_FATAL`,
+/// the stream broken; `PSFS_FEED_ME`, nothing to hand on yet;
+/// `PSFS_PASS_ON`, buckets on the `output` brigade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterStatus {
+    ErrFatal,
+    FeedMe,
+    PassOn,
 }
+
+/// `PSFS_FLAG_NORMAL`, `PSFS_FLAG_FLUSH_INC` and `PSFS_FLAG_FLUSH_CLOSE`:
+/// whether a filter call is one more bucket, a flush, or the last call
+/// before the stream closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterFlags {
+    Normal,
+    FlushInc,
+    FlushClose,
+}
+
+/// `php_stream_filter_ops` (`Z/main/streams/php_stream_filter_api.h`):
+/// one filter on one of a stream's chains, holding what its factory
+/// made it with. The filter takes the buckets of `input` it consumes,
+/// adds to `consumed` how many bytes they held where it is asked, and
+/// puts what it makes on `output`; a call may serve PHP code, whose
+/// throwable the `Err` is and which the stream treats as
+/// `PSFS_ERR_FATAL`.
+pub trait StreamFilter: Send {
+    /// `fops->filter`, on the stream it is attached to.
+    fn filter(
+        &mut self,
+        req: &mut Request,
+        stream: Stream,
+        input: &mut Brigade,
+        output: &mut Brigade,
+        consumed: Option<&mut usize>,
+        flags: FilterFlags,
+    ) -> Result<FilterStatus, Thrown>;
+
+    /// `fops->dtor`, served once when the filter leaves its chain.
+    fn close(&mut self, _req: &mut Request) -> Result<(), Thrown> {
+        Ok(())
+    }
+}
+
+/// `php_stream_filter_factory`'s `create_filter`: a filter of the name
+/// the program asked for, which may be one a wildcard matched, with the
+/// parameters it was given; `None` is the factory's refusal, after
+/// whatever it said.
+pub type FilterFactory =
+    fn(&mut Request, &[u8], Option<&Value>) -> Result<Option<Box<dyn StreamFilter>>, Thrown>;
 
 /// A resource's per-type destructor, php's `list_dtor_ex`: served once,
 /// by [`Resource::close`] or by the release that reaches zero, with the
@@ -640,7 +752,28 @@ pub struct Request {
     /// never one row.
     next_ref_source: usize,
     pub(crate) wrappers: Vec<StreamWrapper>,
-    filters: Vec<StreamFilter>,
+    /// `FG(stream_wrappers)`: the request's own wrapper table once a
+    /// program changed it, `None` while it has the built-in one.
+    pub(crate) url_wrappers: Option<Vec<crate::streams::Registered>>,
+    /// `FG(user_stream_current_filename)`: the path a user-space wrapper's
+    /// opener is opening, which the same path opened from inside it is
+    /// refused as.
+    pub(crate) user_stream_current: Option<Vec<u8>>,
+    /// `FG(pclose_ret)`: what the last stream freed by its resource's
+    /// destructor answered from its kind's close, which `pclose()` reads.
+    pub(crate) pclose_ret: i32,
+    /// `FG(stream_filters)`: each filter name and its factory, in the
+    /// order they were registered.
+    pub(crate) filters: Vec<(Vec<u8>, FilterFactory)>,
+    /// A throwable PHP code served by a stream's kind or filter raised
+    /// inside an operation whose answer has no room for it: php's
+    /// `EG(exception)` standing until the native that asked for the
+    /// operation returns, which is when [`Request::serve_native`] raises
+    /// it, and before which no more such code is served.
+    pub(crate) stream_thrown: Option<Thrown>,
+    /// `le_stream_filter`, the type of the resource a filter on a chain
+    /// is named by.
+    pub(crate) filter_type: ResourceType,
     /// php's `EG(user_error_handler)`, the handler `set_error_handler`
     /// installed, `IS_UNDEF` as none; the stack under it is
     /// `EG(user_error_handlers)`, each row the handler it replaced and
@@ -902,6 +1035,7 @@ impl Request {
         let web = description.is_web;
         let mut resources = Resources::default();
         let stream_type = crate::streams::register(&mut resources);
+        let filter_type = resources.register_type(b"stream filter", None);
         let mut req = Request {
             shared,
             description,
@@ -932,9 +1066,14 @@ impl Request {
             weakrefs: crate::weakrefs::Table::default(),
             next_ref_source: 1,
             wrappers: Vec::new(),
+            url_wrappers: None,
+            user_stream_current: None,
+            pclose_ret: 0,
             filters: Vec::new(),
             error_handling: None,
             error_handling_thrown: None,
+            stream_thrown: None,
+            filter_type,
             error_handler: None,
             error_handler_levels: 0,
             error_handlers: Vec::new(),
@@ -2939,7 +3078,20 @@ impl Request {
                 &format!("Call to undefined function {name}()"),
             ));
         };
-        entry(self)
+        let served = entry(self);
+        match (served, self.stream_thrown.take()) {
+            (Ok(value), Some(thrown)) => {
+                self.release(value);
+                Err(thrown)
+            }
+            (Err(thrown), Some(deferred)) => {
+                if let Some(object) = deferred.exception() {
+                    self.release(object.as_value());
+                }
+                Err(thrown)
+            }
+            (served, None) => served,
+        }
     }
 
     pub(crate) fn take_body(&mut self) -> Vec<u8> {
@@ -9935,6 +10087,17 @@ impl Request {
         if name == b"fiber.stack_size" && !crate::fiber::stack_size_updated(self, value) {
             return Ok(None);
         }
+        let handler = self.shared.extensions.iter().find_map(|e| {
+            e.on_modify
+                .iter()
+                .find(|(n, _)| n.as_slice() == name)
+                .map(|(_, h)| *h)
+        });
+        if let Some(handler) = handler
+            && !handler(self, value)?
+        {
+            return Ok(None);
+        }
         self.ini.retain(|(n, _)| n.as_slice() != name);
         self.ini.push((name.to_vec(), value.to_vec()));
         match name {
@@ -10811,7 +10974,15 @@ impl Request {
         link: bool,
         cached: bool,
     ) -> Result<Option<[i64; 13]>, Thrown> {
-        self.stat_url(path, link, cached)
+        self.stat_url(path, link, cached, false)
+    }
+
+    /// [`Request::url_stat`] with `cached`, as `php_stat` makes it for an
+    /// existence check, `file_exists` and the `is_*` natives: a
+    /// user-space wrapper's `url_stat` is handed
+    /// `STREAM_URL_STAT_QUIET` beside the link bit.
+    pub fn url_stat_quiet(&mut self, path: &[u8], link: bool) -> Result<Option<[i64; 13]>, Thrown> {
+        self.stat_url(path, link, true, true)
     }
 
     /// `php_clear_stat_cache`: the stat cache emptied, both entries.
@@ -10879,13 +11050,23 @@ impl Request {
         self.wrappers.iter().map(|w| w.scheme.clone()).collect()
     }
 
-    /// `stream_filter_register()`: `false` when the name is taken.
-    pub fn register_filter(&mut self, filter: StreamFilter) -> bool {
-        if self.filters.iter().any(|f| f.name == filter.name) {
+    /// `php_stream_filter_register_factory_volatile`
+    /// (`Z/main/streams/filter.c:50`): `factory` for the filter `name`,
+    /// which may end in `.*` to take every name under it, for the rest of
+    /// the request; `false` where the name is taken.
+    pub fn register_filter(&mut self, name: &[u8], factory: FilterFactory) -> bool {
+        if self.filters.iter().any(|(n, _)| n.as_slice() == name) {
             return false;
         }
-        self.filters.push(filter);
+        self.filters.push((name.to_vec(), factory));
         true
+    }
+
+    /// `stream_get_filters()`'s names: every filter registered, in the
+    /// order they were.
+    #[must_use]
+    pub fn stream_filters(&self) -> Vec<Vec<u8>> {
+        self.filters.iter().map(|(name, _)| name.clone()).collect()
     }
 }
 
@@ -11354,6 +11535,51 @@ mod tests {
 
         assert_eq!(String::from_utf8_lossy(&served.stdout), "d\nafter\n");
         assert_eq!(served.fatal, None);
+    }
+
+    /// An extension entry's `on_modify` (`PHP_INI_MH` at
+    /// `ZEND_INI_STAGE_RUNTIME`) as `ini_set()` serves it: before the
+    /// value is taken, what it raises raised, and its refusal leaving the
+    /// entry as it was. No witness holds it, because the entry is no
+    /// entry of the oracle's; `assert.c`'s `OnUpdateAssert` family is
+    /// the one php-src has, which reaches it with #753.
+    #[test]
+    fn an_extension_entrys_on_modify_is_served_by_ini_set() {
+        #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature
+        fn guarded(req: &mut Request, value: &[u8]) -> Result<bool, crate::api::raising::Thrown> {
+            if value == b"0" {
+                crate::api::raising::docref(
+                    req,
+                    Level::Deprecated,
+                    "t.flag INI setting is deprecated",
+                );
+            }
+            Ok(value != b"bad")
+        }
+        let extension = crate::api::abi::ExtensionBuilder::default()
+            .ini(vec![php_unit::decl::IniDecl {
+                name: php_unit::decl::Name(b"t.flag".as_slice().into()),
+                default: b"1".as_slice().into(),
+                user: true,
+                per_dir: true,
+                system: true,
+            }])
+            .on_modify(b"t.flag", guarded)
+            .build("modified");
+        let engine = Engine::builder().extensions(&[extension]).build();
+        let served = engine.serve_capture(
+            "<?php var_dump(ini_set('t.flag', '0'), ini_set('t.flag', 'bad'), ini_get('t.flag'));",
+            crate::test::Capture::default(),
+        );
+        let out = String::from_utf8_lossy(&served.stdout);
+        assert!(
+            out.contains("Deprecated: ini_set(): t.flag INI setting is deprecated"),
+            "{out}"
+        );
+        assert!(
+            out.ends_with("string(1) \"1\"\nbool(false)\nstring(1) \"0\"\n"),
+            "{out}"
+        );
     }
 
     /// `zend_objects_destroy_object`'s `E_CORE_ERROR`

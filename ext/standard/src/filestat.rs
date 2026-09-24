@@ -313,7 +313,12 @@ fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Value, Thrown>
         return Ok(Value::bool(false));
     }
     let link = ty.is_link_operation();
-    let Some(sb) = req.url_stat(filename, link, true)? else {
+    let answered = if ty.is_exists_check() {
+        req.url_stat_quiet(filename, link)?
+    } else {
+        req.url_stat(filename, link, true)?
+    };
+    let Some(sb) = answered else {
         if !ty.is_exists_check() {
             let text = format!(
                 "{}stat failed for {}",
@@ -735,7 +740,17 @@ fn owner_change(req: &mut Request, group: bool, link: bool) -> Result<Value, Thr
     if !plain || has_file_scheme(filename) {
         let id = match who {
             Who::Id(id) => id,
-            Who::Name(name) if plain => {
+            Who::Name(name) if !plain => {
+                // `php_do_chown` hands another wrapper the name as it was
+                // given, `PHP_STREAM_META_OWNER_NAME`.
+                let op = if group {
+                    WrapperOp::GroupName(name.as_bytes())
+                } else {
+                    WrapperOp::OwnerName(name.as_bytes())
+                };
+                return Ok(Value::bool(req.wrapper_op(filename, op)?));
+            }
+            Who::Name(name) => {
                 // The plain files wrapper's `php_plain_files_metadata`
                 // looks the name up, and says so by the path it was
                 // handed, `file://` taken off.
@@ -756,7 +771,6 @@ fn owner_change(req: &mut Request, group: bool, link: bool) -> Result<Value, Thr
                 };
                 i64::from(id)
             }
-            Who::Name(_) => 0,
         };
         let op = if group {
             WrapperOp::Group(id)
@@ -800,7 +814,26 @@ fn owner_change(req: &mut Request, group: bool, link: bool) -> Result<Value, Thr
 
 /// `chown(string $filename, string|int $user): bool`,
 /// `PHP_FUNCTION(chown)` (`Z/ext/standard/filestat.c:543`): the file's
-/// owner, by id or by name.
+/// owner, by id or by name; a wrapper that is not the plain files one is
+/// handed the name as it was given, `STREAM_META_OWNER_NAME`, and an id
+/// as `STREAM_META_OWNER`.
+///
+/// ```php
+/// class Meta { public $context;
+///     function stream_metadata($path, $option, $value) { echo "$path $option $value\n"; return true; } }
+/// stream_wrapper_register('meta', 'Meta');
+/// var_dump(chown('meta://a', 'someone'), chown('meta://b', 42), chgrp('meta://c', 'staff'), chgrp('meta://d', 7));
+/// ```
+/// ```expect
+/// meta://a 2 someone
+/// meta://b 3 42
+/// meta://c 4 staff
+/// meta://d 5 7
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// ```
 ///
 /// ```php
 /// $p = __DIR__ . '/o.txt'; touch($p); $me = fileowner($p);
