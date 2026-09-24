@@ -221,6 +221,14 @@ impl ObjectHandlers for FiberHandlers {
 
 static FIBER: FiberHandlers = FiberHandlers;
 
+/// Whether `table` is `Fiber`'s, whose `dtor_obj` is
+/// `zend_fiber_object_destroy` and not `zend_objects_destroy_object`,
+/// so the cycle collector serves it a destructor whatever the class
+/// declares.
+pub(crate) fn serves_destructor(table: &'static dyn ObjectHandlers) -> bool {
+    std::ptr::addr_eq(table, &raw const FIBER)
+}
+
 /// `zend_fiber_object_create`: a fresh payload, `ZEND_FIBER_STATUS_INIT`.
 fn new_fiber(heap: &mut Heap, class: u32, slots: u32) -> Result<Obj, Fatal> {
     heap.object_with(class, slots, Fiber::default())

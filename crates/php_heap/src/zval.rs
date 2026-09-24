@@ -438,6 +438,13 @@ impl Zval {
         self.type_flags & Zval::TYPE_REFCOUNTED != 0
     }
 
+    /// `Z_COLLECTABLE`: a mutable array, an object or a reference, the
+    /// values a cycle can pass through.
+    #[must_use]
+    pub(crate) const fn is_collectable(self) -> bool {
+        self.type_flags & Zval::TYPE_COLLECTABLE != 0
+    }
+
     /// `IS_TYPE_REFCOUNTED`.
     const TYPE_REFCOUNTED: u8 = 1;
     /// `IS_TYPE_COLLECTABLE`: may be part of a cycle.

@@ -46,9 +46,29 @@ pub(crate) const OBJ_WEAKLY_REFERENCED: u32 = PERSISTENT;
 pub(crate) const OBJ_DESTRUCTOR_CALLED: u32 = 1 << 8;
 /// `IS_OBJ_FREE_CALLED`: `free_obj` ran over the members, once.
 pub(crate) const OBJ_FREE_CALLED: u32 = 1 << 9;
-/// `IS_OBJ_LAZY_UNINITIALIZED`: above the flags, in the collector's
-/// half of the word, where php keeps it (`Z/Zend/zend_types.h:867`).
+/// `IS_OBJ_LAZY_UNINITIALIZED`: a bit of the object's `extra_flags`,
+/// where php keeps it (`Z/Zend/zend_types.h:867-870`), and not of this
+/// word, whose top twenty-two bits are the collector's.
 pub(crate) const OBJ_LAZY_UNINITIALIZED: u32 = 1 << 31;
+
+/// `GC_TYPE_MASK`: the type byte's four bits at the bottom of the word.
+const TYPE_MASK: u32 = 0x0000_000f;
+/// `GC_INFO_SHIFT`: the collector's twenty-two bits start here.
+const INFO_SHIFT: u32 = 10;
+/// `GC_ADDRESS` (`Z/Zend/zend_gc.c:90`): the low twenty bits of the
+/// info, the value's index in the root buffer, compressed past 2^19.
+pub(crate) const GC_ADDRESS: u32 = 0x000f_ffff;
+/// `GC_COLOR`: the two bits above the address.
+pub(crate) const GC_COLOR: u32 = 0x0030_0000;
+/// `GC_BLACK`: in use or free, and zero, so a value nothing coloured
+/// reads black.
+pub(crate) const GC_BLACK: u32 = 0;
+/// `GC_WHITE`: a member of a garbage cycle.
+pub(crate) const GC_WHITE: u32 = 0x0010_0000;
+/// `GC_GREY`: a possible member of a cycle.
+pub(crate) const GC_GREY: u32 = 0x0020_0000;
+/// `GC_PURPLE`: a possible root of a cycle.
+pub(crate) const GC_PURPLE: u32 = 0x0030_0000;
 
 impl Refcounted {
     /// A header with one owner, of `kind`, with `flags` set.
@@ -90,11 +110,6 @@ impl Refcounted {
         self.type_info.get() & FLAGS_MASK
     }
 
-    /// One bit of the whole word, for the bits php keeps above the flags.
-    pub(crate) fn has_info(&self, bit: u32) -> bool {
-        self.type_info.get() & bit != 0
-    }
-
     /// `GC_ADD_FLAGS`.
     pub(crate) fn add_flags(&self, flags: u32) {
         self.type_info
@@ -105,5 +120,57 @@ impl Refcounted {
     pub(crate) fn del_flags(&self, flags: u32) {
         self.type_info
             .set(self.type_info.get() & !(flags & FLAGS_MASK));
+    }
+
+    /// `GC_TYPE`: the type byte, which the collector's free phase turns
+    /// to `IS_NULL` so that a release reaching zero on a value it is
+    /// already destroying does nothing (`GC_NULL`).
+    pub(crate) fn kind(&self) -> u32 {
+        self.type_info.get() & TYPE_MASK
+    }
+
+    /// `GC_TYPE_INFO(p) = GC_NULL | (GC_TYPE_INFO(p) & ~GC_TYPE_MASK)`:
+    /// the type byte `IS_NULL`, the flags and the info kept.
+    pub(crate) fn set_kind_null(&self) {
+        self.type_info
+            .set((self.type_info.get() & !TYPE_MASK) | ZvalType::Null as u32);
+    }
+
+    /// `GC_INFO`: the collector's twenty-two bits, colour and address.
+    pub(crate) fn info(&self) -> u32 {
+        self.type_info.get() >> INFO_SHIFT
+    }
+
+    /// `GC_REF_SET_INFO`: the collector's bits replaced, the type and
+    /// the flags kept.
+    pub(crate) fn set_info(&self, info: u32) {
+        self.type_info
+            .set((self.type_info.get() & (TYPE_MASK | FLAGS_MASK)) | (info << INFO_SHIFT));
+    }
+
+    /// `GC_REF_ADDRESS`: the value's index in the root buffer, zero for
+    /// one that is not there.
+    pub(crate) fn address(&self) -> u32 {
+        self.info() & GC_ADDRESS
+    }
+
+    /// `GC_REF_COLOR`.
+    pub(crate) fn color(&self) -> u32 {
+        self.info() & GC_COLOR
+    }
+
+    /// `GC_REF_SET_COLOR`, which `GC_REF_SET_BLACK` and
+    /// `GC_REF_SET_PURPLE` are for the two colours at either end.
+    pub(crate) fn set_color(&self, color: u32) {
+        self.type_info.set(
+            (self.type_info.get() & !(GC_COLOR << INFO_SHIFT)) | ((color & GC_COLOR) << INFO_SHIFT),
+        );
+    }
+
+    /// `GC_MAY_LEAK` (`Z/Zend/zend_gc.h:110`): not in the root buffer,
+    /// no colour, and collectable, which is what makes a value one
+    /// `gc_possible_root` may take.
+    pub(crate) fn may_leak(&self) -> bool {
+        self.type_info.get() & ((!0 << INFO_SHIFT) | NOT_COLLECTABLE) == 0
     }
 }

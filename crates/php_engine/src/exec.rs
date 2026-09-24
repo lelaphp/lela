@@ -892,8 +892,9 @@ pub(crate) fn take_operand(
 }
 
 /// `FREE_OP`: a `TMP` or a `VAR` operand read by [`operand`] and done
-/// with, its slot's owner given up; a `CV` and a `CONST` are nobody's to
-/// free here and nothing happens.
+/// with, its slot's owner given up as `zval_ptr_dtor_nogc` gives it up,
+/// never a possible root; a `CV` and a `CONST` are nobody's to free here
+/// and nothing happens.
 pub(crate) fn free_operand(
     req: &mut Request,
     frame: FrameRef,
@@ -903,7 +904,7 @@ pub(crate) fn free_operand(
 ) {
     if matches!(kind, OperandKind::Tmp | OperandKind::Var) {
         let value = req.take_slot(frame, temporary_slot(code, field));
-        req.release(value);
+        req.release_nogc(value);
     }
 }
 

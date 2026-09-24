@@ -70,6 +70,28 @@ pub trait HeapHooks {
     fn free_reference(&mut self, r: Ref) {
         let _ = r;
     }
+    /// Whether the object has a destructor to serve, php's
+    /// `obj->handlers->dtor_obj != zend_objects_destroy_object ||
+    /// obj->ce->destructor`, which the cycle collector asks of its
+    /// garbage before it decides to serve destructors first (design
+    /// §5.12). A heap that cannot tell says yes, and is served
+    /// [`HeapHooks::destruct`] for every object, which does nothing
+    /// where there is nothing to serve.
+    fn has_destructor(&mut self, obj: Obj) -> bool {
+        let _ = obj;
+        true
+    }
+    /// The cycle collector's destructor phase served inside a fiber:
+    /// php runs a collection's destructors in a fiber of its own when a
+    /// fiber is running, `gc_call_destructors_in_fiber`, so that a
+    /// destructor that suspends suspends that fiber and not the one the
+    /// collection interrupted. `false` is the phase served in place by
+    /// the heap, the entries below `end` walked for their destructors;
+    /// a heap with no fibers always answers so.
+    fn gc_destructors_in_fiber(&mut self, end: u32) -> bool {
+        let _ = end;
+        false
+    }
     /// `zend_weakrefs_notify` (`Z/Zend/zend_weakrefs.c:212`): the object
     /// is being freed, its destructor served and its members not yet
     /// released, and every `WeakReference` naming it is cleared and

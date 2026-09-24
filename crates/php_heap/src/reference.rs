@@ -120,6 +120,12 @@ impl Ref {
         ZvalRef::new(NonNull::from(&self.header().val).cast())
     }
 
+    /// `zend_refcounted_h gc`: the header the cycle collector colours
+    /// as it walks through the cell, never a root of its own.
+    pub(crate) fn gc(&self) -> &Refcounted {
+        &self.header().gc
+    }
+
     /// Write the zval held as it stands, no owner touched.
     pub(crate) fn write_val(self, z: Zval) {
         self.header().val.set(z);
