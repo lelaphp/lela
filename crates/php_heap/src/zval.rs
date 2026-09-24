@@ -431,6 +431,18 @@ impl Zval {
         }
     }
 
+    /// The block a refcounted value's header stands at, `Z_COUNTED`; none
+    /// for a value that carries no header.
+    #[cfg(debug_assertions)]
+    pub(crate) fn counted(self) -> Option<NonNull<u8>> {
+        if !self.is_refcounted() {
+            return None;
+        }
+        NonNull::new(std::ptr::with_exposed_provenance_mut(
+            usize::try_from(self.value).unwrap_or(0),
+        ))
+    }
+
     /// Whether the value carries a refcounted header (`Z_REFCOUNTED`): a
     /// bit test, never a type-range test.
     #[must_use]

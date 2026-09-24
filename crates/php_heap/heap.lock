@@ -107,6 +107,7 @@ Heap::stored
 Heap::string
 Heap::string_safe_alloc
 Heap::string_with
+Heap::take_freed_use
 HeapHooks
 HeapHooks::destruct
 HeapHooks::free_native

@@ -102,6 +102,29 @@ pub struct Heap {
     /// php's `EG(ht_iterators)`: the positions the walks of this
     /// request's tables are registered at.
     iterators: iterators::Iterators,
+    /// A debug build's record of the first refcount operation it refused
+    /// on a block this heap had freed, until the engine takes it
+    /// ([`Heap::take_freed_use`]).
+    #[cfg(debug_assertions)]
+    freed_use: std::cell::Cell<Option<FreedUse>>,
+}
+
+/// What a refcount operation was asked to do.
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefOp {
+    Addref,
+    Release,
+}
+
+/// A refcount operation a debug build refused: the block, the operation
+/// and the line that asked for it.
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Copy)]
+struct FreedUse {
+    at: usize,
+    op: RefOp,
+    site: &'static std::panic::Location<'static>,
 }
 
 impl Default for Heap {
@@ -124,6 +147,8 @@ impl Heap {
             mm,
             interned: string::Table::new(),
             iterators: iterators::Iterators::default(),
+            #[cfg(debug_assertions)]
+            freed_use: std::cell::Cell::new(None),
         }
     }
 
@@ -247,10 +272,64 @@ impl Heap {
         unsafe { self.mm.free(s.address()) };
     }
 
+    /// The first refcount operation a debug build refused because the
+    /// block it named was one this heap had freed, as the `InternalError`
+    /// fatal that ends the request, naming the block, the operation and
+    /// the line that asked for it; taken, so it is reported once. The
+    /// operation itself did nothing, so the free list the block's first
+    /// word links stands. A release build looks for none and answers
+    /// `None`.
+    pub fn take_freed_use(&mut self) -> Option<Fatal> {
+        #[cfg(debug_assertions)]
+        {
+            self.freed_use.take().map(|refused| {
+                let op = match refused.op {
+                    RefOp::Addref => "an addref",
+                    RefOp::Release => "a release",
+                };
+                Fatal::Error(format!(
+                    "InternalError: {op} of the block at {:#x}, which the heap has freed, at {}",
+                    refused.at, refused.site
+                ))
+            })
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            None
+        }
+    }
+
+    /// A debug build's question before a refcount operation: whether `z`
+    /// names a block this heap has freed ([`mm::freed`]). One that does
+    /// is recorded for [`Heap::take_freed_use`], the first only, and the
+    /// operation is refused.
+    #[cfg(debug_assertions)]
+    fn refuses(&self, z: Zval, op: RefOp, site: &'static std::panic::Location<'static>) -> bool {
+        let Some(at) = z.counted() else {
+            return false;
+        };
+        if !mm::freed::is_freed(at) {
+            return false;
+        }
+        if self.freed_use.get().is_none() {
+            self.freed_use.set(Some(FreedUse {
+                at: at.as_ptr().addr(),
+                op,
+                site,
+            }));
+        }
+        true
+    }
+
     /// One more owner of `z`: a refcount increment for a refcounted
     /// value, nothing for a scalar or an immutable value (`ZVAL_COPY`).
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn addref(&self, z: Zval) {
         if !z.is_refcounted() {
+            return;
+        }
+        #[cfg(debug_assertions)]
+        if self.refuses(z, RefOp::Addref, std::panic::Location::caller()) {
             return;
         }
         if let Some(s) = z.as_str() {
@@ -273,8 +352,16 @@ impl Heap {
     /// value released before its cell. The hooks are what says this may re-enter, and the heap is
     /// theirs: it is asked for at each step and again after every call
     /// up, since the destructor may have grown it.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn release(hooks: &mut dyn HeapHooks, z: Zval) {
         if !z.is_refcounted() {
+            return;
+        }
+        #[cfg(debug_assertions)]
+        if hooks
+            .heap()
+            .refuses(z, RefOp::Release, std::panic::Location::caller())
+        {
             return;
         }
         if let Some(s) = z.as_str() {
@@ -727,6 +814,61 @@ mod tests {
             assert_eq!(heap.memory_usage(false), object::INIT_BYTES);
         }
         assert_eq!(mm::MAPPINGS.load(Relaxed), before);
+    }
+
+    /// A debug build stops at a second release of a block, #723's
+    /// defect planted: the first release frees the string, the second
+    /// finds the block the heap's own and is refused, recorded as the
+    /// `InternalError` naming the block, the operation and this line,
+    /// and the free list the block's first word links is untouched, so
+    /// the bin hands the block out once and then the next one. An addref
+    /// of a freed block is refused the same way.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_release_of_a_freed_block_is_refused_and_named_where_it_was_made() {
+        let _alone = alone();
+        let mut hooks = Recorder { heap: Heap::new() };
+        let start = hooks.heap.memory_usage(false);
+        let made = hooks.heap.string(b"a string of its own block");
+        assert!(made.is_ok(), "the heap would not allocate");
+        let Ok(s) = made else {
+            return;
+        };
+        let z = Zval::string(s);
+        Heap::release(&mut hooks, z);
+        assert_eq!(hooks.heap.memory_usage(false), start);
+        assert_eq!(hooks.heap.take_freed_use(), None);
+
+        Heap::release(&mut hooks, z);
+        let site = line!() - 1;
+        let at = s.address().as_ptr().addr();
+        assert_eq!(
+            hooks.heap.take_freed_use(),
+            Some(Fatal::Error(format!(
+                "InternalError: a release of the block at {at:#x}, which the heap has freed, at {}:{site}:9",
+                file!()
+            )))
+        );
+        assert_eq!(hooks.heap.take_freed_use(), None, "it is reported once");
+        assert_eq!(hooks.heap.memory_usage(false), start);
+
+        let again = hooks.heap.string(b"a string of its own block");
+        let next = hooks.heap.string(b"a string of its own block");
+        assert_eq!(again.as_ref().map(|s| s.address().as_ptr().addr()), Ok(at));
+        assert!(
+            next.as_ref()
+                .is_ok_and(|s| s.address().as_ptr().addr() != at),
+            "the free list's link was not written over"
+        );
+        for s in [again, next].into_iter().flatten() {
+            hooks.heap.release_string(s);
+        }
+
+        hooks.heap.addref(z);
+        assert!(matches!(
+            hooks.heap.take_freed_use(),
+            Some(Fatal::Error(message)) if message.starts_with("InternalError: an addref of the block at ")
+        ));
     }
 
     /// What the heap's tests pass where a request would serve a
