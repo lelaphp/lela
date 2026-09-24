@@ -49,6 +49,7 @@ mod array;
 mod base64;
 mod basic_functions;
 mod crc32;
+mod crypt;
 mod csv;
 mod dir;
 mod exec;
@@ -243,6 +244,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         dir::natives(),
         link::natives(),
         streamsfuncs::natives(),
+        crypt::natives(),
     ]
     .into_iter()
     .flatten()
@@ -258,6 +260,7 @@ fn file_constants() -> Vec<ConstDecl> {
         basic_functions::constants(),
         dir::constants(),
         streamsfuncs::constants(),
+        crypt::constants(),
     ]
     .into_iter()
     .flatten()
