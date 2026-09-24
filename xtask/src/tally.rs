@@ -34,9 +34,14 @@
 //! coverage is the lane's and is judged first, and a snippet that did not
 //! run is counted, never a refusal (#65).
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::thread;
 
 use anyhow::Result;
 
@@ -158,23 +163,74 @@ impl<J: Judgement> Tally<J> {
     ) -> Result<Tally<J>> {
         let mut tally = Tally::found(items.len());
         for item in items {
-            let judged = judge(item)?;
-            if judged.judgement != J::PASS {
-                let note = if judged.judgement.counts_against() {
-                    judged.note.clone()
-                } else {
-                    judged.note.lines().next().unwrap_or_default().to_owned()
-                };
-                println!(
-                    "{} {}{}: {note}",
-                    judged.judgement.as_str(),
-                    judged.id,
-                    judged.place
-                );
-            }
-            tally.judged.push(judged);
+            tally.record(judge(item)?);
         }
         Ok(tally)
+    }
+
+    /// [`Tally::judge`] on as many threads as the machine has, for a lane
+    /// whose items share nothing: each witness runs in a scratch tree of
+    /// its own, and most of its wall is the oracle's process starting,
+    /// which a thread spends waiting. The verdicts are printed and kept in
+    /// the items' order all the same, each once every one before it is
+    /// in, so the run reads as the one-at-a-time run does. The `phpt` lane
+    /// stays on [`Tally::judge`]: its tests run in the corpus's own
+    /// directories, where upstream's runner holds some apart
+    /// (`--CONFLICTS--`) and this one does not yet.
+    pub fn judge_beside<I: Sync>(
+        items: &[I],
+        judge: impl Fn(&I) -> Result<Judged<J>> + Sync,
+    ) -> Result<Tally<J>>
+    where
+        J: Send,
+    {
+        let threads = thread::available_parallelism().map_or(1, NonZeroUsize::get);
+        let next = AtomicUsize::new(0);
+        let (sent, received) = mpsc::channel();
+        thread::scope(|scope| {
+            for _ in 0..threads.min(items.len()) {
+                let (sent, next, judge) = (sent.clone(), &next, &judge);
+                // A send that fails is the receiver gone, a verdict before
+                // this one having ended the run: the thread stops too.
+                scope.spawn(move || {
+                    loop {
+                        let at = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(item) = items.get(at) else { break };
+                        if sent.send((at, judge(item))).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            drop(sent);
+            let mut tally = Tally::found(items.len());
+            let mut early = BTreeMap::new();
+            for (at, judged) in received {
+                early.insert(at, judged);
+                while let Some(judged) = early.remove(&tally.judged.len()) {
+                    tally.record(judged?);
+                }
+            }
+            Ok(tally)
+        })
+    }
+
+    /// One verdict kept, and printed unless it passed.
+    fn record(&mut self, judged: Judged<J>) {
+        if judged.judgement != J::PASS {
+            let note = if judged.judgement.counts_against() {
+                judged.note.clone()
+            } else {
+                judged.note.lines().next().unwrap_or_default().to_owned()
+            };
+            println!(
+                "{} {}{}: {note}",
+                judged.judgement.as_str(),
+                judged.id,
+                judged.place
+            );
+        }
+        self.judged.push(judged);
     }
 
     pub fn count(&self, judgement: J) -> u64 {
@@ -453,5 +509,37 @@ mod tests {
         assert_eq!(reading.status, Status::Fail);
         assert_eq!(reading.message, "words");
         assert_eq!(reading.numbers["run"], crate::reading::Number::Int(3));
+    }
+
+    /// The verdicts come back in the items' order however the threads
+    /// finish them: here the earlier items take longest.
+    #[test]
+    fn beside_keeps_the_items_order_whichever_thread_finishes_first() {
+        let items: Vec<(usize, Went)> = (0..64)
+            .map(|i| (i, [Went::Fail, Went::Pass, Went::Skip][i % 3]))
+            .collect();
+        let tally = Tally::judge_beside(&items, |(i, went)| {
+            std::thread::sleep(std::time::Duration::from_millis(64 - *i as u64));
+            Ok(Judged::new(&i.to_string(), "item", *went, "why"))
+        })
+        .unwrap();
+        assert_eq!(tally.found, 64);
+        let ids: Vec<String> = tally.judged.iter().map(|j| j.id.clone()).collect();
+        let want: Vec<String> = (0..64).map(|i| i.to_string()).collect();
+        assert_eq!(ids, want);
+    }
+
+    /// An item the judge cannot judge ends the run with its error, as the
+    /// one-at-a-time loop's `?` does, whatever came after it.
+    #[test]
+    fn beside_ends_on_the_first_error_in_the_items_order() {
+        let items: Vec<usize> = (0..32).collect();
+        let err = Tally::judge_beside(&items, |i| match i {
+            5 | 20 => anyhow::bail!("item {i}"),
+            _ => Ok(Judged::new("id", "item", Went::Pass, "")),
+        })
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(err.to_string(), "item 5");
     }
 }

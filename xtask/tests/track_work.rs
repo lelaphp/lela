@@ -13,7 +13,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use xtask::scratch::Tree;
+use xtask::scratch::{self, Tree};
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -126,7 +126,16 @@ impl Scratch {
         );
         sh(
             &root,
-            &["git", "push", "-q", "origin", "main", "main:refs/heads/t-x"],
+            &[
+                "git",
+                "-c",
+                "core.hooksPath=/var/empty",
+                "push",
+                "-q",
+                "origin",
+                "main",
+                "main:refs/heads/t-x",
+            ],
         );
         sh(&root, &["git", "checkout", "-q", "--detach", "origin/t-x"]);
         sh(&root, &["git", "config", "track.name", "t-x"]);
@@ -146,6 +155,8 @@ impl Scratch {
     /// The tracker, `bin/gh`: `issue list` answers with `list.json`,
     /// `issue view <n>` with `view.<n>.json` where the test wrote one and
     /// `view.json` otherwise, and every other call is written to `calls`.
+    /// The build, `bin/cargo`: [`scratch::cargo`], so the sync and
+    /// the worktree each lay down a harness without compiling one.
     /// The session, `bin/claude`: appends its arguments, its directory
     /// and the subagents' model to what earlier sessions wrote, then does
     /// what `act.<n>` says, or `act` where the test wrote none for the
@@ -174,6 +185,7 @@ impl Scratch {
             fs::write(&file, text).unwrap();
             fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
         }
+        scratch::cargo(&self.dir.join("bin"), Path::new(xtask)).unwrap();
         sh(
             &self.root,
             &[
@@ -1085,7 +1097,15 @@ fn a_worktree_of_another_track_is_not_swept() {
     let before = rev(&scratch.root, "origin/t-x");
     sh(
         &scratch.root,
-        &["git", "push", "-q", "origin", "HEAD:refs/heads/t-y"],
+        &[
+            "git",
+            "-c",
+            "core.hooksPath=/var/empty",
+            "push",
+            "-q",
+            "origin",
+            "HEAD:refs/heads/t-y",
+        ],
     );
     let dir = scratch.root.join(".claude/worktrees/t-y/t30");
     sh(

@@ -79,6 +79,7 @@ mod tests;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -488,23 +489,28 @@ pub(crate) fn judge(
             Err(unknown) => problems.push(unknown),
         }
     }
-    let mut captured = Vec::new();
     let mut wall = Duration::ZERO;
+    let captured = Mutex::new(Vec::new());
     let witnesses = if oracle_absent.is_some() {
         tally::Tally::found(runnable.len())
     } else {
-        tally::Tally::judge(&runnable, |(witness, regime)| {
-            wall += witness.wall.unwrap_or_default();
-            Ok(judge::one(
-                oracle,
-                registry,
-                ask,
-                witness,
-                *regime,
-                &mut captured,
-            ))
+        wall = runnable.iter().filter_map(|(w, _)| w.wall).sum();
+        tally::Tally::judge_beside(&runnable, |(witness, regime)| {
+            let mut mine = Vec::new();
+            let judged = judge::one(oracle, registry, ask, witness, *regime, &mut mine);
+            captured
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .extend(mine);
+            Ok(judged)
         })?
     };
+    // Captured in the order the threads finished; written and printed in
+    // the order the fences stand.
+    let mut captured = captured
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner);
+    captured.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
     Ok(Tally {
         witnesses,
         subjects: found.subjects.len(),
