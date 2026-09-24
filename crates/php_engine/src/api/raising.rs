@@ -265,6 +265,24 @@ pub fn arg_value_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
     throw(req, "ValueError", &message)
 }
 
+/// `zend_argument_error`: a throwable of `class` for the argument at
+/// `position`, the sentence the two above word, `fn(): Argument #N
+/// ($name) <tail>` with the tail as it stands, which is what SPL throws
+/// its `OutOfRangeException` for an index with.
+///
+/// ```php
+/// $l = new SplDoublyLinkedList;
+/// try { $l->offsetGet(3); } catch (OutOfRangeException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// SplDoublyLinkedList::offsetGet(): Argument #1 ($index) is out of range
+/// ```
+pub fn argument_error(req: &mut Request, class: &str, position: u32, tail: &str) -> Thrown {
+    let message = req.argument_message(position, "");
+    let message = format!("{}{tail}", message.trim_end_matches("must "));
+    throw(req, class, &message)
+}
+
 /// `ArgumentCountError`: `fn() expects <tail>`.
 pub fn arg_count_error(req: &mut Request, tail: &str) -> Thrown {
     let message = format!("{}() expects {tail}", req.active_native());

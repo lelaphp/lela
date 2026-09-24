@@ -26,9 +26,11 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod array;
+mod dllist;
 mod exceptions;
 mod fixedarray;
 mod functions;
+mod heap;
 mod iterators;
 mod observer;
 mod stub;
@@ -71,6 +73,12 @@ pub fn extension() -> Extension {
         .classes(iterators::classes());
     for (decl, methods) in array::classes() {
         builder = builder.class_payload::<array::SplArray>(decl, methods, &array::HANDLERS);
+    }
+    for (decl, methods) in dllist::classes() {
+        builder = builder.class_payload::<dllist::SplDllist>(decl, methods, &dllist::HANDLERS);
+    }
+    for (decl, methods) in heap::classes() {
+        builder = builder.class_payload::<heap::SplHeap>(decl, methods, &heap::HANDLERS);
     }
     for (decl, methods) in fixedarray::classes() {
         builder = builder.class_payload::<fixedarray::SplFixedArray>(
@@ -298,6 +306,14 @@ fn this(req: &mut Request) -> Result<PhpObject, Thrown> {
             req,
             "InternalError: an SPL method served without its receiver",
         )),
+    }
+}
+
+/// `Z_PARAM_LONG_OR_NULL`.
+fn nullable_long(req: &mut Request, position: u32) -> Result<Option<i64>, Thrown> {
+    match given(req, position) {
+        Some(v) if !matches!(v.deref().as_ref(), ValueRef::Null) => long(req, position).map(Some),
+        _ => Ok(None),
     }
 }
 
