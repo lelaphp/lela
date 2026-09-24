@@ -325,6 +325,13 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: Cannot use "bar\int" as a type name as it is reserved in %s on line 2
     /// ```
+    ///
+    /// ```php
+    /// class A { function f(\self $a) {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: '\self' is an invalid class name in %s on line 2
+    /// ```
     fn single_typename(&mut self, id: NodeId<tree::NamedType>) -> Result<Type, CompileError> {
         let written = self.text(self.parsed.tree[id].name).to_vec();
         let lowered = written.to_ascii_lowercase();
@@ -355,6 +362,12 @@ impl Emit<'_> {
                 )));
             }
             return Ok(builtin);
+        }
+        if fully_qualified && class_fetch_type(&written[1..]) != FETCH_CLASS_DEFAULT {
+            return Err(self.compile_error(format!(
+                "'\\{}' is an invalid class name",
+                String::from_utf8_lossy(&written[1..])
+            )));
         }
         let fetch = if fully_qualified {
             FETCH_CLASS_DEFAULT

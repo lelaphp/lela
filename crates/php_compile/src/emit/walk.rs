@@ -54,6 +54,19 @@ enum Flag {
 }
 
 impl Modifiers {
+    /// One modifier more, `zend_modifier_list_to_flags`' duplicate refusal
+    /// in php's words for one already written.
+    fn push(&mut self, flag: Flag, word: &str, line: u32) -> Result<(), CompileError> {
+        if self.has(flag) {
+            return Err(refused(
+                line,
+                format!("Multiple {word} modifiers are not allowed"),
+            ));
+        }
+        self.flags.push(flag);
+        Ok(())
+    }
+
     fn has(&self, flag: Flag) -> bool {
         self.flags.contains(&flag)
     }
@@ -370,6 +383,13 @@ impl Emit<'_> {
     /// int(7)
     /// bool(true)
     /// ```
+    ///
+    /// ```php
+    /// class A { final final function f() {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Multiple final modifiers are not allowed in %s on line 2
+    /// ```
     fn walk_modifiers(&self, modifiers: &[Modifier], line: u32) -> Result<Modifiers, CompileError> {
         let mut out = Modifiers::default();
         for modifier in modifiers {
@@ -402,19 +422,19 @@ impl Emit<'_> {
                     continue;
                 }
                 Modifier::StaticKw(_) => {
-                    out.flags.push(Flag::Static);
+                    out.push(Flag::Static, "static", line)?;
                     continue;
                 }
                 Modifier::AbstractKw(_) => {
-                    out.flags.push(Flag::Abstract);
+                    out.push(Flag::Abstract, "abstract", line)?;
                     continue;
                 }
                 Modifier::FinalKw(_) => {
-                    out.flags.push(Flag::Final);
+                    out.push(Flag::Final, "final", line)?;
                     continue;
                 }
                 Modifier::ReadonlyKw(_) => {
-                    out.flags.push(Flag::Readonly);
+                    out.push(Flag::Readonly, "readonly", line)?;
                     continue;
                 }
             };
@@ -432,6 +452,18 @@ impl Emit<'_> {
     /// A class or an interface from the tree: its members as php's
     /// `ZEND_AST_PROP_GROUP`, `ZEND_AST_CLASS_CONST_GROUP` and
     /// `ZEND_AST_METHOD` hold them, one declarator each.
+    ///
+    /// A class may not take a name `reserved_class_names` lists, and one
+    /// called `_` is php's 8.4 deprecation:
+    ///
+    /// ```php
+    /// class _ {}
+    /// echo "ok\n";
+    /// ```
+    /// ```expect exit=0
+    /// Deprecated: Using "_" as a class name is deprecated since 8.4 in %s on line 2
+    /// ok
+    /// ```
     #[allow(clippy::too_many_arguments)]
     fn walk_class(
         &mut self,
@@ -458,6 +490,21 @@ impl Emit<'_> {
                     }
                 ),
             ));
+        }
+        if name == b"_" {
+            self.diagnostics.push(php_unit::Diagnostic {
+                level: Level::Deprecated,
+                line,
+                message: format!(
+                    "Using \"_\" as {} is deprecated since 8.4",
+                    match kind {
+                        ClassKind::Interface => "an interface name",
+                        _ => "a class name",
+                    }
+                )
+                .as_str()
+                .into(),
+            });
         }
         let mut class = Class {
             name,

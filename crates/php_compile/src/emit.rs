@@ -2304,6 +2304,16 @@ impl Emit<'_> {
     /// class of its clause jumps over the rest to the clause's body.
     /// Returns the clause's last `CATCH`, whose `op2` is the next
     /// clause's first and is left unset on the last clause of the `try`.
+    ///
+    /// `self`, `parent` and `static` name no class a `catch` can hold to
+    /// (`zend_is_const_default_class_ref`):
+    ///
+    /// ```php
+    /// class T { function m() { try { f(); } catch (static $e) {} } }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Bad class name in the catch statement in %s on line 2
+    /// ```
     fn catch_clause(
         &mut self,
         clause: &tree::CatchClause,
@@ -2322,6 +2332,13 @@ impl Emit<'_> {
             return Err(walk::unread(line, "a `catch` naming no class"));
         }
         let var = clause.var.map(|id| self.variable_name(id));
+        self.line = line;
+        if types
+            .iter()
+            .any(|class| class_fetch_type(class) != FETCH_CLASS_DEFAULT)
+        {
+            return Err(self.compile_error("Bad class name in the catch statement"));
+        }
         if var.as_deref() == Some(b"this".as_slice()) {
             return Err(self.compile_error("Cannot re-assign $this"));
         }
@@ -2864,7 +2881,23 @@ impl Emit<'_> {
             None => None,
         };
         let is_ctor = scope.is_some() && name.eq_ignore_ascii_case(b"__construct");
-        let parameters = self.recv_prologue(function, is_ctor)?;
+        // `get_function_or_method_name`, what a deprecation of the
+        // prologue names the function by.
+        let owner = scope.map(<[u8]>::to_vec).or_else(|| {
+            self.fn_flags
+                .closure
+                .then(|| self.active_class.clone())
+                .flatten()
+        });
+        let shown = match owner {
+            Some(owner) => format!(
+                "{}::{}",
+                String::from_utf8_lossy(&owner),
+                String::from_utf8_lossy(name)
+            ),
+            None => String::from_utf8_lossy(name).into_owned(),
+        };
+        let parameters = self.recv_prologue(function, is_ctor, &shown)?;
         // The entry safepoint is the opline after the prologue (design
         // §5.7), which `begin_body` numbered zero at opline zero; the
         // assignments a promoted parameter makes stand after it, as
@@ -2918,10 +2951,45 @@ impl Emit<'_> {
     /// parameter written before a required one becomes a required one
     /// with no default whatever it was written as, which is why the last
     /// required parameter is found before any opline is emitted.
+    ///
+    /// What the prologue refuses, and the two deprecations it raises and
+    /// compiles past, each at the parameter's line and naming the function
+    /// as `get_function_or_method_name` does:
+    ///
+    /// ```php
+    /// function f($_GET) {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot re-assign auto-global variable _GET in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// function f($this) {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use $this as parameter in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// function f($a = 1, $b) {}
+    /// ```
+    /// ```expect exit=0
+    /// Deprecated: f(): Optional parameter $a declared before required parameter $b is implicitly treated as a required parameter in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class C { function m(int $x = null) { var_dump($x); } }
+    /// (new C)->m();
+    /// ```
+    /// ```expect exit=0
+    /// Deprecated: C::m(): Implicitly marking parameter $x as nullable is deprecated, the explicit nullable type must be used instead in %s on line 2
+    /// NULL
+    /// ```
     fn recv_prologue(
         &mut self,
         function: &Function,
         is_ctor: bool,
+        shown: &str,
     ) -> Result<Vec<Parameter>, CompileError> {
         let last_required = function
             .parameters
@@ -2932,34 +3000,26 @@ impl Emit<'_> {
         for (at, parameter) in function.parameters.iter().enumerate() {
             let number = u32::try_from(at).unwrap_or(u32::MAX);
             self.line = parameter.line;
-            let cv = self.lookup_cv(&parameter.name);
-            if cv != number {
-                return Err(self.compile_error(format!(
-                    "Redefinition of parameter ${}",
-                    String::from_utf8_lossy(&parameter.name)
-                )));
-            }
+            let named = String::from_utf8_lossy(&parameter.name).into_owned();
+            let cv = self.parameter_cv(parameter, number)?;
             self.parameter_refused(parameter, variadic_seen, is_ctor)?;
             variadic_seen = parameter.variadic;
             let mut folded = self.parameter_default(parameter)?;
-            let (ty, implicitly_nullable) = match parameter.ty {
-                Some(written) => {
-                    let force_nullable = parameter.promote.is_none()
-                        && folded
-                            .as_ref()
-                            .is_some_and(|zval| zval.kind() == ZvalType::Null);
-                    let (ty, forced) = self.typename(written, force_nullable)?;
-                    self.parameter_type_refused(&ty, parameter, folded.as_mut(), force_nullable)?;
-                    if forced {
-                        (Some(Type::Nullable(Box::new(ty))), true)
-                    } else {
-                        (Some(ty), false)
-                    }
-                }
-                None => (None, false),
-            };
+            let (ty, implicitly_nullable) = self.parameter_type(parameter, &mut folded, shown)?;
             let keeps_default = !parameter.variadic
                 && (implicitly_nullable || last_required.is_none_or(|last| at > last));
+            if let (Some(last), Some(_), false) = (last_required, &folded, implicitly_nullable)
+                && at < last
+                && let Some(required) = function.parameters.get(last)
+            {
+                self.raise(
+                    Level::Deprecated,
+                    &format!(
+                        "{shown}(): Optional parameter ${named} declared before required parameter ${} is implicitly treated as a required parameter",
+                        String::from_utf8_lossy(&required.name)
+                    ),
+                );
+            }
             let default = if let (Some(folded), true) = (folded, keeps_default) {
                 let slot = self.constant(folded);
                 self.push(Opline {
@@ -3015,6 +3075,61 @@ impl Emit<'_> {
             });
         }
         Ok(parameters)
+    }
+
+    /// The CV a parameter takes, `lookup_cv` over its name, which must
+    /// be the next one, after the names php refuses a parameter.
+    fn parameter_cv(
+        &mut self,
+        parameter: &walk::Parameter,
+        number: u32,
+    ) -> Result<u32, CompileError> {
+        let named = String::from_utf8_lossy(&parameter.name).into_owned();
+        if is_auto_global(&parameter.name) {
+            return Err(
+                self.compile_error(format!("Cannot re-assign auto-global variable {named}"))
+            );
+        }
+        let cv = self.lookup_cv(&parameter.name);
+        if cv != number {
+            return Err(self.compile_error(format!("Redefinition of parameter ${named}")));
+        }
+        if parameter.name == b"this" {
+            return Err(self.compile_error("Cannot use $this as parameter"));
+        }
+        Ok(cv)
+    }
+
+    /// A parameter's compiled type, `zend_compile_typename_ex` with a
+    /// `null` default under a written type as its PHP 5 spelling of
+    /// `?T`, which is php's deprecation, and whether that made it
+    /// nullable.
+    fn parameter_type(
+        &mut self,
+        parameter: &walk::Parameter,
+        folded: &mut Option<Zval>,
+        shown: &str,
+    ) -> Result<(Option<Type>, bool), CompileError> {
+        let Some(written) = parameter.ty else {
+            return Ok((None, false));
+        };
+        let force_nullable = parameter.promote.is_none()
+            && folded
+                .as_ref()
+                .is_some_and(|zval| zval.kind() == ZvalType::Null);
+        let (ty, forced) = self.typename(written, force_nullable)?;
+        self.parameter_type_refused(&ty, parameter, folded.as_mut(), force_nullable)?;
+        if !forced {
+            return Ok((Some(ty), false));
+        }
+        self.raise(
+            Level::Deprecated,
+            &format!(
+                "{shown}(): Implicitly marking parameter ${} as nullable is deprecated, the explicit nullable type must be used instead",
+                String::from_utf8_lossy(&parameter.name)
+            ),
+        );
+        Ok((Some(Type::Nullable(Box::new(ty))), true))
     }
 
     /// A parameter's default as `zend_compile_params` folds it, under
@@ -3463,6 +3578,20 @@ impl Emit<'_> {
     /// own line, its value kept as the constant expression it was
     /// written as (design §4.7), and a name the group declares twice
     /// php's fatal in php's words.
+    ///
+    /// ```php
+    /// class A { final private const X = 1; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Private constant A::X cannot be final as it is not visible to other classes in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class A { const CLASS = 1; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: A class constant must not be called 'class'; it is reserved for class name fetching in %s on line 2
+    /// ```
     fn class_constants(
         &mut self,
         decl: &mut ClassDecl,
@@ -3471,6 +3600,18 @@ impl Emit<'_> {
     ) -> Result<(), CompileError> {
         for constant in &class.constants {
             self.line = constant.line;
+            if constant.visibility == Visibility::Private && constant.is_final {
+                return Err(self.compile_error(format!(
+                    "Private constant {}::{} cannot be final as it is not visible to other classes",
+                    String::from_utf8_lossy(name),
+                    String::from_utf8_lossy(&constant.name)
+                )));
+            }
+            if constant.name.eq_ignore_ascii_case(b"class") {
+                return Err(self.compile_error(
+                    "A class constant must not be called 'class'; it is reserved for class name fetching",
+                ));
+            }
             if decl.constants.iter().any(|c| *c.name.0 == *constant.name) {
                 return Err(self.compile_error(format!(
                     "Cannot redefine class constant {}::{}",
@@ -4132,6 +4273,16 @@ impl Emit<'_> {
     /// namespace of what follows, and a first one after any statement
     /// but an empty one is php's compile error (`zend_is_first_statement`);
     /// a later one moves the namespace, as php's does. No opline.
+    ///
+    /// `namespace` is no namespace's name, whatever its case, since
+    /// `namespace\X` is the relative name:
+    ///
+    /// ```php
+    /// namespace NAMEspace;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use 'NAMEspace' as namespace name in %s on line 2
+    /// ```
     fn namespace(&mut self, id: NodeId<tree::NamespaceDef>) -> Result<(), CompileError> {
         let node = &self.parsed.tree[id];
         let Some(name) = node.name else {
@@ -4148,6 +4299,12 @@ impl Emit<'_> {
             return Err(self.compile_error(
                 "Namespace declaration statement has to be the very first statement or after any declare call in the script",
             ));
+        }
+        if name.eq_ignore_ascii_case(b"namespace") {
+            return Err(self.compile_error(format!(
+                "Cannot use '{}' as namespace name",
+                String::from_utf8_lossy(name)
+            )));
         }
         self.namespace = Some(name.to_vec());
         // php's `zend_is_first_statement` steps over a `ZEND_AST_DECLARE`
