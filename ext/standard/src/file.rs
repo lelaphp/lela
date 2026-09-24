@@ -2351,6 +2351,110 @@ const FNM_PATHNAME: i64 = 2;
 const FNM_PERIOD: i64 = 4;
 const FNM_CASEFOLD: i64 = 16;
 
+/// `file(string $filename, int $flags = 0, $context = null): array|false`,
+/// `PHP_FUNCTION(file)` (`Z/ext/standard/file.c:581`): the file read
+/// whole and cut after each `\n`; under `FILE_IGNORE_NEW_LINES` the
+/// `\n` (and a `\r` before it) is dropped, and under
+/// `FILE_SKIP_EMPTY_LINES` as well a line that is then empty is too. A
+/// last line with no `\n` is kept as it is.
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/php-file-witness.txt';
+/// file_put_contents($f, "a\r\n\nb\nc");
+/// var_dump(file($f), file($f, FILE_IGNORE_NEW_LINES), file($f, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES));
+/// file_put_contents($f, ""); var_dump(file($f));
+/// unlink($f);
+/// try { file($f, 64); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(@file($f));
+/// ```
+/// ```expect
+/// array(4) {
+///   [0]=>
+///   string(3) "a
+/// "
+///   [1]=>
+///   string(1) "
+/// "
+///   [2]=>
+///   string(2) "b
+/// "
+///   [3]=>
+///   string(1) "c"
+/// }
+/// array(4) {
+///   [0]=>
+///   string(1) "a"
+///   [1]=>
+///   string(0) ""
+///   [2]=>
+///   string(1) "b"
+///   [3]=>
+///   string(1) "c"
+/// }
+/// array(3) {
+///   [0]=>
+///   string(1) "a"
+///   [1]=>
+///   string(1) "b"
+///   [2]=>
+///   string(1) "c"
+/// }
+/// array(0) {
+/// }
+/// file(): Argument #2 ($flags) must be a valid flag value
+/// bool(false)
+/// ```
+fn file(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 3)?;
+    let filename = path_argument(req, 1)?;
+    let flags = if req.argument_count() >= 2 {
+        long_argument(req, 2)?
+    } else {
+        0
+    };
+    context_argument(req, 3)?;
+    let known = PHP_FILE_USE_INCLUDE_PATH
+        | PHP_FILE_IGNORE_NEW_LINES
+        | PHP_FILE_SKIP_EMPTY_LINES
+        | PHP_FILE_NO_DEFAULT_CONTEXT;
+    if flags & !known != 0 {
+        return Err(arg_value_error(req, 2, "be a valid flag value"));
+    }
+    let include_new_line = flags & PHP_FILE_IGNORE_NEW_LINES == 0;
+    let skip_blank_lines = flags & PHP_FILE_SKIP_EMPTY_LINES != 0;
+    let use_include_path = flags & PHP_FILE_USE_INCLUDE_PATH != 0;
+    let Some(stream) = req.open_stream(filename.as_bytes(), b"rb", use_include_path)? else {
+        return Ok(Value::bool(false));
+    };
+    let contents = stream.copy_to_mem(req, None)?;
+    stream.close(req);
+    let buf = contents.as_bytes().to_vec();
+    let mut lines: Vec<&[u8]> = Vec::new();
+    let mut s = 0;
+    for (p, _) in buf.iter().enumerate().filter(|(_, c)| **c == b'\n') {
+        if include_new_line {
+            lines.push(&buf[s..=p]);
+        } else {
+            let windows_eol = usize::from(p > 0 && buf[p - 1] == b'\r');
+            if skip_blank_lines && p - s == windows_eol {
+                s = p + 1;
+                continue;
+            }
+            lines.push(&buf[s..p - windows_eol]);
+        }
+        s = p + 1;
+    }
+    if s != buf.len() {
+        lines.push(&buf[s..]);
+    }
+    let mut array = PhpArray::new(req)?;
+    for line in lines {
+        let v = Value::string(PhpString::new(req, line)?);
+        array.append(req, v)?;
+    }
+    Ok(Value::array(array))
+}
+
 /// The rest of `file.c`'s natives, as the stub declares them. `popen`
 /// and `pclose` are not among them: a stream over a pipe to a process is
 /// a kind the streams facet does not hand an extension. The witness
@@ -2461,6 +2565,10 @@ fn rest_natives() -> Vec<(FunctionDecl, Entry)> {
             fscanf,
         ),
         (stub("fpassthru($stream): int"), fpassthru),
+        (
+            stub("file(string $filename, int $flags = 0, $context = null): array|false"),
+            file,
+        ),
         (stub("fsync($stream): bool"), fsync),
         (stub("fdatasync($stream): bool"), fdatasync),
         (
