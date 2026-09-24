@@ -46,6 +46,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod array;
+mod assert;
 mod base64;
 mod basic_functions;
 mod crc32;
@@ -214,6 +215,8 @@ pub fn extension() -> Extension {
         .constants(file_constants())
         .dependencies(dependencies())
         .class_with(directory.0, directory.1, directory.2)
+        .classes(vec![assert::assertion_error_class()])
+        .ini(assert::ini())
         .request_state::<State>()
         .build("standard")
 }
@@ -247,6 +250,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         streamsfuncs::natives(),
         crypt::natives(),
         password::natives(),
+        assert::natives(),
     ]
     .into_iter()
     .flatten()
@@ -264,6 +268,7 @@ fn file_constants() -> Vec<ConstDecl> {
         streamsfuncs::constants(),
         crypt::constants(),
         password::constants(),
+        assert::constants(),
     ]
     .into_iter()
     .flatten()
