@@ -10799,6 +10799,17 @@ impl HeapHooks for Hooks<'_> {
         }
     }
 
+    /// A `WeakMap`'s keys beside its entries (`crate::weakrefs::gc_entries`).
+    fn gc_weakmap_entries(&mut self, map: Obj, visit: &mut dyn FnMut(Obj, ZvalRef)) -> bool {
+        crate::weakrefs::gc_entries(self.0, map, visit)
+    }
+
+    /// The `WeakMap` entries keyed by an object
+    /// (`crate::weakrefs::gc_keyed`).
+    fn gc_weakly_keyed(&mut self, key: Obj, visit: &mut dyn FnMut(ZvalRef, Obj)) {
+        crate::weakrefs::gc_keyed(self.0, key, visit);
+    }
+
     /// `get_gc`, through the table: what the payload owns, handed to the
     /// collector's walk as zvals.
     fn gc_children(&mut self, obj: Obj, visit: &mut dyn FnMut(Zval)) {

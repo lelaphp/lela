@@ -42,7 +42,8 @@ use crate::gc::{self, Colour, Refcounted};
 use crate::hooks::HeapHooks;
 use crate::object::Obj;
 use crate::reference::Ref;
-use crate::{Heap, Zval};
+use crate::zval::WeakMarks;
+use crate::{Heap, Zval, ZvalRef};
 
 /// `GC_FIRST_ROOT`: the first index of the root buffer, zero being
 /// the address a value in no entry reads.
@@ -512,6 +513,15 @@ impl Collector {
         buf.entries.truncate(num_roots as usize);
     }
 
+    /// `gc_extra_root`: a value the weak-map walk must still scan,
+    /// added during a collection with its colour kept.
+    fn extra_root(&mut self, node: Node) {
+        if let Some(idx) = self.fetch_any() {
+            let colour = node.gc().colour();
+            self.place(idx, node, colour);
+        }
+    }
+
     /// `gc_add_garbage`: a white value that was not a root, added as
     /// garbage for the free phase, black.
     fn add_garbage(&mut self, node: Node) {
@@ -663,6 +673,25 @@ fn collect(child: Node) -> bool {
     true
 }
 
+/// `zend_weakmap_get_object_key_entry_gc`: the `WeakMap` entries keyed
+/// by `o`, each beside its map; none for an object no weak map keys.
+fn weakly_keyed(hooks: &mut dyn HeapHooks, o: Obj) -> Vec<(ZvalRef, Obj)> {
+    let mut entries = Vec::new();
+    if o.is_weakly_referenced() {
+        hooks.gc_weakly_keyed(o, &mut |entry, map| entries.push((entry, map)));
+    }
+    entries
+}
+
+/// `zend_weakmap_get_key_entry_gc`: a `WeakMap`'s keys beside its
+/// entries, none for an object that is no `WeakMap`.
+fn weakmap_entries(hooks: &mut dyn HeapHooks, o: Obj) -> Option<Vec<(Obj, ZvalRef)>> {
+    let mut entries = Vec::new();
+    hooks
+        .gc_weakmap_entries(o, &mut |key, entry| entries.push((key, entry)))
+        .then_some(entries)
+}
+
 /// Whether the walk may read the object's members: not once `free_obj`
 /// ran over them (`IS_OBJ_FREE_CALLED`).
 fn walkable(o: Obj) -> bool {
@@ -731,6 +760,139 @@ impl Heap {
         }
     }
 
+    /// `gc_mark_grey`'s two weak-map passes over an object: every entry
+    /// keyed by it marked as reached from its key, one owner taken off
+    /// it unless the map's walk took one already, and greyed; and, for
+    /// a `WeakMap`, every entry marked as reached from the map, one owner
+    /// taken off unless its key's walk took one, and greyed, which is
+    /// all of the map's walk. Whether the object was a `WeakMap`.
+    fn gc_grey_weak(hooks: &mut dyn HeapHooks, o: Obj, stack: &mut Vec<Node>) -> bool {
+        for (entry, _) in weakly_keyed(hooks, o) {
+            let z = entry.read();
+            let Some(child) = Node::of(z) else { continue };
+            let marks = z.weak_marks();
+            entry.write(z.with_weak_marks(WeakMarks {
+                from_key: true,
+                ..marks
+            }));
+            if !marks.from_map {
+                child.gc().delref();
+            }
+            if child.gc().colour() != Colour::Grey {
+                child.gc().set_colour(Colour::Grey);
+                stack.push(child);
+            }
+        }
+        let Some(entries) = weakmap_entries(hooks, o) else {
+            return false;
+        };
+        for (_, entry) in entries {
+            let z = entry.read();
+            let Some(child) = Node::of(z) else { continue };
+            let marks = z.weak_marks();
+            entry.write(z.with_weak_marks(WeakMarks {
+                from_map: true,
+                ..marks
+            }));
+            if !marks.from_key {
+                child.gc().delref();
+            }
+            if child.gc().colour() != Colour::Grey {
+                child.gc().set_colour(Colour::Grey);
+                stack.push(child);
+            }
+        }
+        true
+    }
+
+    /// `gc_scan_black`'s two weak-map passes: an entry keyed by the
+    /// object loses its key mark, and is blackened here when its map is
+    /// black and did not reach it, while a grey map not in the buffer is
+    /// added as an extra root so the scan reaches it; a `WeakMap`'s
+    /// entries the same with key and map exchanged, which is all of the
+    /// map's walk. Whether the object was a `WeakMap`.
+    fn gc_black_weak(hooks: &mut dyn HeapHooks, o: Obj, stack: &mut Vec<Node>) -> bool {
+        for (entry, map) in weakly_keyed(hooks, o) {
+            let z = entry.read();
+            let Some(child) = Node::of(z) else { continue };
+            let marks = z.weak_marks();
+            entry.write(z.with_weak_marks(WeakMarks {
+                from_key: false,
+                ..marks
+            }));
+            let map = Node::Obj(map);
+            if map.gc().colour() == Colour::Grey {
+                if map.gc().address().is_none() {
+                    hooks.heap().gc.extra_root(map);
+                }
+            } else if !marks.from_map && blacken(child) {
+                stack.push(child);
+            }
+        }
+        let Some(entries) = weakmap_entries(hooks, o) else {
+            return false;
+        };
+        for (key, entry) in entries {
+            let z = entry.read();
+            let Some(child) = Node::of(z) else { continue };
+            let marks = z.weak_marks();
+            entry.write(z.with_weak_marks(WeakMarks {
+                from_map: false,
+                ..marks
+            }));
+            let key = Node::Obj(key);
+            if key.gc().colour() == Colour::Grey {
+                if key.gc().address().is_none() {
+                    hooks.heap().gc.extra_root(key);
+                }
+            } else if !marks.from_key && blacken(child) {
+                stack.push(child);
+            }
+        }
+        true
+    }
+
+    /// `gc_scan`'s weak-map pass (`zend_weakmap_get_object_entry_gc`):
+    /// every grey entry keyed by the object whitened.
+    fn gc_whiten_weakly_keyed(hooks: &mut dyn HeapHooks, o: Obj, stack: &mut Vec<Node>) {
+        for (entry, _) in weakly_keyed(hooks, o) {
+            if let Some(child) = Node::of(entry.read())
+                && whiten(child)
+            {
+                stack.push(child);
+            }
+        }
+    }
+
+    /// `gc_collect_white`'s two weak-map passes: an entry keyed by the
+    /// object and reached from it, and a `WeakMap`'s entry reached from
+    /// the map, has both marks cleared, its owner given back and, white,
+    /// blackened; the map's pass is all of the map's walk. Whether the
+    /// object was a `WeakMap`.
+    fn gc_collect_weak(hooks: &mut dyn HeapHooks, o: Obj, stack: &mut Vec<Node>) -> bool {
+        let clear = |entry: ZvalRef, reached: fn(WeakMarks) -> bool, stack: &mut Vec<Node>| {
+            let z = entry.read();
+            if let Some(child) = Node::of(z)
+                && reached(z.weak_marks())
+            {
+                entry.write(z.with_weak_marks(WeakMarks::default()));
+                if collect(child) {
+                    stack.push(child);
+                }
+            }
+        };
+        for (entry, _) in weakly_keyed(hooks, o) {
+            clear(entry, |marks| marks.from_key, stack);
+        }
+        let Some(entries) = weakmap_entries(hooks, o) else {
+            return false;
+        };
+        for (_, entry) in entries {
+            clear(entry, |marks| marks.from_map, stack);
+        }
+        true
+    }
+
     /// `gc_mark_grey`: every value reachable from `root` one owner fewer
     /// for each owner inside the walk, and grey.
     fn gc_mark_grey(hooks: &mut dyn HeapHooks, root: Node, kids: &mut Vec<Zval>) {
@@ -738,6 +900,7 @@ impl Heap {
         let mut node = root;
         loop {
             let next = match node {
+                Node::Obj(o) if walkable(o) && Heap::gc_grey_weak(hooks, o, &mut stack) => None,
                 Node::Obj(o) if walkable(o) => match children(hooks, node, kids) {
                     (Some(table), split) => {
                         let g = table.gc();
@@ -773,6 +936,7 @@ impl Heap {
         let mut node = root;
         loop {
             let next = match node {
+                Node::Obj(o) if walkable(o) && Heap::gc_black_weak(hooks, o, &mut stack) => None,
                 Node::Obj(o) if walkable(o) => match children(hooks, node, kids) {
                     (Some(table), split) => {
                         let g = table.gc();
@@ -816,20 +980,23 @@ impl Heap {
                 None
             } else {
                 match node {
-                    Node::Obj(o) if walkable(o) => match children(hooks, node, kids) {
-                        (Some(table), split) => {
-                            let g = table.gc();
-                            if g.colour() == Colour::Grey {
-                                g.set_colour(Colour::White);
-                                stack.push(Node::Arr(table));
-                                push_all(&kids[..split], &mut stack, whiten);
-                                walk(&kids[split..], &mut stack, whiten)
-                            } else {
-                                walk(&kids[..split], &mut stack, whiten)
+                    Node::Obj(o) if walkable(o) => {
+                        Heap::gc_whiten_weakly_keyed(hooks, o, &mut stack);
+                        match children(hooks, node, kids) {
+                            (Some(table), split) => {
+                                let g = table.gc();
+                                if g.colour() == Colour::Grey {
+                                    g.set_colour(Colour::White);
+                                    stack.push(Node::Arr(table));
+                                    push_all(&kids[..split], &mut stack, whiten);
+                                    walk(&kids[split..], &mut stack, whiten)
+                                } else {
+                                    walk(&kids[..split], &mut stack, whiten)
+                                }
                             }
+                            (None, _) => walk(kids, &mut stack, whiten),
                         }
-                        (None, _) => walk(kids, &mut stack, whiten),
-                    },
+                    }
                     Node::Obj(_) => None,
                     Node::Arr(_) | Node::Ref(_) => {
                         children(hooks, node, kids);
@@ -870,19 +1037,23 @@ impl Heap {
                     if !o.has_flag(gc::OBJ_DESTRUCTOR_CALLED) && hooks.has_destructor(o) {
                         *has_destructors = true;
                     }
-                    match children(hooks, node, kids) {
-                        (Some(table), split) => {
-                            let g = table.gc();
-                            g.addref();
-                            if g.colour() == Colour::White {
-                                g.set_colour(Colour::Black);
-                                push_all(&kids[..split], &mut stack, collect);
-                                walk(&kids[split..], &mut stack, collect)
-                            } else {
-                                walk(&kids[..split], &mut stack, collect)
+                    if Heap::gc_collect_weak(hooks, o, &mut stack) {
+                        None
+                    } else {
+                        match children(hooks, node, kids) {
+                            (Some(table), split) => {
+                                let g = table.gc();
+                                g.addref();
+                                if g.colour() == Colour::White {
+                                    g.set_colour(Colour::Black);
+                                    push_all(&kids[..split], &mut stack, collect);
+                                    walk(&kids[split..], &mut stack, collect)
+                                } else {
+                                    walk(&kids[..split], &mut stack, collect)
+                                }
                             }
+                            (None, _) => walk(kids, &mut stack, collect),
                         }
-                        (None, _) => walk(kids, &mut stack, collect),
                     }
                 }
                 Node::Obj(_) => None,
@@ -935,17 +1106,24 @@ impl Heap {
             };
             let next = if traverse {
                 match node {
-                    Node::Obj(o) if walkable(o) => match children(hooks, node, kids) {
-                        (Some(table), split) => {
-                            push_all(&kids[..split], &mut stack, |_| true);
-                            let g = table.gc();
-                            if g.address().is_some() && g.colour() == Colour::Black {
-                                hooks.heap().gc.remove_from_buffer(Node::Arr(table));
+                    Node::Obj(o) if walkable(o) => {
+                        for (entry, _) in weakly_keyed(hooks, o) {
+                            if let Some(child) = Node::of(entry.read()) {
+                                stack.push(child);
                             }
-                            walk(&kids[split..], &mut stack, |_| true)
                         }
-                        (None, _) => walk(kids, &mut stack, |_| true),
-                    },
+                        match children(hooks, node, kids) {
+                            (Some(table), split) => {
+                                push_all(&kids[..split], &mut stack, |_| true);
+                                let g = table.gc();
+                                if g.address().is_some() && g.colour() == Colour::Black {
+                                    hooks.heap().gc.remove_from_buffer(Node::Arr(table));
+                                }
+                                walk(&kids[split..], &mut stack, |_| true)
+                            }
+                            (None, _) => walk(kids, &mut stack, |_| true),
+                        }
+                    }
                     Node::Arr(_) => {
                         children(hooks, node, kids);
                         walk(kids, &mut stack, |_| true)

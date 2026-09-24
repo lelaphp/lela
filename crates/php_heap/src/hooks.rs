@@ -17,10 +17,10 @@
 //! it hands back is its own field.
 
 use crate::Heap;
-use crate::Zval;
 use crate::object::Obj;
 use crate::reference::Ref;
 use crate::resource::{Res, ResourceType};
+use crate::{Zval, ZvalRef};
 
 /// What ends a request's PHP code short of a normal return (design
 /// §5.9): `E_ERROR` and its kin, or the memory limit. Carried as the
@@ -102,6 +102,24 @@ pub trait HeapHooks {
     /// none.
     fn gc_live_temporaries(&mut self, visit: &mut dyn FnMut(Zval)) {
         let _ = visit;
+    }
+    /// A `WeakMap`'s entries for the cycle collector, each key beside
+    /// its entry in place (`zend_weakmap_get_key_entry_gc`), and whether
+    /// `map` is one: php tests `get_gc == zend_weakmap_get_gc`, since an
+    /// entry is owned by the map and kept alive by its key and the walk
+    /// treats it as reached through both. A heap that hands out no weak
+    /// map has none.
+    fn gc_weakmap_entries(&mut self, map: Obj, visit: &mut dyn FnMut(Obj, ZvalRef)) -> bool {
+        let _ = (map, visit);
+        false
+    }
+    /// Every `WeakMap` entry keyed by `key`, in place, beside the map
+    /// that holds it (`zend_weakmap_get_object_key_entry_gc`): what the
+    /// collector walks from an object carrying
+    /// `IS_OBJ_WEAKLY_REFERENCED`. A `WeakReference` names no entry, and
+    /// a heap that hands out no weak map has none.
+    fn gc_weakly_keyed(&mut self, key: Obj, visit: &mut dyn FnMut(ZvalRef, Obj)) {
+        let _ = (key, visit);
     }
     /// `zend_weakrefs_notify` (`Z/Zend/zend_weakrefs.c:212`): the object
     /// is being freed, its destructor served and its members not yet
