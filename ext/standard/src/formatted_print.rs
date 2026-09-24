@@ -192,6 +192,29 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 /// string(55) "1.10000000000000008881784197001252323389053344726562500"
 /// ```
 ///
+/// `%g`'s digits past seventeen are the double's decimal expansion and
+/// not the shortest text that reads back, since `zend_gcvt` asks
+/// `zend_dtoa` for as many digits as the precision names and it caps
+/// at none of its own; the cap at 53 is php's, with the notice
+/// above it. So `%.20g` of `0.1` is `0.10000000000000000555` where
+/// `%.17g` is `0.10000000000000001`, and a precision wide enough to
+/// hold the point leaves the E-style behind.
+///
+/// ```php
+/// var_dump(sprintf("%.20g", 0.1), sprintf("%.18g", 0.1), sprintf("%.20G", 0.1 + 0.2), sprintf("%.20g", 5e-324), sprintf("%.30g", 1e25), sprintf("%.53g", 0.1), sprintf("%.20h", 1/3), sprintf("%.60g", 0.1));
+/// ```
+/// ```expect
+/// Notice: sprintf(): Requested precision of 60 digits was truncated to PHP maximum of 53 digits in %s on line 2
+/// string(22) "0.10000000000000000555"
+/// string(20) "0.100000000000000006"
+/// string(22) "0.30000000000000004441"
+/// string(26) "4.9406564584124654418e-324"
+/// string(26) "10000000000000000905969664"
+/// string(55) "0.10000000000000000555111512312578270211815834045410156"
+/// string(22) "0.33333333333333331483"
+/// string(55) "0.10000000000000000555111512312578270211815834045410156"
+/// ```
+///
 /// `n$` before the modifiers names the argument, and `*` reads the
 /// width or the precision from the next argument or the one `*n$`
 /// names; a specifier with no argnum takes the next argument after the
